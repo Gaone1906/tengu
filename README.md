@@ -161,6 +161,49 @@ pnpm dev
 | `pnpm lint`      | Lint all packages               |
 | `pnpm clean`     | Clean build artifacts           |
 
+## 🗺️ Roadmap
+
+Jinn is under active development. Here's what's coming:
+
+### 🔌 Connectors
+- [ ] **Discord** — bot integration via discord.js
+- [ ] **Telegram** — bot API connector
+- [ ] **iMessage** — macOS-native via AppleScript bridge
+- [ ] **Email** — IMAP/SMTP connector for inbox monitoring and replies
+- [ ] **WhatsApp** — Business API connector
+- [ ] **Webhooks** — generic inbound/outbound HTTP webhooks
+
+### 🧠 Engines
+- [ ] **Gemini CLI** — Google's Gemini as a third engine option
+- [ ] **Local models** — Ollama / llama.cpp integration for offline use
+- [ ] **Engine fallback chains** — auto-failover when primary engine is unavailable
+
+### 👥 Org System
+- [ ] **Agent-to-agent messaging** — direct communication without board intermediary
+- [ ] **Shared memory** — cross-session knowledge that persists across employees
+- [ ] **Performance tracking** — automatic quality scoring per employee over time
+- [ ] **Auto-promotion** — promote employees to manager based on track record
+
+### 🌐 Web Dashboard
+- [ ] **Mobile-responsive UI** — manage your org from your phone
+- [ ] **Live streaming** — watch agent responses stream in real-time
+- [ ] **Approval workflows** — approve/reject agent actions from the dashboard
+- [ ] **Cost analytics** — per-employee, per-department cost breakdowns
+
+### 🛠️ Platform
+- [ ] **Plugin system** — installable plugins for common integrations (Stripe, Linear, GitHub)
+- [ ] **Jinn Cloud** — hosted version with managed infrastructure
+- [ ] **REST API auth** — API keys for secure remote access
+- [ ] **Multi-user support** — team access with roles and permissions
+- [ ] **Docker image** — one-command deployment with `docker run`
+
+### 📦 Skills
+- [ ] **Skills marketplace** — browse and install community skills from [skills.sh](https://skills.sh)
+- [ ] **Skill versioning** — pin skill versions, auto-update with changelogs
+- [ ] **Skill templates** — scaffolding for common patterns (blog pipeline, support inbox, etc.)
+
+Want to suggest a feature? [Open an issue](https://github.com/hristo2612/jinn/issues).
+
 ## 🙏 Acknowledgments
 
 The web dashboard UI is built on components from [ClawPort UI](https://github.com/JohnRiceML/clawport-ui) by John Rice, adapted for Jinn's architecture. ClawPort provides the foundation for the theme system, shadcn components, org map, kanban board, cost dashboard, and activity console.
