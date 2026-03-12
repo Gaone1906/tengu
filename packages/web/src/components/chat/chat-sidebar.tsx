@@ -39,6 +39,7 @@ interface SessionGroup {
 }
 
 const COLLAPSE_STORAGE_KEY = 'jinn-sidebar-collapsed'
+const PINNED_STORAGE_KEY = 'jinn-pinned-sessions'
 
 function formatTime(dateStr?: string): string {
   if (!dateStr) return ''
@@ -66,6 +67,19 @@ function markSessionRead(id: string) {
   localStorage.setItem('jinn-read-sessions', JSON.stringify(arr))
 }
 
+function getPinnedSessions(): Set<string> {
+  try {
+    const raw = localStorage.getItem(PINNED_STORAGE_KEY)
+    return raw ? new Set(JSON.parse(raw)) : new Set()
+  } catch { return new Set() }
+}
+
+function savePinnedSessions(pinned: Set<string>) {
+  try {
+    localStorage.setItem(PINNED_STORAGE_KEY, JSON.stringify(Array.from(pinned)))
+  } catch { /* ignore */ }
+}
+
 function loadCollapsedState(): Set<string> {
   try {
     const raw = localStorage.getItem(COLLAPSE_STORAGE_KEY)
@@ -87,7 +101,18 @@ function isDirectSession(session: Session, portalSlug: string): boolean {
   return !isCronSession(session) && (!session.employee || session.employee === portalSlug)
 }
 
-function groupSessions(sessions: Session[], employeeEmojis: Map<string, string>, portalSlug: string): SessionGroup[] {
+function sortWithPinned(sessions: Session[], pinned: Set<string>): Session[] {
+  const sortByActivity = (a: Session, b: Session) => {
+    const ta = a.lastActivity || a.createdAt || ''
+    const tb = b.lastActivity || b.createdAt || ''
+    return tb.localeCompare(ta)
+  }
+  const pinnedList = sessions.filter(s => pinned.has(s.id)).sort(sortByActivity)
+  const unpinnedList = sessions.filter(s => !pinned.has(s.id)).sort(sortByActivity)
+  return [...pinnedList, ...unpinnedList]
+}
+
+function groupSessions(sessions: Session[], employeeEmojis: Map<string, string>, portalSlug: string, pinned: Set<string>): SessionGroup[] {
   const directSessions: Session[] = []
   const cronSessions: Session[] = []
   const employeeMap = new Map<string, Session[]>()
@@ -104,29 +129,20 @@ function groupSessions(sessions: Session[], employeeEmojis: Map<string, string>,
     }
   }
 
-  const sortByActivity = (a: Session, b: Session) => {
-    const ta = a.lastActivity || a.createdAt || ''
-    const tb = b.lastActivity || b.createdAt || ''
-    return tb.localeCompare(ta)
-  }
-
   const groups: SessionGroup[] = []
 
   if (directSessions.length > 0) {
-    directSessions.sort(sortByActivity)
-    groups.push({ key: 'direct', label: 'Direct', emoji: '💬', sessions: directSessions, sortOrder: 0 })
+    groups.push({ key: 'direct', label: 'Direct', emoji: '💬', sessions: sortWithPinned(directSessions, pinned), sortOrder: 0 })
   }
 
   const employeeNames = Array.from(employeeMap.keys()).sort()
   for (const name of employeeNames) {
     const empSessions = employeeMap.get(name)!
-    empSessions.sort(sortByActivity)
-    groups.push({ key: `emp:${name}`, label: name, emoji: employeeEmojis.get(name) || '🤖', sessions: empSessions, sortOrder: 1 })
+    groups.push({ key: `emp:${name}`, label: name, emoji: employeeEmojis.get(name) || '🤖', sessions: sortWithPinned(empSessions, pinned), sortOrder: 1 })
   }
 
   if (cronSessions.length > 0) {
-    cronSessions.sort(sortByActivity)
-    groups.push({ key: 'cron', label: 'Cron', emoji: '⏰', sessions: cronSessions, sortOrder: 2 })
+    groups.push({ key: 'cron', label: 'Cron', emoji: '⏰', sessions: sortWithPinned(cronSessions, pinned), sortOrder: 2 })
   }
 
   return groups
@@ -158,8 +174,11 @@ export function ChatSidebar({
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<SessionGroup | null>(null)
   const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const [hoveredGroupKey, setHoveredGroupKey] = useState<string | null>(null)
   const [readSessions, setReadSessions] = useState<Set<string>>(new Set())
+  const [pinnedSessions, setPinnedSessions] = useState<Set<string>>(new Set())
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [employeeEmojis, setEmployeeEmojis] = useState<Map<string, string>>(new Map())
   const lastEventKey = useRef<string | null>(null)
@@ -167,6 +186,7 @@ export function ChatSidebar({
   // Load persisted state from localStorage + fetch employee emojis
   useEffect(() => {
     setReadSessions(getReadSessions())
+    setPinnedSessions(getPinnedSessions())
     setCollapsed(loadCollapsedState())
 
     // Fetch org to build employee name → emoji map
@@ -258,10 +278,48 @@ export function ChatSidebar({
     })
   }, [])
 
+  const togglePin = useCallback((sessionId: string) => {
+    setPinnedSessions(prev => {
+      const next = new Set(prev)
+      if (next.has(sessionId)) {
+        next.delete(sessionId)
+      } else {
+        next.add(sessionId)
+      }
+      savePinnedSessions(next)
+      return next
+    })
+  }, [])
+
+  async function handleDeleteGroup(group: SessionGroup) {
+    const ids = group.sessions.map(s => s.id)
+    try {
+      await api.bulkDeleteSessions(ids)
+      setSessions(prev => prev.filter(s => !ids.includes(s.id)))
+      // Clean up localStorage entries
+      setPinnedSessions(prev => {
+        const next = new Set(prev)
+        for (const id of ids) next.delete(id)
+        savePinnedSessions(next)
+        return next
+      })
+      // If the selected session was in this group, start a new chat
+      if (selectedId && ids.includes(selectedId)) onNewChat()
+    } catch { /* ignore */ }
+    setConfirmDeleteGroup(null)
+  }
+
   async function handleDelete(sessionId: string) {
     try {
       await api.deleteSession(sessionId)
       setSessions((prev) => prev.filter((s) => s.id !== sessionId))
+      setPinnedSessions(prev => {
+        if (!prev.has(sessionId)) return prev
+        const next = new Set(prev)
+        next.delete(sessionId)
+        savePinnedSessions(next)
+        return next
+      })
       if (onDelete) onDelete(sessionId)
       else if (selectedId === sessionId) onNewChat()
     } catch { /* ignore */ }
@@ -279,7 +337,7 @@ export function ChatSidebar({
       })
     : sessions
 
-  const groups = groupSessions(displayed, employeeEmojis, portalSlug)
+  const groups = groupSessions(displayed, employeeEmojis, portalSlug, pinnedSessions)
 
   return (
     <div style={{
@@ -418,56 +476,92 @@ export function ChatSidebar({
             return (
               <div key={group.key}>
                 {/* Group header */}
-                <button
-                  onClick={() => toggleGroup(group.key)}
+                <div
+                  onMouseEnter={() => setHoveredGroupKey(group.key)}
+                  onMouseLeave={() => setHoveredGroupKey(null)}
                   style={{
-                    width: '100%',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: 'var(--space-2)',
-                    padding: 'var(--space-2) var(--space-4)',
-                    background: 'transparent',
-                    border: 'none',
-                    cursor: 'pointer',
-                    textAlign: 'left',
                     marginTop: 'var(--space-1)',
                   }}
                 >
-                  <span style={{ fontSize: 'var(--text-caption1)' }}>{group.emoji}</span>
-                  <span style={{
-                    fontSize: 'var(--text-caption1)',
-                    fontWeight: 'var(--weight-semibold)',
-                    color: 'var(--text-secondary)',
-                    letterSpacing: '0.3px',
-                    textTransform: 'uppercase',
-                    flex: 1,
-                  }}>
-                    {group.label}
-                  </span>
-                  <span style={{
-                    fontSize: 'var(--text-caption2)',
-                    color: 'var(--text-tertiary)',
-                    background: 'var(--fill-tertiary)',
-                    borderRadius: 'var(--radius-sm)',
-                    padding: '0 5px',
-                    lineHeight: '18px',
-                    minWidth: 18,
-                    textAlign: 'center',
-                  }}>
-                    {group.sessions.length}
-                  </span>
-                  <svg
-                    width="10" height="10" viewBox="0 0 24 24" fill="none"
-                    stroke="var(--text-tertiary)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                  <button
+                    onClick={() => toggleGroup(group.key)}
                     style={{
-                      flexShrink: 0,
-                      transition: 'transform 150ms ease',
-                      transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+                      flex: 1,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 'var(--space-2)',
+                      padding: 'var(--space-2) var(--space-4)',
+                      paddingRight: 'var(--space-1)',
+                      background: 'transparent',
+                      border: 'none',
+                      cursor: 'pointer',
+                      textAlign: 'left',
                     }}
                   >
-                    <polyline points="6 9 12 15 18 9" />
-                  </svg>
-                </button>
+                    <span style={{ fontSize: 'var(--text-caption1)' }}>{group.emoji}</span>
+                    <span style={{
+                      fontSize: 'var(--text-caption1)',
+                      fontWeight: 'var(--weight-semibold)',
+                      color: 'var(--text-secondary)',
+                      letterSpacing: '0.3px',
+                      textTransform: 'uppercase',
+                      flex: 1,
+                    }}>
+                      {group.label}
+                    </span>
+                    <span style={{
+                      fontSize: 'var(--text-caption2)',
+                      color: 'var(--text-tertiary)',
+                      background: 'var(--fill-tertiary)',
+                      borderRadius: 'var(--radius-sm)',
+                      padding: '0 5px',
+                      lineHeight: '18px',
+                      minWidth: 18,
+                      textAlign: 'center',
+                    }}>
+                      {group.sessions.length}
+                    </span>
+                    <svg
+                      width="10" height="10" viewBox="0 0 24 24" fill="none"
+                      stroke="var(--text-tertiary)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                      style={{
+                        flexShrink: 0,
+                        transition: 'transform 150ms ease',
+                        transform: isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+                      }}
+                    >
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+                  {hoveredGroupKey === group.key && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setConfirmDeleteGroup(group) }}
+                      aria-label={`Delete all sessions in ${group.label}`}
+                      style={{
+                        padding: 4,
+                        marginRight: 'var(--space-3)',
+                        borderRadius: 'var(--radius-sm)',
+                        background: 'transparent',
+                        border: 'none',
+                        cursor: 'pointer',
+                        color: 'var(--text-tertiary)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        flexShrink: 0,
+                        transition: 'color 150ms ease',
+                      }}
+                      onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--system-red)')}
+                      onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-tertiary)')}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="3 6 5 6 21 6" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
 
                 {/* Group sessions */}
                 {!isCollapsed && group.sessions.map((session) => {
@@ -476,6 +570,7 @@ export function ChatSidebar({
                   const isRunning = session.status === 'running'
                   const isRead = readSessions.has(session.id)
                   const isError = session.status === 'error'
+                  const isPinned = pinnedSessions.has(session.id)
                   const timeLabel = formatTime(session.lastActivity || session.createdAt)
 
                   let dotColor: string
@@ -557,31 +652,61 @@ export function ChatSidebar({
                         </div>
                       </div>
 
-                      {/* Delete button on hover */}
+                      {/* Pin indicator (when not hovered) */}
+                      {isPinned && !isHovered && (
+                        <span style={{ fontSize: 11, flexShrink: 0, opacity: 0.5 }}>📌</span>
+                      )}
+
+                      {/* Action buttons on hover */}
                       {isHovered && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.id) }}
-                          aria-label="Delete session"
-                          style={{
-                            padding: 4,
-                            borderRadius: 'var(--radius-sm)',
-                            background: 'transparent',
-                            border: 'none',
-                            cursor: 'pointer',
-                            color: 'var(--text-tertiary)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            flexShrink: 0,
-                            transition: 'color 150ms ease',
-                          }}
-                          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--system-red)')}
-                          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-tertiary)')}
-                        >
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <polyline points="3 6 5 6 21 6" />
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                          </svg>
-                        </button>
+                        <>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); togglePin(session.id) }}
+                            aria-label={isPinned ? 'Unpin session' : 'Pin session'}
+                            style={{
+                              padding: 4,
+                              borderRadius: 'var(--radius-sm)',
+                              background: 'transparent',
+                              border: 'none',
+                              cursor: 'pointer',
+                              color: isPinned ? 'var(--accent)' : 'var(--text-tertiary)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              flexShrink: 0,
+                              transition: 'color 150ms ease',
+                            }}
+                            onMouseEnter={(e) => { if (!isPinned) e.currentTarget.style.color = 'var(--accent)' }}
+                            onMouseLeave={(e) => { if (!isPinned) e.currentTarget.style.color = 'var(--text-tertiary)' }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill={isPinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M12 17v5" />
+                              <path d="M9 2h6l-1 7h4l-2 4H8l-2-4h4L9 2z" />
+                            </svg>
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.id) }}
+                            aria-label="Delete session"
+                            style={{
+                              padding: 4,
+                              borderRadius: 'var(--radius-sm)',
+                              background: 'transparent',
+                              border: 'none',
+                              cursor: 'pointer',
+                              color: 'var(--text-tertiary)',
+                              display: 'flex',
+                              alignItems: 'center',
+                              flexShrink: 0,
+                              transition: 'color 150ms ease',
+                            }}
+                            onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--system-red)')}
+                            onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-tertiary)')}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                          </button>
+                        </>
                       )}
                     </button>
                   )
@@ -634,6 +759,53 @@ export function ChatSidebar({
                   fontWeight: 'var(--weight-semibold)',
                 }}
               >Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm delete group dialog */}
+      {confirmDeleteGroup && (
+        <div
+          style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            background: 'rgba(0,0,0,0.5)', zIndex: 60,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          onClick={() => setConfirmDeleteGroup(null)}
+        >
+          <div
+            style={{
+              background: 'var(--bg)', borderRadius: 'var(--radius-lg)',
+              padding: 'var(--space-6)', maxWidth: 400, width: '90%',
+              boxShadow: 'var(--shadow-overlay)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ fontSize: 'var(--text-headline)', fontWeight: 'var(--weight-bold)', color: 'var(--text-primary)', marginBottom: 'var(--space-2)' }}>
+              Delete Group?
+            </h3>
+            <p style={{ fontSize: 'var(--text-body)', color: 'var(--text-secondary)', marginBottom: 'var(--space-5)' }}>
+              Delete all {confirmDeleteGroup.sessions.length} chats in &ldquo;{confirmDeleteGroup.label}&rdquo;? This cannot be undone.
+            </p>
+            <div style={{ display: 'flex', gap: 'var(--space-3)', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setConfirmDeleteGroup(null)}
+                style={{
+                  padding: 'var(--space-2) var(--space-4)', borderRadius: 'var(--radius-md)',
+                  background: 'var(--fill-tertiary)', color: 'var(--text-primary)',
+                  border: 'none', cursor: 'pointer', fontSize: 'var(--text-body)',
+                }}
+              >Cancel</button>
+              <button
+                onClick={() => handleDeleteGroup(confirmDeleteGroup)}
+                style={{
+                  padding: 'var(--space-2) var(--space-4)', borderRadius: 'var(--radius-md)',
+                  background: 'var(--system-red)', color: '#fff',
+                  border: 'none', cursor: 'pointer', fontSize: 'var(--text-body)',
+                  fontWeight: 'var(--weight-semibold)',
+                }}
+              >Delete {confirmDeleteGroup.sessions.length} Chats</button>
             </div>
           </div>
         </div>

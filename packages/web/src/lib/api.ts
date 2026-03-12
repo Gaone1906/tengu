@@ -57,6 +57,8 @@ export const api = {
   getSession: (id: string) => get<Record<string, unknown>>(`/api/sessions/${id}`),
   getSessionChildren: (id: string) => get<Record<string, unknown>[]>(`/api/sessions/${id}/children`),
   deleteSession: (id: string) => del<Record<string, unknown>>(`/api/sessions/${id}`),
+  bulkDeleteSessions: (ids: string[]) =>
+    post<{ status: string; count: number }>("/api/sessions/bulk-delete", { ids }),
   createSession: (data: Record<string, unknown>) =>
     post<Record<string, unknown>>("/api/sessions", data),
   createStubSession: (data: Record<string, unknown>) =>

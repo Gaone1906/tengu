@@ -13,6 +13,7 @@ import {
   createSession,
   updateSession,
   deleteSession,
+  deleteSessions,
   insertMessage,
   getMessages,
 } from "../sessions/registry.js";
@@ -210,6 +211,30 @@ export async function handleApiRequest(
       logger.info(`Session deleted: ${params.id}`);
       context.emit("session:deleted", { sessionId: params.id });
       return json(res, { status: "deleted" });
+    }
+
+    // POST /api/sessions/bulk-delete
+    if (method === "POST" && pathname === "/api/sessions/bulk-delete") {
+      const body = JSON.parse(await readBody(req));
+      const ids: string[] = body.ids;
+      if (!Array.isArray(ids) || ids.length === 0) return badRequest(res, "ids array is required");
+
+      // Kill any live engine processes before deleting
+      for (const id of ids) {
+        const session = getSession(id);
+        if (!session) continue;
+        const engine = context.sessionManager.getEngine(session.engine);
+        if (engine && isInterruptibleEngine(engine) && engine.isAlive(id)) {
+          engine.kill(id);
+        }
+      }
+
+      const count = deleteSessions(ids);
+      for (const id of ids) {
+        context.emit("session:deleted", { sessionId: id });
+      }
+      logger.info(`Bulk deleted ${count} sessions`);
+      return json(res, { status: "deleted", count });
     }
 
     // GET /api/sessions/:id/children

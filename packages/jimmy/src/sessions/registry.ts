@@ -351,6 +351,18 @@ export function deleteSession(id: string): boolean {
   return result.changes > 0;
 }
 
+export function deleteSessions(ids: string[]): number {
+  if (ids.length === 0) return 0;
+  const db = initDb();
+  const placeholders = ids.map(() => '?').join(',');
+  const txn = db.transaction(() => {
+    db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...ids);
+    const result = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids);
+    return result.changes;
+  });
+  return txn();
+}
+
 export interface SessionMessage {
   id: string;
   role: string;
