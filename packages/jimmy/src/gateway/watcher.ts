@@ -53,16 +53,22 @@ export function syncSkillSymlinks(): void {
       }
     }
 
-    // Create missing symlinks
+    // Create missing symlinks (with copy fallback for Windows without Developer Mode)
     for (const name of skillNames) {
       const linkPath = path.join(targetDir, name);
       const relTarget = path.join("..", "..", "skills", name);
+      const absTarget = path.join(SKILLS_DIR, name);
       if (!fs.existsSync(linkPath)) {
         try {
           fs.symlinkSync(relTarget, linkPath);
           logger.debug(`Created skill symlink: ${linkPath} -> ${relTarget}`);
         } catch {
-          // ignore — may fail on some platforms
+          try {
+            fs.cpSync(absTarget, linkPath, { recursive: true });
+            logger.debug(`Copied skill (symlink unavailable): ${linkPath}`);
+          } catch {
+            // ignore — skill won't be discoverable from this path
+          }
         }
       }
     }

@@ -117,11 +117,19 @@ function resolvePort(): number {
 
 function findPidOnPort(port: number): number | null {
   try {
-    const output = execSync(`lsof -ti tcp:${port}`, { encoding: "utf-8" }).trim();
-    if (!output) return null;
-    // Could be multiple lines — take the first PID
-    const pid = parseInt(output.split("\n")[0], 10);
-    return isNaN(pid) ? null : pid;
+    if (process.platform === "win32") {
+      const output = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, { encoding: "utf-8" }).trim();
+      if (!output) return null;
+      // netstat output: proto  local_addr  foreign_addr  state  PID
+      const parts = output.split("\n")[0].trim().split(/\s+/);
+      const pid = parseInt(parts[parts.length - 1], 10);
+      return isNaN(pid) ? null : pid;
+    } else {
+      const output = execSync(`lsof -ti tcp:${port}`, { encoding: "utf-8" }).trim();
+      if (!output) return null;
+      const pid = parseInt(output.split("\n")[0], 10);
+      return isNaN(pid) ? null : pid;
+    }
   } catch {
     return null;
   }

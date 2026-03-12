@@ -36,7 +36,7 @@ export async function runList(): Promise<void> {
     }
 
     const statusColor = status === "running" ? GREEN : RED;
-    const homeDisplay = inst.home.replace(process.env.HOME || "", "~");
+    const homeDisplay = inst.home.replace(process.env.HOME || process.env.USERPROFILE || "", "~");
     console.log(
       `  ${inst.name.padEnd(16)} ${String(inst.port).padEnd(8)} ${statusColor}${status.padEnd(12)}${RESET} ${DIM}${homeDisplay}${RESET}`
     );

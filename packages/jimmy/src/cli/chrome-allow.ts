@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 
 const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
@@ -143,7 +143,7 @@ function quitBrowser(browser: BrowserConfig): boolean {
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
       if (!isBrowserRunning(browser)) return true;
-      execSync("sleep 0.5");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
     }
     return !isBrowserRunning(browser);
   } catch {
@@ -157,9 +157,16 @@ function openBrowser(browser: BrowserConfig): void {
     if (platform === "darwin") {
       execSync(`open -a '${browser.macAppName}'`, { stdio: "ignore" });
     } else if (platform === "linux") {
-      execSync(`${browser.processName.toLowerCase()} &`, { stdio: "ignore" });
+      const child = spawn(browser.processName.toLowerCase(), [], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
     } else if (platform === "win32") {
-      execSync(`start ${browser.processName.toLowerCase().replace(/ /g, "")}`, { stdio: "ignore" });
+      const child = spawn("cmd", ["/c", "start", "", browser.processName.toLowerCase().replace(/ /g, "")], {
+        stdio: "ignore",
+      });
+      child.unref();
     }
   } catch {
     // User can open browser manually

@@ -56,7 +56,8 @@ function prompt(question: string, defaultValue?: string): Promise<string> {
 
 function whichBin(name: string): string | null {
   try {
-    return execSync(`which ${name}`, { encoding: "utf-8" }).trim();
+    const cmd = process.platform === "win32" ? "where" : "which";
+    return execSync(`${cmd} ${name}`, { encoding: "utf-8" }).trim().split("\n")[0];
   } catch {
     return null;
   }

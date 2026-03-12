@@ -31,7 +31,7 @@ export async function runNuke(name?: string): Promise<void> {
     console.log("\nAvailable instances:\n");
     for (let i = 0; i < instances.length; i++) {
       const inst = instances[i];
-      const homeDisplay = inst.home.replace(process.env.HOME || "", "~");
+      const homeDisplay = inst.home.replace(process.env.HOME || process.env.USERPROFILE || "", "~");
       console.log(`  ${DIM}${i + 1}.${RESET} ${inst.name} ${DIM}(${homeDisplay})${RESET}`);
     }
     console.log("");
@@ -61,7 +61,7 @@ export async function runNuke(name?: string): Promise<void> {
   }
 
   const instance = allInstances[index];
-  const homeDisplay = instance.home.replace(process.env.HOME || "", "~");
+  const homeDisplay = instance.home.replace(process.env.HOME || process.env.USERPROFILE || "", "~");
 
   // Check if running and stop it
   const pidFile = `${instance.home}/gateway.pid`;
