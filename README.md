@@ -2,6 +2,10 @@
 
 Lightweight AI gateway daemon orchestrating Claude Code and Codex.
 
+<p align="center">
+  <img src="assets/jinn-showcase.gif" alt="Jinn Web Dashboard" width="800" />
+</p>
+
 ## What is Jinn?
 
 Jinn is an open-source AI gateway that wraps the Claude Code CLI and Codex SDK
@@ -105,7 +109,7 @@ jinn/
 ## Development
 
 ```bash
-git clone https://github.com/your-org/jinn.git
+git clone https://github.com/hristo2612/jinn.git
 cd jinn
 pnpm install
 pnpm build
