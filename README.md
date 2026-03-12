@@ -179,20 +179,19 @@ Jinn is under active development. Here's what's coming:
 - [ ] **Engine fallback chains** — auto-failover when primary engine is unavailable
 
 ### 👥 Org System
-- [ ] **Agent-to-agent messaging** — direct communication without board intermediary
-- [ ] **Shared memory** — cross-session knowledge that persists across employees
+- [x] **Agent-to-agent messaging** — direct communication without board intermediary
+- [x] **Shared memory** — cross-session knowledge that persists across employees
 - [ ] **Performance tracking** — automatic quality scoring per employee over time
-- [ ] **Auto-promotion** — promote employees to manager based on track record
+- [x] **Auto-promotion** — promote employees to manager based on track record
 
 ### 🌐 Web Dashboard
 - [ ] **Mobile-responsive UI** — manage your org from your phone
-- [ ] **Live streaming** — watch agent responses stream in real-time
+- [x] **Live streaming** — watch agent responses stream in real-time
 - [ ] **Approval workflows** — approve/reject agent actions from the dashboard
 - [ ] **Cost analytics** — per-employee, per-department cost breakdowns
 
 ### 🛠️ Platform
 - [ ] **Plugin system** — installable plugins for common integrations (Stripe, Linear, GitHub)
-- [ ] **Jinn Cloud** — hosted version with managed infrastructure
 - [ ] **REST API auth** — API keys for secure remote access
 - [ ] **Multi-user support** — team access with roles and permissions
 - [ ] **Docker image** — one-command deployment with `docker run`
