@@ -1,33 +1,30 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createRequire } from "node:module";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { STT_MODELS_DIR, TMP_DIR } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 
-const require = createRequire(import.meta.url);
+const execFileAsync = promisify(execFile);
 
-// Resolve nodejs-whisper's internal models path via require.resolve
-const whisperPkgDir = path.dirname(
-  require.resolve("nodejs-whisper/package.json"),
-);
-const WHISPER_INTERNAL_MODELS = path.join(
-  whisperPkgDir,
-  "cpp",
-  "whisper.cpp",
-  "models",
-);
+const WHISPER_CLI = "whisper-cli";
+const FFMPEG = "ffmpeg";
 
-const MODEL_FILES: Record<string, string> = {
-  tiny: "ggml-tiny.bin",
-  "tiny.en": "ggml-tiny.en.bin",
-  base: "ggml-base.bin",
-  "base.en": "ggml-base.en.bin",
-  small: "ggml-small.bin",
-  "small.en": "ggml-small.en.bin",
-  medium: "ggml-medium.bin",
-  "medium.en": "ggml-medium.en.bin",
-  "large-v3-turbo": "ggml-large-v3-turbo.bin",
+const MODEL_URLS: Record<string, string> = {
+  tiny: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+  "tiny.en": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+  base: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+  "base.en": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+  small: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+  "small.en": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+  medium: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+  "medium.en": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
+  "large-v3-turbo": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
 };
+
+const MODEL_FILES: Record<string, string> = Object.fromEntries(
+  Object.entries(MODEL_URLS).map(([k, url]) => [k, path.basename(url)]),
+);
 
 const EXPECTED_SIZES: Record<string, number> = {
   tiny: 75_000_000,
@@ -44,45 +41,10 @@ const EXPECTED_SIZES: Record<string, number> = {
 let downloading = false;
 let downloadProgress = 0;
 
-/**
- * Ensure ~/.jinn/models/whisper/ exists and is symlinked into nodejs-whisper's
- * internal models directory so the package can find downloaded models.
- */
+/** Ensure models directory exists. */
 export function initStt(): void {
   fs.mkdirSync(STT_MODELS_DIR, { recursive: true });
-
-  const parentDir = path.dirname(WHISPER_INTERNAL_MODELS);
-  if (!fs.existsSync(parentDir)) {
-    logger.debug(
-      `STT: whisper.cpp not found at ${parentDir}, skipping symlink`,
-    );
-    return;
-  }
-
-  const stat = fs.lstatSync(WHISPER_INTERNAL_MODELS, {
-    throwIfNoEntry: false,
-  });
-
-  if (stat?.isSymbolicLink()) {
-    const target = fs.readlinkSync(WHISPER_INTERNAL_MODELS);
-    if (target === STT_MODELS_DIR) return; // already correct
-    fs.unlinkSync(WHISPER_INTERNAL_MODELS);
-  } else if (stat?.isDirectory()) {
-    // Move any existing models to our persistent dir before replacing
-    for (const file of fs.readdirSync(WHISPER_INTERNAL_MODELS)) {
-      const src = path.join(WHISPER_INTERNAL_MODELS, file);
-      const dest = path.join(STT_MODELS_DIR, file);
-      if (!fs.existsSync(dest)) {
-        fs.renameSync(src, dest);
-      }
-    }
-    fs.rmSync(WHISPER_INTERNAL_MODELS, { recursive: true });
-  }
-
-  fs.symlinkSync(STT_MODELS_DIR, WHISPER_INTERNAL_MODELS, "dir");
-  logger.info(
-    `STT models symlinked: ${WHISPER_INTERNAL_MODELS} → ${STT_MODELS_DIR}`,
-  );
+  logger.info(`STT initialized, models dir: ${STT_MODELS_DIR}`);
 }
 
 export function getModelPath(model: string): string | null {
@@ -116,8 +78,8 @@ export async function downloadModel(
 ): Promise<void> {
   if (downloading) throw new Error("Download already in progress");
 
-  const filename = MODEL_FILES[model];
-  if (!filename) throw new Error(`Unknown model: ${model}`);
+  const url = MODEL_URLS[model];
+  if (!url) throw new Error(`Unknown model: ${model}`);
 
   if (getModelPath(model)) {
     onProgress(100);
@@ -127,68 +89,75 @@ export async function downloadModel(
   downloading = true;
   downloadProgress = 0;
 
+  const filename = MODEL_FILES[model]!;
+  const destPath = path.join(STT_MODELS_DIR, filename);
+  const tmpPath = destPath + ".downloading";
+  const expectedSize = EXPECTED_SIZES[model] || 466_000_000;
+
   try {
-    // nodejs-whisper is CJS — use dynamic import
-    const mod = await import("nodejs-whisper");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const nodewhisper = mod.nodewhisper as any;
+    fs.mkdirSync(STT_MODELS_DIR, { recursive: true });
 
-    // Create a minimal silent WAV to trigger download + build
-    const silentWav = path.join(TMP_DIR, "stt-download-trigger.wav");
-    fs.mkdirSync(TMP_DIR, { recursive: true });
-    createSilentWav(silentWav);
+    await new Promise<void>((resolve, reject) => {
+      // Use curl for download — handles redirects, progress, and is reliable
+      const curl = spawn("curl", [
+        "-L", // follow redirects
+        "-o", tmpPath,
+        url,
+      ]);
 
-    // Poll file size for progress reporting
-    const modelFilePath = path.join(STT_MODELS_DIR, filename);
-    const expectedSize = EXPECTED_SIZES[model] || 466_000_000;
+      // Poll file size for progress
+      const progressInterval = setInterval(() => {
+        try {
+          const stat = fs.statSync(tmpPath, { throwIfNoEntry: false } as fs.StatSyncOptions & { throwIfNoEntry: false });
+          if (stat && stat.size > 0) {
+            downloadProgress = Math.min(95, Math.round(((stat.size as number) / expectedSize) * 100));
+            onProgress(downloadProgress);
+          }
+        } catch { /* file not created yet */ }
+      }, 1000);
 
-    const progressInterval = setInterval(() => {
-      try {
-        const stat = fs.statSync(modelFilePath, {
-          throwIfNoEntry: false,
-        } as fs.StatSyncOptions & { throwIfNoEntry: false });
-        if (stat && stat.size > 0) {
-          downloadProgress = Math.min(
-            95,
-            Math.round(((stat.size as number) / expectedSize) * 100),
-          );
-          onProgress(downloadProgress);
-        }
-      } catch {
-        // File doesn't exist yet
-      }
-    }, 500);
-
-    try {
-      await nodewhisper(silentWav, {
-        modelName: model,
-        autoDownloadModelName: model,
-        whisperOptions: { outputInText: true },
-        // Suppress noisy shelljs output
-        logger: {
-          log: (...args: unknown[]) =>
-            logger.debug(`[whisper] ${args.join(" ")}`),
-          debug: () => {},
-          error: (...args: unknown[]) =>
-            logger.error(`[whisper] ${args.join(" ")}`),
-          warn: (...args: unknown[]) =>
-            logger.warn(`[whisper] ${args.join(" ")}`),
-          info: () => {},
-        },
+      curl.on("close", (code) => {
+        clearInterval(progressInterval);
+        if (code === 0) resolve();
+        else reject(new Error(`curl exited with code ${code}`));
       });
-    } finally {
-      clearInterval(progressInterval);
-      try {
-        fs.unlinkSync(silentWav);
-      } catch {}
-    }
+
+      curl.on("error", (err) => {
+        clearInterval(progressInterval);
+        reject(err);
+      });
+    });
+
+    // Rename temp file to final path
+    fs.renameSync(tmpPath, destPath);
 
     downloadProgress = 100;
     onProgress(100);
-    logger.info(`STT model '${model}' downloaded successfully`);
+    logger.info(`STT model '${model}' downloaded to ${destPath}`);
+  } catch (err) {
+    // Clean up partial download
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    throw err;
   } finally {
     downloading = false;
   }
+}
+
+/**
+ * Convert audio to WAV (16kHz mono PCM) using ffmpeg.
+ * whisper-cli requires this format.
+ */
+async function convertToWav(inputPath: string): Promise<string> {
+  const wavPath = inputPath.replace(/\.[^.]+$/, "") + ".wav";
+  await execFileAsync(FFMPEG, [
+    "-i", inputPath,
+    "-ar", "16000",    // 16kHz sample rate
+    "-ac", "1",        // mono
+    "-c:a", "pcm_s16le", // 16-bit PCM
+    "-y",              // overwrite
+    wavPath,
+  ]);
+  return wavPath;
 }
 
 export async function transcribe(
@@ -200,57 +169,34 @@ export async function transcribe(
   if (!modelPath)
     throw new Error(`Model '${model}' not found. Download it first.`);
 
-  const mod2 = await import("nodejs-whisper");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const nodewhisper = mod2.nodewhisper as any;
+  // Convert to WAV if not already
+  let wavPath = audioPath;
+  let needsCleanup = false;
+  if (!audioPath.endsWith(".wav")) {
+    wavPath = await convertToWav(audioPath);
+    needsCleanup = true;
+  }
 
-  const result = await nodewhisper(audioPath, {
-    modelName: model,
-    whisperOptions: {
-      outputInText: true,
-      language: language || "en",
-    },
-    removeWavFileAfterTranscription: true,
-    logger: {
-      log: (...args: unknown[]) =>
-        logger.debug(`[whisper] ${args.join(" ")}`),
-      debug: () => {},
-      error: (...args: unknown[]) =>
-        logger.error(`[whisper] ${args.join(" ")}`),
-      warn: (...args: unknown[]) =>
-        logger.warn(`[whisper] ${args.join(" ")}`),
-      info: () => {},
-    },
-  });
+  try {
+    const { stdout } = await execFileAsync(WHISPER_CLI, [
+      "-m", modelPath,
+      "-l", language || "en",
+      "--no-timestamps",
+      "-f", wavPath,
+    ], { maxBuffer: 10 * 1024 * 1024 });
 
-  // whisper-cli output includes timestamps like "[00:00:00.000 --> 00:00:02.000] text"
-  const cleaned = result
-    .replace(/\[[\d:.]+\s*-->\s*[\d:.]+\]\s*/g, "")
-    .trim();
+    // Clean up whisper output: remove blank lines, trim whitespace
+    const text = stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0)
+      .join(" ")
+      .trim();
 
-  return cleaned;
-}
-
-/** Create a minimal 16kHz mono WAV file (0.1s of silence). */
-function createSilentWav(filePath: string): void {
-  const sampleRate = 16000;
-  const numSamples = sampleRate / 10;
-  const dataSize = numSamples * 2;
-  const buffer = Buffer.alloc(44 + dataSize);
-
-  buffer.write("RIFF", 0);
-  buffer.writeUInt32LE(36 + dataSize, 4);
-  buffer.write("WAVE", 8);
-  buffer.write("fmt ", 12);
-  buffer.writeUInt32LE(16, 16);
-  buffer.writeUInt16LE(1, 20); // PCM
-  buffer.writeUInt16LE(1, 22); // mono
-  buffer.writeUInt32LE(sampleRate, 24);
-  buffer.writeUInt32LE(sampleRate * 2, 28);
-  buffer.writeUInt16LE(2, 32);
-  buffer.writeUInt16LE(16, 34);
-  buffer.write("data", 36);
-  buffer.writeUInt32LE(dataSize, 40);
-
-  fs.writeFileSync(filePath, buffer);
+    return text;
+  } finally {
+    if (needsCleanup) {
+      try { fs.unlinkSync(wavPath); } catch { /* ignore */ }
+    }
+  }
 }
