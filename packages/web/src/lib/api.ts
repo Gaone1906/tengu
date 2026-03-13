@@ -104,4 +104,6 @@ export const api = {
     if (!res.ok) throw new Error(`API error: ${res.status}`);
     return res.json();
   },
+  sttUpdateConfig: (languages: string[]) =>
+    put<{ status: string; languages: string[] }>("/api/stt/config", { languages }),
 };

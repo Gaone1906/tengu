@@ -27,7 +27,7 @@ import {
   TMP_DIR,
 } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
-import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLanguages } from "../stt/stt.js";
+import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLanguages, WHISPER_LANGUAGES } from "../stt/stt.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { resolveEffort } from "../shared/effort.js";
 import { loadJobs, saveJobs } from "../cron/jobs.js";
@@ -900,6 +900,35 @@ export async function handleApiRequest(
         return serverError(res, `Transcription failed: ${msg}`);
       } finally {
         try { fs.unlinkSync(tmpFile); } catch {}
+      }
+    }
+
+    if (method === "PUT" && pathname === "/api/stt/config") {
+      const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+      const langs = body.languages;
+
+      if (!Array.isArray(langs) || langs.length === 0) {
+        return badRequest(res, "languages must be a non-empty array");
+      }
+
+      const invalid = langs.filter((l) => typeof l !== "string" || !WHISPER_LANGUAGES[l]);
+      if (invalid.length > 0) {
+        return badRequest(res, `Invalid language codes: ${invalid.join(", ")}`);
+      }
+
+      try {
+        const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
+        const cfg = yaml.load(raw) as Record<string, unknown>;
+        if (!cfg.stt || typeof cfg.stt !== "object") cfg.stt = {};
+        const sttCfg = cfg.stt as Record<string, unknown>;
+        sttCfg.languages = langs;
+        // Remove deprecated language field if present
+        delete sttCfg.language;
+        fs.writeFileSync(CONFIG_PATH, yaml.dump(cfg, { lineWidth: -1 }));
+        return json(res, { status: "ok", languages: langs });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return serverError(res, `Failed to update STT config: ${msg}`);
       }
     }
 

@@ -10,6 +10,18 @@ const execFileAsync = promisify(execFile);
 const WHISPER_CLI = "whisper-cli";
 const FFMPEG = "ffmpeg";
 
+/** Valid Whisper language codes (ISO 639-1). */
+export const WHISPER_LANGUAGES: Record<string, string> = {
+  en: "English", bg: "Bulgarian", de: "German", fr: "French", es: "Spanish",
+  it: "Italian", pt: "Portuguese", ru: "Russian", zh: "Chinese", ja: "Japanese",
+  ko: "Korean", ar: "Arabic", hi: "Hindi", tr: "Turkish", pl: "Polish",
+  nl: "Dutch", sv: "Swedish", cs: "Czech", el: "Greek", ro: "Romanian",
+  uk: "Ukrainian", he: "Hebrew", da: "Danish", fi: "Finnish", hu: "Hungarian",
+  no: "Norwegian", sk: "Slovak", hr: "Croatian", ca: "Catalan", th: "Thai",
+  vi: "Vietnamese", id: "Indonesian", ms: "Malay", tl: "Filipino", sr: "Serbian",
+  lt: "Lithuanian", lv: "Latvian", sl: "Slovenian", et: "Estonian",
+};
+
 const MODEL_URLS: Record<string, string> = {
   tiny: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
   "tiny.en": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",

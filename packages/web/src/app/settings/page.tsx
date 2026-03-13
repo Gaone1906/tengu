@@ -240,6 +240,303 @@ function ToggleSwitch({
 }
 
 // ---------------------------------------------------------------------------
+// Whisper STT language list (curated top ~35)
+// ---------------------------------------------------------------------------
+
+const WHISPER_LANGUAGES: Record<string, string> = {
+  en: "English", bg: "Bulgarian", de: "German", fr: "French", es: "Spanish",
+  it: "Italian", pt: "Portuguese", ru: "Russian", zh: "Chinese", ja: "Japanese",
+  ko: "Korean", ar: "Arabic", hi: "Hindi", tr: "Turkish", pl: "Polish",
+  nl: "Dutch", sv: "Swedish", cs: "Czech", el: "Greek", ro: "Romanian",
+  uk: "Ukrainian", he: "Hebrew", da: "Danish", fi: "Finnish", hu: "Hungarian",
+  no: "Norwegian", sk: "Slovak", hr: "Croatian", ca: "Catalan", th: "Thai",
+  vi: "Vietnamese", id: "Indonesian", ms: "Malay", tl: "Filipino", sr: "Serbian",
+  lt: "Lithuanian", lv: "Latvian", sl: "Slovenian", et: "Estonian",
+}
+
+// ---------------------------------------------------------------------------
+// Voice Input (STT) settings section — self-contained state
+// ---------------------------------------------------------------------------
+
+function SttSettingsSection() {
+  const [status, setStatus] = useState<{
+    available: boolean
+    model: string | null
+    downloading: boolean
+    progress: number
+    languages: string[]
+  } | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [addLang, setAddLang] = useState("")
+
+  useEffect(() => {
+    api.sttStatus().then(setStatus).catch(() => {})
+  }, [])
+
+  // Poll for download progress
+  useEffect(() => {
+    if (!status?.downloading) return
+    const timer = setInterval(() => {
+      api.sttStatus().then(setStatus).catch(() => {})
+    }, 1500)
+    return () => clearInterval(timer)
+  }, [status?.downloading])
+
+  function handleRemoveLanguage(code: string) {
+    if (!status || status.languages.length <= 1) return
+    const next = status.languages.filter((l) => l !== code)
+    setSaving(true)
+    api.sttUpdateConfig(next)
+      .then(() => setStatus((prev) => prev ? { ...prev, languages: next } : prev))
+      .catch(() => {})
+      .finally(() => setSaving(false))
+  }
+
+  function handleAddLanguage() {
+    if (!addLang || !status || status.languages.includes(addLang)) return
+    const next = [...status.languages, addLang]
+    setSaving(true)
+    setAddLang("")
+    api.sttUpdateConfig(next)
+      .then(() => setStatus((prev) => prev ? { ...prev, languages: next } : prev))
+      .catch(() => {})
+      .finally(() => setSaving(false))
+  }
+
+  function handleDownload() {
+    api.sttDownload()
+      .then(() => setStatus((prev) => prev ? { ...prev, downloading: true, progress: 0 } : prev))
+      .catch(() => {})
+  }
+
+  if (!status) return null
+
+  const availableLangs = Object.entries(WHISPER_LANGUAGES)
+    .filter(([code]) => !status.languages.includes(code))
+    .sort((a, b) => a[1].localeCompare(b[1]))
+
+  return (
+    <Section title="Voice Input">
+      {/* Status row */}
+      <div style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--space-3)",
+        marginBottom: "var(--space-4)",
+      }}>
+        <div style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: status.available ? "var(--system-green)" : "var(--system-red)",
+          flexShrink: 0,
+        }} />
+        <div style={{ flex: 1 }}>
+          <div style={{
+            fontSize: "var(--text-subheadline)",
+            fontWeight: "var(--weight-medium)",
+            color: "var(--text-primary)",
+          }}>
+            {status.available
+              ? `Whisper ${(status.model || "small").charAt(0).toUpperCase() + (status.model || "small").slice(1)}`
+              : "No model installed"}
+          </div>
+          <div style={{
+            fontSize: "var(--text-caption1)",
+            color: "var(--text-tertiary)",
+          }}>
+            {status.available
+              ? "Offline speech recognition ready"
+              : "Download a model to enable voice input"}
+          </div>
+        </div>
+      </div>
+
+      {/* Download section */}
+      {!status.available && !status.downloading && (
+        <button
+          onClick={handleDownload}
+          style={{
+            width: "100%",
+            padding: "var(--space-3)",
+            borderRadius: "var(--radius-md)",
+            background: "var(--accent)",
+            color: "var(--accent-contrast)",
+            border: "none",
+            cursor: "pointer",
+            fontSize: "var(--text-footnote)",
+            fontWeight: "var(--weight-semibold)",
+            marginBottom: "var(--space-4)",
+          }}
+        >
+          Download Whisper Small (~500MB)
+        </button>
+      )}
+
+      {/* Download progress */}
+      {status.downloading && (
+        <div style={{ marginBottom: "var(--space-4)" }}>
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            marginBottom: "var(--space-2)",
+            fontSize: "var(--text-caption1)",
+            color: "var(--text-tertiary)",
+          }}>
+            <span>Downloading model…</span>
+            <span>{status.progress}%</span>
+          </div>
+          <div style={{
+            height: 6,
+            borderRadius: 3,
+            background: "var(--fill-tertiary)",
+            overflow: "hidden",
+          }}>
+            <div style={{
+              height: "100%",
+              width: `${status.progress}%`,
+              borderRadius: 3,
+              background: "var(--accent)",
+              transition: "width 300ms ease",
+            }} />
+          </div>
+        </div>
+      )}
+
+      {/* Languages section — only when model is available */}
+      {status.available && (
+        <>
+          <div style={{
+            borderTop: "1px solid var(--separator)",
+            marginTop: "var(--space-2)",
+            paddingTop: "var(--space-3)",
+          }}>
+            <div style={{
+              fontSize: "var(--text-caption1)",
+              fontWeight: "var(--weight-semibold)",
+              color: "var(--text-tertiary)",
+              marginBottom: "var(--space-2)",
+            }}>
+              Transcription Languages
+            </div>
+            <div style={{
+              fontSize: "var(--text-caption2)",
+              color: "var(--text-tertiary)",
+              marginBottom: "var(--space-3)",
+            }}>
+              First language is the default. Add multiple to show a language picker in chat.
+            </div>
+
+            {/* Language chips */}
+            <div style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "var(--space-2)",
+              marginBottom: "var(--space-3)",
+            }}>
+              {status.languages.map((code) => (
+                <div
+                  key={code}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "var(--space-1)",
+                    padding: "3px 8px",
+                    borderRadius: "var(--radius-sm)",
+                    background: "var(--fill-secondary)",
+                    fontSize: "var(--text-caption1)",
+                    fontWeight: "var(--weight-medium)",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  <span style={{
+                    fontFamily: "var(--font-mono)",
+                    textTransform: "uppercase",
+                    fontSize: "var(--text-caption2)",
+                    fontWeight: "var(--weight-semibold)",
+                    color: "var(--accent)",
+                    marginRight: 2,
+                  }}>
+                    {code}
+                  </span>
+                  {WHISPER_LANGUAGES[code] || code}
+                  {status.languages.length > 1 && (
+                    <button
+                      onClick={() => handleRemoveLanguage(code)}
+                      disabled={saving}
+                      aria-label={`Remove ${WHISPER_LANGUAGES[code] || code}`}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        cursor: "pointer",
+                        padding: 0,
+                        marginLeft: 2,
+                        color: "var(--text-quaternary)",
+                        fontSize: 14,
+                        lineHeight: 1,
+                        display: "flex",
+                        alignItems: "center",
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* Add language */}
+            <div style={{
+              display: "flex",
+              gap: "var(--space-2)",
+            }}>
+              <select
+                value={addLang}
+                onChange={(e) => setAddLang(e.target.value)}
+                style={{
+                  flex: 1,
+                  background: "var(--bg-secondary)",
+                  border: "1px solid var(--separator)",
+                  borderRadius: "var(--radius-sm)",
+                  padding: "6px 10px",
+                  fontSize: "var(--text-footnote)",
+                  color: addLang ? "var(--text-primary)" : "var(--text-tertiary)",
+                  cursor: "pointer",
+                }}
+              >
+                <option value="">Add a language…</option>
+                {availableLangs.map(([code, name]) => (
+                  <option key={code} value={code}>
+                    {code.toUpperCase()} — {name}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={handleAddLanguage}
+                disabled={!addLang || saving}
+                style={{
+                  padding: "6px 14px",
+                  borderRadius: "var(--radius-sm)",
+                  background: addLang ? "var(--accent)" : "var(--fill-tertiary)",
+                  color: addLang ? "var(--accent-contrast)" : "var(--text-quaternary)",
+                  border: "none",
+                  cursor: addLang ? "pointer" : "default",
+                  fontSize: "var(--text-footnote)",
+                  fontWeight: "var(--weight-semibold)",
+                  flexShrink: 0,
+                }}
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </Section>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main settings page
 // ---------------------------------------------------------------------------
 
@@ -1105,6 +1402,9 @@ export default function SettingsPage() {
                   />
                 </FieldRow>
               </Section>
+
+              {/* ── Section 8: Voice Input (STT) ── */}
+              <SttSettingsSection />
 
               {/* Save button for gateway config */}
               <div
