@@ -121,7 +121,12 @@ export function ChatInput({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const mentionItemRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
 
-  const stt = useStt(events)
+  const stt = useStt(events, (text) => {
+    // Called when timeout auto-stops recording and transcription completes
+    if (text) {
+      setValue((prev) => prev ? prev + ' ' + text : text)
+    }
+  })
 
   // Load employees for @mention (with full details)
   useEffect(() => {

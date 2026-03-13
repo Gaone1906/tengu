@@ -207,7 +207,10 @@ export async function transcribe(
       "-l", language || "en",
       "--no-timestamps",
       "-f", wavPath,
-    ], { maxBuffer: 10 * 1024 * 1024 });
+    ], {
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 5 * 60 * 1000, // 5 min timeout for long recordings
+    });
 
     // Clean up whisper output: remove blank lines, trim whitespace
     const text = stdout

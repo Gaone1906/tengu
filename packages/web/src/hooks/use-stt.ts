@@ -27,10 +27,11 @@ export interface UseSttReturn {
   dismissDownload: () => void
 }
 
-const MAX_RECORDING_MS = 60_000
+const MAX_RECORDING_MS = 5 * 60_000 // 5 minutes max
 
 export function useStt(
   wsEvents?: Array<{ event: string; payload: unknown }>,
+  onAutoTranscript?: (text: string) => void,
 ): UseSttReturn {
   const [state, setState] = useState<SttState>("idle")
   const [available, setAvailable] = useState<boolean | null>(null)
@@ -50,6 +51,10 @@ export function useStt(
   const streamRef = useRef<MediaStream | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Resolve function for the stop promise — allows timeout to also trigger transcription
+  const stopResolveRef = useRef<((text: string | null) => void) | null>(null)
+  const onAutoTranscriptRef = useRef(onAutoTranscript)
+  onAutoTranscriptRef.current = onAutoTranscript
 
   // Process WebSocket events for download progress
   useEffect(() => {
@@ -145,9 +150,48 @@ export function useStt(
         if (e.data.size > 0) chunksRef.current.push(e.data)
       }
 
+      // Attach onstop at creation time so it fires whether stopped
+      // by user click, timeout, or any other reason
+      recorder.onstop = async () => {
+        cleanup()
+        setState("transcribing")
+
+        const blob = new Blob(chunksRef.current, {
+          type: recorder.mimeType || "audio/webm",
+        })
+        chunksRef.current = []
+
+        if (blob.size === 0) {
+          setState("idle")
+          stopResolveRef.current?.(null)
+          stopResolveRef.current = null
+          return
+        }
+
+        try {
+          const result = await api.sttTranscribe(blob, selectedLanguageRef.current)
+          const text = result.text || null
+          setState("idle")
+          if (stopResolveRef.current) {
+            stopResolveRef.current(text)
+            stopResolveRef.current = null
+          } else if (text && onAutoTranscriptRef.current) {
+            // Timeout-triggered stop — no stopRecording() was called
+            onAutoTranscriptRef.current(text)
+          }
+        } catch {
+          setState("idle")
+          if (stopResolveRef.current) {
+            stopResolveRef.current(null)
+            stopResolveRef.current = null
+          }
+        }
+      }
+
       recorder.start(100)
       setState("recording")
 
+      // Auto-stop after max duration (will trigger onstop → transcription)
       timeoutRef.current = setTimeout(() => {
         if (mediaRecorderRef.current?.state === "recording") {
           mediaRecorderRef.current.stop()
@@ -186,38 +230,16 @@ export function useStt(
     }
 
     return new Promise((resolve) => {
-      const recorder = mediaRecorderRef.current!
+      // The onstop handler was attached in startRecordingInner.
+      // It will call stopResolveRef when transcription is done.
+      stopResolveRef.current = resolve
 
-      recorder.onstop = async () => {
-        cleanup()
-        setState("transcribing")
-
-        const blob = new Blob(chunksRef.current, {
-          type: recorder.mimeType || "audio/webm",
-        })
-        chunksRef.current = []
-
-        if (blob.size === 0) {
-          setState("idle")
-          resolve(null)
-          return
-        }
-
-        try {
-          const result = await api.sttTranscribe(blob, selectedLanguageRef.current)
-          setState("idle")
-          resolve(result.text || null)
-        } catch {
-          setState("idle")
-          resolve(null)
-        }
-      }
-
-      if (recorder.state === "recording") {
-        recorder.stop()
+      if (mediaRecorderRef.current?.state === "recording") {
+        mediaRecorderRef.current.stop()
       } else {
         cleanup()
         setState("idle")
+        stopResolveRef.current = null
         resolve(null)
       }
     })
