@@ -8,6 +8,8 @@ import { Sidebar } from "./sidebar"
 import { GlobalSearch } from "./global-search"
 import { LiveStreamWidget } from "./live-stream-widget"
 import { OnboardingWizard } from "./onboarding-wizard"
+import { NotificationBell } from "./notifications/notification-bell"
+import { ToastContainer } from "./notifications/toast-container"
 import {
   Home,
   MessageSquare,
@@ -81,7 +83,7 @@ function MobileHeader() {
           <span style={{ fontSize: 18, marginRight: 6 }}>{emoji}</span>
           <span style={{ fontSize: 15, fontWeight: 600, color: "var(--text-primary)" }}>{portalName}</span>
         </div>
-        <div style={{ width: 36 }} />
+        <NotificationBell />
       </div>
 
       {/* Drawer overlay */}
@@ -183,8 +185,22 @@ export function PageLayout({ children }: { children: React.ReactNode }) {
       <GlobalSearch />
       <main className="flex-1 overflow-hidden lg:ml-[56px]">
         <MobileHeader />
+        {/* Desktop notification bell — top-right corner */}
+        <div
+          className="hidden lg:flex"
+          style={{
+            position: "fixed",
+            top: 12,
+            right: 16,
+            zIndex: 60,
+            alignItems: "center",
+          }}
+        >
+          <NotificationBell />
+        </div>
         {children}
       </main>
+      <ToastContainer />
       <LiveStreamWidget />
       <OnboardingWizard />
     </div>
