@@ -459,9 +459,13 @@ export async function handleFilesRequest(
       return true;
     }
     const stat = fs.statSync(filePath);
+    // Sanitize filename to prevent Content-Disposition header injection.
+    // Strip anything that isn't alphanumeric, dash, underscore, period, or space,
+    // then use the RFC 5987 filename* parameter with percent-encoding.
+    const sanitizedFilename = meta.filename.replace(/[^\w.\- ]/g, "_");
     res.writeHead(200, {
       "Content-Type": meta.mimetype || "application/octet-stream",
-      "Content-Disposition": `attachment; filename="${meta.filename}"`,
+      "Content-Disposition": `attachment; filename="${sanitizedFilename}"; filename*=UTF-8''${encodeURIComponent(meta.filename)}`,
       "Content-Length": stat.size,
     });
     fs.createReadStream(filePath).pipe(res);

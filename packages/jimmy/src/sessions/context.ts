@@ -315,13 +315,30 @@ function buildConfigContext(config: JinnConfig, gatewayUrl: string): string {
 
 function buildOrgContext(): string | null {
   try {
-    const files = fs.readdirSync(ORG_DIR).filter(f => f.endsWith(".yaml") || f.endsWith(".yml"));
-    if (files.length === 0) return null;
+    // Recursively collect all employee yaml files (skip department.yaml)
+    const employeeFiles: { fullPath: string; name: string }[] = [];
 
-    const lines: string[] = [`## Organization (${files.length} employee(s))`];
-    for (const file of files) {
-      const content = fs.readFileSync(path.join(ORG_DIR, file), "utf-8");
-      const name = file.replace(/\.ya?ml$/, "");
+    function scanDir(dir: string) {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          scanDir(fullPath);
+        } else if (
+          (entry.name.endsWith(".yaml") || entry.name.endsWith(".yml")) &&
+          entry.name !== "department.yaml"
+        ) {
+          employeeFiles.push({ fullPath, name: entry.name.replace(/\.ya?ml$/, "") });
+        }
+      }
+    }
+
+    scanDir(ORG_DIR);
+    if (employeeFiles.length === 0) return null;
+
+    const lines: string[] = [`## Organization (${employeeFiles.length} employee(s))`];
+    for (const { fullPath, name } of employeeFiles) {
+      const content = fs.readFileSync(fullPath, "utf-8");
       const displayMatch = content.match(/displayName:\s*(.+)/);
       const deptMatch = content.match(/department:\s*(.+)/);
       const rankMatch = content.match(/rank:\s*(.+)/);

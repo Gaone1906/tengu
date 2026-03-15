@@ -22,7 +22,7 @@ export function enforceSessionLimits(
     const maxCost = employee?.maxCostUsd ?? config.sessions?.maxCostUsd ?? 10;
 
     // Check duration
-    const startedAt = new Date(session.lastActivity).getTime();
+    const startedAt = new Date(session.createdAt).getTime();
     const elapsed = now - startedAt;
     if (elapsed > maxDurationMs) {
       logger.warn(

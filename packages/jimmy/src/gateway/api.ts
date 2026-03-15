@@ -101,6 +101,16 @@ function readBodyRaw(req: HttpRequest): Promise<Buffer> {
   });
 }
 
+async function readJsonBody(req: HttpRequest, res: ServerResponse): Promise<{ ok: true; body: unknown } | { ok: false }> {
+  const raw = await readBody(req);
+  try {
+    return { ok: true, body: JSON.parse(raw) };
+  } catch {
+    badRequest(res, "Invalid JSON in request body");
+    return { ok: false };
+  }
+}
+
 function json(res: ServerResponse, data: unknown, status = 200): void {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(data));
@@ -215,6 +225,7 @@ export async function handleApiRequest(
     }
 
     // DELETE /api/sessions/:id
+    params = matchRoute("/api/sessions/:id", pathname);
     if (method === "DELETE" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
@@ -235,7 +246,10 @@ export async function handleApiRequest(
 
     // POST /api/sessions/bulk-delete
     if (method === "POST" && pathname === "/api/sessions/bulk-delete") {
-      const body = JSON.parse(await readBody(req));
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
       const ids: string[] = body.ids;
       if (!Array.isArray(ids) || ids.length === 0) return badRequest(res, "ids array is required");
 
@@ -267,7 +281,10 @@ export async function handleApiRequest(
     // POST /api/sessions/stub — create a session with a pre-populated assistant
     // message but do NOT run the engine. Used for lazy onboarding.
     if (method === "POST" && pathname === "/api/sessions/stub") {
-      const body = JSON.parse(await readBody(req));
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
       const greeting = body.greeting || "Hey! Say hi when you're ready to get started.";
       const config = context.getConfig();
       const engineName = body.engine || config.engines.default;
@@ -290,7 +307,10 @@ export async function handleApiRequest(
 
     // POST /api/sessions
     if (method === "POST" && pathname === "/api/sessions") {
-      const body = JSON.parse(await readBody(req));
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
       const prompt = body.prompt || body.message;
       if (!prompt) return badRequest(res, "prompt or message is required");
       const config = context.getConfig();
@@ -341,7 +361,10 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      const body = JSON.parse(await readBody(req));
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
       const prompt = body.message || body.prompt;
       if (!prompt) return badRequest(res, "message is required");
 
@@ -407,7 +430,10 @@ export async function handleApiRequest(
 
     // POST /api/cron — create new cron job
     if (method === "POST" && pathname === "/api/cron") {
-      const body = JSON.parse(await readBody(req));
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
       const jobs = loadJobs();
       const newJob: CronJob = {
         id: body.id || crypto.randomUUID(),
@@ -433,7 +459,10 @@ export async function handleApiRequest(
       const jobs = loadJobs();
       const idx = jobs.findIndex((j) => j.id === params!.id);
       if (idx === -1) return notFound(res);
-      const body = JSON.parse(await readBody(req));
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
       jobs[idx] = { ...jobs[idx], ...body, id: params.id };
       saveJobs(jobs);
       reloadScheduler(jobs);
@@ -550,7 +579,10 @@ export async function handleApiRequest(
       const boardPath = path.join(ORG_DIR, p.name, "board.json");
       const deptDir = path.join(ORG_DIR, p.name);
       if (!fs.existsSync(deptDir)) return notFound(res);
-      const body = JSON.parse(await readBody(req));
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
       fs.writeFileSync(boardPath, JSON.stringify(body, null, 2));
       context.emit("board:updated", { department: p.name });
       return json(res, { status: "ok" });
@@ -561,8 +593,8 @@ export async function handleApiRequest(
       const query = url.searchParams.get("q") || "";
       if (!query) return badRequest(res, "q parameter is required");
       try {
-        const { execSync } = await import("node:child_process");
-        const output = execSync(`npx skills find ${JSON.stringify(query)}`, {
+        const { execFileSync } = await import("node:child_process");
+        const output = execFileSync("npx", ["skills", "find", query], {
           encoding: "utf-8",
           timeout: 30000,
         });
@@ -582,7 +614,10 @@ export async function handleApiRequest(
 
     // POST /api/skills/install — install a skill from skills.sh
     if (method === "POST" && pathname === "/api/skills/install") {
-      const body = JSON.parse(await readBody(req));
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
       const source = body.source;
       if (!source) return badRequest(res, "source is required");
       try {
@@ -590,10 +625,10 @@ export async function handleApiRequest(
           snapshotDirs, diffSnapshots, copySkillToInstance,
           upsertManifest, extractSkillName, findExistingSkill,
         } = await import("../cli/skills.js");
-        const { execSync } = await import("node:child_process");
+        const { execFileSync } = await import("node:child_process");
 
         const before = snapshotDirs();
-        execSync(`npx skills add ${JSON.stringify(source)} -g -y`, {
+        execFileSync("npx", ["skills", "add", String(source), "-g", "-y"], {
           encoding: "utf-8",
           timeout: 60000,
         });
@@ -672,6 +707,7 @@ export async function handleApiRequest(
     }
 
     // DELETE /api/skills/:name — remove a skill
+    params = matchRoute("/api/skills/:name", pathname);
     if (method === "DELETE" && params) {
       const skillDir = path.join(SKILLS_DIR, params.name);
       if (!fs.existsSync(skillDir)) return notFound(res);
@@ -706,7 +742,32 @@ export async function handleApiRequest(
 
     // PUT /api/config
     if (method === "PUT" && pathname === "/api/config") {
-      const body = JSON.parse(await readBody(req));
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
+      // Basic validation: must be a plain object
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return badRequest(res, "Config must be a JSON object");
+      }
+      // Validate known top-level keys
+      const KNOWN_KEYS = ["gateway", "engines", "connectors", "mcp", "portal", "stt", "skills"];
+      const unknownKeys = Object.keys(body).filter((k) => !KNOWN_KEYS.includes(k));
+      if (unknownKeys.length > 0) {
+        return badRequest(res, `Unknown config keys: ${unknownKeys.join(", ")}`);
+      }
+      // Validate critical field types
+      if (body.gateway !== undefined) {
+        if (typeof body.gateway !== "object" || Array.isArray(body.gateway)) {
+          return badRequest(res, "gateway must be an object");
+        }
+        if (body.gateway.port !== undefined && typeof body.gateway.port !== "number") {
+          return badRequest(res, "gateway.port must be a number");
+        }
+      }
+      if (body.engines !== undefined && (typeof body.engines !== "object" || Array.isArray(body.engines))) {
+        return badRequest(res, "engines must be an object");
+      }
       const yamlStr = yaml.dump(body);
       fs.writeFileSync(CONFIG_PATH, yamlStr);
       logger.info("Config updated via API");
@@ -718,8 +779,15 @@ export async function handleApiRequest(
       const logFile = path.join(LOGS_DIR, "gateway.log");
       if (!fs.existsSync(logFile)) return json(res, { lines: [] });
       const n = parseInt(url.searchParams.get("n") || "100", 10);
-      const content = fs.readFileSync(logFile, "utf-8");
-      const allLines = content.trim().split("\n");
+      // Read only the last 64KB to avoid loading the entire file into memory
+      const MAX_BYTES = 64 * 1024;
+      const stat = fs.statSync(logFile);
+      const readSize = Math.min(stat.size, MAX_BYTES);
+      const fd = fs.openSync(logFile, "r");
+      const buf = Buffer.alloc(readSize);
+      fs.readSync(fd, buf, 0, readSize, stat.size - readSize);
+      fs.closeSync(fd);
+      const allLines = buf.toString("utf-8").split("\n").filter(Boolean);
       const lines = allLines.slice(-n);
       return json(res, { lines });
     }
@@ -729,7 +797,10 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const connector = context.connectors.get(params.name);
       if (!connector) return notFound(res);
-      const body = JSON.parse(await readBody(req));
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
       if (!body.channel || !body.text) return badRequest(res, "channel and text are required");
       await connector.sendMessage(
         { channel: body.channel, thread: body.thread },
@@ -787,7 +858,10 @@ export async function handleApiRequest(
 
     // POST /api/onboarding — persist portal personalization
     if (method === "POST" && pathname === "/api/onboarding") {
-      const body = JSON.parse(await readBody(req));
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
       const { portalName, operatorName, language } = body;
 
       // Read current config and merge portal settings
@@ -923,7 +997,10 @@ export async function handleApiRequest(
     }
 
     if (method === "PUT" && pathname === "/api/stt/config") {
-      const body = JSON.parse(await readBody(req)) as Record<string, unknown>;
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
       const langs = body.languages;
 
       if (!Array.isArray(langs) || langs.length === 0) {

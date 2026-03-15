@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import type {
   Connector,
   Employee,
@@ -179,19 +180,31 @@ export class SessionManager {
 
       const effortLevel = resolveEffort(engineConfig, session, employee);
 
-      const result = await engine.run({
-        prompt: msg.text,
-        resumeSessionId: session.engineSessionId ?? undefined,
-        systemPrompt,
-        cwd: JINN_HOME,
-        bin: engineConfig.bin,
-        model: session.model ?? engineConfig.model,
-        effortLevel,
-        cliFlags: employee?.cliFlags,
-        mcpConfigPath,
-        attachments: attachments.length > 0 ? attachments : undefined,
-        sessionId: session.id,
-      });
+      let result: Awaited<ReturnType<Engine["run"]>>;
+      try {
+        result = await engine.run({
+          prompt: msg.text,
+          resumeSessionId: session.engineSessionId ?? undefined,
+          systemPrompt,
+          cwd: JINN_HOME,
+          bin: engineConfig.bin,
+          model: session.model ?? engineConfig.model,
+          effortLevel,
+          cliFlags: employee?.cliFlags,
+          mcpConfigPath,
+          attachments: attachments.length > 0 ? attachments : undefined,
+          sessionId: session.id,
+        });
+      } finally {
+        // Clean up temp attachment files downloaded from Slack
+        for (const filePath of attachments) {
+          try {
+            fs.rmSync(filePath, { force: true });
+          } catch {
+            // Ignore cleanup errors — best effort
+          }
+        }
+      }
 
       const responseText = result.result?.trim()
         ? result.result

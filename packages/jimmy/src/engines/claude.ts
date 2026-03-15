@@ -142,13 +142,16 @@ export class ClaudeEngine implements InterruptibleEngine {
       let lineCount = 0;
       let inTool = false;
 
+      const STDERR_MAX = 10 * 1024; // 10KB rolling window for error reporting
+
       if (streaming && opts.onStream) {
         const onStream = opts.onStream;
         let lineBuf = "";
 
         proc.stdout.on("data", (d: Buffer) => {
           const chunk = d.toString();
-          stdout += chunk;
+          // Do not accumulate stdout in streaming mode — data is forwarded to
+          // the client as it arrives. Only lineBuf is needed for line parsing.
           lineBuf += chunk;
           const lines = lineBuf.split("\n");
           lineBuf = lines.pop() || "";
@@ -185,6 +188,10 @@ export class ClaudeEngine implements InterruptibleEngine {
       proc.stderr.on("data", (d: Buffer) => {
         const chunk = d.toString();
         stderr += chunk;
+        // Keep only the last 10KB of stderr to bound memory usage
+        if (stderr.length > STDERR_MAX) {
+          stderr = stderr.slice(stderr.length - STDERR_MAX);
+        }
         for (const line of chunk.trim().split("\n").filter(Boolean)) {
           logger.debug(`[claude stderr] ${line}`);
         }

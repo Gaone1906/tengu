@@ -79,6 +79,7 @@ export class CodexEngine implements InterruptibleEngine {
       let turnError: string | null = null;
       let lineBuf = "";
       const onStream = opts.onStream || null;
+      const STDERR_MAX = 10 * 1024; // 10KB rolling window for error reporting
 
       proc.stdout.on("data", (d: Buffer) => {
         lineBuf += d.toString();
@@ -121,6 +122,10 @@ export class CodexEngine implements InterruptibleEngine {
       proc.stderr.on("data", (d: Buffer) => {
         const chunk = d.toString();
         stderr += chunk;
+        // Keep only the last 10KB of stderr to bound memory usage
+        if (stderr.length > STDERR_MAX) {
+          stderr = stderr.slice(stderr.length - STDERR_MAX);
+        }
         for (const line of chunk.trim().split("\n").filter(Boolean)) {
           logger.debug(`[codex stderr] ${line}`);
         }

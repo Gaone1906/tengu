@@ -298,12 +298,13 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     }
 
     case "trigger_cron_job": {
-      // Use the /cron command handler via a synthetic session message
-      // For now, just return the job info
+      // Resolve job ID (allow passing name or id)
       const jobs = await apiGet("/api/cron") as any[];
       const job = jobs.find((j: any) => j.id === args.jobId || j.name === args.jobId);
       if (!job) return JSON.stringify({ error: `Job "${args.jobId}" not found` });
-      return JSON.stringify({ status: "triggered", job });
+      // Actually trigger the job via the gateway REST API (fire-and-forget)
+      apiPost(`/api/cron/${job.id}/trigger`, {}).catch(() => {});
+      return JSON.stringify({ triggered: true, jobId: job.id, message: `Cron job "${job.name}" triggered manually` });
     }
 
     case "update_cron_job": {
