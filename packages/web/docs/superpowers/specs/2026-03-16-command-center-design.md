@@ -52,7 +52,7 @@ interface Task {
   id: string
   projectId: string               // belongs to a project
   title: string                   // "Localize blog to German"
-  status: 'todo' | 'in-progress' | 'done' | 'blocked'  // hyphens (matches existing Kanban convention)
+  status: 'todo' | 'in-progress' | 'done' | 'blocked'  // hyphens (matches existing Kanban convention). Tasks in 'blocked' auto-set attentionRequired: true
   priority: 'urgent' | 'normal' | 'low' | null          // null = no priority set (default)
   sessionIds: string[]            // linked sessions that work on this task
   attentionRequired: boolean      // bubbles up from linked sessions or set manually
@@ -237,7 +237,7 @@ UI: Dropdown or popover in the Command Center top bar, right-aligned. Quick pres
 
 | Endpoint | Method | Body | Response |
 |----------|--------|------|----------|
-| `/api/projects` | GET | — | `Project[]` |
+| `/api/projects` | GET | — | `ProjectWithStats[]` (includes computed stats) |
 | `/api/projects` | POST | `{name, color, icon?, parentId?}` | `Project` |
 | `/api/projects/:id` | PUT | `{name?, color?, icon?, parentId?, archived?}` | `Project` |
 | `/api/projects/:id` | DELETE | — | `204` |
@@ -302,6 +302,7 @@ In `packages/jimmy/src/gateway/api.ts`:
 In `packages/web/src/lib/api.ts`, add:
 
 ```typescript
+// Note: requires adding a new `patch` base helper alongside existing get/post/put/del
 patchSession(id: string, data: { projects?: string[]; priority?: string; attentionRequired?: boolean })
 getProjects(): Promise<Project[]>
 createProject(data: Partial<Project>): Promise<Project>
@@ -356,7 +357,7 @@ interface ProjectWithStats extends Project {
 - New nav item: `{ href: "/command", label: "Command Center", icon: Radar }` — positioned second (after Home)
 - Attention badge on nav icon: red pill with count of `attentionRequired` sessions
 - Remove `/kanban` from nav (replaced by per-project Kanban in Command Center). Add 301 redirect from `/kanban` → `/command` for bookmarks.
-- Existing Kanban board data migration: map `backlog` → `todo`, `review` → `in-progress`, `in-progress` → `in-progress` (normalize hyphens). Existing board tickets become Tasks linked to their department's project.
+- Existing Kanban board data migration: Existing board tickets become Tasks linked to their department's project. Status mapping: `backlog` → `todo` (intentionally collapsed — the backlog/todo distinction is dropped in favor of simplicity), `review` → `in-progress`, `in-progress` → `in-progress`, `done` → `done`. Priority mapping: `high` → `urgent`, `medium` → `normal`, `low` → `low`.
 - `/sessions` page stays as lower-level admin view
 - `/chat` page keeps its existing sidebar unchanged
 
