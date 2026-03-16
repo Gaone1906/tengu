@@ -13,14 +13,18 @@ import {
   createSession,
   deleteSession,
   getSessionBySessionKey,
+  getMessages,
   insertMessage,
   updateSession,
 } from "./registry.js";
+import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel } from "./callbacks.js";
 import { buildContext } from "./context.js";
 import { SessionQueue } from "./queue.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 import { resolveEffort } from "../shared/effort.js";
+import { computeNextRetryDelayMs, computeRateLimitDeadlineMs, detectRateLimit } from "../shared/rateLimit.js";
+import { getClaudeExpectedResetAt, isLikelyNearClaudeUsageLimit, recordClaudeRateLimit } from "../shared/usageAwareness.js";
 import { loadJobs } from "../cron/jobs.js";
 import { setCronJobEnabled, triggerCronJob } from "../cron/scheduler.js";
 import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile } from "../mcp/resolver.js";
@@ -30,6 +34,70 @@ export interface RouteOptions {
   engine?: string;
   model?: string;
   title?: string;
+}
+
+function maybeRevertEngineOverride(session: Session): Session {
+  const meta = (session.transportMeta || {}) as Record<string, unknown>;
+  const override = meta["engineOverride"] as Record<string, unknown> | undefined;
+  if (!override) return session;
+
+  const originalEngine = typeof override.originalEngine === "string" ? override.originalEngine : null;
+  const originalEngineSessionId = typeof override.originalEngineSessionId === "string"
+    ? override.originalEngineSessionId
+    : null;
+  const syncSince = typeof override.syncSince === "string" ? override.syncSince : null;
+  const untilIso = typeof override.until === "string" ? override.until : null;
+  if (!originalEngine || !untilIso) return session;
+
+  const until = new Date(untilIso);
+  if (Number.isNaN(until.getTime())) return session;
+  if (until.getTime() > Date.now()) return session;
+
+  const engineSessionsRaw = meta["engineSessions"];
+  const engineSessions = (engineSessionsRaw && typeof engineSessionsRaw === "object" && !Array.isArray(engineSessionsRaw))
+    ? { ...(engineSessionsRaw as Record<string, unknown>) }
+    : {};
+
+  // Preserve the current engine session ID under its engine key
+  if (session.engine && session.engineSessionId) {
+    engineSessions[String(session.engine)] = session.engineSessionId;
+  }
+
+  const restoredSessionId = originalEngineSessionId
+    ?? (typeof engineSessions[originalEngine] === "string" ? (engineSessions[originalEngine] as string) : null);
+
+  const nextMeta = { ...meta, engineSessions } as Record<string, unknown>;
+  if (originalEngine === "claude" && syncSince && session.engine !== "claude") {
+    nextMeta["claudeSyncSince"] = syncSince;
+  }
+  delete (nextMeta as Record<string, unknown>)["engineOverride"];
+  return updateSession(session.id, {
+    engine: originalEngine,
+    engineSessionId: restoredSessionId,
+    transportMeta: nextMeta as any,
+    lastError: null,
+  }) ?? session;
+}
+
+function mergeTransportMeta(
+  existing: Session["transportMeta"],
+  incoming: IncomingMessage["transportMeta"],
+): Session["transportMeta"] {
+  const baseExisting = (existing && typeof existing === "object" && !Array.isArray(existing))
+    ? (existing as Record<string, unknown>)
+    : {};
+  const baseIncoming = (incoming && typeof incoming === "object" && !Array.isArray(incoming))
+    ? (incoming as Record<string, unknown>)
+    : {};
+
+  const merged: Record<string, unknown> = { ...baseExisting, ...baseIncoming };
+
+  // Preserve Jinn internal keys from being overwritten by transport adapters.
+  for (const key of ["engineOverride", "engineSessions", "claudeSyncSince"]) {
+    if (baseExisting[key] !== undefined) merged[key] = baseExisting[key];
+  }
+
+  return merged as any;
 }
 
 export class SessionManager {
@@ -86,13 +154,16 @@ export class SessionManager {
         (opts.employee ? ` (employee: ${opts.employee.name})` : ""),
       );
     } else {
+      const mergedMeta = mergeTransportMeta(session.transportMeta, msg.transportMeta);
       session = updateSession(session.id, {
         replyContext: msg.replyContext,
         messageId: msg.messageId ?? null,
-        transportMeta: msg.transportMeta ?? null,
+        transportMeta: mergedMeta,
         ...(opts.model ? { model: opts.model } : {}),
       }) ?? session;
     }
+
+    session = maybeRevertEngineOverride(session);
 
     const target = connector.reconstructTarget(msg.replyContext);
     target.messageTs ??= msg.messageId;
@@ -100,6 +171,17 @@ export class SessionManager {
     const attachmentPaths = msg.attachments
       .map((attachment) => attachment.localPath)
       .filter((filePath): filePath is string => !!filePath);
+
+    if (session.status === "waiting") {
+      const expectedResetAt = getClaudeExpectedResetAt();
+      const resumeText = expectedResetAt
+        ? expectedResetAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+        : null;
+      await connector.replyMessage(
+        target,
+        `⏳ Still paused due to Claude usage limit${resumeText ? ` (resets ${resumeText})` : ""}. I queued this message and will respond automatically.`,
+      ).catch(() => {});
+    }
 
     if (session.status === "running" && this.queue.isRunning(msg.sessionKey) && connector.getCapabilities().reactions) {
       await connector.addReaction(target, "clock1").catch(() => {});
@@ -148,7 +230,7 @@ export class SessionManager {
       status: "running",
       replyContext: msg.replyContext,
       messageId: msg.messageId ?? null,
-      transportMeta: msg.transportMeta ?? null,
+      transportMeta: mergeTransportMeta(session.transportMeta, msg.transportMeta),
       lastActivity: new Date().toISOString(),
     });
 
@@ -180,29 +262,355 @@ export class SessionManager {
 
       const effortLevel = resolveEffort(engineConfig, session, employee);
 
-      let result: Awaited<ReturnType<Engine["run"]>>;
-      try {
-        result = await engine.run({
-          prompt: msg.text,
-          resumeSessionId: session.engineSessionId ?? undefined,
-          systemPrompt,
-          cwd: JINN_HOME,
-          bin: engineConfig.bin,
-          model: session.model ?? engineConfig.model,
-          effortLevel,
-          cliFlags: employee?.cliFlags,
-          mcpConfigPath,
-          attachments: attachments.length > 0 ? attachments : undefined,
-          sessionId: session.id,
-        });
-      } finally {
-        // Clean up temp attachment files downloaded from Slack
-        for (const filePath of attachments) {
-          try {
-            fs.rmSync(filePath, { force: true });
-          } catch {
-            // Ignore cleanup errors — best effort
+      // If we previously switched to GPT while Claude was rate-limited, inject a sync transcript
+      // so Claude can resume with full context when it comes back online.
+      const syncSinceIso = (session.transportMeta as any)?.claudeSyncSince;
+      let promptToRun = msg.text;
+      const syncSinceMs = typeof syncSinceIso === "string" ? new Date(syncSinceIso).getTime() : NaN;
+      const syncRequested = session.engine === "claude" && typeof syncSinceIso === "string" && Number.isFinite(syncSinceMs);
+      if (syncRequested) {
+        const sinceMessages = getMessages(session.id)
+          .filter((m) => (m.role === "user" || m.role === "assistant") && m.timestamp >= syncSinceMs)
+          .map((m) => `${m.role.toUpperCase()}: ${m.content}`);
+        const transcript = sinceMessages.slice(-20).join("\n\n");
+        promptToRun =
+          `We temporarily switched to GPT due to a Claude usage limit. Sync your context with this transcript (most recent last), then respond to the last USER message.\n\n${transcript}`;
+      }
+
+      // Heuristic preflight warning: Claude usage limits don't expose a precise "remaining" budget.
+      // If we've hit the limit recently and this looks like a heavy turn, warn before we spend time.
+      if (decorateMessages && session.engine === "claude" && isLikelyNearClaudeUsageLimit()) {
+        const modelName = (session.model ?? engineConfig.model ?? "").toLowerCase();
+        const heavyEffort = ["high", "xhigh", "max"].includes((effortLevel || "").toLowerCase());
+        const heavyModel = modelName.includes("opus");
+        const looksBig = attachments.length > 0 || msg.text.length > 6000;
+        if ((heavyEffort || heavyModel) && looksBig) {
+          const expectedResetAt = getClaudeExpectedResetAt();
+          const resumeText = expectedResetAt
+            ? expectedResetAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+            : null;
+          await connector.replyMessage(
+            target,
+            `⚠️ Heads up: Claude usage limits were hit recently, and this looks like a bigger task. If you're near the limit, it may pause${resumeText ? ` until ~${resumeText}` : ""}.`,
+          ).catch(() => {});
+        }
+      }
+
+      const result = await engine.run({
+        prompt: promptToRun,
+        resumeSessionId: session.engineSessionId ?? undefined,
+        systemPrompt,
+        cwd: JINN_HOME,
+        bin: engineConfig.bin,
+        model: session.model ?? engineConfig.model,
+        effortLevel,
+        cliFlags: employee?.cliFlags,
+        mcpConfigPath,
+        attachments: attachments.length > 0 ? attachments : undefined,
+        sessionId: session.id,
+      });
+
+      const wasInterrupted = result.error?.startsWith("Interrupted");
+
+      // Detect rate limit / usage limit errors and auto-retry
+      const rateLimit = !wasInterrupted ? detectRateLimit(result) : { limited: false as const };
+      if (rateLimit.limited) {
+        recordClaudeRateLimit(rateLimit.resetsAt);
+
+        const strategy = this.config.sessions?.rateLimitStrategy ?? "fallback";
+
+        // Optional fallback: switch to GPT (Codex) while Claude resets
+        if (session.engine === "claude" && strategy === "fallback") {
+          const fallbackName = this.config.sessions?.fallbackEngine ?? "codex";
+          const fallbackEngine = this.engines.get(fallbackName);
+          if (fallbackEngine) {
+            const { resumeAt } = computeNextRetryDelayMs(rateLimit.resetsAt);
+            const until = resumeAt ?? new Date(Date.now() + 6 * 60 * 60_000);
+            const syncSince = new Date().toISOString();
+            const resumeText = resumeAt
+              ? resumeAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+              : null;
+
+            notifyDiscordChannel(
+              `⚠️ Claude usage limit reached. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} switching to GPT.`,
+            );
+
+            await connector.replyMessage(
+              target,
+              `⚠️ Claude usage limit reached${resumeText ? `. Resets ${resumeText}` : ""}. Switching to GPT for now.`,
+            ).catch(() => {});
+
+            const nextMeta = { ...(session.transportMeta || {}) } as Record<string, unknown>;
+            const engineSessionsRaw = nextMeta.engineSessions;
+            const engineSessions = (engineSessionsRaw && typeof engineSessionsRaw === "object" && !Array.isArray(engineSessionsRaw))
+              ? { ...(engineSessionsRaw as Record<string, unknown>) }
+              : {};
+            if (session.engineSessionId) {
+              engineSessions.claude = session.engineSessionId;
+            }
+            nextMeta.engineSessions = engineSessions;
+            nextMeta.engineOverride = { originalEngine: "claude", originalEngineSessionId: session.engineSessionId, until: until.toISOString(), syncSince };
+
+            updateSession(session.id, {
+              engine: fallbackName,
+              // Keep Claude engine_session_id intact for later restore; Codex will return its own thread id.
+              transportMeta: nextMeta as any,
+              status: "running",
+              lastActivity: new Date().toISOString(),
+              lastError: resumeAt
+                ? `Claude usage limit — using GPT until ${resumeAt.toISOString()}`
+                : "Claude usage limit — using GPT temporarily",
+            });
+
+            const fallbackConfig = this.config.engines.codex;
+            const fallbackEffort = resolveEffort(fallbackConfig, session, employee);
+            const codexResume = typeof engineSessions.codex === "string" ? (engineSessions.codex as string) : undefined;
+            const history = getMessages(session.id)
+              .filter((m) => m.role === "user" || m.role === "assistant")
+              .map((m) => `${m.role.toUpperCase()}: ${m.content}`);
+            const historyText = history.slice(-12).join("\n\n");
+            const fallbackPrompt = codexResume
+              ? msg.text
+              : `Continue this conversation and respond to the last USER message.\n\nConversation so far:\n\n${historyText}`;
+            const fallbackResult = await fallbackEngine.run({
+              prompt: fallbackPrompt,
+              resumeSessionId: codexResume,
+              systemPrompt,
+              cwd: JINN_HOME,
+              bin: fallbackConfig.bin,
+              model: session.model ?? fallbackConfig.model,
+              effortLevel: fallbackEffort,
+              cliFlags: employee?.cliFlags,
+              attachments: attachments.length > 0 ? attachments : undefined,
+              sessionId: session.id,
+            });
+
+            const fallbackText = fallbackResult.result?.trim()
+              ? fallbackResult.result
+              : fallbackResult.error || "(No response from engine)";
+
+            insertMessage(session.id, "assistant", fallbackText);
+            if (fallbackResult.cost || fallbackResult.numTurns) {
+              accumulateSessionCost(session.id, fallbackResult.cost ?? 0, fallbackResult.numTurns ?? 1);
+            }
+
+            // Persist Codex thread id so future fallbacks can resume it
+            const nextEngineSessions = { ...engineSessions };
+            if (fallbackResult.sessionId) {
+              nextEngineSessions.codex = fallbackResult.sessionId;
+            }
+            const metaAfter = { ...(getSessionBySessionKey(msg.sessionKey)?.transportMeta || nextMeta) } as Record<string, unknown>;
+            metaAfter.engineSessions = nextEngineSessions;
+            updateSession(session.id, { transportMeta: metaAfter as any });
+
+            if (decorateMessages && connector.setTypingStatus) {
+              await connector.setTypingStatus(target.channel, threadTs, "").catch(() => {});
+            }
+            await connector.replyMessage(target, fallbackText).catch(() => {});
+            if (decorateMessages && capabilities.reactions) {
+              await connector.removeReaction(target, "eyes").catch(() => {});
+            }
+
+            const updated = updateSession(session.id, {
+              engineSessionId: fallbackResult.sessionId,
+              status: fallbackResult.error ? "error" : "idle",
+              replyContext: msg.replyContext,
+              messageId: msg.messageId ?? null,
+              transportMeta: mergeTransportMeta(getSessionBySessionKey(msg.sessionKey)?.transportMeta ?? session.transportMeta, msg.transportMeta),
+              lastActivity: new Date().toISOString(),
+              lastError: fallbackResult.error ?? null,
+            });
+            if (updated) {
+              notifyParentSession(updated, { result: fallbackResult.result, error: fallbackResult.error ?? null, cost: fallbackResult.cost, durationMs: fallbackResult.durationMs });
+            }
+            return;
           }
+        }
+
+        const waitEmoji = "hourglass_flowing_sand";
+
+        const { delayMs, resumeAt } = computeNextRetryDelayMs(rateLimit.resetsAt);
+        const deadlineMs = computeRateLimitDeadlineMs(
+          rateLimit.resetsAt,
+          rateLimit.resetsAt ? 30 * 60_000 : 6 * 60 * 60_000,
+        );
+
+        const resumeText = resumeAt
+          ? resumeAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+          : null;
+
+        logger.info(
+          `Session ${session.id} hit Claude usage limit — will auto-retry ${resumeAt ? `at ${resumeAt.toISOString()}` : `in ${Math.round(delayMs / 1000)}s`}`,
+        );
+
+        // Send hardcoded Discord notification — does not depend on LLM
+        notifyDiscordChannel(
+          `⚠️ Claude usage limit reached. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} paused${resumeText ? ` until ${resumeText}` : ""}.`,
+        );
+
+        // Clear "thinking" UI and show waiting state
+        if (decorateMessages && connector.setTypingStatus) {
+          await connector.setTypingStatus(target.channel, threadTs, "").catch(() => {});
+        }
+        if (decorateMessages && capabilities.reactions) {
+          await connector.removeReaction(target, "eyes").catch(() => {});
+          await connector.addReaction(target, waitEmoji).catch(() => {});
+        }
+
+        const waitingSession = updateSession(session.id, {
+          ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
+          status: "waiting",
+          lastActivity: new Date().toISOString(),
+          lastError: resumeAt
+            ? `Claude usage limit — resumes ${resumeAt.toISOString()}`
+            : "Claude usage limit — waiting for reset",
+        }) ?? session;
+
+        notifyRateLimited(
+          waitingSession,
+          resumeAt
+            ? resumeAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
+            : undefined,
+        );
+
+        await connector.replyMessage(
+          target,
+          `⏳ Claude usage limit reached${resumeText ? `. Resets ${resumeText}` : ""} — I'll continue automatically.`,
+        ).catch(() => {});
+
+        // Keep lastActivity fresh while waiting (UI / status endpoints)
+        const heartbeat = setInterval(() => {
+          updateSession(session.id, { status: "waiting", lastActivity: new Date().toISOString() });
+        }, 60_000);
+
+        try {
+          let attempt = 0;
+          let nextDelayMs = delayMs;
+
+          while (Date.now() < deadlineMs) {
+            await new Promise(r => setTimeout(r, nextDelayMs));
+            attempt++;
+
+            // Check if session was stopped while waiting
+            const currentSession = getSessionBySessionKey(msg.sessionKey);
+            if (!currentSession || currentSession.status === "error") {
+              logger.info(`Session ${session.id} stopped while waiting for usage reset`);
+              return;
+            }
+
+            // Show active processing again
+            if (decorateMessages && connector.setTypingStatus) {
+              await connector.setTypingStatus(target.channel, threadTs, "is thinking...").catch(() => {});
+            }
+            if (decorateMessages && capabilities.reactions) {
+              await connector.removeReaction(target, waitEmoji).catch(() => {});
+              await connector.addReaction(target, "eyes").catch(() => {});
+            }
+
+            logger.info(`Session ${session.id} retrying after usage limit (attempt ${attempt})`);
+            const retryResult = await engine.run({
+              prompt: msg.text,
+              resumeSessionId: currentSession.engineSessionId ?? undefined,
+              systemPrompt,
+              cwd: JINN_HOME,
+              bin: engineConfig.bin,
+              model: currentSession.model ?? engineConfig.model,
+              effortLevel,
+              cliFlags: employee?.cliFlags,
+              mcpConfigPath,
+              attachments: attachments.length > 0 ? attachments : undefined,
+              sessionId: session.id,
+            });
+
+            const retryInterrupted = retryResult.error?.startsWith("Interrupted");
+            const retryRateLimit = !retryInterrupted ? detectRateLimit(retryResult) : { limited: false as const };
+            if (retryRateLimit.limited) {
+              recordClaudeRateLimit(retryRateLimit.resetsAt);
+              logger.info(`Session ${session.id} still rate limited (attempt ${attempt})`);
+
+              const next = computeNextRetryDelayMs(retryRateLimit.resetsAt);
+              nextDelayMs = next.delayMs;
+
+              // Return to waiting UI state
+              if (decorateMessages && connector.setTypingStatus) {
+                await connector.setTypingStatus(target.channel, threadTs, "").catch(() => {});
+              }
+              if (decorateMessages && capabilities.reactions) {
+                await connector.removeReaction(target, "eyes").catch(() => {});
+                await connector.addReaction(target, waitEmoji).catch(() => {});
+              }
+
+              updateSession(session.id, {
+                ...(retryResult.sessionId?.trim() ? { engineSessionId: retryResult.sessionId } : {}),
+                status: "waiting",
+                lastActivity: new Date().toISOString(),
+                lastError: next.resumeAt
+                  ? `Claude usage limit — resumes ${next.resumeAt.toISOString()}`
+                  : "Claude usage limit — waiting for reset",
+              });
+
+              continue;
+            }
+
+            // Success or different error — handle normally
+            const retryText = retryResult.result?.trim()
+              ? retryResult.result
+              : retryResult.error || "(No response from engine)";
+
+            insertMessage(session.id, "assistant", retryText);
+            if (retryResult.cost || retryResult.numTurns) {
+              accumulateSessionCost(session.id, retryResult.cost ?? 0, retryResult.numTurns ?? 1);
+            }
+
+            // Clear typing indicator & reactions
+            if (decorateMessages && connector.setTypingStatus) {
+              await connector.setTypingStatus(target.channel, threadTs, "").catch(() => {});
+            }
+            if (decorateMessages && capabilities.reactions) {
+              await connector.removeReaction(target, "eyes").catch(() => {});
+              await connector.removeReaction(target, waitEmoji).catch(() => {});
+            }
+
+            await connector.replyMessage(target, retryText).catch(() => {});
+            const retryUpdated = updateSession(session.id, {
+              ...(retryResult.sessionId?.trim() ? { engineSessionId: retryResult.sessionId } : {}),
+              status: retryResult.error ? "error" : "idle",
+              replyContext: msg.replyContext,
+              messageId: msg.messageId ?? null,
+              transportMeta: msg.transportMeta ?? null,
+              lastActivity: new Date().toISOString(),
+              lastError: retryResult.error ?? null,
+            });
+            if (retryUpdated) {
+              notifyRateLimitResumed(retryUpdated);
+              notifyDiscordChannel(
+                `✅ Claude usage limit cleared. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} resumed.`,
+              );
+              notifyParentSession(retryUpdated, { result: retryResult.result, error: retryResult.error ?? null, cost: retryResult.cost, durationMs: retryResult.durationMs });
+            }
+            logger.info(`Session ${session.id} resumed after usage reset`);
+            return;
+          }
+
+          // Exhausted waiting window
+          notifyDiscordChannel(
+            `❌ Claude usage limit did not clear in time. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} has been stopped.`,
+          );
+          await connector.replyMessage(target, "Usage limit didn't reset in time. Please try again later.").catch(() => {});
+          updateSession(session.id, {
+            status: "error",
+            lastActivity: new Date().toISOString(),
+            lastError: "Claude usage limit did not clear in time",
+          });
+
+          // Clear reactions on failure
+          if (decorateMessages && capabilities.reactions) {
+            await connector.removeReaction(target, "eyes").catch(() => {});
+            await connector.removeReaction(target, waitEmoji).catch(() => {});
+          }
+          return;
+        } finally {
+          clearInterval(heartbeat);
         }
       }
 
@@ -211,35 +619,36 @@ export class SessionManager {
         : result.error || "(No response from engine)";
 
       insertMessage(session.id, "assistant", responseText);
-
-      // Clean up temp MCP config
-      if (mcpConfigPath) cleanupMcpConfigFile(session.id);
-
-      // Track cost
       if (result.cost || result.numTurns) {
         accumulateSessionCost(session.id, result.cost ?? 0, result.numTurns ?? 1);
       }
-
-      // Clear typing indicator before sending response
       if (decorateMessages && connector.setTypingStatus) {
         await connector.setTypingStatus(target.channel, threadTs, "").catch(() => {});
       }
-
-      await connector.replyMessage(target, responseText);
-
+      if (!wasInterrupted) {
+        await connector.replyMessage(target, responseText);
+      }
       if (decorateMessages && capabilities.reactions) {
         await connector.removeReaction(target, "eyes").catch(() => {});
       }
-
-      updateSession(session.id, {
-        engineSessionId: result.sessionId,
-        status: result.error ? "error" : "idle",
+      const updatedSession = updateSession(session.id, {
+        ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
+        status: wasInterrupted ? "idle" : (result.error ? "error" : "idle"),
         replyContext: msg.replyContext,
         messageId: msg.messageId ?? null,
-        transportMeta: msg.transportMeta ?? null,
+        transportMeta: (() => {
+          const merged = mergeTransportMeta(getSessionBySessionKey(msg.sessionKey)?.transportMeta ?? session.transportMeta, msg.transportMeta) as Record<string, unknown>;
+          if (syncRequested && !rateLimit.limited && !wasInterrupted) {
+            delete merged["claudeSyncSince"];
+          }
+          return merged as any;
+        })(),
         lastActivity: new Date().toISOString(),
-        lastError: result.error ?? null,
+        lastError: wasInterrupted ? null : (result.error ?? null),
       });
+      if (updatedSession) {
+        notifyParentSession(updatedSession, { result: result.result, error: wasInterrupted ? null : (result.error ?? null), cost: result.cost, durationMs: result.durationMs });
+      }
 
       logger.info(
         `Session ${session.id} completed in ${result.durationMs ?? 0}ms` +
@@ -249,14 +658,14 @@ export class SessionManager {
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error(`Session ${session.id} error: ${errMsg}`);
 
-      // Clean up temp MCP config on error
-      if (mcpConfigPath) cleanupMcpConfigFile(session.id);
-
-      updateSession(session.id, {
+      const erroredSession = updateSession(session.id, {
         status: "error",
         lastActivity: new Date().toISOString(),
         lastError: errMsg,
       });
+      if (erroredSession) {
+        notifyParentSession(erroredSession, { error: errMsg });
+      }
 
       // Clear typing indicator on error
       if (decorateMessages && connector.setTypingStatus) {
@@ -267,7 +676,19 @@ export class SessionManager {
 
       if (decorateMessages && capabilities.reactions) {
         await connector.removeReaction(target, "eyes").catch(() => {});
+        await connector.removeReaction(target, "hourglass_flowing_sand").catch(() => {});
       }
+    } finally {
+      // Clean up temp attachment files downloaded from Slack
+      for (const filePath of attachments) {
+        try {
+          fs.rmSync(filePath, { force: true });
+        } catch {
+          // Ignore cleanup errors — best effort
+        }
+      }
+
+      if (mcpConfigPath) cleanupMcpConfigFile(session.id);
     }
   }
 

@@ -120,13 +120,3 @@ export function wsEventToNotification(
   }
 }
 
-/** Events that warrant a browser push notification when tab is not focused */
-const PUSH_EVENTS = new Set([
-  "session:completed",
-  "cron:completed",
-  "cron:reloaded",
-]);
-
-export function shouldPushNotify(event: string): boolean {
-  return PUSH_EVENTS.has(event);
-}

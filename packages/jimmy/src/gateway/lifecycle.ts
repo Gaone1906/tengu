@@ -37,15 +37,13 @@ export async function startForeground(config: JinnConfig): Promise<void> {
 
 export function startDaemon(config: JinnConfig): void {
   const __filename = fileURLToPath(import.meta.url);
-  const entryScript = path.resolve(
-    path.dirname(__filename),
-    "..",
-    "..",
-    "dist",
-    "src",
-    "gateway",
-    "daemon-entry.js",
-  );
+  const candidateEntryScripts = [
+    // When running from a built bundle, __filename is dist/src/gateway/lifecycle.js
+    path.resolve(path.dirname(__filename), "daemon-entry.js"),
+    // Fallback for unusual layouts
+    path.resolve(path.dirname(__filename), "..", "..", "dist", "src", "gateway", "daemon-entry.js"),
+  ];
+  const entryScript = candidateEntryScripts.find((p) => fs.existsSync(p)) ?? candidateEntryScripts[0];
 
   // Fork a child process that will run the gateway
   const child = fork(entryScript, [], {
@@ -71,17 +69,18 @@ export function stop(port?: number): boolean {
     try {
       process.kill(pid, "SIGTERM");
       logger.info(`Sent SIGTERM to gateway process ${pid}`);
+      fs.unlinkSync(PID_FILE);
+      return true;
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ESRCH") {
         logger.warn(`Process ${pid} not found. Cleaning up stale PID file.`);
+        fs.unlinkSync(PID_FILE);
       } else {
         throw err;
       }
     }
-
-    fs.unlinkSync(PID_FILE);
-    return true;
+    // PID file existed but was stale; fall through to kill by port.
   }
 
   // No PID file — try to kill whatever is listening on the port
@@ -125,7 +124,12 @@ function findPidOnPort(port: number): number | null {
       const pid = parseInt(parts[parts.length - 1], 10);
       return isNaN(pid) ? null : pid;
     } else {
-      const output = execSync(`lsof -ti tcp:${port}`, { encoding: "utf-8" }).trim();
+      const output = execSync(
+        process.platform === "darwin"
+          ? `/usr/sbin/lsof -ti tcp:${port}`
+          : `lsof -ti tcp:${port}`,
+        { encoding: "utf-8" },
+      ).trim();
       if (!output) return null;
       const pid = parseInt(output.split("\n")[0], 10);
       return isNaN(pid) ? null : pid;
@@ -141,17 +145,22 @@ export interface GatewayStatus {
 }
 
 export function getStatus(): GatewayStatus {
-  if (!fs.existsSync(PID_FILE)) {
-    return { running: false, pid: null };
+  const targetPort = resolvePort();
+
+  if (fs.existsSync(PID_FILE)) {
+    const pid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10);
+    try {
+      process.kill(pid, 0);
+      return { running: true, pid };
+    } catch {
+      // Process not alive, stale PID file — fall back to port check.
+      const portPid = findPidOnPort(targetPort);
+      if (portPid) return { running: true, pid: portPid };
+      return { running: false, pid };
+    }
   }
 
-  const pid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10);
-
-  try {
-    process.kill(pid, 0);
-    return { running: true, pid };
-  } catch {
-    // Process not alive, stale PID file
-    return { running: false, pid };
-  }
+  const portPid = findPidOnPort(targetPort);
+  if (portPid) return { running: true, pid: portPid };
+  return { running: false, pid: null };
 }

@@ -1,4 +1,4 @@
-export type StreamDeltaType = "text" | "tool_use" | "tool_result" | "status" | "error";
+export type StreamDeltaType = "text" | "text_snapshot" | "tool_use" | "tool_result" | "status" | "error";
 
 export interface StreamDelta {
   type: StreamDeltaType;
@@ -50,6 +50,21 @@ export interface EngineResult {
   durationMs?: number;
   numTurns?: number;
   error?: string;
+  /**
+   * Optional rate limit metadata returned by an engine.
+   * `resetsAt` is a Unix timestamp in seconds.
+   */
+  rateLimit?: EngineRateLimitInfo;
+}
+
+export interface EngineRateLimitInfo {
+  status?: string;
+  /** Unix timestamp in seconds */
+  resetsAt?: number;
+  rateLimitType?: string;
+  overageStatus?: string;
+  overageDisabledReason?: string;
+  isUsingOverage?: boolean;
 }
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -66,7 +81,7 @@ export interface ConnectorCapabilities {
 }
 
 export interface ConnectorHealth {
-  status: "running" | "stopped" | "error";
+  status: "running" | "stopped" | "error" | "qr_pending";
   detail?: string;
   capabilities: ConnectorCapabilities;
 }
@@ -134,7 +149,7 @@ export interface Session {
   model: string | null;
   title: string | null;
   parentSessionId: string | null;
-  status: "idle" | "running" | "error" | "interrupted";
+  status: "idle" | "running" | "error" | "waiting" | "interrupted";
   effortLevel: string | null;
   totalCost: number;
   totalTurns: number;
@@ -241,6 +256,27 @@ export interface SlackConnectorConfig {
   ignoreOldMessagesOnBoot?: boolean;
 }
 
+export interface DiscordConnectorConfig {
+  botToken?: string;       // Make optional — not needed in proxy mode
+  allowFrom?: string | string[];
+  ignoreOldMessagesOnBoot?: boolean;
+  guildId?: string;
+  /** Only respond to messages in this channel */
+  channelId?: string;
+  /** Route messages from specific channels to remote Jinn instances */
+  channelRouting?: Record<string, string>;
+  /** URL of the primary Jinn instance to proxy Discord I/O through (secondary/remote mode) */
+  proxyVia?: string;
+}
+
+export interface WhatsAppConnectorConfig {
+  /** Where to store session credentials (default: JINN_HOME/.whatsapp-auth) */
+  authDir?: string;
+  /** Allowed phone numbers in JID format (e.g. "447700900000@s.whatsapp.net") — empty = allow all */
+  allowFrom?: string[];
+  ignoreOldMessagesOnBoot?: boolean;
+}
+
 export interface PortalConfig {
   portalName?: string;
   operatorName?: string;
@@ -258,6 +294,8 @@ export interface JinnConfig {
   connectors: Record<string, any> & {
     web?: WebConnectorConfig;
     slack?: SlackConnectorConfig;
+    discord?: DiscordConnectorConfig;
+    whatsapp?: WhatsAppConnectorConfig;
   };
   logging: { file: boolean; stdout: boolean; level: string };
   mcp?: McpGlobalConfig;
@@ -265,11 +303,19 @@ export interface JinnConfig {
     maxDurationMinutes?: number;
     maxCostUsd?: number;
     interruptOnNewMessage?: boolean;
+    /** What to do when Claude hits a usage/rate limit. Default: "fallback" */
+    rateLimitStrategy?: "wait" | "fallback";
+    /** Engine to use when rateLimitStrategy="fallback". Default: "codex" */
+    fallbackEngine?: "codex";
   };
   cron?: {
     defaultDelivery?: CronDelivery;
     alertChannel?: string;
     alertConnector?: string;
+  };
+  notifications?: {
+    connector?: string;  // defaults to "discord"
+    channel?: string;    // Discord channel ID for admin notifications
   };
   portal?: PortalConfig;
   context?: {
