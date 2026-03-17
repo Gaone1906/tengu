@@ -1,9 +1,10 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
+import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
-import type { CronJob, Engine, JinnConfig, Session } from "../shared/types.js";
+import type { CronJob, Engine, IncomingMessage, JinnConfig, Session, Target } from "../shared/types.js";
 import { isInterruptibleEngine } from "../shared/types.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { buildContext } from "../sessions/context.js";
@@ -16,6 +17,11 @@ import {
   deleteSessions,
   insertMessage,
   getMessages,
+  enqueueQueueItem,
+  cancelQueueItem,
+  getQueueItems,
+  cancelAllPendingQueueItems,
+  listAllPendingQueueItems,
 } from "../sessions/registry.js";
 import {
   CONFIG_PATH,
@@ -30,10 +36,16 @@ import { logger } from "../shared/logger.js";
 import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLanguages, WHISPER_LANGUAGES } from "../stt/stt.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { resolveEffort } from "../shared/effort.js";
+import { computeNextRetryDelayMs, computeRateLimitDeadlineMs, detectRateLimit } from "../shared/rateLimit.js";
+import { getClaudeExpectedResetAt, recordClaudeRateLimit } from "../shared/usageAwareness.js";
 import { loadJobs, saveJobs } from "../cron/jobs.js";
 import { reloadScheduler } from "../cron/scheduler.js";
 import { runCronJob } from "../cron/runner.js";
+import QRCode from "qrcode";
+import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, ensureFilesDir } from "./files.js";
+import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel } from "../sessions/callbacks.js";
+import { loadInstances } from "../cli/instances.js";
 
 export interface ApiContext {
   config: JinnConfig;
@@ -44,19 +56,96 @@ export interface ApiContext {
   connectors: Map<string, import("../shared/types.js").Connector>;
 }
 
+export function resumePendingWebQueueItems(context: ApiContext): void {
+  const pending = listAllPendingQueueItems();
+  if (pending.length === 0) return;
+
+  let resumed = 0;
+  for (const item of pending) {
+    let session = getSession(item.sessionId);
+    if (!session) {
+      cancelQueueItem(item.id);
+      continue;
+    }
+    if (session.source !== "web") continue;
+    session = maybeRevertEngineOverride(session);
+
+    const config = context.getConfig();
+    const engine = context.sessionManager.getEngine(session.engine);
+    if (!engine) {
+      cancelQueueItem(item.id);
+      updateSession(session.id, { status: "error", lastActivity: new Date().toISOString(), lastError: `Engine "${session.engine}" not available` });
+      continue;
+    }
+
+    // Ensure the session is in a runnable state
+    updateSession(session.id, { status: "running", lastActivity: new Date().toISOString(), lastError: null });
+
+    dispatchWebSessionRun(session, item.prompt, engine, config, context, { queueItemId: item.id });
+    resumed++;
+  }
+
+  if (resumed > 0) {
+    logger.info(`Re-dispatched ${resumed} pending web queue item(s) after gateway restart`);
+  }
+}
+
+function maybeRevertEngineOverride(session: Session): Session {
+  const meta = (session.transportMeta || {}) as Record<string, unknown>;
+  const override = meta["engineOverride"] as Record<string, unknown> | undefined;
+  if (!override) return session;
+
+  const originalEngine = typeof override.originalEngine === "string" ? override.originalEngine : null;
+  const originalEngineSessionId = typeof override.originalEngineSessionId === "string"
+    ? override.originalEngineSessionId
+    : null;
+  const syncSince = typeof override.syncSince === "string" ? override.syncSince : null;
+  const untilIso = typeof override.until === "string" ? override.until : null;
+  if (!originalEngine || !untilIso) return session;
+
+  const until = new Date(untilIso);
+  if (Number.isNaN(until.getTime())) return session;
+  if (until.getTime() > Date.now()) return session;
+
+  const engineSessionsRaw = meta["engineSessions"];
+  const engineSessions = (engineSessionsRaw && typeof engineSessionsRaw === "object" && !Array.isArray(engineSessionsRaw))
+    ? { ...(engineSessionsRaw as Record<string, unknown>) }
+    : {};
+
+  // Preserve the current engine session ID under its engine key
+  if (session.engine && session.engineSessionId) {
+    engineSessions[String(session.engine)] = session.engineSessionId;
+  }
+
+  const restoredSessionId = originalEngineSessionId
+    ?? (typeof engineSessions[originalEngine] === "string" ? (engineSessions[originalEngine] as string) : null);
+
+  const nextMeta = { ...meta, engineSessions } as Record<string, unknown>;
+  if (originalEngine === "claude" && syncSince && session.engine !== "claude") {
+    nextMeta["claudeSyncSince"] = syncSince;
+  }
+  delete (nextMeta as Record<string, unknown>)["engineOverride"];
+  return updateSession(session.id, {
+    engine: originalEngine,
+    engineSessionId: restoredSessionId,
+    transportMeta: nextMeta as any,
+    lastError: null,
+  }) ?? session;
+}
+
 function dispatchWebSessionRun(
   session: Session,
   prompt: string,
   engine: Engine,
   config: JinnConfig,
   context: ApiContext,
-  opts?: { delayMs?: number },
+  opts?: { delayMs?: number; queueItemId?: string },
 ): void {
   const run = async () => {
     await context.sessionManager.getQueue().enqueue(session.sessionKey || session.sourceRef, async () => {
       context.emit("session:started", { sessionId: session.id });
       await runWebSession(session, prompt, engine, config, context);
-    });
+    }, opts?.queueItemId);
   };
 
   const launch = () => {
@@ -128,6 +217,20 @@ function serverError(res: ServerResponse, message: string): void {
   json(res, { error: message }, 500);
 }
 
+function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...target };
+  for (const key of Object.keys(source)) {
+    const sv = source[key];
+    const tv = target[key];
+    if (sv && typeof sv === "object" && !Array.isArray(sv) && tv && typeof tv === "object" && !Array.isArray(tv)) {
+      result[key] = deepMerge(tv as Record<string, unknown>, sv as Record<string, unknown>);
+    } else {
+      result[key] = sv;
+    }
+  }
+  return result;
+}
+
 function matchRoute(
   pattern: string,
   pathname: string,
@@ -156,6 +259,18 @@ function serializeSession(session: Session, context: ApiContext): Session {
     queueDepth,
     transportState,
   };
+}
+
+function checkInstanceHealth(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.request({ hostname: "localhost", port, path: "/api/status", timeout: 2000 }, (res) => {
+      resolve(res.statusCode === 200);
+      res.resume();
+    });
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+    req.end();
+  });
 }
 
 export async function handleApiRequest(
@@ -188,6 +303,21 @@ export async function handleApiRequest(
         sessions: { total: sessions.length, running, active: running },
         connectors,
       });
+    }
+
+    // GET /api/instances
+    if (method === "GET" && pathname === "/api/instances") {
+      const instances = loadInstances();
+      const currentPort = context.getConfig().gateway.port || 7777;
+      const results = await Promise.all(
+        instances.map(async (inst) => ({
+          name: inst.name,
+          port: inst.port,
+          running: inst.port === currentPort ? true : await checkInstanceHealth(inst.port),
+          current: inst.port === currentPort,
+        }))
+      );
+      return json(res, results);
     }
 
     // GET /api/sessions
@@ -244,6 +374,79 @@ export async function handleApiRequest(
       return json(res, { status: "deleted" });
     }
 
+    // POST /api/sessions/:id/stop
+    params = matchRoute("/api/sessions/:id/stop", pathname);
+    if (method === "POST" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      const engine = context.sessionManager.getEngine(session.engine);
+      if (engine && isInterruptibleEngine(engine) && engine.isAlive(params.id)) {
+        engine.kill(params.id, "Interrupted by user");
+      }
+      context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
+      updateSession(params.id, { status: "idle", lastActivity: new Date().toISOString(), lastError: null });
+      context.emit("session:stopped", { sessionId: params.id });
+      return json(res, { status: "stopped", sessionId: params.id });
+    }
+
+    // DELETE /api/sessions/:id/queue/:itemId — cancel specific item
+    const queueItemParams = matchRoute("/api/sessions/:id/queue/:itemId", pathname);
+    if (method === "DELETE" && queueItemParams) {
+      const session = getSession(queueItemParams.id);
+      if (!session) return notFound(res);
+      const cancelled = cancelQueueItem(queueItemParams.itemId);
+      if (!cancelled) {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Item not found or already running" }));
+        return;
+      }
+      context.emit("queue:updated", { sessionId: queueItemParams.id, sessionKey: session.sessionKey });
+      return json(res, { status: "cancelled", itemId: queueItemParams.itemId });
+    }
+
+    // GET /api/sessions/:id/queue
+    params = matchRoute("/api/sessions/:id/queue", pathname);
+    if (method === "GET" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      const items = getQueueItems(session.sessionKey || session.sourceRef || session.id);
+      return json(res, items);
+    }
+
+    // DELETE /api/sessions/:id/queue — clear all pending
+    params = matchRoute("/api/sessions/:id/queue", pathname);
+    if (method === "DELETE" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      const sessionKey = session.sessionKey || session.sourceRef || session.id;
+      context.sessionManager.getQueue().clearQueue(sessionKey);
+      const cancelled = cancelAllPendingQueueItems(sessionKey);
+      context.emit("queue:updated", { sessionId: params.id, sessionKey, depth: 0 });
+      return json(res, { status: "cleared", cancelled });
+    }
+
+    // POST /api/sessions/:id/queue/pause
+    params = matchRoute("/api/sessions/:id/queue/pause", pathname);
+    if (method === "POST" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      const sessionKey = session.sessionKey || session.sourceRef || session.id;
+      context.sessionManager.getQueue().pauseQueue(sessionKey);
+      context.emit("queue:updated", { sessionId: params.id, sessionKey, paused: true });
+      return json(res, { status: "paused", sessionId: params.id });
+    }
+
+    // POST /api/sessions/:id/queue/resume
+    params = matchRoute("/api/sessions/:id/queue/resume", pathname);
+    if (method === "POST" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      const sessionKey = session.sessionKey || session.sourceRef || session.id;
+      context.sessionManager.getQueue().resumeQueue(sessionKey);
+      context.emit("queue:updated", { sessionId: params.id, sessionKey, paused: false });
+      return json(res, { status: "resumed", sessionId: params.id });
+    }
+
     // POST /api/sessions/bulk-delete
     if (method === "POST" && pathname === "/api/sessions/bulk-delete") {
       const _parsed = await readJsonBody(req, res);
@@ -276,6 +479,16 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const children = listSessions().filter((s) => s.parentSessionId === params!.id);
       return json(res, children.map((child) => serializeSession(child, context)));
+    }
+
+    // GET /api/sessions/:id/transcript — return raw Claude Code session transcript
+    params = matchRoute("/api/sessions/:id/transcript", pathname);
+    if (method === "GET" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      if (!session.engineSessionId) return json(res, []);
+      const entries = loadRawTranscript(session.engineSessionId);
+      return json(res, entries);
     }
 
     // POST /api/sessions/stub — create a session with a pre-populated assistant
@@ -351,7 +564,11 @@ export async function handleApiRequest(
       });
       session.status = "running";
 
-      dispatchWebSessionRun(session, prompt, engine, config, context);
+      const queueSessionKey = session.sessionKey || session.sourceRef || session.id;
+      const queueItemId = enqueueQueueItem(session.id, queueSessionKey, prompt);
+      context.emit("queue:updated", { sessionId: session.id, sessionKey: queueSessionKey });
+
+      dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId });
 
       return json(res, serializeSession(session, context), 201);
     }
@@ -359,8 +576,9 @@ export async function handleApiRequest(
     // POST /api/sessions/:id/message
     params = matchRoute("/api/sessions/:id/message", pathname);
     if (method === "POST" && params) {
-      const session = getSession(params.id);
+      let session = getSession(params.id);
       if (!session) return notFound(res);
+      session = maybeRevertEngineOverride(session);
       const _parsed = await readJsonBody(req, res);
       if (!_parsed.ok) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -368,16 +586,39 @@ export async function handleApiRequest(
       const prompt = body.message || body.prompt;
       if (!prompt) return badRequest(res, "message is required");
 
+      // Allow internal callers (e.g. child session callbacks) to specify a non-user role
+      const messageRole: string = body.role === "notification" ? "notification" : "user";
+      const isNotification = messageRole === "notification";
+
       const config = context.getConfig();
       const engine = context.sessionManager.getEngine(session.engine);
       if (!engine) return serverError(res, `Engine "${session.engine}" not available`);
 
-      // Persist the user message immediately
-      insertMessage(session.id, "user", prompt);
+      // Persist the message immediately
+      insertMessage(session.id, messageRole, prompt);
+
+      // Emit notification event for UI display (renders as system banner, not user bubble)
+      if (isNotification) {
+        context.emit("session:notification", { sessionId: session.id, message: prompt });
+        // Don't return early — fall through to enqueue + dispatch so the engine
+        // (e.g. the COO) actually processes the notification and can respond.
+      }
+
+      if (!isNotification && session.status === "waiting") {
+        const expectedResetAt = getClaudeExpectedResetAt();
+        const resumeText = expectedResetAt
+          ? expectedResetAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+          : null;
+        const queuedText =
+          `⏳ Still paused due to Claude usage limit${resumeText ? ` (resets ${resumeText})` : ""}. Your message is queued and will run automatically.`;
+        insertMessage(session.id, "notification", queuedText);
+        context.emit("session:notification", { sessionId: session.id, message: queuedText });
+      }
 
       // If a turn is already running, check whether we should interrupt or queue.
+      // Notifications (child completion callbacks) should never interrupt — just queue.
       if (session.status === "running") {
-        if ((config.sessions?.interruptOnNewMessage ?? true) && isInterruptibleEngine(engine) && engine.isAlive(session.id)) {
+        if (!isNotification && (config.sessions?.interruptOnNewMessage ?? true) && isInterruptibleEngine(engine) && engine.isAlive(session.id)) {
           logger.info(`Interrupting running session ${session.id} for new message`);
           engine.kill(session.id, "Interrupted: new message received");
           // Wait briefly for the process to exit so the queue slot frees up
@@ -399,7 +640,14 @@ export async function handleApiRequest(
         context.emit("session:resumed", { sessionId: session.id });
       }
 
-      dispatchWebSessionRun(session, prompt, engine, config, context);
+      // Clear any pending cancellation so the new message runs normally.
+      context.sessionManager.getQueue().clearCancelled(session.sessionKey || session.sourceRef || session.id);
+
+      const sessionKey = session.sessionKey || session.sourceRef || session.id;
+      const queueItemId = enqueueQueueItem(session.id, sessionKey, prompt);
+      context.emit("queue:updated", { sessionId: session.id, sessionKey });
+
+      dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId });
 
       return json(res, { status: "queued", sessionId: session.id });
     }
@@ -759,7 +1007,23 @@ export async function handleApiRequest(
         return badRequest(res, "Config must be a JSON object");
       }
       // Validate known top-level keys
-      const KNOWN_KEYS = ["gateway", "engines", "connectors", "mcp", "portal", "stt", "skills", "sessions"];
+      // Keep this aligned with `JinnConfig` in src/shared/types.ts
+      const KNOWN_KEYS = [
+        "jinn",
+        "gateway",
+        "engines",
+        "connectors",
+        "logging",
+        "mcp",
+        "sessions",
+        "cron",
+        "notifications",
+        "portal",
+        "context",
+        "stt",
+        "skills",
+        "remotes",
+      ];
       const unknownKeys = Object.keys(body).filter((k) => !KNOWN_KEYS.includes(k));
       if (unknownKeys.length > 0) {
         return badRequest(res, `Unknown config keys: ${unknownKeys.join(", ")}`);
@@ -776,7 +1040,14 @@ export async function handleApiRequest(
       if (body.engines !== undefined && (typeof body.engines !== "object" || Array.isArray(body.engines))) {
         return badRequest(res, "engines must be an object");
       }
-      const yamlStr = yaml.dump(body);
+      // Deep-merge incoming config with existing config to preserve
+      // fields not included in the update (e.g. connector tokens).
+      let existing: Record<string, unknown> = {};
+      try {
+        existing = yaml.load(fs.readFileSync(CONFIG_PATH, "utf-8")) as Record<string, unknown> || {};
+      } catch { /* start fresh if unreadable */ }
+      const merged = deepMerge(existing, body);
+      const yamlStr = yaml.dump(merged);
       fs.writeFileSync(CONFIG_PATH, yamlStr);
       logger.info("Config updated via API");
       return json(res, { status: "ok" });
@@ -800,6 +1071,103 @@ export async function handleApiRequest(
       return json(res, { lines });
     }
 
+    // POST /api/connectors/discord/incoming — receive proxied Discord messages from primary instance
+    if (method === "POST" && pathname === "/api/connectors/discord/incoming") {
+      const connector = context.connectors.get("discord");
+      if (!connector) return notFound(res);
+      if (!("deliverMessage" in connector)) {
+        return json(res, { error: "Discord connector is not in remote mode" }, 400);
+      }
+
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
+
+      // Download attachments from Discord CDN URLs to local temp
+      const { downloadAttachment } = await import("../connectors/discord/format.js");
+      const attachments = await Promise.all(
+        (body.attachments || []).map(async (att: { name: string; url: string; mimeType: string }) => {
+          if (att.url) {
+            try {
+              const localPath = await downloadAttachment(att.url, TMP_DIR, att.name);
+              return { name: att.name, url: att.url, mimeType: att.mimeType, localPath };
+            } catch {
+              return { name: att.name, url: att.url, mimeType: att.mimeType };
+            }
+          }
+          return att;
+        }),
+      );
+
+      const incomingMsg: IncomingMessage = {
+        connector: "discord",
+        source: "discord",
+        sessionKey: body.sessionKey,
+        channel: body.channel,
+        thread: body.thread,
+        user: body.user,
+        userId: body.userId,
+        text: body.text,
+        messageId: body.messageId,
+        attachments,
+        replyContext: body.replyContext || {},
+        transportMeta: body.transportMeta,
+        raw: body,
+      };
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (connector as any).deliverMessage(incomingMsg);
+      return json(res, { status: "delivered" });
+    }
+
+    // POST /api/connectors/discord/proxy — proxy connector operations from remote instances
+    if (method === "POST" && pathname === "/api/connectors/discord/proxy") {
+      const connector = context.connectors.get("discord");
+      if (!connector) return notFound(res);
+
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
+
+      const action = body.action as string;
+      const target = body.target as Target | undefined;
+      let messageId: string | undefined;
+
+      switch (action) {
+        case "sendMessage":
+          if (!target || !body.text) return badRequest(res, "target and text are required");
+          messageId = (await connector.sendMessage(target, body.text)) as string | undefined;
+          break;
+        case "replyMessage":
+          if (!target || !body.text) return badRequest(res, "target and text are required");
+          messageId = (await connector.replyMessage(target, body.text)) as string | undefined;
+          break;
+        case "editMessage":
+          if (!target || !body.text) return badRequest(res, "target and text are required");
+          await connector.editMessage(target, body.text);
+          break;
+        case "addReaction":
+          if (!target || !body.emoji) return badRequest(res, "target and emoji are required");
+          await connector.addReaction(target, body.emoji);
+          break;
+        case "removeReaction":
+          if (!target || !body.emoji) return badRequest(res, "target and emoji are required");
+          await connector.removeReaction(target, body.emoji);
+          break;
+        case "setTypingStatus":
+          if (connector.setTypingStatus) {
+            await connector.setTypingStatus(body.channelId ?? "", body.threadTs, body.status ?? "");
+          }
+          break;
+        default:
+          return badRequest(res, `Unknown proxy action: ${action}`);
+      }
+
+      return json(res, { status: "ok", messageId });
+    }
+
     // POST /api/connectors/:name/send — send a message via a connector
     params = matchRoute("/api/connectors/:name/send", pathname);
     if (method === "POST" && params) {
@@ -815,6 +1183,16 @@ export async function handleApiRequest(
         body.text,
       );
       return json(res, { status: "sent" });
+    }
+
+    // GET /api/connectors/whatsapp/qr — return current QR code as PNG data URL
+    if (method === "GET" && pathname === "/api/connectors/whatsapp/qr") {
+      const waConnector = context.connectors.get("whatsapp");
+      if (!waConnector) return notFound(res);
+      const qrString = (waConnector as WhatsAppConnector).getQrCode();
+      if (!qrString) return json(res, { qr: null });
+      const dataUrl = await QRCode.toDataURL(qrString, { width: 256, margin: 2 });
+      return json(res, { qr: dataUrl });
     }
 
     // GET /api/connectors — list available connectors
@@ -1100,6 +1478,94 @@ function parseSkillsSearchOutput(
  * Load messages from a Claude Code JSONL transcript file.
  * Used as a fallback when the messages DB is empty (pre-existing sessions).
  */
+interface TranscriptContentBlock {
+  type: "text" | "tool_use" | "tool_result" | "thinking";
+  text?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+  content?: unknown;
+  id?: string;
+}
+
+interface TranscriptEntry {
+  role: "user" | "assistant" | "system";
+  content: TranscriptContentBlock[];
+}
+
+function loadRawTranscript(engineSessionId: string): TranscriptEntry[] {
+  const claudeProjectsDir = path.join(
+    process.env.HOME || process.env.USERPROFILE || "",
+    ".claude",
+    "projects",
+  );
+  if (!fs.existsSync(claudeProjectsDir)) return [];
+
+  const projectDirs = fs.readdirSync(claudeProjectsDir, { withFileTypes: true });
+  for (const dir of projectDirs) {
+    if (!dir.isDirectory()) continue;
+    const jsonlPath = path.join(claudeProjectsDir, dir.name, `${engineSessionId}.jsonl`);
+    if (!fs.existsSync(jsonlPath)) continue;
+
+    const entries: TranscriptEntry[] = [];
+    const lines = fs.readFileSync(jsonlPath, "utf-8").trim().split("\n").filter(Boolean);
+    for (const line of lines) {
+      try {
+        const obj = JSON.parse(line);
+        const type = obj.type;
+        if (type !== "user" && type !== "assistant") continue;
+        const msg = obj.message;
+        if (!msg) continue;
+
+        const rawContent = msg.content;
+        const blocks: TranscriptContentBlock[] = [];
+
+        if (typeof rawContent === "string") {
+          if (rawContent.trim()) blocks.push({ type: "text", text: rawContent });
+        } else if (Array.isArray(rawContent)) {
+          for (const block of rawContent) {
+            if (!block || typeof block !== "object") continue;
+            const b = block as Record<string, unknown>;
+            const blockType = String(b.type || "");
+            if (blockType === "text") {
+              blocks.push({ type: "text", text: String(b.text || "") });
+            } else if (blockType === "tool_use") {
+              blocks.push({
+                type: "tool_use",
+                name: String(b.name || ""),
+                input: (b.input as Record<string, unknown>) || {},
+              });
+            } else if (blockType === "tool_result") {
+              const resultContent = b.content;
+              let resultText: string;
+              if (typeof resultContent === "string") {
+                resultText = resultContent;
+              } else if (Array.isArray(resultContent)) {
+                resultText = (resultContent as Record<string, unknown>[])
+                  .filter((rc) => rc.type === "text")
+                  .map((rc) => String(rc.text || ""))
+                  .join("");
+              } else {
+                resultText = "";
+              }
+              blocks.push({ type: "tool_result", text: resultText });
+            } else if (blockType === "thinking") {
+              blocks.push({ type: "thinking", text: String(b.thinking || b.text || "") });
+            }
+          }
+        }
+
+        if (blocks.length > 0) {
+          entries.push({ role: type as "user" | "assistant", content: blocks });
+        }
+      } catch {
+        continue;
+      }
+    }
+    return entries;
+  }
+  return [];
+}
+
 function loadTranscriptMessages(engineSessionId: string): Array<{ role: string; content: string }> {
   // Claude Code stores transcripts in ~/.claude/projects/<project-key>/<sessionId>.jsonl
   const claudeProjectsDir = path.join(
@@ -1201,8 +1667,21 @@ async function runWebSession(
       });
     }, 5000);
 
+    const syncSinceIso = (currentSession.transportMeta as any)?.claudeSyncSince;
+    const syncSinceMs = typeof syncSinceIso === "string" ? new Date(syncSinceIso).getTime() : NaN;
+    const syncRequested = currentSession.engine === "claude" && typeof syncSinceIso === "string" && Number.isFinite(syncSinceMs);
+    const promptToRun = syncRequested
+      ? (() => {
+        const sinceMessages = getMessages(currentSession.id)
+          .filter((m) => (m.role === "user" || m.role === "assistant") && m.timestamp >= syncSinceMs)
+          .map((m) => `${m.role.toUpperCase()}: ${m.content}`);
+        const transcript = sinceMessages.slice(-20).join("\n\n");
+        return `We temporarily switched to GPT due to a Claude usage limit. Sync your context with this transcript (most recent last), then respond to the last USER message.\n\n${transcript}`;
+      })()
+      : prompt;
+
     const result = await engine.run({
-      prompt,
+      prompt: promptToRun,
       resumeSessionId: currentSession.engineSessionId ?? undefined,
       systemPrompt,
       cwd: JINN_HOME,
@@ -1240,17 +1719,316 @@ async function runWebSession(
       return;
     }
 
+    const wasInterrupted = result.error?.startsWith("Interrupted");
+    const rateLimit = !wasInterrupted ? detectRateLimit(result) : { limited: false as const };
+
+    if (rateLimit.limited) {
+      recordClaudeRateLimit(rateLimit.resetsAt);
+      const strategy = config.sessions?.rateLimitStrategy ?? "fallback";
+
+      // Optional fallback: switch to GPT (Codex) while Claude resets
+      if (currentSession.engine === "claude" && strategy === "fallback") {
+        const fallbackName = config.sessions?.fallbackEngine ?? "codex";
+        const fallbackEngine = context.sessionManager.getEngine(fallbackName);
+        if (fallbackEngine) {
+          const { resumeAt } = computeNextRetryDelayMs(rateLimit.resetsAt);
+          const until = resumeAt ?? new Date(Date.now() + 6 * 60 * 60_000);
+          const syncSince = new Date().toISOString();
+
+          const resumeText = resumeAt
+            ? resumeAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+            : null;
+
+          const notificationText =
+            `⚠️ Claude usage limit reached${resumeText ? `. Resets ${resumeText}` : ""}. Switching to GPT for now.`;
+          insertMessage(currentSession.id, "notification", notificationText);
+          context.emit("session:notification", { sessionId: currentSession.id, message: notificationText });
+
+          const nextMeta = { ...(currentSession.transportMeta || {}) } as Record<string, unknown>;
+          const engineSessionsRaw = nextMeta.engineSessions;
+          const engineSessions = (engineSessionsRaw && typeof engineSessionsRaw === "object" && !Array.isArray(engineSessionsRaw))
+            ? { ...(engineSessionsRaw as Record<string, unknown>) }
+            : {};
+          if (currentSession.engineSessionId) {
+            engineSessions.claude = currentSession.engineSessionId;
+          }
+          nextMeta.engineSessions = engineSessions;
+          nextMeta.engineOverride = { originalEngine: "claude", originalEngineSessionId: currentSession.engineSessionId, until: until.toISOString(), syncSince };
+
+          updateSession(currentSession.id, {
+            engine: fallbackName,
+            transportMeta: nextMeta as any,
+            status: "running",
+            lastActivity: new Date().toISOString(),
+            lastError: resumeAt
+              ? `Claude usage limit — using GPT until ${resumeAt.toISOString()}`
+              : "Claude usage limit — using GPT temporarily",
+          });
+
+          notifyDiscordChannel(
+            `⚠️ Claude usage limit reached. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} switching to GPT.`,
+          );
+
+          const fallbackConfig = config.engines.codex;
+          const fallbackEffort = resolveEffort(fallbackConfig, currentSession, employee);
+          const codexResume = typeof engineSessions.codex === "string" ? (engineSessions.codex as string) : undefined;
+          const history = getMessages(currentSession.id)
+            .filter((m) => m.role === "user" || m.role === "assistant")
+            .map((m) => `${m.role.toUpperCase()}: ${m.content}`);
+          const historyText = history.slice(-12).join("\n\n");
+          const fallbackPrompt = codexResume
+            ? prompt
+            : `Continue this conversation and respond to the last USER message.\n\nConversation so far:\n\n${historyText}`;
+          const fallbackResult = await fallbackEngine.run({
+            prompt: fallbackPrompt,
+            resumeSessionId: codexResume,
+            systemPrompt,
+            cwd: JINN_HOME,
+            bin: fallbackConfig.bin,
+            model: currentSession.model ?? fallbackConfig.model,
+            effortLevel: fallbackEffort,
+            cliFlags: employee?.cliFlags,
+            sessionId: currentSession.id,
+            onStream: (delta) => {
+              context.emit("session:delta", {
+                sessionId: currentSession.id,
+                type: delta.type,
+                content: delta.content,
+                toolName: delta.toolName,
+              });
+            },
+          });
+
+          if (fallbackResult.result) {
+            insertMessage(currentSession.id, "assistant", fallbackResult.result);
+          }
+
+          // Persist Codex thread id so future fallbacks can resume it
+          const nextEngineSessions = { ...engineSessions };
+          if (fallbackResult.sessionId) {
+            nextEngineSessions.codex = fallbackResult.sessionId;
+          }
+          const metaAfter = { ...(getSession(currentSession.id)?.transportMeta || nextMeta) } as Record<string, unknown>;
+          metaAfter.engineSessions = nextEngineSessions;
+          updateSession(currentSession.id, { transportMeta: metaAfter as any });
+
+          const completedFallback = updateSession(currentSession.id, {
+            engineSessionId: fallbackResult.sessionId,
+            status: fallbackResult.error ? "error" : "idle",
+            lastActivity: new Date().toISOString(),
+            lastError: fallbackResult.error ?? null,
+          });
+          if (completedFallback) {
+            notifyParentSession(completedFallback, { result: fallbackResult.result, error: fallbackResult.error ?? null, cost: fallbackResult.cost, durationMs: fallbackResult.durationMs });
+          }
+
+          context.emit("session:completed", {
+            sessionId: currentSession.id,
+            employee: currentSession.employee || config.portal?.portalName || "Jinn",
+            title: currentSession.title,
+            result: fallbackResult.result,
+            error: fallbackResult.error || null,
+            cost: fallbackResult.cost,
+            durationMs: fallbackResult.durationMs,
+          });
+
+          return;
+        }
+      }
+
+      // Otherwise: wait until reset and retry automatically
+      const { delayMs, resumeAt } = computeNextRetryDelayMs(rateLimit.resetsAt);
+      const deadlineMs = computeRateLimitDeadlineMs(
+        rateLimit.resetsAt,
+        rateLimit.resetsAt ? 30 * 60_000 : 6 * 60 * 60_000,
+      );
+
+      const resumeText = resumeAt
+        ? resumeAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+        : null;
+
+      logger.info(
+        `Web session ${currentSession.id} hit Claude usage limit — will auto-retry ${resumeAt ? `at ${resumeAt.toISOString()}` : `in ${Math.round(delayMs / 1000)}s`}`,
+      );
+
+      // Send hardcoded Discord notification — does not depend on the LLM
+      notifyDiscordChannel(
+        `⚠️ Claude usage limit reached. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} paused${resumeText ? ` until ${resumeText}` : ""}.`,
+      );
+
+      const notificationText =
+        `⏳ Claude usage limit reached${resumeText ? `. Resets ${resumeText}` : ""} — I'll continue automatically.`;
+      insertMessage(currentSession.id, "notification", notificationText);
+      context.emit("session:notification", { sessionId: currentSession.id, message: notificationText });
+
+      const waitingSession = updateSession(currentSession.id, {
+        ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
+        status: "waiting",
+        lastActivity: new Date().toISOString(),
+        lastError: resumeAt
+          ? `Claude usage limit — resumes ${resumeAt.toISOString()}`
+          : "Claude usage limit — waiting for reset",
+      });
+
+      // Notify parent session about rate limit (fire-and-forget)
+      notifyRateLimited(
+        (waitingSession ?? { ...currentSession, status: "waiting" }) as Session,
+        resumeAt
+          ? resumeAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
+          : undefined,
+      );
+
+      context.emit("session:rate-limited", {
+        sessionId: currentSession.id,
+        employee: currentSession.employee,
+        error: result.error,
+        resetsAt: rateLimit.resetsAt ?? null,
+      });
+
+      // Keep lastActivity fresh while waiting (UI / status endpoints)
+      const heartbeat = setInterval(() => {
+        updateSession(currentSession.id, { status: "waiting", lastActivity: new Date().toISOString() });
+      }, 60_000);
+
+      try {
+        let attempt = 0;
+        let nextDelayMs = delayMs;
+
+        while (Date.now() < deadlineMs) {
+          await new Promise<void>((r) => setTimeout(r, nextDelayMs));
+          attempt++;
+
+          // Check session still exists and hasn't been cancelled
+          const current = getSession(currentSession.id);
+          if (!current || current.status === "error") {
+            logger.info(`Web session ${currentSession.id} stopped while waiting for usage reset`);
+            return;
+          }
+
+          logger.info(`Web session ${currentSession.id} retrying after usage limit (attempt ${attempt})`);
+
+          const retryResult = await engine.run({
+            prompt,
+            resumeSessionId: current.engineSessionId ?? undefined,
+            systemPrompt,
+            cwd: JINN_HOME,
+            bin: engineConfig.bin,
+            model: current.model ?? engineConfig.model,
+            effortLevel,
+            cliFlags: employee?.cliFlags,
+            sessionId: currentSession.id,
+            onStream: (delta) => {
+              context.emit("session:delta", {
+                sessionId: currentSession.id,
+                type: delta.type,
+                content: delta.content,
+                toolName: delta.toolName,
+              });
+            },
+          });
+
+          const retryInterrupted = retryResult.error?.startsWith("Interrupted");
+          const retryRateLimit = !retryInterrupted ? detectRateLimit(retryResult) : { limited: false as const };
+
+          if (retryRateLimit.limited) {
+            recordClaudeRateLimit(retryRateLimit.resetsAt);
+            logger.info(`Web session ${currentSession.id} still rate limited (attempt ${attempt})`);
+
+            const next = computeNextRetryDelayMs(retryRateLimit.resetsAt);
+            nextDelayMs = next.delayMs;
+
+            updateSession(currentSession.id, {
+              ...(retryResult.sessionId?.trim() ? { engineSessionId: retryResult.sessionId } : {}),
+              status: "waiting",
+              lastActivity: new Date().toISOString(),
+              lastError: next.resumeAt
+                ? `Claude usage limit — resumes ${next.resumeAt.toISOString()}`
+                : "Claude usage limit — waiting for reset",
+            });
+
+            continue;
+          }
+
+          // Usage limit cleared — handle result
+          if (retryResult.result) {
+            insertMessage(currentSession.id, "assistant", retryResult.result);
+          }
+
+          const completedAfterRetry = updateSession(currentSession.id, {
+            ...(retryResult.sessionId?.trim() ? { engineSessionId: retryResult.sessionId } : {}),
+            status: retryResult.error ? "error" : "idle",
+            lastActivity: new Date().toISOString(),
+            lastError: retryResult.error ?? null,
+          });
+
+          if (completedAfterRetry) {
+            notifyRateLimitResumed(completedAfterRetry);
+            notifyDiscordChannel(
+              `✅ Claude usage limit cleared. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} resumed.`,
+            );
+            notifyParentSession(completedAfterRetry, { result: retryResult.result, error: retryResult.error ?? null, cost: retryResult.cost, durationMs: retryResult.durationMs });
+          }
+
+          context.emit("session:completed", {
+            sessionId: currentSession.id,
+            employee: currentSession.employee || config.portal?.portalName || "Jinn",
+            title: currentSession.title,
+            result: retryResult.result,
+            error: retryResult.error || null,
+            cost: retryResult.cost,
+            durationMs: retryResult.durationMs,
+          });
+
+          logger.info(`Web session ${currentSession.id} resumed after usage reset`);
+          return;
+        }
+
+        // Exhausted waiting window
+        notifyDiscordChannel(
+          `❌ Claude usage limit did not clear in time. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} has been stopped.`,
+        );
+        const erroredSession = updateSession(currentSession.id, {
+          status: "error",
+          lastActivity: new Date().toISOString(),
+          lastError: "Claude usage limit did not clear in time",
+        });
+        if (erroredSession) {
+          notifyParentSession(erroredSession, { error: "Claude usage limit did not clear in time" });
+        }
+        context.emit("session:completed", {
+          sessionId: currentSession.id,
+          result: null,
+          error: "Claude usage limit did not clear in time",
+        });
+        logger.warn(`Web session ${currentSession.id} exhausted usage limit retries`);
+        return;
+      } finally {
+        clearInterval(heartbeat);
+      }
+    }
+
     // Persist the assistant response
     if (result.result) {
       insertMessage(currentSession.id, "assistant", result.result);
     }
 
-    updateSession(currentSession.id, {
-      engineSessionId: result.sessionId,
+    const completedSession = updateSession(currentSession.id, {
+      ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
       status: result.error ? "error" : "idle",
       lastActivity: new Date().toISOString(),
       lastError: result.error ?? null,
     });
+    if (syncRequested && !rateLimit.limited && !wasInterrupted) {
+      const meta = (getSession(currentSession.id)?.transportMeta || currentSession.transportMeta || {}) as Record<string, unknown>;
+      if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+        const nextMeta = { ...meta } as Record<string, unknown>;
+        delete nextMeta["claudeSyncSince"];
+        updateSession(currentSession.id, { transportMeta: nextMeta as any });
+      }
+    }
+    if (completedSession) {
+      notifyParentSession(completedSession, { result: result.result, error: result.error ?? null, cost: result.cost, durationMs: result.durationMs });
+    }
 
     context.emit("session:completed", {
       sessionId: currentSession.id,
@@ -1273,11 +2051,14 @@ async function runWebSession(
       logger.info(`Skipping error handling for deleted web session ${currentSession.id}: ${errMsg}`);
       return;
     }
-    updateSession(currentSession.id, {
+    const erroredSession = updateSession(currentSession.id, {
       status: "error",
       lastActivity: new Date().toISOString(),
       lastError: errMsg,
     });
+    if (erroredSession) {
+      notifyParentSession(erroredSession, { error: errMsg });
+    }
     context.emit("session:completed", {
       sessionId: currentSession.id,
       result: null,

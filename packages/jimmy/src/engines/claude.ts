@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import type { InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta } from "../shared/types.js";
+import type { EngineRateLimitInfo, InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 
 interface LiveProcess {
@@ -139,6 +139,7 @@ export class ClaudeEngine implements InterruptibleEngine {
       let stderr = "";
       let settled = false;
       let lastResultMsg: Record<string, unknown> | null = null;
+      let rateLimitInfo: EngineRateLimitInfo | undefined;
       let lineCount = 0;
       let inTool = false;
 
@@ -161,6 +162,11 @@ export class ClaudeEngine implements InterruptibleEngine {
 
             if (parsed.type === "__result") {
               lastResultMsg = parsed.msg;
+              continue;
+            }
+
+            if (parsed.type === "__rate_limit") {
+              rateLimitInfo = parsed.info;
               continue;
             }
 
@@ -221,29 +227,21 @@ export class ClaudeEngine implements InterruptibleEngine {
 
         if (code === 0) {
           if (streaming && lastResultMsg) {
-            resolve(this.extractResult(lastResultMsg, opts.resumeSessionId));
+            const extracted = this.buildEngineResultFromResultEvent(
+              lastResultMsg,
+              String(lastResultMsg.result || ""),
+              opts.resumeSessionId,
+              rateLimitInfo,
+            );
+            if (extracted.error) opts.onStream?.({ type: "error", content: extracted.error });
+            resolve(extracted);
             return;
           }
 
           try {
-            const parsed = JSON.parse(stdout);
-            // Claude --output-format json returns an array of events.
-            // The last element with type "result" has the final output.
-            let result: Record<string, unknown>;
-            if (Array.isArray(parsed)) {
-              const resultEvent = [...parsed].reverse().find((e: Record<string, unknown>) => e.type === "result");
-              result = resultEvent || parsed[parsed.length - 1] || {};
-            } else {
-              result = parsed;
-            }
-            logger.info(`Claude result: session_id=${result.session_id || "none"}, result_length=${((result.result as string) || "").length}, cost=$${result.total_cost_usd || 0}`);
-            resolve({
-              sessionId: result.session_id as string,
-              result: result.result as string,
-              cost: result.total_cost_usd as number,
-              durationMs: result.duration_ms as number,
-              numTurns: result.num_turns as number,
-            });
+            const parsedResult = this.parseClaudeJsonOutput(stdout, opts.resumeSessionId);
+            logger.info(`Claude result: session_id=${parsedResult.sessionId || "none"}, result_length=${parsedResult.result.length}, cost=$${parsedResult.cost || 0}`);
+            resolve(parsedResult);
           } catch (err) {
             logger.error(`Failed to parse Claude output: ${err}\nstdout: ${stdout.slice(0, 500)}`);
             resolve({
@@ -255,9 +253,60 @@ export class ClaudeEngine implements InterruptibleEngine {
           return;
         }
 
+        // Non-zero exit code — if we still got a structured "result" message, use it.
+        if (streaming && lastResultMsg) {
+          resolve(this.extractResult(lastResultMsg, opts.resumeSessionId, rateLimitInfo));
+          return;
+        }
+
+        if (!streaming && stdout.trim()) {
+          try {
+            const parsed = JSON.parse(stdout);
+            if (Array.isArray(parsed)) {
+              const resultEvent = [...parsed].reverse().find((e: Record<string, unknown>) => e.type === "result") as Record<string, unknown> | undefined;
+              const rlEvent = [...parsed].reverse().find((e: Record<string, unknown>) => e.type === "rate_limit_event") as Record<string, unknown> | undefined;
+              const rl = rlEvent ? this.normalizeRateLimitInfo(rlEvent.rate_limit_info) : rateLimitInfo;
+              if (resultEvent) {
+                resolve(this.extractResult(resultEvent, opts.resumeSessionId, rl));
+                return;
+              }
+            } else if (parsed && typeof parsed === "object" && (parsed as Record<string, unknown>).type === "result") {
+              resolve(this.extractResult(parsed as Record<string, unknown>, opts.resumeSessionId, rateLimitInfo));
+              return;
+            }
+          } catch {
+            // ignore parse errors, fall through to generic stderr/code error
+          }
+        }
+
         // Non-zero exit code — log full stderr for debugging
         if (stderr.trim()) {
           logger.error(`Claude stderr (exit code ${code}):\n${stderr}`);
+        }
+
+        // Prefer structured output when available (stream-json)
+        if (streaming && lastResultMsg) {
+          const extracted = this.buildEngineResultFromResultEvent(
+            lastResultMsg,
+            String(lastResultMsg.result || ""),
+            opts.resumeSessionId,
+            rateLimitInfo,
+          );
+          if (extracted.error) opts.onStream?.({ type: "error", content: extracted.error });
+          resolve(extracted);
+          return;
+        }
+
+        // If stdout contains JSON output, try to parse it even on non-zero exit.
+        if (!streaming && stdout.trim()) {
+          try {
+            const parsedResult = this.parseClaudeJsonOutput(stdout, opts.resumeSessionId);
+            if (parsedResult.error) opts.onStream?.({ type: "error", content: parsedResult.error });
+            resolve(parsedResult);
+            return;
+          } catch {
+            // Fall through to generic error below
+          }
         }
 
         const errMsg = `Claude exited with code ${code}${stderr.trim() ? `: ${stderr.slice(0, 500)}` : " (no stderr output)"}`;
@@ -293,6 +342,7 @@ export class ClaudeEngine implements InterruptibleEngine {
     inTool: boolean,
   ):
     | { type: "__result"; msg: Record<string, unknown> }
+    | { type: "__rate_limit"; info: EngineRateLimitInfo }
     | { type: "__tool_start"; delta: StreamDelta }
     | { type: "__tool_end"; delta: StreamDelta }
     | { type: "delta"; delta: StreamDelta }
@@ -315,6 +365,30 @@ export class ClaudeEngine implements InterruptibleEngine {
     const msgType = String(msg.type || "");
     if (msgType === "result") {
       return { type: "__result", msg };
+    }
+
+    if (msgType === "rate_limit_event") {
+      const info = this.parseRateLimitInfo(msg.rate_limit_info);
+      if (!info) return null;
+      return { type: "__rate_limit", info };
+    }
+
+    // Partial assistant messages contain the full accumulated text so far.
+    // Use these as snapshots to correct any dropped text_delta events.
+    if (msgType === "assistant") {
+      const message = msg.message as Record<string, unknown> | undefined;
+      if (message) {
+        const content = message.content as Array<Record<string, unknown>> | undefined;
+        if (Array.isArray(content)) {
+          const textParts = content
+            .filter((b) => b.type === "text" && typeof b.text === "string")
+            .map((b) => b.text as string);
+          if (textParts.length > 0) {
+            return { type: "delta", delta: { type: "text_snapshot", content: textParts.join("") } };
+          }
+        }
+      }
+      return null;
     }
 
     if (msgType === "stream_event") {
@@ -350,13 +424,133 @@ export class ClaudeEngine implements InterruptibleEngine {
     return null;
   }
 
-  private extractResult(result: Record<string, unknown>, fallbackSessionId?: string): EngineResult {
+  private formatClaudeError(message: string, rateLimit?: EngineRateLimitInfo): string {
+    const cleaned = message.trim() || "Claude error";
+    if (rateLimit?.status === "rejected") {
+      return `Claude usage limit reached: ${cleaned}`;
+    }
+    return cleaned;
+  }
+
+  private buildEngineResultFromResultEvent(
+    resultEvent: Record<string, unknown>,
+    finalText: string,
+    fallbackSessionId?: string,
+    rateLimit?: EngineRateLimitInfo,
+  ): EngineResult {
+    const isError = resultEvent.is_error === true || rateLimit?.status === "rejected";
+    return {
+      sessionId: String(resultEvent.session_id || fallbackSessionId || ""),
+      result: isError ? "" : finalText,
+      error: isError ? this.formatClaudeError(finalText, rateLimit) : undefined,
+      cost: typeof resultEvent.total_cost_usd === "number" ? (resultEvent.total_cost_usd as number) : undefined,
+      durationMs: typeof resultEvent.duration_ms === "number" ? (resultEvent.duration_ms as number) : undefined,
+      numTurns: typeof resultEvent.num_turns === "number" ? (resultEvent.num_turns as number) : undefined,
+      ...(rateLimit ? { rateLimit } : {}),
+    };
+  }
+
+  private parseRateLimitInfo(value: unknown): EngineRateLimitInfo | undefined {
+    if (!value || typeof value !== "object") return undefined;
+    const obj = value as Record<string, unknown>;
+    const info: EngineRateLimitInfo = {};
+
+    if (typeof obj.status === "string") info.status = obj.status;
+    const resetsAt = obj.resetsAt;
+    if (typeof resetsAt === "number" && Number.isFinite(resetsAt)) info.resetsAt = resetsAt;
+    if (typeof resetsAt === "string" && resetsAt.trim()) {
+      const parsed = Number(resetsAt);
+      if (Number.isFinite(parsed)) info.resetsAt = parsed;
+    }
+    if (typeof obj.rateLimitType === "string") info.rateLimitType = obj.rateLimitType;
+    if (typeof obj.overageStatus === "string") info.overageStatus = obj.overageStatus;
+    if (typeof obj.overageDisabledReason === "string") info.overageDisabledReason = obj.overageDisabledReason;
+    if (typeof obj.isUsingOverage === "boolean") info.isUsingOverage = obj.isUsingOverage;
+
+    return Object.keys(info).length > 0 ? info : undefined;
+  }
+
+  private parseClaudeJsonOutput(stdout: string, fallbackSessionId?: string): EngineResult {
+    const parsed = JSON.parse(stdout) as unknown;
+
+    let rateLimitInfo: EngineRateLimitInfo | undefined;
+    let resultEvent: Record<string, unknown> = {};
+
+    if (Array.isArray(parsed)) {
+      const foundResult = [...parsed].reverse().find(
+        (e): e is Record<string, unknown> => !!e && typeof e === "object" && (e as Record<string, unknown>).type === "result",
+      );
+      resultEvent = foundResult || (parsed[parsed.length - 1] as Record<string, unknown>) || {};
+
+      const foundRate = [...parsed].reverse().find(
+        (e): e is Record<string, unknown> => !!e && typeof e === "object" && (e as Record<string, unknown>).type === "rate_limit_event",
+      );
+      if (foundRate) {
+        rateLimitInfo = this.parseRateLimitInfo((foundRate as Record<string, unknown>).rate_limit_info);
+      }
+    } else if (parsed && typeof parsed === "object") {
+      resultEvent = parsed as Record<string, unknown>;
+    }
+
+    let finalText = (resultEvent.result as string) || "";
+
+    // If result text is empty, extract last assistant text from conversation
+    if (!finalText.trim() && Array.isArray(parsed)) {
+      for (let i = parsed.length - 1; i >= 0; i--) {
+        const evt = parsed[i] as Record<string, unknown>;
+        if (evt.type === "assistant" && Array.isArray(evt.content)) {
+          const textBlocks = (evt.content as Array<Record<string, unknown>>)
+            .filter((b) => b.type === "text" && typeof b.text === "string")
+            .map((b) => b.text as string);
+          if (textBlocks.length > 0) {
+            finalText = textBlocks.join("\n");
+            break;
+          }
+        }
+        // Also check for message format with role field
+        if (evt.role === "assistant" && Array.isArray(evt.content)) {
+          const textBlocks = (evt.content as Array<Record<string, unknown>>)
+            .filter((b) => b.type === "text" && typeof b.text === "string")
+            .map((b) => b.text as string);
+          if (textBlocks.length > 0) {
+            finalText = textBlocks.join("\n");
+            break;
+          }
+        }
+      }
+    }
+
+    return this.buildEngineResultFromResultEvent(resultEvent, finalText, fallbackSessionId, rateLimitInfo);
+  }
+
+  private extractResult(result: Record<string, unknown>, fallbackSessionId?: string, rateLimitInfo?: EngineRateLimitInfo): EngineResult {
+    const isError = result.is_error === true;
+    const msg = String(result.result || "");
+    const error = isError
+      ? (rateLimitInfo?.status === "rejected" ? `Claude usage limit reached: ${msg || "Rate limited"}` : (msg || "Claude error"))
+      : undefined;
     return {
       sessionId: String(result.session_id || fallbackSessionId || ""),
-      result: String(result.result || ""),
+      result: isError ? "" : String(result.result || ""),
+      error,
+      rateLimit: rateLimitInfo,
       cost: typeof result.total_cost_usd === "number" ? result.total_cost_usd : undefined,
       durationMs: typeof result.duration_ms === "number" ? result.duration_ms : undefined,
       numTurns: typeof result.num_turns === "number" ? result.num_turns : undefined,
+    };
+  }
+
+  private normalizeRateLimitInfo(raw: unknown): EngineRateLimitInfo | undefined {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    const o = raw as Record<string, unknown>;
+    const resetsAt = typeof o.resetsAt === "number" ? o.resetsAt : undefined;
+    return {
+      status: typeof o.status === "string" ? o.status : undefined,
+      resetsAt,
+      rateLimitType: typeof o.rateLimitType === "string" ? o.rateLimitType : undefined,
+      overageStatus: typeof o.overageStatus === "string" ? o.overageStatus : undefined,
+      overageDisabledReason: typeof o.overageDisabledReason === "string" ? o.overageDisabledReason : undefined,
+      isUsingOverage: typeof o.isUsingOverage === "boolean" ? o.isUsingOverage : undefined,
     };
   }
 

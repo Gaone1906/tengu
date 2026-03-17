@@ -15,41 +15,7 @@ import {
   saveNotifications,
   generateId,
   wsEventToNotification,
-  shouldPushNotify,
 } from "@/lib/notifications";
-
-// ---------------------------------------------------------------------------
-// Browser push helper
-// ---------------------------------------------------------------------------
-
-function sendBrowserNotification(title: string, body: string) {
-  if (typeof window === "undefined") return;
-  if (!("Notification" in window)) return;
-  if (Notification.permission !== "granted") return;
-  if (!document.hidden) return;
-  new Notification(title, { body, icon: "/favicon.ico", tag: `jinn-${Date.now()}` });
-}
-
-// ---------------------------------------------------------------------------
-// Permission prompt — delayed, tasteful
-// ---------------------------------------------------------------------------
-
-const PERMISSION_DELAY_MS = 10_000; // wait 10s after first visit
-const PERM_KEY = "jinn-notif-prompted";
-
-function schedulePermissionRequest() {
-  if (typeof window === "undefined") return;
-  if (!("Notification" in window)) return;
-  if (Notification.permission !== "default") return;
-  if (localStorage.getItem(PERM_KEY)) return;
-
-  setTimeout(() => {
-    if (Notification.permission === "default") {
-      Notification.requestPermission();
-      localStorage.setItem(PERM_KEY, "1");
-    }
-  }, PERMISSION_DELAY_MS);
-}
 
 // ---------------------------------------------------------------------------
 // Context
@@ -87,7 +53,7 @@ export function useNotifications() {
 }
 
 // Re-export for use in provider component
-export { NotificationContext, schedulePermissionRequest };
+export { NotificationContext };
 
 // Re-export types
 export type { AppNotification };

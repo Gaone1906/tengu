@@ -8,15 +8,18 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { JinnConfig, Connector, Employee } from "../shared/types.js";
 import { loadConfig } from "../shared/config.js";
 import { configureLogger, logger } from "../shared/logger.js";
-import { initDb, recoverStaleSessions, getInterruptedSessions, listSessions, updateSession } from "../sessions/registry.js";
+import { initDb, recoverStaleSessions, recoverStaleQueueItems, getInterruptedSessions, listSessions, updateSession } from "../sessions/registry.js";
 import { SessionManager } from "../sessions/manager.js";
 import { ClaudeEngine } from "../engines/claude.js";
 import { CodexEngine } from "../engines/codex.js";
-import { handleApiRequest, type ApiContext } from "./api.js";
+import { handleApiRequest, resumePendingWebQueueItems, type ApiContext } from "./api.js";
 import { ensureFilesDir } from "./files.js";
 import { initStt } from "../stt/stt.js";
 import { startWatchers, stopWatchers, syncSkillSymlinks } from "./watcher.js";
 import { SlackConnector } from "../connectors/slack/index.js";
+import { DiscordConnector } from "../connectors/discord/index.js";
+import { RemoteDiscordConnector } from "../connectors/discord/remote.js";
+import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { loadJobs } from "../cron/jobs.js";
 import { startScheduler, reloadScheduler, stopScheduler } from "../cron/scheduler.js";
 import { scanOrg } from "./org.js";
@@ -119,6 +122,10 @@ export async function startGateway(
       logger.info(`  - ${s.id} (engine: ${s.engine}, employee: ${s.employee || "none"}, engineSessionId: ${s.engineSessionId})`);
     }
   }
+  const recoveredQueue = recoverStaleQueueItems();
+  if (recoveredQueue > 0) {
+    logger.info(`Recovered ${recoveredQueue} in-flight queue item(s) from previous run — reset to pending`);
+  }
 
   // Set up engines
   const claudeEngine = new ClaudeEngine();
@@ -131,6 +138,12 @@ export async function startGateway(
   const connectorNames: string[] = [];
   if (config.connectors?.slack?.appToken && config.connectors?.slack?.botToken) {
     connectorNames.push("slack");
+  }
+  if (config.connectors?.discord?.botToken || config.connectors?.discord?.proxyVia) {
+    connectorNames.push("discord");
+  }
+  if (config.connectors?.whatsapp) {
+    connectorNames.push("whatsapp");
   }
 
   // Session manager
@@ -162,6 +175,75 @@ export async function startGateway(
       connectorMap.set("slack", slack);
     } catch (err) {
       logger.error(`Failed to start Slack connector: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  if (config.connectors?.discord?.proxyVia) {
+    // Remote mode: proxy all Discord operations through the primary instance
+    try {
+      const discord = new RemoteDiscordConnector({
+        proxyVia: config.connectors.discord.proxyVia,
+        channelId: config.connectors.discord.channelId,
+      });
+      discord.onMessage((msg) => {
+        sessionManager.route(msg, discord).catch((err) => {
+          logger.error(`Discord route error: ${err instanceof Error ? err.message : err}`);
+        });
+      });
+      await discord.start();
+      connectors.push(discord);
+      connectorMap.set("discord", discord);
+      logger.info("Discord remote connector started");
+    } catch (err) {
+      logger.error(`Failed to start remote Discord connector: ${err instanceof Error ? err.message : err}`);
+    }
+  } else if (config.connectors?.discord?.botToken) {
+    // Primary mode: direct Discord bot connection
+    try {
+      const discord = new DiscordConnector(config.connectors.discord as import("../connectors/discord/index.js").DiscordConnectorConfig);
+      discord.onMessage((msg) => {
+        sessionManager.route(msg, discord).catch((err) => {
+          logger.error(`Discord route error: ${err instanceof Error ? err.message : err}`);
+        });
+      });
+      await discord.start();
+      connectors.push(discord);
+      connectorMap.set("discord", discord);
+      logger.info("Discord connector started");
+    } catch (err) {
+      logger.error(`Failed to start Discord connector: ${err instanceof Error ? err.message : err}`);
+    }
+  } else if (config.connectors?.discord?.proxyVia) {
+    try {
+      const discord = new RemoteDiscordConnector({ proxyVia: config.connectors.discord.proxyVia });
+      discord.onMessage((msg) => {
+        sessionManager.route(msg, discord).catch((err) => {
+          logger.error(`Discord (remote) route error: ${err instanceof Error ? err.message : err}`);
+        });
+      });
+      await discord.start();
+      connectors.push(discord);
+      connectorMap.set("discord", discord);
+      logger.info(`Discord connector started in remote mode (via ${config.connectors.discord.proxyVia})`);
+    } catch (err) {
+      logger.error(`Failed to start remote Discord connector: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  if (config.connectors?.whatsapp) {
+    try {
+      const whatsapp = new WhatsAppConnector(config.connectors.whatsapp ?? {});
+      whatsapp.onMessage((msg) => {
+        sessionManager.route(msg, whatsapp).catch((err) => {
+          logger.error(`WhatsApp route error: ${err instanceof Error ? err.message : err}`);
+        });
+      });
+      await whatsapp.start();
+      connectors.push(whatsapp);
+      connectorMap.set("whatsapp", whatsapp);
+      logger.info("WhatsApp connector started (scan QR code if first run)");
+    } catch (err) {
+      logger.error(`Failed to start WhatsApp connector: ${err instanceof Error ? err.message : err}`);
     }
   }
 
@@ -202,6 +284,9 @@ export async function startGateway(
     emit,
     connectors: connectorMap,
   };
+
+  // Replay any pending web queue items (e.g. gateway restart mid-run)
+  resumePendingWebQueueItems(apiContext);
 
   // Resolve web UI directory — bundled into dist/web/ by postbuild script
   // At runtime __dirname is dist/src/gateway/, so ../../web resolves to dist/web/

@@ -558,6 +558,7 @@ export function ChatMessages({ messages, loading, streamingText }: ChatMessagesP
 
         const { msg, index: i } = item
         const isUser = msg.role === 'user'
+        const isNotification = msg.role === 'notification'
         const showTimestamp = shouldShowTimestamp(messages, i)
         const media = msg.media || parseMedia(msg.content)
 
@@ -595,6 +596,36 @@ export function ChatMessages({ messages, loading, streamingText }: ChatMessagesP
               <div style={{ height: messages[i - 1].role !== msg.role ? 'var(--space-4)' : 'var(--space-1)' }} />
             )}
 
+            {/* Notification message — centered system-style banner */}
+            {isNotification && (
+              <div style={{
+                display: 'flex',
+                justifyContent: 'center',
+                padding: '0 var(--space-4)',
+                marginBottom: 'var(--space-1)',
+              }}>
+                <div className="notification-msg-bubble" style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 'var(--space-2)',
+                  padding: 'var(--space-3) var(--space-4)',
+                  borderRadius: 'var(--radius-md)',
+                  background: 'var(--fill-secondary)',
+                  border: '1px dashed var(--separator)',
+                  color: 'var(--text-secondary)',
+                  fontSize: 'var(--text-caption1)',
+                  lineHeight: 'var(--leading-relaxed)',
+                  maxWidth: '85%',
+                }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 2, opacity: 0.6 }}>
+                    <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                    <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                  </svg>
+                  <span>{formatMessage(textContent)}</span>
+                </div>
+              </div>
+            )}
+
             {/* User message */}
             {isUser && (
               <div style={{
@@ -627,7 +658,7 @@ export function ChatMessages({ messages, loading, streamingText }: ChatMessagesP
             )}
 
             {/* Assistant message */}
-            {!isUser && (
+            {!isUser && !isNotification && (
               <div className="assistant-msg-row" style={{
                 display: 'flex',
                 justifyContent: 'flex-start',
@@ -683,41 +714,28 @@ export function ChatMessages({ messages, loading, streamingText }: ChatMessagesP
         </div>
       )}
 
-      {/* Loading indicator while waiting for engine response */}
-      {loading && !streamingText && messages.length > 0 && (messages[messages.length - 1]?.role === 'user' || messages[messages.length - 1]?.toolCall) && (
+      {/* Thinking indicator — visible while waiting, disappears when streaming or response arrives */}
+      {loading && !streamingText && messages.length > 0 && (
         <div style={{
           display: 'flex',
-          justifyContent: 'flex-start',
-          padding: '0 var(--space-4)',
-          marginTop: 'var(--space-2)',
+          alignItems: 'center',
+          gap: 6,
+          padding: '6px var(--space-4)',
+          marginTop: 'var(--space-1)',
         }}>
-          <div style={{
-            padding: 'var(--space-3) var(--space-4)',
-            borderRadius: 'var(--radius-sm) var(--radius-lg) var(--radius-lg) var(--radius-lg)',
-            background: 'var(--material-thin)',
-            border: '1px solid var(--separator)',
+          <span style={{
+            width: 6, height: 6, borderRadius: '50%',
+            background: 'var(--accent)',
+            animation: 'jinn-pulse 1.4s infinite',
+            flexShrink: 0,
+          }} />
+          <span style={{
+            fontSize: 'var(--text-caption1)',
+            color: 'var(--text-tertiary)',
+            fontWeight: 'var(--weight-medium)',
           }}>
-            <div style={{ display: 'flex', gap: 4, alignItems: 'center', height: 16 }}>
-              <span style={{
-                width: 6, height: 6, borderRadius: '50%',
-                background: 'var(--text-quaternary)',
-                animation: 'jinn-pulse 1.4s infinite',
-                animationDelay: '0ms',
-              }} />
-              <span style={{
-                width: 6, height: 6, borderRadius: '50%',
-                background: 'var(--text-quaternary)',
-                animation: 'jinn-pulse 1.4s infinite',
-                animationDelay: '200ms',
-              }} />
-              <span style={{
-                width: 6, height: 6, borderRadius: '50%',
-                background: 'var(--text-quaternary)',
-                animation: 'jinn-pulse 1.4s infinite',
-                animationDelay: '400ms',
-              }} />
-            </div>
-          </div>
+            Thinking
+          </span>
         </div>
       )}
 
@@ -731,6 +749,7 @@ export function ChatMessages({ messages, loading, streamingText }: ChatMessagesP
         }
         .assistant-msg-bubble { max-width: 100%; overflow-wrap: break-word; word-break: break-word; }
         .user-msg-bubble { max-width: 90%; overflow-wrap: break-word; word-break: break-word; }
+        .notification-msg-bubble { overflow-wrap: break-word; word-break: break-word; }
         .assistant-msg-row { padding: 0 var(--space-2) !important; }
         @media (min-width: 1024px) {
           .assistant-msg-bubble { max-width: 75%; }
