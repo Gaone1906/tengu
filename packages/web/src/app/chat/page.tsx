@@ -1,5 +1,5 @@
 "use client"
-import { useState, useCallback, useEffect, useRef, Suspense } from 'react'
+import React, { useState, useCallback, useEffect, useRef, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { api } from '@/lib/api'
 import { useGateway } from '@/hooks/use-gateway'
@@ -36,17 +36,48 @@ Read your CLAUDE.md instructions and the onboarding skill at ~/.jinn/skills/onbo
 The user said: "${userMessage}"`
 }
 
+class ChatErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null }
+  static getDerivedStateFromError(error: Error) { return { error } }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('[ChatErrorBoundary]', error.message, '\nComponent stack:', info.componentStack)
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <PageLayout>
+          <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+            <p className="text-lg font-semibold text-[var(--system-red)]">Chat crashed</p>
+            <pre className="max-w-lg overflow-auto rounded-lg bg-[var(--bg-tertiary)] p-4 text-left text-xs text-muted-foreground">
+              {this.state.error.message}{'\n'}{this.state.error.stack?.split('\n').slice(0, 5).join('\n')}
+            </pre>
+            <button
+              onClick={() => { this.setState({ error: null }); window.location.reload() }}
+              className="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white"
+            >
+              Reload
+            </button>
+          </div>
+        </PageLayout>
+      )
+    }
+    return this.props.children
+  }
+}
+
 export default function ChatPageWrapper() {
   return (
-    <Suspense fallback={
-      <PageLayout>
-        <div className="flex h-full items-center justify-center text-muted-foreground">
-          Loading...
-        </div>
-      </PageLayout>
-    }>
-      <ChatPage />
-    </Suspense>
+    <ChatErrorBoundary>
+      <Suspense fallback={
+        <PageLayout>
+          <div className="flex h-full items-center justify-center text-muted-foreground">
+            Loading...
+          </div>
+        </PageLayout>
+      }>
+        <ChatPage />
+      </Suspense>
+    </ChatErrorBoundary>
   )
 }
 
@@ -178,18 +209,17 @@ function ChatPage() {
     [selectedId, handleSelect]
   )
 
-  const handleDeleteSession = useCallback(async (id: string) => {
-    try {
-      await deleteSessionMutation.mutateAsync(id)
-      if (selectedId === id) {
-        setSelectedId(null)
-        setSessionMeta(null)
-      }
-      clearIntermediateMessages(id)
-    } catch { /* ignore */ }
+  const handleDeleteSession = useCallback((id: string) => {
+    // Session already deleted by sidebar mutation — just clear local state
+    if (selectedId === id) {
+      setSelectedId(null)
+      setSessionMeta(null)
+    }
+    clearIntermediateMessages(id)
+    chatTabs.closeTab(chatTabs.tabs.findIndex(t => t.sessionId === id))
     setConfirmDelete(false)
     setShowMoreMenu(false)
-  }, [selectedId, deleteSessionMutation])
+  }, [selectedId, chatTabs])
 
   // ChatPane callbacks
   const handleSessionCreated = useCallback((newId: string) => {

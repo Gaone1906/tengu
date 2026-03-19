@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useRef, useCallback, useMemo } from "react"
+import { useEffect, useState, useRef, useCallback, useMemo, startTransition } from "react"
 import { ChevronDown, Clock3, EllipsisVertical, Pin, Plus, Search, Trash2, X } from "lucide-react"
 import { api, type Employee } from "@/lib/api"
 import { useSettings } from "@/app/settings-provider"
@@ -310,7 +310,9 @@ export function ChatSidebar({
 
   useEffect(() => {
     if (sessions.length > 0) {
-      onSessionsLoadedRef.current?.(sessions)
+      startTransition(() => {
+        onSessionsLoadedRef.current?.(sessions)
+      })
     }
   }, [sessions])
 
@@ -390,7 +392,7 @@ export function ChatSidebar({
         savePinnedSessions(next)
         return next
       })
-      queueMicrotask(() => {
+      startTransition(() => {
         if (selectedId && ids.includes(selectedId)) onNewChat()
       })
     } catch {}
@@ -407,8 +409,7 @@ export function ChatSidebar({
         savePinnedSessions(next)
         return next
       })
-      // Defer parent callback to avoid updating parent state during sidebar render
-      queueMicrotask(() => {
+      startTransition(() => {
         if (onDelete) onDelete(sessionId)
         else if (selectedId === sessionId) onNewChat()
       })
