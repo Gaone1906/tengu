@@ -13,14 +13,6 @@ import {
   ContextMenuSeparator,
 } from "@/components/ui/context-menu"
 import { Button } from "@/components/ui/button"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 
 interface Session {
@@ -214,43 +206,6 @@ function SectionLabel({
   )
 }
 
-function ConfirmationDialog({
-  open,
-  onOpenChange,
-  title,
-  description,
-  confirmLabel,
-  onConfirm,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  title: string
-  description: React.ReactNode
-  confirmLabel: string
-  onConfirm: () => void
-}) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent showCloseButton={false} className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription asChild>
-            <div>{description}</div>
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button variant="destructive" onClick={onConfirm}>
-            {confirmLabel}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
 export function ChatSidebar({
   selectedId,
   onSelect,
@@ -289,12 +244,6 @@ export function ChatSidebar({
   }, [rawSessions])
 
   const [search, setSearch] = useState("")
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-  const [confirmDeleteEmployee, setConfirmDeleteEmployee] = useState<{
-    name: string
-    displayName: string
-    sessions: Session[]
-  } | null>(null)
   const [hoveredKey, setHoveredKey] = useState<string | null>(null)
   const [readSessions, setReadSessions] = useState<Set<string>>(new Set())
   const [pinnedSessions, setPinnedSessions] = useState<Set<string>>(new Set())
@@ -381,7 +330,6 @@ export function ChatSidebar({
   }, [])
 
   async function handleDeleteEmployee(empName: string, empSessions: Session[]) {
-    setConfirmDeleteEmployee(null)
     const ids = empSessions.map((s) => s.id)
     try {
       await bulkDeleteMutation.mutateAsync(ids)
@@ -399,7 +347,6 @@ export function ChatSidebar({
   }
 
   async function handleDelete(sessionId: string) {
-    setConfirmDelete(null)
     try {
       await deleteSessionMutation.mutateAsync(sessionId)
       setPinnedSessions((prev) => {
@@ -578,7 +525,7 @@ export function ChatSidebar({
                 </button>
                 <div className="my-0.5 border-t border-border" />
                 <button
-                  onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.id); setHoveredKey(null) }}
+                  onClick={(e) => { e.stopPropagation(); setHoveredKey(null); if (window.confirm('Delete this session?')) handleDelete(session.id) }}
                   className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--system-red)] transition-colors hover:bg-accent"
                 >
                   <Trash2 className="size-3" /> Delete
@@ -592,7 +539,7 @@ export function ChatSidebar({
             {isPinned ? "Unpin" : "Pin"}
           </ContextMenuItem>
           <ContextMenuSeparator />
-          <ContextMenuItem variant="destructive" onClick={() => setConfirmDelete(session.id)}>
+          <ContextMenuItem variant="destructive" onClick={() => { if (window.confirm('Delete this session?')) handleDelete(session.id) }}>
             Delete session
           </ContextMenuItem>
         </ContextMenuContent>
@@ -703,8 +650,8 @@ export function ChatSidebar({
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
-                      setConfirmDeleteEmployee({ name: empName, displayName, sessions: empSessions })
                       setHoveredKey(null)
+                      if (window.confirm(`Delete all ${empSessions.length} chats with "${displayName}"?`)) handleDeleteEmployee(empName, empSessions)
                     }}
                     className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--system-red)] transition-colors hover:bg-accent"
                   >
@@ -823,44 +770,6 @@ export function ChatSidebar({
           </>
         )}
       </div>
-
-      <ConfirmationDialog
-        open={!!confirmDelete}
-        onOpenChange={(open) => {
-          if (!open) setConfirmDelete(null)
-        }}
-        title="Delete Session?"
-        description="This will permanently delete the session and all its messages."
-        confirmLabel="Delete"
-        onConfirm={() => confirmDelete && handleDelete(confirmDelete)}
-      />
-
-      <ConfirmationDialog
-        open={!!confirmDeleteEmployee}
-        onOpenChange={(open) => {
-          if (!open) setConfirmDeleteEmployee(null)
-        }}
-        title="Delete All Chats?"
-        description={
-          confirmDeleteEmployee ? (
-            <>
-              Delete all {confirmDeleteEmployee.sessions.length} chat
-              {confirmDeleteEmployee.sessions.length !== 1 ? "s" : ""} with{" "}
-              <span className="font-medium text-foreground">&ldquo;{confirmDeleteEmployee.displayName}&rdquo;</span>?
-              This cannot be undone.
-            </>
-          ) : null
-        }
-        confirmLabel={
-          confirmDeleteEmployee
-            ? `Delete ${confirmDeleteEmployee.sessions.length} Chat${confirmDeleteEmployee.sessions.length !== 1 ? "s" : ""}`
-            : "Delete"
-        }
-        onConfirm={() =>
-          confirmDeleteEmployee &&
-          handleDeleteEmployee(confirmDeleteEmployee.name, confirmDeleteEmployee.sessions)
-        }
-      />
 
       <style jsx>{`
         @keyframes sidebar-pulse {
