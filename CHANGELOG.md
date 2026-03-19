@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.7.0] - 2026-03-19
+
+### ✨ Features — Project Phoenix
+- **Chat tabs** — Cmd+W close, Cmd+Shift+[/] switch, draft persistence, status indicators
+- **Command palette** — cmdk-powered Cmd+K with actions, recents, sessions, skills search
+- **Breadcrumb navigation** — context-aware breadcrumbs on all pages
+- **ChatPane extraction** — reusable chat component decoupled from page
+- **Enhanced sidebar** — expandable employee groups, pin/unpin, context menu, hover actions
+- **React Query data layer** — query key factory, hooks for all resources, WS→cache invalidation bridge
+
+### 🔧 Improvements
+- **Tailwind migration** — 640→120 inline styles (81% reduction), shadcn token system
+- **Header consolidation** — single 40px tab bar replaces 3 stacked headers on chat
+- **Mobile UX** — more menu in top header, clean tab bar, responsive sidebar
+- **Session state sync** — tabs and selected session stay in sync
+- **Instant tab switching** — no scroll flash, useLayoutEffect for immediate scroll
+
+### 🏗️ Infrastructure
+- Goals CRUD API + SQLite table (backend, for future use)
+- Cost aggregation API + budget enforcement system
+- Mock engine for E2E tests
+- Vitest setup (api + web), Playwright config, GitHub Actions CI workflow
+
+### 🧹 Cleanup
+- Removed: split view, goals/costs pages (no backend yet), 14 unused shadcn components
+- Fixed: dual-fetch anti-pattern in sidebar, session delete via mutations
+- Net: 81 files changed, +5,608 / -8,723 lines
+
 ## [0.3.0] - 2026-03-10
 
 ### 🔧 Improvements
