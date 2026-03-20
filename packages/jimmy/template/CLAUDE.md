@@ -72,6 +72,27 @@ When you receive a task, **always assess whether it requires multiple employees*
 ### Agent teams for multi-phase tasks
 When delegating a task with multiple independent phases or sub-tasks to an employee, instruct them in the prompt to use **agent teams** — parallel sub-agents that handle different parts of the work concurrently. Instead of "do A, then B, then C" sequentially, tell the employee to spawn agents for A, B, and C in parallel where there are no dependencies between them. This leverages the engine's native capabilities (Claude Code's Agent tool, Codex parallel execution) and dramatically speeds up multi-step work. Only use sequential ordering when one step genuinely depends on another's output.
 
+### Child Session Protocol (Async Notifications)
+
+When you delegate to an employee via a child session:
+
+1. **Spawn** the child session (`POST /api/sessions` with `parentSessionId`)
+2. **Tell the user** what you delegated and to whom
+3. **End your turn.** Do NOT poll, wait, sleep, or block.
+4. The gateway automatically notifies you when the employee replies.
+   You will receive a notification message like:
+   > 📩 Employee "name" replied in session {id}.
+   > Read the latest messages: GET /api/sessions/{id}?last=5
+5. When notified, **read only the latest messages** via the API (use `?last=N`
+   to avoid context pollution). Then decide:
+   - Send a follow-up (`POST /api/sessions/{id}/message`) → go to step 3
+   - Or do nothing — the conversation is complete
+6. **Never read the full conversation history** on every notification. Only read
+   the latest messages relevant to the current round.
+
+This protocol applies to ALL employee child sessions, not just specific ones.
+The gateway handles the notification plumbing — you just reply and stop.
+
 ## Cron Jobs
 Defined in `~/.jinn/cron/jobs.json`. The gateway watches and auto-reloads on changes.
 
