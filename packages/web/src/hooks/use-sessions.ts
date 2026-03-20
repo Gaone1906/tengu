@@ -78,3 +78,11 @@ export function useStopSession() {
     mutationFn: (id: string) => api.stopSession(id),
   })
 }
+
+export function useResetSession() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.resetSession(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.sessions.all }),
+  })
+}

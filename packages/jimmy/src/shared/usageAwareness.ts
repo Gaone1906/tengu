@@ -57,6 +57,15 @@ export function getClaudeExpectedResetAt(now = new Date()): Date | undefined {
 export function isLikelyNearClaudeUsageLimit(now = new Date()): boolean {
   const state = readClaudeUsageState();
   if (!state.lastRateLimitAt) return false;
+
+  // If we know the exact reset time and it has passed, the limit is cleared
+  if (state.lastResetsAt) {
+    const resetAt = new Date(state.lastResetsAt);
+    if (!Number.isNaN(resetAt.getTime()) && now.getTime() > resetAt.getTime()) {
+      return false;
+    }
+  }
+
   const d = new Date(state.lastRateLimitAt);
   if (Number.isNaN(d.getTime())) return false;
   // Heuristic: if we've hit the limit recently, we're likely near it again.

@@ -10,6 +10,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 import { useSettings } from "@/app/settings-provider";
+import { useResetSession } from "@/hooks/use-sessions";
 
 interface Session {
   id: string;
@@ -25,8 +26,8 @@ interface Session {
   model: string | null;
   title: string | null;
   parentSessionId: string | null;
-  status: "idle" | "running" | "error";
-  transportState?: "idle" | "queued" | "running" | "error";
+  status: "idle" | "running" | "error" | "waiting" | "paused";
+  transportState?: "idle" | "queued" | "running" | "error" | "waiting" | "paused";
   queueDepth?: number;
   createdAt: string;
   lastActivity: string;
@@ -71,6 +72,8 @@ export function SessionDetail({
   const { settings } = useSettings();
   const portalName = settings.portalName ?? "Jinn";
   const [children, setChildren] = useState<Session[]>([]);
+  const resetSession = useResetSession();
+  const canReset = ["error", "waiting", "paused"].includes(session.status);
 
   useEffect(() => {
     api.getSessionChildren(session.id)
@@ -179,6 +182,18 @@ export function SessionDetail({
               >
                 {session.lastError}
               </div>
+            </div>
+          )}
+
+          {canReset && (
+            <div className="mt-[var(--space-4)]">
+              <button
+                onClick={() => resetSession.mutate(session.id)}
+                disabled={resetSession.isPending}
+                className="w-full py-[var(--space-2)] px-[var(--space-4)] text-[length:var(--text-body)] font-[var(--weight-medium)] rounded-[var(--radius-sm,8px)] border border-[var(--separator)] bg-[var(--fill-secondary)] text-[var(--text-primary)] cursor-pointer hover:bg-[var(--fill-tertiary)] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {resetSession.isPending ? "Resetting..." : "Reset Session"}
+              </button>
             </div>
           )}
         </div>

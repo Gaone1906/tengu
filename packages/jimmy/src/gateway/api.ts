@@ -396,6 +396,31 @@ export async function handleApiRequest(
       return json(res, { status: "stopped", sessionId: params.id });
     }
 
+    // POST /api/sessions/:id/reset — clear stuck session state (stale engine IDs, errors)
+    params = matchRoute("/api/sessions/:id/reset", pathname);
+    if (method === "POST" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      const engine = context.sessionManager.getEngine(session.engine);
+      if (engine && isInterruptibleEngine(engine) && engine.isAlive(params.id)) {
+        engine.kill(params.id, "Interrupted by reset");
+      }
+      context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
+      const meta = { ...(session.transportMeta || {}) } as Record<string, unknown>;
+      delete meta["engineSessions"];
+      delete meta["engineOverride"];
+      updateSession(params.id, {
+        status: "idle",
+        engineSessionId: null,
+        lastActivity: new Date().toISOString(),
+        lastError: null,
+        transportMeta: meta as any,
+      });
+      logger.info(`Session ${params.id} reset via API (cleared engineSessions, engineOverride, engineSessionId, lastError)`);
+      context.emit("session:updated", { sessionId: params.id });
+      return json(res, { status: "reset", sessionId: params.id });
+    }
+
     // DELETE /api/sessions/:id/queue/:itemId — cancel specific item
     const queueItemParams = matchRoute("/api/sessions/:id/queue/:itemId", pathname);
     if (method === "DELETE" && queueItemParams) {
