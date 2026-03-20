@@ -4,7 +4,7 @@ import { logger } from "../shared/logger.js";
 import type { Session } from "../shared/types.js";
 
 /**
- * Notify the parent session that a child session has completed.
+ * Notify the parent session that a child session has replied.
  * Sends an internal message to the parent via the local HTTP API.
  * Fire-and-forget — errors are logged but never rethrown.
  */
