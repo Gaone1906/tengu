@@ -1,268 +1,246 @@
 import { useEffect, useMemo, useState } from 'react'
 
 /* ============================================================
-   GROUND-UP REDESIGN SHOWCASE — concepts, self-contained.
-   /redesign?c=halo|ledger|bureau|object|ink  (&empty=1, &bare=1)
-   Each concept reinvents the INPUT element + the message model.
-   All share a no-bubbles "gutter transcript". Sample data only.
+   OBJECT family — same visual language, three navigation models.
+   /redesign?c=object|dock|split|stage  (&empty=1, &bare=1)
+   Warm-grey industrial · physical raised tray · signal-orange · square tiles.
+   Focus axes: dock=switch · split=multitask · stage=focus.
    ============================================================ */
 
-type Concept = 'halo' | 'ledger' | 'bureau' | 'object' | 'ink'
+type Concept = 'object' | 'dock' | 'split' | 'stage'
 
 const CONCEPTS: { id: Concept; label: string }[] = [
-  { id: 'bureau', label: 'Bureau' },
   { id: 'object', label: 'Object' },
-  { id: 'ink', label: 'Ink' },
-  { id: 'ledger', label: 'Ledger' },
-  { id: 'halo', label: 'Halo' },
+  { id: 'dock', label: 'Dock' },
+  { id: 'split', label: 'Split' },
+  { id: 'stage', label: 'Stage' },
 ]
+
+const EMOJI = {
+  jimbo: '\u{1F3A9}', dev: '\u{1F9D1}‍\u{1F4BB}', pravko: '⚖️', movekit: '\u{1F4E6}', cos: '\u{1F4CB}', reddit: '\u{1F47D}',
+}
 
 const SAMPLE = {
   user1: 'What’s the status on the MoveKit billing fix?',
-  agentEmoji: '\u{1F9D1}‍\u{1F4BB}',
   reply:
     'The AVS / billing-address fix shipped to all MoveKit Checkout Sessions — `billing_address_collection: "required"`. Conversion held flat through the first 48 hours, so no regression. I’ve queued the 30-day review for June 17. Want me to wire a PostHog funnel alert in the meantime?',
   tools: 4,
-  agents: [
-    { id: 'jimbo', emoji: '\u{1F3A9}', name: 'Jimbo', state: 'idle' },
-    { id: 'jinn-dev', emoji: '\u{1F9D1}‍\u{1F4BB}', name: 'Jinn Dev', state: 'working' },
-    { id: 'pravko', emoji: '⚖️', name: 'Pravko Lead', state: 'idle' },
-    { id: 'movekit', emoji: '\u{1F4E6}', name: 'MoveKit Support', state: 'working' },
-    { id: 'cos', emoji: '\u{1F4CB}', name: 'Chief of Staff', state: 'idle' },
-  ],
 }
 
-/* tiny inline-markdown */
+const EMPLOYEES = [
+  { id: 'jimbo', emoji: EMOJI.jimbo, name: 'Jimbo', state: 'idle', unread: 0 },
+  { id: 'jinn-dev', emoji: EMOJI.dev, name: 'Jinn Dev', state: 'working', unread: 0 },
+  { id: 'movekit', emoji: EMOJI.movekit, name: 'MoveKit Support', state: 'working', unread: 2 },
+  { id: 'pravko', emoji: EMOJI.pravko, name: 'Pravko Lead', state: 'idle', unread: 0 },
+  { id: 'cos', emoji: EMOJI.cos, name: 'Chief of Staff', state: 'idle', unread: 1 },
+  { id: 'reddit', emoji: EMOJI.reddit, name: 'Reddit Scout', state: 'idle', unread: 0 },
+]
+
+const THREADS = [
+  { agent: 'jinn-dev', emoji: EMOJI.dev, name: 'Jinn Dev', title: 'MoveKit billing fix', snippet: 'queued the 30-day review for June 17…', state: 'working', unread: 0 },
+  { agent: 'movekit', emoji: EMOJI.movekit, name: 'MoveKit Support', title: 'Refund — Pedro M.', snippet: 'drafted reply, awaiting your ✅', state: 'working', unread: 2 },
+  { agent: 'pravko', emoji: EMOJI.pravko, name: 'Pravko Lead', title: 'ВКС tax brief', snippet: '2 case sources verified', state: 'idle', unread: 0 },
+  { agent: 'cos', emoji: EMOJI.cos, name: 'Chief of Staff', title: 'Weekly audit', snippet: '3 findings to review', state: 'idle', unread: 1 },
+]
+
+const DEV_CHATS = [
+  { title: 'MoveKit billing fix', snippet: 'queued the 30-day review…', state: 'working' },
+  { title: 'Gateway WS reconnect', snippet: 'patched the boot-guard', state: 'idle' },
+  { title: 'Redesign showcase', snippet: 'three concepts shipped', state: 'idle' },
+]
+
 function mdLite(s: string) {
-  return s
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
 }
 
-/* ===================== BUREAU : light operator console ===================== */
-function Bureau({ empty }: { empty: boolean }) {
-  const [text] = useState(empty ? '' : 'deploy movekit funnel-alert --posthog')
+/* reusable Object-style turns */
+function Turns() {
   return (
-    <div className="bur-root">
-      <header className="bur-top">
-        <span className="bur-mark">▟</span>
-        <span className="bur-title">jinn</span>
-        <span className="bur-dot" /> <span className="bur-mut">gateway up · 2 working</span>
-        <span className="bur-grow" />
-        <span className="bur-mut">22:14 · sofia</span>
-      </header>
-
-      <main className="bur-stream">
-        {empty ? (
-          <div className="bur-empty">
-            <div className="bur-empty-h">Ready when you are.</div>
-            <div className="bur-empty-s">Five employees on shift. Type a request, or <b>/</b> for commands · <b>@</b> to route to an employee.</div>
-          </div>
-        ) : (
-          <div className="bur-transcript">
-            <div className="bur-turn">
-              <div className="bur-head"><i className="bur-tag bur-tag-you" />you</div>
-              <p>{SAMPLE.user1}</p>
-            </div>
-            <div className="bur-turn">
-              <div className="bur-head"><i className="bur-tag bur-tag-agent" />jinn-dev<span className="bur-time">22:13</span></div>
-              <p dangerouslySetInnerHTML={{ __html: mdLite(SAMPLE.reply) }} />
-              <div className="bur-tool">ran {SAMPLE.tools} tools<span className="bur-tool-mut"> · stripe.update · posthog.query · gh.pr · read</span></div>
-            </div>
-          </div>
-        )}
-
-        <div className="bur-bar">
-          <span className="bur-sigil">›</span>
-          <span className="bur-line"><span className="bur-typed">{text}</span><span className="bur-caret" />{!text && <span className="bur-ph">Message jinn…</span>}</span>
-          <span className="bur-keys">⏎ send&nbsp;&nbsp;⌥⏎ newline&nbsp;&nbsp;/ cmd&nbsp;&nbsp;@ agent</span>
+    <>
+      <div className="ob-turn ob-turn-you">
+        <div className="ob-tile ob-tile-you">H</div>
+        <div className="ob-body"><p>{SAMPLE.user1}</p></div>
+      </div>
+      <div className="ob-turn">
+        <div className="ob-tile">{EMOJI.dev}</div>
+        <div className="ob-body">
+          <div className="ob-name">JINN-DEV</div>
+          <p dangerouslySetInnerHTML={{ __html: mdLite(SAMPLE.reply) }} />
+          <div className="ob-tool">▪ ran {SAMPLE.tools} tools · 1.8s</div>
         </div>
-      </main>
+      </div>
+    </>
+  )
+}
+
+function Tray({ value, mini }: { value: string; mini?: boolean }) {
+  return (
+    <div className={`ob-tray ${mini ? 'is-mini' : ''}`}>
+      <button className="ob-agent">{EMOJI.dev}</button>
+      <div className="ob-input">{value || <span className="ob-ph">Message jinn, or @ an employee</span>}<span className="ob-caret" /></div>
+      {!mini && <button className="ob-mic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 3v18M7 7v10M17 7v10M3 11v2M21 11v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg></button>}
+      <button className="ob-send"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M5 12h13M13 6l6 6-6 6" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/></svg></button>
     </div>
   )
 }
 
-/* ===================== OBJECT : physical raised input tray ===================== */
+/* ===================== OBJECT (base, retained) ===================== */
 function Obj({ empty }: { empty: boolean }) {
-  const [text] = useState(empty ? '' : 'Draft the PostHog funnel alert')
   return (
-    <div className="obj-root">
-      <div className="obj-topL"><span className="obj-mark">◧</span> jinn</div>
-      <div className="obj-topR">
-        {SAMPLE.agents.map((a) => (
-          <div key={a.id} className={`obj-chip ${a.state === 'working' ? 'is-working' : ''}`} title={a.name}>{a.emoji}</div>
+    <div className="ob-root">
+      <div className="ob-topL"><span className="ob-mark">◧</span> jinn</div>
+      <div className="ob-topR">{EMPLOYEES.slice(0, 5).map((a) => (
+        <div key={a.id} className={`ob-chip ${a.state === 'working' ? 'is-working' : ''}`} title={a.name}>{a.emoji}</div>
+      ))}</div>
+      <div className="ob-stage">
+        {empty ? (
+          <div className="ob-hero"><div className="ob-hero-h">Good evening, Hristo.</div><div className="ob-hero-s">Five on shift · two working</div></div>
+        ) : (
+          <div className="ob-thread"><Turns /></div>
+        )}
+        <div className={`ob-dock ${empty ? 'is-center' : ''}`}>
+          <Tray value={empty ? '' : 'Draft the PostHog funnel alert'} />
+          <div className="ob-hint">⏎ send · ⌥⏎ newline · @ agent · / command</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ===================== DOCK : switching-first ===================== */
+function Dock({ empty }: { empty: boolean }) {
+  return (
+    <div className="ob-root dk-root">
+      {/* employee rail */}
+      <aside className="dk-rail">
+        <div className="dk-mark">◧</div>
+        {EMPLOYEES.map((a, i) => (
+          <button key={a.id} className={`dk-tile ${i === 1 ? 'is-active' : ''} ${a.state === 'working' ? 'is-working' : ''}`} title={a.name}>
+            {a.emoji}
+            {a.unread > 0 && <span className="dk-badge">{a.unread}</span>}
+          </button>
         ))}
-      </div>
+        <div className="dk-grow" />
+        <button className="dk-tile dk-add">+</button>
+      </aside>
 
-      <div className="obj-stage">
-        {empty ? (
-          <div className="obj-hero">
-            <div className="obj-hero-h">Good evening, Hristo.</div>
-            <div className="obj-hero-s">Five on shift · two working</div>
-          </div>
-        ) : (
-          <div className="obj-thread">
-            <div className="obj-turn obj-turn-you">
-              <div className="obj-tile obj-tile-you">H</div>
-              <div className="obj-body"><p>{SAMPLE.user1}</p></div>
-            </div>
-            <div className="obj-turn">
-              <div className="obj-tile">{SAMPLE.agentEmoji}</div>
-              <div className="obj-body">
-                <div className="obj-name">JINN-DEV</div>
-                <p dangerouslySetInnerHTML={{ __html: mdLite(SAMPLE.reply) }} />
-                <div className="obj-tool">▪ ran {SAMPLE.tools} tools · 1.8s</div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        <div className={`obj-dock ${empty ? 'is-center' : ''}`}>
-          <div className="obj-tray">
-            <button className="obj-agent">{SAMPLE.agentEmoji}</button>
-            <div className="obj-input">{text || <span className="obj-ph">Message jinn, or @ an employee</span>}<span className="obj-caret" /></div>
-            <button className="obj-mic" title="Voice"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 3v18M7 7v10M17 7v10M3 11v2M21 11v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg></button>
-            <button className="obj-send" title="Send"><svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M5 12h13M13 6l6 6-6 6" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/></svg></button>
-          </div>
-          <div className="obj-hint">⏎ send · ⌥⏎ newline · @ agent · / command</div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/* ===================== INK : monochrome editorial, line input ===================== */
-function Ink({ empty }: { empty: boolean }) {
-  const [text] = useState(empty ? '' : 'And send a short note to MoveKit customers about the fix.')
-  return (
-    <div className="ink-root">
-      <div className="ink-col">
-        {empty ? (
-          <div className="ink-hero">
-            <h1>What needs doing?</h1>
-            <p>Five employees on shift. Two are working now.</p>
-          </div>
-        ) : (
-          <div className="ink-thread">
-            <div className="ink-turn">
-              <div className="ink-by">Hristo</div>
-              <p className="ink-you">{SAMPLE.user1}</p>
-            </div>
-            <div className="ink-turn ink-turn-agent">
-              <div className="ink-by">Jinn Dev</div>
-              <p dangerouslySetInnerHTML={{ __html: mdLite(SAMPLE.reply) }} />
-              <div className="ink-meta">— consulted {SAMPLE.tools} sources</div>
-            </div>
-          </div>
-        )}
-
-        {/* the input is a single line you write on */}
-        <div className="ink-compose">
-          <span className="ink-mono">JD</span>
-          <div className="ink-writeline">
-            <span className="ink-text">{text}</span><span className="ink-caret" />
-            {!text && <span className="ink-ph">Write a line…</span>}
-          </div>
-          {!!text && <button className="ink-go" title="Send">→</button>}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/* ===================== HALO (retained) ===================== */
-function Halo({ empty }: { empty: boolean }) {
-  const [text] = useState(empty ? '' : 'Draft the PostHog funnel alert')
-  return (
-    <div className="halo-root">
-      <div className="halo-rail">
-        <div className="halo-mark">✶</div>
-        {SAMPLE.agents.map((a) => (
-          <div key={a.id} className={`halo-orb ${a.state === 'working' ? 'is-working' : ''}`} title={a.name}>
-            <span>{a.emoji}</span>{a.state === 'working' && <i className="halo-pulse" />}
+      {/* chats of selected employee */}
+      <aside className="dk-chats">
+        <div className="dk-chats-head"><span className="dk-emp">{EMOJI.dev} Jinn Dev</span><span className="dk-emp-state">working</span></div>
+        <button className="dk-search">Search agents & chats <kbd>⌘K</kbd></button>
+        {DEV_CHATS.map((c, i) => (
+          <div key={c.title} className={`dk-chat ${i === 0 ? 'is-active' : ''}`}>
+            <div className="dk-chat-t">{c.title}{c.state === 'working' && <span className="dk-run" />}</div>
+            <div className="dk-chat-s">{c.snippet}</div>
           </div>
         ))}
-        <div className="halo-rail-spacer" />
-        <div className="halo-orb halo-orb-ghost">⊕</div>
-      </div>
-      <div className="halo-stage">
-        {empty ? (
-          <div className="halo-hero">
-            <div className="halo-hero-title">Good evening, Hristo.</div>
-            <div className="halo-hero-sub">Five employees on shift · two working now</div>
+      </aside>
+
+      {/* focused conversation */}
+      <main className="dk-main">
+        <div className="ob-thread dk-thread"><Turns /></div>
+        <div className="ob-dock"><Tray value="Draft the PostHog funnel alert" /><div className="ob-hint">⌘1–9 jump to agent · ⌘K switch · @ route</div></div>
+      </main>
+
+      {/* ⌘K switcher overlay (shown on empty) */}
+      {empty && (
+        <div className="dk-overlay">
+          <div className="dk-palette">
+            <div className="dk-pal-input"><span className="dk-pal-q">move</span><span className="ob-caret" /></div>
+            <div className="dk-pal-group">EMPLOYEES</div>
+            <div className="dk-pal-row is-sel">{EMOJI.movekit} <b>MoveKit Support</b><span className="dk-pal-mut">2 unread · working</span><kbd>↵</kbd></div>
+            <div className="dk-pal-group">CHATS</div>
+            <div className="dk-pal-row">{EMOJI.dev} MoveKit billing fix <span className="dk-pal-mut">Jinn Dev · working</span></div>
+            <div className="dk-pal-row">{EMOJI.movekit} Refund — Pedro M. <span className="dk-pal-mut">MoveKit · awaiting ✅</span></div>
+            <div className="dk-pal-foot"><span>↑↓ navigate</span><span>↵ open</span><span>⌘↵ open in split</span><span>esc</span></div>
           </div>
-        ) : (
-          <div className="halo-thread">
-            <div className="halo-turn halo-turn-user"><p>{SAMPLE.user1}</p></div>
-            <div className="halo-turn halo-turn-agent">
-              <div className="halo-gutter"><span>{SAMPLE.agentEmoji}</span></div>
-              <div className="halo-msg">
-                <div className="halo-byline">jinn&#8201;dev</div>
-                <p dangerouslySetInnerHTML={{ __html: mdLite(SAMPLE.reply) }} />
-                <div className="halo-toolline">✓ ran {SAMPLE.tools} tools · 1.8s</div>
-              </div>
-            </div>
-          </div>
-        )}
-        <div className={`halo-dock ${empty ? 'is-center' : ''}`}>
-          <div className="halo-island">
-            <div className="halo-island-ring" />
-            <button className="halo-agent-chip"><span>{SAMPLE.agentEmoji}</span></button>
-            <input className="halo-input" defaultValue={text} placeholder="Ask anything, or summon an agent with @" readOnly />
-            <button className="halo-voice"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M12 3v18M7 7v10M17 7v10M3 11v2M21 11v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg></button>
-            <button className="halo-send"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M5 12h13M13 6l6 6-6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"/></svg></button>
-          </div>
-          <div className="halo-hints"><b>@</b> agent · <b>/</b> command · <b>⏎</b> send</div>
         </div>
+      )}
+    </div>
+  )
+}
+
+/* ===================== SPLIT : multitask-first ===================== */
+function Split({ empty }: { empty: boolean }) {
+  const panes = empty
+    ? [
+        { id: 'jinn-dev', emoji: EMOJI.dev, name: 'Jinn Dev', state: 'working', active: true },
+        { id: 'movekit', emoji: EMOJI.movekit, name: 'MoveKit Support', state: 'working', active: false },
+        { id: 'pravko', emoji: EMOJI.pravko, name: 'Pravko Lead', state: 'idle', active: false },
+      ]
+    : [
+        { id: 'jinn-dev', emoji: EMOJI.dev, name: 'Jinn Dev', state: 'working', active: true },
+        { id: 'movekit', emoji: EMOJI.movekit, name: 'MoveKit Support', state: 'working', active: false },
+      ]
+  return (
+    <div className="ob-root sp-root">
+      <div className="sp-tabs">
+        <span className="sp-mark">◧ jinn</span>
+        {[...panes, { id: 'add' } as any].map((p) =>
+          p.id === 'add' ? (
+            <button key="add" className="sp-tab sp-tab-add">+ pane</button>
+          ) : (
+            <button key={p.id} className={`sp-tab ${p.active ? 'is-active' : ''}`}>
+              <span className="sp-tab-e">{p.emoji}</span>{p.name}{p.state === 'working' && <span className="sp-run" />}
+            </button>
+          ),
+        )}
+        <span className="ob-grow" />
+        <span className="sp-mut">2 working · 22:14</span>
+      </div>
+      <div className={`sp-cols cols-${panes.length}`}>
+        {panes.map((p) => (
+          <section key={p.id} className={`sp-pane ${p.active ? 'is-active' : 'is-dim'}`}>
+            <header className="sp-pane-head">
+              <span className="sp-pane-e">{p.emoji}</span>
+              <span className="sp-pane-n">{p.name}</span>
+              <span className={`sp-pane-st ${p.state === 'working' ? 'is-working' : ''}`}>{p.state === 'working' ? 'working…' : 'idle'}</span>
+            </header>
+            <div className="sp-stream">
+              <div className="ob-turn ob-turn-you"><div className="ob-tile ob-tile-you">H</div><div className="ob-body"><p>{p.id === 'movekit' ? 'Did Pedro reply yet?' : SAMPLE.user1}</p></div></div>
+              <div className="ob-turn"><div className="ob-tile">{p.emoji}</div><div className="ob-body"><div className="ob-name">{p.name.toUpperCase()}</div>
+                <p dangerouslySetInnerHTML={{ __html: mdLite(p.id === 'movekit' ? 'Pedro replied — accepted the $49 image add-on. I drafted the confirmation; it’s waiting for your ✅ in #movekit-support.' : SAMPLE.reply) }} />
+              </div></div>
+            </div>
+            <div className="sp-tray"><Tray value={p.active ? 'Draft the PostHog funnel alert' : ''} mini /></div>
+          </section>
+        ))}
       </div>
     </div>
   )
 }
 
-/* ===================== LEDGER (retained) ===================== */
-function Ledger({ empty }: { empty: boolean }) {
-  const [text] = useState(empty ? '' : 'deploy movekit funnel-alert --posthog')
+/* ===================== STAGE : focus-first + thread dock ===================== */
+function Stage({ empty }: { empty: boolean }) {
   return (
-    <div className="ldg-root">
-      <div className="ldg-status">
-        <span className="ldg-stat-dot" /> jinn · gateway up
-        <span className="ldg-sep">│</span><span className="ldg-mut">5 employees</span>
-        <span className="ldg-sep">│</span><span className="ldg-amber">● 2 working</span>
-        <span className="ldg-grow" /><span className="ldg-mut">22:14 · sofia</span>
+    <div className="ob-root st-root">
+      <div className="st-top"><span className="ob-mark">◧</span> jinn<span className="st-top-mut">· four threads live</span><span className="ob-grow" /><span className="st-top-mut">⌘K</span></div>
+
+      <div className="st-stage">
+        {empty ? (
+          <div className="ob-hero"><div className="ob-hero-h">Good evening, Hristo.</div><div className="ob-hero-s">Four threads running in the wings — pick one up, or start fresh.</div></div>
+        ) : (
+          <div className="ob-thread st-thread"><Turns /></div>
+        )}
+        <div className="st-trayWrap"><Tray value={empty ? '' : 'Draft the PostHog funnel alert'} /></div>
       </div>
-      <div className="ldg-body">
-        <aside className="ldg-index">
-          <div className="ldg-index-head">SESSIONS</div>
-          {['jimbo·main', 'jinn-dev', 'movekit-support', 'pravko-lead', 'cos·audit'].map((s, i) => (
-            <div key={s} className={`ldg-index-row ${i === 0 ? 'is-active' : ''}`}>
-              <span className="ldg-idx-id">{String(i).padStart(2, '0')}</span>
-              <span className="ldg-idx-name">{s}</span>
-              {(i === 1 || i === 2) && <span className="ldg-idx-run">●</span>}
+
+      {/* live thread dock — glanceable multitask, click to bring to stage */}
+      <div className="st-dock">
+        {THREADS.map((t, i) => (
+          <div key={t.title} className={`st-card ${i === 0 ? 'is-onstage' : ''} ${t.state === 'working' ? 'is-working' : ''}`}>
+            <div className="st-card-top">
+              <span className="st-card-e">{t.emoji}</span>
+              <span className="st-card-n">{t.name}</span>
+              {t.state === 'working' ? <span className="st-card-live" /> : t.unread > 0 ? <span className="st-card-badge">{t.unread}</span> : null}
             </div>
-          ))}
-        </aside>
-        <main className="ldg-stream">
-          {!empty && (
-            <div className="ldg-transcript">
-              <div className="ldg-turn"><div className="ldg-spk ldg-spk-you">you&#8201;›</div><div className="ldg-content">{SAMPLE.user1}</div></div>
-              <div className="ldg-turn"><div className="ldg-spk ldg-spk-agent">jinn-dev&#8201;›</div>
-                <div className="ldg-content"><p dangerouslySetInnerHTML={{ __html: mdLite(SAMPLE.reply) }} />
-                  <div className="ldg-tool">▸ ran {SAMPLE.tools} tools<span className="ldg-tool-mut">  stripe.update · posthog.query · gh.pr · read</span></div>
-                </div>
-              </div>
-            </div>
-          )}
-          {empty && (
-            <div className="ldg-empty"><pre className="ldg-ascii">{'   ▌\n  ▌▌ jinn\n ▌▌▌ operator console\n'}</pre>
-              <div className="ldg-empty-mut">type a command, or <b>/</b> to browse · <b>@</b> to route to an employee</div></div>
-          )}
-          <div className="ldg-prompt">
-            <span className="ldg-sigil">›</span>
-            <span className="ldg-cmdline"><span className="ldg-typed">{text}</span><span className="ldg-caret" /></span>
-            <span className="ldg-keyhints">⏎ send&nbsp;&nbsp;⌥⏎ newline&nbsp;&nbsp;/ cmd&nbsp;&nbsp;@ agent</span>
+            <div className="st-card-title">{t.title}</div>
+            <div className="st-card-snip">{t.snippet}</div>
           </div>
-        </main>
+        ))}
+        <div className="st-card st-card-add">＋<span>new thread</span></div>
       </div>
     </div>
   )
@@ -270,12 +248,10 @@ function Ledger({ empty }: { empty: boolean }) {
 
 export default function RedesignPage() {
   const params = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '')
-  const initial = (params.get('c') as Concept) || 'bureau'
+  const initial = (params.get('c') as Concept) || 'dock'
   const empty = params.get('empty') === '1'
   const hideSwitcher = params.get('bare') === '1'
-  const [concept, setConcept] = useState<Concept>(
-    CONCEPTS.some((c) => c.id === initial) ? initial : 'bureau',
-  )
+  const [concept, setConcept] = useState<Concept>(CONCEPTS.some((c) => c.id === initial) ? initial : 'dock')
 
   useEffect(() => {
     document.documentElement.setAttribute('data-redesign', concept)
@@ -284,11 +260,10 @@ export default function RedesignPage() {
 
   const Body = useMemo(() => {
     switch (concept) {
-      case 'ledger': return <Ledger empty={empty} />
-      case 'halo': return <Halo empty={empty} />
-      case 'object': return <Obj empty={empty} />
-      case 'ink': return <Ink empty={empty} />
-      default: return <Bureau empty={empty} />
+      case 'dock': return <Dock empty={empty} />
+      case 'split': return <Split empty={empty} />
+      case 'stage': return <Stage empty={empty} />
+      default: return <Obj empty={empty} />
     }
   }, [concept, empty])
 
@@ -309,165 +284,133 @@ export default function RedesignPage() {
 
 const CSS = String.raw`
 .rd-shell{position:fixed;inset:0;overflow:hidden}
-.rd-switch{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:50;display:flex;gap:2px;padding:3px;border-radius:999px;background:rgba(20,20,24,.55);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,.12)}
+.rd-switch{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:80;display:flex;gap:2px;padding:3px;border-radius:999px;background:rgba(20,20,24,.55);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,.12)}
 .rd-switch button{font:500 12px/1 ui-sans-serif,system-ui;letter-spacing:.02em;color:rgba(255,255,255,.62);background:transparent;border:0;padding:7px 16px;border-radius:999px;cursor:pointer;transition:.18s}
 .rd-switch button.is-on{background:#fff;color:#111}
-code{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.85em;padding:.08em .35em;border-radius:5px;background:rgba(127,127,127,.14)}
+code{font-family:"Geist Mono","IBM Plex Mono",ui-monospace,monospace;font-size:.82em;padding:.08em .35em;border-radius:5px;background:rgba(120,116,104,.16)}
 
-/* ============ BUREAU ============ */
-.bur-root{position:absolute;inset:0;display:flex;flex-direction:column;background:#F2EDE2;color:#23201A;font-family:"Hanken Grotesk",system-ui,sans-serif}
-.bur-top{display:flex;align-items:center;gap:8px;height:46px;padding:0 22px;border-bottom:1px solid #DED7C7;font-size:13px}
-.bur-mark{color:#8A3A33;font-size:14px}
-.bur-title{font-weight:600;letter-spacing:.01em}
-.bur-dot{width:7px;height:7px;border-radius:50%;background:#5C7A4A;margin-left:6px}
-.bur-mut{color:#9A917F;font-family:"IBM Plex Mono",monospace;font-size:12px}
-.bur-grow{flex:1}
-.bur-stream{flex:1;position:relative;display:flex;flex-direction:column;min-height:0}
-.bur-transcript{flex:1;overflow:auto;width:min(760px,92%);margin:0 auto;padding:40px 0 120px}
-.bur-turn{margin-bottom:30px}
-.bur-head{display:flex;align-items:center;gap:8px;font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.04em;color:#6B6457;text-transform:lowercase;margin-bottom:8px}
-.bur-tag{width:7px;height:7px;border-radius:2px;display:inline-block}
-.bur-tag-you{background:#3E5C86}
-.bur-tag-agent{background:#8A3A33}
-.bur-time{color:#B7AE9C;margin-left:auto}
-.bur-turn p{font-size:16px;line-height:1.7;color:#2C271E}
-.bur-tool{margin-top:12px;font-family:"IBM Plex Mono",monospace;font-size:12px;color:#9A917F}
-.bur-tool-mut{color:#BBB2A0}
-.bur-empty{margin:auto;width:min(680px,90%);text-align:center;padding-bottom:90px}
-.bur-empty-h{font-size:30px;font-weight:500;letter-spacing:-.01em}
-.bur-empty-s{margin-top:12px;color:#6B6457;font-size:15px;line-height:1.6}
-.bur-empty-s b{color:#8A3A33;font-family:"IBM Plex Mono",monospace}
-.bur-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:12px;height:56px;padding:0 24px;border-top:1px solid #D9C9A8;background:#F7F2E8;font-family:"IBM Plex Mono",monospace}
-.bur-sigil{color:#8A3A33;font-size:17px;font-weight:600}
-.bur-line{flex:1;display:flex;align-items:center;position:relative;font-size:14.5px;color:#2C271E}
-.bur-caret{width:8px;height:17px;background:#8A3A33;margin-left:1px;animation:burBlink 1.1s steps(1) infinite}
-.bur-ph{position:absolute;left:0;color:#B0A793}
-@keyframes burBlink{50%{opacity:0}}
-.bur-keys{font-size:11px;color:#A99F8B;white-space:nowrap}
+/* ---- shared OBJECT language ---- */
+.ob-root{position:absolute;inset:0;background:radial-gradient(130% 100% at 50% 0%, #EEEBE4, #E5E2DA);color:#1C1B18;font-family:"Geist",system-ui,sans-serif}
+.ob-grow{flex:1}
+.ob-mark{color:#CF4D24}
+.ob-topL{position:absolute;top:20px;left:24px;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;letter-spacing:.02em;color:#3A3833;z-index:2}
+.ob-topR{position:absolute;top:16px;right:20px;display:flex;gap:8px;z-index:2}
+.ob-chip{width:34px;height:34px;border-radius:8px;display:grid;place-items:center;font-size:16px;background:#FBFAF6;border:1px solid #D2CFC6;box-shadow:0 1px 2px rgba(30,28,24,.06);position:relative}
+.ob-chip.is-working::after{content:"";position:absolute;top:-3px;right:-3px;width:9px;height:9px;border-radius:50%;background:#CF4D24;border:2px solid #ECEAE4}
+.ob-stage{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center}
+.ob-hero{margin:auto;text-align:center;padding-bottom:120px}
+.ob-hero-h{font-size:34px;font-weight:540;letter-spacing:-.02em}
+.ob-hero-s{margin-top:10px;color:#6A685F;font-size:14px;font-family:"Geist Mono",monospace}
+.ob-thread{width:min(700px,90%);margin:0 auto;padding:74px 0 200px;flex:1;overflow:auto}
+.ob-turn{display:flex;gap:16px;margin-bottom:26px}
+.ob-tile{width:34px;height:34px;border-radius:8px;display:grid;place-items:center;font-size:16px;background:#FBFAF6;border:1px solid #D2CFC6;flex:0 0 auto}
+.ob-tile-you{background:#1C1B18;color:#F4F2EC;font-weight:600;font-size:14px}
+.ob-body{flex:1}
+.ob-turn-you .ob-body p{color:#4A483F}
+.ob-name{font-family:"Geist Mono",monospace;font-size:11px;letter-spacing:.08em;color:#CF4D24;margin-bottom:6px}
+.ob-body p{font-size:15.5px;line-height:1.66;color:#26251F}
+.ob-tool{margin-top:12px;font-family:"Geist Mono",monospace;font-size:11.5px;color:#A29E92}
+.ob-dock{position:absolute;left:0;right:0;bottom:34px;display:flex;flex-direction:column;align-items:center;gap:9px}
+.ob-dock.is-center{bottom:auto;top:50%;transform:translateY(46px)}
+.ob-tray{display:flex;align-items:center;gap:8px;width:min(640px,86%);padding:9px;border-radius:14px;background:#FBFAF6;border:1px solid #D2CFC6;box-shadow:0 1px 0 rgba(255,255,255,.7) inset,0 8px 28px rgba(40,36,28,.12),0 1px 3px rgba(40,36,28,.08)}
+.ob-tray.is-mini{padding:7px;border-radius:11px;box-shadow:0 1px 0 rgba(255,255,255,.7) inset,0 4px 14px rgba(40,36,28,.1)}
+.ob-agent{width:38px;height:38px;border-radius:9px;display:grid;place-items:center;font-size:17px;background:#F1EEE6;border:1px solid #DBD7CD;cursor:pointer;flex:0 0 auto}
+.ob-tray.is-mini .ob-agent{width:30px;height:30px;font-size:14px;border-radius:7px}
+.ob-input{flex:1;display:flex;align-items:center;font-size:15.5px;color:#26251F;position:relative}
+.ob-tray.is-mini .ob-input{font-size:13.5px}
+.ob-ph{color:#A8A498}
+.ob-caret{width:2px;height:18px;background:#1C1B18;margin-left:1px;animation:obBlink 1.1s steps(1) infinite}
+@keyframes obBlink{50%{opacity:0}}
+.ob-mic{width:38px;height:38px;border-radius:9px;display:grid;place-items:center;background:transparent;border:0;color:#807C70;cursor:pointer;flex:0 0 auto}
+.ob-send{width:38px;height:38px;border-radius:9px;display:grid;place-items:center;background:#CF4D24;color:#fff;border:0;cursor:pointer;flex:0 0 auto;box-shadow:0 2px 8px rgba(207,77,36,.3)}
+.ob-tray.is-mini .ob-send{width:30px;height:30px;border-radius:7px}
+.ob-hint{font-family:"Geist Mono",monospace;font-size:11px;color:#9A968A}
 
-/* ============ OBJECT ============ */
-.obj-root{position:absolute;inset:0;background:radial-gradient(130% 100% at 50% 0%, #EEEBE4, #E5E2DA);color:#1C1B18;font-family:"Geist",system-ui,sans-serif}
-.obj-topL{position:absolute;top:20px;left:24px;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;letter-spacing:.02em;color:#3A3833}
-.obj-mark{color:#CF4D24}
-.obj-topR{position:absolute;top:16px;right:20px;display:flex;gap:8px}
-.obj-chip{width:34px;height:34px;border-radius:8px;display:grid;place-items:center;font-size:16px;background:#FBFAF6;border:1px solid #D2CFC6;box-shadow:0 1px 2px rgba(30,28,24,.06);position:relative}
-.obj-chip.is-working::after{content:"";position:absolute;top:-3px;right:-3px;width:9px;height:9px;border-radius:50%;background:#CF4D24;border:2px solid #ECEAE4}
-.obj-stage{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center}
-.obj-hero{margin:auto;text-align:center;padding-bottom:120px}
-.obj-hero-h{font-size:34px;font-weight:540;letter-spacing:-.02em}
-.obj-hero-s{margin-top:10px;color:#6A685F;font-size:14px;font-family:"Geist Mono",monospace}
-.obj-thread{width:min(700px,90%);margin:0 auto;padding:74px 0 200px;flex:1;overflow:auto}
-.obj-turn{display:flex;gap:16px;margin-bottom:26px}
-.obj-tile{width:34px;height:34px;border-radius:8px;display:grid;place-items:center;font-size:16px;background:#FBFAF6;border:1px solid #D2CFC6;flex:0 0 auto}
-.obj-tile-you{background:#1C1B18;color:#F4F2EC;font-weight:600;font-size:14px}
-.obj-body{flex:1}
-.obj-turn-you .obj-body p{color:#4A483F}
-.obj-name{font-family:"Geist Mono",monospace;font-size:11px;letter-spacing:.08em;color:#CF4D24;margin-bottom:6px}
-.obj-body p{font-size:15.5px;line-height:1.66;color:#26251F}
-.obj-tool{margin-top:12px;font-family:"Geist Mono",monospace;font-size:11.5px;color:#94908544;color:#A29E92}
-.obj-dock{position:absolute;left:0;right:0;bottom:34px;display:flex;flex-direction:column;align-items:center;gap:9px}
-.obj-dock.is-center{bottom:auto;top:50%;transform:translateY(46px)}
-.obj-tray{display:flex;align-items:center;gap:8px;width:min(640px,86%);padding:9px 9px 9px 9px;border-radius:14px;background:#FBFAF6;border:1px solid #D2CFC6;box-shadow:0 1px 0 rgba(255,255,255,.7) inset,0 8px 28px rgba(40,36,28,.12),0 1px 3px rgba(40,36,28,.08)}
-.obj-agent{width:38px;height:38px;border-radius:9px;display:grid;place-items:center;font-size:17px;background:#F1EEE6;border:1px solid #DBD7CD;cursor:pointer;flex:0 0 auto}
-.obj-input{flex:1;display:flex;align-items:center;font-size:15.5px;color:#26251F;position:relative}
-.obj-ph{color:#A8A498}
-.obj-caret{width:2px;height:18px;background:#1C1B18;margin-left:1px;animation:burBlink 1.1s steps(1) infinite}
-.obj-mic{width:38px;height:38px;border-radius:9px;display:grid;place-items:center;background:transparent;border:0;color:#807C70;cursor:pointer;flex:0 0 auto}
-.obj-send{width:38px;height:38px;border-radius:9px;display:grid;place-items:center;background:#CF4D24;color:#fff;border:0;cursor:pointer;flex:0 0 auto;box-shadow:0 2px 8px rgba(207,77,36,.3)}
-.obj-hint{font-family:"Geist Mono",monospace;font-size:11px;color:#9A968A}
+/* ---- DOCK ---- */
+.dk-root{display:flex}
+.dk-rail{width:64px;flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:10px;padding:18px 0;border-right:1px solid #D8D4CB;background:rgba(250,247,239,.5)}
+.dk-mark{color:#CF4D24;font-size:18px;margin-bottom:6px}
+.dk-tile{position:relative;width:40px;height:40px;border-radius:10px;display:grid;place-items:center;font-size:18px;background:#FBFAF6;border:1px solid #D2CFC6;cursor:pointer;transition:.16s}
+.dk-tile:hover{transform:translateY(-1px)}
+.dk-tile.is-active{border-color:#1C1B18;box-shadow:0 0 0 1.5px #1C1B18}
+.dk-tile.is-working::after{content:"";position:absolute;top:-2px;right:-2px;width:9px;height:9px;border-radius:50%;background:#CF4D24;border:2px solid #EFECE4}
+.dk-badge{position:absolute;bottom:-4px;right:-4px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:#1C1B18;color:#fff;font-size:10px;font-weight:600;display:grid;place-items:center}
+.dk-grow{flex:1}
+.dk-add{font-size:20px;color:#8A8678;border-style:dashed;background:transparent}
+.dk-chats{width:248px;flex:0 0 auto;border-right:1px solid #D8D4CB;padding:16px 12px;display:flex;flex-direction:column;gap:6px}
+.dk-chats-head{display:flex;align-items:baseline;justify-content:space-between;padding:2px 6px 6px}
+.dk-emp{font-size:14px;font-weight:600}
+.dk-emp-state{font-family:"Geist Mono",monospace;font-size:11px;color:#CF4D24}
+.dk-search{display:flex;align-items:center;justify-content:space-between;width:100%;padding:9px 12px;border-radius:10px;background:#F1EEE6;border:1px solid #DBD7CD;color:#8A8678;font:inherit;font-size:13px;cursor:pointer;margin-bottom:6px}
+.dk-search kbd{font-family:"Geist Mono",monospace;font-size:11px;background:#E4E0D6;border:1px solid #D2CFC6;border-radius:5px;padding:1px 5px;color:#6A685F}
+.dk-chat{padding:10px 12px;border-radius:10px;cursor:pointer}
+.dk-chat:hover{background:#F1EEE6}
+.dk-chat.is-active{background:#FBFAF6;border:1px solid #D2CFC6;box-shadow:0 1px 2px rgba(30,28,24,.05)}
+.dk-chat-t{font-size:13.5px;font-weight:550;display:flex;align-items:center;gap:7px}
+.dk-run{width:7px;height:7px;border-radius:50%;background:#CF4D24}
+.dk-chat-s{font-size:12px;color:#8A8678;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dk-main{flex:1;position:relative;min-width:0}
+.dk-thread{padding-top:40px}
+.dk-overlay{position:absolute;inset:0;background:rgba(30,28,24,.28);backdrop-filter:blur(2px);display:flex;justify-content:center;padding-top:13vh;z-index:20}
+.dk-palette{width:min(560px,90%);height:max-content;background:#FBFAF6;border:1px solid #CFCBC1;border-radius:16px;box-shadow:0 30px 80px rgba(30,28,24,.3);overflow:hidden}
+.dk-pal-input{display:flex;align-items:center;padding:18px 20px;font-size:18px;border-bottom:1px solid #E4E0D6}
+.dk-pal-q{color:#1C1B18}
+.dk-pal-group{font-family:"Geist Mono",monospace;font-size:10.5px;letter-spacing:.12em;color:#A29E92;padding:12px 20px 4px}
+.dk-pal-row{display:flex;align-items:center;gap:10px;padding:9px 20px;font-size:14px;cursor:pointer}
+.dk-pal-row b{font-weight:600}
+.dk-pal-row .dk-pal-mut{margin-left:auto;font-family:"Geist Mono",monospace;font-size:11px;color:#9A968A}
+.dk-pal-row kbd{font-family:"Geist Mono",monospace;font-size:11px;background:#E4E0D6;border-radius:4px;padding:1px 5px;margin-left:10px}
+.dk-pal-row.is-sel{background:#F1EEE6;box-shadow:inset 2px 0 0 #CF4D24}
+.dk-pal-foot{display:flex;gap:16px;padding:11px 20px;border-top:1px solid #E4E0D6;font-family:"Geist Mono",monospace;font-size:11px;color:#9A968A}
 
-/* ============ INK ============ */
-.ink-root{position:absolute;inset:0;background:#F4F1EA;color:#1A1714;font-family:"Source Serif 4",Georgia,serif;display:flex;justify-content:center}
-.ink-col{width:min(660px,88%);height:100%;display:flex;flex-direction:column;padding:0 0 44px}
-.ink-hero{margin-top:20vh}
-.ink-hero h1{font-family:"Fraunces",serif;font-size:50px;font-weight:430;letter-spacing:-.02em;margin:0;color:#1A1714}
-.ink-hero p{font-size:19px;color:#6E665B;margin-top:14px;font-style:italic}
-.ink-thread{flex:1;overflow:auto;padding:56px 0 40px}
-.ink-turn{margin-bottom:34px}
-.ink-turn-agent{padding-left:20px;border-left:1px solid #D7CFC0}
-.ink-by{font-family:"Fraunces",serif;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#9A8F7E;margin-bottom:9px}
-.ink-turn p{font-size:20px;line-height:1.62;color:#241F19;margin:0}
-.ink-you{color:#5A5145;font-style:italic}
-.ink-turn code{font-family:"IBM Plex Mono",monospace;font-size:.74em;font-style:normal;background:#E7E0D2;color:#3A332A;padding:.1em .35em;border-radius:4px}
-.ink-meta{margin-top:12px;font-family:"Fraunces",serif;font-size:13px;font-style:italic;color:#A89D8B}
-.ink-compose{margin-top:auto;display:flex;align-items:center;gap:16px;padding-top:18px;border-top:1px solid #1A1714}
-.ink-mono{font-family:"Fraunces",serif;font-size:13px;letter-spacing:.1em;color:#1A1714;border:1px solid #1A1714;border-radius:50%;width:30px;height:30px;display:grid;place-items:center;flex:0 0 auto}
-.ink-writeline{flex:1;position:relative;display:flex;align-items:center;min-height:34px}
-.ink-text{font-size:20px;color:#241F19}
-.ink-caret{width:2px;height:24px;background:#1A1714;margin-left:1px;animation:burBlink 1.05s steps(1) infinite}
-.ink-ph{position:absolute;left:0;font-size:20px;color:#B3A892;font-style:italic}
-.ink-go{width:36px;height:36px;border-radius:50%;border:1px solid #1A1714;background:transparent;color:#1A1714;font-size:18px;cursor:pointer;flex:0 0 auto}
+/* ---- SPLIT ---- */
+.sp-root{display:flex;flex-direction:column}
+.sp-tabs{display:flex;align-items:center;gap:6px;height:46px;padding:0 14px;border-bottom:1px solid #D8D4CB;background:rgba(250,247,239,.5)}
+.sp-mark{font-size:13px;font-weight:600;color:#3A3833;margin-right:8px}
+.sp-mark::first-letter{color:#CF4D24}
+.sp-tab{display:flex;align-items:center;gap:8px;padding:7px 13px;border-radius:9px;font:inherit;font-size:12.5px;color:#6A685F;background:transparent;border:1px solid transparent;cursor:pointer}
+.sp-tab .sp-tab-e{font-size:14px}
+.sp-tab.is-active{background:#FBFAF6;border-color:#D2CFC6;color:#1C1B18;box-shadow:0 1px 2px rgba(30,28,24,.05)}
+.sp-run{width:7px;height:7px;border-radius:50%;background:#CF4D24}
+.sp-tab-add{color:#8A8678;border:1px dashed #CFCBC1}
+.sp-mut{font-family:"Geist Mono",monospace;font-size:11px;color:#9A968A}
+.sp-cols{flex:1;display:grid;min-height:0}
+.sp-cols.cols-2{grid-template-columns:1fr 1fr}
+.sp-cols.cols-3{grid-template-columns:1fr 1fr 1fr}
+.sp-pane{position:relative;display:flex;flex-direction:column;min-width:0;border-right:1px solid #D8D4CB;transition:.2s}
+.sp-pane:last-child{border-right:0}
+.sp-pane.is-dim{opacity:.62}
+.sp-pane.is-active{background:rgba(251,250,246,.4)}
+.sp-pane-head{display:flex;align-items:center;gap:9px;padding:12px 18px;border-bottom:1px solid #E4E0D6}
+.sp-pane-e{font-size:16px}
+.sp-pane-n{font-size:13.5px;font-weight:600;flex:1}
+.sp-pane-st{font-family:"Geist Mono",monospace;font-size:11px;color:#9A968A}
+.sp-pane-st.is-working{color:#CF4D24}
+.sp-stream{flex:1;overflow:auto;padding:22px 18px}
+.sp-stream .ob-body p{font-size:14.5px;line-height:1.62}
+.sp-stream .ob-turn{margin-bottom:20px;gap:12px}
+.sp-stream .ob-tile{width:30px;height:30px;font-size:14px}
+.sp-tray{padding:12px 16px;border-top:1px solid #E4E0D6}
+.sp-pane.is-dim .ob-tray{opacity:.7}
 
-/* ============ HALO (retained, unchanged) ============ */
-.halo-root{position:absolute;inset:0;display:flex;background:radial-gradient(120% 90% at 78% -10%, rgba(124,92,246,.16), transparent 55%),radial-gradient(90% 70% at 12% 110%, rgba(232,120,84,.12), transparent 55%),#141019;color:#ECE6F2;font-family:"Hanken Grotesk",system-ui,sans-serif}
-.halo-rail{width:72px;display:flex;flex-direction:column;align-items:center;gap:16px;padding:22px 0;border-right:1px solid rgba(255,255,255,.06)}
-.halo-mark{font-size:20px;color:#C9B6FF;opacity:.9;margin-bottom:8px}
-.halo-orb{position:relative;width:40px;height:40px;border-radius:50%;display:grid;place-items:center;font-size:18px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.09)}
-.halo-orb.is-working{box-shadow:0 0 0 1px rgba(201,182,255,.5),0 0 18px rgba(160,120,255,.35)}
-.halo-pulse{position:absolute;right:-1px;top:-1px;width:9px;height:9px;border-radius:50%;background:#C9B6FF;box-shadow:0 0 8px #C9B6FF;animation:haloBreathe 1.8s ease-in-out infinite}
-@keyframes haloBreathe{0%,100%{opacity:.45;transform:scale(.85)}50%{opacity:1;transform:scale(1.1)}}
-.halo-rail-spacer{flex:1}
-.halo-orb-ghost{font-size:20px;color:rgba(255,255,255,.4);background:transparent;border-style:dashed}
-.halo-stage{flex:1;position:relative;display:flex;flex-direction:column;align-items:center}
-.halo-hero{margin:auto;text-align:center;padding-bottom:120px}
-.halo-hero-title{font-family:"Fraunces",serif;font-size:42px;font-weight:500;letter-spacing:-.02em;background:linear-gradient(180deg,#fff,#C9B6FF);-webkit-background-clip:text;background-clip:text;color:transparent}
-.halo-hero-sub{margin-top:12px;color:rgba(236,230,242,.5);font-size:15px}
-.halo-thread{width:min(720px,90%);margin:0 auto;padding:64px 0 200px;flex:1;overflow:auto}
-.halo-turn-user{margin:0 0 34px auto;max-width:78%}
-.halo-turn-user p{display:inline-block;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);padding:13px 18px;border-radius:20px 20px 6px 20px;font-size:15.5px;line-height:1.55;float:right;clear:both}
-.halo-turn-agent{display:flex;gap:16px;clear:both;margin-bottom:30px}
-.halo-gutter span{display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:rgba(201,182,255,.12);border:1px solid rgba(201,182,255,.25);font-size:16px}
-.halo-msg{flex:1}
-.halo-byline{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#C9B6FF;margin-bottom:6px;opacity:.85}
-.halo-msg p{font-size:16px;line-height:1.7;color:rgba(236,230,242,.92)}
-.halo-toolline{margin-top:12px;font-size:12.5px;color:rgba(236,230,242,.4)}
-.halo-dock{position:absolute;left:0;right:0;bottom:30px;display:flex;flex-direction:column;align-items:center;gap:10px}
-.halo-dock.is-center{bottom:auto;top:50%;transform:translateY(40px)}
-.halo-island{position:relative;display:flex;align-items:center;gap:10px;width:min(680px,86%);padding:10px 12px;border-radius:999px;background:rgba(28,24,38,.72);backdrop-filter:blur(26px) saturate(160%);border:1px solid rgba(255,255,255,.1);box-shadow:0 20px 60px rgba(0,0,0,.5)}
-.halo-island-ring{position:absolute;inset:-1px;border-radius:999px;padding:1px;background:linear-gradient(120deg,rgba(201,182,255,.7),rgba(232,120,84,.5),transparent 60%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;opacity:.8;pointer-events:none}
-.halo-agent-chip{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;font-size:18px;background:rgba(201,182,255,.14);border:1px solid rgba(201,182,255,.3);cursor:pointer;flex:0 0 auto}
-.halo-input{flex:1;background:transparent;border:0;outline:0;color:#fff;font-size:16px;font-family:inherit}
-.halo-input::placeholder{color:rgba(236,230,242,.4)}
-.halo-voice,.halo-send{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;cursor:pointer;flex:0 0 auto;border:0}
-.halo-voice{background:transparent;color:rgba(236,230,242,.6)}
-.halo-send{background:linear-gradient(150deg,#C9B6FF,#A07CFF);color:#1a1226;box-shadow:0 4px 18px rgba(160,120,255,.5)}
-.halo-hints{font-size:12px;color:rgba(236,230,242,.4)}
-.halo-hints b{color:rgba(236,230,242,.7);font-weight:600}
-
-/* ============ LEDGER (retained, unchanged) ============ */
-.ldg-root{position:absolute;inset:0;display:flex;flex-direction:column;background:#14130F;color:#E8E4D8;font-family:"Hanken Grotesk",system-ui,sans-serif}
-.ldg-status{display:flex;align-items:center;gap:10px;height:34px;padding:0 16px;font-family:"IBM Plex Mono",monospace;font-size:12px;color:#A8A290;border-bottom:1px solid rgba(255,255,255,.07);background:rgba(0,0,0,.2)}
-.ldg-stat-dot{width:7px;height:7px;border-radius:50%;background:#7DBE6A;box-shadow:0 0 8px rgba(125,190,106,.7)}
-.ldg-sep{color:rgba(255,255,255,.18)}
-.ldg-mut{color:#827C6C}
-.ldg-amber{color:#E0A33C}
-.ldg-grow{flex:1}
-.ldg-body{flex:1;display:flex;min-height:0}
-.ldg-index{width:208px;border-right:1px solid rgba(255,255,255,.07);padding:14px 8px;font-family:"IBM Plex Mono",monospace}
-.ldg-index-head{font-size:10.5px;letter-spacing:.18em;color:#6E6957;padding:0 8px 10px}
-.ldg-index-row{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:5px;font-size:12.5px;color:#B5AF9C;cursor:pointer}
-.ldg-index-row.is-active{background:rgba(224,163,60,.1);color:#F0E9D6}
-.ldg-idx-id{color:#5F5A4A}
-.ldg-idx-name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ldg-idx-run{color:#E0A33C;font-size:9px;animation:ldgBlink 1.4s steps(1) infinite}
-@keyframes ldgBlink{50%{opacity:.25}}
-.ldg-stream{flex:1;position:relative;display:flex;flex-direction:column;min-width:0}
-.ldg-transcript{flex:1;overflow:auto;padding:34px 40px 120px;max-width:900px}
-.ldg-turn{display:flex;gap:20px;margin-bottom:26px}
-.ldg-spk{font-family:"IBM Plex Mono",monospace;font-size:13px;padding-top:2px;white-space:nowrap;flex:0 0 auto;width:96px;text-align:right}
-.ldg-spk-you{color:#7FA8D6}
-.ldg-spk-agent{color:#E0A33C}
-.ldg-content{font-size:15.5px;line-height:1.72;color:#E2DDCF}
-.ldg-content code{background:rgba(224,163,60,.14);color:#F0D89A}
-.ldg-tool{margin-top:12px;font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:#8A846F;cursor:pointer}
-.ldg-tool-mut{color:#5F5A4A}
-.ldg-empty{flex:1;display:flex;flex-direction:column;justify-content:center;padding-left:60px}
-.ldg-ascii{font-family:"IBM Plex Mono",monospace;color:#E0A33C;font-size:15px;line-height:1.35;opacity:.85}
-.ldg-empty-mut{margin-top:14px;color:#827C6C;font-family:"IBM Plex Mono",monospace;font-size:12.5px}
-.ldg-empty-mut b{color:#E0A33C}
-.ldg-prompt{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:12px;height:54px;padding:0 24px;border-top:1px solid rgba(224,163,60,.28);background:linear-gradient(0deg,rgba(0,0,0,.35),transparent);font-family:"IBM Plex Mono",monospace}
-.ldg-sigil{color:#E0A33C;font-size:18px;font-weight:600}
-.ldg-cmdline{flex:1;display:flex;align-items:center;font-size:14.5px;color:#F0E9D6}
-.ldg-caret{width:8px;height:17px;background:#E0A33C;margin-left:2px;animation:ldgBlink 1.1s steps(1) infinite}
-.ldg-keyhints{font-size:11px;color:#6E6957;white-space:nowrap}
+/* ---- STAGE ---- */
+.st-root{display:flex;flex-direction:column}
+.st-top{display:flex;align-items:center;gap:8px;padding:16px 22px 0;font-size:13px;font-weight:500;color:#3A3833}
+.st-top-mut{font-family:"Geist Mono",monospace;font-size:11.5px;color:#9A968A;font-weight:400}
+.st-stage{flex:1;position:relative;display:flex;flex-direction:column;align-items:center;min-height:0}
+.st-thread{padding-top:30px;padding-bottom:40px}
+.st-trayWrap{position:absolute;left:0;right:0;bottom:26px;display:flex;justify-content:center}
+.st-dock{flex:0 0 auto;display:flex;gap:12px;padding:16px 22px 20px;border-top:1px solid #D8D4CB;background:rgba(250,247,239,.6);overflow-x:auto}
+.st-card{width:212px;flex:0 0 auto;padding:12px 14px;border-radius:12px;background:#FBFAF6;border:1px solid #D2CFC6;box-shadow:0 1px 2px rgba(30,28,24,.05);cursor:pointer;transition:.16s}
+.st-card:hover{transform:translateY(-2px);box-shadow:0 6px 18px rgba(40,36,28,.1)}
+.st-card.is-onstage{border-color:#1C1B18;box-shadow:0 0 0 1.5px #1C1B18,0 8px 22px rgba(40,36,28,.12);transform:translateY(-2px)}
+.st-card-top{display:flex;align-items:center;gap:8px}
+.st-card-e{font-size:15px}
+.st-card-n{font-size:12px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.st-card-live{width:8px;height:8px;border-radius:50%;background:#CF4D24;animation:obBlink 1.4s steps(1) infinite}
+.st-card-badge{min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:#1C1B18;color:#fff;font-size:10px;font-weight:600;display:grid;place-items:center}
+.st-card-title{font-size:13px;font-weight:550;margin-top:8px}
+.st-card-snip{font-size:11.5px;color:#8A8678;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.st-card-add{width:140px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#8A8678;border-style:dashed;background:transparent;font-size:20px}
+.st-card-add span{font-size:11px}
 `
