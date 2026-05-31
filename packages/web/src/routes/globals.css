@@ -35,8 +35,10 @@
    ============================================ */
 
 @theme {
-  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
-  --font-mono: "SF Mono", Monaco, Menlo, "Courier New", monospace;
+  /* Theme-driven font stacks (overridden per [data-theme]; defaults below in :root) */
+  --font-sans: var(--font-ui);
+  --font-serif: var(--font-display);
+  --font-mono: var(--font-code);
 
   /* Typography Scale — Apple HIG */
   --text-caption2: 11px;
@@ -92,6 +94,10 @@
 
 /* DEFAULT: Dark (Apple Dark Mode) */
 :root, [data-theme="dark"] {
+  /* Default font stacks (Apple system) — warm themes override these three */
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+  --font-code: "SF Mono", Monaco, Menlo, "Courier New", monospace;
   --bg: #000000;
   --bg-secondary: rgba(28,28,30,1);
   --bg-tertiary: rgba(44,44,46,1);
@@ -282,6 +288,190 @@
   --ease-snappy: cubic-bezier(0.2, 0, 0, 1);
 }
 
+/* ============================================
+   REDESIGN CONCEPT 1 — "Atelier"
+   Warm editorial paper · clay accent · Fraunces headings
+   ============================================ */
+[data-theme="atelier"] {
+  --font-ui: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
+  --font-display: "Fraunces", Georgia, serif;
+  --font-code: "IBM Plex Mono", "SF Mono", monospace;
+
+  --bg: #F7F3EC;
+  --bg-secondary: #FCF9F3;
+  --bg-tertiary: #F1EBE0;
+  --material-regular: rgba(252,249,243,0.94);
+  --material-thick: rgba(247,243,236,0.97);
+  --material-thin: rgba(42,37,32,0.05);
+  --material-ultra-thin: rgba(42,37,32,0.03);
+  --fill-primary: rgba(120,108,92,0.18);
+  --fill-secondary: rgba(120,108,92,0.14);
+  --fill-tertiary: rgba(120,108,92,0.10);
+  --fill-quaternary: rgba(120,108,92,0.06);
+  --separator: #E4DBCC;
+  --separator-opaque: #D2C5B0;
+  --text-primary: #2A2520;
+  --text-secondary: #6B6258;
+  --text-tertiary: #9A9085;
+  --text-quaternary: rgba(154,144,133,0.55);
+  --accent: #B85C38;
+  --accent-fill: rgba(184,92,56,0.12);
+  --accent-contrast: #FFFFFF;
+  --system-blue: #3B6EA5;
+  --system-green: #5C7A4A;
+  --system-red: #B23B33;
+  --system-orange: #C08A2D;
+  --system-purple: #8A6BA8;
+  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.65);
+  --shadow-subtle: 0 1px 2px rgba(60,50,40,0.05);
+  --shadow-ambient: 0 0 0 0.5px rgba(60,50,40,0.06);
+  --shadow-key: 0 2px 8px rgba(60,50,40,0.08);
+  --shadow-card: 0 0 0 0.5px rgba(60,50,40,0.06), 0 1px 2px rgba(60,50,40,0.05);
+  --shadow-overlay: 0 0 0 0.5px rgba(60,50,40,0.08), 0 12px 32px rgba(60,50,40,0.12);
+  --code-bg: rgba(42,37,32,0.05);
+  --code-border: rgba(42,37,32,0.08);
+  --code-text: #4A4036;
+  --sidebar-bg: #F1EBE0;
+  --sidebar-backdrop: blur(20px) saturate(140%);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-2xl: 24px;
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-snappy: cubic-bezier(0.2, 0, 0, 1);
+}
+[data-theme="atelier"] h1,
+[data-theme="atelier"] h2,
+[data-theme="atelier"] h3 {
+  letter-spacing: -0.018em;
+  font-weight: 500;
+}
+
+/* ============================================
+   REDESIGN CONCEPT 2 — "Console"
+   Warm operator deck · deep-teal accent · mono-forward
+   ============================================ */
+[data-theme="console"] {
+  --font-ui: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
+  --font-display: "Newsreader", Georgia, serif;
+  --font-code: "IBM Plex Mono", "SF Mono", monospace;
+
+  --bg: #F4F2ED;
+  --bg-secondary: #FBFAF6;
+  --bg-tertiary: #EBE8E0;
+  --material-regular: rgba(251,250,246,0.94);
+  --material-thick: rgba(244,242,237,0.97);
+  --material-thin: rgba(35,38,42,0.05);
+  --material-ultra-thin: rgba(35,38,42,0.03);
+  --fill-primary: rgba(94,97,104,0.16);
+  --fill-secondary: rgba(94,97,104,0.12);
+  --fill-tertiary: rgba(94,97,104,0.09);
+  --fill-quaternary: rgba(94,97,104,0.06);
+  --separator: #DFDBD0;
+  --separator-opaque: #C7C1B2;
+  --text-primary: #23262A;
+  --text-secondary: #5E6168;
+  --text-tertiary: #92968F;
+  --text-quaternary: rgba(146,150,143,0.55);
+  --accent: #0F766E;
+  --accent-fill: rgba(15,118,110,0.12);
+  --accent-contrast: #FFFFFF;
+  --system-blue: #2563EB;
+  --system-green: #3F7D4E;
+  --system-red: #B14237;
+  --system-orange: #B8821F;
+  --system-purple: #6D5BA8;
+  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.6);
+  --shadow-subtle: 0 1px 2px rgba(20,24,26,0.05);
+  --shadow-ambient: 0 0 0 0.5px rgba(20,24,26,0.07);
+  --shadow-key: 0 2px 8px rgba(20,24,26,0.09);
+  --shadow-card: 0 0 0 0.5px rgba(20,24,26,0.07), 0 1px 2px rgba(20,24,26,0.05);
+  --shadow-overlay: 0 0 0 0.5px rgba(20,24,26,0.09), 0 12px 32px rgba(20,24,26,0.14);
+  --code-bg: #EBE8E0;
+  --code-border: rgba(35,38,42,0.10);
+  --code-text: #1F2937;
+  --sidebar-bg: #EBE8E0;
+  --sidebar-backdrop: blur(20px) saturate(140%);
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 14px;
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-smooth: cubic-bezier(0.3, 0, 0.1, 1);
+  --ease-snappy: cubic-bezier(0.2, 0, 0, 1);
+}
+[data-theme="console"] h1,
+[data-theme="console"] h2,
+[data-theme="console"] h3 {
+  letter-spacing: -0.01em;
+  font-weight: 500;
+}
+
+/* ============================================
+   REDESIGN CONCEPT 3 — "Ember"
+   Bold cream · rust-ochre accent · Instrument Serif display
+   ============================================ */
+[data-theme="ember"] {
+  --font-ui: "Geist", -apple-system, system-ui, sans-serif;
+  --font-display: "Instrument Serif", Georgia, serif;
+  --font-code: "Geist Mono", "SF Mono", monospace;
+
+  --bg: #FAF6F0;
+  --bg-secondary: #FFFDFA;
+  --bg-tertiary: #F2EBE1;
+  --material-regular: rgba(255,253,250,0.94);
+  --material-thick: rgba(250,246,240,0.97);
+  --material-thin: rgba(35,28,22,0.05);
+  --material-ultra-thin: rgba(35,28,22,0.03);
+  --fill-primary: rgba(124,100,80,0.16);
+  --fill-secondary: rgba(124,100,80,0.12);
+  --fill-tertiary: rgba(124,100,80,0.09);
+  --fill-quaternary: rgba(124,100,80,0.06);
+  --separator: #E8DECF;
+  --separator-opaque: #D8C9B2;
+  --text-primary: #231C16;
+  --text-secondary: #6A5F52;
+  --text-tertiary: #9C8F7E;
+  --text-quaternary: rgba(156,143,126,0.55);
+  --accent: #C2410C;
+  --accent-fill: rgba(194,65,12,0.12);
+  --accent-contrast: #FFFFFF;
+  --system-blue: #3B6EA5;
+  --system-green: #4D7C3A;
+  --system-red: #B91C1C;
+  --system-orange: #CA8A04;
+  --system-purple: #7C3AED;
+  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.7);
+  --shadow-subtle: 0 1px 2px rgba(70,45,25,0.06);
+  --shadow-ambient: 0 0 0 0.5px rgba(70,45,25,0.07);
+  --shadow-key: 0 2px 10px rgba(70,45,25,0.10);
+  --shadow-card: 0 0 0 0.5px rgba(70,45,25,0.06), 0 1px 3px rgba(70,45,25,0.06);
+  --shadow-overlay: 0 0 0 0.5px rgba(70,45,25,0.09), 0 14px 36px rgba(70,45,25,0.16);
+  --code-bg: rgba(35,28,22,0.05);
+  --code-border: rgba(35,28,22,0.08);
+  --code-text: #4A3D30;
+  --sidebar-bg: #F2EBE1;
+  --sidebar-backdrop: blur(20px) saturate(150%);
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+  --radius-2xl: 32px;
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-snappy: cubic-bezier(0.45, 0, 0.1, 1);
+}
+/* Ember leans on its display serif — make headings large & expressive */
+[data-theme="ember"] h1,
+[data-theme="ember"] h2,
+[data-theme="ember"] h3 {
+  letter-spacing: -0.01em;
+  font-weight: 400;
+}
+
 /* SYSTEM: Media query fallback before JS hydration */
 @media (prefers-color-scheme: light) {
   [data-theme="system"] {
@@ -361,12 +551,17 @@ html {
 body {
   background: var(--bg);
   color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
+  font-family: var(--font-ui);
   font-size: var(--text-body);
   line-height: var(--leading-normal);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+}
+
+/* Display typeface for headings (per-theme; default = same UI stack). */
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-display);
 }
 
 /* Apple-style scrollbar */
