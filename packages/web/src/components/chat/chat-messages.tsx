@@ -469,7 +469,7 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages }: M
 
       {/* User message */}
       {isUser && (
-        <div className="flex flex-col items-end px-[var(--space-4)] mb-[var(--space-1)]">
+        <div className="flex flex-col items-end px-[var(--space-3)] lg:px-[var(--space-8)] mb-[var(--space-1)]">
           {textContent && (
             <div className="user-msg-bubble py-[var(--space-3)] px-[var(--space-4)] rounded-[var(--radius-lg)_var(--radius-lg)_var(--radius-sm)_var(--radius-lg)] bg-[var(--accent)] text-[var(--accent-contrast)] text-[length:var(--text-subheadline)] leading-[var(--leading-relaxed)] font-[var(--weight-medium)] shadow-[var(--shadow-subtle)]">
               {formattedContent}
@@ -489,7 +489,7 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages }: M
           <div className="assistant-msg-bubble flex flex-col">
             {/* Text bubble */}
             {textContent && (
-              <div className="py-[var(--space-3)] px-[var(--space-4)] rounded-[var(--radius-sm)_var(--radius-lg)_var(--radius-lg)_var(--radius-lg)] bg-[var(--material-thin)] border border-[var(--separator)] text-[var(--text-primary)] text-[length:var(--text-subheadline)] leading-[var(--leading-relaxed)]">
+              <div className="assistant-transcript py-[var(--space-1)] text-[var(--text-primary)] text-[length:var(--text-body)] leading-[var(--leading-relaxed)]">
                 {formattedContent}
               </div>
             )}
@@ -513,7 +513,7 @@ function StreamingBubble({ streamingText }: { streamingText: string }) {
   return (
     <div className="assistant-msg-row flex justify-start px-[var(--space-4)] mb-[var(--space-1)]">
       <div className="assistant-msg-bubble flex flex-col">
-        <div className="py-[var(--space-3)] px-[var(--space-4)] rounded-[var(--radius-sm)_var(--radius-lg)_var(--radius-lg)_var(--radius-lg)] bg-[var(--material-thin)] border border-[var(--separator)] text-[var(--text-primary)] text-[length:var(--text-subheadline)] leading-[var(--leading-relaxed)]">
+        <div className="assistant-transcript py-[var(--space-1)] text-[var(--text-primary)] text-[length:var(--text-body)] leading-[var(--leading-relaxed)]">
           {formattedContent}
         </div>
       </div>
@@ -713,11 +713,11 @@ export function ChatMessages({ messages, loading, streamingText }: ChatMessagesP
         .assistant-msg-bubble { max-width: 100%; overflow-wrap: break-word; word-break: break-word; }
         .user-msg-bubble { max-width: 90%; overflow-wrap: break-word; word-break: break-word; }
         .notification-msg-bubble { overflow-wrap: break-word; word-break: break-word; white-space: pre-wrap; }
-        .assistant-msg-row { padding: 0 var(--space-2) !important; }
+        .assistant-msg-row { padding: 0 var(--space-3) !important; }
         @media (min-width: 1024px) {
-          .assistant-msg-bubble { max-width: 75%; }
-          .user-msg-bubble { max-width: 75%; }
-          .assistant-msg-row { padding: 0 var(--space-4) !important; }
+          .assistant-msg-bubble { max-width: 100%; }
+          .user-msg-bubble { max-width: 82%; }
+          .assistant-msg-row { padding: 0 var(--space-8) !important; }
         }
         /* User message contrast fixes — ensure all child elements are visible on accent background */
         .user-msg-bubble code {
