@@ -20,9 +20,9 @@ const LEVEL_COLOR: Record<string, string> = {
 }
 
 const LEVEL_BG: Record<string, string> = {
-  info: "rgba(48,209,88,0.12)",
-  warn: "rgba(255,159,10,0.12)",
-  error: "rgba(255,69,58,0.12)",
+  info: "color-mix(in srgb, var(--system-green) 12%, transparent)",
+  warn: "color-mix(in srgb, var(--system-orange) 12%, transparent)",
+  error: "color-mix(in srgb, var(--system-red) 12%, transparent)",
   debug: "var(--fill-secondary)",
 }
 
@@ -178,7 +178,7 @@ export function LogBrowser({ lines }: LogBrowserProps) {
                     cursor: isLong ? "pointer" : "default",
                     background:
                       entry.level === "error"
-                        ? "rgba(255,69,58,0.06)"
+                        ? "color-mix(in srgb, var(--system-red) 7%, transparent)"
                         : undefined,
                   }}
                 >

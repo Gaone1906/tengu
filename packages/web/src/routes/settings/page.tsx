@@ -597,7 +597,7 @@ export default function SettingsPage() {
               Theme
             </div>
             <div
-              className="grid grid-cols-4 gap-[var(--space-2)] mb-[var(--space-4)]"
+              className="grid grid-cols-3 gap-[var(--space-2)] mb-[var(--space-4)]"
             >
               {THEMES.map((t) => {
                 const isActive = theme === t.id

@@ -275,7 +275,10 @@ export default function CronPage() {
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-[var(--space-6)] pt-[var(--space-4)] pb-[var(--space-6)]">
           {error && jobs.length === 0 ? (
-            <div className="bg-[rgba(255,69,58,0.06)] border border-[var(--system-red)] rounded-[var(--radius-md)] p-[var(--space-4)] text-[var(--system-red)] text-[length:var(--text-footnote)] mb-[var(--space-4)]">
+            <div
+              className="border border-[var(--system-red)] rounded-[var(--radius-md)] p-[var(--space-4)] text-[var(--system-red)] text-[length:var(--text-footnote)] mb-[var(--space-4)]"
+              style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}
+            >
               Failed to load cron jobs: {error}
               <button
                 onClick={refresh}
@@ -434,8 +437,10 @@ export default function CronPage() {
                                         }}
                                       >
                                         <span
-                                          className="block w-3.5 h-3.5 rounded-full bg-white transition-transform duration-200 ease-in-out"
+                                          className="block w-3.5 h-3.5 rounded-full transition-transform duration-200 ease-in-out"
                                           style={{
+                                            background: "var(--bg-secondary)",
+                                            boxShadow: "var(--shadow-subtle)",
                                             transform: job.enabled ? "translateX(18px)" : "translateX(3px)",
                                           }}
                                         />

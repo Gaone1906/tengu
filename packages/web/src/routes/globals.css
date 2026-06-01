@@ -2,7 +2,7 @@
 
 /* :where() has zero specificity so shadcn's dark: utilities remain overridable.
    data-theme is never "system" after JS hydration — ThemeProvider resolves it to dark/light. */
-@custom-variant dark (:where([data-theme="dark"], [data-theme="glass"], [data-theme="color"]) &);
+@custom-variant dark (:where([data-theme="dark"]) &);
 
 @theme inline {
   --color-background: var(--bg);
@@ -92,433 +92,209 @@
    Apple Material Design System — Themes
    ============================================ */
 
-/* DEFAULT: Dark (Apple Dark Mode) */
+/* LEDGER DARK — warm charcoal + amber (default) */
 :root, [data-theme="dark"] {
-  /* Default font stacks (Apple system) — warm themes override these three */
-  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif;
-  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
-  --font-code: "SF Mono", Monaco, Menlo, "Courier New", monospace;
-  --bg: #000000;
-  --bg-secondary: rgba(28,28,30,1);
-  --bg-tertiary: rgba(44,44,46,1);
-  --material-regular: rgba(28,28,30,0.92);
-  --material-thick: rgba(22,22,24,0.96);
-  --material-thin: rgba(255,255,255,0.06);
-  --material-ultra-thin: rgba(255,255,255,0.04);
-  --fill-primary: rgba(120,120,128,0.36);
-  --fill-secondary: rgba(120,120,128,0.32);
-  --fill-tertiary: rgba(118,118,128,0.24);
-  --fill-quaternary: rgba(118,118,128,0.18);
-  --separator: rgba(84,84,88,0.60);
-  --separator-opaque: #38383A;
-  --text-primary: #FFFFFF;
-  --text-secondary: rgba(235,235,245,0.60);
-  --text-tertiary: rgba(235,235,245,0.30);
-  --text-quaternary: rgba(235,235,245,0.18);
-  --accent: #EF4444;
-  --accent-fill: rgba(239,68,68,0.15);
-  --accent-contrast: #fff;
-  --system-blue: #0A84FF;
-  --system-green: #30D158;
-  --system-red: #FF453A;
-  --system-orange: #FF9F0A;
-  --system-purple: #BF5AF2;
-  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.08);
-  --shadow-subtle: 0 1px 2px rgba(0,0,0,0.20);
-  --shadow-ambient: 0 0 0 0.5px rgba(0,0,0,0.20);
-  --shadow-key: 0 4px 16px rgba(0,0,0,0.40);
-  --shadow-card: 0 0 0 0.5px rgba(0,0,0,0.20), 0 4px 16px rgba(0,0,0,0.40), inset 0 1px 0 rgba(255,255,255,0.08);
-  --shadow-overlay: 0 0 0 0.5px rgba(0,0,0,0.30), 0 16px 48px rgba(0,0,0,0.60), inset 0 1px 0 rgba(255,255,255,0.06);
-  --code-bg: rgba(255,255,255,0.06);
-  --code-border: rgba(255,255,255,0.10);
-  --code-text: #e5e5ea;
-  --sidebar-bg: rgba(28,28,30,0.92);
-  --sidebar-backdrop: blur(40px) saturate(180%);
-  --radius-sm: 6px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
-  --radius-2xl: 24px;
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-snappy: cubic-bezier(0.2, 0, 0, 1);
-}
-
-/* GLASS: Frosted glass dark variant */
-[data-theme="glass"] {
-  --bg: #0d0d18;
-  --bg-secondary: rgba(20,20,32,1);
-  --bg-tertiary: rgba(30,30,48,1);
-  --material-regular: rgba(255,255,255,0.07);
-  --material-thick: rgba(255,255,255,0.10);
-  --material-thin: rgba(255,255,255,0.06);
-  --material-ultra-thin: rgba(255,255,255,0.04);
-  --fill-primary: rgba(255,255,255,0.16);
-  --fill-secondary: rgba(255,255,255,0.12);
-  --fill-tertiary: rgba(255,255,255,0.08);
-  --fill-quaternary: rgba(255,255,255,0.05);
-  --separator: rgba(255,255,255,0.14);
-  --separator-opaque: rgba(255,255,255,0.18);
-  --text-primary: #ffffff;
-  --text-secondary: rgba(255,255,255,0.60);
-  --text-tertiary: rgba(255,255,255,0.30);
-  --text-quaternary: rgba(255,255,255,0.18);
-  --accent: #EF4444;
-  --accent-fill: rgba(239,68,68,0.18);
-  --accent-contrast: #fff;
-  --system-blue: #3B9EFF;
-  --system-green: #34D058;
-  --system-red: #FF5C57;
-  --system-orange: #FFB340;
-  --system-purple: #CC6FF0;
-  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.15);
-  --shadow-subtle: 0 1px 3px rgba(0,0,0,0.25);
-  --shadow-ambient: 0 0 0 0.5px rgba(255,255,255,0.06);
-  --shadow-key: 0 8px 32px rgba(0,0,0,0.45);
-  --shadow-card: 0 0 0 0.5px rgba(255,255,255,0.06), 0 8px 32px rgba(0,0,0,0.40), inset 0 1px 0 rgba(255,255,255,0.15);
-  --shadow-overlay: 0 0 0 0.5px rgba(255,255,255,0.08), 0 16px 56px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.12);
-  --code-bg: rgba(255,255,255,0.07);
-  --code-border: rgba(255,255,255,0.12);
-  --code-text: #e5e5ea;
-  --sidebar-bg: rgba(255,255,255,0.05);
-  --sidebar-backdrop: blur(40px) saturate(180%);
-  --radius-sm: 6px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
-  --radius-2xl: 24px;
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-snappy: cubic-bezier(0.2, 0, 0, 1);
-}
-
-/* COLOR: Vibrant purple-indigo variant */
-[data-theme="color"] {
-  --bg: #0a0814;
-  --bg-secondary: #16112a;
-  --bg-tertiary: #1e1838;
-  --material-regular: #16112a;
-  --material-thick: #1e1838;
-  --material-thin: rgba(139,92,246,0.12);
-  --material-ultra-thin: rgba(139,92,246,0.06);
-  --fill-primary: rgba(139,92,246,0.30);
-  --fill-secondary: rgba(139,92,246,0.20);
-  --fill-tertiary: rgba(139,92,246,0.14);
-  --fill-quaternary: rgba(139,92,246,0.08);
-  --separator: rgba(139,92,246,0.25);
-  --separator-opaque: rgba(139,92,246,0.35);
-  --text-primary: #ffffff;
-  --text-secondary: rgba(220,210,255,0.70);
-  --text-tertiary: rgba(220,210,255,0.35);
-  --text-quaternary: rgba(220,210,255,0.20);
-  --accent: #EF4444;
-  --accent-fill: rgba(239,68,68,0.20);
-  --accent-contrast: #fff;
-  --system-blue: #60A5FA;
-  --system-green: #34D399;
-  --system-red: #F87171;
-  --system-orange: #FB923C;
-  --system-purple: #C084FC;
-  --inset-shine: inset 0 1px 0 rgba(139,92,246,0.15);
-  --shadow-subtle: 0 1px 3px rgba(88,28,135,0.20);
-  --shadow-ambient: 0 0 0 0.5px rgba(88,28,135,0.30);
-  --shadow-key: 0 8px 32px rgba(88,28,135,0.40);
-  --shadow-card: 0 0 0 0.5px rgba(88,28,135,0.25), 0 4px 24px rgba(88,28,135,0.30), inset 0 1px 0 rgba(139,92,246,0.15);
-  --shadow-overlay: 0 0 0 0.5px rgba(88,28,135,0.30), 0 16px 48px rgba(88,28,135,0.45), inset 0 1px 0 rgba(139,92,246,0.12);
-  --code-bg: rgba(139,92,246,0.10);
-  --code-border: rgba(139,92,246,0.20);
-  --code-text: #ddd6fe;
-  --sidebar-bg: #0f0b20;
-  --sidebar-backdrop: blur(40px) saturate(200%);
-  --radius-sm: 6px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
-  --radius-2xl: 24px;
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-snappy: cubic-bezier(0.2, 0, 0, 1);
-}
-
-/* LIGHT: Apple Light Mode */
-[data-theme="light"] {
-  --bg: #f2f2f7;
-  --bg-secondary: #ffffff;
-  --bg-tertiary: #e5e5ea;
-  --material-regular: #ffffff;
-  --material-thick: rgba(255,255,255,0.97);
-  --material-thin: rgba(0,0,0,0.03);
-  --material-ultra-thin: rgba(0,0,0,0.02);
-  --fill-primary: rgba(120,120,128,0.20);
-  --fill-secondary: rgba(120,120,128,0.16);
-  --fill-tertiary: rgba(118,118,128,0.12);
-  --fill-quaternary: rgba(118,118,128,0.08);
-  --separator: rgba(60,60,67,0.29);
-  --separator-opaque: #C6C6C8;
-  --text-primary: #000000;
-  --text-secondary: rgba(60,60,67,0.60);
-  --text-tertiary: rgba(60,60,67,0.44);
-  --text-quaternary: rgba(60,60,67,0.30);
-  --accent: #DC2626;
-  --accent-fill: rgba(220,38,38,0.12);
-  --accent-contrast: #fff;
-  --system-blue: #007AFF;
-  --system-green: #28CD41;
-  --system-red: #FF3B30;
-  --system-orange: #FF9500;
-  --system-purple: #AF52DE;
-  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.70);
-  --shadow-subtle: 0 1px 2px rgba(0,0,0,0.06);
-  --shadow-ambient: 0 0 0 0.5px rgba(0,0,0,0.08);
-  --shadow-key: 0 2px 8px rgba(0,0,0,0.12), 0 8px 24px rgba(0,0,0,0.08);
-  --shadow-card: 0 0 0 0.5px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.06), inset 0 1px 0 rgba(255,255,255,0.70);
-  --shadow-overlay: 0 0 0 0.5px rgba(0,0,0,0.08), 0 4px 16px rgba(0,0,0,0.10), 0 16px 48px rgba(0,0,0,0.12), inset 0 1px 0 rgba(255,255,255,0.80);
-  --code-bg: rgba(0,0,0,0.04);
-  --code-border: rgba(0,0,0,0.08);
-  --code-text: #1c1c1e;
-  --sidebar-bg: #ffffff;
-  --sidebar-backdrop: blur(20px) saturate(150%);
-  --radius-sm: 6px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 20px;
-  --radius-2xl: 24px;
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-snappy: cubic-bezier(0.2, 0, 0, 1);
-}
-
-/* ============================================
-   REDESIGN CONCEPT 1 — "Atelier"
-   Warm editorial paper · clay accent · Fraunces headings
-   ============================================ */
-[data-theme="atelier"] {
-  --font-ui: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
-  --font-display: "Fraunces", Georgia, serif;
-  --font-code: "IBM Plex Mono", "SF Mono", monospace;
-
-  --bg: #F7F3EC;
-  --bg-secondary: #FCF9F3;
-  --bg-tertiary: #F1EBE0;
-  --material-regular: rgba(252,249,243,0.94);
-  --material-thick: rgba(247,243,236,0.97);
-  --material-thin: rgba(42,37,32,0.05);
-  --material-ultra-thin: rgba(42,37,32,0.03);
-  --fill-primary: rgba(120,108,92,0.18);
-  --fill-secondary: rgba(120,108,92,0.14);
-  --fill-tertiary: rgba(120,108,92,0.10);
-  --fill-quaternary: rgba(120,108,92,0.06);
-  --separator: #E4DBCC;
-  --separator-opaque: #D2C5B0;
-  --text-primary: #2A2520;
-  --text-secondary: #6B6258;
-  --text-tertiary: #9A9085;
-  --text-quaternary: rgba(154,144,133,0.55);
-  --accent: #B85C38;
-  --accent-fill: rgba(184,92,56,0.12);
-  --accent-contrast: #FFFFFF;
-  --system-blue: #3B6EA5;
-  --system-green: #5C7A4A;
-  --system-red: #B23B33;
-  --system-orange: #C08A2D;
-  --system-purple: #8A6BA8;
-  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.65);
-  --shadow-subtle: 0 1px 2px rgba(60,50,40,0.05);
-  --shadow-ambient: 0 0 0 0.5px rgba(60,50,40,0.06);
-  --shadow-key: 0 2px 8px rgba(60,50,40,0.08);
-  --shadow-card: 0 0 0 0.5px rgba(60,50,40,0.06), 0 1px 2px rgba(60,50,40,0.05);
-  --shadow-overlay: 0 0 0 0.5px rgba(60,50,40,0.08), 0 12px 32px rgba(60,50,40,0.12);
-  --code-bg: rgba(42,37,32,0.05);
-  --code-border: rgba(42,37,32,0.08);
-  --code-text: #4A4036;
-  --sidebar-bg: #F1EBE0;
-  --sidebar-backdrop: blur(20px) saturate(140%);
+  --font-ui: "Hanken Grotesk", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-display: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
+  --font-code: "IBM Plex Mono", "SF Mono", Monaco, Menlo, monospace;
+  --bg: #14130F;
+  --bg-secondary: #1E1C16;
+  --bg-tertiary: #2A2720;
+  --material-regular: rgba(30,28,22,0.92);
+  --material-thick: rgba(20,18,15,0.96);
+  --material-thin: rgba(255,255,255,0.05);
+  --material-ultra-thin: rgba(255,255,255,0.03);
+  --fill-primary: rgba(255,255,255,0.10);
+  --fill-secondary: rgba(255,255,255,0.07);
+  --fill-tertiary: rgba(255,255,255,0.05);
+  --fill-quaternary: rgba(255,255,255,0.035);
+  --separator: rgba(255,255,255,0.09);
+  --separator-opaque: #38342B;
+  --text-primary: #E8E4D8;
+  --text-secondary: rgba(232,228,216,0.62);
+  --text-tertiary: rgba(232,228,216,0.38);
+  --text-quaternary: rgba(232,228,216,0.22);
+  --accent: #E0A33C;
+  --accent-fill: rgba(224,163,60,0.14);
+  --accent-contrast: #14130F;
+  --system-blue: #5B9BD5;
+  --system-green: #7DBE6A;
+  --system-red: #E0675A;
+  --system-orange: #E89B45;
+  --system-purple: #B98AD6;
+  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.06);
+  --shadow-subtle: 0 1px 2px rgba(0,0,0,0.30);
+  --shadow-ambient: 0 0 0 0.5px rgba(0,0,0,0.30);
+  --shadow-key: 0 4px 16px rgba(0,0,0,0.50);
+  --shadow-card: 0 0 0 0.5px rgba(0,0,0,0.30), 0 4px 16px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.05);
+  --shadow-overlay: 0 0 0 0.5px rgba(0,0,0,0.40), 0 16px 48px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.05);
+  --code-bg: rgba(255,255,255,0.05);
+  --code-border: rgba(255,255,255,0.09);
+  --code-text: #E8E4D8;
+  --sidebar-bg: rgba(26,24,19,0.92);
+  --sidebar-backdrop: blur(40px) saturate(160%);
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
-  --radius-xl: 20px;
+  --radius-xl: 18px;
   --radius-2xl: 24px;
-  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
-  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-snappy: cubic-bezier(0.2, 0, 0, 1);
-}
-[data-theme="atelier"] h1,
-[data-theme="atelier"] h2,
-[data-theme="atelier"] h3 {
-  letter-spacing: -0.018em;
-  font-weight: 500;
+  --ease-spring: cubic-bezier(0.34,1.56,0.64,1);
+  --ease-smooth: cubic-bezier(0.4,0,0.2,1);
+  --ease-snappy: cubic-bezier(0.2,0,0,1);
 }
 
-/* ============================================
-   REDESIGN CONCEPT 2 — "Console"
-   Warm operator deck · deep-teal accent · mono-forward
-   ============================================ */
-[data-theme="console"] {
-  --font-ui: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
-  --font-display: "Newsreader", Georgia, serif;
-  --font-code: "IBM Plex Mono", "SF Mono", monospace;
-
-  --bg: #F4F2ED;
-  --bg-secondary: #FBFAF6;
-  --bg-tertiary: #EBE8E0;
-  --material-regular: rgba(251,250,246,0.94);
-  --material-thick: rgba(244,242,237,0.97);
-  --material-thin: rgba(35,38,42,0.05);
-  --material-ultra-thin: rgba(35,38,42,0.03);
-  --fill-primary: rgba(94,97,104,0.16);
-  --fill-secondary: rgba(94,97,104,0.12);
-  --fill-tertiary: rgba(94,97,104,0.09);
-  --fill-quaternary: rgba(94,97,104,0.06);
-  --separator: #DFDBD0;
-  --separator-opaque: #C7C1B2;
-  --text-primary: #23262A;
-  --text-secondary: #5E6168;
-  --text-tertiary: #92968F;
-  --text-quaternary: rgba(146,150,143,0.55);
-  --accent: #0F766E;
-  --accent-fill: rgba(15,118,110,0.12);
-  --accent-contrast: #FFFFFF;
-  --system-blue: #2563EB;
-  --system-green: #3F7D4E;
-  --system-red: #B14237;
-  --system-orange: #B8821F;
-  --system-purple: #6D5BA8;
-  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.6);
-  --shadow-subtle: 0 1px 2px rgba(20,24,26,0.05);
-  --shadow-ambient: 0 0 0 0.5px rgba(20,24,26,0.07);
-  --shadow-key: 0 2px 8px rgba(20,24,26,0.09);
-  --shadow-card: 0 0 0 0.5px rgba(20,24,26,0.07), 0 1px 2px rgba(20,24,26,0.05);
-  --shadow-overlay: 0 0 0 0.5px rgba(20,24,26,0.09), 0 12px 32px rgba(20,24,26,0.14);
-  --code-bg: #EBE8E0;
-  --code-border: rgba(35,38,42,0.10);
-  --code-text: #1F2937;
-  --sidebar-bg: #EBE8E0;
-  --sidebar-backdrop: blur(20px) saturate(140%);
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 12px;
-  --radius-2xl: 14px;
-  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-smooth: cubic-bezier(0.3, 0, 0.1, 1);
-  --ease-snappy: cubic-bezier(0.2, 0, 0, 1);
-}
-[data-theme="console"] h1,
-[data-theme="console"] h2,
-[data-theme="console"] h3 {
-  letter-spacing: -0.01em;
-  font-weight: 500;
-}
-
-/* ============================================
-   REDESIGN CONCEPT 3 — "Ember"
-   Bold cream · rust-ochre accent · Instrument Serif display
-   ============================================ */
-[data-theme="ember"] {
-  --font-ui: "Geist", -apple-system, system-ui, sans-serif;
-  --font-display: "Instrument Serif", Georgia, serif;
-  --font-code: "Geist Mono", "SF Mono", monospace;
-
-  --bg: #FAF6F0;
-  --bg-secondary: #FFFDFA;
-  --bg-tertiary: #F2EBE1;
-  --material-regular: rgba(255,253,250,0.94);
-  --material-thick: rgba(250,246,240,0.97);
-  --material-thin: rgba(35,28,22,0.05);
-  --material-ultra-thin: rgba(35,28,22,0.03);
-  --fill-primary: rgba(124,100,80,0.16);
-  --fill-secondary: rgba(124,100,80,0.12);
-  --fill-tertiary: rgba(124,100,80,0.09);
-  --fill-quaternary: rgba(124,100,80,0.06);
-  --separator: #E8DECF;
-  --separator-opaque: #D8C9B2;
-  --text-primary: #231C16;
-  --text-secondary: #6A5F52;
-  --text-tertiary: #9C8F7E;
-  --text-quaternary: rgba(156,143,126,0.55);
-  --accent: #C2410C;
-  --accent-fill: rgba(194,65,12,0.12);
-  --accent-contrast: #FFFFFF;
-  --system-blue: #3B6EA5;
-  --system-green: #4D7C3A;
-  --system-red: #B91C1C;
-  --system-orange: #CA8A04;
-  --system-purple: #7C3AED;
-  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.7);
-  --shadow-subtle: 0 1px 2px rgba(70,45,25,0.06);
-  --shadow-ambient: 0 0 0 0.5px rgba(70,45,25,0.07);
-  --shadow-key: 0 2px 10px rgba(70,45,25,0.10);
-  --shadow-card: 0 0 0 0.5px rgba(70,45,25,0.06), 0 1px 3px rgba(70,45,25,0.06);
-  --shadow-overlay: 0 0 0 0.5px rgba(70,45,25,0.09), 0 14px 36px rgba(70,45,25,0.16);
-  --code-bg: rgba(35,28,22,0.05);
-  --code-border: rgba(35,28,22,0.08);
-  --code-text: #4A3D30;
-  --sidebar-bg: #F2EBE1;
+/* LEDGER LIGHT — warm paper + ochre */
+[data-theme="light"] {
+  --font-ui: "Hanken Grotesk", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-display: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
+  --font-code: "IBM Plex Mono", "SF Mono", Monaco, Menlo, monospace;
+  --bg: #F4F1E8;
+  --bg-secondary: #FBF9F2;
+  --bg-tertiary: #ECE8DC;
+  --material-regular: rgba(251,249,242,0.94);
+  --material-thick: rgba(244,241,232,0.97);
+  --material-thin: rgba(33,30,22,0.04);
+  --material-ultra-thin: rgba(33,30,22,0.02);
+  --fill-primary: rgba(33,30,22,0.08);
+  --fill-secondary: rgba(33,30,22,0.06);
+  --fill-tertiary: rgba(33,30,22,0.045);
+  --fill-quaternary: rgba(33,30,22,0.028);
+  --separator: rgba(33,30,22,0.14);
+  --separator-opaque: #DED8C7;
+  --text-primary: #211E16;
+  --text-secondary: rgba(33,30,22,0.66);
+  --text-tertiary: rgba(33,30,22,0.46);
+  --text-quaternary: rgba(33,30,22,0.30);
+  --accent: #B07A1A;
+  --accent-fill: rgba(176,122,26,0.12);
+  --accent-contrast: #FBF9F2;
+  --system-blue: #2D6CB5;
+  --system-green: #5C7A4A;
+  --system-red: #B23B33;
+  --system-orange: #B5701A;
+  --system-purple: #7A5A9E;
+  --inset-shine: inset 0 1px 0 rgba(255,255,255,0.70);
+  --shadow-subtle: 0 1px 2px rgba(40,34,20,0.06);
+  --shadow-ambient: 0 0 0 0.5px rgba(40,34,20,0.10);
+  --shadow-key: 0 2px 8px rgba(40,34,20,0.10), 0 8px 24px rgba(40,34,20,0.08);
+  --shadow-card: 0 0 0 0.5px rgba(40,34,20,0.08), 0 1px 3px rgba(40,34,20,0.07), 0 4px 12px rgba(40,34,20,0.06), inset 0 1px 0 rgba(255,255,255,0.70);
+  --shadow-overlay: 0 0 0 0.5px rgba(40,34,20,0.10), 0 4px 16px rgba(40,34,20,0.10), 0 16px 48px rgba(40,34,20,0.14), inset 0 1px 0 rgba(255,255,255,0.80);
+  --code-bg: rgba(33,30,22,0.05);
+  --code-border: rgba(33,30,22,0.10);
+  --code-text: #4A4030;
+  --sidebar-bg: #EFEBE0;
   --sidebar-backdrop: blur(20px) saturate(150%);
-  --radius-sm: 8px;
-  --radius-md: 14px;
-  --radius-lg: 20px;
-  --radius-xl: 28px;
-  --radius-2xl: 32px;
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-snappy: cubic-bezier(0.45, 0, 0.1, 1);
-}
-/* Ember leans on its display serif — make headings large & expressive */
-[data-theme="ember"] h1,
-[data-theme="ember"] h2,
-[data-theme="ember"] h3 {
-  letter-spacing: -0.01em;
-  font-weight: 400;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 24px;
+  --ease-spring: cubic-bezier(0.34,1.56,0.64,1);
+  --ease-smooth: cubic-bezier(0.4,0,0.2,1);
+  --ease-snappy: cubic-bezier(0.2,0,0,1);
 }
 
-/* SYSTEM: Media query fallback before JS hydration */
+/* SYSTEM: media-query fallback before JS hydration */
 @media (prefers-color-scheme: light) {
   [data-theme="system"] {
-    --bg: #f2f2f7;
-    --bg-secondary: #ffffff;
-    --bg-tertiary: #e5e5ea;
-    --material-regular: #ffffff;
-    --material-thick: rgba(255,255,255,0.97);
-    --material-thin: rgba(0,0,0,0.03);
-    --material-ultra-thin: rgba(0,0,0,0.02);
-    --fill-primary: rgba(120,120,128,0.20);
-    --fill-secondary: rgba(120,120,128,0.16);
-    --fill-tertiary: rgba(118,118,128,0.12);
-    --fill-quaternary: rgba(118,118,128,0.08);
-    --separator: rgba(60,60,67,0.29);
-    --separator-opaque: #C6C6C8;
-    --text-primary: #000000;
-    --text-secondary: rgba(60,60,67,0.60);
-    --text-tertiary: rgba(60,60,67,0.44);
-    --text-quaternary: rgba(60,60,67,0.30);
-    --accent: #B8860B;
-    --accent-fill: rgba(184,134,11,0.12);
-    --accent-contrast: #fff;
-    --system-blue: #007AFF;
-    --system-green: #28CD41;
-    --system-red: #FF3B30;
-    --system-orange: #FF9500;
-    --system-purple: #AF52DE;
+    --font-ui: "Hanken Grotesk", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-display: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
+    --font-code: "IBM Plex Mono", "SF Mono", Monaco, Menlo, monospace;
+    --bg: #F4F1E8;
+    --bg-secondary: #FBF9F2;
+    --bg-tertiary: #ECE8DC;
+    --material-regular: rgba(251,249,242,0.94);
+    --material-thick: rgba(244,241,232,0.97);
+    --material-thin: rgba(33,30,22,0.04);
+    --material-ultra-thin: rgba(33,30,22,0.02);
+    --fill-primary: rgba(33,30,22,0.08);
+    --fill-secondary: rgba(33,30,22,0.06);
+    --fill-tertiary: rgba(33,30,22,0.045);
+    --fill-quaternary: rgba(33,30,22,0.028);
+    --separator: rgba(33,30,22,0.14);
+    --separator-opaque: #DED8C7;
+    --text-primary: #211E16;
+    --text-secondary: rgba(33,30,22,0.66);
+    --text-tertiary: rgba(33,30,22,0.46);
+    --text-quaternary: rgba(33,30,22,0.30);
+    --accent: #B07A1A;
+    --accent-fill: rgba(176,122,26,0.12);
+    --accent-contrast: #FBF9F2;
+    --system-blue: #2D6CB5;
+    --system-green: #5C7A4A;
+    --system-red: #B23B33;
+    --system-orange: #B5701A;
+    --system-purple: #7A5A9E;
     --inset-shine: inset 0 1px 0 rgba(255,255,255,0.70);
-    --shadow-subtle: 0 1px 2px rgba(0,0,0,0.06);
-    --shadow-ambient: 0 0 0 0.5px rgba(0,0,0,0.08);
-    --shadow-key: 0 2px 8px rgba(0,0,0,0.12), 0 8px 24px rgba(0,0,0,0.08);
-    --shadow-card: 0 0 0 0.5px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.06), inset 0 1px 0 rgba(255,255,255,0.70);
-    --shadow-overlay: 0 0 0 0.5px rgba(0,0,0,0.08), 0 4px 16px rgba(0,0,0,0.10), 0 16px 48px rgba(0,0,0,0.12), inset 0 1px 0 rgba(255,255,255,0.80);
-    --code-bg: rgba(0,0,0,0.04);
-    --code-border: rgba(0,0,0,0.08);
-    --code-text: #1c1c1e;
-    --sidebar-bg: #ffffff;
+    --shadow-subtle: 0 1px 2px rgba(40,34,20,0.06);
+    --shadow-ambient: 0 0 0 0.5px rgba(40,34,20,0.10);
+    --shadow-key: 0 2px 8px rgba(40,34,20,0.10), 0 8px 24px rgba(40,34,20,0.08);
+    --shadow-card: 0 0 0 0.5px rgba(40,34,20,0.08), 0 1px 3px rgba(40,34,20,0.07), 0 4px 12px rgba(40,34,20,0.06), inset 0 1px 0 rgba(255,255,255,0.70);
+    --shadow-overlay: 0 0 0 0.5px rgba(40,34,20,0.10), 0 4px 16px rgba(40,34,20,0.10), 0 16px 48px rgba(40,34,20,0.14), inset 0 1px 0 rgba(255,255,255,0.80);
+    --code-bg: rgba(33,30,22,0.05);
+    --code-border: rgba(33,30,22,0.10);
+    --code-text: #4A4030;
+    --sidebar-bg: #EFEBE0;
     --sidebar-backdrop: blur(20px) saturate(150%);
     --radius-sm: 6px;
-    --radius-md: 12px;
-    --radius-lg: 16px;
-    --radius-xl: 20px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 18px;
     --radius-2xl: 24px;
-    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-    --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
-    --ease-snappy: cubic-bezier(0.2, 0, 0, 1);
+    --ease-spring: cubic-bezier(0.34,1.56,0.64,1);
+    --ease-smooth: cubic-bezier(0.4,0,0.2,1);
+    --ease-snappy: cubic-bezier(0.2,0,0,1);
+  }
+}
+@media (prefers-color-scheme: dark) {
+  [data-theme="system"] {
+    --font-ui: "Hanken Grotesk", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-display: "Hanken Grotesk", -apple-system, system-ui, sans-serif;
+    --font-code: "IBM Plex Mono", "SF Mono", Monaco, Menlo, monospace;
+    --bg: #14130F;
+    --bg-secondary: #1E1C16;
+    --bg-tertiary: #2A2720;
+    --material-regular: rgba(30,28,22,0.92);
+    --material-thick: rgba(20,18,15,0.96);
+    --material-thin: rgba(255,255,255,0.05);
+    --material-ultra-thin: rgba(255,255,255,0.03);
+    --fill-primary: rgba(255,255,255,0.10);
+    --fill-secondary: rgba(255,255,255,0.07);
+    --fill-tertiary: rgba(255,255,255,0.05);
+    --fill-quaternary: rgba(255,255,255,0.035);
+    --separator: rgba(255,255,255,0.09);
+    --separator-opaque: #38342B;
+    --text-primary: #E8E4D8;
+    --text-secondary: rgba(232,228,216,0.62);
+    --text-tertiary: rgba(232,228,216,0.38);
+    --text-quaternary: rgba(232,228,216,0.22);
+    --accent: #E0A33C;
+    --accent-fill: rgba(224,163,60,0.14);
+    --accent-contrast: #14130F;
+    --system-blue: #5B9BD5;
+    --system-green: #7DBE6A;
+    --system-red: #E0675A;
+    --system-orange: #E89B45;
+    --system-purple: #B98AD6;
+    --inset-shine: inset 0 1px 0 rgba(255,255,255,0.06);
+    --shadow-subtle: 0 1px 2px rgba(0,0,0,0.30);
+    --shadow-ambient: 0 0 0 0.5px rgba(0,0,0,0.30);
+    --shadow-key: 0 4px 16px rgba(0,0,0,0.50);
+    --shadow-card: 0 0 0 0.5px rgba(0,0,0,0.30), 0 4px 16px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.05);
+    --shadow-overlay: 0 0 0 0.5px rgba(0,0,0,0.40), 0 16px 48px rgba(0,0,0,0.65), inset 0 1px 0 rgba(255,255,255,0.05);
+    --code-bg: rgba(255,255,255,0.05);
+    --code-border: rgba(255,255,255,0.09);
+    --code-text: #E8E4D8;
+    --sidebar-bg: rgba(26,24,19,0.92);
+    --sidebar-backdrop: blur(40px) saturate(160%);
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 18px;
+    --radius-2xl: 24px;
+    --ease-spring: cubic-bezier(0.34,1.56,0.64,1);
+    --ease-smooth: cubic-bezier(0.4,0,0.2,1);
+    --ease-snappy: cubic-bezier(0.2,0,0,1);
   }
 }
 
@@ -854,58 +630,27 @@ h1, h2, h3, h4, h5, h6 {
 .apple-btn-secondary:hover { filter: brightness(1.08); }
 
 /* ============================================
-   Glass Theme Specifics
+   Ledger Theme Specifics
    ============================================ */
 
-[data-theme="glass"] body {
-  background: radial-gradient(ellipse at 30% 20%, #1a1040 0%, #0d0d18 40%, #050510 100%);
-  min-height: 100vh;
-}
+/* Org map (react-flow) edges follow the separator token */
+.react-flow__edge-path { stroke: var(--separator-opaque); }
 
-.glass-orbs { display: none; }
-[data-theme="glass"] .glass-orbs { display: block; }
-
-/* ============================================
-   Color Theme Specifics
-   ============================================ */
-
-[data-theme="color"] body {
-  background: linear-gradient(135deg, #0a0814 0%, #0f0b20 50%, #0a0814 100%);
-}
-
-[data-theme="color"] .react-flow__node > div {
-  background: linear-gradient(#16112a, #16112a) padding-box,
-              linear-gradient(135deg, rgba(139,92,246,0.5), rgba(245,197,24,0.3)) border-box !important;
-  border: 1px solid transparent !important;
-}
-
-[data-theme="color"] .react-flow__edge-path { stroke: rgba(139,92,246,0.45) !important; }
-
-/* ============================================
-   Light Theme Overrides
-   ============================================ */
-
-[data-theme="light"] .react-flow__edge-path { stroke: rgba(60,60,67,0.25) !important; }
-
-[data-theme="light"] .apple-card {
-  background: #ffffff !important;
-  border: 1px solid rgba(60,60,67,0.12) !important;
-  box-shadow: var(--shadow-card) !important;
-}
-
-[data-theme="light"] .apple-input:focus { box-shadow: 0 0 0 4px rgba(0,122,255,0.25); }
-
-[data-theme="light"] .msg-user { background: var(--system-blue) !important; color: #ffffff !important; }
+/* Classic chat bubbles kept readable in light mode (transcript styling
+   lives in chat-messages.tsx; these are the bubble fallback). */
+[data-theme="light"] .msg-user { background: var(--accent) !important; color: var(--accent-contrast) !important; }
 [data-theme="light"] .msg-assistant {
-  background: #ffffff !important;
-  color: #000000 !important;
-  border: 1px solid rgba(60,60,67,0.12) !important;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.06) !important;
+  background: var(--bg-secondary) !important;
+  color: var(--text-primary) !important;
+  border: 1px solid var(--separator) !important;
+  box-shadow: var(--shadow-subtle) !important;
 }
+[data-theme="light"] .apple-card { background: var(--bg-secondary) !important; border: 1px solid var(--separator) !important; box-shadow: var(--shadow-card) !important; }
+[data-theme="light"] .apple-input:focus { box-shadow: 0 0 0 4px var(--accent-fill); }
 
-/* User bubble code blocks need inverted colors in light theme */
-.msg-user pre { background: rgba(0,0,0,0.15) !important; color: var(--accent-contrast) !important; }
-.msg-user code { background: rgba(0,0,0,0.12) !important; color: var(--accent-contrast) !important; }
+/* User bubble code blocks need inverted colors */
+.msg-user pre { background: rgba(0,0,0,0.18) !important; color: var(--accent-contrast) !important; }
+.msg-user code { background: rgba(0,0,0,0.16) !important; color: var(--accent-contrast) !important; }
 
 /* ============================================
    Chat — Typing Dots

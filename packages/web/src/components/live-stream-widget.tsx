@@ -12,9 +12,9 @@ const MAX_LINES = 500
 const WIDGET_EVENT = "open-live-stream"
 
 const LEVEL_STYLE: Record<string, { bg: string; color: string; label: string }> = {
-  info: { bg: "rgba(48,209,88,0.12)", color: "var(--system-green)", label: "INF" },
-  warn: { bg: "rgba(255,159,10,0.12)", color: "var(--system-orange)", label: "WRN" },
-  error: { bg: "rgba(255,69,58,0.12)", color: "var(--system-red)", label: "ERR" },
+  info: { bg: "color-mix(in srgb, var(--system-green) 12%, transparent)", color: "var(--system-green)", label: "INF" },
+  warn: { bg: "color-mix(in srgb, var(--system-orange) 12%, transparent)", color: "var(--system-orange)", label: "WRN" },
+  error: { bg: "color-mix(in srgb, var(--system-red) 12%, transparent)", color: "var(--system-red)", label: "ERR" },
   debug: { bg: "var(--fill-secondary)", color: "var(--text-tertiary)", label: "DBG" },
 }
 
@@ -42,7 +42,12 @@ function LogRow({ entry }: { entry: ParsedLogEntry }) {
 
   return (
     <div
-      className={`border-b border-[var(--separator)] ${entry.level === "error" ? "bg-[rgba(255,69,58,0.03)]" : ""}`}
+      className="border-b border-[var(--separator)]"
+      style={
+        entry.level === "error"
+          ? { background: "color-mix(in srgb, var(--system-red) 4%, transparent)" }
+          : undefined
+      }
     >
       <button
         onClick={() => isLong && setOpen((o) => !o)}
@@ -265,7 +270,13 @@ export function LiveStreamWidget() {
 
       {/* Error banner */}
       {error && (
-        <div className="px-3.5 py-1.5 bg-[rgba(255,69,58,0.06)] border-b border-[rgba(255,69,58,0.15)] text-[length:var(--text-caption2)] text-[var(--system-red)] shrink-0">
+        <div
+          className="px-3.5 py-1.5 border-b text-[length:var(--text-caption2)] text-[var(--system-red)] shrink-0"
+          style={{
+            background: "color-mix(in srgb, var(--system-red) 7%, transparent)",
+            borderBottomColor: "color-mix(in srgb, var(--system-red) 15%, transparent)",
+          }}
+        >
           {error}
         </div>
       )}

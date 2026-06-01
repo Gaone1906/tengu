@@ -139,7 +139,7 @@ export function TicketDetailPanel({
                     style={{
                       cursor: isCurrent ? 'default' : 'pointer',
                       background: isCurrent ? accentColor : 'var(--fill-tertiary)',
-                      color: isCurrent ? '#fff' : 'var(--text-secondary)',
+                      color: isCurrent ? 'var(--accent-contrast)' : 'var(--text-secondary)',
                       opacity: isCurrent ? 1 : 0.8,
                     }}
                   >

@@ -157,7 +157,13 @@ export default function LogsPage() {
         <div className="flex-1 overflow-y-auto flex flex-col px-[var(--space-6)] pt-[var(--space-4)] pb-[var(--space-6)] min-h-0">
           {/* Error banner */}
           {error && (
-            <div className="mb-[var(--space-3)] px-[var(--space-4)] py-[var(--space-3)] rounded-[var(--radius-md)] bg-[rgba(255,69,58,0.06)] border border-[rgba(255,69,58,0.15)] text-[length:var(--text-footnote)] text-[var(--system-red)]">
+            <div
+              className="mb-[var(--space-3)] px-[var(--space-4)] py-[var(--space-3)] rounded-[var(--radius-md)] border text-[length:var(--text-footnote)] text-[var(--system-red)]"
+              style={{
+                background: "color-mix(in srgb, var(--system-red) 7%, transparent)",
+                borderColor: "color-mix(in srgb, var(--system-red) 15%, transparent)",
+              }}
+            >
               Failed to load logs: {error}
             </div>
           )}

@@ -56,7 +56,7 @@ function PillTooltip({ slot, rect, containerRect }: { slot: SlotInfo; rect: DOMR
         top,
         left,
         transform: "translate(-50%, -100%)",
-        boxShadow: "0 8px 24px rgba(0,0,0,0.4), 0 2px 8px rgba(0,0,0,0.2)",
+        boxShadow: "var(--shadow-key)",
       }}
     >
       {/* Arrow */}

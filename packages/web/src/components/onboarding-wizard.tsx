@@ -166,7 +166,7 @@ export function OnboardingWizard({ forceOpen, onClose }: OnboardingWizardProps) 
       <div
         className="animate-fade-in w-full max-w-[520px] mx-[var(--space-4)] bg-[var(--material-regular)] rounded-[var(--radius-lg)] border border-[var(--separator)] overflow-hidden flex flex-col max-h-[90vh]"
         style={{
-          boxShadow: "0 24px 48px rgba(0,0,0,0.3)",
+          boxShadow: "var(--shadow-overlay)",
         }}
       >
         {/* Step indicator dots */}
@@ -338,7 +338,7 @@ export function OnboardingWizard({ forceOpen, onClose }: OnboardingWizardProps) 
                       }}
                     >
                       {isActive && (
-                        <Check size={18} color="#fff" strokeWidth={3} />
+                        <Check size={18} color="var(--accent-contrast)" strokeWidth={3} />
                       )}
                     </button>
                   )

@@ -1,9 +1,90 @@
 import { useEffect, useRef, useState } from "react";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { usePageVisibility } from "../hooks/use-page-visibility";
 import { dlog } from "../lib/debug-log";
+
+/**
+ * Theme-aware xterm color palettes. The app exposes exactly two visual themes
+ * via `data-theme` on <html> ("dark" / "light"; "system" resolves through the
+ * prefers-color-scheme media query). These ITheme palettes mirror the Ledger
+ * design tokens (warm charcoal / warm paper) with a tasteful warm ANSI 16-color
+ * set so the interactive `claude` TUI reads correctly in both themes.
+ */
+const XTERM_THEME_DARK: ITheme = {
+  background: "#14130F",
+  foreground: "#E8E4D8",
+  cursor: "#E0A33C",
+  cursorAccent: "#14130F",
+  selectionBackground: "rgba(224,163,60,0.30)",
+  black: "#14130F",
+  red: "#E0675A",
+  green: "#7DBE6A",
+  yellow: "#E0A33C",
+  blue: "#5B9BD5",
+  magenta: "#B98AD6",
+  cyan: "#6FBFB0",
+  white: "#E8E4D8",
+  brightBlack: "#5C564A",
+  brightRed: "#EC8479",
+  brightGreen: "#95D183",
+  brightYellow: "#EDB85E",
+  brightBlue: "#7BB1E2",
+  brightMagenta: "#CBA3E4",
+  brightCyan: "#8AD2C4",
+  brightWhite: "#F4F1E8",
+};
+
+const XTERM_THEME_LIGHT: ITheme = {
+  background: "#F4F1E8",
+  foreground: "#211E16",
+  cursor: "#B07A1A",
+  cursorAccent: "#F4F1E8",
+  selectionBackground: "rgba(176,122,26,0.25)",
+  black: "#211E16",
+  red: "#B23B33",
+  green: "#5C7A4A",
+  yellow: "#B07A1A",
+  blue: "#2D6CB5",
+  magenta: "#7A5A9E",
+  cyan: "#2E7D74",
+  white: "#211E16",
+  brightBlack: "#6B6457",
+  brightRed: "#C45248",
+  brightGreen: "#6E8E5A",
+  brightYellow: "#C68F2A",
+  brightBlue: "#3F7DC4",
+  brightMagenta: "#8E6CB0",
+  brightCyan: "#3C8E84",
+  brightWhite: "#14130F",
+};
+
+/** Resolve the active app theme to its xterm palette. "system" → media query. */
+function resolveXtermTheme(): ITheme {
+  if (typeof document === "undefined") return XTERM_THEME_DARK;
+  const attr = document.documentElement.getAttribute("data-theme");
+  // ThemeProvider writes a concrete "dark"/"light" onto <html> even for
+  // "system", but guard for "system"/absent by resolving the media query.
+  let mode = attr;
+  if (!mode || mode === "system") {
+    mode =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light";
+  }
+  return mode === "light" ? XTERM_THEME_LIGHT : XTERM_THEME_DARK;
+}
+
+/** Read the app mono font from CSS so the terminal matches the rest of the UI. */
+function resolveXtermFont(): string {
+  if (typeof document === "undefined") return '"IBM Plex Mono", monospace';
+  const v = getComputedStyle(document.documentElement)
+    .getPropertyValue("--font-code")
+    .trim();
+  return v || '"IBM Plex Mono", monospace';
+}
 
 function getPtyWsUrl(sessionId: string): string {
   const gatewayUrl = process.env.NEXT_PUBLIC_GATEWAY_URL;
@@ -48,7 +129,8 @@ export function CliTerminal({ sessionId }: { sessionId: string }) {
     const term = new Terminal({
       convertEol: true,
       fontSize: 13,
-      theme: { background: "#0b0b0c" },
+      fontFamily: resolveXtermFont(),
+      theme: resolveXtermTheme(),
       scrollback: 5000,
       scrollOnUserInput: true,
       // Display-only: input flows through the sibling ChatInput, never via
@@ -193,7 +275,33 @@ export function CliTerminal({ sessionId }: { sessionId: string }) {
     wrapper.addEventListener("touchstart", onTouchStart, { passive: true });
     wrapper.addEventListener("touchmove", onTouchMove, { passive: true });
 
+    // Live re-theme: when the app theme flips (data-theme attribute on <html>,
+    // or the OS color scheme while in "system" mode) re-apply the matching
+    // xterm palette + mono font so an already-open terminal updates instantly.
+    // `disposed` guards against the rare race where a pending observer/media
+    // callback fires after term.dispose() during teardown.
+    let disposed = false;
+    const applyTheme = () => {
+      if (disposed) return;
+      try {
+        term.options.theme = resolveXtermTheme();
+        term.options.fontFamily = resolveXtermFont();
+      } catch {
+        /* term disposed mid-flight */
+      }
+    };
+    const themeObserver = new MutationObserver(applyTheme);
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    const colorSchemeMq = window.matchMedia("(prefers-color-scheme: dark)");
+    colorSchemeMq.addEventListener("change", applyTheme);
+
     return () => {
+      disposed = true;
+      themeObserver.disconnect();
+      colorSchemeMq.removeEventListener("change", applyTheme);
       window.removeEventListener("resize", scheduleFit);
       ro.disconnect();
       wrapper.removeEventListener("touchstart", onTouchStart);
@@ -231,8 +339,8 @@ export function CliTerminal({ sessionId }: { sessionId: string }) {
           alignItems: "center",
           justifyContent: "center",
           height: "100%",
-          color: "#888",
-          fontFamily: "monospace",
+          color: "var(--text-tertiary)",
+          fontFamily: "var(--font-code)",
           fontSize: 13,
           padding: "1rem",
           textAlign: "center",
@@ -251,12 +359,12 @@ export function CliTerminal({ sessionId }: { sessionId: string }) {
         minHeight: 0,
         width: "100%",
         overflow: "hidden",
-        background: "#0b0b0c",
+        background: "var(--bg)",
         paddingTop: "1rem",
         boxSizing: "border-box",
       }}
     >
-      <div ref={containerRef} tabIndex={-1} style={{ height: "100%", width: "100%", overflow: "hidden", background: "#0b0b0c" }} />
+      <div ref={containerRef} tabIndex={-1} style={{ height: "100%", width: "100%", overflow: "hidden", background: "var(--bg)" }} />
       {!hasOutput && (
         <div
           style={{
@@ -265,8 +373,8 @@ export function CliTerminal({ sessionId }: { sessionId: string }) {
             left: 0,
             right: 0,
             padding: "1rem",
-            color: "#888",
-            fontFamily: "monospace",
+            color: "var(--text-tertiary)",
+            fontFamily: "var(--font-code)",
             fontSize: 12,
             pointerEvents: "none",
             textAlign: "center",
