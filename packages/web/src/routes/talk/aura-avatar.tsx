@@ -238,8 +238,14 @@ export function AuraAvatar({
     if (!ctx) return
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2.5)
-    // Logical coordinate space = `size`. We scale the backing store by dpr.
-    const px = size
+    // The reactive layers (ripples, equalizer, ring) emanate well past the orb,
+    // so the canvas drawing space is HEADROOM× the orb footprint — the orb stays
+    // the same visual size, but the rings have room to fully dissipate instead
+    // of being clipped at the edge. The canvas is centered over the wrapper
+    // (CSS), overflowing it symmetrically; it's transparent + pointer-events:none
+    // so the extra room costs nothing in layout.
+    const HEADROOM = 1.7
+    const px = Math.round(size * HEADROOM)
     canvas.width = Math.round(px * dpr)
     canvas.height = Math.round(px * dpr)
     canvas.style.width = `${px}px`
@@ -247,8 +253,10 @@ export function AuraAvatar({
 
     const CX = px / 2
     const CY = px / 2
-    // Orb radius ~ 0.353 of wrapper (240/340 ≈ 0.706 diameter from reference).
-    const R = px * 0.3529
+    // Orb radius ~ 0.353 of the ORB footprint (`size`), not the padded canvas.
+    const R = size * 0.3529
+    // Rings fade to zero by this radius so they never touch the canvas edge.
+    const maxRippleR = (px / 2) * 0.96
 
     const accent = accentRef.current
     const core = {
@@ -323,17 +331,19 @@ export function AuraAvatar({
       ctx.clearRect(0, 0, px, px)
 
       // ===== 1. Emanating ripples (behind ring, listening + speaking) =====
+      const rippleStart = R + R * 0.08
       if (moving && s.rippleRate > 0.05) {
         const emit = 0.05 * s.rippleRate * (0.6 + amp)
-        if (Math.random() < emit) ripples.push({ r: R + R * 0.08, a: 0.5 })
+        if (Math.random() < emit) ripples.push({ r: rippleStart, a: 0.5 })
       }
       for (let i = ripples.length - 1; i >= 0; i--) {
         const p = ripples[i]
-        if (moving) {
-          p.r += R * 0.017
-          p.a *= 0.975
-        }
-        if (p.a <= 0.02) {
+        if (moving) p.r += R * 0.02
+        // Fade smoothly to zero as the ring travels toward the canvas-safe edge,
+        // so it always fully dissipates on-canvas (never a hard clipped cut).
+        const prog = Math.min(1, (p.r - rippleStart) / (maxRippleR - rippleStart))
+        p.a = 0.5 * Math.pow(1 - prog, 1.6)
+        if (prog >= 1 || p.a <= 0.01) {
           ripples.splice(i, 1)
           continue
         }

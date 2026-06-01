@@ -36,12 +36,16 @@
   will-change: opacity, transform;
 }
 
-/* The canvas carries the orb + all reactive layers. */
+/* The canvas carries the orb + all reactive layers. It is sized larger than the
+   orb footprint (HEADROOM, set inline in JS) so emanating rings have room to
+   dissipate; it's centered over the wrapper so the overflow doesn't affect
+   layout. Width/height are set inline (px) by the render loop. */
 .aura__canvas {
-  position: relative;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   z-index: 1;
-  width: var(--aura-size, 340px);
-  height: var(--aura-size, 340px);
   display: block;
   pointer-events: none;
 }
