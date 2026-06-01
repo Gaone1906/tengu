@@ -201,6 +201,15 @@ export const api = {
   },
   sttUpdateConfig: (languages: string[]) =>
     put<{ status: string; languages: string[] }>("/api/stt/config", { languages }),
+  /** Talk (Phase 2 real loop): submit a user turn — backend streams the reply over WS. */
+  talkTurn: (sessionId: string, text: string) =>
+    post<{ status: string }>("/api/talk/turn", { sessionId, text }),
+  /** Talk: TTS/loop readiness (whether the local voice model is installed + download state). */
+  talkStatus: () =>
+    get<{ available: boolean; ttsAvailable: boolean; ttsModel: string | null; downloading: boolean; progress: number }>("/api/talk/status"),
+  /** Talk: kick off the local TTS model download (progress streams via talk:tts:download:* WS events). */
+  talkTtsDownload: () =>
+    post<{ status: string; model: string }>("/api/talk/tts/download", {}),
   getSessionQueue: (id: string) =>
     get<QueueItem[]>(`/api/sessions/${id}/queue`),
   cancelQueueItem: (sessionId: string, itemId: string) =>

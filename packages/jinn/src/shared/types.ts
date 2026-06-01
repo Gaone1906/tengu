@@ -430,5 +430,14 @@ export interface JinnConfig {
     language?: string;
     languages?: string[];
   };
+  /** /talk voice loop — optional, off unless explicitly configured. */
+  talk?: {
+    enabled?: boolean;
+    kokoro?: {
+      voice?: string;
+      modelDir?: string;
+      sidecarPort?: number;
+    };
+  };
   remotes?: Record<string, { url: string; label?: string }>;
 }

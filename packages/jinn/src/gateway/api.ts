@@ -60,6 +60,7 @@ import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAtta
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel } from "../sessions/callbacks.js";
 import { loadInstances } from "../cli/instances.js";
 import { handleHookPost, LOOPBACK as HOOK_LOOPBACK } from "./hook-endpoint.js";
+import { handleTalkApi } from "../talk/routes.js";
 
 /** Max bytes accepted on /api/internal/hook (loopback-only relay payloads are tiny). */
 const HOOK_BODY_MAX_BYTES = 64 * 1024;
@@ -1276,6 +1277,7 @@ export async function handleApiRequest(
         "portal",
         "context",
         "stt",
+        "talk",
         "skills",
         "remotes",
       ];
@@ -1691,6 +1693,12 @@ export async function handleApiRequest(
         const msg = err instanceof Error ? err.message : String(err);
         return serverError(res, `Failed to update STT config: ${msg}`);
       }
+    }
+
+    // ── Talk (/talk voice loop) ───────────────────────────────
+    if (pathname.startsWith("/api/talk/")) {
+      const handled = await handleTalkApi(req, res, context);
+      if (handled) return;
     }
 
     // /api/files — file upload/download/management

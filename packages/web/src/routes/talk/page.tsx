@@ -5,136 +5,121 @@
  * living liquid-light orb (4 states + springy transitions), the dynamic
  * "Lego-block" content cards, a parallel-task tracker, and a minimal transcript.
  *
- * PHASE 1 = visual-first proof of concept. The voice loop is SCRIPTED (see
- * demo-script.ts) and TTS uses the Web Speech API (see use-speak.ts). The mic
- * button reuses the existing useStt hook for trigger UX; backend STT is
- * best-effort and the demo works without it.
+ * PHASE 2 = the REAL voice loop is the default (see use-talk.ts): mic → STT →
+ * POST /api/talk/turn → the gateway streams talk:* events (state, transcript,
+ * say, audio, cards, tasks) back over the WS, which this page renders live.
+ * Streamed TTS audio drives the orb's level via TalkAudioPlayer.
+ *
+ * The Phase-1 SCRIPTED demo (demo-script.ts + Web Speech useSpeak) is preserved
+ * behind a "Demo" toggle in the dock — handy for a deterministic walkthrough.
+ * When demo mode is on, the live WS loop is paused (events ignored).
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
-import { ArrowLeft, Mic, Play, Sun, Moon, Square } from "lucide-react"
+import { ArrowLeft, Mic, Play, Sun, Moon, Square, Sparkles, Radio } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { useStt } from "@/hooks/use-stt"
 import { useTheme } from "@/routes/providers"
 import { AuraAvatar } from "./aura-avatar"
 import { CardStack } from "./cards/card-stack"
 import { Transcript, type TranscriptEntry } from "./transcript"
 import { TaskTracker } from "./task-tracker"
 import { useSpeak } from "./use-speak"
+import { useTalk } from "./use-talk"
 import { runDemo } from "./demo-script"
 import type { AvatarState, Card, TrackerTask } from "./types"
 
 const STATES: AvatarState[] = ["idle", "listening", "thinking", "speaking"]
 
 export default function TalkPage() {
-  const [state, setState] = useState<AvatarState>("idle")
-  const [entries, setEntries] = useState<TranscriptEntry[]>([])
-  const [cards, setCards] = useState<Card[]>([])
-  const [tasks, setTasks] = useState<TrackerTask[]>([])
-  /** Live mic amplitude 0..1, or undefined → avatar self-animates. */
-  const [level, setLevel] = useState<number | undefined>(undefined)
-
   const { theme, setTheme } = useTheme()
+
+  // --- The REAL loop (default) ---------------------------------------------
+  const talk = useTalk()
+
+  // --- Demo mode (Phase-1 scripted walkthrough, paused live loop) ----------
+  const [demoMode, setDemoMode] = useState(false)
   const speakHandle = useSpeak()
   const speakRef = useRef(speakHandle)
   speakRef.current = speakHandle
-
   const cancelDemoRef = useRef<(() => void) | null>(null)
-  const utteranceSeq = useRef(0)
+
+  // Demo-local UI state (kept separate so it never collides with live state).
+  const [demoState, setDemoState] = useState<AvatarState>("idle")
+  const [demoEntries, setDemoEntries] = useState<TranscriptEntry[]>([])
+  const [demoCards, setDemoCards] = useState<Card[]>([])
+  const [demoTasks, setDemoTasks] = useState<TrackerTask[]>([])
 
   const stopDemo = useCallback(() => {
     cancelDemoRef.current?.()
     cancelDemoRef.current = null
+    speakRef.current.cancel()
   }, [])
 
-  // --- STT (mic trigger UX only; backend is best-effort for this POC) -------
-  const handleUtterance = useCallback((text: string) => {
-    const seq = ++utteranceSeq.current
-    const userId = `u-${seq}`
-    setEntries([{ id: userId, role: "user", text }])
-    setState("thinking")
-    window.setTimeout(() => {
-      if (utteranceSeq.current !== seq) return
-      const reply = "Got it — pulling that together now."
-      setState("speaking")
-      setEntries([
-        { id: userId, role: "user", text },
-        { id: `a-${seq}`, role: "assistant", text: reply },
-      ])
-      speakRef.current
-        .speak(reply)
-        .then(() => { if (utteranceSeq.current === seq) setState("idle") })
-        .catch(() => {})
-    }, 1200)
-  }, [])
+  // What the page actually renders: demo state when in demo mode, else live.
+  const state = demoMode ? demoState : talk.state
+  const entries = demoMode ? demoEntries : talk.entries
+  const cards = demoMode ? demoCards : talk.cards
+  const tasks = demoMode ? demoTasks : talk.tasks
+  const level = demoMode ? undefined : talk.level
 
-  const stt = useStt(undefined, handleUtterance)
-
-  // Reflect recording → listening, and feed the analyser amplitude to the orb.
-  useEffect(() => {
-    if (stt.state === "recording") setState("listening")
-  }, [stt.state])
-
-  useEffect(() => {
-    const analyser = stt.analyser
-    if (!analyser) {
-      setLevel(undefined)
-      return
-    }
-    const buf = new Uint8Array(analyser.fftSize)
-    let raf = 0
-    const tick = () => {
-      analyser.getByteTimeDomainData(buf)
-      let sum = 0
-      for (let i = 0; i < buf.length; i++) {
-        const v = (buf[i] - 128) / 128
-        sum += v * v
-      }
-      const rms = Math.sqrt(sum / buf.length)
-      // Scale RMS into a lively 0..1 range for the visuals.
-      setLevel(Math.min(1, rms * 3.2))
-      raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [stt.analyser])
-
-  const onMic = useCallback(async () => {
-    stopDemo()
-    if (stt.state === "recording") {
-      const text = await stt.stopRecording()
-      if (text) handleUtterance(text)
-      else setState("idle")
-      return
-    }
-    setState("listening")
-    stt.handleMicClick()
-  }, [stt, stopDemo, handleUtterance])
+  // --- Mic (live loop) ------------------------------------------------------
+  const onMic = useCallback(() => {
+    if (demoMode) return
+    if (talk.listening) talk.stop()
+    else talk.startListening()
+  }, [demoMode, talk])
 
   // --- Manual state scrubbing (lets a reviewer feel each state) -------------
-  const onPickState = useCallback((s: AvatarState) => {
-    stopDemo()
-    speakRef.current.cancel()
-    setState(s)
-    if (s === "idle") {
-      setEntries([])
-      setCards([])
-    }
-  }, [stopDemo])
+  // Scrubbing is a visual preview, so it flips into demo mode (which pauses the
+  // live WS loop) and sets that orb state. This keeps the live loop's real
+  // state untouched while still letting a reviewer feel each mood.
+  const onPickState = useCallback(
+    (s: AvatarState) => {
+      if (!demoMode && talk.listening) talk.stop()
+      stopDemo()
+      setDemoMode(true)
+      setDemoState(s)
+      if (s === "idle") {
+        setDemoEntries([])
+        setDemoCards([])
+        setDemoTasks([])
+      }
+    },
+    [demoMode, stopDemo, talk],
+  )
 
   const onPlayDemo = useCallback(() => {
+    setDemoMode(true)
+    if (talk.listening) talk.stop()
     stopDemo()
-    speakRef.current.cancel()
     cancelDemoRef.current = runDemo({
-      setState,
-      setEntries,
-      setCards,
-      setTasks,
+      setState: setDemoState,
+      setEntries: setDemoEntries,
+      setCards: setDemoCards,
+      setTasks: setDemoTasks,
       speak: (text) => speakRef.current.speak(text),
     })
-  }, [stopDemo])
+  }, [stopDemo, talk])
 
-  // Clean up on unmount.
+  const onToggleDemo = useCallback(() => {
+    setDemoMode((prev) => {
+      const next = !prev
+      if (next) {
+        // Entering demo: pause the live loop's mic.
+        if (talk.listening) talk.stop()
+      } else {
+        // Leaving demo: stop the scripted run + reset demo visuals.
+        stopDemo()
+        setDemoState("idle")
+        setDemoEntries([])
+        setDemoCards([])
+        setDemoTasks([])
+      }
+      return next
+    })
+  }, [stopDemo, talk])
+
+  // Clean up the demo on unmount.
   useEffect(() => {
     return () => {
       cancelDemoRef.current?.()
@@ -142,7 +127,19 @@ export default function TalkPage() {
     }
   }, [])
 
-  const isRecording = stt.state === "recording"
+  const isRecording = !demoMode && talk.listening
+
+  // Status hint shown under the dock.
+  const hint = (() => {
+    if (demoMode) return null
+    if (!talk.connected) return "Connecting to Jinn…"
+    if (talk.ttsStatus.kind === "downloading")
+      return `Voice model downloading… ${Math.round(talk.ttsStatus.progress)}%`
+    if (talk.ttsStatus.kind === "error") return `Voice: ${talk.ttsStatus.message}`
+    if (talk.sttAvailable === false)
+      return "STT model not installed — mic shows the listening visual only"
+    return null
+  })()
 
   return (
     <div
@@ -157,6 +154,7 @@ export default function TalkPage() {
       {/* Top-left wordmark */}
       <div className="pointer-events-none absolute left-7 top-6 select-none font-[family-name:var(--font-code)] text-xs uppercase tracking-[0.3em] text-[var(--text-tertiary)]">
         Jinn · Talk&nbsp;&nbsp;<span className="text-[var(--accent)]">// AURA</span>
+        {demoMode ? <span className="ml-2 text-[var(--text-quaternary)]">· demo</span> : null}
       </div>
 
       {/* Back to dock */}
@@ -210,12 +208,14 @@ export default function TalkPage() {
 
           <div className="mx-1 h-5 w-px bg-[var(--separator)]" />
 
-          {/* Mic — reuses useStt */}
+          {/* Mic — drives the live loop (disabled in demo mode) */}
           <button
             onClick={onMic}
+            disabled={demoMode}
             aria-label={isRecording ? "Stop recording" : "Start voice input"}
             className={cn(
               "inline-flex size-9 items-center justify-center rounded-full transition-all duration-200",
+              demoMode && "opacity-40",
               isRecording
                 ? "bg-[var(--system-red)] text-white"
                 : "text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]",
@@ -232,6 +232,23 @@ export default function TalkPage() {
             <Play size={14} className="fill-current" /> Play demo
           </button>
 
+          {/* Demo / Live toggle */}
+          <button
+            onClick={onToggleDemo}
+            aria-pressed={demoMode}
+            aria-label={demoMode ? "Switch to live voice loop" : "Switch to scripted demo"}
+            title={demoMode ? "Demo mode — live loop paused" : "Live mode"}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full px-3 py-2 text-footnote transition-all duration-200",
+              demoMode
+                ? "bg-[var(--fill-secondary)] font-semibold text-[var(--text-primary)]"
+                : "text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]",
+            )}
+          >
+            {demoMode ? <Sparkles size={14} /> : <Radio size={14} />}
+            {demoMode ? "Demo" : "Live"}
+          </button>
+
           <div className="mx-1 h-5 w-px bg-[var(--separator)]" />
 
           {/* Theme toggle (handy for reviewing both Ledger themes) */}
@@ -244,11 +261,9 @@ export default function TalkPage() {
           </button>
         </div>
 
-        {/* Subtle hint when STT model isn't installed */}
-        {stt.available === false && (
-          <p className="mt-2 text-center text-caption1 text-[var(--text-quaternary)]">
-            STT model not installed — mic shows the listening visual only
-          </p>
+        {/* Connection / model status hint */}
+        {hint && (
+          <p className="mt-2 text-center text-caption1 text-[var(--text-quaternary)]">{hint}</p>
         )}
       </div>
     </div>
