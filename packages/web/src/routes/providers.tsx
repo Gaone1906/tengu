@@ -1,6 +1,6 @@
 
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react'
-import type { ThemeId } from '@/lib/themes'
+import { THEMES, type ThemeId } from '@/lib/themes'
 
 interface ThemeContextValue {
   theme: ThemeId
@@ -26,8 +26,10 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    const saved = localStorage.getItem('jinn-theme') as ThemeId | null
-    if (saved) apply(saved)
+    const saved = localStorage.getItem('jinn-theme')
+    // Coerce stale ids from removed themes (glass/atelier/…) to a valid one.
+    const valid = saved && THEMES.some((t) => t.id === saved) ? (saved as ThemeId) : 'dark'
+    apply(valid)
   }, [apply])
 
   // React to OS color scheme changes when theme is "system"

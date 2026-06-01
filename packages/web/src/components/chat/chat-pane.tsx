@@ -637,7 +637,7 @@ export function ChatPane({
       {viewMode === 'cli' && sessionId ? (
         // Reserve flex space during lazy-chunk load so the ChatInput below stays
         // pinned to the bottom instead of flashing to the top for a frame.
-        <Suspense fallback={<div style={{ flex: 1, minHeight: 0, background: '#0b0b0c' }} />}>
+        <Suspense fallback={<div style={{ flex: 1, minHeight: 0, background: 'var(--bg)' }} />}>
           <CliTerminal sessionId={sessionId} />
         </Suspense>
       ) : (sessionId || messages.length > 0) ? (

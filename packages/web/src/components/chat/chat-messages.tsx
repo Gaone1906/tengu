@@ -124,7 +124,7 @@ function FileLink({ path }: { path: string }) {
         if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return
         if (openFile) { e.preventDefault(); openFile(trimmed) }
       }}
-      className="text-[var(--system-blue)] underline decoration-[var(--system-blue)]/40 hover:decoration-[var(--system-blue)] underline-offset-2 font-['SF_Mono',Menlo,monospace] text-[0.88em]"
+      className="text-[var(--system-blue)] underline decoration-[var(--system-blue)]/40 hover:decoration-[var(--system-blue)] underline-offset-2 font-[family-name:var(--font-code)] text-[0.88em]"
     >
       {path}
     </a>
@@ -179,7 +179,7 @@ function inlineFormat(text: string): React.ReactNode {
         parts.push(renderPathLink(match[7], match.index))
       } else {
         parts.push(
-          <code key={match.index} className="bg-[var(--fill-secondary)] border border-[var(--separator)] rounded-[5px] py-px px-[5px] text-[0.88em] font-['SF_Mono',Menlo,monospace] text-[var(--accent)]">{match[7]}</code>
+          <code key={match.index} className="bg-[var(--fill-secondary)] border border-[var(--separator)] rounded-[5px] py-px px-[5px] text-[0.88em] font-[family-name:var(--font-code)] text-[var(--accent)]">{match[7]}</code>
         )
       }
     } else if (match[8]) {
@@ -213,7 +213,7 @@ function CodeBlock({ code, keyProp }: { code: string; keyProp: number }) {
       >
         {copied ? 'Copied!' : 'Copy'}
       </button>
-      <pre className="code-block bg-[var(--fill-tertiary)] border border-[var(--separator)] rounded-[var(--radius-md)] py-[var(--space-3)] px-[var(--space-4)] overflow-x-auto text-[13px] leading-normal font-['SF_Mono',Menlo,monospace] text-[var(--text-primary)]"><code>{code}</code></pre>
+      <pre className="code-block bg-[var(--fill-tertiary)] border border-[var(--separator)] rounded-[var(--radius-md)] py-[var(--space-3)] px-[var(--space-4)] overflow-x-auto text-[13px] leading-normal font-[family-name:var(--font-code)] text-[var(--text-primary)]"><code>{code}</code></pre>
     </div>
   )
 }

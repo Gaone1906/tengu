@@ -163,13 +163,13 @@
   --separator-opaque: #DED8C7;
   --text-primary: #211E16;
   --text-secondary: rgba(33,30,22,0.66);
-  --text-tertiary: rgba(33,30,22,0.46);
+  --text-tertiary: rgba(33,30,22,0.56);
   --text-quaternary: rgba(33,30,22,0.30);
-  --accent: #B07A1A;
-  --accent-fill: rgba(176,122,26,0.12);
+  --accent: #926516;
+  --accent-fill: rgba(146,101,22,0.14);
   --accent-contrast: #FBF9F2;
   --system-blue: #2D6CB5;
-  --system-green: #5C7A4A;
+  --system-green: #597648;
   --system-red: #B23B33;
   --system-orange: #B5701A;
   --system-purple: #7A5A9E;
@@ -215,13 +215,13 @@
     --separator-opaque: #DED8C7;
     --text-primary: #211E16;
     --text-secondary: rgba(33,30,22,0.66);
-    --text-tertiary: rgba(33,30,22,0.46);
+    --text-tertiary: rgba(33,30,22,0.56);
     --text-quaternary: rgba(33,30,22,0.30);
     --accent: #B07A1A;
     --accent-fill: rgba(176,122,26,0.12);
     --accent-contrast: #FBF9F2;
     --system-blue: #2D6CB5;
-    --system-green: #5C7A4A;
+    --system-green: #597648;
     --system-red: #B23B33;
     --system-orange: #B5701A;
     --system-purple: #7A5A9E;
@@ -594,7 +594,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .apple-input::placeholder { color: var(--text-tertiary); }
-.apple-input:focus { box-shadow: 0 0 0 4px rgba(10,132,255,0.30); }
+.apple-input:focus { box-shadow: 0 0 0 4px var(--accent-fill); }
 
 /* ============================================
    Apple Buttons
@@ -635,22 +635,6 @@ h1, h2, h3, h4, h5, h6 {
 
 /* Org map (react-flow) edges follow the separator token */
 .react-flow__edge-path { stroke: var(--separator-opaque); }
-
-/* Classic chat bubbles kept readable in light mode (transcript styling
-   lives in chat-messages.tsx; these are the bubble fallback). */
-[data-theme="light"] .msg-user { background: var(--accent) !important; color: var(--accent-contrast) !important; }
-[data-theme="light"] .msg-assistant {
-  background: var(--bg-secondary) !important;
-  color: var(--text-primary) !important;
-  border: 1px solid var(--separator) !important;
-  box-shadow: var(--shadow-subtle) !important;
-}
-[data-theme="light"] .apple-card { background: var(--bg-secondary) !important; border: 1px solid var(--separator) !important; box-shadow: var(--shadow-card) !important; }
-[data-theme="light"] .apple-input:focus { box-shadow: 0 0 0 4px var(--accent-fill); }
-
-/* User bubble code blocks need inverted colors */
-.msg-user pre { background: rgba(0,0,0,0.18) !important; color: var(--accent-contrast) !important; }
-.msg-user code { background: rgba(0,0,0,0.16) !important; color: var(--accent-contrast) !important; }
 
 /* ============================================
    Chat — Typing Dots

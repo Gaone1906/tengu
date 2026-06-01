@@ -29,7 +29,7 @@ function App() {
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/skills" element={<SkillsPage />} />
             <Route path="/file" element={<FilePage />} />
-            <Route path="/redesign" element={<RedesignPage />} />
+            {import.meta.env.DEV && <Route path="/redesign" element={<RedesignPage />} />}
           </Routes>
         </Suspense>
       </ClientProviders>
