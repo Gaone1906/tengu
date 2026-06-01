@@ -176,7 +176,7 @@ const CSS = String.raw`
 .dk-run{width:7px;height:7px;border-radius:50%;background:var(--accent)}
 .dk-chat-s{font-size:12px;color:var(--soft);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dk-main{flex:1;position:relative;min-width:0;display:flex;flex-direction:column}
-.dk-thread{flex:1;overflow:auto;width:min(680px,90%);margin:0 auto;padding:46px 0 90px}
+.dk-thread{flex:1;overflow:auto;width:100%;padding:40px 40px 90px}
 .dk-turn{display:flex;gap:16px;margin-bottom:26px}
 .dk-av{width:34px;height:34px;border-radius:8px;display:grid;place-items:center;font-size:16px;background:var(--surface);border:1px solid var(--line);flex:0 0 auto}
 .dk-av-you{background:var(--accent);color:var(--accentText);font-weight:600;font-size:14px;border-color:transparent}
