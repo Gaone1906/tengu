@@ -13,6 +13,7 @@ const SettingsPage = lazy(() => import('./routes/settings/page'))
 const SkillsPage = lazy(() => import('./routes/skills/page'))
 const FilePage = lazy(() => import('./routes/file/page'))
 const RedesignPage = lazy(() => import('./routes/redesign/page'))
+const TalkPage = lazy(() => import('./routes/talk/page'))
 
 function App() {
   return (
@@ -29,6 +30,7 @@ function App() {
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/skills" element={<SkillsPage />} />
             <Route path="/file" element={<FilePage />} />
+            <Route path="/talk" element={<TalkPage />} />
             {import.meta.env.DEV && <Route path="/redesign" element={<RedesignPage />} />}
           </Routes>
         </Suspense>

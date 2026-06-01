@@ -1,0 +1,420 @@
+/**
+ * Jinn Talk — shared styles + keyframes for the floating HUD pieces
+ * (TaskTracker panel + Transcript caption/reply overlay).
+ *
+ * Everything reads from the Ledger theme tokens in globals.css so both pieces
+ * adapt to light + dark with zero hardcoded colors. The look mirrors the AURA
+ * prototype's `.card` / `.ttl` / `.bar` / `.chip` and `.caption` / `.reply`
+ * but as calm glass HUD layers floating over the living orb.
+ */
+
+/* ============================================================================
+ * TASK TRACKER — floating glass panel (top-right of a full-screen page)
+ * ========================================================================== */
+
+.tracker {
+  position: relative;
+  width: 300px;
+  max-height: min(70vh, 560px);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 14px 6px;
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--separator);
+  background: var(--material-thick);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: var(--shadow-overlay);
+  color: var(--text-primary);
+  isolation: isolate;
+}
+
+.tracker__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 2px 10px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--separator);
+}
+
+.tracker__eyebrow {
+  font-family: var(--font-code);
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.tracker__count {
+  font-family: var(--font-code);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--accent);
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--accent-fill);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  white-space: nowrap;
+}
+
+.tracker__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 0;
+  /* thin, unobtrusive scrollbar */
+  scrollbar-width: thin;
+  scrollbar-color: var(--separator) transparent;
+}
+.tracker__list::-webkit-scrollbar {
+  width: 6px;
+}
+.tracker__list::-webkit-scrollbar-thumb {
+  background: var(--separator);
+  border-radius: 999px;
+}
+
+/* ---- individual task row ---- */
+.tracker__row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto auto;
+  column-gap: 9px;
+  row-gap: 6px;
+  padding: 10px 6px;
+  border-radius: var(--radius-lg);
+  /* springy enter (slide + fade); var(--enter-delay) staggers via index */
+  animation: tracker-row-in 520ms var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1))
+    both;
+  animation-delay: var(--enter-delay, 0ms);
+}
+
+.tracker__row + .tracker__row {
+  border-top: 1px solid color-mix(in srgb, var(--separator) 55%, transparent);
+}
+
+@keyframes tracker-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* status dot */
+.tracker__dot {
+  grid-column: 1;
+  grid-row: 1;
+  width: 9px;
+  height: 9px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  /* cross-fade dot color when status flips */
+  transition: background-color 420ms var(--ease-smooth, cubic-bezier(0.4, 0, 0.2, 1)),
+    box-shadow 420ms var(--ease-smooth, cubic-bezier(0.4, 0, 0.2, 1));
+}
+.tracker__dot--queued {
+  background: var(--text-tertiary);
+}
+.tracker__dot--running {
+  background: var(--accent);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent);
+  animation: tracker-dot-pulse 1.8s var(--ease-smooth, cubic-bezier(0.4, 0, 0.2, 1))
+    infinite;
+}
+.tracker__dot--done {
+  background: var(--system-green);
+}
+.tracker__dot--error {
+  background: var(--system-red);
+}
+
+@keyframes tracker-dot-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+}
+
+.tracker__title {
+  grid-column: 2;
+  grid-row: 1;
+  font-size: 13.5px;
+  line-height: 1.35;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.tracker__owner {
+  grid-column: 2;
+  grid-row: 2;
+  justify-self: start;
+  font-family: var(--font-code);
+  font-size: 10.5px;
+  letter-spacing: 0.4px;
+  color: var(--accent);
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent-fill);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* progress bar track */
+.tracker__bar {
+  grid-column: 2;
+  grid-row: 3;
+  position: relative;
+  height: 5px;
+  margin-top: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  overflow: hidden;
+}
+
+.tracker__bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 55%, #fff)
+  );
+  /* width is set inline; ease it on change */
+  transition: width 1100ms var(--ease-smooth, cubic-bezier(0.4, 0, 0.2, 1)),
+    background-color 420ms var(--ease-smooth, cubic-bezier(0.4, 0, 0.2, 1));
+}
+.tracker__bar-fill--done {
+  background: linear-gradient(
+    90deg,
+    var(--system-green),
+    color-mix(in srgb, var(--system-green) 60%, #fff)
+  );
+}
+.tracker__bar-fill--error {
+  background: linear-gradient(
+    90deg,
+    var(--system-red),
+    color-mix(in srgb, var(--system-red) 60%, #fff)
+  );
+}
+
+/* indeterminate shimmer for running rows without concrete progress */
+.tracker__bar-fill--indeterminate {
+  width: 40% !important;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--accent),
+    color-mix(in srgb, var(--accent) 60%, #fff),
+    var(--accent),
+    transparent
+  );
+  animation: tracker-shimmer 1.5s var(--ease-smooth, cubic-bezier(0.4, 0, 0.2, 1))
+    infinite;
+}
+
+@keyframes tracker-shimmer {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(360%);
+  }
+}
+
+/* result / error line shown under the bar */
+.tracker__result {
+  grid-column: 2;
+  grid-row: 4;
+  margin-top: 5px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  padding: 6px 9px;
+  border-radius: var(--radius-lg);
+  animation: tracker-result-in 420ms var(--ease-smooth, cubic-bezier(0.4, 0, 0.2, 1))
+    both;
+}
+.tracker__result--done {
+  color: color-mix(in srgb, var(--system-green) 85%, var(--text-primary));
+  background: color-mix(in srgb, var(--system-green) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--system-green) 26%, transparent);
+}
+.tracker__result--error {
+  color: color-mix(in srgb, var(--system-red) 88%, var(--text-primary));
+  background: color-mix(in srgb, var(--system-red) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--system-red) 28%, transparent);
+}
+
+@keyframes tracker-result-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* tint the whole error row subtly */
+.tracker__row--error .tracker__title {
+  color: color-mix(in srgb, var(--system-red) 30%, var(--text-primary));
+}
+
+/* ============================================================================
+ * TRANSCRIPT — minimal centered caption/reply overlay (floats over the orb)
+ * ========================================================================== */
+
+.transcript {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 820px;
+  padding: 0 14%;
+  text-align: center;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* the muted "you" caption line */
+.transcript__caption {
+  font-size: 15px;
+  letter-spacing: 0.2px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  min-height: 22px;
+  max-width: 640px;
+  animation: transcript-caption-in 500ms var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1))
+    both;
+}
+
+@keyframes transcript-caption-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* the large cream assistant "reply" line */
+.transcript__reply {
+  font-size: 23px;
+  line-height: 1.45;
+  font-weight: 500;
+  color: var(--text-primary);
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+/* each word reveals with a blur-in, staggered via inline --i */
+.transcript__word {
+  display: inline-block;
+  opacity: 0;
+  filter: blur(6px);
+  transform: translateY(6px);
+  animation: transcript-word-in 450ms var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1))
+    both;
+  animation-delay: calc(var(--i, 0) * 65ms);
+}
+
+@keyframes transcript-word-in {
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: none;
+  }
+}
+
+/* soft blinking cursor for in-flight (partial) assistant replies */
+.transcript__cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 3px;
+  vertical-align: -0.12em;
+  border-radius: 1px;
+  background: var(--accent);
+  animation: transcript-cursor-blink 1s steps(1, end) infinite;
+}
+
+@keyframes transcript-cursor-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  50.01%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* ============================================================================
+ * REDUCED MOTION — opacity only, no transforms / blur / pulses anywhere.
+ * ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  .tracker__row {
+    animation: tracker-fade-in 200ms linear both;
+    animation-delay: 0ms;
+  }
+  .tracker__dot--running {
+    animation: none;
+    box-shadow: none;
+  }
+  .tracker__bar-fill {
+    transition: none;
+  }
+  .tracker__bar-fill--indeterminate {
+    animation: none;
+    width: 100% !important;
+    opacity: 0.5;
+  }
+  .tracker__result {
+    animation: tracker-fade-in 200ms linear both;
+  }
+  .transcript__caption {
+    animation: tracker-fade-in 200ms linear both;
+  }
+  .transcript__word {
+    opacity: 1;
+    filter: none;
+    transform: none;
+    animation: none;
+    animation-delay: 0ms !important;
+  }
+  .transcript__cursor {
+    animation: none;
+    opacity: 0.7;
+  }
+
+  @keyframes tracker-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
