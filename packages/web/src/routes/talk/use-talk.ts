@@ -278,6 +278,16 @@ export function useTalk(sessionId: string = TALK_SESSION_ID): UseTalkReturn {
     }
   }, [gateway, sessionId, startLevelLoop, stopLevelLoop])
 
+  // ---- Pre-warm the agent session -----------------------------------------
+  // Boot the persistent Agent-SDK session (and its CLI subprocess) on mount so
+  // the user's FIRST utterance is warm (~1.5s) instead of paying the ~9s cold
+  // boot. Fire-and-forget; harmless if it races with the first real turn.
+  useEffect(() => {
+    api.talkWarm(sessionId).catch(() => {
+      /* warm is best-effort — the first turn will just boot lazily */
+    })
+  }, [sessionId])
+
   // ---- Initial TTS status probe -------------------------------------------
   useEffect(() => {
     let alive = true

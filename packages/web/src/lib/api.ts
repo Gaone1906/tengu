@@ -204,6 +204,9 @@ export const api = {
   /** Talk (Phase 2 real loop): submit a user turn — backend streams the reply over WS. */
   talkTurn: (sessionId: string, text: string) =>
     post<{ status: string }>("/api/talk/turn", { sessionId, text }),
+  /** Talk: pre-boot the agent session so the first real turn is warm (no cold-start). */
+  talkWarm: (sessionId: string) =>
+    post<{ ok: boolean }>("/api/talk/warm", { sessionId }),
   /** Talk: TTS/loop readiness (whether the local voice model is installed + download state). */
   talkStatus: () =>
     get<{ available: boolean; ttsAvailable: boolean; ttsModel: string | null; downloading: boolean; progress: number }>("/api/talk/status"),

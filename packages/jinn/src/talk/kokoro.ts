@@ -259,6 +259,18 @@ export function createKokoroTts(opts?: {
       }
     },
 
+    async warm(): Promise<void> {
+      // Nothing to warm if the engine can't run; speak() will surface the error.
+      if (!pythonPresent() || !weightsPresent()) return
+      try {
+        // One throwaway synth spawns the sidecar AND forces the heavy model load
+        // so the user's first real sentence doesn't pay it. Audio is discarded.
+        await synth(".")
+      } catch (err) {
+        logger.debug(`[kokoro] warm failed: ${err instanceof Error ? err.message : err}`)
+      }
+    },
+
     status() {
       return {
         available: pythonPresent() && weightsPresent(),

@@ -12,7 +12,7 @@
  */
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { ApiContext } from "../gateway/api.js";
-import { runTalkTurn } from "./agent.js";
+import { runTalkTurn, warmTalkSession } from "./agent.js";
 import { createOrgBridge } from "./org-bridge.js";
 import { createKokoroTts } from "./kokoro.js";
 import type { OrgBridge, Tts, TalkDeps } from "./context.js";
@@ -73,6 +73,27 @@ export async function handleTalkApi(
       };
       const result = await runTalkTurn(text, deps);
       json(res, { ok: result.ok, error: result.error });
+      return true;
+    }
+
+    // POST /api/talk/warm — pre-boot the agent session so the first real turn
+    // is warm. Fire-and-forget; returns immediately.
+    if (method === "POST" && pathname === "/api/talk/warm") {
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return true;
+      const body = parsed.body as Partial<TalkTurnRequest> | null;
+      const sessionId = body?.sessionId;
+      if (typeof sessionId !== "string" || !sessionId.trim()) {
+        badRequest(res, "sessionId is required");
+        return true;
+      }
+      warmTalkSession({
+        sessionId,
+        emit: context.emit,
+        org,
+        tts: getTts(context),
+      });
+      json(res, { ok: true });
       return true;
     }
 

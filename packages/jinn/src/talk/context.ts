@@ -48,6 +48,8 @@ export interface Tts {
   /** Synthesize `text`, sentence-chunked, streaming talk:audio events; resolves when fully spoken. */
   speak(sessionId: string, text: string, emit: Emit): Promise<void>
   status(): { available: boolean; downloading: boolean; progress: number; voice: string; ready: boolean }
+  /** Pre-spawn the sidecar and load the model (one throwaway synth) so the first real speak is fast. No-op if weights/venv are missing. */
+  warm?(): Promise<void>
   /** Download Kokoro weights on first use, emitting talk:tts:download:* events. */
   download(emit: Emit): Promise<void>
   shutdown(): void
