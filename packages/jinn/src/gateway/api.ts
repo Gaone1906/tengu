@@ -531,12 +531,30 @@ export function matchRoute(
   return params;
 }
 
-function serializeSession(session: Session, context: ApiContext): Session {
+function sessionHasRuntimeActivity(session: Session, context: ApiContext): boolean {
+  const activity = context.backgroundActivity?.get(session.id);
+  if (!activity) return false;
+  const stale = activity.activeStreams <= 0 && Date.now() - activity.lastActivityAt > BACKGROUND_ACTIVITY_STALE_MS;
+  if (stale) {
+    context.backgroundActivity?.delete(session.id);
+    return false;
+  }
+  return activity.activeStreams > 0;
+}
+
+function getSessionTransportState(session: Session, context: ApiContext): "idle" | "queued" | "running" | "error" | "interrupted" {
+  const queue = context.sessionManager.getQueue();
+  const base = queue.getTransportState(session.sessionKey || session.sourceRef, session.status);
+  if (sessionHasRuntimeActivity(session, context) && base !== "error" && base !== "interrupted") return "running";
+  return base;
+}
+
+export function serializeSession(session: Session, context: ApiContext): Session {
   const queue = context.sessionManager.getQueue();
   const queueDepth = queue.getPendingCount(session.sessionKey || session.sourceRef);
-  const transportState = queue.getTransportState(session.sessionKey || session.sourceRef, session.status);
+  const transportState = getSessionTransportState(session, context);
   const bg = context.backgroundActivity?.get(session.id);
-  const bgIsStale = bg && Date.now() - bg.lastActivityAt > BACKGROUND_ACTIVITY_STALE_MS;
+  const bgIsStale = bg && bg.activeStreams <= 0 && Date.now() - bg.lastActivityAt > BACKGROUND_ACTIVITY_STALE_MS;
   if (bgIsStale) context.backgroundActivity?.delete(session.id);
   return {
     ...session,
@@ -1859,7 +1877,7 @@ export async function handleApiRequest(
       const events: Array<{ event: string; payload: unknown; ts: number }> = [];
       for (const s of sessions) {
         const ts = new Date(s.lastActivity || s.createdAt).getTime();
-        const transportState = context.sessionManager.getQueue().getTransportState(s.sessionKey || s.sourceRef, s.status);
+        const transportState = getSessionTransportState(s, context);
         if (transportState === "running") {
           events.push({ event: "session:started", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
         } else if (transportState === "queued") {

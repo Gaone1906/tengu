@@ -47,6 +47,7 @@ export function patchSessionBackgroundActivity(
   qc: QueryClient,
   id: string,
   backgroundActivity: BackgroundActivity | null,
+  transportState?: string,
 ) {
   qc.setQueryData<SessionsResponse>(queryKeys.sessions.all, (old) => {
     if (!old) return old
@@ -54,7 +55,21 @@ export function patchSessionBackgroundActivity(
     const sessions = old.sessions.map((s) => {
       if (sessionId(s) !== id) return s
       changed = true
-      return { ...s, backgroundActivity }
+      const active = (backgroundActivity?.activeStreams ?? 0) > 0
+      const status = typeof s.status === 'string' ? s.status : undefined
+      const queueDepth = typeof s.queueDepth === 'number' ? s.queueDepth : 0
+      const nextTransportState = transportState ?? (active
+        ? 'running'
+        : status === 'running'
+          ? 'running'
+          : status === 'error'
+            ? 'error'
+            : status === 'interrupted'
+              ? 'interrupted'
+              : queueDepth > 0
+                ? 'queued'
+                : 'idle')
+      return { ...s, backgroundActivity, transportState: nextTransportState }
     })
     return changed ? { ...old, sessions } : old
   })

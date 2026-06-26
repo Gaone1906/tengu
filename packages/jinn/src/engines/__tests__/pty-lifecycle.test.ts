@@ -1,5 +1,5 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { PtyLifecycleManager } from "../pty-lifecycle.js";
+import { enforcePtyIdleCap, PtyLifecycleManager } from "../pty-lifecycle.js";
 
 function fakeHandle() {
   const h: any = { killed: false, pid: Math.floor(Math.random() * 9999) };
@@ -43,15 +43,27 @@ describe("PtyLifecycleManager", () => {
     expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 
-  it("a PTY with no viewer dies within the grace window after turnEnded", () => {
-    // No viewer, no turn → grace window starts → reevaluate kills since lastTurnEndedAt is 0… actually
-    // lastTurnEndedAt is set on turnEnded, so within the keep-alive cap it stays alive.
+  it("keeps an idle warm PTY alive even after days pass", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-01T00:00:00Z"));
+    const m = new PtyLifecycleManager({ maxLivePtys: 8 });
+    const h = fakeHandle();
+    m.adopt("long-running-session", h);
+
+    vi.advanceTimersByTime(7 * 24 * 60 * 60 * 1000);
+
+    expect(h.killed).toBe(false);
+    expect(m.getWarm("long-running-session")).toBe(h);
+    m.dispose();
+  });
+
+  it("a PTY with no viewer stays warm after turnEnded", () => {
     const m = new PtyLifecycleManager({ maxLivePtys: 8 });
     const h = fakeHandle();
     m.adopt("sess-3", h);
     m.turnStarted("sess-3");
     m.turnEnded("sess-3");
-    expect(h.killed).toBe(false); // still inside CLI_KEEPALIVE_AFTER_LEAVE_MS
+    expect(h.killed).toBe(false);
   });
 
   it("a PTY with an active viewer survives turnEnded indefinitely (within the keep-alive cap)", () => {
@@ -104,6 +116,57 @@ describe("PtyLifecycleManager", () => {
     expect(nextIdle.killed).toBe(false);
   });
 
+  it("evicts the stalest idle PTY when a running turn ends over the idle cap", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-01T00:00:00Z"));
+    const m = new PtyLifecycleManager({ maxLivePtys: 1 });
+    const staleIdle = fakeHandle(), justFinished = fakeHandle();
+    m.adopt("stale-idle", staleIdle);
+    vi.advanceTimersByTime(1000);
+    m.adopt("just-finished", justFinished, { turnRunning: true });
+
+    m.turnEnded("just-finished");
+
+    expect(staleIdle.killed).toBe(true);
+    expect(justFinished.killed).toBe(false);
+  });
+
+  it("enforces a global idle cap across lifecycle managers", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-01T00:00:00Z"));
+    const claude = new PtyLifecycleManager({ maxLivePtys: 8 });
+    const codex = new PtyLifecycleManager({ maxLivePtys: 8 });
+    const oldest = fakeHandle(), newest = fakeHandle();
+    claude.adopt("oldest", oldest);
+    vi.advanceTimersByTime(1000);
+    codex.adopt("newest", newest);
+
+    enforcePtyIdleCap([claude, codex], 1);
+
+    expect(oldest.killed).toBe(true);
+    expect(newest.killed).toBe(false);
+  });
+
+  it("does not evict a runtime-active PTY to satisfy the idle cap", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-01T00:00:00Z"));
+    const claude = new PtyLifecycleManager({ maxLivePtys: 8 });
+    const codex = new PtyLifecycleManager({ maxLivePtys: 8 });
+    const loop = fakeHandle(), staleIdle = fakeHandle(), newestIdle = fakeHandle();
+    claude.adopt("loop", loop);
+    claude.setRuntimeActive("loop", true);
+    vi.advanceTimersByTime(1000);
+    codex.adopt("stale-idle", staleIdle);
+    vi.advanceTimersByTime(1000);
+    codex.adopt("newest-idle", newestIdle);
+
+    enforcePtyIdleCap([claude, codex], 1);
+
+    expect(loop.killed).toBe(false);
+    expect(staleIdle.killed).toBe(true);
+    expect(newestIdle.killed).toBe(false);
+  });
+
   it("killAll kills every live PTY", () => {
     const m = new PtyLifecycleManager({ maxLivePtys: 8 });
     const a = fakeHandle(), b = fakeHandle();
@@ -137,6 +200,20 @@ describe("PtyLifecycleManager", () => {
     expect(idle.killed).toBe(true);
     expect(active.killed).toBe(false);
     expect(m.getWarm("active")).toBe(active);
+  });
+
+  it("releaseIdle spares runtime-active PTYs", () => {
+    const m = new PtyLifecycleManager({ maxLivePtys: 8 });
+    const idle = fakeHandle(), loop = fakeHandle();
+    m.adopt("idle", idle);
+    m.adopt("loop", loop);
+    m.setRuntimeActive("loop", true);
+
+    m.releaseIdle(() => false);
+
+    expect(idle.killed).toBe(true);
+    expect(loop.killed).toBe(false);
+    expect(m.getWarm("loop")).toBe(loop);
   });
 
   it("onRelease listeners fire for every released session (engines purge per-session maps here)", () => {

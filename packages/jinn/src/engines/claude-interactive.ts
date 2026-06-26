@@ -528,9 +528,14 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
     this.backgroundActivityCb = cb;
   }
 
+  onRuntimeActivity(cb: (jinnSessionId: string, info: UpstreamActivityInfo | null) => void): void {
+    this.onBackgroundActivity(cb);
+  }
+
   /** Per-PTY SSE proxy reported an in-flight change. Always record it (counts
    *  must stay truthful across the run boundary); emission is gated downstream. */
   private handleUpstreamActivity(jinnSessionId: string, info: UpstreamActivityInfo): void {
+    this.lifecycle.setRuntimeActive(jinnSessionId, info.activeStreams > 0);
     let st = this.bgActivity.get(jinnSessionId);
     if (!st) {
       st = { info, emitted: false };
@@ -586,6 +591,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
   /** Drop all background state for a session (PTY released / killed), emitting
    *  the cleared notification if activity had been reported. */
   private clearBackground(jinnSessionId: string): void {
+    this.lifecycle.setRuntimeActive(jinnSessionId, false);
     const st = this.bgActivity.get(jinnSessionId);
     if (!st) return;
     if (st.clearTimer) clearTimeout(st.clearTimer);

@@ -47,6 +47,7 @@ export function useQueryInvalidation() {
               qc,
               p.sessionId as string,
               (p.backgroundActivity as BackgroundActivity | null) ?? null,
+              typeof p.transportState === 'string' ? p.transportState : undefined,
             )
           }
           return

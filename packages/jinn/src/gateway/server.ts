@@ -13,7 +13,7 @@ import { configureLogger, logger } from "../shared/logger.js";
 import { initDb, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, getInterruptedSessions, listSessions, updateSession, getSession } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
-import { PtyLifecycleManager } from "../engines/pty-lifecycle.js";
+import { enforcePtyIdleCap, PtyLifecycleManager, type PtyLifecycleOpts } from "../engines/pty-lifecycle.js";
 import { CodexEngine } from "../engines/codex.js";
 import { CodexInteractiveEngine } from "../engines/codex-interactive.js";
 import { AntigravityEngine } from "../engines/antigravity.js";
@@ -108,6 +108,11 @@ const MIME_TYPES: Record<string, string> = {
   ".ico": "image/x-icon",
   ".woff": "font/woff",
   ".woff2": "font/woff2",
+};
+
+type RuntimeActivityInfo = { activeStreams: number; lastActivityAt: number };
+type RuntimeActivitySource = {
+  onRuntimeActivity?: (cb: (sessionId: string, info: RuntimeActivityInfo | null) => void) => void;
 };
 
 export function serveStatic(
@@ -293,6 +298,8 @@ export async function startGateway(
   let antigravityLifecycle: PtyLifecycleManager | undefined;
   let grokLifecycle: PtyLifecycleManager | undefined;
   let hermesLifecycle: PtyLifecycleManager | undefined;
+  const ptyLifecycles: PtyLifecycleManager[] = [];
+  let enforcingGlobalIdleCap = false;
   function refreshPtyPids(): void {
     try {
       const pids = [
@@ -305,9 +312,27 @@ export async function startGateway(
       updateGatewayPtyPids(GATEWAY_INFO_FILE, pids);
     } catch { /* best effort */ }
   }
+  function enforceGlobalIdleCap(): void {
+    if (enforcingGlobalIdleCap) return;
+    enforcingGlobalIdleCap = true;
+    try {
+      enforcePtyIdleCap(ptyLifecycles, claudeCfg.maxLivePtys!);
+    } finally {
+      enforcingGlobalIdleCap = false;
+    }
+  }
+  function createPtyLifecycle(opts: Omit<PtyLifecycleOpts, "maxLivePtys" | "onIdleStateChange">): PtyLifecycleManager {
+    const lifecycle = new PtyLifecycleManager({
+      ...opts,
+      maxLivePtys: claudeCfg.maxLivePtys!,
+      enforceLocalCap: false,
+      onIdleStateChange: enforceGlobalIdleCap,
+    });
+    ptyLifecycles.push(lifecycle);
+    return lifecycle;
+  }
 
-  const claudeLifecycle: PtyLifecycleManager = new PtyLifecycleManager({
-    maxLivePtys: claudeCfg.maxLivePtys!,
+  const claudeLifecycle: PtyLifecycleManager = createPtyLifecycle({
     onAdopt: () => refreshPtyPids(),
     onCleanup: (id) => {
       cleanupSessionSettings(CLAUDE_SETTINGS_DIR, id);
@@ -319,8 +344,7 @@ export async function startGateway(
 
   // Codex has two modes: headless `codex exec --json` for chat/default work
   // turns, and real `codex` TUI PTYs for the dashboard CLI view.
-  codexLifecycle = new PtyLifecycleManager({
-    maxLivePtys: claudeCfg.maxLivePtys!,
+  codexLifecycle = createPtyLifecycle({
     onAdopt: () => refreshPtyPids(),
     onCleanup: () => refreshPtyPids(),
   });
@@ -329,20 +353,17 @@ export async function startGateway(
   // Antigravity (`agy`) — PTY-interactive engine. One instance both runs turns
   // and backs the xterm view (agy has no headless mode), so it needs its own
   // PTY lifecycle manager.
-  antigravityLifecycle = new PtyLifecycleManager({
-    maxLivePtys: claudeCfg.maxLivePtys!,
+  antigravityLifecycle = createPtyLifecycle({
     onAdopt: () => refreshPtyPids(),
     onCleanup: () => refreshPtyPids(),
   });
   const antigravityEngine = new AntigravityEngine(antigravityLifecycle);
-  grokLifecycle = new PtyLifecycleManager({
-    maxLivePtys: claudeCfg.maxLivePtys!,
+  grokLifecycle = createPtyLifecycle({
     onAdopt: () => refreshPtyPids(),
     onCleanup: () => refreshPtyPids(),
   });
   const grokInteractiveEngine = new GrokInteractiveEngine(grokLifecycle);
-  hermesLifecycle = new PtyLifecycleManager({
-    maxLivePtys: claudeCfg.maxLivePtys!,
+  hermesLifecycle = createPtyLifecycle({
     onAdopt: () => refreshPtyPids(),
     onCleanup: () => refreshPtyPids(),
   });
@@ -771,43 +792,44 @@ export async function startGateway(
   };
   refreshDynamicModels(currentConfig);
 
-  // Synchronously re-scan org/ into the in-memory registry and drop warm PTYs so the
-  // next turn respawns with a fresh system prompt. Shared by the API employee-update
-  // handler (immediate refresh, no watcher lag) and the chokidar onOrgChange watcher.
+  // Synchronously re-scan org/ into the in-memory registry. Shared by the API
+  // employee-update handler (immediate refresh, no watcher lag) and the chokidar
+  // onOrgChange watcher.
   const reloadOrg = () => {
     employeeRegistry = scanOrg();
     logger.info(`Org directory changed, reloaded ${employeeRegistry.size} employee(s)`);
-    // Org/persona changed — recycle only IDLE warm PTYs so the next turn respawns
-    // with the fresh system prompt. Must NOT killAll(): a turn in flight may itself
-    // have written the org file that triggered this reload (e.g. the onboarding
-    // genie hatching an employee, or a COO turn editing a persona). Interrupting
-    // that turn's PTY would settle it as "Interrupted", drop the web response, and
-    // hang the session. Active turns finish on their current persona; the new
-    // persona takes effect on the session's NEXT turn via cold respawn.
-    interactiveClaudeEngine.killIdle();
-    codexInteractiveEngine.killIdle();
-    antigravityEngine.killIdle();
-    grokInteractiveEngine.killIdle();
-    hermesInteractiveEngine.killIdle();
+    // Keep warm PTYs alive on org reload. Native CLI schedulers can sleep inside
+    // an otherwise idle PTY for days; recycling "idle" PTYs here would silently
+    // delete those loops. New sessions and cold respawns pick up the fresh org.
     emit("org:changed", {});
   };
 
-  // Post-settle background activity (in-memory only): the interactive engine
-  // reports when the CLI still has upstream API requests in flight (background
-  // subagents/tasks) AFTER the Stop hook settled the turn — so the UI can show
-  // "still working" instead of lying "idle". Mirrored into serializeSession via
-  // apiContext.backgroundActivity and pushed live as `session:background`.
+  // Runtime activity after the foreground turn has settled (in-memory only).
+  // Native CLI schedulers such as /loop wake inside the PTY without entering
+  // Jinn's queue; engines can expose onRuntimeActivity so the UI stops showing
+  // those sessions as transport-idle while the native work is awake.
   const backgroundActivity = new Map<string, { activeStreams: number; lastActivityAt: number }>();
-  interactiveClaudeEngine.onBackgroundActivity((sessionId, info) => {
+  const handleRuntimeActivity = (sessionId: string, info: RuntimeActivityInfo | null): void => {
     if (info) backgroundActivity.set(sessionId, info);
     else backgroundActivity.delete(sessionId);
+    const session = getSession(sessionId);
+    const baseTransportState = session
+      ? sessionManager.getQueue().getTransportState(session.sessionKey || session.sourceRef, session.status)
+      : "idle";
+    const transportState = info && info.activeStreams > 0 && baseTransportState !== "error" && baseTransportState !== "interrupted"
+      ? "running"
+      : baseTransportState;
     emit("session:background", {
       sessionId,
+      transportState,
       backgroundActivity: info
         ? { activeStreams: info.activeStreams, lastActivityAt: new Date(info.lastActivityAt).toISOString() }
         : null,
     });
-  });
+  };
+  for (const engine of new Set(Object.values(ptyViewEngines))) {
+    (engine as RuntimeActivitySource).onRuntimeActivity?.(handleRuntimeActivity);
+  }
 
   // Unsolicited-Stop consumer: a Stop hook nobody claims within the registry's
   // grace delay means a PTY-native turn (typed straight into the CLI/xterm

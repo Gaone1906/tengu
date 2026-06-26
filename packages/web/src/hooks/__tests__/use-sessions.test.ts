@@ -72,17 +72,42 @@ describe('patchSessionBackgroundActivity', () => {
     expect(data.sessions.find((s) => s.id === 'b')?.backgroundActivity).toBeUndefined()
   })
 
+  it('marks the row transport as running while background activity is active', () => {
+    const qc = new QueryClient()
+    qc.setQueryData(queryKeys.sessions.all, resp([session('a', { status: 'idle', transportState: 'idle' })]))
+
+    patchSessionBackgroundActivity(qc, 'a', activity)
+
+    const data = qc.getQueryData<SessionsResponse>(queryKeys.sessions.all)!
+    expect(data.sessions.find((s) => s.id === 'a')?.transportState).toBe('running')
+  })
+
   it('clears the row on the null (cleared) event', () => {
     const qc = new QueryClient()
     qc.setQueryData(
       queryKeys.sessions.all,
-      resp([session('a', { backgroundActivity: activity })]),
+      resp([session('a', { status: 'idle', transportState: 'running', backgroundActivity: activity })]),
     )
 
     patchSessionBackgroundActivity(qc, 'a', null)
 
     const data = qc.getQueryData<SessionsResponse>(queryKeys.sessions.all)!
     expect(data.sessions.find((s) => s.id === 'a')?.backgroundActivity).toBeNull()
+    expect(data.sessions.find((s) => s.id === 'a')?.transportState).toBe('idle')
+  })
+
+  it('uses server-provided transport state on background clear events', () => {
+    const qc = new QueryClient()
+    qc.setQueryData(
+      queryKeys.sessions.all,
+      resp([session('a', { status: 'idle', transportState: 'running', backgroundActivity: activity })]),
+    )
+
+    patchSessionBackgroundActivity(qc, 'a', null, 'running')
+
+    const data = qc.getQueryData<SessionsResponse>(queryKeys.sessions.all)!
+    expect(data.sessions.find((s) => s.id === 'a')?.backgroundActivity).toBeNull()
+    expect(data.sessions.find((s) => s.id === 'a')?.transportState).toBe('running')
   })
 
   it('is a no-op (same object) when the session is not in the cache', () => {
