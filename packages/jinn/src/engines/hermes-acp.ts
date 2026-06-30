@@ -79,6 +79,12 @@ export class HermesAcpEngine implements InterruptibleEngine {
     return entry;
   }
 
+  private evictProc(jinnId: string, p: HermesProc): void {
+    p.alive = false;
+    try { p.handle.killProc(); } catch { /* ignore */ }
+    if (this.procs.get(jinnId) === p) this.procs.delete(jinnId);
+  }
+
   async run(opts: EngineRunOpts): Promise<EngineResult> {
     const jinnId = opts.sessionId || opts.resumeSessionId || "default";
     const bin = resolveBin("hermes", opts.bin);
@@ -137,9 +143,7 @@ export class HermesAcpEngine implements InterruptibleEngine {
       const msg = e instanceof Error ? e.message : String(e);
       logger.warn(`[hermes-acp] handshake error for ${jinnId}: ${msg}`);
       // Evict the mute/dead process so the next turn gets a clean respawn.
-      p.alive = false;
-      try { p.handle.killProc(); } catch { /* ignore */ }
-      if (this.procs.get(jinnId) === p) this.procs.delete(jinnId);
+      this.evictProc(jinnId, p);
       return { sessionId: "", result: "", error: msg };
     } finally {
       if (handshakeWatchdog) clearTimeout(handshakeWatchdog);
@@ -181,10 +185,13 @@ export class HermesAcpEngine implements InterruptibleEngine {
       ]);
 
       const stop = String(res.stopReason ?? res.stop_reason ?? "");
-      const error =
-        !resultText && (stop === "refusal" || stop === "cancelled")
+      const error = !resultText
+        ? (stop === "refusal" || stop === "cancelled"
           ? `Hermes turn ended: ${stop}`
-          : undefined;
+          : "Hermes turn ended with no assistant text")
+        : undefined;
+
+      if (error) this.evictProc(jinnId, p);
 
       return {
         sessionId: hermesSessionId!,
@@ -195,6 +202,7 @@ export class HermesAcpEngine implements InterruptibleEngine {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.warn(`[hermes-acp] turn error for ${jinnId}: ${msg}`);
+      if (!resultText) this.evictProc(jinnId, p);
       return {
         sessionId: hermesSessionId || "",
         result: resultText,

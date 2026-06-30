@@ -70,6 +70,51 @@ function fakeServerLoadFail() {
   return rpc;
 }
 
+/** Fake server whose prompt fails before producing any assistant text. */
+function fakeServerPromptError() {
+  const toServer = new PassThrough();
+  const fromServer = new PassThrough();
+  const rpc = new HermesRpc(toServer, fromServer);
+  toServer.on("data", (b: Buffer) => {
+    for (const line of b.toString().split("\n")) {
+      if (!line.trim()) continue;
+      const msg = JSON.parse(line) as Record<string, unknown>;
+      const reply = (result: unknown) =>
+        fromServer.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }) + "\n");
+      const replyErr = (error: unknown) =>
+        fromServer.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error }) + "\n");
+      if (msg.method === "initialize") reply({ protocolVersion: 1 });
+      else if (msg.method === "session/new")
+        reply({ sessionId: "S1", models: { currentModelId: "openai-codex:gpt-5.5", availableModels: [] } });
+      else if (msg.method === "session/set_mode") reply({});
+      else if (msg.method === "session/prompt")
+        replyErr({ code: -32000, message: "Provided authentication token is expired. Please try signing in again." });
+    }
+  });
+  return rpc;
+}
+
+/** Fake server whose prompt completes without any assistant text. */
+function fakeServerEmptyPromptResult() {
+  const toServer = new PassThrough();
+  const fromServer = new PassThrough();
+  const rpc = new HermesRpc(toServer, fromServer);
+  toServer.on("data", (b: Buffer) => {
+    for (const line of b.toString().split("\n")) {
+      if (!line.trim()) continue;
+      const msg = JSON.parse(line) as Record<string, unknown>;
+      const reply = (result: unknown) =>
+        fromServer.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }) + "\n");
+      if (msg.method === "initialize") reply({ protocolVersion: 1 });
+      else if (msg.method === "session/new")
+        reply({ sessionId: "S1", models: { currentModelId: "openai-codex:gpt-5.5", availableModels: [] } });
+      else if (msg.method === "session/set_mode") reply({});
+      else if (msg.method === "session/prompt") reply({ stopReason: "end_turn" });
+    }
+  });
+  return rpc;
+}
+
 // ---------------------------------------------------------------------------
 // Test engines
 // ---------------------------------------------------------------------------
@@ -191,5 +236,36 @@ describe("HermesAcpEngine.run", () => {
     expect(r.error).toBeUndefined();
     expect(r.sessionId).toBe("NEW-1");
     expect(r.result).toBe("fallback ok");
+  });
+
+  it("evicts the ACP process when a prompt fails before producing text", async () => {
+    let killed = false;
+    class PromptErrorEngine extends HermesAcpEngine {
+      protected spawnProc() {
+        const rpc = fakeServerPromptError();
+        return { rpc, killProc: () => { killed = true; }, isAliveProc: () => !killed, onExit: (_cb: () => void) => {}, onError: (_cb: (e: Error) => void) => {} };
+      }
+    }
+
+    const eng = new PromptErrorEngine();
+    const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-auth-expired" });
+    expect(r.result).toBe("");
+    expect(r.error).toMatch(/authentication token is expired/);
+    expect(killed).toBe(true);
+    expect(eng.isAlive("jinn-auth-expired")).toBe(false);
+  });
+
+  it("treats an empty prompt completion as an error instead of silent success", async () => {
+    class EmptyResultEngine extends HermesAcpEngine {
+      protected spawnProc() {
+        const rpc = fakeServerEmptyPromptResult();
+        return { rpc, killProc: () => {}, isAliveProc: () => true, onExit: (_cb: () => void) => {}, onError: (_cb: (e: Error) => void) => {} };
+      }
+    }
+
+    const eng = new EmptyResultEngine();
+    const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-empty" });
+    expect(r.result).toBe("");
+    expect(r.error).toMatch(/no assistant text/);
   });
 });
