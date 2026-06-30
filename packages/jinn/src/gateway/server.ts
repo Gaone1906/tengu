@@ -24,7 +24,7 @@ import { HermesAcpEngine } from "../engines/hermes-acp.js";
 import { HermesInteractiveEngine } from "../engines/hermes-interactive.js";
 import type { PtyViewEngine } from "../engines/pty-view-engine.js";
 import { HookRegistry } from "./hook-registry.js";
-import { writeGatewayInfo, readGatewayInfo, updateGatewayPtyPids, staleGatewayPids } from "./gateway-info.js";
+import { writeGatewayInfo, readGatewayInfo, updateGatewayPtyPids, staleGatewayPids, gatewayBaseUrl } from "./gateway-info.js";
 import { authenticateGatewayRequest, authRequiredForRequest, ensureGatewayAuthToken, shouldRequireGatewayAuth, validateGatewayExposure } from "./auth.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
@@ -237,6 +237,15 @@ export async function startGateway(
   if (!exposure.ok) throw new Error(exposure.error);
   const gatewayAuthToken = ensureGatewayAuthToken(JINN_HOME);
   if (shouldRequireGatewayAuth(config)) logger.info("Gateway auth enabled for privileged API and WebSocket routes");
+
+  // Expose the auth token + base URL to spawned sessions. Every engine builds its
+  // child PTY env by spreading `process.env`, so an in-session agent inherits these
+  // and can dispatch/poll child sessions in one curl instead of hunting for the
+  // token. Same trust boundary as the 0600 gateway.json it already came from.
+  // gatewayBaseUrl maps a wildcard bind (0.0.0.0) to 127.0.0.1 and keeps a specific
+  // host as-is, so the URL is always reachable from the child.
+  process.env.JINN_GATEWAY_TOKEN = gatewayAuthToken;
+  process.env.JINN_GATEWAY_URL = gatewayBaseUrl({ port, host });
 
   // Normalize claude engine config (idempotent — loadConfig already normalized it)
   const claudeCfg = normalizeClaudeEngineConfig(config.engines.claude);

@@ -599,7 +599,7 @@ function buildKnowledgeContextUncached(): string | null {
 function buildConnectorContext(connectors: string[], gatewayUrl: string): string {
   return [
     `## Available connectors: ${connectors.join(", ")}`,
-    `Send a message: \`curl -X POST ${gatewayUrl}/api/connectors/<name>/send -H 'Content-Type: application/json' -d '{"channel":"CHANNEL_ID","text":"message"}'\` (add \`"thread":"THREAD_TS"\` for a threaded reply).`,
+    `Send a message: \`curl -X POST ${gatewayUrl}/api/connectors/<name>/send -H "Authorization: Bearer $JINN_GATEWAY_TOKEN" -H 'Content-Type: application/json' -d '{"channel":"CHANNEL_ID","text":"message"}'\` (add \`"thread":"THREAD_TS"\` for a threaded reply).`,
     `Channel IDs are in \`~/.jinn/config.yaml\`. You may send proactively (completed tasks, errors, status updates). Details: CLAUDE.md / AGENTS.md.`,
   ].join("\n");
 }
@@ -685,9 +685,10 @@ export function buildOnboardingContext(opts: {
  */
 function buildApiReference(gatewayUrl: string, portalName: string, employee?: Employee, directReportCount = 0): string {
   const header = `## ${portalName} Gateway API (base URL: ${gatewayUrl})`;
-  const authLine = `Privileged endpoints require local gateway auth; the web UI and built-in delegation tools handle this automatically.`;
+  const authLine =
+    `Privileged endpoints (everything below) require auth: add \`-H "Authorization: Bearer $JINN_GATEWAY_TOKEN"\`. Both \`$JINN_GATEWAY_TOKEN\` and \`$JINN_GATEWAY_URL\` (base URL) are already exported in your environment — use them directly. (The web UI authenticates via cookie instead.)`;
   const attachmentsLine =
-    `- Push a file/image into this chat (web view): \`curl -X POST ${gatewayUrl}/api/sessions/<your-session-id>/attachments -H 'Content-Type: application/json' -d '{"path":"/abs/path","text":"caption"}'\``;
+    `- Push a file/image into this chat (web view): \`curl -X POST "$JINN_GATEWAY_URL"/api/sessions/<your-session-id>/attachments -H "Authorization: Bearer $JINN_GATEWAY_TOKEN" -H 'Content-Type: application/json' -d '{"path":"/abs/path","text":"caption"}'\``;
   if (!employee) {
     return `${header}\n${authLine}\nThe full endpoint reference is in CLAUDE.md / AGENTS.md (auto-loaded). Substitute the base URL above.\n${attachmentsLine}`;
   }
@@ -696,10 +697,10 @@ function buildApiReference(gatewayUrl: string, portalName: string, employee?: Em
     return [
       header,
       authLine,
-      `- Delegate to another employee: \`POST ${gatewayUrl}/api/sessions\` with \`{prompt, employee, parentSessionId}\``,
-      `- Follow up on a child session: \`POST ${gatewayUrl}/api/sessions/:id/message\` with \`{message}\``,
-      `- Read a child's latest replies: \`GET ${gatewayUrl}/api/sessions/:id?last=N\``,
-      `- Valid \`employee\` values are the slugs in your chain of command, \`GET ${gatewayUrl}/api/org\`, or \`ls ${ORG_DIR}/\``,
+      `- Delegate to another employee: \`curl -X POST "$JINN_GATEWAY_URL"/api/sessions -H "Authorization: Bearer $JINN_GATEWAY_TOKEN" -H 'Content-Type: application/json' -d '{"prompt":"...","employee":"...","parentSessionId":"<your-id>"}'\``,
+      `- Follow up on a child session: \`POST "$JINN_GATEWAY_URL/api/sessions/:id/message"\` with \`{message}\` (same auth header)`,
+      `- Read a child's latest replies: \`GET "$JINN_GATEWAY_URL/api/sessions/:id?last=N"\` (same auth header)`,
+      `- Valid \`employee\` values are the slugs in your chain of command, \`GET "$JINN_GATEWAY_URL/api/org"\`, or \`ls ${ORG_DIR}/\``,
       attachmentsLine,
       `Full endpoint table: CLAUDE.md / AGENTS.md.`,
     ].join("\n");

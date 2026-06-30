@@ -286,6 +286,8 @@ Direct employee → user delivery is only acceptable for simple, no-review-neede
 
 The gateway base URL (host:port) is provided in your session context under "Current configuration". All endpoints below are relative to it. Call them with `curl`. In the examples below, replace `<gateway>` with that base URL.
 
+Privileged endpoints (everything except `/api/status`) require auth. Your environment already exports `$JINN_GATEWAY_TOKEN` and `$JINN_GATEWAY_URL`, so add `-H "Authorization: Bearer $JINN_GATEWAY_TOKEN"` to any privileged call — e.g. `curl -X POST "$JINN_GATEWAY_URL"/api/sessions -H "Authorization: Bearer $JINN_GATEWAY_TOKEN" -H 'Content-Type: application/json' -d '{...}'`. (The web UI authenticates via cookie instead.)
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/status` | GET | Gateway status, uptime, engine info |
