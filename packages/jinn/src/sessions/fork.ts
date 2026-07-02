@@ -5,7 +5,7 @@
  * - Codex: copies the JSONL session file with a new UUID
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -14,6 +14,7 @@ import { v4 as uuidv4 } from "uuid";
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import type { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
+import { HermesRpc } from "../engines/hermes-jsonrpc.js";
 
 export interface ForkResult {
   engineSessionId: string;
@@ -254,10 +255,78 @@ export function forkCodexSession(engineSessionId: string): ForkResult {
 }
 
 /**
+ * Fork a Hermes ACP session using Hermes's own `session/fork` primitive.
+ *
+ * This keeps Jinn's duplicate semantics aligned with Hermes itself: the new
+ * Jinn session points at a distinct Hermes session id whose transcript/history
+ * was copied by Hermes's SessionManager, rather than merely copying Jinn's
+ * registry rows or reusing the source Hermes id.
+ */
+export async function forkHermesSession(engineSessionId: string, cwd: string): Promise<ForkResult> {
+  logger.info(`Forking Hermes session ${engineSessionId} in ${cwd}`);
+
+  const bin = resolveBin("hermes");
+  const child: ChildProcess = spawn(bin, ["acp"], {
+    stdio: ["pipe", "pipe", "ignore"],
+    cwd,
+    detached: process.platform !== "win32",
+    env: { ...process.env, HERMES_YOLO_MODE: "1", HERMES_ACCEPT_HOOKS: "1" },
+  });
+
+  const rpc = new HermesRpc(child.stdin!, child.stdout!);
+  const failOnExit = new Promise<never>((_, reject) => {
+    child.once("error", (err) => reject(new Error(`Hermes ACP fork process error: ${err.message}`)));
+    child.once("exit", (code, signal) => reject(new Error(`Hermes ACP fork process exited before completing (code ${code ?? "null"}, signal ${signal ?? "null"})`)));
+  });
+
+  try {
+    const newId = await withTimeout(
+      Promise.race([
+        (async () => {
+          await rpc.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
+          const fork = await rpc.request<Record<string, unknown>>("session/fork", {
+            sessionId: engineSessionId,
+            cwd,
+            mcpServers: [],
+          });
+          const sessionId = fork.sessionId ? String(fork.sessionId) : "";
+          if (!sessionId) throw new Error("Hermes fork did not return a sessionId");
+          return sessionId;
+        })(),
+        failOnExit,
+      ]),
+      60_000,
+      "Hermes fork timed out",
+    );
+    logger.info(`Hermes fork successful: ${engineSessionId} → ${newId}`);
+    return { engineSessionId: newId };
+  } finally {
+    rpc.rejectAll(new Error("Hermes ACP fork process closed"));
+    try {
+      if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGTERM");
+      else child.kill("SIGTERM");
+    } catch {
+      try { child.kill("SIGTERM"); } catch { /* ignore */ }
+    }
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
  * Fork an engine session based on engine type.
  *
  * For Claude, the optional `interactive` ctx routes the fork through a PTY
- * (no `-p`) so it bills as `cc_entrypoint=cli`. Codex ignores it.
+ * (no `-p`) so it bills as `cc_entrypoint=cli`. Codex and Hermes ignore it.
  */
 export async function forkEngineSession(
   engine: string,
@@ -270,6 +339,8 @@ export async function forkEngineSession(
       return forkClaudeSession({ engineSessionId, cwd, interactive });
     case "codex":
       return forkCodexSession(engineSessionId);
+    case "hermes":
+      return forkHermesSession(engineSessionId, cwd);
     default:
       throw new Error(`Unsupported engine for fork: ${engine}`);
   }
