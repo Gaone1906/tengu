@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.24.0] - 2026-07-06
+
+### ✨ Features
+- **Seamless chat history paging.** Long chat sessions now hydrate the latest messages first, automatically load older history as you scroll upward, preserve scroll position while prepending, and lazy-load chat media/audio so large transcripts open faster.
+
+### 🐛 Fixes
+- **Jump-to-latest stays pinned and quiet.** The control now lives outside the scrollable transcript, animates in/out smoothly, uses a compact icon-only affordance, and no longer counts prepended history as unread.
+
 ## [0.23.6] - 2026-07-06
 
 ### 🐛 Fixes
