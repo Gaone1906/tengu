@@ -294,7 +294,22 @@ export const api = {
   /** Search across ALL sessions (title / employee / id), newest first. */
   searchSessions: (query: string) =>
     get<Record<string, unknown>[]>(`/api/sessions?q=${encodeURIComponent(query)}`),
-  getSession: (id: string) => get<Record<string, unknown>>(`/api/sessions/${id}`),
+  getSession: (id: string, options?: { last?: number; messages?: boolean }) => {
+    const params = new URLSearchParams()
+    if (options?.last) params.set("last", String(options.last))
+    if (options?.messages === false) params.set("messages", "0")
+    const query = params.toString()
+    return get<Record<string, unknown>>(`/api/sessions/${id}${query ? `?${query}` : ""}`)
+  },
+  getSessionMessages: (id: string, options: { before?: string; limit?: number }) => {
+    const params = new URLSearchParams()
+    if (options.before) params.set("before", options.before)
+    if (options.limit) params.set("limit", String(options.limit))
+    const query = params.toString()
+    return get<{ messages: Record<string, unknown>[]; hasOlder: boolean }>(
+      `/api/sessions/${id}/messages${query ? `?${query}` : ""}`,
+    )
+  },
   getSessionChildren: (id: string) => get<Record<string, unknown>[]>(`/api/sessions/${id}/children`),
   updateSession: (id: string, data: { title?: string; model?: string; effortLevel?: string }) =>
     put<Record<string, unknown>>(`/api/sessions/${id}`, data),

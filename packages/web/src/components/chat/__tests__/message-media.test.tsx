@@ -57,6 +57,14 @@ describe('MessageMedia image loading states', () => {
     expect(screen.queryByTestId('image-skeleton')).toBeNull()
   })
 
+  it('marks thumbnails for native lazy image decoding', () => {
+    render(<MessageMedia media={[mixed[0]]} isUser={false} />)
+
+    const img = screen.getByAltText('one.png') as HTMLImageElement
+    expect(img.getAttribute('loading')).toBe('lazy')
+    expect(img.getAttribute('decoding')).toBe('async')
+  })
+
   it('renders one skeleton per image in a multi-image grid', () => {
     render(<MessageMedia media={mixed} isUser={false} />)
     // 3 images → 3 skeletons before any load fires.

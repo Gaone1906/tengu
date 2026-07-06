@@ -47,6 +47,10 @@ const CREATE_MESSAGES_INDEX = `
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, timestamp)
 `;
 
+const CREATE_MESSAGES_ORDER_INDEX = `
+CREATE INDEX IF NOT EXISTS idx_messages_session_order ON messages (session_id, timestamp, seq)
+`;
+
 const CREATE_SESSION_KEY_INDEX = `
 CREATE INDEX IF NOT EXISTS idx_sessions_session_key ON sessions (session_key, last_activity)
 `;
@@ -158,6 +162,7 @@ export function initDb(): Database.Database {
   db.exec(CREATE_MESSAGES_INDEX);
   db.exec(CREATE_META_TABLE);
   migrateMessagesSchema(db);
+  db.exec(CREATE_MESSAGES_ORDER_INDEX);
   migrateFtsSchema(db);
   // Seed the FTS index for pre-existing rows synchronously at boot — BEFORE the
   // gateway serves any request. The AD/AU sync triggers issue an FTS `'delete'`
@@ -997,6 +1002,31 @@ export interface SessionMessage {
   blocks?: ChatBlock[];
 }
 
+interface MessageRow {
+  rowid: number;
+  id: string;
+  role: string;
+  content: string;
+  timestamp: number;
+  media: string | null;
+  partial: number | null;
+  seq: number | null;
+  tool_call: string | null;
+  blocks: string | null;
+}
+
+export interface MessagePage {
+  messages: SessionMessage[];
+  hasOlder: boolean;
+}
+
+export interface MessagePageOptions {
+  /** Fetch messages strictly older than this message id. Omit for the newest tail. */
+  before?: string;
+  /** Number of messages to return. Clamped to a bounded positive page size. */
+  limit?: number;
+}
+
 function parseMediaColumn(value: unknown): MessageMedia[] | undefined {
   if (typeof value !== 'string' || !value.trim()) return undefined;
   try {
@@ -1020,6 +1050,22 @@ function parseBlocksColumn(value: unknown): ChatBlock[] | undefined {
   } catch {
     return undefined;
   }
+}
+
+function rowToMessage(r: MessageRow): SessionMessage {
+  const msg: SessionMessage = { id: r.id, role: r.role, content: r.content, timestamp: r.timestamp };
+  const media = parseMediaColumn(r.media);
+  const blocks = parseBlocksColumn(r.blocks);
+  if (media) msg.media = media;
+  if (blocks) msg.blocks = blocks;
+  if (r.partial) msg.partial = true;
+  if (r.tool_call) msg.toolCall = r.tool_call;
+  return msg;
+}
+
+function normalizeMessagePageLimit(limit: number | undefined): number {
+  if (!Number.isFinite(limit) || !limit || limit < 1) return 100;
+  return Math.min(500, Math.max(1, Math.floor(limit)));
 }
 
 function blockFallbackCandidates(block: ChatBlock, fallbackText?: string): string[] {
@@ -1058,18 +1104,61 @@ export function insertMessage(sessionId: string, role: string, content: string, 
 export function getMessages(sessionId: string): SessionMessage[] {
   const db = initDb();
   const rows = db
-    .prepare('SELECT id, role, content, timestamp, media, partial, seq, tool_call, blocks FROM messages WHERE session_id = ? ORDER BY timestamp ASC, seq ASC')
-    .all(sessionId) as Array<{ id: string; role: string; content: string; timestamp: number; media: string | null; partial: number | null; seq: number | null; tool_call: string | null; blocks: string | null }>;
-  return rows.map((r) => {
-    const msg: SessionMessage = { id: r.id, role: r.role, content: r.content, timestamp: r.timestamp };
-    const media = parseMediaColumn(r.media);
-    const blocks = parseBlocksColumn(r.blocks);
-    if (media) msg.media = media;
-    if (blocks) msg.blocks = blocks;
-    if (r.partial) msg.partial = true;
-    if (r.tool_call) msg.toolCall = r.tool_call;
-    return msg;
-  });
+    .prepare('SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks FROM messages WHERE session_id = ? ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC')
+    .all(sessionId) as MessageRow[];
+  return rows.map(rowToMessage);
+}
+
+export function getMessagePage(sessionId: string, options: MessagePageOptions = {}): MessagePage {
+  const db = initDb();
+  const limit = normalizeMessagePageLimit(options.limit);
+  const pageLimit = limit + 1;
+  let rows: MessageRow[];
+
+  if (options.before) {
+    const cursor = db
+      .prepare('SELECT rowid, timestamp, COALESCE(seq, 0) AS seq_order FROM messages WHERE session_id = ? AND id = ?')
+      .get(sessionId, options.before) as { rowid: number; timestamp: number; seq_order: number } | undefined;
+    if (!cursor) return { messages: [], hasOlder: false };
+
+    rows = db
+      .prepare(`
+        SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks
+        FROM messages
+        WHERE session_id = ?
+          AND (
+            timestamp < ?
+            OR (timestamp = ? AND COALESCE(seq, 0) < ?)
+            OR (timestamp = ? AND COALESCE(seq, 0) = ? AND rowid < ?)
+          )
+        ORDER BY timestamp DESC, COALESCE(seq, 0) DESC, rowid DESC
+        LIMIT ?
+      `)
+      .all(
+        sessionId,
+        cursor.timestamp,
+        cursor.timestamp,
+        cursor.seq_order,
+        cursor.timestamp,
+        cursor.seq_order,
+        cursor.rowid,
+        pageLimit,
+      ) as MessageRow[];
+  } else {
+    rows = db
+      .prepare(`
+        SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks
+        FROM messages
+        WHERE session_id = ?
+        ORDER BY timestamp DESC, COALESCE(seq, 0) DESC, rowid DESC
+        LIMIT ?
+      `)
+      .all(sessionId, pageLimit) as MessageRow[];
+  }
+
+  const hasOlder = rows.length > limit;
+  const pageRows = (hasOlder ? rows.slice(0, limit) : rows).reverse();
+  return { messages: pageRows.map(rowToMessage), hasOlder };
 }
 
 export function applyBlockEnvelope(

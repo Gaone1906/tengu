@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Message } from '@/lib/conversations'
 import { parseMedia, stripAttachedFilesBlock } from '@/lib/conversations'
 import { MessageMedia } from './message-media'
@@ -732,7 +732,7 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
   }, [messages, i, isUser, isNotification])
 
   return (
-    <div key={msg.id || i}>
+    <div key={msg.id || i} data-message-id={msg.id || `idx-${i}`}>
       {/* Timestamp divider */}
       {showTimestamp && (
         <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
@@ -842,9 +842,22 @@ interface ChatMessagesProps {
   streamingText?: string
   /** Resend a prior user message (assistant action-row "retry"). */
   onRetry?: (text: string) => void
+  hasOlderMessages?: boolean
+  loadingOlderMessages?: boolean
+  olderMessagesError?: Error | null
+  onLoadOlderMessages?: () => Promise<void> | void
 }
 
 const JUMP_EXIT_MS = 140
+const OLDER_LOAD_THRESHOLD_PX = 900
+
+interface ScrollAnchor {
+  id: string | null
+  offset: number
+  scrollHeight: number
+  scrollTop: number
+  token: number
+}
 
 function JumpToLatestButton({
   show,
@@ -909,13 +922,110 @@ function JumpToLatestButton({
   )
 }
 
-export function ChatMessages({ messages, loading, streamingText, onRetry }: ChatMessagesProps) {
+function captureVisibleAnchor(node: HTMLDivElement, token: number): ScrollAnchor {
+  const containerRect = node.getBoundingClientRect()
+  const rows = Array.from(node.querySelectorAll<HTMLElement>('[data-message-id]'))
+  for (const row of rows) {
+    const rect = row.getBoundingClientRect()
+    if (rect.bottom >= containerRect.top && rect.top <= containerRect.bottom) {
+      return {
+        id: row.getAttribute('data-message-id'),
+        offset: rect.top - containerRect.top,
+        scrollHeight: node.scrollHeight,
+        scrollTop: node.scrollTop,
+        token,
+      }
+    }
+  }
+  return {
+    id: null,
+    offset: 0,
+    scrollHeight: node.scrollHeight,
+    scrollTop: node.scrollTop,
+    token,
+  }
+}
+
+function restoreVisibleAnchor(node: HTMLDivElement, anchor: ScrollAnchor) {
+  if (anchor.id) {
+    const target = Array.from(node.querySelectorAll<HTMLElement>('[data-message-id]'))
+      .find((row) => row.getAttribute('data-message-id') === anchor.id)
+    if (target) {
+      const containerRect = node.getBoundingClientRect()
+      const rect = target.getBoundingClientRect()
+      node.scrollTop += rect.top - containerRect.top - anchor.offset
+      return
+    }
+  }
+  node.scrollTop = anchor.scrollTop + (node.scrollHeight - anchor.scrollHeight)
+}
+
+export function ChatMessages({
+  messages,
+  loading,
+  streamingText,
+  onRetry,
+  hasOlderMessages = false,
+  loadingOlderMessages = false,
+  olderMessagesError = null,
+  onLoadOlderMessages,
+}: ChatMessagesProps) {
   // Stick-to-bottom: one hook owns follow-intent, growth-follow, resize/keyboard,
   // tab-return, mount-snap, and the jump affordance. See use-stick-to-bottom.ts.
   const { containerRef, showJump, unreadCount, scrollToBottom } = useStickToBottom({
     streamingText,
     messageCount: messages.length,
   })
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null)
+  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null)
+  const pendingAnchorRef = useRef<ScrollAnchor | null>(null)
+  const anchorTokenRef = useRef(0)
+  const olderRequestInFlightRef = useRef(false)
+  const setScrollContainerRef = useCallback((node: HTMLDivElement | null) => {
+    scrollContainerRef.current = node
+    setScrollEl(node)
+    containerRef(node)
+  }, [containerRef])
+
+  useEffect(() => {
+    olderRequestInFlightRef.current = loadingOlderMessages
+  }, [loadingOlderMessages])
+
+  const requestOlderMessages = useCallback(() => {
+    const node = scrollContainerRef.current
+    if (!node || !hasOlderMessages || !onLoadOlderMessages || olderRequestInFlightRef.current) return
+    const token = ++anchorTokenRef.current
+    pendingAnchorRef.current = captureVisibleAnchor(node, token)
+    olderRequestInFlightRef.current = true
+    Promise.resolve(onLoadOlderMessages())
+      .catch(() => { /* hook owns the visible error state */ })
+      .finally(() => {
+        olderRequestInFlightRef.current = false
+        requestAnimationFrame(() => {
+          if (pendingAnchorRef.current?.token !== token) return
+          const currentNode = scrollContainerRef.current
+          if (currentNode) restoreVisibleAnchor(currentNode, pendingAnchorRef.current)
+          if (pendingAnchorRef.current?.token === token) pendingAnchorRef.current = null
+        })
+      })
+  }, [hasOlderMessages, onLoadOlderMessages])
+
+  useEffect(() => {
+    if (!scrollEl) return
+    const onScroll = () => {
+      if (scrollEl.scrollTop <= OLDER_LOAD_THRESHOLD_PX) requestOlderMessages()
+    }
+    scrollEl.addEventListener('scroll', onScroll, { passive: true })
+    return () => scrollEl.removeEventListener('scroll', onScroll)
+  }, [requestOlderMessages, scrollEl])
+
+  useLayoutEffect(() => {
+    const anchor = pendingAnchorRef.current
+    const node = scrollContainerRef.current
+    if (!anchor || !node) return
+    restoreVisibleAnchor(node, anchor)
+    pendingAnchorRef.current = null
+  }, [messages])
 
   // Memoize grouped messages to avoid re-running on streaming-only re-renders
   const groupedMessages = useMemo(() => groupMessages(messages), [messages])
@@ -950,8 +1060,18 @@ export function ChatMessages({ messages, loading, streamingText, onRetry }: Chat
 
   return (
     <div className="relative flex-1 min-h-0 bg-[var(--bg)]">
-      <div ref={containerRef} style={{ overflowAnchor: 'auto' }} className="chat-messages-scroll h-full overflow-y-auto overflow-x-hidden bg-[var(--bg)] min-h-0">
+      <div ref={setScrollContainerRef} style={{ overflowAnchor: 'auto' }} className="chat-messages-scroll h-full overflow-y-auto overflow-x-hidden bg-[var(--bg)] min-h-0">
         <div className="mx-auto w-full max-w-[var(--chat-measure)] pt-[72px] pb-[var(--space-6)] lg:pt-[88px]">
+          {loadingOlderMessages && (
+            <div role="status" aria-label="Loading older messages" className="flex h-8 items-center justify-center">
+              <span className="size-3 rounded-full bg-[var(--fill-tertiary)] animate-[jinn-pulse_1.4s_infinite]" />
+            </div>
+          )}
+          {olderMessagesError && hasOlderMessages && (
+            <div className="flex h-8 items-center justify-center text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
+              Older messages could not load
+            </div>
+          )}
           {groupedMessages.map((item) => {
             if (item.kind === 'tool-group') {
               const firstMsg = item.msgs[0]
@@ -959,7 +1079,7 @@ export function ChatMessages({ messages, loading, streamingText, onRetry }: Chat
               const prevMsg = item.startIndex > 0 ? messages[item.startIndex - 1] : null
               const isActive = item.startIndex === activeToolGroupStart
               return (
-                <div key={`tg-${item.startIndex}`}>
+                <div key={`tg-${firstMsg.id || item.startIndex}`} data-message-id={firstMsg.id || `tg-${item.startIndex}`}>
                   {showTimestamp && (
                     <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
                       {formatTimestamp(firstMsg.timestamp)}

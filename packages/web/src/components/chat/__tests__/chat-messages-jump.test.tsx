@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { ChatMessages } from '../chat-messages'
 import type { Message } from '@/lib/conversations'
 
@@ -86,5 +86,84 @@ describe('ChatMessages jump affordance', () => {
 
     act(() => { vi.runAllTimers() })
     expect(document.querySelector('[data-state="exiting"]')).toBeNull()
+  })
+})
+
+describe('ChatMessages older history loading', () => {
+  it('loads older messages automatically near the top without exposing a top button', () => {
+    const onLoadOlderMessages = vi.fn()
+    render(
+      <ChatMessages
+        messages={messages}
+        loading={false}
+        hasOlderMessages
+        onLoadOlderMessages={onLoadOlderMessages}
+      />,
+    )
+
+    const scroller = document.querySelector('.chat-messages-scroll') as HTMLDivElement
+    Object.defineProperty(scroller, 'scrollTop', { value: 120, writable: true, configurable: true })
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2400, configurable: true })
+    Object.defineProperty(scroller, 'clientHeight', { value: 700, configurable: true })
+
+    fireEvent.scroll(scroller)
+
+    expect(onLoadOlderMessages).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: /load older/i })).toBeNull()
+  })
+
+  it('preserves the visible message position when older messages are prepended', () => {
+    const rects = new Map<string, { top: number; bottom: number }>()
+    const rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('chat-messages-scroll')) {
+        return { top: 0, bottom: 500, left: 0, right: 500, width: 500, height: 500, x: 0, y: 0, toJSON: () => ({}) }
+      }
+      const id = this.getAttribute('data-message-id')
+      const rect = id ? rects.get(id) : null
+      if (rect) {
+        return { ...rect, left: 0, right: 500, width: 500, height: rect.bottom - rect.top, x: 0, y: rect.top, toJSON: () => ({}) }
+      }
+      return { top: 900, bottom: 940, left: 0, right: 500, width: 500, height: 40, x: 0, y: 900, toJSON: () => ({}) }
+    })
+    const onLoadOlderMessages = vi.fn()
+    const initial: Message[] = [
+      { id: 'm3', role: 'assistant', content: 'three', timestamp: 3 },
+      { id: 'm4', role: 'assistant', content: 'four', timestamp: 4 },
+    ]
+    const older: Message[] = [
+      { id: 'm1', role: 'assistant', content: 'one', timestamp: 1 },
+      { id: 'm2', role: 'assistant', content: 'two', timestamp: 2 },
+      ...initial,
+    ]
+    rects.set('m3', { top: 40, bottom: 90 })
+    const { rerender } = render(
+      <ChatMessages
+        messages={initial}
+        loading={false}
+        hasOlderMessages
+        onLoadOlderMessages={onLoadOlderMessages}
+      />,
+    )
+
+    const scroller = document.querySelector('.chat-messages-scroll') as HTMLDivElement
+    Object.defineProperty(scroller, 'scrollTop', { value: 120, writable: true, configurable: true })
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2000, writable: true, configurable: true })
+    Object.defineProperty(scroller, 'clientHeight', { value: 700, configurable: true })
+
+    fireEvent.scroll(scroller)
+
+    rects.set('m3', { top: 640, bottom: 690 })
+    Object.defineProperty(scroller, 'scrollHeight', { value: 2600, writable: true, configurable: true })
+    rerender(
+      <ChatMessages
+        messages={older}
+        loading={false}
+        hasOlderMessages={false}
+        onLoadOlderMessages={onLoadOlderMessages}
+      />,
+    )
+
+    expect(scroller.scrollTop).toBe(720)
+    rectSpy.mockRestore()
   })
 })

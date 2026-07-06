@@ -152,6 +152,10 @@ export function ChatPane({
     session: currentSession,
     liveContextTokens,
     backgroundActivity,
+    hasOlderMessages,
+    loadingOlderMessages,
+    olderMessagesError,
+    loadOlderMessages,
     beginSend,
     failSend,
     appendLocal,
@@ -522,7 +526,16 @@ export function ChatPane({
           <CliTerminal ref={cliTerminalRef} sessionId={sessionId} />
         </Suspense>
       ) : !showSessionHydration && (sessionId || messages.length > 0) ? (
-        <ChatMessages messages={messages} loading={loading} streamingText={streamingText} onRetry={(t) => void handleSend(t)} />
+        <ChatMessages
+          messages={messages}
+          loading={loading}
+          streamingText={streamingText}
+          onRetry={(t) => void handleSend(t)}
+          hasOlderMessages={hasOlderMessages}
+          loadingOlderMessages={loadingOlderMessages}
+          olderMessagesError={olderMessagesError}
+          onLoadOlderMessages={loadOlderMessages}
+        />
       ) : null}
 
       {/* Queue panel — hidden in the live xterm view (noise on top of the PTY). */}

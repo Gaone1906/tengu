@@ -32,6 +32,7 @@ import {
   deletePartialMessages,
   finalizePartialMessages,
   getMessages,
+  getMessagePage,
   enqueueQueueItem,
   cancelQueueItem,
   getQueueItems,
@@ -113,6 +114,12 @@ const AUTH_BODY_MAX_BYTES = 16 * 1024;
 const SESSION_LIST_PER_GROUP = 50;
 const BACKGROUND_ACTIVITY_STALE_MS = 5 * 60 * 1000;
 const SUPERSEDED_TURN_META_KEY = "supersededRunningTurnAt";
+
+function parseMessageLimit(value: string | null, fallback: number): number {
+  const parsed = Number.parseInt(value || "", 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return Math.min(500, parsed);
+}
 
 function scopeBlockEnvelopeForTurn(envelope: ChatBlockEnvelope, turnStartedAt: number): ChatBlockEnvelope {
   const suffix = `t${turnStartedAt.toString(36)}`;
@@ -814,20 +821,39 @@ export async function handleApiRequest(
       return json(res, interrupted.map((session) => serializeSession(session, context)));
     }
 
-    // GET /api/sessions/:id
-    let params = matchRoute("/api/sessions/:id", pathname);
+    // GET /api/sessions/:id/messages?before=<messageId>&limit=N
+    // Bounded older-history page for seamless transcript prepending in the web UI.
+    let params = matchRoute("/api/sessions/:id/messages", pathname);
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      let messages = getMessages(params.id);
+      const limit = parseMessageLimit(url.searchParams.get("limit"), 100);
+      const before = url.searchParams.get("before") || undefined;
+      const page = getMessagePage(params.id, { before, limit });
+      return json(res, page);
+    }
+
+    // GET /api/sessions/:id
+    params = matchRoute("/api/sessions/:id", pathname);
+    if (method === "GET" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      const includeMessages = url.searchParams.get("messages") !== "0";
+      const lastN = parseMessageLimit(url.searchParams.get("last"), 0);
+      const page = includeMessages && lastN > 0
+        ? getMessagePage(params.id, { limit: lastN })
+        : null;
+      const messages = includeMessages
+        ? page ? page.messages : getMessages(params.id)
+        : [];
 
       // Backfill from Claude Code's JSONL transcript if our DB has no messages.
       // Run async + transactional so the GET doesn't block on multi-MB JSONL
       // parsing + N individual INSERTs. Subsequent GETs will see the messages
       // once the backfill finishes; this one returns whatever is in DB now.
-      if (messages.length === 0 && session.engineSessionId) {
+      if (includeMessages && messages.length === 0 && session.engineSessionId) {
         scheduleTranscriptBackfill(params.id, session.engineSessionId, context);
-      } else if (session.engine === "claude") {
+      } else if (includeMessages && session.engine === "claude") {
         // On-load safety net for PTY-native (CLI-typed) turns whose unclaimed
         // Stop was missed entirely: fire-and-forget a transcript tail sync.
         // Cheap (one stat() in the common case) and never delays this GET —
@@ -835,13 +861,11 @@ export async function handleApiRequest(
         scheduleOnLoadTailSync(params.id, context.emit);
       }
 
-      // Support ?last=N to return only the N most recent messages
-      const lastN = parseInt(url.searchParams.get("last") || "0", 10);
-      if (lastN > 0 && messages.length > lastN) {
-        messages = messages.slice(-lastN);
-      }
-
-      return json(res, { ...serializeSession(session, context), messages });
+      return json(res, {
+        ...serializeSession(session, context),
+        ...(includeMessages ? { messages } : {}),
+        ...(page ? { messagesPage: { hasOlder: page.hasOlder } } : {}),
+      });
     }
 
     // PUT|PATCH /api/sessions/:id — update title and/or mid-chat model/effort

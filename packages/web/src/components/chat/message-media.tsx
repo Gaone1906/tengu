@@ -52,6 +52,8 @@ function LoadingImage({
       <img
         src={src}
         alt={alt}
+        loading="lazy"
+        decoding="async"
         onLoad={() => setStatus('loaded')}
         onError={() => setStatus('error')}
         className={cn(
@@ -127,6 +129,7 @@ function ImageLightbox({
       <img
         src={url}
         alt={name || 'Image'}
+        decoding="async"
         onClick={(e) => e.stopPropagation()}
         className="max-h-full max-w-full rounded-[var(--radius-md)] object-contain"
       />

@@ -10,12 +10,36 @@ interface VoiceMessageProps {
 
 export function VoiceMessage({ src, duration, waveform, isUser }: VoiceMessageProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const listenersRef = useRef<{
+    onTimeUpdate: () => void
+    onEnded: () => void
+    onPause: () => void
+    onPlay: () => void
+  } | null>(null)
   const [playing, setPlaying] = useState(false)
   const [progress, setProgress] = useState(0) // 0-1
   const [currentTime, setCurrentTime] = useState(0)
 
-  useEffect(() => {
+  const cleanupAudio = useCallback(() => {
+    const audio = audioRef.current
+    const listeners = listenersRef.current
+    if (!audio) return
+    if (listeners) {
+      audio.removeEventListener('timeupdate', listeners.onTimeUpdate)
+      audio.removeEventListener('ended', listeners.onEnded)
+      audio.removeEventListener('pause', listeners.onPause)
+      audio.removeEventListener('play', listeners.onPlay)
+    }
+    audio.pause()
+    audio.src = ''
+    audioRef.current = null
+    listenersRef.current = null
+  }, [])
+
+  const ensureAudio = useCallback(() => {
+    if (audioRef.current) return audioRef.current
     const audio = new Audio(src)
+    audio.preload = 'none'
     audioRef.current = audio
 
     const onTimeUpdate = () => {
@@ -36,26 +60,21 @@ export function VoiceMessage({ src, duration, waveform, isUser }: VoiceMessagePr
     audio.addEventListener('ended', onEnded)
     audio.addEventListener('pause', onPause)
     audio.addEventListener('play', onPlay)
+    listenersRef.current = { onTimeUpdate, onEnded, onPause, onPlay }
 
-    return () => {
-      audio.removeEventListener('timeupdate', onTimeUpdate)
-      audio.removeEventListener('ended', onEnded)
-      audio.removeEventListener('pause', onPause)
-      audio.removeEventListener('play', onPlay)
-      audio.pause()
-      audio.src = ''
-    }
+    return audio
   }, [src])
 
+  useEffect(() => cleanupAudio, [cleanupAudio, src])
+
   const toggle = useCallback(() => {
-    const audio = audioRef.current
-    if (!audio) return
     if (playing) {
-      audio.pause()
+      audioRef.current?.pause()
     } else {
+      const audio = ensureAudio()
       audio.play().catch(() => {})
     }
-  }, [playing])
+  }, [ensureAudio, playing])
 
   const bars = waveform.length > 0 ? waveform : Array(50).fill(0.1)
   const displayTime = playing ? currentTime : duration

@@ -9,7 +9,13 @@ import { renderHook, act } from "@testing-library/react"
 
 // Mock the API module the hook loads sessions through.
 const getSession = vi.fn()
-vi.mock("@/lib/api", () => ({ api: { getSession: (id: string) => getSession(id) } }))
+const getSessionMessages = vi.fn()
+vi.mock("@/lib/api", () => ({
+  api: {
+    getSession: (id: string, options?: unknown) => getSession(id, options),
+    getSessionMessages: (id: string, options: unknown) => getSessionMessages(id, options),
+  },
+}))
 
 import {
   __cacheLiveSessionSnapshotForTests,
@@ -33,10 +39,64 @@ function makeBus() {
 
 beforeEach(() => {
   getSession.mockReset()
+  getSessionMessages.mockReset()
   __clearLiveSessionSnapshotCacheForTests()
 })
 
 describe("useLiveSession (read-only)", () => {
+  it("loads only the session tail on initial hydration and tracks older availability", async () => {
+    getSession.mockResolvedValue({
+      status: "idle",
+      messages: [
+        { id: "m3", role: "assistant", content: "three", timestamp: 3 },
+        { id: "m4", role: "assistant", content: "four", timestamp: 4 },
+      ],
+      messagesPage: { hasOlder: true },
+    })
+    const { subscribe } = makeBus()
+    const { result } = renderHook(() =>
+      useLiveSession("s1", { subscribe, readOnly: true }),
+    )
+
+    await act(async () => { await Promise.resolve() })
+
+    expect(getSession).toHaveBeenCalledWith("s1", { last: 150 })
+    expect(result.current.messages.map((m) => m.content)).toEqual(["three", "four"])
+    expect(result.current.hasOlderMessages).toBe(true)
+  })
+
+  it("prepends older pages and dedupes the cursor message", async () => {
+    getSession.mockResolvedValue({
+      status: "idle",
+      messages: [
+        { id: "m3", role: "assistant", content: "three", timestamp: 3 },
+        { id: "m4", role: "assistant", content: "four", timestamp: 4 },
+      ],
+      messagesPage: { hasOlder: true },
+    })
+    getSessionMessages.mockResolvedValue({
+      messages: [
+        { id: "m1", role: "assistant", content: "one", timestamp: 1 },
+        { id: "m2", role: "assistant", content: "two", timestamp: 2 },
+        { id: "m3", role: "assistant", content: "three", timestamp: 3 },
+      ],
+      hasOlder: false,
+    })
+    const { subscribe } = makeBus()
+    const { result } = renderHook(() =>
+      useLiveSession("s1", { subscribe, readOnly: true }),
+    )
+    await act(async () => { await Promise.resolve() })
+
+    await act(async () => {
+      await result.current.loadOlderMessages()
+    })
+
+    expect(getSessionMessages).toHaveBeenCalledWith("s1", { before: "m3", limit: 100 })
+    expect(result.current.messages.map((m) => m.content)).toEqual(["one", "two", "three", "four"])
+    expect(result.current.hasOlderMessages).toBe(false)
+  })
+
   it("loads history and seeds loading from running state", async () => {
     getSession.mockResolvedValue({
       status: "running",

@@ -35,6 +35,8 @@ type Listener = (event: string, payload: unknown) => void
  *  this long, assume the session:completed frame was dropped and reconcile from
  *  the server to clear a stuck spinner. */
 export const COMPLETION_WATCHDOG_MS = 8000
+const INITIAL_MESSAGE_PAGE_SIZE = 150
+const OLDER_MESSAGE_PAGE_SIZE = 100
 
 /** Decide whether the post-reconnect watchdog should treat the turn as stuck
  *  (i.e. recover from a dropped completion). Pure for testing. */
@@ -101,8 +103,16 @@ export interface UseLiveSessionResult {
    *  session is officially idle. null = none. Seeded from the session fetch,
    *  kept live via the session:background WS event. */
   backgroundActivity: BackgroundActivity | null
+  /** Whether the server has older history before the first loaded message. */
+  hasOlderMessages: boolean
+  /** True while an older history page is being prepended. */
+  loadingOlderMessages: boolean
+  /** Set when loading older history fails. */
+  olderMessagesError: Error | null
   /** Re-load (reconcile) a session from the server. */
   reload: (id: string) => Promise<void>
+  /** Load and prepend the next older message page. */
+  loadOlderMessages: () => Promise<void>
   // --- write API (editable pane only) ---
   /** Optimistically append the user message + arm loading for a send. */
   beginSend: (userMsg: Message) => void
@@ -124,6 +134,7 @@ interface LiveSessionSnapshot {
   session: Record<string, unknown> | null
   liveContextTokens: number | null
   backgroundActivity: BackgroundActivity | null
+  hasOlderMessages?: boolean
   updatedAt: number
 }
 
@@ -180,6 +191,69 @@ function writeLiveSessionSnapshot(id: string, input: SnapshotInput) {
   pruneLiveSessionSnapshotCache()
 }
 
+function normalizeHistoryMessages(history: unknown): { messages: Message[]; firstPartialIndex: number } {
+  const rows = Array.isArray(history) ? history as Record<string, unknown>[] : []
+  const firstPartialIndex = rows.findIndex((m) => m.partial === true)
+  const messages = rows.map((m) => {
+    const blocks = Array.isArray(m.blocks) ? m.blocks.filter(isChatBlock) : []
+    return {
+      id: typeof m.id === 'string' ? m.id : crypto.randomUUID(),
+      role: (m.role as 'user' | 'assistant' | 'notification') || 'assistant',
+      content: String(m.content || m.text || ''),
+      timestamp: m.timestamp ? Number(m.timestamp) : Date.now(),
+      ...(typeof m.toolCall === 'string' && m.toolCall ? { toolCall: m.toolCall } : {}),
+      ...(typeof m.toolId === 'string' && m.toolId ? { toolId: m.toolId } : {}),
+      ...(Array.isArray(m.media) && m.media.length > 0
+        ? { media: m.media as MediaAttachment[] }
+        : {}),
+      ...(blocks.length > 0
+        ? { blocks }
+        : {}),
+    } satisfies Message
+  })
+  return { messages, firstPartialIndex }
+}
+
+function readHasOlderMessages(payload: Record<string, unknown>): boolean {
+  const page = payload.messagesPage
+  return Boolean(page && typeof page === 'object' && !Array.isArray(page) && (page as { hasOlder?: unknown }).hasOlder === true)
+}
+
+function mergeOlderMessages(older: Message[], current: Message[]): Message[] {
+  if (older.length === 0) return current
+  const seen = new Set<string>()
+  const merged: Message[] = []
+  for (const message of [...older, ...current]) {
+    if (message.id && seen.has(message.id)) continue
+    if (message.id) seen.add(message.id)
+    merged.push(message)
+  }
+  return merged
+}
+
+function mergePagedSnapshot(current: Message[], snapshot: Message[], preserveOlderLoaded: boolean): Message[] {
+  const reconciled = reconcileMessages(current, snapshot)
+  if (!preserveOlderLoaded || snapshot.length === 0) return reconciled
+  const ids = new Set(reconciled.map((m) => m.id))
+  const firstSnapshot = snapshot[0]
+  const olderLoaded = current.filter((m) =>
+    !ids.has(m.id) &&
+    m.timestamp <= firstSnapshot.timestamp,
+  )
+  return mergeOlderMessages(olderLoaded, reconciled)
+}
+
+function hasUnmergedLocalTail(current: Message[], snapshot: Message[]): boolean {
+  if (snapshot.length === 0) return current.length > 0
+  const snapshotIds = new Set(snapshot.map((m) => m.id))
+  const lastSnapshot = snapshot[snapshot.length - 1]
+  return current.some((m) =>
+    !snapshotIds.has(m.id) &&
+    m.timestamp >= lastSnapshot.timestamp &&
+    !(m.media && m.media.length > 0),
+  )
+}
+
 export function __clearLiveSessionSnapshotCacheForTests() {
   liveSessionSnapshotCache.clear()
 }
@@ -219,6 +293,9 @@ export function useLiveSession(
   const [streamingText, setStreamingText] = useState(initialSnapshot?.streamingText ?? '')
   const [liveContextTokens, setLiveContextTokens] = useState<number | null>(initialSnapshot?.liveContextTokens ?? null)
   const [backgroundActivity, setBackgroundActivity] = useState<BackgroundActivity | null>(initialSnapshot?.backgroundActivity ?? null)
+  const [hasOlderMessages, setHasOlderMessages] = useState<boolean>(() => initialSnapshot?.hasOlderMessages === true)
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false)
+  const [olderMessagesError, setOlderMessagesError] = useState<Error | null>(null)
   const intermediateStartRef = useRef<number>(-1)
   const statusMessageIdRef = useRef<string | null>(null)
   const [currentSession, setCurrentSession] = useState<Record<string, unknown> | null>(initialSnapshot?.session ?? null)
@@ -226,6 +303,12 @@ export function useLiveSession(
   const sessionIdRef = useRef(sessionId)
   const justCompletedAtRef = useRef<number>(0)
   const loadTokenRef = useRef(0)
+  const messagesRef = useRef<Message[]>(messages)
+  const hasOlderMessagesRef = useRef(hasOlderMessages)
+  const loadingOlderMessagesRef = useRef(false)
+
+  useEffect(() => { messagesRef.current = messages }, [messages])
+  useEffect(() => { hasOlderMessagesRef.current = hasOlderMessages }, [hasOlderMessages])
 
   const readOnlyRef = useRef(readOnly)
   useEffect(() => { readOnlyRef.current = readOnly }, [readOnly])
@@ -503,7 +586,7 @@ export function useLiveSession(
         // manual reload. Light getSession only — does NOT touch messages (we just
         // set them above; loadSession would re-reconcile and could flicker).
         if (completedSessionId && completedSessionId === sid) {
-          api.getSession(completedSessionId)
+          api.getSession(completedSessionId, { messages: false })
             .then((s) => setCurrentSession(s as Record<string, unknown>))
             .catch(() => { /* best-effort; next load will pick it up */ })
         }
@@ -530,12 +613,14 @@ export function useLiveSession(
     setLoadError(null) // fresh attempt
     if (!options?.suppressHydrating && !readLiveSessionSnapshot(id)) setHydrating(true)
     try {
-      const session = (await api.getSession(id)) as Record<string, unknown>
+      const session = (await api.getSession(id, { last: INITIAL_MESSAGE_PAGE_SIZE })) as Record<string, unknown>
       if (myToken !== loadTokenRef.current) {
         return
       }
       setHydrating(false)
       setCurrentSession(session)
+      setHasOlderMessages(readHasOlderMessages(session))
+      setOlderMessagesError(null)
       // Seed background-activity from the authoritative fetch (absent → null);
       // session:background WS events keep it live from here.
       setBackgroundActivity((session.backgroundActivity as BackgroundActivity | null) ?? null)
@@ -549,32 +634,8 @@ export function useLiveSession(
       onMetaRef.current?.(meta)
 
       const history = session.messages || session.history || []
-      const firstPartialIndex = Array.isArray(history)
-        ? history.findIndex((m: Record<string, unknown>) => m.partial === true)
-        : -1
-      const backendMessages: Message[] = Array.isArray(history)
-        ? history.map((m: Record<string, unknown>) => {
-          const blocks = Array.isArray(m.blocks) ? m.blocks.filter(isChatBlock) : []
-          return {
-            // Preserve the server's stable message id so live-pushed messages
-            // (e.g. attachments) merge/dedupe by id instead of duplicating.
-            id: typeof m.id === 'string' ? m.id : crypto.randomUUID(),
-            role: (m.role as 'user' | 'assistant' | 'notification') || 'assistant',
-            content: String(m.content || m.text || ''),
-            timestamp: m.timestamp ? Number(m.timestamp) : Date.now(),
-            // A persisted mid-turn tool block carries its tool name so it renders as
-            // a tool card on reload, matching the live stream.
-            ...(typeof m.toolCall === 'string' && m.toolCall ? { toolCall: m.toolCall } : {}),
-            ...(typeof m.toolId === 'string' && m.toolId ? { toolId: m.toolId } : {}),
-            ...(Array.isArray(m.media) && m.media.length > 0
-              ? { media: m.media as MediaAttachment[] }
-              : {}),
-            ...(blocks.length > 0
-              ? { blocks }
-              : {}),
-          }
-        })
-        : []
+      const { messages: backendMessages, firstPartialIndex } = normalizeHistoryMessages(history)
+      const isPagedHistory = Boolean(session.messagesPage && typeof session.messagesPage === 'object')
       if (session.status === 'error' && session.lastError) {
         const lastMessage = backendMessages[backendMessages.length - 1]
         const errorText = `Error: ${String(session.lastError)}`
@@ -613,14 +674,13 @@ export function useLiveSession(
         // what makes a mid-turn refresh restore the streamed blocks on any device.
         intermediateStartRef.current = firstPartialIndex >= 0 ? firstPartialIndex : backendMessages.length
         setMessages((current) => {
-          // If backend has FEWER messages than local, the backend snapshot is stale —
-          // local already contains newer live blocks the server hasn't flushed yet (or
-          // a stale-snapshot race during slow GET). Keep current.
-          if (backendMessages.length < current.length) {
+          // If the tail snapshot is stale and misses newer live rows, keep current.
+          // Older already-loaded rows are still preserved by mergePagedSnapshot.
+          if (backendMessages.length < current.length && hasUnmergedLocalTail(current, backendMessages)) {
             return current
           }
           const next = backendMessages.length > 0 ? backendMessages : current
-          return reconcileMessages(current, next)
+          return mergePagedSnapshot(current, next, isPagedHistory)
         })
         // Loading state is owned by handleSend (sets true) + WS session:completed/stopped (sets false).
         // loadSession must NEVER set loading=true — a stale GET arriving after completion would
@@ -638,16 +698,17 @@ export function useLiveSession(
         if (!readOnlyRef.current) clearIntermediateMessages(id)
         intermediateStartRef.current = -1
         setMessages((current) => {
-          // If backend has FEWER messages than local, the backend snapshot is stale —
-          // local already contains streaming-completed messages not yet persisted.
-          // Exception: if local was still in-flight (cached loading/streaming/partial
-          // rows) and the server is now idle, the shorter backend is the canonical
-          // collapsed history and must replace the stale mid-turn cache.
-          if (backendMessages.length < current.length && !hadLocalInFlightState) {
+          // If a stale tail misses locally-known newer rows, keep them; if the local
+          // state was mid-turn, the idle backend snapshot is canonical collapse.
+          if (
+            backendMessages.length < current.length &&
+            !hadLocalInFlightState &&
+            hasUnmergedLocalTail(current, backendMessages)
+          ) {
             return current
           }
           const next = backendMessages.length > 0 ? backendMessages : current
-          return reconcileMessages(current, next)
+          return mergePagedSnapshot(current, next, isPagedHistory)
         })
       }
     } catch (err) {
@@ -655,6 +716,7 @@ export function useLiveSession(
       setHydrating(false)
       setMessages([])
       setCurrentSession(null)
+      setHasOlderMessages(false)
       intermediateStartRef.current = -1
       setLoadError(err instanceof Error ? err : new Error("Failed to load session"))
     }
@@ -669,6 +731,10 @@ export function useLiveSession(
       setCurrentSession(null)
       setLoadError(null)
       setBackgroundActivity(null)
+      setHasOlderMessages(false)
+      setLoadingOlderMessages(false)
+      loadingOlderMessagesRef.current = false
+      setOlderMessagesError(null)
       statusMessageIdRef.current = null
       streamingTextRef.current = ''
       setStreamingText('')
@@ -684,6 +750,10 @@ export function useLiveSession(
       setLoadError(null)
       setLiveContextTokens(cached.liveContextTokens)
       setBackgroundActivity(cached.backgroundActivity)
+      setHasOlderMessages(cached.hasOlderMessages === true)
+      setLoadingOlderMessages(false)
+      loadingOlderMessagesRef.current = false
+      setOlderMessagesError(null)
       streamingTextRef.current = cached.streamingText
       setStreamingText(cached.streamingText)
       setHydrating(false)
@@ -694,6 +764,10 @@ export function useLiveSession(
       setLoadError(null)
       setLiveContextTokens(null)
       setBackgroundActivity(null)
+      setHasOlderMessages(false)
+      setLoadingOlderMessages(false)
+      loadingOlderMessagesRef.current = false
+      setOlderMessagesError(null)
       streamingTextRef.current = ''
       setStreamingText('')
       setHydrating(false)
@@ -703,6 +777,10 @@ export function useLiveSession(
       setCurrentSession(null)
       setLoadError(null)
       setLiveContextTokens(null)
+      setHasOlderMessages(false)
+      setLoadingOlderMessages(false)
+      loadingOlderMessagesRef.current = false
+      setOlderMessagesError(null)
       setHydrating(true)
     }
     // Don't carry the previous session's background indicator across a switch;
@@ -755,7 +833,7 @@ export function useLiveSession(
       if (!loadingRef.current) return
       if (Date.now() - lastDeltaAtRef.current < COMPLETION_WATCHDOG_MS) return // still actively streaming
       try {
-        const session = (await api.getSession(id)) as Record<string, unknown>
+        const session = (await api.getSession(id, { messages: false })) as Record<string, unknown>
         if (shouldRecoverStuckTurn({
           loading: loadingRef.current,
           msSinceLastDelta: Date.now() - lastDeltaAtRef.current,
@@ -789,7 +867,7 @@ export function useLiveSession(
       const currentId = sessionIdRef.current
       if (!currentId) return
       try {
-        const session = (await api.getSession(currentId)) as Record<string, unknown>
+        const session = (await api.getSession(currentId, { messages: false })) as Record<string, unknown>
         if (session.status !== 'running') {
           setLoading(false)
           streamingTextRef.current = ''
@@ -835,12 +913,38 @@ export function useLiveSession(
     setMessages((prev) => [...prev, msg])
   }, [])
 
+  const loadOlderMessages = useCallback(async () => {
+    const id = sessionIdRef.current
+    if (!id || !hasOlderMessagesRef.current || loadingOlderMessagesRef.current) return
+    const before = messagesRef.current[0]?.id
+    if (!before) return
+
+    loadingOlderMessagesRef.current = true
+    setLoadingOlderMessages(true)
+    setOlderMessagesError(null)
+    try {
+      const page = await api.getSessionMessages(id, { before, limit: OLDER_MESSAGE_PAGE_SIZE })
+      const { messages: olderMessages } = normalizeHistoryMessages(page.messages || [])
+      setMessages((current) => mergeOlderMessages(olderMessages, current))
+      setHasOlderMessages(page.hasOlder === true)
+    } catch (err) {
+      setOlderMessagesError(err instanceof Error ? err : new Error("Failed to load older messages"))
+    } finally {
+      loadingOlderMessagesRef.current = false
+      setLoadingOlderMessages(false)
+    }
+  }, [])
+
   const reset = useCallback(() => {
     setMessages([])
     setLoading(false)
     setHydrating(false)
     setCurrentSession(null)
     setBackgroundActivity(null)
+    setHasOlderMessages(false)
+    setLoadingOlderMessages(false)
+    loadingOlderMessagesRef.current = false
+    setOlderMessagesError(null)
     streamingTextRef.current = ''
     setStreamingText('')
     intermediateStartRef.current = -1
@@ -855,8 +959,9 @@ export function useLiveSession(
       session: currentSession,
       liveContextTokens,
       backgroundActivity,
+      hasOlderMessages,
     })
-  }, [sessionId, messages, streamingText, loading, currentSession, liveContextTokens, backgroundActivity])
+  }, [sessionId, messages, streamingText, loading, currentSession, liveContextTokens, backgroundActivity, hasOlderMessages])
 
   return {
     messages,
@@ -867,7 +972,11 @@ export function useLiveSession(
     error: loadError,
     liveContextTokens,
     backgroundActivity,
+    hasOlderMessages,
+    loadingOlderMessages,
+    olderMessagesError,
     reload: loadSession,
+    loadOlderMessages,
     beginSend,
     failSend,
     appendLocal,
