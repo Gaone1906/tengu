@@ -188,6 +188,19 @@ export function useStickToBottom({
     return () => ro.disconnect()
   }, [el, pinNow])
 
+  // ── Rendered content growth: image/media decode can change scrollHeight without
+  // changing messageCount or streamingText. Keep following users truly pinned.
+  useEffect(() => {
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const content = el.firstElementChild
+    if (!(content instanceof Element)) return
+    const ro = new ResizeObserver(() => {
+      if (followRef.current && elRef.current) pinNow(elRef.current)
+    })
+    ro.observe(content)
+    return () => ro.disconnect()
+  }, [el, pinNow])
+
   // ── Tab return: re-sync (rAF is throttled in background tabs, so don't rely on it). ──
   useEffect(() => {
     const resync = () => {

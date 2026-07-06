@@ -844,6 +844,71 @@ interface ChatMessagesProps {
   onRetry?: (text: string) => void
 }
 
+const JUMP_EXIT_MS = 140
+
+function JumpToLatestButton({
+  show,
+  unreadCount,
+  onClick,
+}: {
+  show: boolean
+  unreadCount: number
+  onClick: () => void
+}) {
+  const [rendered, setRendered] = useState(show)
+  const [exiting, setExiting] = useState(false)
+  const reducedMotion = usePrefersReducedMotion()
+  const hasUnread = unreadCount > 0
+  const visibleUnread = unreadCount > 99 ? '99+' : String(unreadCount)
+  const label = hasUnread
+    ? `Jump to latest, ${unreadCount} new message${unreadCount === 1 ? '' : 's'}`
+    : 'Jump to latest'
+
+  useEffect(() => {
+    if (show) {
+      setRendered(true)
+      setExiting(false)
+      return
+    }
+    if (!rendered) return
+
+    setExiting(true)
+    const timer = window.setTimeout(() => {
+      setRendered(false)
+      setExiting(false)
+    }, reducedMotion ? 1 : JUMP_EXIT_MS)
+    return () => window.clearTimeout(timer)
+  }, [show, reducedMotion, rendered])
+
+  if (!rendered) return null
+
+  const motionClass = reducedMotion
+    ? 'data-[state=exiting]:opacity-0 data-[state=visible]:opacity-100'
+    : 'data-[state=exiting]:animate-[jinn-jump-out_140ms_var(--ease-snappy)_both] data-[state=visible]:animate-[jinn-jump-in_160ms_var(--ease-smooth)_both]'
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      aria-hidden={exiting ? true : undefined}
+      tabIndex={exiting ? -1 : undefined}
+      data-state={exiting ? 'exiting' : 'visible'}
+      className={`absolute bottom-4 left-1/2 z-10 inline-flex h-10 w-10 -translate-x-1/2 cursor-pointer items-center justify-center rounded-full bg-[var(--material-thick)] px-0 text-[var(--text-secondary)] shadow-[var(--shadow-overlay)] backdrop-blur-md transition-[background-color,transform,opacity] duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-secondary)] active:scale-[0.96] data-[state=exiting]:pointer-events-none ${motionClass}`}
+    >
+      <ChevronDown size={18} strokeWidth={2.25} aria-hidden="true" className="-mb-px shrink-0" />
+      {hasUnread && (
+        <span
+          aria-hidden="true"
+          className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[9px] font-[var(--weight-semibold)] leading-none text-[var(--accent-contrast)] shadow-[var(--shadow-subtle)] tabular-nums"
+        >
+          {visibleUnread}
+        </span>
+      )}
+    </button>
+  )
+}
+
 export function ChatMessages({ messages, loading, streamingText, onRetry }: ChatMessagesProps) {
   // Stick-to-bottom: one hook owns follow-intent, growth-follow, resize/keyboard,
   // tab-return, mount-snap, and the jump affordance. See use-stick-to-bottom.ts.
@@ -884,80 +949,83 @@ export function ChatMessages({ messages, loading, streamingText, onRetry }: Chat
   }
 
   return (
-    <div ref={containerRef} style={{ overflowAnchor: 'auto' }} className="chat-messages-scroll relative flex-1 overflow-y-auto overflow-x-hidden bg-[var(--bg)] min-h-0">
-      <div className="mx-auto w-full max-w-[var(--chat-measure)] pt-[72px] pb-[var(--space-6)] lg:pt-[88px]">
-      {groupedMessages.map((item) => {
-        if (item.kind === 'tool-group') {
-          const firstMsg = item.msgs[0]
-          const showTimestamp = shouldShowTimestamp(messages, item.startIndex)
-          const prevMsg = item.startIndex > 0 ? messages[item.startIndex - 1] : null
-          const isActive = item.startIndex === activeToolGroupStart
-          return (
-            <div key={`tg-${item.startIndex}`}>
-              {showTimestamp && (
-                <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
-                  {formatTimestamp(firstMsg.timestamp)}
+    <div className="relative flex-1 min-h-0 bg-[var(--bg)]">
+      <div ref={containerRef} style={{ overflowAnchor: 'auto' }} className="chat-messages-scroll h-full overflow-y-auto overflow-x-hidden bg-[var(--bg)] min-h-0">
+        <div className="mx-auto w-full max-w-[var(--chat-measure)] pt-[72px] pb-[var(--space-6)] lg:pt-[88px]">
+          {groupedMessages.map((item) => {
+            if (item.kind === 'tool-group') {
+              const firstMsg = item.msgs[0]
+              const showTimestamp = shouldShowTimestamp(messages, item.startIndex)
+              const prevMsg = item.startIndex > 0 ? messages[item.startIndex - 1] : null
+              const isActive = item.startIndex === activeToolGroupStart
+              return (
+                <div key={`tg-${item.startIndex}`}>
+                  {showTimestamp && (
+                    <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
+                      {formatTimestamp(firstMsg.timestamp)}
+                    </div>
+                  )}
+                  {!showTimestamp && prevMsg && (
+                    <div className={prevMsg.role !== 'assistant' ? 'h-[var(--space-4)]' : 'h-[var(--space-1)]'} />
+                  )}
+                  <ToolGroup msgs={item.msgs} isActive={isActive} />
                 </div>
-              )}
-              {!showTimestamp && prevMsg && (
-                <div className={prevMsg.role !== 'assistant' ? 'h-[var(--space-4)]' : 'h-[var(--space-1)]'} />
-              )}
-              <ToolGroup msgs={item.msgs} isActive={isActive} />
+              )
+            }
+
+            const { msg, index: i } = item
+            return (
+              <MessageRow
+                key={msg.id || i}
+                msg={msg}
+                index={i}
+                messages={messages}
+                loading={loading}
+                onRetry={onRetry}
+              />
+            )
+          })}
+
+          {/* Streaming message — shows text as it arrives, always re-renders */}
+          {streamingText && <StreamingBubble streamingText={streamingText} />}
+
+          {/* Running indicator — pre-first-token only; once streamingText arrives the
+              caret carries the "live" signal, so suppress this to avoid a double cue. */}
+          {loading && messages.length > 0 && !streamingText && (
+            // Share the assistant text gutter (space-3 mobile / space-8 @lg) so the
+            // indicator lines up flush with the messages and tool cards.
+            <div className="assistant-msg-row flex items-center gap-1.5 mt-[var(--space-1)]">
+              <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-[jinn-pulse_1.4s_infinite] shrink-0" />
+              <span className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)] font-[var(--weight-medium)]">
+                Thinking
+              </span>
             </div>
-          )
-        }
+          )}
 
-        const { msg, index: i } = item
-        return (
-          <MessageRow
-            key={msg.id || i}
-            msg={msg}
-            index={i}
-            messages={messages}
-            loading={loading}
-            onRetry={onRetry}
-          />
-        )
-      })}
-
-      {/* Streaming message — shows text as it arrives, always re-renders */}
-      {streamingText && <StreamingBubble streamingText={streamingText} />}
-
-      {/* Running indicator — pre-first-token only; once streamingText arrives the
-          caret carries the "live" signal, so suppress this to avoid a double cue. */}
-      {loading && messages.length > 0 && !streamingText && (
-        // Share the assistant text gutter (space-3 mobile / space-8 @lg) so the
-        // indicator lines up flush with the messages and tool cards.
-        <div className="assistant-msg-row flex items-center gap-1.5 mt-[var(--space-1)]">
-          <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-[jinn-pulse_1.4s_infinite] shrink-0" />
-          <span className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)] font-[var(--weight-medium)]">
-            Thinking
-          </span>
         </div>
-      )}
-
       </div>
 
-      {/* Jump-to-latest — borderless (soft material + shadow, no hairline), with an
-          optional unread count. Shown only when the user has scrolled away. */}
-      {showJump && (
-        <button
-          onClick={() => scrollToBottom('smooth')}
-          aria-label="Jump to latest"
-          className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 py-1.5 pl-3 pr-3.5 rounded-full bg-[var(--material-thick)] text-[var(--text-secondary)] text-[length:var(--text-caption1)] font-[var(--weight-medium)] shadow-[var(--shadow-card)] backdrop-blur-md cursor-pointer transition-opacity duration-150 hover:bg-[var(--fill-secondary)]"
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
-          {unreadCount > 0 ? `${unreadCount} new message${unreadCount > 1 ? 's' : ''}` : 'Jump to latest'}
-        </button>
-      )}
+      {/* Jump-to-latest — outside the scrollable transcript so it stays pinned
+          above the composer instead of moving with the message content. */}
+      <JumpToLatestButton
+        show={showJump}
+        unreadCount={unreadCount}
+        onClick={() => scrollToBottom('smooth')}
+      />
 
       {/* Keyframe animations + responsive bubble widths */}
       <style>{`
         @keyframes jinn-pulse {
           0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
           40% { opacity: 1; transform: scale(1); }
+        }
+        @keyframes jinn-jump-in {
+          from { opacity: 0; transform: translateY(8px) scale(0.96); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @keyframes jinn-jump-out {
+          from { opacity: 1; transform: translateY(0) scale(1); }
+          to { opacity: 0; transform: translateY(6px) scale(0.98); }
         }
         .assistant-msg-bubble { max-width: 100%; overflow-wrap: break-word; word-break: break-word; }
         .user-msg-bubble { max-width: 90%; overflow-wrap: break-word; word-break: break-word; }

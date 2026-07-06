@@ -7,7 +7,7 @@ import { useStickToBottom, STICK_THRESHOLD_PX } from '@/hooks/use-stick-to-botto
 // scrollTop on the container and a captured ResizeObserver, then assert the hook's
 // observable behaviour (does it pin? does it preserve position? jump/unread state).
 
-let roInstances: Array<{ cb: ResizeObserverCallback }> = []
+let roInstances: Array<{ cb: ResizeObserverCallback; observed: Element[] }> = []
 
 beforeEach(() => {
   roInstances = []
@@ -16,9 +16,12 @@ beforeEach(() => {
   vi.stubGlobal('cancelAnimationFrame', () => {})
   vi.stubGlobal('ResizeObserver', class {
     cb: ResizeObserverCallback
-    constructor(cb: ResizeObserverCallback) { this.cb = cb; roInstances.push({ cb }) }
-    observe() {}
-    unobserve() {}
+    observed: Element[] = []
+    constructor(cb: ResizeObserverCallback) { this.cb = cb; roInstances.push(this) }
+    observe(target: Element) { this.observed.push(target) }
+    unobserve(target: Element) {
+      this.observed = this.observed.filter((item) => item !== target)
+    }
     disconnect() {}
   })
 })
@@ -32,7 +35,7 @@ function Harness(props: { streamingText?: string; messageCount: number }) {
   return (
     <div>
       <div data-testid="scroller" ref={containerRef}>
-        <div>content</div>
+        <div data-testid="content">content</div>
       </div>
       <span data-testid="jump">{showJump ? 'show' : 'hide'}</span>
       <span data-testid="unread">{unreadCount}</span>
@@ -114,6 +117,23 @@ describe('useStickToBottom — behaviour', () => {
     // drifted off the bottom. The viewport ResizeObserver must re-pin.
     el.scrollTop = 600
     act(() => { roInstances.forEach((r) => r.cb([], {} as ResizeObserver)) })
+    expect(dist(el)).toBe(0)
+  })
+
+  it('content-growth: re-pins when rendered media/content grows while following', () => {
+    const { getByTestId, rerender } = render(<Harness messageCount={0} />)
+    const el = getByTestId('scroller')
+    const content = getByTestId('content')
+    setMetrics(el, 1000, 200, 0)
+    act(() => { rerender(<Harness messageCount={5} />) }) // following
+    expect(dist(el)).toBe(0)
+
+    // An image/media decode can grow the rendered content without changing the
+    // message count or streaming text. The content observer must keep following
+    // pinned users at the true bottom.
+    setMetrics(el, 1400, 200, el.scrollTop)
+    const contentObservers = roInstances.filter((r) => r.observed.includes(content))
+    act(() => { contentObservers.forEach((r) => r.cb([], {} as ResizeObserver)) })
     expect(dist(el)).toBe(0)
   })
 
