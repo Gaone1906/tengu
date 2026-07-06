@@ -5,6 +5,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import type { InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
+import { buildPromptWithPlatformContext } from "./platform-context.js";
 
 const CODEX_SESSIONS_DIR = path.join(os.homedir(), ".codex", "sessions");
 
@@ -139,13 +140,7 @@ export class CodexEngine implements InterruptibleEngine {
   }
 
   async run(opts: EngineRunOpts): Promise<EngineResult> {
-    let prompt = opts.prompt;
-    // Only inject the system prompt on the FIRST turn of a conversation. On a
-    // resume (warm follow-up / restored session), codex already has it in the
-    // thread, so re-prepending it every turn just duplicates/bloats context.
-    if (opts.systemPrompt && !opts.resumeSessionId) {
-      prompt = opts.systemPrompt + "\n\n---\n\n" + prompt;
-    }
+    let prompt = buildPromptWithPlatformContext(opts, "\n\n---\n\n");
     if (opts.attachments?.length) {
       prompt += "\n\nAttached files:\n" + opts.attachments.map((a) => `- ${a}`).join("\n");
     }

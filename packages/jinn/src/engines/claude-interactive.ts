@@ -13,6 +13,7 @@ import type { PtyControlEvent, PtyViewEngine, PtyIdleSpawnOpts } from "./pty-vie
 import type { HookRegistry, HookPayload } from "../gateway/hook-registry.js";
 import { SsePtyProxy, MAIN_AGENT_SENTINEL, type SseDataEvent, type UpstreamActivityInfo } from "./sse-pty-proxy.js";
 import { neutralizeForPaste } from "../shared/skill-commands.js";
+import { buildPromptWithPlatformContext } from "./platform-context.js";
 
 export type { PtyControlEvent } from "./pty-view-engine.js";
 
@@ -921,7 +922,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
    *  Allocates a per-PTY SSE forward proxy first and points the child at it. */
   private async spawn(jinnSessionId: string, opts: EngineRunOpts, settingsPath: string): Promise<PtyHandle> {
     const args = buildInteractiveArgs({
-      prompt: opts.prompt,
+      prompt: buildPromptWithPlatformContext(opts),
       settingsPath,
       resumeSessionId: opts.resumeSessionId,
       model: opts.model,

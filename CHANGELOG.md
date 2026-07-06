@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.23.5] - 2026-07-06
+
+### 🐛 Fixes
+- **Duplicated sessions keep child callbacks in the duplicate across engines.** Claude/Opus, Codex, Hermes, and Pi resumed turns now get the current Jinn session metadata in the positional prompt as a compact platform refresh, so delegated child sessions use the duplicate's session id as their parent instead of stale ids copied from the original transcript.
+
 ## [0.23.4] - 2026-07-06
 
 ### 🐛 Fixes

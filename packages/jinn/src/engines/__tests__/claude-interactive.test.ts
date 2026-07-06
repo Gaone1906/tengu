@@ -9,6 +9,7 @@ vi.mock("node-pty", () => ({ spawn: vi.fn() }));
 
 import { TurnResolver, buildInteractiveArgs, claudeHookToDeltas, pasteAndSubmit } from "../claude-interactive.js";
 import { MAIN_AGENT_SENTINEL } from "../sse-pty-proxy.js";
+import { buildPromptWithPlatformContext } from "../platform-context.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -136,6 +137,28 @@ describe("buildInteractiveArgs — system prompt + sentinel via CLI flag", () =>
   it("omits the flag when no appendSystemPrompt is given", () => {
     const args = buildInteractiveArgs({ prompt: "hi", settingsPath: "/tmp/s.json" });
     expect(args).not.toContain("--append-system-prompt");
+  });
+
+  it("can carry a current platform context refresh in the positional resume prompt", () => {
+    const prompt = buildPromptWithPlatformContext({
+      prompt: "spawn the child now",
+      resumeSessionId: "original-claude-id",
+      systemPrompt: [
+        "# You are Jimbo",
+        "## Current session",
+        "- Session ID: duplicated-jinn-session",
+        "## Current configuration",
+        "- Gateway: http://127.0.0.1:7777",
+        "## Organization",
+        "- Should not be repeated on resume",
+      ].join("\n"),
+    });
+    const args = buildInteractiveArgs({ prompt, settingsPath: "/tmp/s.json", resumeSessionId: "original-claude-id" });
+    const positionalPrompt = args[args.indexOf("original-claude-id") + 1];
+    expect(positionalPrompt).toContain("## Jinn platform context refresh");
+    expect(positionalPrompt).toContain("- Session ID: duplicated-jinn-session");
+    expect(positionalPrompt).not.toContain("Should not be repeated on resume");
+    expect(positionalPrompt).toContain("spawn the child now");
   });
 });
 

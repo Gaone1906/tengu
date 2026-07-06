@@ -5,6 +5,7 @@ import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import { HermesRpc } from "./hermes-jsonrpc.js";
 import { mapSessionUpdate, extractPromptText } from "./hermes-protocol.js";
+import { buildPromptWithPlatformContext } from "./platform-context.js";
 
 const TURN_TIMEOUT_MS = 14 * 24 * 60 * 60 * 1000;
 const HANDSHAKE_TIMEOUT_MS = 60_000;
@@ -236,34 +237,4 @@ export class HermesAcpEngine implements InterruptibleEngine {
   }
 }
 
-function buildPromptWithPlatformContext(opts: EngineRunOpts): string {
-  if (!opts.systemPrompt) return opts.prompt;
-  if (!opts.resumeSessionId) return `${opts.systemPrompt}\n\n${opts.prompt}`;
 
-  const refresh = buildResumePlatformRefresh(opts.systemPrompt);
-  return refresh ? `${refresh}\n\n${opts.prompt}` : opts.prompt;
-}
-
-function buildResumePlatformRefresh(systemPrompt: string): string {
-  const sections = [
-    extractMarkdownSection(systemPrompt, "## Current session"),
-    extractMarkdownSection(systemPrompt, "## Current configuration"),
-  ].filter((section): section is string => Boolean(section));
-
-  if (sections.length === 0) return "";
-  return [
-    "## Jinn platform context refresh",
-    "This replaces any stale platform/session metadata in the resumed transcript. Use these IDs/URLs for this turn and for any gateway API calls.",
-    "",
-    ...sections,
-  ].join("\n");
-}
-
-function extractMarkdownSection(markdown: string, heading: string): string | null {
-  const start = markdown.indexOf(heading);
-  if (start === -1) return null;
-  const rest = markdown.slice(start);
-  const next = rest.slice(heading.length).search(/^##\s/m);
-  const section = next === -1 ? rest : rest.slice(0, heading.length + next);
-  return section.trim() || null;
-}
