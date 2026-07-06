@@ -165,8 +165,7 @@ describe("HermesAcpEngine.run", () => {
     expect(capturedPromptText).toContain("user question");
   });
 
-  // Fix 1 — systemPrompt NOT prepended on resume
-  it("does NOT prepend systemPrompt when resumeSessionId is set", async () => {
+  it("refreshes platform session context when resumeSessionId is set", async () => {
     let capturedPromptText = "";
 
     class ResumeEngine extends HermesAcpEngine {
@@ -188,9 +187,23 @@ describe("HermesAcpEngine.run", () => {
       cwd: "/tmp",
       sessionId: "jinn-resume",
       resumeSessionId: "S1",
-      systemPrompt: "PERSONA-XYZ",
+      systemPrompt: [
+        "# You are Jimbo",
+        "PERSONA-XYZ",
+        "## Current session",
+        "- Session ID: duplicated-jinn-session",
+        "- Source: web",
+        "## Current configuration",
+        "- Gateway: http://127.0.0.1:7777",
+        "## Organization",
+        "- Should not be repeated on resume",
+      ].join("\n"),
     });
+    expect(capturedPromptText).toContain("## Jinn platform context refresh");
+    expect(capturedPromptText).toContain("- Session ID: duplicated-jinn-session");
+    expect(capturedPromptText).toContain("- Gateway: http://127.0.0.1:7777");
     expect(capturedPromptText).not.toContain("PERSONA-XYZ");
+    expect(capturedPromptText).not.toContain("Should not be repeated on resume");
     expect(capturedPromptText).toContain("user question");
   });
 

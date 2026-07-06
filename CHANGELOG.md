@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.23.4] - 2026-07-06
+
+### 🐛 Fixes
+- **Duplicated Hermes sessions keep callbacks in the duplicate.** Resumed Hermes turns now receive a compact, authoritative Jinn platform context refresh with the current session id and gateway config, so a forked/duplicated session that delegates to an employee uses the duplicate as the child parent instead of stale ids copied from the original transcript.
+
 ## [0.23.3] - 2026-06-25
 
 ### 🐛 Fixes
