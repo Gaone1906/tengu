@@ -6,7 +6,6 @@ import type { InterruptibleEngine, EngineRunOpts, EngineResult } from "../shared
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import { JINN_HOME } from "../shared/paths.js";
-import { buildPromptWithPlatformContext } from "./platform-context.js";
 
 interface LiveProcess {
   proc: ChildProcess;
@@ -95,7 +94,10 @@ export class PiEngine implements InterruptibleEngine {
     // continues the same Pi conversation.
     const piSessionId = opts.resumeSessionId || trackingId;
 
-    let prompt = buildPromptWithPlatformContext(opts, "\n\n---\n\n");
+    let prompt = opts.prompt;
+    if (opts.systemPrompt && !opts.resumeSessionId) {
+      prompt = opts.systemPrompt + "\n\n---\n\n" + prompt;
+    }
     if (opts.attachments?.length) {
       prompt += "\n\nAttached files:\n" + opts.attachments.map((a) => `- ${a}`).join("\n");
     }

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.23.6] - 2026-07-06
+
+### 🐛 Fixes
+- **Duplicate callback fix narrowed to duplicate-capable engines.** The platform context refresh now applies to Claude/Opus, Codex, and Hermes resumed turns only; Pi keeps its previous prompt behavior because it does not participate in Jinn's duplicate/fork flow.
+
 ## [0.23.5] - 2026-07-06
 
 ### 🐛 Fixes
