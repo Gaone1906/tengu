@@ -975,6 +975,7 @@ export function ChatMessages({
   const { containerRef, showJump, unreadCount, scrollToBottom } = useStickToBottom({
     streamingText,
     messageCount: messages.length,
+    latestMessageKey: messages.at(-1)?.id ?? null,
   })
   const scrollContainerRef = useRef<HTMLDivElement | null>(null)
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null)

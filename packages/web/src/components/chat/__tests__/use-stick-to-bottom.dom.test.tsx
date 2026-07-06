@@ -30,7 +30,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-function Harness(props: { streamingText?: string; messageCount: number }) {
+function Harness(props: { streamingText?: string; messageCount: number; latestMessageKey?: string | null }) {
   const { containerRef, showJump, unreadCount, scrollToBottom } = useStickToBottom(props)
   return (
     <div>
@@ -173,5 +173,23 @@ describe('useStickToBottom — behaviour', () => {
     setMetrics(el, 1400, 200, el.scrollTop)
     act(() => { rerender(<Harness messageCount={7} />) })
     expect(getByTestId('unread').textContent).toBe('2')
+  })
+
+  it('does not count prepended history as unread while detached', () => {
+    const { getByTestId, rerender } = render(<Harness messageCount={0} />)
+    const el = getByTestId('scroller')
+    setMetrics(el, 10000, 1000, 0)
+    act(() => { rerender(<Harness messageCount={150} latestMessageKey="m220" />) })
+    act(() => { el.scrollTop = 700; fireEvent.scroll(el) })
+    expect(getByTestId('jump').textContent).toBe('show')
+    expect(getByTestId('unread').textContent).toBe('0')
+
+    setMetrics(el, 15000, 1000, el.scrollTop)
+    act(() => { rerender(<Harness messageCount={220} latestMessageKey="m220" />) })
+    expect(getByTestId('unread').textContent).toBe('0')
+
+    setMetrics(el, 15200, 1000, el.scrollTop)
+    act(() => { rerender(<Harness messageCount={221} latestMessageKey="m221" />) })
+    expect(getByTestId('unread').textContent).toBe('1')
   })
 })

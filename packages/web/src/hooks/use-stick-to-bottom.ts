@@ -45,6 +45,12 @@ export interface UseStickToBottomOptions {
   streamingText?: string
   /** Total committed message count — drives mount-snap, growth-follow, and the unread count. */
   messageCount: number
+  /**
+   * Identity of the newest committed message. When the count grows but this key
+   * does not change, history was prepended above the viewport, not appended as
+   * unread content below it.
+   */
+  latestMessageKey?: string | null
   /** Override the at-bottom threshold (px). */
   threshold?: number
 }
@@ -65,6 +71,7 @@ export interface StickToBottom {
 export function useStickToBottom({
   streamingText,
   messageCount,
+  latestMessageKey,
   threshold = STICK_THRESHOLD_PX,
 }: UseStickToBottomOptions): StickToBottom {
   // The scroll container, tracked as state (via a callback ref) so the listener
@@ -85,6 +92,9 @@ export function useStickToBottom({
   // Fresh message count for stable callbacks (avoids stale closures).
   const messageCountRef = useRef(messageCount)
   messageCountRef.current = messageCount
+  const latestKey = latestMessageKey ?? `count:${messageCount}`
+  const prevCountRef = useRef(messageCount)
+  const prevLatestKeyRef = useRef(latestKey)
   const mountedRef = useRef(false)
   const uiRaf = useRef<number | null>(null)
 
@@ -168,6 +178,12 @@ export function useStickToBottom({
   useLayoutEffect(() => {
     const node = elRef.current
     if (!node) return
+    const prevCount = prevCountRef.current
+    const prevLatestKey = prevLatestKeyRef.current
+    const prependedHistory = messageCount > prevCount && latestKey === prevLatestKey
+    if (prependedHistory) {
+      seenCountRef.current += messageCount - prevCount
+    }
     if (followRef.current) {
       pinNow(node)
       seenCountRef.current = messageCount
@@ -175,8 +191,10 @@ export function useStickToBottom({
     } else {
       setUnreadCount(unreadDelta(messageCount, seenCountRef.current))
     }
+    prevCountRef.current = messageCount
+    prevLatestKeyRef.current = latestKey
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [el, streamingText, messageCount, pinNow])
+  }, [el, streamingText, messageCount, latestKey, pinNow])
 
   // ── Viewport resize / mobile keyboard: re-pin when following (RO on the container). ──
   useEffect(() => {
