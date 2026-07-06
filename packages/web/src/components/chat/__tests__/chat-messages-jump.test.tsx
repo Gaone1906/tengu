@@ -49,6 +49,16 @@ describe('ChatMessages jump affordance', () => {
     expect(within(jump).queryByText(/jump to latest/i)).toBeNull()
   })
 
+  it('keeps the touch affordance at 40px and shrinks only for fine pointers', () => {
+    render(<ChatMessages messages={messages} loading={false} />)
+
+    const jump = screen.getByRole('button', { name: 'Jump to latest' })
+    expect(jump.className).toContain('h-10')
+    expect(jump.className).toContain('w-10')
+    expect(jump.className).toContain('[@media(pointer:fine)]:h-9')
+    expect(jump.className).toContain('[@media(pointer:fine)]:w-9')
+  })
+
   it('shows only a compact numeric unread badge when detached messages accumulate', () => {
     stickState.unreadCount = 3
 
