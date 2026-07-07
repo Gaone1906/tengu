@@ -42,9 +42,8 @@ export interface TalkTurnDoneEvent { sessionId: string; ok: boolean; error?: str
 export interface TalkFocusEvent { cooId: string; label: string; parentId: string }
 /** Orchestrator sets/refines a COO thread's topic label. */
 export interface TalkThreadLabelEvent { sessionId: string; threadId: string; label: string }
-/** The active orchestrator engine/model changed (POST /api/talk/engine). The model
- *  applies on the live session's next turn; the engine is new-chat-only (the UI
- *  re-bootstraps the talk session for an engine change). */
+/** The active orchestrator engine/model changed (POST /api/talk/engine). The
+ *  backend applies the selector to the live session when it is idle. */
 export interface TalkEngineEvent { engine: string | null; model: string | null; fallback: boolean }
 
 /**

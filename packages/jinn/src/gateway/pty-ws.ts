@@ -1,6 +1,6 @@
 import type { WebSocket } from "ws";
 import type { PtyViewEngine } from "../engines/pty-view-engine.js";
-import { getSession } from "../sessions/registry.js";
+import { getEngineSessionRef, getSession } from "../sessions/registry.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 
@@ -38,7 +38,7 @@ export function attachPtyWebSocket(ws: WebSocket, sessionId: string, engine: Pty
     try {
       const session = getSession(sessionId);
       engine.ensureIdleSpawn(sessionId, {
-        engineSessionId: session?.engineSessionId ?? undefined,
+        engineSessionId: session ? getEngineSessionRef(session).id : undefined,
         model: session?.model ?? undefined,
         effortLevel: session?.effortLevel ?? undefined,
         cwd: JINN_HOME,

@@ -252,12 +252,13 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
 
   /** env for the agy PTY: inherit, force a real TERM. Do NOT strip GEMINI_*
    *  (agy shares the ~/.gemini account dir for its cached credential). */
-  private buildPtyEnv(): Record<string, string> {
+  private buildPtyEnv(sessionId?: string): Record<string, string> {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined) env[k] = v;
     }
     env.TERM = "xterm-256color";
+    if (sessionId) env.JINN_SESSION_ID = sessionId;
     return env;
   }
 
@@ -301,7 +302,7 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
       cols: geom?.cols ?? 120,
       rows: geom?.rows ?? 40,
       cwd,
-      env: this.buildPtyEnv(),
+      env: this.buildPtyEnv(jinnSessionId),
     });
     this.spawnParams.set(jinnSessionId, {
       resumeSessionId: resumeConvId,
@@ -410,7 +411,7 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
       cols,
       rows,
       cwd,
-      env: this.buildPtyEnv(),
+      env: this.buildPtyEnv(jinnSessionId),
     });
     this.spawnParams.set(jinnSessionId, {
       resumeSessionId: opts.engineSessionId,

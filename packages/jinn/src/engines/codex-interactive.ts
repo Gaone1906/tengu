@@ -369,13 +369,14 @@ export class CodexInteractiveEngine implements InterruptibleEngine, PtyViewEngin
     return undefined;
   }
 
-  private buildEnv(): Record<string, string> {
+  private buildEnv(sessionId?: string): Record<string, string> {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
       if (v !== undefined) env[k] = v;
     }
     env.TERM = "xterm-256color";
+    if (sessionId) env.JINN_SESSION_ID = sessionId;
     return env;
   }
 
@@ -425,7 +426,7 @@ export class CodexInteractiveEngine implements InterruptibleEngine, PtyViewEngin
       cols: geom?.cols ?? 120,
       rows: geom?.rows ?? 40,
       cwd: opts.cwd || JINN_HOME,
-      env: this.buildEnv(),
+      env: this.buildEnv(jinnSessionId),
     });
     this.spawnParams.set(jinnSessionId, {
       model: opts.model,

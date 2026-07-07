@@ -8,6 +8,8 @@ import { logger } from "../shared/logger.js";
 import type { JinnConfig } from "../shared/types.js";
 import { startGateway } from "./server.js";
 import { loadConfig } from "../shared/config.js";
+import { gatewayBaseUrl } from "./gateway-info.js";
+import { ensureGatewayAuthToken } from "./auth.js";
 
 export async function startForeground(config: JinnConfig): Promise<void> {
   const cleanup = await startGateway(config);
@@ -49,7 +51,7 @@ export function startDaemon(config: JinnConfig): void {
   const child = spawn(process.execPath, [entryScript], {
     detached: true,
     stdio: "ignore",
-    env: { ...process.env, JINN_HOME },
+    env: buildGatewayChildEnv(config),
   });
 
   if (child.pid) {
@@ -73,6 +75,7 @@ export function startDaemon(config: JinnConfig): void {
  * gateway then resumes the interrupted session.
  */
 export function restartDetached(): void {
+  const config = loadConfig();
   const __filename = fileURLToPath(import.meta.url);
   const candidateEntryScripts = [
     path.resolve(path.dirname(__filename), "restart-entry.js"),
@@ -83,7 +86,7 @@ export function restartDetached(): void {
   const child = spawn(process.execPath, [entryScript], {
     detached: true,
     stdio: "ignore",
-    env: { ...process.env, JINN_HOME },
+    env: buildGatewayChildEnv(config),
   });
 
   if (child.pid) {
@@ -91,6 +94,20 @@ export function restartDetached(): void {
   }
 
   child.unref();
+}
+
+export function buildGatewayChildEnv(
+  config: JinnConfig,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const port = config.gateway.port || 7777;
+  const host = config.gateway.host || "127.0.0.1";
+  return {
+    ...baseEnv,
+    JINN_HOME,
+    JINN_GATEWAY_URL: gatewayBaseUrl({ port, host }),
+    JINN_GATEWAY_TOKEN: ensureGatewayAuthToken(JINN_HOME),
+  };
 }
 
 /**
@@ -105,31 +122,60 @@ export function restartDetached(): void {
  * liveness with kill(pid, 0) and treat a dead PID as stale, and startDaemon()
  * overwrites the file. stopAndWait() removes it once the process has exited.
  */
+export type PortOwnerLookup =
+  | { status: "found"; pid: number }
+  | { status: "none" }
+  | { status: "unknown" };
+
+export function shouldSignalPidFileProcess(
+  pid: number,
+  portOwner: PortOwnerLookup,
+  commandLooksLikeGateway: boolean,
+): boolean {
+  if (portOwner.status === "found") return portOwner.pid === pid;
+  return commandLooksLikeGateway;
+}
+
 function signalGateway(port?: number): number | null {
+  const targetPort = port ?? resolvePort();
+
   // Try PID file first
   if (fs.existsSync(PID_FILE)) {
     const pid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10);
-
-    try {
-      process.kill(pid, "SIGTERM");
-      logger.info(`Sent SIGTERM to gateway process ${pid}`);
-      return pid;
-    } catch (err: unknown) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "ESRCH") {
-        logger.warn(`Process ${pid} not found. Cleaning up stale PID file.`);
-        fs.unlinkSync(PID_FILE);
-      } else {
-        throw err;
+    const portOwner = lookupPidOnPort(targetPort);
+    const commandLooksLikeGateway = pidLooksLikeGateway(pid);
+    if (!shouldSignalPidFileProcess(pid, portOwner, commandLooksLikeGateway)) {
+      logger.warn(
+        portOwner.status === "none"
+          ? `PID file points to ${pid}, but no process owns port ${targetPort}. Cleaning up stale PID file.`
+          : portOwner.status === "unknown"
+            ? `PID file points to ${pid}, but port ${targetPort} ownership could not be verified and the process does not look like Jinn. Cleaning up stale PID file.`
+            : `PID file points to ${pid}, but port ${targetPort} is owned by ${portOwner.pid}. Cleaning up stale PID file.`,
+      );
+      fs.unlinkSync(PID_FILE);
+    } else {
+      try {
+        process.kill(pid, "SIGTERM");
+        logger.info(`Sent SIGTERM to gateway process ${pid}`);
+        return pid;
+      } catch (err: unknown) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "ESRCH") {
+          logger.warn(`Process ${pid} not found. Cleaning up stale PID file.`);
+          fs.unlinkSync(PID_FILE);
+        } else {
+          throw err;
+        }
       }
     }
+
     // PID file existed but was stale; fall through to kill by port.
   }
 
   // No PID file — try to kill whatever is listening on the port
-  const targetPort = port ?? resolvePort();
-  const pid = findPidOnPort(targetPort);
-  if (pid) {
+  const portOwner = lookupPidOnPort(targetPort);
+  if (portOwner.status === "found") {
+    const pid = portOwner.pid;
     try {
       process.kill(pid, "SIGTERM");
       logger.info(`Killed process ${pid} on port ${targetPort}`);
@@ -142,6 +188,10 @@ function signalGateway(port?: number): number | null {
       }
       throw err;
     }
+  }
+  if (portOwner.status === "unknown") {
+    logger.warn(`Could not determine process listening on port ${targetPort}.`);
+    return null;
   }
 
   logger.warn(`No PID file found and nothing listening on port ${targetPort}.`);
@@ -161,13 +211,39 @@ export function stop(port?: number): boolean {
  * running.
  */
 export async function stopAndWait(port?: number, timeoutMs = 10_000): Promise<boolean> {
-  const pid = signalGateway(port);
+  const targetPort = port ?? resolvePort();
+  const pid = signalGateway(targetPort);
   if (pid === null) return false;
 
   const exited = await waitForPidExit(pid, timeoutMs);
   if (!exited) {
-    logger.warn(`Process ${pid} still alive after ${timeoutMs}ms — leaving PID file in place`);
-    return true;
+    const portOwner = lookupPidOnPort(targetPort);
+    if (!shouldSignalPidFileProcess(pid, portOwner, pidLooksLikeGateway(pid))) {
+      logger.warn(`Process ${pid} no longer verifies as the gateway for port ${targetPort} after SIGTERM — not force-killing it`);
+      try {
+        if (
+          fs.existsSync(PID_FILE) &&
+          parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10) === pid
+        ) {
+          fs.unlinkSync(PID_FILE);
+        }
+      } catch {
+        // best-effort cleanup; a leftover stale file self-heals (see signalGateway)
+      }
+      return true;
+    }
+    logger.warn(`Process ${pid} still alive after ${timeoutMs}ms — forcing exit`);
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH") throw err;
+    }
+    const killed = await waitForPidExit(pid, 3_000);
+    if (!killed) {
+      logger.warn(`Process ${pid} still alive after SIGKILL — leaving PID file in place`);
+      return true;
+    }
   }
 
   // Only remove the PID file if it still refers to the process we stopped —
@@ -208,28 +284,44 @@ function resolvePort(): number {
   }
 }
 
-function findPidOnPort(port: number): number | null {
+export function lookupPidOnPort(port: number): PortOwnerLookup {
   try {
     if (process.platform === "win32") {
       const output = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, { encoding: "utf-8" }).trim();
-      if (!output) return null;
+      if (!output) return { status: "none" };
       // netstat output: proto  local_addr  foreign_addr  state  PID
       const parts = output.split("\n")[0].trim().split(/\s+/);
       const pid = parseInt(parts[parts.length - 1], 10);
-      return isNaN(pid) ? null : pid;
+      return isNaN(pid) ? { status: "unknown" } : { status: "found", pid };
     } else {
       const output = execSync(
         process.platform === "darwin"
-          ? `/usr/sbin/lsof -ti tcp:${port}`
-          : `lsof -ti tcp:${port}`,
+          ? `/usr/sbin/lsof -nP -iTCP:${port} -sTCP:LISTEN -t`
+          : `lsof -nP -iTCP:${port} -sTCP:LISTEN -t`,
         { encoding: "utf-8" },
       ).trim();
-      if (!output) return null;
+      if (!output) return { status: "none" };
       const pid = parseInt(output.split("\n")[0], 10);
-      return isNaN(pid) ? null : pid;
+      return isNaN(pid) ? { status: "unknown" } : { status: "found", pid };
     }
+  } catch (err: unknown) {
+    const status = (err as { status?: number | null }).status;
+    return status === 1 ? { status: "none" } : { status: "unknown" };
+  }
+}
+
+function findPidOnPort(port: number): number | null {
+  const lookup = lookupPidOnPort(port);
+  return lookup.status === "found" ? lookup.pid : null;
+}
+
+function pidLooksLikeGateway(pid: number): boolean {
+  try {
+    if (process.platform === "win32") return false;
+    const output = execSync(`ps -p ${pid} -o command=`, { encoding: "utf-8" }).trim();
+    return output.includes("daemon-entry.js");
   } catch {
-    return null;
+    return false;
   }
 }
 
@@ -271,6 +363,38 @@ export async function waitForPortListening(port: number, host = "127.0.0.1", tim
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   return false;
+}
+
+export async function waitForDashboardReady(port: number, host = "127.0.0.1", timeoutMs = 20_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await dashboardIsReady(port, host)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+async function dashboardIsReady(port: number, host: string): Promise<boolean> {
+  try {
+    const baseUrl = gatewayBaseUrl({ port, host });
+    const root = await fetch(`${baseUrl}/`, { signal: AbortSignal.timeout(1_000) });
+    if (!root.ok) return false;
+
+    const html = await root.text();
+    if (!html.includes('id="root"')) return false;
+
+    const assetRefs = new Set([...html.matchAll(/["']\/assets\/([^"']+)["']/g)].map((match) => match[1]));
+    if (assetRefs.size === 0) return false;
+
+    for (const assetRef of assetRefs) {
+      const asset = await fetch(`${baseUrl}/assets/${assetRef}`, { signal: AbortSignal.timeout(1_000) });
+      if (!asset.ok) return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface GatewayStatus {

@@ -145,6 +145,30 @@ describe("syncExternalTurn", () => {
     expect(events).toEqual([{ event: "session:external-turn", payload: { sessionId: id } }]);
   });
 
+  it("does not persist an unclaimed Claude transcript tail after the logical session switches engines", () => {
+    const id = makeSession({ engineSessionId: "claude-old" });
+    reg.switchSessionEngine(id, "codex", {
+      model: "gpt-5.5",
+      effortLevel: "medium",
+    });
+    const file = writeTranscript([
+      { type: "user", text: "old claude prompt", ts: iso(10_000) },
+      { type: "assistant", text: "old claude answer", ts: iso(5_000) },
+    ]);
+
+    const n = ext.syncExternalTurn(id, emit, {
+      hook_event_name: "Stop",
+      session_id: "claude-old",
+      transcript_path: file,
+      last_assistant_message: "old claude answer",
+    });
+
+    expect(n).toBe(0);
+    expect(reg.getSession(id)?.engine).toBe("codex");
+    expect(reg.getMessages(id)).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
   it("is idempotent — a repeated Stop for the same turn inserts nothing (anchor dedup)", () => {
     const id = makeSession();
     const file = writeTranscript([

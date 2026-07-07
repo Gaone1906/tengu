@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { JINN_HOME } from "../shared/paths.js";
 import { restartDetached } from "../gateway/lifecycle.js";
+import { requestRestartFromGateway } from "./restart-request.js";
 
 /**
  * `jinn restart` — race-free, in-session-safe gateway restart.
@@ -14,6 +15,11 @@ export async function runRestart(): Promise<void> {
   if (!fs.existsSync(JINN_HOME)) {
     console.error(`Error: ${JINN_HOME} does not exist. Run "jinn setup" first.`);
     process.exit(1);
+  }
+
+  if (await requestRestartFromGateway()) {
+    console.log("Gateway restart requested from the running gateway. It will be back in a few seconds.");
+    return;
   }
 
   restartDetached();

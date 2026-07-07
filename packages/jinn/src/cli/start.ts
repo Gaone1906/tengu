@@ -4,6 +4,7 @@ import { JINN_HOME } from "../shared/paths.js";
 import { loadConfig } from "../shared/config.js";
 import { startForeground, startDaemon, getStatus, restartDetached } from "../gateway/lifecycle.js";
 import { compareSemver, getPackageVersion, getInstanceVersion } from "../shared/version.js";
+import { requestRestartFromGateway } from "./restart-request.js";
 
 const YELLOW = "\x1b[33m";
 const DIM = "\x1b[2m";
@@ -47,12 +48,15 @@ export async function runStart(opts: { daemon?: boolean; port?: number }): Promi
     config.gateway.port = opts.port;
   }
 
-  // If a gateway is already running, `start` becomes a clean restart instead of
-  // the old racy double-boot (new daemon SIGTERMs the old, then races its
-  // graceful shutdown into EADDRINUSE). Always hand off to the detached helper:
-  // an inline foreground stop from inside a gateway session kills the PTY that is
-  // running this command before it can start the replacement.
+  // If a gateway is already running, `start` becomes a clean restart. Prefer
+  // asking the gateway to spawn the helper itself; when this CLI is running
+  // inside a Jinn session, that keeps the restart handoff out of the engine
+  // process tree that the old gateway is about to interrupt.
   if (getStatus().running) {
+    if (await requestRestartFromGateway()) {
+      console.log("Gateway already running — restart requested from gateway.");
+      return;
+    }
     restartDetached();
     console.log("Gateway already running — restarting in background.");
     return;

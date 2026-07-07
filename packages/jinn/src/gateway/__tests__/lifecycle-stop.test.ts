@@ -10,7 +10,7 @@ import path from "node:path";
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-lifecycle-stop-"));
 process.env.JINN_HOME = tmpHome;
 
-const { stop, stopAndWait } = await import("../lifecycle.js");
+const { buildGatewayChildEnv, lookupPidOnPort, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
 const { PID_FILE } = await import("../../shared/paths.js");
 
 /** Pick a free ephemeral port (nothing will be listening on it afterwards). */
@@ -32,6 +32,36 @@ function spawnSlowShutdownChild(delayMs: number): ChildProcess {
   return spawn(process.execPath, ["-e", script], { stdio: "ignore" });
 }
 
+/** Spawn a child that ignores SIGTERM until force-killed. */
+function spawnIgnoringSigtermChild(): ChildProcess {
+  const script = `process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);`;
+  return spawn(process.execPath, ["-e", script], { stdio: "ignore" });
+}
+
+function spawnListeningGatewayChild(port: number, opts: { sigtermDelayMs?: number; ignoreSigterm?: boolean }): ChildProcess {
+  const sigtermHandler = opts.ignoreSigterm
+    ? `process.on("SIGTERM", () => {});`
+    : `process.on("SIGTERM", () => setTimeout(() => process.exit(0), ${opts.sigtermDelayMs ?? 0}));`;
+  const script = `
+    const net = require("node:net");
+    const server = net.createServer();
+    server.listen(${port}, "127.0.0.1");
+    ${sigtermHandler}
+    setInterval(() => {}, 1000);
+  `;
+  return spawn(process.execPath, ["-e", script], { stdio: "ignore" });
+}
+
+function spawnClientChild(port: number): ChildProcess {
+  const script = `
+    const net = require("node:net");
+    const socket = net.connect({ port: ${port}, host: "127.0.0.1" });
+    socket.on("error", () => {});
+    setInterval(() => {}, 1000);
+  `;
+  return spawn(process.execPath, ["-e", script], { stdio: "ignore" });
+}
+
 function waitForSpawn(child: ChildProcess): Promise<void> {
   return new Promise((resolve, reject) => {
     child.once("spawn", () => resolve());
@@ -42,6 +72,26 @@ function waitForSpawn(child: ChildProcess): Promise<void> {
 function waitForExit(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve) => child.once("exit", () => resolve()));
+}
+
+async function waitForListening(port: number): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const ok = await new Promise<boolean>((resolve) => {
+      const socket = net.connect({ port, host: "127.0.0.1" }, () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once("error", () => resolve(false));
+      socket.setTimeout(100, () => {
+        socket.destroy();
+        resolve(false);
+      });
+    });
+    if (ok) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`port ${port} did not start listening`);
 }
 
 describe("stop / stopAndWait PID-file race", () => {
@@ -60,13 +110,15 @@ describe("stop / stopAndWait PID-file race", () => {
   });
 
   it("stop() leaves the PID file in place while the process is still shutting down", async () => {
-    const child = spawnSlowShutdownChild(500);
+    const port = await freePort();
+    const child = spawnListeningGatewayChild(port, { sigtermDelayMs: 500 });
     children.push(child);
     await waitForSpawn(child);
+    await waitForListening(port);
     fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
     fs.writeFileSync(PID_FILE, String(child.pid));
 
-    const stopped = stop(await freePort());
+    const stopped = stop(port);
     expect(stopped).toBe(true);
     // The fix: no early unlink — a concurrent start/status must keep seeing
     // the (still running) gateway until it actually exits.
@@ -77,17 +129,48 @@ describe("stop / stopAndWait PID-file race", () => {
   });
 
   it("stopAndWait() waits for the process to exit, then removes the PID file", async () => {
-    const child = spawnSlowShutdownChild(300);
+    const port = await freePort();
+    const child = spawnListeningGatewayChild(port, { sigtermDelayMs: 300 });
+    children.push(child);
+    await waitForSpawn(child);
+    await waitForListening(port);
+    fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
+    fs.writeFileSync(PID_FILE, String(child.pid));
+
+    const stopped = await stopAndWait(port, 5_000);
+    expect(stopped).toBe(true);
+    // Process must be gone by the time stopAndWait resolves…
+    expect(() => process.kill(child.pid!, 0)).toThrow();
+    // …and only then is the PID file removed.
+    expect(fs.existsSync(PID_FILE)).toBe(false);
+  });
+
+  it("stopAndWait() force-kills a process that ignores SIGTERM", async () => {
+    const port = await freePort();
+    const child = spawnListeningGatewayChild(port, { ignoreSigterm: true });
+    children.push(child);
+    await waitForSpawn(child);
+    await waitForListening(port);
+    fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
+    fs.writeFileSync(PID_FILE, String(child.pid));
+
+    const stopped = await stopAndWait(port, 200);
+    expect(stopped).toBe(true);
+    await waitForExit(child);
+    expect(() => process.kill(child.pid!, 0)).toThrow();
+    expect(fs.existsSync(PID_FILE)).toBe(false);
+  });
+
+  it("stopAndWait() does not kill a stale PID-file process that does not own the gateway port", async () => {
+    const child = spawnIgnoringSigtermChild();
     children.push(child);
     await waitForSpawn(child);
     fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
     fs.writeFileSync(PID_FILE, String(child.pid));
 
-    const stopped = await stopAndWait(await freePort(), 5_000);
-    expect(stopped).toBe(true);
-    // Process must be gone by the time stopAndWait resolves…
-    expect(() => process.kill(child.pid!, 0)).toThrow();
-    // …and only then is the PID file removed.
+    const stopped = await stopAndWait(await freePort(), 200);
+    expect(stopped).toBe(false);
+    expect(() => process.kill(child.pid!, 0)).not.toThrow();
     expect(fs.existsSync(PID_FILE)).toBe(false);
   });
 
@@ -105,5 +188,54 @@ describe("stop / stopAndWait PID-file race", () => {
     const stopped = stop(await freePort());
     expect(stopped).toBe(false);
     expect(fs.existsSync(PID_FILE)).toBe(false);
+  });
+
+  it("lookupPidOnPort() returns the listener PID, not a connected client PID", async () => {
+    const port = await freePort();
+    const server = spawnListeningGatewayChild(port, { ignoreSigterm: true });
+    children.push(server);
+    await waitForSpawn(server);
+    await waitForListening(port);
+
+    const client = spawnClientChild(port);
+    children.push(client);
+    await waitForSpawn(client);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(lookupPidOnPort(port)).toEqual({ status: "found", pid: server.pid });
+  });
+});
+
+describe("shouldSignalPidFileProcess", () => {
+  it("does not trust a PID file when port ownership lookup is unknown and the command is not Jinn", () => {
+    expect(shouldSignalPidFileProcess(123, { status: "unknown" }, false)).toBe(false);
+  });
+
+  it("trusts a PID file with unknown port ownership only when the command looks like Jinn", () => {
+    expect(shouldSignalPidFileProcess(123, { status: "unknown" }, true)).toBe(true);
+  });
+
+  it("trusts a PID file when the process owns the gateway port", () => {
+    expect(shouldSignalPidFileProcess(123, { status: "found", pid: 123 }, false)).toBe(true);
+    expect(shouldSignalPidFileProcess(123, { status: "found", pid: 456 }, true)).toBe(false);
+  });
+});
+
+describe("buildGatewayChildEnv", () => {
+  it("overrides stale gateway env from another instance", () => {
+    const env = buildGatewayChildEnv({
+      gateway: { port: 7789, host: "127.0.0.1" },
+      engines: { default: "claude" },
+    } as any, {
+      ...process.env,
+      JINN_HOME: "/wrong/home",
+      JINN_GATEWAY_URL: "http://127.0.0.1:7777",
+      JINN_GATEWAY_TOKEN: "wrong-token",
+    });
+
+    expect(env.JINN_HOME).toBe(tmpHome);
+    expect(env.JINN_GATEWAY_URL).toBe("http://127.0.0.1:7789");
+    expect(env.JINN_GATEWAY_TOKEN).not.toBe("wrong-token");
+    expect(env.JINN_GATEWAY_TOKEN).toBeTruthy();
   });
 });

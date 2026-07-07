@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { SESSIONS_DB } from '../shared/paths.js';
 import { logger } from '../shared/logger.js';
-import type { ChatBlock, ChatBlockEnvelope, JsonObject, ReplyContext, Session } from '../shared/types.js';
+import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
 
 let db: Database.Database;
@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   engine TEXT NOT NULL,
   engine_session_id TEXT,
+  engine_sessions TEXT,
   source TEXT NOT NULL,
   source_ref TEXT NOT NULL,
   connector TEXT,
@@ -119,15 +120,55 @@ function parseJsonObject(value: unknown, label?: string): JsonObject | null {
   }
 }
 
+function parseEngineSessions(value: unknown): EngineSessionRefs | null {
+  const parsed = parseJsonObject(value, 'engine_sessions');
+  if (!parsed) return null;
+
+  const refs: EngineSessionRefs = {};
+  for (const [engine, raw] of Object.entries(parsed)) {
+    if (!engine || !raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const obj = raw as Record<string, unknown>;
+    const ref: EngineSessionRef = {};
+    if (typeof obj.id === 'string' && obj.id.trim()) ref.id = obj.id;
+    if (typeof obj.model === 'string' && obj.model.trim()) ref.model = obj.model;
+    if (typeof obj.effortLevel === 'string' && obj.effortLevel.trim()) ref.effortLevel = obj.effortLevel;
+    if (typeof obj.lastSyncedAt === 'string' && obj.lastSyncedAt.trim()) ref.lastSyncedAt = obj.lastSyncedAt;
+    if (Object.keys(ref).length > 0) refs[engine] = ref;
+  }
+  return Object.keys(refs).length > 0 ? refs : null;
+}
+
+function cleanEngineSessionRef(ref: EngineSessionRef): EngineSessionRef {
+  const cleaned: EngineSessionRef = {};
+  if (ref.id?.trim()) cleaned.id = ref.id;
+  if (ref.model?.trim()) cleaned.model = ref.model;
+  if (ref.effortLevel?.trim()) cleaned.effortLevel = ref.effortLevel;
+  if (ref.lastSyncedAt?.trim()) cleaned.lastSyncedAt = ref.lastSyncedAt;
+  return cleaned;
+}
+
+function cleanEngineSessionRefs(refs: EngineSessionRefs | null | undefined): EngineSessionRefs | null {
+  if (!refs || typeof refs !== 'object') return null;
+  const cleaned: EngineSessionRefs = {};
+  for (const [engine, ref] of Object.entries(refs)) {
+    if (!engine || !ref || typeof ref !== 'object' || Array.isArray(ref)) continue;
+    const next = cleanEngineSessionRef(ref);
+    if (Object.keys(next).length > 0) cleaned[engine] = next;
+  }
+  return Object.keys(cleaned).length > 0 ? cleaned : null;
+}
+
 function rowToSession(row: Record<string, unknown>): Session {
   const replyContext = parseJsonObject(row.reply_context, 'reply_context');
   const transportMeta = parseJsonObject(row.transport_meta, 'transport_meta');
+  const engineSessions = parseEngineSessions(row.engine_sessions);
   const sessionKey = ((row.session_key as string) || (row.source_ref as string));
   const connector = (row.connector as string) ?? (row.source as string) ?? null;
   return {
     id: row.id as string,
     engine: row.engine as string,
     engineSessionId: (row.engine_session_id as string) ?? null,
+    engineSessions,
     source: row.source as string,
     sourceRef: row.source_ref as string,
     connector,
@@ -457,6 +498,7 @@ export function migrateSessionsSchema(database: Database.Database): void {
     ['reply_context', 'TEXT'],
     ['message_id', 'TEXT'],
     ['transport_meta', 'TEXT'],
+    ['engine_sessions', 'TEXT'],
     ['total_cost', 'REAL', '0'],
     ['total_turns', 'INTEGER', '0'],
     ['effort_level', 'TEXT'],
@@ -575,6 +617,7 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     id,
     engine: opts.engine,
     engineSessionId: null,
+    engineSessions: null,
     source: opts.source,
     sourceRef: opts.sourceRef,
     connector,
@@ -618,6 +661,7 @@ export function getSessionBySessionKey(sessionKey: string): Session | undefined 
 export interface UpdateSessionFields {
   engine?: string;
   engineSessionId?: string | null;
+  engineSessions?: EngineSessionRefs | null;
   status?: Session['status'];
   model?: string | null;
   effortLevel?: string | null;
@@ -643,6 +687,11 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
   if (updates.engineSessionId !== undefined) {
     sets.push('engine_session_id = ?');
     values.push(updates.engineSessionId);
+  }
+  if (updates.engineSessions !== undefined) {
+    sets.push('engine_sessions = ?');
+    const cleaned = cleanEngineSessionRefs(updates.engineSessions);
+    values.push(cleaned ? JSON.stringify(cleaned) : null);
   }
   if (updates.status !== undefined) {
     sets.push('status = ?');
@@ -694,6 +743,121 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
   values.push(id);
   db.prepare(`UPDATE sessions SET ${sets.join(', ')} WHERE id = ?`).run(...values);
   return getSession(id);
+}
+
+export function getEngineSessionRef(session: Session, engine = session.engine): EngineSessionRef {
+  const stored = cleanEngineSessionRef(session.engineSessions?.[engine] ?? {});
+  if (engine === session.engine) {
+    if (!stored.id && session.engineSessionId) stored.id = session.engineSessionId;
+    if (!stored.model && session.model) stored.model = session.model;
+    if (!stored.effortLevel && session.effortLevel) stored.effortLevel = session.effortLevel;
+  }
+  return stored;
+}
+
+export function recordEngineSessionId(
+  sessionId: string,
+  engine: string,
+  nativeId: string,
+  meta: Omit<EngineSessionRef, 'id'> = {},
+): Session | undefined {
+  const session = getSession(sessionId);
+  const id = nativeId.trim();
+  if (!session || !engine || !id) return session;
+
+  const refs = cleanEngineSessionRefs(session.engineSessions) ?? {};
+  const existing = getEngineSessionRef(session, engine);
+  const next = cleanEngineSessionRef({
+    ...existing,
+    ...meta,
+    id,
+  });
+  refs[engine] = next;
+
+  const updates: UpdateSessionFields = { engineSessions: refs };
+  if (session.engine === engine) {
+    updates.engineSessionId = next.id ?? null;
+  }
+  return updateSession(sessionId, updates);
+}
+
+export interface SwitchSessionEngineOptions {
+  model?: string | null;
+  effortLevel?: string | null;
+}
+
+export function switchSessionEngine(
+  sessionId: string,
+  nextEngine: string,
+  opts: SwitchSessionEngineOptions = {},
+): Session | undefined {
+  const session = getSession(sessionId);
+  if (!session || !nextEngine) return session;
+
+  const refs = cleanEngineSessionRefs(session.engineSessions) ?? {};
+  if (session.engine) {
+    const currentRef = getEngineSessionRef(session, session.engine);
+    const current = cleanEngineSessionRef({
+      ...currentRef,
+      id: session.engineSessionId ?? currentRef.id,
+      model: session.model ?? currentRef.model,
+      effortLevel: session.effortLevel ?? currentRef.effortLevel,
+    });
+    if (Object.keys(current).length > 0) refs[session.engine] = current;
+  }
+
+  let target = cleanEngineSessionRef(refs[nextEngine] ?? {});
+  const requestedTargetModel = typeof opts.model === 'string' && opts.model.trim() ? opts.model : undefined;
+  if (nextEngine === 'grok' && target.id && requestedTargetModel && target.model !== requestedTargetModel) {
+    target = cleanEngineSessionRef({
+      ...target,
+      id: undefined,
+      lastSyncedAt: undefined,
+      model: requestedTargetModel,
+    });
+  }
+  const nextModel = opts.model !== undefined ? opts.model : target.model ?? null;
+  const nextEffort = opts.effortLevel !== undefined ? opts.effortLevel : target.effortLevel ?? null;
+  const nextTarget = cleanEngineSessionRef({
+    ...target,
+    model: nextModel ?? undefined,
+    effortLevel: nextEffort ?? undefined,
+  });
+  if (Object.keys(nextTarget).length > 0) refs[nextEngine] = nextTarget;
+
+  const transportMeta = (session.transportMeta && typeof session.transportMeta === 'object' && !Array.isArray(session.transportMeta))
+    ? { ...session.transportMeta }
+    : {};
+  if (nextEngine !== session.engine) {
+    transportMeta.engineSyncTarget = nextEngine;
+    transportMeta.engineSyncSince = target.lastSyncedAt ?? session.createdAt;
+  }
+  delete transportMeta.engineOverride;
+
+  return updateSession(sessionId, {
+    engine: nextEngine,
+    engineSessionId: target.id ?? null,
+    engineSessions: refs,
+    model: nextModel ?? null,
+    effortLevel: nextEffort ?? null,
+    lastContextTokens: null,
+    transportMeta: transportMeta as JsonObject,
+    lastError: null,
+  });
+}
+
+export function clearEngineSessionRefs(sessionId: string, engine?: string): Session | undefined {
+  const session = getSession(sessionId);
+  if (!session) return undefined;
+  if (!engine) {
+    return updateSession(sessionId, { engineSessionId: null, engineSessions: null });
+  }
+  const refs = cleanEngineSessionRefs(session.engineSessions) ?? {};
+  delete refs[engine];
+  return updateSession(sessionId, {
+    engineSessionId: session.engine === engine ? null : session.engineSessionId,
+    engineSessions: refs,
+  });
 }
 
 export interface ListSessionsFilter {
@@ -1319,6 +1483,14 @@ export function markQueueItemCompleted(itemId: string): void {
   const db = initDb();
   db.prepare("UPDATE queue_items SET status = 'completed', completed_at = ? WHERE id = ?")
     .run(new Date().toISOString(), itemId);
+}
+
+export function markRunningQueueItemsCompletedForSession(sessionId: string): number {
+  const db = initDb();
+  const result = db.prepare(
+    "UPDATE queue_items SET status = 'completed', completed_at = ? WHERE session_id = ? AND status = 'running'"
+  ).run(new Date().toISOString(), sessionId);
+  return result.changes;
 }
 
 export function getQueueItem(itemId: string): QueueItem | undefined {

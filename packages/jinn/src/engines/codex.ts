@@ -146,6 +146,7 @@ export class CodexEngine implements InterruptibleEngine {
     }
 
     const bin = resolveBin("codex", opts.bin);
+    const sessionId = opts.sessionId || `codex-${Date.now()}`;
     const isResume = !!opts.resumeSessionId;
     const args = isResume
       ? this.buildResumeArgs(opts, prompt)
@@ -155,7 +156,7 @@ export class CodexEngine implements InterruptibleEngine {
       `Codex engine starting: ${bin} ${args[0]}${isResume ? " resume" : ""} --model ${opts.model || "default"} (resume: ${opts.resumeSessionId || "none"})`,
     );
 
-    const cleanEnv = this.buildCleanEnv();
+    const cleanEnv = this.buildCleanEnv(sessionId);
 
     return new Promise((resolve, reject) => {
       const proc = spawn(bin, args, {
@@ -165,7 +166,6 @@ export class CodexEngine implements InterruptibleEngine {
         detached: process.platform !== "win32",
       });
 
-      const sessionId = opts.sessionId || `codex-${Date.now()}`;
       this.liveProcesses.set(sessionId, {
         proc,
         terminationReason: null,
@@ -580,13 +580,14 @@ export class CodexEngine implements InterruptibleEngine {
     return null;
   }
 
-  private buildCleanEnv(): Record<string, string> {
+  private buildCleanEnv(sessionId?: string): Record<string, string> {
     const cleanEnv: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
       if (k === "CODEX" || k.startsWith("CODEX_")) continue;
       if (v !== undefined) cleanEnv[k] = v;
     }
+    if (sessionId) cleanEnv.JINN_SESSION_ID = sessionId;
     return cleanEnv;
   }
 

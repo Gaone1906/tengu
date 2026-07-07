@@ -686,7 +686,7 @@ export function buildOnboardingContext(opts: {
 function buildApiReference(gatewayUrl: string, portalName: string, employee?: Employee, directReportCount = 0): string {
   const header = `## ${portalName} Gateway API (base URL: ${gatewayUrl})`;
   const authLine =
-    `Privileged endpoints (everything below) require auth: add \`-H "Authorization: Bearer $JINN_GATEWAY_TOKEN"\`. Both \`$JINN_GATEWAY_TOKEN\` and \`$JINN_GATEWAY_URL\` (base URL) are already exported in your environment — use them directly. (The web UI authenticates via cookie instead.)`;
+    `Privileged endpoints (everything below) require auth: add \`-H "Authorization: Bearer $JINN_GATEWAY_TOKEN"\`. \`$JINN_GATEWAY_TOKEN\`, \`$JINN_GATEWAY_URL\` (base URL), and \`$JINN_SESSION_ID\` are already exported in your environment — use them directly. For privileged calls made from inside this session, also add \`-H "X-Jinn-Session-Id: $JINN_SESSION_ID"\` so restart/interrupt accounting can identify this turn. (The web UI authenticates via cookie instead.)`;
   const attachmentsLine =
     `- Push a file/image into this chat (web view): \`curl -X POST "$JINN_GATEWAY_URL"/api/sessions/<your-session-id>/attachments -H "Authorization: Bearer $JINN_GATEWAY_TOKEN" -H 'Content-Type: application/json' -d '{"path":"/abs/path","text":"caption"}'\``;
   if (!employee) {

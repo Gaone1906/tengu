@@ -837,8 +837,8 @@ export function useTalk(): UseTalkReturn {
   }, [activated, bootstrapSession, refreshEngineInfo])
 
   // ---- Engine / model switching --------------------------------------------
-  // Engine: persist then re-bootstrap (new-chat-only). Model: persist only
-  // (applies on the live session's next turn — the backend mutates it for us).
+  // Persist selector changes; the backend applies them to the live session when
+  // idle, and bootstrap reuses the updated orchestrator session.
   const switchEngine = useCallback((engine: string) => {
     void (async () => {
       try {

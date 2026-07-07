@@ -311,7 +311,7 @@ export const api = {
     )
   },
   getSessionChildren: (id: string) => get<Record<string, unknown>[]>(`/api/sessions/${id}/children`),
-  updateSession: (id: string, data: { title?: string; model?: string; effortLevel?: string }) =>
+  updateSession: (id: string, data: { title?: string; engine?: string; model?: string; effortLevel?: string }) =>
     put<Record<string, unknown>>(`/api/sessions/${id}`, data),
   deleteSession: (id: string) => del<Record<string, unknown>>(`/api/sessions/${id}`),
   duplicateSession: (id: string) =>
@@ -434,8 +434,8 @@ export const api = {
   /**
    * Talk: switch the orchestrator engine and/or model.
    * - model: applies to the live session on its next turn (no re-bootstrap).
-   * - engine: new-chat-only — the caller MUST re-bootstrap the talk session
-   *   (talkCreateSession) so the new engine is adopted.
+   * - engine: applies to the live session when idle; callers may re-bootstrap to
+   *   refresh local session metadata.
    */
   talkEngineSet: (body: { engine?: string; model?: string }) =>
     post<{

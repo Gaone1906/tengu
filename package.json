@@ -7,7 +7,7 @@
   },
   "scripts": {
     "postinstall": "chmod +x node_modules/.pnpm/node-pty@*/node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true",
-    "build": "turbo build && rm -rf packages/jinn/dist/web && cp -r packages/web/out packages/jinn/dist/web",
+    "build": "turbo build && node scripts/sync-web-dist.mjs",
     "dev": "turbo dev",
     "lint": "turbo lint",
     "typecheck": "turbo typecheck",
@@ -18,7 +18,7 @@
     "jinn": "node packages/jinn/dist/bin/jinn.js",
     "setup": "pnpm build && node packages/jinn/dist/bin/jinn.js setup",
     "setup:force": "pnpm build && node packages/jinn/dist/bin/jinn.js setup --force",
-    "start": "pnpm clean && pnpm build && node packages/jinn/dist/bin/jinn.js start",
+    "start": "pnpm build && node packages/jinn/dist/bin/jinn.js start",
     "stop": "node packages/jinn/dist/bin/jinn.js stop",
     "nuke": "node packages/jinn/dist/bin/jinn.js nuke",
     "status": "node packages/jinn/dist/bin/jinn.js status"

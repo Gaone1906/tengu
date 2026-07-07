@@ -19,8 +19,12 @@ import {
   searchSessions,
   listChildSessions,
   getSession,
+  getEngineSessionRef,
   createSession,
   updateSession,
+  recordEngineSessionId,
+  switchSessionEngine,
+  clearEngineSessionRefs,
   UpdateSessionFields,
   deleteSession,
   deleteSessions,
@@ -35,6 +39,7 @@ import {
   getMessagePage,
   enqueueQueueItem,
   cancelQueueItem,
+  markRunningQueueItemsCompletedForSession,
   getQueueItems,
   cancelAllPendingQueueItems,
   listAllPendingQueueItems,
@@ -106,6 +111,7 @@ import {
 import { isTalkMuted } from "../talk/mute-state.js";
 import { maybeEmitTalkGraph } from "../talk/graph.js";
 import { onboardingNeeded, applyEngineChoice } from "./onboarding-policy.js";
+import { restartDetached } from "./lifecycle.js";
 
 /** Max bytes accepted on /api/internal/hook (loopback-only relay payloads are tiny). */
 const HOOK_BODY_MAX_BYTES = 64 * 1024;
@@ -114,6 +120,12 @@ const AUTH_BODY_MAX_BYTES = 16 * 1024;
 const SESSION_LIST_PER_GROUP = 50;
 const BACKGROUND_ACTIVITY_STALE_MS = 5 * 60 * 1000;
 const SUPERSEDED_TURN_META_KEY = "supersededRunningTurnAt";
+const RESTART_ACK_META_KEY = "restartAcknowledgedAt";
+
+function headerValue(req: HttpRequest, name: string): string | undefined {
+  const value = req.headers[name.toLowerCase()];
+  return Array.isArray(value) ? value[0] : value;
+}
 
 function parseMessageLimit(value: string | null, fallback: number): number {
   const parsed = Number.parseInt(value || "", 10);
@@ -204,6 +216,8 @@ export interface ApiContext {
   gatewayAuthToken?: string;
   /** Test-injectable Jinn home for auth device storage. Defaults to shared JINN_HOME. */
   jinnHome?: string;
+  /** Test-injectable gateway restart primitive. Defaults to lifecycle.restartDetached(). */
+  restartGateway?: () => void;
 }
 
 function killSessionEngines(context: ApiContext, session: Session, reason: string): void {
@@ -212,6 +226,8 @@ function killSessionEngines(context: ApiContext, session: Session, reason: strin
   const pty = context.ptyViewEngines?.[session.engine];
   if (primary) engines.add(primary);
   if (pty) engines.add(pty);
+  for (const engine of context.sessionManager.getEngines().values()) engines.add(engine);
+  for (const engine of Object.values(context.ptyViewEngines ?? {})) engines.add(engine);
 
   for (const engine of engines) {
     if (isInterruptibleEngine(engine)) engine.kill(session.id, reason);
@@ -766,6 +782,42 @@ export async function handleApiRequest(
       });
     }
 
+    // POST /api/system/restart — spawn the detached restart helper from the
+    // gateway process itself, after the HTTP response has been flushed.
+    if (method === "POST" && pathname === "/api/system/restart") {
+      const auth = authenticateGatewayRequest(req, context.gatewayAuthToken, jinnHome);
+      if (!auth.ok) return json(res, { error: auth.reason || "Unauthorized" }, 401);
+      const requestingSessionId = headerValue(req, "x-jinn-session-id")?.trim();
+      if (requestingSessionId) {
+        const completed = markRunningQueueItemsCompletedForSession(requestingSessionId);
+        if (completed > 0) {
+          logger.info(`Completed ${completed} active queue item(s) for restart-requesting session ${requestingSessionId}`);
+        }
+        const requestingSession = getSession(requestingSessionId);
+        const transportMeta = (requestingSession?.transportMeta && typeof requestingSession.transportMeta === "object" && !Array.isArray(requestingSession.transportMeta))
+          ? { ...(requestingSession.transportMeta as JsonObject) }
+          : {};
+        transportMeta[RESTART_ACK_META_KEY] = new Date().toISOString();
+        updateSession(requestingSessionId, {
+          status: "idle",
+          lastActivity: new Date().toISOString(),
+          lastError: null,
+          transportMeta,
+        });
+      }
+      const restartGateway = context.restartGateway ?? restartDetached;
+      logger.info("Gateway restart requested via API");
+      const timer = setTimeout(() => {
+        try {
+          restartGateway();
+        } catch (err) {
+          logger.error(`Failed to spawn gateway restart helper: ${err instanceof Error ? err.stack : err}`);
+        }
+      }, 50);
+      timer.unref?.();
+      return json(res, { status: "restarting" });
+    }
+
     // GET /api/instances
     if (method === "GET" && pathname === "/api/instances") {
       const instances = loadInstances();
@@ -851,8 +903,9 @@ export async function handleApiRequest(
       // Run async + transactional so the GET doesn't block on multi-MB JSONL
       // parsing + N individual INSERTs. Subsequent GETs will see the messages
       // once the backfill finishes; this one returns whatever is in DB now.
-      if (includeMessages && messages.length === 0 && session.engineSessionId) {
-        scheduleTranscriptBackfill(params.id, session.engineSessionId, context);
+      const claudeSessionId = getEngineSessionRef(session, "claude").id;
+      if (includeMessages && messages.length === 0 && session.engine === "claude" && claudeSessionId) {
+        scheduleTranscriptBackfill(params.id, claudeSessionId, context);
       } else if (includeMessages && session.engine === "claude") {
         // On-load safety net for PTY-native (CLI-typed) turns whose unclaimed
         // Stop was missed entirely: fire-and-forget a transcript tail sync.
@@ -884,14 +937,47 @@ export async function handleApiRequest(
         if (!trimmed) return badRequest(res, "title must not be empty");
         updates.title = trimmed.slice(0, 200);
       }
-      // Mid-chat model / effort switch (applies from the next turn). Engine is
-      // new-chat-only, so it's not mutable here. Validated against the registry.
+      const configForPatch = context.getConfig();
+      let requestedEngine: string | undefined;
+      if (body.engine !== undefined) {
+        if (typeof body.engine !== "string" || !body.engine.trim()) {
+          return badRequest(res, "engine must be a non-empty string");
+        }
+        requestedEngine = body.engine.trim();
+      }
+
+      const engineChanging = Boolean(requestedEngine && requestedEngine !== session.engine);
+      if (engineChanging) {
+        if (getSessionTransportState(session, context) !== "idle") {
+          return badRequest(res, "Cannot switch engine while a turn is running, waiting, or queued");
+        }
+        const savedRef = getEngineSessionRef(session, requestedEngine);
+        const selection = validateNewSessionSelection(configForPatch, {
+          engine: requestedEngine,
+          model: body.model ?? savedRef.model,
+          effortLevel: body.effortLevel ?? savedRef.effortLevel,
+        });
+        if (!selection.ok) return badRequest(res, selection.error || "invalid engine/model/effort");
+        let switched = switchSessionEngine(params.id, selection.engine!, {
+          model: selection.model ?? null,
+          effortLevel: selection.effortLevel ?? null,
+        });
+        if (!switched) return notFound(res);
+        if (updates.title !== undefined) {
+          switched = updateSession(params.id, { title: updates.title }) ?? switched;
+        }
+        context.emit("session:updated", { sessionId: params.id });
+        return json(res, serializeSession(switched, context));
+      }
+
+      // Mid-chat model / effort switch (applies from the next turn). Validated
+      // against the current engine unless this request intentionally switched
+      // engines above.
       if (body.model !== undefined || body.effortLevel !== undefined) {
-        const configForPatch = context.getConfig();
         const engineConfigForPatch =
           (configForPatch.engines as unknown as Record<string, { model?: string } | undefined>)[session.engine] ?? {};
         const patch = validateSessionPatch(configForPatch, session.engine, session.model, body, {
-          engineSessionId: session.engineSessionId,
+          engineSessionId: getEngineSessionRef(session, session.engine).id,
           defaultModel: engineConfigForPatch.model,
         });
         if (!patch.ok) return badRequest(res, patch.error || "invalid model/effort");
@@ -947,9 +1033,9 @@ export async function handleApiRequest(
       const meta = { ...(session.transportMeta || {}) } as Record<string, unknown>;
       delete meta["engineSessions"];
       delete meta["engineOverride"];
+      clearEngineSessionRefs(params.id);
       updateSession(params.id, {
         status: "idle",
-        engineSessionId: null,
         lastActivity: new Date().toISOString(),
         lastError: null,
         transportMeta: meta as any,
@@ -990,7 +1076,10 @@ export async function handleApiRequest(
         const forkResult = await forkEngineSession(source.engine, source.engineSessionId, JINN_HOME, interactive);
 
         // 3. Store the new engine session ID
-        updateSession(newSession.id, { engineSessionId: forkResult.engineSessionId });
+        recordEngineSessionId(newSession.id, newSession.engine, forkResult.engineSessionId, {
+          model: newSession.model ?? undefined,
+          effortLevel: newSession.effortLevel ?? undefined,
+        });
 
         const result = getSession(newSession.id)!;
         logger.info(`Session duplicated: ${params.id} → ${newSession.id} (engine: ${forkResult.engineSessionId}, ${messageCount} messages)`);
@@ -1107,8 +1196,9 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (!session.engineSessionId) return json(res, []);
-      const entries = loadRawTranscript(session.engineSessionId);
+      const claudeSessionId = getEngineSessionRef(session, "claude").id;
+      if (!claudeSessionId) return json(res, []);
+      const entries = loadRawTranscript(claudeSessionId);
       return json(res, entries);
     }
 
@@ -2214,8 +2304,8 @@ export async function handleApiRequest(
         hookBody.hook.session_id
       ) {
         const existing = getSession(hookBody.jinnSessionId);
-        if (existing && existing.engineSessionId !== hookBody.hook.session_id) {
-          updateSession(hookBody.jinnSessionId, { engineSessionId: hookBody.hook.session_id });
+        if (existing && getEngineSessionRef(existing, "claude").id !== hookBody.hook.session_id) {
+          recordEngineSessionId(hookBody.jinnSessionId, "claude", hookBody.hook.session_id);
         }
       }
       return json(res, { message: result.body }, result.status);
@@ -2469,6 +2559,8 @@ async function runWebSession(
     logger.info(`Skipping deleted web session ${session.id} before run start`);
     return;
   }
+  const engineAtTurnStart = currentSession.engine;
+  const resumeRefAtTurnStart = getEngineSessionRef(currentSession, engineAtTurnStart);
   config = context.getConfig();
   const preferredPtyView = context.ptyViewEngines?.[session.engine] === engine;
   const runtimeEngine =
@@ -2489,7 +2581,7 @@ async function runWebSession(
     return;
   }
   engine = runtimeEngine;
-  logger.info(`Web session ${currentSession.id} running engine "${currentSession.engine}" (model: ${currentSession.model || "default"})`);
+  logger.info(`Web session ${currentSession.id} running engine "${engineAtTurnStart}" (model: ${currentSession.model || "default"})`);
 
   // Ensure status is "running" (may already be set by the POST handler)
   const currentStatus = getSession(currentSession.id);
@@ -2640,23 +2732,48 @@ async function runWebSession(
       }
     };
 
-    const syncSinceIso = (currentSession.transportMeta as any)?.claudeSyncSince;
-    const syncSinceMs = typeof syncSinceIso === "string" ? new Date(syncSinceIso).getTime() : NaN;
-    const syncRequested = currentSession.engine === "claude" && typeof syncSinceIso === "string" && Number.isFinite(syncSinceMs);
+    const syncMeta = (currentSession.transportMeta || {}) as Record<string, unknown>;
+    const switchSyncTarget = typeof syncMeta.engineSyncTarget === "string" ? syncMeta.engineSyncTarget : null;
+    const switchSyncSinceIso = typeof syncMeta.engineSyncSince === "string" ? syncMeta.engineSyncSince : null;
+    const switchSyncSinceMs = switchSyncSinceIso ? new Date(switchSyncSinceIso).getTime() : NaN;
+    const engineSyncRequested =
+      switchSyncTarget === engineAtTurnStart &&
+      typeof switchSyncSinceIso === "string" &&
+      Number.isFinite(switchSyncSinceMs);
+    const claudeSyncSinceIso = typeof syncMeta.claudeSyncSince === "string" ? syncMeta.claudeSyncSince : null;
+    const claudeSyncSinceMs = claudeSyncSinceIso ? new Date(claudeSyncSinceIso).getTime() : NaN;
+    const claudeSyncRequested =
+      engineAtTurnStart === "claude" &&
+      typeof claudeSyncSinceIso === "string" &&
+      Number.isFinite(claudeSyncSinceMs);
+    const syncRequested = engineSyncRequested || claudeSyncRequested;
     const promptToRun = syncRequested
       ? (() => {
-        const sinceMessages = getMessages(currentSession.id)
-          .filter((m) => (m.role === "user" || m.role === "assistant") && m.timestamp >= syncSinceMs)
+        const sinceMs = engineSyncRequested ? switchSyncSinceMs : claudeSyncSinceMs;
+        const recentMessages = getMessages(currentSession.id).filter((m) => m.timestamp >= sinceMs);
+        const sinceMessages = recentMessages
+          .filter((m) => m.role === "user" || m.role === "assistant")
           .map((m) => `${m.role.toUpperCase()}: ${m.content}`);
         const transcript = sinceMessages.slice(-20).join("\n\n");
-        return `We temporarily switched to GPT due to a Claude usage limit. Sync your context with this transcript (most recent last), then respond to the last USER message.\n\n${transcript}`;
+        const latestMessage = recentMessages.at(-1);
+        const currentPromptWasIncluded =
+          latestMessage &&
+          (latestMessage.role === "user" || latestMessage.role === "assistant") &&
+          latestMessage.content === prompt;
+        const currentPrompt = currentPromptWasIncluded || !prompt.trim()
+          ? ""
+          : `CURRENT MESSAGE:\n${prompt}`;
+        const intro = engineSyncRequested
+          ? `We switched engines in this Jinn session. Sync your context with this transcript (most recent last), then respond to the current message.`
+          : `We temporarily switched to GPT due to a Claude usage limit. Sync your context with this transcript (most recent last), then respond to the current message.`;
+        return [intro, transcript, currentPrompt].filter(Boolean).join("\n\n");
       })()
       : prompt;
 
     const turnStartedAt = Date.now();
     const result = await engine.run({
       prompt: promptToRun,
-      resumeSessionId: currentSession.engineSessionId ?? undefined,
+      resumeSessionId: resumeRefAtTurnStart.id ?? undefined,
       systemPrompt,
       cwd: JINN_HOME,
       bin: engineConfig.bin,
@@ -2735,10 +2852,16 @@ async function runWebSession(
       // the session is gone or a NEW turn owns it (status back to "running").
       onLateRecovery: ({ result: lateText, sessionId: engineSid }) => {
         const live = getSession(currentSession.id);
-        if (!live || live.status === "running") return;
+        if (!live || live.status === "running" || live.engine !== engineAtTurnStart) return;
         insertMessage(currentSession.id, "assistant", lateText);
+        if (engineSid.trim()) {
+          recordEngineSessionId(currentSession.id, engineAtTurnStart, engineSid, {
+            model: currentSession.model ?? engineConfig.model,
+            effortLevel,
+            lastSyncedAt: new Date().toISOString(),
+          });
+        }
         const recovered = updateSession(currentSession.id, {
-          ...(engineSid.trim() ? { engineSessionId: engineSid } : {}),
           status: "idle",
           lastActivity: new Date().toISOString(),
           lastError: null,
@@ -2769,6 +2892,17 @@ async function runWebSession(
 
     if (!getSession(currentSession.id)) {
       logger.info(`Skipping completion for deleted web session ${currentSession.id}`);
+      return;
+    }
+
+    const liveAfterRun = getSession(currentSession.id);
+    if (liveAfterRun?.engine !== engineAtTurnStart) {
+      deletePartialMessages(currentSession.id);
+      clearSupersededTurnMeta(currentSession.id);
+      if (currentSession.source === "talk") discardTalkSpeech(currentSession.id);
+      logger.info(
+        `Dropping stale ${engineAtTurnStart} result for session ${currentSession.id}; session now uses ${liveAfterRun?.engine ?? "unknown"}`,
+      );
       return;
     }
 
@@ -2863,10 +2997,18 @@ async function runWebSession(
               insertMessage(currentSession.id, "assistant", fallbackResult.result);
             }
 
+            const fallbackCompletedAt = new Date().toISOString();
+            if (fallbackResult.sessionId?.trim()) {
+              const fallbackEngineName = getSession(currentSession.id)?.engine ?? currentSession.engine;
+              recordEngineSessionId(currentSession.id, fallbackEngineName, fallbackResult.sessionId, {
+                model: currentSession.model ?? engineConfig.model,
+                effortLevel,
+                lastSyncedAt: fallbackCompletedAt,
+              });
+            }
             const completedFallback = updateSession(currentSession.id, {
-              engineSessionId: fallbackResult.sessionId,
               status: fallbackResult.error ? "error" : "idle",
-              lastActivity: new Date().toISOString(),
+              lastActivity: fallbackCompletedAt,
               lastError: fallbackResult.error ?? null,
             });
             if (completedFallback) {
@@ -2923,10 +3065,17 @@ async function runWebSession(
               insertMessage(currentSession.id, "assistant", retryResult.result);
             }
 
+            const retryCompletedAt = new Date().toISOString();
+            if (retryResult.sessionId?.trim()) {
+              recordEngineSessionId(currentSession.id, engineAtTurnStart, retryResult.sessionId, {
+                model: currentSession.model ?? engineConfig.model,
+                effortLevel,
+                lastSyncedAt: retryCompletedAt,
+              });
+            }
             const completedAfterRetry = updateSession(currentSession.id, {
-              ...(retryResult.sessionId?.trim() ? { engineSessionId: retryResult.sessionId } : {}),
               status: retryResult.error ? "error" : "idle",
-              lastActivity: new Date().toISOString(),
+              lastActivity: retryCompletedAt,
               lastError: retryResult.error ?? null,
             });
 
@@ -2998,18 +3147,25 @@ async function runWebSession(
       else void flushTalkSpeech(currentSession.id, config.talk?.kokoro, context.emit);
     }
 
+    const completedAt = new Date().toISOString();
+    if (result.sessionId?.trim()) {
+      recordEngineSessionId(currentSession.id, engineAtTurnStart, result.sessionId, {
+        model: currentSession.model ?? engineConfig.model,
+        effortLevel,
+        lastSyncedAt: completedAt,
+      });
+    }
     const completedSession = updateSession(currentSession.id, {
-      ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
       ...(typeof result.contextTokens === "number" ? { lastContextTokens: result.contextTokens } : {}),
       // An interrupt (new message arrived / user stopped) is NOT an error — land idle
       // with no lastError, mirroring the connector path (manager.ts). Otherwise the
       // session would stick in "error" with a misleading "Interrupted" message and
       // fire a false parent-callback failure when the interrupt is the last action.
       status: quietPreempted ? "idle" : (result.error ? "error" : "idle"),
-      lastActivity: new Date().toISOString(),
+      lastActivity: completedAt,
       lastError: quietPreempted ? null : (result.error ?? null),
     });
-    if (!quietPreempted && currentSession.engine === "claude") {
+    if (!quietPreempted && engineAtTurnStart === "claude") {
       markTranscriptSyncedThrough(currentSession.id, result.sessionId);
     }
     if (syncRequested && !rateLimit.limited && !quietPreempted) {
@@ -3017,6 +3173,8 @@ async function runWebSession(
       if (meta && typeof meta === "object" && !Array.isArray(meta)) {
         const nextMeta = { ...meta } as Record<string, unknown>;
         delete nextMeta["claudeSyncSince"];
+        delete nextMeta["engineSyncTarget"];
+        delete nextMeta["engineSyncSince"];
         updateSession(currentSession.id, { transportMeta: nextMeta as any });
       }
     }
@@ -3051,8 +3209,18 @@ async function runWebSession(
     );
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    if (!getSession(currentSession.id)) {
+    const live = getSession(currentSession.id);
+    if (!live) {
       logger.info(`Skipping error handling for deleted web session ${currentSession.id}: ${errMsg}`);
+      return;
+    }
+    if (live.engine !== engineAtTurnStart) {
+      deletePartialMessages(currentSession.id);
+      clearSupersededTurnMeta(currentSession.id);
+      if (currentSession.source === "talk") discardTalkSpeech(currentSession.id);
+      logger.info(
+        `Dropping stale ${engineAtTurnStart} error for session ${currentSession.id}; session now uses ${live.engine}`,
+      );
       return;
     }
     // The run threw — drop any orphaned mid-turn partial blocks.

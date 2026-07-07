@@ -12,8 +12,12 @@ const lifecycle = vi.hoisted(() => ({
   startForeground: vi.fn(),
   startDaemon: vi.fn(),
 }));
+const restartRequest = vi.hoisted(() => ({
+  requestRestartFromGateway: vi.fn(async () => true),
+}));
 
 vi.mock("../../gateway/lifecycle.js", () => lifecycle);
+vi.mock("../restart-request.js", () => restartRequest);
 vi.mock("../../shared/config.js", () => ({
   loadConfig: () => ({ gateway: { host: "127.0.0.1", port: 7777 }, engines: { default: "claude" } }),
 }));
@@ -35,11 +39,20 @@ afterAll(() => {
 });
 
 describe("runStart", () => {
-  it("uses the detached restart helper when a gateway is already running, even without --daemon", async () => {
+  it("asks the running gateway to own the restart when one is already running", async () => {
+    await runStart({ daemon: false });
+
+    expect(restartRequest.requestRestartFromGateway).toHaveBeenCalledTimes(1);
+    expect(lifecycle.restartDetached).not.toHaveBeenCalled();
+    expect(lifecycle.startForeground).not.toHaveBeenCalled();
+    expect(lifecycle.startDaemon).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the detached restart helper when the gateway request fails", async () => {
+    restartRequest.requestRestartFromGateway.mockResolvedValueOnce(false);
+
     await runStart({ daemon: false });
 
     expect(lifecycle.restartDetached).toHaveBeenCalledTimes(1);
-    expect(lifecycle.startForeground).not.toHaveBeenCalled();
-    expect(lifecycle.startDaemon).not.toHaveBeenCalled();
   });
 });

@@ -242,6 +242,9 @@ export function syncExternalTurn(
   }
   // A run() owns the session — its completion path persists the turn.
   if (session.status === "running") return 0;
+  // This sync is Claude-transcript-specific. Once the logical session has moved
+  // to another engine, an unclaimed old Claude Stop must not append stale rows.
+  if (session.engine !== "claude") return 0;
 
   const engineSessionId =
     (typeof payload?.session_id === "string" && payload.session_id) ||

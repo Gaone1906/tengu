@@ -24,6 +24,14 @@ function queueRowCount(sessionId: string): number {
   return row.count;
 }
 
+function queueStatus(itemId: string): string | null {
+  const db = reg.initDb();
+  const row = db
+    .prepare("SELECT status FROM queue_items WHERE id = ?")
+    .get(itemId) as { status: string } | undefined;
+  return row?.status ?? null;
+}
+
 describe("deleteSession/deleteSessions queue_items cleanup", () => {
   it("deleteSession removes the session's queue_items rows", () => {
     const session = reg.createSession({ engine: "claude", source: "web", sourceRef: "web:delq-1" });
@@ -43,5 +51,23 @@ describe("deleteSession/deleteSessions queue_items cleanup", () => {
     expect(reg.deleteSessions([a.id, b.id])).toBe(2);
     expect(queueRowCount(a.id)).toBe(0);
     expect(queueRowCount(b.id)).toBe(0);
+  });
+});
+
+describe("markRunningQueueItemsCompletedForSession", () => {
+  it("completes only running queue rows for the requesting session", () => {
+    const session = reg.createSession({ engine: "codex", source: "web", sourceRef: "web:restart-loop" });
+    const other = reg.createSession({ engine: "codex", source: "web", sourceRef: "web:other-running" });
+    const running = reg.enqueueQueueItem(session.id, session.sessionKey, "Restart the gateway.");
+    const pending = reg.enqueueQueueItem(session.id, session.sessionKey, "Next normal message");
+    const otherRunning = reg.enqueueQueueItem(other.id, other.sessionKey, "Unrelated work");
+    reg.markQueueItemRunning(running);
+    reg.markQueueItemRunning(otherRunning);
+
+    expect(reg.markRunningQueueItemsCompletedForSession(session.id)).toBe(1);
+
+    expect(queueStatus(running)).toBe("completed");
+    expect(queueStatus(pending)).toBe("pending");
+    expect(queueStatus(otherRunning)).toBe("running");
   });
 });

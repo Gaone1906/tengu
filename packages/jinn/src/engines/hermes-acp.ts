@@ -34,12 +34,17 @@ export class HermesAcpEngine implements InterruptibleEngine {
   protected handshakeTimeoutMs = HANDSHAKE_TIMEOUT_MS;
 
   /** Test seam — overridden in unit tests to inject a fake server. */
-  protected spawnProc(bin: string, cwd: string): ProcHandle {
+  protected spawnProc(bin: string, cwd: string, jinnSessionId?: string): ProcHandle {
     const child: ChildProcess = spawn(bin, ["acp"], {
       stdio: ["pipe", "pipe", "ignore"],
       cwd,
       detached: process.platform !== "win32",
-      env: { ...process.env, HERMES_YOLO_MODE: "1", HERMES_ACCEPT_HOOKS: "1" },
+      env: {
+        ...process.env,
+        ...(jinnSessionId ? { JINN_SESSION_ID: jinnSessionId } : {}),
+        HERMES_YOLO_MODE: "1",
+        HERMES_ACCEPT_HOOKS: "1",
+      },
     });
     const rpc = new HermesRpc(child.stdin!, child.stdout!);
     return {
@@ -57,7 +62,7 @@ export class HermesAcpEngine implements InterruptibleEngine {
     const existing = this.procs.get(jinnId);
     if (existing && existing.alive) return existing;
 
-    const handle = this.spawnProc(bin, cwd);
+    const handle = this.spawnProc(bin, cwd, jinnId);
     // Fix 4: only auto-approve the specific permission-request method.
     handle.rpc.onServerRequest((method) =>
       method === "session/request_permission" ? ALLOW_ALWAYS : {},
@@ -236,5 +241,4 @@ export class HermesAcpEngine implements InterruptibleEngine {
     /* no-op */
   }
 }
-
 

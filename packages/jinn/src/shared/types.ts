@@ -180,10 +180,20 @@ export interface Target {
   replyContext?: ReplyContext;
 }
 
+export interface EngineSessionRef {
+  id?: string;
+  model?: string;
+  effortLevel?: string;
+  lastSyncedAt?: string;
+}
+
+export type EngineSessionRefs = Record<string, EngineSessionRef>;
+
 export interface Session {
   id: string;
   engine: string;
   engineSessionId: string | null;
+  engineSessions?: EngineSessionRefs | null;
   source: string;
   sourceRef: string;
   connector: string | null;
@@ -225,6 +235,7 @@ export interface CronJob {
   timezone?: string;
   engine?: string;
   model?: string;
+  effortLevel?: string;
   employee?: string;
   prompt: string;
   delivery?: CronDelivery;

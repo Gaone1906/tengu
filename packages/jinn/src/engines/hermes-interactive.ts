@@ -106,12 +106,13 @@ export class HermesInteractiveEngine implements InterruptibleEngine, PtyViewEngi
 
   // ── Private spawn ─────────────────────────────────────────────────────────
 
-  private buildEnv(): Record<string, string> {
+  private buildEnv(sessionId?: string): Record<string, string> {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined) env[k] = v;
     }
     env.TERM = "xterm-256color";
+    if (sessionId) env.JINN_SESSION_ID = sessionId;
     env.HERMES_YOLO_MODE = "1";
     env.HERMES_ACCEPT_HOOKS = "1";
     return env;
@@ -127,7 +128,7 @@ export class HermesInteractiveEngine implements InterruptibleEngine, PtyViewEngi
       cols: geom?.cols ?? 120,
       rows: geom?.rows ?? 40,
       cwd: opts.cwd || JINN_HOME,
-      env: this.buildEnv(),
+      env: this.buildEnv(jinnSessionId),
     });
     const handle = createPtyHandle(proc);
     this.streams.attach(jinnSessionId, proc);

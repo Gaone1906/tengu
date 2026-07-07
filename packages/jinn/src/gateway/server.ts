@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { JinnConfig, Connector, Employee, Engine } from "../shared/types.js";
+import type { JinnConfig, Connector, Employee, Engine, JsonObject, Session } from "../shared/types.js";
 import { loadConfig, normalizeClaudeEngineConfig } from "../shared/config.js";
 import { invalidateModelRegistry, refreshGrokModels, refreshPiModels, refreshHermesModels } from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
@@ -33,6 +33,17 @@ import { startStatusReconciler } from "./status-reconciler.js";
 import { syncExternalTurn } from "./external-turns.js";
 import { pickEncoding, isCompressibleExt, compressStream } from "./compress.js";
 import { attachPtyWebSocket } from "./pty-ws.js";
+
+const RESTART_ACK_META_KEY = "restartAcknowledgedAt";
+
+function consumeRestartAcknowledgement(session: Session): JsonObject | null | undefined {
+  const meta = (session.transportMeta && typeof session.transportMeta === "object" && !Array.isArray(session.transportMeta))
+    ? { ...(session.transportMeta as JsonObject) }
+    : undefined;
+  if (!meta || typeof meta[RESTART_ACK_META_KEY] !== "string") return undefined;
+  delete meta[RESTART_ACK_META_KEY];
+  return Object.keys(meta).length > 0 ? meta : null;
+}
 import { startWsHeartbeat, trackHeartbeat } from "./ws-heartbeat.js";
 import { ensureFilesDir, cleanupOldUploads } from "./files.js";
 import { initStt } from "../stt/stt.js";
@@ -1151,6 +1162,17 @@ export async function startGateway(
     // This preserves their engine_session_id so they can be resumed on next startup.
     const runningSessions = listSessions({ status: "running" });
     for (const session of runningSessions) {
+      const consumedRestartMeta = consumeRestartAcknowledgement(session);
+      if (consumedRestartMeta !== undefined) {
+        updateSession(session.id, {
+          status: "idle",
+          lastActivity: new Date().toISOString(),
+          lastError: null,
+          transportMeta: consumedRestartMeta,
+        });
+        logger.info(`Left restart-requesting session ${session.id} idle during gateway shutdown`);
+        continue;
+      }
       updateSession(session.id, {
         status: "interrupted",
         lastActivity: new Date().toISOString(),

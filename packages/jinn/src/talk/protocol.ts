@@ -111,9 +111,8 @@ export interface TalkTaskEvent { sessionId: string; task: TrackerTask }
 export interface TalkTurnDoneEvent { sessionId: string; ok: boolean; error?: string }
 /**
  * The active orchestrator engine/model changed (POST /api/talk/engine). The model
- * applies on the live session's next turn; the engine — new-chat-only, mirroring
- * PATCH /api/sessions — applies when the talk session is next (re)created. Harmless
- * if a client doesn't handle it.
+ * applies on the live session's next turn; the engine applies in place when the
+ * live session is idle. Harmless if a client doesn't handle it.
  */
 export interface TalkEngineEvent {
   engine: string | null

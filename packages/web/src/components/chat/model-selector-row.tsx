@@ -61,7 +61,7 @@ export interface SelectorValue {
 }
 
 interface ModelSelectorRowProps {
-  /** 'new' = engine editable; 'existing' = engine is read-only (locked mid-chat). */
+  /** 'new' = pre-create selection; 'existing' = persisted to the active chat. */
   mode: 'new' | 'existing'
   value: SelectorValue
   onChange: (next: SelectorValue) => void
@@ -73,8 +73,6 @@ interface ModelSelectorRowProps {
   /** Most recent turn's input-context token count (session.lastContextTokens),
    *  for the in-dropdown context meter. Omitted/0 → fresh chat (window-only). */
   contextTokens?: number | null
-  /** Start-a-new-chat handler — offered for the locked-engine (existing-chat) case. */
-  onNewChat?: () => void
 }
 
 const engineLabelOf = (e: string) => (e ? e.charAt(0).toUpperCase() + e.slice(1) : '')
@@ -130,7 +128,7 @@ function SlidePanel({ dir, reduceMotion, children }: { dir: 1 | -1; reduceMotion
  * engine header, model radio list, effort pill row, a context-usage footer, and
  * a "Switch engine" affordance. All options come from the live registry
  * (GET /api/engines); nothing is hardcoded.
- *  - Engine: editable on a NEW chat only; locked (explainer) in an existing chat.
+ *  - Engine: editable in-place; existing chats persist the change for the next turn.
  *  - Model: editable always.
  *  - Effort: editable always; hidden entirely for models with no effort levels.
  * Cascading: changing engine resets model to that engine's default; changing model
@@ -141,7 +139,7 @@ function SlidePanel({ dir, reduceMotion, children }: { dir: 1 | -1; reduceMotion
  * Model/Effort panel; choosing an engine sets it and auto-returns to that panel,
  * now reflecting the new engine's models.
  */
-export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote, disabled, contextTokens, onNewChat }: ModelSelectorRowProps) {
+export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote, disabled, contextTokens }: ModelSelectorRowProps) {
   const { data: registry, isLoading } = useModelRegistry()
   const queryClient = useQueryClient()
 
@@ -228,7 +226,7 @@ export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote
 
   // Other installed engines, for the "Switch engine" subtext.
   const otherEngines = engines.filter((e) => e.name !== engine)
-  const canSwitchEngine = mode === 'new' && otherEngines.length > 0
+  const canSwitchEngine = otherEngines.length > 0
 
   // Re-discover dynamic (pi) models without a restart, then update the cache.
   const refreshModels = async () => {
@@ -279,10 +277,9 @@ export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote
 
   const mainPanel = (
     <>
-      {/* Engine header — current engine; locked label in an existing chat. */}
+      {/* Engine header — current engine. */}
       <div className="px-2 pt-1 pb-1.5 text-[length:var(--text-caption2)] font-[var(--weight-bold)] uppercase tracking-[0.4px] text-[var(--text-quaternary)]">
         Engine · {engineLabelOf(engine)}
-        {mode === 'existing' && <span className="ml-1 normal-case tracking-normal opacity-80">(locked)</span>}
       </div>
 
       {/* Model radio list — label left, accent ✓ on the selected (right). */}
@@ -380,8 +377,7 @@ export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote
         </>
       )}
 
-      {/* Engine switch — editable on a new chat only; locked mid-chat.
-          Navigates the SAME surface to the engine panel (no nested menu). */}
+      {/* Engine switch — navigates the SAME surface to the engine panel (no nested menu). */}
       <DropdownMenuSeparator className="bg-[var(--separator)]" />
       {canSwitchEngine ? (
         <DropdownMenuItem
@@ -393,19 +389,6 @@ export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote
             {otherEngines.map((e) => engineLabelOf(e.name)).join(' · ')}
           </span>
         </DropdownMenuItem>
-      ) : mode === 'existing' ? (
-        onNewChat ? (
-          <DropdownMenuItem
-            onSelect={onNewChat}
-            className="rounded-[9px] py-1.5 px-2 text-[length:var(--text-footnote)] text-[var(--text-secondary)]"
-          >
-            <span className="flex-1">Start a new chat to switch engine</span>
-          </DropdownMenuItem>
-        ) : (
-          <div className="px-2 py-1.5 text-[length:var(--text-caption1)] leading-snug text-[var(--text-quaternary)]">
-            Engine is locked for this chat.
-          </div>
-        )
       ) : (
         <DropdownMenuItem
           onSelect={(e) => { e.preventDefault(); void refreshModels() }}

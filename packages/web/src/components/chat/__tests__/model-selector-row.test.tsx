@@ -195,19 +195,18 @@ describe('ModelSelectorRow in-place engine panel', () => {
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ engine: 'claude', model: 'claude-sonnet-4-6' }))
   })
 
-  it('existing-chat keeps the engine locked (no Switch engine affordance)', async () => {
-    const onNewChat = vi.fn()
+  it('existing-chat can switch engines in-place', async () => {
+    const onChange = vi.fn()
     renderRow(
       <ModelSelectorRow
         mode="existing"
         value={{ engine: 'claude', model: 'opus', effortLevel: 'high' }}
-        onChange={() => {}}
-        onNewChat={onNewChat}
+        onChange={onChange}
       />,
     )
     openMenu()
-    // No engine panel entry; instead the locked "start a new chat" affordance.
-    expect(screen.queryByRole('menuitem', { name: /^switch engine/i })).toBeNull()
-    expect(await screen.findByRole('menuitem', { name: /start a new chat to switch engine/i })).toBeTruthy()
+    fireEvent.click(await screen.findByRole('menuitem', { name: /switch engine/i }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: /codex/i }))
+    expect(onChange).toHaveBeenCalledWith({ engine: 'codex', model: 'gpt-5.5', effortLevel: 'medium' })
   })
 })

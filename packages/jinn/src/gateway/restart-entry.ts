@@ -8,8 +8,8 @@
  * The returning gateway resumes any sessions it marked "interrupted" on shutdown.
  */
 import { loadConfig } from "../shared/config.js";
-import { stopAndWait, startDaemon, waitForPortFree, waitForPortListening } from "./lifecycle.js";
-import { logger } from "../shared/logger.js";
+import { stopAndWait, startDaemon, waitForDashboardReady, waitForPortFree, waitForPortListening } from "./lifecycle.js";
+import { closeLogger, configureLogger, logger } from "../shared/logger.js";
 
 // stdio is ignored in detached mode — surface crashes to the log file instead of
 // letting them vanish.
@@ -21,8 +21,9 @@ process.on("unhandledRejection", (reason) => {
   logger.error(`restart-entry unhandled rejection: ${msg}`);
 });
 
-async function main(): Promise<void> {
+async function main(): Promise<number> {
   const config = loadConfig();
+  configureLogger({ level: config.logging.level, stdout: false, file: true });
   const port = config.gateway?.port ?? 7777;
 
   logger.info("restart-entry: stopping current gateway…");
@@ -38,19 +39,33 @@ async function main(): Promise<void> {
 
   logger.info("restart-entry: starting fresh daemon…");
   startDaemon(config);
-  const connectHost = !config.gateway?.host || config.gateway.host === "0.0.0.0" ? "127.0.0.1" : config.gateway.host;
+  const configuredHost = config.gateway?.host;
+  const connectHost = !configuredHost || configuredHost === "0.0.0.0"
+    ? "127.0.0.1"
+    : configuredHost === "::"
+      ? "::1"
+      : configuredHost;
   const listening = await waitForPortListening(port, connectHost);
   if (!listening) {
     logger.error(`restart-entry: fresh daemon did not bind port ${port} before timeout`);
-    process.exitCode = 1;
-    return;
+    return 1;
+  }
+  const dashboardReady = await waitForDashboardReady(port, connectHost);
+  if (!dashboardReady) {
+    logger.error(`restart-entry: fresh daemon bound port ${port}, but the dashboard did not become ready`);
+    return 1;
   }
   logger.info("restart-entry: done");
+  return 0;
 }
 
 main()
-  .then(() => process.exit(0))
-  .catch((err) => {
+  .then(async (code) => {
+    await closeLogger();
+    process.exit(code);
+  })
+  .catch(async (err) => {
     logger.error(`restart-entry failed: ${err instanceof Error ? err.stack : err}`);
+    await closeLogger();
     process.exit(1);
   });

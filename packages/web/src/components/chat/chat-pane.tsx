@@ -257,6 +257,7 @@ export function ChatPane({
       const previous = selector
       const lockedGrokModel =
         currentSession?.engine === 'grok' &&
+        next.engine === currentSession.engine &&
         Boolean(currentSession.engineSessionId) &&
         Boolean(next.model) &&
         Boolean(previous.model) &&
@@ -272,7 +273,7 @@ export function ChatPane({
       setSelector(next)
       setSelectorError(null)
       setEffortPendingNote(false)
-      api.updateSession(sid, { model: next.model, effortLevel: next.effortLevel })
+      api.updateSession(sid, { engine: next.engine, model: next.model, effortLevel: next.effortLevel })
         .then(() => {
           if (selectorPatchSeq.current === seq) setEffortPendingNote(true)
         })
@@ -280,7 +281,7 @@ export function ChatPane({
           if (selectorPatchSeq.current !== seq) return
           setSelector(previous)
           setEffortPendingNote(false)
-          setSelectorError(err instanceof Error ? err.message : 'Model/effort update failed')
+          setSelectorError(err instanceof Error ? err.message : 'Model update failed')
         })
     } else {
       newSessionSelectorDirtyRef.current = true
@@ -578,7 +579,6 @@ export function ChatPane({
             errorNote={selectorError ?? undefined}
             disabled={loading}
             contextTokens={liveContextTokens ?? (currentSession?.lastContextTokens as number | null | undefined) ?? undefined}
-            onNewChat={sessionId ? onNewChat : handleNewSession}
           />
         }
         terminalActionsSlot={

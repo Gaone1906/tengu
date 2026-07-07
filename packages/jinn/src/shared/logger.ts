@@ -25,6 +25,15 @@ export function configureLogger(opts: {
   }
 }
 
+export function closeLogger(): Promise<void> {
+  const stream = logStream;
+  if (!stream) return Promise.resolve();
+  logStream = null;
+  return new Promise((resolve) => {
+    stream.end(() => resolve());
+  });
+}
+
 function log(level: LogLevel, message: string) {
   if (LEVELS[level] < LEVELS[minLevel]) return;
   const safeMessage = redactText(message);

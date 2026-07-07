@@ -18,7 +18,7 @@ import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { ApiContext } from "../gateway/api.js";
 import { gatewayBaseUrl } from "../gateway/gateway-info.js";
 import { readJsonBody } from "../gateway/http-helpers.js";
-import type { JinnConfig, JsonObject } from "../shared/types.js";
+import type { JinnConfig, JsonObject, Session } from "../shared/types.js";
 import { CONFIG_PATH } from "../shared/paths.js";
 import { saveConfigAtomic } from "../shared/config.js";
 import { logger } from "../shared/logger.js";
@@ -27,6 +27,7 @@ import {
   getSession,
   getSessionBySessionKey,
   listChildSessions,
+  switchSessionEngine,
   updateSession,
   searchSessions,
   searchMessages,
@@ -47,10 +48,26 @@ const TALK_SESSION_KEY = "talk:main";
 
 /** Default orchestrator model when `talk.orchestratorModel` is unset (capable enough to orchestrate; override via talk.orchestratorModel). */
 const DEFAULT_TALK_MODEL = "sonnet";
+const TALK_BACKGROUND_ACTIVITY_STALE_MS = 5 * 60 * 1000;
 
 /** The orchestrator model the talk session should run on. */
 function talkModel(config: JinnConfig): string {
   return config.talk?.orchestratorModel ?? DEFAULT_TALK_MODEL;
+}
+
+function talkSessionTransportState(session: Session, context: ApiContext): "idle" | "queued" | "running" | "error" | "interrupted" {
+  const base = context.sessionManager.getQueue().getTransportState(
+    session.sessionKey || session.sourceRef || session.id,
+    session.status,
+  );
+  const activity = context.backgroundActivity?.get(session.id);
+  if (!activity) return base;
+  const stale = activity.activeStreams <= 0 && Date.now() - activity.lastActivityAt > TALK_BACKGROUND_ACTIVITY_STALE_MS;
+  if (stale) {
+    context.backgroundActivity?.delete(session.id);
+    return base;
+  }
+  return activity.activeStreams > 0 && base !== "error" && base !== "interrupted" ? "running" : base;
 }
 
 /**
@@ -125,12 +142,22 @@ export async function handleTalkApi(
 
       if (!body.fresh) {
         const existing = getSessionBySessionKey(TALK_SESSION_KEY);
-        // Engine is new-chat-only (mirrors PATCH /api/sessions): only reuse the
-        // existing orchestrator if it already runs the resolved engine. If the
-        // engine changed (e.g. via POST /api/talk/engine), fall through and create
-        // a fresh session on the new engine — that's how an engine switch lands.
-        if (existing && existing.source === "talk" && existing.engine === resolved.engine) {
-          json(res, { sessionId: existing.id, reused: true });
+        if (existing && existing.source === "talk") {
+          let live = existing;
+          if (
+            resolved.engine &&
+            existing.engine !== resolved.engine &&
+            talkSessionTransportState(existing, context) === "idle"
+          ) {
+            live = switchSessionEngine(existing.id, resolved.engine, { model: talkModel(config) }) ?? existing;
+          }
+          json(res, {
+            sessionId: live.id,
+            reused: true,
+            engine: live.engine,
+            model: live.model ?? talkModel(config),
+            fallback: resolved.fallback,
+          });
           return true;
         }
       }
@@ -245,12 +272,8 @@ export async function handleTalkApi(
     // Body: { engine?: string; model?: string }. Persists to config.talk and:
     //   • model — mutable mid-chat → applied to the live session immediately
     //     (takes effect on its NEXT turn, like PATCH /api/sessions).
-    //   • engine — new-chat-only (a live PTY can't swap engine mid-turn). We persist
-    //     the desired engine; it lands when the talk session is next (re)created.
-    //     The POST /api/talk/session reuse guard refuses to reuse a session whose
-    //     engine differs from the resolved one, so the next bootstrap (page reload /
-    //     reconnect, or { fresh:true }) silently moves to the new engine. We do NOT
-    //     tear down an in-flight conversation here.
+    //   • engine — switched in place when the live session is idle; if a turn is
+    //     active/waiting, only config is persisted and the next idle bootstrap adopts it.
     if (method === "POST" && pathname === "/api/talk/engine") {
       const parsed = await readJsonBody(req, res, { allowEmpty: true });
       if (!parsed.ok) return true;
@@ -303,31 +326,52 @@ export async function handleTalkApi(
       const config = context.getConfig();
       const resolved = resolveActiveTalkEngine(config);
       const activeModel = talkModel(config);
+      let responseEngine = resolved.engine;
+      let responseModel: string | null = activeModel;
+      let responseFallback = resolved.fallback;
+      let responseReason: string | null = resolved.reason;
 
-      // Apply the model switch to the live session right away (mid-chat mutable).
-      if (model !== undefined) {
-        const existing = getSessionBySessionKey(TALK_SESSION_KEY);
-        if (existing && existing.source === "talk") {
-          updateSession(existing.id, { model: activeModel });
+      // Apply the selector change to the live session right away when possible.
+      const existing = getSessionBySessionKey(TALK_SESSION_KEY);
+      if (existing && existing.source === "talk") {
+        responseEngine = existing.engine;
+        responseModel = existing.model ?? activeModel;
+        responseFallback = false;
+
+        const canSwitchLive = talkSessionTransportState(existing, context) === "idle";
+        if (engine !== undefined && resolved.engine && existing.engine !== resolved.engine) {
+          if (canSwitchLive) {
+            const switched = switchSessionEngine(existing.id, resolved.engine, { model: activeModel }) ?? existing;
+            responseEngine = switched.engine;
+            responseModel = switched.model ?? activeModel;
+            responseFallback = responseEngine === resolved.engine ? resolved.fallback : false;
+          } else {
+            responseReason = `Engine switch saved, but the active Talk session is still running on ${existing.engine}.`;
+          }
+        } else if (model !== undefined || (engine !== undefined && existing.engine === resolved.engine)) {
+          const updated = updateSession(existing.id, { model: activeModel }) ?? existing;
+          responseEngine = updated.engine;
+          responseModel = updated.model ?? activeModel;
+          responseFallback = responseEngine === resolved.engine ? resolved.fallback : false;
         }
       }
 
       logger.info(
-        `Talk engine switch → engine=${resolved.engine ?? "none"} model=${activeModel}` +
-          (resolved.fallback ? " (fallback)" : ""),
+        `Talk engine switch → engine=${responseEngine ?? "none"} model=${responseModel}` +
+          (responseFallback ? " (fallback)" : ""),
       );
       context.emit(TALK_EVENTS.engine, {
-        engine: resolved.engine,
-        model: activeModel,
-        fallback: resolved.fallback,
+        engine: responseEngine,
+        model: responseModel,
+        fallback: responseFallback,
       });
 
       json(res, {
         ok: true,
-        engine: resolved.engine,
-        model: activeModel,
-        fallback: resolved.fallback,
-        reason: resolved.reason,
+        engine: responseEngine,
+        model: responseModel,
+        fallback: responseFallback,
+        reason: responseReason,
         available: resolved.available,
       });
       return true;

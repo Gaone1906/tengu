@@ -439,6 +439,23 @@ describe("CodexEngine — error / failure handling", () => {
 });
 
 describe("CodexEngine — process lifecycle", () => {
+  it("exports the Jinn session id to spawned commands", async () => {
+    const engine = new CodexEngine();
+    const promise = engine.run({
+      prompt: "hi",
+      cwd: "/tmp",
+      sessionId: "sess-env",
+    } as any);
+    await flush();
+
+    const call = spawnCalls[spawnCalls.length - 1];
+    expect((call.opts as any).env.JINN_SESSION_ID).toBe("sess-env");
+
+    call.proc.emitStdout(threadStarted("t-env") + "\n" + agentMessage("done") + "\n");
+    call.proc.close(0);
+    await promise;
+  });
+
   it("tracks a live process and clears it after close (isAlive)", async () => {
     const engine = new CodexEngine();
     const promise = engine.run({

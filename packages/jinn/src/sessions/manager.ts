@@ -13,10 +13,13 @@ import {
   accumulateSessionCost,
   createSession,
   deleteSession,
+  clearEngineSessionRefs,
+  getEngineSessionRef,
   getSession,
   getSessionBySessionKey,
   getMessages,
   insertMessage,
+  recordEngineSessionId,
   updateSession,
 } from "./registry.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel } from "./callbacks.js";
@@ -39,6 +42,7 @@ export interface RouteOptions {
   employee?: Employee;
   engine?: string;
   model?: string;
+  effortLevel?: string;
   title?: string;
 }
 
@@ -99,7 +103,7 @@ export function mergeTransportMeta(
   const merged: Record<string, unknown> = { ...baseExisting, ...baseIncoming };
 
   // Preserve Jinn internal keys from being overwritten by transport adapters.
-  for (const key of ["engineOverride", "engineSessions", "claudeSyncSince", "transcriptSyncedThrough"]) {
+  for (const key of ["engineOverride", "engineSessions", "claudeSyncSince", "engineSyncTarget", "engineSyncSince", "transcriptSyncedThrough"]) {
     if (baseExisting[key] !== undefined) merged[key] = baseExisting[key];
   }
 
@@ -159,7 +163,7 @@ export class SessionManager {
         transportMeta: msg.transportMeta,
         employee: opts.employee?.name ?? undefined,
         model: opts.model ?? opts.employee?.model ?? undefined,
-        effortLevel: opts.employee?.effortLevel ?? undefined,
+        effortLevel: opts.effortLevel ?? opts.employee?.effortLevel ?? undefined,
         title: opts.title,
         prompt: msg.text,
         portalName: this.config.portal?.portalName,
@@ -175,6 +179,7 @@ export class SessionManager {
         messageId: msg.messageId ?? null,
         transportMeta: mergedMeta,
         ...(opts.model ? { model: opts.model } : {}),
+        ...(opts.effortLevel ? { effortLevel: opts.effortLevel } : {}),
       }) ?? session;
     }
 
@@ -280,7 +285,10 @@ export class SessionManager {
       hierarchy = resolveOrgHierarchy(scanOrg());
     } catch { /* fallback to filesystem scan in context builder */ }
 
+    let engineAtTurnStart = session.engine;
     try {
+      engineAtTurnStart = session.engine;
+      const resumeRefAtTurnStart = getEngineSessionRef(session, engineAtTurnStart);
       const systemPrompt = buildContext({
         source: session.source,
         channel: msg.channel,
@@ -327,17 +335,39 @@ export class SessionManager {
 
       // If we previously switched to GPT while Claude was rate-limited, inject a sync transcript
       // so Claude can resume with full context when it comes back online.
-      const syncSinceIso = (session.transportMeta as any)?.claudeSyncSince;
+      const syncMeta = (session.transportMeta || {}) as Record<string, unknown>;
+      const switchSyncTarget = typeof syncMeta.engineSyncTarget === "string" ? syncMeta.engineSyncTarget : null;
+      const switchSyncSinceIso = typeof syncMeta.engineSyncSince === "string" ? syncMeta.engineSyncSince : null;
+      const switchSyncSinceMs = switchSyncSinceIso ? new Date(switchSyncSinceIso).getTime() : NaN;
+      const engineSyncRequested =
+        switchSyncTarget === engineAtTurnStart &&
+        typeof switchSyncSinceIso === "string" &&
+        Number.isFinite(switchSyncSinceMs);
+      const syncSinceIso = typeof syncMeta.claudeSyncSince === "string" ? syncMeta.claudeSyncSince : null;
       let promptToRun = msg.text;
       const syncSinceMs = typeof syncSinceIso === "string" ? new Date(syncSinceIso).getTime() : NaN;
-      const syncRequested = session.engine === "claude" && typeof syncSinceIso === "string" && Number.isFinite(syncSinceMs);
+      const claudeSyncRequested = engineAtTurnStart === "claude" && typeof syncSinceIso === "string" && Number.isFinite(syncSinceMs);
+      const syncRequested = engineSyncRequested || claudeSyncRequested;
       if (syncRequested) {
-        const sinceMessages = getMessages(session.id)
-          .filter((m) => (m.role === "user" || m.role === "assistant") && m.timestamp >= syncSinceMs)
+        const sinceMs = engineSyncRequested ? switchSyncSinceMs : syncSinceMs;
+        const recentMessages = getMessages(session.id).filter((m) => m.timestamp >= sinceMs);
+        const sinceMessages = recentMessages
+          .filter((m) => m.role === "user" || m.role === "assistant")
           .map((m) => `${m.role.toUpperCase()}: ${m.content}`);
         const transcript = sinceMessages.slice(-20).join("\n\n");
+        const latestMessage = recentMessages.at(-1);
+        const currentPromptWasIncluded =
+          latestMessage &&
+          (latestMessage.role === "user" || latestMessage.role === "assistant") &&
+          latestMessage.content === msg.text;
+        const currentPrompt = currentPromptWasIncluded || !msg.text.trim()
+          ? ""
+          : `CURRENT MESSAGE:\n${msg.text}`;
+        const intro = engineSyncRequested
+          ? `We switched engines in this Jinn session. Sync your context with this transcript (most recent last), then respond to the current message.`
+          : `We temporarily switched to GPT due to a Claude usage limit. Sync your context with this transcript (most recent last), then respond to the current message.`;
         promptToRun =
-          `We temporarily switched to GPT due to a Claude usage limit. Sync your context with this transcript (most recent last), then respond to the last USER message.\n\n${transcript}`;
+          [intro, transcript, currentPrompt].filter(Boolean).join("\n\n");
       }
 
       // Budget enforcement — check BEFORE engine.run()
@@ -386,7 +416,7 @@ export class SessionManager {
 
       const result = await engine.run({
         prompt: promptToRun,
-        resumeSessionId: session.engineSessionId ?? undefined,
+        resumeSessionId: resumeRefAtTurnStart.id ?? undefined,
         systemPrompt,
         cwd: JINN_HOME,
         bin: engineConfig.bin,
@@ -399,10 +429,16 @@ export class SessionManager {
         source: session.source,
         onLateRecovery: ({ result: lateText, sessionId: engineSid }) => {
           const live = getSession(session.id);
-          if (!live || live.status === "running") return;
+          if (!live || live.status === "running" || live.engine !== engineAtTurnStart) return;
           insertMessage(session.id, "assistant", lateText);
+          if (engineSid.trim()) {
+            recordEngineSessionId(session.id, engineAtTurnStart, engineSid, {
+              model: session.model ?? engineConfig.model,
+              effortLevel,
+              lastSyncedAt: new Date().toISOString(),
+            });
+          }
           const recovered = updateSession(session.id, {
-            ...(engineSid.trim() ? { engineSessionId: engineSid } : {}),
             status: "idle",
             lastActivity: new Date().toISOString(),
             lastError: null,
@@ -416,6 +452,18 @@ export class SessionManager {
         },
       });
 
+      const liveAfterRun = getSession(session.id);
+      if (!liveAfterRun) {
+        logger.warn(`Dropping engine result for deleted session ${session.id}`);
+        return;
+      }
+      if (liveAfterRun.engine !== engineAtTurnStart) {
+        logger.info(
+          `Dropping stale ${engineAtTurnStart} result for session ${session.id}; session now uses ${liveAfterRun.engine}`,
+        );
+        return;
+      }
+
       const wasInterrupted = result.error?.startsWith("Interrupted");
 
       // Dead session detection: if the engine session ID is stale (expired/invalid),
@@ -428,12 +476,12 @@ export class SessionManager {
         const meta = { ...(session.transportMeta || {}) } as Record<string, unknown>;
         delete meta["engineSessions"];
         delete meta["engineOverride"];
+        clearEngineSessionRefs(session.id, engineAtTurnStart);
         updateSession(session.id, {
-          engineSessionId: null,
           transportMeta: meta as any,
         });
         // Update local reference so subsequent code doesn't re-read stale IDs
-        session = { ...session, engineSessionId: null, transportMeta: meta as any };
+        session = { ...session, engineSessionId: null, engineSessions: null, transportMeta: meta as any };
       }
 
       // Detect rate limit / usage limit errors and auto-retry.
@@ -496,14 +544,22 @@ export class SessionManager {
                 await connector.removeReaction(target, "eyes").catch(() => {});
               }
 
+              const fallbackCompletedAt = new Date().toISOString();
+              if (fallbackResult.sessionId?.trim()) {
+                const fallbackEngineName = getSession(session.id)?.engine ?? session.engine;
+                recordEngineSessionId(session.id, fallbackEngineName, fallbackResult.sessionId, {
+                  model: session.model ?? engineConfig.model,
+                  effortLevel,
+                  lastSyncedAt: fallbackCompletedAt,
+                });
+              }
               const updated = updateSession(session.id, {
-                engineSessionId: fallbackResult.sessionId,
                 ...(typeof fallbackResult.contextTokens === "number" ? { lastContextTokens: fallbackResult.contextTokens } : {}),
                 status: fallbackResult.error ? "error" : "idle",
                 replyContext: msg.replyContext,
                 messageId: msg.messageId ?? null,
                 transportMeta: mergeTransportMeta(getSessionBySessionKey(msg.sessionKey)?.transportMeta ?? session.transportMeta, msg.transportMeta),
-                lastActivity: new Date().toISOString(),
+                lastActivity: fallbackCompletedAt,
                 lastError: fallbackResult.error ?? null,
               });
               if (updated) {
@@ -583,14 +639,21 @@ export class SessionManager {
               }
 
               await connector.replyMessage(target, retryText).catch(() => {});
+              const retryCompletedAt = new Date().toISOString();
+              if (retryResult.sessionId?.trim()) {
+                recordEngineSessionId(session.id, engineAtTurnStart, retryResult.sessionId, {
+                  model: session.model ?? engineConfig.model,
+                  effortLevel,
+                  lastSyncedAt: retryCompletedAt,
+                });
+              }
               const retryUpdated = updateSession(session.id, {
-                ...(retryResult.sessionId?.trim() ? { engineSessionId: retryResult.sessionId } : {}),
                 ...(typeof retryResult.contextTokens === "number" ? { lastContextTokens: retryResult.contextTokens } : {}),
                 status: retryResult.error ? "error" : "idle",
                 replyContext: msg.replyContext,
                 messageId: msg.messageId ?? null,
                 transportMeta: mergeTransportMeta(getSessionBySessionKey(msg.sessionKey)?.transportMeta ?? session.transportMeta, msg.transportMeta),
-                lastActivity: new Date().toISOString(),
+                lastActivity: retryCompletedAt,
                 lastError: retryResult.error ?? null,
               });
               if (retryUpdated) {
@@ -629,11 +692,6 @@ export class SessionManager {
         ? result.result
         : result.error || "(No response from engine)";
 
-      if (!getSession(session.id)) {
-        logger.warn(`Dropping engine result for deleted session ${session.id}`);
-        return;
-      }
-
       insertMessage(session.id, "assistant", responseText);
       if (result.cost || result.numTurns) {
         accumulateSessionCost(session.id, result.cost ?? 0, result.numTurns ?? 1);
@@ -647,8 +705,15 @@ export class SessionManager {
       if (decorateMessages && capabilities.reactions) {
         await connector.removeReaction(target, "eyes").catch(() => {});
       }
+      const completedAt = new Date().toISOString();
+      if (result.sessionId?.trim()) {
+        recordEngineSessionId(session.id, engineAtTurnStart, result.sessionId, {
+          model: session.model ?? engineConfig.model,
+          effortLevel,
+          lastSyncedAt: completedAt,
+        });
+      }
       const updatedSession = updateSession(session.id, {
-        ...(result.sessionId?.trim() ? { engineSessionId: result.sessionId } : {}),
         ...(typeof result.contextTokens === "number" ? { lastContextTokens: result.contextTokens } : {}),
         status: wasInterrupted ? "idle" : (result.error ? "error" : "idle"),
         replyContext: msg.replyContext,
@@ -657,13 +722,15 @@ export class SessionManager {
           const merged = mergeTransportMeta(getSessionBySessionKey(msg.sessionKey)?.transportMeta ?? session.transportMeta, msg.transportMeta) as Record<string, unknown>;
           if (syncRequested && !rateLimit.limited && !wasInterrupted) {
             delete merged["claudeSyncSince"];
+            delete merged["engineSyncTarget"];
+            delete merged["engineSyncSince"];
           }
           return merged as any;
         })(),
-        lastActivity: new Date().toISOString(),
+        lastActivity: completedAt,
         lastError: wasInterrupted ? null : (result.error ?? null),
       });
-      if (!wasInterrupted && session.engine === "claude") {
+      if (!wasInterrupted && engineAtTurnStart === "claude") {
         markTranscriptSyncedThrough(session.id, result.sessionId);
       }
       if (updatedSession) {
@@ -677,6 +744,18 @@ export class SessionManager {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error(`Session ${session.id} error: ${errMsg}`);
+
+      const live = getSession(session.id);
+      if (!live) {
+        logger.info(`Skipping error handling for deleted session ${session.id}: ${errMsg}`);
+        return;
+      }
+      if (live.engine !== engineAtTurnStart) {
+        logger.info(
+          `Dropping stale ${engineAtTurnStart} error for session ${session.id}; session now uses ${live.engine}`,
+        );
+        return;
+      }
 
       const erroredSession = updateSession(session.id, {
         status: "error",
@@ -806,9 +885,10 @@ export class SessionManager {
     const session = getSessionBySessionKey(sessionKey);
     if (session) {
       // Tear down any live/warm engine process before deleting the session.
-      const engine = this.engines.get(session.engine);
-      if (engine && isInterruptibleEngine(engine)) {
-        engine.kill(session.id, "Interrupted: session reset");
+      for (const engine of this.engines.values()) {
+        if (isInterruptibleEngine(engine)) {
+          engine.kill(session.id, "Interrupted: session reset");
+        }
       }
       deleteSession(session.id);
       logger.info(`Deleted session ${session.id}`);

@@ -35,6 +35,10 @@ export async function runCronJob(
       employee = findEmployee(job.employee, orgRegistry);
     }
 
+    const effectiveEmployee = employee && job.effortLevel
+      ? { ...employee, effortLevel: job.effortLevel }
+      : employee;
+
     const routeResult = await sessionManager.route(
       {
         connector: connector.name,
@@ -64,9 +68,10 @@ export async function runCronJob(
       },
       connector,
       {
-        employee,
+        employee: effectiveEmployee,
         engine: job.engine || employee?.engine || config.engines.default,
         model: job.model || employee?.model || config.engines[(job.engine || config.engines.default) as "claude" | "codex" | "antigravity"]?.model,
+        effortLevel: job.effortLevel,
         title: job.name,
       },
     );

@@ -143,7 +143,7 @@ export class PiEngine implements InterruptibleEngine {
         ` (resume: ${opts.resumeSessionId || "none"})`,
     );
 
-    const cleanEnv = this.buildCleanEnv();
+    const cleanEnv = this.buildCleanEnv(trackingId);
 
     return new Promise((resolve, reject) => {
       const proc = spawn(bin, args, {
@@ -396,13 +396,14 @@ export class PiEngine implements InterruptibleEngine {
     return "";
   }
 
-  private buildCleanEnv(): Record<string, string> {
+  private buildCleanEnv(sessionId?: string): Record<string, string> {
     const cleanEnv: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
       if (k === "CODEX" || k.startsWith("CODEX_")) continue;
       if (v !== undefined) cleanEnv[k] = v;
     }
+    if (sessionId) cleanEnv.JINN_SESSION_ID = sessionId;
     return cleanEnv;
   }
 

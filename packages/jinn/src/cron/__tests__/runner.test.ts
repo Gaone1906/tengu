@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runCronJob } from "../runner.js";
 import type { CronJob, Connector, JinnConfig } from "../../shared/types.js";
+import { findEmployee } from "../../gateway/org.js";
 
 // Stub appendRunLog so we don't touch the filesystem
 vi.mock("../jobs.js", () => ({
@@ -142,5 +143,57 @@ describe("runCronJob — latency alerting", () => {
     expect(connector.sendMessage).toHaveBeenCalledTimes(1);
     const alertMsg = (connector.sendMessage as any).mock.calls[0][1];
     expect(alertMsg).toContain("failed");
+  });
+});
+
+
+describe("runCronJob — engine selection", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("passes cron job effortLevel through the employee so the spawned session honors it", async () => {
+    vi.mocked(findEmployee).mockReturnValue({
+      name: "jimbo",
+      department: "operations",
+      rank: "manager",
+      engine: "claude",
+      model: "opus",
+      persona: "COO",
+      effortLevel: "medium",
+    } as any);
+    const connector = makeMockConnector();
+    const connectors = new Map<string, Connector>([["slack", connector]]);
+    const sessionManager = makeMockSessionManager(0);
+
+    await runCronJob(
+      makeJob({ employee: "jimbo", engine: "claude", model: "opus", effortLevel: "high" }),
+      sessionManager,
+      makeConfig(),
+      connectors,
+    );
+
+    const routeOpts = sessionManager.route.mock.calls[0][2];
+    expect(routeOpts.effortLevel).toBe("high");
+    expect(routeOpts.employee.effortLevel).toBe("high");
+    expect(routeOpts.engine).toBe("claude");
+    expect(routeOpts.model).toBe("opus");
+  });
+
+  it("passes cron job effortLevel even when no employee file is found", async () => {
+    vi.mocked(findEmployee).mockReturnValue(undefined);
+    const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+    const sessionManager = makeMockSessionManager(0);
+
+    await runCronJob(
+      makeJob({ employee: "jimbo", engine: "claude", model: "opus", effortLevel: "high" }),
+      sessionManager,
+      makeConfig(),
+      connectors,
+    );
+
+    const routeOpts = sessionManager.route.mock.calls[0][2];
+    expect(routeOpts.effortLevel).toBe("high");
+    expect(routeOpts.employee).toBeUndefined();
   });
 });

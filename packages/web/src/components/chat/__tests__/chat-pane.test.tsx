@@ -3,7 +3,11 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import type React from 'react'
 import { ChatPane } from '../chat-pane'
 
-vi.mock('@/lib/api', () => ({ api: {} }))
+const apiMocks = vi.hoisted(() => ({
+  updateSession: vi.fn(() => Promise.resolve({})),
+}))
+
+vi.mock('@/lib/api', () => ({ api: apiMocks }))
 
 vi.mock('@/hooks/use-employees', () => ({
   useOrg: () => ({ data: { employees: [] } }),
@@ -54,8 +58,13 @@ vi.mock('@/components/chat/chat-input', () => ({
 }))
 
 vi.mock('@/components/chat/model-selector-row', () => ({
-  ModelSelectorRow: ({ onNewChat }: { onNewChat?: () => void }) => (
-    <button type="button" onClick={onNewChat}>selector new chat</button>
+  ModelSelectorRow: ({ onChange }: { onChange: (next: { engine?: string; model?: string; effortLevel?: string }) => void }) => (
+    <button
+      type="button"
+      onClick={() => onChange({ engine: 'codex', model: 'gpt-5.5', effortLevel: 'medium' })}
+    >
+      selector switch engine
+    </button>
   ),
 }))
 
@@ -95,15 +104,21 @@ function renderPane(props: Partial<React.ComponentProps<typeof ChatPane>> = {}) 
 describe('ChatPane', () => {
   beforeEach(() => {
     liveSessionState = { ...liveSessionDefaults }
+    apiMocks.updateSession.mockClear()
   })
 
-  it('routes existing-chat engine switching to the parent new-chat flow', () => {
+  it('persists existing-chat engine switching on the same session', () => {
     const onNewChat = vi.fn()
     renderPane({ onNewChat })
 
-    fireEvent.click(screen.getByRole('button', { name: /selector new chat/i }))
+    fireEvent.click(screen.getByRole('button', { name: /selector switch engine/i }))
 
-    expect(onNewChat).toHaveBeenCalledTimes(1)
+    expect(apiMocks.updateSession).toHaveBeenCalledWith('s1', {
+      engine: 'codex',
+      model: 'gpt-5.5',
+      effortLevel: 'medium',
+    })
+    expect(onNewChat).not.toHaveBeenCalled()
   })
 
   it('shows a lightweight loading status instead of an empty new-chat picker while a session hydrates', () => {

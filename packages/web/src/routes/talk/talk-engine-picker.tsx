@@ -3,8 +3,8 @@
  *
  * A tiny gear button in the top bar opens a quiet popover to pick the voice
  * orchestrator's ENGINE (from the resolved available set) and MODEL (from the
- * live registry). Engine is new-chat-only — the hook re-bootstraps the talk
- * session on change; model applies on the next turn. When no engine is
+ * live registry). The backend applies changes to the live orchestrator session
+ * when it is idle. When no engine is
  * installed the popover shows an actionable message instead of an empty list.
  */
 import { Settings2 } from "lucide-react"

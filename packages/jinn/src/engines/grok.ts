@@ -518,7 +518,7 @@ export class GrokEngine implements InterruptibleEngine {
     return new Promise((resolve, reject) => {
       const proc = spawn(bin, args, {
         cwd: opts.cwd,
-        env: this.buildCleanEnv(),
+        env: this.buildCleanEnv(trackingId),
         stdio: ["pipe", "pipe", "pipe"],
         detached: process.platform !== "win32",
       });
@@ -731,13 +731,14 @@ export class GrokEngine implements InterruptibleEngine {
     });
   }
 
-  private buildCleanEnv(): Record<string, string> {
+  private buildCleanEnv(sessionId?: string): Record<string, string> {
     const cleanEnv: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
       if (k === "CODEX" || k.startsWith("CODEX_")) continue;
       if (v !== undefined) cleanEnv[k] = v;
     }
+    if (sessionId) cleanEnv.JINN_SESSION_ID = sessionId;
     cleanEnv.GROK_CLAUDE_MCPS_ENABLED = "false";
     cleanEnv.GROK_CURSOR_MCPS_ENABLED = "false";
     return cleanEnv;

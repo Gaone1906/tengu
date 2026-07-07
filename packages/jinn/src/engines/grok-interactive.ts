@@ -335,7 +335,7 @@ export class GrokInteractiveEngine implements InterruptibleEngine, PtyViewEngine
     return promise;
   }
 
-  private buildEnv(): Record<string, string> {
+  private buildEnv(sessionId?: string): Record<string, string> {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
@@ -343,6 +343,7 @@ export class GrokInteractiveEngine implements InterruptibleEngine, PtyViewEngine
       if (v !== undefined) env[k] = v;
     }
     env.TERM = "xterm-256color";
+    if (sessionId) env.JINN_SESSION_ID = sessionId;
     // The TUI blocks prompt execution while inherited MCP compatibility servers
     // initialize. Jinn exposes its own MCP/connectors; keep the Grok PTY clean
     // and deterministic unless the operator explicitly opts back in.
@@ -373,7 +374,7 @@ export class GrokInteractiveEngine implements InterruptibleEngine, PtyViewEngine
       cols: geom?.cols ?? 120,
       rows: geom?.rows ?? 40,
       cwd: opts.cwd || JINN_HOME,
-      env: this.buildEnv(),
+      env: this.buildEnv(jinnSessionId),
     });
     this.spawnParams.set(jinnSessionId, { model: opts.model, effortLevel: opts.effortLevel, sessionId: grokSessionId });
     return this.wireProcToStream(jinnSessionId, proc);
