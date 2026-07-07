@@ -7,7 +7,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu'
-import { CheckIcon, ChevronLeftIcon } from 'lucide-react'
+import { CheckIcon, ChevronLeftIcon, ChevronRightIcon } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
@@ -224,7 +224,7 @@ export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote
   const modelLabel = models.find((m) => m.id === modelId)?.label ?? modelId ?? 'Model'
   const usage = formatContextUsage(contextTokens, contextWindowFor(registry, engine, modelId))
 
-  // Other installed engines, for the "Switch engine" subtext.
+  // Other installed engines, for deciding whether the engine panel is useful.
   const otherEngines = engines.filter((e) => e.name !== engine)
   const canSwitchEngine = otherEngines.length > 0
 
@@ -385,9 +385,7 @@ export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote
           className="rounded-[9px] py-1.5 pl-2 pr-2 text-[length:var(--text-footnote)] text-[var(--text-secondary)]"
         >
           <span className="flex-1">Switch engine…</span>
-          <span className="text-[length:var(--text-caption2)] text-[var(--text-quaternary)]">
-            {otherEngines.map((e) => engineLabelOf(e.name)).join(' · ')}
-          </span>
+          <ChevronRightIcon className="size-3.5 shrink-0 text-[var(--text-quaternary)]" />
         </DropdownMenuItem>
       ) : (
         <DropdownMenuItem

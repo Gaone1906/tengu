@@ -153,6 +153,16 @@ describe('ModelSelectorRow in-place engine panel', () => {
     expect(screen.queryByRole('menuitemradio', { name: /opus 4\.8/i })).toBeNull()
   })
 
+  it('"Switch engine…" row does not include every engine name in the button label', async () => {
+    renderRow(<Harness initial={{ engine: 'claude', model: 'opus', effortLevel: 'high' }} />)
+    openMenu()
+
+    const item = await screen.findByRole('menuitem', { name: /^switch engine…$/i })
+    expect(item.textContent).toBe('Switch engine…')
+    expect(screen.queryByRole('menuitem', { name: /switch engine.*codex/i })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: /switch engine.*antigravity/i })).toBeNull()
+  })
+
   it('Back returns to the model/effort panel', async () => {
     renderRow(<Harness initial={{ engine: 'claude', model: 'opus', effortLevel: 'high' }} />)
     openMenu()

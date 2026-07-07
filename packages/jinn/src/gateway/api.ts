@@ -576,6 +576,10 @@ function getSessionTransportState(session: Session, context: ApiContext): "idle"
   return base;
 }
 
+function blocksEngineSwitch(transportState: Session["transportState"]): boolean {
+  return transportState === "running" || transportState === "queued";
+}
+
 export function serializeSession(session: Session, context: ApiContext): Session {
   const queue = context.sessionManager.getQueue();
   const queueDepth = queue.getPendingCount(session.sessionKey || session.sourceRef);
@@ -948,7 +952,7 @@ export async function handleApiRequest(
 
       const engineChanging = Boolean(requestedEngine && requestedEngine !== session.engine);
       if (engineChanging) {
-        if (getSessionTransportState(session, context) !== "idle") {
+        if (blocksEngineSwitch(getSessionTransportState(session, context))) {
           return badRequest(res, "Cannot switch engine while a turn is running, waiting, or queued");
         }
         const savedRef = getEngineSessionRef(session, requestedEngine);

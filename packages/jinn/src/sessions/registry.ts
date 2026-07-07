@@ -838,6 +838,7 @@ export function switchSessionEngine(
     engine: nextEngine,
     engineSessionId: target.id ?? null,
     engineSessions: refs,
+    status: "idle",
     model: nextModel ?? null,
     effortLevel: nextEffort ?? null,
     lastContextTokens: null,
