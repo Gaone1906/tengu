@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.25.0] - 2026-07-07
+
+### ✨ Features
+- **Existing chats can switch engines in place.** Jinn now keeps per-engine native session refs, bridges recent transcript context when moving between engines, and restores the prior native session when switching back.
+
+### 🐛 Fixes
+- **Gateway restarts no longer replay the restart turn.** Chat-driven restarts now acknowledge the requesting session, complete its active queue item before shutdown, preserve healthy idle state during graceful cleanup, and avoid stale PID/port-owner hazards.
+- **Rebuilds keep the web UI loadable.** The build now syncs web assets into `dist/web` without removing the live bundle mid-request, preventing blank pages from transient missing chunks.
+- **Errored chats can recover by switching engines.** Terminal error/interrupted states are now switchable, while queued/running turns remain protected.
+- **Engine picker label stays concise.** The model menu now shows `Switch engine…` as the row label instead of listing every installed engine inline.
+
 ## [0.24.0] - 2026-07-06
 
 ### ✨ Features
