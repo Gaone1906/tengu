@@ -31,6 +31,13 @@ export const PID_FILE = path.join(JINN_HOME, "gateway.pid");
 export const GATEWAY_INFO_FILE = path.join(JINN_HOME, "gateway.json");
 /** Per-session Claude Code --settings files. */
 export const CLAUDE_SETTINGS_DIR = path.join(JINN_HOME, "tmp", "settings");
+/**
+ * Per-session Codex CODEX_HOME overlays. Each jinn session that runs the builtin
+ * `jinn` MCP server with a capability token gets a stable dir here whose
+ * `config.toml` carries the server stanza (token off argv) — fresh and resume
+ * both point CODEX_HOME here so the thread rollout persists across turns.
+ */
+export const CODEX_HOMES_DIR = path.join(JINN_HOME, "tmp", "codex-homes");
 /** The hook-relay script written once at boot. */
 export const HOOK_RELAY_SCRIPT = path.join(JINN_HOME, "hook-relay.mjs");
 export const CLAUDE_SKILLS_DIR = path.join(JINN_HOME, ".claude", "skills");

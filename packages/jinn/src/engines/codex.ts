@@ -1,11 +1,11 @@
 import fs from "node:fs";
-import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta, ResolvedMcpConfig, McpServerStdioConfig } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
+import { CODEX_HOMES_DIR } from "../shared/paths.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
 
 const CODEX_SESSIONS_DIR = path.join(os.homedir(), ".codex", "sessions");
@@ -21,6 +21,9 @@ interface LiveProcess {
 
 export interface CodexEngineOpts {
   codexSessionsDir?: string;
+  /** Base dir for per-session CODEX_HOME overlays. Defaults to CODEX_HOMES_DIR;
+   *  overridable so tests never write under the real ~/.jinn. */
+  codexHomesBaseDir?: string;
 }
 
 export function codexCliFlags(flags: string[] | undefined): string[] {
@@ -73,7 +76,7 @@ const CODEX_ARGV_JINN_SAFE_ENV_KEYS: ReadonlySet<string> = new Set([
 
 export function codexMcpConfigArgs(
   resolvedMcp: ResolvedMcpConfig | undefined,
-  opts: { skipProfiledJinn?: boolean } = {},
+  opts: { skipJinn?: boolean } = {},
 ): string[] {
   const servers = resolvedMcp?.mcpServers;
   if (!servers) return [];
@@ -82,7 +85,9 @@ export function codexMcpConfigArgs(
     const command = (spec as McpServerStdioConfig).command;
     if (!command) continue; // stdio servers only (URL servers skipped this slice)
     const stdio = spec as McpServerStdioConfig;
-    if (opts.skipProfiledJinn && name === "jinn" && stdio.env?.JINN_SESSION_CAPABILITY) continue;
+    // When a per-session CODEX_HOME is active, the builtin jinn server rides its
+    // config.toml (token off argv) — don't also re-emit it on argv.
+    if (opts.skipJinn && name === "jinn" && stdio.env?.JINN_SESSION_CAPABILITY) continue;
     args.push("-c", `mcp_servers.${name}.command=${JSON.stringify(command)}`);
     const cmdArgs = stdio.args ?? [];
     args.push("-c", `mcp_servers.${name}.args=[${cmdArgs.map((a) => JSON.stringify(a)).join(",")}]`);
@@ -101,13 +106,25 @@ export function codexMcpConfigArgs(
   return args;
 }
 
-export interface CodexMcpProfile {
-  profileName: string;
-  filePath: string;
+/**
+ * A per-session Codex `CODEX_HOME` overlay. Codex 0.141 dropped the legacy
+ * `profile` config key, so `codex exec resume` cannot layer a `--profile` file —
+ * the old profile mechanism lost the jinn MCP server after the first resume. The
+ * fix unifies fresh + resume onto ONE mechanism: both point `CODEX_HOME` at this
+ * stable per-session dir, whose auto-loaded `config.toml` carries the builtin-jinn
+ * stanza (capability in the 0600 file, NEVER on argv). Because the codex thread
+ * rollout lives under `CODEX_HOME`, fresh and every resume of the same jinn
+ * session MUST share this dir — that's a correctness requirement, not cosmetics.
+ */
+export interface CodexSessionHome {
+  /** Absolute path to point `CODEX_HOME` at for this session's turns. */
+  home: string;
+  /** Remove the whole per-session dir. Call on SESSION end, never per-turn. */
   cleanup: () => void;
 }
 
-function codexHome(): string {
+/** The operator's real codex home — source of `auth.json` + base `config.toml`. */
+function realCodexHome(): string {
   return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 }
 
@@ -115,7 +132,8 @@ function tomlString(value: string): string {
   return JSON.stringify(value);
 }
 
-function buildJinnProfileToml(name: string, spec: McpServerStdioConfig): string {
+/** A `[mcp_servers.<name>]` TOML stanza (command/args + full env, incl. capability). */
+function buildJinnMcpStanza(name: string, spec: McpServerStdioConfig): string {
   const lines = [`[mcp_servers.${name}]`, `command = ${tomlString(spec.command)}`];
   lines.push(`args = [${(spec.args ?? []).map(tomlString).join(", ")}]`);
   const env = spec.env ?? {};
@@ -126,24 +144,140 @@ function buildJinnProfileToml(name: string, spec: McpServerStdioConfig): string 
   return `${lines.join("\n")}\n`;
 }
 
-export function writeCodexMcpProfile(resolvedMcp: ResolvedMcpConfig | undefined, sessionId: string): CodexMcpProfile | undefined {
-  const spec = resolvedMcp?.mcpServers?.jinn as (McpServerStdioConfig & { url?: unknown }) | undefined;
-  if (!spec || typeof spec.command !== "string" || spec.url !== undefined || !spec.env?.JINN_SESSION_CAPABILITY) return undefined;
+/** Filesystem-safe per-session dir name derived from the jinn session id. */
+function safeSessionDirName(sessionId: string): string {
+  return sessionId.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 120) || "session";
+}
 
-  const home = codexHome();
+function codexSessionHomeDir(sessionId: string, baseDir: string = CODEX_HOMES_DIR): string {
+  return path.join(baseDir, safeSessionDirName(sessionId));
+}
+
+/**
+ * Ensure the per-session CODEX_HOME overlay exists and its `config.toml` carries
+ * the builtin-jinn MCP stanza. Idempotent across turns; the `config.toml` is
+ * REWRITTEN each turn so a rotated capability takes effect. Returns `undefined`
+ * (→ default ~/.codex home, jinn MCP via argv) when there is no builtin-jinn
+ * server carrying a capability token — third-party / no-capability behaviour is
+ * unchanged.
+ */
+export function prepareCodexSessionHome(
+  resolvedMcp: ResolvedMcpConfig | undefined,
+  sessionId: string,
+  opts: { baseDir?: string } = {},
+): CodexSessionHome | undefined {
+  const spec = resolvedMcp?.mcpServers?.jinn as (McpServerStdioConfig & { url?: unknown }) | undefined;
+  if (!spec || typeof spec.command !== "string" || spec.url !== undefined || !spec.env?.JINN_SESSION_CAPABILITY) {
+    return undefined;
+  }
+
+  const baseDir = opts.baseDir ?? CODEX_HOMES_DIR;
+  const home = codexSessionHomeDir(sessionId, baseDir);
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-  const safeSessionId = sessionId.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "session";
-  const profileName = `jinn-mcp-${safeSessionId}-${crypto.randomBytes(6).toString("hex")}`;
-  const filePath = path.join(home, `${profileName}.config.toml`);
-  fs.writeFileSync(filePath, buildJinnProfileToml("jinn", spec), { mode: 0o600 });
-  try { fs.chmodSync(filePath, 0o600); } catch { /* best effort on filesystems without POSIX modes */ }
-  return {
-    profileName,
-    filePath,
-    cleanup: () => {
-      try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch { /* ignore cleanup errors */ }
-    },
-  };
+  try { fs.chmodSync(home, 0o700); } catch { /* best effort on filesystems without POSIX modes */ }
+
+  // Symlink auth.json back to the real codex home so login (and token refreshes)
+  // propagate — the overlay never owns credentials.
+  const realHome = realCodexHome();
+  const realAuth = path.join(realHome, "auth.json");
+  const linkAuth = path.join(home, "auth.json");
+  try {
+    if (fs.existsSync(realAuth)) {
+      const already =
+        fs.existsSync(linkAuth) &&
+        fs.lstatSync(linkAuth).isSymbolicLink() &&
+        fs.readlinkSync(linkAuth) === realAuth;
+      if (!already) {
+        try { fs.rmSync(linkAuth, { force: true }); } catch { /* ignore */ }
+        fs.symlinkSync(realAuth, linkAuth);
+      }
+    }
+  } catch (err) {
+    logger.warn(`Codex per-session home: could not link auth.json (${err instanceof Error ? err.message : err}); codex may fail to authenticate`);
+  }
+
+  // Merge the operator's base config.toml, then append the jinn MCP stanza so the
+  // user's own settings (model, providers, other servers) survive the CODEX_HOME
+  // swap. Rewritten each turn (capability rotation). 0600 — it holds the token.
+  let baseConfig = "";
+  try {
+    const realConfig = path.join(realHome, "config.toml");
+    if (fs.existsSync(realConfig)) baseConfig = fs.readFileSync(realConfig, "utf8");
+  } catch { /* no base config — fine, start empty */ }
+  const merged = (baseConfig.trimEnd() + "\n\n" + buildJinnMcpStanza("jinn", spec)).replace(/^\n+/, "");
+  const cfgPath = path.join(home, "config.toml");
+  fs.writeFileSync(cfgPath, merged, { mode: 0o600 });
+  try { fs.chmodSync(cfgPath, 0o600); } catch { /* best effort */ }
+
+  return { home, cleanup: () => removeCodexSessionHome(sessionId, baseDir) };
+}
+
+/**
+ * Remove a session's CODEX_HOME overlay. Idempotent and safe on non-codex /
+ * already-removed sessions — call it from the session-teardown path (not per
+ * turn: the dir must persist across a session's turns so resume finds the thread).
+ */
+export function removeCodexSessionHome(sessionId: string, baseDir: string = CODEX_HOMES_DIR): void {
+  try {
+    fs.rmSync(codexSessionHomeDir(sessionId, baseDir), { recursive: true, force: true });
+  } catch { /* ignore cleanup errors */ }
+}
+
+/**
+ * Build `codex exec` argv for a FRESH turn. When `homeActive` is true the builtin
+ * jinn server rides the per-session CODEX_HOME config.toml, so it is skipped from
+ * the argv `-c` overrides (its capability must never touch argv). No `--profile`:
+ * codex 0.141 dropped it, and fresh/resume are unified on the CODEX_HOME overlay.
+ */
+export function buildCodexFreshArgs(opts: EngineRunOpts, prompt: string, homeActive: boolean): string[] {
+  const args = ["exec"];
+  if (opts.model) args.push("--model", opts.model);
+  if (opts.effortLevel && opts.effortLevel !== "default") args.push("-c", `model_reasoning_effort="${opts.effortLevel}"`);
+  args.push("--json", "--color", "never", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check");
+  if (opts.cwd) args.push("-C", opts.cwd);
+  args.push(...codexMcpConfigArgs(opts.resolvedMcp, { skipJinn: homeActive }));
+  args.push(...codexCliFlags(opts.cliFlags));
+  args.push(prompt);
+  return args;
+}
+
+/**
+ * Build `codex exec resume` argv. `codex exec resume` accepts neither `--profile`
+ * nor `-C`; the per-session CODEX_HOME (shared with the fresh turn) carries the
+ * jinn MCP config and locates the thread rollout.
+ */
+export function buildCodexResumeArgs(opts: EngineRunOpts, prompt: string, homeActive: boolean): string[] {
+  const args = ["exec", "resume"];
+  if (opts.model) args.push("--model", opts.model);
+  if (opts.effortLevel && opts.effortLevel !== "default") args.push("-c", `model_reasoning_effort="${opts.effortLevel}"`);
+  args.push("--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check");
+  args.push(...codexMcpConfigArgs(opts.resolvedMcp, { skipJinn: homeActive }));
+  args.push(...codexCliFlags(opts.cliFlags));
+  args.push(opts.resumeSessionId!);
+  args.push(prompt);
+  return args;
+}
+
+/**
+ * The child-process env for a codex spawn: strip inherited CLAUDE_ and CODEX_
+ * env (a clean baseline — see GRS-018), then set JINN_SESSION_ID and, when a per-session
+ * overlay is active, point CODEX_HOME at it. CODEX_HOME is set AFTER the strip so
+ * it survives.
+ */
+export function codexChildEnv(
+  baseEnv: NodeJS.ProcessEnv,
+  sessionId?: string,
+  codexHome?: string,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(baseEnv)) {
+    if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
+    if (k === "CODEX" || k.startsWith("CODEX_")) continue;
+    if (v !== undefined) env[k] = v;
+  }
+  if (sessionId) env.JINN_SESSION_ID = sessionId;
+  if (codexHome) env.CODEX_HOME = codexHome;
+  return env;
 }
 
 /**
@@ -265,17 +399,22 @@ export class CodexEngine implements InterruptibleEngine {
 
     const bin = resolveBin("codex", opts.bin);
     const sessionId = opts.sessionId || `codex-${Date.now()}`;
-    const mcpProfile = writeCodexMcpProfile(opts.resolvedMcp, sessionId);
+    // Per-session CODEX_HOME overlay carries the builtin-jinn MCP stanza (token in
+    // its 0600 config.toml, off argv) and hosts the thread rollout. Ensured every
+    // turn (idempotent); NOT cleaned up per-turn — the dir must persist so resume
+    // finds the rollout. Session-end teardown removes it (manager.resetSession).
+    const sessionHome = prepareCodexSessionHome(opts.resolvedMcp, sessionId, { baseDir: this.opts.codexHomesBaseDir });
+    const homeActive = !!sessionHome;
     const isResume = !!opts.resumeSessionId;
     const args = isResume
-      ? this.buildResumeArgs(opts, prompt, mcpProfile)
-      : this.buildFreshArgs(opts, prompt, mcpProfile);
+      ? this.buildResumeArgs(opts, prompt, homeActive)
+      : this.buildFreshArgs(opts, prompt, homeActive);
 
     logger.info(
-      `Codex engine starting: ${bin} ${args[0]}${isResume ? " resume" : ""} --model ${opts.model || "default"} (resume: ${opts.resumeSessionId || "none"})`,
+      `Codex engine starting: ${bin} ${args[0]}${isResume ? " resume" : ""} --model ${opts.model || "default"} (resume: ${opts.resumeSessionId || "none"}, codexHome: ${sessionHome ? "per-session" : "default"})`,
     );
 
-    const cleanEnv = this.buildCleanEnv(sessionId);
+    const cleanEnv = this.buildCleanEnv(sessionId, sessionHome?.home);
 
     return new Promise((resolve, reject) => {
       const proc = spawn(bin, args, {
@@ -330,7 +469,6 @@ export class CodexEngine implements InterruptibleEngine {
         settled = true;
         clearTimers();
         this.liveProcesses.delete(sessionId);
-        mcpProfile?.cleanup();
         // Detached child has signalled turn end and will exit; don't let its (or a
         // lingering grandchild's) open stdout pipe keep the event loop busy.
         try { proc.unref?.(); } catch { /* not detached / already gone */ }
@@ -450,7 +588,6 @@ export class CodexEngine implements InterruptibleEngine {
 
         const terminationReason = this.liveProcesses.get(sessionId)?.terminationReason ?? null;
         this.liveProcesses.delete(sessionId);
-        mcpProfile?.cleanup();
 
         if (lineBuf.trim()) {
           const parsed = this.processJsonlLine(lineBuf);
@@ -527,36 +664,17 @@ export class CodexEngine implements InterruptibleEngine {
         settled = true;
         clearTimers();
         this.liveProcesses.delete(sessionId);
-        mcpProfile?.cleanup();
         reject(new Error(`Failed to spawn Codex CLI: ${err.message}`));
       });
     });
   }
 
-  private buildFreshArgs(opts: EngineRunOpts, prompt: string, mcpProfile?: CodexMcpProfile): string[] {
-    const args = ["exec"];
-    if (opts.model) args.push("--model", opts.model);
-    if (opts.effortLevel && opts.effortLevel !== "default") args.push("-c", `model_reasoning_effort="${opts.effortLevel}"`);
-    args.push("--json", "--color", "never", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check");
-    if (opts.cwd) args.push("-C", opts.cwd);
-    if (mcpProfile) args.push("--profile", mcpProfile.profileName);
-    args.push(...codexMcpConfigArgs(opts.resolvedMcp, { skipProfiledJinn: !!mcpProfile }));
-    args.push(...codexCliFlags(opts.cliFlags));
-    args.push(prompt);
-    return args;
+  private buildFreshArgs(opts: EngineRunOpts, prompt: string, homeActive: boolean): string[] {
+    return buildCodexFreshArgs(opts, prompt, homeActive);
   }
 
-  private buildResumeArgs(opts: EngineRunOpts, prompt: string, mcpProfile?: CodexMcpProfile): string[] {
-    const args = ["exec", "resume"];
-    if (opts.model) args.push("--model", opts.model);
-    if (opts.effortLevel && opts.effortLevel !== "default") args.push("-c", `model_reasoning_effort="${opts.effortLevel}"`);
-    args.push("--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check");
-    if (mcpProfile) args.push("--profile", mcpProfile.profileName);
-    args.push(...codexMcpConfigArgs(opts.resolvedMcp, { skipProfiledJinn: !!mcpProfile }));
-    args.push(...codexCliFlags(opts.cliFlags));
-    args.push(opts.resumeSessionId!);
-    args.push(prompt);
-    return args;
+  private buildResumeArgs(opts: EngineRunOpts, prompt: string, homeActive: boolean): string[] {
+    return buildCodexResumeArgs(opts, prompt, homeActive);
   }
 
   private processJsonlLine(
@@ -706,15 +824,8 @@ export class CodexEngine implements InterruptibleEngine {
     return null;
   }
 
-  private buildCleanEnv(sessionId?: string): Record<string, string> {
-    const cleanEnv: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
-      if (k === "CODEX" || k.startsWith("CODEX_")) continue;
-      if (v !== undefined) cleanEnv[k] = v;
-    }
-    if (sessionId) cleanEnv.JINN_SESSION_ID = sessionId;
-    return cleanEnv;
+  private buildCleanEnv(sessionId?: string, codexHome?: string): Record<string, string> {
+    return codexChildEnv(process.env, sessionId, codexHome);
   }
 
   private signalProcess(proc: ChildProcess, signal: NodeJS.Signals): void {
