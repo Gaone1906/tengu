@@ -85,7 +85,7 @@ Steps:
 
 1. Locate the employee's YAML file under `org/<department>/<name>.yaml`.
 2. Check for active Todos assigned to the employee. Warn the user if any are not terminal.
-3. **Check for direct reports**: Call `GET /api/org` and check the employee's `directReports` field.
+3. **Check for direct reports**: Use `jinn_get_employee` to inspect the employee's `directReports` and `parentName` fields. Use `jinn_list_employees` if you need the broader department roster.
    - If they have direct reports: warn "X has N direct reports. They will be reassigned to X's manager (Y)."
    - On confirmation, update each report's YAML: set `reportsTo` to the fired employee's own `parentName` (their grandparent in the tree).
    - If the fired employee reported to root (parentName null), remove the `reportsTo` field from each orphaned report (smart defaults will re-resolve).
@@ -131,21 +131,26 @@ persona: |
   technical expertise, you:
 
   - Manage and delegate tasks to employees in your department
-  - You can spawn child sessions via the gateway API to delegate work
+  - Use `jinn_delegate_task` for tracked work and `jinn_spawn_session`
+    for quick untracked child sessions
+  - After delegating or spawning, end your turn and let the child's callback
+    wake you; use `jinn_read_session` only as the missed-callback fallback
   - Apply oversight levels to your reports' work:
     - TRUST: simple lookups, status checks - relay directly
     - VERIFY: code changes, routine work - spot-check key outputs
     - THOROUGH: architecture, breaking changes - full review, multi-turn
   - Report summaries back to the COO ({{portalName}}), not raw employee output
   - Use Todos to track task status
-  - When given a task by the COO, decide whether to do it yourself or
-    delegate to the right employee based on their skills and workload
+  - Default to orchestrating through the right employee as the department
+    grows; do the work directly only for tiny tasks where that is the cleanest path
 
-  ## Delegation API
-  - Create child session: POST /api/sessions with parentSessionId
-  - Send follow-up: POST /api/sessions/:id/message
-  - Poll status: GET /api/sessions/:id
-  - List your reports: GET /api/org
+  ## Delegation Tools
+  - Delegate tracked work: `jinn_delegate_task`
+  - Spawn a quick child session: `jinn_spawn_session`
+  - Send follow-up: `jinn_send_to_session`
+  - Read latest child status/messages: `jinn_read_session`
+  - List or inspect reports: `jinn_list_employees`, `jinn_find_employees`,
+    `jinn_get_employee`
 ```
 
 **When to suggest promoting to manager:**
@@ -161,7 +166,7 @@ Create or delegate a Todo. Todos are the ledger; Workflows are the reusable HOW 
 Steps:
 1. Verify the assignee exists in the org.
 2. If the work is durable and owned by this session, create a Todo with `jinn_create_work_item` when MCP is available.
-3. Assign the Todo with `jinn_assign_work_item`, or delegate directly via the gateway if the work should start immediately.
+3. Assign the Todo with `jinn_assign_work_item`, or start the work immediately with `jinn_delegate_task` when it should execute now.
 4. If the work is repeatable, scheduled, or multi-step, use or propose a Workflow instead of carrying the process in prose.
 5. Confirm the delegation to the user.
 

@@ -6,6 +6,10 @@ function readTemplate(rel: string): string {
   return fs.readFileSync(path.join(process.cwd(), "template", rel), "utf-8");
 }
 
+function readRepo(rel: string): string {
+  return fs.readFileSync(path.join(process.cwd(), "..", "..", rel), "utf-8");
+}
+
 describe("template company doctrine", () => {
   it("ships the seven locked company-doctrine headings", () => {
     const doctrine = readTemplate("docs/company-doctrine.md");
@@ -66,5 +70,57 @@ describe("template company doctrine", () => {
     expect(template).not.toContain("config.yaml changes");
     expect(template).not.toContain("cron/jobs.json changes");
     expect(template).not.toContain("org/` changes");
+  });
+
+  it("ships compact delegation doctrine for nested callbacks and execution quality", () => {
+    const template = readTemplate("CLAUDE.md");
+
+    expect(template).toContain("any session at any depth");
+    expect(template).toContain("COO -> lead -> pod -> sub-report");
+    expect(template).toContain("Employees =");
+    expect(template).toContain("Sub-agents =");
+    expect(template).toContain("different role -> employee; more hands for your own task -> sub-agents");
+    expect(template).not.toContain("Agent teams for multi-phase tasks");
+
+    expect(template).toContain("PLAN -> REFINE -> IMPLEMENT -> REVIEW -> VERIFY");
+    expect(template).toContain("at least two independent reviewers");
+    expect(template).toContain("in_review");
+    expect(template).toContain("Managers and the COO should orchestrate, not implement");
+    expect(template).toContain("explicit, testable stop condition and a budget");
+    expect(template).toContain("If an engine exposes a native goal loop");
+  });
+
+  it("keeps shipped management/onboarding/sync skills on MCP tools, not raw gateway HTTP", () => {
+    const skillFiles = [
+      "skills/management/SKILL.md",
+      "skills/onboarding/SKILL.md",
+      "skills/sync/SKILL.md",
+    ];
+
+    for (const rel of skillFiles) {
+      const content = readTemplate(rel);
+      expect(content, rel).not.toMatch(/\b(?:GET|POST|PUT|PATCH|DELETE)\s+\/api\//);
+      expect(content, rel).not.toMatch(/\bcurl\b.*\/api\//);
+      expect(content, rel).not.toContain("gateway API");
+      expect(content, rel).not.toContain("parentSessionId");
+    }
+
+    expect(readTemplate("skills/management/SKILL.md")).toContain("jinn_delegate_task");
+    expect(readTemplate("skills/management/SKILL.md")).toContain("jinn_get_employee");
+    expect(readTemplate("skills/onboarding/SKILL.md")).toContain("jinn_spawn_session");
+    expect(readTemplate("skills/sync/SKILL.md")).toContain("jinn_list_sessions");
+    expect(readTemplate("skills/sync/SKILL.md")).toContain("jinn_read_session");
+  });
+
+  it("includes the pre-merge template staleness audit report", () => {
+    const report = readRepo("docs/superpowers/specs/2026-07-08-template-doctrine-staleness-audit.md");
+
+    expect(report).toContain("# Template Doctrine Staleness Audit");
+    expect(report).toContain("Fix:");
+    expect(report).toContain("Defer:");
+    expect(report).toContain("skills/management/SKILL.md");
+    expect(report).toContain("skills/onboarding/SKILL.md");
+    expect(report).toContain("skills/sync/SKILL.md");
+    expect(report).toContain("talk/card-reference.md");
   });
 });
