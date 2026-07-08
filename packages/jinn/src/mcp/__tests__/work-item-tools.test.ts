@@ -61,15 +61,17 @@ describe("work-item tools — registry + schemas", () => {
       "create_work_item",
       "update_work_item",
       "assign_work_item",
+      "archive_work_item",
     ]);
     const names = buildTools().map((t) => t.name).sort();
     expect(names).toContain("create_work_item");
     expect(names).toContain("assign_work_item");
     expect(names).toContain("decide_work_item_approval");
     expect(names).toContain("escalate_work_item_approval");
+    expect(names).toContain("archive_work_item");
     expect(names).toContain("delete_trigger");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(40);
+    expect(names).toHaveLength(41);
   });
 
   it("positions list as structured/recent and search as text search", () => {
@@ -220,6 +222,21 @@ describe("work-item tools — unit (stub gateway)", () => {
     );
     expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/wi_1/assign");
     expect(calls[0].body).toEqual({ assignee: "platfrom-dev" });
+  });
+
+  it("archive is identity-gated and posts to the non-deleting archive route", async () => {
+    const anon = stub(() => ({ status: 200, body: {} }), null);
+    await expect(tool("archive_work_item").handler({ id: "wi_1", note: "stale" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
+
+    const { calls, ctx } = stub(() => ({ status: 200, body: { workItem: { id: "wi_1", status: "cancelled" }, archived: true } }), "sess-1");
+    const out = (await tool("archive_work_item").handler({ id: "wi_1", note: "stale cleanup" }, ctx)) as {
+      archived: boolean;
+      workItem: { status: string };
+    };
+    expect(out).toMatchObject({ archived: true, workItem: { status: "cancelled" } });
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/wi_1/archive");
+    expect(calls[0].body).toEqual({ note: "stale cleanup" });
   });
 });
 
@@ -445,6 +462,23 @@ describe("work-item tools — integration against the real API + store", () => {
       workItem: { status: string };
     };
     expect(blocked.workItem.status).toBe("blocked");
+  });
+
+  it("archives a Todo without deleting its row or audit history", async () => {
+    const caller = registry.createSession({ engine: "codex", source: "web", sourceRef: "archive-caller", title: "archive caller" });
+    const item = store.createWorkItem({ title: "Archive, do not delete", status: "backlog", source: "session" });
+
+    const archived = (await tool("archive_work_item").handler({ id: item.id, note: "obsolete" }, ctxFor(caller.id))) as {
+      archived: boolean;
+      workItem: { id: string; status: string; closedAt: string | null };
+    };
+
+    expect(archived.archived).toBe(true);
+    expect(archived.workItem).toMatchObject({ id: item.id, status: "cancelled" });
+    expect(archived.workItem.closedAt).toBeTruthy();
+    expect(store.getWorkItem(item.id)?.status).toBe("cancelled");
+    const events = store.listWorkItemEvents(item.id);
+    expect(events.some((e) => e.kind === "status_change" && e.fromStatus === "backlog" && e.toStatus === "cancelled")).toBe(true);
   });
 
   it("recursively rejects approval keys and validates exact verifyPolicy/provenance schemas", async () => {

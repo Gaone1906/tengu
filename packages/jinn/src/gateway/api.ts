@@ -2606,6 +2606,44 @@ export async function handleApiRequest(
       return json(res, { workItem: item });
     }
 
+    // POST /api/work-items/:id/archive — non-deleting Todo archive. This preserves
+    // the work_items row and event log, using the existing closed `cancelled`
+    // terminal internally while presenting the action as archive on tool surfaces.
+    params = matchRoute("/api/work-items/:id/archive", pathname);
+    if (method === "POST" && params) {
+      const caller = resolveWorkItemCaller(req, res);
+      if (!caller) return;
+      const parsed = await readJsonBody(req, res, { allowEmpty: true });
+      if (!parsed.ok) return;
+      if (parsed.body !== undefined && (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body))) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = (parsed.body ?? {}) as Record<string, unknown>;
+      const approvalKeys = findApprovalKeysDeep(body);
+      if (approvalKeys.length > 0) {
+        return badRequest(res, `approval fields (${approvalKeys.join(", ")}) cannot be attached through Todo archive — approvals are requested/decided through the approval authority surface`);
+      }
+      const note = typeof body.note === "string" ? body.note.trim() : "";
+      const item = getWorkItem(params.id);
+      if (!item) return notFound(res);
+      if (item.status === "cancelled") return json(res, { workItem: item, archived: true });
+      try {
+        const result = transition(params.id, "cancelled", workItemActor(caller), {
+          human: true,
+          callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
+          detail: { action: "archive", ...(note ? { note } : {}) },
+        });
+        return json(res, { workItem: result.item, archived: true });
+      } catch (err) {
+        if (err instanceof TransitionError) {
+          if (err.code === "not-found") return notFound(res);
+          const statusCode = err.code === "illegal-edge" ? 400 : 403;
+          return json(res, { error: `${err.message} — archive preserves the Todo; use another lifecycle action first if needed` }, statusCode);
+        }
+        throw err;
+      }
+    }
+
     // GET /api/work-items/:id/sessions — execution attempts linked to a work item.
     // The read-back half of the GRS-002 work-item slice (cron mints+links an item).
     params = matchRoute("/api/work-items/:id/sessions", pathname);

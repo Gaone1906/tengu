@@ -87,6 +87,7 @@ describe("buildTools", () => {
   it("exposes exactly the admitted org/session/reference/knowledge/delegation/Todo/workflow groups (scope discipline; NO gate-resolve, NO session-delete, NO cancel Todo tool)", () => {
     const names = buildTools().map((t) => t.name).sort();
     expect(names).toEqual([
+      "archive_work_item",
       "assign_work_item",
       "cost_report",
       "create_trigger",

@@ -329,5 +329,30 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     },
   };
 
-  return [list, get, search, create, update, assign];
+  const archive: JinnMcpTool = {
+    name: "archive_work_item",
+    description:
+      "Archive a Todo without deleting it. This moves the item to the closed/archived status used by the ledger, preserves the row and audit trail, and records an optional note.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Work item id." },
+        note: { type: "string", description: "Optional reason for archiving." },
+      },
+      required: ["id"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      rejectApprovalFields(args, "archive_work_item");
+      const id = requireString(args, "id");
+      const payload: Record<string, unknown> = {};
+      const note = optionalString(args, "note", 4000);
+      if (note !== undefined) payload.note = note;
+      const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/archive`, payload);
+      if (status >= 400) throw gatewayFailure(`archiving work item "${id}"`, status, body);
+      return body;
+    },
+  };
+
+  return [list, get, search, create, update, assign, archive];
 }
