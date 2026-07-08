@@ -4,6 +4,7 @@ import { effortLevelsForModel, invalidateModelRegistry } from "../models.js";
 import type { JinnConfig } from "../types.js";
 
 const CLAUDE = ["low", "medium", "high"];
+const CLAUDE_REGISTRY = ["low", "medium", "high", "xhigh", "max"];
 const CODEX = ["low", "medium", "high", "xhigh"];
 
 describe("resolveEffort (registry-driven validation)", () => {
@@ -105,6 +106,6 @@ describe("effortLevelsForModel (registry lookup)", () => {
     expect(effortLevelsForModel(cfg(), "nope")).toEqual([]);
   });
   it("returns claude levels for its default model", () => {
-    expect(effortLevelsForModel(cfg(), "claude")).toEqual(CLAUDE);
+    expect(effortLevelsForModel(cfg(), "claude")).toEqual(CLAUDE_REGISTRY);
   });
 });

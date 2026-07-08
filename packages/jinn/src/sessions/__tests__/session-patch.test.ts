@@ -94,13 +94,14 @@ describe("validateNewSessionSelection", () => {
   });
 
   it("an EMPLOYEE'S unknown configured model yields a clear actionable error naming employee+model+known-set+fix (GRS-017f)", () => {
-    // The seed generalist ships model:sonnet; a gateway registering opus only
+    // A gateway can still reject a stale employee model that is neither a
+    // Claude Code alias nor a registered custom model.
     // doesn't know it. The error must name the culprit (employee + its model),
     // the known set, and the fix — not a bare engine-level string.
-    const r = validateNewSessionSelection(cfg(), {}, { engine: "claude", model: "sonnet", employee: "assistant" });
+    const r = validateNewSessionSelection(cfg(), {}, { engine: "claude", model: "claude-not-real", employee: "assistant" });
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/assistant/); // names the employee
-    expect(r.error).toMatch(/sonnet/); // names its configured model
+    expect(r.error).toMatch(/claude-not-real/); // names its configured model
     expect(r.error).toMatch(/opus/); // names the known-model set
     expect(r.error).toMatch(/config\.yaml/); // names the register-the-model fix
     expect(r.error).toMatch(/\.yaml/); // points at the employee YAML fix
@@ -110,20 +111,20 @@ describe("validateNewSessionSelection", () => {
   it("an EXPLICIT caller model override that's unknown stays the generic engine error (not employee-shaped)", () => {
     // Only a model coming from the EMPLOYEE DEFAULT gets the employee-named
     // error; an explicit override is the caller's own doing.
-    const r = validateNewSessionSelection(cfg(), { model: "sonnet" }, { engine: "claude", model: "opus", employee: "assistant" });
+    const r = validateNewSessionSelection(cfg(), { model: "claude-not-real" }, { engine: "claude", model: "opus", employee: "assistant" });
     expect(r.ok).toBe(false);
-    expect(r.error).toMatch(/unknown model "sonnet"/i);
+    expect(r.error).toMatch(/unknown model "claude-not-real"/i);
     expect(r.error).not.toMatch(/assistant/);
   });
 
   it("an unknown employee-default model without an employee slug falls back to the generic error", () => {
-    const r = validateNewSessionSelection(cfg(), {}, { engine: "claude", model: "sonnet" });
+    const r = validateNewSessionSelection(cfg(), {}, { engine: "claude", model: "claude-not-real" });
     expect(r.ok).toBe(false);
-    expect(r.error).toMatch(/unknown model "sonnet"/i);
+    expect(r.error).toMatch(/unknown model "claude-not-real"/i);
   });
 
   it("rejects an effort level not valid for the selected model", () => {
-    const r = validateNewSessionSelection(cfg(), { engine: "claude", model: "opus", effortLevel: "xhigh" });
+    const r = validateNewSessionSelection(cfg(), { engine: "claude", model: "opus", effortLevel: "warp" });
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/invalid effortLevel/i);
   });
@@ -191,7 +192,7 @@ describe("validateSessionPatch", () => {
   });
 
   it("rejects an effort level not valid for the model", () => {
-    const r = validateSessionPatch(cfg(), "claude", "opus", { effortLevel: "xhigh" }); // claude has no xhigh
+    const r = validateSessionPatch(cfg(), "claude", "opus", { effortLevel: "warp" });
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/invalid effortLevel/i);
   });

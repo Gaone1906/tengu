@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { JinnConfig } from "../types.js";
-import { getModelRegistry, invalidateModelRegistry, synthesizeFromEngineConfig } from "../models.js";
+import { getModelRegistry, invalidateModelRegistry, setDiscoveredClaudeModelsForTest, synthesizeFromEngineConfig } from "../models.js";
 
 function cfg(partial: Partial<JinnConfig["engines"]>, models?: JinnConfig["models"]): JinnConfig {
   return {
@@ -16,7 +16,10 @@ function cfg(partial: Partial<JinnConfig["engines"]>, models?: JinnConfig["model
   } as JinnConfig;
 }
 
-beforeEach(() => invalidateModelRegistry());
+beforeEach(() => {
+  setDiscoveredClaudeModelsForTest(null);
+  invalidateModelRegistry();
+});
 
 describe("synthesizeFromEngineConfig (backward-compat fallback)", () => {
   it("builds an entry per engine from engines.<name>.model", () => {
@@ -33,7 +36,7 @@ describe("synthesizeFromEngineConfig (backward-compat fallback)", () => {
   it("uses per-engine effort semantics: claude flag, codex config, grok flag, antigravity none", () => {
     const reg = synthesizeFromEngineConfig(cfg({}));
     expect(reg.claude.effortMechanism).toBe("claude-flag");
-    expect(reg.claude.models[0].effortLevels).toEqual(["low", "medium", "high"]);
+    expect(reg.claude.models[0].effortLevels).toEqual(["low", "medium", "high", "xhigh", "max"]);
     expect(reg.codex.effortMechanism).toBe("codex-config");
     expect(reg.codex.models[0].effortLevels).toContain("xhigh");
     expect(reg.grok.effortMechanism).toBe("grok-flag");
@@ -69,17 +72,35 @@ describe("getModelRegistry with a models: block", () => {
     },
   };
 
-  it("honors the configured models, labels, and effort levels", () => {
+  it("uses Claude alias fallback plus configured additions, while other engines honor configured models", () => {
     const reg = getModelRegistry(cfg({}, models));
-    expect(reg.claude.models.map((m) => m.id)).toEqual(["claude-opus-4-8", "claude-sonnet-4-6"]);
-    expect(reg.claude.models[0].label).toBe("Opus 4.8");
+    expect(reg.claude.models.slice(0, 3).map((m) => [m.id, m.label])).toEqual([
+      ["opus", "Opus (Latest)"],
+      ["sonnet", "Sonnet (Latest)"],
+      ["fable", "Fable (Latest)"],
+    ]);
+    expect(reg.claude.models.find((m) => m.id === "claude-opus-4-8")?.label).toBe("Opus 4.8");
     expect(reg.codex.models[0].effortLevels).toContain("xhigh");
     expect(reg.antigravity.models[0].supportsEffort).toBe(false);
   });
 
+  it("does not let stale configured Claude alias labels override the latest fallback label", () => {
+    const reg = getModelRegistry(cfg({}, {
+      claude: {
+        default: "opus",
+        models: [
+          { id: "opus", label: "Opus 4.6", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        ],
+      },
+    }));
+
+    expect(reg.claude.models.find((m) => m.id === "opus")?.label).toBe("Opus (Latest)");
+    expect(reg.claude.models.find((m) => m.id === "opus")?.effortLevels).toEqual(["low", "medium", "high", "xhigh", "max"]);
+  });
+
   it("resolves defaultModel from block.default, else the first model", () => {
     const reg = getModelRegistry(cfg({}, models));
-    expect(reg.claude.defaultModel).toBe("claude-opus-4-8");
+    expect(reg.claude.defaultModel).toBe("opus");
     expect(reg.antigravity.defaultModel).toBe("gemini-3-flash-preview"); // no default → first
   });
 
@@ -101,6 +122,53 @@ describe("getModelRegistry with a models: block", () => {
     expect(reg.grok.defaultModel).toBe("grok-composer-2.5-fast");
     expect(reg.grok.models[0].label).toBe("Grok Build");
     expect(reg.grok.models[0].contextWindow).toBe(256000);
+  });
+
+  it("merges discovered Claude aliases over a stale configured block while preserving custom entries", () => {
+    setDiscoveredClaudeModelsForTest({
+      defaultModel: "opus",
+      models: [
+        { id: "opus", label: "Opus 4.8", supportsEffort: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "sonnet", label: "Sonnet 5", supportsEffort: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "fable", label: "Fable 5", supportsEffort: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "claude-opus-4-8", label: "Opus 4.8", supportsEffort: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+      ],
+    });
+
+    const reg = getModelRegistry(cfg({}, {
+      claude: {
+        default: "opus",
+        models: [
+          { id: "opus", label: "Opus 4.7", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+          { id: "claude-custom-preview", label: "Custom Preview", supportsEffort: false, effortLevels: [] },
+        ],
+      },
+    }));
+
+    expect(reg.claude.defaultModel).toBe("opus");
+    expect(reg.claude.models.find((m) => m.id === "opus")?.label).toBe("Opus 4.8");
+    expect(reg.claude.models.find((m) => m.id === "claude-custom-preview")?.label).toBe("Custom Preview");
+  });
+
+  it("hides configured model ids from a discovered catalog", () => {
+    setDiscoveredClaudeModelsForTest({
+      defaultModel: "opus",
+      models: [
+        { id: "opus", label: "Opus 4.8", supportsEffort: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+        { id: "sonnet", label: "Sonnet 5", supportsEffort: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+      ],
+    });
+
+    const reg = getModelRegistry(cfg({}, {
+      claude: {
+        default: "opus",
+        hidden: ["sonnet"],
+        models: [],
+      },
+    }));
+
+    expect(reg.claude.models.map((m) => m.id)).toEqual(["opus"]);
+    expect(reg.claude.defaultModel).toBe("opus");
   });
 });
 

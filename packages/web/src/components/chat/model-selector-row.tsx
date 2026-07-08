@@ -309,7 +309,10 @@ export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote
           <div className="px-2 pt-0.5 pb-1 text-[length:var(--text-caption2)] font-[var(--weight-bold)] uppercase tracking-[0.4px] text-[var(--text-quaternary)]">
             Effort
           </div>
-          <div className="flex gap-1 px-1 pb-1">
+          <div
+            data-testid="effort-levels"
+            className={`flex gap-1 px-1 pb-1 ${efforts.length > 4 ? 'overflow-x-auto [-webkit-overflow-scrolling:touch]' : ''}`}
+          >
             {efforts.map((lvl) => {
               const on = lvl === effort
               return (
@@ -318,7 +321,7 @@ export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote
                   type="button"
                   onClick={() => pickEffort(lvl)}
                   aria-pressed={on}
-                  className={`flex-1 rounded-[8px] py-1.5 text-center text-[length:var(--text-caption1)] capitalize transition-colors ${
+                  className={`${efforts.length > 4 ? 'min-w-[56px] shrink-0 px-2' : 'flex-1'} rounded-[8px] py-1.5 text-center text-[length:var(--text-caption1)] capitalize transition-colors ${
                     on
                       ? 'bg-[var(--accent-fill)] font-[var(--weight-semibold)] text-[var(--accent)]'
                       : 'bg-[var(--fill-tertiary)] text-[var(--text-tertiary)] hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)]'

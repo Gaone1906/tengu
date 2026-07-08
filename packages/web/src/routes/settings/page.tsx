@@ -1,6 +1,6 @@
 
 import { useEffect, useState } from "react"
-import { RotateCcw, Trash2, Check, Save, Loader2 } from "lucide-react"
+import { RotateCcw, Trash2, Check, Save, Loader2, Plus, EyeOff } from "lucide-react"
 import { PageLayout } from "@/components/page-layout"
 import { useSettings } from "@/routes/settings-provider"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
@@ -12,6 +12,12 @@ import { EmojiPicker } from "@/components/ui/emoji-picker"
 import { useModelRegistry } from "@/hooks/use-model-registry"
 import { RemoteAccessPanel } from "@/components/auth/remote-access-panel"
 import { useAuth } from "@/routes/auth-provider"
+import {
+  addModelOverride,
+  hideModelOverride,
+  resetEngineModelOverrides,
+  showModelOverride,
+} from "@/lib/model-config"
 
 // ---------------------------------------------------------------------------
 // Accent color presets
@@ -94,6 +100,18 @@ interface Config {
     stdout?: boolean
     file?: boolean
   }
+  models?: Record<string, {
+    default?: string
+    effortMechanism?: string
+    hidden?: string[]
+    models: Array<{
+      id: string
+      label?: string
+      supportsEffort?: boolean
+      effortLevels?: string[]
+      contextWindow?: number
+    }>
+  }>
   cron?: {
     defaultDelivery?: { connector?: string; channel?: string }
   }
@@ -453,6 +471,8 @@ export default function SettingsPage() {
   const [languageValue, setLanguageValue] = useState(settings.language ?? "English")
   const [customHex, setCustomHex] = useState(settings.accentColor ?? "")
   const [showCooEmojiPicker, setShowCooEmojiPicker] = useState(false)
+  const [claudeModelId, setClaudeModelId] = useState("")
+  const [claudeModelLabel, setClaudeModelLabel] = useState("")
 
   // Model/capability registry — drives the model + effort dropdowns (no hardcoded lists).
   const { data: modelRegistry } = useModelRegistry()
@@ -572,6 +592,29 @@ export default function SettingsPage() {
       obj[path[path.length - 1]] = value
       return next
     })
+  }
+
+  function applyModelConfig(updater: (cfg: Config) => Config) {
+    setConfig((prev) => updater(prev))
+  }
+
+  const claudeRegistryModels = modelRegistry?.engines?.claude?.models ?? []
+  const hiddenClaudeIds = config.models?.claude?.hidden ?? []
+  const registryClaudeIds = new Set(claudeRegistryModels.map((m) => m.id))
+  const customClaudeModels = (config.models?.claude?.models ?? []).filter((m) => !registryClaudeIds.has(m.id))
+  const claudeEffortDefaults = Array.from(new Set(claudeRegistryModels.flatMap((m) => m.effortLevels)))
+  const visibleClaudeModels = claudeRegistryModels.filter((m) => !hiddenClaudeIds.includes(m.id))
+  const hiddenClaudeModels = hiddenClaudeIds.map((id) => claudeRegistryModels.find((m) => m.id === id) ?? { id, label: id })
+
+  function addClaudeModel() {
+    if (!claudeModelId.trim()) return
+    applyModelConfig((prev) => addModelOverride(prev, "claude", {
+      id: claudeModelId,
+      label: claudeModelLabel,
+      effortLevels: claudeEffortDefaults,
+    }))
+    setClaudeModelId("")
+    setClaudeModelLabel("")
   }
 
   function handleSave() {
@@ -1002,6 +1045,105 @@ export default function SettingsPage() {
                     ])}
                   />
                 </FieldRow>
+
+                <div
+                  className="border-t border-[var(--separator)] mt-[var(--space-3)] pt-[var(--space-3)]"
+                >
+                  <div className="flex items-center justify-between gap-[var(--space-3)] mb-[var(--space-2)]">
+                    <div className="text-[length:var(--text-caption1)] font-[var(--weight-semibold)] text-[var(--text-tertiary)]">
+                      Claude Models
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => applyModelConfig((prev) => resetEngineModelOverrides(prev, "claude"))}
+                      className="inline-flex items-center gap-[var(--space-1)] rounded-[var(--radius-sm)] border-none bg-[var(--fill-tertiary)] px-[8px] py-[5px] text-[length:var(--text-caption1)] text-[var(--text-tertiary)] cursor-pointer hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)]"
+                    >
+                      <RotateCcw size={13} />
+                      Reset
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-[var(--space-2)] sm:grid-cols-[1fr_1fr_auto]">
+                    <SettingsInput
+                      value={claudeModelId}
+                      onChange={setClaudeModelId}
+                      placeholder="claude-sonnet-4-6"
+                    />
+                    <SettingsInput
+                      value={claudeModelLabel}
+                      onChange={setClaudeModelLabel}
+                      placeholder="Sonnet 4.6"
+                    />
+                    <button
+                      type="button"
+                      onClick={addClaudeModel}
+                      disabled={!claudeModelId.trim()}
+                      className="inline-flex items-center justify-center gap-[var(--space-1)] rounded-[var(--radius-sm)] border-none bg-[var(--accent)] px-[10px] py-[6px] text-[length:var(--text-footnote)] font-[var(--weight-semibold)] text-[var(--accent-contrast)] disabled:cursor-default disabled:opacity-50"
+                    >
+                      <Plus size={14} />
+                      Add
+                    </button>
+                  </div>
+
+                  {visibleClaudeModels.length > 0 && (
+                    <div className="mt-[var(--space-3)] space-y-[var(--space-1)]">
+                      {visibleClaudeModels.map((m) => (
+                        <div key={m.id} className="flex items-center gap-[var(--space-2)] rounded-[var(--radius-sm)] bg-[var(--fill-tertiary)] px-[8px] py-[6px]">
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-[length:var(--text-caption1)] font-[var(--weight-medium)] text-[var(--text-primary)]">{m.label}</div>
+                            <div className="truncate font-[family-name:var(--font-mono)] text-[length:var(--text-caption2)] text-[var(--text-quaternary)]">{m.id}</div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => applyModelConfig((prev) => hideModelOverride(prev, "claude", m.id))}
+                            aria-label={`Hide ${m.label}`}
+                            className="inline-flex size-[28px] items-center justify-center rounded-[var(--radius-sm)] border-none bg-transparent text-[var(--text-tertiary)] cursor-pointer hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)]"
+                          >
+                            <EyeOff size={14} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {hiddenClaudeModels.length > 0 && (
+                    <div className="mt-[var(--space-2)] flex flex-wrap gap-[var(--space-2)]">
+                      {hiddenClaudeModels.map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => applyModelConfig((prev) => showModelOverride(prev, "claude", m.id))}
+                          className="rounded-[var(--radius-sm)] border-none bg-[var(--fill-tertiary)] px-[8px] py-[4px] text-[length:var(--text-caption1)] text-[var(--text-tertiary)] cursor-pointer hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)]"
+                        >
+                          Restore {m.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {customClaudeModels.length > 0 && (
+                    <div className="mt-[var(--space-2)] flex flex-wrap gap-[var(--space-2)]">
+                      {customClaudeModels.map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => {
+                            applyModelConfig((prev) => {
+                              const next = structuredClone(prev)
+                              const block = next.models?.claude
+                              if (block) block.models = block.models.filter((entry) => entry.id !== m.id)
+                              return next
+                            })
+                          }}
+                          className="inline-flex items-center gap-[var(--space-1)] rounded-[var(--radius-sm)] border-none bg-[var(--fill-tertiary)] px-[8px] py-[4px] text-[length:var(--text-caption1)] text-[var(--text-tertiary)] cursor-pointer hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)]"
+                        >
+                          <Trash2 size={13} />
+                          {m.label || m.id}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
                 <div
                   className="border-t border-[var(--separator)] mt-[var(--space-3)] pt-[var(--space-3)]"

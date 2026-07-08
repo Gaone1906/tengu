@@ -267,10 +267,9 @@ models:
     default: opus
     effortMechanism: claude-flag
     models:
-      - { id: claude-fable-5, label: "Fable 5", supportsEffort: true, effortLevels: [low, medium, high], contextWindow: 1000000 }
-      - { id: opus, label: "Opus 4.8", supportsEffort: true, effortLevels: [low, medium, high], contextWindow: 1000000 }
-      - { id: claude-sonnet-4-6, label: "Sonnet 4.6", supportsEffort: true, effortLevels: [low, medium, high], contextWindow: 200000 }
-      - { id: claude-haiku-4-5, label: "Haiku 4.5", supportsEffort: true, effortLevels: [low, medium, high], contextWindow: 200000 }
+      - { id: opus, label: "Opus (Latest)", supportsEffort: true, effortLevels: [low, medium, high, xhigh, max] }
+      - { id: sonnet, label: "Sonnet (Latest)", supportsEffort: true, effortLevels: [low, medium, high, xhigh, max] }
+      - { id: fable, label: "Fable (Latest)", supportsEffort: true, effortLevels: [low, medium, high, xhigh, max] }
   codex:
     default: gpt-5.5
     effortMechanism: codex-config

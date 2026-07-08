@@ -8,7 +8,15 @@ import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { JinnConfig, Connector, Employee, Engine, JsonObject, Session } from "../shared/types.js";
 import { loadConfig, normalizeClaudeEngineConfig } from "../shared/config.js";
-import { invalidateModelRegistry, refreshGrokModels, refreshPiModels, refreshHermesModels } from "../shared/models.js";
+import {
+  invalidateModelRegistry,
+  refreshAntigravityModels,
+  refreshClaudeModels,
+  refreshCodexModels,
+  refreshGrokModels,
+  refreshHermesModels,
+  refreshPiModels,
+} from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
 import { initDb, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, getInterruptedSessions, listSessions, updateSession, getSession } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
@@ -878,7 +886,14 @@ export async function startGateway(
   // registry serves known/synthesized fallbacks until the snapshots land, then
   // the web UI invalidates its model registry cache via engines:updated.
   const refreshDynamicModels = (cfg: JinnConfig): void => {
-    void Promise.all([refreshPiModels(cfg), refreshGrokModels(cfg), refreshHermesModels(cfg)])
+    void Promise.all([
+      refreshClaudeModels(cfg),
+      refreshCodexModels(cfg),
+      refreshAntigravityModels(cfg),
+      refreshPiModels(cfg),
+      refreshGrokModels(cfg),
+      refreshHermesModels(cfg),
+    ])
       .finally(() => emit("engines:updated", {}));
   };
   refreshDynamicModels(currentConfig);

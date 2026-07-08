@@ -609,6 +609,8 @@ export interface EngineModelsConfig {
   /** Default model id; falls back to the first listed model. */
   default?: string;
   effortMechanism?: EffortMechanism;
+  /** Model ids hidden from the resolved registry while discovery stays active. */
+  hidden?: string[];
   models: ModelConfigEntry[];
 }
 

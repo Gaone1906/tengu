@@ -10,6 +10,20 @@ import { logger } from "./logger.js";
 import { resolveBin, isInstalled } from "./resolve-bin.js";
 import { discoverPiModels } from "./pi-models.js";
 import {
+  discoverClaudeEffortLevels,
+  discoverClaudeModels,
+  knownClaudeModels,
+  type ClaudeModelDiscovery,
+} from "./claude-models.js";
+import {
+  discoverCodexModels,
+  type CodexModelDiscovery,
+} from "./codex-models.js";
+import {
+  discoverAntigravityModels,
+  type AntigravityModelDiscovery,
+} from "./antigravity-models.js";
+import {
   discoverGrokModels,
   GROK_EFFORT_LEVELS,
   knownGrokModels,
@@ -27,7 +41,7 @@ import {
  * models exist and what they support (effort levels, availability).
  *
  * Sources, in precedence order per engine:
- *   1. Dynamic discovery (pi/grok), refreshed at boot and on config reload into
+ *   1. Dynamic discovery, refreshed at boot and on config reload into
  *      snapshots that the (synchronous) registry reads.
  *   2. The optional `models:` block in config.yaml.
  *   3. Synthesis from `engines.<name>.model` (back-compat default).
@@ -63,7 +77,7 @@ export const CODEX_DEFAULT_MODEL = "gpt-5.5";
 
 /** Conservative per-engine defaults used when synthesizing (no `models:` block). */
 const SYNTH_DEFAULTS: Record<EngineName, { supportsEffort: boolean; effortLevels: string[]; fallbackModel: string }> = {
-  claude: { supportsEffort: true, effortLevels: ["low", "medium", "high"], fallbackModel: "opus" },
+  claude: { supportsEffort: true, effortLevels: ["low", "medium", "high", "xhigh", "max"], fallbackModel: "opus" },
   codex: { supportsEffort: true, effortLevels: ["low", "medium", "high", "xhigh"], fallbackModel: CODEX_DEFAULT_MODEL },
   antigravity: { supportsEffort: false, effortLevels: [], fallbackModel: "Gemini 3.5 Flash (Medium)" },
   grok: { supportsEffort: true, effortLevels: GROK_EFFORT_LEVELS, fallbackModel: "grok-build" },
@@ -109,10 +123,88 @@ export function engineUnavailableMessage(config: JinnConfig, name: EngineName): 
 
 /** Snapshot of dynamically-discovered Pi models (null until first discovery). */
 let discoveredPiModels: ModelInfo[] | null = null;
+/** Snapshot of dynamically-discovered Claude models (null until first discovery). */
+let discoveredClaudeModels: ClaudeModelDiscovery | null = null;
+/** Snapshot of Claude Code's read-only `--effort` options (null until first discovery). */
+let discoveredClaudeEffortLevels: string[] | null = null;
+/** Snapshot of dynamically-discovered Codex models (null until first discovery). */
+let discoveredCodexModels: CodexModelDiscovery | null = null;
+/** Snapshot of dynamically-discovered Antigravity models (null until first discovery). */
+let discoveredAntigravityModels: AntigravityModelDiscovery | null = null;
 /** Snapshot of dynamically-discovered Grok models (null until first discovery). */
 let discoveredGrokModels: GrokModelDiscovery | null = null;
 /** Snapshot of dynamically-discovered Hermes models (null until first discovery). */
 let discoveredHermesModels: HermesModelDiscovery | null = null;
+
+/**
+ * Discover Claude's catalog through Claude Code OAuth. This is best-effort and
+ * read-only; it never validates a model by starting a Claude turn.
+ */
+export async function refreshClaudeModels(config: JinnConfig): Promise<void> {
+  if (!engineAvailable(config, "claude")) {
+    discoveredClaudeModels = null;
+    discoveredClaudeEffortLevels = null;
+    invalidateModelRegistry();
+    return;
+  }
+  try {
+    const bin = resolveBin("claude", engineBinOverride(config, "claude"));
+    discoveredClaudeEffortLevels = await discoverClaudeEffortLevels(bin);
+    discoveredClaudeModels = await discoverClaudeModels({
+      effortLevels: discoveredClaudeEffortLevels.length > 0 ? discoveredClaudeEffortLevels : undefined,
+    });
+    logger.info(`Claude model discovery: ${discoveredClaudeModels.models.length} model(s)`);
+  } catch (err) {
+    logger.warn(`Claude model discovery failed: ${err instanceof Error ? err.message : err}`);
+    discoveredClaudeModels = null;
+  } finally {
+    invalidateModelRegistry();
+  }
+}
+
+export function setDiscoveredClaudeModelsForTest(models: ClaudeModelDiscovery | null): void {
+  discoveredClaudeModels = models;
+  discoveredClaudeEffortLevels = null;
+  invalidateModelRegistry();
+}
+
+/** Discover Codex's model catalog (`codex debug models`) and refresh the registry. */
+export async function refreshCodexModels(config: JinnConfig): Promise<void> {
+  if (!engineAvailable(config, "codex")) {
+    discoveredCodexModels = null;
+    invalidateModelRegistry();
+    return;
+  }
+  try {
+    const bin = resolveBin("codex", engineBinOverride(config, "codex"));
+    discoveredCodexModels = await discoverCodexModels(bin);
+    logger.info(`Codex model discovery: ${discoveredCodexModels.models.length} model(s)`);
+  } catch (err) {
+    logger.warn(`Codex model discovery failed: ${err instanceof Error ? err.message : err}`);
+    discoveredCodexModels = null;
+  } finally {
+    invalidateModelRegistry();
+  }
+}
+
+/** Discover Antigravity's model catalog (`agy models`) and refresh the registry. */
+export async function refreshAntigravityModels(config: JinnConfig): Promise<void> {
+  if (!engineAvailable(config, "antigravity")) {
+    discoveredAntigravityModels = null;
+    invalidateModelRegistry();
+    return;
+  }
+  try {
+    const bin = resolveBin("agy", engineBinOverride(config, "antigravity"));
+    discoveredAntigravityModels = await discoverAntigravityModels(bin);
+    logger.info(`Antigravity model discovery: ${discoveredAntigravityModels.models.length} model(s)`);
+  } catch (err) {
+    logger.warn(`Antigravity model discovery failed: ${err instanceof Error ? err.message : err}`);
+    discoveredAntigravityModels = null;
+  } finally {
+    invalidateModelRegistry();
+  }
+}
 
 /**
  * Discover Pi's local/custom models (`pi --list-models`) and refresh the registry.
@@ -233,6 +325,18 @@ export function buildRegistry(config: JinnConfig): ModelRegistry {
     const available = engineAvailable(config, name);
     // Dynamic engine model discovery overrides
     // both the config block and synthesis.
+    if (name === "claude") {
+      registry[name] = buildClaudeEntry(config, block?.claude, synthesized[name], available);
+      continue;
+    }
+    if (name === "codex") {
+      registry[name] = buildCodexEntry(config, block?.codex, synthesized[name], available);
+      continue;
+    }
+    if (name === "antigravity") {
+      registry[name] = buildAntigravityEntry(config, block?.antigravity, synthesized[name], available);
+      continue;
+    }
     if (name === "pi") {
       registry[name] = buildPiEntry(config, block?.pi, synthesized[name], available);
       continue;
@@ -251,6 +355,58 @@ export function buildRegistry(config: JinnConfig): ModelRegistry {
       : synthesized[name]; // engine omitted from the block → keep the synthesized entry
   }
   return registry;
+}
+
+/** Claude registry entry: discovered aliases/catalog > config additions > alias fallback. */
+function buildClaudeEntry(
+  config: JinnConfig,
+  claudeBlock: EngineModelsConfig | undefined,
+  synthEntry: EngineRegistryEntry,
+  available: boolean,
+): EngineRegistryEntry {
+  const pinned = config.engines.claude?.model;
+  const discovered = discoveredClaudeModels?.models.length ? discoveredClaudeModels : null;
+  const base = discovered ?? knownClaudeModels(pinned, discoveredClaudeEffortLevels ?? undefined);
+  const models = mergeDiscoveredModels(base.models, claudeBlock, { configuredOverridesDiscovered: false });
+  const valid = (id?: string) => (id && models.some((m) => m.id === id) ? id : undefined);
+  const defaultModel = valid(pinned) ?? valid(claudeBlock?.default) ?? valid(base.defaultModel) ?? models[0]?.id ?? synthEntry.defaultModel;
+  return { name: "claude", available, defaultModel, effortMechanism: "claude-flag", models };
+}
+
+/** Codex registry entry: discovered catalog > config block > synthesized. */
+function buildCodexEntry(
+  config: JinnConfig,
+  codexBlock: EngineModelsConfig | undefined,
+  synthEntry: EngineRegistryEntry,
+  available: boolean,
+): EngineRegistryEntry {
+  if (discoveredCodexModels && discoveredCodexModels.models.length > 0) {
+    const models = mergeDiscoveredModels(discoveredCodexModels.models, codexBlock, { configuredOverridesDiscovered: true });
+    const pinned = config.engines.codex?.model;
+    const valid = (id?: string) => (id && models.some((m) => m.id === id) ? id : undefined);
+    const defaultModel = valid(pinned) ?? valid(codexBlock?.default) ?? valid(discoveredCodexModels.defaultModel) ?? models[0].id;
+    return { name: "codex", available, defaultModel, effortMechanism: "codex-config", models };
+  }
+  if (codexBlock) return fromEngineModelsConfig("codex", codexBlock, available, config.engines.codex?.model);
+  return { ...synthEntry, available };
+}
+
+/** Antigravity registry entry: discovered catalog > config block > synthesized. */
+function buildAntigravityEntry(
+  config: JinnConfig,
+  antigravityBlock: EngineModelsConfig | undefined,
+  synthEntry: EngineRegistryEntry,
+  available: boolean,
+): EngineRegistryEntry {
+  if (discoveredAntigravityModels && discoveredAntigravityModels.models.length > 0) {
+    const models = mergeDiscoveredModels(discoveredAntigravityModels.models, antigravityBlock, { configuredOverridesDiscovered: true });
+    const pinned = config.engines.antigravity?.model;
+    const valid = (id?: string) => (id && models.some((m) => m.id === id) ? id : undefined);
+    const defaultModel = valid(pinned) ?? valid(antigravityBlock?.default) ?? valid(discoveredAntigravityModels.defaultModel) ?? models[0].id;
+    return { name: "antigravity", available, defaultModel, effortMechanism: "none", models };
+  }
+  if (antigravityBlock) return fromEngineModelsConfig("antigravity", antigravityBlock, available, config.engines.antigravity?.model);
+  return { ...synthEntry, available };
 }
 
 /** Grok registry entry: discovered models > config `models.grok` block > known catalog. */
@@ -337,6 +493,17 @@ export function synthesizeFromEngineConfig(config: JinnConfig): ModelRegistry {
     const defaults = SYNTH_DEFAULTS[name];
     const engineCfg = (config.engines as unknown as Record<string, { model?: string } | undefined>)[name];
     const modelId = engineCfg?.model || defaults.fallbackModel;
+    if (name === "claude") {
+      const known = knownClaudeModels(modelId);
+      registry[name] = {
+        name,
+        available: engineAvailable(config, name),
+        defaultModel: known.defaultModel || modelId,
+        effortMechanism: EFFORT_MECHANISM[name],
+        models: known.models,
+      };
+      continue;
+    }
     if (name === "grok") {
       const known = knownGrokModels(modelId);
       registry[name] = {
@@ -365,6 +532,43 @@ export function synthesizeFromEngineConfig(config: JinnConfig): ModelRegistry {
   return registry;
 }
 
+function mergeDiscoveredModels(
+  discovered: ModelInfo[],
+  block: EngineModelsConfig | undefined,
+  opts: { configuredOverridesDiscovered: boolean },
+): ModelInfo[] {
+  if (!block) return discovered;
+
+  const configured = new Map(block.models.map((m) => [m.id, m]));
+  const hidden = new Set(block.hidden ?? []);
+  const seen = new Set<string>();
+  const merged = discovered.filter((model) => !hidden.has(model.id)).map((model) => {
+    seen.add(model.id);
+    const configuredModel = configured.get(model.id);
+    if (!configuredModel) return model;
+    if (!opts.configuredOverridesDiscovered) return model;
+
+    const supportsEffort = configuredModel.supportsEffort ?? model.supportsEffort;
+    return {
+      id: model.id,
+      label: configuredModel.label || model.label,
+      supportsEffort,
+      effortLevels: supportsEffort ? (configuredModel.effortLevels ?? model.effortLevels) : [],
+      ...(typeof configuredModel.contextWindow === "number"
+        ? { contextWindow: configuredModel.contextWindow }
+        : typeof model.contextWindow === "number"
+          ? { contextWindow: model.contextWindow }
+          : {}),
+    };
+  });
+
+  for (const configuredModel of block.models) {
+    if (hidden.has(configuredModel.id)) continue;
+    if (!seen.has(configuredModel.id)) merged.push(modelInfoFromConfigEntry(configuredModel));
+  }
+  return merged;
+}
+
 function modelInfoFromConfigEntry(m: EngineModelsConfig["models"][number]): ModelInfo {
   const supportsEffort = m.supportsEffort ?? false;
   return {
@@ -382,7 +586,8 @@ function fromEngineModelsConfig(
   available: boolean,
   pinnedModel?: string,
 ): EngineRegistryEntry {
-  const models: ModelInfo[] = (block.models ?? []).map((m) => {
+  const hidden = new Set(block.hidden ?? []);
+  const models: ModelInfo[] = (block.models ?? []).filter((m) => !hidden.has(m.id)).map((m) => {
     return modelInfoFromConfigEntry(m);
   });
   const validDefault = (id: string | undefined) => id && models.some((m) => m.id === id) ? id : undefined;
@@ -400,8 +605,9 @@ function mergeDiscoveredGrokModels(discovered: ModelInfo[], block: EngineModelsC
   if (!block) return discovered;
 
   const configured = new Map(block.models.map((m) => [m.id, m]));
+  const hidden = new Set(block.hidden ?? []);
   const seen = new Set<string>();
-  const merged = discovered.map((model) => {
+  const merged = discovered.filter((model) => !hidden.has(model.id)).map((model) => {
     seen.add(model.id);
     const configuredModel = configured.get(model.id);
     if (!configuredModel) return model;
@@ -421,6 +627,7 @@ function mergeDiscoveredGrokModels(discovered: ModelInfo[], block: EngineModelsC
   });
 
   for (const configuredModel of block.models) {
+    if (hidden.has(configuredModel.id)) continue;
     if (!seen.has(configuredModel.id)) merged.push(modelInfoFromConfigEntry(configuredModel));
   }
 

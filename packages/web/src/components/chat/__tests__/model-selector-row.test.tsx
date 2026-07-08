@@ -49,7 +49,7 @@ const REG: EnginesResponse = {
     claude: {
       name: 'claude', available: true, defaultModel: 'opus', effortMechanism: 'claude-flag',
       models: [
-        { id: 'opus', label: 'Opus 4.8', supportsEffort: true, effortLevels: ['low', 'medium', 'high'] },
+        { id: 'opus', label: 'Opus 4.8', supportsEffort: true, effortLevels: ['low', 'medium', 'high', 'xhigh', 'max'] },
         { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', supportsEffort: true, effortLevels: ['low', 'medium', 'high'] },
       ],
     },
@@ -195,6 +195,15 @@ describe('ModelSelectorRow in-place engine panel', () => {
     openMenu()
     fireEvent.click(await screen.findByRole('button', { name: 'low' }))
     expect(onChange).toHaveBeenCalledWith({ engine: 'claude', model: 'opus', effortLevel: 'low' })
+  })
+
+  it('uses a scrollable effort row for long effort sets', async () => {
+    renderRow(<Harness initial={{ engine: 'claude', model: 'opus', effortLevel: 'high' }} />)
+    openMenu()
+    const row = await screen.findByTestId('effort-levels')
+    expect(row.className).toContain('overflow-x-auto')
+    expect(screen.getByRole('button', { name: 'xhigh' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'max' })).toBeTruthy()
   })
 
   it('model selection callback still fires (effort clamped to a valid level)', async () => {

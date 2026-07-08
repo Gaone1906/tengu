@@ -6,7 +6,20 @@ import path from "node:path";
 import yaml from "js-yaml";
 import type { ChatBlock, ChatBlockEnvelope, CronJob, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
 import { isInterruptibleEngine } from "../shared/types.js";
-import { getModelRegistry, invalidateModelRegistry, effortLevelsForModel, refreshGrokModels, refreshPiModels, refreshHermesModels, engineAvailable, isKnownEngine, engineUnavailableMessage } from "../shared/models.js";
+import {
+  getModelRegistry,
+  invalidateModelRegistry,
+  effortLevelsForModel,
+  refreshAntigravityModels,
+  refreshClaudeModels,
+  refreshCodexModels,
+  refreshGrokModels,
+  refreshHermesModels,
+  refreshPiModels,
+  engineAvailable,
+  isKnownEngine,
+  engineUnavailableMessage,
+} from "../shared/models.js";
 import { validateNewSessionSelection, validateSessionPatch } from "../sessions/session-patch.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { buildContext } from "../sessions/context.js";
@@ -120,6 +133,7 @@ import { redactText } from "../shared/redact.js";
 import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLanguages, WHISPER_LANGUAGES } from "../stt/stt.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { resolveEffort } from "../shared/effort.js";
+import { selectClaudeModelFallback } from "../shared/model-fallback.js";
 import { detectRateLimit } from "../shared/rateLimit.js";
 import { getClaudeExpectedResetAt } from "../shared/usageAwareness.js";
 import { collectEngineLimits } from "../shared/engine-limits.js";
@@ -4006,9 +4020,14 @@ export async function handleApiRequest(
     // restarting the gateway.
     if (method === "POST" && pathname === "/api/engines/refresh") {
       const config = context.getConfig();
-      await refreshPiModels(config);
-      await refreshGrokModels(config);
-      await refreshHermesModels(config);
+      await Promise.all([
+        refreshClaudeModels(config),
+        refreshCodexModels(config),
+        refreshAntigravityModels(config),
+        refreshPiModels(config),
+        refreshGrokModels(config),
+        refreshHermesModels(config),
+      ]);
       context.emit("engines:updated", {});
       return json(res, { default: config.engines.default, engines: getModelRegistry(config) });
     }
@@ -4905,6 +4924,7 @@ async function runWebSession(
   // temp file only AFTER the full turn lifecycle — including any rate-limit
   // retry/fallback that reuses mcpConfigPath (parity with manager.ts runSession).
   let mcpConfigPath: string | undefined;
+  let runHeartbeat: ReturnType<typeof setInterval> | undefined;
 
   try {
 
@@ -4984,13 +5004,14 @@ async function runWebSession(
     );
 
     let lastHeartbeatAt = 0;
-    const runHeartbeat = setInterval(() => {
+    runHeartbeat = setInterval(() => {
       // If the session was deleted mid-turn, stop heartbeating immediately —
       // the engine.run promise may still take minutes to resolve, and we don't
       // want to keep writing status:"running" rows for a session the user
       // already removed (and risk re-creating registry state in some paths).
       if (!getSession(currentSession.id)) {
-        clearInterval(runHeartbeat);
+        if (runHeartbeat) clearInterval(runHeartbeat);
+        runHeartbeat = undefined;
         return;
       }
       updateSession(currentSession.id, {
@@ -5086,13 +5107,14 @@ async function runWebSession(
       : prompt;
 
     const turnStartedAt = Date.now();
-    const result = await engine.run({
+    let modelForTurn = currentSession.model ?? engineConfig.model;
+    const runAttempt = (modelForAttempt: string | undefined) => engine.run({
       prompt: promptToRun,
       resumeSessionId: resumeRefAtTurnStart.id ?? undefined,
       systemPrompt,
       cwd: JINN_HOME,
       bin: engineConfig.bin,
-      model: currentSession.model ?? engineConfig.model,
+      model: modelForAttempt,
       effortLevel,
       cliFlags: employee?.cliFlags,
       mcpConfigPath,
@@ -5173,7 +5195,7 @@ async function runWebSession(
         insertMessage(currentSession.id, "assistant", lateText);
         if (engineSid.trim()) {
           recordEngineSessionId(currentSession.id, engineAtTurnStart, engineSid, {
-            model: currentSession.model ?? engineConfig.model,
+            model: modelForAttempt,
             effortLevel,
             lastSyncedAt: new Date().toISOString(),
           });
@@ -5200,12 +5222,36 @@ async function runWebSession(
         logger.info(`Web session ${currentSession.id} recovered by late Stop after a failed turn`);
       },
     }).finally(() => {
-      clearInterval(runHeartbeat);
       // Stop any pending debounced text flush so it can't re-insert a partial row
       // after the turn-end cleanup below deletes them.
       if (partialFlushTimer) { clearTimeout(partialFlushTimer); partialFlushTimer = null; }
       flushPartialText();
     });
+    let result = await runAttempt(modelForTurn);
+
+    if (currentSession.engine === "claude" && result.error && !result.result.trim()) {
+      await refreshClaudeModels(config);
+      const refreshedRegistry = getModelRegistry(context.getConfig());
+      const fallbackModel = selectClaudeModelFallback({
+        engine: currentSession.engine,
+        requestedModel: modelForTurn,
+        error: result.error,
+        models: refreshedRegistry.claude?.models ?? [],
+      });
+      if (fallbackModel) {
+        logger.warn(`Claude model "${modelForTurn}" failed availability check; retrying session ${currentSession.id} with "${fallbackModel}"`);
+        deletePartialMessages(currentSession.id);
+        if (currentSession.source === "talk") discardTalkSpeech(currentSession.id);
+        modelForTurn = fallbackModel;
+        updateSession(currentSession.id, { model: fallbackModel, lastError: null });
+        result = await runAttempt(modelForTurn);
+      }
+    }
+
+    if (runHeartbeat) {
+      clearInterval(runHeartbeat);
+      runHeartbeat = undefined;
+    }
 
     if (!getSession(currentSession.id)) {
       logger.info(`Skipping completion for deleted web session ${currentSession.id}`);
@@ -5323,7 +5369,7 @@ async function runWebSession(
             if (fallbackResult.sessionId?.trim()) {
               const fallbackEngineName = getSession(currentSession.id)?.engine ?? currentSession.engine;
               recordEngineSessionId(currentSession.id, fallbackEngineName, fallbackResult.sessionId, {
-                model: currentSession.model ?? engineConfig.model,
+                model: modelForTurn,
                 effortLevel,
                 lastSyncedAt: fallbackCompletedAt,
               });
@@ -5390,7 +5436,7 @@ async function runWebSession(
             const retryCompletedAt = new Date().toISOString();
             if (retryResult.sessionId?.trim()) {
               recordEngineSessionId(currentSession.id, engineAtTurnStart, retryResult.sessionId, {
-                model: currentSession.model ?? engineConfig.model,
+                model: modelForTurn,
                 effortLevel,
                 lastSyncedAt: retryCompletedAt,
               });
@@ -5472,7 +5518,7 @@ async function runWebSession(
     const completedAt = new Date().toISOString();
     if (result.sessionId?.trim()) {
       recordEngineSessionId(currentSession.id, engineAtTurnStart, result.sessionId, {
-        model: currentSession.model ?? engineConfig.model,
+        model: modelForTurn,
         effortLevel,
         lastSyncedAt: completedAt,
       });
@@ -5537,6 +5583,10 @@ async function runWebSession(
       return;
     }
     if (live.engine !== engineAtTurnStart) {
+      if (runHeartbeat) {
+        clearInterval(runHeartbeat);
+        runHeartbeat = undefined;
+      }
       deletePartialMessages(currentSession.id);
       clearSupersededTurnMeta(currentSession.id);
       if (currentSession.source === "talk") discardTalkSpeech(currentSession.id);
@@ -5563,6 +5613,10 @@ async function runWebSession(
     maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
     logger.error(`Web session ${currentSession.id} error: ${errMsg}`);
   } finally {
+    if (runHeartbeat) {
+      clearInterval(runHeartbeat);
+      runHeartbeat = undefined;
+    }
     // Clean up the per-session Claude MCP temp file AFTER the full turn lifecycle
     // (including any rate-limit retry/fallback that reused mcpConfigPath). Mirrors
     // the connector path's outer-finally cleanup (manager.ts runSession). Idempotent
