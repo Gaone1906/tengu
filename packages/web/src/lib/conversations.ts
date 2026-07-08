@@ -40,7 +40,7 @@ export interface Message {
  * copy) falling back to type, so it is robust to the url differing and to any
  * media type (image, audio, video → 'file', etc.).
  */
-function messageIdentityKey(m: Message): string {
+export function messageIdentityKey(m: Message): string {
   const sep = '\u0000'
   const mediaFp = (m.media || [])
     .map((x) => x.name || x.type || x.url)

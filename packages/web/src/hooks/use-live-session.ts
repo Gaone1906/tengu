@@ -25,6 +25,7 @@ import type { BackgroundActivity } from '@/lib/api'
 import type { Message, MediaAttachment } from '@/lib/conversations'
 import {
   clearIntermediateMessages,
+  messageIdentityKey,
   reconcileMessages,
 } from '@/lib/conversations'
 import { applyBlockEnvelopeToMessages, isBlockEnvelope, isChatBlock } from '@/lib/blocks'
@@ -235,9 +236,11 @@ function mergePagedSnapshot(current: Message[], snapshot: Message[], preserveOld
   const reconciled = reconcileMessages(current, snapshot)
   if (!preserveOlderLoaded || snapshot.length === 0) return reconciled
   const ids = new Set(reconciled.map((m) => m.id))
+  const keys = new Set(reconciled.map(messageIdentityKey))
   const firstSnapshot = snapshot[0]
   const olderLoaded = current.filter((m) =>
     !ids.has(m.id) &&
+    !keys.has(messageIdentityKey(m)) &&
     m.timestamp <= firstSnapshot.timestamp,
   )
   return mergeOlderMessages(olderLoaded, reconciled)

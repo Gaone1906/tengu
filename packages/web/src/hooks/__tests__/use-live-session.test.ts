@@ -666,6 +666,68 @@ describe("useLiveSession (editable write path)", () => {
     expect(result.current.hydrating).toBe(false)
   })
 
+  it("dedupes paged canonical user snapshots so completion keeps the next prompt", async () => {
+    const first = "first prompt"
+    const second = "second prompt"
+    getSession.mockResolvedValueOnce({
+      status: "running",
+      messages: [{ id: "server-first", role: "user", content: first, timestamp: 1001 }],
+      messagesPage: { hasOlder: false },
+    })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() =>
+      useLiveSession("s-new", {
+        subscribe,
+        pendingUserMessage: {
+          id: "client-first",
+          role: "user",
+          content: first,
+          timestamp: 1000,
+        },
+      }),
+    )
+
+    await act(async () => { await Promise.resolve() })
+    expect(result.current.messages.map((m) => m.content)).toEqual([first])
+
+    getSession.mockResolvedValueOnce({ status: "idle" })
+    await act(async () => {
+      emit("session:completed", { sessionId: "s-new", result: "OK" })
+      await Promise.resolve()
+    })
+    expect(result.current.messages.map((m) => m.content)).toEqual([first, "OK"])
+
+    act(() => {
+      result.current.beginSend({
+        id: "client-second",
+        role: "user",
+        content: second,
+        timestamp: 3000,
+      })
+    })
+
+    getSession.mockResolvedValueOnce({
+      status: "running",
+      messages: [
+        { id: "server-first", role: "user", content: first, timestamp: 1001 },
+        { id: "server-ok", role: "assistant", content: "OK", timestamp: 2000 },
+        { id: "server-second", role: "user", content: second, timestamp: 3001 },
+      ],
+      messagesPage: { hasOlder: false },
+    })
+    await act(async () => {
+      await result.current.reload("s-new")
+    })
+    expect(result.current.messages.map((m) => m.content)).toEqual([first, "OK", second])
+
+    getSession.mockResolvedValueOnce({ status: "idle" })
+    await act(async () => {
+      emit("session:completed", { sessionId: "s-new", result: "OK2" })
+      await Promise.resolve()
+    })
+    expect(result.current.messages.map((m) => m.content)).toEqual([first, "OK", second, "OK2"])
+  })
+
   it("evicts old session cache entries so switching does not grow unbounded", () => {
     for (let i = 0; i < 25; i++) {
       __cacheLiveSessionSnapshotForTests(`s-${i}`, {
