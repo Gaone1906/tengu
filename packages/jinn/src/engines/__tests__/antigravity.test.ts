@@ -58,3 +58,32 @@ describe.skipIf(!process.env.AGY_E2E)("AntigravityEngine (e2e: real agy)", () =>
     e.killAll();
   }, 90_000);
 });
+
+/**
+ * GRS-018 item 4 — Antigravity Tier-3 fallback seam. agy 1.0.16 has no
+ * per-session MCP lever (global ~/.gemini only, which jinn never mutates), so
+ * Antigravity sessions operate the company via the gateway HTTP API instead:
+ * the session context's API-reference block tells them to use
+ * $JINN_GATEWAY_TOKEN / $JINN_GATEWAY_URL, and THIS seam — the PTY env
+ * builder inheriting the gateway's process.env — is what actually delivers
+ * those variables to the agy child. Pin it so an env-allowlist refactor can't
+ * silently sever the fallback.
+ */
+describe("buildAntigravityPtyEnv (GRS-018 Tier-3 fallback seam)", () => {
+  it("inherits JINN_GATEWAY_TOKEN and JINN_GATEWAY_URL from the gateway process env", async () => {
+    const { buildAntigravityPtyEnv } = await import("../antigravity.js");
+    const prevToken = process.env.JINN_GATEWAY_TOKEN;
+    const prevUrl = process.env.JINN_GATEWAY_URL;
+    process.env.JINN_GATEWAY_TOKEN = "tok-tier3";
+    process.env.JINN_GATEWAY_URL = "http://127.0.0.1:59999";
+    try {
+      const env = buildAntigravityPtyEnv();
+      expect(env.JINN_GATEWAY_TOKEN).toBe("tok-tier3");
+      expect(env.JINN_GATEWAY_URL).toBe("http://127.0.0.1:59999");
+      expect(env.TERM).toBe("xterm-256color");
+    } finally {
+      if (prevToken === undefined) delete process.env.JINN_GATEWAY_TOKEN; else process.env.JINN_GATEWAY_TOKEN = prevToken;
+      if (prevUrl === undefined) delete process.env.JINN_GATEWAY_URL; else process.env.JINN_GATEWAY_URL = prevUrl;
+    }
+  });
+});

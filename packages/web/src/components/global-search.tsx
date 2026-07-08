@@ -2,8 +2,8 @@
 import { useCallback, useEffect, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import {
-  MessageSquare, Users, LayoutGrid, Clock,
-  Activity, Zap, Settings, Plus, Hash,
+  MessageSquare, Users, ListChecks, Clock,
+  Activity, Zap, Settings, Plus, Hash, Workflow, Gauge,
 } from "lucide-react"
 import {
   Command,
@@ -46,11 +46,15 @@ function saveRecent(item: RecentItem) {
   localStorage.setItem(RECENT_KEY, JSON.stringify(items.slice(0, MAX_RECENT)))
 }
 
+// Every top-level destination, so the command palette can reach anything the
+// mobile tab bar / More overflow reaches (kept in step with lib/nav NAV_ITEMS).
 const STATIC_PAGES = [
   { id: "page-chat", label: "Chat", icon: MessageSquare, href: "/" },
+  { id: "page-workflow", label: "Workflows", icon: Workflow, href: "/workflow" },
+  { id: "page-todos", label: "Todos", icon: ListChecks, href: "/todos" },
   { id: "page-org", label: "Organization", icon: Users, href: "/org" },
-  { id: "page-kanban", label: "Kanban", icon: LayoutGrid, href: "/kanban" },
   { id: "page-cron", label: "Cron", icon: Clock, href: "/cron" },
+  { id: "page-limits", label: "Limits", icon: Gauge, href: "/limits" },
   { id: "page-logs", label: "Activity", icon: Activity, href: "/logs" },
   { id: "page-skills", label: "Skills", icon: Zap, href: "/skills" },
   { id: "page-settings", label: "Settings", icon: Settings, href: "/settings" },

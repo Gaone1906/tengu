@@ -1,4 +1,3 @@
-import type { TalkGraphNodeWire } from '@/routes/talk/protocol'
 import { authFetch } from "@/lib/auth"
 
 export interface TranscriptContentBlock {
@@ -237,46 +236,576 @@ export interface EngineLimitsResponse {
   engines: Record<string, EngineLimitEngineSnapshot>;
 }
 
-// --- Talk: session search + delegate (Mission Control) ---
-export interface TalkSearchHit {
-  snippet: string
+/* ── Workflow visualization (GRS-009) ───────────────────────────────────────── */
+
+export interface WorkflowGateResult {
+  id?: string
+  kind: 'artifact' | 'flag' | 'approval'
+  description: string
+  passed: boolean
+  evidence?: string
+}
+export interface WorkflowStepView {
+  id: string
+  title: string
   role: string
-  ts: number
+  who: string
+  optional: boolean
+  cadence?: string
+  gates: WorkflowGateResult[]
+  passed: boolean
+  isCurrent: boolean
 }
-export interface TalkSearchResult {
-  sessionId: string
-  title: string | null
-  employee: string | null
-  source: string
-  lastActivity: string
+export interface WorkflowRunView {
+  wave: number
+  item: string | null
+  fireIso: string | null
+  status: 'pending' | 'active' | 'passed' | 'blocked' | 'needs_fix'
+  lastWaveState: string | null
+  startedAt: string | null
+  endedAt: string | null
+  steps: WorkflowStepView[]
+  runGates: WorkflowGateResult[]
+  flagSource: 'live' | 'receipt'
+}
+export interface WorkflowDefinitionWire {
+  id: string
+  title: string
+  description?: string
+  version: number
   status: string
-  isTalkChild: boolean
-  hits: TalkSearchHit[]
+  orchestrator?: string
+  trigger: { kind: string; cron?: string; timezone?: string; until?: string; cronJobId?: string }
+  loop?: { until?: string; maxRoundsPerRun?: number; stopWhen?: string }
 }
-export interface TalkSearchResponse {
-  ok: true
-  results: TalkSearchResult[]
+export interface DerivedWorkflow {
+  definition: WorkflowDefinitionWire
+  runs: WorkflowRunView[]
+  latest: WorkflowRunView | null
+  triggerSummary: string
+  evidenceRoot: string
+  generatedFrom: { receiptsFound: number; stateJsonPresent: boolean }
 }
-/** POST /api/talk/delegate body — see talkDelegate() / the server delegate.ts. */
-export interface TalkDelegateBody {
-  /** The caller's own talk session id (orchestratorId). Required. */
-  sessionId: string
-  /** "new" to spawn, or a session id to continue / attach / detach. */
-  thread: string
-  attach?: boolean
-  detach?: boolean
-  mode?: "observe" | "engage"
-  brief?: string
+
+/* ── Editable workflow definitions (GRS-011a/b schema; GRS-011c Edit view) ─────
+ * The DURABLE, EDITABLE definition — a node/edge graph the canvas Edit view
+ * mutates. Kept SEPARATE from the read-only DerivedWorkflow run state above, so
+ * editing a definition never touches historical run receipts. Mirrors
+ * packages/jinn/src/workflows/definition.ts (EditableWorkflowDefinition). */
+export interface WorkflowNodePosition { x: number; y: number }
+export interface WorkflowActorWire { kind: 'employee' | 'engine'; ref: string }
+export interface WorkflowGateWire {
+  id?: string
+  kind: string
+  description?: string
+  [k: string]: unknown
+}
+/** Engine-node execution options (GRS-016b) — mirrors StepNodeOptions in
+ * packages/jinn/src/workflows/definition.ts. Step-only; requires an actor. */
+export interface StepNodeOptionsWire {
+  model?: string
+  effort?: string
+  /** `none` (GRS-016d) = fire-and-forget: the receipt settles `fired` at spawn,
+   * the session is never awaited, and the run never blocks on it. */
+  output?: 'handoff' | 'full' | 'none'
+  retry?: { maxAttempts: number; on: string[] }
+  /** `error-edge` (GRS-016d) routes a terminal failure down the node's
+   * lane:'error' out-edge(s) instead of failing the run. */
+  onError?: 'fail-run' | 'continue' | 'error-edge'
+  timeoutMinutes?: number
+  /** Session mode (GRS-016e): where the node's turn runs. Absent = 'fresh' (a new
+   * session per invocation). 'workflow' = the run's ONE shared session (follow-up
+   * turns, serialized). 'existing' = a follow-up turn into the operator-picked
+   * LIVE gateway session named by sessionId — the inspector labels the risk. */
+  session?: { mode: 'fresh' | 'workflow' | 'existing'; sessionId?: string }
+}
+/** One routing condition (GRS-016c) — mirrors WorkflowCondition in
+ * packages/jinn/src/workflows/condition.ts. Dot-path over the closed grammar
+ * (steps.<id>.status | steps.<id>.outcome.summary|notes|finalMessage|artifacts |
+ * steps.<id>.outcome.fields.<key> | run.rounds | run.status | trigger.kind/source/event |
+ * trigger.payload.<key>). */
+export interface WorkflowConditionWire {
+  path: string
+  op: string
+  value?: string | number | boolean
+}
+export interface WorkflowNodeWire {
+  id: string
+  type: 'trigger' | 'step' | 'gate' | 'switch' | 'fail' | 'wait'
+  label: string
+  position: WorkflowNodePosition
+  actor?: WorkflowActorWire
+  role?: string
+  trigger?: Record<string, unknown>
+  gate?: WorkflowGateWire
+  gates?: WorkflowGateWire[]
+  optional?: boolean
+  cadence?: string
+  /** Step task text (GRS-014c) — becomes the spawned step prompt's task section. Step-only. */
+  instructions?: string
+  /** Engine-node execution options (GRS-016b). Step-only; requires an actor. */
+  options?: StepNodeOptionsWire
+  /** Switch evaluation mode (GRS-016c). Switch-only; absent = firstMatch. */
+  switchMode?: 'firstMatch' | 'allMatches'
+  /** Authored stop-and-error message (GRS-016c). Required on fail nodes. */
+  failMessage?: string
+  /** Wait node duration in minutes (GRS-016d, 1..10080). Wait-only; exactly one
+   * of waitMinutes/waitUntil is required on a wait node. */
+  waitMinutes?: number
+  /** Wait node absolute ISO-8601 deadline (GRS-016d). Wait-only. */
+  waitUntil?: string
+}
+export interface WorkflowEdgeWire {
+  id: string
+  from: string
+  to: string
+  kind?: 'handoff' | 'sequence' | 'loop'
   label?: string
-  utterance?: string
+  /** Routing conditions (GRS-016c) — switch out-edges only; AND within the array;
+   * absent = the default/fallback branch of its switch. */
+  when?: WorkflowConditionWire[]
+  /** Error-output lane (GRS-016d): 'error' marks this edge as the failure route
+   * of its onError:'error-edge' source step. */
+  lane?: 'error'
 }
-export type TalkDelegateResult =
-  | { ok: true; threadId: string; created: boolean }
-  | { ok: true; threadId: string; attached: true; mode: "observe" | "engage" }
-  | { ok: true; threadId: string; detached: true }
+export interface EditableWorkflowDefinitionWire {
+  schemaVersion: number
+  id: string
+  title: string
+  description?: string
+  version: number
+  status: 'active' | 'paused' | 'retired'
+  orchestrator?: string
+  nodes: WorkflowNodeWire[]
+  edges: WorkflowEdgeWire[]
+  runGates?: WorkflowGateWire[]
+  loop?: { until?: string; maxRoundsPerRun?: number; stopWhen?: string }
+  evidenceRoot?: string
+  updatedAt?: string
+}
+export interface WorkflowDefinitionSummaryWire {
+  id: string
+  title: string
+  status: 'active' | 'paused' | 'retired'
+  version: number
+  updatedAt?: string
+  nodeCount: number
+  edgeCount: number
+}
+/* ── Workflow RUNS (GRS-011d-2c/-ui) ───────────────────────────────────────────
+ * A durable record of an actual EXECUTION of an editable definition — the "run"
+ * half of the edit→run→evidence loop. SEPARATE from the derived DerivedWorkflow
+ * projection above (that is the workflow dogfood's hand-written receipts) and from
+ * the editable definition (that is the graph you save). Mirrors
+ * packages/jinn/src/workflows/run-store.ts. Served by
+ * GET /api/workflow-definitions/:id/runs[/:runId]. */
+/** v1 walk statuses (spawned|inline|checkpoint|error) plus the GRS-014b step-machine
+ * states (pending|dispatching|running|done|failed|skipped) — reserved in the wire
+ * vocabulary now (GRS-014a); the gateway emits them from GRS-014b. */
+export type RunStepStatusWire =
+  | 'spawned' | 'inline' | 'checkpoint' | 'error'
+  | 'pending' | 'dispatching' | 'running' | 'done' | 'failed' | 'skipped'
+  | 'routed'
+  /** GRS-016d: `fired` = fire-and-forget step settled at spawn (never awaited);
+   * `waiting` = a wait node pausing until its persisted readyAt. */
+  | 'fired' | 'waiting'
+export interface RunStepReceiptWire {
+  nodeId: string
+  label: string
+  /** null for an orchestrator-inline step or a checkpoint node (no spawned actor). */
+  actor: { kind: 'employee' | 'engine'; ref: string } | null
+  status: RunStepStatusWire
+  /** Dispatch counter (GRS-014b): 1 or 2 — respawn-once caps it at 2. */
+  attempt?: number
+  /** Set once a session exists for this step — the real session on the gateway. */
+  sessionId?: string
+  detail?: string
+  /** When the current attempt's dispatch was minted (before the spawn). */
+  dispatchedAt?: string
+  /** When the step's session settled or the step otherwise terminally resolved. */
+  settledAt?: string
+  /** Loop iteration (GRS-014e); absent = round 1. Rounds ≥ 2 repeat the loop
+   * segment's nodes with fresh receipts, appended in execution order. */
+  round?: number
+  /** The step's durable outcome (GRS-014c): declared ```handoff block or capped
+   * final-message fallback — the exact material injected into successors' prompts. */
+  outcome?: {
+    sessionId: string
+    summary?: string
+    artifacts?: string[]
+    notes?: string
+    /** Machine-readable scalars the step declared (GRS-016c) — what switch
+     * conditions route on (steps.<id>.outcome.fields.<key>). */
+    fields?: Record<string, string | number | boolean>
+    finalMessage: string
+    extractedFrom: 'handoff-block' | 'final-message'
+  }
+  /** A switch receipt's frozen routing decision (GRS-016c): activated edge ids. */
+  route?: string[]
+  /** A wait receipt's durable deadline (GRS-016d): the sweep settles the receipt
+   * `checkpoint` on the first pass at/after this time. */
+  readyAt?: string
+  at: string
+}
+export interface ParkedGateWire {
+  scope: 'gateNode' | 'runGate'
+  nodeId: string | null
+  kind: 'approval'
+  evaluator: 'human-approval'
+  ref?: string
+  description: string
+  /** When the run parked (GRS-014b). Parked runs keep endedAt null — not terminal. */
+  at?: string
+}
+/** Honest v2 run statuses (GRS-014a). `passed` is retired — the gateway serves legacy
+ * v1 `passed` records as `dispatched` ("walk finished, sessions dispatched, completion
+ * unknown") via a read-time mapping; files are never rewritten. `completed` means the
+ * work actually finished; `cancelled` is reserved for the run-lifecycle slice. */
+export type WorkflowRunStatusWire =
+  | 'running' | 'parked' | 'dispatched' | 'completed' | 'failed' | 'cancelled'
+/** What started a run (GRS-014d). The gateway wraps legacy bare-string triggers at
+ * read time, so the wire always carries the object. Schedule fires from a managed
+ * cron job carry cronJobId + fireIso (the per-fire dedupe identity). */
+export type WorkflowRunTriggerWire =
+  | {
+    source: string
+    event: string
+    payload: Record<string, unknown>
+    fireRef?: string
+  }
+  | {
+  kind: 'manual' | 'schedule'
+  cronJobId?: string
+  fireIso?: string
+  }
+
+export interface WorkflowRunWire {
+  /** Absent on legacy v1 records; 2 on records written since GRS-014a. */
+  schemaVersion?: number
+  runId: string
+  workflowId: string
+  definitionVersion: number
+  title: string
+  trigger: WorkflowRunTriggerWire
+  status: WorkflowRunStatusWire
+  startedAt: string
+  endedAt: string | null
+  steps: RunStepReceiptWire[]
+  /** Present iff status==='parked': the human-approval gate holding the run. */
+  parked: ParkedGateWire | null
+  errors?: { code: string; message: string; ref?: string }[]
+  /** The frozen execution order of the run's nodes (GRS-014b sequential runs);
+   * steps[] is materialized 1:1 in this order. */
+  order?: string[]
+  /** Loop round counter (GRS-014e): present on runs whose definition declares a loop
+   * edge; run record shows rounds === maxRoundsPerRun when a gated loop exhausted. */
+  rounds?: number
+  /** Durable loop-exit marker (GRS-014e). */
+  loopExit?: { round: number; at: string; reason: 'gate-passed' | 'max-rounds' }
+  /** Run gates an operator approved via the resolve-gate API (GRS-014e). */
+  resolvedRunGates?: string[]
+  /** The definition content frozen at mint (GRS-014b-fix) — what this run executes,
+   * immune to later edits of the definition store. Evidence; the Run view does not
+   * currently render it. */
+  definitionSnapshot?: EditableWorkflowDefinitionWire
+  /** LEGACY (GRS-014a): stamped by the retired declaration-order walk when its edges
+   * disagreed. New runs execute in edge order and never carry it; old records render. */
+  orderWarning?: { code: 'order-warning'; message: string; impliedOrder?: string[] }
+}
+export interface WorkflowRunSummaryWire {
+  runId: string
+  workflowId: string
+  status: WorkflowRunStatusWire
+  trigger: WorkflowRunTriggerWire
+  startedAt: string
+  endedAt: string | null
+  stepCount: number
+  parked: boolean
+}
+
+/** A field-level validation error from the 400 `errors[]` contract (GRS-011b). */
+export interface WorkflowValidationError { code: string; message: string; path?: string }
+/** Discriminated result of a definition save so the caller can render inline
+ * validation/conflict errors instead of only a flat message. */
+export type SaveDefinitionResult =
+  | { ok: true; definition: EditableWorkflowDefinitionWire }
+  | { ok: false; status: number; message: string; errors?: WorkflowValidationError[] }
+
+// ---------------------------------------------------------------------------
+// Work items (the Todos ledger) — GRS-021a/b/c shipped the store + routes; the
+// Todos surface (GRS-021d) reads them. The gateway is the ONLY write path for
+// lifecycle; approval decisions route through manager/COO authority by default,
+// with operator/aCEO access only after explicit escalation.
+// ---------------------------------------------------------------------------
+export type WorkItemStatusWire =
+  | "backlog" | "assigned" | "executing" | "in_review" | "done" | "blocked" | "escalated" | "cancelled"
+export type WorkItemSourceWire =
+  | "human" | "delegation" | "cron" | "workflow" | "session" | "connector" | "goal"
+export type ApprovalStateWire = "pending" | "approved" | "rejected"
+export type VerifyModeWire = "trust" | "verify" | "thorough"
+
+export interface WorkItemSessionRefWire {
+  id: string
+  status?: string | null
+  title?: string | null
+  lastActivity?: string | null
+}
+
+/** The compact row GET /api/work-items returns (list/board/people). */
+export interface WorkItemCompactWire {
+  id: string
+  title: string
+  status: WorkItemStatusWire
+  assignee: string | null
+  department: string | null
+  source: WorkItemSourceWire
+  sourceRef: string | null
+  approvalState: ApprovalStateWire | null
+  approvalRequest: string | null
+  approvalRef: string | null
+  approvalTarget: string | null
+  approvalEscalatedAt: string | null
+  workflowRun?: { workflowId: string; runId: string } | null
+  sessionRef?: WorkItemSessionRefWire | null
+  updatedAt: string
+}
+
+export interface VerifyPolicyWire {
+  mode: VerifyModeWire
+  verifier?: { employee?: string; engine?: string; model?: string }
+  maxRounds?: number
+}
+
+/** The full row GET /api/work-items/:id returns under `workItem`. */
+export interface WorkItemFullWire {
+  id: string
+  title: string
+  body: string | null
+  status: WorkItemStatusWire
+  department: string | null
+  assignee: string | null
+  priority: number
+  source: WorkItemSourceWire
+  sourceRef: string | null
+  acceptance: string | null
+  verifyPolicy: VerifyPolicyWire | null
+  rounds: number
+  budgetUsd: number | null
+  approvalState: ApprovalStateWire | null
+  approvalRequest: string | null
+  approvalRef: string | null
+  approvalTarget: string | null
+  approvalEscalatedAt: string | null
+  approvalDecidedBy: string | null
+  approvalDecidedAt: string | null
+  createdAt: string
+  updatedAt: string
+  closedAt: string | null
+}
+
+export interface WorkItemEventWire {
+  id: string
+  workItemId: string
+  kind: string
+  fromStatus: WorkItemStatusWire | null
+  toStatus: WorkItemStatusWire | null
+  actor: string | null
+  detail: Record<string, unknown> | null
+  createdAt: string
+}
+
+/** The GET /api/work-items/:id payload: full row + live-derived spend + audit. */
+export interface WorkItemDetailWire {
+  workItem: WorkItemFullWire
+  spendUsd: number
+  workflowRun: { workflowId: string; runId: string } | null
+  events: WorkItemEventWire[]
+}
+
+export interface ApprovalDecisionResultWire {
+  workItem: WorkItemFullWire
+  escalated: boolean
+  mirrored: boolean
+  runStatus?: string
+}
+
+export interface ApprovalEscalationResultWire {
+  workItem: WorkItemFullWire
+}
+
+/** A serialized session linked to a Todo (the sheet's "Executing session" link
+ *  only needs the id + a status glance; the rest is passthrough). */
+export interface LinkedSessionWire {
+  id: string
+  status?: string
+  title?: string | null
+  lastActivity?: string | null
+  [key: string]: unknown
+}
+
+export type WorkflowTriggerBindingKindWire = "webhook" | "poll"
+export type WorkflowTriggerActivationWire = "active" | "pending_approval" | "disabled"
+export interface WorkflowTriggerFilterWire {
+  path: string
+  op: "equals" | "notEquals" | "exists" | "matches"
+  value?: unknown
+}
+export interface WorkflowTriggerBindingWire {
+  schemaVersion?: number
+  kind: WorkflowTriggerBindingKindWire
+  name: string
+  event: string
+  targetWorkflowId: string
+  source?: "event-webhook" | "poll"
+  filter?: WorkflowTriggerFilterWire[]
+  activation?: WorkflowTriggerActivationWire
+  createdAt?: string
+  updatedAt?: string
+  createdBy?: string
+  secretTokenPreview?: string
+  command?: string
+  intervalSeconds?: number
+  timeoutMs?: number
+  stdoutMaxBytes?: number
+  stderrMaxBytes?: number
+  approvalWorkItemId?: string
+  lastCheckedAt?: string
+  lastFiredAt?: string
+  lastOutcome?: string
+}
+export type CreateWorkflowTriggerInputWire =
+  | {
+      kind: "webhook"
+      name: string
+      event: string
+      targetWorkflowId: string
+      secretToken?: string
+      filter?: WorkflowTriggerFilterWire[]
+    }
+  | {
+      kind: "poll"
+      name: string
+      event: string
+      targetWorkflowId: string
+      command: string
+      intervalSeconds: number
+      timeoutMs?: number
+      stdoutMaxBytes?: number
+      stderrMaxBytes?: number
+      filter?: WorkflowTriggerFilterWire[]
+    }
+export interface CreateWorkflowTriggerResultWire {
+  trigger: WorkflowTriggerBindingWire
+  secretToken?: string
+  approval?: { workItem: WorkItemFullWire }
+}
 
 export const api = {
   getStatus: () => get<Record<string, unknown>>("/api/status"),
+  /** GRS-009: one workflow's definition + DERIVED run state (read-only). */
+  getWorkflow: (id: string) => get<DerivedWorkflow>(`/api/workflows/${encodeURIComponent(id)}`),
+  listWorkflows: () => get<{ workflows: string[]; evidenceConfigured: boolean }>("/api/workflows"),
+  /** GRS-011c: list editable workflow definitions (Edit view rail). */
+  listWorkflowDefinitions: () =>
+    get<{ definitions: WorkflowDefinitionSummaryWire[]; evidenceConfigured: boolean }>(
+      "/api/workflow-definitions",
+    ),
+  /** GRS-019: create a new editable definition (the list's "+ New Workflow").
+   * Same discriminated error contract as updateWorkflowDefinition so the dialog
+   * can render 400 validation / 409 duplicate-id inline. */
+  createWorkflowDefinition: async (
+    def: Partial<EditableWorkflowDefinitionWire>,
+  ): Promise<SaveDefinitionResult> => {
+    const res = await authFetch("/api/workflow-definitions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(def),
+    })
+    if (res.ok) return { ok: true, definition: (await res.json()) as EditableWorkflowDefinitionWire }
+    let message = `API error: ${res.status}`
+    let errors: WorkflowValidationError[] | undefined
+    try {
+      const body = await res.json()
+      if (body?.error) message = String(body.error)
+      else if (body?.message) message = String(body.message)
+      if (Array.isArray(body?.errors)) errors = body.errors as WorkflowValidationError[]
+    } catch {
+      /* non-JSON body — keep the status-code message */
+    }
+    return { ok: false, status: res.status, message, errors }
+  },
+  /** GRS-011c: full editable definition (Edit view canvas + inspector). */
+  getWorkflowDefinition: (id: string) =>
+    get<EditableWorkflowDefinitionWire>(`/api/workflow-definitions/${encodeURIComponent(id)}`),
+  /** GRS-011c: save a definition edit (shallow patch, optimistic lock on
+   * `expectedVersion`). Returns a discriminated result so the Edit view can
+   * render inline 400 `errors[]` / 409 conflicts instead of a flat throw. */
+  updateWorkflowDefinition: async (
+    id: string,
+    patch: Partial<EditableWorkflowDefinitionWire>,
+    expectedVersion?: number,
+  ): Promise<SaveDefinitionResult> => {
+    const res = await authFetch(`/api/workflow-definitions/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(expectedVersion === undefined ? patch : { ...patch, expectedVersion }),
+    })
+    if (res.ok) return { ok: true, definition: (await res.json()) as EditableWorkflowDefinitionWire }
+    let message = `API error: ${res.status}`
+    let errors: WorkflowValidationError[] | undefined
+    try {
+      const body = await res.json()
+      if (body?.error) message = String(body.error)
+      else if (body?.message) message = String(body.message)
+      if (Array.isArray(body?.errors)) errors = body.errors as WorkflowValidationError[]
+    } catch {
+      /* non-JSON body — keep the status-code message */
+    }
+    return { ok: false, status: res.status, message, errors }
+  },
+  /** GRS-011d-2c-ui: list a definition's real runs (newest first). Returns
+   * `evidenceConfigured:false` (not an error) when the gateway has no evidence root. */
+  listWorkflowRuns: (id: string) =>
+    get<{ runs: WorkflowRunSummaryWire[]; evidenceConfigured: boolean }>(
+      `/api/workflow-definitions/${encodeURIComponent(id)}/runs`,
+    ),
+  /** GRS-011d-2c-ui: one run record (steps receipts + parked gate). Throws 404 if absent. */
+  getWorkflowRun: (id: string, runId: string) =>
+    get<WorkflowRunWire>(
+      `/api/workflow-definitions/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`,
+    ),
+  listWorkflowTriggers: () =>
+    get<{ triggers: WorkflowTriggerBindingWire[]; evidenceConfigured: boolean }>("/api/workflow-triggers"),
+  createWorkflowTrigger: (input: CreateWorkflowTriggerInputWire) =>
+    post<CreateWorkflowTriggerResultWire>("/api/workflow-triggers", input),
+  deleteWorkflowTrigger: (name: string) =>
+    del<{ deleted: boolean; name: string }>(`/api/workflow-triggers/${encodeURIComponent(name)}`),
+
+  /** GRS-014e: resolve a PARKED run's human-approval gate. Returns the updated run,
+   * or throws with the gateway's error message (409 when the run is not parked). */
+  resolveWorkflowRunGate: async (
+    id: string,
+    runId: string,
+    decision: 'approve' | 'reject',
+  ): Promise<WorkflowRunWire> => {
+    const res = await authFetch(
+      `/api/workflow-definitions/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/resolve-gate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision }),
+      },
+    )
+    if (res.ok) return (await res.json()) as WorkflowRunWire
+    let message = `API error: ${res.status}`
+    try {
+      const body = await res.json()
+      if (body?.error) message = String(body.error)
+    } catch {
+      /* keep status message */
+    }
+    throw new Error(message)
+  },
   /** Resolved model + capability registry (engines, their models, effort levels). */
   getEngines: () => get<EnginesResponse>("/api/engines"),
   /** Force re-discovery of dynamic (pi) models, returning the rebuilt registry. */
@@ -388,90 +917,6 @@ export const api = {
   },
   sttUpdateConfig: (languages: string[]) =>
     put<{ status: string; languages: string[] }>("/api/stt/config", { languages }),
-  /**
-   * Talk (Path 1): bootstrap (or reuse) the voice orchestrator —
-   * a real gateway session with source:"talk". Voice turns then go through the
-   * normal sendMessage(); the spoken reply streams back as talk:audio over WS.
-   */
-  talkCreateSession: (fresh = false) =>
-    post<{ sessionId: string; reused: boolean }>("/api/talk/session", { fresh }),
-  /** Talk: full delegation-tree snapshot under the orchestrator (Mission Control).
-   *  Nodes are the wire type (incl. briefExcerpt/attached/mode), not a stripped copy. */
-  getTalkGraph: (rootId: string) =>
-    get<{ rootId: string; nodes: TalkGraphNodeWire[] }>(
-      `/api/talk/graph?root=${encodeURIComponent(rootId)}`,
-    ),
-  /** Talk: TTS/loop readiness + the active orchestrator engine/model. */
-  talkStatus: () =>
-    get<{
-      ttsAvailable: boolean
-      ttsDownloading: boolean
-      progress: number
-      voice?: string | null
-      ready?: boolean
-      /** Active orchestrator engine (null when none is installed). */
-      engine: string | null
-      model: string | null
-      /** True when the configured/default engine was unavailable and we fell back. */
-      engineFallback: boolean
-      /** Installed engines the orchestrator could use, in priority order. */
-      enginesAvailable: string[]
-    }>("/api/talk/status"),
-  /** Talk: kick off the local TTS model download (progress streams via talk:tts:download:* WS events). */
-  talkTtsDownload: () =>
-    post<{ status: string; model: string }>("/api/talk/tts/download", {}),
-  /** Talk: the currently-active orchestrator engine/model + the available set. */
-  talkEngineGet: () =>
-    get<{
-      engine: string | null
-      model: string | null
-      fallback: boolean
-      reason: string | null
-      available: string[]
-      configured: string | null
-      liveSessionEngine: string | null
-    }>("/api/talk/engine"),
-  /**
-   * Talk: switch the orchestrator engine and/or model.
-   * - model: applies to the live session on its next turn (no re-bootstrap).
-   * - engine: applies to the live session when idle; callers may re-bootstrap to
-   *   refresh local session metadata.
-   */
-  talkEngineSet: (body: { engine?: string; model?: string }) =>
-    post<{
-      ok: boolean
-      engine: string | null
-      model: string | null
-      fallback: boolean
-      reason: string | null
-      available: string[]
-    }>("/api/talk/engine", body),
-  /**
-   * Talk: tell the gateway this talk session is muted (silent/read mode) so the
-   * run loop skips server-side Kokoro synthesis it would otherwise discard.
-   * Best-effort — the UI mutes regardless; this just saves the wasted synthesis.
-   */
-  talkSetMuted: (body: { sessionId: string; muted: boolean }) =>
-    post<{ ok: boolean; muted: boolean }>("/api/talk/mute", body),
-  /**
-   * Talk: search sessions by title/metadata + message content (FTS). Returns
-   * merged, de-duped results (≤20, ≤3 hits each); snippets carry «» highlight
-   * markers. Throws on 4xx with the backend `error` message.
-   */
-  talkSearch: (q: string, limit?: number) =>
-    get<TalkSearchResponse>(
-      `/api/talk/search?q=${encodeURIComponent(q)}${limit ? `&limit=${limit}` : ""}`,
-    ),
-  /**
-   * Talk: server-owned delegate surface — spawn (thread:"new"), continue an
-   * owned COO thread (thread:"<id>"), or attach/detach a soft link
-   * (attach:true / detach:true, optional mode:"observe"|"engage" + brief).
-   * NOTE: a follow-up to an ALREADY-attached engage session does NOT go here
-   * (both delegate paths 400 — see the thread drawer's composer, which uses
-   * sendMessage instead). Throws on 4xx with the backend `error` message.
-   */
-  talkDelegate: (body: TalkDelegateBody) =>
-    post<TalkDelegateResult>("/api/talk/delegate", body),
   getSessionQueue: (id: string) =>
     get<QueueItem[]>(`/api/sessions/${id}/queue`),
   cancelQueueItem: (sessionId: string, itemId: string) =>
@@ -484,6 +929,37 @@ export const api = {
     post<{ status: string }>(`/api/sessions/${sessionId}/queue/resume`, {}),
   getSessionTranscript: (id: string) =>
     get<TranscriptEntry[]>(`/api/sessions/${id}/transcript`),
+
+  // ── Work items (Todos) ──────────────────────────────────────────────────
+  /** GRS-021c: compact Todo list, optionally filtered by status. The gateway
+   *  caps `limit` at 20, so the board fetches one call per display status. */
+  listWorkItems: (params?: { status?: WorkItemStatusWire; assignee?: string; department?: string; needsAttentionFor?: string; limit?: number }) => {
+    const q = new URLSearchParams()
+    if (params?.status) q.set("status", params.status)
+    if (params?.assignee) q.set("assignee", params.assignee)
+    if (params?.department) q.set("department", params.department)
+    if (params?.needsAttentionFor) q.set("needsAttentionFor", params.needsAttentionFor)
+    q.set("limit", String(params?.limit ?? 20))
+    return get<{ workItems: WorkItemCompactWire[] }>(`/api/work-items?${q.toString()}`)
+  },
+  /** GRS-021c: create a Todo (the "+ New Todo" affordance). The operator caller
+   *  mints a `human`-source item; approvals structurally cannot be attached here. */
+  createWorkItem: (input: { title: string; body?: string }) =>
+    post<{ workItem: WorkItemFullWire }>("/api/work-items", input),
+  /** GRS-021a: full Todo detail (property stack + live spend + audit). */
+  getWorkItem: (id: string) => get<WorkItemDetailWire>(`/api/work-items/${encodeURIComponent(id)}`),
+  /** GRS-021b: the operator's approval DECISION. Human-only server-side; a
+   *  tool-marked caller is refused 403. Send-back is `reject` (+ optional note). */
+  decideWorkItemApproval: (id: string, decision: "approve" | "reject", note?: string) =>
+    post<ApprovalDecisionResultWire>(
+      `/api/work-items/${encodeURIComponent(id)}/approval`,
+      note !== undefined && note !== "" ? { decision, note } : { decision },
+    ),
+  escalateWorkItemApproval: (id: string) =>
+    post<ApprovalEscalationResultWire>(`/api/work-items/${encodeURIComponent(id)}/approval/escalate`, {}),
+  /** GRS-002: execution attempts linked to a Todo (the sheet's session link). */
+  listWorkItemSessions: (id: string) =>
+    get<LinkedSessionWire[]>(`/api/work-items/${encodeURIComponent(id)}/sessions`),
   uploadFile: async (file: File, sessionId?: string): Promise<UploadedFile> => {
     const form = new FormData()
     form.append('file', file)

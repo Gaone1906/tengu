@@ -85,3 +85,44 @@ alwaysNotify: "yes"
     expect(emp!.alwaysNotify).toBe(true);
   });
 });
+
+describe("scanOrg — jinnMcp per-employee override (GRS-017e-fix, live-QA phase-D catch)", () => {
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "org-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("parses jinnMcp: true/false from the employee YAML (the scan whitelist previously dropped it — a YAML pilot could never arm the smoke gate)", () => {
+    writeYaml("platform", "pilot.yaml", `
+name: pilot
+persona: pilot employee
+jinnMcp: true
+`);
+    writeYaml("platform", "optout.yaml", `
+name: optout
+persona: opted-out employee
+jinnMcp: false
+`);
+    const registry = scanOrg();
+    expect(registry.get("pilot")!.jinnMcp).toBe(true);
+    expect(registry.get("optout")!.jinnMcp).toBe(false);
+  });
+
+  it("leaves jinnMcp undefined when absent or non-boolean (follow the global setting)", () => {
+    writeYaml("platform", "plain.yaml", `
+name: plain
+persona: plain employee
+`);
+    writeYaml("platform", "bad.yaml", `
+name: badjinn
+persona: bad value
+jinnMcp: "yes"
+`);
+    const registry = scanOrg();
+    expect(registry.get("plain")!.jinnMcp).toBeUndefined();
+    expect(registry.get("badjinn")!.jinnMcp).toBeUndefined();
+  });
+});

@@ -116,6 +116,31 @@ describe("auth UX API routes", () => {
     expect(JSON.stringify(cap.body)).not.toContain("gateway-token");
   });
 
+  it("rejects bearer-only and unauthenticated pairing-code creation", async () => {
+    const context = ctx();
+    const bearer = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-codes", {
+        authorization: "Bearer gateway-token",
+        body: {},
+      }),
+      bearer.res,
+      context,
+    );
+
+    expect(bearer.status).toBe(403);
+    expect(bearer.body.code).toBeUndefined();
+
+    const unauthenticated = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-codes", { body: {} }),
+      unauthenticated.res,
+      context,
+    );
+    expect(unauthenticated.status).toBe(401);
+    expect(unauthenticated.body.code).toBeUndefined();
+  });
+
   it("rejects remote and proxied local bootstrap without setting cookies", async () => {
     const remote = makeRes();
     await handleApiRequest(

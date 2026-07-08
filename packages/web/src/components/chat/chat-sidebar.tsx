@@ -2,7 +2,7 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo, startTransition } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { useQueryClient } from "@tanstack/react-query"
-import { ChevronDown, Clock3, Copy, EllipsisVertical, Pencil, Pin, Plus, Search, Trash2, X } from "lucide-react"
+import { ChevronDown, Clock3, Copy, EllipsisVertical, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
 import { api, type BackgroundActivity, type Employee, type SessionsResponse } from "@/lib/api"
 import { useOrg } from "@/hooks/use-employees"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
@@ -1687,6 +1687,20 @@ export function ChatSidebar({
 
             <div className="flex-1" />
 
+            {/* GRS-022 — new-chat (compose) on the mobile chat LIST. Desktop
+                reaches compose from the thread header pill / ribbon, but on
+                mobile the list view has no header pill, so surface the SAME
+                compose action here (top-right, HIG). Mobile only.
+                GRS-023b — sits BEFORE search (order swapped per operator). */}
+            <button
+              onClick={onNewChat}
+              title="New chat"
+              aria-label="New chat"
+              className="inline-flex size-9 shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-foreground lg:hidden"
+            >
+              <SquarePen className="size-[18px]" />
+            </button>
+
             <button
               onClick={() => setSearchOpen(true)}
               title="Search chats"
@@ -1742,7 +1756,7 @@ export function ChatSidebar({
           className="pointer-events-none absolute inset-x-0 top-0 z-10 h-3"
           style={{ background: "linear-gradient(to bottom, var(--sidebar-bg), transparent)" }}
         />
-        <div ref={scrollContainerRef} onScroll={handleListScroll} className="h-full overflow-y-auto pb-[calc(49px+var(--safe-bottom))] lg:pb-0">
+        <div ref={scrollContainerRef} data-chat-list-scroll onScroll={handleListScroll} className="h-full overflow-y-auto pb-[calc(49px+var(--safe-bottom))] lg:pb-0">
         {loading ? (
           <div className="px-4 py-8 text-center text-xs text-[var(--text-quaternary)]">
             Loading sessions...

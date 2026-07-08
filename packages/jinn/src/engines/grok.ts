@@ -6,6 +6,7 @@ import type { InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta } fr
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import { tailTranscriptLines, type TranscriptTailer } from "./transcript-tailer.js";
+import { prepareGrokProjectMcpConfig, cleanupGrokProjectMcpConfig, grokJinnSessionEnv, type GrokMcpAttachHandle } from "./grok-mcp.js";
 
 export const GROK_DEFAULT_MODEL = "grok-build";
 export const GROK_SESSIONS_DIR = path.join(os.homedir(), ".grok", "sessions");
@@ -515,10 +516,27 @@ export class GrokEngine implements InterruptibleEngine {
     logger.info(`Grok engine starting: ${bin} --model ${opts.model || "default"} (session: ${grokSessionId})`);
     const transcriptBaseline = listTranscriptStats();
 
+    // GRS-012c: attach the resolved MCP servers via a session-scoped
+    // `<cwd>/.grok/config.toml` (grok's only per-session MCP lever). Written before
+    // spawn so grok discovers it at startup; torn down on every settle path below
+    // so the run leaves zero residue in the project tree.
+    const grokMcp: GrokMcpAttachHandle = prepareGrokProjectMcpConfig(opts.cwd, opts.resolvedMcp);
+
     return new Promise((resolve, reject) => {
+      let mcpCleanedUp = false;
+      const cleanupMcpOnce = () => {
+        if (mcpCleanedUp) return;
+        mcpCleanedUp = true;
+        cleanupGrokProjectMcpConfig(grokMcp);
+      };
+
       const proc = spawn(bin, args, {
         cwd: opts.cwd,
-        env: this.buildCleanEnv(trackingId),
+        // GRS-018/GRS-017: the per-session caller identity rides the grok CHILD
+        // env (grok forwards its full env to the MCP servers it spawns), because
+        // the SHARED .grok/config.toml must stay byte-identical across concurrent
+        // sessions and can never carry a per-session value (grok-mcp.ts doc).
+        env: { ...this.buildCleanEnv(trackingId), ...grokJinnSessionEnv(opts.resolvedMcp) },
         stdio: ["pipe", "pipe", "pipe"],
         detached: process.platform !== "win32",
       });
@@ -562,6 +580,7 @@ export class GrokEngine implements InterruptibleEngine {
         if (settled) return;
         settled = true;
         stopTranscriptWatch();
+        cleanupMcpOnce();
         this.liveProcesses.delete(trackingId);
         // The detached child has signalled EndTurn and will exit; don't let its
         // (or a lingering grandchild's) open stdout pipe keep the event loop busy.
@@ -669,6 +688,7 @@ export class GrokEngine implements InterruptibleEngine {
         if (settled) return;
         settled = true;
         stopTranscriptWatch();
+        cleanupMcpOnce();
         handleParsed(parseGrokJsonLine(lineBuf));
         const terminationReason = this.liveProcesses.get(trackingId)?.terminationReason ?? null;
         this.liveProcesses.delete(trackingId);
@@ -725,6 +745,7 @@ export class GrokEngine implements InterruptibleEngine {
         if (settled) return;
         settled = true;
         stopTranscriptWatch();
+        cleanupMcpOnce();
         this.liveProcesses.delete(trackingId);
         reject(new Error(`Failed to spawn Grok CLI: ${err.message}`));
       });
@@ -741,6 +762,14 @@ export class GrokEngine implements InterruptibleEngine {
     if (sessionId) cleanEnv.JINN_SESSION_ID = sessionId;
     cleanEnv.GROK_CLAUDE_MCPS_ENABLED = "false";
     cleanEnv.GROK_CURSOR_MCPS_ENABLED = "false";
+    // GRS-012c: grok's OpenTelemetry trace exporter TLS-fails against its traces
+    // endpoint (`BadRecordMac` → cli-chat-proxy.grok.com/v1/traces) and can CANCEL
+    // a headless turn mid-run (observed with the jinn MCP server attached; the
+    // probe's run-1 stderr proved the correlation, run-3 with OTEL disabled ran
+    // clean → EndTurn). Disable the SDK for THIS jinn-spawned child only — this is
+    // the child's env, never the operator's global shell, so a user's own `grok`
+    // telemetry is unaffected (Fable memo-9 §2.1 acceptance property).
+    cleanEnv.OTEL_SDK_DISABLED = "true";
     return cleanEnv;
   }
 

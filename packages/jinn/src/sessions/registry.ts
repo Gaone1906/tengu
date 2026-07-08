@@ -5,6 +5,12 @@ import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { SESSIONS_DB } from '../shared/paths.js';
 import { logger } from '../shared/logger.js';
+import {
+  migrateWorkItemsSchema,
+  WORK_ITEMS_TABLE_DDL,
+  WORK_ITEMS_INDEX_DDL,
+  WORK_ITEM_EVENTS_DDL,
+} from '../work-items/migrate.js';
 import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
 
@@ -84,6 +90,22 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
 )
+`;
+
+// Work-item primitive (GRS-002, elevated to the Todos model by GRS-021a). The
+// durable unit of intended work; sessions are execution attempts against it
+// (see sessions.work_item_id below). The DDL lives in `work-items/migrate.ts`
+// (single source of truth shared with the vocabulary rebuild); CHECK constraints
+// enforce the valid status/priority/source sets at the DB layer and the partial
+// UNIQUE index gives machine-minted items idempotency on (source, source_ref).
+// Created inside initDb's sequence to avoid an init-order race. The store module
+// (`work-items/store.ts`) + guarded `work-items/transitions.ts` are the only
+// write paths.
+
+// Backs listSessionsByWorkItem (the GRS-002 read-back path) and any future
+// per-item session lookup. Partial: only sessions actually linked to an item.
+const CREATE_WORK_ITEM_SESSION_INDEX = `
+CREATE INDEX IF NOT EXISTS idx_sessions_work_item ON sessions (work_item_id) WHERE work_item_id IS NOT NULL
 `;
 
 // Full-text search over message bodies. External-content FTS5 table (the index
@@ -224,6 +246,18 @@ export function initDb(): Database.Database {
   db.exec(CREATE_SESSION_KEY_INDEX);
   db.exec(CREATE_LAST_ACTIVITY_INDEX);
   db.exec(CREATE_PARENT_INDEX);
+  // Work-item primitive (GRS-002 → GRS-021a Todos model): the vocabulary rebuild
+  // runs FIRST (a GRS-002-shape table is remapped onto the 8-status/7-source
+  // enums inside one rollback-safe transaction; a migration failure aborts boot
+  // by design — a half-migrated ledger must never serve), then CREATE IF NOT
+  // EXISTS covers fresh installs with the new shape directly. The nullable
+  // sessions.work_item_id FK is added by migrateSessionsSchema above. All
+  // idempotent for already-new DBs.
+  migrateWorkItemsSchema(db);
+  db.exec(WORK_ITEMS_TABLE_DDL);
+  db.exec(WORK_ITEMS_INDEX_DDL);
+  db.exec(WORK_ITEM_EVENTS_DDL);
+  db.exec(CREATE_WORK_ITEM_SESSION_INDEX);
   db.exec(`
     CREATE TABLE IF NOT EXISTS queue_items (
       id TEXT PRIMARY KEY,
@@ -432,21 +466,67 @@ function scheduleFtsBackfill(): void {
 }
 
 export interface MessageSearchResult {
+  /** Anchor for getMessageContext — the matched message's id. */
+  messageId: string;
   sessionId: string;
   snippet: string;
   role: string;
   timestamp: number;
+  /** Owning session's employee/engine (null when the session row is gone). */
+  employee: string | null;
+  engine: string | null;
+}
+
+/** Replace NUL and other non-printing control bytes with spaces (GRS-020a-fix
+ *  finding 2). Shared by the FTS sanitizer and the search routes so hostile
+ *  encoded input (%00 etc.) yields a normal result everywhere, never a 500. */
+export function stripControlChars(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u001f\u007f]/g, ' ');
+}
+
+/** True if the string carries a NUL or other non-printing control byte. The
+ *  REJECT-don't-strip gate for security-critical PATH params (GRS-020b-fix):
+ *  {@link stripControlChars} would silently REPAIR a `%00`-tampered path into a
+ *  valid one, so the knowledge read surface rejects on the raw param instead. */
+export function hasControlBytes(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c <= 0x1f || c === 0x7f) return true;
+  }
+  return false;
+}
+
+/** Deterministic AND-composed narrowing for searchMessages (GRS-020a). All
+ *  values become bound SQL parameters — never spliced into the statement. */
+export interface MessageSearchFilter {
+  sessionId?: string;
+  /** Exclude one session's messages (GRS-020a-fix finding 1: the MCP tool
+   *  passes the caller's own session here by default, so "search for X" never
+   *  returns the caller's own act of searching for X). */
+  excludeSessionId?: string;
+  /** Case-insensitive equality on the owning session's employee. */
+  employee?: string;
+  /** Case-insensitive equality on the owning session's engine. */
+  engine?: string;
+  role?: 'user' | 'assistant';
+  /** Inclusive epoch-ms bounds on the message timestamp. */
+  since?: number;
+  until?: number;
 }
 
 /**
- * Turn arbitrary user text into a safe FTS5 MATCH expression. Each whitespace
- * token becomes a double-quoted phrase (any embedded `"` stripped first), so FTS5
- * operators (`*`, `(`, `)`, `-`, `NEAR`, `"`) are treated as literal text and can
- * never throw a syntax error. Space-separated phrases AND together implicitly, so
- * a multi-word query requires all words. Returns '' when nothing indexable remains.
+ * Turn arbitrary user text into a safe FTS5 MATCH expression. NUL and other
+ * control bytes are stripped first (GRS-020a-fix finding 2: an embedded NUL
+ * inside a quoted FTS5 phrase throws "unterminated string" — hostile input must
+ * yield a normal result, never an error). Then each whitespace token becomes a
+ * double-quoted phrase (any embedded `"` stripped), so FTS5 operators (`*`, `(`,
+ * `)`, `-`, `NEAR`, `"`) are treated as literal text and can never throw a
+ * syntax error. Space-separated phrases AND together implicitly, so a
+ * multi-word query requires all words. Returns '' when nothing indexable remains.
  */
 function sanitizeFtsQuery(query: string): string {
-  return query
+  return stripControlChars(query)
     .split(/\s+/)
     .map((tok) => tok.replace(/"/g, ''))
     .filter(Boolean)
@@ -458,28 +538,69 @@ function sanitizeFtsQuery(query: string): string {
  * Full-text search over user/assistant message bodies, newest-first. `snippet`
  * wraps matched terms in «»; results are capped by `limit` (default 50). Triggers
  * the one-time backfill on first call so older history becomes searchable.
+ *
+ * GRS-020a: optional AND-composed filters, every value a bound parameter. The
+ * sessions join is a LEFT JOIN so an orphan message (invariant breach — deleteSession
+ * removes both) still surfaces when no session-field filter is passed; an
+ * employee/engine equality predicate on a NULL join simply never matches, which is
+ * the correct narrowing semantics.
  */
-export function searchMessages(query: string, limit = 50): MessageSearchResult[] {
+export function searchMessages(query: string, limit = 50, filter?: MessageSearchFilter): MessageSearchResult[] {
   const db = initDb();
   if (!ftsAvailable) return [];
   scheduleFtsBackfill();
   const match = sanitizeFtsQuery(query);
   if (!match) return [];
   const cap = Math.max(1, Math.min(Math.floor(limit) || 50, 200));
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  if (filter?.sessionId) {
+    conditions.push('m.session_id = ?');
+    values.push(filter.sessionId);
+  }
+  if (filter?.excludeSessionId) {
+    conditions.push('m.session_id != ?');
+    values.push(filter.excludeSessionId);
+  }
+  if (filter?.role) {
+    conditions.push('m.role = ?');
+    values.push(filter.role);
+  }
+  if (typeof filter?.since === 'number') {
+    conditions.push('m.timestamp >= ?');
+    values.push(filter.since);
+  }
+  if (typeof filter?.until === 'number') {
+    conditions.push('m.timestamp <= ?');
+    values.push(filter.until);
+  }
+  if (filter?.employee) {
+    conditions.push('LOWER(s.employee) = ?');
+    values.push(filter.employee.toLowerCase());
+  }
+  if (filter?.engine) {
+    conditions.push('LOWER(s.engine) = ?');
+    values.push(filter.engine.toLowerCase());
+  }
+  const extra = conditions.length ? ` AND ${conditions.join(' AND ')}` : '';
   try {
     return db
       .prepare(
-        `SELECT m.session_id AS sessionId,
+        `SELECT m.id AS messageId,
+                m.session_id AS sessionId,
                 snippet(messages_fts, 0, '«', '»', '…', 12) AS snippet,
                 m.role AS role,
-                m.timestamp AS timestamp
+                m.timestamp AS timestamp,
+                s.employee AS employee,
+                s.engine AS engine
          FROM messages_fts
          JOIN messages m ON m.rowid = messages_fts.rowid
-         WHERE messages_fts MATCH ?
+         LEFT JOIN sessions s ON s.id = m.session_id
+         WHERE messages_fts MATCH ?${extra}
          ORDER BY m.timestamp DESC
          LIMIT ?`,
       )
-      .all(match, cap) as MessageSearchResult[];
+      .all(match, ...values, cap) as MessageSearchResult[];
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('no such table')) return [];
@@ -506,6 +627,9 @@ export function migrateSessionsSchema(database: Database.Database): void {
     ['user_id', 'TEXT'],
     // No backfill: pre-existing sessions stay NULL (no excerpt); only new sessions populate it.
     ['prompt_excerpt', 'TEXT'],
+    // Work-item link (GRS-002). Nullable; NULL = unchanged legacy behavior. The
+    // partial index idx_sessions_work_item is created in initDb.
+    ['work_item_id', 'TEXT'],
   ];
 
   for (const [name, type, defaultVal] of missingColumns) {
@@ -996,6 +1120,80 @@ export function searchSessions(query: string, limit = 100): Session[] {
   return rows.map(rowToSession);
 }
 
+/** Deterministic AND-composed session search (GRS-020a). At least one filter is
+ *  required — an empty filter would be an unbounded alias of listSessions. */
+export interface SearchSessionsFilter {
+  /** Escaped-LIKE substring over title + prompt_excerpt + id (%/_ are literal). */
+  text?: string;
+  /** Case-insensitive equality. */
+  employee?: string;
+  /** Case-insensitive equality. */
+  engine?: string;
+  status?: Session['status'];
+  source?: string;
+  parentSessionId?: string;
+  /** Inclusive ISO-8601 bounds on last_activity (ISO strings compare lexicographically). */
+  activeSince?: string;
+  activeBefore?: string;
+  /** Deterministic derivation: status IN ('error','interrupted'). `waiting` is
+   *  deliberately excluded (operator ruling — usage-limit pauses self-resolve). */
+  needsAttention?: boolean;
+}
+
+export function searchSessionsFiltered(filter: SearchSessionsFilter, limit = 20): Session[] {
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  if (filter.text) {
+    // The ESCAPE character itself must be escaped too, so a literal backslash
+    // in the query matches literally (GRS-020a-fix finding 4 — unescaped, `\b`
+    // under ESCAPE '\' matches plain `b`). The character class handles all
+    // three in one pass, so `\` never double-escapes the added prefixes.
+    const like = `%${filter.text.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+    conditions.push("(title LIKE ? ESCAPE '\\' OR prompt_excerpt LIKE ? ESCAPE '\\' OR id LIKE ? ESCAPE '\\')");
+    values.push(like, like, like);
+  }
+  if (filter.employee) {
+    conditions.push('LOWER(employee) = ?');
+    values.push(filter.employee.toLowerCase());
+  }
+  if (filter.engine) {
+    conditions.push('LOWER(engine) = ?');
+    values.push(filter.engine.toLowerCase());
+  }
+  if (filter.status) {
+    conditions.push('status = ?');
+    values.push(filter.status);
+  }
+  if (filter.source) {
+    conditions.push('source = ?');
+    values.push(filter.source);
+  }
+  if (filter.parentSessionId) {
+    conditions.push('parent_session_id = ?');
+    values.push(filter.parentSessionId);
+  }
+  if (filter.activeSince) {
+    conditions.push('last_activity >= ?');
+    values.push(filter.activeSince);
+  }
+  if (filter.activeBefore) {
+    conditions.push('last_activity <= ?');
+    values.push(filter.activeBefore);
+  }
+  if (filter.needsAttention) {
+    conditions.push("status IN ('error','interrupted')");
+  }
+  if (conditions.length === 0) {
+    throw new Error('searchSessionsFiltered requires at least one filter');
+  }
+  const cap = Math.max(1, Math.min(Math.floor(limit) || 20, 50));
+  const db = initDb();
+  const rows = db
+    .prepare(`SELECT * FROM sessions WHERE ${conditions.join(' AND ')} ORDER BY last_activity DESC LIMIT ?`)
+    .all(...values, cap) as Record<string, unknown>[];
+  return rows.map(rowToSession);
+}
+
 /** Recent sessions for a given source, newest first (bounded). */
 export function listSessionsBySource(source: string, limit: number): Session[] {
   const db = initDb();
@@ -1011,6 +1209,19 @@ export function listChildSessions(parentSessionId: string): Session[] {
   const rows = db
     .prepare(`SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY last_activity DESC`)
     .all(parentSessionId) as Record<string, unknown>[];
+  return rows.map(rowToSession);
+}
+
+/**
+ * Execution attempts (sessions) linked to a work item — backed by
+ * idx_sessions_work_item. The read-back half of the GRS-002 work-item slice
+ * (cron mints+links an item; this reads its sessions). Newest first.
+ */
+export function listSessionsByWorkItem(workItemId: string): Session[] {
+  const db = initDb();
+  const rows = db
+    .prepare(`SELECT * FROM sessions WHERE work_item_id = ? ORDER BY last_activity DESC`)
+    .all(workItemId) as Record<string, unknown>[];
   return rows.map(rowToSession);
 }
 
@@ -1060,6 +1271,93 @@ export function accumulateSessionCost(id: string, cost: number, turns: number): 
   db.prepare(
     'UPDATE sessions SET total_cost = total_cost + ?, total_turns = total_turns + ? WHERE id = ?',
   ).run(cost, turns, id);
+}
+
+export interface CostReportFilter {
+  groupBy?: 'employee' | 'day';
+  since?: string;
+  until?: string;
+  employee?: string;
+  limit?: number;
+}
+
+export interface CostReportRow {
+  key: string;
+  cost: number;
+  turns: number;
+  sessions: number;
+}
+
+export interface CostReport {
+  range: { since: string | null; until: string | null };
+  groupBy: 'employee' | 'day';
+  rows: CostReportRow[];
+  total: { cost: number; turns: number; sessions: number };
+}
+
+/**
+ * Deterministic cost/spend report over existing session accounting only.
+ * No budgets, no work-item joins, no judgment: this wraps sessions.total_cost
+ * and sessions.total_turns exactly as the engines recorded them.
+ */
+export function getCostReport(filter: CostReportFilter = {}): CostReport {
+  const db = initDb();
+  const groupBy = filter.groupBy ?? 'employee';
+  if (groupBy !== 'employee' && groupBy !== 'day') throw new Error('groupBy must be "employee" or "day"');
+  const limit = Math.max(1, Math.min(Math.floor(filter.limit ?? 100), 100));
+  const where: string[] = [];
+  const values: unknown[] = [];
+  if (filter.since) {
+    where.push('created_at >= ?');
+    values.push(filter.since);
+  }
+  if (filter.until) {
+    where.push('created_at <= ?');
+    values.push(filter.until);
+  }
+  if (filter.employee) {
+    where.push('LOWER(employee) = ?');
+    values.push(filter.employee.toLowerCase());
+  }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const keyExpr = groupBy === 'employee'
+    ? "COALESCE(NULLIF(employee, ''), '__unassigned__')"
+    : "substr(created_at, 1, 10)";
+  const rows = db.prepare(
+    `SELECT ${keyExpr} AS key,
+            ROUND(COALESCE(SUM(total_cost), 0), 6) AS cost,
+            COALESCE(SUM(total_turns), 0) AS turns,
+            COUNT(*) AS sessions
+     FROM sessions
+     ${whereSql}
+     GROUP BY key
+     ORDER BY cost DESC, key ASC
+     LIMIT ?`,
+  ).all(...values, limit) as Array<{ key: string | null; cost: number | null; turns: number | null; sessions: number }>;
+
+  const total = db.prepare(
+    `SELECT ROUND(COALESCE(SUM(total_cost), 0), 6) AS cost,
+            COALESCE(SUM(total_turns), 0) AS turns,
+            COUNT(*) AS sessions
+     FROM sessions
+     ${whereSql}`,
+  ).get(...values) as { cost: number | null; turns: number | null; sessions: number };
+
+  return {
+    range: { since: filter.since ?? null, until: filter.until ?? null },
+    groupBy,
+    rows: rows.map((r) => ({
+      key: r.key ?? '__unassigned__',
+      cost: Number(r.cost ?? 0),
+      turns: Number(r.turns ?? 0),
+      sessions: Number(r.sessions ?? 0),
+    })),
+    total: {
+      cost: Number(total.cost ?? 0),
+      turns: Number(total.turns ?? 0),
+      sessions: Number(total.sessions ?? 0),
+    },
+  };
 }
 
 /**
@@ -1255,9 +1553,13 @@ function isSyntheticBlockRow(rowId: string, content: string, block: ChatBlock | 
   return isSyntheticBlockContent(content, block, fallbackText);
 }
 
-export function insertMessage(sessionId: string, role: string, content: string, media?: MessageMedia[], blocks?: ChatBlock[]): string {
+export function insertMessage(sessionId: string, role: string, content: string, media?: MessageMedia[], blocks?: ChatBlock[], presetId?: string): string {
   const db = initDb();
-  const id = uuidv4();
+  // presetId (GRS-016e-fix2): workflow follow-up turns pre-mint the row id and
+  // persist it as the receipt's settle anchor BEFORE this insert — the row must
+  // carry exactly that id so crash recovery disambiguates by identity. Only ever
+  // used for a row that does not exist yet (the id was never used on a re-post).
+  const id = presetId ?? uuidv4();
   const mediaJson = media && media.length > 0 ? JSON.stringify(media) : null;
   const blocksJson = blocks && blocks.length > 0 ? JSON.stringify(blocks) : null;
   db.prepare('INSERT INTO messages (id, session_id, role, content, timestamp, media, blocks) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
@@ -1324,6 +1626,94 @@ export function getMessagePage(sessionId: string, options: MessagePageOptions = 
   const hasOlder = rows.length > limit;
   const pageRows = (hasOlder ? rows.slice(0, limit) : rows).reverse();
   return { messages: pageRows.map(rowToMessage), hasOlder };
+}
+
+/** Per-message content cap in getMessageContext output (chars). Matches the
+ *  jinn_read_session cap — the reference layer never returns unbounded bodies. */
+export const MESSAGE_CONTEXT_CHAR_CAP = 2_000;
+/** Max messages each side of the anchor. */
+export const MESSAGE_CONTEXT_MAX_RADIUS = 10;
+
+export interface MessageContextEntry {
+  id: string;
+  role: string;
+  content: string;
+  timestamp: number;
+  isAnchor: boolean;
+}
+
+export interface MessageContext {
+  sessionId: string;
+  anchorMessageId: string;
+  messages: MessageContextEntry[];
+}
+
+/**
+ * GRS-020a — the ±radius window around a message anchor (a jinn_search_messages
+ * hit), so a search result becomes readable in place without pulling a whole
+ * transcript. Bounded by construction: radius clamped to
+ * {@link MESSAGE_CONTEXT_MAX_RADIUS}, each body truncated at
+ * {@link MESSAGE_CONTEXT_CHAR_CAP} with the intentional-cap marker (the same
+ * doctrine as jinn_read_session — no full-transcript escape hatch).
+ * Returns undefined when the message doesn't exist IN THAT SESSION (an anchor
+ * from another session must not leak across).
+ */
+export function getMessageContext(sessionId: string, messageId: string, radius = 3): MessageContext | undefined {
+  const db = initDb();
+  const r = Math.max(1, Math.min(Math.floor(radius) || 3, MESSAGE_CONTEXT_MAX_RADIUS));
+  // GRS-020a-fix finding 6: O(radius), not O(session) — locate the anchor with
+  // one bound lookup, then fetch its neighbors with two bounded LIMIT queries
+  // walking the (session_id, timestamp) index. Ordering matches getMessages
+  // (timestamp ASC, seq ASC) with rowid as a deterministic final tie-break;
+  // seq is COALESCEd to -1 so NULL (the common final-message value) keeps its
+  // sorts-before-numbers position explicitly.
+  interface Row {
+    id: string;
+    role: string;
+    content: string;
+    timestamp: number;
+    seq: number | null;
+    rowid: number;
+  }
+  const anchor = db
+    .prepare('SELECT id, role, content, timestamp, seq, rowid FROM messages WHERE session_id = ? AND id = ?')
+    .get(sessionId, messageId) as Row | undefined;
+  if (!anchor) return undefined;
+  const aSeq = anchor.seq ?? -1;
+  const before = db
+    .prepare(
+      `SELECT id, role, content, timestamp, seq, rowid FROM messages
+       WHERE session_id = ?
+         AND (timestamp < ?
+              OR (timestamp = ? AND COALESCE(seq, -1) < ?)
+              OR (timestamp = ? AND COALESCE(seq, -1) = ? AND rowid < ?))
+       ORDER BY timestamp DESC, COALESCE(seq, -1) DESC, rowid DESC
+       LIMIT ?`,
+    )
+    .all(sessionId, anchor.timestamp, anchor.timestamp, aSeq, anchor.timestamp, aSeq, anchor.rowid, r) as Row[];
+  const after = db
+    .prepare(
+      `SELECT id, role, content, timestamp, seq, rowid FROM messages
+       WHERE session_id = ?
+         AND (timestamp > ?
+              OR (timestamp = ? AND COALESCE(seq, -1) > ?)
+              OR (timestamp = ? AND COALESCE(seq, -1) = ? AND rowid > ?))
+       ORDER BY timestamp ASC, COALESCE(seq, -1) ASC, rowid ASC
+       LIMIT ?`,
+    )
+    .all(sessionId, anchor.timestamp, anchor.timestamp, aSeq, anchor.timestamp, aSeq, anchor.rowid, r) as Row[];
+  const messages: MessageContextEntry[] = [...before.reverse(), anchor, ...after].map((row) => ({
+    id: row.id,
+    role: row.role,
+    content:
+      row.content.length > MESSAGE_CONTEXT_CHAR_CAP
+        ? row.content.slice(0, MESSAGE_CONTEXT_CHAR_CAP) +
+          `…[truncated ${row.content.length - MESSAGE_CONTEXT_CHAR_CAP} chars — intentional cap; ask the session to summarize instead of re-reading]`
+        : row.content,
+    timestamp: row.timestamp,
+    isAnchor: row.id === messageId,
+  }));
+  return { sessionId, anchorMessageId: messageId, messages };
 }
 
 export function applyBlockEnvelope(

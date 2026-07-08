@@ -6,12 +6,14 @@
 
 **{{portalName}} is a bus, not a brain.** All AI intelligence comes from the engines natively. {{portalName}} adds no custom agentic loop, no prompt engineering layer, no opinions on how AI should behave. It delegates everything to professional tools (Claude Code CLI, Codex SDK, and the Antigravity engine for Gemini models) and focuses solely on routing, scheduling, and connectivity.
 
+The company operating model is in [company-doctrine.md](company-doctrine.md). The public blocks are Employees, Todos, Workflows, and Triggers.
+
 ## What {{portalName}} Does
 
 - **Gateway**: Single Node.js process that accepts messages from multiple sources and routes them to AI engines
 - **Connectors**: Modular input/output adapters (Slack, web UI, future: Discord, iMessage)
 - **Cron**: Scheduled AI jobs with hot-reloadable configuration
-- **Organization**: Employee personas with departments, ranks, and inter-agent communication via boards
+- **Organization**: Employee personas with departments, ranks, Todos, and inter-agent sessions
 - **Skills**: Markdown instruction sets that engines read and follow natively
 - **Self-modification**: {{portalName}} can edit its own config, skills, cron jobs, and org structure at runtime
 
@@ -34,7 +36,6 @@ Traditional approaches build custom tool-calling loops, manage context windows, 
   org/
     <department>/
       department.yaml  # Department config
-      board.json       # Task board
       <name>.yaml      # Employee persona
   logs/                # Application logs
 ```

@@ -1,10 +1,18 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import yaml from "js-yaml";
 import { ORG_DIR } from "../shared/paths.js";
 import type { Employee, JinnConfig } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 import { getModelRegistry, effortLevelsForModel } from "../shared/models.js";
+
+function currentOrgDir(): string {
+  const instance = process.env.JINN_INSTANCE || "jinn";
+  const defaultOrgDir = path.join(os.homedir(), `.${instance}`, "org");
+  if (ORG_DIR !== defaultOrgDir) return ORG_DIR;
+  return process.env.JINN_HOME ? path.join(process.env.JINN_HOME, "org") : ORG_DIR;
+}
 
 /**
  * Recursively walk `dir`, invoking `visit` for every employee YAML file
@@ -35,10 +43,11 @@ function walkEmployeeYamls<T>(
 
 export function scanOrg(): Map<string, Employee> {
   const registry = new Map<string, Employee>();
+  const orgDir = currentOrgDir();
 
-  if (!fs.existsSync(ORG_DIR)) return registry;
+  if (!fs.existsSync(orgDir)) return registry;
 
-  walkEmployeeYamls(ORG_DIR, (fullPath) => {
+  walkEmployeeYamls(orgDir, (fullPath) => {
     try {
       const raw = fs.readFileSync(fullPath, "utf-8");
       const data = yaml.load(raw) as any;
@@ -59,6 +68,11 @@ export function scanOrg(): Map<string, Employee> {
           alwaysNotify: typeof data.alwaysNotify === "boolean" ? data.alwaysNotify : true,
           reportsTo: data.reportsTo ?? undefined,
           mcp: data.mcp ?? undefined,
+          // GRS-017e: per-employee jinn-toolset override (force-on pilot /
+          // force-off). Boolean-checked like the other optional flags — the
+          // scan whitelist previously dropped it, which live QA phase D caught
+          // (a YAML pilot could never arm the smoke gate).
+          jinnMcp: typeof data.jinnMcp === "boolean" ? data.jinnMcp : undefined,
           provides: Array.isArray(data.provides)
             ? data.provides.filter((s: unknown) => s && typeof s === "object" && typeof (s as any).name === "string" && typeof (s as any).description === "string")
               .map((s: any) => ({ name: s.name as string, description: s.description as string }))
@@ -80,9 +94,10 @@ export function scanOrg(): Map<string, Employee> {
  * Searches ORG_DIR recursively.
  */
 function findEmployeeYamlPath(name: string): string | undefined {
-  if (!fs.existsSync(ORG_DIR)) return undefined;
+  const orgDir = currentOrgDir();
+  if (!fs.existsSync(orgDir)) return undefined;
 
-  return walkEmployeeYamls(ORG_DIR, (fullPath) => {
+  return walkEmployeeYamls(orgDir, (fullPath) => {
     try {
       const raw = fs.readFileSync(fullPath, "utf-8");
       const data = yaml.load(raw) as any;
@@ -102,7 +117,7 @@ export interface EmployeeUpdate {
   rank?: Employee["rank"];
   engine?: string;
   model?: string;
-  effortLevel?: string;
+  effortLevel?: string | null;
   persona?: string;
   reportsTo?: string | string[];
   cliFlags?: string[];
@@ -226,12 +241,12 @@ export function validateEmployeeUpdate(
   }
 
   // --- effortLevel (valid for the resulting engine+model) ---
+  const effectiveModel = updates.model ?? current.model ?? undefined;
   if (body.effortLevel !== undefined) {
     if (typeof body.effortLevel !== "string" || !body.effortLevel.trim()) {
       return { ok: false, error: "effortLevel must be a non-empty string" };
     }
     const level = body.effortLevel.trim();
-    const effectiveModel = updates.model ?? current.model ?? undefined;
     const valid = effortLevelsForModel(config, resultingEngine, effectiveModel);
     if (valid.length === 0) {
       return { ok: false, error: `engine "${resultingEngine}"${effectiveModel ? ` model "${effectiveModel}"` : ""} does not support effort levels` };
@@ -240,6 +255,12 @@ export function validateEmployeeUpdate(
       return { ok: false, error: `invalid effortLevel "${level}" (valid: ${valid.join(", ")})` };
     }
     updates.effortLevel = level;
+  } else if (current.effortLevel) {
+    const level = current.effortLevel.trim();
+    const valid = effortLevelsForModel(config, resultingEngine, effectiveModel);
+    if (level && (valid.length === 0 || !valid.includes(level))) {
+      updates.effortLevel = null;
+    }
   }
 
   // --- reportsTo (string | string[]) ---
@@ -297,7 +318,9 @@ export function updateEmployeeYaml(
 
     for (const key of WRITABLE_FIELDS) {
       const value = (updates as Record<string, unknown>)[key];
-      if (value !== undefined) {
+      if (value === null) {
+        delete data[key];
+      } else if (value !== undefined) {
         data[key] = value;
       }
     }

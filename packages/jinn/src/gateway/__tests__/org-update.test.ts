@@ -101,6 +101,20 @@ alwaysNotify: false
     expect(data.alwaysNotify).toBe(true);
   });
 
+  it("removes fields set to null", () => {
+    writeYaml("platform", "dev.yaml", `
+name: dev
+persona: A developer
+engine: claude
+effortLevel: high
+`);
+    const result = updateEmployeeYaml("dev", { effortLevel: null });
+    expect(result).toBe(true);
+
+    const data = readYaml("platform", "dev.yaml");
+    expect(data.effortLevel).toBeUndefined();
+  });
+
   it("returns false for non-existent employee", () => {
     const result = updateEmployeeYaml("ghost", { alwaysNotify: false });
     expect(result).toBe(false);
@@ -304,6 +318,26 @@ describe("validateEmployeeUpdate", () => {
     });
     expect(bad.ok).toBe(false);
     expect(bad.error).toMatch(/model/i);
+  });
+
+  it("clears stale effortLevel when switching to an engine/model with no effort support", () => {
+    const config = {
+      ...testConfig,
+      models: {
+        ...(testConfig as any).models,
+        antigravity: {
+          models: [{ id: "gemini-flash", supportsEffort: false, effortLevels: [] }],
+        },
+      },
+    } as unknown as JinnConfig;
+
+    const r = validateEmployeeUpdate(config, emp({ effortLevel: "high" }), {
+      engine: "antigravity",
+      model: "gemini-flash",
+    });
+
+    expect(r.ok).toBe(true);
+    expect(r.updates).toMatchObject({ engine: "antigravity", model: "gemini-flash", effortLevel: null });
   });
 
   it("rejects an empty/whitespace persona (G3)", () => {

@@ -117,7 +117,7 @@ Direct employee-to-user delivery is only acceptable for simple, no-review-needed
     "timezone": "America/New_York",
     "engine": "claude",
     "employee": "{{portalSlug}}",
-    "prompt": "Delegate to @project-manager: review yesterday's board activity across all departments. Review the output and write a concise standup summary.",
+    "prompt": "Delegate to @project-manager: review yesterday's Todo activity across all departments. Review the output and write a concise standup summary.",
     "delivery": {
       "connector": "slack",
       "channel": "#engineering"

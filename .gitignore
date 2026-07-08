@@ -14,3 +14,8 @@ packages/jinn/.npmrc
 
 # Superpowers SDD scratch (briefs, reports, ledger, diffs)
 .superpowers/
+
+# Hermes engine local scratch (session plans) — runtime residue, never product code
+.hermes/
+# Local sprint/evidence sandboxes and captured runtime artifacts — never commit
+.jinn-*-sprint/

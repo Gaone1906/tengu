@@ -55,6 +55,65 @@ export function resolveClientCommand(text: string): ClientCommand | null {
   return null
 }
 
+/* ── Armed-send state machine (STT) ───────────────────────────────────────
+ * The operator can queue a send DURING dictation: while STT is still capturing
+ * or transcribing (the "pending" window), the Send button is already pressable
+ * in an "armed" affordance. Tapping it arms an auto-send that fires the instant
+ * the transcribed text lands in the field — no second tap, no waiting.
+ *
+ * The two functions below are the pure core (state → action), extracted so the
+ * arm / auto-send-on-populate / empty-no-send / disarm rules are unit-testable
+ * without a DOM. The component owns the side effects (setState, onSend).
+ */
+
+/** Inputs that decide what a tap on the Send button does. */
+export interface SendTapContext {
+  /** The button is currently a Stop control (a turn is streaming + interruptible). */
+  isStop: boolean
+  /** An auto-send is already armed (waiting for the transcript to land). */
+  armed: boolean
+  /** STT is active — recording or transcribing — so words haven't landed yet. */
+  sttPending: boolean
+  /** The field already has text / media ready to send. */
+  hasContent: boolean
+}
+
+export type SendTapAction =
+  | 'stop'    // interrupt the streaming turn
+  | 'disarm'  // a second tap while armed cancels the queued send
+  | 'arm'     // queue an auto-send for when the transcript lands
+  | 'send'    // normal immediate send
+  | 'noop'    // nothing to do (empty field, no pending STT)
+
+/**
+ * Resolve what a Send-button tap should do. Order matters: Stop wins over
+ * everything; a second tap while armed toggles the queue off; during the STT
+ * pending window a tap arms; otherwise it's a normal send (or a no-op when the
+ * field is empty).
+ */
+export function resolveSendTap(c: SendTapContext): SendTapAction {
+  if (c.isStop) return 'stop'
+  if (c.armed) return 'disarm'
+  if (c.sttPending) return 'arm'
+  if (c.hasContent) return 'send'
+  return 'noop'
+}
+
+export type TranscriptLandAction =
+  | 'send'    // armed + real text → fire the auto-send now
+  | 'disarm'  // armed + empty transcript → cancel the queue, keep the field
+  | 'fill'    // not armed → just drop the text into the field (normal STT)
+
+/**
+ * Resolve what happens when a transcript lands. An armed send fires only when
+ * the transcript actually carried words; an empty transcript disarms cleanly
+ * (never sends a blank message) and leaves the field for the operator.
+ */
+export function resolveTranscriptLanding(armed: boolean, transcript: string): TranscriptLandAction {
+  if (!armed) return 'fill'
+  return transcript.trim().length > 0 ? 'send' : 'disarm'
+}
+
 interface ChatInputProps {
   disabled: boolean
   loading: boolean
@@ -169,9 +228,21 @@ export function ChatInput({
   const [commandFilter, setCommandFilter] = useState('')
   const [commandIndex, setCommandIndex] = useState(0)
   const [pendingAttachments, setPendingAttachments] = useState<MediaAttachment[]>([])
+  // Armed-send (STT): true once the operator has queued a send that will fire
+  // automatically the instant the dictated transcript lands in the field.
+  const [sendArmed, setSendArmed] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const rafRef = useRef<number | null>(null)
+
+  // Live mirrors so the async transcript-landing handler reads the latest value
+  // without re-creating itself (and without stale-closure races on send).
+  const valueRef = useRef('')
+  const armedRef = useRef(false)
+  const pendingAttachmentsRef = useRef<MediaAttachment[]>([])
+  armedRef.current = sendArmed
+  pendingAttachmentsRef.current = pendingAttachments
+  valueRef.current = value
 
   const resize = useCallback((el: HTMLTextAreaElement) => {
     if (rafRef.current != null) cancelAnimationFrame(rafRef.current)
@@ -200,11 +271,12 @@ export function ChatInput({
   }, [focusTrigger])
   const mentionItemRefs = useRef<Map<number, HTMLButtonElement>>(new Map())
 
+  // applyTranscript is defined below; the ref lets this stable callback reach it.
+  const applyTranscriptRef = useRef<(text: string) => void>(() => {})
   const stt = useStt(events, (text) => {
-    // Called when timeout auto-stops recording and transcription completes
-    if (text) {
-      setValue((prev) => prev ? prev + ' ' + text : text)
-    }
+    // Timeout auto-stop completed — route through the same landing handler so an
+    // armed auto-send still fires on this path.
+    applyTranscriptRef.current(text ?? '')
   })
 
   // Consume files dropped onto the chat area by the parent
@@ -295,6 +367,12 @@ export function ChatInput({
     const val = e.target.value
     setValue(val)
 
+    // Any real keystroke (typing, clearing, editing) while a send is queued
+    // means the operator took over — disarm cleanly so nothing auto-fires under
+    // them. Programmatic transcript fills don't go through onChange, so they
+    // never trip this.
+    if (armedRef.current) setSendArmed(false)
+
     // Detect slash commands: text starts with / and has no space yet (still typing the command name)
     if (val.startsWith('/') && !val.includes(' ')) {
       const filter = val.slice(1).toLowerCase()
@@ -376,26 +454,32 @@ export function ChatInput({
     }
   }
 
-  function handleSubmit() {
-    const trimmed = value.trim()
-    const hasMedia = pendingAttachments.length > 0
+  // Send core — resolves client-only commands, otherwise clears the composer and
+  // hands text + media to onSend. Shared by the Enter/tap path (handleSubmit) and
+  // the STT auto-send path (applyTranscript), so both behave identically.
+  function sendText(rawText: string, media: MediaAttachment[]) {
+    const trimmed = rawText.trim()
+    const hasMedia = media.length > 0
 
     if ((!trimmed && !hasMedia) || disabled) return
 
     const command = resolveClientCommand(trimmed)
     if (command === 'new') {
       setValue('')
+      setSendArmed(false)
       onNewSession()
       return
     }
     if (command === 'status') {
       setValue('')
+      setSendArmed(false)
       onStatusRequest()
       return
     }
-    const mediaToSend = hasMedia ? [...pendingAttachments] : undefined
+    const mediaToSend = hasMedia ? [...media] : undefined
     setValue('')
     setPendingAttachments([])
+    setSendArmed(false)
     setShowMentions(false)
     setShowCommands(false)
 
@@ -405,6 +489,10 @@ export function ChatInput({
     }
 
     onSend(trimmed, mediaToSend, false)
+  }
+
+  function handleSubmit() {
+    sendText(value, pendingAttachments)
   }
 
   async function handleFileAttach(e: React.ChangeEvent<HTMLInputElement>) {
@@ -442,11 +530,6 @@ export function ChatInput({
 
   /* ── Speech-to-text (offline whisper.cpp) ─────────────── */
 
-  const fillTextarea = useCallback((text: string) => {
-    if (!text) return
-    setValue((prev) => prev ? prev + ' ' + text : text)
-  }, [])
-
   // Auto-resize textarea when value changes programmatically (e.g., from STT)
   useEffect(() => {
     if (textareaRef.current) {
@@ -454,12 +537,48 @@ export function ChatInput({
     }
   }, [value, resize])
 
-  // Stop the current recording, transcribe, and drop the text into the input.
+  // The single choke point for a landed transcript — both the tap/hold stop path
+  // and the timeout auto-stop path funnel through here so an armed auto-send is
+  // honored identically. Recreated each render (closes over live state) and
+  // published via a ref so the stable useStt callback can reach the latest copy.
+  function applyTranscript(text: string) {
+    const action = resolveTranscriptLanding(armedRef.current, text)
+    const prev = valueRef.current
+    const merged = prev ? prev + ' ' + text : text
+    if (action === 'send') {
+      // Armed + real words → fire the combined message now, then clear + disarm.
+      sendText(merged, pendingAttachmentsRef.current)
+      return
+    }
+    if (action === 'fill') {
+      // Normal dictation (not armed) → drop the text in and keep editing.
+      if (text.trim().length > 0) setValue(merged)
+      textareaRef.current?.focus()
+      return
+    }
+    // action === 'disarm': armed but the transcript came back empty → never send
+    // a blank message. Cancel the queue and leave the field focused as-is.
+    setSendArmed(false)
+    textareaRef.current?.focus()
+  }
+  applyTranscriptRef.current = applyTranscript
+
+  // Stop the current recording, transcribe, and land the text (honoring an arm).
   const transcribeAndFill = useCallback(async () => {
     const text = await stt.stopRecording()
-    fillTextarea(text ?? '')
-    textareaRef.current?.focus()
-  }, [stt, fillTextarea])
+    applyTranscriptRef.current(text ?? '')
+  }, [stt])
+
+  // Disarm cleanly if STT ends without a transcript reaching applyTranscript —
+  // an error, a declined model, or a timeout-stop that yielded no words. The
+  // successful-landing paths read armedRef synchronously before this commits, so
+  // this only ever tidies a genuinely-orphaned arm (never pre-empts a real send).
+  useEffect(() => {
+    if (!sendArmed) return
+    if (stt.state === 'error' || stt.state === 'no-model' || stt.state === 'idle') {
+      setSendArmed(false)
+    }
+  }, [sendArmed, stt.state])
 
   /* ── Mic gestures: tap-and-hold (push-to-talk) + quick-tap (toggle) ──── */
   // Refs avoid stale-closure races between pointerdown and pointerup.
@@ -526,6 +645,9 @@ export function ChatInput({
   )
 
   const hasContent = value.trim().length > 0 || pendingAttachments.length > 0
+  // STT "pending" window: words are being captured or transcribed but haven't
+  // landed in the field yet. During this window the Send button is armable.
+  const sttPending = stt.state === 'recording' || stt.state === 'transcribing'
 
   return (
     <div className="px-3 sm:px-4 pt-[var(--space-3)] pb-[max(var(--safe-bottom),var(--space-3))] bg-[var(--bg)] shrink-0 relative">
@@ -731,36 +853,83 @@ export function ChatInput({
             )}
           </button>
 
-          {/* Send ↔ Stop — one persistent circular button. While a turn streams
-              (and an interrupt handler exists) it morphs to red and calls the
-              SAME stop handler; otherwise it sends. Background + icon crossfade
-              keyed on `loading` instead of an instant button swap. */}
+          {/* Send ↔ Stop — one persistent circular button with five states:
+                • stop     — a turn is streaming + interruptible (red square)
+                • armed    — an STT auto-send is queued (solid accent + spinning
+                             dashed ring: "locked, will fire when your words land")
+                • armable  — STT is capturing/transcribing (tinted + static dashed
+                             ring: "tap me to queue the send")
+                • ready    — the field has content (solid accent arrow)
+                • idle     — empty field (muted, inert)
+              Background + arrow/stop crossfade keyed on the mode. */}
           {(() => {
             const showStop = loading && !!onInterrupt
+            const mode: 'stop' | 'armed' | 'armable' | 'ready' | 'idle' =
+              showStop ? 'stop'
+              : sendArmed ? 'armed'
+              : sttPending ? 'armable'
+              : hasContent ? 'ready'
+              : 'idle'
+            // Disabled only when there's genuinely nothing to do: an empty idle
+            // field, or the parent is blocking sends (waiting for a response) and
+            // we're not in stop/arm/armable mode.
+            const isDisabled =
+              mode === 'idle' ? true
+              : mode === 'stop' || mode === 'armed' ? false
+              : disabled
+            const showRing = mode === 'armable' || mode === 'armed'
+            const label =
+              mode === 'stop' ? 'Stop'
+              : mode === 'armed' ? 'Send queued — will fire when transcription lands. Tap to cancel.'
+              : mode === 'armable' ? 'Send when transcription lands'
+              : 'Send message'
             return (
               <button
                 onPointerDown={(e) => e.stopPropagation()}
-                onClick={showStop ? onInterrupt : handleSubmit}
-                disabled={showStop ? false : (!hasContent || disabled)}
-                aria-label={showStop ? 'Stop' : 'Send message'}
-                title={showStop ? 'Stop' : 'Send message'}
+                onClick={() => {
+                  const action = resolveSendTap({ isStop: showStop, armed: sendArmed, sttPending, hasContent })
+                  if (action === 'stop') onInterrupt?.()
+                  else if (action === 'arm') setSendArmed(true)
+                  else if (action === 'disarm') setSendArmed(false)
+                  else if (action === 'send') handleSubmit()
+                  // 'noop' → nothing to do
+                }}
+                disabled={isDisabled}
+                aria-label={label}
+                title={label}
                 className={`relative w-[38px] h-[38px] rounded-full border-none flex items-center justify-center shrink-0 transition-all duration-200 ease-in-out ${
-                  showStop
+                  mode === 'stop'
                     ? 'bg-[var(--system-red)] text-white cursor-pointer'
-                    : hasContent
+                    : mode === 'armed' || mode === 'ready'
                       ? 'bg-[var(--accent)] text-[var(--accent-contrast)] cursor-pointer'
-                      : 'bg-[var(--fill-tertiary)] text-[var(--text-quaternary)] cursor-default'
+                      : mode === 'armable'
+                        ? 'bg-[var(--accent-fill)] text-[var(--accent)] cursor-pointer'
+                        : 'bg-[var(--fill-tertiary)] text-[var(--text-quaternary)] cursor-default'
                 }`}
               >
+                {/* Pending affordance — a dashed ring around the button. Static
+                    while armable (invites the tap); slowly spinning once armed
+                    (queued, waiting for words). Purely decorative. */}
+                {showRing && (
+                  <span
+                    aria-hidden
+                    className={`pointer-events-none absolute rounded-full border-[1.5px] border-dashed ${
+                      mode === 'armed'
+                        ? 'inset-[-4px] motion-safe:animate-[send-ring-spin_2.4s_linear_infinite]'
+                        : 'inset-[-3px]'
+                    }`}
+                    style={{ borderColor: `color-mix(in srgb, var(--accent) ${mode === 'armed' ? 70 : 55}%, transparent)` }}
+                  />
+                )}
                 {/* Send arrow */}
-                <span className={`absolute inset-0 flex items-center justify-center transition-all duration-200 ease-in-out ${showStop ? 'opacity-0 scale-50' : 'opacity-100 scale-100'}`}>
+                <span className={`absolute inset-0 flex items-center justify-center transition-all duration-200 ease-in-out ${mode === 'stop' ? 'opacity-0 scale-50' : 'opacity-100 scale-100'}`}>
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
                     <line x1="12" y1="19" x2="12" y2="5" />
                     <polyline points="5 12 12 5 19 12" />
                   </svg>
                 </span>
                 {/* Stop square */}
-                <span className={`absolute inset-0 flex items-center justify-center transition-all duration-200 ease-in-out ${showStop ? 'opacity-100 scale-100' : 'opacity-0 scale-50'}`}>
+                <span className={`absolute inset-0 flex items-center justify-center transition-all duration-200 ease-in-out ${mode === 'stop' ? 'opacity-100 scale-100' : 'opacity-0 scale-50'}`}>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
                     <rect x="4" y="4" width="16" height="16" rx="2" />
                   </svg>
@@ -824,6 +993,12 @@ export function ChatInput({
 
       <style>{`
         @keyframes stt-spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        /* Armed-send pending ring — a calm 2.4s rotation of the dashed ring so
+           the queued Send reads as "waiting for your words" without being loud. */
+        @keyframes send-ring-spin {
           from { transform: rotate(0deg); }
           to { transform: rotate(360deg); }
         }

@@ -36,7 +36,7 @@ export interface SessionPatchContext {
 export function validateNewSessionSelection(
   config: JinnConfig,
   body: { engine?: unknown; model?: unknown; effortLevel?: unknown },
-  defaults: { engine?: string; model?: string; effortLevel?: string } = {},
+  defaults: { engine?: string; model?: string; effortLevel?: string; employee?: string } = {},
 ): NewSessionSelectionResult {
   const registry = getModelRegistry(config);
   let engine: string = defaults.engine?.trim() || config.engines.default;
@@ -52,7 +52,10 @@ export function validateNewSessionSelection(
   if (!entry) return { ok: false, error: `unknown engine "${engine}"` };
 
   let model: string | undefined;
-  const requestedModel = body.model !== undefined ? body.model : defaults.model;
+  // Track whether the model came from an explicit caller override (body) or an
+  // employee's configured default — the error phrasing differs (GRS-017f).
+  const modelFromBody = body.model !== undefined;
+  const requestedModel = modelFromBody ? body.model : defaults.model;
   if (requestedModel !== undefined) {
     if (typeof requestedModel !== "string" || !requestedModel.trim()) {
       return { ok: false, error: "model must be a non-empty string" };
@@ -65,13 +68,31 @@ export function validateNewSessionSelection(
         logger.warn(`pi model "${model}" not in discovered set yet — allowing`);
       } else {
         const known = entry.models.map((m) => m.id).join(", ");
+        // GRS-017f: when the unknown model is an EMPLOYEE'S CONFIGURED DEFAULT
+        // (not an explicit caller override), the bare engine string ("unknown
+        // model X for engine Y") gives the agent no hint the culprit is the
+        // employee YAML. Name the employee, its configured model, the known set,
+        // AND the two-way fix — so delegate/spawn/workflow all fail actionably
+        // instead of silently running a different model or emitting a cryptic
+        // engine error.
+        if (!modelFromBody && defaults.employee) {
+          const suggested = entry.models[0]?.id;
+          return {
+            ok: false,
+            error:
+              `employee "${defaults.employee}" is configured with model "${model}", which engine "${engine}" does not know ` +
+              `(known: ${known || "none"}). Fix: set a known model${suggested ? ` (e.g. model: ${suggested})` : ""} in the employee's ` +
+              `org YAML (org/${defaults.employee}.yaml), or register "${model}" for engine "${engine}" in config.yaml.`,
+          };
+        }
         return { ok: false, error: `unknown model "${model}" for engine "${engine}" (known: ${known || "none"})` };
       }
     }
   }
 
   let effortLevel: string | undefined;
-  const requestedEffortLevel = body.effortLevel !== undefined ? body.effortLevel : defaults.effortLevel;
+  const effortFromBody = body.effortLevel !== undefined;
+  const requestedEffortLevel = effortFromBody ? body.effortLevel : defaults.effortLevel;
   if (requestedEffortLevel !== undefined) {
     if (typeof requestedEffortLevel !== "string" || !requestedEffortLevel.trim()) {
       return { ok: false, error: "effortLevel must be a non-empty string" };
@@ -80,10 +101,28 @@ export function validateNewSessionSelection(
     const effectiveModel = model ?? undefined;
     const valid = effortLevelsForModel(config, engine, effectiveModel);
     if (valid.length === 0) {
-      return { ok: false, error: `engine "${engine}"${effectiveModel ? ` model "${effectiveModel}"` : ""} does not support effort levels` };
+      if (!effortFromBody) {
+        logger.warn(
+          `Ignoring employee default effortLevel "${effortLevel}" for engine "${engine}"` +
+          `${effectiveModel ? ` model "${effectiveModel}"` : ""}` +
+          `${defaults.employee ? ` on employee "${defaults.employee}"` : ""}: model does not support effort levels`,
+        );
+        effortLevel = undefined;
+      } else {
+        return { ok: false, error: `engine "${engine}"${effectiveModel ? ` model "${effectiveModel}"` : ""} does not support effort levels` };
+      }
     }
-    if (!valid.includes(effortLevel)) {
-      return { ok: false, error: `invalid effortLevel "${effortLevel}" (valid: ${valid.join(", ")})` };
+    if (effortLevel !== undefined && !valid.includes(effortLevel)) {
+      if (!effortFromBody) {
+        logger.warn(
+          `Ignoring invalid employee default effortLevel "${effortLevel}" for engine "${engine}"` +
+          `${effectiveModel ? ` model "${effectiveModel}"` : ""}` +
+          `${defaults.employee ? ` on employee "${defaults.employee}"` : ""} (valid: ${valid.join(", ")})`,
+        );
+        effortLevel = undefined;
+      } else {
+        return { ok: false, error: `invalid effortLevel "${effortLevel}" (valid: ${valid.join(", ")})` };
+      }
     }
   }
 

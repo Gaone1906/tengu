@@ -1,0 +1,389 @@
+import { beforeAll, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { Readable } from "node:stream";
+import type { ServerResponse } from "node:http";
+import yaml from "js-yaml";
+import {
+  CALLER_SESSION_CAPABILITY_HEADER,
+  CALLER_SESSION_HEADER,
+  TOOL_CALL_HEADER,
+  TOOL_CALL_HEADER_VALUE,
+  ensureSessionCapability,
+} from "../../mcp/identity.js";
+
+const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-control-plane-"));
+process.env.JINN_HOME = tmpHome;
+process.env.JINN_WORKFLOW_EVIDENCE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-control-plane-wf-"));
+
+const safePortalName = "Portal COO";
+const collidingPortalName = "platform-worker";
+const orgDir = path.join(tmpHome, "org", "platform");
+const skillDir = path.join(tmpHome, "skills", "sample-skill");
+const cronDir = path.join(tmpHome, "cron");
+
+function writeConfig(portalName = safePortalName) {
+  fs.writeFileSync(
+    path.join(tmpHome, "config.yaml"),
+    yaml.dump({
+      gateway: {},
+      engines: { default: "codex", claude: {}, codex: { bin: "codex", model: "gpt-5.5" } },
+      portal: { portalName, setupComplete: true },
+      stt: { languages: ["en"] },
+      connectors: {},
+      mcp: {},
+      sessions: {},
+    }),
+  );
+}
+
+function readConfig(): Record<string, any> {
+  return yaml.load(fs.readFileSync(path.join(tmpHome, "config.yaml"), "utf-8")) as Record<string, any>;
+}
+
+writeConfig();
+fs.mkdirSync(orgDir, { recursive: true });
+fs.mkdirSync(skillDir, { recursive: true });
+fs.mkdirSync(cronDir, { recursive: true });
+fs.writeFileSync(path.join(orgDir, "department.yaml"), "name: platform\n");
+fs.writeFileSync(
+  path.join(orgDir, "platform-manager.yaml"),
+  "name: platform-manager\ndisplayName: Platform Manager\ndepartment: platform\nrank: manager\nengine: codex\nmodel: gpt-5.5\npersona: Manages platform work.\n",
+);
+fs.writeFileSync(
+  path.join(orgDir, "platform-worker.yaml"),
+  "name: platform-worker\ndisplayName: Platform Worker\ndepartment: platform\nrank: employee\nreportsTo: platform-manager\nengine: codex\nmodel: gpt-5.5\npersona: Executes platform work.\n",
+);
+fs.writeFileSync(
+  path.join(orgDir, "platform-peer.yaml"),
+  "name: platform-peer\ndisplayName: Platform Peer\ndepartment: platform\nrank: employee\nreportsTo: platform-manager\nengine: codex\nmodel: gpt-5.5\npersona: Reviews peer work.\n",
+);
+fs.writeFileSync(path.join(skillDir, "SKILL.md"), "---\nname: sample-skill\ndescription: Generic sample skill.\n---\n\n# Sample\n");
+fs.writeFileSync(path.join(cronDir, "jobs.json"), JSON.stringify([{ id: "existing", name: "Existing", enabled: false, schedule: "0 * * * *", prompt: "Run." }], null, 2));
+
+type Api = typeof import("../api.js");
+type Registry = typeof import("../../sessions/registry.js");
+type Store = typeof import("../../work-items/store.js");
+type Approvals = typeof import("../../work-items/approvals.js");
+type ApprovalAuthority = typeof import("../approval-authority.js");
+
+let api: Api;
+let registry: Registry;
+let store: Store;
+let approvals: Approvals;
+let approvalAuthority: ApprovalAuthority;
+let worker: import("../../shared/types.js").Session;
+let peer: import("../../shared/types.js").Session;
+
+const apiCtx = {
+  getConfig: () => readConfig(),
+  reloadConfig: () => {},
+  reloadOrg: () => {},
+  reloadConnectorInstances: async () => ({ reloaded: true }),
+  connectors: new Map(),
+  startTime: Date.now(),
+  gatewayAuthToken: "test-token",
+  emit: () => {},
+  sessionManager: {
+    getEngines: () => new Map([["codex", {}]]),
+    getEngine: () => undefined,
+    getQueue: () => ({
+      getPendingCount: () => 0,
+      getTransportState: (_key: string, status: string) => status,
+    }),
+  },
+} as unknown as import("../api.js").ApiContext;
+
+function makeRes() {
+  let status = 200;
+  const chunks: Buffer[] = [];
+  const headers = new Map<string, unknown>();
+  const res = {
+    writeHead(s: number) {
+      status = s;
+      return this;
+    },
+    setHeader(name: string, value: unknown) {
+      headers.set(name.toLowerCase(), value);
+      return this;
+    },
+    getHeader(name: string) {
+      return headers.get(name.toLowerCase());
+    },
+    end(buf?: Buffer | string) {
+      if (buf) chunks.push(Buffer.isBuffer(buf) ? buf : Buffer.from(buf));
+    },
+  } as unknown as ServerResponse;
+  return {
+    res,
+    get status() {
+      return status;
+    },
+    get bodyText() {
+      return Buffer.concat(chunks).toString("utf-8");
+    },
+    header(name: string) {
+      return headers.get(name.toLowerCase());
+    },
+    get body() {
+      const raw = Buffer.concat(chunks).toString("utf-8");
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return raw;
+      }
+    },
+  };
+}
+
+async function call(method: string, urlPath: string, body?: unknown, headers: Record<string, string> = {}) {
+  const payload = body !== undefined ? [Buffer.from(JSON.stringify(body))] : [];
+  const req = Object.assign(Readable.from(payload), {
+    method,
+    url: urlPath,
+    headers: { host: "localhost", "content-type": "application/json", ...headers },
+    socket: { remoteAddress: "127.0.0.1" },
+  });
+  const cap = makeRes();
+  await api.handleApiRequest(req as unknown as Parameters<Api["handleApiRequest"]>[0], cap.res, apiCtx);
+  return { status: cap.status, body: cap.body, bodyText: cap.bodyText, header: cap.header };
+}
+
+function toolHeaders(session: import("../../shared/types.js").Session): Record<string, string> {
+  return {
+    [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+    [CALLER_SESSION_HEADER]: session.id,
+    [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(session.id),
+  };
+}
+
+function resetCronJobs() {
+  fs.writeFileSync(path.join(cronDir, "jobs.json"), JSON.stringify([{ id: "existing", name: "Existing", enabled: false, schedule: "0 * * * *", prompt: "Run." }], null, 2));
+}
+
+beforeAll(async () => {
+  api = await import("../api.js");
+  registry = await import("../../sessions/registry.js");
+  store = await import("../../work-items/store.js");
+  approvals = await import("../../work-items/approvals.js");
+  approvalAuthority = await import("../approval-authority.js");
+  registry.initDb();
+  worker = registry.createSession({ engine: "codex", source: "web", sourceRef: "worker", title: "worker", employee: "platform-worker" });
+  peer = registry.createSession({ engine: "codex", source: "web", sourceRef: "peer", title: "peer", employee: "platform-peer" });
+});
+
+describe("control-plane writes require operator authority", () => {
+  it("rejects a capability-bound worker PUT /api/config and leaves portalName unchanged", async () => {
+    writeConfig();
+
+    const resp = await call("PUT", "/api/config", { portal: { portalName: collidingPortalName } }, toolHeaders(worker));
+
+    expect(resp.status).toBe(403);
+    expect(resp.bodyText).toMatch(/operator.*control-plane/i);
+    expect(readConfig().portal.portalName).toBe(safePortalName);
+  });
+
+  it("keeps operator/browser config writes working", async () => {
+    writeConfig();
+
+    const resp = await call("PUT", "/api/config", { portal: { portalName: "Operator Portal" } });
+
+    expect(resp.status).toBe(200);
+    expect(readConfig().portal.portalName).toBe("Operator Portal");
+    writeConfig();
+  });
+
+  it("rejects capability-bound auth bootstrap and pair before they mint operator cookies", async () => {
+    const bootstrap = await call("POST", "/api/auth/bootstrap", {}, toolHeaders(worker));
+    expect(bootstrap.status).toBe(403);
+    expect(bootstrap.header("set-cookie")).toBeUndefined();
+
+    const pair = await call("POST", "/api/auth/pair", { token: "test-token" }, toolHeaders(worker));
+    expect(pair.status).toBe(403);
+    expect(pair.header("set-cookie")).toBeUndefined();
+  });
+
+  it("rejects no-scoped-header token pairing so global gateway tokens cannot mint browser cookies", async () => {
+    const pair = await call("POST", "/api/auth/pair", { token: "test-token" });
+
+    expect(pair.status).toBe(401);
+    expect(pair.header("set-cookie")).toBeUndefined();
+  });
+
+  it("rejects bearer-issued pairing codes, including scoped callers carrying bearer auth", async () => {
+    const bearer = await call("POST", "/api/auth/pairing-codes", {}, { authorization: "Bearer test-token" });
+    expect(bearer.status).toBe(403);
+    expect(bearer.body.code).toBeUndefined();
+
+    const scopedBearer = await call("POST", "/api/auth/pairing-codes", {}, { ...toolHeaders(worker), authorization: "Bearer test-token" });
+    expect(scopedBearer.status).toBe(403);
+    expect(scopedBearer.body.code).toBeUndefined();
+  });
+
+  it("keeps genuine browser bootstrap/pairing-code pair and cookie-backed config writes working", async () => {
+    writeConfig();
+
+    const bootstrap = await call("POST", "/api/auth/bootstrap", {});
+    expect(bootstrap.status).toBe(200);
+    expect(String(bootstrap.header("set-cookie"))).toContain("jinn_auth=");
+
+    const bootstrapCookies = Array.isArray(bootstrap.header("set-cookie")) ? bootstrap.header("set-cookie") : [bootstrap.header("set-cookie")];
+    const bootstrapCookieHeader = (bootstrapCookies as string[]).map((part) => part.split(";")[0]).join("; ");
+    const pairingCode = await call("POST", "/api/auth/pairing-codes", {}, { cookie: bootstrapCookieHeader });
+    expect(pairingCode.status).toBe(200);
+
+    const pair = await call("POST", "/api/auth/pair", { code: pairingCode.body.code });
+    expect(pair.status).toBe(200);
+    expect(String(pair.header("set-cookie"))).toContain("jinn_auth=");
+    const rawCookies = Array.isArray(pair.header("set-cookie")) ? pair.header("set-cookie") : [pair.header("set-cookie")];
+    const cookieHeader = (rawCookies as string[]).map((part) => part.split(";")[0]).join("; ");
+
+    const configWrite = await call("PUT", "/api/config", { portal: { portalName: "Cookie Operator" } }, { cookie: cookieHeader });
+    expect(configWrite.status).toBe(200);
+    expect(readConfig().portal.portalName).toBe("Cookie Operator");
+    writeConfig();
+  });
+
+  it.each([
+    { method: "POST", path: "/api/cron", body: { id: "worker-job", name: "Worker Job", schedule: "* * * * *", prompt: "Run." }, label: "cron create" },
+    { method: "PUT", path: "/api/cron/existing", body: { enabled: true }, label: "cron update" },
+    { method: "DELETE", path: "/api/cron/existing", body: undefined, label: "cron delete" },
+    { method: "POST", path: "/api/cron/existing/trigger", body: {}, label: "cron manual trigger" },
+    { method: "PATCH", path: "/api/org/employees/platform-worker", body: { displayName: "Renamed Worker" }, label: "org employee update" },
+    { method: "PUT", path: "/api/org/departments/platform/board", body: { todo: [] }, label: "legacy board write" },
+    { method: "DELETE", path: "/api/skills/sample-skill", body: undefined, label: "skill removal" },
+    { method: "POST", path: "/api/engines/refresh", body: {}, label: "engine registry refresh" },
+    { method: "POST", path: "/api/engine-limits/refresh", body: {}, label: "engine limits refresh" },
+    { method: "POST", path: "/api/connectors/reload", body: {}, label: "connector reload" },
+    { method: "POST", path: "/api/onboarding", body: { portalName: "Worker Portal" }, label: "onboarding config write" },
+    { method: "POST", path: "/api/stt/download", body: {}, label: "stt model download/config enable" },
+    { method: "PUT", path: "/api/stt/config", body: { languages: ["en"] }, label: "stt config" },
+    { method: "POST", path: "/api/auth/pairing-codes", body: {}, label: "auth pairing code mint" },
+    { method: "DELETE", path: "/api/auth/devices/device-1", body: undefined, label: "auth device revoke" },
+  ])("rejects capability-bound workers on $label", async (route) => {
+    resetCronJobs();
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, "SKILL.md"), "---\nname: sample-skill\ndescription: Generic sample skill.\n---\n\n# Sample\n");
+
+    const resp = await call(route.method, route.path, route.body, toolHeaders(worker));
+
+    expect(resp.status).toBe(403);
+    expect(resp.bodyText).toMatch(/operator.*control-plane/i);
+  });
+
+  it("rejects capability-bound callers on destructive session and queue controls", async () => {
+    const target = registry.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: "target-control",
+      title: "target control",
+      employee: "platform-worker",
+    });
+    const originalTitle = target.title;
+    const routes = [
+      { method: "PATCH", path: `/api/sessions/${target.id}`, body: { title: "Worker changed victim" }, label: "session metadata patch" },
+      { method: "POST", path: `/api/sessions/${target.id}/duplicate`, body: {}, label: "session duplicate" },
+      { method: "DELETE", path: `/api/sessions/${target.id}`, body: undefined, label: "session delete" },
+      { method: "POST", path: `/api/sessions/${target.id}/reset`, body: {}, label: "session reset" },
+      { method: "DELETE", path: `/api/sessions/${target.id}/queue/qi_missing`, body: undefined, label: "queue item cancel" },
+      { method: "DELETE", path: `/api/sessions/${target.id}/queue`, body: undefined, label: "queue clear" },
+      { method: "POST", path: `/api/sessions/${target.id}/queue/pause`, body: {}, label: "queue pause" },
+      { method: "POST", path: `/api/sessions/${target.id}/queue/resume`, body: {}, label: "queue resume" },
+      { method: "POST", path: "/api/sessions/bulk-delete", body: { ids: [target.id] }, label: "bulk delete" },
+    ];
+
+    for (const route of routes) {
+      const resp = await call(route.method, route.path, route.body, toolHeaders(worker));
+      expect(resp.status, route.label).toBe(403);
+      expect(resp.bodyText, route.label).toMatch(/operator.*control-plane/i);
+    }
+    expect(registry.getSession(target.id)).toBeTruthy();
+    expect(registry.getSession(target.id)?.title).toBe(originalTitle);
+  });
+});
+
+describe("portal fallback is a virtual root, not employee authority", () => {
+  it("breaks the config-spoof-to-self-approve chain at both the config write and virtual-root decision check", async () => {
+    writeConfig();
+    const blockedConfig = await call("PUT", "/api/config", { portal: { portalName: collidingPortalName } }, toolHeaders(worker));
+    expect(blockedConfig.status).toBe(403);
+
+    writeConfig(collidingPortalName);
+    const root = approvalAuthority.resolveRootApprovalTarget() as { name: string; department: string | null; kind?: string } | null;
+    expect(root).toBeTruthy();
+    expect(root?.kind).toBe("virtual");
+    expect(root?.name).not.toBe(collidingPortalName);
+
+    const item = store.createWorkItem({ title: "collision-root approval", source: "human", status: "backlog" });
+    const approval = approvals.requestApproval(item.id, { request: "Approve collision root", actor: "test" });
+    expect(approval.approvalTarget).toBe(root?.name);
+    expect(approval.approvalTarget).not.toBe(collidingPortalName);
+
+    const workerDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" }, toolHeaders(worker));
+    expect(workerDecision.status).toBe(403);
+
+    const peerDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" }, toolHeaders(peer));
+    expect(peerDecision.status).toBe(403);
+
+    const operatorDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" });
+    expect(operatorDecision.status).toBe(200);
+    expect(operatorDecision.body.workItem).toMatchObject({ approvalState: "approved", approvalDecidedBy: "operator", approvalTarget: root?.name });
+  });
+
+  it("keeps a persisted virtual-root target virtual after an org employee later claims the same name", async () => {
+    const driftRoot = "Drift Root";
+    const driftFile = path.join(orgDir, "drift-root.yaml");
+    fs.rmSync(driftFile, { force: true });
+    writeConfig(driftRoot);
+
+    const item = store.createWorkItem({ title: "org-drift virtual root", source: "human", status: "backlog" });
+    const approval = approvals.requestApproval(item.id, { request: "Approve before drift", actor: "test" });
+    expect(approval.approvalTarget).toBe(driftRoot);
+    expect(approval.approvalTargetKind).toBe("virtual");
+
+    fs.writeFileSync(
+      driftFile,
+      "name: Drift Root\ndisplayName: Drift Root\ndepartment: platform\nrank: employee\nreportsTo: platform-manager\nengine: codex\nmodel: gpt-5.5\npersona: Attempts to claim the persisted virtual root.\n",
+    );
+    const driftSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "drift", title: "drift", employee: driftRoot });
+
+    const employeeDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" }, toolHeaders(driftSession));
+    expect(employeeDecision.status).toBe(403);
+
+    const operatorDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" });
+    expect(operatorDecision.status).toBe(200);
+    expect(operatorDecision.body.workItem).toMatchObject({ approvalState: "approved", approvalDecidedBy: "operator", approvalTarget: driftRoot });
+
+    fs.rmSync(driftFile, { force: true });
+    writeConfig();
+  });
+
+  it("treats legacy NULL target-kind rows as non-employee-decidable after org drift", async () => {
+    const legacyRoot = "Legacy Root";
+    const legacyFile = path.join(orgDir, "legacy-root.yaml");
+    fs.rmSync(legacyFile, { force: true });
+    writeConfig(legacyRoot);
+
+    const item = store.createWorkItem({ title: "legacy virtual root", source: "human", status: "backlog" });
+    const approval = approvals.requestApproval(item.id, { request: "Approve before kind column existed", actor: "test" });
+    expect(approval.approvalTarget).toBe(legacyRoot);
+    expect(approval.approvalTargetKind).toBe("virtual");
+
+    registry.initDb().prepare("UPDATE work_items SET approval_target_kind = NULL WHERE id = ?").run(approval.id);
+    fs.writeFileSync(
+      legacyFile,
+      "name: Legacy Root\ndisplayName: Legacy Root\ndepartment: platform\nrank: employee\nreportsTo: platform-manager\nengine: codex\nmodel: gpt-5.5\npersona: Attempts to claim a legacy persisted approval target.\n",
+    );
+    const legacySession = registry.createSession({ engine: "codex", source: "web", sourceRef: "legacy-root", title: "legacy root", employee: legacyRoot });
+
+    const employeeDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" }, toolHeaders(legacySession));
+    expect(employeeDecision.status).toBe(403);
+
+    const operatorDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" });
+    expect(operatorDecision.status).toBe(200);
+
+    fs.rmSync(legacyFile, { force: true });
+    writeConfig();
+  });
+});

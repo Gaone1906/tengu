@@ -303,7 +303,11 @@ portal: {}
 #   browser: { enabled: true, provider: playwright }
 #   search:  { enabled: false, provider: brave }   # set true + add BRAVE_API_KEY
 #   fetch:   { enabled: true }
-#   gateway: { enabled: true }                      # built-in gateway MCP server
+#   gateway: { enabled: true }                      # jinn company toolset: employees get typed
+#                                                   # org/session/delegation tools via MCP instead
+#                                                   # of curl recipes. Off while commented; false =
+#                                                   # kill switch. Per-engine opt-out available:
+#                                                   # gateway: { enabled: true, engines: { grok: false } }
 # Per-session safety limits (can be overridden per-employee in their YAML).
 # sessions:
 #   maxDurationMinutes: 30

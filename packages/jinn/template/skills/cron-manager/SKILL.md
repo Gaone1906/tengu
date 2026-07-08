@@ -25,7 +25,7 @@ All cron jobs are stored in `~/.jinn/cron/jobs.json` as a JSON array of job obje
   "engine": "claude",
   "model": "sonnet",
   "employee": "project-manager",
-  "prompt": "Review all department boards and summarize progress since yesterday. Highlight blockers and upcoming deadlines.",
+  "prompt": "Review active Todos and summarize progress since yesterday. Highlight blockers and upcoming deadlines.",
   "delivery": {
     "connector": "slack",
     "channel": "#engineering-standup"

@@ -23,7 +23,7 @@
  * the streaming, ordering, and fallback logic is unit-testable without a DOM.
  */
 import { stripMarkdown } from "@/lib/strip-markdown"
-import { TalkAudioPlayer } from "@/routes/talk/audio-player"
+import { TalkAudioPlayer } from "@/components/chat/audio-player"
 import type { TtsStart, TtsStartCallbacks } from "./tts-controller"
 
 /** A gapless, ordered WAV-chunk player (subset of TalkAudioPlayer we depend on). */

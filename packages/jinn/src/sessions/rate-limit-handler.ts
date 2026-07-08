@@ -19,7 +19,7 @@
  * or the order of side effects without auditing both call sites.
  */
 
-import type { Employee, Engine, EngineResult, JinnConfig, Session, StreamDelta } from "../shared/types.js";
+import type { Employee, Engine, EngineResult, JinnConfig, ResolvedMcpConfig, Session, StreamDelta } from "../shared/types.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 import { resolveEffort } from "../shared/effort.js";
@@ -125,6 +125,9 @@ export interface RateLimitHandlerOpts {
   cliFlags?: string[];
   /** Path to MCP config JSON file, if applicable to the original turn. */
   mcpConfigPath?: string;
+  /** In-memory resolved MCP server set from the original turn (preserved on retry
+   *  and fallback so the payload is not silently dropped). */
+  resolvedMcp?: ResolvedMcpConfig;
   /** Optional attachment file paths from the original turn (preserved on retry). */
   attachments?: string[];
   /** The current jinn config (used to look up rateLimitStrategy + fallbackEngine + fallback engineConfig). */
@@ -152,7 +155,7 @@ export interface RateLimitHandlerOpts {
 export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateLimitOutcome> {
   const {
     session, prompt, systemPrompt, engineConfig, effortLevel, cliFlags,
-    mcpConfigPath, attachments, config, engines, employee, engine,
+    mcpConfigPath, resolvedMcp, attachments, config, engines, employee, engine,
     rateLimit, originalResult, hooks,
   } = opts;
 
@@ -224,6 +227,10 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
         model: session.model ?? fallbackConfig.model,
         effortLevel: fallbackEffort,
         cliFlags: employee?.cliFlags ?? cliFlags,
+        // The fallback engine is codex (MCP-capable, Tier 1); the resolved server
+        // set is engine-agnostic (same employee) so it is valid to carry over.
+        // Claude's `mcpConfigPath` temp file is intentionally NOT passed here.
+        resolvedMcp,
         attachments: attachments?.length ? attachments : undefined,
         sessionId: session.id,
         ...(hooks.onFallbackStream ? { onStream: hooks.onFallbackStream } : {}),
@@ -315,6 +322,7 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
         effortLevel,
         cliFlags,
         mcpConfigPath,
+        resolvedMcp,
         attachments: attachments?.length ? attachments : undefined,
         sessionId: session.id,
         source: session.source,

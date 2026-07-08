@@ -1,8 +1,9 @@
 import fs from "node:fs";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
-import type { InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta } from "../shared/types.js";
+import type { InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta, ResolvedMcpConfig, McpServerStdioConfig } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
@@ -26,6 +27,123 @@ export function codexCliFlags(flags: string[] | undefined): string[] {
   // `--chrome` is a Claude Code flag. Older shared employee/config paths can
   // still provide it via cliFlags; Codex rejects it before a session starts.
   return (flags ?? []).filter((flag) => flag !== "--chrome");
+}
+
+/**
+ * GRS-012b — translate the resolved MCP server set into Codex `-c` config
+ * overrides so a spawned `codex exec` session attaches the same servers other
+ * MCP-capable engines get (the wave-30 `resolvedMcp` payload's first non-Claude
+ * consumer). Codex reads `[mcp_servers.<name>]` TOML; per-invocation `-c
+ * dotted.key=value` overrides let us attach per session WITHOUT editing the
+ * operator's global `~/.codex/config.toml`.
+ *
+ * Only stdio servers (those with a `command`) are emitted; URL-based servers are
+ * skipped for this slice. Values are JSON-encoded, which is a valid TOML basic
+ * string for the plain command/path/URL values involved.
+ *
+ * SECURITY: `-c` values land in the process argv, which is world-readable (e.g.
+ * `ps`). So this NEVER serializes an arbitrary `server.env` — only env keys on an
+ * explicit non-secret allowlist are emitted. Any secret-bearing env (a
+ * `${SECRET}`-expanded API key on the `search` server or a custom server) is
+ * deliberately dropped from argv; such servers must receive their secrets via the
+ * engine's inherited process env instead — wiring that up for non-`jinn` servers
+ * is a later slice.
+ *
+ * GRS-018 unified builtin-env model: codex spawns MCP servers with a CLEAN env
+ * (probe-verified, ~8 baseline keys — nothing inherits), so the BUILTIN `jinn`
+ * server's whole required env must ride this allowlisted argv channel:
+ *   - JINN_GATEWAY_URL — reach the (possibly sandbox-port) gateway;
+ *   - JINN_SESSION_ID  — the GRS-017 caller-identity seam;
+ *   - JINN_HOME        — lets the server read its bearer from the 0600
+ *     <JINN_HOME>/gateway.json (mcp/server.ts fallback), since the token itself
+ *     must never ride argv.
+ *
+ * GRS-021c hygiene: the per-session capability is not on that allowlist. When a
+ * bound capability is present, CodexEngine writes the full builtin-jinn server
+ * stanza to a 0600 Codex profile file and passes only `--profile <name>` on argv.
+ * Third-party servers stay on the URL-only base list — identity, capability,
+ * and the token path are builtin-jinn privileges, not a general grant.
+ */
+const CODEX_ARGV_SAFE_ENV_KEYS: ReadonlySet<string> = new Set(["JINN_GATEWAY_URL"]);
+const CODEX_ARGV_JINN_SAFE_ENV_KEYS: ReadonlySet<string> = new Set([
+  "JINN_GATEWAY_URL",
+  "JINN_SESSION_ID",
+  "JINN_HOME",
+]);
+
+export function codexMcpConfigArgs(
+  resolvedMcp: ResolvedMcpConfig | undefined,
+  opts: { skipProfiledJinn?: boolean } = {},
+): string[] {
+  const servers = resolvedMcp?.mcpServers;
+  if (!servers) return [];
+  const args: string[] = [];
+  for (const [name, spec] of Object.entries(servers)) {
+    const command = (spec as McpServerStdioConfig).command;
+    if (!command) continue; // stdio servers only (URL servers skipped this slice)
+    const stdio = spec as McpServerStdioConfig;
+    if (opts.skipProfiledJinn && name === "jinn" && stdio.env?.JINN_SESSION_CAPABILITY) continue;
+    args.push("-c", `mcp_servers.${name}.command=${JSON.stringify(command)}`);
+    const cmdArgs = stdio.args ?? [];
+    args.push("-c", `mcp_servers.${name}.args=[${cmdArgs.map((a) => JSON.stringify(a)).join(",")}]`);
+    if (stdio.env) {
+      // Only emit allowlisted non-secret env keys into argv; drop everything else
+      // (potential secrets) so nothing sensitive is exposed via the process table.
+      // The builtin jinn server gets its (wider, still non-secret) required set.
+      const allowlist = name === "jinn" ? CODEX_ARGV_JINN_SAFE_ENV_KEYS : CODEX_ARGV_SAFE_ENV_KEYS;
+      const safe = Object.entries(stdio.env).filter(([k]) => allowlist.has(k));
+      if (safe.length > 0) {
+        const inline = safe.map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(",");
+        args.push("-c", `mcp_servers.${name}.env={${inline}}`);
+      }
+    }
+  }
+  return args;
+}
+
+export interface CodexMcpProfile {
+  profileName: string;
+  filePath: string;
+  cleanup: () => void;
+}
+
+function codexHome(): string {
+  return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function buildJinnProfileToml(name: string, spec: McpServerStdioConfig): string {
+  const lines = [`[mcp_servers.${name}]`, `command = ${tomlString(spec.command)}`];
+  lines.push(`args = [${(spec.args ?? []).map(tomlString).join(", ")}]`);
+  const env = spec.env ?? {};
+  if (Object.keys(env).length > 0) {
+    lines.push(`[mcp_servers.${name}.env]`);
+    for (const [key, value] of Object.entries(env)) lines.push(`${key} = ${tomlString(value)}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+export function writeCodexMcpProfile(resolvedMcp: ResolvedMcpConfig | undefined, sessionId: string): CodexMcpProfile | undefined {
+  const spec = resolvedMcp?.mcpServers?.jinn as (McpServerStdioConfig & { url?: unknown }) | undefined;
+  if (!spec || typeof spec.command !== "string" || spec.url !== undefined || !spec.env?.JINN_SESSION_CAPABILITY) return undefined;
+
+  const home = codexHome();
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  const safeSessionId = sessionId.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80) || "session";
+  const profileName = `jinn-mcp-${safeSessionId}-${crypto.randomBytes(6).toString("hex")}`;
+  const filePath = path.join(home, `${profileName}.config.toml`);
+  fs.writeFileSync(filePath, buildJinnProfileToml("jinn", spec), { mode: 0o600 });
+  try { fs.chmodSync(filePath, 0o600); } catch { /* best effort on filesystems without POSIX modes */ }
+  return {
+    profileName,
+    filePath,
+    cleanup: () => {
+      try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch { /* ignore cleanup errors */ }
+    },
+  };
 }
 
 /**
@@ -147,10 +265,11 @@ export class CodexEngine implements InterruptibleEngine {
 
     const bin = resolveBin("codex", opts.bin);
     const sessionId = opts.sessionId || `codex-${Date.now()}`;
+    const mcpProfile = writeCodexMcpProfile(opts.resolvedMcp, sessionId);
     const isResume = !!opts.resumeSessionId;
     const args = isResume
-      ? this.buildResumeArgs(opts, prompt)
-      : this.buildFreshArgs(opts, prompt);
+      ? this.buildResumeArgs(opts, prompt, mcpProfile)
+      : this.buildFreshArgs(opts, prompt, mcpProfile);
 
     logger.info(
       `Codex engine starting: ${bin} ${args[0]}${isResume ? " resume" : ""} --model ${opts.model || "default"} (resume: ${opts.resumeSessionId || "none"})`,
@@ -211,6 +330,7 @@ export class CodexEngine implements InterruptibleEngine {
         settled = true;
         clearTimers();
         this.liveProcesses.delete(sessionId);
+        mcpProfile?.cleanup();
         // Detached child has signalled turn end and will exit; don't let its (or a
         // lingering grandchild's) open stdout pipe keep the event loop busy.
         try { proc.unref?.(); } catch { /* not detached / already gone */ }
@@ -330,6 +450,7 @@ export class CodexEngine implements InterruptibleEngine {
 
         const terminationReason = this.liveProcesses.get(sessionId)?.terminationReason ?? null;
         this.liveProcesses.delete(sessionId);
+        mcpProfile?.cleanup();
 
         if (lineBuf.trim()) {
           const parsed = this.processJsonlLine(lineBuf);
@@ -406,27 +527,32 @@ export class CodexEngine implements InterruptibleEngine {
         settled = true;
         clearTimers();
         this.liveProcesses.delete(sessionId);
+        mcpProfile?.cleanup();
         reject(new Error(`Failed to spawn Codex CLI: ${err.message}`));
       });
     });
   }
 
-  private buildFreshArgs(opts: EngineRunOpts, prompt: string): string[] {
+  private buildFreshArgs(opts: EngineRunOpts, prompt: string, mcpProfile?: CodexMcpProfile): string[] {
     const args = ["exec"];
     if (opts.model) args.push("--model", opts.model);
     if (opts.effortLevel && opts.effortLevel !== "default") args.push("-c", `model_reasoning_effort="${opts.effortLevel}"`);
     args.push("--json", "--color", "never", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check");
     if (opts.cwd) args.push("-C", opts.cwd);
+    if (mcpProfile) args.push("--profile", mcpProfile.profileName);
+    args.push(...codexMcpConfigArgs(opts.resolvedMcp, { skipProfiledJinn: !!mcpProfile }));
     args.push(...codexCliFlags(opts.cliFlags));
     args.push(prompt);
     return args;
   }
 
-  private buildResumeArgs(opts: EngineRunOpts, prompt: string): string[] {
+  private buildResumeArgs(opts: EngineRunOpts, prompt: string, mcpProfile?: CodexMcpProfile): string[] {
     const args = ["exec", "resume"];
     if (opts.model) args.push("--model", opts.model);
     if (opts.effortLevel && opts.effortLevel !== "default") args.push("-c", `model_reasoning_effort="${opts.effortLevel}"`);
     args.push("--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check");
+    if (mcpProfile) args.push("--profile", mcpProfile.profileName);
+    args.push(...codexMcpConfigArgs(opts.resolvedMcp, { skipProfiledJinn: !!mcpProfile }));
     args.push(...codexCliFlags(opts.cliFlags));
     args.push(opts.resumeSessionId!);
     args.push(prompt);

@@ -93,6 +93,35 @@ describe("validateNewSessionSelection", () => {
     expect(r.error).toMatch(/unknown model/i);
   });
 
+  it("an EMPLOYEE'S unknown configured model yields a clear actionable error naming employee+model+known-set+fix (GRS-017f)", () => {
+    // The seed generalist ships model:sonnet; a gateway registering opus only
+    // doesn't know it. The error must name the culprit (employee + its model),
+    // the known set, and the fix — not a bare engine-level string.
+    const r = validateNewSessionSelection(cfg(), {}, { engine: "claude", model: "sonnet", employee: "assistant" });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/assistant/); // names the employee
+    expect(r.error).toMatch(/sonnet/); // names its configured model
+    expect(r.error).toMatch(/opus/); // names the known-model set
+    expect(r.error).toMatch(/config\.yaml/); // names the register-the-model fix
+    expect(r.error).toMatch(/\.yaml/); // points at the employee YAML fix
+    expect(r.error).not.toMatch(/^unknown model/); // NOT the cryptic bare-engine string
+  });
+
+  it("an EXPLICIT caller model override that's unknown stays the generic engine error (not employee-shaped)", () => {
+    // Only a model coming from the EMPLOYEE DEFAULT gets the employee-named
+    // error; an explicit override is the caller's own doing.
+    const r = validateNewSessionSelection(cfg(), { model: "sonnet" }, { engine: "claude", model: "opus", employee: "assistant" });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/unknown model "sonnet"/i);
+    expect(r.error).not.toMatch(/assistant/);
+  });
+
+  it("an unknown employee-default model without an employee slug falls back to the generic error", () => {
+    const r = validateNewSessionSelection(cfg(), {}, { engine: "claude", model: "sonnet" });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/unknown model "sonnet"/i);
+  });
+
   it("rejects an effort level not valid for the selected model", () => {
     const r = validateNewSessionSelection(cfg(), { engine: "claude", model: "opus", effortLevel: "xhigh" });
     expect(r.ok).toBe(false);
@@ -101,6 +130,30 @@ describe("validateNewSessionSelection", () => {
 
   it("rejects effort for an engine/model with no effort support", () => {
     const r = validateNewSessionSelection(cfg(), { engine: "antigravity", model: "gemini-3-flash-preview", effortLevel: "high" });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/does not support effort/i);
+  });
+
+  it("drops a stale employee-default effort when the employee engine/model does not support effort", () => {
+    const r = validateNewSessionSelection(
+      cfg(),
+      {},
+      { engine: "antigravity", model: "gemini-3-flash-preview", effortLevel: "high", employee: "security-reviewer" },
+    );
+    expect(r).toEqual({
+      ok: true,
+      engine: "antigravity",
+      model: "gemini-3-flash-preview",
+      effortLevel: undefined,
+    });
+  });
+
+  it("still rejects an explicit caller effort when the selected engine/model does not support effort", () => {
+    const r = validateNewSessionSelection(
+      cfg(),
+      { effortLevel: "high" },
+      { engine: "antigravity", model: "gemini-3-flash-preview", employee: "security-reviewer" },
+    );
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/does not support effort/i);
   });

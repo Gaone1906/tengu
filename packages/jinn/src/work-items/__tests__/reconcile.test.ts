@@ -1,0 +1,236 @@
+import { describe, it, expect, beforeAll } from "vitest";
+import os from "node:os";
+import fs from "node:fs";
+import path from "node:path";
+
+// Point the registry DB at a throwaway dir BEFORE importing it (SESSIONS_DB is
+// resolved from JINN_HOME at module load). Keeps the suite off the live DB.
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-reconcile-"));
+process.env.JINN_HOME = tmp;
+
+type Store = typeof import("../store.js");
+type Reconcile = typeof import("../reconcile.js");
+type Reg = typeof import("../../sessions/registry.js");
+
+let store: Store;
+let reconcile: Reconcile;
+let reg: Reg;
+let db: import("better-sqlite3").Database;
+
+type SessionStatus = "idle" | "running" | "error" | "waiting" | "interrupted";
+
+/** Insert a session in a given status and link it to a work item. `at` sets last_activity
+ *  so newest-first ordering in listSessionsByWorkItem is deterministic. */
+function linkedSession(id: string, workItemId: string, status: SessionStatus, at: string): void {
+  db.prepare(
+    `INSERT INTO sessions (id, engine, source, source_ref, status, work_item_id, created_at, last_activity)
+     VALUES (?, 'claude', 'cron', ?, ?, ?, ?, ?)`,
+  ).run(id, `cron:${id}`, status, workItemId, at, at);
+}
+
+beforeAll(async () => {
+  store = await import("../store.js");
+  reconcile = await import("../reconcile.js");
+  reg = await import("../../sessions/registry.js");
+  db = reg.initDb();
+});
+
+describe("deriveWorkItemStatus — pure truth table (GRS-021a elevated vocabulary)", () => {
+  const D = () => reconcile.deriveWorkItemStatus;
+
+  it("keeps sticky terminals (done/cancelled/ESCALATED) regardless of session evidence", () => {
+    expect(D()("done", ["running"])).toBe("done");
+    expect(D()("done", ["error", "interrupted"])).toBe("done");
+    expect(D()("cancelled", ["idle"])).toBe("cancelled");
+    expect(D()("escalated", ["running"])).toBe("escalated"); // operator queue never silently drained
+    expect(D()("escalated", ["idle"])).toBe("escalated");
+  });
+
+  it("leaves an item with NO linked sessions untouched (no evidence — backlog/assigned safe)", () => {
+    expect(D()("backlog", [])).toBe("backlog");
+    expect(D()("assigned", [])).toBe("assigned");
+    expect(D()("executing", [])).toBe("executing");
+    expect(D()("blocked", [])).toBe("blocked");
+  });
+
+  it("is executing when any linked session is in flight (running/waiting)", () => {
+    expect(D()("backlog", ["running"])).toBe("executing");
+    expect(D()("assigned", ["running"])).toBe("executing");
+    expect(D()("blocked", ["waiting"])).toBe("executing");
+    expect(D()("backlog", ["interrupted", "running"])).toBe("executing");
+    expect(D()("blocked", ["error", "waiting"])).toBe("executing");
+  });
+
+  it("derives IN_REVIEW when the NEWEST attempt settled idle (the vision's settle ≠ done)", () => {
+    // Arrays are newest-first: idle is the latest attempt, the older error is superseded.
+    expect(D()("backlog", ["idle"])).toBe("in_review");
+    expect(D()("blocked", ["idle", "error"])).toBe("in_review");
+    expect(D()("executing", ["idle", "interrupted"])).toBe("in_review");
+    // Never done from derivation alone — the TRUST hook / a reviewer decides.
+    expect(D()("executing", ["idle", "idle"])).toBe("in_review");
+  });
+
+  it("is blocked when the NEWEST attempt failed, even if an older attempt settled idle", () => {
+    expect(D()("executing", ["error", "idle"])).toBe("blocked");
+    expect(D()("executing", ["interrupted", "idle"])).toBe("blocked");
+    expect(D()("executing", ["interrupted"])).toBe("blocked");
+    expect(D()("backlog", ["error", "interrupted"])).toBe("blocked");
+  });
+
+  it("in-flight anywhere trumps a newer terminal state", () => {
+    expect(D()("backlog", ["error", "running"])).toBe("executing");
+    expect(D()("blocked", ["interrupted", "waiting"])).toBe("executing");
+  });
+
+  it("WORKFLOW items derive only executing — settles between steps never move them", () => {
+    // The run driver owns workflow terminals (workflow-bridge.ts); a step settle
+    // mid-run must not read as review-ready (or trust-auto-close mid-run).
+    expect(D()("executing", ["running"], "workflow")).toBe("executing");
+    expect(D()("backlog", ["running"], "workflow")).toBe("executing");
+    expect(D()("executing", ["idle"], "workflow")).toBe("executing");
+    expect(D()("executing", ["interrupted"], "workflow")).toBe("executing");
+    expect(D()("backlog", ["idle"], "workflow")).toBe("backlog");
+  });
+});
+
+describe("reconcileWorkItem — integration against real store + registry", () => {
+  it("returns undefined for an unknown id", () => {
+    expect(reconcile.reconcileWorkItem("wi_nope")).toBeUndefined();
+  });
+
+  it("moves executing → blocked when its only session was interrupted (the split-brain case)", () => {
+    const wi = store.createWorkItem({ title: "delegated fix", status: "executing", source: "delegation", sourceRef: "delegate:j1:1" });
+    linkedSession("s-int-1", wi.id, "interrupted", "2026-07-01T00:00:00.000Z");
+
+    const r = reconcile.reconcileWorkItem(wi.id);
+    expect(r?.changed).toBe(true);
+    expect(r?.item.status).toBe("blocked");
+    // The derived move is event-audited through the guarded transitions.
+    const last = store.listWorkItemEvents(wi.id).at(-1)!;
+    expect(last).toMatchObject({ kind: "status_change", fromStatus: "executing", toStatus: "blocked", actor: "reconciler" });
+  });
+
+  it("VERIFY-tier settle lands in in_review and STAYS (a reviewer closes it, not the reconciler)", () => {
+    const wi = store.createWorkItem({ title: "delegation settled", status: "executing", source: "delegation", sourceRef: "delegate:j2:1" });
+    linkedSession("s-ok-2", wi.id, "idle", "2026-07-01T01:00:00.000Z");
+
+    const r = reconcile.reconcileWorkItem(wi.id);
+    expect(r?.changed).toBe(true);
+    expect(r?.item.status).toBe("in_review");
+    // A second pass is a no-op: verify-tier items wait for their reviewer.
+    expect(reconcile.reconcileWorkItem(wi.id)?.changed).toBe(false);
+    expect(store.getWorkItem(wi.id)?.status).toBe("in_review");
+  });
+
+  it("TRUST-tier settle auto-closes: executing → in_review → done in ONE pass, both event-audited", () => {
+    const wi = store.createWorkItem({ title: "cron fire", status: "executing", source: "cron", sourceRef: "cron:j3:1" });
+    linkedSession("s-ok-3", wi.id, "idle", "2026-07-01T01:00:00.000Z");
+
+    const r = reconcile.reconcileWorkItem(wi.id);
+    expect(r?.changed).toBe(true);
+    expect(r?.item.status).toBe("done");
+    expect(r?.item.closedAt).not.toBeNull();
+    const kinds = store.listWorkItemEvents(wi.id).map((e) => `${e.fromStatus}→${e.toStatus}:${e.actor}`);
+    expect(kinds).toContain("executing→in_review:reconciler");
+    expect(kinds).toContain("in_review→done:policy:trust");
+  });
+
+  it("an explicit verify policy OVERRIDES the trust provenance default (cron item held for review)", () => {
+    const wi = store.createWorkItem({
+      title: "reviewed cron",
+      status: "executing",
+      source: "cron",
+      sourceRef: "cron:j3b:1",
+      verifyPolicy: { mode: "verify" },
+    });
+    linkedSession("s-ok-3b", wi.id, "idle", "2026-07-01T01:00:00.000Z");
+    expect(reconcile.reconcileWorkItem(wi.id)?.item.status).toBe("in_review");
+  });
+
+  it("a pre-existing in_review TRUST item closes on the next sweep pass (hook fires on sitting items too)", () => {
+    const wi = store.createWorkItem({ title: "stranded trust", status: "in_review", source: "cron", sourceRef: "cron:j3c:1" });
+    linkedSession("s-ok-3c", wi.id, "idle", "2026-07-01T01:00:00.000Z");
+    const r = reconcile.reconcileWorkItem(wi.id);
+    expect(r?.item.status).toBe("done");
+  });
+
+  it("moves executing → blocked when a NEWER attempt failed after an older idle (recency wins)", () => {
+    const wi = store.createWorkItem({ title: "regressed", status: "executing", source: "delegation", sourceRef: "delegate:j4:1" });
+    linkedSession("s-ok-4", wi.id, "idle", "2026-07-01T00:00:00.000Z");
+    linkedSession("s-int-4", wi.id, "interrupted", "2026-07-01T01:00:00.000Z");
+
+    expect(reconcile.reconcileWorkItem(wi.id)?.item.status).toBe("blocked");
+  });
+
+  it("is a no-op when derived status already matches (no write, no updated_at churn)", () => {
+    const wi = store.createWorkItem({ title: "steady", status: "executing", source: "cron", sourceRef: "cron:j5:1" });
+    linkedSession("s-run-5", wi.id, "running", "2026-07-01T00:00:00.000Z");
+    const before = store.getWorkItem(wi.id)!.updatedAt;
+
+    const r = reconcile.reconcileWorkItem(wi.id);
+    expect(r?.changed).toBe(false);
+    expect(store.getWorkItem(wi.id)?.updatedAt).toBe(before);
+  });
+
+  it("keeps done sticky even though its session errored; keeps ESCALATED sticky through churn", () => {
+    const done = store.createWorkItem({ title: "finished", status: "done", source: "cron", sourceRef: "cron:j6:1" });
+    linkedSession("s-err-6", done.id, "error", "2026-07-01T00:00:00.000Z");
+    expect(reconcile.reconcileWorkItem(done.id)?.changed).toBe(false);
+    expect(store.getWorkItem(done.id)?.status).toBe("done");
+
+    const esc = store.createWorkItem({ title: "with operator", status: "escalated", source: "delegation", sourceRef: "delegate:j7:1" });
+    linkedSession("s-idle-7", esc.id, "idle", "2026-07-01T00:00:00.000Z");
+    expect(reconcile.reconcileWorkItem(esc.id)?.changed).toBe(false);
+    expect(store.getWorkItem(esc.id)?.status).toBe("escalated");
+  });
+
+  it("leaves an item with no linked sessions untouched (backlog/assigned never clobbered)", () => {
+    const wi = store.createWorkItem({ title: "unlinked", status: "assigned", source: "human" });
+    expect(reconcile.reconcileWorkItem(wi.id)?.changed).toBe(false);
+    expect(store.getWorkItem(wi.id)?.status).toBe("assigned");
+  });
+
+  it("WORKFLOW item: step settle does NOT move it; the bridge's run-terminal does", async () => {
+    const bridge = (await import("../workflow-bridge.js")).createWorkflowTodoBridge();
+    const run = { runId: "run-rc-1", workflowId: "wf-rc", title: "wf run" };
+    bridge.mintRunItem(run);
+    const item = store.getWorkItemBySourceRef("workflow", "workflow:wf-rc:run-rc-1")!;
+    linkedSession("s-wf-step1", item.id, "idle", "2026-07-01T00:00:00.000Z"); // step 1 settled, run mid-flight
+
+    expect(reconcile.reconcileWorkItem(item.id)?.item.status).toBe("backlog"); // untouched — not in_review, not done
+    bridge.onRunTerminal({ ...run, status: "completed" });
+    expect(store.getWorkItem(item.id)?.status).toBe("done");
+  });
+});
+
+describe("reconcileActiveWorkItems / startup sweep — the recoverStaleSessions moment", () => {
+  it("sweeps non-sticky items (incl. in_review) and skips done/cancelled/escalated", () => {
+    const dying = store.createWorkItem({ title: "sweep-dying", status: "executing", source: "cron", sourceRef: "cron:sw1:1" });
+    linkedSession("s-sw-int", dying.id, "interrupted", "2026-07-01T02:00:00.000Z");
+    const closed = store.createWorkItem({ title: "sweep-closed", status: "done", source: "cron", sourceRef: "cron:sw2:1" });
+    linkedSession("s-sw-err", closed.id, "error", "2026-07-01T02:00:00.000Z");
+
+    const result = reconcile.reconcileActiveWorkItems();
+    expect(result.checked).toBeGreaterThanOrEqual(1);
+    expect(result.changed).toBeGreaterThanOrEqual(1);
+
+    expect(store.getWorkItem(dying.id)?.status).toBe("blocked");
+    expect(store.getWorkItem(closed.id)?.status).toBe("done"); // sticky, untouched
+  });
+
+  it("reconcileWorkItemsOnStartup returns the change count and never throws", () => {
+    const changed = reconcile.reconcileWorkItemsOnStartup();
+    expect(typeof changed).toBe("number");
+    expect(changed).toBeGreaterThanOrEqual(0);
+  });
+
+  it("startWorkItemReconciler ticks a sweep and stops cleanly", async () => {
+    const wi = store.createWorkItem({ title: "periodic", status: "executing", source: "cron", sourceRef: "cron:tick:1" });
+    linkedSession("s-tick-1", wi.id, "idle", "2026-07-01T03:00:00.000Z");
+    const stop = reconcile.startWorkItemReconciler(20);
+    await new Promise((r) => setTimeout(r, 80));
+    stop();
+    // trust-tier cron item settled → the periodic sweep closed it without a boot.
+    expect(store.getWorkItem(wi.id)?.status).toBe("done");
+  });
+});

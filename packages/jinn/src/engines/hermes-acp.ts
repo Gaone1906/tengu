@@ -6,6 +6,7 @@ import { resolveBin } from "../shared/resolve-bin.js";
 import { HermesRpc } from "./hermes-jsonrpc.js";
 import { mapSessionUpdate, extractPromptText } from "./hermes-protocol.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
+import { buildAcpMcpServers } from "./hermes-mcp.js";
 
 const TURN_TIMEOUT_MS = 14 * 24 * 60 * 60 * 1000;
 const HANDSHAKE_TIMEOUT_MS = 60_000;
@@ -105,11 +106,15 @@ export class HermesAcpEngine implements InterruptibleEngine {
         (async () => {
           await p.initialized;
 
-          // session/new or session/load (with Fix 3 fallback)
+          // session/new or session/load (with Fix 3 fallback). GRS-018: emit the
+          // resolved MCP set into the ACP handshake — Hermes registers these
+          // servers at session start, so a jinn-spawned Hermes session finally
+          // sees (and can call) the attached jinn tools.
           if (!p.hermesSessionId) {
+            const mcpServers = buildAcpMcpServers(opts.resolvedMcp);
             if (opts.resumeSessionId) {
               try {
-                await rpc.request("session/load", { sessionId: opts.resumeSessionId, cwd: opts.cwd, mcpServers: [] });
+                await rpc.request("session/load", { sessionId: opts.resumeSessionId, cwd: opts.cwd, mcpServers });
                 p.hermesSessionId = opts.resumeSessionId;
               } catch (loadErr) {
                 // Fix 3: stale/expired id — fall back to a fresh session so the
@@ -118,13 +123,13 @@ export class HermesAcpEngine implements InterruptibleEngine {
                   `[hermes-acp] session/load failed for ${opts.resumeSessionId}, falling back to session/new: ` +
                   (loadErr instanceof Error ? loadErr.message : String(loadErr)),
                 );
-                const ns = await rpc.request<Record<string, unknown>>("session/new", { cwd: opts.cwd, mcpServers: [] });
+                const ns = await rpc.request<Record<string, unknown>>("session/new", { cwd: opts.cwd, mcpServers });
                 p.hermesSessionId = String(ns.sessionId);
                 const models = ns.models as Record<string, unknown> | undefined;
                 p.currentModelId = models?.currentModelId ? String(models.currentModelId) : undefined;
               }
             } else {
-              const ns = await rpc.request<Record<string, unknown>>("session/new", { cwd: opts.cwd, mcpServers: [] });
+              const ns = await rpc.request<Record<string, unknown>>("session/new", { cwd: opts.cwd, mcpServers });
               p.hermesSessionId = String(ns.sessionId);
               const models = ns.models as Record<string, unknown> | undefined;
               p.currentModelId = models?.currentModelId ? String(models.currentModelId) : undefined;
@@ -241,4 +246,3 @@ export class HermesAcpEngine implements InterruptibleEngine {
     /* no-op */
   }
 }
-

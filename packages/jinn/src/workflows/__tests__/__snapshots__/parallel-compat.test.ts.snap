@@ -1,0 +1,3140 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 1: linear three-step chain with declared handoff blocks > raw-bytes 1`] = `
+"{
+  "schemaVersion": 2,
+  "runId": "run-golden-1",
+  "workflowId": "golden-linear",
+  "definitionVersion": 1,
+  "title": "golden-linear",
+  "trigger": {
+    "kind": "manual"
+  },
+  "status": "completed",
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "steps": [
+    {
+      "nodeId": "a",
+      "label": "A",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:a:1",
+      "outcome": {
+        "sessionId": "sess:a:1",
+        "summary": "a shipped",
+        "artifacts": [
+          "src/a.ts"
+        ],
+        "finalMessage": "A done.\\n\`\`\`handoff\\n{ \\"summary\\": \\"a shipped\\", \\"artifacts\\": [\\"src/a.ts\\"] }\\n\`\`\`",
+        "extractedFrom": "handoff-block"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "b",
+      "label": "B",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:b:1",
+      "outcome": {
+        "sessionId": "sess:b:1",
+        "summary": "b reviewed a",
+        "artifacts": [
+          "src/b.ts"
+        ],
+        "notes": "watch the cap",
+        "finalMessage": "B done.\\n\`\`\`handoff\\n{ \\"summary\\": \\"b reviewed a\\", \\"artifacts\\": [\\"src/b.ts\\"], \\"notes\\": \\"watch the cap\\" }\\n\`\`\`",
+        "extractedFrom": "handoff-block"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "c",
+      "label": "C",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:c:1",
+      "outcome": {
+        "sessionId": "sess:c:1",
+        "finalMessage": "C wrapped everything up.",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    }
+  ],
+  "parked": null,
+  "order": [
+    "a",
+    "b",
+    "c"
+  ],
+  "definitionSnapshot": {
+    "schemaVersion": 1,
+    "id": "golden-linear",
+    "title": "golden-linear",
+    "version": 1,
+    "status": "active",
+    "nodes": [
+      {
+        "id": "trg",
+        "type": "trigger",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "trigger": {
+          "kind": "manual"
+        }
+      },
+      {
+        "id": "a",
+        "type": "step",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        },
+        "instructions": "do a"
+      },
+      {
+        "id": "b",
+        "type": "step",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        },
+        "instructions": "do b"
+      },
+      {
+        "id": "c",
+        "type": "step",
+        "label": "C",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        },
+        "instructions": "do c"
+      }
+    ],
+    "edges": [
+      {
+        "id": "e0",
+        "from": "trg",
+        "to": "a",
+        "kind": "sequence"
+      },
+      {
+        "id": "e1",
+        "from": "a",
+        "to": "b",
+        "kind": "sequence"
+      },
+      {
+        "id": "e2",
+        "from": "b",
+        "to": "c",
+        "kind": "sequence"
+      }
+    ],
+    "updatedAt": "2026-07-04T18:00:00.000Z"
+  }
+}
+"
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 1: linear three-step chain with declared handoff blocks 1`] = `
+{
+  "definitionSnapshot": {
+    "edges": [
+      {
+        "from": "trg",
+        "id": "e0",
+        "kind": "sequence",
+        "to": "a",
+      },
+      {
+        "from": "a",
+        "id": "e1",
+        "kind": "sequence",
+        "to": "b",
+      },
+      {
+        "from": "b",
+        "id": "e2",
+        "kind": "sequence",
+        "to": "c",
+      },
+    ],
+    "id": "golden-linear",
+    "nodes": [
+      {
+        "id": "trg",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "trigger": {
+          "kind": "manual",
+        },
+        "type": "trigger",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "a",
+        "instructions": "do a",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "b",
+        "instructions": "do b",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "c",
+        "instructions": "do c",
+        "label": "C",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+    ],
+    "schemaVersion": 1,
+    "status": "active",
+    "title": "golden-linear",
+    "updatedAt": "2026-07-04T18:00:00.000Z",
+    "version": 1,
+  },
+  "definitionVersion": 1,
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "order": [
+    "a",
+    "b",
+    "c",
+  ],
+  "parked": null,
+  "runId": "run-golden-1",
+  "schemaVersion": 2,
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "status": "completed",
+  "steps": [
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "A",
+      "nodeId": "a",
+      "outcome": {
+        "artifacts": [
+          "src/a.ts",
+        ],
+        "extractedFrom": "handoff-block",
+        "finalMessage": "A done.
+\`\`\`handoff
+{ "summary": "a shipped", "artifacts": ["src/a.ts"] }
+\`\`\`",
+        "sessionId": "sess:a:1",
+        "summary": "a shipped",
+      },
+      "sessionId": "sess:a:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "B",
+      "nodeId": "b",
+      "outcome": {
+        "artifacts": [
+          "src/b.ts",
+        ],
+        "extractedFrom": "handoff-block",
+        "finalMessage": "B done.
+\`\`\`handoff
+{ "summary": "b reviewed a", "artifacts": ["src/b.ts"], "notes": "watch the cap" }
+\`\`\`",
+        "notes": "watch the cap",
+        "sessionId": "sess:b:1",
+        "summary": "b reviewed a",
+      },
+      "sessionId": "sess:b:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "C",
+      "nodeId": "c",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "C wrapped everything up.",
+        "sessionId": "sess:c:1",
+      },
+      "sessionId": "sess:c:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+  ],
+  "title": "golden-linear",
+  "trigger": {
+    "kind": "manual",
+  },
+  "workflowId": "golden-linear",
+}
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 2: sample-shaped branching graph (fan-out + fan-in) executes sequentially in topo order > raw-bytes 1`] = `
+"{
+  "schemaVersion": 2,
+  "runId": "run-golden-2",
+  "workflowId": "golden-branch",
+  "definitionVersion": 1,
+  "title": "golden-branch",
+  "trigger": {
+    "kind": "manual"
+  },
+  "status": "completed",
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "steps": [
+    {
+      "nodeId": "select",
+      "label": "SELECT",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:select:1",
+      "outcome": {
+        "sessionId": "sess:select:1",
+        "finalMessage": "output of select attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "implement",
+      "label": "IMPLEMENT",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:implement:1",
+      "outcome": {
+        "sessionId": "sess:implement:1",
+        "finalMessage": "output of implement attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "adversary",
+      "label": "ADVERSARY",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:adversary:1",
+      "outcome": {
+        "sessionId": "sess:adversary:1",
+        "finalMessage": "output of adversary attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "steer",
+      "label": "STEER",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:steer:1",
+      "outcome": {
+        "sessionId": "sess:steer:1",
+        "finalMessage": "output of steer attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "decide",
+      "label": "DECIDE",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:decide:1",
+      "outcome": {
+        "sessionId": "sess:decide:1",
+        "finalMessage": "output of decide attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    }
+  ],
+  "parked": null,
+  "order": [
+    "select",
+    "implement",
+    "adversary",
+    "steer",
+    "decide"
+  ],
+  "definitionSnapshot": {
+    "schemaVersion": 1,
+    "id": "golden-branch",
+    "title": "golden-branch",
+    "version": 1,
+    "status": "active",
+    "nodes": [
+      {
+        "id": "trg",
+        "type": "trigger",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "trigger": {
+          "kind": "manual"
+        }
+      },
+      {
+        "id": "select",
+        "type": "step",
+        "label": "SELECT",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      },
+      {
+        "id": "implement",
+        "type": "step",
+        "label": "IMPLEMENT",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      },
+      {
+        "id": "adversary",
+        "type": "step",
+        "label": "ADVERSARY",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      },
+      {
+        "id": "steer",
+        "type": "step",
+        "label": "STEER",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      },
+      {
+        "id": "decide",
+        "type": "step",
+        "label": "DECIDE",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e0",
+        "from": "trg",
+        "to": "select",
+        "kind": "sequence"
+      },
+      {
+        "id": "e1",
+        "from": "select",
+        "to": "implement",
+        "kind": "sequence"
+      },
+      {
+        "id": "e2",
+        "from": "implement",
+        "to": "adversary",
+        "kind": "sequence"
+      },
+      {
+        "id": "e3",
+        "from": "adversary",
+        "to": "decide",
+        "kind": "handoff"
+      },
+      {
+        "id": "e4",
+        "from": "adversary",
+        "to": "steer",
+        "kind": "sequence"
+      },
+      {
+        "id": "e5",
+        "from": "steer",
+        "to": "decide",
+        "kind": "sequence"
+      }
+    ],
+    "updatedAt": "2026-07-04T18:00:00.000Z"
+  }
+}
+"
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 2: sample-shaped branching graph (fan-out + fan-in) executes sequentially in topo order 1`] = `
+{
+  "definitionSnapshot": {
+    "edges": [
+      {
+        "from": "trg",
+        "id": "e0",
+        "kind": "sequence",
+        "to": "select",
+      },
+      {
+        "from": "select",
+        "id": "e1",
+        "kind": "sequence",
+        "to": "implement",
+      },
+      {
+        "from": "implement",
+        "id": "e2",
+        "kind": "sequence",
+        "to": "adversary",
+      },
+      {
+        "from": "adversary",
+        "id": "e3",
+        "kind": "handoff",
+        "to": "decide",
+      },
+      {
+        "from": "adversary",
+        "id": "e4",
+        "kind": "sequence",
+        "to": "steer",
+      },
+      {
+        "from": "steer",
+        "id": "e5",
+        "kind": "sequence",
+        "to": "decide",
+      },
+    ],
+    "id": "golden-branch",
+    "nodes": [
+      {
+        "id": "trg",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "trigger": {
+          "kind": "manual",
+        },
+        "type": "trigger",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "select",
+        "label": "SELECT",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "implement",
+        "label": "IMPLEMENT",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "adversary",
+        "label": "ADVERSARY",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "steer",
+        "label": "STEER",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "decide",
+        "label": "DECIDE",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+    ],
+    "schemaVersion": 1,
+    "status": "active",
+    "title": "golden-branch",
+    "updatedAt": "2026-07-04T18:00:00.000Z",
+    "version": 1,
+  },
+  "definitionVersion": 1,
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "order": [
+    "select",
+    "implement",
+    "adversary",
+    "steer",
+    "decide",
+  ],
+  "parked": null,
+  "runId": "run-golden-2",
+  "schemaVersion": 2,
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "status": "completed",
+  "steps": [
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "SELECT",
+      "nodeId": "select",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of select attempt 1",
+        "sessionId": "sess:select:1",
+      },
+      "sessionId": "sess:select:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "IMPLEMENT",
+      "nodeId": "implement",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of implement attempt 1",
+        "sessionId": "sess:implement:1",
+      },
+      "sessionId": "sess:implement:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "ADVERSARY",
+      "nodeId": "adversary",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of adversary attempt 1",
+        "sessionId": "sess:adversary:1",
+      },
+      "sessionId": "sess:adversary:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "STEER",
+      "nodeId": "steer",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of steer attempt 1",
+        "sessionId": "sess:steer:1",
+      },
+      "sessionId": "sess:steer:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "DECIDE",
+      "nodeId": "decide",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of decide attempt 1",
+        "sessionId": "sess:decide:1",
+      },
+      "sessionId": "sess:decide:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+  ],
+  "title": "golden-branch",
+  "trigger": {
+    "kind": "manual",
+  },
+  "workflowId": "golden-branch",
+}
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 3: inline steps + artifact checkpoint + mid-graph approval park, then approve to completion > approved-completed 1`] = `
+{
+  "definitionSnapshot": {
+    "edges": [
+      {
+        "from": "trg",
+        "id": "e0",
+        "kind": "sequence",
+        "to": "i",
+      },
+      {
+        "from": "i",
+        "id": "e1",
+        "kind": "sequence",
+        "to": "chk",
+      },
+      {
+        "from": "chk",
+        "id": "e2",
+        "kind": "sequence",
+        "to": "a",
+      },
+      {
+        "from": "a",
+        "id": "e3",
+        "kind": "sequence",
+        "to": "ap",
+      },
+      {
+        "from": "ap",
+        "id": "e4",
+        "kind": "sequence",
+        "to": "b",
+      },
+    ],
+    "id": "golden-park",
+    "nodes": [
+      {
+        "id": "trg",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "trigger": {
+          "kind": "manual",
+        },
+        "type": "trigger",
+      },
+      {
+        "id": "i",
+        "label": "I",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "gate": {
+          "description": "has report",
+          "glob": "reports/*.md",
+          "kind": "artifact",
+        },
+        "id": "chk",
+        "label": "CHK",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "gate",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "a",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "gate": {
+          "approvalRef": "op-ok",
+          "description": "operator approves",
+          "kind": "approval",
+        },
+        "id": "ap",
+        "label": "AP",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "gate",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "b",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+    ],
+    "schemaVersion": 1,
+    "status": "active",
+    "title": "golden-park",
+    "updatedAt": "2026-07-04T18:00:00.000Z",
+    "version": 1,
+  },
+  "definitionVersion": 1,
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "order": [
+    "i",
+    "chk",
+    "a",
+    "ap",
+    "b",
+  ],
+  "parked": null,
+  "runId": "run-golden-3",
+  "schemaVersion": 2,
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "status": "completed",
+  "steps": [
+    {
+      "actor": null,
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 0,
+      "detail": "inline step (no actor)",
+      "label": "I",
+      "nodeId": "i",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "inline",
+    },
+    {
+      "actor": null,
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 0,
+      "detail": "artifact checkpoint (auto-evaluated)",
+      "label": "CHK",
+      "nodeId": "chk",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "checkpoint",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "A",
+      "nodeId": "a",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of a attempt 1",
+        "sessionId": "sess:a:1",
+      },
+      "sessionId": "sess:a:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": null,
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 0,
+      "detail": "approved by operator",
+      "label": "AP",
+      "nodeId": "ap",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "checkpoint",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "B",
+      "nodeId": "b",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of b attempt 1",
+        "sessionId": "sess:b:1",
+      },
+      "sessionId": "sess:b:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+  ],
+  "title": "golden-park",
+  "trigger": {
+    "kind": "manual",
+  },
+  "workflowId": "golden-park",
+}
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 3: inline steps + artifact checkpoint + mid-graph approval park, then approve to completion > approved-completed raw-bytes 1`] = `
+"{
+  "schemaVersion": 2,
+  "runId": "run-golden-3",
+  "workflowId": "golden-park",
+  "definitionVersion": 1,
+  "title": "golden-park",
+  "trigger": {
+    "kind": "manual"
+  },
+  "status": "completed",
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "steps": [
+    {
+      "nodeId": "i",
+      "label": "I",
+      "actor": null,
+      "status": "inline",
+      "attempt": 0,
+      "at": "2026-07-04T18:00:00.000Z",
+      "detail": "inline step (no actor)",
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "chk",
+      "label": "CHK",
+      "actor": null,
+      "status": "checkpoint",
+      "attempt": 0,
+      "at": "2026-07-04T18:00:00.000Z",
+      "detail": "artifact checkpoint (auto-evaluated)",
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "a",
+      "label": "A",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:a:1",
+      "outcome": {
+        "sessionId": "sess:a:1",
+        "finalMessage": "output of a attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "ap",
+      "label": "AP",
+      "actor": null,
+      "status": "checkpoint",
+      "attempt": 0,
+      "at": "2026-07-04T18:00:00.000Z",
+      "detail": "approved by operator",
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "b",
+      "label": "B",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:b:1",
+      "outcome": {
+        "sessionId": "sess:b:1",
+        "finalMessage": "output of b attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    }
+  ],
+  "parked": null,
+  "order": [
+    "i",
+    "chk",
+    "a",
+    "ap",
+    "b"
+  ],
+  "definitionSnapshot": {
+    "schemaVersion": 1,
+    "id": "golden-park",
+    "title": "golden-park",
+    "version": 1,
+    "status": "active",
+    "nodes": [
+      {
+        "id": "trg",
+        "type": "trigger",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "trigger": {
+          "kind": "manual"
+        }
+      },
+      {
+        "id": "i",
+        "type": "step",
+        "label": "I",
+        "position": {
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": "chk",
+        "type": "gate",
+        "label": "CHK",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "gate": {
+          "kind": "artifact",
+          "glob": "reports/*.md",
+          "description": "has report"
+        }
+      },
+      {
+        "id": "a",
+        "type": "step",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      },
+      {
+        "id": "ap",
+        "type": "gate",
+        "label": "AP",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "gate": {
+          "kind": "approval",
+          "description": "operator approves",
+          "approvalRef": "op-ok"
+        }
+      },
+      {
+        "id": "b",
+        "type": "step",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e0",
+        "from": "trg",
+        "to": "i",
+        "kind": "sequence"
+      },
+      {
+        "id": "e1",
+        "from": "i",
+        "to": "chk",
+        "kind": "sequence"
+      },
+      {
+        "id": "e2",
+        "from": "chk",
+        "to": "a",
+        "kind": "sequence"
+      },
+      {
+        "id": "e3",
+        "from": "a",
+        "to": "ap",
+        "kind": "sequence"
+      },
+      {
+        "id": "e4",
+        "from": "ap",
+        "to": "b",
+        "kind": "sequence"
+      }
+    ],
+    "updatedAt": "2026-07-04T18:00:00.000Z"
+  }
+}
+"
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 3: inline steps + artifact checkpoint + mid-graph approval park, then approve to completion > parked 1`] = `
+{
+  "definitionSnapshot": {
+    "edges": [
+      {
+        "from": "trg",
+        "id": "e0",
+        "kind": "sequence",
+        "to": "i",
+      },
+      {
+        "from": "i",
+        "id": "e1",
+        "kind": "sequence",
+        "to": "chk",
+      },
+      {
+        "from": "chk",
+        "id": "e2",
+        "kind": "sequence",
+        "to": "a",
+      },
+      {
+        "from": "a",
+        "id": "e3",
+        "kind": "sequence",
+        "to": "ap",
+      },
+      {
+        "from": "ap",
+        "id": "e4",
+        "kind": "sequence",
+        "to": "b",
+      },
+    ],
+    "id": "golden-park",
+    "nodes": [
+      {
+        "id": "trg",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "trigger": {
+          "kind": "manual",
+        },
+        "type": "trigger",
+      },
+      {
+        "id": "i",
+        "label": "I",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "gate": {
+          "description": "has report",
+          "glob": "reports/*.md",
+          "kind": "artifact",
+        },
+        "id": "chk",
+        "label": "CHK",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "gate",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "a",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "gate": {
+          "approvalRef": "op-ok",
+          "description": "operator approves",
+          "kind": "approval",
+        },
+        "id": "ap",
+        "label": "AP",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "gate",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "b",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+    ],
+    "schemaVersion": 1,
+    "status": "active",
+    "title": "golden-park",
+    "updatedAt": "2026-07-04T18:00:00.000Z",
+    "version": 1,
+  },
+  "definitionVersion": 1,
+  "endedAt": null,
+  "order": [
+    "i",
+    "chk",
+    "a",
+    "ap",
+    "b",
+  ],
+  "parked": {
+    "at": "2026-07-04T18:00:00.000Z",
+    "description": "operator approves",
+    "evaluator": "human-approval",
+    "kind": "approval",
+    "nodeId": "ap",
+    "ref": "op-ok",
+    "scope": "gateNode",
+  },
+  "runId": "run-golden-3",
+  "schemaVersion": 2,
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "status": "parked",
+  "steps": [
+    {
+      "actor": null,
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 0,
+      "detail": "inline step (no actor)",
+      "label": "I",
+      "nodeId": "i",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "inline",
+    },
+    {
+      "actor": null,
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 0,
+      "detail": "artifact checkpoint (auto-evaluated)",
+      "label": "CHK",
+      "nodeId": "chk",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "checkpoint",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "A",
+      "nodeId": "a",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of a attempt 1",
+        "sessionId": "sess:a:1",
+      },
+      "sessionId": "sess:a:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": null,
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 0,
+      "label": "AP",
+      "nodeId": "ap",
+      "status": "pending",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 0,
+      "label": "B",
+      "nodeId": "b",
+      "status": "pending",
+    },
+  ],
+  "title": "golden-park",
+  "trigger": {
+    "kind": "manual",
+  },
+  "workflowId": "golden-park",
+}
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 3: inline steps + artifact checkpoint + mid-graph approval park, then approve to completion > parked raw-bytes 1`] = `
+"{
+  "schemaVersion": 2,
+  "runId": "run-golden-3",
+  "workflowId": "golden-park",
+  "definitionVersion": 1,
+  "title": "golden-park",
+  "trigger": {
+    "kind": "manual"
+  },
+  "status": "parked",
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "endedAt": null,
+  "steps": [
+    {
+      "nodeId": "i",
+      "label": "I",
+      "actor": null,
+      "status": "inline",
+      "attempt": 0,
+      "at": "2026-07-04T18:00:00.000Z",
+      "detail": "inline step (no actor)",
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "chk",
+      "label": "CHK",
+      "actor": null,
+      "status": "checkpoint",
+      "attempt": 0,
+      "at": "2026-07-04T18:00:00.000Z",
+      "detail": "artifact checkpoint (auto-evaluated)",
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "a",
+      "label": "A",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:a:1",
+      "outcome": {
+        "sessionId": "sess:a:1",
+        "finalMessage": "output of a attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "ap",
+      "label": "AP",
+      "actor": null,
+      "status": "pending",
+      "attempt": 0,
+      "at": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "b",
+      "label": "B",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "pending",
+      "attempt": 0,
+      "at": "2026-07-04T18:00:00.000Z"
+    }
+  ],
+  "parked": {
+    "scope": "gateNode",
+    "nodeId": "ap",
+    "kind": "approval",
+    "evaluator": "human-approval",
+    "ref": "op-ok",
+    "description": "operator approves",
+    "at": "2026-07-04T18:00:00.000Z"
+  },
+  "order": [
+    "i",
+    "chk",
+    "a",
+    "ap",
+    "b"
+  ],
+  "definitionSnapshot": {
+    "schemaVersion": 1,
+    "id": "golden-park",
+    "title": "golden-park",
+    "version": 1,
+    "status": "active",
+    "nodes": [
+      {
+        "id": "trg",
+        "type": "trigger",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "trigger": {
+          "kind": "manual"
+        }
+      },
+      {
+        "id": "i",
+        "type": "step",
+        "label": "I",
+        "position": {
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": "chk",
+        "type": "gate",
+        "label": "CHK",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "gate": {
+          "kind": "artifact",
+          "glob": "reports/*.md",
+          "description": "has report"
+        }
+      },
+      {
+        "id": "a",
+        "type": "step",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      },
+      {
+        "id": "ap",
+        "type": "gate",
+        "label": "AP",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "gate": {
+          "kind": "approval",
+          "description": "operator approves",
+          "approvalRef": "op-ok"
+        }
+      },
+      {
+        "id": "b",
+        "type": "step",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e0",
+        "from": "trg",
+        "to": "i",
+        "kind": "sequence"
+      },
+      {
+        "id": "e1",
+        "from": "i",
+        "to": "chk",
+        "kind": "sequence"
+      },
+      {
+        "id": "e2",
+        "from": "chk",
+        "to": "a",
+        "kind": "sequence"
+      },
+      {
+        "id": "e3",
+        "from": "a",
+        "to": "ap",
+        "kind": "sequence"
+      },
+      {
+        "id": "e4",
+        "from": "ap",
+        "to": "b",
+        "kind": "sequence"
+      }
+    ],
+    "updatedAt": "2026-07-04T18:00:00.000Z"
+  }
+}
+"
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 4: gate-less bounded loop runs exactly maxRoundsPerRun rounds with in-place spliced receipts > raw-bytes 1`] = `
+"{
+  "schemaVersion": 2,
+  "runId": "run-golden-4",
+  "workflowId": "golden-loop",
+  "definitionVersion": 1,
+  "title": "golden-loop",
+  "trigger": {
+    "kind": "manual"
+  },
+  "status": "completed",
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "steps": [
+    {
+      "nodeId": "a",
+      "label": "A",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:a:1",
+      "outcome": {
+        "sessionId": "sess:a:1",
+        "finalMessage": "output of a attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "b",
+      "label": "B",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:b:1",
+      "outcome": {
+        "sessionId": "sess:b:1",
+        "finalMessage": "output of b attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "a",
+      "label": "A",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "round": 2,
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:a:r2:1",
+      "outcome": {
+        "sessionId": "sess:a:r2:1",
+        "finalMessage": "round-2 a builds on round-1 b",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "b",
+      "label": "B",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "round": 2,
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:b:r2:1",
+      "outcome": {
+        "sessionId": "sess:b:r2:1",
+        "finalMessage": "output of b attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "c",
+      "label": "C",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:c:1",
+      "outcome": {
+        "sessionId": "sess:c:1",
+        "finalMessage": "output of c attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    }
+  ],
+  "parked": null,
+  "order": [
+    "a",
+    "b",
+    "c"
+  ],
+  "rounds": 2,
+  "definitionSnapshot": {
+    "schemaVersion": 1,
+    "id": "golden-loop",
+    "title": "golden-loop",
+    "version": 1,
+    "status": "active",
+    "nodes": [
+      {
+        "id": "trg",
+        "type": "trigger",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "trigger": {
+          "kind": "manual"
+        }
+      },
+      {
+        "id": "a",
+        "type": "step",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      },
+      {
+        "id": "b",
+        "type": "step",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      },
+      {
+        "id": "c",
+        "type": "step",
+        "label": "C",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e0",
+        "from": "trg",
+        "to": "a",
+        "kind": "sequence"
+      },
+      {
+        "id": "e1",
+        "from": "a",
+        "to": "b",
+        "kind": "sequence"
+      },
+      {
+        "id": "e2",
+        "from": "b",
+        "to": "c",
+        "kind": "sequence"
+      },
+      {
+        "id": "lp",
+        "from": "b",
+        "to": "a",
+        "kind": "loop"
+      }
+    ],
+    "loop": {
+      "maxRoundsPerRun": 2
+    },
+    "updatedAt": "2026-07-04T18:00:00.000Z"
+  },
+  "loopExit": {
+    "round": 2,
+    "at": "2026-07-04T18:00:00.000Z",
+    "reason": "max-rounds"
+  }
+}
+"
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 4: gate-less bounded loop runs exactly maxRoundsPerRun rounds with in-place spliced receipts 1`] = `
+{
+  "definitionSnapshot": {
+    "edges": [
+      {
+        "from": "trg",
+        "id": "e0",
+        "kind": "sequence",
+        "to": "a",
+      },
+      {
+        "from": "a",
+        "id": "e1",
+        "kind": "sequence",
+        "to": "b",
+      },
+      {
+        "from": "b",
+        "id": "e2",
+        "kind": "sequence",
+        "to": "c",
+      },
+      {
+        "from": "b",
+        "id": "lp",
+        "kind": "loop",
+        "to": "a",
+      },
+    ],
+    "id": "golden-loop",
+    "loop": {
+      "maxRoundsPerRun": 2,
+    },
+    "nodes": [
+      {
+        "id": "trg",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "trigger": {
+          "kind": "manual",
+        },
+        "type": "trigger",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "a",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "b",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "c",
+        "label": "C",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+    ],
+    "schemaVersion": 1,
+    "status": "active",
+    "title": "golden-loop",
+    "updatedAt": "2026-07-04T18:00:00.000Z",
+    "version": 1,
+  },
+  "definitionVersion": 1,
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "loopExit": {
+    "at": "2026-07-04T18:00:00.000Z",
+    "reason": "max-rounds",
+    "round": 2,
+  },
+  "order": [
+    "a",
+    "b",
+    "c",
+  ],
+  "parked": null,
+  "rounds": 2,
+  "runId": "run-golden-4",
+  "schemaVersion": 2,
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "status": "completed",
+  "steps": [
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "A",
+      "nodeId": "a",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of a attempt 1",
+        "sessionId": "sess:a:1",
+      },
+      "sessionId": "sess:a:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "B",
+      "nodeId": "b",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of b attempt 1",
+        "sessionId": "sess:b:1",
+      },
+      "sessionId": "sess:b:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "A",
+      "nodeId": "a",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "round-2 a builds on round-1 b",
+        "sessionId": "sess:a:r2:1",
+      },
+      "round": 2,
+      "sessionId": "sess:a:r2:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "B",
+      "nodeId": "b",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of b attempt 1",
+        "sessionId": "sess:b:r2:1",
+      },
+      "round": 2,
+      "sessionId": "sess:b:r2:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "C",
+      "nodeId": "c",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of c attempt 1",
+        "sessionId": "sess:c:1",
+      },
+      "sessionId": "sess:c:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+  ],
+  "title": "golden-loop",
+  "trigger": {
+    "kind": "manual",
+  },
+  "workflowId": "golden-loop",
+}
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 5: a required step erroring fails the run immediately with downstream pending > raw-bytes 1`] = `
+"{
+  "schemaVersion": 2,
+  "runId": "run-golden-5",
+  "workflowId": "golden-fail",
+  "definitionVersion": 1,
+  "title": "golden-fail",
+  "trigger": {
+    "kind": "manual"
+  },
+  "status": "failed",
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "steps": [
+    {
+      "nodeId": "a",
+      "label": "A",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:a:1",
+      "outcome": {
+        "sessionId": "sess:a:1",
+        "finalMessage": "output of a attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "b",
+      "label": "B",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "failed",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "step \\"b\\" session ended in error",
+      "sessionId": "sess:b:1",
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "c",
+      "label": "C",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "pending",
+      "attempt": 0,
+      "at": "2026-07-04T18:00:00.000Z"
+    }
+  ],
+  "parked": null,
+  "order": [
+    "a",
+    "b",
+    "c"
+  ],
+  "definitionSnapshot": {
+    "schemaVersion": 1,
+    "id": "golden-fail",
+    "title": "golden-fail",
+    "version": 1,
+    "status": "active",
+    "nodes": [
+      {
+        "id": "trg",
+        "type": "trigger",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "trigger": {
+          "kind": "manual"
+        }
+      },
+      {
+        "id": "a",
+        "type": "step",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      },
+      {
+        "id": "b",
+        "type": "step",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      },
+      {
+        "id": "c",
+        "type": "step",
+        "label": "C",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e0",
+        "from": "trg",
+        "to": "a",
+        "kind": "sequence"
+      },
+      {
+        "id": "e1",
+        "from": "a",
+        "to": "b",
+        "kind": "sequence"
+      },
+      {
+        "id": "e2",
+        "from": "b",
+        "to": "c",
+        "kind": "sequence"
+      }
+    ],
+    "updatedAt": "2026-07-04T18:00:00.000Z"
+  },
+  "errors": [
+    {
+      "code": "step-errored",
+      "message": "step \\"b\\" session ended in error",
+      "ref": "b"
+    }
+  ]
+}
+"
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 5: a required step erroring fails the run immediately with downstream pending 1`] = `
+{
+  "definitionSnapshot": {
+    "edges": [
+      {
+        "from": "trg",
+        "id": "e0",
+        "kind": "sequence",
+        "to": "a",
+      },
+      {
+        "from": "a",
+        "id": "e1",
+        "kind": "sequence",
+        "to": "b",
+      },
+      {
+        "from": "b",
+        "id": "e2",
+        "kind": "sequence",
+        "to": "c",
+      },
+    ],
+    "id": "golden-fail",
+    "nodes": [
+      {
+        "id": "trg",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "trigger": {
+          "kind": "manual",
+        },
+        "type": "trigger",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "a",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "b",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "c",
+        "label": "C",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+    ],
+    "schemaVersion": 1,
+    "status": "active",
+    "title": "golden-fail",
+    "updatedAt": "2026-07-04T18:00:00.000Z",
+    "version": 1,
+  },
+  "definitionVersion": 1,
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "errors": [
+    {
+      "code": "step-errored",
+      "message": "step "b" session ended in error",
+      "ref": "b",
+    },
+  ],
+  "order": [
+    "a",
+    "b",
+    "c",
+  ],
+  "parked": null,
+  "runId": "run-golden-5",
+  "schemaVersion": 2,
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "status": "failed",
+  "steps": [
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "A",
+      "nodeId": "a",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of a attempt 1",
+        "sessionId": "sess:a:1",
+      },
+      "sessionId": "sess:a:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "step "b" session ended in error",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "B",
+      "nodeId": "b",
+      "sessionId": "sess:b:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "failed",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 0,
+      "label": "C",
+      "nodeId": "c",
+      "status": "pending",
+    },
+  ],
+  "title": "golden-fail",
+  "trigger": {
+    "kind": "manual",
+  },
+  "workflowId": "golden-fail",
+}
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 6: an optional step settling with no output is skipped and the chain keeps advancing > raw-bytes 1`] = `
+"{
+  "schemaVersion": 2,
+  "runId": "run-golden-6",
+  "workflowId": "golden-skip",
+  "definitionVersion": 1,
+  "title": "golden-skip",
+  "trigger": {
+    "kind": "manual"
+  },
+  "status": "completed",
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "steps": [
+    {
+      "nodeId": "a",
+      "label": "A",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "skipped",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "optional step skipped: session settled with no output",
+      "sessionId": "sess:a:1",
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "b",
+      "label": "B",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:b:1",
+      "outcome": {
+        "sessionId": "sess:b:1",
+        "finalMessage": "output of b attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    }
+  ],
+  "parked": null,
+  "order": [
+    "a",
+    "b"
+  ],
+  "definitionSnapshot": {
+    "schemaVersion": 1,
+    "id": "golden-skip",
+    "title": "golden-skip",
+    "version": 1,
+    "status": "active",
+    "nodes": [
+      {
+        "id": "trg",
+        "type": "trigger",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "trigger": {
+          "kind": "manual"
+        }
+      },
+      {
+        "id": "a",
+        "type": "step",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        },
+        "optional": true
+      },
+      {
+        "id": "b",
+        "type": "step",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e0",
+        "from": "trg",
+        "to": "a",
+        "kind": "sequence"
+      },
+      {
+        "id": "e1",
+        "from": "a",
+        "to": "b",
+        "kind": "sequence"
+      }
+    ],
+    "updatedAt": "2026-07-04T18:00:00.000Z"
+  }
+}
+"
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 6: an optional step settling with no output is skipped and the chain keeps advancing 1`] = `
+{
+  "definitionSnapshot": {
+    "edges": [
+      {
+        "from": "trg",
+        "id": "e0",
+        "kind": "sequence",
+        "to": "a",
+      },
+      {
+        "from": "a",
+        "id": "e1",
+        "kind": "sequence",
+        "to": "b",
+      },
+    ],
+    "id": "golden-skip",
+    "nodes": [
+      {
+        "id": "trg",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "trigger": {
+          "kind": "manual",
+        },
+        "type": "trigger",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "a",
+        "label": "A",
+        "optional": true,
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "b",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+    ],
+    "schemaVersion": 1,
+    "status": "active",
+    "title": "golden-skip",
+    "updatedAt": "2026-07-04T18:00:00.000Z",
+    "version": 1,
+  },
+  "definitionVersion": 1,
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "order": [
+    "a",
+    "b",
+  ],
+  "parked": null,
+  "runId": "run-golden-6",
+  "schemaVersion": 2,
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "status": "completed",
+  "steps": [
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "optional step skipped: session settled with no output",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "A",
+      "nodeId": "a",
+      "sessionId": "sess:a:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "skipped",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "B",
+      "nodeId": "b",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of b attempt 1",
+        "sessionId": "sess:b:1",
+      },
+      "sessionId": "sess:b:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+  ],
+  "title": "golden-skip",
+  "trigger": {
+    "kind": "manual",
+  },
+  "workflowId": "golden-skip",
+}
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 7: interrupted step respawns once (attempt 2) under a NEW sessionKey then completes > raw-bytes 1`] = `
+"{
+  "schemaVersion": 2,
+  "runId": "run-golden-7",
+  "workflowId": "golden-respawn",
+  "definitionVersion": 1,
+  "title": "golden-respawn",
+  "trigger": {
+    "kind": "manual"
+  },
+  "status": "completed",
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "steps": [
+    {
+      "nodeId": "a",
+      "label": "A",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 2,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:a:2",
+      "outcome": {
+        "sessionId": "sess:a:2",
+        "finalMessage": "output of a attempt 2",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    },
+    {
+      "nodeId": "b",
+      "label": "B",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:b:1",
+      "outcome": {
+        "sessionId": "sess:b:1",
+        "finalMessage": "output of b attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    }
+  ],
+  "parked": null,
+  "order": [
+    "a",
+    "b"
+  ],
+  "definitionSnapshot": {
+    "schemaVersion": 1,
+    "id": "golden-respawn",
+    "title": "golden-respawn",
+    "version": 1,
+    "status": "active",
+    "nodes": [
+      {
+        "id": "trg",
+        "type": "trigger",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "trigger": {
+          "kind": "manual"
+        }
+      },
+      {
+        "id": "a",
+        "type": "step",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      },
+      {
+        "id": "b",
+        "type": "step",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e0",
+        "from": "trg",
+        "to": "a",
+        "kind": "sequence"
+      },
+      {
+        "id": "e1",
+        "from": "a",
+        "to": "b",
+        "kind": "sequence"
+      }
+    ],
+    "updatedAt": "2026-07-04T18:00:00.000Z"
+  }
+}
+"
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 7: interrupted step respawns once (attempt 2) under a NEW sessionKey then completes 1`] = `
+{
+  "definitionSnapshot": {
+    "edges": [
+      {
+        "from": "trg",
+        "id": "e0",
+        "kind": "sequence",
+        "to": "a",
+      },
+      {
+        "from": "a",
+        "id": "e1",
+        "kind": "sequence",
+        "to": "b",
+      },
+    ],
+    "id": "golden-respawn",
+    "nodes": [
+      {
+        "id": "trg",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "trigger": {
+          "kind": "manual",
+        },
+        "type": "trigger",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "a",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "b",
+        "label": "B",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+    ],
+    "schemaVersion": 1,
+    "status": "active",
+    "title": "golden-respawn",
+    "updatedAt": "2026-07-04T18:00:00.000Z",
+    "version": 1,
+  },
+  "definitionVersion": 1,
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "order": [
+    "a",
+    "b",
+  ],
+  "parked": null,
+  "runId": "run-golden-7",
+  "schemaVersion": 2,
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "status": "completed",
+  "steps": [
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 2,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "A",
+      "nodeId": "a",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of a attempt 2",
+        "sessionId": "sess:a:2",
+      },
+      "sessionId": "sess:a:2",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "B",
+      "nodeId": "b",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of b attempt 1",
+        "sessionId": "sess:b:1",
+      },
+      "sessionId": "sess:b:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+  ],
+  "title": "golden-respawn",
+  "trigger": {
+    "kind": "manual",
+  },
+  "workflowId": "golden-respawn",
+}
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 8: advanceWorkflowRunById on a single run matches the sweep path (same driver) > raw-bytes 1`] = `
+"{
+  "schemaVersion": 2,
+  "runId": "run-golden-8",
+  "workflowId": "golden-byid",
+  "definitionVersion": 1,
+  "title": "golden-byid",
+  "trigger": {
+    "kind": "manual"
+  },
+  "status": "completed",
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "steps": [
+    {
+      "nodeId": "a",
+      "label": "A",
+      "actor": {
+        "kind": "engine",
+        "ref": "codex"
+      },
+      "status": "done",
+      "attempt": 1,
+      "at": "2026-07-04T18:00:00.000Z",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "detail": "session settled",
+      "sessionId": "sess:a:1",
+      "outcome": {
+        "sessionId": "sess:a:1",
+        "finalMessage": "output of a attempt 1",
+        "extractedFrom": "final-message"
+      },
+      "settledAt": "2026-07-04T18:00:00.000Z"
+    }
+  ],
+  "parked": null,
+  "order": [
+    "a"
+  ],
+  "definitionSnapshot": {
+    "schemaVersion": 1,
+    "id": "golden-byid",
+    "title": "golden-byid",
+    "version": 1,
+    "status": "active",
+    "nodes": [
+      {
+        "id": "trg",
+        "type": "trigger",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "trigger": {
+          "kind": "manual"
+        }
+      },
+      {
+        "id": "a",
+        "type": "step",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "actor": {
+          "kind": "engine",
+          "ref": "codex"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e0",
+        "from": "trg",
+        "to": "a",
+        "kind": "sequence"
+      }
+    ],
+    "updatedAt": "2026-07-04T18:00:00.000Z"
+  }
+}
+"
+`;
+
+exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execute byte-identically > golden 8: advanceWorkflowRunById on a single run matches the sweep path (same driver) 1`] = `
+{
+  "definitionSnapshot": {
+    "edges": [
+      {
+        "from": "trg",
+        "id": "e0",
+        "kind": "sequence",
+        "to": "a",
+      },
+    ],
+    "id": "golden-byid",
+    "nodes": [
+      {
+        "id": "trg",
+        "label": "Manual",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "trigger": {
+          "kind": "manual",
+        },
+        "type": "trigger",
+      },
+      {
+        "actor": {
+          "kind": "engine",
+          "ref": "codex",
+        },
+        "id": "a",
+        "label": "A",
+        "position": {
+          "x": 0,
+          "y": 0,
+        },
+        "type": "step",
+      },
+    ],
+    "schemaVersion": 1,
+    "status": "active",
+    "title": "golden-byid",
+    "updatedAt": "2026-07-04T18:00:00.000Z",
+    "version": 1,
+  },
+  "definitionVersion": 1,
+  "endedAt": "2026-07-04T18:00:00.000Z",
+  "order": [
+    "a",
+  ],
+  "parked": null,
+  "runId": "run-golden-8",
+  "schemaVersion": 2,
+  "startedAt": "2026-07-04T18:00:00.000Z",
+  "status": "completed",
+  "steps": [
+    {
+      "actor": {
+        "kind": "engine",
+        "ref": "codex",
+      },
+      "at": "2026-07-04T18:00:00.000Z",
+      "attempt": 1,
+      "detail": "session settled",
+      "dispatchedAt": "2026-07-04T18:00:00.000Z",
+      "label": "A",
+      "nodeId": "a",
+      "outcome": {
+        "extractedFrom": "final-message",
+        "finalMessage": "output of a attempt 1",
+        "sessionId": "sess:a:1",
+      },
+      "sessionId": "sess:a:1",
+      "settledAt": "2026-07-04T18:00:00.000Z",
+      "status": "done",
+    },
+  ],
+  "title": "golden-byid",
+  "trigger": {
+    "kind": "manual",
+  },
+  "workflowId": "golden-byid",
+}
+`;

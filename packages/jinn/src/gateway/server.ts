@@ -26,10 +26,23 @@ import type { PtyViewEngine } from "../engines/pty-view-engine.js";
 import { HookRegistry } from "./hook-registry.js";
 import { writeGatewayInfo, readGatewayInfo, updateGatewayPtyPids, staleGatewayPids, gatewayBaseUrl } from "./gateway-info.js";
 import { authenticateGatewayRequest, authRequiredForRequest, ensureGatewayAuthToken, shouldRequireGatewayAuth, validateGatewayExposure } from "./auth.js";
+import { reconcileWorkItemsOnStartup, startWorkItemReconciler } from "../work-items/reconcile.js";
+import { setTodoStatusChangeListener } from "../work-items/transitions.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
-import { handleApiRequest, resumePendingWebQueueItems, type ApiContext } from "./api.js";
+import { handleApiRequest, resumePendingWebQueueItems, workflowRunDriverDeps, workflowCronFireHandler, type ApiContext } from "./api.js";
+import { resolveCallerIdentity, type CallerIdentityOptions } from "./session-comm-guards.js";
+import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
+import {
+  applyWorkflowCronSync,
+  fireTodoStatusChangeWorkflows,
+  replayMissedTodoStatusChangeWorkflowFires,
+  resolveWorkflowEvidenceRoot,
+  startPollTriggerRunner,
+  startWorkflowRunReconciler,
+} from "../workflows/index.js";
 import { startStatusReconciler } from "./status-reconciler.js";
+import { armJinnAttachGate } from "../mcp/attachment.js";
 import { syncExternalTurn } from "./external-turns.js";
 import { pickEncoding, isCompressibleExt, compressStream } from "./compress.js";
 import { attachPtyWebSocket } from "./pty-ws.js";
@@ -54,12 +67,17 @@ import { RemoteDiscordConnector } from "../connectors/discord/remote.js";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { TelegramConnector } from "../connectors/telegram/index.js";
 import { loadJobs } from "../cron/jobs.js";
-import { startScheduler, reloadScheduler, stopScheduler } from "../cron/scheduler.js";
+import { startScheduler, reloadScheduler, stopScheduler, setWorkflowCronFire } from "../cron/scheduler.js";
 import { scanOrg } from "./org.js";
 
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+type UpgradeRejectionSocket = {
+  write(chunk: string): unknown;
+  destroy(): unknown;
+};
 
 // Extract the lowercased hostname from a Host header (or any host[:port]
 // string), tolerating IPv6 brackets and missing ports. Returns null if unparseable.
@@ -95,6 +113,53 @@ export function isAllowedCorsOrigin(origin: string | undefined, requestHost?: st
   return false;
 }
 
+export function rejectUnverifiedIdentifiedUpgradeCaller(
+  req: http.IncomingMessage,
+  socket: UpgradeRejectionSocket,
+  options: Pick<CallerIdentityOptions, "sessionExists"> = {},
+): boolean {
+  const identity = resolveCallerIdentity(req.headers, {
+    sessionExists: options.sessionExists ?? ((sessionId) => !!getSession(sessionId)),
+    verifySessionCapability,
+    requireCapability: true,
+  });
+  if (identity.kind !== "unidentified-tool") return false;
+  socket.write(
+    "HTTP/1.1 403 Forbidden\r\n" +
+    "Connection: close\r\n" +
+    "Content-Type: application/json\r\n" +
+    "\r\n" +
+    JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }),
+  );
+  socket.destroy();
+  return true;
+}
+
+export function rejectNonOperatorPtyUpgradeCaller(
+  req: http.IncomingMessage,
+  socket: UpgradeRejectionSocket,
+  options: Pick<CallerIdentityOptions, "sessionExists"> = {},
+): boolean {
+  const identity = resolveCallerIdentity(req.headers, {
+    sessionExists: options.sessionExists ?? ((sessionId) => !!getSession(sessionId)),
+    verifySessionCapability,
+    requireCapability: true,
+  });
+  if (identity.kind === "operator") return false;
+  const error = identity.kind === "unidentified-tool"
+    ? UNIDENTIFIED_TOOL_CALL_ERROR
+    : "/ws/pty is operator-only; capability-bound sessions cannot attach to or inject stdin into PTY sessions";
+  socket.write(
+    "HTTP/1.1 403 Forbidden\r\n" +
+    "Connection: close\r\n" +
+    "Content-Type: application/json\r\n" +
+    "\r\n" +
+    JSON.stringify({ error }),
+  );
+  socket.destroy();
+  return true;
+}
+
 function setCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): boolean {
   const rawOrigin = req.headers.origin;
   const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
@@ -104,7 +169,7 @@ function setCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): bo
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Credentials", "true");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Jinn-Workflow-Event-Token");
   }
   return allowed;
 }
@@ -221,6 +286,10 @@ export async function startGateway(
   if (recovered > 0) {
     logger.info(`Recovered ${recovered} stale session(s) — marked as "interrupted" for resume`);
   }
+  // GRS-003a split-brain fix: the sessions just flipped running→interrupted above, so any
+  // work item still marked `executing` on the strength of one of those sessions is now stale.
+  // Re-derive work-item status from linked-session evidence. Best-effort — never blocks boot.
+  reconcileWorkItemsOnStartup();
 
   // Log resumable sessions so operators know what can be picked up
   const resumable = getInterruptedSessions();
@@ -777,10 +846,12 @@ export async function startGateway(
     return { started, stopped, errors };
   }
 
-  // Start cron scheduler
-  const cronJobs = loadJobs();
-  startScheduler(cronJobs, sessionManager, config, connectorMap);
-  logger.info(`Loaded ${cronJobs.length} cron job(s)`);
+  // NOTE: the cron scheduler is started LATER in boot (after the ApiContext exists),
+  // so the managed-workflow fire handler and the jobs.json drift heal are both in
+  // place before the first possible tick (GRS-014d-fix, Codex finding 3). Nothing in
+  // between serves cron: the HTTP server, watchers, and connector routes all come up
+  // after that point.
+  const workflowEvidenceRoot = resolveWorkflowEvidenceRoot();
 
   // Mutable config reference for hot-reload
   let currentConfig = config;
@@ -818,6 +889,11 @@ export async function startGateway(
   const reloadOrg = () => {
     employeeRegistry = scanOrg();
     logger.info(`Org directory changed, reloaded ${employeeRegistry.size} employee(s)`);
+    // GRS-017e-fix (finding 1): an employee YAML gaining/losing `jinnMcp: true`
+    // changes whether the jinn-attachment smoke gate must be armed — re-arm on
+    // every org reload. Fail-closed while the probe is in flight (finding 2),
+    // so fire-and-forget cannot widen attachment through a stale verdict.
+    void armJinnAttachGate(currentConfig.mcp, { gatewayUrl: process.env.JINN_GATEWAY_URL!, log: logger, employees: employeeRegistry.values() }).catch(() => {});
     // Keep warm PTYs alive on org reload. Native CLI schedulers can sleep inside
     // an otherwise idle PTY for days; recycling "idle" PTYs here would silently
     // delete those loops. New sessions and cold respawns pick up the fresh org.
@@ -891,6 +967,14 @@ export async function startGateway(
       sessionManager.setConfig(currentConfig);
       invalidateModelRegistry(); // rebuild the model/capability registry from the new config
       refreshDynamicModels(currentConfig); // re-discover dynamic models (engine bins/auth may have changed)
+      // GRS-017e: re-arm (or disarm) the jinn-attachment smoke gate for the new
+      // config, so the operator's one-line `mcp.gateway.enabled: true` flip in
+      // config.yaml gets its authed smoke check without a gateway restart.
+      // Fire-and-forget is SAFE (GRS-017e-fix, codex finding 2): armJinnAttachGate
+      // replaces any stale verdict with a denying probe-in-flight state before
+      // its first await, so the reload window fails closed, never stale-open.
+      // Employees threaded so a jinnMcp pilot arms the gate too (finding 1).
+      void armJinnAttachGate(currentConfig.mcp, { gatewayUrl: process.env.JINN_GATEWAY_URL!, log: logger, employees: employeeRegistry.values() }).catch(() => {});
       logger.info("Config reloaded successfully");
       emit("config:reloaded", {});
     } catch (err) {
@@ -905,6 +989,69 @@ export async function startGateway(
   // Unstick sessions whose completion event was lost (status:"running" with no
   // live turn). 15s sweep; logs one line per fix.
   const stopStatusReconciler = startStatusReconciler({ engines, emit });
+
+  // Todos ledger truth-keeping (GRS-021a): periodically re-derive work-item
+  // status from linked-session evidence, so a session settling mid-process moves
+  // its item to in_review/done (trust) without waiting for the next boot.
+  const stopWorkItemReconciler = startWorkItemReconciler();
+
+  // ── Cron boot (GRS-014d-fix ordering, Codex finding 3) ────────────────────
+  // Strictly BEFORE startScheduler: (1) heal the managed workflow cron jobs from the
+  // definition store (drift heal — a hand-deleted/edited managed `workflow:<id>` job
+  // is re-derived, the reconcile-at-boot pattern), and (2) wire the managed-fire
+  // handler (it closes over the ApiContext, which now exists). This closes the boot
+  // window where a managed job due exactly at startup would fire with no handler,
+  // append a terminal error row, and permanently miss that scheduled run. No
+  // evidence root → neither runs; managed residue stays untouched and fires no-op
+  // honestly in the runner (inert, same guard as the workflow routes).
+  const workflowRunDeps = workflowEvidenceRoot ? workflowRunDriverDeps(workflowEvidenceRoot, apiContext) : undefined;
+  if (workflowEvidenceRoot && workflowRunDeps) {
+    try {
+      applyWorkflowCronSync(workflowEvidenceRoot, {
+        log: (level, message) => logger[level](message),
+      });
+    } catch (err) {
+      logger.warn(`Workflow cron sync failed at boot: ${err instanceof Error ? err.message : err}`);
+    }
+    setWorkflowCronFire(workflowCronFireHandler(apiContext));
+    setTodoStatusChangeListener((event) => {
+      void fireTodoStatusChangeWorkflows(workflowRunDeps, {
+        id: event.id,
+        workItemId: event.workItemId,
+        fromStatus: event.fromStatus,
+        toStatus: event.toStatus,
+        item: {
+          source: event.item.source,
+          department: event.item.department,
+          assignee: event.item.assignee,
+        },
+      }).catch((err) => {
+        logger.warn(`Todo status workflow trigger failed for event ${event.id}: ${err instanceof Error ? err.message : err}`);
+      });
+    });
+    void replayMissedTodoStatusChangeWorkflowFires(workflowRunDeps, { limit: 500 }).catch((err) => {
+      logger.warn(`Todo status workflow trigger replay failed at boot: ${err instanceof Error ? err.message : err}`);
+    });
+  }
+
+  // Start cron scheduler — jobs.json is already healed and the workflow fire handler
+  // is already wired, so the first tick can never land in a half-wired gateway.
+  const cronJobs = loadJobs();
+  startScheduler(cronJobs, sessionManager, config, connectorMap);
+  logger.info(`Loaded ${cronJobs.length} cron job(s)`);
+
+  // Workflow RUN reconciler (GRS-014b): advances sequential workflow runs as their
+  // step sessions settle — 15s sweep + one immediate startup sweep. Boot ordering:
+  // recoverStaleSessions() already stamped dead sessions `interrupted` earlier in this
+  // boot, so the startup sweep re-derives every running run from truthful session
+  // evidence (the respawn-once recovery path). Inert when no evidence root is
+  // configured — the same guard the workflow routes use.
+  const stopWorkflowRunReconciler = workflowRunDeps ? startWorkflowRunReconciler(workflowRunDeps) : undefined;
+  const stopPollTriggerRunner = workflowRunDeps ? startPollTriggerRunner(workflowRunDeps) : undefined;
+  if (workflowEvidenceRoot) {
+    logger.info(`Workflow run reconciler started (evidence root: ${workflowEvidenceRoot})`);
+    logger.info(`Workflow poll trigger runner started (evidence root: ${workflowEvidenceRoot})`);
+  }
 
   // Resolve web UI directory — bundled into dist/web/ by postbuild script
   // At runtime __dirname is dist/src/gateway/, so ../../web resolves to dist/web/
@@ -1004,6 +1151,7 @@ export async function startGateway(
   server.on("upgrade", (req, socket, head) => {
     const reqUrl = req.url || "";
     const pathname = reqUrl.split("?")[0];
+    if (rejectUnverifiedIdentifiedUpgradeCaller(req, socket)) return;
     if (authRequiredNow() && authRequiredForRequest("GET", pathname)) {
       const auth = authenticateGatewayRequest(req, gatewayAuthToken, JINN_HOME);
       if (!auth.ok) {
@@ -1021,6 +1169,7 @@ export async function startGateway(
     // Dedicated per-session PTY channel for the live xterm CLI view.
     const ptyMatch = reqUrl.split("?")[0].match(/^\/ws\/pty\/([^/]+)$/);
     if (ptyMatch) {
+      if (rejectNonOperatorPtyUpgradeCaller(req, socket)) return;
       let sessionId: string;
       try {
         sessionId = decodeURIComponent(ptyMatch[1]);
@@ -1112,6 +1261,20 @@ export async function startGateway(
     listen();
   });
 
+  // GRS-017e: arm the jinn-attachment authed smoke gate. Runs right after
+  // listen (the probe is one loopback GET against this very server, using the
+  // bearer read from the 0600 gateway.json — the child's clean-env channel,
+  // GRS-018 §3b) and is AWAITED so no session can resolve MCP before the gate
+  // reflects reality. Employees threaded (GRS-017e-fix, finding 1) so a
+  // `jinnMcp: true` pilot arms the probe even with the master switch absent.
+  // When NO attach path exists (globally off, no pilot — the shipped default),
+  // this resets the gate and makes ZERO calls — the default path stays
+  // byte-identical to today. A failed probe logs loudly and every attach
+  // decision degrades to no-attach until a config/org reload re-checks; the
+  // decision side ALSO fails closed on an unarmed gate, so nothing attaches
+  // before this line runs.
+  await armJinnAttachGate(currentConfig.mcp, { gatewayUrl: process.env.JINN_GATEWAY_URL!, log: logger, employees: employeeRegistry.values() });
+
   // Notify connected WebSocket clients about interrupted sessions available for resume
   if (resumable.length > 0) {
     // Small delay to let WebSocket clients connect after server starts
@@ -1151,6 +1314,11 @@ export async function startGateway(
     // Stop the status reconciler sweep before we start marking sessions
     // interrupted below — a mid-shutdown sweep must not race the teardown.
     stopStatusReconciler();
+    stopWorkItemReconciler();
+    // Same for the workflow run reconciler — a mid-shutdown sweep must not spawn
+    // a step session into a dying gateway.
+    stopWorkflowRunReconciler?.();
+    stopPollTriggerRunner?.();
 
     // Stop caffeinate
     if (caffeinate && caffeinate.exitCode === null) {
@@ -1217,6 +1385,10 @@ export async function startGateway(
 
     // Stop cron scheduler
     stopScheduler();
+    // Clear the managed-workflow fire handler so nothing fires into a torn-down
+    // ApiContext (GRS-014d-fix; module-level state must not outlive the gateway).
+    setWorkflowCronFire(undefined);
+    setTodoStatusChangeListener(null);
 
     // Stop connectors
     for (const connector of connectors) {

@@ -258,10 +258,15 @@ function ChatPage() {
   )
 
   const handleSelect = useCallback(
-    (id: string) => {
+    (id: string, opts?: { navigateMobile?: boolean }) => {
       newChatIntentRef.current = false
       setSelectedId(id)
-      setMobileView('chat')
+      // On mobile, opening a session pushes from the list into the thread. The
+      // one exception is the background auto-select of the most-recent session
+      // (see handleSessionsLoaded): it primes selectedId for the desktop thread
+      // but must NOT drop a phone user into a chat when they tapped the Chat tab
+      // — that tab should always land on the LIST (GRS-023).
+      if (opts?.navigateMobile !== false) setMobileView('chat')
       // Open a tab — label will be updated once session meta loads
       chatTabs.openTab({ sessionId: id, label: 'Loading...', status: 'idle', unread: false })
     },
@@ -344,7 +349,10 @@ function ChatPage() {
   const handleSessionsLoaded = useCallback(
     (sessions: { id: string }[]) => {
       if (!selectedId && !newChatIntentRef.current && sessions.length > 0) {
-        handleSelect(sessions[0].id)
+        // Background auto-select of the most-recent session: primes the desktop
+        // thread, but stays on the chat LIST on mobile (navigateMobile: false),
+        // so tapping the Chat tab opens the list to pick/start a chat.
+        handleSelect(sessions[0].id, { navigateMobile: false })
       }
     },
     [selectedId, handleSelect]

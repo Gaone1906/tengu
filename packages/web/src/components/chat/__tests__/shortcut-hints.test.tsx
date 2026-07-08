@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 function withQueryClient(ui: React.ReactNode) {
@@ -49,15 +49,26 @@ describe('ChatSidebar shortcut hints', () => {
     onNewChat: vi.fn(),
   }
 
-  // The "+ New" affordance moved out of the sidebar into the header pill
-  // (see the "ChatHeaderPills shortcut hints" suite below, which asserts the
-  // New-chat button + its (N) shortcut hint). The sidebar header no longer
-  // renders a New button.
+  // Desktop reaches compose from the thread header pill / ribbon. GRS-022
+  // re-surfaces the SAME new-chat action on the mobile chat LIST header (the
+  // list has no header pill on mobile), wired to the existing onNewChat handler.
 
   it('renders search input with placeholder', () => {
     render(withQueryClient(<ChatSidebar {...defaultProps} />))
     const searchInput = screen.getByPlaceholderText(/search/i)
     expect(searchInput).toBeTruthy()
+  })
+
+  it('surfaces a New chat (compose) control on the list header', () => {
+    render(withQueryClient(<ChatSidebar {...defaultProps} />))
+    expect(screen.getByRole('button', { name: 'New chat' })).toBeTruthy()
+  })
+
+  it('fires onNewChat when the list compose control is tapped', () => {
+    const onNewChat = vi.fn()
+    render(withQueryClient(<ChatSidebar {...defaultProps} onNewChat={onNewChat} />))
+    fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
+    expect(onNewChat).toHaveBeenCalledTimes(1)
   })
 })
 

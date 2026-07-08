@@ -1,6 +1,7 @@
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import os from "node:os";
 import { pipeline } from "node:stream/promises";
@@ -9,8 +10,10 @@ import Busboy from "busboy";
 import { FILES_DIR, UPLOADS_DIR, JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 import { redactText } from "../shared/redact.js";
-import { insertFile, getFile, listFiles, deleteFile, setFilePath, insertMessage, type FileMeta, type MessageMedia } from "../sessions/registry.js";
+import { insertFile, getFile, getSession, listFiles, deleteFile, setFilePath, insertMessage, hasControlBytes, type FileMeta, type MessageMedia } from "../sessions/registry.js";
 import type { ApiContext } from "./api.js";
+import { CALLER_SESSION_HEADER, TOOL_CALL_HEADER, UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
+import { resolveCallerIdentity } from "./session-comm-guards.js";
 
 // Ensure managed files directory exists
 export function ensureFilesDir(): void {
@@ -72,6 +75,127 @@ export function allowUploadedFileOpen(context: Pick<ApiContext, "getConfig">): b
 }
 
 class FileRequestError extends Error {}
+
+function rejectUnidentifiedToolCaller(req: HttpRequest, res: ServerResponse): boolean {
+  if (!req.headers[TOOL_CALL_HEADER] && !req.headers[CALLER_SESSION_HEADER]) return false;
+  const identity = resolveCallerIdentity(req.headers, {
+    sessionExists: (sessionId) => !!getSession(sessionId),
+    verifySessionCapability,
+    requireCapability: true,
+  });
+  if (identity.kind !== "unidentified-tool") return false;
+  json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
+  return true;
+}
+
+function requireOperatorFileAuthority(req: HttpRequest, res: ServerResponse, action: string): boolean {
+  const identity = resolveCallerIdentity(req.headers, {
+    sessionExists: (sessionId) => !!getSession(sessionId),
+    verifySessionCapability,
+    requireCapability: true,
+  });
+  if (identity.kind === "unidentified-tool") {
+    json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
+    return false;
+  }
+  if (identity.kind === "session") {
+    json(res, { error: `${action} is operator-only; capability-bound sessions cannot read, transfer, or delete local gateway files` }, 403);
+    return false;
+  }
+  return true;
+}
+
+function stripTrailingDots(host: string): string {
+  return host.replace(/\.+$/g, "");
+}
+
+function parseIpv4(host: string): [number, number, number, number] | null {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!match) return null;
+  const parts = match.slice(1).map(Number);
+  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return parts as [number, number, number, number];
+}
+
+function ipv4FromMappedIpv6(host: string): string | null {
+  const lower = host.toLowerCase();
+  const dotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(lower);
+  if (dotted) return dotted[1];
+  const compatibleDotted = /^::(\d{1,3}(?:\.\d{1,3}){3})$/.exec(lower);
+  if (compatibleDotted) return compatibleDotted[1];
+  const hex = /^(?:::ffff:|0:0:0:0:0:ffff:|::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(lower);
+  if (!hex) return null;
+  const hi = Number.parseInt(hex[1], 16);
+  const lo = Number.parseInt(hex[2], 16);
+  if (!Number.isFinite(hi) || !Number.isFinite(lo)) return null;
+  return `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
+}
+
+function privateIpReason(address: string): string | null {
+  const host = stripTrailingDots(address.toLowerCase().replace(/^\[|\]$/g, ""));
+  const mapped = ipv4FromMappedIpv6(host);
+  const ipv4 = parseIpv4(mapped ?? host);
+  if (ipv4) {
+    const [a, b, c] = ipv4;
+    if (a === 0 || a === 10 || a === 127) return "loopback or private URLs are not fetchable";
+    if (a === 100 && b >= 64 && b <= 127) return "private URLs are not fetchable";
+    if (a === 169 && b === 254) return "link-local URLs are not fetchable";
+    if (a === 172 && b >= 16 && b <= 31) return "private URLs are not fetchable";
+    if (a === 192 && b === 0 && (c === 0 || c === 2)) return "non-public URLs are not fetchable";
+    if (a === 192 && b === 88 && c === 99) return "non-public URLs are not fetchable";
+    if (a === 192 && b === 168) return "private URLs are not fetchable";
+    if (a === 198 && (b === 18 || b === 19)) return "private URLs are not fetchable";
+    if (a === 198 && b === 51 && c === 100) return "non-public URLs are not fetchable";
+    if (a === 203 && b === 0 && c === 113) return "non-public URLs are not fetchable";
+    if (a >= 224) return "non-public URLs are not fetchable";
+    return null;
+  }
+  if (net.isIP(host) === 6) {
+    if (host === "::" || host === "::1" || host === "0:0:0:0:0:0:0:0" || host === "0:0:0:0:0:0:0:1") {
+      return "loopback URLs are not fetchable";
+    }
+    if (/^f[cd][0-9a-f]*:/i.test(host)) return "private URLs are not fetchable";
+    if (/^fe[89ab][0-9a-f]*:/i.test(host)) return "link-local URLs are not fetchable";
+    if (/^ff[0-9a-f]*:/i.test(host)) return "non-public URLs are not fetchable";
+  }
+  return null;
+}
+
+async function privateUrlReason(raw: string): Promise<string | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return "url must be a valid absolute URL";
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return "url must use http or https";
+  }
+  const host = stripTrailingDots(parsed.hostname.toLowerCase().replace(/^\[|\]$/g, ""));
+  if (!host) return "url host is required";
+  if (host === "localhost" || host.endsWith(".localhost")) return "loopback URLs are not fetchable";
+  const literalReason = privateIpReason(host);
+  if (literalReason) return literalReason;
+  if (net.isIP(host) !== 0) return null;
+  return "url host must be a literal public IP address; hostname fetches are disabled to prevent DNS rebinding";
+}
+
+async function fetchPublicUrl(raw: string, redirects = 0): Promise<{ ok: true; response: Response } | { ok: false; error: string }> {
+  if (redirects > 5) return { ok: false, error: "too many URL redirects" };
+  const unsafe = await privateUrlReason(raw);
+  if (unsafe) return { ok: false, error: unsafe };
+  const response = await fetch(raw, { redirect: "manual" });
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get("location");
+    if (!location) return { ok: true, response };
+    try {
+      return fetchPublicUrl(new URL(location, raw).toString(), redirects + 1);
+    } catch {
+      return { ok: false, error: "redirect location must be a valid URL" };
+    }
+  }
+  return { ok: true, response };
+}
 
 /** Delete date-bucket directories under UPLOADS_DIR older than maxAgeDays. Returns count removed. */
 export function cleanupOldUploads(maxAgeDays = 30): number {
@@ -146,10 +270,11 @@ function expandPath(p: string): string {
   return p;
 }
 
-// ── Arbitrary file read (web UI) ─────────────────────────────────
-// CEO has waived path allowlisting: single-user machine behind Tailscale, risk
-// accepted. This endpoint reads ANY file on disk. Guards: 5 MB size cap +
-// binary detection (no allowlist, no secrets denylist).
+// ── Managed file read (web UI + MCP belt) ────────────────────────
+// GRS-020e: this route used to resolve arbitrary filesystem paths. It is now
+// confined to managed file roots only (`files/` and `uploads/`) with the same
+// layered containment pattern as knowledge/read: shape gate, raw control-byte
+// rejection, then realpath containment as the authority.
 
 /** Max bytes we'll read into memory for inline display. Larger files → tooLarge flag. */
 export const MAX_READ_SIZE = 5 * 1024 * 1024; // 5 MB
@@ -171,40 +296,113 @@ function isBinaryMime(mime: string): boolean {
   );
 }
 
+const FILE_READ_ROOT_LABELS = ["files", "uploads"] as const;
+type FileReadRootLabel = (typeof FILE_READ_ROOT_LABELS)[number];
+
+function rawManagedPathError(requestedPath: string): { status: 400 | 403; error: string } | null {
+  if (typeof requestedPath !== "string" || requestedPath.length === 0 || requestedPath.trim().length === 0) {
+    return { status: 400, error: "path query parameter is required" };
+  }
+  if (requestedPath !== requestedPath.trim()) {
+    return { status: 400, error: "path must not have leading or trailing whitespace" };
+  }
+  if (requestedPath.length > 1024) {
+    return { status: 400, error: "path is too long (max 1024 chars)" };
+  }
+  // Reject, never strip, control bytes on the raw decoded path. A %00-tampered
+  // request must not become a repaired valid path.
+  if (hasControlBytes(requestedPath)) {
+    return { status: 400, error: "path contains control bytes — pass a managed files/ or uploads/ relative path exactly" };
+  }
+  if (requestedPath.includes("\\")) {
+    return { status: 400, error: "path must use forward slashes; backslash separators are not accepted" };
+  }
+  if (path.isAbsolute(requestedPath) || requestedPath.startsWith("~")) {
+    return { status: 403, error: "absolute and home-relative paths are not readable; use a managed files/ or uploads/ relative path" };
+  }
+  const parts = requestedPath.split("/");
+  const label = parts[0] as FileReadRootLabel;
+  if (!(FILE_READ_ROOT_LABELS as readonly string[]).includes(label)) {
+    return { status: 403, error: 'path must start with "files/" or "uploads/" — arbitrary filesystem reads are not allowed' };
+  }
+  if (parts.length < 2 || parts.some((part) => part === "" || part === "." || part === "..")) {
+    return { status: 400, error: 'path must be a normalized relative path under "files/" or "uploads/" with no "." or ".." segments' };
+  }
+  return null;
+}
+
+function managedReadRoot(label: FileReadRootLabel): string {
+  return label === "files" ? FILES_DIR : UPLOADS_DIR;
+}
+
+function isInsideRealPath(realFile: string, realRoot: string): boolean {
+  return realFile === realRoot || realFile.startsWith(realRoot + path.sep);
+}
+
+function rootRealpath(label: FileReadRootLabel): string | null {
+  try {
+    const real = fs.realpathSync.native(managedReadRoot(label));
+    return fs.statSync(real).isDirectory() ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+function rawQueryParamValue(reqUrl: string | undefined, name: string): string | null {
+  const query = (reqUrl || "").split("?", 2)[1];
+  if (!query) return null;
+  for (const part of query.split("&")) {
+    const idx = part.indexOf("=");
+    const rawKey = idx === -1 ? part : part.slice(0, idx);
+    const rawValue = idx === -1 ? "" : part.slice(idx + 1);
+    try {
+      if (decodeURIComponent(rawKey.replace(/\+/g, " ")) === name) return rawValue;
+    } catch {
+      if (rawKey === name) return rawValue;
+    }
+  }
+  return null;
+}
+
+function hasEncodedPathSeparator(rawValue: string | null): boolean {
+  return rawValue !== null && /%(?:2f|5c)/i.test(rawValue);
+}
+
 /**
- * Build the ordered list of candidate absolute paths for a requested path.
- *  - Absolute (`/…`) or home (`~…`) → single verbatim candidate (with ~ expanded).
- *  - Relative → JINN_HOME first (most artifacts live there), then ~/Projects,
- *    then the gateway cwd, then the literal path resolved against cwd.
- * Exposed for unit-testing the resolution ORDER without touching disk.
+ * Build the candidate absolute path for a managed file read. Only relative
+ * paths under `files/` or `uploads/` produce a candidate; absolute, home,
+ * project, cwd, traversal, backslash, and other-root paths produce none.
  */
 export function readPathCandidates(requestedPath: string): string[] {
-  const p = String(requestedPath ?? "").trim();
-  if (!p) return [];
-  // Absolute or home-relative → use verbatim (expand ~).
-  if (p.startsWith("/") || p.startsWith("~")) {
-    return [path.resolve(expandPath(p))];
-  }
-  // Relative → ordered roots. JINN_HOME wins.
-  return [
-    path.resolve(JINN_HOME, p),
-    path.resolve(os.homedir(), "Projects", p),
-    path.resolve(process.cwd(), p),
-    path.resolve(p),
-  ];
+  const p = String(requestedPath ?? "");
+  if (rawManagedPathError(p)) return [];
+  return [path.resolve(JINN_HOME, p)];
 }
 
 /**
  * Resolve a requested path to the first candidate that exists as a regular file.
  * Returns { resolvedPath: null, candidates } when none exist.
  */
-export function resolveReadPath(requestedPath: string): { resolvedPath: string | null; candidates: string[] } {
+export function resolveReadPath(requestedPath: string): { resolvedPath: string | null; candidates: string[]; error?: string; status?: 400 | 403 } {
+  const shapeError = rawManagedPathError(String(requestedPath ?? ""));
+  if (shapeError) return { resolvedPath: null, candidates: [], ...shapeError };
   const candidates = readPathCandidates(requestedPath);
   for (const candidate of candidates) {
+    const label = String(requestedPath).split("/")[0] as FileReadRootLabel;
+    const realRoot = rootRealpath(label);
+    if (!realRoot) return { resolvedPath: null, candidates };
     try {
-      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-        return { resolvedPath: candidate, candidates };
+      if (!fs.existsSync(candidate)) continue;
+      const realFile = fs.realpathSync.native(candidate);
+      if (!isInsideRealPath(realFile, realRoot)) {
+        return {
+          resolvedPath: null,
+          candidates,
+          status: 403,
+          error: `${requestedPath} resolves outside the ${label}/ root and is not readable`,
+        };
       }
+      if (fs.statSync(realFile).isFile()) return { resolvedPath: realFile, candidates };
     } catch {
       // unreadable candidate — skip
     }
@@ -270,6 +468,102 @@ export interface FileClassification {
   binary: boolean;
   /** utf-8 text content; only present for non-binary, non-too-large files. */
   content?: string;
+}
+
+interface ManagedFileRead {
+  resolvedPath: string;
+  classification: FileClassification;
+}
+
+interface ManagedFileReadError {
+  status: 400 | 403 | 404 | 500;
+  error: string;
+}
+
+function sameInode(a: fs.Stats, b: fs.Stats): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+function classifyOpenedFile(fd: number, filename: string, stat = fs.fstatSync(fd)): FileClassification {
+  const size = stat.size;
+  const mime = mimeFromFilename(filename);
+
+  if (!stat.isFile()) {
+    throw new FileRequestError("Not a file");
+  }
+  if (size > MAX_READ_SIZE) {
+    return { mime, size, tooLarge: true, binary: false };
+  }
+  if (isBinaryMime(mime)) {
+    return { mime, size, tooLarge: false, binary: true };
+  }
+
+  const buffer = fs.readFileSync(fd);
+  const scanLen = Math.min(buffer.length, 8192);
+  for (let i = 0; i < scanLen; i++) {
+    if (buffer[i] === 0) {
+      return { mime, size, tooLarge: false, binary: true };
+    }
+  }
+
+  return { mime, size, tooLarge: false, binary: false, content: redactText(buffer.toString("utf-8")) };
+}
+
+/**
+ * Open, authorize, and read a managed path through ONE file descriptor.
+ *
+ * Security invariant: authorization and byte-read are tied to the same opened
+ * inode. The leaf is opened with O_NOFOLLOW, the opened fd's real path is checked
+ * against the selected managed root, bytes are read from that fd, and a final
+ * path-stability check refuses a swap that happened during the read. The route
+ * never re-opens the authorized path string for content.
+ */
+export function readManagedFile(requestedPath: string): ManagedFileRead | ManagedFileReadError {
+  const shapeError = rawManagedPathError(String(requestedPath ?? ""));
+  if (shapeError) return shapeError;
+  const label = String(requestedPath).split("/")[0] as FileReadRootLabel;
+  const realRoot = rootRealpath(label);
+  if (!realRoot) return { status: 404, error: "Not found" };
+  const candidate = path.resolve(JINN_HOME, requestedPath);
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(candidate, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const openedStat = fs.fstatSync(fd);
+    if (!openedStat.isFile()) return { status: 400, error: "Not a file" };
+    const openedRealPath = fs.realpathSync.native(candidate);
+    if (!isInsideRealPath(openedRealPath, realRoot)) {
+      return { status: 403, error: `${requestedPath} resolves outside the ${label}/ root and is not readable` };
+    }
+    const currentStat = fs.statSync(openedRealPath);
+    if (!sameInode(openedStat, currentStat)) {
+      return { status: 403, error: `${requestedPath} changed during open and was refused` };
+    }
+    const assessment = assessFileRead(openedRealPath, { authenticated: true });
+    if (!assessment.allowed) {
+      return { status: 403, error: assessment.reason || "File read blocked by security policy" };
+    }
+    const classification = classifyOpenedFile(fd, requestedPath, openedStat);
+    try {
+      const finalRealPath = fs.realpathSync.native(candidate);
+      const finalStat = fs.statSync(finalRealPath);
+      if (finalRealPath !== openedRealPath || !sameInode(openedStat, finalStat)) {
+        return { status: 403, error: `${requestedPath} changed during read and was refused` };
+      }
+    } catch {
+      return { status: 403, error: `${requestedPath} changed during read and was refused` };
+    }
+    return { resolvedPath: openedRealPath, classification };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (err instanceof FileRequestError) return { status: 400, error: err.message };
+    if (code === "ENOENT" || code === "ENOTDIR") return { status: 404, error: "Not found" };
+    if (code === "ELOOP") return { status: 403, error: `${requestedPath} is a symlink leaf and is not readable` };
+    return { status: 500, error: err instanceof Error ? err.message : "Read failed" };
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+  }
 }
 
 /**
@@ -485,7 +779,9 @@ async function handleJsonUpload(req: HttpRequest, res: ServerResponse, context: 
   } else {
     // URL fetch
     try {
-      const response = await fetch(url!);
+      const fetched = await fetchPublicUrl(url!);
+      if (!fetched.ok) return badRequest(res, fetched.error);
+      const { response } = fetched;
       if (!response.ok) {
         return serverError(res, `Failed to fetch URL: ${response.status} ${response.statusText}`);
       }
@@ -517,7 +813,7 @@ async function handleJsonUpload(req: HttpRequest, res: ServerResponse, context: 
 // ── Transfer types ──────────────────────────────────────────────
 
 interface TransferSpec {
-  file: string;       // absolute local path OR file ID from /api/files
+  file: string;       // managed file ID from /api/files
   remotePath?: string; // destination path on remote (defaults to same relative path)
 }
 
@@ -539,35 +835,21 @@ type RemoteConfig = { remotes?: Record<string, { url: string; label?: string; to
 
 /** Resolve a file spec to { buffer, filename, relativePath }. */
 function resolveFileSpec(spec: TransferSpec): { buffer: Buffer; filename: string; relativePath: string | null } {
-  const expanded = expandPath(spec.file);
-
-  // Try as absolute/home path first
-  if (fs.existsSync(expanded)) {
-    const stat = fs.statSync(expanded);
-    if (stat.size > MAX_TRANSFER_SIZE) {
-      throw new Error(`File ${spec.file} is ${(stat.size / 1024 / 1024).toFixed(1)} MB — exceeds 50 MB transfer limit`);
-    }
-    const buffer = fs.readFileSync(expanded);
-    const filename = path.basename(expanded);
-    // Compute relative path from ~/.jinn/ for default remotePath
-    const jinnHome = path.join(os.homedir(), ".jinn");
-    const relativePath = expanded.startsWith(jinnHome)
-      ? path.relative(jinnHome, expanded)
-      : null;
-    return { buffer, filename, relativePath };
-  }
-
-  // Try as file ID from managed storage
   const meta = getFile(spec.file);
   if (meta) {
-    const filePath = path.join(FILES_DIR, meta.id, meta.filename);
-    if (!fs.existsSync(filePath)) {
+    const candidates = [path.join(FILES_DIR, meta.id, meta.filename), meta.path].filter(
+      (p): p is string => !!p,
+    );
+    const filePath = candidates.find((p) => isServablePath(p) && fs.existsSync(p) && fs.statSync(p).isFile());
+    if (!filePath) {
       throw new Error(`Managed file ${spec.file} exists in DB but not on disk`);
     }
     const stat = fs.statSync(filePath);
     if (stat.size > MAX_TRANSFER_SIZE) {
       throw new Error(`File ${spec.file} is ${(stat.size / 1024 / 1024).toFixed(1)} MB — exceeds 50 MB transfer limit`);
     }
+    const assessment = assessFileRead(filePath, { authenticated: true });
+    if (!assessment.allowed) throw new Error(assessment.reason || "File read blocked by security policy");
     return {
       buffer: fs.readFileSync(filePath),
       filename: meta.filename,
@@ -575,7 +857,7 @@ function resolveFileSpec(spec: TransferSpec): { buffer: Buffer; filename: string
     };
   }
 
-  throw new Error(`File not found: ${spec.file}`);
+  throw new Error(`Managed file not found: ${spec.file}`);
 }
 
 /** Resolve destination URL — accept raw URL or remote name from config. Whitelist is enforced after resolution. */
@@ -855,11 +1137,15 @@ async function handleAttachmentJson(
   let buffer: Buffer;
 
   if (localPath) {
+    if (!requireOperatorFileAuthority(req, res, "path attachment")) return;
     const expanded = expandPath(localPath);
     if (!fs.existsSync(expanded) || !fs.statSync(expanded).isFile()) {
       return badRequest(res, `File not found: ${localPath}`);
     }
-    if (fs.statSync(expanded).size > MAX) return badRequest(res, "File exceeds 50 MB limit");
+    const stat = fs.statSync(expanded);
+    if (stat.size > MAX) return badRequest(res, "File exceeds 50 MB limit");
+    const assessment = assessFileRead(expanded, { authenticated: true });
+    if (!assessment.allowed) return json(res, { error: assessment.reason || "File read blocked by security policy" }, 403);
     buffer = fs.readFileSync(expanded);
     if (!filename) filename = path.basename(expanded);
   } else if (content) {
@@ -868,7 +1154,9 @@ async function handleAttachmentJson(
     if (!filename) return badRequest(res, "filename is required when sending base64 content");
   } else {
     try {
-      const response = await fetch(url!);
+      const fetched = await fetchPublicUrl(url!);
+      if (!fetched.ok) return badRequest(res, fetched.error);
+      const { response } = fetched;
       if (!response.ok) return serverError(res, `Failed to fetch URL: ${response.status} ${response.statusText}`);
       buffer = Buffer.from(await response.arrayBuffer());
       if (buffer.length > MAX) return badRequest(res, "File exceeds 50 MB limit");
@@ -941,38 +1229,36 @@ export async function handleFilesRequest(
   method: string,
   context: ApiContext,
 ): Promise<boolean> {
-  // GET /api/files/read?path=<path> — read ANY file on disk for inline display.
-  // No allowlist (CEO-waived). Guards: 5 MB size cap + binary detection.
+  // GET /api/files/read?path=<path> — read one managed file under files/ or
+  // uploads/. GRS-020e containment guard: raw path shape gate + control-byte
+  // rejection + realpath containment. No arbitrary filesystem reads.
   if (method === "GET" && pathname === "/api/files/read") {
+    if (rejectUnidentifiedToolCaller(req, res)) return true;
     const reqUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     const requested = reqUrl.searchParams.get("path");
     if (!requested) {
       badRequest(res, "path query parameter is required");
       return true;
     }
-    const { resolvedPath } = resolveReadPath(requested);
-    if (!resolvedPath) {
-      notFound(res);
-      return true;
-    }
-    if (!fs.statSync(resolvedPath).isFile()) {
-      badRequest(res, "Not a file");
-      return true;
-    }
-    const assessment = assessFileRead(resolvedPath, { authenticated: true });
-    if (!assessment.allowed) {
-      json(res, { error: assessment.reason || "File read blocked by security policy" }, 403);
+    if (hasEncodedPathSeparator(rawQueryParamValue(req.url, "path"))) {
+      badRequest(res, "path contains encoded separators — pass a literal managed files/ or uploads/ relative path");
       return true;
     }
     try {
-      const c = classifyFile(resolvedPath);
+      const opened = readManagedFile(requested);
+      if ("error" in opened) {
+        if (opened.status === 404) notFound(res);
+        else json(res, { error: opened.error }, opened.status);
+        return true;
+      }
+      const c = opened.classification;
       json(res, {
         path: requested,
-        resolvedPath,
+        resolvedPath: opened.resolvedPath,
         mime: c.mime,
         size: c.size,
-        ...(c.tooLarge ? { tooLarge: true } : {}),
-        ...(c.binary ? { binary: true } : {}),
+        tooLarge: c.tooLarge,
+        binary: c.binary,
         ...(c.content !== undefined ? { content: c.content } : {}),
       });
     } catch (err) {
@@ -983,6 +1269,7 @@ export async function handleFilesRequest(
 
   // POST /api/files/transfer — send files to remote gateway
   if (method === "POST" && pathname === "/api/files/transfer") {
+    if (!requireOperatorFileAuthority(req, res, "file transfer")) return true;
     await handleTransfer(req, res, context);
     return true;
   }
@@ -1000,6 +1287,7 @@ export async function handleFilesRequest(
 
   // GET /api/files — list all
   if (method === "GET" && pathname === "/api/files") {
+    if (rejectUnidentifiedToolCaller(req, res)) return true;
     json(res, listFiles());
     return true;
   }
@@ -1007,6 +1295,7 @@ export async function handleFilesRequest(
   // GET /api/files/:id/meta — file metadata
   const metaMatch = pathname.match(/^\/api\/files\/([^/]+)\/meta$/);
   if (method === "GET" && metaMatch) {
+    if (rejectUnidentifiedToolCaller(req, res)) return true;
     const meta = getFile(metaMatch[1]);
     if (!meta) { notFound(res); return true; }
     json(res, meta);
@@ -1016,6 +1305,7 @@ export async function handleFilesRequest(
   // GET /api/files/:id — download file
   const dlMatch = pathname.match(/^\/api\/files\/([^/]+)$/);
   if (method === "GET" && dlMatch) {
+    if (rejectUnidentifiedToolCaller(req, res)) return true;
     const meta = getFile(dlMatch[1]);
     if (!meta) { notFound(res); return true; }
     // Managed storage first, then the recorded path (e.g. session uploads under UPLOADS_DIR).
@@ -1059,6 +1349,7 @@ export async function handleFilesRequest(
   // DELETE /api/files/:id
   const delMatch = pathname.match(/^\/api\/files\/([^/]+)$/);
   if (method === "DELETE" && delMatch) {
+    if (!requireOperatorFileAuthority(req, res, "file delete")) return true;
     const id = delMatch[1];
     const meta = getFile(id);
     if (!meta) { notFound(res); return true; }

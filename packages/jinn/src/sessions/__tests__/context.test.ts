@@ -137,6 +137,127 @@ describe("buildContext — config awareness", () => {
   });
 });
 
+describe("buildContext — Jinn MCP usage directive", () => {
+  const director: Employee = {
+    ...minimalEmployee,
+    name: "ops-director",
+    displayName: "Ops Director",
+    department: "operations",
+    rank: "manager",
+  };
+  const qa: Employee = {
+    ...minimalEmployee,
+    name: "qa-engineer",
+    displayName: "QA Engineer",
+    department: "quality",
+    rank: "senior",
+    engine: "codex",
+    model: "gpt-5.5",
+  };
+  const junior: Employee = {
+    ...minimalEmployee,
+    name: "junior-qa",
+    displayName: "Junior QA",
+    department: "quality",
+    rank: "employee",
+  };
+  const hierarchy = {
+    root: "ops-director",
+    nodes: {
+      "ops-director": { employee: director, parentName: null, directReports: ["qa-engineer"], depth: 0, chain: [] },
+      "qa-engineer": { employee: qa, parentName: "ops-director", directReports: ["junior-qa"], depth: 1, chain: ["ops-director"] },
+      "junior-qa": { employee: junior, parentName: "qa-engineer", directReports: [], depth: 2, chain: ["ops-director", "qa-engineer"] },
+    },
+    sorted: ["ops-director", "qa-engineer", "junior-qa"],
+    warnings: [],
+  };
+
+  it("announces the attached Jinn MCP and points task tracking at Todos/work-items for COO sessions", () => {
+    const out = buildContext({ ...baseOpts, engine: "codex", jinnMcpAttached: true });
+
+    expect(out).toContain("## COO Company Anchor");
+    expect(out).toContain("Your `codex` engine has the built-in `jinn` MCP attached for this session.");
+    expect(out).toContain("Todos/work-items are the source of truth for task tracking");
+    expect(out).toContain("Use Workflows for multi-step or scheduled orchestration");
+    expect(out).toContain("Use company-reference reads before asking the operator");
+    expect(out).not.toContain("## Company Identity");
+  });
+
+  it("MCP-attached sessions are not taught gateway/connector/file side-door curl flows", () => {
+    const out = buildContext({
+      ...baseOpts,
+      employee: qa,
+      hierarchy,
+      connectors: ["slack"],
+      config: { gateway: { host: "127.0.0.1", port: 7777 }, engines: { default: "codex" } } as unknown as JinnConfig,
+      jinnMcpAttached: true,
+    });
+
+    expect(out).toContain("Your hands are the attached Jinn MCP");
+    expect(out).toContain("Local shell/filesystem access remains available for implementation work");
+    expect(out).not.toContain("curl -X POST");
+    expect(out).not.toContain("curl POST");
+    expect(out).not.toContain("JINN_GATEWAY_TOKEN");
+    expect(out).not.toContain("/api/connectors");
+    expect(out).not.toContain("/api/sessions");
+    expect(out).not.toContain("/attachments");
+    expect(out).not.toContain("board.json");
+    expect(out).not.toContain("Create new employees by writing YAML");
+    expect(out).not.toContain("editing YAML");
+    expect(out).not.toContain("hand-editing roster files");
+    expect(out).not.toContain("~/.jinn/org/");
+    expect(out).not.toContain("config.yaml changes");
+    expect(out).not.toContain("cron/jobs.json changes");
+    expect(out).not.toContain("org/` changes");
+  });
+
+  it("non-MCP sessions retain operational YAML/roster guidance", () => {
+    const out = buildContext({
+      ...baseOpts,
+      employee: qa,
+      hierarchy,
+      connectors: ["slack"],
+      config: { gateway: { host: "127.0.0.1", port: 7777 }, engines: { default: "codex" } } as unknown as JinnConfig,
+    });
+
+    expect(out).toContain("editing YAML");
+    expect(out).toContain("hand-editing roster files");
+    expect(out).toContain("~/.jinn/org/");
+  });
+
+  it("does not announce Jinn MCP tools to sessions without the built-in server attached", () => {
+    const out = buildContext({ ...baseOpts, engine: "codex" });
+
+    expect(out).not.toContain("## COO Company Anchor");
+    expect(out).not.toContain("## Company Identity");
+    expect(out).not.toContain("built-in `jinn` MCP attached");
+  });
+
+  it("emits a lean company identity block only for employee sessions with Jinn MCP attached", () => {
+    const out = buildContext({ ...baseOpts, employee: qa, hierarchy, jinnMcpAttached: true });
+
+    expect(out).toContain("## Company Identity");
+    expect(out).toContain("You are QA Engineer (`qa-engineer`), a senior in quality, level 1 of the company.");
+    expect(out).toContain("You report to Ops Director; direct reports: Junior QA.");
+    expect(out).toContain("Your hands are the attached Jinn MCP");
+    expect(out).toContain("Todos are your live work ledger");
+    expect(out).toContain("Workflows are reusable automations (the HOW)");
+    expect(out).toContain("Todos and Workflows are SEPARATE");
+    expect(out).toContain("Questions and approvals route to your manager/COO by default");
+    expect(out).toContain("aCEO/operator is the exception");
+    expect(out).not.toContain("## COO Company Anchor");
+    expect(out).not.toContain("Use it extensively before asking the operator or carrying state in prose.");
+  });
+
+  it("does not emit the company identity block for employee sessions without Jinn MCP attached", () => {
+    const out = buildContext({ ...baseOpts, employee: qa, hierarchy });
+
+    expect(out).not.toContain("## Company Identity");
+    expect(out).not.toContain("Your hands are the attached Jinn MCP");
+    expect(out).not.toContain("Todos are your live work ledger");
+  });
+});
+
 describe("buildContext — onboarding block is omitted when portal setup is complete", () => {
   // Gate is portal.setupComplete === true, with portal.onboarded === true accepted for legacy wizard completions.
   const minConfig = {
@@ -208,6 +329,8 @@ describe("buildContext — compact org roster", () => {
   it("points at the employee-detail endpoint for full personas", () => {
     const out = buildContext({ ...baseOpts, hierarchy });
     expect(out).toContain("GET /api/org/employees/:name");
+    expect(out).toContain("Create new employees by writing YAML files there");
+    expect(out).toContain("the YAML under");
   });
 });
 

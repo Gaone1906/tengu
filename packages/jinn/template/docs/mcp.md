@@ -42,18 +42,36 @@ mcp:
     enabled: true
 ```
 
-### Gateway
-Built-in MCP server that wraps {{portalName}}'s own API. Gives employees tools to:
-- Send messages via connectors (Slack, etc.)
-- List and query sessions
-- Manage cron jobs
-- Query the org structure
-- Update department boards
+### Gateway (the `jinn` company toolset)
+Built-in MCP server (named `jinn`) that wraps {{portalName}}'s own API. Gives
+employees typed tools to discover colleagues, delegate work, spawn/read/message
+sessions, and run workflows — instead of hand-written `curl` calls.
 
 ```yaml
 mcp:
   gateway:
-    enabled: true  # enabled by default
+    enabled: true   # ← the one-line switch: attach the jinn toolset to every
+                    #   session on an MCP-capable engine (claude/codex/hermes/grok).
+                    #   Currently OFF when absent; false = global kill switch.
+```
+
+Attachment is decided per session from, in order: engine capability (an engine
+without a per-session MCP lever never attaches) → the `enabled` master switch
+(`false` beats everything) → per-engine opt-out → an authed smoke check → the
+per-employee override. At startup (and on every config reload), the gateway
+verifies the builtin server can actually authenticate against itself — the same
+bearer-from-`gateway.json` path a spawned server uses. If that check fails,
+sessions spawn **without** the toolset and the reason is logged, rather than
+spawning with tools whose every call fails.
+
+Opt a single engine out (e.g. while its adapter misbehaves):
+
+```yaml
+mcp:
+  gateway:
+    enabled: true
+    engines:
+      grok: false   # grok sessions skip the jinn toolset; others keep it
 ```
 
 ## Custom MCP Servers
@@ -83,11 +101,26 @@ Employees can opt out of MCP servers or request only specific ones:
 name: backend-dev
 mcp: false  # No MCP servers at all
 
-# Or specific servers only:
+# Or specific servers only (the built-in gateway server is named `jinn`):
 mcp:
   - search
-  - gateway
+  - jinn
 ```
+
+The built-in `jinn` toolset additionally has its own per-employee override,
+which beats the general `mcp` field (specific over general):
+
+```yaml
+# Force-attach for one employee even while mcp.gateway.enabled is absent —
+# a single-employee pilot before flipping the gateway-wide switch:
+jinnMcp: true
+
+# Or force-detach even when attachment is on gateway-wide:
+jinnMcp: false
+```
+
+`mcp.gateway.enabled: false` (the kill switch) and a per-engine opt-out beat
+`jinnMcp: true`.
 
 By default, all globally enabled MCP servers are available to all employees.
 

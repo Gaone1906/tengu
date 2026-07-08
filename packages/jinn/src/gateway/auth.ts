@@ -155,6 +155,10 @@ export function authRequiredForRequest(method: string | undefined, pathname: str
   if (pathname === "/api/auth/pair" && (method || "GET").toUpperCase() === "POST") return false;
   if (pathname === "/api/auth/logout" && (method || "GET").toUpperCase() === "POST") return false;
   if (pathname === "/api/internal/hook" && (method || "GET").toUpperCase() === "POST") return false;
+  // Route-local auth accepts either the gateway token or a per-binding workflow-event
+  // token. The generic middleware only knows the gateway token, so this route must
+  // verify its own auth and fail closed for anonymous requests.
+  if (pathname === "/api/workflow-events" && (method || "GET").toUpperCase() === "POST") return false;
   if (pathname.startsWith("/api/")) return true;
   if (pathname === "/ws" || pathname.startsWith("/ws/pty/")) return true;
   return false;

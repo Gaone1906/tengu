@@ -1,5 +1,5 @@
 // packages/jinn/src/engines/__tests__/hermes-acp.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { PassThrough } from "node:stream";
 import { HermesRpc } from "../hermes-jsonrpc.js";
 import { HermesAcpEngine } from "../hermes-acp.js";
@@ -280,5 +280,88 @@ describe("HermesAcpEngine.run", () => {
     const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-empty" });
     expect(r.result).toBe("");
     expect(r.error).toMatch(/no assistant text/);
+  });
+
+  // GRS-018 — the resolved MCP set is emitted into the ACP session handshake.
+  // Before this, both call sites hardcoded `mcpServers: []`, so an attached jinn
+  // server exposed NO tools to a Hermes session (state.json honest limit).
+  describe("ACP mcpServers emit (GRS-018)", () => {
+    // The mapper injects JINN_GATEWAY_TOKEN from the gateway process env into
+    // the jinn server (Hermes filters inherited env for MCP subprocesses).
+    // Pin it to a known value so the wire assertion is deterministic
+    // regardless of the test runner's own environment.
+    const ORIGINAL_TOKEN = process.env.JINN_GATEWAY_TOKEN;
+    beforeEach(() => { process.env.JINN_GATEWAY_TOKEN = "test-bearer-token"; });
+    afterEach(() => {
+      if (ORIGINAL_TOKEN === undefined) delete process.env.JINN_GATEWAY_TOKEN;
+      else process.env.JINN_GATEWAY_TOKEN = ORIGINAL_TOKEN;
+    });
+
+    const RESOLVED = {
+      mcpServers: {
+        jinn: {
+          command: "/usr/bin/node",
+          args: ["/dist/mcp/server-entry.js"],
+          env: { JINN_GATEWAY_URL: "http://127.0.0.1:7777" },
+        },
+      },
+    };
+    const EXPECTED_WIRE = [
+      {
+        name: "jinn",
+        command: "/usr/bin/node",
+        args: ["/dist/mcp/server-entry.js"],
+        env: [
+          { name: "JINN_GATEWAY_URL", value: "http://127.0.0.1:7777" },
+          { name: "JINN_GATEWAY_TOKEN", value: "test-bearer-token" },
+        ],
+      },
+    ];
+
+    it("session/new carries the mapped resolvedMcp servers", async () => {
+      let captured: unknown = "never-called";
+      class CaptureEngine extends HermesAcpEngine {
+        protected spawnProc() {
+          const rpc = fakeServer((msg) => {
+            if (msg.method === "session/new") captured = (msg.params as Record<string, unknown>)?.mcpServers;
+          });
+          return { rpc, killProc: () => {}, isAliveProc: () => true, onExit: (_cb: () => void) => {}, onError: (_cb: (e: Error) => void) => {} };
+        }
+      }
+      const eng = new CaptureEngine();
+      const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-mcp-new", resolvedMcp: RESOLVED });
+      expect(r.error).toBeUndefined();
+      expect(captured).toEqual(EXPECTED_WIRE);
+    });
+
+    it("session/load carries the mapped servers too (resume path)", async () => {
+      let captured: unknown = "never-called";
+      class CaptureEngine extends HermesAcpEngine {
+        protected spawnProc() {
+          const rpc = fakeServer((msg) => {
+            if (msg.method === "session/load") captured = (msg.params as Record<string, unknown>)?.mcpServers;
+          });
+          return { rpc, killProc: () => {}, isAliveProc: () => true, onExit: (_cb: () => void) => {}, onError: (_cb: (e: Error) => void) => {} };
+        }
+      }
+      const eng = new CaptureEngine();
+      await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-mcp-load", resumeSessionId: "S1", resolvedMcp: RESOLVED });
+      expect(captured).toEqual(EXPECTED_WIRE);
+    });
+
+    it("emits [] when no resolvedMcp is provided (unchanged behavior)", async () => {
+      let captured: unknown = "never-called";
+      class CaptureEngine extends HermesAcpEngine {
+        protected spawnProc() {
+          const rpc = fakeServer((msg) => {
+            if (msg.method === "session/new") captured = (msg.params as Record<string, unknown>)?.mcpServers;
+          });
+          return { rpc, killProc: () => {}, isAliveProc: () => true, onExit: (_cb: () => void) => {}, onError: (_cb: (e: Error) => void) => {} };
+        }
+      }
+      const eng = new CaptureEngine();
+      await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-mcp-none" });
+      expect(captured).toEqual([]);
+    });
   });
 });

@@ -141,6 +141,7 @@
   --system-green: #7DBE6A;
   --system-red: #E0675A;
   --system-orange: #E89B45;
+  --system-yellow: #E3C34C;
   --system-purple: #B98AD6;
   --inset-shine: inset 0 1px 0 rgba(255,255,255,0.06);
   --shadow-subtle: 0 1px 2px rgba(0,0,0,0.30);
@@ -200,6 +201,7 @@
   --system-green: #597648;
   --system-red: #B23B33;
   --system-orange: #B5701A;
+  --system-yellow: #9C7A10;
   --system-purple: #7A5A9E;
   --inset-shine: inset 0 1px 0 rgba(255,255,255,0.70);
   --shadow-subtle: 0 1px 2px rgba(40,34,20,0.06);
@@ -258,6 +260,7 @@
     --system-green: #597648;
     --system-red: #B23B33;
     --system-orange: #B5701A;
+    --system-yellow: #9C7A10;
     --system-purple: #7A5A9E;
     --inset-shine: inset 0 1px 0 rgba(255,255,255,0.70);
     --shadow-subtle: 0 1px 2px rgba(40,34,20,0.06);
@@ -314,6 +317,7 @@
     --system-green: #7DBE6A;
     --system-red: #E0675A;
     --system-orange: #E89B45;
+    --system-yellow: #E3C34C;
     --system-purple: #B98AD6;
     --inset-shine: inset 0 1px 0 rgba(255,255,255,0.06);
     --shadow-subtle: 0 1px 2px rgba(0,0,0,0.30);
@@ -614,6 +618,11 @@ h1, h2, h3, h4, h5, h6 {
 .react-flow__controls-button:hover { background: var(--material-thin) !important; color: var(--text-primary) !important; }
 /* Edge stroke/width/opacity are set per-edge inline by the layout seam. */
 .react-flow__node { transition: transform 200ms var(--ease-spring); }
+/* GRS-019: React Flow stamps inline pointer-events:none on nodes that are not
+   selectable/draggable/connectable — which silently killed tap-to-inspect on
+   the read-only workflow canvas (selection is OURS, via the card button).
+   Re-enable hit-testing on the node wrapper; the pane still pans/zooms. */
+.react-flow__node { pointer-events: all !important; }
 
 /* Per-department hue (org map group containers). Hue comes from --dept-h set
    inline on the node; S/L is fixed per theme so it stays low-saturation and

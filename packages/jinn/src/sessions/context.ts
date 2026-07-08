@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Employee, JinnConfig } from "../shared/types.js";
+import type { Employee, JinnConfig, OrgHierarchy, OrgNode } from "../shared/types.js";
 import { JINN_HOME, ORG_DIR, CRON_JOBS, DOCS_DIR } from "../shared/paths.js";
 import { gatewayBaseUrl } from "../gateway/gateway-info.js";
 
@@ -75,12 +75,13 @@ export function buildContext(opts: {
   employee?: Employee;
   connectors?: string[];
   config?: JinnConfig;
+  engine?: string;
   sessionId?: string;
   portalName?: string;
   operatorName?: string;
   language?: string;
   channelName?: string;
-  hierarchy?: import("../shared/types.js").OrgHierarchy;
+  hierarchy?: OrgHierarchy;
   /**
    * Extra ESSENTIAL persona injected for the hands-free voice orchestrator
    * (source:"talk"). Layered on top of the base identity so the session keeps
@@ -94,6 +95,15 @@ export function buildContext(opts: {
    * Undefined/empty for all normal sessions — section is omitted.
    */
   talkThreads?: TalkThreadSummary[];
+  /**
+   * GRS-017b context diet: true when this session's engine gets the built-in
+   * `jinn` MCP toolset (org/sessions/workflow tools). The pasted org roster,
+   * the escalation-path prose, and the delegation-curl recipes are then
+   * replaced by short manifests pointing at the tools — the measured net
+   * saving is the slice's acceptance (mcp/__tests__/context-diet.test.ts).
+   * False/undefined → the full prose, byte-identical to before.
+   */
+  jinnMcpAttached?: boolean;
 }): string {
   const maxChars = opts.config?.context?.maxChars ?? DEFAULT_MAX_CONTEXT_CHARS;
   const sections: Section[] = [];
@@ -119,6 +129,7 @@ export function buildContext(opts: {
         language,
         opts.hierarchy?.nodes[opts.employee.name],
         opts.hierarchy,
+        opts.jinnMcpAttached,
       ),
       summary: `# You are ${opts.employee.displayName}\nEmployee: ${opts.employee.name}, ${opts.employee.department}, ${opts.employee.rank}`,
     });
@@ -190,9 +201,21 @@ export function buildContext(opts: {
     });
   }
 
+  if (opts.jinnMcpAttached) {
+    const engine = opts.engine ?? opts.employee?.engine ?? opts.config?.engines.default;
+    sections.push({
+      tier: Tier.ESSENTIAL,
+      marker: opts.employee ? "## Company Identity" : "## COO Company Anchor",
+      content: opts.employee
+        ? buildCompanyIdentityBlock(opts.employee, opts.hierarchy, engine, opts.jinnMcpAttached)
+        : buildCooCompanyAnchor(engine, opts.jinnMcpAttached),
+      summary: "",
+    });
+  }
+
   // ── STANDARD: Organization (COO only — employees get their chain of command) ──
   if (!opts.employee) {
-    const orgCtx = buildOrgContext(opts.hierarchy);
+    const orgCtx = buildOrgContext(opts.hierarchy, opts.jinnMcpAttached);
     if (orgCtx) {
       sections.push({
         tier: Tier.STANDARD,
@@ -205,25 +228,33 @@ export function buildContext(opts: {
 
   // ── STANDARD: Cron jobs (COO only — employees don't manage the schedule) ──
   if (!opts.employee) {
-    const cronCtx = buildCronContext();
+    const cronCtx = buildCronContext(opts.jinnMcpAttached);
     if (cronCtx) {
       sections.push({
         tier: Tier.STANDARD,
         marker: "## Scheduled cron",
         content: cronCtx,
-        summary: "## Scheduled cron jobs\nCron definitions are in `~/.jinn/cron/jobs.json`. Read directly when needed.",
+        summary: opts.jinnMcpAttached
+          ? cronCtx
+          : "## Scheduled cron jobs\nCron definitions are in `~/.jinn/cron/jobs.json`. Read directly when needed.",
       });
     }
   }
 
   // ── OPTIONAL: Knowledge / docs (filenames only, never inlined)
-  const knowledgeCtx = buildKnowledgeContext();
+  // GRS-020b context diet (mirrors the 017b jinnMcpAttached pattern): for
+  // jinn-MCP-attached sessions the ~100-file index collapses to a 2-line
+  // manifest pointing at jinn_search_knowledge/jinn_read_knowledge; everyone
+  // else keeps the full index byte-identical.
+  const knowledgeCtx = buildKnowledgeContext(opts.jinnMcpAttached);
   if (knowledgeCtx) {
     sections.push({
       tier: Tier.OPTIONAL,
       marker: "## Knowledge base",
       content: knowledgeCtx,
-      summary: "## Knowledge base\nKnowledge files are in `~/.jinn/knowledge/` and `~/.jinn/docs/`. Read them directly when needed.",
+      summary: opts.jinnMcpAttached
+        ? knowledgeCtx // the manifest is already 2 lines — trimming keeps it verbatim
+        : "## Knowledge base\nKnowledge files are in `~/.jinn/knowledge/` and `~/.jinn/docs/`. Read them directly when needed.",
     });
   }
 
@@ -242,8 +273,10 @@ export function buildContext(opts: {
     sections.push({
       tier: Tier.STANDARD,
       marker: "## Available connectors",
-      content: buildConnectorContext(opts.connectors, gatewayUrl),
-      summary: `## Available connectors: ${opts.connectors.join(", ")}\nUse \`curl POST ${gatewayUrl}/api/connectors/<name>/send\` to send messages.`,
+      content: buildConnectorContext(opts.connectors, gatewayUrl, opts.jinnMcpAttached),
+      summary: opts.jinnMcpAttached
+        ? `## Available connectors: ${opts.connectors.join(", ")}\nUse Jinn MCP/company routing for company operations; connector configuration lives in config.`
+        : `## Available connectors: ${opts.connectors.join(", ")}\nUse \`curl POST ${gatewayUrl}/api/connectors/<name>/send\` to send messages.`,
     });
   }
 
@@ -267,7 +300,7 @@ export function buildContext(opts: {
   sections.push({
     tier: Tier.STANDARD,
     marker: `## ${portalName} Gateway API`,
-    content: buildApiReference(gatewayUrl, portalName, opts.employee, employeeNode?.directReports?.length ?? 0),
+    content: buildApiReference(gatewayUrl, portalName, opts.employee, employeeNode?.directReports?.length ?? 0, opts.jinnMcpAttached),
     summary: `## ${portalName} Gateway API (${gatewayUrl})\nFull endpoint reference: CLAUDE.md / AGENTS.md.`,
   });
 
@@ -283,14 +316,30 @@ function buildEmployeeIdentity(
   employee: Employee,
   portalName: string,
   language: string,
-  node?: import("../shared/types.js").OrgNode,
-  hierarchy?: import("../shared/types.js").OrgHierarchy,
+  node?: OrgNode,
+  hierarchy?: OrgHierarchy,
+  jinnMcpAttached?: boolean,
 ): string {
   const languageInstruction = language !== "English"
     ? `\n**Language**: Always respond in ${language}. All your communication with the user must be in ${language}.\n`
     : "";
 
-  const chainOfCommand = buildChainOfCommand(employee, portalName, node, hierarchy);
+  const chainOfCommand = buildChainOfCommand(employee, portalName, node, hierarchy, jinnMcpAttached);
+  const systemContext = jinnMcpAttached
+    ? `## System context
+You are part of the ${portalName} AI gateway. Be proactive, take initiative, and deliver results. You're not a chatbot — you're a worker.`
+    : `## System context
+You are part of the ${portalName} AI gateway — a system that orchestrates AI workers. You have access to the filesystem, can run commands, call APIs, and send messages via connectors. Your working directory is \`~/.jinn\` (${JINN_HOME}).
+
+You can:
+- Read and write files in the home directory
+- Run shell commands
+- Call the gateway API to interact with other parts of the system
+- Send messages via connectors (Slack, etc.)
+- Access skills, knowledge base, and documentation
+- Collaborate with other employees by mentioning them or creating sessions
+
+Be proactive, take initiative, and deliver results. You're not a chatbot — you're a worker.`;
 
   return `# You are ${employee.displayName}
 
@@ -307,32 +356,53 @@ ${languageInstruction}
 - **Engine**: ${employee.engine}
 - **Model**: ${employee.model}
 ${chainOfCommand}
-## System context
-You are part of the ${portalName} AI gateway — a system that orchestrates AI workers. You have access to the filesystem, can run commands, call APIs, and send messages via connectors. Your working directory is \`~/.jinn\` (${JINN_HOME}).
+${systemContext}`;
+}
 
-You can:
-- Read and write files in the home directory
-- Run shell commands
-- Call the gateway API to interact with other parts of the system
-- Send messages via connectors (Slack, etc.)
-- Access skills, knowledge base, and documentation
-- Collaborate with other employees by mentioning them or creating sessions
+function buildCompanyIdentityBlock(
+  employee: Employee,
+  hierarchy: OrgHierarchy | undefined,
+  engine: string | undefined,
+  jinnMcpAttached: boolean,
+): string {
+  const node = hierarchy?.nodes[employee.name];
+  const manager = node?.parentName
+    ? hierarchy?.nodes[node.parentName]?.employee.displayName ?? node.parentName
+    : "COO";
+  const directReports = node?.directReports
+    .map((name) => hierarchy?.nodes[name]?.employee.displayName ?? name)
+    .join(", ") || "none";
+  const level = node?.depth ?? 0;
+  const engineName = engine ? `\`${engine}\`` : "current";
+  const mcpLine = jinnMcpAttached
+    ? `Your hands are the attached Jinn MCP on the ${engineName} engine - default to it to read/update the company (org, sessions, Todos, Workflows, cron, reference). Local shell/filesystem access remains available for implementation work or when MCP has no hand.`
+    : "";
 
-Be proactive, take initiative, and deliver results. You're not a chatbot — you're a worker.`;
+  return [
+    "## Company Identity",
+    `You are ${employee.displayName} (\`${employee.name}\`), a ${employee.rank} in ${employee.department}, level ${level} of the company.`,
+    `You report to ${manager}; direct reports: ${directReports}.`,
+    mcpLine,
+    "Todos are your live work ledger - find and update your Todo; create one only for durable work you own.",
+    "Workflows are reusable automations (the HOW) - use or propose one when a job is repeatable/scheduled/multi-step; Todos and Workflows are SEPARATE.",
+    "You have autonomy in your lane; end your turn when waiting on another employee.",
+    "Do NOT bombard the operator. Questions and approvals route to your manager/COO by default; the aCEO/operator is the exception (money, irreversible, public, legal/security, or explicit COO escalation).",
+  ].filter(Boolean).join("\n");
 }
 
 function buildChainOfCommand(
   employee: Employee,
   portalName: string,
-  node?: import("../shared/types.js").OrgNode,
-  hierarchy?: import("../shared/types.js").OrgHierarchy,
+  node?: OrgNode,
+  hierarchy?: OrgHierarchy,
+  jinnMcpAttached?: boolean,
 ): string {
   if (!node || !hierarchy) return "";
 
   const lines: string[] = ["## Chain of command"];
   lines.push(`- **Department**: ${employee.department}`);
 
-  // Your manager
+  // Your manager — load-bearing for escalation, always inline (design GRS-017 §3).
   if (node.parentName) {
     const parent = hierarchy.nodes[node.parentName];
     if (parent) {
@@ -353,19 +423,25 @@ function buildChainOfCommand(
     lines.push(`- **Your direct reports**: ${reports.join(", ")}`);
   }
 
-  // Escalation path
-  const escalation: string[] = [];
-  let current = node.parentName;
-  const visited = new Set<string>();
-  while (current && !visited.has(current)) {
-    visited.add(current);
-    const mgr = hierarchy.nodes[current];
-    escalation.push(mgr ? mgr.employee.displayName : current);
-    current = mgr?.parentName ?? null;
+  if (jinnMcpAttached) {
+    // GRS-017b diet: the walked escalation-path prose is discoverable through
+    // the org tools; one pointer replaces it.
+    lines.push(`- **Org discovery**: jinn_find_employees / jinn_get_employee / jinn_list_employees (roster, personas, reporting lines).`);
+  } else {
+    // Escalation path
+    const escalation: string[] = [];
+    let current = node.parentName;
+    const visited = new Set<string>();
+    while (current && !visited.has(current)) {
+      visited.add(current);
+      const mgr = hierarchy.nodes[current];
+      escalation.push(mgr ? mgr.employee.displayName : current);
+      current = mgr?.parentName ?? null;
+    }
+    escalation.push(`${portalName} (COO)`);
+    const unique = [...new Set(escalation)];
+    lines.push(`- **Escalation path**: ${unique.join(" → ")}`);
   }
-  escalation.push(`${portalName} (COO)`);
-  const unique = [...new Set(escalation)];
-  lines.push(`- **Escalation path**: ${unique.join(" → ")}`);
 
   return "\n" + lines.join("\n") + "\n";
 }
@@ -437,8 +513,37 @@ function buildConfigContext(config: JinnConfig, gatewayUrl: string): string {
   return lines.join("\n");
 }
 
-function buildOrgContext(hierarchy?: import("../shared/types.js").OrgHierarchy): string | null {
+function buildCooCompanyAnchor(engine?: string, jinnMcpAttached = false): string {
+  const engineName = engine ? `\`${engine}\`` : "current";
+  const mcpLine = jinnMcpAttached
+    ? `Your ${engineName} engine has the built-in \`jinn\` MCP attached for this session. Use it as the default way to read/update company state before asking the operator or carrying state in prose.`
+    : "";
+  return [
+    "## COO Company Anchor",
+    mcpLine,
+    "- Todos/work-items are the source of truth for task tracking: list/search/read/create/update/assign them through the MCP.",
+    "- Use Workflows for multi-step or scheduled orchestration.",
+    "- Use company-reference reads before asking the operator: sessions/search, knowledge, cost, and cron.",
+    "- Keep the operator out of the firehose: route questions and approvals through managers/COO by default, escalating to the operator only for money, irreversible, public, legal/security, or explicit escalation cases.",
+  ].filter(Boolean).join("\n");
+}
+
+function buildOrgContext(
+  hierarchy?: OrgHierarchy,
+  jinnMcpAttached?: boolean,
+): string | null {
   try {
+    // GRS-017b diet: with the jinn belt attached, the pasted roster tree is
+    // replaced by a short manifest pointing at the org tools. The employee
+    // COUNT stays (cheap, orients scale); everything else is discoverable.
+    if (jinnMcpAttached && hierarchy && Object.keys(hierarchy.nodes).length > 0) {
+      const count = Object.keys(hierarchy.nodes).length;
+      return [
+        `## Organization (${count} employee(s))`,
+        `Use MCP org tools for roster, personas, and reporting lines: jinn_list_employees, jinn_find_employees, jinn_get_employee.`,
+        `Create or change employees through the company/management tools; keep normal MCP-attached company work on the tool surface.`,
+      ].join("\n");
+    }
     if (hierarchy && Object.keys(hierarchy.nodes).length > 0) {
       const MAX_DEPTH = 3;
       const count = Object.keys(hierarchy.nodes).length;
@@ -459,7 +564,11 @@ function buildOrgContext(hierarchy?: import("../shared/types.js").OrgHierarchy):
         lines.push(`${"  ".repeat(MAX_DEPTH)}- ... and ${deepCount} more at deeper levels`);
       }
 
-      lines.push(`\nFull persona/details: \`GET /api/org/employees/:name\` or the YAML under \`${ORG_DIR}/\`. Create new employees by writing YAML files there.`);
+      lines.push(
+        `\nFull persona/details: \`GET /api/org/employees/:name\` or the YAML under \`${ORG_DIR}/\`. ` +
+        `Create new employees by writing YAML files there. ` +
+        `For non-MCP maintenance, editing YAML in \`~/.jinn/org/\` is available; keep hand-editing roster files narrow and format-preserving.`,
+      );
       return lines.join("\n");
     }
 
@@ -493,7 +602,11 @@ function buildOrgContext(hierarchy?: import("../shared/types.js").OrgHierarchy):
       const rankMatch = content.match(/rank:\s*(.+)/);
       lines.push(`- **${displayMatch?.[1] || name}** (${name}) — ${deptMatch?.[1] || "unassigned"}, ${rankMatch?.[1] || "employee"}`);
     }
-    lines.push(`\nFull persona/details: \`GET /api/org/employees/:name\` or the YAML under \`${ORG_DIR}/\`. Create new employees by writing YAML files there.`);
+    lines.push(
+      `\nFull persona/details: \`GET /api/org/employees/:name\` or the YAML under \`${ORG_DIR}/\`. ` +
+      `Create new employees by writing YAML files there. ` +
+      `For non-MCP maintenance, editing YAML in \`~/.jinn/org/\` is available; keep hand-editing roster files narrow and format-preserving.`,
+    );
     return lines.join("\n");
   } catch {
     return null;
@@ -504,7 +617,7 @@ function buildOrgContext(hierarchy?: import("../shared/types.js").OrgHierarchy):
  * Cron context: shows only enabled jobs inline, with a count of disabled jobs.
  * Previously listed all 77+ jobs; now only active ones are shown to save tokens.
  */
-function buildCronContext(): string | null {
+function buildCronContext(jinnMcpAttached = false): string | null {
   try {
     const raw = fs.readFileSync(CRON_JOBS, "utf-8");
     const jobs = JSON.parse(raw);
@@ -512,6 +625,12 @@ function buildCronContext(): string | null {
 
     const enabled = jobs.filter((j: any) => j.enabled !== false);
     const disabledCount = jobs.length - enabled.length;
+    if (jinnMcpAttached) {
+      return [
+        `## Scheduled cron jobs (${enabled.length} active, ${disabledCount} disabled)`,
+        "Read schedules/status with `jinn_list_cron_jobs`; read runs with `jinn_get_cron_run_history { id }`. Schedule edits stay operator/COO operations.",
+      ].join("\n");
+    }
 
     const lines: string[] = [`## Scheduled cron jobs (${enabled.length} active, ${disabledCount} disabled)`];
     for (const job of enabled) {
@@ -536,13 +655,26 @@ function buildCronContext(): string | null {
 const KNOWLEDGE_CACHE_TTL_MS = 30_000;
 let knowledgeCache: { builtAt: number; value: string | null } | null = null;
 
-function buildKnowledgeContext(): string | null {
-  if (knowledgeCache && Date.now() - knowledgeCache.builtAt < KNOWLEDGE_CACHE_TTL_MS) {
-    return knowledgeCache.value;
+/**
+ * GRS-020b context diet: when the session's engine carries the built-in `jinn`
+ * MCP toolset, the full per-file index (~1,200 tokens at the operator's real
+ * scale) is replaced by this 2-line manifest — the agent searches on demand
+ * instead of carrying the whole catalog every turn. Gated on the SAME
+ * existence check as the index (no knowledge files → no section at all), and
+ * non-attached sessions keep the index byte-identical (pinned in
+ * mcp/__tests__/knowledge-diet.test.ts).
+ */
+const KNOWLEDGE_MCP_MANIFEST = [
+  "## Knowledge base",
+  "Company knowledge is in `knowledge/` + `docs/`: search with `jinn_search_knowledge`, then read a hit with `jinn_read_knowledge { path }`.",
+].join("\n");
+
+function buildKnowledgeContext(jinnMcpAttached?: boolean): string | null {
+  if (!knowledgeCache || Date.now() - knowledgeCache.builtAt >= KNOWLEDGE_CACHE_TTL_MS) {
+    knowledgeCache = { builtAt: Date.now(), value: buildKnowledgeContextUncached() };
   }
-  const value = buildKnowledgeContextUncached();
-  knowledgeCache = { builtAt: Date.now(), value };
-  return value;
+  if (knowledgeCache.value === null) return null;
+  return jinnMcpAttached ? KNOWLEDGE_MCP_MANIFEST : knowledgeCache.value;
 }
 
 function buildKnowledgeContextUncached(): string | null {
@@ -596,7 +728,14 @@ function buildKnowledgeContextUncached(): string | null {
   return lines.join("\n");
 }
 
-function buildConnectorContext(connectors: string[], gatewayUrl: string): string {
+function buildConnectorContext(connectors: string[], gatewayUrl: string, jinnMcpAttached?: boolean): string {
+  if (jinnMcpAttached) {
+    return [
+      `## Available connectors: ${connectors.join(", ")}`,
+      `Use the attached Jinn MCP tools and company routing for company operations; connector configuration lives in \`config.yaml\`.`,
+      `Local shell/filesystem access remains available for implementation work.`,
+    ].join("\n");
+  }
   return [
     `## Available connectors: ${connectors.join(", ")}`,
     `Send a message: \`curl -X POST ${gatewayUrl}/api/connectors/<name>/send -H "Authorization: Bearer $JINN_GATEWAY_TOKEN" -H 'Content-Type: application/json' -d '{"channel":"CHANNEL_ID","text":"message"}'\` (add \`"thread":"THREAD_TS"\` for a threaded reply).`,
@@ -683,8 +822,22 @@ export function buildOnboardingContext(opts: {
  * was pure duplication. What remains dynamic is the live base URL and the
  * short list of calls each audience actually makes.
  */
-function buildApiReference(gatewayUrl: string, portalName: string, employee?: Employee, directReportCount = 0): string {
+function buildApiReference(
+  gatewayUrl: string,
+  portalName: string,
+  employee?: Employee,
+  directReportCount = 0,
+  jinnMcpAttached?: boolean,
+): string {
   const header = `## ${portalName} Gateway API (base URL: ${gatewayUrl})`;
+  if (jinnMcpAttached) {
+    return [
+      header,
+      `Use the attached Jinn MCP tools for company operations (sessions, delegation, Todos, Workflows, org, reference reads, and managed files).`,
+      `Local shell/filesystem access remains available for implementation work.`,
+      `The full HTTP endpoint reference remains in CLAUDE.md / AGENTS.md for gateway maintenance and non-MCP fallback.`,
+    ].join("\n");
+  }
   const authLine =
     `Privileged endpoints (everything below) require auth: add \`-H "Authorization: Bearer $JINN_GATEWAY_TOKEN"\`. \`$JINN_GATEWAY_TOKEN\`, \`$JINN_GATEWAY_URL\` (base URL), and \`$JINN_SESSION_ID\` are already exported in your environment — use them directly. For privileged calls made from inside this session, also add \`-H "X-Jinn-Session-Id: $JINN_SESSION_ID"\` so restart/interrupt accounting can identify this turn. (The web UI authenticates via cookie instead.)`;
   const attachmentsLine =
@@ -701,6 +854,7 @@ function buildApiReference(gatewayUrl: string, portalName: string, employee?: Em
       `- Follow up on a child session: \`POST "$JINN_GATEWAY_URL/api/sessions/:id/message"\` with \`{message}\` (same auth header)`,
       `- Read a child's latest replies: \`GET "$JINN_GATEWAY_URL/api/sessions/:id?last=N"\` (same auth header)`,
       `- Valid \`employee\` values are the slugs in your chain of command, \`GET "$JINN_GATEWAY_URL/api/org"\`, or \`ls ${ORG_DIR}/\``,
+      `- Non-MCP org maintenance: editing YAML in \`~/.jinn/org/\` is available for hand-editing roster files when needed.`,
       attachmentsLine,
       `Full endpoint table: CLAUDE.md / AGENTS.md.`,
     ].join("\n");

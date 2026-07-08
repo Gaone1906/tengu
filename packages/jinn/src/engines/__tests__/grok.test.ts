@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import type { StreamDelta, EngineResult } from "../../shared/types.js";
 
 interface FakeProc {
@@ -695,5 +696,59 @@ describe("GrokEngine run", () => {
       input: "{\"target_file\":\"RIGHT.md\"}",
     });
     expect(deltas).not.toContainEqual(expect.objectContaining({ toolId: "wrong-tool" }));
+  });
+});
+
+describe("GrokEngine — GRS-012c MCP wiring", () => {
+  it("sets OTEL_SDK_DISABLED=true on the spawned grok child env (jinn-spawned scope only)", async () => {
+    const { call } = await runWith([JSON.stringify({ type: "result", result: "ok", done: true })]);
+    const env = (call.opts as { env: Record<string, string> }).env;
+    expect(env.OTEL_SDK_DISABLED).toBe("true");
+    // Regression: the pre-existing MCP-source opt-outs are still set.
+    expect(env.GROK_CLAUDE_MCPS_ENABLED).toBe("false");
+    expect(env.GROK_CURSOR_MCPS_ENABLED).toBe("false");
+  });
+
+  it("does NOT write a .grok/config.toml when no resolvedMcp is provided", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-run-nomcp-"));
+    try {
+      await runWith([JSON.stringify({ type: "result", result: "ok", done: true })], { cwd });
+      expect(fs.existsSync(path.join(cwd, ".grok", "config.toml"))).toBe(false);
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("writes the session-scoped .grok/config.toml before spawn and cleans it up on settle (zero residue)", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-run-mcp-"));
+    try {
+      const engine = new GrokEngine();
+      const promise = engine.run({
+        prompt: "hi",
+        cwd,
+        sessionId: "jinn-grok-mcp-1",
+        model: "grok-build",
+        resolvedMcp: {
+          mcpServers: {
+            jinn: { command: "/usr/bin/node", args: ["/abs/server-entry.js"], env: { JINN_GATEWAY_URL: "http://127.0.0.1:7799" } },
+          },
+        },
+      } as any);
+
+      await flush();
+      const call = spawnCalls[spawnCalls.length - 1];
+      // Config exists WHILE the process is live (grok discovers it at startup).
+      const configPath = path.join(cwd, ".grok", "config.toml");
+      expect(fs.existsSync(configPath)).toBe(true);
+      expect(fs.readFileSync(configPath, "utf-8")).toContain("[mcp_servers.jinn]");
+
+      call.proc.close(0);
+      await promise;
+      // Cleaned up after the turn settles → no residue in the project tree.
+      expect(fs.existsSync(configPath)).toBe(false);
+      expect(fs.existsSync(path.join(cwd, ".grok"))).toBe(false);
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });

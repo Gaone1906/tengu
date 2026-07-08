@@ -250,16 +250,8 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
     return promise;
   }
 
-  /** env for the agy PTY: inherit, force a real TERM. Do NOT strip GEMINI_*
-   *  (agy shares the ~/.gemini account dir for its cached credential). */
   private buildPtyEnv(sessionId?: string): Record<string, string> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined) env[k] = v;
-    }
-    env.TERM = "xterm-256color";
-    if (sessionId) env.JINN_SESSION_ID = sessionId;
-    return env;
+    return buildAntigravityPtyEnv(sessionId);
   }
 
   private buildArgs(resumeConvId: string | undefined, model?: string): string[] {
@@ -489,4 +481,28 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
   isAlive(sessionId: string): boolean {
     return this.active.has(sessionId) || this.lifecycle.getWarm(sessionId) !== undefined;
   }
+}
+
+/**
+ * env for the agy PTY: inherit EVERYTHING, force a real TERM. Do NOT strip
+ * GEMINI_* (agy shares the ~/.gemini account dir for its cached credential).
+ *
+ * GRS-018 Tier-3 fallback seam: agy 1.0.16 reads MCP config only from the
+ * global ~/.gemini (which jinn never mutates), so Antigravity has NO native
+ * per-session MCP lever. Antigravity sessions operate the company via the
+ * gateway HTTP API instead — the session context's API-reference block points
+ * them at `$JINN_GATEWAY_TOKEN` / `$JINN_GATEWAY_URL`, and this full-inherit
+ * env builder is what delivers those variables (exported by the gateway at
+ * boot) to the agy child. Exported so tests pin the seam: an env-allowlist
+ * refactor here would silently sever the only company-control path this
+ * engine has.
+ */
+export function buildAntigravityPtyEnv(sessionId?: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined) env[k] = v;
+  }
+  env.TERM = "xterm-256color";
+  if (sessionId) env.JINN_SESSION_ID = sessionId;
+  return env;
 }

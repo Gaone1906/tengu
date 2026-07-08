@@ -74,12 +74,12 @@ Delete all contents of `~/.jinn/tmp/` but keep the directory itself.
 
 ### Fix Malformed JSON
 
-If any JSON file (board.json, jobs.json, etc.) is malformed:
+If any JSON file (jobs.json, structured state files, etc.) is malformed:
 1. Read the raw file content.
 2. Attempt to identify the syntax error (missing comma, bracket, quote).
 3. Fix the error and parse to verify.
 4. Write the corrected JSON back to the file.
-5. If the file is unrecoverable, back it up as `<filename>.bak` and create a fresh default (empty array `[]` for boards and job files).
+5. If the file is unrecoverable, back it up as `<filename>.bak` and create a fresh default only when the file's format is well known.
 
 ### Fix Malformed YAML
 

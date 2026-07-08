@@ -66,6 +66,15 @@ function listTextFiles(path: string): string[] {
 }
 
 describe("privacy guard", () => {
+  it("keeps local sprint/evidence sandboxes out of the repository", () => {
+    const localSprintDirs = readdirSync(REPO, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((name) => /^\.jinn-.*-sprint$/.test(name));
+
+    expect(localSprintDirs).toEqual([]);
+  });
+
   it("keeps shipped templates and public source fixtures generic", () => {
     const findings: string[] = [];
 

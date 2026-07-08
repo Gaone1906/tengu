@@ -85,13 +85,15 @@ export function ChatHeaderPills({
           style={{ paddingTop: 'max(var(--safe-top), 0px)' }}
         >
           <div className="relative flex h-12 items-center gap-1 bg-[var(--material-thick)] px-1.5 [backdrop-filter:blur(20px)_saturate(1.3)] [-webkit-backdrop-filter:blur(20px)_saturate(1.3)]">
+            {/* Icon-only back (HIG icons-over-labels) — a bare chevron; the
+                accessible name lives in aria-label, not visible text. */}
             <button
               onClick={onBack}
               aria-label="Back to chats"
-              className="inline-flex h-9 shrink-0 items-center gap-0.5 rounded-full pl-1 pr-2.5 text-[length:var(--text-body)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)] active:bg-[var(--fill-secondary)]"
+              title="Back to chats"
+              className="inline-flex size-9 shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)] active:bg-[var(--fill-secondary)]"
             >
-              <ChevronLeft size={22} className="shrink-0" />
-              Chats
+              <ChevronLeft size={24} className="shrink-0" />
             </button>
             <span
               className={cn(

@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
-import type { ChatBlock, ChatBlockEnvelope, CronJob, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
+import type { ChatBlock, ChatBlockEnvelope, CronJob, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
 import { isInterruptibleEngine } from "../shared/types.js";
 import { getModelRegistry, invalidateModelRegistry, effortLevelsForModel, refreshGrokModels, refreshPiModels, refreshHermesModels, engineAvailable, isKnownEngine, engineUnavailableMessage } from "../shared/models.js";
 import { validateNewSessionSelection, validateSessionPatch } from "../sessions/session-patch.js";
@@ -17,7 +17,17 @@ import {
   getSessionGroupCounts,
   coercePortalEmployee,
   searchSessions,
+  searchMessages,
+  searchSessionsFiltered,
+  getMessageContext,
+  getCostReport,
+  stripControlChars,
+  hasControlBytes,
+  MESSAGE_CONTEXT_MAX_RADIUS,
+  type MessageSearchFilter,
+  type SearchSessionsFilter,
   listChildSessions,
+  listSessionsByWorkItem,
   getSession,
   getEngineSessionRef,
   createSession,
@@ -44,10 +54,56 @@ import {
   cancelAllPendingQueueItems,
   listAllPendingQueueItems,
   getFile,
+  getSessionBySessionKey,
   initDb,
 } from "../sessions/registry.js";
 import { blockFallbackText, validateBlockEnvelope } from "../shared/blocks.js";
 import { forkEngineSession } from "../sessions/fork.js";
+import {
+  deriveRunState,
+  resolveWorkflowEvidenceRoot,
+  listWorkflowIds,
+  listDefinitions,
+  getDefinition,
+  createDefinition,
+  updateDefinition,
+  duplicateDefinition,
+  retireDefinition,
+  resolveExecutionPlan,
+  startWorkflowRun,
+  startWorkflowRunFromTrigger,
+  stepSessionKey,
+  listRuns,
+  getRun,
+  applyWorkflowCronSync,
+  fireWorkflowCronJob,
+  resolveWorkflowRunGate,
+  workflowRunTriggerTodoId,
+  artifactGatePasses,
+  stateFlagPasses,
+  checkWorkflowEventRateLimit,
+  createWorkflowTriggerBinding,
+  deleteWorkflowTriggerBinding,
+  fireWorkflowEvent,
+  formatPollActivationApprovalRequest,
+  getWorkflowTriggerBinding,
+  listPublicWorkflowTriggerBindings,
+  sanitizeWorkflowTriggerPayload,
+  updateWorkflowTriggerBinding,
+  verifyAnyWorkflowTriggerBindingToken,
+  withPollActivationContract,
+  workflowEventRateLimitKeyFromToken,
+  WorkflowStoreError,
+  WorkflowRunStoreError,
+  WorkflowTriggerStoreError,
+  correlateSessionTurn,
+  type EditableWorkflowDefinition,
+  type FollowUpContext,
+  type FollowUpPostResult,
+  type RunDriverDeps,
+  type SpawnContext,
+  type SpawnResult,
+} from "../workflows/index.js";
 import {
   CONFIG_PATH,
   CRON_JOBS,
@@ -68,10 +124,12 @@ import { detectRateLimit } from "../shared/rateLimit.js";
 import { getClaudeExpectedResetAt } from "../shared/usageAwareness.js";
 import { collectEngineLimits } from "../shared/engine-limits.js";
 import { handleRateLimit } from "../sessions/rate-limit-handler.js";
+import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile, isMcpCapableEngine } from "../mcp/resolver.js";
 import { pickEncoding, compressBuffer, MIN_COMPRESS_BYTES } from "./compress.js";
-import { loadJobs, saveJobs } from "../cron/jobs.js";
+import { canonicalCronJobId, loadJobs, saveJobs } from "../cron/jobs.js";
+import { summarizeCronRun } from "../cron/run-summary.js";
 import { reloadScheduler } from "../cron/scheduler.js";
-import { runCronJob } from "../cron/runner.js";
+import { runCronJob, type WorkflowCronFire } from "../cron/runner.js";
 import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir } from "./files.js";
@@ -79,6 +137,32 @@ import { readJsonBody, readBodyRaw } from "./http-helpers.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { resultAlreadyInStreamedBlocks, shouldPreserveStreamedBlocks } from "./streamed-blocks.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions } from "../sessions/callbacks.js";
+import { sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
+import { UNIDENTIFIED_TOOL_CALL_ERROR, attachSessionIdentity, verifySessionCapability } from "../mcp/identity.js";
+import {
+  createWorkItem,
+  getWorkItem,
+  getWorkItemBySourceRef,
+  getWorkItemSpend,
+  linkSession,
+  listWorkItemEvents,
+  listWorkItems,
+  searchWorkItems,
+  type CreateWorkItemInput,
+  type SearchWorkItemsFilter,
+  type VerifyPolicy,
+  type WorkItem,
+  type WorkItemSource,
+  type WorkItemStatus,
+} from "../work-items/store.js";
+import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
+import { reconcileWorkItem } from "../work-items/reconcile.js";
+import { createWorkflowTodoBridge } from "../work-items/workflow-bridge.js";
+import { decideWorkItemApproval, escalateApproval, requestApproval } from "../work-items/approvals.js";
+import { resolveApprovalDecisionAuthority, resolveRootApprovalTarget } from "./approval-authority.js";
+import { scanOrg } from "./org.js";
+import { searchKnowledge, readKnowledgeFile } from "../knowledge/store.js";
+import { planWorkflowAuthoringInput } from "../workflows/authoring.js";
 import { loadInstances } from "../cli/instances.js";
 import { handleHookPost, isLoopback } from "./hook-endpoint.js";
 import {
@@ -93,12 +177,10 @@ import {
   issuePairingCode,
   isLoopbackHost,
   listAuthSessions,
-  matchesGatewayAuthToken,
   revokeAuthSession,
   touchAuthSession,
 } from "./auth.js";
 import { markTranscriptSyncedThrough, scheduleOnLoadTailSync, transcriptEntryText } from "./external-turns.js";
-import { handleTalkApi } from "../talk/routes.js";
 import { getOrchestratorPersona } from "../talk/orchestrator-persona.js";
 import {
   feedTalkText,
@@ -117,6 +199,10 @@ import { restartDetached } from "./lifecycle.js";
 const HOOK_BODY_MAX_BYTES = 64 * 1024;
 /** Max bytes accepted by public auth helpers. Codes/tokens are tiny. */
 const AUTH_BODY_MAX_BYTES = 16 * 1024;
+/** Cap for workflow-definition CRUD bodies (GRS-011b). A large graph is still KB-scale. */
+const WORKFLOW_DEFINITION_BODY_MAX_BYTES = 512 * 1024;
+/** Cap for inbound workflow events. Payloads become prompt context, so keep them small. */
+const WORKFLOW_EVENT_BODY_MAX_BYTES = 64 * 1024;
 const SESSION_LIST_PER_GROUP = 50;
 const BACKGROUND_ACTIVITY_STALE_MS = 5 * 60 * 1000;
 const SUPERSEDED_TURN_META_KEY = "supersededRunningTurnAt";
@@ -239,10 +325,22 @@ export function resumePendingWebQueueItems(context: ApiContext): void {
   if (pending.length === 0) return;
 
   let resumed = 0;
+  let ceded = 0;
   for (const item of pending) {
     let session = getSession(item.sessionId);
     if (!session) {
       cancelQueueItem(item.id);
+      continue;
+    }
+    // Workflow step sessions have exactly ONE recovery owner: the run RECONCILER
+    // (GRS-014b-fix, Codex finding 1). Their durable intent lives in the run record,
+    // not in this queue row — replaying the row here would resume the interrupted
+    // attempt under its OLD sessionKey and defeat the respawn-once accounting
+    // (attempt 2 under a new key). Cancel the stale row so it can never replay, and
+    // leave the session `interrupted` for the reconciler's startup sweep to re-derive.
+    if (session.sourceRef?.startsWith("workflow-run:") || session.sessionKey?.startsWith("workflow-run:")) {
+      cancelQueueItem(item.id);
+      ceded++;
       continue;
     }
     if (session.source !== "web") continue;
@@ -265,6 +363,9 @@ export function resumePendingWebQueueItems(context: ApiContext): void {
 
   if (resumed > 0) {
     logger.info(`Re-dispatched ${resumed} pending web queue item(s) after gateway restart`);
+  }
+  if (ceded > 0) {
+    logger.info(`Ceded ${ceded} workflow step queue item(s) to the run reconciler (single recovery owner)`);
   }
 }
 
@@ -366,6 +467,368 @@ function dispatchWebSessionRun(
 }
 
 /**
+ * Spawn the real session a workflow-run step maps to (GRS-011d-2c; attempt-keyed and
+ * driven by the sequential engine since GRS-014b).
+ *
+ * This is the gateway-side `spawnStep` the run driver calls for a step with a spawn
+ * spec. It maps the plan's actor (employee → its org engine/model, or a bare engine) onto a
+ * REAL linked session via the SAME createSession + dispatch path POST /api/sessions uses, so
+ * a workflow run genuinely spawns work — no shadow runtime. The session is linked to the run
+ * by its sourceRef/sessionKey (`workflow-run:<runId>:<nodeId>:<attempt>` — the deterministic
+ * identity the driver's mint-before-spawn probe reads back) and dispatched fire-and-forget;
+ * the RUN RECONCILER then observes the session's status to advance the run step-by-step.
+ *
+ * Exported for the gateway boot wiring (server.ts starts the run reconciler with this
+ * as its injected spawner).
+ *
+ * This spawns on WHICHEVER gateway serves the /run request — a configured evidence root only
+ * proves where definition/run files live, not that the target is isolated (see the /run route's
+ * honest sandbox note). Point an evidence root only at the isolated instance.
+ */
+export async function spawnWorkflowStepSession(ctx: SpawnContext, context: ApiContext): Promise<SpawnResult> {
+  const config = context.getConfig();
+  const { actorKind, actorRef } = ctx.spec;
+  let engineName: string;
+  let model: string | undefined;
+  let employee: string | null = null;
+  if (actorKind === "employee") {
+    const { scanOrg } = await import("./org.js");
+    const emp = scanOrg().get(actorRef);
+    if (!emp) throw new Error(`employee "${actorRef}" not found`);
+    engineName = emp.engine;
+    model = emp.model;
+    employee = actorRef;
+  } else {
+    engineName = actorRef;
+  }
+  // Per-node overrides (GRS-016b options.model/effort): the model override WINS over
+  // an employee's default model; effort becomes the session's effortLevel (the same
+  // per-task slot the sessions API uses — the engine resolves it via resolveEffort).
+  if (ctx.spec.model) model = ctx.spec.model;
+  const effortLevel = ctx.spec.effort;
+  // The RESOLVED model/effort is validated against the SAME model registry the
+  // sessions and delegations routes use (GRS-016b-fix, Codex finding 2) —
+  // spawn-time, not compile-time (model availability is config-dependent, so a
+  // spawn-time check is load-bearing). Invalid → throw HERE, before
+  // createSession: the driver records an honest, fast `spawn-failed` instead of
+  // minting a doomed real session that burns a turn and step-errors (or, worse,
+  // gets retried under retry.on:['error'] against a permanently invalid model).
+  //
+  // GRS-017f: this now validates an employee's CONFIGURED default model too, not
+  // just an explicit per-node override — passing the employee slug so an
+  // unregistered configured model fails with the SAME clear, employee-named
+  // error the sessions/delegations routes emit. v2 validated overrides only and
+  // let an employee's own model pass untouched; that silent path was the
+  // GRS-017f divergence (delegate 400'd, workflow spawned an unknown model).
+  {
+    const selection = validateNewSessionSelection(
+      config,
+      {
+        ...(ctx.spec.model !== undefined ? { model: ctx.spec.model } : {}),
+        ...(ctx.spec.effort !== undefined ? { effortLevel: ctx.spec.effort } : {}),
+      },
+      {
+        engine: engineName,
+        ...(model !== undefined ? { model } : {}),
+        ...(employee ? { employee } : {}),
+      },
+    );
+    if (!selection.ok) {
+      throw new Error(`step options rejected by the model registry: ${selection.error}`);
+    }
+  }
+  const engine = context.sessionManager.getEngine(engineName);
+  if (!engine) throw new Error(`engine "${engineName}" not available`);
+
+  // GRS-016e: the shared-session creation spawn overrides the key
+  // (`workflow-run:<runId>:shared`); absent = the ordinary attempt key (v2).
+  const sessionKey = ctx.sessionKey ?? stepSessionKey(ctx.runId, ctx.nodeId, ctx.attempt, ctx.round);
+  // The driver builds the full step prompt (GRS-014c: instructions + predecessor
+  // handoffs + acceptance criteria) from the run's frozen snapshot; the fallback only
+  // guards a hand-rolled caller.
+  const prompt = ctx.prompt ||
+    (`You are executing workflow step "${ctx.label}" (node ${ctx.nodeId}) of workflow ` +
+    `"${ctx.workflowId}", run ${ctx.runId}. Perform this step's work and report a concise result.`);
+  const session = createSession({
+    engine: engineName,
+    source: "web",
+    sourceRef: sessionKey,
+    connector: "web",
+    sessionKey,
+    replyContext: { source: "web" },
+    employee,
+    ...(model ? { model } : {}),
+    ...(effortLevel ? { effortLevel } : {}),
+    prompt,
+    portalName: config.portal?.portalName,
+  });
+  // DISPATCH-STARTED evidence, BEFORE the insert (GRS-016e-fix4, Codex round-4
+  // finding 5) — the same status-before-insert invariant postWorkflowStepFollowUp
+  // holds (fix3), applied to session CREATION: createSession persists 'idle', so
+  // mark the new session `running` durably FIRST, then insert the anchored row.
+  // A process death anywhere from the insert to (and through) the engine turn
+  // leaves a dead `running` row that boot's recoverStaleSessions stamps
+  // `interrupted`, so recovery RETRIES instead of mis-settling `step-no-output`.
+  // Ordering is load-bearing: status BEFORE insert means an anchored row can
+  // never exist without the dispatch-started mark — idle+anchored+no-reply is
+  // therefore always a turn the ENGINE completed empty (the honest no-output
+  // terminal), never a crash artifact. A crash between createSession and the
+  // status write leaves an idle row-less session: recovery by row-id absence
+  // (re-post the same attempt), unchanged.
+  updateSession(session.id, { status: "running", lastActivity: new Date().toISOString() });
+  session.status = "running";
+  // The shared-session creation spawn inserts the prompt row with the driver's
+  // PRE-MINTED anchor id (GRS-016e-fix2) — already persisted on the receipt.
+  insertMessage(session.id, "user", prompt, undefined, undefined, ctx.anchorMessageId);
+  const queueSessionKey = session.sessionKey || session.sourceRef || session.id;
+  const queueItemId = enqueueQueueItem(session.id, queueSessionKey, prompt);
+  context.emit("queue:updated", { sessionId: session.id, sessionKey: queueSessionKey });
+  dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId });
+  return { sessionId: session.id, detail: `spawned ${actorKind} "${actorRef}" (engine ${engineName})` };
+}
+
+/**
+ * Post a workflow step's FOLLOW-UP turn into an EXISTING gateway session
+ * (GRS-016e session modes 'workflow'/'existing') — the driver's injected
+ * `postStepFollowUp`. Mirrors the POST /api/sessions/:id/message core (insert the
+ * user message, enqueue, dispatch) with two deliberate differences:
+ *
+ *   - it NEVER interrupts a running turn (the planner only dispatches into idle
+ *     targets, and the per-session queue serializes any race) — a workflow must
+ *     not kill an operator's live turn;
+ *   - the step's declared actor is ASSERTED against the target session before
+ *     anything is posted: an engine actor must match the session's engine, an
+ *     employee actor the session's employee. A mismatch throws — an honest
+ *     spawn-failure for the step's policy chain — because a silently-ignored
+ *     actor declaration is the misplaced-config failure mode.
+ *
+ * TRUST PATH (vs the GRS-017c lateral-send guards): those guards bound
+ * AGENT-initiated sends — an engine choosing targets at runtime, unboundedly.
+ * A workflow follow-up is OPERATOR-AUTHORED: the target is frozen in the
+ * definition snapshot at run start, every send is one per node dispatch,
+ * serialized per target, stamped on a durable receipt, and bounded by the run
+ * machinery (maxNodes × retry cap). It is the operator posting through a
+ * machine, not a session messaging a session — so it takes the internal-callback
+ * path (no caller header), like parent notifications do. The prompt's marker
+ * line names the workflow/run/step, so the receiving conversation always shows
+ * WHO is speaking.
+ *
+ * ATOMIC BUSY-RESERVE (GRS-016e-fix, Codex finding 2): the planner's busy probe
+ * runs BEFORE the dispatch reaches here, so an operator message can land in
+ * between (TOCTOU). The authoritative check is therefore INSIDE this function,
+ * and the segment from the busy check through insertMessage is AWAIT-FREE — the
+ * single-process event loop cannot interleave another route's insert between our
+ * check and our insert (the GRS-017c synchronous-guard invariant; do NOT
+ * introduce an await inside this segment). Busy — or became busy — returns a
+ * typed DEFER: the driver hands the attempt back and the next sweep retries.
+ * The inserted user row's durable id is returned as the settle ANCHOR.
+ */
+export async function postWorkflowStepFollowUp(ctx: FollowUpContext, context: ApiContext): Promise<FollowUpPostResult> {
+  const session = getSession(ctx.sessionId);
+  if (!session) throw new Error(`target session "${ctx.sessionId}" not found`);
+  // Actor assertion — the declaration must be true of the target, or the author
+  // learns immediately (via the step's honest spawn-failure) instead of silently
+  // running their step on whatever the session happens to be.
+  if (ctx.spec.actorKind === 'engine' && session.engine !== ctx.spec.actorRef) {
+    throw new Error(`target session "${ctx.sessionId}" runs engine "${session.engine}", not the declared engine "${ctx.spec.actorRef}"`);
+  }
+  if (ctx.spec.actorKind === 'employee' && session.employee !== ctx.spec.actorRef) {
+    throw new Error(`target session "${ctx.sessionId}" belongs to employee "${session.employee ?? 'none'}", not the declared employee "${ctx.spec.actorRef}"`);
+  }
+  const engine = context.sessionManager.getEngine(session.engine);
+  if (!engine) throw new Error(`engine "${session.engine}" not available`);
+  const config = context.getConfig();
+
+  // ── ATOMIC SEGMENT: busy check → dispatch-started mark → insert. No await
+  // between here and insertMessage. A running/waiting status, a live queue lane,
+  // or ANY pending queue item (an operator message that landed after the
+  // planner's probe) defers the post — the marker row is never inserted into a
+  // target that is not verified-idle within this same synchronous segment.
+  const queueSessionKey = session.sessionKey || session.sourceRef || session.id;
+  const queue = context.sessionManager.getQueue();
+  const busy =
+    session.status === "running" ||
+    session.status === "waiting" ||
+    queue.isRunning(queueSessionKey) ||
+    queue.getPendingCount(queueSessionKey) > 0;
+  if (busy) {
+    return { outcome: "deferred", reason: `target session ${session.id} is busy (status ${session.status})` };
+  }
+  // DISPATCH-STARTED evidence, BEFORE the insert (GRS-016e-fix3, Codex round-3
+  // finding 4): mark the target session `running` durably — exactly what
+  // spawnWorkflowStepSession does before its own enqueue+dispatch. A process
+  // death anywhere from this write to (and through) the engine turn leaves a
+  // dead `running` row that boot's recoverStaleSessions stamps `interrupted`,
+  // so recovery RETRIES instead of mis-settling `step-no-output`. Ordering is
+  // load-bearing: status BEFORE insert means an anchored row can never exist
+  // without the dispatch-started mark — idle+anchored+no-reply is therefore
+  // always a turn the ENGINE completed empty (the honest no-output terminal),
+  // never a crash artifact. A crash between the status write and the insert
+  // recovers by row-id absence (re-post the same attempt), unchanged.
+  const wasInterrupted = session.status === "interrupted";
+  updateSession(session.id, { status: "running", lastActivity: new Date().toISOString(), lastError: null });
+  session.status = "running";
+  insertMessage(session.id, "user", ctx.prompt, undefined, undefined, ctx.anchorMessageId);
+  // ── end atomic segment. The row now exists under the driver's PRE-MINTED
+  // anchor id (GRS-016e-fix2), already persisted on the receipt.
+  if (wasInterrupted) {
+    // A restart-interrupted target resumes on the new turn, the message route's rule.
+    context.emit("session:resumed", { sessionId: session.id });
+  }
+  const queueItemId = enqueueQueueItem(session.id, queueSessionKey, ctx.prompt);
+  context.emit("queue:updated", { sessionId: session.id, sessionKey: queueSessionKey });
+  dispatchWebSessionRun(session, ctx.prompt, engine, config, context, { queueItemId });
+  return { outcome: "posted", sessionId: session.id, detail: `follow-up turn posted into session ${session.id} (${ctx.turnMarker})` };
+}
+
+/**
+ * Build the run-driver dependency set (GRS-014b) shared by the POST …/run route and
+ * the gateway-boot run reconciler: real definition store, real session probe
+ * (registry by deterministic sessionKey), real spawner. Injected — the driver module
+ * itself stays gateway-free.
+ */
+export function workflowRunDriverDeps(root: string, context: ApiContext): RunDriverDeps {
+  return {
+    root,
+    getDefinition,
+    probeStepSession: (sessionKey) => {
+      const session = getSessionBySessionKey(sessionKey);
+      if (!session) return { found: false };
+      // For a SETTLED session, also surface the final assistant message — the raw
+      // material of the step's outcome (GRS-014c). Fetched only on idle (once per
+      // settle, not per sweep tick). An idle session with no assistant output is an
+      // honest step failure ("settled with no output"), so null is meaningful.
+      let finalAssistantText: string | null | undefined;
+      if (session.status === "idle") {
+        const messages = getMessages(session.id);
+        for (let i = messages.length - 1; i >= 0; i--) {
+          if (messages[i].role === "assistant" && !messages[i].partial) {
+            finalAssistantText = messages[i].content;
+            break;
+          }
+        }
+        finalAssistantText ??= null;
+      }
+      return {
+        found: true,
+        sessionId: session.id,
+        status: session.status,
+        ...(finalAssistantText !== undefined ? { finalAssistantText } : {}),
+      };
+    },
+    spawnStep: (ctx) => spawnWorkflowStepSession(ctx, context),
+    // ROW-ANCHORED turn probe (GRS-016e-fix, identity-only since fix2): correlation
+    // runs through the shared `correlateSessionTurn` — the anchor is the workflow's
+    // own inserted USER row, matched ONLY by its persisted pre-minted row id (no
+    // content/marker-prefix fallback exists), and the reply is the first non-partial
+    // ASSISTANT row strictly AFTER it. Marker TEXT is human attribution only. A
+    // session with queued or running work reports busy ('running') even when its
+    // status record says idle, closing the settled-turn/queued-turn gap.
+    probeSessionTurn: ({ sessionId, marker, anchor }) => {
+      const session = getSession(sessionId);
+      if (!session) return { found: false };
+      const queue = context.sessionManager.getQueue();
+      const queueKey = session.sessionKey || session.sourceRef || session.id;
+      const busy = queue.isRunning(queueKey) || queue.getPendingCount(queueKey) > 0;
+      const status = busy && session.status === "idle" ? "running" : session.status;
+      const c = correlateSessionTurn(getMessages(session.id), { marker, ...(anchor ? { anchor } : {}) });
+      return {
+        found: true,
+        status,
+        markerPosted: c.markerPosted,
+        ...(c.superseded ? { superseded: true } : {}),
+        ...(status === "idle" && c.markerPosted ? { replyText: c.replyText } : {}),
+      };
+    },
+    postStepFollowUp: (ctx) => postWorkflowStepFollowUp(ctx, context),
+    // Run-START existence check for 'existing' targets. LOCAL REGISTRY ONLY — a
+    // sandbox gateway can never see (let alone message) another instance's
+    // sessions: there is no cross-gateway path here, the evidence-root isolation
+    // argument for mode 'existing' (GRS-016e safety note c).
+    sessionExists: (sessionId) => !!getSession(sessionId),
+    // The timeout stop (GRS-016b, operator ruling #2 — tokens stop burning): kill
+    // the live engine turn, drain the session's queue lane, idle the record — the
+    // same sequence POST /api/sessions/:id/stop performs, keyed by the step's
+    // deterministic sessionKey. Best-effort by contract: the driver logs a failure
+    // and moves on (the receipt's settle is already persisted).
+    stopStepSession: async (stop) => {
+      const session = getSessionBySessionKey(stop.sessionKey);
+      if (!session) return; // already gone — the settle stands, nothing burns
+      killSessionEngines(context, session, `Interrupted: workflow step timeout (${stop.reason})`);
+      context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
+      updateSession(session.id, { status: "idle", lastActivity: new Date().toISOString(), lastError: null });
+      context.emit("session:stopped", { sessionId: session.id });
+    },
+    // Deterministic loop exit-gate evaluation (GRS-014e): the same evidence checks
+    // the derive path uses — artifact glob under the evidence root, flag from
+    // state.json. Approval never reaches here (the validator refuses it on loop edges).
+    evaluateGate: (gate) => {
+      if (gate.evaluator === "artifact-glob" && gate.ref) {
+        return artifactGatePasses(root, gate.ref, null, 0) !== null;
+      }
+      if (gate.evaluator === "state-flag" && gate.ref) {
+        return stateFlagPasses(root, gate.ref);
+      }
+      return false;
+    },
+    // Todos ledger (GRS-021a): the run driver mints the run-level work item,
+    // links spawned step sessions, and reflects run terminals. Best-effort by
+    // contract inside the bridge — never load-bearing for the run.
+    workItems: createWorkflowTodoBridge(),
+    log: (level, message) => logger[level](message),
+  };
+}
+
+/**
+ * Re-derive the managed workflow cron jobs from the definition store and reload the
+ * scheduler when jobs.json changed (GRS-014d). Called after every definition
+ * mutation (create/update/duplicate/retire) and once at gateway boot. BEST-EFFORT
+ * from the routes: the definition save already succeeded, so a sync hiccup must not
+ * fail the response — drift heals on the next save or boot.
+ */
+export function syncWorkflowCronJobsForRoot(root: string): void {
+  try {
+    applyWorkflowCronSync(root, {
+      onChanged: (jobs) => reloadScheduler(jobs),
+      log: (level, message) => logger[level](message),
+    });
+  } catch (err) {
+    logger.warn(`Workflow cron sync failed: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+/**
+ * The managed-workflow cron fire handler (GRS-014d): what the scheduler's tick (and
+ * the manual trigger paths) call for a `managedBy:'workflow'` job. Resolves the
+ * evidence root PER FIRE (same guard the workflow routes use — a production-shaped
+ * home without one keeps managed jobs inert), starts the typed run, and re-syncs the
+ * managed job set when the fire proves the job expired or stale (self-cleaning:
+ * expired → disabled, stale → removed).
+ */
+export function workflowCronFireHandler(context: ApiContext): WorkflowCronFire {
+  return async (job, fireIso) => {
+    const root = resolveWorkflowEvidenceRoot();
+    if (!root) {
+      return { ok: false, note: "workflow evidence root is not configured — managed cron job is inert on this gateway" };
+    }
+    const result = await fireWorkflowCronJob(workflowRunDriverDeps(root, context), job, fireIso);
+    if (result.outcome === "expired" || result.outcome === "stale") {
+      syncWorkflowCronJobsForRoot(root);
+    }
+    switch (result.outcome) {
+      case "started":
+        return { ok: true, note: result.detail, runId: result.run.runId };
+      case "duplicate":
+        return { ok: true, note: result.detail, runId: result.runId };
+      case "expired":
+        return { ok: true, note: `${result.detail} — managed job disabled by sync` };
+      case "stale":
+        return { ok: false, note: `${result.detail} — managed job removed by sync` };
+    }
+  };
+}
+
+/**
  * GET /api/skills description cache, keyed by skill dir name and invalidated
  * by SKILL.md mtime (statSync is far cheaper than re-reading + re-parsing ~70
  * files per request). Mirrors the mtime-cache in talk/orchestrator-persona.ts.
@@ -457,6 +920,55 @@ function badRequest(res: ServerResponse, message: string): void {
 
 function serverError(res: ServerResponse, message: string): void {
   json(res, { error: message }, 500);
+}
+
+/** Map a WorkflowStoreError (GRS-011b CRUD) to an HTTP status; unknown errors → 500. */
+function workflowStoreErrorResponse(res: ServerResponse, err: unknown): void {
+  if (err instanceof WorkflowStoreError) {
+    switch (err.code) {
+      case "not-found":
+        return notFound(res);
+      case "conflict":
+        return json(res, { error: err.message }, 409);
+      case "validation":
+        return json(res, { error: err.message, errors: err.errors ?? [] }, 400);
+      default: // invalid-id | bad-input
+        return badRequest(res, err.message);
+    }
+  }
+  logger.error(`workflow-definition route error: ${(err as Error).message}`);
+  return serverError(res, "workflow definition operation failed");
+}
+
+function workflowTriggerStoreErrorResponse(res: ServerResponse, err: unknown): void {
+  if (err instanceof WorkflowTriggerStoreError) {
+    switch (err.code) {
+      case "not-found":
+        return notFound(res);
+      case "conflict":
+        return json(res, { error: err.message }, 409);
+      default:
+        return badRequest(res, err.message);
+    }
+  }
+  logger.error(`workflow-trigger route error: ${(err as Error).message}`);
+  return serverError(res, "workflow trigger operation failed");
+}
+
+function bearerToken(headers: HttpRequest["headers"]): string | undefined {
+  const raw = headers.authorization;
+  const header = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof header !== "string") return undefined;
+  const [scheme, ...rest] = header.trim().split(/\s+/);
+  if (scheme?.toLowerCase() !== "bearer") return undefined;
+  const token = rest.join(" ").trim();
+  return token || undefined;
+}
+
+function workflowEventToken(headers: HttpRequest["headers"]): string | undefined {
+  const header = headers["x-jinn-workflow-event-token"];
+  const explicit = Array.isArray(header) ? header[0] : header;
+  return typeof explicit === "string" && explicit.trim() ? explicit.trim() : bearerToken(headers);
 }
 
 const REDACTED_SECRET = "***";
@@ -580,6 +1092,479 @@ function blocksEngineSwitch(transportState: Session["transportState"]): boolean 
   return transportState === "running" || transportState === "queued";
 }
 
+/** Route-side cap for search query/text params (GRS-020a-fix finding 3). The
+ *  MCP tools cap earlier with a friendlier error; this is the substrate
+ *  backstop so a hostile curl gets a clean 400, never HTTP-parser noise. */
+export const SEARCH_QUERY_ROUTE_CHAR_CAP = 1_024;
+
+/** Read a query param with NUL/control bytes stripped (GRS-020a-fix finding 2)
+ *  and whitespace trimmed; empty-after-cleaning collapses to null. */
+function readCleanSearchParam(url: URL, name: string): string | null {
+  const raw = url.searchParams.get(name);
+  if (raw === null) return null;
+  const cleaned = stripControlChars(raw).trim();
+  return cleaned || null;
+}
+
+/** The compact summary shape the GRS-020 reference-layer routes return
+ *  (GRS-020a-fix finding 5): exactly the documented fields — never the full
+ *  serialized session (sourceRef/replyContext/transportMeta/promptExcerpt/cost
+ *  fields stay off the reference surface), never message bodies. */
+function compactSessionSummary(session: Session): Record<string, unknown> {
+  return {
+    id: session.id,
+    title: session.title ?? null,
+    employee: session.employee ?? null,
+    engine: session.engine,
+    status: session.status,
+    lastActivity: session.lastActivity ?? null,
+    parentSessionId: session.parentSessionId ?? null,
+  };
+}
+
+function cronJobSummary(job: Record<string, unknown>, lastRun: unknown): Record<string, unknown> {
+  return {
+    id: job.id,
+    name: job.name,
+    schedule: job.schedule,
+    enabled: job.enabled !== false,
+    employee: job.employee ?? null,
+    engine: job.engine ?? null,
+    timezone: job.timezone ?? null,
+    lastRun: lastRun ? summarizeCronRun(lastRun) : null,
+  };
+}
+
+const WORK_ITEM_STATUSES: readonly WorkItemStatus[] = ['backlog', 'assigned', 'executing', 'in_review', 'done', 'blocked', 'escalated', 'cancelled'];
+const WORK_ITEM_SOURCES: readonly WorkItemSource[] = ['human', 'delegation', 'cron', 'workflow', 'session', 'connector', 'goal'];
+const AGENT_WORK_ITEM_TARGETS: readonly WorkItemStatus[] = ['in_review', 'blocked', 'escalated', 'done'];
+const VERIFY_MODES = ['trust', 'verify', 'thorough'] as const;
+const VERIFY_POLICY_KEYS = new Set(['mode', 'verifier', 'maxRounds']);
+
+function compactWorkItem(item: WorkItem): Record<string, unknown> {
+  return {
+    id: item.id,
+    title: item.title,
+    status: item.status,
+    assignee: item.assignee,
+    department: item.department,
+    source: item.source,
+    sourceRef: item.sourceRef,
+    approvalState: item.approvalState,
+    approvalRequest: item.approvalRequest,
+    approvalRef: item.approvalRef,
+    approvalTarget: item.approvalTarget,
+    approvalEscalatedAt: item.approvalEscalatedAt,
+    workflowRun: workflowRunRef(item),
+    sessionRef: sessionRef(item),
+    updatedAt: item.updatedAt,
+  };
+}
+
+function workflowRunRef(item: WorkItem): Record<string, string> | null {
+  if (item.source !== 'workflow' || !item.sourceRef) return null;
+  const m = /^workflow:([^:]+):(.+)$/.exec(item.sourceRef);
+  return m ? { workflowId: m[1], runId: m[2] } : null;
+}
+
+function sessionRef(item: WorkItem): Record<string, string> | null {
+  if (!item.sourceRef) return null;
+  const m = /^session:([^:]+)(?::(.+))?$/.exec(item.sourceRef);
+  if (m) return m[2] ? { sessionId: m[1], ref: m[2] } : { sessionId: m[1] };
+  const delegated = /^delegate:([^:]+)(?::(.+))?$/.exec(item.sourceRef);
+  if (delegated) return delegated[2] ? { sessionId: delegated[1], ref: delegated[2] } : { sessionId: delegated[1] };
+  return null;
+}
+
+function fullWorkItemPayload(item: WorkItem): Record<string, unknown> {
+  return {
+    workItem: item,
+    spendUsd: getWorkItemSpend(item.id),
+    workflowRun: workflowRunRef(item),
+    events: listWorkItemEvents(item.id),
+  };
+}
+
+function readWorkItemStatusParam(url: URL): WorkItemStatus | undefined | null {
+  const status = readCleanSearchParam(url, 'status');
+  if (!status) return undefined;
+  if (!(WORK_ITEM_STATUSES as readonly string[]).includes(status)) return null;
+  return status as WorkItemStatus;
+}
+
+function readWorkItemSourceParam(url: URL): WorkItemSource | undefined | null {
+  const source = readCleanSearchParam(url, 'source');
+  if (!source) return undefined;
+  if (!(WORK_ITEM_SOURCES as readonly string[]).includes(source)) return null;
+  return source as WorkItemSource;
+}
+
+type WorkItemCaller =
+  | { kind: 'operator'; session?: undefined; callerId?: undefined }
+  | { kind: 'session'; session: Session; callerId: string };
+
+function resolveWorkItemCaller(req: HttpRequest, res: ServerResponse): WorkItemCaller | undefined {
+  const identity = resolveScopedWriteCallerIdentity(req.headers);
+  if (identity.kind === "unidentified-tool") {
+    json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
+    return undefined;
+  }
+  if (identity.kind === "operator") return { kind: 'operator' };
+  const session = getSession(identity.callerId);
+  if (!session) {
+    json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
+    return undefined;
+  }
+  return { kind: 'session', callerId: identity.callerId, session };
+}
+
+function resolveNeedsAttentionTarget(req: HttpRequest, res: ServerResponse, requested: string): string | undefined {
+  const identity = resolveScopedWriteCallerIdentity(req.headers);
+  if (identity.kind === "unidentified-tool") {
+    json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
+    return undefined;
+  }
+  if (identity.kind === "session") {
+    const session = getSession(identity.callerId);
+    if (!session?.employee) {
+      json(res, { error: "needsAttentionFor=me requires a caller session with an employee identity" }, 403);
+      return undefined;
+    }
+    if (requested !== "me" && requested !== session.employee) {
+      json(res, { error: "capability-scoped callers can only read their own queue; use needsAttentionFor=me" }, 403);
+      return undefined;
+    }
+    return session.employee;
+  }
+  if (requested === "me") {
+    const root = resolveRootApprovalTarget()?.name;
+    if (root) return root;
+    json(res, { error: "needsAttentionFor=me could not resolve a COO/root approval target" }, 403);
+    return undefined;
+  }
+  return requested;
+}
+
+function resolveScopedWriteCallerIdentity(headers: HttpRequest["headers"]) {
+  return resolveCallerIdentity(headers, {
+    sessionExists: (sessionId) => !!getSession(sessionId),
+    verifySessionCapability,
+    requireCapability: true,
+  });
+}
+
+function isPublicIdentifiedCallerRoute(method: string, pathname: string): boolean {
+  // Public liveness/bootstrap: safe summary used to discover whether the gateway is up.
+  if (method === "GET" && pathname === "/api/status") return true;
+  // Public webhook ingress: this route enforces its own gateway-token or binding-token auth.
+  if (method === "POST" && pathname === "/api/workflow-events") return true;
+  return false;
+}
+
+function rejectUnverifiedIdentifiedApiCaller(req: HttpRequest, res: ServerResponse, method: string, pathname: string): boolean {
+  if (isPublicIdentifiedCallerRoute(method, pathname)) return false;
+  const identity = resolveScopedWriteCallerIdentity(req.headers);
+  if (identity.kind !== "unidentified-tool") return false;
+  json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
+  return true;
+}
+
+function operatorOnlyControlPlaneRoute(method: string, pathname: string): string | null {
+  if ((method === "PUT" || method === "PATCH") && pathname === "/api/config") return "config update";
+  if (method === "POST" && pathname === "/api/onboarding") return "onboarding config update";
+  if (method === "POST" && pathname === "/api/auth/pairing-codes") return "auth pairing-code mint";
+  if (method === "DELETE" && pathname.startsWith("/api/auth/devices/")) return "auth device revoke";
+  if (method === "POST" && pathname === "/api/engines/refresh") return "engine registry refresh";
+  if (method === "POST" && pathname === "/api/engine-limits/refresh") return "engine limits refresh";
+  if (method === "POST" && pathname === "/api/connectors/reload") return "connector reload";
+  if (method === "POST" && pathname === "/api/stt/download") return "STT model download/config enable";
+  if (method === "PUT" && pathname === "/api/stt/config") return "STT config update";
+  if (method === "DELETE" && matchRoute("/api/sessions/:id", pathname)) return "session delete";
+  if ((method === "PUT" || method === "PATCH") && matchRoute("/api/sessions/:id", pathname)) return "session metadata/model update";
+  if (method === "POST" && matchRoute("/api/sessions/:id/duplicate", pathname)) return "session duplicate";
+  if (method === "POST" && matchRoute("/api/sessions/:id/reset", pathname)) return "session reset";
+  if (method === "POST" && pathname === "/api/sessions/bulk-delete") return "session bulk delete";
+  if (method === "DELETE" && matchRoute("/api/sessions/:id/queue/:itemId", pathname)) return "session queue item cancel";
+  if (method === "DELETE" && matchRoute("/api/sessions/:id/queue", pathname)) return "session queue clear";
+  if (method === "POST" && matchRoute("/api/sessions/:id/queue/pause", pathname)) return "session queue pause";
+  if (method === "POST" && matchRoute("/api/sessions/:id/queue/resume", pathname)) return "session queue resume";
+  if (method === "POST" && pathname === "/api/cron") return "cron create";
+  if (method === "PUT" && matchRoute("/api/cron/:id", pathname)) return "cron update";
+  if (method === "DELETE" && matchRoute("/api/cron/:id", pathname)) return "cron delete";
+  if (method === "POST" && matchRoute("/api/cron/:id/trigger", pathname)) return "cron manual trigger";
+  if (method === "PATCH" && matchRoute("/api/org/employees/:name", pathname)) return "org employee update";
+  if (method === "PUT" && matchRoute("/api/org/departments/:name/board", pathname)) return "legacy org board write";
+  if (method === "DELETE" && matchRoute("/api/skills/:name", pathname)) return "skill removal";
+  return null;
+}
+
+function requireOperatorControlPlaneAuthority(req: HttpRequest, res: ServerResponse, action: string): boolean {
+  const identity = resolveScopedWriteCallerIdentity(req.headers);
+  if (identity.kind === "unidentified-tool") {
+    json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
+    return false;
+  }
+  if (identity.kind === "session") {
+    json(res, { error: `${action} is operator-only control-plane authority; capability-bound employee sessions cannot mutate gateway configuration, scheduling, org, auth, or settings` }, 403);
+    return false;
+  }
+  return true;
+}
+
+function rejectScopedIdentityGrant(req: HttpRequest, res: ServerResponse, action: string): boolean {
+  const identity = resolveScopedWriteCallerIdentity(req.headers);
+  if (identity.kind === "operator") return false;
+  if (identity.kind === "unidentified-tool") {
+    json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
+    return true;
+  }
+  json(res, { error: `${action} cannot mint broader browser/operator identity for a capability-bound employee session` }, 403);
+  return true;
+}
+
+type WorkflowOperation = "create" | "update" | "duplicate" | "retire" | "run" | "bind-trigger";
+
+type WorkflowOperationAuthority =
+  | { ok: true; actor: string; employee?: Employee; canSetWorkflowAuthority: boolean }
+  | { ok: false; status: 403; error: string };
+
+const WORKFLOW_AUTHORITY_FIELDS = [
+  "owner",
+  "ownerEmployee",
+  "workflowOwner",
+  "createdBy",
+  "creator",
+  "author",
+  "department",
+  "ownerDepartment",
+  "workflowDepartment",
+  "critical",
+  "cooOwned",
+  "requiresCooApproval",
+  "classification",
+  "authority",
+] as const;
+
+function readWorkflowAuthorityString(def: EditableWorkflowDefinition, keys: string[]): string | null {
+  const rec = def as unknown as Record<string, unknown>;
+  for (const key of keys) {
+    const value = rec[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function workflowAuthorityEmployee(principal: string | null, registry: Map<string, Employee>): string | null {
+  if (!principal) return null;
+  const sessionMatch = /^session:([^:]+)$/.exec(principal);
+  if (sessionMatch) {
+    const session = getSession(sessionMatch[1]);
+    return session?.employee && registry.has(session.employee) ? session.employee : null;
+  }
+  return registry.has(principal) ? principal : null;
+}
+
+function workflowAuthorityCritical(def: EditableWorkflowDefinition): boolean {
+  const rec = def as unknown as Record<string, unknown>;
+  if (rec.critical === true || rec.cooOwned === true || rec.requiresCooApproval === true) return true;
+  const classification = typeof rec.classification === "string" ? rec.classification.toLowerCase() : "";
+  const authority = typeof rec.authority === "string" ? rec.authority.toLowerCase() : "";
+  return classification === "critical" || authority === "coo" || authority === "operator";
+}
+
+function hasDepartmentWorkflowAuthority(employee: Employee, workflowDepartment: string | null): boolean {
+  if (!workflowDepartment || employee.department !== workflowDepartment) return false;
+  return employee.rank === "manager" || employee.rank === "executive";
+}
+
+function authorizeWorkflowOperation(
+  headers: HttpRequest["headers"],
+  def: EditableWorkflowDefinition | null,
+  op: WorkflowOperation,
+): WorkflowOperationAuthority {
+  const identity = resolveScopedWriteCallerIdentity(headers);
+  if (identity.kind === "unidentified-tool") {
+    return { ok: false, status: 403, error: UNIDENTIFIED_TOOL_CALL_ERROR };
+  }
+  if (identity.kind === "operator") {
+    return { ok: true, actor: "operator", canSetWorkflowAuthority: true };
+  }
+
+  const session = getSession(identity.callerId);
+  if (!session?.employee) {
+    return { ok: false, status: 403, error: `workflow ${op} requires a session with an employee identity` };
+  }
+  const registry = scanOrg();
+  const employee = registry.get(session.employee);
+  if (!employee) {
+    return { ok: false, status: 403, error: `employee "${session.employee}" is not in the org roster; workflow ${op} requires workflow authority` };
+  }
+
+  const root = resolveRootApprovalTarget();
+  if (root?.kind === "employee" && employee.name === root.name) {
+    return { ok: true, actor: employee.name, employee, canSetWorkflowAuthority: true };
+  }
+
+  if (op === "create") {
+    return { ok: true, actor: employee.name, employee, canSetWorkflowAuthority: false };
+  }
+
+  if (!def) {
+    return { ok: false, status: 403, error: `workflow ${op} requires a persisted workflow authority record` };
+  }
+
+  const ownerPrincipal = readWorkflowAuthorityString(def, ["owner", "ownerEmployee", "workflowOwner", "createdBy", "creator", "author"]);
+  const owner = workflowAuthorityEmployee(ownerPrincipal, registry);
+  const department = readWorkflowAuthorityString(def, ["department", "ownerDepartment", "workflowDepartment"]);
+  const critical = workflowAuthorityCritical(def);
+
+  if (!owner && !department) {
+    return { ok: false, status: 403, error: `workflow "${def.id}" does not declare owner/department authority; workflow ${op} defaults to COO/operator` };
+  }
+  if (owner && owner === employee.name) {
+    return { ok: true, actor: employee.name, employee, canSetWorkflowAuthority: false };
+  }
+  if (owner && (critical || owner === root?.name)) {
+    return { ok: false, status: 403, error: `employee "${employee.name}" cannot ${op} workflow "${def.id}" owned by "${owner}"` };
+  }
+  if (hasDepartmentWorkflowAuthority(employee, department)) {
+    return { ok: true, actor: employee.name, employee, canSetWorkflowAuthority: false };
+  }
+  return { ok: false, status: 403, error: `employee "${employee.name}" cannot ${op} workflow "${def.id}"` };
+}
+
+function stripWorkflowAuthorityFields(patch: Partial<EditableWorkflowDefinition>): Partial<EditableWorkflowDefinition> {
+  const safePatch = { ...patch } as Record<string, unknown>;
+  for (const field of WORKFLOW_AUTHORITY_FIELDS) delete safePatch[field];
+  return safePatch as Partial<EditableWorkflowDefinition>;
+}
+
+function workflowDefinitionAuthorPatch(authority: WorkflowOperationAuthority): Record<string, string> {
+  if (!authority.ok) return {};
+  if (!authority.employee) return authority.actor === "operator" ? { createdBy: "operator" } : {};
+  return { owner: authority.employee.name, department: authority.employee.department, createdBy: authority.employee.name };
+}
+
+function workflowDefinitionAuthorityResetPatch(authority: WorkflowOperationAuthority): Partial<EditableWorkflowDefinition> & Record<string, unknown> {
+  const reset: Record<string, unknown> = {};
+  for (const field of WORKFLOW_AUTHORITY_FIELDS) reset[field] = undefined;
+  return { ...reset, ...workflowDefinitionAuthorPatch(authority) } as Partial<EditableWorkflowDefinition> & Record<string, unknown>;
+}
+
+function workItemActor(caller: WorkItemCaller): string {
+  return caller.kind === 'session' ? `session:${caller.callerId}` : 'operator';
+}
+
+function findApprovalKeysDeep(value: unknown, path = 'body', found: string[] = []): string[] {
+  if (!value || typeof value !== 'object') return found;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const childPath = `${path}.${key}`;
+    if (/^approval/i.test(key)) found.push(childPath);
+    findApprovalKeysDeep(child, childPath, found);
+  }
+  return found;
+}
+
+function objectKeys(value: unknown, name: string): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+  if (value === undefined || value === null) return { ok: true, value: {} };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: `${name} must be a JSON object` };
+  return { ok: true, value: value as Record<string, unknown> };
+}
+
+function validateVerifyPolicy(value: unknown): { ok: true; value: VerifyPolicy | null } | { ok: false; error: string } {
+  if (value === undefined || value === null) return { ok: true, value: null };
+  const rec = objectKeys(value, 'verifyPolicy');
+  if (!rec.ok) return rec;
+  const extras = Object.keys(rec.value).filter((key) => !VERIFY_POLICY_KEYS.has(key));
+  if (extras.length > 0) return { ok: false, error: `verifyPolicy has unknown key(s) ${extras.join(', ')}; only mode, verifier, and maxRounds are allowed` };
+  const mode = rec.value.mode;
+  if (!(VERIFY_MODES as readonly unknown[]).includes(mode)) {
+    return { ok: false, error: `verifyPolicy.mode must be one of ${VERIFY_MODES.join(', ')}` };
+  }
+  const policy: VerifyPolicy = { mode: mode as VerifyPolicy['mode'] };
+  if (rec.value.maxRounds !== undefined) {
+    if (typeof rec.value.maxRounds !== 'number' || !Number.isInteger(rec.value.maxRounds) || rec.value.maxRounds < 1 || rec.value.maxRounds > 20) {
+      return { ok: false, error: 'verifyPolicy.maxRounds must be an integer from 1 to 20' };
+    }
+    policy.maxRounds = rec.value.maxRounds;
+  }
+  if (rec.value.verifier !== undefined) {
+    const verifier = objectKeys(rec.value.verifier, 'verifyPolicy.verifier');
+    if (!verifier.ok) return verifier;
+    const allowed = new Set(['employee', 'engine', 'model']);
+    const extraVerifier = Object.keys(verifier.value).filter((key) => !allowed.has(key));
+    if (extraVerifier.length > 0) {
+      return { ok: false, error: `verifyPolicy.verifier has unknown key(s) ${extraVerifier.join(', ')}; only employee, engine, and model are allowed` };
+    }
+    const out: NonNullable<VerifyPolicy['verifier']> = {};
+    for (const key of ['employee', 'engine', 'model'] as const) {
+      if (verifier.value[key] !== undefined) {
+        if (typeof verifier.value[key] !== 'string' || !verifier.value[key].trim()) {
+          return { ok: false, error: `verifyPolicy.verifier.${key} must be a non-empty string` };
+        }
+        out[key] = verifier.value[key].trim();
+      }
+    }
+    policy.verifier = out;
+  }
+  return { ok: true, value: policy };
+}
+
+function ownsWorkItem(session: Session, item: WorkItem, linked: Session[]): boolean {
+  if (linked.some((s) => s.id === session.id)) return true;
+  if (item.assignee && session.employee && item.assignee === session.employee) return true;
+  return item.source === 'session' && !!item.sourceRef?.startsWith(`session:${session.id}:`);
+}
+
+function canReviewWorkItemDone(session: Session, item: WorkItem, linked: Session[]): { ok: true } | { ok: false; error: string } {
+  if (item.status !== 'in_review') {
+    return { ok: false, error: `marking a Todo done through MCP requires an authorized reviewer and an item already in_review; use the human review surface for ${item.status} → done` };
+  }
+  if (linked.some((s) => s.id === session.id)) {
+    return { ok: false, error: `session ${session.id} executed work item ${item.id} and cannot mark it done — a reviewer does (self-review ban); use the human review surface / a reviewer session to mark done` };
+  }
+  if (linked.some((s) => s.parentSessionId === session.id)) return { ok: true };
+  if (item.sourceRef?.startsWith(`delegate:${session.id}:`)) return { ok: true };
+  if (item.source === 'session' && item.sourceRef?.startsWith(`session:${session.id}:`)) return { ok: true };
+  return { ok: false, error: `session ${session.id} is not an authorized reviewer for Todo ${item.id}; use the human review surface or the parent reviewer session` };
+}
+
+function authorizeAgentWorkItemStatus(caller: WorkItemCaller, item: WorkItem, target: WorkItemStatus): { ok: true } | { ok: false; status: 403; error: string } {
+  if (caller.kind === 'operator') return { ok: true };
+  const linked = listSessionsByWorkItem(item.id);
+  if (target === 'done') {
+    const review = canReviewWorkItemDone(caller.session, item, linked);
+    return review.ok ? { ok: true } : { ok: false, status: 403, error: review.error };
+  }
+  if (!ownsWorkItem(caller.session, item, linked)) {
+    return {
+      ok: false,
+      status: 403,
+      error: `session ${caller.callerId} does not own Todo ${item.id} and is not its authorized reviewer; agents may update only their own Todos, otherwise use the human surface`,
+    };
+  }
+  return { ok: true };
+}
+
+function levenshtein(a: string, b: string): number {
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const curr = [i];
+    for (let j = 1; j <= b.length; j++) {
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev.splice(0, prev.length, ...curr);
+  }
+  return prev[b.length];
+}
+
+function nearestEmployee(name: string, names: string[]): string | undefined {
+  return names
+    .map((n) => ({ n, d: levenshtein(name.toLowerCase(), n.toLowerCase()) }))
+    .filter((x) => x.d <= 4 || x.n.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(x.n.toLowerCase()))
+    .sort((a, b) => a.d - b.d || a.n.localeCompare(b.n))[0]?.n;
+}
+
 export function serializeSession(session: Session, context: ApiContext): Session {
   const queue = context.sessionManager.getQueue();
   const queueDepth = queue.getPendingCount(session.sessionKey || session.sourceRef);
@@ -663,6 +1648,15 @@ export async function handleApiRequest(
   try {
     const jinnHome = context.jinnHome ?? JINN_HOME;
 
+    if (rejectUnverifiedIdentifiedApiCaller(req, res, method, pathname)) {
+      return;
+    }
+
+    const controlPlaneAction = operatorOnlyControlPlaneRoute(method, pathname);
+    if (controlPlaneAction && !requireOperatorControlPlaneAuthority(req, res, controlPlaneAction)) {
+      return;
+    }
+
     // GET /api/auth/state — safe browser boot metadata. Never includes the token.
     if (method === "GET" && pathname === "/api/auth/state") {
       const state = createAuthState(context.getConfig(), req, context.gatewayAuthToken, jinnHome);
@@ -674,6 +1668,7 @@ export async function handleApiRequest(
     // from a local browser session so daily local use does not require a login form.
     if (method === "POST" && pathname === "/api/auth/bootstrap") {
       if (!context.gatewayAuthToken) return json(res, { authRequired: false });
+      if (rejectScopedIdentityGrant(req, res, "auth bootstrap")) return;
       if (!isLoopback(req.socket.remoteAddress) || !isLoopbackHost(Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host)) {
         return json(res, { error: "Bootstrap is loopback-only" }, 403);
       }
@@ -688,12 +1683,15 @@ export async function handleApiRequest(
       const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: AUTH_BODY_MAX_BYTES });
       if (!parsed.ok) return;
       if (!context.gatewayAuthToken) return json(res, { error: "Gateway auth token is not configured" }, 503);
+      const bearer = hasGatewayBearerAuth(req.headers, context.gatewayAuthToken);
+      if (bearer) {
+        return json(res, { error: "Pairing codes require an authenticated browser session; bearer tokens cannot mint browser pairing material" }, 403);
+      }
       const auth = authenticateGatewayRequest(req, context.gatewayAuthToken, jinnHome);
       if (!auth.ok) return json(res, { error: auth.reason || "Unauthorized" }, 401);
-      const bearer = hasGatewayBearerAuth(req.headers, context.gatewayAuthToken);
       const localBrowser = isLoopback(req.socket.remoteAddress)
         && isLoopbackHost(Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host);
-      if (!bearer && !localBrowser) return json(res, { error: "Pairing codes can only be created locally" }, 403);
+      if (!localBrowser) return json(res, { error: "Pairing codes can only be created locally" }, 403);
       const issued = issuePairingCode();
       return json(res, {
         status: "ok",
@@ -703,18 +1701,17 @@ export async function handleApiRequest(
       });
     }
 
-    // POST /api/auth/pair — exchange a one-time pairing code (or advanced token
-    // fallback) for the HttpOnly browser cookie used by APIs and WebSockets.
+    // POST /api/auth/pair — exchange a one-time pairing code for the HttpOnly
+    // browser cookie used by APIs and WebSockets.
     if (method === "POST" && pathname === "/api/auth/pair") {
+      if (rejectScopedIdentityGrant(req, res, "auth pair")) return;
       const parsed = await readJsonBody(req, res, { maxBytes: AUTH_BODY_MAX_BYTES });
       if (!parsed.ok) return;
       const body = parsed.body && typeof parsed.body === "object" ? parsed.body as Record<string, unknown> : {};
       const code = typeof body.code === "string" ? body.code : undefined;
-      const token = typeof body.token === "string" ? body.token : undefined;
-      const pairedWithToken = matchesGatewayAuthToken(token, context.gatewayAuthToken);
-      const ok = consumePairingCode(undefined, code) || pairedWithToken;
+      const ok = consumePairingCode(undefined, code);
       if (!ok || !context.gatewayAuthToken) return json(res, { error: "Invalid or expired pairing code" }, 401);
-      const session = createAuthSession(jinnHome, req, { kind: pairedWithToken ? "token" : "remote" });
+      const session = createAuthSession(jinnHome, req, { kind: "remote" });
       res.setHeader("Set-Cookie", authCookieHeaders(session.secret, session.device.id));
       return json(res, { status: "ok", authRequired: true, device: { ...session.device, current: true } });
     }
@@ -835,6 +1832,201 @@ export async function handleApiRequest(
         }))
       );
       return json(res, results);
+    }
+
+    // GET /api/search/messages — GRS-020a company-reference search: FTS5 over
+    // user/assistant message bodies (injection-safe — the store sanitizes the
+    // query into quoted phrases), AND-composed bound-param filters, newest-first.
+    // GRS-020a-fix hardening: control bytes are stripped from every string param
+    // (an embedded NUL made FTS5 throw — finding 2) and the query length is
+    // capped route-side (finding 3; the MCP tools cap earlier and friendlier).
+    if (method === "GET" && pathname === "/api/search/messages") {
+      const readParam = (name: string): string | null => readCleanSearchParam(url, name);
+      const q = readParam("q");
+      if (!q) return badRequest(res, "q is required");
+      if (q.length > SEARCH_QUERY_ROUTE_CHAR_CAP) {
+        return badRequest(res, `q is too long (${q.length} chars, max ${SEARCH_QUERY_ROUTE_CHAR_CAP}) — shorten the query`);
+      }
+      const filter: MessageSearchFilter = {};
+      const sessionId = readParam("sessionId");
+      if (sessionId) filter.sessionId = sessionId;
+      const excludeSessionId = readParam("excludeSessionId");
+      if (excludeSessionId) filter.excludeSessionId = excludeSessionId;
+      const employee = readParam("employee");
+      if (employee) filter.employee = employee;
+      const engine = readParam("engine");
+      if (engine) filter.engine = engine;
+      const role = readParam("role");
+      if (role) {
+        if (role !== "user" && role !== "assistant") {
+          return badRequest(res, `role must be "user" or "assistant" (only those rows are indexed), got "${role}"`);
+        }
+        filter.role = role;
+      }
+      for (const [param, key] of [["since", "since"], ["until", "until"]] as const) {
+        const raw = readParam(param);
+        if (raw) {
+          const ms = Date.parse(raw);
+          if (Number.isNaN(ms)) return badRequest(res, `${param} must be an ISO-8601 timestamp, got "${raw}"`);
+          filter[key] = ms;
+        }
+      }
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get("limit") || "20", 10) || 20, 200));
+      const results = searchMessages(q, limit, filter);
+      return json(res, { query: q, results });
+    }
+
+    // GET /api/search/sessions — GRS-020a: deterministic AND-composed session
+    // search (escaped-LIKE text over title/prompt_excerpt/id + structured
+    // filters). At least one filter required — the unbounded list stays on
+    // GET /api/sessions. Returns COMPACT summaries only (GRS-020a-fix finding
+    // 5: the reference layer's route contract is summaries, not the full
+    // serialized session); string params are control-stripped and the text
+    // filter is length-capped (findings 2+3).
+    if (method === "GET" && pathname === "/api/search/sessions") {
+      const readParam = (name: string): string | null => readCleanSearchParam(url, name);
+      const filter: SearchSessionsFilter = {};
+      const text = readParam("text");
+      if (text) {
+        if (text.length > SEARCH_QUERY_ROUTE_CHAR_CAP) {
+          return badRequest(res, `text is too long (${text.length} chars, max ${SEARCH_QUERY_ROUTE_CHAR_CAP}) — shorten the query`);
+        }
+        filter.text = text;
+      }
+      const employee = readParam("employee");
+      if (employee) filter.employee = employee;
+      const engine = readParam("engine");
+      if (engine) filter.engine = engine;
+      const status = readParam("status");
+      if (status) {
+        const valid: Session["status"][] = ["idle", "running", "error", "waiting", "interrupted"];
+        if (!valid.includes(status as Session["status"])) {
+          return badRequest(res, `status must be one of ${valid.join(", ")}, got "${status}"`);
+        }
+        filter.status = status as Session["status"];
+      }
+      const source = readParam("source");
+      if (source) filter.source = source;
+      const parentSessionId = readParam("parentSessionId");
+      if (parentSessionId) filter.parentSessionId = parentSessionId;
+      for (const key of ["activeSince", "activeBefore"] as const) {
+        const raw = readParam(key);
+        if (raw) {
+          if (Number.isNaN(Date.parse(raw))) return badRequest(res, `${key} must be an ISO-8601 timestamp, got "${raw}"`);
+          filter[key] = new Date(raw).toISOString();
+        }
+      }
+      if (url.searchParams.get("needsAttention") === "true") filter.needsAttention = true;
+      if (Object.keys(filter).length === 0) {
+        return badRequest(res, "at least one filter is required (text, employee, engine, status, source, parentSessionId, activeSince, activeBefore, needsAttention)");
+      }
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get("limit") || "20", 10) || 20, 50));
+      const sessions = searchSessionsFiltered(filter, limit);
+      return json(res, { sessions: sessions.map(compactSessionSummary) });
+    }
+
+    // GET /api/cost/report — GRS-020c cost-only read surface. Deterministic
+    // aggregate over existing sessions.total_cost/total_turns; no budgets,
+    // thresholds, work-item joins, or mutation.
+    if (method === "GET" && pathname === "/api/cost/report") {
+      const groupBy = readCleanSearchParam(url, "groupBy") || "employee";
+      if (groupBy !== "employee" && groupBy !== "day") return badRequest(res, 'groupBy must be "employee" or "day"');
+      const parseIso = (name: "since" | "until"): string | undefined => {
+        const raw = readCleanSearchParam(url, name);
+        if (!raw) return undefined;
+        if (Number.isNaN(Date.parse(raw))) return "";
+        return new Date(raw).toISOString();
+      };
+      const since = parseIso("since");
+      if (since === "") return badRequest(res, "since must be an ISO-8601 timestamp");
+      const until = parseIso("until");
+      if (until === "") return badRequest(res, "until must be an ISO-8601 timestamp");
+      const employee = readCleanSearchParam(url, "employee") || undefined;
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get("limit") || "100", 10) || 100, 100));
+      const report = getCostReport({ groupBy, since, until, employee, limit });
+      return json(res, {
+        ...report,
+        hint: "Costs are engine-reported per session; missing/zero rows mean the engine reported none.",
+      });
+    }
+
+    // GET /api/search/work-items — GRS-021c: deterministic AND-composed Todo
+    // search. Text is escaped-LIKE over title+body (%/_/backslash literal) and
+    // structured filters are exact. Compact summaries only — body/acceptance
+    // dumps stay behind GET /api/work-items/:id.
+    if (method === "GET" && pathname === "/api/search/work-items") {
+      const text = readCleanSearchParam(url, "text");
+      const filter: SearchWorkItemsFilter = {};
+      if (text) {
+        if (text.length > SEARCH_QUERY_ROUTE_CHAR_CAP) {
+          return badRequest(res, `text is too long (${text.length} chars, max ${SEARCH_QUERY_ROUTE_CHAR_CAP}) — shorten the query`);
+        }
+        filter.text = text;
+      }
+      const status = readWorkItemStatusParam(url);
+      if (status === null) return badRequest(res, `status must be one of ${WORK_ITEM_STATUSES.join(", ")}`);
+      if (status) filter.status = status;
+      const source = readWorkItemSourceParam(url);
+      if (source === null) return badRequest(res, `source must be one of ${WORK_ITEM_SOURCES.join(", ")}`);
+      if (source) filter.source = source;
+      const assignee = readCleanSearchParam(url, "assignee");
+      if (assignee) filter.assignee = assignee;
+      const department = readCleanSearchParam(url, "department");
+      if (department) filter.department = department;
+      const needsAttentionFor = readCleanSearchParam(url, "needsAttentionFor");
+      if (needsAttentionFor) {
+        const target = resolveNeedsAttentionTarget(req, res, needsAttentionFor);
+        if (!target) return;
+        filter.needsAttentionFor = target;
+      }
+      if (Object.keys(filter).length === 0) {
+        return badRequest(res, "at least one filter is required (text, status, source, assignee, department, needsAttentionFor)");
+      }
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get("limit") || "10", 10) || 10, 20));
+      const workItems = searchWorkItems(filter, limit);
+      return json(res, { workItems: workItems.map(compactWorkItem) });
+    }
+
+    // GET /api/knowledge/search — GRS-020b: deterministic token-AND search over
+    // the two allowlisted knowledge roots (knowledge/ + docs/, .md only).
+    // Snippets only, never bodies; query is control-stripped + length-capped
+    // (the GRS-020a hardening, reused).
+    if (method === "GET" && pathname === "/api/knowledge/search") {
+      const q = readCleanSearchParam(url, "q");
+      if (!q) return badRequest(res, "q is required");
+      if (q.length > SEARCH_QUERY_ROUTE_CHAR_CAP) {
+        return badRequest(res, `q is too long (${q.length} chars, max ${SEARCH_QUERY_ROUTE_CHAR_CAP}) — shorten the query`);
+      }
+      return json(res, { query: q, results: searchKnowledge(q, jinnHome) });
+    }
+
+    // GET /api/knowledge/read — GRS-020b: read ONE knowledge/docs file by the
+    // RELATIVE path knowledge search returned. SECURITY-CRITICAL (the
+    // exfiltration surface): the store enforces the scoped-root invariant —
+    // shape gate + realpath containment, so `..`, absolute paths, other roots,
+    // and symlink escapes are refused (400/403), never read. This route is
+    // deliberately SEPARATE from the operator/UI GET /api/files/read.
+    if (method === "GET" && pathname === "/api/knowledge/read") {
+      // GRS-020b-fix: REJECT control bytes on the RAW path — never strip. The
+      // shared readCleanSearchParam STRIPS control bytes (correct for free-text
+      // search queries) which would silently REPAIR a `%00`-tampered path into a
+      // valid one and read it (the claimed "%00 -> 400" contract failing). The
+      // security-critical read surface rejects on the raw param first; the store
+      // primitive mirrors the same reject as defense-in-depth.
+      const rawPath = url.searchParams.get("path");
+      if (rawPath !== null && hasControlBytes(rawPath)) {
+        return badRequest(res, "path contains control bytes — pass the relative path exactly as knowledge search returned it");
+      }
+      const rel = readCleanSearchParam(url, "path");
+      if (!rel) return badRequest(res, 'path is required — a relative path from /api/knowledge/search, e.g. "knowledge/some-file.md"');
+      const result = readKnowledgeFile(rel, jinnHome);
+      if (!result.ok) {
+        if (result.reason === "forbidden") return json(res, { error: result.detail }, 403);
+        if (result.reason === "not-found") return json(res, { error: result.detail }, 404);
+        return badRequest(res, result.detail);
+      }
+      const { ok: _ok, ...payload } = result;
+      return json(res, payload);
     }
 
     // GET /api/sessions
@@ -1020,6 +2212,28 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      // GRS-017a — an agent-initiated stop (declared caller identity) is scoped
+      // to the caller's OWN DESCENDANTS: cross-tree stops are a lateral
+      // authority grab, so peers and ancestors are refused. Operator/UI calls
+      // carry neither identity nor tool marker and keep today's full access.
+      // A TOOL call that LOST its identity (marker, no caller header) fails
+      // CLOSED — it must never fall through to this unrestricted operator path
+      // (codex finding 2). Honor-system caveat (design §5): with a shared
+      // bearer token the scoping is best-effort — it refuses to TEACH the
+      // pattern, it cannot police curl.
+      const stopCaller = resolveScopedWriteCallerIdentity(req.headers);
+      if (stopCaller.kind === "unidentified-tool") {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
+        return;
+      }
+      if (stopCaller.kind === "session" && !isDescendantOf(params.id, stopCaller.callerId, getSession)) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          error: `session ${params.id} is not a descendant of your session — agents may only stop sessions they spawned (directly or transitively). Ask the operator or the session's parent instead.`,
+        }));
+        return;
+      }
       killSessionEngines(context, session, "Interrupted by user");
       context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
       updateSession(params.id, { status: "idle", lastActivity: new Date().toISOString(), lastError: null });
@@ -1195,6 +2409,757 @@ export async function handleApiRequest(
       return json(res, children.map((child) => serializeSession(child, context)));
     }
 
+    // GET /api/sessions/:id/context?message=<id>&radius=<n> — GRS-020a: the
+    // bounded ±radius window around a message anchor (a search hit), so a hit
+    // becomes readable in place without a full-transcript read. Content is
+    // capped store-side (MESSAGE_CONTEXT_CHAR_CAP + intentional-cap marker);
+    // the session field is the COMPACT summary (GRS-020a-fix finding 5).
+    params = matchRoute("/api/sessions/:id/context", pathname);
+    if (method === "GET" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      const messageId = readCleanSearchParam(url, "message");
+      if (!messageId) return badRequest(res, "message (the anchor message id, from a search hit) is required");
+      const radius = Math.max(
+        1,
+        Math.min(parseInt(url.searchParams.get("radius") || "3", 10) || 3, MESSAGE_CONTEXT_MAX_RADIUS),
+      );
+      const context_ = getMessageContext(params.id, messageId, radius);
+      if (!context_) {
+        return json(res, { error: `message "${messageId}" not found in session "${params.id}" — anchors come from message-search results` }, 404);
+      }
+      return json(res, {
+        session: compactSessionSummary(session),
+        anchorMessageId: context_.anchorMessageId,
+        messages: context_.messages,
+      });
+    }
+
+    // GET /api/work-items — compact Todo list for MCP/web surfaces.
+    if (method === "GET" && pathname === "/api/work-items") {
+      const filter: SearchWorkItemsFilter = {};
+      const status = readWorkItemStatusParam(url);
+      if (status === null) return badRequest(res, `status must be one of ${WORK_ITEM_STATUSES.join(", ")}`);
+      if (status) filter.status = status;
+      const source = readWorkItemSourceParam(url);
+      if (source === null) return badRequest(res, `source must be one of ${WORK_ITEM_SOURCES.join(", ")}`);
+      if (source) filter.source = source;
+      const assignee = readCleanSearchParam(url, "assignee");
+      if (assignee) filter.assignee = assignee;
+      const department = readCleanSearchParam(url, "department");
+      if (department) filter.department = department;
+      const needsAttentionFor = readCleanSearchParam(url, "needsAttentionFor");
+      if (needsAttentionFor) {
+        const target = resolveNeedsAttentionTarget(req, res, needsAttentionFor);
+        if (!target) return;
+        filter.needsAttentionFor = target;
+      }
+      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get("limit") || "10", 10) || 10, 20));
+      return json(res, { workItems: listWorkItems(filter).slice(0, limit).map(compactWorkItem) });
+    }
+
+    // POST /api/work-items — GRS-021c create. Tool callers must carry identity;
+    // create structurally cannot attach approvals (anti-bottleneck LAW).
+    if (method === "POST" && pathname === "/api/work-items") {
+      const caller = resolveWorkItemCaller(req, res);
+      if (!caller) return;
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      const approvalKeys = findApprovalKeysDeep(body);
+      if (approvalKeys.length > 0) {
+        return badRequest(res, `approval fields (${approvalKeys.join(", ")}) cannot be attached at Todo creation — approvals are requested/decided through the approval authority surface`);
+      }
+      if (body.provenance !== undefined) {
+        return badRequest(res, "provenance cannot be supplied on public Todo creation — cron/workflow/delegation source records are minted only by their dedicated bridges; normal tool/session creation is source=session");
+      }
+      const title = typeof body.title === "string" ? stripControlChars(body.title).trim() : "";
+      if (!title) return badRequest(res, "title is required");
+      const verifyPolicy = validateVerifyPolicy(body.verifyPolicy);
+      if (!verifyPolicy.ok) return badRequest(res, verifyPolicy.error);
+      const source: WorkItemSource = caller.kind === "session" ? "session" : "human";
+      const input: CreateWorkItemInput = {
+        title: title.slice(0, 200),
+        body: typeof body.body === "string" ? body.body : null,
+        acceptance: typeof body.acceptance === "string" ? body.acceptance : null,
+        assignee: typeof body.assignee === "string" && body.assignee.trim() ? body.assignee.trim() : null,
+        department: typeof body.department === "string" && body.department.trim() ? body.department.trim() : null,
+        source,
+        sourceRef: source === "session" && caller.kind === "session" ? `session:${caller.callerId}:${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}` : null,
+        verifyPolicy: verifyPolicy.value,
+      };
+      try {
+        const item = createWorkItem(input);
+        return json(res, { workItem: item }, 201);
+      } catch (err) {
+        return badRequest(res, err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    // GET /api/work-items/:id — full Todo detail.
+    params = matchRoute("/api/work-items/:id", pathname);
+    if (method === "GET" && params) {
+      const item = getWorkItem(params.id);
+      if (!item) return notFound(res);
+      return json(res, fullWorkItemPayload(item));
+    }
+
+    // POST /api/work-items/:id/status — GRS-021c guarded status update. Agents
+    // may keep their own work current; self-done and authority-only edges are
+    // refused readably.
+    params = matchRoute("/api/work-items/:id/status", pathname);
+    if (method === "POST" && params) {
+      const caller = resolveWorkItemCaller(req, res);
+      if (!caller) return;
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      const approvalKeys = findApprovalKeysDeep(body);
+      if (approvalKeys.length > 0) {
+        return badRequest(res, `approval fields (${approvalKeys.join(", ")}) cannot be attached through Todo status updates — approvals are requested/decided through the approval authority surface`);
+      }
+      const target = typeof body.status === "string" ? body.status : "";
+      if (target === "cancelled") {
+        return json(res, { error: "cancelling a Todo is a human surface decision; agents do not have a cancel tool" }, 403);
+      }
+      if (!(AGENT_WORK_ITEM_TARGETS as readonly string[]).includes(target)) {
+        return badRequest(res, `status must be one of ${AGENT_WORK_ITEM_TARGETS.join(", ")} for agent updates; other lifecycle edits use the human surface`);
+      }
+      const note = typeof body.note === "string" ? body.note.trim() : "";
+      if ((target === "blocked" || target === "escalated") && !note) {
+        return badRequest(res, `note is required when moving a Todo to ${target}`);
+      }
+      const item = getWorkItem(params.id);
+      if (!item) return notFound(res);
+      const authorized = authorizeAgentWorkItemStatus(caller, item, target as WorkItemStatus);
+      if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
+      try {
+        const result = transition(params.id, target as WorkItemStatus, workItemActor(caller), {
+          callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
+          detail: note ? { note } : undefined,
+        });
+        return json(res, { workItem: result.item, escalated: result.escalated });
+      } catch (err) {
+        if (err instanceof TransitionError) {
+          if (err.code === "not-found") return notFound(res);
+          const human = err.code === "self-review-banned"
+            ? `${err.message} — use the human review surface / a reviewer session to mark done`
+            : `${err.message} — use the human surface for this transition if it is intentional`;
+          const statusCode = err.code === "illegal-edge" ? 400 : 403;
+          return json(res, { error: human }, statusCode);
+        }
+        throw err;
+      }
+    }
+
+    // POST /api/work-items/:id/assign — roster-validated collaborative write.
+    params = matchRoute("/api/work-items/:id/assign", pathname);
+    if (method === "POST" && params) {
+      const caller = resolveWorkItemCaller(req, res);
+      if (!caller) return;
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      const approvalKeys = findApprovalKeysDeep(body);
+      if (approvalKeys.length > 0) {
+        return badRequest(res, `approval fields (${approvalKeys.join(", ")}) cannot be attached through Todo assignment — approvals are requested/decided through the approval authority surface`);
+      }
+      const assignee = typeof body.assignee === "string"
+        ? (body.assignee as string).trim()
+        : "";
+      if (!assignee) return badRequest(res, "assignee is required");
+      const { scanOrg } = await import("./org.js");
+      const roster = scanOrg();
+      const employee = roster.get(assignee);
+      if (!employee) {
+        const near = nearestEmployee(assignee, [...roster.keys()]);
+        return badRequest(
+          res,
+          `unknown employee "${assignee}"${near ? `. Did you mean "${near}"?` : ""} Check jinn_find_employees or GET /api/org for valid employees`,
+        );
+      }
+      const item = assignWorkItem(params.id, assignee, employee.department ?? null, workItemActor(caller));
+      if (!item) return notFound(res);
+      return json(res, { workItem: item });
+    }
+
+    // GET /api/work-items/:id/sessions — execution attempts linked to a work item.
+    // The read-back half of the GRS-002 work-item slice (cron mints+links an item).
+    params = matchRoute("/api/work-items/:id/sessions", pathname);
+    if (method === "GET" && params) {
+      const linked = listSessionsByWorkItem(params.id);
+      return json(res, linked.map((s) => serializeSession(s, context)));
+    }
+
+    // POST /api/work-items/:id/approval — approval DECISION surface.
+    // COO-default: routed manager or root/COO can decide through the same
+    // identity/capability seam MCP uses; operator/aCEO HTTP can decide only after
+    // explicit escalation persisted on the Todo.
+    // {decision:"approve"|"reject", note?}. Native decisions apply the FIXED
+    // consequence rules (approve+in_review → done; reject+in_review → bounce/escalate;
+    // otherwise the decision is recorded, status untouched). A MIRRORED workflow park
+    // routes the decision to the shipped resolve-gate authority.
+    params = matchRoute("/api/work-items/:id/approval", pathname);
+    if (method === "POST" && params) {
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const decision = (parsed.body as { decision?: unknown }).decision;
+      if (decision !== "approve" && decision !== "reject") {
+        return badRequest(res, 'decision must be "approve" or "reject"');
+      }
+      const noteRaw = (parsed.body as { note?: unknown }).note;
+      const note = typeof noteRaw === "string" ? noteRaw : undefined;
+      const item = getWorkItem(params.id);
+      if (!item) return notFound(res);
+      const authority = resolveApprovalDecisionAuthority(req.headers, item, { operatorCanActOnRootTarget: true });
+      if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+
+      // The resolve-gate authority is wired only when a workflow evidence root
+      // exists; without it a mirrored decision reports evidence-root-missing (503).
+      const evidenceRoot = resolveWorkflowEvidenceRoot();
+      const result = await decideWorkItemApproval(
+        { id: params.id, decision, ...(note !== undefined ? { note } : {}), decidedBy: authority.authority.actor },
+        evidenceRoot
+          ? {
+              resolveWorkflowGate: async (workflowId, runId, d, decidedBy) => {
+                const r = await resolveWorkflowRunGate(workflowRunDriverDeps(evidenceRoot, context), workflowId, runId, d, { decidedBy });
+                return { outcome: r.outcome, ...(r.outcome !== "not-found" ? { runStatus: r.run.status } : {}) };
+              },
+            }
+          : {},
+      );
+      if (!result.ok) {
+        switch (result.code) {
+          case "not-found":
+            return notFound(res);
+          case "evidence-root-missing":
+            return json(res, { error: result.message }, 503);
+          case "no-pending":
+          case "run-not-found":
+            return json(res, { error: result.message }, 409);
+          case "run-not-parked":
+            return json(res, { error: result.message, ...(result.runStatus ? { status: result.runStatus } : {}) }, 409);
+          default:
+            return json(res, { error: result.message }, 400);
+        }
+      }
+      return json(res, {
+        workItem: result.item,
+        escalated: result.escalated,
+        mirrored: result.mirrored,
+        ...(result.runStatus ? { runStatus: result.runStatus } : {}),
+      });
+    }
+
+    // POST /api/work-items/:id/approval/escalate — routed approval authority can
+    // deliberately expose this pending approval to the operator/aCEO path.
+    params = matchRoute("/api/work-items/:id/approval/escalate", pathname);
+    if (method === "POST" && params) {
+      const parsed = await readJsonBody(req, res, { allowEmpty: true });
+      if (!parsed.ok) return;
+      const item = getWorkItem(params.id);
+      if (!item) return notFound(res);
+      const authority = resolveApprovalDecisionAuthority(req.headers, item, { operatorCanActOnRootTarget: true });
+      if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+      const body = (parsed.body ?? {}) as { reason?: unknown };
+      const reason = typeof body.reason === "string" ? body.reason : undefined;
+      try {
+        return json(res, { workItem: escalateApproval(params.id, authority.authority.actor, reason) });
+      } catch (err) {
+        if (err instanceof Error && /no pending approval/i.test(err.message)) {
+          return json(res, { error: err.message }, 409);
+        }
+        throw err;
+      }
+    }
+
+    // GET /api/workflows — list workflow ids (GRS-009 read-only visualization).
+    // Workflow run state is a DERIVED VIEW over shipped primitives (GRS-007 §5);
+    // this endpoint reads definition + evidence files under JINN_WORKFLOW_EVIDENCE_ROOT
+    // and computes state. It writes nothing.
+    if (method === "GET" && pathname === "/api/workflows") {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { workflows: [], evidenceConfigured: false });
+      return json(res, { workflows: listWorkflowIds(root), evidenceConfigured: true });
+    }
+
+    // GET /api/workflows/:id — one workflow's definition + derived run state.
+    params = matchRoute("/api/workflows/:id", pathname);
+    if (method === "GET" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return notFound(res);
+      try {
+        return json(res, deriveRunState(root, params.id));
+      } catch (err) {
+        // Missing/invalid definition → 404, not a 500 (KISS: one hardcoded example today).
+        logger.warn(`workflow derive failed for ${params.id}: ${(err as Error).message}`);
+        return notFound(res);
+      }
+    }
+
+    // ── Workflow CUSTOM TRIGGERS (GRS-027 S5/S6) ─────────────────────────────
+    // Custom sources persist as bindings outside the workflow definition schema and
+    // emit the same uniform trigger envelope into startWorkflowRunFromTrigger.
+    if (pathname === "/api/workflow-events" && method === "POST") {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+
+      const gatewayAuthorized = hasGatewayBearerAuth(req.headers, context.gatewayAuthToken);
+      const token = workflowEventToken(req.headers);
+      const bindingAuthorized = !gatewayAuthorized && verifyAnyWorkflowTriggerBindingToken(root, token);
+      if (!gatewayAuthorized && !bindingAuthorized) {
+        return json(res, { error: "Workflow event authentication required" }, 401);
+      }
+      const rateKey = gatewayAuthorized
+        ? workflowEventRateLimitKeyFromToken("gateway", context.gatewayAuthToken ?? token ?? "gateway")
+        : workflowEventRateLimitKeyFromToken("binding", token!);
+      const rate = checkWorkflowEventRateLimit(rateKey);
+      if (!rate.ok) {
+        return json(res, { error: "Workflow event rate limit exceeded", resetAt: rate.resetAt }, 429);
+      }
+
+      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_EVENT_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "Request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      if (typeof body.event !== "string" || !body.event.trim()) return badRequest(res, "event is required");
+      let payload: Record<string, unknown>;
+      try {
+        payload = sanitizeWorkflowTriggerPayload(body.payload);
+      } catch (err) {
+        return badRequest(res, err instanceof Error ? err.message : "payload must be a JSON object");
+      }
+      const fireRef = typeof body.fireRef === "string" && body.fireRef.trim() ? body.fireRef.trim() : undefined;
+      const result = await fireWorkflowEvent(
+        workflowRunDriverDeps(root, context),
+        { event: body.event, payload, ...(fireRef ? { fireRef } : {}) },
+        { gatewayAuthorized, ...(bindingAuthorized && token ? { authorizedSecretToken: token } : {}) },
+      );
+      if (result.rejected === "no-matching-binding") {
+        return json(res, { error: "No matching workflow trigger binding", outcomes: [] }, 404);
+      }
+      if (result.rejected) {
+        return badRequest(res, `Workflow event rejected: ${result.rejected}`);
+      }
+      return json(res, { outcomes: result.outcomes }, 202);
+    }
+
+    if (pathname === "/api/workflow-triggers") {
+      const root = resolveWorkflowEvidenceRoot();
+      if (method === "GET") {
+        if (!root) return json(res, { triggers: [], evidenceConfigured: false });
+        try {
+          return json(res, { triggers: listPublicWorkflowTriggerBindings(root), evidenceConfigured: true });
+        } catch (err) {
+          return workflowTriggerStoreErrorResponse(res, err);
+        }
+      }
+      if (method === "POST") {
+        if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+        const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+        if (!parsed.ok) return;
+        if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+          return badRequest(res, "Request body must be a JSON object");
+        }
+        const body = parsed.body as Record<string, unknown>;
+        const targetWorkflowId = typeof body.targetWorkflowId === "string" ? body.targetWorkflowId : "";
+        const targetWorkflow = targetWorkflowId ? getDefinition(root, targetWorkflowId) : null;
+        if (!targetWorkflow) {
+          return json(res, { error: "target workflow not found" }, 404);
+        }
+        const authority = authorizeWorkflowOperation(req.headers, targetWorkflow, "bind-trigger");
+        if (!authority.ok) {
+          return json(res, { error: authority.error }, authority.status);
+        }
+        const actor = authority.actor;
+        try {
+          let approvalPayload: Record<string, unknown> | undefined;
+          const input: Record<string, unknown> = { ...body, createdBy: actor };
+          const created = createWorkflowTriggerBinding(root, input as unknown as Parameters<typeof createWorkflowTriggerBinding>[1]);
+          let bindingName = created.binding.name;
+          if (body.kind === "poll") {
+            if (created.binding.kind !== "poll") {
+              throw new Error("poll trigger creation returned a non-poll binding");
+            }
+            const triggerName = created.binding.name;
+            try {
+              const target = resolveRootApprovalTarget();
+              const approvalRequest = formatPollActivationApprovalRequest(created.binding);
+              const item = createWorkItem({
+                title: `Activate poll trigger "${triggerName}"`,
+                body: approvalRequest,
+                status: "backlog",
+                source: "workflow",
+                sourceRef: `workflow-trigger:${triggerName}:activation`,
+                assignee: target?.name ?? null,
+                department: target?.department ?? null,
+              });
+              const workItem = requestApproval(item.id, {
+                request: approvalRequest,
+                target: target?.name ?? null,
+                actor,
+              });
+              const updated = updateWorkflowTriggerBinding(root, {
+                ...withPollActivationContract(created.binding),
+                approvalWorkItemId: workItem.id,
+                activation: "pending_approval",
+              });
+              bindingName = updated.name;
+              approvalPayload = { workItem };
+            } catch (approvalErr) {
+              deleteWorkflowTriggerBinding(root, created.binding.name);
+              throw approvalErr;
+            }
+          }
+          return json(
+            res,
+            {
+              trigger: listPublicWorkflowTriggerBindings(root).find((t) => t.name === bindingName) ?? created.binding,
+              ...(created.secretToken ? { secretToken: created.secretToken } : {}),
+              ...(approvalPayload ? { approval: approvalPayload } : {}),
+            },
+            201,
+          );
+        } catch (err) {
+          return workflowTriggerStoreErrorResponse(res, err);
+        }
+      }
+    }
+
+    params = matchRoute("/api/workflow-triggers/:name", pathname);
+    if (method === "DELETE" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+      try {
+        const binding = getWorkflowTriggerBinding(root, params.name);
+        if (!binding) return notFound(res);
+        const targetWorkflow = getDefinition(root, binding.targetWorkflowId);
+        if (!targetWorkflow) {
+          const authority = authorizeWorkflowOperation(req.headers, null, "bind-trigger");
+          if (!authority.ok) {
+            return json(res, { error: authority.error }, authority.status);
+          }
+          const deleted = deleteWorkflowTriggerBinding(root, params.name);
+          if (!deleted) return notFound(res);
+          return json(res, { deleted: true, name: params.name, orphaned: true });
+        }
+        const authority = authorizeWorkflowOperation(req.headers, targetWorkflow, "bind-trigger");
+        if (!authority.ok) {
+          return json(res, { error: authority.error }, authority.status);
+        }
+        const deleted = deleteWorkflowTriggerBinding(root, params.name);
+        if (!deleted) return notFound(res);
+        return json(res, { deleted: true, name: params.name });
+      } catch (err) {
+        return workflowTriggerStoreErrorResponse(res, err);
+      }
+    }
+
+    // ── Workflow DEFINITION CRUD (GRS-011b) ──────────────────────────────────
+    // Editable workflow definitions live at <evidenceRoot>/workflows/<id>.definition.json,
+    // a SEPARATE artifact from the read-only run-state surface above (Edit view vs Run
+    // view). Every write validates the graph (validateDefinition) and bumps version/
+    // updatedAt in the store; editing a definition never mutates historical run receipts.
+    // Namespaced under /api/workflow-definitions to avoid colliding with /api/workflows.
+    if (method === "POST" && pathname === "/api/workflow-definitions/plan") {
+      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "Request body must be a JSON object");
+      }
+      try {
+        return json(res, planWorkflowAuthoringInput(parsed.body as Record<string, unknown>));
+      } catch (err) {
+        return badRequest(res, err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    if (pathname === "/api/workflow-definitions") {
+      const root = resolveWorkflowEvidenceRoot();
+      if (method === "GET") {
+        if (!root) return json(res, { definitions: [], evidenceConfigured: false });
+        return json(res, { definitions: listDefinitions(root), evidenceConfigured: true });
+      }
+      if (method === "POST") {
+        // Resolve the root BEFORE reading the body so an unconfigured gateway 503s
+        // without buffering a (capped) request body.
+        if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+        const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+        if (!parsed.ok) return;
+        if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+          return badRequest(res, "Request body must be a JSON object");
+        }
+        try {
+          const body = parsed.body as Record<string, unknown>;
+          const authority = authorizeWorkflowOperation(req.headers, null, "create");
+          if (!authority.ok) {
+            return json(res, { error: authority.error }, authority.status);
+          }
+          const safeBody = authority.actor === "operator" ? body : stripWorkflowAuthorityFields(body as Partial<EditableWorkflowDefinition>);
+          const created = createDefinition(root, { ...safeBody, ...workflowDefinitionAuthorPatch(authority) } as unknown as EditableWorkflowDefinition);
+          syncWorkflowCronJobsForRoot(root); // GRS-014d: schedule triggers become managed cron jobs
+          return json(res, created, 201);
+        } catch (err) {
+          return workflowStoreErrorResponse(res, err);
+        }
+      }
+    }
+
+    // POST /api/workflow-definitions/:id/duplicate — copy a definition to a new id.
+    params = matchRoute("/api/workflow-definitions/:id/duplicate", pathname);
+    if (method === "POST" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      const body = (parsed.body ?? {}) as { newId?: string; title?: string };
+      try {
+        const existing = getDefinition(root, params.id);
+        if (!existing) return notFound(res);
+        const authority = authorizeWorkflowOperation(req.headers, existing, "duplicate");
+        if (!authority.ok) {
+          return json(res, { error: authority.error }, authority.status);
+        }
+        const dup = duplicateDefinition(root, params.id, {
+          newId: body.newId,
+          title: body.title,
+          definitionPatch: workflowDefinitionAuthorityResetPatch(authority),
+        });
+        syncWorkflowCronJobsForRoot(root); // a duplicate is a create — its schedule syncs too
+        return json(res, dup, 201);
+      } catch (err) {
+        return workflowStoreErrorResponse(res, err);
+      }
+    }
+
+    // POST /api/workflow-definitions/:id/retire — soft-delete (status=retired).
+    params = matchRoute("/api/workflow-definitions/:id/retire", pathname);
+    if (method === "POST" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      try {
+        const existing = getDefinition(root, params.id);
+        if (!existing) return notFound(res);
+        const authority = authorizeWorkflowOperation(req.headers, existing, "retire");
+        if (!authority.ok) {
+          return json(res, { error: authority.error }, authority.status);
+        }
+        const retired = retireDefinition(root, params.id);
+        syncWorkflowCronJobsForRoot(root); // GRS-014d: retiring removes the managed cron job
+        return json(res, retired);
+      } catch (err) {
+        return workflowStoreErrorResponse(res, err);
+      }
+    }
+
+    // GET /api/workflow-definitions/:id/plan — DRY-RUN compile (GRS-011d-1). Resolves the
+    // editable definition into a concrete execution plan (trigger→cron shape, step→session
+    // spawn spec, gate→evaluator kind, approval gate→run-parking) OR structured execution
+    // errors, WITHOUT running anything. Read-only + pure: it never spawns a session or mutates
+    // a run receipt. This is the dry-run the Edit view calls to surface "this definition cannot
+    // execute because…" the same way it surfaces validation errors. (Live roster injection +
+    // actually driving a sandbox run from a plan is GRS-011d-2.)
+    params = matchRoute("/api/workflow-definitions/:id/plan", pathname);
+    if (method === "GET" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return notFound(res);
+      try {
+        const def = getDefinition(root, params.id);
+        if (!def) return notFound(res);
+        return json(res, resolveExecutionPlan(def));
+      } catch (err) {
+        return workflowStoreErrorResponse(res, err);
+      }
+    }
+
+    // POST /api/workflow-definitions/:id/run — START a run of the definition (GRS-014b).
+    // Sequential engine: mint the durable pending-receipts record (edge-implied topo order,
+    // declaration tiebreak) BEFORE any spawn, then drive the first advancement — pass-through
+    // nodes settle, the FIRST actor step spawns through the SAME createSession+dispatch path
+    // the UI uses, mid-graph approval gates PARK the run with downstream steps still pending.
+    // Subsequent steps are dispatched by the run reconciler as each session settles; the
+    // response is the run's current snapshot (usually status:"running" with one step in
+    // flight, or parked/completed/failed). Cyclic graphs are refused (unsupported-cycle)
+    // until GRS-014e's bounded loops.
+    //
+    // HONEST SANDBOX SCOPE: running a workflow spawns REAL sessions on whichever
+    // gateway serves this request. The evidence root only says where definition/run
+    // files live, not that the target is isolated. Without an explicit
+    // JINN_WORKFLOW_EVIDENCE_ROOT this route 503s and is inert.
+    // Sessions it spawns are linked/tagged (sourceRef `workflow-run:<runId>:<nodeId>:<attempt>`).
+    params = matchRoute("/api/workflow-definitions/:id/run", pathname);
+    if (method === "POST" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      const body = (parsed.body ?? {}) as { trigger?: "manual" | "schedule" };
+      try {
+        const def = getDefinition(root, params.id);
+        if (!def) return notFound(res);
+        const authority = authorizeWorkflowOperation(req.headers, def, "run");
+        if (!authority.ok) {
+          return json(res, { error: authority.error }, authority.status);
+        }
+        // Store invariant: the on-disk file named <id> must carry id===<id> (createDefinition
+        // enforces it, update keeps it immutable). Guard against a hand-corrupted file so a run
+        // never persists under a different workflowId than the route id (Codex Major 2 sub-point).
+        if (def.id !== params.id) {
+          return badRequest(res, `definition file "${params.id}" has mismatched id "${def.id}"`);
+        }
+        const { scanOrg } = await import("./org.js");
+        const knownEmployees = [...scanOrg().keys()];
+        const knownEngines = [...context.sessionManager.getEngines().keys()];
+        const trigger = body.trigger === "schedule"
+          ? { source: "schedule" as const, event: "schedule.fire", payload: { workflowId: def.id, requestedBy: "api" } }
+          : { source: "manual" as const, event: "workflow.manual_started", payload: { workflowId: def.id, requestedBy: "api" } };
+        const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context), def, trigger, {
+          knownEmployees,
+          knownEngines,
+        });
+        return json(res, run, run.status === "failed" ? 422 : 201);
+      } catch (err) {
+        if (err instanceof WorkflowRunStoreError) {
+          return json(res, { error: err.message, code: err.code }, err.code === "not-found" ? 404 : 400);
+        }
+        return workflowStoreErrorResponse(res, err);
+      }
+    }
+
+    // POST /api/workflow-definitions/:id/runs/:runId/resolve-gate — resolve a PARKED
+    // run's human-approval gate (GRS-014e): {decision:"approve"} unparks and drives the
+    // run forward through the same driver path the sweep uses; {decision:"reject"}
+    // fails it with an operator-rejection receipt. Parked runs are never swept —
+    // this route is the ONLY unpark. 404 unknown run; 409 when the run is not parked.
+    params = matchRoute("/api/workflow-definitions/:id/runs/:runId/resolve-gate", pathname);
+    if (method === "POST" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      const decision = (parsed.body as { decision?: unknown } | null)?.decision;
+      if (decision !== "approve" && decision !== "reject") {
+        return badRequest(res, 'decision must be "approve" or "reject"');
+      }
+      const run = getRun(root, params.id, params.runId);
+      if (!run) return notFound(res);
+      const triggerTodoId = workflowRunTriggerTodoId(run);
+      let item = getWorkItemBySourceRef("workflow", `workflow:${params.id}:${params.runId}`)
+        ?? (triggerTodoId ? getWorkItem(triggerTodoId) : undefined);
+      if (!item && run.status === "parked" && run.parked) {
+        createWorkflowTodoBridge().mirrorParkedGate(run, {
+          description: run.parked.description,
+          ...(run.parked.ref ? { ref: run.parked.ref } : {}),
+        });
+        item = getWorkItemBySourceRef("workflow", `workflow:${params.id}:${params.runId}`)
+          ?? (triggerTodoId ? getWorkItem(triggerTodoId) : undefined);
+      }
+      if (!item) {
+        return json(res, { error: "workflow gate resolution requires the mirrored Todo approval record" }, 409);
+      }
+      const authority = resolveApprovalDecisionAuthority(req.headers, item);
+      if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+      try {
+        const result = await resolveWorkflowRunGate(workflowRunDriverDeps(root, context), params.id, params.runId, decision, { decidedBy: authority.authority.actor });
+        if (result.outcome === "not-found") return notFound(res);
+        if (result.outcome === "not-parked") {
+          return json(res, { error: `run is ${result.run.status}, not parked`, status: result.run.status }, 409);
+        }
+        return json(res, result.run);
+      } catch (err) {
+        if (err instanceof WorkflowRunStoreError) {
+          return json(res, { error: err.message, code: err.code }, err.code === "not-found" ? 404 : 400);
+        }
+        return workflowStoreErrorResponse(res, err);
+      }
+    }
+
+    // GET /api/workflow-definitions/:id/runs — list runs of a definition (newest first).
+    params = matchRoute("/api/workflow-definitions/:id/runs", pathname);
+    if (method === "GET" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { runs: [], evidenceConfigured: false });
+      try {
+        return json(res, { runs: listRuns(root, params.id), evidenceConfigured: true });
+      } catch (err) {
+        if (err instanceof WorkflowRunStoreError) return json(res, { error: err.message, code: err.code }, 400);
+        return workflowStoreErrorResponse(res, err);
+      }
+    }
+
+    // GET /api/workflow-definitions/:id/runs/:runId — one run record.
+    params = matchRoute("/api/workflow-definitions/:id/runs/:runId", pathname);
+    if (method === "GET" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return notFound(res);
+      try {
+        const run = getRun(root, params.id, params.runId);
+        if (!run) return notFound(res);
+        return json(res, run);
+      } catch (err) {
+        if (err instanceof WorkflowRunStoreError) return json(res, { error: err.message, code: err.code }, 400);
+        return workflowStoreErrorResponse(res, err);
+      }
+    }
+
+    // GET /api/workflow-definitions/:id — full editable definition.
+    // PUT /api/workflow-definitions/:id — update (shallow patch; version bump; optimistic lock).
+    params = matchRoute("/api/workflow-definitions/:id", pathname);
+    if (params && (method === "GET" || method === "PUT")) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (method === "GET") {
+        if (!root) return notFound(res);
+        try {
+          const def = getDefinition(root, params.id);
+          if (!def) return notFound(res);
+          return json(res, def);
+        } catch (err) {
+          return workflowStoreErrorResponse(res, err);
+        }
+      }
+      // PUT
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      if (parsed.body !== null && (typeof parsed.body !== "object" || Array.isArray(parsed.body))) {
+        return badRequest(res, "Request body must be a JSON object");
+      }
+      const body = (parsed.body ?? {}) as Partial<EditableWorkflowDefinition> & {
+        expectedVersion?: number;
+      };
+      const { expectedVersion, ...patch } = body;
+      try {
+        const existing = getDefinition(root, params.id);
+        if (!existing) return notFound(res);
+        const authority = authorizeWorkflowOperation(req.headers, existing, "update");
+        if (!authority.ok) {
+          return json(res, { error: authority.error }, authority.status);
+        }
+        const safePatch = authority.canSetWorkflowAuthority ? patch : stripWorkflowAuthorityFields(patch);
+        const updated = updateDefinition(root, params.id, safePatch, { expectedVersion });
+        syncWorkflowCronJobsForRoot(root); // GRS-014d: schedule/status edits re-derive the managed cron job
+        return json(res, updated);
+      } catch (err) {
+        return workflowStoreErrorResponse(res, err);
+      }
+    }
+
     // GET /api/sessions/:id/transcript — return raw Claude Code session transcript
     params = matchRoute("/api/sessions/:id/transcript", pathname);
     if (method === "GET" && params) {
@@ -1206,6 +3171,209 @@ export async function handleApiRequest(
       return json(res, entries);
     }
 
+    // POST /api/delegations — the delegation transaction (GRS-017d, design §4).
+    // ONE atomic in-process handler: mint the work item (the durable record of
+    // INTENT), spawn the delegate session, link the two, derive the item's live
+    // status — all before responding. It lives HERE, where the store functions
+    // live, because composing mint→spawn→link as three HTTP calls from a client
+    // (the MCP tool) would re-create exactly the partial-failure windows
+    // GRS-003b-2b spent a wave closing (crash after spawn, before link → orphan).
+    //
+    // MINT-BEFORE-SPAWN, LINK-BEFORE-DISPATCH (the cron bridge's proven
+    // ordering, tightened per the 017d codex review): the work item (intent) is
+    // minted first; the session ROW is created and LINKED before the engine
+    // turn is dispatched. So a crash at any point leaves either a recoverable
+    // `open` item with zero sessions, or a linked reconciler-derivable pair —
+    // never a running-but-unlinked orphan. Status is `open` at mint, never
+    // hardcoded `active`: reconcileWorkItem DERIVES the live status from the
+    // linked session (the GRS-003a single-source-of-truth rule).
+    //
+    // Unlike the cron bridge (where the item is best-effort dogfood around a
+    // job that must run regardless), here the work item IS the deliverable — a
+    // delegation is "tracked work" by definition — so a mint failure aborts the
+    // whole transaction with nothing spawned.
+    if (method === "POST" && pathname === "/api/delegations") {
+      const _parsed = await readJsonBody(req, res);
+      if (!_parsed.ok) return;
+
+      // Fail-closed tool identity (GRS-017 codex finding 2), same rule as spawn:
+      // a delegation always acts on behalf of a session, so a tool call whose
+      // identity got lost must never fall through to the operator path. Headers
+      // only — the identity gate outranks body validation.
+      const delegationCaller = resolveScopedWriteCallerIdentity(req.headers);
+      if (delegationCaller.kind === "unidentified-tool") {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
+        return;
+      }
+
+      // Body shape guard (017d codex review finding 2): `null`, arrays, and
+      // scalars are valid JSON but not a delegation — a structured 400, not a
+      // property-access 500 TypeError.
+      if (!_parsed.body || typeof _parsed.body !== "object" || Array.isArray(_parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = _parsed.body as any;
+
+      // Validation — ALL of it before the mint, so a 400 never litters the
+      // work-item table with garbage intent records.
+      const task = typeof body.task === "string" && body.task.trim() ? (body.task as string) : undefined;
+      if (!task) return badRequest(res, "task is required — the full brief for the delegate");
+      const employeeName = typeof body.employee === "string" && body.employee.trim() ? (body.employee as string).trim() : undefined;
+      const engineParam = typeof body.engine === "string" && body.engine.trim() ? (body.engine as string).trim() : undefined;
+      if (!employeeName && !engineParam) {
+        return badRequest(res, "employee or engine is required — delegate to a named employee (GET /api/org lists them) or to a bare engine");
+      }
+      const config = context.getConfig();
+      let delegateEmployee: import("../shared/types.js").Employee | undefined;
+      if (employeeName) {
+        const { scanOrg } = await import("./org.js");
+        delegateEmployee = scanOrg().get(employeeName);
+        if (!delegateEmployee) {
+          return badRequest(res, `unknown employee "${employeeName}" — GET /api/org lists valid employees`);
+        }
+      }
+      const employeeDefaults = delegateEmployee
+        ? {
+            engine: delegateEmployee.engine,
+            model: delegateEmployee.model,
+            // GRS-017f: name the employee so an unregistered configured model
+            // fails with an actionable, employee-named error, not a bare engine
+            // string — the same clear signal spawn now surfaces.
+            employee: employeeName,
+            ...(delegateEmployee.effortLevel ? { effortLevel: delegateEmployee.effortLevel } : {}),
+          }
+        : undefined;
+      const selection = validateNewSessionSelection(config, {
+        engine: body.engine,
+        model: body.model,
+        effortLevel: body.effortLevel,
+      }, employeeDefaults);
+      if (!selection.ok) return badRequest(res, selection.error || "invalid engine/model/effort");
+      const engineName = selection.engine || config.engines.default;
+
+      // Parent resolution — the GRS-017a identity seam, spawn-route semantics:
+      // explicit body.parentSessionId wins (internal callers); else the declared
+      // caller identity, best-effort (unknown id → warn + parentless).
+      let parentSessionId: string | undefined =
+        typeof body.parentSessionId === "string" ? (body.parentSessionId as string) : undefined;
+      if (delegationCaller.kind === "session" && body.parentSessionId === undefined) {
+        if (getSession(delegationCaller.callerId)) {
+          parentSessionId = delegationCaller.callerId;
+        } else {
+          logger.warn(`Ignoring unknown x-jinn-caller-session "${delegationCaller.callerId}" on delegation`);
+        }
+      }
+
+      const title = (
+        typeof body.title === "string" && body.title.trim() ? (body.title as string).trim() : task.split("\n")[0].trim()
+      ).slice(0, 200);
+
+      // 1. MINT — before any spawn step, including the engine lookup. The
+      //    sourceRef mirrors the cron bridge's shape (`delegate:<caller>:<nonce>`);
+      //    the nonce makes every delegation a distinct intent (there is no
+      //    natural idempotency key for "delegate this again"). Provenance is
+      //    first-class `delegation` since the GRS-021a vocabulary rebuild
+      //    (pre-rebuild rows carried source 'session' + this ref shape and were
+      //    remapped by the migration).
+      const callerRef = delegationCaller.kind === "session" ? delegationCaller.callerId : "operator";
+      let workItem;
+      try {
+        workItem = createWorkItem({
+          title,
+          body: task,
+          status: "backlog",
+          source: "delegation",
+          sourceRef: `delegate:${callerRef}:${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+          assignee: employeeName ?? null,
+          department: delegateEmployee?.department ?? null,
+        });
+      } catch (mintErr) {
+        logger.warn(`Delegation work-item mint failed: ${mintErr instanceof Error ? mintErr.message : mintErr}`);
+        return json(res, { error: "delegation failed before any work started — the work item could not be minted; nothing was spawned" }, 500);
+      }
+
+      // 2. SPAWN — the irreversible step. A failure here PRESERVES the minted
+      //    `backlog` item (durable intent, recoverable) and reports its id.
+      const engine = context.sessionManager.getEngine(engineName);
+      if (!engine) {
+        return json(res, {
+          error: `engine "${engineName}" not available`,
+          workItemId: workItem.id,
+          hint: "the work item was minted before the spawn and is preserved as backlog — the delegation intent is durable, not lost",
+        }, 502);
+      }
+      const sessionKey = `delegation:${workItem.id}`;
+      const session = createSession({
+        engine: engineName,
+        source: "web",
+        sourceRef: sessionKey,
+        connector: "web",
+        sessionKey,
+        replyContext: { source: "web" },
+        employee: employeeName ?? null,
+        parentSessionId,
+        model: selection.model,
+        effortLevel: selection.effortLevel,
+        prompt: task,
+        title,
+        portalName: config.portal?.portalName,
+      });
+      insertMessage(session.id, "user", task);
+
+      // 3. LINK — BEFORE any dispatch step (017d codex review finding 1). The
+      //    whole point of the in-process transaction is that the work item ↔
+      //    session link is DURABLE before the worker can run: a crash from here
+      //    on leaves a linked, reconciler-derivable pair, never a running-but-
+      //    unlinked orphan next to a backlog item with zero sessions. The link is
+      //    transactional and both rows were just created in-process, so a
+      //    failure is a genuine anomaly — and because NOTHING has been
+      //    dispatched yet, the honest response is to HALT: report both
+      //    preserved ids (backlog item + idle, undispatched, re-linkable session)
+      //    instead of dispatching an untracked turn.
+      try {
+        linkSession(workItem.id, session.id);
+      } catch (linkErr) {
+        logger.warn(`Delegation ${workItem.id} link failed before dispatch: ${linkErr instanceof Error ? linkErr.message : linkErr}`);
+        return json(res, {
+          error: "delegation halted before dispatch — linking the work item to the spawned session failed",
+          workItemId: workItem.id,
+          sessionId: session.id,
+          hint: "nothing was dispatched: the backlog work item and the idle session row are both preserved and re-linkable",
+        }, 500);
+      }
+
+      // 4. DERIVE + DISPATCH — mark the attempt running, let the reconciler
+      //    derive the item's live status (`open`→`active`, the GRS-003a
+      //    single-source-of-truth rule; best-effort — a derive hiccup never
+      //    undoes a correctly linked delegation), then start the turn.
+      updateSession(session.id, { status: "running", lastActivity: new Date().toISOString() });
+      session.status = "running";
+      try {
+        reconcileWorkItem(workItem.id);
+      } catch (reconcileErr) {
+        logger.warn(`Delegation ${workItem.id} reconcile failed: ${reconcileErr instanceof Error ? reconcileErr.message : reconcileErr}`);
+      }
+      logger.info(`Delegation ${workItem.id}: session ${session.id} linked + dispatching for ${employeeName ?? engineName}`);
+      const delegationQueueKey = session.sessionKey || session.sourceRef || session.id;
+      const delegationQueueItemId = enqueueQueueItem(session.id, delegationQueueKey, task);
+      context.emit("queue:updated", { sessionId: session.id, sessionKey: delegationQueueKey });
+      dispatchWebSessionRun(session, task, engine, config, context, { queueItemId: delegationQueueItemId });
+      maybeEmitTalkGraph(session.id, "added", { getSession, emit: context.emit });
+
+      return json(res, {
+        workItemId: workItem.id,
+        sessionId: session.id,
+        employee: employeeName ?? null,
+        engine: engineName,
+        model: selection.model ?? null,
+        effortLevel: selection.effortLevel ?? null,
+        status: session.status,
+        title,
+      }, 201);
+    }
+
     // POST /api/sessions
     if (method === "POST" && pathname === "/api/sessions") {
       const _parsed = await readJsonBody(req, res);
@@ -1214,14 +3382,39 @@ export async function handleApiRequest(
       const body = _parsed.body as any;
       const prompt = body.prompt || body.message;
       if (!prompt) return badRequest(res, "prompt or message is required");
+      // GRS-017a identity seam: a spawn carrying x-jinn-caller-session (the jinn
+      // MCP server run by another session) is auto-linked as that session's
+      // child — the agent cannot forget the linkage and the child-completion
+      // callback protocol works without it knowing the mechanic. An explicit
+      // body.parentSessionId always wins (internal callers). Best-effort: an
+      // unknown caller id is ignored with a warning, never a refusal.
+      // A TOOL spawn that LOST its identity fails CLOSED (codex finding 2):
+      // silently inheriting the operator's parentless spawn would orphan the
+      // child and break the callback protocol without anyone noticing.
+      const spawnCaller = resolveScopedWriteCallerIdentity(req.headers);
+      if (spawnCaller.kind === "unidentified-tool") {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
+        return;
+      }
+      if (spawnCaller.kind === "session" && body.parentSessionId === undefined) {
+        if (getSession(spawnCaller.callerId)) {
+          body.parentSessionId = spawnCaller.callerId;
+        } else {
+          logger.warn(`Ignoring unknown x-jinn-caller-session "${spawnCaller.callerId}" on session spawn`);
+        }
+      }
       const config = context.getConfig();
       const employeeName = coercePortalEmployee(body.employee, config.portal?.portalName);
-      let employeeDefaults: { engine: string; model: string; effortLevel?: string } | undefined;
+      let employeeDefaults: { engine: string; model: string; effortLevel?: string; employee?: string } | undefined;
       if (employeeName) {
         const { scanOrg } = await import("./org.js");
         const emp = scanOrg().get(employeeName);
         if (emp) {
-          employeeDefaults = { engine: emp.engine, model: emp.model };
+          // GRS-017f: carry the employee slug so an unregistered configured
+          // model produces the same actionable, employee-named error the
+          // delegation route surfaces (not a cryptic bare-engine string).
+          employeeDefaults = { engine: emp.engine, model: emp.model, employee: employeeName };
           if (emp.effortLevel) employeeDefaults.effortLevel = emp.effortLevel;
         }
       }
@@ -1326,6 +3519,55 @@ export async function handleApiRequest(
       if (!_parsed.ok) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
+
+      // GRS-017a — agent-initiated (lateral / child follow-up) sends carry the
+      // caller's session identity in x-jinn-caller-session (the jinn MCP server).
+      // The substrate guards live HERE, route-side, so curl is equally guarded:
+      // no self-messages, a per-sender rate cap, and a relay hop budget. A
+      // guarded send is rewritten into a sender-tagged notification (wakes the
+      // target; queues if mid-turn — the callbacks mechanic, generalized).
+      // Internal parent callbacks (sessions/callbacks.ts) send no headers and
+      // are untouched. A TOOL send that LOST its identity fails CLOSED (codex
+      // finding 2): without a caller it would bypass every guard and land as an
+      // unprefixed operator-grade user message.
+      const msgCaller = resolveScopedWriteCallerIdentity(req.headers);
+      if (msgCaller.kind === "unidentified-tool") {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
+        return;
+      }
+      if (msgCaller.kind === "session") {
+        const msgCallerId = msgCaller.callerId;
+        const rawMessage = body.message || body.prompt;
+        if (!rawMessage) return badRequest(res, "message is required");
+        const caller = getSession(msgCallerId);
+        if (!caller) {
+          return badRequest(res, `unknown caller session "${msgCallerId}" — agent-initiated sends need a live caller session`);
+        }
+        const plan = prepareLateralSend({
+          caller,
+          targetSessionId: params.id,
+          message: String(rawMessage),
+          guards: sessionCommGuards,
+        });
+        if (!plan.ok) {
+          res.writeHead(plan.status, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: plan.error }));
+          return;
+        }
+        body.role = "notification";
+        body.message = plan.prompt;
+        body.displayMessage = plan.displayMessage;
+        // Conservative on later failure (e.g. engine unavailable): the hop tag
+        // may be recorded for an undelivered message, which only ever tightens
+        // the budget, never loosens it.
+        sessionCommGuards.recordDelivery(params.id, plan.hops);
+      } else if (body.role !== "notification") {
+        // A genuine user/operator message resets the target's relay-hop chain —
+        // an operator instruction is a fresh start, not hop N of a relay.
+        sessionCommGuards.clearInboundHop(params.id);
+      }
+
       const prompt = body.message || body.prompt;
       if (!prompt) return badRequest(res, "message is required");
 
@@ -1469,7 +3711,7 @@ export async function handleApiRequest(
       const enriched = await Promise.all(jobs.map(async (job) => {
         const runFile = path.join(CRON_RUNS, `${job.id}.jsonl`);
         const { entries } = await readJsonlTail(runFile, 1);
-        return { ...job, lastRun: entries[0] ?? null };
+        return cronJobSummary(job as unknown as Record<string, unknown>, entries[0] ?? null);
       }));
       return json(res, enriched);
     }
@@ -1483,7 +3725,7 @@ export async function handleApiRequest(
       const runFile = path.join(CRON_RUNS, `${params.id}.jsonl`);
       const { entries: runs, skipped } = await readJsonlTail(runFile, limit);
       if (skipped) logger.warn(`GET /api/cron/${params.id}/runs: skipped ${skipped} corrupt line(s)`);
-      return json(res, runs);
+      return json(res, runs.map(summarizeCronRun));
     }
 
     // POST /api/cron — create new cron job
@@ -1492,7 +3734,27 @@ export async function handleApiRequest(
       if (!_parsed.ok) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
+      // GRS-014d: managed workflow jobs are normally CREATED BY THE SYNC, but a
+      // hand-authored one must at least be well-formed (managed ⇒ workflowId) —
+      // note the sync owns every managedBy:'workflow' job and will reconcile it
+      // against the definition store on the next definition save or boot.
+      if (body.managedBy === "workflow" && !(typeof body.workflowId === "string" && body.workflowId.trim())) {
+        return badRequest(res, "managed workflow cron jobs require workflowId");
+      }
       const jobs = loadJobs();
+      // Job ids are identity (run-log files, sync ownership, PUT/DELETE routing) —
+      // a duplicate would double-schedule one id and collide two run histories in
+      // one jsonl (Codex GRS-014d finding 2). Identity is CANONICAL (trim+lowercase,
+      // GRS-014d-fix2): run-log files `<id>.jsonl` collide case-insensitively on the
+      // default macOS volume, so "Workflow:wf-a" and "workflow:wf-a" are the same
+      // job history. Stored ids stay as authored; only the collision check (and a
+      // padded-id rejection — whitespace ids break addressing) canonicalizes.
+      if (typeof body.id === "string" && body.id !== body.id.trim()) {
+        return badRequest(res, "cron job id must not have leading/trailing whitespace");
+      }
+      if (body.id && jobs.some((j) => canonicalCronJobId(j.id) === canonicalCronJobId(body.id))) {
+        return badRequest(res, `a cron job with id "${body.id}" already exists`);
+      }
       const newJob: CronJob = {
         id: body.id || crypto.randomUUID(),
         name: body.name || "untitled",
@@ -1504,6 +3766,7 @@ export async function handleApiRequest(
         employee: body.employee,
         prompt: body.prompt || "",
         delivery: body.delivery,
+        ...(body.managedBy === "workflow" ? { managedBy: "workflow" as const, workflowId: body.workflowId } : {}),
       };
       jobs.push(newJob);
       saveJobs(jobs);
@@ -1521,7 +3784,14 @@ export async function handleApiRequest(
       if (!_parsed.ok) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
-      jobs[idx] = { ...jobs[idx], ...body, id: params.id };
+      const merged = { ...jobs[idx], ...body, id: params.id } as CronJob;
+      // GRS-014d: a job cannot end up managed without a workflow to fire. (Edits to a
+      // managed job persist but are re-synced away on the next definition save/boot —
+      // the definition is the source of truth.)
+      if (merged.managedBy === "workflow" && !(typeof merged.workflowId === "string" && merged.workflowId.trim())) {
+        return badRequest(res, "managed workflow cron jobs require workflowId");
+      }
+      jobs[idx] = merged;
       saveJobs(jobs);
       reloadScheduler(jobs);
       return json(res, jobs[idx]);
@@ -1548,8 +3818,12 @@ export async function handleApiRequest(
 
       logger.info(`Manual trigger for cron job "${job.name}" (${job.id})`);
 
-      // Fire and forget — respond immediately, run in background
-      runCronJob(job, context.sessionManager, context.getConfig(), context.connectors).catch(
+      // Fire and forget — respond immediately, run in background. A managed workflow
+      // job triggered manually starts a fresh workflow run (fresh fireIso — never
+      // deduped, same manual semantics as prompt jobs).
+      runCronJob(job, context.sessionManager, context.getConfig(), context.connectors, {
+        workflowFire: workflowCronFireHandler(context),
+      }).catch(
         (err) => logger.error(`Manual cron trigger failed for "${job.name}": ${err}`)
       );
 
@@ -2258,12 +4532,6 @@ export async function handleApiRequest(
       return;
     }
 
-    // ── Talk (/talk voice loop) ───────────────────────────────
-    if (pathname.startsWith("/api/talk/")) {
-      const handled = await handleTalkApi(req, res, context);
-      if (handled) return;
-    }
-
     // /api/files — file upload/download/management
     if (pathname.startsWith("/api/files")) {
       const handled = await handleFilesRequest(req, res, pathname, method, context);
@@ -2633,17 +4901,60 @@ async function runWebSession(
   const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
   const orgHierarchy = resolveOrgHierarchy(scanOrgForHierarchy());
 
+  // Declared in the function scope so the OUTER finally can clean up the Claude MCP
+  // temp file only AFTER the full turn lifecycle — including any rate-limit
+  // retry/fallback that reuses mcpConfigPath (parity with manager.ts runSession).
+  let mcpConfigPath: string | undefined;
+
   try {
+
+    // Resolve MCP servers for MCP-capable engines. This mirrors the connector
+    // path in sessions/manager.ts (runSession) — web-created sessions (POST
+    // /api/sessions) run through THIS function instead, so without this block the
+    // resolved server set (including the built-in `jinn` server) never reaches the
+    // engine. GRS-012b closes that gap so a codex/hermes web session actually
+    // attaches the Jinn MCP tools. The `mcp:`-absent default is centralized in
+    // resolveMcpServers (no global config → empty set → no engine gets MCP).
+    // Claude additionally consumes its servers via the `--mcp-config` temp file
+    // (byte-identical to the connector path); other capable engines read the
+    // in-memory `resolvedMcp` payload in their adapters (no on-disk secret write).
+    // GRS-020b: resolved BEFORE buildContext (the manager.ts ordering, which this
+    // path had drifted from) so the context diet actually applies to web-created
+    // sessions — the live QA caught the composed prompt still carrying the full
+    // knowledge index (and the 017b org prose) because the flag was never passed
+    // here.
+    let resolvedMcp: import("../shared/types.js").ResolvedMcpConfig | undefined;
+    if (isMcpCapableEngine(currentSession.engine)) {
+      // engine threaded for the GRS-017e per-engine opt-out (mcp.gateway.engines).
+      const mcpConfig = resolveMcpServers(config.mcp, employee, currentSession.engine);
+      if (Object.keys(mcpConfig.mcpServers).length > 0) {
+        // GRS-017d QA catch: stamp the caller identity here exactly as the
+        // connector path does (manager.ts runSession). This block predated the
+        // GRS-017a identity seam and was missed by it, so every WEB-created
+        // session's jinn server launched without JINN_SESSION_ID — and since
+        // the fail-closed rule (codex finding 2), all its scoped MCP writes
+        // (spawn/send/stop/delegate) were refused with "caller identity
+        // unavailable". Pinned by the delegations-route identity-seam tests.
+        resolvedMcp = attachSessionIdentity(mcpConfig, currentSession.id);
+        if (currentSession.engine === "claude") {
+          mcpConfigPath = writeMcpConfigFile(resolvedMcp, currentSession.id);
+        }
+      }
+    }
 
     const systemPrompt = buildContext({
       source: currentSession.source,
       channel: currentSession.sourceRef,
       user: currentSession.userId ?? "web-user",
       employee,
+      engine: currentSession.engine,
       connectors: Array.from(context.connectors.keys()),
       config,
       sessionId: currentSession.id,
       hierarchy: orgHierarchy,
+      // The diet keys off the built-in jinn server specifically — custom MCP
+      // servers don't carry the company tools (same rule as manager.ts).
+      jinnMcpAttached: Boolean(resolvedMcp?.mcpServers?.["jinn"]),
       // Hands-free voice orchestrator: layer the AURA persona on top of the
       // base identity so it behaves as the thin voice layer above the COO.
       voicePersona: currentSession.source === "talk" ? getOrchestratorPersona() : undefined,
@@ -2784,6 +5095,8 @@ async function runWebSession(
       model: currentSession.model ?? engineConfig.model,
       effortLevel,
       cliFlags: employee?.cliFlags,
+      mcpConfigPath,
+      resolvedMcp,
       attachments: attachments?.length ? attachments : undefined,
       sessionId: currentSession.id,
       source: currentSession.source,
@@ -2967,6 +5280,11 @@ async function runWebSession(
         engineConfig,
         effortLevel,
         cliFlags: employee?.cliFlags,
+        // Carry the resolved MCP set into the rate-limit retry/fallback turn so a
+        // web session that hits a usage limit keeps its MCP tools on recovery —
+        // parity with the connector path (manager.ts runSession → handleRateLimit).
+        mcpConfigPath,
+        resolvedMcp,
         attachments: attachments?.length ? attachments : undefined,
         config,
         engines: context.sessionManager.getEngines(),
@@ -3244,5 +5562,11 @@ async function runWebSession(
     });
     maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
     logger.error(`Web session ${currentSession.id} error: ${errMsg}`);
+  } finally {
+    // Clean up the per-session Claude MCP temp file AFTER the full turn lifecycle
+    // (including any rate-limit retry/fallback that reused mcpConfigPath). Mirrors
+    // the connector path's outer-finally cleanup (manager.ts runSession). Idempotent
+    // and a no-op for engines that never wrote one.
+    if (mcpConfigPath) cleanupMcpConfigFile(currentSession.id);
   }
 }

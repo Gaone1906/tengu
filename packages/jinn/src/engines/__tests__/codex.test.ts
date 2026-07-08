@@ -323,6 +323,56 @@ describe("CodexEngine — systemPrompt / developer_instructions injection", () =
     expect(call.args).not.toContain("--chrome");
     expect(call.args).toContain("prev-thread");
   });
+
+  it("passes bound jinn capability through a 0600 Codex profile, never argv, and cleans it up", async () => {
+    const prevCodexHome = process.env.CODEX_HOME;
+    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mcp-profile-"));
+    process.env.CODEX_HOME = codexHome;
+    const capability = "capability-secret-for-profile";
+    const sessionId = "sess-capability-profile";
+    try {
+      const engine = new CodexEngine({ codexSessionsDir: fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-sessions-")) });
+      const promise = engine.run({
+        prompt: "hello",
+        cwd: "/tmp",
+        sessionId,
+        resolvedMcp: {
+          mcpServers: {
+            jinn: {
+              command: "/usr/bin/node",
+              args: ["/abs/server-entry.js"],
+              env: {
+                JINN_GATEWAY_URL: "http://127.0.0.1:7777",
+                JINN_HOME: "/tmp/jinn-home",
+                JINN_SESSION_ID: sessionId,
+                JINN_SESSION_CAPABILITY: capability,
+              },
+            },
+          },
+        },
+      } as any);
+      await flush();
+      const call = spawnCalls[spawnCalls.length - 1];
+      const joined = call.args.join(" ");
+      expect(joined).not.toContain(capability);
+      expect(joined).not.toContain("JINN_SESSION_CAPABILITY");
+      const profileFlag = call.args.indexOf("--profile");
+      expect(profileFlag).toBeGreaterThan(-1);
+      const profileName = call.args[profileFlag + 1];
+      const profilePath = path.join(codexHome, `${profileName}.config.toml`);
+      expect(fs.statSync(profilePath).mode & 0o777).toBe(0o600);
+      expect(fs.readFileSync(profilePath, "utf-8")).toContain(`JINN_SESSION_CAPABILITY = ${JSON.stringify(capability)}`);
+
+      call.proc.emitStdout(`${threadStarted("t-profile")}\n${agentMessage("ok")}\n`);
+      call.proc.close(0);
+      await promise;
+      expect(fs.existsSync(profilePath)).toBe(false);
+    } finally {
+      if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prevCodexHome;
+      fs.rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("CodexEngine — usage / context-token extraction", () => {

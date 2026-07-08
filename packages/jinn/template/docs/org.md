@@ -1,6 +1,6 @@
 # Organization
 
-{{portalName}} supports an organizational structure with employee personas, departments, ranks, and inter-agent communication through boards.
+{{portalName}} supports an organizational structure with employee personas, departments, ranks, Todos, Workflows, and inter-agent sessions.
 
 ## Employee Personas
 
@@ -38,7 +38,6 @@ Each department is a directory under `~/.jinn/org/` containing:
 ```
 ~/.jinn/org/engineering/
   department.yaml     # Department metadata
-  board.json          # Shared task board
   alice.yaml          # Employee persona
   bob.yaml            # Employee persona
 ```
@@ -51,42 +50,27 @@ displayName: Engineering
 description: Builds and maintains the product codebase.
 ```
 
-### board.json
+### Todos and Workflows
 
-A JSON array of task objects used for inter-agent communication:
+Todos are the live work ledger. Employees find and update their assigned Todos, move finished work to `in_review`, and use `blocked` or `escalated` only when they cannot proceed.
 
-```json
-[
-  {
-    "id": "task_001",
-    "title": "Refactor auth module",
-    "assignee": "alice",
-    "status": "in-progress",
-    "priority": "high",
-    "description": "Move auth logic into a dedicated service class.",
-    "createdAt": "2026-01-10T14:00:00.000Z",
-    "updatedAt": "2026-01-11T09:30:00.000Z"
-  }
-]
-```
-
-Task fields: `id`, `title`, `assignee`, `status` (open, in-progress, done, blocked), `priority` (low, medium, high, critical), `description`, `createdAt`, `updatedAt`.
+Workflows are reusable automations - the HOW. Use or propose one when the same job is repeatable, scheduled, or multi-step. Todos and Workflows stay separate: one records live work, the other defines how repeated work runs.
 
 ## Ranks
 
 | Rank | Privileges |
 |---|---|
 | **executive** | Full access. Can message any employee, modify org structure, create departments. {{portalName}} holds this rank. |
-| **manager** | Can message employees in their department. Can assign tasks on their department's board. |
+| **manager** | Can message employees in their department. Can assign and review department Todos. |
 | **senior** | Can message employees in their department. Can update tasks assigned to them. |
-| **employee** | Can update tasks assigned to them. Can post to their department's board. |
+| **employee** | Can update tasks assigned to them. |
 
 ## Communication
 
-- **Downward**: Higher-ranked agents write tasks to lower-ranked agents' department boards
+- **Downward**: Higher-ranked agents delegate work through sessions and Todos
 - **@mentions**: Messages containing `@name` route to that specific employee
-- **Board-based**: Agents check their department's `board.json` for assigned tasks
-- **Cross-department**: Executives and managers can write to any department's board
+- **Todo-ledger**: Agents check and update their assigned Todos
+- **Cross-department**: Executives and managers can delegate across departments when needed
 
 ## Default Organization
 

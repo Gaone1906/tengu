@@ -1,24 +1,54 @@
 import { describe, it, expect } from 'vitest'
-import { NAV_ITEMS, MOBILE_TAB_ITEMS } from '../nav'
+import { NAV_ITEMS, MOBILE_TAB_ITEMS, OVERFLOW_ITEMS, MORE_NAV_ITEM } from '../nav'
 
+// GRS-022 — the mobile bottom tab bar is the sole mobile nav: 4 primary tabs
+// (Chat · Todos · Workflows · More), with everything else under the More
+// overflow screen.
 describe('MOBILE_TAB_ITEMS', () => {
-  it('has exactly 5 curated entries', () => {
-    expect(MOBILE_TAB_ITEMS).toHaveLength(5)
+  it('has exactly 4 entries', () => {
+    expect(MOBILE_TAB_ITEMS).toHaveLength(4)
   })
 
-  it('lists the curated hrefs in order', () => {
+  it('lists the primary hrefs in order, ending with More', () => {
     expect(MOBILE_TAB_ITEMS.map((item) => item.href)).toEqual([
       '/',
-      '/talk',
+      '/todos',
+      '/workflow',
+      '/more',
+    ])
+  })
+
+  it('includes Todos as a primary tab', () => {
+    expect(MOBILE_TAB_ITEMS.some((i) => i.href === '/todos' && i.label === 'Todos')).toBe(true)
+  })
+
+  it('derives the 3 primary destinations from NAV_ITEMS (icons/labels stay in sync)', () => {
+    for (const item of MOBILE_TAB_ITEMS) {
+      if (item.href === MORE_NAV_ITEM.href) continue // More is the synthetic overflow entry
+      expect(NAV_ITEMS).toContain(item)
+    }
+  })
+})
+
+describe('OVERFLOW_ITEMS (the More screen)', () => {
+  it('holds every non-Chat destination that is not a primary tab', () => {
+    expect(OVERFLOW_ITEMS.map((i) => i.href)).toEqual([
       '/org',
       '/cron',
+      '/skills',
+      '/logs',
+      '/limits',
       '/settings',
     ])
   })
 
-  it('derives every entry from NAV_ITEMS (icons/labels stay in sync)', () => {
-    for (const item of MOBILE_TAB_ITEMS) {
-      expect(NAV_ITEMS).toContain(item)
-    }
+  it('partitions NAV_ITEMS with no gaps and no overlap (Chat + primary tabs + overflow)', () => {
+    const primary = MOBILE_TAB_ITEMS.filter((i) => i.href !== MORE_NAV_ITEM.href).map((i) => i.href)
+    const overflow = OVERFLOW_ITEMS.map((i) => i.href)
+    const covered = new Set([...primary, ...overflow])
+    // '/' (Chat) is a primary tab; every NAV_ITEMS href is either a primary tab
+    // or lives in the overflow — nothing is orphaned, nothing is double-listed.
+    for (const item of NAV_ITEMS) expect(covered.has(item.href)).toBe(true)
+    expect(primary.filter((h) => overflow.includes(h))).toEqual([])
   })
 })

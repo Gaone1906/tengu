@@ -7,15 +7,18 @@ import './routes/globals.css'
 
 const ChatPage = lazyRoute(() => import('./routes/chat/page'), 'chat')
 const CronPage = lazyRoute(() => import('./routes/cron/page'), 'cron')
-const KanbanPage = lazyRoute(() => import('./routes/kanban/page'), 'kanban')
+const TodosPage = lazyRoute(() => import('./routes/todos/page'), 'todos')
 const LogsPage = lazyRoute(() => import('./routes/logs/page'), 'logs')
 const LimitsPage = lazyRoute(() => import('./routes/limits/page'), 'limits')
 const OrgPage = lazyRoute(() => import('./routes/org/page'), 'org')
 const SettingsPage = lazyRoute(() => import('./routes/settings/page'), 'settings')
 const SkillsPage = lazyRoute(() => import('./routes/skills/page'), 'skills')
 const FilePage = lazyRoute(() => import('./routes/file/page'), 'file')
+const MorePage = lazyRoute(() => import('./routes/more/page'), 'more')
 const RedesignPage = lazyRoute(() => import('./routes/redesign/page'), 'redesign')
-const TalkPage = lazyRoute(() => import('./routes/talk/page'), 'talk')
+const WorkflowPreviewPage = lazyRoute(() => import('./routes/workflow/preview'), 'workflow-preview')
+const WorkflowListPage = lazyRoute(() => import('./routes/workflow/list'), 'workflow-list')
+const WorkflowPage = lazyRoute(() => import('./routes/workflow/page'), 'workflow')
 
 function RouteLoading() {
   return (
@@ -62,15 +65,20 @@ function App() {
               <Route path="/" element={<ChatPage />} />
               <Route path="/chat" element={<Navigate to="/" replace />} />
               <Route path="/cron" element={<CronPage />} />
-              <Route path="/kanban" element={<KanbanPage />} />
+              <Route path="/todos" element={<TodosPage />} />
+              {/* GRS-021d: Kanban became Todos. Old links redirect. */}
+              <Route path="/kanban" element={<Navigate to="/todos" replace />} />
               <Route path="/logs" element={<LogsPage />} />
               <Route path="/limits" element={<LimitsPage />} />
               <Route path="/org" element={<OrgPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/file" element={<FilePage />} />
-              <Route path="/talk" element={<TalkPage />} />
+              <Route path="/more" element={<MorePage />} />
+              <Route path="/workflow" element={<WorkflowListPage />} />
+              <Route path="/workflow/:id" element={<WorkflowPage />} />
               {import.meta.env.DEV && <Route path="/redesign" element={<RedesignPage />} />}
+              {import.meta.env.DEV && <Route path="/workflow-preview" element={<WorkflowPreviewPage />} />}
             </Routes>
           </Suspense>
         </ClientProviders>

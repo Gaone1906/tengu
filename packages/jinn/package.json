@@ -21,7 +21,7 @@
     "build": "rm -rf dist/bin dist/src && tsc -p tsconfig.build.json && mkdir -p dist/src/talk && (cp src/talk/*.md src/talk/*.py dist/src/talk/ 2>/dev/null || true)",
     "dev": "tsc && (tsc --watch &) && node --watch-path=dist dist/bin/jinn.js start",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "pnpm build && vitest run",
     "coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "clean": "rm -rf dist"

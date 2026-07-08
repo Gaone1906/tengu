@@ -70,6 +70,14 @@ export interface EngineRunOpts {
   cliFlags?: string[];
   /** Path to MCP config JSON file (passed as --mcp-config to Claude Code) */
   mcpConfigPath?: string;
+  /** In-memory resolved MCP server set for this session's employee, threaded to
+   *  ALL MCP-capable engines (Tier 1: claude/codex/hermes). Claude also consumes
+   *  its servers via {@link mcpConfigPath} (the `--mcp-config` temp file) today;
+   *  the other capable engines' adapters read this payload directly in a later
+   *  slice (GRS-012b/012c). Unset when the session's engine is not MCP-capable or
+   *  no servers resolve. Kept in-memory (never written to disk for non-Claude
+   *  engines), so this does not extend the resolver's temp-file secret exposure. */
+  resolvedMcp?: ResolvedMcpConfig;
   onStream?: (delta: StreamDelta) => void;
   /** Unique Jinn session ID for tracking the spawned process. */
   sessionId?: string;
@@ -237,8 +245,25 @@ export interface CronJob {
   model?: string;
   effortLevel?: string;
   employee?: string;
-  prompt: string;
+  /**
+   * The prompt a fire routes to an engine session. Required for user-authored jobs;
+   * optional ONLY for managed workflow jobs (`managedBy: 'workflow'`), whose fires
+   * start a typed workflow run instead of a prompt session (GRS-014d — no LLM in the
+   * trigger path).
+   */
+  prompt?: string;
   delivery?: CronDelivery;
+  /**
+   * 'workflow' marks a job OWNED by the workflow cron sync (GRS-014d): it is
+   * created/updated/removed by desired-state reconciliation from workflow
+   * definitions (`workflows/cron-sync.ts`, job id `workflow:<workflowId>`), and a
+   * manual edit is simply re-synced away on the next definition save — the
+   * definition is the source of truth. Absent = user-authored job; the sync never
+   * touches those.
+   */
+  managedBy?: "workflow";
+  /** The workflow definition a managed job fires (required when managedBy==='workflow'). */
+  workflowId?: string;
 }
 
 export interface CronDelivery {
@@ -260,6 +285,14 @@ export interface Employee {
   cliFlags?: string[];
   /** MCP servers this employee needs. true = all global, false = none, string[] = specific servers */
   mcp?: boolean | string[];
+  /** Per-employee override for the built-in `jinn` company toolset (GRS-017e).
+   *  true = force-attach even when `mcp.gateway.enabled` is absent (single-employee
+   *  pilot; still requires an MCP-capable engine and a passing authed smoke gate);
+   *  false = force-detach even when attachment is globally on. Unset = follow the
+   *  global setting + the general `mcp` field. This jinn-specific field beats the
+   *  general `mcp` field (specific-over-general); the global `enabled: false` kill
+   *  switch and a per-engine opt-out beat it. */
+  jinnMcp?: boolean;
   /** Max cost in USD for a single session. Overrides global config. */
   maxCostUsd?: number;
   /** Default effort level for sessions assigned to this employee */
@@ -341,6 +374,14 @@ export interface McpServerUrlConfig {
 /** MCP server config — either stdio (command) or URL-based */
 export type McpServerConfig = McpServerStdioConfig | McpServerUrlConfig;
 
+/** A fully-resolved MCP server set for one employee/session (env vars expanded,
+ *  employee allow/deny applied). Produced by `resolveMcpServers`. Single source
+ *  of truth for the payload shape so both the resolver and {@link EngineRunOpts}
+ *  reference the same type. */
+export interface ResolvedMcpConfig {
+  mcpServers: Record<string, McpServerConfig>;
+}
+
 export interface McpGlobalConfig {
   browser?: {
     enabled: boolean;
@@ -353,6 +394,22 @@ export interface McpGlobalConfig {
   };
   fetch?: {
     enabled: boolean;
+  };
+  /** The built-in `jinn` MCP server that exposes company primitives (org, work
+   *  items, sessions, workflows, …) to engines. Attachment is decided in ONE
+   *  place — `decideJinnAttachment` (mcp/attachment.ts) — composing this block
+   *  with engine capability and the per-employee `jinnMcp` override. */
+  gateway?: {
+    /** Master switch for the built-in `jinn` company toolset. `true` = attach to
+     *  every MCP-capable engine session (minus the opt-outs below); `false` =
+     *  global kill switch (beats every override); absent = the shipped default
+     *  (JINN_ATTACH_DEFAULT in mcp/attachment.ts — OFF until the GRS-017e
+     *  merge-day flip). */
+    enabled?: boolean;
+    /** Per-engine opt-out (GRS-017e): `engines: { grok: false }` detaches one
+     *  engine (e.g. a known-broken adapter) while the others keep the toolset.
+     *  Beats per-employee force-on. `true` entries are redundant but harmless. */
+    engines?: Record<string, boolean>;
   };
   /** Custom MCP servers defined by the user */
   custom?: Record<string, (McpServerStdioConfig | McpServerUrlConfig) & { enabled?: boolean }>;
@@ -651,7 +708,7 @@ export interface JinnConfig {
     enabled?: boolean;
     /** Engine for the hands-free voice orchestrator session. When unset (or
      *  unavailable) the talk session falls back to `engines.default`, then to the
-     *  first available engine — see talk/engine-resolver.ts. */
+     *  first available engine. */
     engine?: string;
     /** Model for the hands-free voice orchestrator session (default: "sonnet" — capable enough to orchestrate). */
     orchestratorModel?: string;

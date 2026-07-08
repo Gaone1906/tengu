@@ -9,7 +9,6 @@
 | `config.yaml` | File watcher triggers full config reload |
 | `cron/jobs.json` | File watcher triggers cron reschedule |
 | `org/**/*.yaml` | File watcher triggers employee registry rebuild |
-| `org/**/board.json` | Read on demand by employees; no watcher needed |
 | `skills/*/SKILL.md` | Read on demand by engines; no watcher needed |
 | `skills/**/*` | Supporting skill data; read on demand |
 
@@ -30,7 +29,7 @@ Engines have full file access within `~/.jinn/`. To avoid breaking the gateway:
 ### Do
 
 - Validate YAML before writing to `config.yaml` (must be valid YAML with expected schema)
-- Validate JSON before writing to `jobs.json` or `board.json`
+- Validate JSON before writing to `jobs.json` or other structured state files
 - Use atomic writes (write to temp file, then rename) for critical files
 - Back up files before making destructive changes
 - Test cron expressions before adding them to `jobs.json`

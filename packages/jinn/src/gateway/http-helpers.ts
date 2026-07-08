@@ -1,6 +1,6 @@
 /**
- * Shared HTTP request-body helpers used by gateway/api.ts and talk/routes.ts
- * (previously duplicated in both). Error responses written here are tiny
+ * Shared HTTP request-body helpers used by gateway/api.ts.
+ * Error responses written here are tiny
  * (well under the compression threshold), so plain uncompressed JSON writes
  * are behaviour-identical to api.ts's compressing json() helper.
  */
@@ -29,16 +29,29 @@ export function readBody(req: HttpRequest, opts: ReadBodyOpts = {}): Promise<str
     const chunks: Buffer[] = [];
     let total = 0;
     const max = opts.maxBytes;
-    req.on("data", (chunk: Buffer) => {
+    const onData = (chunk: Buffer) => {
       total += chunk.length;
       if (max !== undefined && total > max) {
-        // Bail out — destroy the socket so the sender stops shoveling bytes.
-        req.destroy();
+        // Over the cap: reject WITHOUT touching the socket. Destroying here tore
+        // down the connection before the caller's 413 could reach the wire, so
+        // real HTTP clients saw a bare "fetch failed" instead of the structured
+        // error (Codex GRS-015 finding 2). Instead, stop BUFFERING but keep
+        // DISCARDING inbound chunks so the exchange completes and the response is
+        // deliverable; a hard ceiling (8× the cap) still cuts off a sender that
+        // never stops (local-machine threat model — compatibility first, with a
+        // bounded worst case).
+        req.off("data", onData);
+        chunks.length = 0;
+        req.on("data", (later: Buffer) => {
+          total += later.length;
+          if (total > max * 8) req.destroy();
+        });
         reject(new BodyTooLargeError());
         return;
       }
       chunks.push(chunk);
-    });
+    };
+    req.on("data", onData);
     req.on("end", () => resolve(Buffer.concat(chunks).toString()));
     req.on("error", reject);
   });
@@ -68,7 +81,11 @@ export async function readJsonBody(
     raw = await readBody(req, opts);
   } catch (err) {
     if (err instanceof BodyTooLargeError) {
-      errorJson(res, { error: "Payload too large" }, 413);
+      // The 413 is written while the client may still be uploading (readBody now
+      // drains instead of destroying — the response must actually reach the wire).
+      // Connection: close tells the client not to reuse the exchange.
+      res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
+      res.end(JSON.stringify({ error: "Payload too large" }));
       return { ok: false };
     }
     throw err;

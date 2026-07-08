@@ -28,3 +28,36 @@ if (typeof localStorage === "undefined" || typeof localStorage.clear !== "functi
     configurable: true,
   });
 }
+
+/* @xyflow/react (workflow canvas GRS-013, org map) needs DOM measurement APIs
+ * jsdom doesn't implement. Standard mocks from the xyflow testing guide,
+ * defined only when missing so tests that stub their own (e.g. the captured
+ * ResizeObserver in use-stick-to-bottom.dom.test) keep full control. */
+if (typeof globalThis.ResizeObserver === "undefined") {
+  class ResizeObserverMock {
+    private readonly cb: ResizeObserverCallback;
+    constructor(cb: ResizeObserverCallback) {
+      this.cb = cb;
+    }
+    observe(target: Element) {
+      this.cb(
+        [{ target, contentRect: target.getBoundingClientRect() } as ResizeObserverEntry],
+        this as unknown as ResizeObserver,
+      );
+    }
+    unobserve() {}
+    disconnect() {}
+  }
+  globalThis.ResizeObserver = ResizeObserverMock as unknown as typeof ResizeObserver;
+}
+
+if (typeof (globalThis as Record<string, unknown>).DOMMatrixReadOnly === "undefined") {
+  class DOMMatrixReadOnlyMock {
+    readonly m22: number;
+    constructor(transform?: string) {
+      const scale = transform?.match(/scale\(([\d.]+)\)/)?.[1];
+      this.m22 = scale !== undefined ? +scale : 1;
+    }
+  }
+  (globalThis as Record<string, unknown>).DOMMatrixReadOnly = DOMMatrixReadOnlyMock;
+}

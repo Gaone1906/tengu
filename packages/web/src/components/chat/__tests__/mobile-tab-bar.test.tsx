@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { describe, it, expect, vi } from 'vitest'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { MobileTabBar } from '../mobile-tab-bar'
 
@@ -12,11 +12,13 @@ function renderAt(path: string) {
 }
 
 describe('MobileTabBar', () => {
-  it('renders exactly 5 tabs with the curated labels', () => {
+  // GRS-022: the sole mobile nav — 4 icon-only tabs. No visible labels, so the
+  // accessible name comes from each tab's aria-label.
+  it('renders exactly 4 tabs with accessible names', () => {
     renderAt('/')
     const tabs = screen.getAllByRole('link')
-    expect(tabs).toHaveLength(5)
-    for (const label of ['Chat', 'Talk', 'Organization', 'Cron', 'Settings']) {
+    expect(tabs).toHaveLength(4)
+    for (const label of ['Chat', 'Todos', 'Workflows', 'More']) {
       expect(screen.getByRole('link', { name: label })).toBeDefined()
     }
   })
@@ -26,20 +28,70 @@ describe('MobileTabBar', () => {
     expect(
       screen.getByRole('link', { name: 'Chat' }).getAttribute('aria-current')
     ).toBe('page')
-    for (const label of ['Talk', 'Organization', 'Cron', 'Settings']) {
+    for (const label of ['Todos', 'Workflows', 'More']) {
       expect(
         screen.getByRole('link', { name: label }).getAttribute('aria-current')
       ).toBeNull()
     }
   })
 
-  it('marks the Cron tab current on "/cron"', () => {
-    renderAt('/cron')
+  it('marks the Workflows tab current on "/workflow"', () => {
+    renderAt('/workflow')
     expect(
-      screen.getByRole('link', { name: 'Cron' }).getAttribute('aria-current')
+      screen.getByRole('link', { name: 'Workflows' }).getAttribute('aria-current')
     ).toBe('page')
     expect(
       screen.getByRole('link', { name: 'Chat' }).getAttribute('aria-current')
     ).toBeNull()
+  })
+
+  it('keeps the More tab lit on the More screen', () => {
+    renderAt('/more')
+    expect(
+      screen.getByRole('link', { name: 'More' }).getAttribute('aria-current')
+    ).toBe('page')
+  })
+
+  it('keeps the More tab lit on an overflow child (e.g. /settings)', () => {
+    renderAt('/settings')
+    expect(
+      screen.getByRole('link', { name: 'More' }).getAttribute('aria-current')
+    ).toBe('page')
+    // ...and no primary tab steals the cue.
+    for (const label of ['Chat', 'Todos', 'Workflows']) {
+      expect(
+        screen.getByRole('link', { name: label }).getAttribute('aria-current')
+      ).toBeNull()
+    }
+  })
+
+  // GRS-023: re-tapping the already-active Chat tab scrolls the chat list to the
+  // top (HIG tab re-tap). Only fires when Chat is the current tab.
+  it('scrolls the chat list to top when the active Chat tab is re-tapped', () => {
+    const list = document.createElement('div')
+    list.setAttribute('data-chat-list-scroll', '')
+    const scrollTo = vi.fn()
+    ;(list as unknown as { scrollTo: typeof scrollTo }).scrollTo = scrollTo
+    document.body.appendChild(list)
+
+    renderAt('/')
+    fireEvent.click(screen.getByRole('link', { name: 'Chat' }))
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' })
+
+    document.body.removeChild(list)
+  })
+
+  it('does not scroll on Chat tap when Chat is not the active tab', () => {
+    const list = document.createElement('div')
+    list.setAttribute('data-chat-list-scroll', '')
+    const scrollTo = vi.fn()
+    ;(list as unknown as { scrollTo: typeof scrollTo }).scrollTo = scrollTo
+    document.body.appendChild(list)
+
+    renderAt('/workflow')
+    fireEvent.click(screen.getByRole('link', { name: 'Chat' }))
+    expect(scrollTo).not.toHaveBeenCalled()
+
+    document.body.removeChild(list)
   })
 })
