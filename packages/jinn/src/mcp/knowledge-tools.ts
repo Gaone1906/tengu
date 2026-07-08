@@ -21,7 +21,7 @@ import { assertBoundCaller, gatewayGet, JinnMcpToolError, type JinnMcpTool } fro
  *     capability; operator/browser reads without those headers remain unchanged.
  *   - LENGTH CAPS (the 020a-fix finding-3 pattern): query/path are capped
  *     tool-side with a structured error BEFORE the HTTP call.
- *   - TEACHING lives on jinn_search_knowledge; jinn_read_knowledge stays short.
+ *   - TEACHING lives on search_knowledge; read_knowledge stays short.
  */
 
 /** Tool-side query cap (route backstop is 1,024 — the tool fails first, friendlier). */
@@ -69,9 +69,9 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
 
 export function buildKnowledgeTools(): JinnMcpTool[] {
   const searchKnowledge: JinnMcpTool = {
-    name: "jinn_search_knowledge",
+    name: "search_knowledge",
     description:
-      "Search the company's institutional knowledge — the operator-curated markdown libraries in knowledge/ (research, strategies, profiles) and docs/ (platform docs). Query is plain words (case-insensitive; ALL words must appear in a file's name or content; deterministic, no LLM). Returns up to 20 hits {path, title, snippet, matchCount} — snippets only, never file bodies; read a hit with jinn_read_knowledge { path }. Nothing outside knowledge/ and docs/ is searchable or readable.",
+      "Search the company's institutional knowledge — the operator-curated markdown libraries in knowledge/ (research, strategies, profiles) and docs/ (platform docs). Query is plain words (case-insensitive; ALL words must appear in a file's name or content; deterministic, no LLM). Returns up to 20 hits {path, title, snippet, matchCount} — snippets only, never file bodies; read a hit with read_knowledge { path }. Nothing outside knowledge/ and docs/ is searchable or readable.",
     inputSchema: {
       type: "object",
       properties: {
@@ -92,15 +92,15 @@ export function buildKnowledgeTools(): JinnMcpTool[] {
         hint:
           results.length === 0
             ? "No knowledge hits. Try fewer or different words (all must appear). The library covers curated company knowledge and platform docs only."
-            : "Read a hit with jinn_read_knowledge { path } — cite the path when you use its content.",
+            : "Read a hit with read_knowledge { path } — cite the path when you use its content.",
       };
     },
   };
 
   const readKnowledge: JinnMcpTool = {
-    name: "jinn_read_knowledge",
+    name: "read_knowledge",
     description:
-      'Read ONE knowledge file by the relative path a jinn_search_knowledge hit returned (e.g. "knowledge/pricing-strategy.md" or "docs/architecture.md"). Long files are truncated at ~20 KB with a marker. Only files inside knowledge/ and docs/ are reachable.',
+      'Read ONE knowledge file by the relative path a search_knowledge hit returned (e.g. "knowledge/pricing-strategy.md" or "docs/architecture.md"). Long files are truncated at ~20 KB with a marker. Only files inside knowledge/ and docs/ are reachable.',
     inputSchema: {
       type: "object",
       properties: {
@@ -112,13 +112,13 @@ export function buildKnowledgeTools(): JinnMcpTool[] {
       assertBoundCaller(ctx);
       if (typeof args.path === "string" && hasControlBytes(args.path)) {
         throw new JinnMcpToolError(
-          "path contains control bytes — pass the relative path exactly as a jinn_search_knowledge hit returned it",
+          "path contains control bytes — pass the relative path exactly as a search_knowledge hit returned it",
         );
       }
       const relPath = requireString(args, "path", KNOWLEDGE_PATH_CHAR_CAP);
       if (!/^(knowledge|docs)\//.test(relPath)) {
         throw new JinnMcpToolError(
-          `path must start with "knowledge/" or "docs/" (the two readable roots) — got ${JSON.stringify(relPath.slice(0, 120))}. Get paths from jinn_search_knowledge.`,
+          `path must start with "knowledge/" or "docs/" (the two readable roots) — got ${JSON.stringify(relPath.slice(0, 120))}. Get paths from search_knowledge.`,
         );
       }
       const { status, body } = await gatewayGet(ctx, `/api/knowledge/read?path=${encodeURIComponent(relPath)}`);
@@ -129,7 +129,7 @@ export function buildKnowledgeTools(): JinnMcpTool[] {
         title: rec.title ?? null,
         truncated: rec.truncated === true,
         content: typeof rec.content === "string" ? rec.content : "",
-        hint: "Cite the path when you use this content. Search for related files with jinn_search_knowledge.",
+        hint: "Cite the path when you use this content. Search for related files with search_knowledge.",
       };
     },
   };

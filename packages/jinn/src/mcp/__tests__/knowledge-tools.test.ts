@@ -77,9 +77,9 @@ function tool(name: string): JinnMcpTool {
 describe("knowledge tools — registry + schemas", () => {
   it("exposes the 2 knowledge tools with flat schemas and required args", () => {
     const tools = buildKnowledgeTools();
-    expect(tools.map((t) => t.name)).toEqual(["jinn_search_knowledge", "jinn_read_knowledge"]);
-    expect(tool("jinn_search_knowledge").inputSchema.required).toEqual(["query"]);
-    expect(tool("jinn_read_knowledge").inputSchema.required).toEqual(["path"]);
+    expect(tools.map((t) => t.name)).toEqual(["search_knowledge", "read_knowledge"]);
+    expect(tool("search_knowledge").inputSchema.required).toEqual(["query"]);
+    expect(tool("read_knowledge").inputSchema.required).toEqual(["path"]);
     for (const t of tools) {
       for (const prop of Object.values(t.inputSchema.properties) as Array<{ type?: string }>) {
         expect(prop.type).toBe("string");
@@ -89,22 +89,22 @@ describe("knowledge tools — registry + schemas", () => {
 
   it("the belt registers the knowledge group — 40 tools total after SOP/file tools", () => {
     const names = buildTools().map((t) => t.name);
-    expect(names).toContain("jinn_search_knowledge");
-    expect(names).toContain("jinn_read_knowledge");
+    expect(names).toContain("search_knowledge");
+    expect(names).toContain("read_knowledge");
     expect(names).toHaveLength(40);
   });
 
-  it("domain teaching lives on jinn_search_knowledge; read stays short and names the roots", () => {
-    expect(tool("jinn_search_knowledge").description).toMatch(/never file bodies/i);
-    expect(tool("jinn_search_knowledge").description).toMatch(/jinn_read_knowledge/);
-    expect(tool("jinn_read_knowledge").description).toMatch(/knowledge\/ and docs\//);
+  it("domain teaching lives on search_knowledge; read stays short and names the roots", () => {
+    expect(tool("search_knowledge").description).toMatch(/never file bodies/i);
+    expect(tool("search_knowledge").description).toMatch(/read_knowledge/);
+    expect(tool("read_knowledge").description).toMatch(/knowledge\/ and docs\//);
   });
 });
 
 describe("knowledge tools — unit (stub gateway)", () => {
-  it("jinn_search_knowledge GETs the search route with the encoded query", async () => {
+  it("search_knowledge GETs the search route with the encoded query", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { results: [] } }));
-    await tool("jinn_search_knowledge").handler({ query: "pricing tiers?" }, ctx);
+    await tool("search_knowledge").handler({ query: "pricing tiers?" }, ctx);
     const url = new URL(calls[0].url);
     expect(url.pathname).toBe("/api/knowledge/search");
     expect(url.searchParams.get("q")).toBe("pricing tiers?");
@@ -113,47 +113,47 @@ describe("knowledge tools — unit (stub gateway)", () => {
   it("refuses an over-long query with a structured error BEFORE any HTTP call", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: {} }));
     await expect(
-      tool("jinn_search_knowledge").handler({ query: "x".repeat(KNOWLEDGE_QUERY_CHAR_CAP + 1) }, ctx),
+      tool("search_knowledge").handler({ query: "x".repeat(KNOWLEDGE_QUERY_CHAR_CAP + 1) }, ctx),
     ).rejects.toThrow(/too long/);
     expect(calls).toHaveLength(0);
   });
 
-  it("jinn_read_knowledge refuses a path outside the two roots locally (no HTTP call)", async () => {
+  it("read_knowledge refuses a path outside the two roots locally (no HTTP call)", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: {} }));
     for (const bad of ["secrets/api-keys.json", "/etc/passwd", "../knowledge/foo.md", "config.yaml"]) {
-      await expect(tool("jinn_read_knowledge").handler({ path: bad }, ctx)).rejects.toThrow(/knowledge\/|docs\//);
+      await expect(tool("read_knowledge").handler({ path: bad }, ctx)).rejects.toThrow(/knowledge\/|docs\//);
     }
     expect(calls).toHaveLength(0);
   });
 
-  it("jinn_read_knowledge refuses a control-byte path locally (no HTTP call) — GRS-020b-fix", async () => {
+  it("read_knowledge refuses a control-byte path locally (no HTTP call) — GRS-020b-fix", async () => {
     // A trailing NUL survives .trim(); pre-fix the gateway's free-text cleaner
     // stripped it and read the repaired path. The tool now rejects control
     // bytes on the raw arg BEFORE any HTTP call — mirrored at route + store.
     const { calls, ctx } = stub(() => ({ status: 200, body: {} }));
     const NUL = String.fromCharCode(0);
     const CTRL = String.fromCharCode(1);
-    await expect(tool("jinn_read_knowledge").handler({ path: `knowledge/a.md${NUL}` }, ctx)).rejects.toThrow(/control bytes/);
-    await expect(tool("jinn_read_knowledge").handler({ path: `knowledge/a${CTRL}b.md` }, ctx)).rejects.toThrow(/control bytes/);
+    await expect(tool("read_knowledge").handler({ path: `knowledge/a.md${NUL}` }, ctx)).rejects.toThrow(/control bytes/);
+    await expect(tool("read_knowledge").handler({ path: `knowledge/a${CTRL}b.md` }, ctx)).rejects.toThrow(/control bytes/);
     expect(calls).toHaveLength(0);
   });
 
   it("passes gateway 4xx bodies through as readable errors", async () => {
     const { ctx } = stub(() => ({ status: 403, body: { error: "resolves outside the knowledge/ root" } }));
-    await expect(tool("jinn_read_knowledge").handler({ path: "knowledge/escape.md" }, ctx)).rejects.toThrow(
+    await expect(tool("read_knowledge").handler({ path: "knowledge/escape.md" }, ctx)).rejects.toThrow(
       /refused \(403\).*outside/,
     );
   });
 
   it("read tier: requires a bound caller capability and returns hints when bound", async () => {
     const anon = stub(() => ({ status: 200, body: { results: [] } }), null);
-    await expect(tool("jinn_search_knowledge").handler({ query: "a" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("search_knowledge").handler({ query: "a" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
     expect(anon.calls).toHaveLength(0);
 
     const { ctx } = stub(() => ({ status: 200, body: { results: [{ path: "knowledge/a.md", title: "A", snippet: "«a»", matchCount: 1 }] } }));
-    const out = (await tool("jinn_search_knowledge").handler({ query: "a" }, ctx)) as { results: unknown[]; hint: string };
+    const out = (await tool("search_knowledge").handler({ query: "a" }, ctx)) as { results: unknown[]; hint: string };
     expect(out.results).toHaveLength(1);
-    expect(out.hint).toMatch(/jinn_read_knowledge/);
+    expect(out.hint).toMatch(/read_knowledge/);
   });
 });
 
@@ -236,7 +236,7 @@ describe("knowledge tools — integration against the real routes/store", () => 
   });
 
   it("the slice acceptance: search a seeded term → read the hit by its relative path", async () => {
-    const found = (await tool("jinn_search_knowledge").handler({ query: "zebrafish" }, ctx())) as {
+    const found = (await tool("search_knowledge").handler({ query: "zebrafish" }, ctx())) as {
       results: Array<{ path: string; title: string; snippet: string; matchCount: number }>;
     };
     const paths = found.results.map((r) => r.path);
@@ -246,7 +246,7 @@ describe("knowledge tools — integration against the real routes/store", () => 
     expect(hit.snippet).toContain("«zebrafish»");
     expect(hit.snippet).not.toContain("29 euro with annual billing.\n");
 
-    const read = (await tool("jinn_read_knowledge").handler({ path: hit.path }, ctx())) as {
+    const read = (await tool("read_knowledge").handler({ path: hit.path }, ctx())) as {
       path: string;
       title: string;
       content: string;
@@ -260,11 +260,11 @@ describe("knowledge tools — integration against the real routes/store", () => 
 
   it("refuses traversal through the real route with a readable 400 — never content", async () => {
     await expect(
-      tool("jinn_read_knowledge").handler({ path: "knowledge/../secrets/api-keys.json" }, ctx()),
+      tool("read_knowledge").handler({ path: "knowledge/../secrets/api-keys.json" }, ctx()),
     ).rejects.toThrow(/rejected \(400\)/);
     let leaked = "";
     try {
-      await tool("jinn_read_knowledge").handler({ path: "knowledge/../secrets/api-keys.json" }, ctx());
+      await tool("read_knowledge").handler({ path: "knowledge/../secrets/api-keys.json" }, ctx());
     } catch (e) {
       leaked = String(e);
     }
@@ -274,7 +274,7 @@ describe("knowledge tools — integration against the real routes/store", () => 
   it("refuses the symlink escape through the real route with a readable 403 — never content", async () => {
     let message = "";
     try {
-      await tool("jinn_read_knowledge").handler({ path: "knowledge/escape.md" }, ctx());
+      await tool("read_knowledge").handler({ path: "knowledge/escape.md" }, ctx());
     } catch (e) {
       message = String(e);
     }
@@ -284,17 +284,17 @@ describe("knowledge tools — integration against the real routes/store", () => 
   });
 
   it("hostile queries degrade to normal results through the real route (NUL, oversized)", async () => {
-    const nul = (await tool("jinn_search_knowledge").handler({ query: "zebrafish\u0000" }, ctx())) as {
+    const nul = (await tool("search_knowledge").handler({ query: "zebrafish\u0000" }, ctx())) as {
       results: Array<{ path: string }>;
     };
     expect(nul.results.map((r) => r.path)).toContain("knowledge/q3-pricing.md");
     await expect(
-      tool("jinn_search_knowledge").handler({ query: "z".repeat(10_000) }, ctx()),
+      tool("search_knowledge").handler({ query: "z".repeat(10_000) }, ctx()),
     ).rejects.toThrow(/too long/);
   });
 
   it("404s a missing file with the store's readable message", async () => {
-    await expect(tool("jinn_read_knowledge").handler({ path: "knowledge/nope.md" }, ctx())).rejects.toThrow(
+    await expect(tool("read_knowledge").handler({ path: "knowledge/nope.md" }, ctx())).rejects.toThrow(
       /failed \(404\).*no such knowledge file/,
     );
   });

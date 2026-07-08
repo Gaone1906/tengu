@@ -153,7 +153,7 @@ describe("prepareLateralSend — the route-side transform", () => {
       expect(out.prompt).toContain("jinn-dev");
       expect(out.prompt).toContain(`hop 2/${LATERAL_MAX_HOPS}`);
       expect(out.prompt).toContain("please review the diff");
-      expect(out.prompt).toContain("jinn_send_to_session");
+      expect(out.prompt).toContain("send_to_session");
       expect(out.displayMessage).toContain("jinn-dev");
       expect(out.displayMessage).toContain("please review the diff");
       expect(out.hops).toBe(2);

@@ -95,7 +95,7 @@ describe("resolveMcpServers — per-engine opt-out threads through", () => {
   });
 
   it("an MCP-incapable engine name never gets jinn even when enabled (resolver-internal capability gate)", () => {
-    const r = resolveMcpServers({ browser: { enabled: false }, gateway: { enabled: true } } as McpGlobalConfig, emp(), "antigravity");
+    const r = resolveMcpServers({ browser: { enabled: false }, gateway: { enabled: true } } as McpGlobalConfig, emp(), "unknown");
     expect(r.mcpServers).not.toHaveProperty("jinn");
   });
 });

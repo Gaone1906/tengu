@@ -21,7 +21,7 @@ import { assertBoundCaller, gatewayGet, JinnMcpToolError, type JinnMcpContext, t
  *     summaries without message bodies; get-context is radius-bounded with the
  *     store's 2,000-char per-message cap. There is deliberately NO
  *     full-transcript mode anywhere on the reference layer.
- *   - SELF-EXCLUSION (GRS-020a-fix finding 1): jinn_search_messages excludes
+ *   - SELF-EXCLUSION (GRS-020a-fix finding 1): search_messages excludes
  *     the CALLER'S OWN session by default — the act of searching for X is
  *     itself a message containing X, and newest-first ranking would return it
  *     as the top hit. Explicit sessionId scope or includeOwnSession opts back
@@ -33,7 +33,7 @@ import { assertBoundCaller, gatewayGet, JinnMcpToolError, type JinnMcpContext, t
  *   - READ TIER: these are privileged company reads. Tool-marked or
  *     caller-session-claimed requests must carry a valid bound session
  *     capability; operator/browser reads without those headers remain unchanged.
- *   - TEACHING lives on jinn_search_messages (one teaching description per
+ *   - TEACHING lives on search_messages (one teaching description per
  *     domain); the other two stay short.
  */
 
@@ -119,7 +119,7 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
   return new JinnMcpToolError(`${what} failed (HTTP ${status}): ${detail}`);
 }
 
-/** Compact session summary — the same shape jinn_list_sessions exposes. */
+/** Compact session summary — the same shape list_sessions exposes. */
 function summarizeSession(s: Record<string, unknown>): Record<string, unknown> {
   return {
     id: s.id,
@@ -144,9 +144,9 @@ function qs(params: Record<string, string | number | undefined>): string {
 
 export function buildSearchTools(): JinnMcpTool[] {
   const searchMessages: JinnMcpTool = {
-    name: "jinn_search_messages",
+    name: "search_messages",
     description:
-      "Full-text search across OTHER sessions' user/assistant messages — the company reference layer: find where something was discussed, decided, or reported, then expand a hit with jinn_get_message_context and see the session's current state with jinn_read_session. Your OWN session is excluded by default (your search request would otherwise match itself); pass includeOwnSession true to search your own history. Query is plain words (a multi-word query requires ALL words; operators like OR/NEAR/* are treated as literal text). Newest hits first. Returns snippets only, never full messages.",
+      "Full-text search across OTHER sessions' user/assistant messages — the company reference layer: find where something was discussed, decided, or reported, then expand a hit with get_message_context and see the session's current state with read_session. Your OWN session is excluded by default (your search request would otherwise match itself); pass includeOwnSession true to search your own history. Query is plain words (a multi-word query requires ALL words; operators like OR/NEAR/* are treated as literal text). Newest hits first. Returns snippets only, never full messages.",
     inputSchema: {
       type: "object",
       properties: {
@@ -206,13 +206,13 @@ export function buildSearchTools(): JinnMcpTool[] {
         hint:
           results.length === 0
             ? `No hits. Try fewer/different words (all words must appear), widen the time range, or drop a filter.${excludeOwn ? " Your own session was excluded (default) — pass includeOwnSession true to search it." : ""}`
-            : "Read around a hit with jinn_get_message_context { sessionId, messageId }; check the session's current state with jinn_read_session.",
+            : "Read around a hit with get_message_context { sessionId, messageId }; check the session's current state with read_session.",
       };
     },
   };
 
   const searchSessions: JinnMcpTool = {
-    name: "jinn_search_sessions",
+    name: "search_sessions",
     description:
       "Find sessions by AND-composed filters: text (matches title/prompt-excerpt/id as a literal substring), employee, engine, status, source, parentSessionId, activeSince/activeBefore (ISO-8601), needsAttention (status error|interrupted). At least one filter required. Returns capped summaries newest-first — no message bodies.",
     inputSchema: {
@@ -251,7 +251,7 @@ export function buildSearchTools(): JinnMcpTool[] {
       const hasFilter = Object.values(params).some((v) => v !== undefined);
       if (!hasFilter) {
         throw new JinnMcpToolError(
-          "pass at least one filter (text, employee, engine, status, source, parentSessionId, activeSince, activeBefore, needsAttention) — for your children or recent sessions use jinn_list_sessions.",
+          "pass at least one filter (text, employee, engine, status, source, parentSessionId, activeSince, activeBefore, needsAttention) — for your children or recent sessions use list_sessions.",
         );
       }
       params.limit = clampInt(args.limit, SESSION_SEARCH_LIMIT_DEFAULT, 1, SESSION_SEARCH_LIMIT_MAX);
@@ -263,21 +263,21 @@ export function buildSearchTools(): JinnMcpTool[] {
         sessions,
         hint:
           sessions.length === 0
-            ? `No sessions match. Valid statuses: ${SESSION_STATUSES.join(", ")}. Check employee slugs with jinn_find_employees, or search message CONTENT with jinn_search_messages.`
-            : "Read one with jinn_read_session; search its content with jinn_search_messages { sessionId }; message it with jinn_send_to_session.",
+            ? `No sessions match. Valid statuses: ${SESSION_STATUSES.join(", ")}. Check employee slugs with find_employees, or search message CONTENT with search_messages.`
+            : "Read one with read_session; search its content with search_messages { sessionId }; message it with send_to_session.",
       };
     },
   };
 
   const getMessageContext: JinnMcpTool = {
-    name: "jinn_get_message_context",
+    name: "get_message_context",
     description:
-      `Read the messages around a search hit from jinn_search_messages: given { sessionId, messageId }, returns the ±radius surrounding messages (default ${CONTEXT_RADIUS_DEFAULT}, max ${CONTEXT_RADIUS_MAX}; long messages truncated). Read-only; there is no full-transcript mode — if the window isn't enough, ask the session to summarize.`,
+      `Read the messages around a search hit from search_messages: given { sessionId, messageId }, returns the ±radius surrounding messages (default ${CONTEXT_RADIUS_DEFAULT}, max ${CONTEXT_RADIUS_MAX}; long messages truncated). Read-only; there is no full-transcript mode — if the window isn't enough, ask the session to summarize.`,
     inputSchema: {
       type: "object",
       properties: {
         sessionId: { type: "string", description: "The session the hit is in." },
-        messageId: { type: "string", description: "The anchor message id (from a jinn_search_messages hit)." },
+        messageId: { type: "string", description: "The anchor message id (from a search_messages hit)." },
         radius: { type: "number", description: `Messages each side of the anchor (1–${CONTEXT_RADIUS_MAX}, default ${CONTEXT_RADIUS_DEFAULT}).` },
       },
       required: ["sessionId", "messageId"],
@@ -299,7 +299,7 @@ export function buildSearchTools(): JinnMcpTool[] {
         session: rec.session ? summarizeSession(rec.session) : null,
         anchorMessageId: rec.anchorMessageId,
         messages: Array.isArray(rec.messages) ? rec.messages : [],
-        hint: "For the session's CURRENT state use jinn_read_session; to act on this, message the session (jinn_send_to_session) or your manager.",
+        hint: "For the session's CURRENT state use read_session; to act on this, message the session (send_to_session) or your manager.",
       };
     },
   };

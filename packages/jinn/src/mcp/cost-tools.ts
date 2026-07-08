@@ -47,7 +47,7 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
 export function buildCostTools(): JinnMcpTool[] {
   return [
     {
-      name: "jinn_cost_report",
+      name: "cost_report",
       description:
         "Report deterministic spend from existing session accounting. Groups sessions.total_cost/total_turns by employee or day with optional time range and employee filter. Cost-only read surface: no budgets, thresholds, work-item joins, or mutations.",
       inputSchema: {

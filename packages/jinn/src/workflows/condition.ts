@@ -341,7 +341,7 @@ function isPlainDataObject(v: unknown): v is Record<string, unknown> {
  * values are authoring errors — a condition that could never pass (or could only
  * pass vacuously) must fail at save time, not silently route to the default branch.
  * The condition must be a PLAIN DATA object (isPlainDataObject) — an agent-authored
- * definition arriving through jinn_create_workflow/PUT is JSON and always is; an
+ * definition arriving through create_workflow/PUT is JSON and always is; an
  * in-process caller handing us accessors/proxies gets a validation error, never a
  * throw (the whole body is guarded). Node-id existence is checked by the caller
  * (it owns the graph). Returns reasons; empty = valid.

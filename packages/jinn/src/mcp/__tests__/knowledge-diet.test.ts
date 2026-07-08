@@ -19,7 +19,7 @@ import path from "node:path";
  *      AND the index block matches the legacy format exactly (reconstructed
  *      from the same directory listing).
  *   2. The index is genuinely GONE when attached (no filename survives), the
- *      manifest points at jinn_search_knowledge.
+ *      manifest points at search_knowledge.
  *   3. SLICE GATE: saving − (2 knowledge tool schemas) > 0.
  */
 
@@ -107,7 +107,7 @@ function schemaTokens(names?: string[]): number {
   return approxTokens(JSON.stringify(tools));
 }
 
-const NEW_IN_THIS_SLICE = ["jinn_search_knowledge", "jinn_read_knowledge"];
+const NEW_IN_THIS_SLICE = ["search_knowledge", "read_knowledge"];
 
 describe("the measured knowledge-index diet", () => {
   it("flag off (or absent) leaves the bootstrap byte-identical, including the exact legacy index format", () => {
@@ -126,8 +126,8 @@ describe("the measured knowledge-index diet", () => {
     expect(after).not.toContain("platform-area-3.md");
     expect(after).not.toContain("(100 files)");
     expect(after).toContain("## Knowledge base");
-    expect(after).toContain("jinn_search_knowledge");
-    expect(after).toContain("jinn_read_knowledge { path }");
+    expect(after).toContain("search_knowledge");
+    expect(after).toContain("read_knowledge { path }");
   });
 
   it("SLICE GATE: the index saving exceeds the schema cost of the two knowledge tools", () => {

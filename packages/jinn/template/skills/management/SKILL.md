@@ -85,7 +85,7 @@ Steps:
 
 1. Locate the employee's YAML file under `org/<department>/<name>.yaml`.
 2. Check for active Todos assigned to the employee. Warn the user if any are not terminal.
-3. **Check for direct reports**: Use `jinn_get_employee` to inspect the employee's `directReports` and `parentName` fields. Use `jinn_list_employees` if you need the broader department roster.
+3. **Check for direct reports**: Use `get_employee` to inspect the employee's `directReports` and `parentName` fields. Use `list_employees` if you need the broader department roster.
    - If they have direct reports: warn "X has N direct reports. They will be reassigned to X's manager (Y)."
    - On confirmation, update each report's YAML: set `reportsTo` to the fired employee's own `parentName` (their grandparent in the tree).
    - If the fired employee reported to root (parentName null), remove the `reportsTo` field from each orphaned report (smart defaults will re-resolve).
@@ -131,10 +131,10 @@ persona: |
   technical expertise, you:
 
   - Manage and delegate tasks to employees in your department
-  - Use `jinn_delegate_task` for tracked work and `jinn_spawn_session`
+  - Use `delegate_task` for tracked work and `spawn_session`
     for quick untracked child sessions
   - After delegating or spawning, end your turn and let the child's callback
-    wake you; use `jinn_read_session` only as the missed-callback fallback
+    wake you; use `read_session` only as the missed-callback fallback
   - Apply oversight levels to your reports' work:
     - TRUST: simple lookups, status checks - relay directly
     - VERIFY: code changes, routine work - spot-check key outputs
@@ -145,12 +145,12 @@ persona: |
     grows; do the work directly only for tiny tasks where that is the cleanest path
 
   ## Delegation Tools
-  - Delegate tracked work: `jinn_delegate_task`
-  - Spawn a quick child session: `jinn_spawn_session`
-  - Send follow-up: `jinn_send_to_session`
-  - Read latest child status/messages: `jinn_read_session`
-  - List or inspect reports: `jinn_list_employees`, `jinn_find_employees`,
-    `jinn_get_employee`
+  - Delegate tracked work: `delegate_task`
+  - Spawn a quick child session: `spawn_session`
+  - Send follow-up: `send_to_session`
+  - Read latest child status/messages: `read_session`
+  - List or inspect reports: `list_employees`, `find_employees`,
+    `get_employee`
 ```
 
 **When to suggest promoting to manager:**
@@ -165,8 +165,8 @@ Create or delegate a Todo. Todos are the ledger; Workflows are the reusable HOW 
 
 Steps:
 1. Verify the assignee exists in the org.
-2. If the work is durable and owned by this session, create a Todo with `jinn_create_work_item` when MCP is available.
-3. Assign the Todo with `jinn_assign_work_item`, or start the work immediately with `jinn_delegate_task` when it should execute now.
+2. If the work is durable and owned by this session, create a Todo with `create_work_item` when MCP is available.
+3. Assign the Todo with `assign_work_item`, or start the work immediately with `delegate_task` when it should execute now.
 4. If the work is repeatable, scheduled, or multi-step, use or propose a Workflow instead of carrying the process in prose.
 5. Confirm the delegation to the user.
 

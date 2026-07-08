@@ -87,51 +87,52 @@ describe("buildTools", () => {
   it("exposes exactly the admitted org/session/reference/knowledge/delegation/Todo/workflow groups (scope discipline; NO gate-resolve, NO session-delete, NO cancel Todo tool)", () => {
     const names = buildTools().map((t) => t.name).sort();
     expect(names).toEqual([
-      "jinn_assign_work_item",
-      "jinn_cost_report",
-      "jinn_create_trigger",
-      "jinn_create_work_item",
-      "jinn_create_workflow",
-      "jinn_decide_work_item_approval",
-      "jinn_delegate_task",
-      "jinn_delete_trigger",
-      "jinn_escalate_work_item_approval",
-      "jinn_find_employees",
-      "jinn_get_cron_run_history",
-      "jinn_get_employee",
-      "jinn_get_message_context",
-      "jinn_get_work_item",
-      "jinn_get_workflow",
-      "jinn_get_workflow_run",
-      "jinn_list_cron_jobs",
-      "jinn_list_employees",
-      "jinn_list_files",
-      "jinn_list_sessions",
-      "jinn_list_triggers",
-      "jinn_list_work_items",
-      "jinn_list_workflow_runs",
-      "jinn_list_workflows",
-      "jinn_plan_workflow",
-      "jinn_read_file",
-      "jinn_read_knowledge",
-      "jinn_read_session",
-      "jinn_retire_workflow",
-      "jinn_search_knowledge",
-      "jinn_search_messages",
-      "jinn_search_sessions",
-      "jinn_search_work_items",
-      "jinn_send_to_session",
-      "jinn_spawn_session",
-      "jinn_start_workflow_run",
-      "jinn_stop_session",
-      "jinn_update_work_item",
-      "jinn_update_workflow",
-      "jinn_validate_workflow",
+      "assign_work_item",
+      "cost_report",
+      "create_trigger",
+      "create_work_item",
+      "create_workflow",
+      "decide_work_item_approval",
+      "delegate_task",
+      "delete_trigger",
+      "escalate_work_item_approval",
+      "find_employees",
+      "get_cron_run_history",
+      "get_employee",
+      "get_message_context",
+      "get_work_item",
+      "get_workflow",
+      "get_workflow_run",
+      "list_cron_jobs",
+      "list_employees",
+      "list_files",
+      "list_sessions",
+      "list_triggers",
+      "list_work_items",
+      "list_workflow_runs",
+      "list_workflows",
+      "plan_workflow",
+      "read_file",
+      "read_knowledge",
+      "read_session",
+      "retire_workflow",
+      "search_knowledge",
+      "search_messages",
+      "search_sessions",
+      "search_work_items",
+      "send_to_session",
+      "spawn_session",
+      "start_workflow_run",
+      "stop_session",
+      "update_work_item",
+      "update_workflow",
+      "validate_workflow",
     ]);
+    expect(names.some((name) => name.startsWith("jinn_"))).toBe(false);
   });
 
-  it("jinn_get_workflow declares workflowId as required", () => {
-    const wf = buildTools().find((t) => t.name === "jinn_get_workflow")!;
+  it("get_workflow declares workflowId as required", () => {
+    const wf = buildTools().find((t) => t.name === "get_workflow")!;
     expect(wf.inputSchema.required).toEqual(["workflowId"]);
   });
 });
@@ -188,14 +189,14 @@ describe("handleMcpRequest — protocol", () => {
 });
 
 describe("handleMcpRequest — tools/call", () => {
-  it("jinn_list_employees returns real gateway data as text content", async () => {
+  it("list_employees returns real gateway data as text content", async () => {
     const org = { employees: [{ name: "chief-of-staff", rank: "manager" }] };
     const ctx = stubCtx((url) => {
       expect(url).toBe("http://127.0.0.1:7777/api/org");
       return { status: 200, body: org };
     });
     const resp = await handleMcpRequest(
-      { id: 3, method: "tools/call", params: { name: "jinn_list_employees", arguments: {} } },
+      { id: 3, method: "tools/call", params: { name: "list_employees", arguments: {} } },
       buildTools(),
       ctx,
     );
@@ -205,14 +206,14 @@ describe("handleMcpRequest — tools/call", () => {
     expect(JSON.parse(result.content[0].text)).toEqual(org);
   });
 
-  it("jinn_get_workflow encodes the id into the definitions path and returns the editable definition (GRS-015 semantics)", async () => {
+  it("get_workflow encodes the id into the definitions path and returns the editable definition (GRS-015 semantics)", async () => {
     const def = { id: "sample-autonomy", title: "Sample Autonomy", version: 3, nodes: [], edges: [] };
     const ctx = stubCtx((url) => {
       expect(url).toBe("http://127.0.0.1:7777/api/workflow-definitions/sample-autonomy");
       return { status: 200, body: def };
     });
     const resp = await handleMcpRequest(
-      { id: 4, method: "tools/call", params: { name: "jinn_get_workflow", arguments: { workflowId: "sample-autonomy" } } },
+      { id: 4, method: "tools/call", params: { name: "get_workflow", arguments: { workflowId: "sample-autonomy" } } },
       buildTools(),
       ctx,
     );
@@ -221,10 +222,10 @@ describe("handleMcpRequest — tools/call", () => {
     expect(JSON.parse(result.content[0].text)).toEqual(def);
   });
 
-  it("jinn_get_workflow with a missing id returns an isError tool result (not a crash)", async () => {
+  it("get_workflow with a missing id returns an isError tool result (not a crash)", async () => {
     const ctx = stubCtx(() => ({ status: 200, body: {} }));
     const resp = await handleMcpRequest(
-      { id: 5, method: "tools/call", params: { name: "jinn_get_workflow", arguments: {} } },
+      { id: 5, method: "tools/call", params: { name: "get_workflow", arguments: {} } },
       buildTools(),
       ctx,
     );
@@ -236,7 +237,7 @@ describe("handleMcpRequest — tools/call", () => {
   it("a gateway 404 becomes a readable isError tool result", async () => {
     const ctx = stubCtx(() => ({ status: 404, body: { error: "not found" } }));
     const resp = await handleMcpRequest(
-      { id: 6, method: "tools/call", params: { name: "jinn_get_workflow", arguments: { workflowId: "nope" } } },
+      { id: 6, method: "tools/call", params: { name: "get_workflow", arguments: { workflowId: "nope" } } },
       buildTools(),
       ctx,
     );
@@ -248,7 +249,7 @@ describe("handleMcpRequest — tools/call", () => {
   it("an unknown tool name is an isError result, not a protocol error", async () => {
     const ctx = stubCtx(() => ({ status: 200, body: {} }));
     const resp = await handleMcpRequest(
-      { id: 8, method: "tools/call", params: { name: "jinn_delete_everything", arguments: {} } },
+      { id: 8, method: "tools/call", params: { name: "delete_everything", arguments: {} } },
       buildTools(),
       ctx,
     );

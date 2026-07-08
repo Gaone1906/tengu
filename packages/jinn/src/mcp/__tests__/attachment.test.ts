@@ -84,13 +84,13 @@ describe("decideJinnAttachment — master switch (gate passed)", () => {
 
   it("enabled: true attaches for capable engines and engine-undefined (caller-gated) calls", () => {
     expect(decideJinnAttachment({ globalMcp: ON, gate: OK }).attach).toBe(true);
-    for (const engine of ["claude", "codex", "hermes", "grok"]) {
+    for (const engine of ["antigravity", "claude", "codex", "hermes", "grok", "pi"]) {
       expect(decideJinnAttachment({ globalMcp: ON, engine, gate: OK }).attach).toBe(true);
     }
   });
 
   it("an MCP-incapable engine NEVER attaches, whatever the flags say (hard capability gate)", () => {
-    for (const engine of ["antigravity", "pi", "unknown", ""]) {
+    for (const engine of ["unknown", ""]) {
       const d = decideJinnAttachment({ globalMcp: ON, engine, employee: emp({ jinnMcp: true }), gate: OK });
       expect(d.attach).toBe(false);
       expect(d.reason).toContain("MCP-capable");

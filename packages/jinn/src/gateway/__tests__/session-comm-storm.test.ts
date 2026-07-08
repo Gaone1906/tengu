@@ -218,11 +218,11 @@ describe("storm matrix — integration against the real routes", () => {
     for (let i = 0; i <= LATERAL_MAX_SENDS; i++) peers.push(await createOperatorSession(`peer ${i}`));
     const ctx = ctxFor(sender);
     for (let i = 0; i < LATERAL_MAX_SENDS; i++) {
-      await tool("jinn_send_to_session").handler({ sessionId: peers[i], message: `fanout ${i}` }, ctx);
+      await tool("send_to_session").handler({ sessionId: peers[i], message: `fanout ${i}` }, ctx);
     }
     // The cap is per SENDER across all targets — a fresh target does not help.
     await expect(
-      tool("jinn_send_to_session").handler({ sessionId: peers[LATERAL_MAX_SENDS], message: "one more" }, ctx),
+      tool("send_to_session").handler({ sessionId: peers[LATERAL_MAX_SENDS], message: "one more" }, ctx),
     ).rejects.toThrow(/429.*rate cap/is);
   });
 
@@ -230,13 +230,13 @@ describe("storm matrix — integration against the real routes", () => {
     const ids: string[] = [];
     for (const label of ["A", "B", "C", "D", "E"]) ids.push(await createOperatorSession(`relay ${label}`));
     const [a, b, c, d, e] = ids;
-    await tool("jinn_send_to_session").handler({ sessionId: b, message: "relay this" }, ctxFor(a)); // hop 1
-    await tool("jinn_send_to_session").handler({ sessionId: c, message: "relay this" }, ctxFor(b)); // hop 2
-    await tool("jinn_send_to_session").handler({ sessionId: d, message: "relay this" }, ctxFor(c)); // hop 3
-    await tool("jinn_send_to_session").handler({ sessionId: e, message: "relay this" }, ctxFor(d)); // hop 4
+    await tool("send_to_session").handler({ sessionId: b, message: "relay this" }, ctxFor(a)); // hop 1
+    await tool("send_to_session").handler({ sessionId: c, message: "relay this" }, ctxFor(b)); // hop 2
+    await tool("send_to_session").handler({ sessionId: d, message: "relay this" }, ctxFor(c)); // hop 3
+    await tool("send_to_session").handler({ sessionId: e, message: "relay this" }, ctxFor(d)); // hop 4
     const banner = registry.getMessages(e).at(-1)!;
     expect(banner.content).toContain(`hop ${LATERAL_MAX_HOPS}/${LATERAL_MAX_HOPS}`);
-    await expect(tool("jinn_send_to_session").handler({ sessionId: a, message: "keep relaying" }, ctxFor(e))).rejects.toThrow(
+    await expect(tool("send_to_session").handler({ sessionId: a, message: "keep relaying" }, ctxFor(e))).rejects.toThrow(
       /400.*hop budget.*escalate/is,
     );
   });
@@ -247,7 +247,7 @@ describe("storm matrix — integration against the real routes", () => {
     const ctx = ctxFor(sender);
     const results = await Promise.allSettled(
       Array.from({ length: LATERAL_MAX_SENDS + 5 }, (_, i) =>
-        tool("jinn_send_to_session").handler({ sessionId: target, message: `race ${i}` }, ctx),
+        tool("send_to_session").handler({ sessionId: target, message: `race ${i}` }, ctx),
       ),
     );
     const ok = results.filter((r) => r.status === "fulfilled").length;
@@ -264,7 +264,7 @@ describe("storm matrix — integration against the real routes", () => {
     const before = sessionCommGuards.stats();
     for (let i = 0; i < 25; i++) {
       await expect(
-        tool("jinn_send_to_session").handler({ sessionId: target, message: "spoofed" }, ctxFor(`ghost-${i}`)),
+        tool("send_to_session").handler({ sessionId: target, message: "spoofed" }, ctxFor(`ghost-${i}`)),
       ).rejects.toThrow(/caller identity unavailable/i);
     }
     expect(sessionCommGuards.stats()).toEqual(before);
@@ -277,7 +277,7 @@ describe("storm matrix — integration against the real routes", () => {
     let parent = root;
     let leaf = root;
     for (let depth = 1; depth <= 5; depth++) {
-      const spawned = (await tool("jinn_spawn_session").handler({ prompt: `depth ${depth}`, engine: "codex" }, ctxFor(parent))) as {
+      const spawned = (await tool("spawn_session").handler({ prompt: `depth ${depth}`, engine: "codex" }, ctxFor(parent))) as {
         sessionId: string;
       };
       parent = spawned.sessionId;
@@ -285,13 +285,13 @@ describe("storm matrix — integration against the real routes", () => {
     }
     // A separate branch: another root with one child (the "cousin").
     const otherRoot = await createOperatorSession("other root");
-    const cousin = (await tool("jinn_spawn_session").handler({ prompt: "cousin", engine: "codex" }, ctxFor(otherRoot))) as {
+    const cousin = (await tool("spawn_session").handler({ prompt: "cousin", engine: "codex" }, ctxFor(otherRoot))) as {
       sessionId: string;
     };
 
-    const stopped = (await tool("jinn_stop_session").handler({ sessionId: leaf }, ctxFor(root))) as { action: string };
+    const stopped = (await tool("stop_session").handler({ sessionId: leaf }, ctxFor(root))) as { action: string };
     expect(stopped.action).toBe("stopped");
-    await expect(tool("jinn_stop_session").handler({ sessionId: cousin.sessionId }, ctxFor(root))).rejects.toThrow(/403.*descendant/is);
+    await expect(tool("stop_session").handler({ sessionId: cousin.sessionId }, ctxFor(root))).rejects.toThrow(/403.*descendant/is);
     // No header (operator/UI) → unrestricted, unchanged.
     const op = await apiFetch()(`http://gateway.test/api/sessions/${cousin.sessionId}/stop`, { method: "POST" });
     expect(op.status).toBe(200);

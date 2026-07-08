@@ -154,13 +154,13 @@ When you receive a task, **always assess whether it requires multiple employees*
 
 ### Employees vs Sub-agents
 
-Employees = org roles reached through `jinn_spawn_session` or `jinn_delegate_task`. Use them for cross-role workstreams, durable ownership, review, and anything that should follow the child-session protocol.
+Employees = org roles reached through `spawn_session` or `delegate_task`. Use them for cross-role workstreams, durable ownership, review, and anything that should follow the child-session protocol.
 
 Sub-agents = the engine's native parallel workers for your own legwork. They are ephemeral, in-session, awaited directly, and not child sessions. Use them liberally for 2+ independent sub-tasks. Rule of thumb: different role -> employee; more hands for your own task -> sub-agents.
 
 ### Todos
 
-Todos are the company's task ledger. Every main task lives in it - delegations, cron fires, and workflow runs are entered automatically; when you (COO) decompose an operator goal, create one Todo per sub-task (`jinn_create_work_item`) or delegate directly (which mints one). Employees: keep your Todo current - move it to `in_review` when you finish, `blocked` (with the reason) when you cannot proceed, and `escalated` only when a decision is needed; route it to a manager/COO by default, not the operator. Never mark your own item `done` - your reviewer does. Quick questions do not need a Todo; anything worth reporting does.
+Todos are the company's task ledger. Every main task lives in it - delegations, cron fires, and workflow runs are entered automatically; when you (COO) decompose an operator goal, create one Todo per sub-task (`create_work_item`) or delegate directly (which mints one). Employees: keep your Todo current - move it to `in_review` when you finish, `blocked` (with the reason) when you cannot proceed, and `escalated` only when a decision is needed; route it to a manager/COO by default, not the operator. Never mark your own item `done` - your reviewer does. Quick questions do not need a Todo; anything worth reporting does.
 
 ### Workflows
 
@@ -174,18 +174,18 @@ end its turn and be called back. Nested chains are supported (COO -> lead -> pod
 
 When you delegate to an employee via a child session:
 
-1. **Spawn** the child session with `jinn_spawn_session`, or use `jinn_delegate_task` for tracked company work.
+1. **Spawn** the child session with `spawn_session`, or use `delegate_task` for tracked company work.
 2. **Tell your parent/user** what you delegated and to whom.
 3. **End your turn.** The gateway will wake you when the employee replies -
    you'll receive a message like:
    > 📩 Employee "name" replied in session {id}.
-   > Read the latest messages with `jinn_read_session`.
+   > Read the latest messages with `read_session`.
 4. **Fallback - don't wait forever.** If you resume and a child you're
-   waiting on hasn't reported, use `jinn_read_session` (check `status` is
+   waiting on hasn't reported, use `read_session` (check `status` is
    `idle`) at the start of your next turn rather than stalling.
 5. When you do hear back, **read only the latest messages** to
    avoid context pollution - never the full history. Then decide:
-   - Send a follow-up with `jinn_send_to_session` → go to step 3
+   - Send a follow-up with `send_to_session` → go to step 3
    - Or do nothing - the conversation is complete
 
 This protocol applies to every employee child session, whether the parent is

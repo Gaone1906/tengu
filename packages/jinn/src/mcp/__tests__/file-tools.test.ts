@@ -94,8 +94,8 @@ describe("managed file MCP tools", () => {
     const calls: string[] = [];
     const ctx = { gatewayUrl: "http://gateway.test", token: "tok", fetchFn: routeFetch(calls) };
 
-    await expect(tool("jinn_list_files").handler({ limit: 10 }, ctx)).rejects.toThrow(/caller identity unavailable/i);
-    await expect(tool("jinn_read_file").handler({ path: "files/visible.txt" }, ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("list_files").handler({ limit: 10 }, ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("read_file").handler({ path: "files/visible.txt" }, ctx)).rejects.toThrow(/caller identity unavailable/i);
     expect(calls).toHaveLength(0);
   });
 
@@ -110,7 +110,7 @@ describe("managed file MCP tools", () => {
     registry.insertFile({ id: "file-two", filename: "upload.txt", size: 6, mimetype: "text/plain", path: path.join(uploadsDir, "upload.txt") });
 
     const calls: string[] = [];
-    const out = (await tool("jinn_list_files").handler(
+    const out = (await tool("list_files").handler(
       { limit: 10 },
       boundCtx(routeFetch(calls)),
     )) as { files: Array<Record<string, unknown>> };
@@ -130,7 +130,7 @@ describe("managed file MCP tools", () => {
     fs.writeFileSync(path.join(tmpHome, "files", "ok.txt"), "managed content");
     const calls: string[] = [];
 
-    const out = (await tool("jinn_read_file").handler(
+    const out = (await tool("read_file").handler(
       { path: "files/ok.txt" },
       boundCtx(routeFetch(calls)),
     )) as { path: string; content: string };
@@ -144,7 +144,7 @@ describe("managed file MCP tools", () => {
     for (const attempt of attempts) {
       const calls: string[] = [];
       await expect(
-        tool("jinn_read_file").handler({ path: attempt }, boundCtx(routeFetch(calls))),
+        tool("read_file").handler({ path: attempt }, boundCtx(routeFetch(calls))),
       ).rejects.toThrow(/managed|path|control|relative|slash|normalized/i);
       expect(calls, attempt).toHaveLength(0);
     }
@@ -164,7 +164,7 @@ describe("managed file MCP tools", () => {
 
     for (const attempt of ["files/leaf-link.txt", "files/dir-link/api-keys.json"]) {
       await expect(
-        tool("jinn_read_file").handler({ path: attempt }, boundCtx(routeFetch())),
+        tool("read_file").handler({ path: attempt }, boundCtx(routeFetch())),
       ).rejects.toThrow(/403|symlink|outside|not readable/i);
     }
   });

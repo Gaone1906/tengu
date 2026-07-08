@@ -2,7 +2,7 @@ import { gatewayRequest, JinnMcpToolError, type JinnMcpContext, type JinnMcpTool
 import { UNIDENTIFIED_TOOL_CALL_ERROR } from "./identity.js";
 
 /**
- * GRS-017d — `jinn_delegate_task`, the delegation transaction (the design's §4
+ * GRS-017d — `delegate_task`, the delegation transaction (the design's §4
  * "company verb"). One tool call = tracked delegation: the gateway's
  * POST /api/delegations mints a durable WORK ITEM (the record of intent),
  * spawns the target session with the caller's brief, and links the two —
@@ -11,7 +11,7 @@ import { UNIDENTIFIED_TOOL_CALL_ERROR } from "./identity.js";
  * three HTTP calls here would reopen exactly the partial-failure windows the
  * cron bridge spent a wave closing.
  *
- * Division of labor (stated here and in jinn_spawn_session, nowhere else):
+ * Division of labor (stated here and in spawn_session, nowhere else):
  * delegate = company work, TRACKED (mints the accountability record);
  * spawn = quick question to a colleague, untracked.
  *
@@ -82,14 +82,14 @@ function delegationFailure(status: number, body: unknown): JinnMcpToolError {
 
 export function buildDelegationTools(): JinnMcpTool[] {
   const delegateTask: JinnMcpTool = {
-    name: "jinn_delegate_task",
+    name: "delegate_task",
     description:
-      "Delegate TRACKED company work to an employee (or a bare engine): one atomic gateway transaction mints a durable work item (the accountability record), spawns a session briefed with your task, and links the two. The session is automatically your CHILD. For a quick untracked question, use jinn_spawn_session instead. Protocol: after delegating, END YOUR TURN — the gateway wakes you when the child replies ('📩 replied'); never poll in a loop. Callbacks are best-effort: if you resume for another reason, check the child with jinn_read_session (status 'idle' = finished).",
+      "Delegate TRACKED company work to an employee (or a bare engine): one atomic gateway transaction mints a durable work item (the accountability record), spawns a session briefed with your task, and links the two. The session is automatically your CHILD. For a quick untracked question, use spawn_session instead. Protocol: after delegating, END YOUR TURN — the gateway wakes you when the child replies ('📩 replied'); never poll in a loop. Callbacks are best-effort: if you resume for another reason, check the child with read_session (status 'idle' = finished).",
     inputSchema: {
       type: "object",
       properties: {
         task: { type: "string", description: "The full task brief for the delegate. You write it — context, acceptance, constraints; the delegate does not see your conversation." },
-        employee: { type: "string", description: "Employee slug to delegate to (jinn_list_employees / jinn_find_employees show the roster). Provide this or engine." },
+        employee: { type: "string", description: "Employee slug to delegate to (list_employees / find_employees show the roster). Provide this or engine." },
         engine: { type: "string", description: "Bare engine to delegate to (e.g. claude, codex) when no employee fits. Provide this or employee." },
         model: { type: "string", description: "Model override. Omit to use the employee's/gateway default." },
         effortLevel: { type: "string", description: "Effort override (e.g. low, medium, high). Omit to use defaults." },
@@ -109,7 +109,7 @@ export function buildDelegationTools(): JinnMcpTool[] {
       }
       if (!body.employee && !body.engine) {
         throw new JinnMcpToolError(
-          "provide employee or engine — delegate to a named employee (jinn_list_employees / jinn_find_employees show the roster) or to a bare engine.",
+          "provide employee or engine — delegate to a named employee (list_employees / find_employees show the roster) or to a bare engine.",
         );
       }
       const { status, body: resp } = await gatewayRequest(ctx, "POST", "/api/delegations", body);
@@ -124,7 +124,7 @@ export function buildDelegationTools(): JinnMcpTool[] {
         status: d.status,
         hint:
           `Work item ${String(d.workItemId ?? "?")} tracks this delegation; session ${String(d.sessionId ?? "?")} is executing it as your child. ` +
-          "END YOUR TURN now — the reply wakes you ('📩 replied'). If you resume for another reason, jinn_read_session shows the child's status ('idle' = finished).",
+          "END YOUR TURN now — the reply wakes you ('📩 replied'). If you resume for another reason, read_session shows the child's status ('idle' = finished).",
       };
     },
   };

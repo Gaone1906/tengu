@@ -6,6 +6,7 @@ import type { InterruptibleEngine, EngineRunOpts, EngineResult } from "../shared
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import { JINN_HOME } from "../shared/paths.js";
+import { cleanupPiJinnMcpExtension, piJinnSessionEnv, writePiJinnMcpExtension, type PiMcpExtensionHandle } from "./pi-mcp.js";
 
 interface LiveProcess {
   proc: ChildProcess;
@@ -19,6 +20,7 @@ interface LiveProcess {
   sessionIdOut: string;
   hardTimeout?: NodeJS.Timeout;
   agentEndExitTimer?: NodeJS.Timeout;
+  mcpExtension?: PiMcpExtensionHandle;
 }
 
 const STDERR_MAX = 10 * 1024; // 10KB rolling window for error reporting
@@ -125,6 +127,7 @@ export class PiEngine implements InterruptibleEngine {
     }
 
     const args: string[] = [];
+    const mcpExtension = writePiJinnMcpExtension(opts.resolvedMcp, trackingId);
     if (provider) args.push("--provider", provider);
     args.push("--model", model, "-p", "--mode", "json");
     // Effort → Pi thinking level. Only reasoning-capable models ever carry an
@@ -134,6 +137,7 @@ export class PiEngine implements InterruptibleEngine {
       args.push("--thinking", opts.effortLevel);
     }
     args.push("--session-id", piSessionId, "--session-dir", sessionDir);
+    if (mcpExtension.attached) args.push("--extension", mcpExtension.extensionPath);
     if (opts.cliFlags?.length) args.push(...opts.cliFlags);
     args.push(prompt);
 
@@ -143,7 +147,7 @@ export class PiEngine implements InterruptibleEngine {
         ` (resume: ${opts.resumeSessionId || "none"})`,
     );
 
-    const cleanEnv = this.buildCleanEnv(trackingId);
+    const cleanEnv = { ...this.buildCleanEnv(trackingId), ...piJinnSessionEnv(opts.resolvedMcp) };
 
     return new Promise((resolve, reject) => {
       const proc = spawn(bin, args, {
@@ -165,6 +169,7 @@ export class PiEngine implements InterruptibleEngine {
         settled: false,
         resolve,
         sessionIdOut: piSessionId,
+        mcpExtension,
       };
       this.liveProcesses.set(trackingId, live);
       live.hardTimeout = setTimeout(() => {
@@ -266,6 +271,7 @@ export class PiEngine implements InterruptibleEngine {
         if (!l || l.settled) return;
         l.settled = true;
         this.clearTimers(l);
+        cleanupPiJinnMcpExtension(l.mcpExtension);
         this.liveProcesses.delete(trackingId);
         reject(new Error(`Failed to spawn Pi agent CLI: ${err.message}`));
       });
@@ -278,6 +284,7 @@ export class PiEngine implements InterruptibleEngine {
     if (!live || live.settled) return;
     live.settled = true;
     this.clearTimers(live);
+    cleanupPiJinnMcpExtension(live.mcpExtension);
 
     try {
       live.rl.close();

@@ -146,8 +146,8 @@ describe("web-spawn context diet (POST /api/sessions → runWebSession)", () => 
     expect(Boolean(run.resolvedMcp?.mcpServers?.["jinn"])).toBe(true);
     const prompt = String(run.systemPrompt ?? "");
     expect(prompt).toContain("## Knowledge base");
-    expect(prompt).toContain("jinn_search_knowledge");
-    expect(prompt).toContain("jinn_read_knowledge { path }");
+    expect(prompt).toContain("search_knowledge");
+    expect(prompt).toContain("read_knowledge { path }");
     expect(prompt).not.toContain("seeded-diet-fixture.md");
     expect(prompt).not.toContain("**knowledge/** (");
   });
@@ -160,6 +160,6 @@ describe("web-spawn context diet (POST /api/sessions → runWebSession)", () => 
     const prompt = String(run.systemPrompt ?? "");
     expect(prompt).toContain("seeded-diet-fixture.md");
     expect(prompt).toContain("Read them directly when needed.");
-    expect(prompt).not.toContain("jinn_search_knowledge");
+    expect(prompt).not.toContain("search_knowledge");
   });
 });

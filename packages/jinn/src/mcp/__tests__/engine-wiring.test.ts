@@ -28,6 +28,12 @@ import { JINN_SESSION_CAPABILITY_ENV, attachSessionIdentity } from "../identity.
 import { codexMcpConfigArgs, writeCodexMcpProfile } from "../../engines/codex.js";
 import { prepareGrokProjectMcpConfig, cleanupGrokProjectMcpConfig, grokJinnSessionEnv, JINN_GROK_MCP_MARKER } from "../../engines/grok-mcp.js";
 import { buildAcpMcpServers } from "../../engines/hermes-mcp.js";
+import { writePiJinnMcpExtension, cleanupPiJinnMcpExtension, piJinnSessionEnv } from "../../engines/pi-mcp.js";
+import {
+  ensureAntigravityJinnMcpConfig,
+  antigravityJinnSessionEnv,
+  ANTIGRAVITY_JINN_MCP_MARKER,
+} from "../../engines/antigravity-mcp.js";
 import type { McpGlobalConfig } from "../../shared/types.js";
 
 const GATEWAY_URL = "http://127.0.0.1:56789";
@@ -56,7 +62,7 @@ describe("per-engine jinn-server wiring (GRS-018 seam for GRS-017 default-on)", 
   it("covers every MCP-capable engine (fails when the set grows without a wiring test here)", () => {
     // If a new engine joins MCP_CAPABLE_ENGINES, add its attach-artifact case
     // below and extend this list — the seam must stay complete.
-    expect([...MCP_CAPABLE_ENGINES].sort()).toEqual(["claude", "codex", "grok", "hermes"]);
+    expect([...MCP_CAPABLE_ENGINES].sort()).toEqual(["antigravity", "claude", "codex", "grok", "hermes", "pi"]);
   });
 
   it("claude: temp-file JSON carries the jinn spec verbatim, non-secret env only, and cleans up", () => {
@@ -218,6 +224,61 @@ describe("per-engine jinn-server wiring (GRS-018 seam for GRS-017 default-on)", 
       expect(jinn.env).toContainEqual({ name: "JINN_SESSION_ID", value: SID });
       expect(jinn.env).toContainEqual({ name: "JINN_SESSION_CAPABILITY", value: capabilityOf(resolved) });
       expect(jinn.env.some((e) => e.name === "JINN_HOME")).toBe(true);
+    });
+
+    it("pi: a per-session extension file registers the jinn tools while identity rides the child env", () => {
+      const resolved = stamped();
+      const capability = capabilityOf(resolved);
+      const handle = writePiJinnMcpExtension(resolved, SID);
+      expect(handle.attached).toBe(true);
+      try {
+        if (!handle.attached) throw new Error("expected pi MCP extension to attach");
+        expect(fs.statSync(handle.extensionPath).mode & 0o777).toBe(0o600);
+        const source = fs.readFileSync(handle.extensionPath, "utf-8");
+        expect(source).toContain("registerTool");
+        expect(source).toContain("buildTools");
+        expect(source).not.toContain(TOKEN);
+        expect(source).not.toContain(SID);
+        expect(source).not.toContain(String(capability));
+      } finally {
+        cleanupPiJinnMcpExtension(handle);
+      }
+      expect(handle.attached && fs.existsSync(handle.extensionPath)).toBe(false);
+      expect(piJinnSessionEnv(resolved)).toEqual({
+        JINN_SESSION_ID: SID,
+        JINN_SESSION_CAPABILITY: capability,
+      });
+      expect(piJinnSessionEnv(resolveMcpServers(ON, undefined))).toEqual({});
+      expect(piJinnSessionEnv(undefined)).toEqual({});
+    });
+
+    it("antigravity: guarded Gemini config carries only process-global jinn MCP data; identity rides the child env", () => {
+      const resolved = stamped();
+      const capability = capabilityOf(resolved);
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wiring-antigravity-"));
+      const configPath = path.join(tmp, "mcp_config.json");
+      fs.writeFileSync(configPath, JSON.stringify({ mcpServers: { search: { command: "search-cli" } } }));
+      try {
+        const handle = ensureAntigravityJinnMcpConfig(resolved, { configPath });
+        expect(handle.attached).toBe(true);
+        const json = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+        expect(json.mcpServers.search.command).toBe("search-cli");
+        expect(json.mcpServers.jinn.command).toBeTruthy();
+        expect(json.mcpServers.jinn.env.JINN_GATEWAY_URL).toBe(GATEWAY_URL);
+        expect(json.mcpServers.jinn.env.JINN_MCP_MANAGED_BY).toBe(ANTIGRAVITY_JINN_MCP_MARKER);
+        const onDisk = fs.readFileSync(configPath, "utf-8");
+        expect(onDisk).not.toContain(TOKEN);
+        expect(onDisk).not.toContain(SID);
+        expect(onDisk).not.toContain(String(capability));
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+      expect(antigravityJinnSessionEnv(resolved)).toEqual({
+        JINN_SESSION_ID: SID,
+        JINN_SESSION_CAPABILITY: capability,
+      });
+      expect(antigravityJinnSessionEnv(resolveMcpServers(ON, undefined))).toEqual({});
+      expect(antigravityJinnSessionEnv(undefined)).toEqual({});
     });
   });
 

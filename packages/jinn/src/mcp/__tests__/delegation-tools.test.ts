@@ -10,7 +10,7 @@ import { CALLER_SESSION_HEADER, TOOL_CALL_HEADER, TOOL_CALL_HEADER_VALUE, ensure
 import type { JinnMcpContext, JinnMcpTool } from "../toolkit.js";
 
 /**
- * GRS-017d — `jinn_delegate_task`, the company verb: one MCP call delegates
+ * GRS-017d — `delegate_task`, the company verb: one MCP call delegates
  * TRACKED work (work item minted + session spawned + linked, atomically, in the
  * gateway's POST /api/delegations — never composed client-side).
  *
@@ -21,7 +21,7 @@ import type { JinnMcpContext, JinnMcpTool } from "../toolkit.js";
  *      error mapping including the preserved-intent 502.
  *   3. INTEGRATION — the tool drives the REAL route + registry + work-item
  *      store: delegate → mint + spawn + link + caller-parented, in one call;
- *      then the collect loop (jinn_read_session poll fallback) on the child.
+ *      then the collect loop (read_session poll fallback) on the child.
  */
 
 // Isolated registry DB for the integration tier. Set BEFORE the dynamic api import.
@@ -54,16 +54,16 @@ function stub(responder: (call: SeenCall) => { status: number; body: unknown }, 
 }
 
 function delegateTool(): JinnMcpTool {
-  const t = buildDelegationTools().find((t) => t.name === "jinn_delegate_task");
-  if (!t) throw new Error("no jinn_delegate_task");
+  const t = buildDelegationTools().find((t) => t.name === "delegate_task");
+  if (!t) throw new Error("no delegate_task");
   return t;
 }
 
-describe("jinn_delegate_task — registry + schema", () => {
+describe("delegate_task — registry + schema", () => {
   it("is on the belt exactly once, next to spawn (the tracked/untracked pair)", () => {
     const names = buildTools().map((t) => t.name);
-    expect(names.filter((n) => n === "jinn_delegate_task")).toHaveLength(1);
-    expect(names).toContain("jinn_spawn_session");
+    expect(names.filter((n) => n === "delegate_task")).toHaveLength(1);
+    expect(names).toContain("spawn_session");
   });
 
   it("has a flat schema: string params only, task required", () => {
@@ -80,12 +80,12 @@ describe("jinn_delegate_task — registry + schema", () => {
   it("teaches the division of labor and the end-turn protocol in its description", () => {
     const d = delegateTool().description;
     expect(d).toMatch(/work item/i);
-    expect(d).toMatch(/jinn_spawn_session/);
+    expect(d).toMatch(/spawn_session/);
     expect(d).toMatch(/END YOUR TURN/);
   });
 });
 
-describe("jinn_delegate_task — unit (stub gateway)", () => {
+describe("delegate_task — unit (stub gateway)", () => {
   it("FAILS CLOSED with no caller identity: refuses locally, zero round trips", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: {} }));
     await expect(delegateTool().handler({ task: "t", employee: "e" }, ctx)).rejects.toThrow(
@@ -97,7 +97,7 @@ describe("jinn_delegate_task — unit (stub gateway)", () => {
   it("requires task, and one of employee/engine — locally, naming the discovery tool", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: {} }), "caller-1");
     await expect(delegateTool().handler({ employee: "e" }, ctx)).rejects.toThrow(/task/i);
-    await expect(delegateTool().handler({ task: "t" }, ctx)).rejects.toThrow(/jinn_list_employees/);
+    await expect(delegateTool().handler({ task: "t" }, ctx)).rejects.toThrow(/list_employees/);
     expect(calls).toHaveLength(0);
   });
 
@@ -127,7 +127,7 @@ describe("jinn_delegate_task — unit (stub gateway)", () => {
     expect(hint).toContain("wi_abc");
     expect(hint).toContain("sess-1");
     expect(hint).toMatch(/END YOUR TURN/);
-    expect(hint).toMatch(/jinn_read_session/);
+    expect(hint).toMatch(/read_session/);
   });
 
   it("maps a structured 400 readably (self-correction) and surfaces the preserved intent on a 502", async () => {
@@ -258,7 +258,7 @@ beforeAll(async () => {
   store = await import("../../work-items/store.js");
 });
 
-describe("jinn_delegate_task — integration against the real route + stores", () => {
+describe("delegate_task — integration against the real route + stores", () => {
   it("the delegate-and-collect loop: one call mints + spawns + links + parents; the poll fallback reads the result", async () => {
     const cooId = await createOperatorSession("I am the COO");
     const ctx = ctxFor(cooId);
@@ -286,11 +286,11 @@ describe("jinn_delegate_task — integration against the real route + stores", (
     expect(out.hint).toContain(out.workItemId);
 
     // Collect via the poll fallback: the child settles with a reply; the caller
-    // reads it with jinn_read_session (the callback wake itself is engine-side,
+    // reads it with read_session (the callback wake itself is engine-side,
     // covered by the live QA beat — GRS-015 pattern: engines stay stubbed here).
     registry.insertMessage(out.sessionId, "assistant", "Sprint is green.");
     registry.updateSession(out.sessionId, { status: "idle" });
-    const read = (await sessionTool("jinn_read_session").handler({ sessionId: out.sessionId }, ctx)) as {
+    const read = (await sessionTool("read_session").handler({ sessionId: out.sessionId }, ctx)) as {
       status: string;
       messages: Array<{ role?: string; content: string }>;
     };

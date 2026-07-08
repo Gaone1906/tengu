@@ -55,37 +55,37 @@ function tool(name: string): JinnMcpTool {
 describe("work-item tools — registry + schemas", () => {
   it("exposes the generic Todo verbs separately from COO approval verbs", () => {
     expect(buildWorkItemTools().map((t) => t.name)).toEqual([
-      "jinn_list_work_items",
-      "jinn_get_work_item",
-      "jinn_search_work_items",
-      "jinn_create_work_item",
-      "jinn_update_work_item",
-      "jinn_assign_work_item",
+      "list_work_items",
+      "get_work_item",
+      "search_work_items",
+      "create_work_item",
+      "update_work_item",
+      "assign_work_item",
     ]);
     const names = buildTools().map((t) => t.name).sort();
-    expect(names).toContain("jinn_create_work_item");
-    expect(names).toContain("jinn_assign_work_item");
-    expect(names).toContain("jinn_decide_work_item_approval");
-    expect(names).toContain("jinn_escalate_work_item_approval");
-    expect(names).toContain("jinn_delete_trigger");
+    expect(names).toContain("create_work_item");
+    expect(names).toContain("assign_work_item");
+    expect(names).toContain("decide_work_item_approval");
+    expect(names).toContain("escalate_work_item_approval");
+    expect(names).toContain("delete_trigger");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
     expect(names).toHaveLength(40);
   });
 
   it("positions list as structured/recent and search as text search", () => {
-    expect(tool("jinn_list_work_items").description).toMatch(/recent or structured-filtered/i);
-    expect(tool("jinn_list_work_items").description).toMatch(/needsAttentionFor.*me/i);
-    expect(tool("jinn_search_work_items").description).toMatch(/text search/i);
-    expect(tool("jinn_search_work_items").description).toMatch(/title.*body/i);
+    expect(tool("list_work_items").description).toMatch(/recent or structured-filtered/i);
+    expect(tool("list_work_items").description).toMatch(/needsAttentionFor.*me/i);
+    expect(tool("search_work_items").description).toMatch(/text search/i);
+    expect(tool("search_work_items").description).toMatch(/title.*body/i);
   });
 
   it("create schema has no approval fields and update schema excludes cancelled", () => {
-    const createProps = tool("jinn_create_work_item").inputSchema.properties;
+    const createProps = tool("create_work_item").inputSchema.properties;
     expect(Object.keys(createProps).sort()).toEqual(
       ["acceptance", "assignee", "body", "department", "title", "verifyPolicy"].sort(),
     );
     expect(JSON.stringify(createProps)).not.toMatch(/approval/i);
-    const status = tool("jinn_update_work_item").inputSchema.properties.status as { enum: string[] };
+    const status = tool("update_work_item").inputSchema.properties.status as { enum: string[] };
     expect(status.enum).toEqual(["in_review", "blocked", "escalated", "done"]);
     expect(status.enum).not.toContain("cancelled");
   });
@@ -93,7 +93,7 @@ describe("work-item tools — registry + schemas", () => {
   it("ships the generic Todo doctrine in the repo template CLAUDE.md", () => {
     const template = fs.readFileSync(path.join(process.cwd(), "template", "CLAUDE.md"), "utf-8");
     expect(template).toContain("Todos are the company's task ledger");
-    expect(template).toContain("jinn_create_work_item");
+    expect(template).toContain("create_work_item");
     expect(template).toContain("Never mark your own item `done`");
     expect(template).not.toContain(["", "Users", ""].join("/"));
   });
@@ -102,7 +102,7 @@ describe("work-item tools — registry + schemas", () => {
 describe("work-item tools — unit (stub gateway)", () => {
   it("list passes status/source/assignee filters and returns compact summaries", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { workItems: [{ id: "wi_1", title: "T", body: "MUST NOT LEAK", status: "blocked", source: "session" }] } }));
-    const out = (await tool("jinn_list_work_items").handler({ status: "blocked", source: "session", assignee: "qa", limit: 99 }, ctx)) as {
+    const out = (await tool("list_work_items").handler({ status: "blocked", source: "session", assignee: "qa", limit: 99 }, ctx)) as {
       workItems: Array<Record<string, unknown>>;
     };
     const url = new URL(calls[0].url);
@@ -135,14 +135,14 @@ describe("work-item tools — unit (stub gateway)", () => {
         workflowRun: { workflowId: "wf", runId: "run_1" },
       },
     }));
-    const out = (await tool("jinn_get_work_item").handler({ id: "wi_2" }, ctx)) as Record<string, unknown>;
+    const out = (await tool("get_work_item").handler({ id: "wi_2" }, ctx)) as Record<string, unknown>;
     expect(out).toMatchObject({ spendUsd: 1.25, workflowRun: { workflowId: "wf", runId: "run_1" } });
     expect(out.workItem).toMatchObject({ acceptance: "- pass", approvalState: "pending", rounds: 1 });
   });
 
   it("search uses the search route, caps hostile input locally, and returns no body dumps", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { workItems: [{ id: "wi_s", title: "Needle", body: "SECRET", status: "backlog", source: "session" }] } }));
-    const out = (await tool("jinn_search_work_items").handler(
+    const out = (await tool("search_work_items").handler(
       { text: "%_\\ hostile", status: "backlog", department: "platform", limit: 999 },
       ctx,
     )) as { workItems: Array<Record<string, unknown>> };
@@ -153,20 +153,20 @@ describe("work-item tools — unit (stub gateway)", () => {
     expect(url.searchParams.get("department")).toBe("platform");
     expect(url.searchParams.get("limit")).toBe(String(WORK_ITEM_SEARCH_LIMIT_MAX));
     expect(out.workItems[0]).not.toHaveProperty("body");
-    await expect(tool("jinn_search_work_items").handler({ text: "x".repeat(WORK_ITEM_QUERY_CHAR_CAP + 1) }, ctx)).rejects.toThrow(
+    await expect(tool("search_work_items").handler({ text: "x".repeat(WORK_ITEM_QUERY_CHAR_CAP + 1) }, ctx)).rejects.toThrow(
       /text is too long.*shorten/,
     );
   });
 
   it("create requires caller identity, posts session provenance, and structurally refuses approval fields", async () => {
     const anon = stub(() => ({ status: 201, body: {} }), null);
-    await expect(tool("jinn_create_work_item").handler({ title: "T" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("create_work_item").handler({ title: "T" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
 
     const { calls, ctx } = stub(() => ({ status: 201, body: { workItem: { id: "wi_new", title: "T", status: "backlog", approvalState: null } } }), "sess-caller");
-    await expect(tool("jinn_create_work_item").handler({ title: "T", approvalRequest: "decide" }, ctx)).rejects.toThrow(
+    await expect(tool("create_work_item").handler({ title: "T", approvalRequest: "decide" }, ctx)).rejects.toThrow(
       /approval.*authority surface/i,
     );
-    await tool("jinn_create_work_item").handler({ title: "T", body: "B", acceptance: "- ok", verifyPolicy: { mode: "verify" } }, ctx);
+    await tool("create_work_item").handler({ title: "T", body: "B", acceptance: "- ok", verifyPolicy: { mode: "verify" } }, ctx);
     expect(calls[0].method).toBe("POST");
     expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items");
     expect(calls[0].headers[CALLER_SESSION_HEADER]).toBe("sess-caller");
@@ -177,18 +177,18 @@ describe("work-item tools — unit (stub gateway)", () => {
   it("create refuses caller-supplied provenance instead of forwarding spoofable source/sourceRef", async () => {
     const { calls, ctx } = stub(() => ({ status: 201, body: {} }), "sess-caller");
     await expect(
-      tool("jinn_create_work_item").handler({ title: "Spoof", provenance: { source: "workflow", sourceRef: "workflow:wf:run" } }, ctx),
+      tool("create_work_item").handler({ title: "Spoof", provenance: { source: "workflow", sourceRef: "workflow:wf:run" } }, ctx),
     ).rejects.toThrow(/provenance.*dedicated bridge|cannot be supplied/i);
     expect(calls).toHaveLength(0);
   });
 
   it("COO approval tools post to the separate approval decision/escalation routes", async () => {
     const names = new Set(buildTools().map((t) => t.name));
-    expect(names.has("jinn_decide_work_item_approval")).toBe(true);
-    expect(names.has("jinn_escalate_work_item_approval")).toBe(true);
+    expect(names.has("decide_work_item_approval")).toBe(true);
+    expect(names.has("escalate_work_item_approval")).toBe(true);
 
-    const decideTool = buildTools().find((t) => t.name === "jinn_decide_work_item_approval")!;
-    const escalateTool = buildTools().find((t) => t.name === "jinn_escalate_work_item_approval")!;
+    const decideTool = buildTools().find((t) => t.name === "decide_work_item_approval")!;
+    const escalateTool = buildTools().find((t) => t.name === "escalate_work_item_approval")!;
     const { calls, ctx } = stub((call) => ({ status: 200, body: { ok: true, route: new URL(call.url).pathname } }), "sess-coo");
 
     await decideTool.handler({ id: "wi_approval", decision: "approve", note: "ship" }, ctx);
@@ -202,21 +202,21 @@ describe("work-item tools — unit (stub gateway)", () => {
 
   it("update is identity-gated, refuses cancel locally, and readable gateway refusals name the human surface", async () => {
     const anon = stub(() => ({ status: 200, body: {} }), null);
-    await expect(tool("jinn_update_work_item").handler({ id: "wi_1", status: "blocked" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("update_work_item").handler({ id: "wi_1", status: "blocked" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
     const { calls, ctx } = stub(() => ({ status: 403, body: { error: "self-review ban — use the human review surface" } }), "sess-1");
-    await expect(tool("jinn_update_work_item").handler({ id: "wi_1", status: "cancelled", note: "drop" }, ctx)).rejects.toThrow(
+    await expect(tool("update_work_item").handler({ id: "wi_1", status: "cancelled", note: "drop" }, ctx)).rejects.toThrow(
       /cancelling.*human surface/i,
     );
-    await expect(tool("jinn_update_work_item").handler({ id: "wi_1", status: "done" }, ctx)).rejects.toThrow(/human review surface/i);
+    await expect(tool("update_work_item").handler({ id: "wi_1", status: "done" }, ctx)).rejects.toThrow(/human review surface/i);
     expect(calls[0].method).toBe("POST");
     expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/wi_1/status");
     expect(calls[0].body).toEqual({ status: "done" });
   });
 
   it("assign validates through the route and maps readable 400 near-match errors", async () => {
-    const { calls, ctx } = stub(() => ({ status: 400, body: { error: 'unknown employee "platfrom-dev". Did you mean "platform-dev"? Check jinn_find_employees.' } }), "sess-1");
-    await expect(tool("jinn_assign_work_item").handler({ id: "wi_1", assignee: "platfrom-dev" }, ctx)).rejects.toThrow(
-      /Did you mean "platform-dev".*jinn_find_employees/,
+    const { calls, ctx } = stub(() => ({ status: 400, body: { error: 'unknown employee "platfrom-dev". Did you mean "platform-dev"? Check find_employees.' } }), "sess-1");
+    await expect(tool("assign_work_item").handler({ id: "wi_1", assignee: "platfrom-dev" }, ctx)).rejects.toThrow(
+      /Did you mean "platform-dev".*find_employees/,
     );
     expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/wi_1/assign");
     expect(calls[0].body).toEqual({ assignee: "platfrom-dev" });
@@ -337,28 +337,28 @@ describe("work-item tools — integration against the real API + store", () => {
     const caller = registry.createSession({ engine: "codex", source: "web", sourceRef: "caller", title: "caller" });
     const ctx = ctxFor(caller.id);
 
-    const created = (await tool("jinn_create_work_item").handler(
+    const created = (await tool("create_work_item").handler(
       { title: "Polish narwhal queue", body: "Literal %_\\ body", acceptance: "- ship", verifyPolicy: { mode: "verify" } },
       ctx,
     )) as { workItem: { id: string; approvalState: null } };
     expect(created.workItem.approvalState).toBeNull();
 
-    const found = (await tool("jinn_search_work_items").handler({ text: "%_\\", status: "backlog" }, ctx)) as {
+    const found = (await tool("search_work_items").handler({ text: "%_\\", status: "backlog" }, ctx)) as {
       workItems: Array<{ id: string }>;
     };
     expect(found.workItems.map((w) => w.id)).toContain(created.workItem.id);
 
-    const assigned = (await tool("jinn_assign_work_item").handler({ id: created.workItem.id, assignee: "platform-dev" }, ctx)) as {
+    const assigned = (await tool("assign_work_item").handler({ id: created.workItem.id, assignee: "platform-dev" }, ctx)) as {
       workItem: { assignee: string; department: string; status: string };
     };
     expect(assigned.workItem).toMatchObject({ assignee: "platform-dev", department: "platform", status: "assigned" });
 
-    const reviewed = (await tool("jinn_update_work_item").handler({ id: created.workItem.id, status: "in_review", note: "done" }, ctx)) as {
+    const reviewed = (await tool("update_work_item").handler({ id: created.workItem.id, status: "in_review", note: "done" }, ctx)) as {
       workItem: { status: string };
     };
     expect(reviewed.workItem.status).toBe("in_review");
 
-    const read = (await tool("jinn_get_work_item").handler({ id: created.workItem.id }, ctx)) as {
+    const read = (await tool("get_work_item").handler({ id: created.workItem.id }, ctx)) as {
       workItem: { acceptance: string; verifyPolicy: { mode: string } };
       spendUsd: number;
     };
@@ -369,18 +369,18 @@ describe("work-item tools — integration against the real API + store", () => {
 
   it("linked executor can move its delegated item to in_review, but cannot mark it done", async () => {
     const coo = registry.createSession({ engine: "codex", source: "web", sourceRef: "coo", title: "coo" });
-    const delegated = (await buildTools().find((t) => t.name === "jinn_delegate_task")!.handler(
+    const delegated = (await buildTools().find((t) => t.name === "delegate_task")!.handler(
       { task: "Execute the check", engine: "codex", title: "Executor check" },
       ctxFor(coo.id),
     )) as { workItemId: string; sessionId: string };
     expect(store.getWorkItem(delegated.workItemId)?.status).toBe("executing");
 
     const execCtx = ctxFor(delegated.sessionId);
-    const moved = (await tool("jinn_update_work_item").handler({ id: delegated.workItemId, status: "in_review", note: "ready" }, execCtx)) as {
+    const moved = (await tool("update_work_item").handler({ id: delegated.workItemId, status: "in_review", note: "ready" }, execCtx)) as {
       workItem: { status: string };
     };
     expect(moved.workItem.status).toBe("in_review");
-    await expect(tool("jinn_update_work_item").handler({ id: delegated.workItemId, status: "done" }, execCtx)).rejects.toThrow(
+    await expect(tool("update_work_item").handler({ id: delegated.workItemId, status: "done" }, execCtx)).rejects.toThrow(
       /self-review ban.*human review surface/i,
     );
   });
@@ -398,27 +398,27 @@ describe("work-item tools — integration against the real API + store", () => {
     const item = store.createWorkItem({ title: "Identity authority close", status: "in_review", source: "delegation", sourceRef: `delegate:${reviewer.id}:qa` });
     store.linkSession(item.id, executor.id);
 
-    await expect(tool("jinn_update_work_item").handler({ id: item.id, status: "done" }, ctxFor("ghost-session-not-in-db"))).rejects.toThrow(
+    await expect(tool("update_work_item").handler({ id: item.id, status: "done" }, ctxFor("ghost-session-not-in-db"))).rejects.toThrow(
       /unidentified.*tool.*caller|caller identity unavailable/i,
     );
     expect(store.getWorkItem(item.id)?.status).toBe("in_review");
 
-    await expect(tool("jinn_update_work_item").handler({ id: item.id, status: "done" }, ctxFor(reviewer.id, "none"))).rejects.toThrow(
+    await expect(tool("update_work_item").handler({ id: item.id, status: "done" }, ctxFor(reviewer.id, "none"))).rejects.toThrow(
       /caller identity unavailable|unidentified/i,
     );
     expect(store.getWorkItem(item.id)?.status).toBe("in_review");
 
-    await expect(tool("jinn_update_work_item").handler({ id: item.id, status: "done" }, ctxFor(operatorSource.id, "none"))).rejects.toThrow(
+    await expect(tool("update_work_item").handler({ id: item.id, status: "done" }, ctxFor(operatorSource.id, "none"))).rejects.toThrow(
       /caller identity unavailable|unidentified/i,
     );
     expect(store.getWorkItem(item.id)?.status).toBe("in_review");
 
-    await expect(tool("jinn_update_work_item").handler({ id: item.id, status: "done" }, ctxFor(executor.id))).rejects.toThrow(
+    await expect(tool("update_work_item").handler({ id: item.id, status: "done" }, ctxFor(executor.id))).rejects.toThrow(
       /self-review ban.*human review surface/i,
     );
     expect(store.getWorkItem(item.id)?.status).toBe("in_review");
 
-    const closed = (await tool("jinn_update_work_item").handler({ id: item.id, status: "done" }, ctxFor(reviewer.id))) as {
+    const closed = (await tool("update_work_item").handler({ id: item.id, status: "done" }, ctxFor(reviewer.id))) as {
       workItem: { status: string };
     };
     expect(closed.workItem.status).toBe("done");
@@ -429,19 +429,19 @@ describe("work-item tools — integration against the real API + store", () => {
     const other = registry.createSession({ engine: "codex", source: "web", sourceRef: "other", title: "other", employee: "other-dev" });
 
     const backlog = store.createWorkItem({ title: "No shortcut close", status: "backlog", assignee: "platform-dev", source: "session" });
-    await expect(tool("jinn_update_work_item").handler({ id: backlog.id, status: "done" }, ctxFor(owner.id))).rejects.toThrow(
+    await expect(tool("update_work_item").handler({ id: backlog.id, status: "done" }, ctxFor(owner.id))).rejects.toThrow(
       /reviewer.*in_review|human review surface/i,
     );
     expect(store.getWorkItem(backlog.id)?.status).toBe("backlog");
 
     const unowned = store.createWorkItem({ title: "Owned by another assignee", status: "assigned", assignee: "platform-dev", source: "session" });
-    await expect(tool("jinn_update_work_item").handler({ id: unowned.id, status: "blocked", note: "waiting" }, ctxFor(other.id))).rejects.toThrow(
+    await expect(tool("update_work_item").handler({ id: unowned.id, status: "blocked", note: "waiting" }, ctxFor(other.id))).rejects.toThrow(
       /does not own.*Todo|authorized reviewer/i,
     );
     expect(store.getWorkItem(unowned.id)?.status).toBe("assigned");
 
     const owned = store.createWorkItem({ title: "Owner may report blocked", status: "assigned", assignee: "platform-dev", source: "session" });
-    const blocked = (await tool("jinn_update_work_item").handler({ id: owned.id, status: "blocked", note: "waiting on input" }, ctxFor(owner.id))) as {
+    const blocked = (await tool("update_work_item").handler({ id: owned.id, status: "blocked", note: "waiting on input" }, ctxFor(owner.id))) as {
       workItem: { status: string };
     };
     expect(blocked.workItem.status).toBe("blocked");
@@ -452,24 +452,24 @@ describe("work-item tools — integration against the real API + store", () => {
     const ctx = ctxFor(caller.id);
 
     await expect(
-      tool("jinn_create_work_item").handler({ title: "Nested approval", verifyPolicy: { mode: "verify", approvalState: "pending" } }, ctx),
+      tool("create_work_item").handler({ title: "Nested approval", verifyPolicy: { mode: "verify", approvalState: "pending" } }, ctx),
     ).rejects.toThrow(/approval.*authority surface/i);
     await expect(
-      tool("jinn_create_work_item").handler({ title: "Deep approval", provenance: { source: "session", nested: { approvalAlias: true } } }, ctx),
+      tool("create_work_item").handler({ title: "Deep approval", provenance: { source: "session", nested: { approvalAlias: true } } }, ctx),
     ).rejects.toThrow(/approval.*authority surface/i);
-    await expect(tool("jinn_create_work_item").handler({ title: "Unknown policy key", verifyPolicy: { mode: "verify", extra: true } }, ctx)).rejects.toThrow(
+    await expect(tool("create_work_item").handler({ title: "Unknown policy key", verifyPolicy: { mode: "verify", extra: true } }, ctx)).rejects.toThrow(
       /verifyPolicy.*unknown key|verifyPolicy.*only/i,
     );
-    await expect(tool("jinn_create_work_item").handler({ title: "Bad policy mode", verifyPolicy: { mode: "maybe" } }, ctx)).rejects.toThrow(
+    await expect(tool("create_work_item").handler({ title: "Bad policy mode", verifyPolicy: { mode: "maybe" } }, ctx)).rejects.toThrow(
       /verifyPolicy\.mode.*trust, verify, thorough/i,
     );
-    await expect(tool("jinn_create_work_item").handler({ title: "Unknown provenance key", provenance: { source: "session", extra: true } }, ctx)).rejects.toThrow(
+    await expect(tool("create_work_item").handler({ title: "Unknown provenance key", provenance: { source: "session", extra: true } }, ctx)).rejects.toThrow(
       /provenance.*dedicated bridge|cannot be supplied/i,
     );
-    await expect(tool("jinn_create_work_item").handler({ title: "Bad provenance source", provenance: { source: "bogus" } }, ctx)).rejects.toThrow(
+    await expect(tool("create_work_item").handler({ title: "Bad provenance source", provenance: { source: "bogus" } }, ctx)).rejects.toThrow(
       /provenance.*dedicated bridge|cannot be supplied/i,
     );
-    await expect(tool("jinn_update_work_item").handler({ id: "wi_missing", status: "blocked", note: "x", metadata: { approvalBypass: true } }, ctx)).rejects.toThrow(
+    await expect(tool("update_work_item").handler({ id: "wi_missing", status: "blocked", note: "x", metadata: { approvalBypass: true } }, ctx)).rejects.toThrow(
       /approval.*authority surface/i,
     );
 

@@ -105,11 +105,11 @@ describe("template company doctrine", () => {
       expect(content, rel).not.toContain("parentSessionId");
     }
 
-    expect(readTemplate("skills/management/SKILL.md")).toContain("jinn_delegate_task");
-    expect(readTemplate("skills/management/SKILL.md")).toContain("jinn_get_employee");
-    expect(readTemplate("skills/onboarding/SKILL.md")).toContain("jinn_spawn_session");
-    expect(readTemplate("skills/sync/SKILL.md")).toContain("jinn_list_sessions");
-    expect(readTemplate("skills/sync/SKILL.md")).toContain("jinn_read_session");
+    expect(readTemplate("skills/management/SKILL.md")).toContain("delegate_task");
+    expect(readTemplate("skills/management/SKILL.md")).toContain("get_employee");
+    expect(readTemplate("skills/onboarding/SKILL.md")).toContain("spawn_session");
+    expect(readTemplate("skills/sync/SKILL.md")).toContain("list_sessions");
+    expect(readTemplate("skills/sync/SKILL.md")).toContain("read_session");
   });
 
   it("includes the pre-merge template staleness audit report", () => {

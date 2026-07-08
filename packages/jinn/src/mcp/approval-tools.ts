@@ -38,7 +38,7 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
 
 export function buildApprovalTools(): JinnMcpTool[] {
   const decide: JinnMcpTool = {
-    name: "jinn_decide_work_item_approval",
+    name: "decide_work_item_approval",
     description:
       "Decide a pending Todo approval as the routed manager/COO authority. Worker/self and unrelated peers are refused by the gateway.",
     inputSchema: {
@@ -67,7 +67,7 @@ export function buildApprovalTools(): JinnMcpTool[] {
   };
 
   const escalate: JinnMcpTool = {
-    name: "jinn_escalate_work_item_approval",
+    name: "escalate_work_item_approval",
     description:
       "Escalate a pending Todo approval to the operator/aCEO path. Only the routed manager/COO authority can escalate.",
     inputSchema: {

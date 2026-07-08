@@ -17,8 +17,8 @@ import path from "node:path";
  *
  * Ledgers asserted:
  *   1. SLICE GATE (must pass to ship): the bootstrap saving exceeds the schema
- *      cost of the two tools this slice adds (jinn_get_employee,
- *      jinn_find_employees) — the catalog's per-tool rule.
+ *      cost of the two tools this slice adds (get_employee,
+ *      find_employees) — the catalog's per-tool rule.
  *   2. COMMS-SURFACE ledger (org + sessions groups vs the prose they replace):
  *      reported in the measurement output; the workflow group is excluded — it
  *      was admitted under the catalog's "enables a concrete action" arm
@@ -131,17 +131,17 @@ function schemaTokens(names?: string[]): number {
   return approxTokens(JSON.stringify(tools));
 }
 
-const ORG_GROUP = ["jinn_list_employees", "jinn_get_employee", "jinn_find_employees"];
-const NEW_IN_THIS_SLICE = ["jinn_get_employee", "jinn_find_employees"];
-const SESSION_GROUP = ["jinn_spawn_session", "jinn_send_to_session", "jinn_read_session", "jinn_list_sessions", "jinn_stop_session"];
-const COST_CRON_GROUP = ["jinn_cost_report", "jinn_list_cron_jobs", "jinn_get_cron_run_history"];
+const ORG_GROUP = ["list_employees", "get_employee", "find_employees"];
+const NEW_IN_THIS_SLICE = ["get_employee", "find_employees"];
+const SESSION_GROUP = ["spawn_session", "send_to_session", "read_session", "list_sessions", "stop_session"];
+const COST_CRON_GROUP = ["cost_report", "list_cron_jobs", "get_cron_run_history"];
 const WORK_ITEM_GROUP = [
-  "jinn_list_work_items",
-  "jinn_get_work_item",
-  "jinn_search_work_items",
-  "jinn_create_work_item",
-  "jinn_update_work_item",
-  "jinn_assign_work_item",
+  "list_work_items",
+  "get_work_item",
+  "search_work_items",
+  "create_work_item",
+  "update_work_item",
+  "assign_work_item",
 ];
 
 describe("the measured context diet", () => {
@@ -166,7 +166,7 @@ describe("the measured context diet", () => {
     // A mid-roster employee appears in the pasted roster, not in the manifest.
     expect(before).toContain("delta-worker-3");
     expect(after).not.toContain("delta-worker-3");
-    expect(after).toContain("jinn_find_employees");
+    expect(after).toContain("find_employees");
     expect(after).toContain("(40 employee(s))"); // scale stays, roster goes
   });
 
@@ -177,8 +177,8 @@ describe("the measured context diet", () => {
     expect(before).toContain("alpha-worker-2");
     expect(after).not.toContain("Job 17");
     expect(after).not.toContain("alpha-worker-2");
-    expect(after).toContain("jinn_list_cron_jobs");
-    expect(after).toContain("jinn_get_cron_run_history");
+    expect(after).toContain("list_cron_jobs");
+    expect(after).toContain("get_cron_run_history");
   });
 
   it("SLICE GATE: the COO-bootstrap saving exceeds the schema cost of the tools this slice adds", () => {

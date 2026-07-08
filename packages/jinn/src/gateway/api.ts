@@ -2584,7 +2584,7 @@ export async function handleApiRequest(
         const near = nearestEmployee(assignee, [...roster.keys()]);
         return badRequest(
           res,
-          `unknown employee "${assignee}"${near ? `. Did you mean "${near}"?` : ""} Check jinn_find_employees or GET /api/org for valid employees`,
+          `unknown employee "${assignee}"${near ? `. Did you mean "${near}"?` : ""} Check find_employees or GET /api/org for valid employees`,
         );
       }
       const item = assignWorkItem(params.id, assignee, employee.department ?? null, workItemActor(caller));

@@ -72,13 +72,13 @@ export const JINN_ATTACH_DEFAULT = false;
  *   - grok:   session-scoped `<cwd>/.grok/config.toml` written before spawn and
  *             torn down on settle (GRS-012c; grok has no per-invocation config
  *             flag, so the project-scoped file is its only per-session lever).
- * Antigravity/pi have no proven per-session MCP lever under the no-global-config
- * constraint and fall back to concise tool instructions — they are deliberately
- * excluded so the surface stays honest.
+ *   - pi:     per-session generated `--extension` file; id/capability ride the
+ *             Pi child env.
+ *   - antigravity: guarded Gemini MCP config entry plus per-session child env.
  * (Lives here, not in resolver.ts, so the attachment decision can consult it
  * without an import cycle; resolver.ts re-exports it.)
  */
-export const MCP_CAPABLE_ENGINES: ReadonlySet<string> = new Set(["claude", "codex", "hermes", "grok"]);
+export const MCP_CAPABLE_ENGINES: ReadonlySet<string> = new Set(["claude", "codex", "hermes", "grok", "pi", "antigravity"]);
 
 /** Whether an engine's adapter can consume a resolved MCP server set. */
 export function isMcpCapableEngine(engine: string | undefined): boolean {

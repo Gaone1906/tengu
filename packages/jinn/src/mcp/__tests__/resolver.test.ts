@@ -20,16 +20,13 @@ import type { Employee, McpGlobalConfig } from "../../shared/types.js";
  */
 
 describe("isMcpCapableEngine (GRS-012b-0 capability set)", () => {
-  it("returns true for MCP-capable engines (claude, codex, hermes, grok)", () => {
+  it("returns true for MCP-capable engines", () => {
+    expect(isMcpCapableEngine("antigravity")).toBe(true);
     expect(isMcpCapableEngine("claude")).toBe(true);
     expect(isMcpCapableEngine("codex")).toBe(true);
     expect(isMcpCapableEngine("hermes")).toBe(true);
     expect(isMcpCapableEngine("grok")).toBe(true); // GRS-012c: session-scoped .grok/config.toml
-  });
-
-  it("returns false for engines with no proven per-session MCP lever (antigravity, pi)", () => {
-    expect(isMcpCapableEngine("antigravity")).toBe(false);
-    expect(isMcpCapableEngine("pi")).toBe(false);
+    expect(isMcpCapableEngine("pi")).toBe(true);
   });
 
   it("returns false for undefined / unknown engines (safe default)", () => {
@@ -38,8 +35,8 @@ describe("isMcpCapableEngine (GRS-012b-0 capability set)", () => {
     expect(isMcpCapableEngine("gemini")).toBe(false); // Gemini CLI is not a Jinn engine
   });
 
-  it("MCP_CAPABLE_ENGINES is exactly the four wired engines", () => {
-    expect([...MCP_CAPABLE_ENGINES].sort()).toEqual(["claude", "codex", "grok", "hermes"]);
+  it("MCP_CAPABLE_ENGINES is exactly the wired engines", () => {
+    expect([...MCP_CAPABLE_ENGINES].sort()).toEqual(["antigravity", "claude", "codex", "grok", "hermes", "pi"]);
   });
 });
 

@@ -79,19 +79,19 @@ describe("workflow tools — registry + schemas", () => {
   it("exposes the workflow and trigger tools with concise object schemas", () => {
     const tools = buildWorkflowTools();
     expect(tools.map((t) => t.name)).toEqual([
-      "jinn_list_workflows",
-      "jinn_get_workflow",
-      "jinn_list_workflow_runs",
-      "jinn_get_workflow_run",
-      "jinn_plan_workflow",
-      "jinn_validate_workflow",
-      "jinn_create_workflow",
-      "jinn_update_workflow",
-      "jinn_retire_workflow",
-      "jinn_start_workflow_run",
-      "jinn_list_triggers",
-      "jinn_create_trigger",
-      "jinn_delete_trigger",
+      "list_workflows",
+      "get_workflow",
+      "list_workflow_runs",
+      "get_workflow_run",
+      "plan_workflow",
+      "validate_workflow",
+      "create_workflow",
+      "update_workflow",
+      "retire_workflow",
+      "start_workflow_run",
+      "list_triggers",
+      "create_trigger",
+      "delete_trigger",
     ]);
     for (const t of tools) {
       expect(t.inputSchema.type).toBe("object");
@@ -116,45 +116,45 @@ describe("workflow tools — registry + schemas", () => {
   });
 
   it("declares the required args each route needs", () => {
-    expect(tool("jinn_get_workflow").inputSchema.required).toEqual(["workflowId"]);
-    expect(tool("jinn_list_workflow_runs").inputSchema.required).toEqual(["workflowId"]);
-    expect(tool("jinn_get_workflow_run").inputSchema.required).toEqual(["workflowId", "runId"]);
-    expect(tool("jinn_plan_workflow").inputSchema.required).toEqual([]);
-    expect(tool("jinn_validate_workflow").inputSchema.required).toEqual([]);
-    expect(tool("jinn_create_workflow").inputSchema.required).toEqual([]);
-    expect(tool("jinn_update_workflow").inputSchema.required).toEqual(["workflowId"]);
-    expect(tool("jinn_retire_workflow").inputSchema.required).toEqual(["workflowId"]);
-    expect(tool("jinn_start_workflow_run").inputSchema.required).toEqual(["workflowId"]);
-    expect(tool("jinn_create_trigger").inputSchema.required).toEqual(["kind", "name", "event", "targetWorkflowId"]);
-    expect(tool("jinn_delete_trigger").inputSchema.required).toEqual(["name"]);
+    expect(tool("get_workflow").inputSchema.required).toEqual(["workflowId"]);
+    expect(tool("list_workflow_runs").inputSchema.required).toEqual(["workflowId"]);
+    expect(tool("get_workflow_run").inputSchema.required).toEqual(["workflowId", "runId"]);
+    expect(tool("plan_workflow").inputSchema.required).toEqual([]);
+    expect(tool("validate_workflow").inputSchema.required).toEqual([]);
+    expect(tool("create_workflow").inputSchema.required).toEqual([]);
+    expect(tool("update_workflow").inputSchema.required).toEqual(["workflowId"]);
+    expect(tool("retire_workflow").inputSchema.required).toEqual(["workflowId"]);
+    expect(tool("start_workflow_run").inputSchema.required).toEqual(["workflowId"]);
+    expect(tool("create_trigger").inputSchema.required).toEqual(["kind", "name", "event", "targetWorkflowId"]);
+    expect(tool("delete_trigger").inputSchema.required).toEqual(["name"]);
   });
 });
 
 describe("workflow tools — unit (stub gateway)", () => {
-  it("jinn_list_workflows GETs the definitions route and passes summaries through", async () => {
+  it("list_workflows GETs the definitions route and passes summaries through", async () => {
     const { calls, ctx } = stub(() => ({
       status: 200,
       body: { definitions: [{ id: "wf-a", title: "A", version: 2, status: "active" }], evidenceConfigured: true },
     }));
-    const out = (await tool("jinn_list_workflows").handler({}, ctx)) as Record<string, unknown>;
+    const out = (await tool("list_workflows").handler({}, ctx)) as Record<string, unknown>;
     expect(calls[0]).toMatchObject({ url: "http://127.0.0.1:7777/api/workflow-definitions", method: "GET" });
     expect((out.definitions as unknown[]).length).toBe(1);
     expect(out.hint).toBeUndefined(); // configured gateway → no warning hint
   });
 
-  it("jinn_list_workflows surfaces the unconfigured-evidence-root state as a hint", async () => {
+  it("list_workflows surfaces the unconfigured-evidence-root state as a hint", async () => {
     const { ctx } = stub(() => ({ status: 200, body: { definitions: [], evidenceConfigured: false } }));
-    const out = (await tool("jinn_list_workflows").handler({}, ctx)) as Record<string, unknown>;
+    const out = (await tool("list_workflows").handler({}, ctx)) as Record<string, unknown>;
     expect(String(out.hint)).toMatch(/no workflow evidence root/i);
   });
 
-  it("jinn_list_workflow_runs GETs the runs route for the encoded id", async () => {
+  it("list_workflow_runs GETs the runs route for the encoded id", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { runs: [], evidenceConfigured: true } }));
-    await tool("jinn_list_workflow_runs").handler({ workflowId: "my wf" }, ctx);
+    await tool("list_workflow_runs").handler({ workflowId: "my wf" }, ctx);
     expect(calls[0].url).toBe("http://127.0.0.1:7777/api/workflow-definitions/my%20wf/runs");
   });
 
-  it("jinn_get_workflow_run wraps the VERBATIM record as {run, hint} — steps[] order untouched", async () => {
+  it("get_workflow_run wraps the VERBATIM record as {run, hint} — steps[] order untouched", async () => {
     // Loop-shaped receipts deliberately NOT in any sortable order: array order is
     // execution order (rounds spliced in place) and must survive the tool byte-for-byte.
     const record = {
@@ -168,7 +168,7 @@ describe("workflow tools — unit (stub gateway)", () => {
       ],
     };
     const { calls, ctx } = stub(() => ({ status: 200, body: record }));
-    const out = (await tool("jinn_get_workflow_run").handler({ workflowId: "wf", runId: "r1" }, ctx)) as {
+    const out = (await tool("get_workflow_run").handler({ workflowId: "wf", runId: "r1" }, ctx)) as {
       run: { steps: Array<{ nodeId: string; round?: number }> };
       hint: string;
     };
@@ -182,15 +182,15 @@ describe("workflow tools — unit (stub gateway)", () => {
       status: 200,
       body: { runId: "r2", status: "parked", parked: { scope: "gateNode", nodeId: "g", description: "operator sign-off" }, steps: [] },
     }));
-    const out = (await tool("jinn_get_workflow_run").handler({ workflowId: "wf", runId: "r2" }, ctx)) as { hint: string };
+    const out = (await tool("get_workflow_run").handler({ workflowId: "wf", runId: "r2" }, ctx)) as { hint: string };
     expect(out.hint).toMatch(/HUMAN decision/i);
     expect(out.hint).toContain("operator sign-off");
     expect(out.hint).not.toContain("jinn_resolve_workflow_gate");
   });
 
-  it("jinn_create_workflow POSTs the definition and auto-places nodes that omit position", async () => {
+  it("create_workflow POSTs the definition and auto-places nodes that omit position", async () => {
     const { calls, ctx } = stub(() => ({ status: 201, body: { id: "wf-new", version: 1 } }));
-    await tool("jinn_create_workflow").handler(
+    await tool("create_workflow").handler(
       {
         definition: {
           id: "wf-new",
@@ -210,14 +210,14 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(sent.nodes[1].position).toEqual({ x: 7, y: 7 }); // explicit position kept
   });
 
-  it("jinn_plan_workflow compiles an SOP wake-up and ordered steps into a valid graph without saving", async () => {
+  it("plan_workflow compiles an SOP wake-up and ordered steps into a valid graph without saving", async () => {
     const { calls, ctx } = stub((call) => {
       if (call.url.endsWith("/api/workflow-definitions/plan")) {
         return { status: 200, body: planWorkflowAuthoringInput(call.body as Record<string, unknown>) };
       }
       return { status: 500, body: { error: "unexpected route" } };
     });
-    const out = (await tool("jinn_plan_workflow").handler(
+    const out = (await tool("plan_workflow").handler(
       {
         sop: {
           id: "daily-brief",
@@ -251,7 +251,7 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(out.definition.edges.map((e) => [e.from, e.to])).toEqual([["wake", "research"], ["research", "summarize"]]);
   });
 
-  it("jinn_plan_workflow and jinn_validate_workflow require a bound caller identity", async () => {
+  it("plan_workflow and validate_workflow require a bound caller identity", async () => {
     const { calls, ctx } = stub(() => ({ status: 500, body: { error: "should not call gateway" } }));
     const unbound = { ...ctx, callerSessionId: undefined, sessionCapability: undefined };
     const sop = {
@@ -261,19 +261,19 @@ describe("workflow tools — unit (stub gateway)", () => {
       steps: [{ engine: "codex", instruction: "Plan privately." }],
     };
 
-    await expect(tool("jinn_plan_workflow").handler({ sop }, unbound)).rejects.toThrow(/caller identity unavailable/i);
-    await expect(tool("jinn_validate_workflow").handler({ sop }, unbound)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("plan_workflow").handler({ sop }, unbound)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("validate_workflow").handler({ sop }, unbound)).rejects.toThrow(/caller identity unavailable/i);
     expect(calls).toHaveLength(0);
   });
 
-  it("jinn_plan_workflow compiles event and poll wake-ups to raw graph plus trigger binding plans", async () => {
+  it("plan_workflow compiles event and poll wake-ups to raw graph plus trigger binding plans", async () => {
     const { calls, ctx } = stub((call) => {
       if (call.url.endsWith("/api/workflow-definitions/plan")) {
         return { status: 200, body: planWorkflowAuthoringInput(call.body as Record<string, unknown>) };
       }
       return { status: 500, body: { error: "unexpected route" } };
     });
-    const webhook = (await tool("jinn_plan_workflow").handler(
+    const webhook = (await tool("plan_workflow").handler(
       {
         sop: {
           id: "lead-sop",
@@ -294,7 +294,7 @@ describe("workflow tools — unit (stub gateway)", () => {
       filter: [{ path: "payload.kind", op: "equals", value: "trial" }],
     });
 
-    const poll = (await tool("jinn_plan_workflow").handler(
+    const poll = (await tool("plan_workflow").handler(
       {
         sop: {
           id: "check-sop",
@@ -316,13 +316,13 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("jinn_create_workflow accepts SOP input, saves the compiled graph, and binds custom wake-ups through gateway routes", async () => {
+  it("create_workflow accepts SOP input, saves the compiled graph, and binds custom wake-ups through gateway routes", async () => {
     const { calls, ctx } = stub((call) => {
       if (call.url.endsWith("/api/workflow-definitions")) return { status: 201, body: { id: "lead-sop", version: 1 } };
       if (call.url.endsWith("/api/workflow-triggers")) return { status: 201, body: { trigger: { name: "lead-hook", kind: "webhook" } } };
       return { status: 500, body: { error: "unexpected route" } };
     });
-    const out = (await tool("jinn_create_workflow").handler(
+    const out = (await tool("create_workflow").handler(
       {
         sop: {
           id: "lead-sop",
@@ -344,26 +344,26 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(out.hint).toContain("SOP");
   });
 
-  it("jinn_retire_workflow POSTs the retire route and requires caller identity", async () => {
+  it("retire_workflow POSTs the retire route and requires caller identity", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { id: "wf", status: "retired", version: 2 } }));
     const unbound = { ...ctx, callerSessionId: undefined, sessionCapability: undefined };
-    await expect(tool("jinn_retire_workflow").handler({ workflowId: "wf" }, unbound)).rejects.toThrow(/caller identity unavailable/i);
-    const out = (await tool("jinn_retire_workflow").handler({ workflowId: "wf" }, ctx)) as { definition: { status: string }; hint: string };
+    await expect(tool("retire_workflow").handler({ workflowId: "wf" }, unbound)).rejects.toThrow(/caller identity unavailable/i);
+    const out = (await tool("retire_workflow").handler({ workflowId: "wf" }, ctx)) as { definition: { status: string }; hint: string };
     expect(calls[0]).toMatchObject({ url: "http://127.0.0.1:7777/api/workflow-definitions/wf/retire", method: "POST", body: {} });
     expect(out.definition.status).toBe("retired");
     expect(out.hint).toMatch(/retired/i);
   });
 
-  it("jinn_create_workflow's success hint points at jinn_start_workflow_run", async () => {
+  it("create_workflow's success hint points at start_workflow_run", async () => {
     const { ctx } = stub(() => ({ status: 201, body: { id: "wf-new", version: 1 } }));
-    const out = (await tool("jinn_create_workflow").handler(
+    const out = (await tool("create_workflow").handler(
       { definition: { id: "wf-new", title: "New", nodes: [], edges: [] } },
       ctx,
     )) as { hint: string };
-    expect(out.hint).toContain("jinn_start_workflow_run");
+    expect(out.hint).toContain("start_workflow_run");
   });
 
-  it("jinn_create_workflow passes the validator's STRUCTURED errors through for self-correction", async () => {
+  it("create_workflow passes the validator's STRUCTURED errors through for self-correction", async () => {
     const { ctx } = stub(() => ({
       status: 400,
       body: {
@@ -375,16 +375,16 @@ describe("workflow tools — unit (stub gateway)", () => {
       },
     }));
     await expect(
-      tool("jinn_create_workflow").handler({ definition: { id: "bad", title: "Bad", nodes: [], edges: [] } }, ctx),
+      tool("create_workflow").handler({ definition: { id: "bad", title: "Bad", nodes: [], edges: [] } }, ctx),
     ).rejects.toThrow(/retry[\s\S]*missing-trigger[\s\S]*dangling-edge/i);
   });
 
   it("write tools surface the 503 evidence-root refusal as the intended live-gateway safety", async () => {
     const { ctx } = stub(() => ({ status: 503, body: { error: "Workflow evidence root is not configured" } }));
     await expect(
-      tool("jinn_create_workflow").handler({ definition: { id: "x", title: "X", nodes: [], edges: [] } }, ctx),
+      tool("create_workflow").handler({ definition: { id: "x", title: "X", nodes: [], edges: [] } }, ctx),
     ).rejects.toThrow(/evidence root.*intended safety.*JINN_WORKFLOW_EVIDENCE_ROOT/is);
-    await expect(tool("jinn_start_workflow_run").handler({ workflowId: "x" }, ctx)).rejects.toThrow(/intended safety/i);
+    await expect(tool("start_workflow_run").handler({ workflowId: "x" }, ctx)).rejects.toThrow(/intended safety/i);
   });
 
   it("workflow write and run tools fail closed locally when MCP caller identity is missing", async () => {
@@ -392,23 +392,23 @@ describe("workflow tools — unit (stub gateway)", () => {
     const unbound = { ...ctx, callerSessionId: undefined, sessionCapability: undefined };
 
     await expect(
-      tool("jinn_create_workflow").handler({ definition: { id: "wf", title: "WF", nodes: [], edges: [] } }, unbound),
+      tool("create_workflow").handler({ definition: { id: "wf", title: "WF", nodes: [], edges: [] } }, unbound),
     ).rejects.toThrow(/caller identity unavailable/i);
-    await expect(tool("jinn_update_workflow").handler({ workflowId: "wf", patch: { title: "T" } }, unbound)).rejects.toThrow(
+    await expect(tool("update_workflow").handler({ workflowId: "wf", patch: { title: "T" } }, unbound)).rejects.toThrow(
       /caller identity unavailable/i,
     );
-    await expect(tool("jinn_start_workflow_run").handler({ workflowId: "wf" }, unbound)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("start_workflow_run").handler({ workflowId: "wf" }, unbound)).rejects.toThrow(/caller identity unavailable/i);
     expect(calls).toHaveLength(0);
   });
 
-  it("jinn_update_workflow PUTs {patch + expectedVersion} and maps a stale version to a readable 409", async () => {
+  it("update_workflow PUTs {patch + expectedVersion} and maps a stale version to a readable 409", async () => {
     const { calls, ctx } = stub((call) =>
       call.method === "PUT"
         ? { status: 409, body: { error: "version conflict: expected 1, on disk 3" } }
         : { status: 200, body: {} },
     );
     await expect(
-      tool("jinn_update_workflow").handler({ workflowId: "wf", patch: { title: "T2" }, expectedVersion: 1 }, ctx),
+      tool("update_workflow").handler({ workflowId: "wf", patch: { title: "T2" }, expectedVersion: 1 }, ctx),
     ).rejects.toThrow(/conflicted \(409\).*expected 1, on disk 3/is);
     expect(calls[0]).toMatchObject({
       url: "http://127.0.0.1:7777/api/workflow-definitions/wf",
@@ -417,31 +417,31 @@ describe("workflow tools — unit (stub gateway)", () => {
     });
   });
 
-  it("jinn_update_workflow omits expectedVersion from the body when not given", async () => {
+  it("update_workflow omits expectedVersion from the body when not given", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { id: "wf", version: 4 } }));
-    const out = (await tool("jinn_update_workflow").handler({ workflowId: "wf", patch: { title: "T3" } }, ctx)) as { hint: string };
+    const out = (await tool("update_workflow").handler({ workflowId: "wf", patch: { title: "T3" } }, ctx)) as { hint: string };
     expect(calls[0].body).toEqual({ title: "T3" });
     expect(out.hint).toContain("version 4");
   });
 
-  it("jinn_start_workflow_run POSTs the run route and hints by run status", async () => {
+  it("start_workflow_run POSTs the run route and hints by run status", async () => {
     const { calls, ctx } = stub(() => ({
       status: 201,
       body: { runId: "run-1", status: "running", steps: [{ nodeId: "a", status: "running" }] },
     }));
-    const out = (await tool("jinn_start_workflow_run").handler({ workflowId: "wf" }, ctx)) as { run: { runId: string }; hint: string };
+    const out = (await tool("start_workflow_run").handler({ workflowId: "wf" }, ctx)) as { run: { runId: string }; hint: string };
     expect(calls[0]).toMatchObject({ url: "http://127.0.0.1:7777/api/workflow-definitions/wf/run", method: "POST" });
     expect(out.run.runId).toBe("run-1");
     expect(out.hint).toContain("run-1");
-    expect(out.hint).toMatch(/jinn_get_workflow_run/);
+    expect(out.hint).toMatch(/get_workflow_run/);
   });
 
-  it("jinn_start_workflow_run surfaces a 422 failed-at-start run's structured errors", async () => {
+  it("start_workflow_run surfaces a 422 failed-at-start run's structured errors", async () => {
     const { ctx } = stub(() => ({
       status: 422,
       body: { runId: "run-2", status: "failed", steps: [], errors: [{ code: "unsupported-cycle", message: "workflow edges form a cycle" }] },
     }));
-    await expect(tool("jinn_start_workflow_run").handler({ workflowId: "wf" }, ctx)).rejects.toThrow(
+    await expect(tool("start_workflow_run").handler({ workflowId: "wf" }, ctx)).rejects.toThrow(
       /refused to start \(422\)[\s\S]*unsupported-cycle/,
     );
   });
@@ -454,11 +454,11 @@ describe("workflow tools — unit (stub gateway)", () => {
       return { status: 500, body: {} };
     });
 
-    await tool("jinn_list_triggers").handler({}, ctx);
+    await tool("list_triggers").handler({}, ctx);
     expect(calls[0]).toMatchObject({ url: "http://127.0.0.1:7777/api/workflow-triggers", method: "GET" });
 
     const unbound = { ...ctx, callerSessionId: undefined, sessionCapability: undefined };
-    await expect(tool("jinn_create_trigger").handler({
+    await expect(tool("create_trigger").handler({
       kind: "webhook",
       name: "lead-hook",
       event: "lead.created",
@@ -466,7 +466,7 @@ describe("workflow tools — unit (stub gateway)", () => {
     }, unbound)).rejects.toThrow(/caller identity unavailable/i);
 
     const authedCtx = { ...ctx, callerSessionId: "sess-1", sessionCapability: "cap-1" };
-    await tool("jinn_create_trigger").handler({
+    await tool("create_trigger").handler({
       kind: "webhook",
       name: "lead-hook",
       event: "lead.created",
@@ -487,22 +487,22 @@ describe("workflow tools — unit (stub gateway)", () => {
       },
     });
 
-    await tool("jinn_delete_trigger").handler({ name: "lead-hook" }, authedCtx);
+    await tool("delete_trigger").handler({ name: "lead-hook" }, authedCtx);
     expect(calls[2]).toMatchObject({ url: "http://127.0.0.1:7777/api/workflow-triggers/lead-hook", method: "DELETE" });
   });
 
   it("a gateway 413 maps to a structured too-large error the agent can act on", async () => {
     const { ctx } = stub(() => ({ status: 413, body: { error: "Payload too large" } }));
     await expect(
-      tool("jinn_create_workflow").handler({ definition: { id: "big", title: "Big", nodes: [], edges: [] } }, ctx),
+      tool("create_workflow").handler({ definition: { id: "big", title: "Big", nodes: [], edges: [] } }, ctx),
     ).rejects.toThrow(/413.*size cap.*shrink/is);
   });
 
   it("missing required args fail fast with the arg name (no gateway call)", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: {} }));
-    await expect(tool("jinn_get_workflow_run").handler({ workflowId: "wf" }, ctx)).rejects.toThrow(/runId is required/);
-    await expect(tool("jinn_create_workflow").handler({}, ctx)).rejects.toThrow(/sop or definition is required/);
-    await expect(tool("jinn_update_workflow").handler({ workflowId: "wf" }, ctx)).rejects.toThrow(/sop or patch is required/);
+    await expect(tool("get_workflow_run").handler({ workflowId: "wf" }, ctx)).rejects.toThrow(/runId is required/);
+    await expect(tool("create_workflow").handler({}, ctx)).rejects.toThrow(/sop or definition is required/);
+    await expect(tool("update_workflow").handler({ workflowId: "wf" }, ctx)).rejects.toThrow(/sop or patch is required/);
     expect(calls).toHaveLength(0);
   });
 });
@@ -601,7 +601,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
     };
 
     // 1. Invalid definition (no trigger) → the validator's structured errors reach the agent.
-    const bad = await call("jinn_create_workflow", {
+    const bad = await call("create_workflow", {
       definition: {
         id: "mcp-demo",
         title: "MCP Demo",
@@ -615,7 +615,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
     // 2. Corrected definition: trigger → a → gate(approval) → b. Inline steps (no
     //    actor) so the engine settles them without spawning sessions; positions omitted
     //    on purpose — the tool auto-places them.
-    const good = await call("jinn_create_workflow", {
+    const good = await call("create_workflow", {
       definition: {
         id: "mcp-demo",
         title: "MCP Demo",
@@ -638,11 +638,11 @@ describe("workflow tools — integration against the real routes/stores", () => 
     expect(created.definition.nodes.every((n) => n.position !== undefined)).toBe(true);
 
     // 3. Discoverable through the list tool.
-    const listed = await call("jinn_list_workflows", {});
+    const listed = await call("list_workflows", {});
     expect(JSON.parse(listed.text).definitions.map((d: { id: string }) => d.id)).toContain("mcp-demo");
 
     // 4. Start a run: step a settles inline, the run PARKS on the approval gate.
-    const started = await call("jinn_start_workflow_run", { workflowId: "mcp-demo" });
+    const started = await call("start_workflow_run", { workflowId: "mcp-demo" });
     expect(started.isError).toBe(false);
     const startedRun = JSON.parse(started.text) as { run: { runId: string; status: string }; hint: string };
     expect(startedRun.run.status).toBe("parked");
@@ -650,7 +650,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
     expect(startedRun.hint).not.toContain("jinn_resolve_workflow_gate");
 
     // 5. Inspect the run: receipts verbatim, execution order, downstream honestly pending.
-    const inspected = await call("jinn_get_workflow_run", { workflowId: "mcp-demo", runId: startedRun.run.runId });
+    const inspected = await call("get_workflow_run", { workflowId: "mcp-demo", runId: startedRun.run.runId });
     const view = JSON.parse(inspected.text) as { run: { steps: Array<{ nodeId: string; status: string }> } };
     expect(view.run.steps.map((s) => [s.nodeId, s.status])).toEqual([
       ["a", "inline"],
@@ -677,7 +677,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
     expect(resolved.status).toBe(200);
 
     // 8. The agent reads the outcome through its read tool: completed, receipts honest.
-    const after = await call("jinn_get_workflow_run", { workflowId: "mcp-demo", runId: startedRun.run.runId });
+    const after = await call("get_workflow_run", { workflowId: "mcp-demo", runId: startedRun.run.runId });
     const finalView = JSON.parse(after.text) as { run: { status: string; steps: Array<{ nodeId: string; status: string }> } };
     expect(finalView.run.status).toBe("completed");
     expect(finalView.run.steps.map((s) => [s.nodeId, s.status])).toEqual([
@@ -708,7 +708,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
         ],
         edges: [{ id: "e1", from: "trg", to: "a", kind: "sequence" }],
       };
-      await expect(tool("jinn_create_workflow").handler({ definition: oversized }, ctx)).rejects.toThrow(
+      await expect(tool("create_workflow").handler({ definition: oversized }, ctx)).rejects.toThrow(
         /413[\s\S]*size cap[\s\S]*shrink/i,
       );
     } finally {
@@ -716,9 +716,9 @@ describe("workflow tools — integration against the real routes/stores", () => 
     }
   });
 
-  it("jinn_update_workflow round-trips the editable shape: get → patch with expectedVersion → version bump", async () => {
+  it("update_workflow round-trips the editable shape: get → patch with expectedVersion → version bump", async () => {
     const ctx: JinnMcpContext = { gatewayUrl: "http://gateway.test", fetchFn: apiFetch(), ...cooMcpIdentity };
-    const create = tool("jinn_create_workflow");
+    const create = tool("create_workflow");
     await create.handler(
       {
         definition: {
@@ -733,10 +733,10 @@ describe("workflow tools — integration against the real routes/stores", () => 
       },
       ctx,
     );
-    const got = (await tool("jinn_get_workflow").handler({ workflowId: "mcp-edit" }, ctx)) as { title: string; version: number };
+    const got = (await tool("get_workflow").handler({ workflowId: "mcp-edit" }, ctx)) as { title: string; version: number };
     expect(got).toMatchObject({ title: "Before", version: 1 });
 
-    const updated = (await tool("jinn_update_workflow").handler(
+    const updated = (await tool("update_workflow").handler(
       { workflowId: "mcp-edit", patch: { title: "After" }, expectedVersion: got.version },
       ctx,
     )) as { definition: { title: string; version: number } };
@@ -744,13 +744,13 @@ describe("workflow tools — integration against the real routes/stores", () => 
 
     // A stale expectedVersion is refused (optimistic lock through the tool).
     await expect(
-      tool("jinn_update_workflow").handler({ workflowId: "mcp-edit", patch: { title: "Stale" }, expectedVersion: 1 }, ctx),
+      tool("update_workflow").handler({ workflowId: "mcp-edit", patch: { title: "Stale" }, expectedVersion: 1 }, ctx),
     ).rejects.toThrow(/409/);
   });
 
   it("SOP create through MCP round-trips to a persisted valid graph and dry-run plan", async () => {
     const ctx: JinnMcpContext = { gatewayUrl: "http://gateway.test", fetchFn: apiFetch(), ...cooMcpIdentity };
-    const created = (await tool("jinn_create_workflow").handler(
+    const created = (await tool("create_workflow").handler(
       {
         sop: {
           id: "mcp-sop",
@@ -766,7 +766,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
     )) as { definition: { id: string; version: number } };
     expect(created.definition).toMatchObject({ id: "mcp-sop", version: 1 });
 
-    const got = (await tool("jinn_get_workflow").handler({ workflowId: "mcp-sop" }, ctx)) as {
+    const got = (await tool("get_workflow").handler({ workflowId: "mcp-sop" }, ctx)) as {
       nodes: Array<{ id: string; type: string; instructions?: string }>;
       edges: Array<{ from: string; to: string }>;
     };
@@ -777,7 +777,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
     ]);
     expect(got.edges.map((e) => [e.from, e.to])).toEqual([["wake", "draft"], ["draft", "review"]]);
 
-    const planned = (await tool("jinn_plan_workflow").handler({ definition: got }, ctx)) as { ok: boolean; validation: { ok: boolean }; execution: { ok: boolean } };
+    const planned = (await tool("plan_workflow").handler({ definition: got }, ctx)) as { ok: boolean; validation: { ok: boolean }; execution: { ok: boolean } };
     expect(planned).toMatchObject({ ok: true, validation: { ok: true }, execution: { ok: true } });
   });
 
@@ -785,7 +785,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
     const ctx: JinnMcpContext = { gatewayUrl: "http://gateway.test", fetchFn: apiFetch(), ...cooMcpIdentity };
     const baseStep = [{ id: "handle", engine: "codex", instruction: "Handle the event." }];
 
-    await tool("jinn_create_workflow").handler(
+    await tool("create_workflow").handler(
       {
         sop: {
           id: "sop-trigger-reconcile",
@@ -796,10 +796,10 @@ describe("workflow tools — integration against the real routes/stores", () => 
       },
       ctx,
     );
-    let listed = (await tool("jinn_list_triggers").handler({}, ctx)) as { triggers: Array<{ name: string; event: string }> };
+    let listed = (await tool("list_triggers").handler({}, ctx)) as { triggers: Array<{ name: string; event: string }> };
     expect(listed.triggers.map((t) => [t.name, t.event])).toEqual([["first-hook", "lead.created"]]);
 
-    await tool("jinn_update_workflow").handler(
+    await tool("update_workflow").handler(
       {
         workflowId: "sop-trigger-reconcile",
         sop: {
@@ -811,11 +811,11 @@ describe("workflow tools — integration against the real routes/stores", () => 
       },
       ctx,
     );
-    listed = (await tool("jinn_list_triggers").handler({}, ctx)) as { triggers: Array<{ name: string; event: string }> };
+    listed = (await tool("list_triggers").handler({}, ctx)) as { triggers: Array<{ name: string; event: string }> };
     expect(listed.triggers.map((t) => t.name)).not.toContain("first-hook");
     expect(listed.triggers).toEqual([]);
 
-    await tool("jinn_update_workflow").handler(
+    await tool("update_workflow").handler(
       {
         workflowId: "sop-trigger-reconcile",
         sop: {
@@ -827,10 +827,10 @@ describe("workflow tools — integration against the real routes/stores", () => 
       },
       ctx,
     );
-    listed = (await tool("jinn_list_triggers").handler({}, ctx)) as { triggers: Array<{ name: string; event: string }> };
+    listed = (await tool("list_triggers").handler({}, ctx)) as { triggers: Array<{ name: string; event: string }> };
     expect(listed.triggers.map((t) => [t.name, t.event])).toEqual([["second-hook", "lead.updated"]]);
 
-    await tool("jinn_update_workflow").handler(
+    await tool("update_workflow").handler(
       {
         workflowId: "sop-trigger-reconcile",
         sop: {
@@ -842,7 +842,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
       },
       ctx,
     );
-    listed = (await tool("jinn_list_triggers").handler({}, ctx)) as { triggers: Array<{ name: string; event: string }> };
+    listed = (await tool("list_triggers").handler({}, ctx)) as { triggers: Array<{ name: string; event: string }> };
     expect(listed.triggers.map((t) => [t.name, t.event])).toEqual([["third-hook", "lead.won"]]);
   });
 
@@ -850,7 +850,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
     const ctx: JinnMcpContext = { gatewayUrl: "http://gateway.test", fetchFn: apiFetch(), ...cooMcpIdentity };
     const baseStep = [{ id: "handle", engine: "codex", instruction: "Handle the event." }];
 
-    await tool("jinn_create_workflow").handler(
+    await tool("create_workflow").handler(
       {
         sop: {
           id: "sop-conflict-owner",
@@ -861,7 +861,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
       },
       ctx,
     );
-    await tool("jinn_create_workflow").handler(
+    await tool("create_workflow").handler(
       {
         sop: {
           id: "sop-conflict-other",
@@ -874,7 +874,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
     );
 
     await expect(
-      tool("jinn_update_workflow").handler(
+      tool("update_workflow").handler(
         {
           workflowId: "sop-conflict-owner",
           sop: {
@@ -888,7 +888,7 @@ describe("workflow tools — integration against the real routes/stores", () => 
       ),
     ).rejects.toThrow(/409|conflict/i);
 
-    const listed = (await tool("jinn_list_triggers").handler({}, ctx)) as {
+    const listed = (await tool("list_triggers").handler({}, ctx)) as {
       triggers: Array<{ name: string; event: string; sopOwnerWorkflowId?: string }>;
     };
     expect(listed.triggers.map((t) => [t.name, t.event, t.sopOwnerWorkflowId]).sort()).toEqual([

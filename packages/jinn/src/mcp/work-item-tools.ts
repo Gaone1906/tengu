@@ -150,16 +150,16 @@ function validateVerifyPolicy(policy: Record<string, unknown>): Record<string, u
 function rejectProvenance(args: Record<string, unknown>): void {
   if (args.provenance !== undefined) {
     throw new JinnMcpToolError(
-      "provenance cannot be supplied by jinn_create_work_item — cron/workflow/delegation source records are minted only by their dedicated bridge; normal tool/session creation is source=session",
+      "provenance cannot be supplied by create_work_item — cron/workflow/delegation source records are minted only by their dedicated bridge; normal tool/session creation is source=session",
     );
   }
 }
 
 export function buildWorkItemTools(): JinnMcpTool[] {
   const list: JinnMcpTool = {
-    name: "jinn_list_work_items",
+    name: "list_work_items",
     description:
-      "List recent or structured-filtered Todos (substrate: work_items) by status/source/assignee/department, or pass needsAttentionFor='me' for your own approval/blocked queue. Read-only, compact summaries only. Use jinn_get_work_item for full acceptance, approval, spend, rounds, and workflow-run detail.",
+      "List recent or structured-filtered Todos (substrate: work_items) by status/source/assignee/department, or pass needsAttentionFor='me' for your own approval/blocked queue. Read-only, compact summaries only. Use get_work_item for full acceptance, approval, spend, rounds, and workflow-run detail.",
     inputSchema: {
       type: "object",
       properties: {
@@ -184,12 +184,12 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       const { status, body } = await gatewayRequest(ctx, "GET", `/api/work-items?${params}`);
       if (status >= 400) throw gatewayFailure("listing work items", status, body);
       const workItems = workItemsFrom(body);
-      return { workItems, hint: workItems.length ? "Read full detail with jinn_get_work_item { id }." : "No matching Todos. Search text with jinn_search_work_items or create one with jinn_create_work_item." };
+      return { workItems, hint: workItems.length ? "Read full detail with get_work_item { id }." : "No matching Todos. Search text with search_work_items or create one with create_work_item." };
     },
   };
 
   const get: JinnMcpTool = {
-    name: "jinn_get_work_item",
+    name: "get_work_item",
     description:
       "Get one Todo's full detail: body, acceptance, verify policy, rounds, approval fields, live spend, workflowRun reference, and event log. Read-only.",
     inputSchema: {
@@ -207,7 +207,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
   };
 
   const search: JinnMcpTool = {
-    name: "jinn_search_work_items",
+    name: "search_work_items",
     description:
       "Text search Todos with deterministic escaped-LIKE text over title+body AND-composed with status/source/assignee/department filters. Operators like %, _, and backslash are literal. Returns <=20 compact hits, never body dumps.",
     inputSchema: {
@@ -232,16 +232,16 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         limit: clampInt(args.limit, WORK_ITEM_SEARCH_LIMIT_DEFAULT, 1, WORK_ITEM_SEARCH_LIMIT_MAX),
       };
       const hasFilter = Object.entries(params).some(([k, v]) => k !== "limit" && v !== undefined);
-      if (!hasFilter) throw new JinnMcpToolError("pass at least one filter (text, status, source, assignee, department) — for recent Todos use jinn_list_work_items.");
+      if (!hasFilter) throw new JinnMcpToolError("pass at least one filter (text, status, source, assignee, department) — for recent Todos use list_work_items.");
       const { status, body } = await gatewayRequest(ctx, "GET", `/api/search/work-items?${qs(params)}`);
       if (status >= 400) throw gatewayFailure("searching work items", status, body);
       const workItems = workItemsFrom(body);
-      return { workItems, hint: workItems.length ? "Read full detail with jinn_get_work_item { id }." : "No matching Todos. Try fewer words or drop a structured filter." };
+      return { workItems, hint: workItems.length ? "Read full detail with get_work_item { id }." : "No matching Todos. Try fewer words or drop a structured filter." };
     },
   };
 
   const create: JinnMcpTool = {
-    name: "jinn_create_work_item",
+    name: "create_work_item",
     description:
       "Create a Todo for COO decomposition or agent-captured work. Agent-legal live write. Approval is deliberately impossible here: fresh Todos never attach approvals; approval decisions use the separate routed authority tools.",
     inputSchema: {
@@ -250,7 +250,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         title: { type: "string", description: "Short Todo title." },
         body: { type: "string", description: "Brief/spec body." },
         acceptance: { type: "string", description: "Acceptance criteria/checklist." },
-        assignee: { type: "string", description: "Optional assignee slug; use jinn_assign_work_item for roster-validated assignment." },
+        assignee: { type: "string", description: "Optional assignee slug; use assign_work_item for roster-validated assignment." },
         department: { type: "string", description: "Optional department slug." },
         verifyPolicy: { type: "object", description: "{ mode: 'trust'|'verify'|'thorough', maxRounds? }." },
       },
@@ -258,7 +258,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     },
     handler: async (args, ctx) => {
       assertIdentity(ctx);
-      rejectApprovalFields(args, "jinn_create_work_item");
+      rejectApprovalFields(args, "create_work_item");
       rejectProvenance(args);
       const body: Record<string, unknown> = { title: requireString(args, "title") };
       for (const key of ["body", "acceptance", "assignee", "department"] as const) {
@@ -269,12 +269,12 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       if (verifyPolicy) body.verifyPolicy = validateVerifyPolicy(verifyPolicy);
       const { status, body: resp } = await gatewayRequest(ctx, "POST", "/api/work-items", body);
       if (status >= 400) throw gatewayFailure("creating work item", status, resp);
-      return { ...(resp as Record<string, unknown>), hint: "Todo created. Assign with jinn_assign_work_item or keep it current with jinn_update_work_item." };
+      return { ...(resp as Record<string, unknown>), hint: "Todo created. Assign with assign_work_item or keep it current with update_work_item." };
     },
   };
 
   const update: JinnMcpTool = {
-    name: "jinn_update_work_item",
+    name: "update_work_item",
     description:
       "Update your Todo status through the guarded transition rules. Agent-legal statuses: in_review, blocked, escalated, done. Own executing item -> done is refused by the self-review ban; cancellation and approval decisions are human-surface only.",
     inputSchema: {
@@ -288,7 +288,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     },
     handler: async (args, ctx) => {
       assertIdentity(ctx);
-      rejectApprovalFields(args, "jinn_update_work_item");
+      rejectApprovalFields(args, "update_work_item");
       const id = requireString(args, "id");
       const rawStatus = requireString(args, "status");
       if (rawStatus === "cancelled") {
@@ -307,20 +307,20 @@ export function buildWorkItemTools(): JinnMcpTool[] {
   };
 
   const assign: JinnMcpTool = {
-    name: "jinn_assign_work_item",
+    name: "assign_work_item",
     description:
       "Assign a Todo to a named employee. Agent-legal collaborative write; the gateway validates the employee against the org roster and returns near-match hints on typos.",
     inputSchema: {
       type: "object",
       properties: {
         id: { type: "string", description: "Work item id." },
-        assignee: { type: "string", description: "Employee slug from jinn_find_employees / jinn_list_employees." },
+        assignee: { type: "string", description: "Employee slug from find_employees / list_employees." },
       },
       required: ["id", "assignee"],
     },
     handler: async (args, ctx) => {
       assertIdentity(ctx);
-      rejectApprovalFields(args, "jinn_assign_work_item");
+      rejectApprovalFields(args, "assign_work_item");
       const id = requireString(args, "id");
       const assignee = requireString(args, "assignee");
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/assign`, { assignee });

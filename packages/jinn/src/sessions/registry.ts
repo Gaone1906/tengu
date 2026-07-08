@@ -1629,7 +1629,7 @@ export function getMessagePage(sessionId: string, options: MessagePageOptions = 
 }
 
 /** Per-message content cap in getMessageContext output (chars). Matches the
- *  jinn_read_session cap — the reference layer never returns unbounded bodies. */
+ *  read_session cap — the reference layer never returns unbounded bodies. */
 export const MESSAGE_CONTEXT_CHAR_CAP = 2_000;
 /** Max messages each side of the anchor. */
 export const MESSAGE_CONTEXT_MAX_RADIUS = 10;
@@ -1649,12 +1649,12 @@ export interface MessageContext {
 }
 
 /**
- * GRS-020a — the ±radius window around a message anchor (a jinn_search_messages
+ * GRS-020a — the ±radius window around a message anchor (a search_messages
  * hit), so a search result becomes readable in place without pulling a whole
  * transcript. Bounded by construction: radius clamped to
  * {@link MESSAGE_CONTEXT_MAX_RADIUS}, each body truncated at
  * {@link MESSAGE_CONTEXT_CHAR_CAP} with the intentional-cap marker (the same
- * doctrine as jinn_read_session — no full-transcript escape hatch).
+ * doctrine as read_session — no full-transcript escape hatch).
  * Returns undefined when the message doesn't exist IN THAT SESSION (an anchor
  * from another session must not leak across).
  */

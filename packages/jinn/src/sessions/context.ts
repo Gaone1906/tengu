@@ -244,7 +244,7 @@ export function buildContext(opts: {
   // ── OPTIONAL: Knowledge / docs (filenames only, never inlined)
   // GRS-020b context diet (mirrors the 017b jinnMcpAttached pattern): for
   // jinn-MCP-attached sessions the ~100-file index collapses to a 2-line
-  // manifest pointing at jinn_search_knowledge/jinn_read_knowledge; everyone
+  // manifest pointing at search_knowledge/read_knowledge; everyone
   // else keeps the full index byte-identical.
   const knowledgeCtx = buildKnowledgeContext(opts.jinnMcpAttached);
   if (knowledgeCtx) {
@@ -426,7 +426,7 @@ function buildChainOfCommand(
   if (jinnMcpAttached) {
     // GRS-017b diet: the walked escalation-path prose is discoverable through
     // the org tools; one pointer replaces it.
-    lines.push(`- **Org discovery**: jinn_find_employees / jinn_get_employee / jinn_list_employees (roster, personas, reporting lines).`);
+    lines.push(`- **Org discovery**: find_employees / get_employee / list_employees (roster, personas, reporting lines).`);
   } else {
     // Escalation path
     const escalation: string[] = [];
@@ -540,7 +540,7 @@ function buildOrgContext(
       const count = Object.keys(hierarchy.nodes).length;
       return [
         `## Organization (${count} employee(s))`,
-        `Use MCP org tools for roster, personas, and reporting lines: jinn_list_employees, jinn_find_employees, jinn_get_employee.`,
+        `Use MCP org tools for roster, personas, and reporting lines: list_employees, find_employees, get_employee.`,
         `Create or change employees through the company/management tools; keep normal MCP-attached company work on the tool surface.`,
       ].join("\n");
     }
@@ -628,7 +628,7 @@ function buildCronContext(jinnMcpAttached = false): string | null {
     if (jinnMcpAttached) {
       return [
         `## Scheduled cron jobs (${enabled.length} active, ${disabledCount} disabled)`,
-        "Read schedules/status with `jinn_list_cron_jobs`; read runs with `jinn_get_cron_run_history { id }`. Schedule edits stay operator/COO operations.",
+        "Read schedules/status with `list_cron_jobs`; read runs with `get_cron_run_history { id }`. Schedule edits stay operator/COO operations.",
       ].join("\n");
     }
 
@@ -666,7 +666,7 @@ let knowledgeCache: { builtAt: number; value: string | null } | null = null;
  */
 const KNOWLEDGE_MCP_MANIFEST = [
   "## Knowledge base",
-  "Company knowledge is in `knowledge/` + `docs/`: search with `jinn_search_knowledge`, then read a hit with `jinn_read_knowledge { path }`.",
+  "Company knowledge is in `knowledge/` + `docs/`: search with `search_knowledge`, then read a hit with `read_knowledge { path }`.",
 ].join("\n");
 
 function buildKnowledgeContext(jinnMcpAttached?: boolean): string | null {

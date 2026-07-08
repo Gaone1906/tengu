@@ -10,7 +10,7 @@ import { assertBoundCaller, gatewayGet, JinnMcpToolError, type JinnMcpContext, t
  * (mcp/__tests__/context-diet.test.ts).
  *
  * Contract (012d-0 admission rules): deterministic wrappers over the org read
- * routes. `jinn_find_employees` is a deterministic AND-filter on DECLARED
+ * routes. `find_employees` is a deterministic AND-filter on DECLARED
  * fields (department / rank / engine) — it never ranks "fit"; judging which
  * matching employee suits a task is the calling engine's job over the returned
  * list (no LLM inside tools).
@@ -41,7 +41,7 @@ function optionalString(args: Record<string, unknown>, name: string): string | u
   return v.trim();
 }
 
-/** Compact roster row — never the persona (that's jinn_get_employee's job). */
+/** Compact roster row — never the persona (that's get_employee's job). */
 function summarize(e: OrgEmployeeRecord): Record<string, unknown> {
   return {
     name: e.name,
@@ -64,7 +64,7 @@ async function fetchOrgEmployees(ctx: JinnMcpContext): Promise<OrgEmployeeRecord
 
 export function buildOrgTools(): JinnMcpTool[] {
   const listEmployees: JinnMcpTool = {
-    name: "jinn_list_employees",
+    name: "list_employees",
     description:
       "List the AI employees in this Jinn organization — their names, roles, ranks, departments, and reporting lines. Read-only. Use this to discover who works here instead of relying on a pasted roster.",
     inputSchema: { type: "object", properties: {} },
@@ -79,12 +79,12 @@ export function buildOrgTools(): JinnMcpTool[] {
   };
 
   const getEmployee: JinnMcpTool = {
-    name: "jinn_get_employee",
+    name: "get_employee",
     description:
       "Get one employee's FULL record by slug: persona, department, rank, engine/model defaults, manager, direct reports. Read-only. Use before delegating to understand who you're briefing.",
     inputSchema: {
       type: "object",
-      properties: { name: { type: "string", description: "Employee slug (from jinn_list_employees / jinn_find_employees)." } },
+      properties: { name: { type: "string", description: "Employee slug (from list_employees / find_employees)." } },
       required: ["name"],
     },
     handler: async (args, ctx) => {
@@ -93,19 +93,19 @@ export function buildOrgTools(): JinnMcpTool[] {
       const { status, body } = await gatewayGet(ctx, `/api/org/employees/${encodeURIComponent(name)}`);
       if (status === 404) {
         throw new JinnMcpToolError(
-          `employee "${name}" not found. Discover valid slugs with jinn_find_employees (filter by department/rank/engine) or jinn_list_employees.`,
+          `employee "${name}" not found. Discover valid slugs with find_employees (filter by department/rank/engine) or list_employees.`,
         );
       }
       if (status >= 400) throw new JinnMcpToolError(`getting employee "${name}" failed (HTTP ${status})`);
       return {
         employee: body,
-        hint: `Delegate to them with jinn_spawn_session { employee: "${name}", prompt: ... } — then end your turn; the reply wakes you.`,
+        hint: `Delegate to them with spawn_session { employee: "${name}", prompt: ... } — then end your turn; the reply wakes you.`,
       };
     },
   };
 
   const findEmployees: JinnMcpTool = {
-    name: "jinn_find_employees",
+    name: "find_employees",
     description:
       "Find employees by exact department, rank, and/or engine (AND of the filters you pass; at least one required). Deterministic filter on declared fields — YOU judge which match fits the task. Read-only; returns compact rows without personas.",
     inputSchema: {
@@ -125,7 +125,7 @@ export function buildOrgTools(): JinnMcpTool[] {
       }
       if (filters.length === 0) {
         throw new JinnMcpToolError(
-          "pass at least one filter (department, rank, engine) — for the whole roster use jinn_list_employees.",
+          "pass at least one filter (department, rank, engine) — for the whole roster use list_employees.",
         );
       }
       const employees = await fetchOrgEmployees(ctx);
@@ -143,12 +143,12 @@ export function buildOrgTools(): JinnMcpTool[] {
           .join("; ");
         return {
           matches: [],
-          hint: `No employee matches. Observed values: ${observed}. Adjust the filter or use jinn_list_employees.`,
+          hint: `No employee matches. Observed values: ${observed}. Adjust the filter or use list_employees.`,
         };
       }
       return {
         matches: matches.map(summarize),
-        hint: "Full persona: jinn_get_employee { name }. Delegate: jinn_spawn_session { employee, prompt }.",
+        hint: "Full persona: get_employee { name }. Delegate: spawn_session { employee, prompt }.",
       };
     },
   };

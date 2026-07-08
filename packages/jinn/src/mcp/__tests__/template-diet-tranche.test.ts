@@ -21,10 +21,10 @@ describe("the GRS-017e template diet tranche (MCP-first realized)", () => {
     expect(template).not.toContain("grs-017e-diet:start child-session-protocol");
     expect(template).not.toContain("grs-017e-diet:end child-session-protocol");
     expect(template).toContain("### Child Session Protocol");
-    expect(template).toContain("jinn_spawn_session");
-    expect(template).toContain("jinn_delegate_task");
-    expect(template).toContain("jinn_read_session");
-    expect(template).toContain("jinn_send_to_session");
+    expect(template).toContain("spawn_session");
+    expect(template).toContain("delegate_task");
+    expect(template).toContain("read_session");
+    expect(template).toContain("send_to_session");
     expect(template).not.toContain("POST /api/sessions");
     expect(template).not.toContain("GET /api/sessions/{id}");
     expect(template).not.toContain("POST /api/sessions/{id}/message");

@@ -90,43 +90,43 @@ describe("session tools — registry + schemas", () => {
   it("exposes the 5 session tools with flat object schemas and required args", () => {
     const tools = buildSessionTools();
     expect(tools.map((t) => t.name)).toEqual([
-      "jinn_spawn_session",
-      "jinn_send_to_session",
-      "jinn_read_session",
-      "jinn_list_sessions",
-      "jinn_stop_session",
+      "spawn_session",
+      "send_to_session",
+      "read_session",
+      "list_sessions",
+      "stop_session",
     ]);
-    expect(tool("jinn_spawn_session").inputSchema.required).toEqual(["prompt"]);
-    expect(tool("jinn_send_to_session").inputSchema.required).toEqual(["sessionId", "message"]);
-    expect(tool("jinn_read_session").inputSchema.required).toEqual(["sessionId"]);
-    expect(tool("jinn_list_sessions").inputSchema.required).toBeUndefined();
-    expect(tool("jinn_stop_session").inputSchema.required).toEqual(["sessionId"]);
+    expect(tool("spawn_session").inputSchema.required).toEqual(["prompt"]);
+    expect(tool("send_to_session").inputSchema.required).toEqual(["sessionId", "message"]);
+    expect(tool("read_session").inputSchema.required).toEqual(["sessionId"]);
+    expect(tool("list_sessions").inputSchema.required).toBeUndefined();
+    expect(tool("stop_session").inputSchema.required).toEqual(["sessionId"]);
   });
 
   it("the full belt registers the sessions group and still has NO delete tool (human-only authority)", () => {
     const names = buildTools().map((t) => t.name);
-    expect(names).toContain("jinn_spawn_session");
+    expect(names).toContain("spawn_session");
     expect(names).not.toContain("jinn_delete_session");
   });
 
   it("the protocol teaching (end turn, callback, no polling loops) lives on the spawn tool", () => {
-    expect(tool("jinn_spawn_session").description).toMatch(/END YOUR TURN/);
-    expect(tool("jinn_spawn_session").description).toMatch(/never poll/i);
+    expect(tool("spawn_session").description).toMatch(/END YOUR TURN/);
+    expect(tool("spawn_session").description).toMatch(/never poll/i);
   });
 
   it("positions spawn as the quick untracked session verb, distinct from delegate_task", () => {
-    expect(tool("jinn_spawn_session").description).toMatch(/quick untracked/i);
-    expect(tool("jinn_spawn_session").description).toMatch(/tracked company work.*jinn_delegate_task/i);
+    expect(tool("spawn_session").description).toMatch(/quick untracked/i);
+    expect(tool("spawn_session").description).toMatch(/tracked company work.*delegate_task/i);
   });
 });
 
 describe("session tools — unit (stub gateway)", () => {
-  it("jinn_spawn_session POSTs the create route with only the provided fields and hints the callback protocol", async () => {
+  it("spawn_session POSTs the create route with only the provided fields and hints the callback protocol", async () => {
     const { calls, ctx } = stub(
       () => ({ status: 201, body: { id: "child-1", employee: "worker", engine: "codex", status: "running" } }),
       "parent-1",
     );
-    const out = (await tool("jinn_spawn_session").handler({ prompt: "do X", employee: "worker" }, ctx)) as Record<string, unknown>;
+    const out = (await tool("spawn_session").handler({ prompt: "do X", employee: "worker" }, ctx)) as Record<string, unknown>;
     expect(calls[0]).toMatchObject({
       url: "http://127.0.0.1:7777/api/sessions",
       method: "POST",
@@ -142,9 +142,9 @@ describe("session tools — unit (stub gateway)", () => {
   it("spawn/send/stop REFUSE locally when the server has no caller identity — fail closed, no round trip (GRS-017 finding 2)", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: {} }));
     const cases: Array<[string, Record<string, unknown>]> = [
-      ["jinn_spawn_session", { prompt: "p" }],
-      ["jinn_send_to_session", { sessionId: "b", message: "hi" }],
-      ["jinn_stop_session", { sessionId: "b" }],
+      ["spawn_session", { prompt: "p" }],
+      ["send_to_session", { sessionId: "b", message: "hi" }],
+      ["stop_session", { sessionId: "b" }],
     ];
     for (const [name, args] of cases) {
       await expect(tool(name).handler(args, ctx)).rejects.toThrow(/caller identity unavailable.*JINN_SESSION_ID/is);
@@ -152,43 +152,43 @@ describe("session tools — unit (stub gateway)", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("jinn_spawn_session passes a structured 400 (unknown employee/engine/model) through readable", async () => {
+  it("spawn_session passes a structured 400 (unknown employee/engine/model) through readable", async () => {
     const { ctx } = stub(() => ({ status: 400, body: { error: 'unknown engine "warp"' } }), "p");
-    await expect(tool("jinn_spawn_session").handler({ prompt: "p", engine: "warp" }, ctx)).rejects.toThrow(
+    await expect(tool("spawn_session").handler({ prompt: "p", engine: "warp" }, ctx)).rejects.toThrow(
       /rejected \(400\).*unknown engine/,
     );
   });
 
-  it("jinn_send_to_session POSTs the message route; 429 and hop-budget 400 come back readable", async () => {
+  it("send_to_session POSTs the message route; 429 and hop-budget 400 come back readable", async () => {
     const ok = stub(() => ({ status: 200, body: { status: "queued", sessionId: "b" } }), "a");
-    const out = (await tool("jinn_send_to_session").handler({ sessionId: "b", message: "hi" }, ok.ctx)) as Record<string, unknown>;
+    const out = (await tool("send_to_session").handler({ sessionId: "b", message: "hi" }, ok.ctx)) as Record<string, unknown>;
     expect(ok.calls[0]).toMatchObject({ url: "http://127.0.0.1:7777/api/sessions/b/message", method: "POST", body: { message: "hi" } });
     expect(out.status).toBe("queued");
 
     const rated = stub(() => ({ status: 429, body: { error: "lateral-send rate cap: 10 per 10 minutes. Retry in ~540s" } }), "a");
-    await expect(tool("jinn_send_to_session").handler({ sessionId: "b", message: "hi" }, rated.ctx)).rejects.toThrow(
+    await expect(tool("send_to_session").handler({ sessionId: "b", message: "hi" }, rated.ctx)).rejects.toThrow(
       /refused \(429\).*rate cap/,
     );
 
     const hopped = stub(() => ({ status: 400, body: { error: "hop budget exhausted: relay hop 5 (max 4)" } }), "a");
-    await expect(tool("jinn_send_to_session").handler({ sessionId: "b", message: "hi" }, hopped.ctx)).rejects.toThrow(
+    await expect(tool("send_to_session").handler({ sessionId: "b", message: "hi" }, hopped.ctx)).rejects.toThrow(
       /rejected \(400\).*hop budget/,
     );
   });
 
-  it("jinn_send_to_session refuses a self-message locally — no round trip", async () => {
+  it("send_to_session refuses a self-message locally — no round trip", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: {} }), "me");
-    await expect(tool("jinn_send_to_session").handler({ sessionId: "me", message: "hi" }, ctx)).rejects.toThrow(/own session/i);
+    await expect(tool("send_to_session").handler({ sessionId: "me", message: "hi" }, ctx)).rejects.toThrow(/own session/i);
     expect(calls).toHaveLength(0);
   });
 
-  it(`jinn_read_session defaults last=${READ_LAST_DEFAULT}, clamps to ${READ_LAST_MAX}, and truncates long messages with the intentional-cap marker`, async () => {
+  it(`read_session defaults last=${READ_LAST_DEFAULT}, clamps to ${READ_LAST_MAX}, and truncates long messages with the intentional-cap marker`, async () => {
     const long = "y".repeat(READ_MESSAGE_CHAR_CAP + 500);
     const { calls, ctx } = stub(() => ({
       status: 200,
       body: { id: "s", engine: "codex", status: "idle", messages: [{ role: "assistant", content: long, timestamp: 5 }] },
     }), "reader");
-    const out = (await tool("jinn_read_session").handler({ sessionId: "s" }, ctx)) as {
+    const out = (await tool("read_session").handler({ sessionId: "s" }, ctx)) as {
       messages: Array<{ content: string }>;
       hint: string;
     };
@@ -197,29 +197,29 @@ describe("session tools — unit (stub gateway)", () => {
     expect(out.messages[0].content.length).toBeLessThan(READ_MESSAGE_CHAR_CAP + 120);
     expect(out.hint).toMatch(/idle/i);
 
-    await tool("jinn_read_session").handler({ sessionId: "s", last: 999 }, ctx);
+    await tool("read_session").handler({ sessionId: "s", last: 999 }, ctx);
     expect(calls[1].url).toBe(`http://127.0.0.1:7777/api/sessions/s?last=${READ_LAST_MAX}`);
-    await tool("jinn_read_session").handler({ sessionId: "s", last: 0 }, ctx);
+    await tool("read_session").handler({ sessionId: "s", last: 0 }, ctx);
     expect(calls[2].url).toBe("http://127.0.0.1:7777/api/sessions/s?last=1");
   });
 
-  it("jinn_read_session hints are decision-shaped per status (running → end turn / wake; error → surfaces lastError)", async () => {
+  it("read_session hints are decision-shaped per status (running → end turn / wake; error → surfaces lastError)", async () => {
     const running = stub(() => ({ status: 200, body: { id: "s", status: "running", messages: [] } }), "reader");
-    const r1 = (await tool("jinn_read_session").handler({ sessionId: "s" }, running.ctx)) as { hint: string };
+    const r1 = (await tool("read_session").handler({ sessionId: "s" }, running.ctx)) as { hint: string };
     expect(r1.hint).toMatch(/END YOUR TURN/);
     expect(r1.hint).toMatch(/never poll/i);
 
     const errored = stub(() => ({ status: 200, body: { id: "s", status: "error", lastError: "engine exploded", messages: [] } }), "reader");
-    const r2 = (await tool("jinn_read_session").handler({ sessionId: "s" }, errored.ctx)) as { hint: string };
+    const r2 = (await tool("read_session").handler({ sessionId: "s" }, errored.ctx)) as { hint: string };
     expect(r2.hint).toContain("engine exploded");
   });
 
-  it("jinn_read_session maps 404 to a discovery hint", async () => {
+  it("read_session maps 404 to a discovery hint", async () => {
     const { ctx } = stub(() => ({ status: 404, body: { error: "not found" } }), "reader");
-    await expect(tool("jinn_read_session").handler({ sessionId: "ghost" }, ctx)).rejects.toThrow(/404.*jinn_list_sessions/);
+    await expect(tool("read_session").handler({ sessionId: "ghost" }, ctx)).rejects.toThrow(/404.*list_sessions/);
   });
 
-  it("jinn_list_sessions: children scope hits /children with the caller id and returns summaries WITHOUT message bodies", async () => {
+  it("list_sessions: children scope hits /children with the caller id and returns summaries WITHOUT message bodies", async () => {
     const { calls, ctx } = stub(
       () => ({
         status: 200,
@@ -229,39 +229,39 @@ describe("session tools — unit (stub gateway)", () => {
       }),
       "p",
     );
-    const out = (await tool("jinn_list_sessions").handler({}, ctx)) as { scope: string; sessions: Array<Record<string, unknown>> };
+    const out = (await tool("list_sessions").handler({}, ctx)) as { scope: string; sessions: Array<Record<string, unknown>> };
     expect(calls[0].url).toBe("http://127.0.0.1:7777/api/sessions/p/children");
     expect(out.scope).toBe("children");
     expect(out.sessions[0].id).toBe("c1");
     expect(JSON.stringify(out.sessions)).not.toContain("SECRET");
   });
 
-  it("jinn_list_sessions: children scope without identity refuses with a scope suggestion", async () => {
+  it("list_sessions: children scope without identity refuses with a scope suggestion", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: [] }));
-    await expect(tool("jinn_list_sessions").handler({ scope: "children" }, ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("list_sessions").handler({ scope: "children" }, ctx)).rejects.toThrow(/caller identity unavailable/i);
     expect(calls).toHaveLength(0);
   });
 
-  it("jinn_list_sessions: employee scope requires the employee arg and hits the group route; recent unwraps {sessions}", async () => {
+  it("list_sessions: employee scope requires the employee arg and hits the group route; recent unwraps {sessions}", async () => {
     const emp = stub(() => ({ status: 200, body: [{ id: "e1", employee: "worker" }] }), "p");
-    await expect(tool("jinn_list_sessions").handler({ scope: "employee" }, emp.ctx)).rejects.toThrow(/employee is required/);
-    const out = (await tool("jinn_list_sessions").handler({ scope: "employee", employee: "worker", limit: 7 }, emp.ctx)) as {
+    await expect(tool("list_sessions").handler({ scope: "employee" }, emp.ctx)).rejects.toThrow(/employee is required/);
+    const out = (await tool("list_sessions").handler({ scope: "employee", employee: "worker", limit: 7 }, emp.ctx)) as {
       sessions: unknown[];
     };
     expect(emp.calls[0].url).toBe("http://127.0.0.1:7777/api/sessions?group=worker&limit=7");
     expect(out.sessions).toHaveLength(1);
 
     const rec = stub(() => ({ status: 200, body: { sessions: [{ id: "r1" }, { id: "r2" }], counts: {} } }), "p");
-    const recent = (await tool("jinn_list_sessions").handler({ scope: "recent", limit: 1 }, rec.ctx)) as { sessions: unknown[] };
+    const recent = (await tool("list_sessions").handler({ scope: "recent", limit: 1 }, rec.ctx)) as { sessions: unknown[] };
     expect(rec.calls[0].url).toBe("http://127.0.0.1:7777/api/sessions");
     expect(recent.sessions).toHaveLength(1); // limit applied tool-side
 
     expect(LIST_LIMIT_MAX).toBe(50);
   });
 
-  it("jinn_stop_session POSTs the stop route; a 403 non-descendant refusal passes through readable", async () => {
+  it("stop_session POSTs the stop route; a 403 non-descendant refusal passes through readable", async () => {
     const ok = stub(() => ({ status: 200, body: { status: "stopped", sessionId: "c" } }), "p");
-    const out = (await tool("jinn_stop_session").handler({ sessionId: "c" }, ok.ctx)) as Record<string, unknown>;
+    const out = (await tool("stop_session").handler({ sessionId: "c" }, ok.ctx)) as Record<string, unknown>;
     expect(ok.calls[0]).toMatchObject({ url: "http://127.0.0.1:7777/api/sessions/c/stop", method: "POST" });
     // GRS-017f: the return is an ACTION RESULT (`action`), not a `status` field
     // that would collide with the session's persistent state (read shows `idle`).
@@ -270,15 +270,15 @@ describe("session tools — unit (stub gateway)", () => {
     expect(String(out.hint)).toMatch(/recoverable/i);
 
     const denied = stub(() => ({ status: 403, body: { error: "not a descendant of your session" } }), "p");
-    await expect(tool("jinn_stop_session").handler({ sessionId: "x" }, denied.ctx)).rejects.toThrow(/403.*descendant/);
+    await expect(tool("stop_session").handler({ sessionId: "x" }, denied.ctx)).rejects.toThrow(/403.*descendant/);
   });
 
   it("missing required args fail fast with the arg name (no gateway call)", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: {} }), "p");
-    await expect(tool("jinn_spawn_session").handler({}, ctx)).rejects.toThrow(/prompt is required/);
-    await expect(tool("jinn_send_to_session").handler({ sessionId: "s" }, ctx)).rejects.toThrow(/message is required/);
-    await expect(tool("jinn_read_session").handler({}, ctx)).rejects.toThrow(/sessionId is required/);
-    await expect(tool("jinn_stop_session").handler({}, ctx)).rejects.toThrow(/sessionId is required/);
+    await expect(tool("spawn_session").handler({}, ctx)).rejects.toThrow(/prompt is required/);
+    await expect(tool("send_to_session").handler({ sessionId: "s" }, ctx)).rejects.toThrow(/message is required/);
+    await expect(tool("read_session").handler({}, ctx)).rejects.toThrow(/sessionId is required/);
+    await expect(tool("stop_session").handler({}, ctx)).rejects.toThrow(/sessionId is required/);
     expect(calls).toHaveLength(0);
   });
 });
@@ -311,20 +311,20 @@ describe("the identity seam", () => {
 
   it(`every gateway call carries ${CALLER_SESSION_HEADER} and ${CALLER_SESSION_CAPABILITY_HEADER} when the ctx has a bound identity`, async () => {
     const withId = stub(() => ({ status: 200, body: { id: "s", messages: [] } }), "sess-42");
-    await tool("jinn_read_session").handler({ sessionId: "s" }, withId.ctx);
+    await tool("read_session").handler({ sessionId: "s" }, withId.ctx);
     expect(withId.calls[0].headers[CALLER_SESSION_HEADER]).toBe("sess-42");
     expect(withId.calls[0].headers[CALLER_SESSION_CAPABILITY_HEADER]).toBe("cap-test");
   });
 
   it(`read calls without identity fail locally before sending ${TOOL_CALL_HEADER}`, async () => {
     const without = stub(() => ({ status: 200, body: { id: "s", messages: [] } }));
-    await expect(tool("jinn_read_session").handler({ sessionId: "s" }, without.ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("read_session").handler({ sessionId: "s" }, without.ctx)).rejects.toThrow(/caller identity unavailable/i);
     expect(without.calls).toHaveLength(0);
   });
 
   it(`every gateway call carries the tool-origin marker ${TOOL_CALL_HEADER} with a bound identity so routes can tell a tool call from the operator (GRS-017 finding 2)`, async () => {
     const withId = stub(() => ({ status: 200, body: { id: "s", messages: [] } }), "sess-42");
-    await tool("jinn_read_session").handler({ sessionId: "s" }, withId.ctx);
+    await tool("read_session").handler({ sessionId: "s" }, withId.ctx);
     expect(withId.calls[0].headers[TOOL_CALL_HEADER]).toBe(TOOL_CALL_HEADER_VALUE);
   });
 });
@@ -448,7 +448,7 @@ describe("session tools — integration against the real routes/registry", () =>
     const ctx = ctxFor(parentId);
 
     // 1. Spawn via MCP: parent linkage comes from the header, not the body.
-    const spawned = (await tool("jinn_spawn_session").handler({ prompt: "child task", engine: "codex" }, ctx)) as {
+    const spawned = (await tool("spawn_session").handler({ prompt: "child task", engine: "codex" }, ctx)) as {
       sessionId: string;
       hint: string;
     };
@@ -457,12 +457,12 @@ describe("session tools — integration against the real routes/registry", () =>
     expect(child.parentSessionId).toBe(parentId);
 
     // 2. The child shows up under scope=children.
-    const listed = (await tool("jinn_list_sessions").handler({}, ctx)) as { sessions: Array<{ id: string }> };
+    const listed = (await tool("list_sessions").handler({}, ctx)) as { sessions: Array<{ id: string }> };
     expect(listed.sessions.map((s) => s.id)).toContain(spawned.sessionId);
 
     // 3. Read: the spawn prompt is there; the cap holds against a padded history.
     for (let i = 0; i < 30; i++) registry.insertMessage(spawned.sessionId, "assistant", `filler ${i}`);
-    const read = (await tool("jinn_read_session").handler({ sessionId: spawned.sessionId, last: 999 }, ctx)) as {
+    const read = (await tool("read_session").handler({ sessionId: spawned.sessionId, last: 999 }, ctx)) as {
       messages: Array<{ content: string }>;
       parentSessionId: string;
     };
@@ -470,7 +470,7 @@ describe("session tools — integration against the real routes/registry", () =>
     expect(read.parentSessionId).toBe(parentId);
 
     // 4. Lateral/child send: persisted as a sender-tagged notification banner.
-    await tool("jinn_send_to_session").handler({ sessionId: spawned.sessionId, message: "status update please" }, ctx);
+    await tool("send_to_session").handler({ sessionId: spawned.sessionId, message: "status update please" }, ctx);
     const messages = registry.getMessages(spawned.sessionId);
     const banner = messages[messages.length - 1];
     expect(banner.role).toBe("notification");
@@ -478,7 +478,7 @@ describe("session tools — integration against the real routes/registry", () =>
     expect(banner.content).toContain("status update please");
 
     // 5. Stop the child (own descendant → allowed); the record survives.
-    const stopped = (await tool("jinn_stop_session").handler({ sessionId: spawned.sessionId }, ctx)) as { action: string };
+    const stopped = (await tool("stop_session").handler({ sessionId: spawned.sessionId }, ctx)) as { action: string };
     expect(stopped.action).toBe("stopped");
     expect(registry.getSession(spawned.sessionId)!.status).toBe("idle");
   });
@@ -493,7 +493,7 @@ describe("session tools — integration against the real routes/registry", () =>
     expect(lost.status).toBe(403);
     expect(await lost.text()).toMatch(/caller identity unavailable/i);
 
-    await expect(tool("jinn_spawn_session").handler({ prompt: "p", engine: "codex" }, ctxFor("no-such-session"))).rejects.toThrow(
+    await expect(tool("spawn_session").handler({ prompt: "p", engine: "codex" }, ctxFor("no-such-session"))).rejects.toThrow(
       /caller identity unavailable/i,
     );
   });
@@ -535,9 +535,9 @@ describe("session tools — integration against the real routes/registry", () =>
     const b = await createOperatorSession("target");
     const ctx = ctxFor(a);
     for (let i = 0; i < LATERAL_MAX_SENDS; i++) {
-      await tool("jinn_send_to_session").handler({ sessionId: b, message: `m${i}` }, ctx);
+      await tool("send_to_session").handler({ sessionId: b, message: `m${i}` }, ctx);
     }
-    await expect(tool("jinn_send_to_session").handler({ sessionId: b, message: "one too many" }, ctx)).rejects.toThrow(
+    await expect(tool("send_to_session").handler({ sessionId: b, message: "one too many" }, ctx)).rejects.toThrow(
       /429.*rate cap/is,
     );
   });
@@ -548,12 +548,12 @@ describe("session tools — integration against the real routes/registry", () =>
     const ctxA = ctxFor(a);
     const ctxB = ctxFor(b);
 
-    await tool("jinn_send_to_session").handler({ sessionId: b, message: "hop1" }, ctxA);
-    await tool("jinn_send_to_session").handler({ sessionId: a, message: "hop2" }, ctxB);
-    await tool("jinn_send_to_session").handler({ sessionId: b, message: "hop3" }, ctxA);
-    await tool("jinn_send_to_session").handler({ sessionId: a, message: "hop4" }, ctxB);
+    await tool("send_to_session").handler({ sessionId: b, message: "hop1" }, ctxA);
+    await tool("send_to_session").handler({ sessionId: a, message: "hop2" }, ctxB);
+    await tool("send_to_session").handler({ sessionId: b, message: "hop3" }, ctxA);
+    await tool("send_to_session").handler({ sessionId: a, message: "hop4" }, ctxB);
     // A's next relay would be hop 5 → substrate refusal, no doctrine involved.
-    await expect(tool("jinn_send_to_session").handler({ sessionId: b, message: "hop5" }, ctxA)).rejects.toThrow(
+    await expect(tool("send_to_session").handler({ sessionId: b, message: "hop5" }, ctxA)).rejects.toThrow(
       /400.*hop budget/is,
     );
     // hop tags rode the delivered banners
@@ -567,7 +567,7 @@ describe("session tools — integration against the real routes/registry", () =>
       body: JSON.stringify({ message: "operator says: wrap up" }),
     });
     expect(op.status).toBe(200);
-    const again = (await tool("jinn_send_to_session").handler({ sessionId: b, message: "fresh chain" }, ctxFor(a))) as {
+    const again = (await tool("send_to_session").handler({ sessionId: b, message: "fresh chain" }, ctxFor(a))) as {
       status: string;
     };
     expect(again.status).toBe("queued");
@@ -576,18 +576,18 @@ describe("session tools — integration against the real routes/registry", () =>
   it("stop is scoped to descendants for agents: grandchild ok, peer 403, operator (no header) unrestricted", async () => {
     const root = await createOperatorSession("root");
     const rootCtx = ctxFor(root);
-    const child = (await tool("jinn_spawn_session").handler({ prompt: "c", engine: "codex" }, rootCtx)) as { sessionId: string };
-    const grandchild = (await tool("jinn_spawn_session").handler({ prompt: "g", engine: "codex" }, ctxFor(child.sessionId))) as {
+    const child = (await tool("spawn_session").handler({ prompt: "c", engine: "codex" }, rootCtx)) as { sessionId: string };
+    const grandchild = (await tool("spawn_session").handler({ prompt: "g", engine: "codex" }, ctxFor(child.sessionId))) as {
       sessionId: string;
     };
     const peer = await createOperatorSession("peer");
 
     // transitive descendant → allowed
-    const ok = (await tool("jinn_stop_session").handler({ sessionId: grandchild.sessionId }, rootCtx)) as { action: string };
+    const ok = (await tool("stop_session").handler({ sessionId: grandchild.sessionId }, rootCtx)) as { action: string };
     expect(ok.action).toBe("stopped");
 
     // a peer is not root's descendant → 403 through the tool, readable
-    await expect(tool("jinn_stop_session").handler({ sessionId: peer }, rootCtx)).rejects.toThrow(/403.*descendant/is);
+    await expect(tool("stop_session").handler({ sessionId: peer }, rootCtx)).rejects.toThrow(/403.*descendant/is);
 
     // the operator path (no header) keeps full access
     const op = await apiFetch()(`http://gateway.test/api/sessions/${peer}/stop`, { method: "POST" });
@@ -649,13 +649,13 @@ describe("fail-closed session-tool authority (codex review finding 2 regression)
   it("marker + VALID identity keeps working and stays scoped: child spawn linked, peer stop refused, own child stop allowed", async () => {
     const parent = await createOperatorSession("scoped parent");
     const ctx = ctxFor(parent); // the tools now always send the marker alongside the identity
-    const child = (await tool("jinn_spawn_session").handler({ prompt: "c", engine: "codex" }, ctx)) as { sessionId: string };
+    const child = (await tool("spawn_session").handler({ prompt: "c", engine: "codex" }, ctx)) as { sessionId: string };
     expect(registry.getSession(child.sessionId)!.parentSessionId).toBe(parent);
 
     const peer = await createOperatorSession("scoped peer");
-    await expect(tool("jinn_stop_session").handler({ sessionId: peer }, ctx)).rejects.toThrow(/403.*descendant/is);
+    await expect(tool("stop_session").handler({ sessionId: peer }, ctx)).rejects.toThrow(/403.*descendant/is);
 
-    const ok = (await tool("jinn_stop_session").handler({ sessionId: child.sessionId }, ctx)) as { action: string };
+    const ok = (await tool("stop_session").handler({ sessionId: child.sessionId }, ctx)) as { action: string };
     expect(ok.action).toBe("stopped");
   });
 });

@@ -18,6 +18,12 @@ import {
   listConvDirs,
 } from "./antigravity-protocol.js";
 import { neutralizeForPaste } from "../shared/skill-commands.js";
+import {
+  antigravityJinnSessionEnv,
+  cleanupAntigravityJinnMcpConfig,
+  ensureAntigravityJinnMcpConfig,
+  type AntigravityMcpConfigHandle,
+} from "./antigravity-mcp.js";
 
 /**
  * Antigravity (`agy`) engine — PTY-interactive, modeled on InteractiveClaudeEngine.
@@ -74,6 +80,7 @@ interface AntigravitySpawnParams {
   cwd?: string;
   model?: string;
   bin?: string;
+  mcpAttached?: boolean;
 }
 
 export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
@@ -82,10 +89,15 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
   private streams: PtyStreamManager;
   private lastGeom = new Map<string, { cols: number; rows: number }>();
   private spawnParams = new Map<string, AntigravitySpawnParams>();
+  private mcpConfigs = new Map<string, AntigravityMcpConfigHandle>();
 
   constructor(private lifecycle: PtyLifecycleManager) {
     this.streams = new PtyStreamManager("Antigravity PTY", (id) => this.lifecycle.getWarm(id) !== undefined);
-    this.lifecycle.onRelease((id) => this.spawnParams.delete(id));
+    this.lifecycle.onRelease((id) => {
+      this.spawnParams.delete(id);
+      cleanupAntigravityJinnMcpConfig(this.mcpConfigs.get(id));
+      this.mcpConfigs.delete(id);
+    });
   }
 
   async run(opts: EngineRunOpts): Promise<EngineResult> {
@@ -232,6 +244,7 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
       cwd,
       model: opts.model,
       bin: opts.bin,
+      mcpAttached: Boolean(opts.resolvedMcp?.mcpServers?.jinn),
     })) {
       this.lifecycle.releaseSession(jinnSessionId);
       warm = undefined;
@@ -250,8 +263,8 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
     return promise;
   }
 
-  private buildPtyEnv(sessionId?: string): Record<string, string> {
-    return buildAntigravityPtyEnv(sessionId);
+  private buildPtyEnv(sessionId?: string, resolvedMcp?: EngineRunOpts["resolvedMcp"]): Record<string, string> {
+    return buildAntigravityPtyEnv(sessionId, resolvedMcp);
   }
 
   private buildArgs(resumeConvId: string | undefined, model?: string): string[] {
@@ -276,7 +289,8 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
     return norm(prev.resumeSessionId) !== norm(next.resumeSessionId)
       || norm(prev.cwd) !== norm(next.cwd)
       || norm(prev.model) !== norm(next.model)
-      || norm(prev.bin) !== norm(next.bin);
+      || norm(prev.bin) !== norm(next.bin)
+      || Boolean(prev.mcpAttached) !== Boolean(next.mcpAttached);
   }
 
   private updateSpawnResumeSessionId(jinnSessionId: string, resumeSessionId: string): void {
@@ -288,19 +302,30 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
     const bin = resolveBin("agy", opts.bin);
     const args = this.buildArgs(resumeConvId, opts.model);
     const geom = this.lastGeom.get(jinnSessionId);
+    const mcpConfig = ensureAntigravityJinnMcpConfig(opts.resolvedMcp);
     logger.info(`AntigravityEngine spawning ${bin} (resume: ${resumeConvId || "none"}, geom: ${geom ? `${geom.cols}×${geom.rows}` : "default"})`);
-    const proc = pty.spawn(bin, args, {
-      name: "xterm-256color",
-      cols: geom?.cols ?? 120,
-      rows: geom?.rows ?? 40,
-      cwd,
-      env: this.buildPtyEnv(jinnSessionId),
-    });
+    let proc: pty.IPty;
+    try {
+      proc = pty.spawn(bin, args, {
+        name: "xterm-256color",
+        cols: geom?.cols ?? 120,
+        rows: geom?.rows ?? 40,
+        cwd,
+        env: this.buildPtyEnv(jinnSessionId, opts.resolvedMcp),
+      });
+    } catch (err) {
+      cleanupAntigravityJinnMcpConfig(mcpConfig);
+      throw err;
+    }
+    cleanupAntigravityJinnMcpConfig(this.mcpConfigs.get(jinnSessionId));
+    if (mcpConfig.attached) this.mcpConfigs.set(jinnSessionId, mcpConfig);
+    else this.mcpConfigs.delete(jinnSessionId);
     this.spawnParams.set(jinnSessionId, {
       resumeSessionId: resumeConvId,
       cwd,
       model: opts.model,
       bin: opts.bin,
+      mcpAttached: mcpConfig.attached,
     });
     // Inject once the TUI is ready. A fixed delay is unreliable — agy needs a
     // few seconds to render and start accepting input. Gate on output quiescence:
@@ -390,6 +415,7 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
       cwd,
       model: opts.model,
       bin: opts.bin,
+      mcpAttached: false,
     })) return;
     if (warm) this.lifecycle.releaseSession(jinnSessionId);
     const bin = resolveBin("agy", opts.bin);
@@ -410,6 +436,7 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
       cwd,
       model: opts.model,
       bin: opts.bin,
+      mcpAttached: false,
     });
     const handle = this.wireProcToStream(jinnSessionId, proc);
     this.lifecycle.adopt(jinnSessionId, handle);
@@ -487,22 +514,18 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
  * env for the agy PTY: inherit EVERYTHING, force a real TERM. Do NOT strip
  * GEMINI_* (agy shares the ~/.gemini account dir for its cached credential).
  *
- * GRS-018 Tier-3 fallback seam: agy 1.0.16 reads MCP config only from the
- * global ~/.gemini (which jinn never mutates), so Antigravity has NO native
- * per-session MCP lever. Antigravity sessions operate the company via the
- * gateway HTTP API instead — the session context's API-reference block points
- * them at `$JINN_GATEWAY_TOKEN` / `$JINN_GATEWAY_URL`, and this full-inherit
- * env builder is what delivers those variables (exported by the gateway at
- * boot) to the agy child. Exported so tests pin the seam: an env-allowlist
- * refactor here would silently sever the only company-control path this
- * engine has.
+ * Antigravity reads MCP servers from Gemini's config file, while per-session
+ * Jinn identity rides the agy child env. This full-inherit env builder keeps
+ * agy's cached Google credential path intact and adds the caller id/capability
+ * only when the resolved built-in jinn MCP server is attached.
  */
-export function buildAntigravityPtyEnv(sessionId?: string): Record<string, string> {
+export function buildAntigravityPtyEnv(sessionId?: string, resolvedMcp?: EngineRunOpts["resolvedMcp"]): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v !== undefined) env[k] = v;
   }
   env.TERM = "xterm-256color";
   if (sessionId) env.JINN_SESSION_ID = sessionId;
+  Object.assign(env, antigravityJinnSessionEnv(resolvedMcp));
   return env;
 }

@@ -91,9 +91,9 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
 
 export function buildFileTools(): JinnMcpTool[] {
   const list: JinnMcpTool = {
-    name: "jinn_list_files",
+    name: "list_files",
     description:
-      "List managed company files as relative managedPath values under files/ or uploads/. Read-only; never returns host absolute paths. Use jinn_read_file with managedPath to read one.",
+      "List managed company files as relative managedPath values under files/ or uploads/. Read-only; never returns host absolute paths. Use read_file with managedPath to read one.",
     inputSchema: {
       type: "object",
       properties: {
@@ -116,17 +116,17 @@ export function buildFileTools(): JinnMcpTool[] {
           managedPath: managedPath(meta) ?? null,
         };
       });
-      return { files, hint: files.length ? "Read one with jinn_read_file { path: managedPath }." : "No managed files found." };
+      return { files, hint: files.length ? "Read one with read_file { path: managedPath }." : "No managed files found." };
     },
   };
 
   const read: JinnMcpTool = {
-    name: "jinn_read_file",
+    name: "read_file",
     description:
       "Read one managed company file by relative path under files/ or uploads/. Reuses the gateway containment guard: control-byte reject, realpath containment, symlink-escape blocked, canary-safe.",
     inputSchema: {
       type: "object",
-      properties: { path: { type: "string", description: "Managed relative path from jinn_list_files, e.g. files/<id>/note.md." } },
+      properties: { path: { type: "string", description: "Managed relative path from list_files, e.g. files/<id>/note.md." } },
       required: ["path"],
     },
     handler: async (args, ctx: JinnMcpContext) => {

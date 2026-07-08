@@ -51,8 +51,8 @@ function stub(
 }
 
 function costTool(): JinnMcpTool {
-  const t = costTools.buildCostTools().find((tool) => tool.name === "jinn_cost_report");
-  if (!t) throw new Error("missing jinn_cost_report");
+  const t = costTools.buildCostTools().find((tool) => tool.name === "cost_report");
+  if (!t) throw new Error("missing cost_report");
   return t;
 }
 
@@ -64,24 +64,24 @@ function cronTool(name: string): JinnMcpTool {
 
 describe("cost + cron tools — schemas and belt registration", () => {
   it("exposes the cost-only 020c tool and the two cron read tools", () => {
-    expect(costTools.buildCostTools().map((t) => t.name)).toEqual(["jinn_cost_report"]);
-    expect(cronTools.buildCronTools().map((t) => t.name)).toEqual(["jinn_list_cron_jobs", "jinn_get_cron_run_history"]);
+    expect(costTools.buildCostTools().map((t) => t.name)).toEqual(["cost_report"]);
+    expect(cronTools.buildCronTools().map((t) => t.name)).toEqual(["list_cron_jobs", "get_cron_run_history"]);
     expect(costTool().inputSchema.properties).not.toHaveProperty("workItemId");
-    expect(cronTool("jinn_get_cron_run_history").inputSchema.required).toEqual(["id"]);
+    expect(cronTool("get_cron_run_history").inputSchema.required).toEqual(["id"]);
   });
 
   it("registers the read-tier tools on the belt without adding work-item duplicates", () => {
     const names = server.buildTools().map((t) => t.name);
-    expect(names).toContain("jinn_cost_report");
-    expect(names).toContain("jinn_list_cron_jobs");
-    expect(names).toContain("jinn_get_cron_run_history");
-    expect(names.filter((name) => name === "jinn_list_work_items")).toHaveLength(1);
+    expect(names).toContain("cost_report");
+    expect(names).toContain("list_cron_jobs");
+    expect(names).toContain("get_cron_run_history");
+    expect(names.filter((name) => name === "list_work_items")).toHaveLength(1);
     expect(names).toHaveLength(40);
   });
 });
 
 describe("cost + cron tools — unit", () => {
-  it("jinn_cost_report validates groupBy and sends a capped read query", async () => {
+  it("cost_report validates groupBy and sends a capped read query", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { rows: [], total: { cost: 0, turns: 0, sessions: 0 } } }));
     await expect(costTool().handler({ groupBy: "workItem" }, ctx)).rejects.toThrow(/groupBy must be/);
     await costTool().handler({ groupBy: "employee", employee: "alpha-dev", limit: 999 }, ctx);
@@ -95,7 +95,7 @@ describe("cost + cron tools — unit", () => {
   it("read tier: cost and cron require a bound caller capability and work when bound", async () => {
     const anon = stub(() => ({ status: 200, body: {} }), null);
     await expect(costTool().handler({}, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
-    await expect(cronTool("jinn_list_cron_jobs").handler({}, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(cronTool("list_cron_jobs").handler({}, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
     expect(anon.calls).toHaveLength(0);
 
     const { ctx } = stub((call) => {
@@ -105,10 +105,10 @@ describe("cost + cron tools — unit", () => {
       return { status: 404, body: { error: "unexpected" } };
     });
     await expect(costTool().handler({}, ctx)).resolves.toMatchObject({ hint: expect.stringMatching(/engine-reported/i) });
-    await expect(cronTool("jinn_list_cron_jobs").handler({}, ctx)).resolves.toMatchObject({ cronJobs: [] });
+    await expect(cronTool("list_cron_jobs").handler({}, ctx)).resolves.toMatchObject({ cronJobs: [] });
   });
 
-  it("jinn_list_cron_jobs removes prompt bodies and jinn_get_cron_run_history caps at 10", async () => {
+  it("list_cron_jobs removes prompt bodies and get_cron_run_history caps at 10", async () => {
     const { calls, ctx } = stub((call) => {
       const url = new URL(call.url);
       if (url.pathname === "/api/cron") {
@@ -119,10 +119,10 @@ describe("cost + cron tools — unit", () => {
       }
       return { status: 404, body: { error: "unexpected" } };
     });
-    const listed = (await cronTool("jinn_list_cron_jobs").handler({}, ctx)) as { cronJobs: Array<Record<string, unknown>> };
+    const listed = (await cronTool("list_cron_jobs").handler({}, ctx)) as { cronJobs: Array<Record<string, unknown>> };
     expect(listed.cronJobs[0]).not.toHaveProperty("prompt");
     expect(listed.cronJobs[0]).toMatchObject({ id: "daily", name: "Daily", schedule: "0 8 * * *", enabled: true, employee: "ops" });
-    const history = (await cronTool("jinn_get_cron_run_history").handler({ id: "daily", limit: 500 }, ctx)) as { runs: Array<Record<string, unknown>> };
+    const history = (await cronTool("get_cron_run_history").handler({ id: "daily", limit: 500 }, ctx)) as { runs: Array<Record<string, unknown>> };
     expect(new URL(calls.at(-1)!.url).searchParams.get("limit")).toBe("10");
     expect(history.runs[0]).toEqual({ id: "run-1", timestamp: "2026-07-06T08:00:00.000Z", status: "success" });
   });
@@ -254,10 +254,10 @@ describe("cost + cron tools — integration through real gateway routes", () => 
   });
 
   it("lists cron jobs and reads last-10 run history without prompt bodies", async () => {
-    const listed = (await cronTool("jinn_list_cron_jobs").handler({}, ctx())) as { cronJobs: Array<Record<string, unknown>> };
+    const listed = (await cronTool("list_cron_jobs").handler({}, ctx())) as { cronJobs: Array<Record<string, unknown>> };
     expect(listed.cronJobs[0]).toMatchObject({ id: "daily-check", name: "Daily Check", schedule: "0 8 * * *", enabled: true, employee: "ops-dev" });
     expect(listed.cronJobs[0]).not.toHaveProperty("prompt");
-    const history = (await cronTool("jinn_get_cron_run_history").handler({ id: "daily-check" }, ctx())) as { runs: Array<Record<string, unknown>> };
+    const history = (await cronTool("get_cron_run_history").handler({ id: "daily-check" }, ctx())) as { runs: Array<Record<string, unknown>> };
     expect(history.runs).toHaveLength(1);
     expect(history.runs[0]).toEqual({
       id: "run-secret",
@@ -280,11 +280,11 @@ describe("cost + cron tools — integration through real gateway routes", () => 
   });
 
   it("coerces allowed run-log keys before exposing them through MCP", async () => {
-    const listed = (await cronTool("jinn_list_cron_jobs").handler({}, ctx())) as { cronJobs: Array<Record<string, unknown>> };
+    const listed = (await cronTool("list_cron_jobs").handler({}, ctx())) as { cronJobs: Array<Record<string, unknown>> };
     const listedJob = listed.cronJobs.find((job) => job.id === "allowed-key-check");
     expect(listedJob?.lastRun).toEqual({ id: "run-secret", jobId: "allowed-key-check" });
 
-    const history = (await cronTool("jinn_get_cron_run_history").handler({ id: "allowed-key-check" }, ctx())) as { runs: Array<Record<string, unknown>> };
+    const history = (await cronTool("get_cron_run_history").handler({ id: "allowed-key-check" }, ctx())) as { runs: Array<Record<string, unknown>> };
     expect(history.runs).toEqual([{ id: "run-secret", jobId: "allowed-key-check" }]);
 
     const serialized = JSON.stringify({ listedJob, history });

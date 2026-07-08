@@ -80,13 +80,13 @@ describe("search tools — registry + schemas", () => {
   it("exposes the 3 reference tools with flat schemas and correct required args", () => {
     const tools = buildSearchTools();
     expect(tools.map((t) => t.name)).toEqual([
-      "jinn_search_messages",
-      "jinn_search_sessions",
-      "jinn_get_message_context",
+      "search_messages",
+      "search_sessions",
+      "get_message_context",
     ]);
-    expect(tool("jinn_search_messages").inputSchema.required).toEqual(["query"]);
-    expect(tool("jinn_search_sessions").inputSchema.required).toBeUndefined();
-    expect(tool("jinn_get_message_context").inputSchema.required).toEqual(["sessionId", "messageId"]);
+    expect(tool("search_messages").inputSchema.required).toEqual(["query"]);
+    expect(tool("search_sessions").inputSchema.required).toBeUndefined();
+    expect(tool("get_message_context").inputSchema.required).toEqual(["sessionId", "messageId"]);
     // Flat schemas only: every property is a primitive type.
     for (const t of tools) {
       for (const prop of Object.values(t.inputSchema.properties) as Array<{ type?: string }>) {
@@ -97,24 +97,24 @@ describe("search tools — registry + schemas", () => {
 
   it("the belt registers the search group — 40 tools total after SOP/file tools", () => {
     const names = buildTools().map((t) => t.name);
-    expect(names).toContain("jinn_search_messages");
-    expect(names).toContain("jinn_search_sessions");
-    expect(names).toContain("jinn_get_message_context");
+    expect(names).toContain("search_messages");
+    expect(names).toContain("search_sessions");
+    expect(names).toContain("get_message_context");
     expect(names).toHaveLength(40);
   });
 
-  it("domain teaching lives on jinn_search_messages; the others stay short", () => {
-    expect(tool("jinn_search_messages").description).toMatch(/plain words/i);
-    expect(tool("jinn_search_messages").description).toMatch(/jinn_get_message_context/);
-    expect(tool("jinn_get_message_context").description).toMatch(/no full-transcript mode/i);
-    expect(tool("jinn_get_message_context").description).toMatch(/around a search hit/i);
+  it("domain teaching lives on search_messages; the others stay short", () => {
+    expect(tool("search_messages").description).toMatch(/plain words/i);
+    expect(tool("search_messages").description).toMatch(/get_message_context/);
+    expect(tool("get_message_context").description).toMatch(/no full-transcript mode/i);
+    expect(tool("get_message_context").description).toMatch(/around a search hit/i);
   });
 });
 
 describe("search tools — unit (stub gateway)", () => {
-  it("jinn_search_messages GETs the search route with encoded params and clamps the limit", async () => {
+  it("search_messages GETs the search route with encoded params and clamps the limit", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { results: [] } }));
-    await tool("jinn_search_messages").handler(
+    await tool("search_messages").handler(
       { query: "budget approved?", employee: "Alpha-Dev", role: "assistant", since: "2026-07-01T00:00:00Z", limit: 999 },
       ctx,
     );
@@ -131,58 +131,58 @@ describe("search tools — unit (stub gateway)", () => {
   it("SELF-EXCLUSION default (finding 1): with caller identity the URL carries excludeSessionId; explicit sessionId or includeOwnSession opts out", async () => {
     // Identity present, no explicit scope → exclude own session.
     const withId = stub(() => ({ status: 200, body: { results: [] } }), "my-sess");
-    await tool("jinn_search_messages").handler({ query: "x" }, withId.ctx);
+    await tool("search_messages").handler({ query: "x" }, withId.ctx);
     expect(new URL(withId.calls[0].url).searchParams.get("excludeSessionId")).toBe("my-sess");
 
     // includeOwnSession: true → no exclusion.
-    await tool("jinn_search_messages").handler({ query: "x", includeOwnSession: true }, withId.ctx);
+    await tool("search_messages").handler({ query: "x", includeOwnSession: true }, withId.ctx);
     expect(new URL(withId.calls[1].url).searchParams.has("excludeSessionId")).toBe(false);
 
     // Explicit sessionId (even the caller's own) → explicit scope wins, no exclusion param.
-    await tool("jinn_search_messages").handler({ query: "x", sessionId: "my-sess" }, withId.ctx);
+    await tool("search_messages").handler({ query: "x", sessionId: "my-sess" }, withId.ctx);
     const explicit = new URL(withId.calls[2].url);
     expect(explicit.searchParams.get("sessionId")).toBe("my-sess");
     expect(explicit.searchParams.has("excludeSessionId")).toBe(false);
 
     const anon = stub(() => ({ status: 200, body: { results: [] } }), null);
-    await expect(tool("jinn_search_messages").handler({ query: "x" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("search_messages").handler({ query: "x" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
     expect(anon.calls).toHaveLength(0);
   });
 
   it("the zero-hit hint teaches the own-session exclusion when it applied", async () => {
     const { ctx } = stub(() => ({ status: 200, body: { results: [] } }), "my-sess");
-    const excluded = (await tool("jinn_search_messages").handler({ query: "x" }, ctx)) as { hint: string };
+    const excluded = (await tool("search_messages").handler({ query: "x" }, ctx)) as { hint: string };
     expect(excluded.hint).toContain("includeOwnSession");
-    const notExcluded = (await tool("jinn_search_messages").handler({ query: "x", includeOwnSession: true }, ctx)) as { hint: string };
+    const notExcluded = (await tool("search_messages").handler({ query: "x", includeOwnSession: true }, ctx)) as { hint: string };
     expect(notExcluded.hint).not.toContain("includeOwnSession");
   });
 
   it("LENGTH CAPS (finding 3): an over-long query/text is a structured tool error BEFORE any HTTP call — never a raw 431", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { results: [], sessions: [] } }));
-    await expect(tool("jinn_search_messages").handler({ query: "z".repeat(QUERY_CHAR_CAP + 1) }, ctx)).rejects.toThrow(
+    await expect(tool("search_messages").handler({ query: "z".repeat(QUERY_CHAR_CAP + 1) }, ctx)).rejects.toThrow(
       /query is too long \(513 chars, max 512\).*shorten/,
     );
-    await expect(tool("jinn_search_sessions").handler({ text: "z".repeat(10_000) }, ctx)).rejects.toThrow(/text is too long/);
-    await expect(tool("jinn_search_messages").handler({ query: "ok", employee: "e".repeat(300) }, ctx)).rejects.toThrow(
+    await expect(tool("search_sessions").handler({ text: "z".repeat(10_000) }, ctx)).rejects.toThrow(/text is too long/);
+    await expect(tool("search_messages").handler({ query: "ok", employee: "e".repeat(300) }, ctx)).rejects.toThrow(
       /employee is too long/,
     );
     expect(calls).toHaveLength(0);
     // At the cap is fine.
-    await tool("jinn_search_messages").handler({ query: "z".repeat(QUERY_CHAR_CAP) }, ctx);
+    await tool("search_messages").handler({ query: "z".repeat(QUERY_CHAR_CAP) }, ctx);
     expect(calls).toHaveLength(1);
   });
 
-  it("jinn_search_messages defaults the limit and refuses bad role / bad ISO locally (no round trip)", async () => {
+  it("search_messages defaults the limit and refuses bad role / bad ISO locally (no round trip)", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { results: [] } }));
-    await tool("jinn_search_messages").handler({ query: "x" }, ctx);
+    await tool("search_messages").handler({ query: "x" }, ctx);
     expect(new URL(calls[0].url).searchParams.get("limit")).toBe(String(SEARCH_LIMIT_DEFAULT));
 
-    await expect(tool("jinn_search_messages").handler({ query: "x", role: "notification" }, ctx)).rejects.toThrow(/role must be/);
-    await expect(tool("jinn_search_messages").handler({ query: "x", since: "not-a-date" }, ctx)).rejects.toThrow(/ISO-8601/);
+    await expect(tool("search_messages").handler({ query: "x", role: "notification" }, ctx)).rejects.toThrow(/role must be/);
+    await expect(tool("search_messages").handler({ query: "x", since: "not-a-date" }, ctx)).rejects.toThrow(/ISO-8601/);
     expect(calls).toHaveLength(1); // the two refusals never reached the gateway
   });
 
-  it("jinn_search_messages caps runaway snippets defensively and hints the context hop", async () => {
+  it("search_messages caps runaway snippets defensively and hints the context hop", async () => {
     const { ctx } = stub(() => ({
       status: 200,
       body: {
@@ -191,22 +191,22 @@ describe("search tools — unit (stub gateway)", () => {
         ],
       },
     }));
-    const out = (await tool("jinn_search_messages").handler({ query: "y" }, ctx)) as {
+    const out = (await tool("search_messages").handler({ query: "y" }, ctx)) as {
       results: Array<{ snippet: string }>;
       hint: string;
     };
     expect(out.results[0].snippet.length).toBeLessThanOrEqual(SNIPPET_CHAR_CAP + 1);
-    expect(out.hint).toContain("jinn_get_message_context");
+    expect(out.hint).toContain("get_message_context");
   });
 
-  it("jinn_search_sessions refuses an empty filter locally and validates the status enum", async () => {
+  it("search_sessions refuses an empty filter locally and validates the status enum", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { sessions: [] } }));
-    await expect(tool("jinn_search_sessions").handler({}, ctx)).rejects.toThrow(/at least one filter/i);
-    await expect(tool("jinn_search_sessions").handler({ status: "zombie" }, ctx)).rejects.toThrow(/status must be one of/);
+    await expect(tool("search_sessions").handler({}, ctx)).rejects.toThrow(/at least one filter/i);
+    await expect(tool("search_sessions").handler({ status: "zombie" }, ctx)).rejects.toThrow(/status must be one of/);
     expect(calls).toHaveLength(0);
   });
 
-  it("jinn_search_sessions builds the query string (incl. needsAttention) and returns compact summaries", async () => {
+  it("search_sessions builds the query string (incl. needsAttention) and returns compact summaries", async () => {
     const { calls, ctx } = stub(() => ({
       status: 200,
       body: {
@@ -219,7 +219,7 @@ describe("search tools — unit (stub gateway)", () => {
         ],
       },
     }));
-    const out = (await tool("jinn_search_sessions").handler({ needsAttention: true, engine: "codex", limit: 999 }, ctx)) as {
+    const out = (await tool("search_sessions").handler({ needsAttention: true, engine: "codex", limit: 999 }, ctx)) as {
       sessions: Array<Record<string, unknown>>;
     };
     const url = new URL(calls[0].url);
@@ -233,19 +233,19 @@ describe("search tools — unit (stub gateway)", () => {
     }); // summaries only — no message bodies, no excerpt
   });
 
-  it("jinn_search_sessions zero-match hint teaches self-correction (valid statuses + where to look next)", async () => {
+  it("search_sessions zero-match hint teaches self-correction (valid statuses + where to look next)", async () => {
     const { ctx } = stub(() => ({ status: 200, body: { sessions: [] } }));
-    const out = (await tool("jinn_search_sessions").handler({ employee: "tpyo-dev" }, ctx)) as { hint: string };
+    const out = (await tool("search_sessions").handler({ employee: "tpyo-dev" }, ctx)) as { hint: string };
     expect(out.hint).toMatch(/idle, running, error, waiting, interrupted/);
-    expect(out.hint).toContain("jinn_find_employees");
+    expect(out.hint).toContain("find_employees");
   });
 
-  it("jinn_get_message_context GETs the context route with the anchor + clamped radius and passes 404s through readable", async () => {
+  it("get_message_context GETs the context route with the anchor + clamped radius and passes 404s through readable", async () => {
     const { calls, ctx } = stub(() => ({
       status: 200,
       body: { session: { id: "s1", engine: "codex" }, anchorMessageId: "m7", messages: [{ id: "m7", isAnchor: true }] },
     }));
-    const out = (await tool("jinn_get_message_context").handler({ sessionId: "s/1", messageId: "m7", radius: 999 }, ctx)) as {
+    const out = (await tool("get_message_context").handler({ sessionId: "s/1", messageId: "m7", radius: 999 }, ctx)) as {
       anchorMessageId: string;
     };
     const url = new URL(calls[0].url);
@@ -255,20 +255,20 @@ describe("search tools — unit (stub gateway)", () => {
     expect(out.anchorMessageId).toBe("m7");
 
     const notFound = stub(() => ({ status: 404, body: { error: 'message "mX" not found in session "s1" — anchors come from message-search results' } }));
-    await expect(tool("jinn_get_message_context").handler({ sessionId: "s1", messageId: "mX" }, notFound.ctx)).rejects.toThrow(
+    await expect(tool("get_message_context").handler({ sessionId: "s1", messageId: "mX" }, notFound.ctx)).rejects.toThrow(
       /anchors come from message-search results/,
     );
   });
 
   it("READ TIER: all three tools require a bound capability and every gateway call carries the marker + capability", async () => {
     const anon = stub(() => ({ status: 200, body: { results: [], sessions: [], messages: [] } }), null);
-    await expect(tool("jinn_search_messages").handler({ query: "q" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
-    await expect(tool("jinn_search_sessions").handler({ engine: "codex" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
-    await expect(tool("jinn_get_message_context").handler({ sessionId: "s", messageId: "m" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("search_messages").handler({ query: "q" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("search_sessions").handler({ engine: "codex" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("get_message_context").handler({ sessionId: "s", messageId: "m" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
     expect(anon.calls).toHaveLength(0);
 
     const withId = stub(() => ({ status: 200, body: { results: [] } }), "sess-9");
-    await tool("jinn_search_messages").handler({ query: "q" }, withId.ctx);
+    await tool("search_messages").handler({ query: "q" }, withId.ctx);
     expect(withId.calls[0].headers[TOOL_CALL_HEADER]).toBe(TOOL_CALL_HEADER_VALUE);
     expect(withId.calls[0].headers[CALLER_SESSION_HEADER]).toBe("sess-9");
     expect(withId.calls[0].headers[CALLER_SESSION_CAPABILITY_HEADER]).toBe("cap-test");
@@ -393,7 +393,7 @@ describe("search tools — integration against the real routes/registry", () => 
     seedSession({ employee: "gamma-dev", engine: "claude", title: "Unrelated" });
 
     // 1. Search finds the decision with an actionable anchor.
-    const found = (await tool("jinn_search_messages").handler({ query: "axolotl pricing" }, ctx)) as {
+    const found = (await tool("search_messages").handler({ query: "axolotl pricing" }, ctx)) as {
       results: Array<{ messageId: string; sessionId: string; snippet: string; employee: string }>;
     };
     expect(found.results.length).toBe(2);
@@ -403,13 +403,13 @@ describe("search tools — integration against the real routes/registry", () => 
     expect(hit.snippet).toContain("«axolotl»");
 
     // Narrowing by employee/role works through the real join.
-    const narrowed = (await tool("jinn_search_messages").handler({ query: "axolotl", employee: "alpha-dev", role: "user" }, ctx)) as {
+    const narrowed = (await tool("search_messages").handler({ query: "axolotl", employee: "alpha-dev", role: "user" }, ctx)) as {
       results: Array<{ role: string }>;
     };
     expect(narrowed.results.map((r) => r.role)).toEqual(["user"]);
 
     // 2. The anchor expands into its surrounding context, anchor flagged.
-    const context = (await tool("jinn_get_message_context").handler(
+    const context = (await tool("get_message_context").handler(
       { sessionId: hit.sessionId, messageId: hit.messageId, radius: 1 },
       ctx,
     )) as { anchorMessageId: string; messages: Array<{ content: string; isAnchor: boolean }>; session: { id: string } };
@@ -420,7 +420,7 @@ describe("search tools — integration against the real routes/registry", () => 
     expect(context.session.id).toBe(decisionSession);
 
     // 3. Session search by employee finds the source session (summaries only).
-    const sessions = (await tool("jinn_search_sessions").handler({ employee: "alpha-dev" }, ctx)) as {
+    const sessions = (await tool("search_sessions").handler({ employee: "alpha-dev" }, ctx)) as {
       sessions: Array<Record<string, unknown>>;
     };
     expect(sessions.sessions.map((s) => s.id)).toContain(decisionSession);
@@ -432,12 +432,12 @@ describe("search tools — integration against the real routes/registry", () => 
     const broken = seedSession({ employee: "qa-attn", status: "error", title: "Broken deploy kerfuffle" });
     seedSession({ employee: "qa-attn", status: "waiting", title: "Waiting on limits" });
 
-    const attn = (await tool("jinn_search_sessions").handler({ employee: "qa-attn", needsAttention: true }, ctx)) as {
+    const attn = (await tool("search_sessions").handler({ employee: "qa-attn", needsAttention: true }, ctx)) as {
       sessions: Array<{ id: string; status: string }>;
     };
     expect(attn.sessions.map((s) => s.id)).toEqual([broken]);
 
-    const byText = (await tool("jinn_search_sessions").handler({ text: "kerfuffle" }, ctx)) as {
+    const byText = (await tool("search_sessions").handler({ text: "kerfuffle" }, ctx)) as {
       sessions: Array<{ id: string }>;
     };
     expect(byText.sessions.map((s) => s.id)).toEqual([broken]);
@@ -457,23 +457,23 @@ describe("search tools — integration against the real routes/registry", () => 
     ];
     for (const q of hostile) {
       // Tool-level: resolves (possibly zero hits) — never a MATCH/SQL error.
-      const out = (await tool("jinn_search_messages").handler({ query: q, sessionId: sid }, ctx)) as { results: unknown[] };
+      const out = (await tool("search_messages").handler({ query: q, sessionId: sid }, ctx)) as { results: unknown[] };
       expect(Array.isArray(out.results)).toBe(true);
     }
     // A 10 KB query is refused by the finding-3 length cap with a STRUCTURED
     // error (never a raw HTTP 431) — that refusal IS the hardened behavior.
-    await expect(tool("jinn_search_messages").handler({ query: "x".repeat(10_000), sessionId: sid }, ctx)).rejects.toThrow(
+    await expect(tool("search_messages").handler({ query: "x".repeat(10_000), sessionId: sid }, ctx)).rejects.toThrow(
       /too long.*shorten/,
     );
     // The sanitizer phrases tokens: the honest word still matches…
-    const ok = (await tool("jinn_search_messages").handler({ query: `wombat" ledger`, sessionId: sid }, ctx)) as {
+    const ok = (await tool("search_messages").handler({ query: `wombat" ledger`, sessionId: sid }, ctx)) as {
       results: Array<{ snippet: string }>;
     };
     expect(ok.results).toHaveLength(1);
     // …and the tables survived the "DROP TABLE" text.
     expect(registry.getMessages(sid)).toHaveLength(1);
     // The %/_ literal contract holds through the real session-search route too.
-    const like = (await tool("jinn_search_sessions").handler({ text: "%" }, ctx)) as { sessions: unknown[] };
+    const like = (await tool("search_sessions").handler({ text: "%" }, ctx)) as { sessions: unknown[] };
     expect(like.sessions).toHaveLength(0); // no seeded title contains a literal %
   });
 
@@ -491,14 +491,14 @@ describe("search tools — integration against the real routes/registry", () => 
     expect((await raw(`http://gateway.test/api/search/sessions?status=zombie`, {})).status).toBe(400);
 
     // Context: unknown session vs unknown message are distinct readable 404s.
-    await expect(tool("jinn_get_message_context").handler({ sessionId: "no-such", messageId: "m" }, ctx)).rejects.toThrow(/404/);
-    await expect(tool("jinn_get_message_context").handler({ sessionId: sid, messageId: "no-such-msg" }, ctx)).rejects.toThrow(
+    await expect(tool("get_message_context").handler({ sessionId: "no-such", messageId: "m" }, ctx)).rejects.toThrow(/404/);
+    await expect(tool("get_message_context").handler({ sessionId: sid, messageId: "no-such-msg" }, ctx)).rejects.toThrow(
       /anchors come from message-search results/,
     );
     // An anchor from ANOTHER session must not leak across.
     const otherSid = seedSession({ title: "Other" });
     const otherMsg = registry.getMessages(sid)[0].id;
-    await expect(tool("jinn_get_message_context").handler({ sessionId: otherSid, messageId: otherMsg }, ctx)).rejects.toThrow(/404/);
+    await expect(tool("get_message_context").handler({ sessionId: otherSid, messageId: otherMsg }, ctx)).rejects.toThrow(/404/);
   });
 
   it("FINDING 1 repro: an agent whose OWN prompt contains the term still gets the OTHER session's hit (self-exclusion default), and includeOwnSession opts back in", async () => {
@@ -511,7 +511,7 @@ describe("search tools — integration against the real routes/registry", () => 
     registry.insertMessage(callerSid, "user", "please search for: tamarin rollout approved");
     const ctx = ctxFor(callerSid);
 
-    const found = (await tool("jinn_search_messages").handler({ query: "tamarin rollout approved" }, ctx)) as {
+    const found = (await tool("search_messages").handler({ query: "tamarin rollout approved" }, ctx)) as {
       results: Array<{ sessionId: string }>;
     };
     expect(found.results.length).toBe(1);
@@ -520,13 +520,13 @@ describe("search tools — integration against the real routes/registry", () => 
 
     // Opt-in returns both (order under identical-ms timestamps is a tie —
     // assert membership, not order).
-    const withOwn = (await tool("jinn_search_messages").handler({ query: "tamarin rollout approved", includeOwnSession: true }, ctx)) as {
+    const withOwn = (await tool("search_messages").handler({ query: "tamarin rollout approved", includeOwnSession: true }, ctx)) as {
       results: Array<{ sessionId: string }>;
     };
     expect(withOwn.results.map((r) => r.sessionId).sort()).toEqual([callerSid, decisionSid].sort());
 
     // Explicit own-session scope also works (explicit intent beats the default).
-    const scoped = (await tool("jinn_search_messages").handler({ query: "tamarin", sessionId: callerSid }, ctx)) as {
+    const scoped = (await tool("search_messages").handler({ query: "tamarin", sessionId: callerSid }, ctx)) as {
       results: Array<{ sessionId: string }>;
     };
     expect(scoped.results.map((r) => r.sessionId)).toEqual([callerSid]);
@@ -571,10 +571,10 @@ describe("search tools — integration against the real routes/registry", () => 
   it("FINDING 4 through the real route: backslash is a literal in session text search", async () => {
     seedSession({ employee: "bs-owner", title: "config path C:\\jinn\\bin fixture" });
     const ctx = ctxFor();
-    const hit = (await tool("jinn_search_sessions").handler({ text: "C:\\jinn\\bin" }, ctx)) as { sessions: Array<{ title: string }> };
+    const hit = (await tool("search_sessions").handler({ text: "C:\\jinn\\bin" }, ctx)) as { sessions: Array<{ title: string }> };
     expect(hit.sessions).toHaveLength(1);
     expect(hit.sessions[0].title).toContain("C:\\jinn\\bin");
-    const miss = (await tool("jinn_search_sessions").handler({ text: "C:\\jinn\\missing" }, ctx)) as { sessions: unknown[] };
+    const miss = (await tool("search_sessions").handler({ text: "C:\\jinn\\missing" }, ctx)) as { sessions: unknown[] };
     expect(miss.sessions).toHaveLength(0);
   });
 
@@ -601,14 +601,14 @@ describe("search tools — integration against the real routes/registry", () => 
     const ctx = ctxFor();
     const sid = seedSession({ title: "Caps" });
     for (let i = 0; i < 30; i++) registry.insertMessage(sid, "assistant", `pangolin item ${i}`);
-    const hits = (await tool("jinn_search_messages").handler({ query: "pangolin", limit: 999 }, ctx)) as { results: unknown[] };
+    const hits = (await tool("search_messages").handler({ query: "pangolin", limit: 999 }, ctx)) as { results: unknown[] };
     expect(hits.results).toHaveLength(SEARCH_LIMIT_MAX);
 
     registry.insertMessage(sid, "assistant", `capybara ${"z".repeat(6000)}`);
-    const found = (await tool("jinn_search_messages").handler({ query: "capybara" }, ctx)) as {
+    const found = (await tool("search_messages").handler({ query: "capybara" }, ctx)) as {
       results: Array<{ messageId: string }>;
     };
-    const context = (await tool("jinn_get_message_context").handler(
+    const context = (await tool("get_message_context").handler(
       { sessionId: sid, messageId: found.results[0].messageId, radius: 1 },
       ctx,
     )) as { messages: Array<{ content: string; isAnchor: boolean }> };

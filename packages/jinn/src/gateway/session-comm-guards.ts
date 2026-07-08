@@ -206,7 +206,7 @@ export function prepareLateralSend(opts: {
   const prompt =
     `📨 Message from session ${caller.id} (${senderLabel})${hopTag}:\n\n` +
     `${message}\n\n` +
-    `To reply: jinn_send_to_session { sessionId: "${caller.id}" }. ` +
+    `To reply: send_to_session { sessionId: "${caller.id}" }. ` +
     `If this exchange is going in circles, stop and report to your parent session or the operator instead of forwarding.`;
   const displayMessage = `📨 From ${senderLabel}${verdict.hops > 1 ? hopTag : ""}: ${clip(message)}`;
   return { ok: true, prompt, displayMessage, hops: verdict.hops };
