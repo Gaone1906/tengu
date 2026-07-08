@@ -591,7 +591,6 @@ export function ChatPane({
             <CliKeybar onKey={(data) => cliTerminalRef.current?.sendKey(data)} />
           ) : undefined
         }
-        reserveTerminalActions={Boolean(sessionId)}
       />
     </div>
   )

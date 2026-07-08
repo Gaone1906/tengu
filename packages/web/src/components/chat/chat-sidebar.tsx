@@ -2,7 +2,7 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo, startTransition } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { useQueryClient } from "@tanstack/react-query"
-import { ChevronDown, Clock3, Copy, EllipsisVertical, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
+import { ChevronDown, Clock3, Copy, EllipsisVertical, Focus, Layers, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
 import { api, type BackgroundActivity, type Employee, type SessionsResponse } from "@/lib/api"
 import { useOrg } from "@/hooks/use-employees"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
@@ -644,7 +644,7 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
                 >
                   {displayName}
                 </span>
-                <span className="shrink-0 text-[10px] text-[var(--text-tertiary)]">{time}</span>
+                <span className="shrink-0 text-[10px] text-[var(--text-tertiary)] group-hover/flat:lg:hidden group-has-[[data-state=open]]/flat:lg:hidden">{time}</span>
               </div>
               {isRenaming ? (
                 <input
@@ -1650,7 +1650,10 @@ export function ChatSidebar({
           it's borderless. */}
       <div
         className={cn(
-          "shrink-0 bg-[var(--sidebar-bg)] px-3 py-2 transition-shadow duration-150",
+          // Desktop: extra top inset so the control row's axis lines up with the
+          // floating header pill (new-chat / more) and the logo. Mobile keeps the
+          // tighter top padding (the row + compose/search share one line there).
+          "shrink-0 bg-[var(--sidebar-bg)] px-3 py-2 lg:pt-[19px] transition-shadow duration-150",
           listScrolled && "shadow-[0_1px_0_0_var(--separator)]",
         )}
       >
@@ -1666,21 +1669,25 @@ export function ChatSidebar({
             {/* Focused (default) shows only the operator's own top-level chats;
                 All reveals delegated/automated sessions too. Persisted; search
                 spans everything regardless. */}
-            <div className="flex items-center gap-0.5 rounded-full bg-[var(--fill-tertiary)] p-0.5 text-[11px] font-medium">
-              {(["focused", "all"] as const).map((mode) => (
+            <div className="flex items-center gap-0.5 rounded-full bg-[var(--fill-tertiary)] p-0.5">
+              {([
+                { mode: "focused", Icon: Focus, aria: "Focused", tip: "Only chats you started" },
+                { mode: "all", Icon: Layers, aria: "All", tip: "Include automated & delegated sessions" },
+              ] as const).map(({ mode, Icon, aria, tip }) => (
                 <button
                   key={mode}
                   onClick={() => selectFocusMode(mode)}
                   aria-pressed={focusMode === mode}
-                  title={mode === "focused" ? "Only chats you started" : "Include automated & delegated sessions"}
+                  aria-label={aria}
+                  title={tip}
                   className={cn(
-                    "rounded-full px-2.5 py-1 capitalize transition-all",
+                    "flex items-center justify-center rounded-full px-2.5 py-1.5 transition-all",
                     focusMode === mode
                       ? "bg-[var(--bg-secondary)] text-foreground shadow-[var(--shadow-subtle)]"
                       : "text-muted-foreground hover:text-foreground"
                   )}
                 >
-                  {mode}
+                  <Icon className="size-[15px]" strokeWidth={2} />
                 </button>
               ))}
             </div>

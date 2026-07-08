@@ -139,8 +139,6 @@ interface ChatInputProps {
   terminalActionsSlot?: React.ReactNode
   /** Optional compact terminal controls rendered as a tucked icon on mobile. */
   mobileTerminalActionsSlot?: React.ReactNode
-  /** Keeps the terminal hint footprint reserved when inactive to avoid mode-switch shifts. */
-  reserveTerminalActions?: boolean
 }
 
 /* ── File to MediaAttachment ─────────────────────────────── */
@@ -216,7 +214,6 @@ export function ChatInput({
   selectorSlot,
   terminalActionsSlot,
   mobileTerminalActionsSlot,
-  reserveTerminalActions,
 }: ChatInputProps) {
   const [value, setValue] = useState('')
   const [employees, setEmployees] = useState<Employee[]>([])
@@ -650,13 +647,19 @@ export function ChatInput({
   const sttPending = stt.state === 'recording' || stt.state === 'transcribing'
 
   return (
-    <div className="px-3 sm:px-4 pt-[var(--space-3)] pb-[max(var(--safe-bottom),var(--space-3))] bg-[var(--bg)] shrink-0 relative">
+    <div className="pt-[var(--space-3)] pb-[max(var(--safe-bottom),var(--space-3))] bg-[var(--bg)] shrink-0 relative">
       {/* Soft top scrim — fades scrolling content into the composer instead of a
-          hard 1px divider. Borderless, readable over the thread in both themes. */}
+          hard 1px divider. Borderless, readable over the thread in both themes.
+          Stays full-bleed (spans the whole thread width). */}
       <div aria-hidden className="pointer-events-none absolute -top-5 left-0 right-0 h-5 bg-gradient-to-b from-transparent to-[var(--bg)]" />
+      {/* Centered measure — caps the composer to the same column as the message
+          text (--chat-measure + the message rows' space-3/space-8 side insets), so
+          the card lines up edge-for-edge with the thread content instead of
+          spanning the full pane. Mobile stays effectively full-width. */}
+      <div className="relative mx-auto w-full max-w-[var(--chat-measure)] px-3 lg:px-8">
       {/* Slash command autocomplete */}
       {showCommands && filteredCommands.length > 0 && (
-        <div className="absolute bottom-full left-3 right-3 sm:left-4 sm:right-4 mb-1 border-0 bg-[var(--bg-tertiary)] rounded-[var(--radius-lg)] shadow-[var(--shadow-overlay)] max-h-60 overflow-y-auto z-10">
+        <div className="absolute bottom-full left-3 right-3 lg:left-8 lg:right-8 mb-1 border-0 bg-[var(--bg-tertiary)] rounded-[var(--radius-lg)] shadow-[var(--shadow-overlay)] max-h-60 overflow-y-auto z-10">
           {filteredCommands.map((cmd, idx) => {
             const isHighlighted = idx === commandIndex
             return (
@@ -678,7 +681,7 @@ export function ChatInput({
 
       {/* Mention autocomplete */}
       {showMentions && filteredEmployees.length > 0 && (
-        <div className="absolute bottom-full left-3 right-3 sm:left-4 sm:right-4 mb-1 border-0 bg-[var(--bg-tertiary)] rounded-[var(--radius-lg)] shadow-[var(--shadow-overlay)] max-h-40 overflow-y-auto z-10">
+        <div className="absolute bottom-full left-3 right-3 lg:left-8 lg:right-8 mb-1 border-0 bg-[var(--bg-tertiary)] rounded-[var(--radius-lg)] shadow-[var(--shadow-overlay)] max-h-40 overflow-y-auto z-10">
           {filteredEmployees.slice(0, 8).map((emp, idx) => {
             const isHighlighted = idx === mentionIndex
             return (
@@ -941,9 +944,21 @@ export function ChatInput({
       </div>
 
       {/* Slim helper row — shortcuts + terminal access (CLI view). Quiet; the
-          command/mention hints were dropped (discoverable by typing / or @). */}
-      {(onShortcutsClick || terminalActionsSlot || reserveTerminalActions || mobileTerminalActionsSlot) && (
+          command/mention hints were dropped (discoverable by typing / or @).
+          Shortcuts sits LAST so it always hugs the right edge; the terminal-keys
+          hint only occupies space (to its left) when the CLI view is active, so
+          chat mode has no reserved/wasted gap and toggling to CLI never shifts
+          shortcuts. */}
+      {(onShortcutsClick || terminalActionsSlot || mobileTerminalActionsSlot) && (
         <div className="flex items-center justify-end gap-[var(--space-3)] mt-1.5 px-1.5 min-w-0">
+          {terminalActionsSlot && (
+            <span className="hidden sm:flex items-center text-[length:var(--text-caption2)] text-[var(--text-quaternary)]">
+              {terminalActionsSlot}
+            </span>
+          )}
+          {mobileTerminalActionsSlot && (
+            <div className="flex items-center sm:hidden">{mobileTerminalActionsSlot}</div>
+          )}
           {onShortcutsClick && (
             <button
               onClick={onShortcutsClick}
@@ -952,22 +967,6 @@ export function ChatInput({
               <kbd className="font-mono text-[10px] leading-none not-italic">?</kbd>
               <span>shortcuts</span>
             </button>
-          )}
-          {(terminalActionsSlot || reserveTerminalActions) && (
-            <span
-              className={`hidden sm:flex items-center text-[length:var(--text-caption2)] text-[var(--text-quaternary)] ${terminalActionsSlot ? '' : 'invisible pointer-events-none'}`}
-              aria-hidden={!terminalActionsSlot}
-            >
-              {terminalActionsSlot ?? (
-                <span className="flex items-center gap-1">
-                  <kbd className="flex size-4 items-center justify-center text-[10px] leading-none not-italic">⌨</kbd>
-                  <span>terminal</span>
-                </span>
-              )}
-            </span>
-          )}
-          {mobileTerminalActionsSlot && (
-            <div className="flex items-center sm:hidden">{mobileTerminalActionsSlot}</div>
           )}
         </div>
       )}
@@ -982,6 +981,7 @@ export function ChatInput({
           >Dismiss</button>
         </div>
       )}
+      </div>{/* /centered measure wrapper */}
 
       {/* STT model download modal */}
       <WhisperDownloadModal
