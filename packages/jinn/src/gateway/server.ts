@@ -39,7 +39,7 @@ import { setTodoStatusChangeListener } from "../work-items/transitions.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
 import { handleApiRequest, resumePendingWebQueueItems, workflowRunDriverDeps, workflowCronFireHandler, type ApiContext } from "./api.js";
-import { resolveCallerIdentity, type CallerIdentityOptions } from "./session-comm-guards.js";
+import { resolveCallerIdentity, sessionCommGuards, LATERAL_MAX_HOPS, type CallerIdentityOptions } from "./session-comm-guards.js";
 import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
 import {
   applyWorkflowCronSync,
@@ -989,11 +989,20 @@ export async function startGateway(
   // Re-read config.yaml into memory. Used by both the file-watcher (debounced)
   // and by API handlers that write config.yaml and need getConfig() to reflect
   // the change immediately (e.g. onboarding / PUT /api/config).
+  // Apply the configurable lateral-send hop cap to the guards singleton. The
+  // guard clamps out-of-range values, so config can widen/narrow the bound but
+  // never disable the runaway-loop protection.
+  const applyLateralHopConfig = (cfg: typeof config): void => {
+    sessionCommGuards.setMaxHops(cfg.sessions?.lateralMaxHops ?? LATERAL_MAX_HOPS);
+  };
+  applyLateralHopConfig(currentConfig);
+
   const reloadConfig = (): void => {
     try {
       currentConfig = loadConfig();
       apiContext.config = currentConfig;
       sessionManager.setConfig(currentConfig);
+      applyLateralHopConfig(currentConfig);
       invalidateModelRegistry(); // rebuild the model/capability registry from the new config
       refreshDynamicModels(currentConfig); // re-discover dynamic models (engine bins/auth may have changed)
       // GRS-017e: re-arm (or disarm) the jinn-attachment smoke gate for the new

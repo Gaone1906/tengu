@@ -48,8 +48,26 @@ import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, TOOL_CALL_HEAD
 export const LATERAL_MAX_SENDS = 10;
 /** The rolling window for the rate cap. */
 export const LATERAL_WINDOW_MS = 10 * 60_000;
-/** Max relay hops a lateral chain may traverse. */
-export const LATERAL_MAX_HOPS = 4;
+/**
+ * Default max relay hops a lateral chain may traverse. Raised from 4 → 12: a
+ * legitimate COO ↔ implementer ↔ QA loop is a 3-actor cycle whose round-trips
+ * add up fast, and a cap of 4 refused real multi-round reviews. Override per
+ * install via `sessions.lateralMaxHops` in config.yaml — the guards singleton is
+ * reconfigured at boot and on hot-reload. This is still a bound, not a disable:
+ * config is clamped to [LATERAL_MIN_HOPS, LATERAL_HOPS_HARD_CAP].
+ */
+export const LATERAL_MAX_HOPS = 12;
+/** Lower bound for a configured hop cap (must allow at least one hop). */
+export const LATERAL_MIN_HOPS = 1;
+/** Hard ceiling for a configured hop cap — config can raise the bound but never
+ *  remove the runaway-loop protection entirely. */
+export const LATERAL_HOPS_HARD_CAP = 64;
+
+/** Clamp a requested hop cap into the allowed range (anti-loop: never unbounded). */
+export function clampLateralMaxHops(value: number): number {
+  if (!Number.isFinite(value)) return LATERAL_MAX_HOPS;
+  return Math.max(LATERAL_MIN_HOPS, Math.min(LATERAL_HOPS_HARD_CAP, Math.floor(value)));
+}
 /** Inbound hop state older than this no longer penalizes a sender. */
 export const LATERAL_HOP_TTL_MS = 30 * 60_000;
 /** Lazy-prune cadence: every N guard operations, sweep expired state. */
@@ -70,13 +88,22 @@ export interface SessionCommGuards {
   clearInboundHop(sessionId: string): void;
   /** Live map sizes — ops/tests introspection (spoof-flood no-growth proof). */
   stats(): { senders: number; hopEntries: number };
-  /** Test/ops escape hatch: drop all in-memory state. */
+  /** The current relay-hop cap for this guard instance. */
+  maxHops(): number;
+  /** Reconfigure the relay-hop cap (config apply at boot + hot-reload). Clamped
+   *  to [LATERAL_MIN_HOPS, LATERAL_HOPS_HARD_CAP]. Does not touch storm state. */
+  setMaxHops(value: number): void;
+  /** Test/ops escape hatch: drop all in-memory storm state (NOT the hop cap). */
   reset(): void;
 }
 
-export function createSessionCommGuards(now: () => number = Date.now): SessionCommGuards {
+export function createSessionCommGuards(
+  now: () => number = Date.now,
+  initialMaxHops: number = LATERAL_MAX_HOPS,
+): SessionCommGuards {
   const sends = new Map<string, number[]>(); // sender id → send timestamps in window
   const inboundHop = new Map<string, { hops: number; at: number }>();
+  let maxHops = clampLateralMaxHops(initialMaxHops);
   let opsSincePrune = 0;
 
   function inboundHopOf(id: string): number {
@@ -109,12 +136,12 @@ export function createSessionCommGuards(now: () => number = Date.now): SessionCo
     checkSendAllowed(callerId: string): SendVerdict {
       maybePrune();
       const hops = inboundHopOf(callerId) + 1;
-      if (hops > LATERAL_MAX_HOPS) {
+      if (hops > maxHops) {
         return {
           ok: false,
           status: 400,
           error:
-            `hop budget exhausted: this message would be relay hop ${hops} of a lateral chain (max ${LATERAL_MAX_HOPS}). ` +
+            `hop budget exhausted: this message would be relay hop ${hops} of a lateral chain (max ${maxHops}). ` +
             `Stop forwarding — escalate to your parent session or the operator with a summary instead.`,
         };
       }
@@ -147,6 +174,14 @@ export function createSessionCommGuards(now: () => number = Date.now): SessionCo
 
     stats(): { senders: number; hopEntries: number } {
       return { senders: sends.size, hopEntries: inboundHop.size };
+    },
+
+    maxHops(): number {
+      return maxHops;
+    },
+
+    setMaxHops(value: number): void {
+      maxHops = clampLateralMaxHops(value);
     },
 
     reset(): void {
@@ -202,7 +237,7 @@ export function prepareLateralSend(opts: {
   const senderLabel = caller.employee || caller.source || "session";
   // Relayed messages (hop > 1) carry the hop tag in the human banner too, so an
   // operator watching a chain sees how deep it runs; first-hop banners stay clean.
-  const hopTag = ` [hop ${verdict.hops}/${LATERAL_MAX_HOPS}]`;
+  const hopTag = ` [hop ${verdict.hops}/${guards.maxHops()}]`;
   const prompt =
     `📨 Message from session ${caller.id} (${senderLabel})${hopTag}:\n\n` +
     `${message}\n\n` +

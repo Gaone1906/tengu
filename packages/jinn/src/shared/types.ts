@@ -683,6 +683,10 @@ export interface JinnConfig {
     maxDurationMinutes?: number;
     maxCostUsd?: number;
     interruptOnNewMessage?: boolean;
+    /** Max relay hops a lateral (agent-to-agent) send chain may traverse before
+     *  the gateway refuses and tells the sender to escalate. Default 12; clamped
+     *  to [1, 64] (still a runaway-loop bound, never unbounded). */
+    lateralMaxHops?: number;
     /** What to do when Claude hits a usage/rate limit. Default: "wait" (no automatic engine switch). Set to "fallback" to opt in to switching to Codex while Claude resets. */
     rateLimitStrategy?: "wait" | "fallback";
     /** Engine to use when rateLimitStrategy="fallback". Default: "codex" */

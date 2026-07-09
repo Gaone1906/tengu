@@ -75,8 +75,10 @@ describe("rate cap — sliding window per sender", () => {
 });
 
 describe("hop budget — relay chains are bounded", () => {
-  it("a fresh sender sends at hop 1; each relay increments; the budget refuses beyond the max", () => {
-    const g = createSessionCommGuards(() => 0);
+  it("a fresh sender sends at hop 1; each relay increments; the budget refuses beyond the max (cap=4)", () => {
+    // Construct with an explicit cap of 4 so this compact arithmetic chain still
+    // exercises the refusal boundary (the default is now 12).
+    const g = createSessionCommGuards(() => 0, 4);
     // a → b (hop 1)
     let v = g.checkSendAllowed("a");
     expect(v.ok && v.hops === 1).toBe(true);
@@ -90,8 +92,8 @@ describe("hop budget — relay chains are bounded", () => {
     expect(v.ok && v.hops === 3).toBe(true);
     g.recordDelivery("b", 3);
     v = g.checkSendAllowed("b");
-    expect(v.ok && v.hops === LATERAL_MAX_HOPS).toBe(true);
-    g.recordDelivery("a", LATERAL_MAX_HOPS);
+    expect(v.ok && v.hops === 4).toBe(true);
+    g.recordDelivery("a", 4);
     // a → anywhere would be hop 5 → refused, readable
     const denied = g.checkSendAllowed("a");
     expect(denied.ok).toBe(false);
@@ -117,6 +119,58 @@ describe("hop budget — relay chains are bounded", () => {
     g.clearInboundHop("b");
     const v = g.checkSendAllowed("b");
     expect(v.ok && v.hops === 1).toBe(true);
+  });
+});
+
+describe("hop budget — configurable cap (default 12)", () => {
+  it("defaults to LATERAL_MAX_HOPS (12) and admits a 12-deep chain, refusing the 13th", () => {
+    const g = createSessionCommGuards(() => 0);
+    expect(g.maxHops()).toBe(12);
+    expect(LATERAL_MAX_HOPS).toBe(12);
+    // Drive an inbound hop of 12 (the cap); the next outbound would be hop 13.
+    let prev = "seed";
+    for (let hop = 1; hop <= LATERAL_MAX_HOPS; hop++) {
+      const v = g.checkSendAllowed(prev);
+      expect(v.ok && v.hops === hop).toBe(true);
+      const next = `s${hop}`;
+      g.recordDelivery(next, hop);
+      prev = next;
+    }
+    const denied = g.checkSendAllowed(prev); // would be hop 13
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) expect(denied.error).toMatch(/max 12/);
+  });
+
+  it("setMaxHops reconfigures the cap live (config apply / hot-reload)", () => {
+    const g = createSessionCommGuards(() => 0);
+    g.setMaxHops(6);
+    expect(g.maxHops()).toBe(6);
+    g.recordDelivery("x", 6); // inbound at the new cap
+    expect(g.checkSendAllowed("x").ok).toBe(false); // hop 7 > 6 → refused
+    // Widen the cap and the same sender can proceed.
+    g.setMaxHops(20);
+    g.recordDelivery("x", 6);
+    const v = g.checkSendAllowed("x");
+    expect(v.ok && v.hops === 7).toBe(true);
+  });
+
+  it("clamps a configured cap to [1, 64] and rejects non-finite values (never unbounded)", () => {
+    const g = createSessionCommGuards(() => 0);
+    g.setMaxHops(0);
+    expect(g.maxHops()).toBe(1);
+    g.setMaxHops(-5);
+    expect(g.maxHops()).toBe(1);
+    g.setMaxHops(1000);
+    expect(g.maxHops()).toBe(64);
+    g.setMaxHops(Number.NaN);
+    expect(g.maxHops()).toBe(LATERAL_MAX_HOPS); // non-finite → default
+    g.setMaxHops(7.9);
+    expect(g.maxHops()).toBe(7); // floored
+  });
+
+  it("constructs with an explicit initial cap", () => {
+    const g = createSessionCommGuards(() => 0, 3);
+    expect(g.maxHops()).toBe(3);
   });
 });
 

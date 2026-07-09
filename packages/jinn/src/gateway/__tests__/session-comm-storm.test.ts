@@ -209,6 +209,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   sessionCommGuards.reset();
+  sessionCommGuards.setMaxHops(LATERAL_MAX_HOPS); // restore the default cap between tests
 });
 
 describe("storm matrix — integration against the real routes", () => {
@@ -226,7 +227,10 @@ describe("storm matrix — integration against the real routes", () => {
     ).rejects.toThrow(/429.*rate cap/is);
   });
 
-  it(`RELAY CHAIN A→B→C→D→E: delivery to E carries hop ${LATERAL_MAX_HOPS}/${LATERAL_MAX_HOPS}; E's forward attempt is refused`, async () => {
+  it(`RELAY CHAIN A→B→C→D→E with the cap pinned to 4: delivery to E carries hop 4/4; E's forward attempt is refused`, async () => {
+    // The default cap is now 12; pin it to 4 here so a compact 5-session chain
+    // still exercises the refusal-at-cap + hop-tag path.
+    sessionCommGuards.setMaxHops(4);
     const ids: string[] = [];
     for (const label of ["A", "B", "C", "D", "E"]) ids.push(await createOperatorSession(`relay ${label}`));
     const [a, b, c, d, e] = ids;
@@ -235,10 +239,30 @@ describe("storm matrix — integration against the real routes", () => {
     await tool("send_to_session").handler({ sessionId: d, message: "relay this" }, ctxFor(c)); // hop 3
     await tool("send_to_session").handler({ sessionId: e, message: "relay this" }, ctxFor(d)); // hop 4
     const banner = registry.getMessages(e).at(-1)!;
-    expect(banner.content).toContain(`hop ${LATERAL_MAX_HOPS}/${LATERAL_MAX_HOPS}`);
+    expect(banner.content).toContain(`hop 4/4`);
     await expect(tool("send_to_session").handler({ sessionId: a, message: "keep relaying" }, ctxFor(e))).rejects.toThrow(
       /400.*hop budget.*escalate/is,
     );
+  });
+
+  it(`RELAY CHAIN of 10 passes at the default cap of ${LATERAL_MAX_HOPS}, and the 13th hop is refused`, async () => {
+    // 13 sessions so we can drive 12 deliveries (hops 1..12) then attempt a 13th.
+    const ids: string[] = [];
+    for (let i = 0; i < 13; i++) ids.push(await createOperatorSession(`deepchain ${i}`));
+    // Drive 12 hops: ids[0]→ids[1] (hop 1) … ids[11]→ids[12] (hop 12). Hop 10 passes.
+    for (let i = 0; i < LATERAL_MAX_HOPS; i++) {
+      const res = (await tool("send_to_session").handler(
+        { sessionId: ids[i + 1], message: `relay ${i + 1}` },
+        ctxFor(ids[i]),
+      )) as { status: string };
+      expect(res.status).toBe("queued");
+    }
+    // ids[12] received hop 12 (the cap); its own forward would be hop 13 → refused.
+    const banner = registry.getMessages(ids[12]).at(-1)!;
+    expect(banner.content).toContain(`hop ${LATERAL_MAX_HOPS}/${LATERAL_MAX_HOPS}`);
+    await expect(
+      tool("send_to_session").handler({ sessionId: ids[0], message: "hop 13" }, ctxFor(ids[12])),
+    ).rejects.toThrow(/400.*hop budget.*escalate/is);
   });
 
   it(`CONCURRENCY: ${LATERAL_MAX_SENDS + 5} sends racing one sender's window admit EXACTLY ${LATERAL_MAX_SENDS} (synchronous-guard invariant, end-to-end)`, async () => {

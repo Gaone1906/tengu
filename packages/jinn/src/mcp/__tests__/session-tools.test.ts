@@ -440,6 +440,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   sessionCommGuards.reset();
+  sessionCommGuards.setMaxHops(LATERAL_MAX_HOPS); // restore the default cap between tests
 });
 
 describe("session tools — integration against the real routes/registry", () => {
@@ -542,7 +543,9 @@ describe("session tools — integration against the real routes/registry", () =>
     );
   });
 
-  it(`a two-agent ping-pong dies on the hop budget at relay ${LATERAL_MAX_HOPS + 1}, and an operator message resets the chain`, async () => {
+  it(`a two-agent ping-pong dies on the hop budget (cap pinned to 4) at relay 5, and an operator message resets the chain`, async () => {
+    // The default cap is now 12; pin it to 4 so this stays a compact 5-hop test.
+    sessionCommGuards.setMaxHops(4);
     const a = await createOperatorSession("agent A");
     const b = await createOperatorSession("agent B");
     const ctxA = ctxFor(a);
@@ -558,7 +561,7 @@ describe("session tools — integration against the real routes/registry", () =>
     );
     // hop tags rode the delivered banners
     const hop4 = registry.getMessages(a).at(-1)!;
-    expect(hop4.content).toContain(`hop ${LATERAL_MAX_HOPS}/${LATERAL_MAX_HOPS}`);
+    expect(hop4.content).toContain(`hop 4/4`);
 
     // A genuine operator message to A resets its chain — A can send again.
     const op = await apiFetch()(`http://gateway.test/api/sessions/${a}/message`, {
