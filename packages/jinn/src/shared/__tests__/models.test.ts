@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import type { JinnConfig } from "../types.js";
 import { getModelRegistry, invalidateModelRegistry, setDiscoveredClaudeModelsForTest, synthesizeFromEngineConfig } from "../models.js";
+import { logger } from "../logger.js";
 
 function cfg(partial: Partial<JinnConfig["engines"]>, models?: JinnConfig["models"]): JinnConfig {
   return {
@@ -221,6 +222,79 @@ describe("featured models (registry marking)", () => {
     const reg = getModelRegistry(cfg({}));
     const featured = reg.claude.models.filter((m) => m.featured).map((m) => m.id);
     expect(featured).toEqual(["opus", "sonnet", "fable"]);
+  });
+
+  describe("misconfigured featuredModels", () => {
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      warn.mockRestore();
+    });
+
+    it("all-typo nonempty override → warns and falls back to the default alias set", () => {
+      setDiscoveredClaudeModelsForTest({
+        defaultModel: "opus",
+        models: [
+          { id: "opus", label: "Opus (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+          { id: "sonnet", label: "Sonnet (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+          { id: "fable", label: "Fable (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+          { id: "claude-opus-4-8", label: "Opus 4.8", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        ],
+      });
+      const reg = getModelRegistry(cfg({ claude: { bin: "claude", model: "opus", featuredModels: ["definitely-not-a-model", "another-typo"] } }));
+      const featured = reg.claude.models.filter((m) => m.featured).map((m) => m.id);
+      expect(featured).toEqual(["opus", "sonnet", "fable"]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("definitely-not-a-model");
+      expect(warn.mock.calls[0][0]).toContain("another-typo");
+    });
+
+    it("partial-typo override → features the valid ids and warns about the unmatched ones", () => {
+      setDiscoveredClaudeModelsForTest({
+        defaultModel: "opus",
+        models: [
+          { id: "opus", label: "Opus (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+          { id: "sonnet", label: "Sonnet (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+          { id: "claude-haiku-4-5", label: "Haiku 4.5", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        ],
+      });
+      const reg = getModelRegistry(cfg({ claude: { bin: "claude", model: "opus", featuredModels: ["opus", "nope-typo"] } }));
+      const featured = reg.claude.models.filter((m) => m.featured).map((m) => m.id);
+      expect(featured).toEqual(["opus"]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain("nope-typo");
+      expect(warn.mock.calls[0][0]).not.toContain("opus,"); // valid id not reported as unknown
+    });
+
+    it("explicit [] stays 'none featured' with no warning", () => {
+      setDiscoveredClaudeModelsForTest({
+        defaultModel: "opus",
+        models: [
+          { id: "opus", label: "Opus (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+          { id: "sonnet", label: "Sonnet (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        ],
+      });
+      const reg = getModelRegistry(cfg({ claude: { bin: "claude", model: "opus", featuredModels: [] } }));
+      expect(reg.claude.models.some((m) => m.featured)).toBe(false);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("a fully valid override features exactly those ids with no warning", () => {
+      setDiscoveredClaudeModelsForTest({
+        defaultModel: "opus",
+        models: [
+          { id: "opus", label: "Opus (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+          { id: "sonnet", label: "Sonnet (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+          { id: "claude-haiku-4-5", label: "Haiku 4.5", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        ],
+      });
+      const reg = getModelRegistry(cfg({ claude: { bin: "claude", model: "opus", featuredModels: ["opus", "claude-haiku-4-5"] } }));
+      const featured = reg.claude.models.filter((m) => m.featured).map((m) => m.id);
+      expect(featured).toEqual(["opus", "claude-haiku-4-5"]);
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 });
 

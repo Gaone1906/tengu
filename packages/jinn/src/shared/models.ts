@@ -360,14 +360,53 @@ export function buildRegistry(config: JinnConfig): ModelRegistry {
 
 /**
  * Mark the picker's featured set. Featured models show by default in the UI
- * before the "More models…" expansion; the rest stay one click away. `featuredIds`
- * absent → default set; explicit [] → nothing featured. Order/membership of
- * `models` is untouched — only the `featured` flag is set.
+ * before the "More models…" expansion; the rest stay one click away. Only ids
+ * that actually exist in `models` are featured; `matched`/`unmatched` let the
+ * caller detect a misconfigured override. Order/membership of `models` is
+ * untouched — only the `featured` flag is set on matches.
  */
-function applyFeatured(models: ModelInfo[], featuredIds: readonly string[] | undefined): ModelInfo[] {
-  if (!featuredIds || featuredIds.length === 0) return models;
-  const set = new Set(featuredIds);
-  return models.map((m) => (set.has(m.id) ? { ...m, featured: true } : m));
+function applyFeatured(
+  models: ModelInfo[],
+  featuredIds: readonly string[],
+): { models: ModelInfo[]; matched: string[]; unmatched: string[] } {
+  const known = new Set(models.map((m) => m.id));
+  const matched = featuredIds.filter((id) => known.has(id));
+  const unmatched = featuredIds.filter((id) => !known.has(id));
+  if (matched.length === 0) return { models, matched, unmatched };
+  const featured = new Set(matched);
+  return {
+    models: models.map((m) => (featured.has(m.id) ? { ...m, featured: true } : m)),
+    matched,
+    unmatched,
+  };
+}
+
+/**
+ * Resolve the featured set for the claude picker, distinguishing three cases of
+ * `engines.claude.featuredModels`:
+ *   - absent      → default to the three latest alias families.
+ *   - explicit [] → nothing featured (deliberate "long picker" opt-out).
+ *   - nonempty    → feature the matching ids; warn about typos, and if NONE match
+ *                   fall back to the default set so a stale override can't silently
+ *                   regress the picker to the full 10+ model list.
+ */
+function resolveClaudeFeatured(merged: ModelInfo[], configured: string[] | undefined): ModelInfo[] {
+  const defaults = [...CLAUDE_ALIAS_IDS];
+  if (configured === undefined) return applyFeatured(merged, defaults).models;
+  if (configured.length === 0) return merged;
+
+  const res = applyFeatured(merged, configured);
+  if (res.matched.length === 0) {
+    logger.warn(
+      `engines.claude.featuredModels matched no known models (${configured.join(", ")}); ` +
+        `falling back to the default featured set (${defaults.join(", ")}).`,
+    );
+    return applyFeatured(merged, defaults).models;
+  }
+  if (res.unmatched.length > 0) {
+    logger.warn(`engines.claude.featuredModels: ignoring unknown model id(s): ${res.unmatched.join(", ")}`);
+  }
+  return res.models;
 }
 
 /** Claude registry entry: discovered aliases/catalog > config additions > alias fallback. */
@@ -381,9 +420,7 @@ function buildClaudeEntry(
   const discovered = discoveredClaudeModels?.models.length ? discoveredClaudeModels : null;
   const base = discovered ?? knownClaudeModels(pinned, discoveredClaudeEffortLevels ?? undefined);
   const merged = mergeDiscoveredModels(base.models, claudeBlock, { configuredOverridesDiscovered: false });
-  // Featured set: config override, else the three latest alias families.
-  const featuredIds = config.engines.claude?.featuredModels ?? [...CLAUDE_ALIAS_IDS];
-  const models = applyFeatured(merged, featuredIds);
+  const models = resolveClaudeFeatured(merged, config.engines.claude?.featuredModels);
   const valid = (id?: string) => (id && models.some((m) => m.id === id) ? id : undefined);
   const defaultModel = valid(pinned) ?? valid(claudeBlock?.default) ?? valid(base.defaultModel) ?? models[0]?.id ?? synthEntry.defaultModel;
   return { name: "claude", available, defaultModel, effortMechanism: "claude-flag", models };
