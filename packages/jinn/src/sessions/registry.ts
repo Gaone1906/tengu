@@ -1620,6 +1620,20 @@ export function getMessages(sessionId: string): SessionMessage[] {
   return rows.map(rowToMessage);
 }
 
+/**
+ * Just the live mid-turn (`partial=1`) blocks for a session, in stream order.
+ * Backed by idx_messages_partial so turn-settle reads only the handful of live
+ * rows instead of loading + parsing the whole transcript to filter them out
+ * (the heaviest sessions were 600+ messages loaded on EVERY turn-settle).
+ */
+export function getPartialMessages(sessionId: string): SessionMessage[] {
+  const db = initDb();
+  const rows = db
+    .prepare('SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks FROM messages WHERE session_id = ? AND partial = 1 ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC')
+    .all(sessionId) as MessageRow[];
+  return rows.map(rowToMessage);
+}
+
 export function getMessagePage(sessionId: string, options: MessagePageOptions = {}): MessagePage {
   const db = initDb();
   const limit = normalizeMessagePageLimit(options.limit);

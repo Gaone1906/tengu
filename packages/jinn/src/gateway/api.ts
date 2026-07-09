@@ -61,6 +61,7 @@ import {
   deletePartialMessages,
   finalizePartialMessages,
   getMessages,
+  getPartialMessages,
   getMessagePage,
   enqueueQueueItem,
   cancelQueueItem,
@@ -5359,7 +5360,7 @@ async function runWebSession(
     // chat history collapses to the final assistant message. If the turn was
     // preempted by a newer user message, drop stale partials/results so the old
     // assistant answer cannot land after the new user bubble.
-    const streamedBlocks = getMessages(currentSession.id).filter((m) => m.partial);
+    const streamedBlocks = getPartialMessages(currentSession.id);
     const finalBlocksById = new Map<string, ChatBlock>();
     for (const message of streamedBlocks) {
       for (const block of message.blocks ?? []) {
