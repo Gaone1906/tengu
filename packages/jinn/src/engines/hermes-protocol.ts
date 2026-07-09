@@ -138,6 +138,36 @@ export function mapSessionUpdate(update: Record<string, unknown>): HermesUpdate 
   }
 }
 
+/**
+ * Fold one streamed answer-text chunk into the accumulated reply.
+ *
+ * Hermes delivers answer text as incremental `agent_message_chunk` frames while
+ * streaming, then may emit a FINAL `agent_message_chunk` carrying the ENTIRE
+ * reply (the acp server's `update_agent_message_text` path — fired when a
+ * `transform_llm_output` plugin rewrote the output, i.e. `response_transformed`,
+ * or when token streaming was skipped). Both the increments and the full-text
+ * frame share the same wire kind (`agent_message_chunk`), so appending the
+ * full-text frame on top of the increments doubles the reply
+ * ("pineapple" + snapshot "pineapple" → "pineapplepineapple").
+ *
+ * A cumulative full-text frame contains everything accumulated so far as a
+ * prefix, so we treat a chunk that starts with the whole accumulation as a
+ * snapshot and REPLACE; anything else is a fresh suffix and appends. This
+ * mirrors the `text` (append) vs `text_snapshot` (replace) split the grok and
+ * antigravity adapters already use. `isSnapshot` lets the caller forward the
+ * right delta type to the UI so the live stream doesn't double-render either.
+ *
+ * Ambiguity note: a reply that legitimately re-sends its full prefix as a single
+ * separator-less chunk (e.g. streamed as "banana" + "banana" meaning the literal
+ * "bananabanana") is indistinguishable at the wire from the snapshot case and
+ * collapses to one copy. Real hermes snapshots are common; that pathological
+ * double is not, so replace is the correct trade.
+ */
+export function accumulateAgentText(acc: string, chunk: string): { text: string; isSnapshot: boolean } {
+  if (acc && chunk.startsWith(acc)) return { text: chunk, isSnapshot: true };
+  return { text: acc + chunk, isSnapshot: false };
+}
+
 export function extractPromptText(prompt: string): { type: "text"; text: string }[] {
   return [{ type: "text", text: prompt }];
 }

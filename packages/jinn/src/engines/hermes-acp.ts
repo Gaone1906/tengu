@@ -4,7 +4,7 @@ import type { InterruptibleEngine, EngineRunOpts, EngineResult } from "../shared
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import { HermesRpc } from "./hermes-jsonrpc.js";
-import { mapSessionUpdate, extractPromptText } from "./hermes-protocol.js";
+import { mapSessionUpdate, extractPromptText, accumulateAgentText } from "./hermes-protocol.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
 import { buildAcpMcpServers } from "./hermes-mcp.js";
 
@@ -170,8 +170,17 @@ export class HermesAcpEngine implements InterruptibleEngine {
       if (m !== "session/update" || params.sessionId !== hermesSessionId) return;
       const u = mapSessionUpdate((params.update ?? {}) as Record<string, unknown>);
       for (const d of u.deltas) {
-        if (d.type === "text") resultText += d.content;
-        opts.onStream?.(d);
+        if (d.type === "text") {
+          // Hermes emits streamed increments AND a final full-text frame under
+          // the same wire kind; accumulateAgentText replaces on the cumulative
+          // frame instead of appending (else the reply doubles). Forward it as a
+          // text_snapshot so the live UI + partial persistence replace too.
+          const { text, isSnapshot } = accumulateAgentText(resultText, d.content);
+          resultText = text;
+          opts.onStream?.(isSnapshot ? { type: "text_snapshot", content: text } : d);
+        } else {
+          opts.onStream?.(d);
+        }
       }
       if (u.contextTokens != null) lastContext = u.contextTokens;
     };

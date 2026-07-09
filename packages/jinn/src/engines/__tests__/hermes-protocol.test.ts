@@ -2,6 +2,7 @@
 import { describe, it, expect } from "vitest";
 import {
   encodeModelChoice, splitModelChoice, rpcRequest, mapSessionUpdate,
+  accumulateAgentText,
 } from "../hermes-protocol.js";
 
 describe("model choice encoding", () => {
@@ -124,5 +125,61 @@ describe("mapSessionUpdate", () => {
     });
 
     expect(r.deltas).toEqual([{ type: "tool_result", content: "completed", toolId: "search-1" }]);
+  });
+});
+
+// Regression: Hermes delivers streamed answer text as incremental
+// agent_message_chunk frames AND (on some turns — e.g. after a
+// transform_llm_output plugin sets response_transformed, or when streaming was
+// skipped) a FINAL agent_message_chunk carrying the FULL reply. Both share the
+// same wire kind, so a naive `resultText += chunk` doubles the reply
+// ("pineapplepineapple"). accumulateAgentText treats a cumulative full-text
+// frame (one that starts with everything accumulated so far) as a snapshot and
+// REPLACES instead of appending. Frame shapes captured from real hermes acp
+// (hermes-agent v0.17.0, openai-codex:gpt-5.5).
+describe("accumulateAgentText", () => {
+  // Helper: fold a sequence of chunks the way hermes-acp onNote does.
+  const fold = (chunks: string[]) =>
+    chunks.reduce(
+      (acc, chunk) => accumulateAgentText(acc, chunk).text,
+      "",
+    );
+
+  it("appends pure incremental chunks (chunks-only stream)", () => {
+    expect(fold(["hel", "lo"])).toBe("hello");
+    expect(fold(["The", " quick", " brown", " fox"])).toBe("The quick brown fox");
+  });
+
+  it("replaces (does not double) a full-text snapshot after chunks", () => {
+    // Real capture: "pine" + "apple" increments, then a full "pineapple" frame.
+    expect(fold(["pine", "apple", "pineapple"])).toBe("pineapple");
+  });
+
+  it("replaces when a one-shot reply is followed by its identical snapshot", () => {
+    // Real capture: "banana" (single chunk == full reply), then "banana" snapshot.
+    expect(fold(["banana", "banana"])).toBe("banana");
+  });
+
+  it("handles a snapshots-only stream (no prior increments)", () => {
+    expect(fold(["hello"])).toBe("hello");
+    expect(fold(["hello", "hello world"])).toBe("hello world");
+  });
+
+  it("keeps a transformed snapshot that extends the streamed prefix", () => {
+    // Increments stream "hello"; a transform rewrites the final to "hello world".
+    expect(fold(["hel", "lo", "hello world"])).toBe("hello world");
+  });
+
+  it("does NOT treat a fresh suffix as a snapshot (no false replace)", () => {
+    // A legitimate continuation is a suffix, never a re-send of the whole prefix.
+    expect(fold(["hello", " world"])).toBe("hello world");
+    // Repeated word with a separator streams as a suffix — must append.
+    expect(fold(["banana", " banana"])).toBe("banana banana");
+  });
+
+  it("reports isSnapshot so the caller can emit text_snapshot vs text", () => {
+    expect(accumulateAgentText("pineapple", "pineapple")).toEqual({ text: "pineapple", isSnapshot: true });
+    expect(accumulateAgentText("pine", "apple")).toEqual({ text: "pineapple", isSnapshot: false });
+    expect(accumulateAgentText("", "pine")).toEqual({ text: "pine", isSnapshot: false });
   });
 });

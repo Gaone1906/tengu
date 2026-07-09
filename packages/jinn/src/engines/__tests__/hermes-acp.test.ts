@@ -115,6 +115,38 @@ function fakeServerEmptyPromptResult() {
   return rpc;
 }
 
+/** Fake server that streams incremental answer chunks and THEN a final
+ *  full-text `agent_message_chunk` carrying the whole reply — the real hermes
+ *  shape when `response_transformed` is set (or streaming was skipped). Before
+ *  the snapshot-aware accumulation this doubled the reply ("pineapplepineapple"). */
+function fakeServerFullTextAfterChunks() {
+  const toServer = new PassThrough();
+  const fromServer = new PassThrough();
+  const rpc = new HermesRpc(toServer, fromServer);
+  toServer.on("data", (b: Buffer) => {
+    for (const line of b.toString().split("\n")) {
+      if (!line.trim()) continue;
+      const msg = JSON.parse(line) as Record<string, unknown>;
+      const reply = (result: unknown) =>
+        fromServer.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }) + "\n");
+      const note = (params: unknown) =>
+        fromServer.write(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params }) + "\n");
+      if (msg.method === "initialize") reply({ protocolVersion: 1 });
+      else if (msg.method === "session/new")
+        reply({ sessionId: "S1", models: { currentModelId: "openai-codex:gpt-5.5", availableModels: [] } });
+      else if (msg.method === "session/set_mode") reply({});
+      else if (msg.method === "session/prompt") {
+        const c = (text: string) => note({ sessionId: "S1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
+        c("pine");
+        c("apple");
+        c("pineapple"); // FINAL full-text frame — must replace, not append
+        reply({ stopReason: "end_turn" });
+      }
+    }
+  });
+  return rpc;
+}
+
 // ---------------------------------------------------------------------------
 // Test engines
 // ---------------------------------------------------------------------------
@@ -140,6 +172,26 @@ describe("HermesAcpEngine.run", () => {
     expect(r.contextTokens).toBe(42);
     expect(deltas).toContainEqual({ type: "text", content: "ok" });
     expect(eng.isAlive("jinn-1")).toBe(true);
+  });
+
+  // Regression: a final full-text agent_message_chunk after streamed increments
+  // must not double the reply, and must reach the UI as a REPLACE (text_snapshot)
+  // rather than an appended text delta.
+  it("does not double the reply when a full-text frame follows streamed chunks", async () => {
+    class DupEngine extends HermesAcpEngine {
+      protected spawnProc() {
+        const rpc = fakeServerFullTextAfterChunks();
+        return { rpc, killProc: () => {}, isAliveProc: () => true, onExit: (_cb: () => void) => {}, onError: (_cb: (e: Error) => void) => {} };
+      }
+    }
+    const eng = new DupEngine();
+    const deltas: any[] = [];
+    const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-dup", onStream: (d) => deltas.push(d) });
+    expect(r.result).toBe("pineapple"); // NOT "pineapplepineapple"
+    // Increments stream as text; the cumulative full-text frame streams as a
+    // replace so the FE live view doesn't double either.
+    expect(deltas.filter((d) => d.type === "text").map((d) => d.content)).toEqual(["pine", "apple"]);
+    expect(deltas.filter((d) => d.type === "text_snapshot").map((d) => d.content)).toEqual(["pineapple"]);
   });
 
   // Fix 1 — systemPrompt prepended on fresh session
