@@ -20,6 +20,88 @@ const MAX_FILTER_PATH_CHARS = 160;
 // length cap plus a compile guard is a proportionate mitigation for the blast
 // radius (one gateway-local trigger burning CPU on its own inbound events).
 const MAX_FILTER_REGEX_CHARS = 256;
+// Runtime input cap for a `matches` test: catastrophic backtracking needs input
+// length, so bounding the tested string bounds the worst case for polynomial
+// patterns the nested-quantifier check below does not catch.
+const MAX_FILTER_MATCH_INPUT_CHARS = 512;
+
+/**
+ * Conservative ReDoS guard: reject a regex with star-height > 1 — a quantified
+ * group whose body itself varies (contains a quantifier or an alternation), e.g.
+ * `(a+)+`, `(a*)*`, `(a|aa)+`, `([a-z]+)+`, `((a+))+`. These are the classic
+ * exponential-backtracking shapes; a plain length cap + compile check does not
+ * touch them. Deliberately over-rejects exotic-but-safe nesting — trigger filters
+ * do not need it. A hand-written single-pass scanner (no deps, no parser):
+ * tracks group frames, marks a frame "variable" when its body has a quantifier or
+ * `|`, and flags DANGER when a variable group is immediately quantified; that
+ * variability propagates to the enclosing group so deep nesting is caught too.
+ * Escapes and character classes are skipped so `\(`, `[a+]`, `[)]` are literal.
+ */
+export function hasCatastrophicRegexNesting(pattern: string): boolean {
+  interface Frame { variable: boolean }
+  const stack: Frame[] = [];
+  const isQuant = (ch: string | undefined): boolean =>
+    ch === '*' || ch === '+' || ch === '?' || ch === '{';
+  const n = pattern.length;
+  let i = 0;
+  while (i < n) {
+    const ch = pattern[i];
+    if (ch === '\\') { i += 2; continue; }
+    if (ch === '[') {
+      // Skip the character class — quantifier chars inside are literal.
+      i++;
+      if (pattern[i] === '^') i++;
+      if (pattern[i] === ']') i++; // a leading ] is a literal member
+      while (i < n && pattern[i] !== ']') {
+        if (pattern[i] === '\\') i++;
+        i++;
+      }
+      i++; // consume the closing ]
+      continue;
+    }
+    if (ch === '(') {
+      i++;
+      // Skip a group-type prefix so the '?' in (?: (?= (?! (?<= (?<! (?<name>
+      // is not mistaken for a quantifier.
+      if (pattern[i] === '?') {
+        i++;
+        if (pattern[i] === '<') {
+          i++;
+          if (pattern[i] === '=' || pattern[i] === '!') i++;
+          else { while (i < n && pattern[i] !== '>') i++; i++; }
+        } else if (pattern[i] === ':' || pattern[i] === '=' || pattern[i] === '!') {
+          i++;
+        }
+      }
+      stack.push({ variable: false });
+      continue;
+    }
+    if (ch === ')') {
+      const frame = stack.pop();
+      i++;
+      const nextIsQuant = isQuant(pattern[i]);
+      const bodyVariable = !!frame && frame.variable;
+      if (bodyVariable && nextIsQuant) return true; // variable group, quantified → ReDoS shape
+      // A group that is itself variable or quantified makes the ENCLOSING body
+      // variable, so `((a+))+` and friends are caught one level out.
+      if (stack.length && (bodyVariable || nextIsQuant)) stack[stack.length - 1].variable = true;
+      continue;
+    }
+    if (isQuant(ch)) {
+      if (stack.length) stack[stack.length - 1].variable = true;
+      if (ch === '{') { while (i < n && pattern[i] !== '}') i++; }
+      i++;
+      continue;
+    }
+    if (ch === '|') {
+      if (stack.length) stack[stack.length - 1].variable = true;
+      i++;
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
 const MAX_PAYLOAD_DEPTH = 8;
 const MAX_PAYLOAD_KEYS = 200;
 const MAX_PAYLOAD_ARRAY = 100;
@@ -403,6 +485,14 @@ function cleanFilter(input: unknown): WorkflowTriggerFilter[] | undefined {
       } catch {
         throw new WorkflowTriggerStoreError('invalid-input', 'filter.value is not a valid regular expression');
       }
+      // Reject catastrophic-backtracking shapes at creation (the length cap +
+      // compile check do not catch them). This is the primary ReDoS defense.
+      if (hasCatastrophicRegexNesting(rec.value)) {
+        throw new WorkflowTriggerStoreError(
+          'invalid-input',
+          'filter.value has nested quantifiers that risk catastrophic backtracking (ReDoS) — simplify the regex',
+        );
+      }
     }
     out.push({ path: pathValue, op, ...(rec.value !== undefined ? { value: sanitizeJsonValue(rec.value) } : {}) });
   }
@@ -632,8 +722,16 @@ function filterMatches(input: FireWorkflowEventInput, filter: WorkflowTriggerFil
       return JSON.stringify(actual) !== JSON.stringify(filter.value);
     case 'matches': {
       if (typeof actual !== 'string' || typeof filter.value !== 'string') return false;
+      // Defense-in-depth for a pattern that bypassed creation validation (e.g. a
+      // hand-edited binding file): a catastrophic-backtracking shape is skipped
+      // outright (fail-safe non-match) rather than executed, and the tested input
+      // is length-capped so any remaining (polynomial) pattern stays bounded.
+      if (hasCatastrophicRegexNesting(filter.value)) return false;
+      const capped = actual.length > MAX_FILTER_MATCH_INPUT_CHARS
+        ? actual.slice(0, MAX_FILTER_MATCH_INPUT_CHARS)
+        : actual;
       try {
-        return new RegExp(filter.value).test(actual);
+        return new RegExp(filter.value).test(capped);
       } catch {
         return false;
       }
