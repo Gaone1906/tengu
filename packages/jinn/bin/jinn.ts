@@ -128,9 +128,9 @@ program
 
 program
   .command("migrate")
-  .description("Apply pending template migrations to update this instance")
-  .option("--check", "Only check for pending migrations, don't apply")
-  .option("--auto", "Apply safe changes automatically without launching AI")
+  .description("Print (or apply) the migration prompt for template changes since your instance's version")
+  .option("--apply", "Pipe the composed migration prompt into this instance's agent, then advance the version marker")
+  .option("--mark-done [version]", "Mark the instance as migrated to <version> (default: package version) without running anything")
   .action(async (opts) => {
     const { runMigrate } = await import("../src/cli/migrate.js");
     await runMigrate(opts);

@@ -32,24 +32,3 @@ export function getInstanceVersion(): string {
     return "0.0.0";
   }
 }
-
-/**
- * List migration version directories shipped in the template that apply
- * between fromVersion (exclusive) and toVersion (inclusive).
- * Returns sorted ascending by semver.
- */
-export function getPendingMigrations(fromVersion: string, toVersion: string): string[] {
-  const migrationsDir = path.join(TEMPLATE_DIR, "migrations");
-  if (!fs.existsSync(migrationsDir)) return [];
-
-  return fs
-    .readdirSync(migrationsDir, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name)
-    .filter((v) => {
-      // Only include valid semver-looking directories
-      if (!/^\d+\.\d+\.\d+$/.test(v)) return false;
-      return compareSemver(v, fromVersion) > 0 && compareSemver(v, toVersion) <= 0;
-    })
-    .sort(compareSemver);
-}

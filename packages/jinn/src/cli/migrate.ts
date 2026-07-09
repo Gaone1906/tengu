@@ -5,19 +5,15 @@ import yaml from "js-yaml";
 import {
   JINN_HOME,
   CONFIG_PATH,
-  MIGRATIONS_DIR,
-  TEMPLATE_DIR,
-  SKILLS_DIR,
-  CLAUDE_SKILLS_DIR,
-  AGENTS_SKILLS_DIR,
+  TEMPLATE_MIGRATIONS_DIR,
 } from "../shared/paths.js";
 import { loadConfig } from "../shared/config.js";
 import {
   compareSemver,
   getPackageVersion,
   getInstanceVersion,
-  getPendingMigrations,
 } from "../shared/version.js";
+import { scanMigrationPrompts, composeMigrationPrompt } from "./migrate-prompt.js";
 
 const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
@@ -26,42 +22,9 @@ const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
 
 /**
- * Recursively copy a directory tree, overwriting existing files.
- * Used to stage migration files into the instance home.
- */
-function copyDirRecursive(src: string, dest: string): void {
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyDirRecursive(srcPath, destPath);
-    } else if (entry.name !== ".gitkeep") {
-      fs.copyFileSync(srcPath, destPath);
-    }
-  }
-}
-
-/**
- * Ensure symlinks exist for a skill directory in .claude/skills/ and .agents/skills/.
- */
-function ensureSkillSymlinks(skillName: string): void {
-  const relTarget = path.join("..", "..", "skills", skillName);
-  for (const targetDir of [CLAUDE_SKILLS_DIR, AGENTS_SKILLS_DIR]) {
-    fs.mkdirSync(targetDir, { recursive: true });
-    const linkPath = path.join(targetDir, skillName);
-    if (!fs.existsSync(linkPath)) {
-      try {
-        fs.symlinkSync(relTarget, linkPath);
-      } catch {
-        // ignore — may fail on some platforms
-      }
-    }
-  }
-}
-
-/**
- * Stamp the jinn.version field in config.yaml.
+ * Stamp the jinn.version field in config.yaml — the instance's "last migrated"
+ * marker. The live gateway hot-reloads config.yaml, so write atomically
+ * (tmp file + rename) to avoid a partial-write corruption window.
  */
 function stampVersion(version: string): void {
   const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
@@ -70,16 +33,14 @@ function stampVersion(version: string): void {
   if (!config.jinn) config.jinn = {};
   config.jinn.version = version;
 
-  // Atomic write: the live gateway hot-reloads config.yaml, so a partial write
-  // would corrupt it. Write to a tmp file in the same directory, then rename.
   const tmpPath = `${CONFIG_PATH}.tmp`;
   fs.writeFileSync(tmpPath, yaml.dump(config, { lineWidth: -1 }), "utf-8");
   fs.renameSync(tmpPath, CONFIG_PATH);
 }
 
 /**
- * Build engine-specific CLI args for running a one-shot migration prompt.
- * Each engine CLI uses different flags for prompt input.
+ * Build engine-specific CLI args for running the composed migration prompt as a
+ * one-shot. Each engine CLI uses different flags for prompt input.
  */
 function buildMigrateArgs(engine: string, prompt: string): string[] {
   switch (engine) {
@@ -91,18 +52,23 @@ function buildMigrateArgs(engine: string, prompt: string): string[] {
     case "claude":
     default:
       // No `-p`: launch the interactive claude TUI (cc_entrypoint=cli, subsidy-safe)
-      // instead of the headless Agent-SDK `--print` pool. `jinn migrate` is an
-      // operator-run, supervised one-shot launched from a real terminal, so the
+      // instead of the headless Agent-SDK `--print` pool. `jinn migrate --apply` is
+      // an operator-run, supervised one-shot launched from a real terminal, so the
       // inherited TTY (stdio: "inherit") renders the TUI and the operator watches
-      // the migration apply. Trade-off vs `-p`: the TUI does not self-exit after
-      // the turn — the operator closes it (e.g. /exit) once the migration looks
-      // complete. Acceptable for a rare maintenance command, and it keeps the
-      // call fully subsidy-safe with no trace of `-p`.
+      // the migration apply. The TUI does not self-exit after the turn — the
+      // operator closes it (e.g. /exit) once the migration looks complete.
       return ["--dangerously-skip-permissions", prompt];
   }
 }
 
-export async function runMigrate(opts: { check?: boolean; auto?: boolean }): Promise<void> {
+export interface MigrateOptions {
+  /** Pipe the composed prompt into the instance's agent, then stamp the marker. */
+  apply?: boolean;
+  /** Mark the instance as migrated to a version without running anything. */
+  markDone?: string | boolean;
+}
+
+export async function runMigrate(opts: MigrateOptions = {}): Promise<void> {
   // Ensure instance exists
   if (!fs.existsSync(JINN_HOME)) {
     console.error(`${RED}Error:${RESET} ${JINN_HOME} does not exist. Run "jinn setup" first.`);
@@ -112,91 +78,55 @@ export async function runMigrate(opts: { check?: boolean; auto?: boolean }): Pro
   const packageVersion = getPackageVersion();
   const instanceVersion = getInstanceVersion();
 
-  console.log(`\n${DIM}Instance version:${RESET} ${instanceVersion}`);
-  console.log(`${DIM}Package version:${RESET}  ${packageVersion}\n`);
-
-  // Already up to date
-  if (compareSemver(instanceVersion, packageVersion) >= 0) {
-    console.log(`${GREEN}Up to date.${RESET} No migrations needed.\n`);
+  // --mark-done: just stamp the marker and exit. Value defaults to the package
+  // version when the flag is passed without an explicit version.
+  if (opts.markDone !== undefined && opts.markDone !== false) {
+    const target = typeof opts.markDone === "string" ? opts.markDone : packageVersion;
+    if (!/^\d+\.\d+\.\d+$/.test(target)) {
+      console.error(`${RED}Error:${RESET} --mark-done expects a semver version (e.g. ${packageVersion}), got "${target}".`);
+      process.exit(1);
+    }
+    stampVersion(target);
+    console.log(`${GREEN}Marked instance as migrated to ${target}.${RESET} ${DIM}(config.yaml jinn.version)${RESET}\n`);
     return;
   }
 
-  // Find pending migrations
-  const pending = getPendingMigrations(instanceVersion, packageVersion);
+  console.log(`\n${DIM}Instance version:${RESET} ${instanceVersion}`);
+  console.log(`${DIM}Package version:${RESET}  ${packageVersion}\n`);
 
-  if (pending.length === 0) {
-    console.log(`${YELLOW}No migration scripts found${RESET} for ${instanceVersion} → ${packageVersion}.`);
+  // Range-scan the template migrations for prompts in (instance, package].
+  const versions = scanMigrationPrompts(TEMPLATE_MIGRATIONS_DIR, instanceVersion, packageVersion);
 
-    if (!opts.check) {
-      console.log(`Updating version stamp to ${packageVersion}...`);
-      stampVersion(packageVersion);
-      console.log(`${GREEN}Done.${RESET}\n`);
+  if (versions.length === 0) {
+    const range =
+      compareSemver(instanceVersion, packageVersion) >= 0
+        ? `v${packageVersion}`
+        : `(${instanceVersion}, ${packageVersion}]`;
+    console.log(`${GREEN}You're up to date${RESET} — no instance migrations for ${range}.\n`);
+
+    // If the instance marker lags but no prompts apply (releases touched no
+    // instance surface), advance the marker so we don't re-scan every run.
+    if (compareSemver(instanceVersion, packageVersion) < 0 && !opts.apply) {
+      console.log(`${DIM}Tip: run${RESET} jinn migrate --mark-done ${packageVersion} ${DIM}to advance the version marker.${RESET}\n`);
     }
     return;
   }
 
-  // List pending migrations
-  console.log(`${YELLOW}Pending migrations:${RESET}`);
-  for (const v of pending) {
-    const migrationMd = path.join(TEMPLATE_DIR, "migrations", v, "MIGRATION.md");
-    const hasMd = fs.existsSync(migrationMd);
-    console.log(`  ${v} ${hasMd ? "" : `${RED}(missing MIGRATION.md)${RESET}`}`);
-  }
-  console.log("");
+  const prompt = composeMigrationPrompt({
+    templateMigrationsDir: TEMPLATE_MIGRATIONS_DIR,
+    versions,
+    fromVersion: instanceVersion,
+    toVersion: packageVersion,
+    instanceHome: JINN_HOME,
+  });
 
-  // --check: just show what's pending, don't apply
-  if (opts.check) {
-    console.log(`Run ${DIM}jinn migrate${RESET} to apply.\n`);
-    return;
-  }
+  // --apply: pipe the composed prompt into the instance's own agent, then stamp.
+  if (opts.apply) {
+    console.log(`${YELLOW}Applying migrations${RESET} for ${versions.join(", ")} via the instance agent...\n`);
 
-  // Stage migration files into ~/.jinn/migrations/
-  console.log("Staging migration files...");
-  fs.mkdirSync(MIGRATIONS_DIR, { recursive: true });
-
-  for (const version of pending) {
-    const src = path.join(TEMPLATE_DIR, "migrations", version);
-    const dest = path.join(MIGRATIONS_DIR, version);
-    copyDirRecursive(src, dest);
-    console.log(`  ${GREEN}[staged]${RESET} ${version}`);
-  }
-
-  // Also ensure the migrate skill is available in the instance
-  const migrateSkillSrc = path.join(TEMPLATE_DIR, "skills", "migrate");
-  const migrateSkillDest = path.join(SKILLS_DIR, "migrate");
-  if (fs.existsSync(migrateSkillSrc) && !fs.existsSync(migrateSkillDest)) {
-    copyDirRecursive(migrateSkillSrc, migrateSkillDest);
-    ensureSkillSymlinks("migrate");
-    console.log(`  ${GREEN}[staged]${RESET} migrate skill`);
-  }
-
-  // --auto: apply safe changes deterministically without launching AI
-  if (opts.auto) {
-    console.log("\nApplying safe changes automatically...");
-    await applyAutoMigrations(pending, instanceVersion, packageVersion);
-    return;
-  }
-
-  // Launch AI session to apply migrations
-  console.log(`\nLaunching AI to apply ${pending.length} migration(s)...\n`);
-
-  const config = loadConfig();
-  const defaultEngine = config.engines.default ?? "claude";
-  const engineConfig = config.engines[defaultEngine] ?? config.engines.claude;
-
-  try {
-    const prompt = [
-      `Apply all pending migrations in ${MIGRATIONS_DIR}.`,
-      `Follow the migrate skill instructions at ${path.join(SKILLS_DIR, "migrate", "SKILL.md")}.`,
-      `Current instance version: ${instanceVersion}`,
-      `Target version: ${packageVersion}`,
-      `Pending versions: ${pending.join(", ")}`,
-      ``,
-      `For each version in order, read its MIGRATION.md and apply the changes.`,
-      `After all migrations, update jinn.version in config.yaml to "${packageVersion}".`,
-      `Clean up the migrations/ directory when done.`,
-    ].join("\n");
-
+    const config = loadConfig();
+    const defaultEngine = config.engines.default ?? "claude";
+    const engineConfig = config.engines[defaultEngine] ?? config.engines.claude;
     const args = buildMigrateArgs(defaultEngine, prompt);
     // `bin` may be absent for engines with optional config (e.g. antigravity);
     // fall back to the engine name so spawn resolves via PATH (or fails clearly).
@@ -204,81 +134,26 @@ export async function runMigrate(opts: { check?: boolean; auto?: boolean }): Pro
     const migrateBin = engineConfig.bin ?? defaultEngine;
     console.log(`${DIM}Engine: ${defaultEngine} (${migrateBin})${RESET}\n`);
 
-    execFileSync(migrateBin, args, {
-      stdio: "inherit",
-      cwd: JINN_HOME,
-    });
-
-    console.log(`\n${GREEN}Migration complete.${RESET}\n`);
-  } catch (err: any) {
-    console.error(`\n${RED}Migration failed.${RESET} You can retry with: jinn migrate`);
-    console.error(`The staged files are still in ${MIGRATIONS_DIR}\n`);
-    process.exit(1);
-  }
-}
-
-/**
- * Auto-migration: deterministically apply safe changes without AI.
- * Copies new files, adds new config keys. Does NOT modify user-customized files.
- */
-async function applyAutoMigrations(
-  pending: string[],
-  instanceVersion: string,
-  packageVersion: string,
-): Promise<void> {
-  let applied = 0;
-
-  for (const version of pending) {
-    const migrationDir = path.join(MIGRATIONS_DIR, version);
-    const filesDir = path.join(migrationDir, "files");
-
-    if (!fs.existsSync(filesDir)) {
-      console.log(`  ${DIM}${version}: no files to auto-apply${RESET}`);
-      continue;
+    try {
+      execFileSync(migrateBin, args, { stdio: "inherit", cwd: JINN_HOME });
+    } catch {
+      console.error(`\n${RED}Migration agent exited with an error.${RESET} The version marker was NOT advanced.`);
+      console.error(`Re-run ${DIM}jinn migrate --apply${RESET}, or apply manually with ${DIM}jinn migrate${RESET} and then ${DIM}jinn migrate --mark-done ${packageVersion}${RESET}.\n`);
+      process.exit(1);
     }
 
-    // Copy new files (skip files that already exist)
-    const newFiles = collectFiles(filesDir, filesDir);
-    for (const relPath of newFiles) {
-      const destPath = path.join(JINN_HOME, relPath);
-      if (!fs.existsSync(destPath)) {
-        fs.mkdirSync(path.dirname(destPath), { recursive: true });
-        fs.copyFileSync(path.join(filesDir, relPath), destPath);
-        console.log(`  ${GREEN}[new]${RESET} ${relPath}`);
-        applied++;
-
-        // If it's a skill, create symlinks
-        const parts = relPath.split(path.sep);
-        if (parts[0] === "skills" && parts.length >= 2) {
-          ensureSkillSymlinks(parts[1]);
-        }
-      } else {
-        console.log(`  ${YELLOW}[skip]${RESET} ${relPath} (exists — needs AI merge)`);
-      }
-    }
+    stampVersion(packageVersion);
+    console.log(`\n${GREEN}Migration complete.${RESET} Marker advanced ${instanceVersion} → ${packageVersion}.\n`);
+    return;
   }
 
-  // Stamp version
-  stampVersion(packageVersion);
-  console.log(`\n  ${GREEN}[version]${RESET} ${instanceVersion} → ${packageVersion}`);
-  console.log(`\n${GREEN}Auto-migration complete.${RESET} ${applied} file(s) added.`);
-
-  // Clean up
-  fs.rmSync(MIGRATIONS_DIR, { recursive: true, force: true });
-
-  console.log(`\n${DIM}Tip: Run ${RESET}jinn migrate${DIM} (without --auto) to also merge updated files with AI.${RESET}\n`);
-}
-
-/** Recursively collect relative file paths under a directory. */
-function collectFiles(baseDir: string, currentDir: string): string[] {
-  const files: string[] = [];
-  for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
-    const fullPath = path.join(currentDir, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...collectFiles(baseDir, fullPath));
-    } else if (entry.name !== ".gitkeep") {
-      files.push(path.relative(baseDir, fullPath));
-    }
-  }
-  return files;
+  // Default: print the composed prompt. Mutates nothing.
+  console.log(`${DIM}Migration prompt for ${versions.join(", ")} (copy into an agent, or run ${RESET}jinn migrate --apply${DIM}):${RESET}\n`);
+  console.log(prompt);
+  console.log(
+    `\n${DIM}────────${RESET}\n` +
+      `${DIM}This printed a prompt only — nothing was changed. Options:${RESET}\n` +
+      `  ${DIM}•${RESET} ${DIM}jinn migrate --apply${RESET}              run it via this instance's agent (advances the marker)\n` +
+      `  ${DIM}•${RESET} apply the changes yourself, then ${DIM}jinn migrate --mark-done ${packageVersion}${RESET}\n`,
+  );
 }
