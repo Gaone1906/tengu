@@ -1,13 +1,56 @@
 import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+// PrismAsyncLight ships NO grammars by default (the full `Prism` build bundles
+// ~200, ~250KB gzip). We register only the languages EXT_TO_LANG can produce, so
+// this component's chunk carries a handful of grammars instead of all of them.
+// Unregistered languages (e.g. an exotic fenced code block) simply render
+// unhighlighted — acceptable graceful degradation.
+import { PrismAsyncLight as SyntaxHighlighter } from "react-syntax-highlighter";
 import {
   oneDark,
   oneLight,
 } from "react-syntax-highlighter/dist/esm/styles/prism";
+import typescript from "react-syntax-highlighter/dist/esm/languages/prism/typescript";
+import tsx from "react-syntax-highlighter/dist/esm/languages/prism/tsx";
+import javascript from "react-syntax-highlighter/dist/esm/languages/prism/javascript";
+import jsx from "react-syntax-highlighter/dist/esm/languages/prism/jsx";
+import python from "react-syntax-highlighter/dist/esm/languages/prism/python";
+import ruby from "react-syntax-highlighter/dist/esm/languages/prism/ruby";
+import go from "react-syntax-highlighter/dist/esm/languages/prism/go";
+import rust from "react-syntax-highlighter/dist/esm/languages/prism/rust";
+import java from "react-syntax-highlighter/dist/esm/languages/prism/java";
+import kotlin from "react-syntax-highlighter/dist/esm/languages/prism/kotlin";
+import swift from "react-syntax-highlighter/dist/esm/languages/prism/swift";
+import c from "react-syntax-highlighter/dist/esm/languages/prism/c";
+import cpp from "react-syntax-highlighter/dist/esm/languages/prism/cpp";
+import csharp from "react-syntax-highlighter/dist/esm/languages/prism/csharp";
+import php from "react-syntax-highlighter/dist/esm/languages/prism/php";
+import json from "react-syntax-highlighter/dist/esm/languages/prism/json";
+import yaml from "react-syntax-highlighter/dist/esm/languages/prism/yaml";
+import toml from "react-syntax-highlighter/dist/esm/languages/prism/toml";
+import ini from "react-syntax-highlighter/dist/esm/languages/prism/ini";
+import bash from "react-syntax-highlighter/dist/esm/languages/prism/bash";
+import css from "react-syntax-highlighter/dist/esm/languages/prism/css";
+import scss from "react-syntax-highlighter/dist/esm/languages/prism/scss";
+import less from "react-syntax-highlighter/dist/esm/languages/prism/less";
+import markup from "react-syntax-highlighter/dist/esm/languages/prism/markup";
+import sql from "react-syntax-highlighter/dist/esm/languages/prism/sql";
+import graphql from "react-syntax-highlighter/dist/esm/languages/prism/graphql";
+import docker from "react-syntax-highlighter/dist/esm/languages/prism/docker";
+import markdown from "react-syntax-highlighter/dist/esm/languages/prism/markdown";
 import { ExternalLink, ArrowLeft } from "lucide-react";
 import { useTheme } from "@/routes/providers";
+
+// The languages reachable from EXT_TO_LANG (plus common fenced-block langs).
+const PRISM_LANGUAGES: Record<string, unknown> = {
+  typescript, tsx, javascript, jsx, python, ruby, go, rust, java, kotlin,
+  swift, c, cpp, csharp, php, json, yaml, toml, ini, bash, css, scss, less,
+  markup, sql, graphql, docker, markdown,
+};
+for (const [name, grammar] of Object.entries(PRISM_LANGUAGES)) {
+  SyntaxHighlighter.registerLanguage(name, grammar);
+}
 
 /** Shape returned by GET /api/files/read?path=<path>. */
 interface FileReadResponse {

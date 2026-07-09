@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef, useMemo, Suspense } from 'react'
+import React, { useState, useCallback, useEffect, useRef, useMemo, Suspense, lazy } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { resolveDeepLink } from '@/components/chat/chat-route-helpers'
@@ -9,7 +9,11 @@ import { ChatHeaderPills } from '@/components/chat/chat-tabs'
 import { NavRibbon } from '@/components/pill-nav'
 import { MobileTabBar } from '@/components/chat/mobile-tab-bar'
 import { ChatPane } from '@/components/chat/chat-pane'
-import { FileView } from '@/components/chat/file-view'
+// Lazy so the file viewer's syntax-highlighter grammars + react-markdown are
+// fetched only when a file tab is actually opened — not on the landing route.
+const FileView = lazy(() =>
+  import('@/components/chat/file-view').then((m) => ({ default: m.FileView })),
+)
 import { FileOpenContext } from '@/components/chat/file-open-context'
 import { ShortcutOverlay } from '@/components/chat/shortcut-overlay'
 import { useChatTabs } from '@/hooks/use-chat-tabs'
@@ -757,7 +761,9 @@ function ChatPage() {
                 selectedId so switching sessions remounts cleanly — no hidden
                 keep-alive panes (they caused stacked WS subscriptions + races). */}
             {chatTabs.activeTab?.kind === 'file' ? (
-              <FileView path={chatTabs.activeTab.path} embedded onBack={handleFileBack} />
+              <Suspense fallback={<div className="flex-1" />}>
+                <FileView path={chatTabs.activeTab.path} embedded onBack={handleFileBack} />
+              </Suspense>
             ) : (
               <ChatPane
                 key={selectedId ?? `__new__:${pendingEmployee ?? ''}`}
