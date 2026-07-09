@@ -4360,27 +4360,38 @@ export async function handleApiRequest(
 
     // GET /api/activity — recent activity derived from sessions
     if (method === "GET" && pathname === "/api/activity") {
-      // Only the 30 most-recent events are returned, and event ts == last_activity
-      // (ordered DESC), so a bounded recent window suffices. Cap generously (100)
-      // so statuses that emit no event (e.g. interrupted) can't starve the top 30,
-      // instead of hydrating + JSON-parsing all ~2.5k sessions every poll.
-      const sessions = listRecentSessions(100);
+      // We return the 30 newest activity events, and event ts == last_activity
+      // (sessions are ordered DESC), so we only need the recent tail. But some
+      // statuses emit no event (e.g. interrupted), so a single fixed window can
+      // starve the result when the newest sessions are all non-emitting. Page the
+      // newest-first window (re-deriving the real emitting predicate per row) until
+      // we have 30 events or hit a hard row cap — still O(bounded), never a full
+      // ~2.5k-session hydrate every poll.
+      const TARGET_EVENTS = 30;
+      const PAGE = 100;
+      const HARD_ROW_CAP = 1000;
       const events: Array<{ event: string; payload: unknown; ts: number }> = [];
-      for (const s of sessions) {
-        const ts = new Date(s.lastActivity || s.createdAt).getTime();
-        const transportState = getSessionTransportState(s, context);
-        if (transportState === "running") {
-          events.push({ event: "session:started", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
-        } else if (transportState === "queued") {
-          events.push({ event: "session:queued", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
-        } else if (transportState === "idle") {
-          events.push({ event: "session:completed", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
-        } else if (transportState === "error") {
-          events.push({ event: "session:error", payload: { sessionId: s.id, employee: s.employee, error: s.lastError, connector: s.connector }, ts });
+      for (let offset = 0; events.length < TARGET_EVENTS && offset < HARD_ROW_CAP; offset += PAGE) {
+        const page = listRecentSessions(PAGE, offset);
+        for (const s of page) {
+          const ts = new Date(s.lastActivity || s.createdAt).getTime();
+          const transportState = getSessionTransportState(s, context);
+          if (transportState === "running") {
+            events.push({ event: "session:started", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
+          } else if (transportState === "queued") {
+            events.push({ event: "session:queued", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
+          } else if (transportState === "idle") {
+            events.push({ event: "session:completed", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
+          } else if (transportState === "error") {
+            events.push({ event: "session:error", payload: { sessionId: s.id, employee: s.employee, error: s.lastError, connector: s.connector }, ts });
+          }
         }
+        if (page.length < PAGE) break; // exhausted — no more rows
       }
+      // Newest first. Pages are already last_activity DESC, so any collected
+      // event is newer than every un-fetched one; the top 30 are the true newest.
       events.sort((a, b) => b.ts - a.ts);
-      return json(res, events.slice(0, 30));
+      return json(res, events.slice(0, TARGET_EVENTS));
     }
 
     // GET /api/onboarding — check if onboarding is needed

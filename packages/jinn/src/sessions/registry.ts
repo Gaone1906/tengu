@@ -1049,13 +1049,14 @@ export function listSessions(filter?: ListSessionsFilter): Session[] {
 /**
  * The N most-recently-active sessions, newest first — a bounded window for
  * polled endpoints (e.g. /api/activity) that only ever surface the recent tail.
- * Backed by idx_sessions_last_activity; avoids hydrating + JSON-parsing every row.
+ * `offset` pages deeper (newest-first) when the first window is all non-emitting
+ * rows. Backed by idx_sessions_last_activity; avoids hydrating every row.
  */
-export function listRecentSessions(limit: number): Session[] {
+export function listRecentSessions(limit: number, offset = 0): Session[] {
   const db = initDb();
   const rows = db
-    .prepare('SELECT * FROM sessions ORDER BY last_activity DESC LIMIT ?')
-    .all(Math.max(0, Math.floor(limit))) as Record<string, unknown>[];
+    .prepare('SELECT * FROM sessions ORDER BY last_activity DESC LIMIT ? OFFSET ?')
+    .all(Math.max(0, Math.floor(limit)), Math.max(0, Math.floor(offset))) as Record<string, unknown>[];
   return rows.map(rowToSession);
 }
 
