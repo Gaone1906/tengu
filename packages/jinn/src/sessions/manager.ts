@@ -9,6 +9,7 @@ import type {
   Target,
 } from "../shared/types.js";
 import { isInterruptibleEngine } from "../shared/types.js";
+import { removeCodexSessionHome } from "../engines/codex.js";
 import {
   accumulateSessionCost,
   createSession,
@@ -924,6 +925,10 @@ export class SessionManager {
         }
       }
       deleteSession(session.id);
+      // Remove any per-session Codex CODEX_HOME overlay (no-op for non-codex
+      // sessions). Safe here because the session is ending — the thread rollout
+      // under it is no longer needed. Idempotent.
+      removeCodexSessionHome(session.id);
       logger.info(`Deleted session ${session.id}`);
     }
   }

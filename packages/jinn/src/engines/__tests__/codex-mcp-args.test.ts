@@ -1,6 +1,40 @@
-import { describe, it, expect } from "vitest";
-import { codexMcpConfigArgs } from "../codex.js";
-import type { ResolvedMcpConfig } from "../../shared/types.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import {
+  codexMcpConfigArgs,
+  prepareCodexSessionHome,
+  removeCodexSessionHome,
+  buildCodexFreshArgs,
+  buildCodexResumeArgs,
+  codexChildEnv,
+} from "../codex.js";
+import type { ResolvedMcpConfig, EngineRunOpts } from "../../shared/types.js";
+
+const CAPABILITY = "cap-SUPER-SECRET-do-not-leak-123";
+
+/** A resolved-MCP payload with the builtin jinn server carrying a capability. */
+function jinnResolvedWithCapability(capability = CAPABILITY): ResolvedMcpConfig {
+  return {
+    mcpServers: {
+      jinn: {
+        command: "/usr/bin/node",
+        args: ["/abs/dist/src/mcp/server-entry.js"],
+        env: {
+          JINN_GATEWAY_URL: "http://127.0.0.1:7801",
+          JINN_SESSION_ID: "sess-1",
+          JINN_HOME: "/home/u/.jinn",
+          JINN_SESSION_CAPABILITY: capability,
+        },
+      },
+    },
+  };
+}
+
+function baseOpts(over: Partial<EngineRunOpts> = {}): EngineRunOpts {
+  return { sessionId: "sess-1", prompt: "hi", ...over } as EngineRunOpts;
+}
 
 /**
  * GRS-012b — Codex is the first non-Claude consumer of the wave-30 `resolvedMcp`
@@ -107,5 +141,145 @@ describe("codexMcpConfigArgs", () => {
     expect(args).toContain('mcp_servers.jinn.command="node"');
     expect(args).toContain('mcp_servers.search.command="npx"');
     expect(args).toContain('mcp_servers.search.args=["-y","brave-search-mcp"]');
+  });
+});
+
+/**
+ * BUG-1 fix — Codex 0.141 dropped the legacy `profile` config key, so `codex exec
+ * resume` cannot layer a `--profile` file and MCP was lost after resume. The fix
+ * unifies fresh + resume onto ONE mechanism: a per-session CODEX_HOME whose
+ * `config.toml` carries the builtin-jinn stanza (capability in the 0600 file,
+ * never on argv). Fresh AND resume point CODEX_HOME at the SAME per-session dir so
+ * the codex thread rollout persists across turns.
+ */
+describe("prepareCodexSessionHome", () => {
+  let realHome: string;
+  let baseDir: string;
+
+  beforeEach(() => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-test-"));
+    realHome = path.join(root, "real-codex");
+    baseDir = path.join(root, "session-homes");
+    fs.mkdirSync(realHome, { recursive: true });
+    // A real codex home with an auth.json and a base config.toml the operator set.
+    fs.writeFileSync(path.join(realHome, "auth.json"), JSON.stringify({ token: "login" }));
+    fs.writeFileSync(path.join(realHome, "config.toml"), 'model = "gpt-5.5"\napproval_policy = "never"\n');
+    process.env.CODEX_HOME = realHome;
+  });
+
+  afterEach(() => {
+    delete process.env.CODEX_HOME;
+  });
+
+  it("returns undefined when there is no jinn server with a capability", () => {
+    expect(prepareCodexSessionHome(undefined, "sess-1", { baseDir })).toBeUndefined();
+    const noCap: ResolvedMcpConfig = { mcpServers: { jinn: { command: "node", args: ["/e.js"] } } };
+    expect(prepareCodexSessionHome(noCap, "sess-1", { baseDir })).toBeUndefined();
+  });
+
+  it("creates a 0700 per-session home with a 0600 config.toml carrying the jinn stanza + merged base", () => {
+    const home = prepareCodexSessionHome(jinnResolvedWithCapability(), "sess-1", { baseDir });
+    expect(home).toBeDefined();
+    expect(fs.existsSync(home!.home)).toBe(true);
+    // Deterministic path — same session id → same dir every turn.
+    expect(home!.home).toBe(path.join(baseDir, "sess-1"));
+
+    const dirMode = fs.statSync(home!.home).mode & 0o777;
+    expect(dirMode).toBe(0o700);
+
+    const cfgPath = path.join(home!.home, "config.toml");
+    expect(fs.existsSync(cfgPath)).toBe(true);
+    expect(fs.statSync(cfgPath).mode & 0o777).toBe(0o600);
+
+    const cfg = fs.readFileSync(cfgPath, "utf8");
+    // Operator base settings preserved…
+    expect(cfg).toContain('model = "gpt-5.5"');
+    expect(cfg).toContain('approval_policy = "never"');
+    // …plus the builtin jinn MCP stanza with the capability in the FILE.
+    expect(cfg).toContain("[mcp_servers.jinn]");
+    expect(cfg).toContain(CAPABILITY);
+  });
+
+  it("symlinks auth.json back to the real codex home (so token refreshes propagate)", () => {
+    const home = prepareCodexSessionHome(jinnResolvedWithCapability(), "sess-1", { baseDir })!;
+    const authLink = path.join(home.home, "auth.json");
+    expect(fs.existsSync(authLink)).toBe(true);
+    expect(fs.lstatSync(authLink).isSymbolicLink()).toBe(true);
+    expect(fs.realpathSync(authLink)).toBe(fs.realpathSync(path.join(realHome, "auth.json")));
+  });
+
+  it("is idempotent across turns and rewrites config.toml when the capability rotates", () => {
+    const first = prepareCodexSessionHome(jinnResolvedWithCapability("cap-round-1"), "sess-1", { baseDir })!;
+    const second = prepareCodexSessionHome(jinnResolvedWithCapability("cap-round-2"), "sess-1", { baseDir })!;
+    expect(second.home).toBe(first.home); // same stable dir across turns
+    const cfg = fs.readFileSync(path.join(second.home, "config.toml"), "utf8");
+    expect(cfg).toContain("cap-round-2");
+    expect(cfg).not.toContain("cap-round-1"); // rewritten, not appended
+  });
+
+  it("cleanup() removes the per-session dir; removeCodexSessionHome is a no-op when absent", () => {
+    const home = prepareCodexSessionHome(jinnResolvedWithCapability(), "sess-1", { baseDir })!;
+    expect(fs.existsSync(home.home)).toBe(true);
+    home.cleanup();
+    expect(fs.existsSync(home.home)).toBe(false);
+    // Idempotent removal by id — safe on non-codex / already-removed sessions.
+    expect(() => removeCodexSessionHome("sess-1", baseDir)).not.toThrow();
+    expect(() => removeCodexSessionHome("never-existed", baseDir)).not.toThrow();
+  });
+});
+
+describe("buildCodexFreshArgs / buildCodexResumeArgs — no --profile, no capability on argv", () => {
+  it("fresh argv has no --profile and never leaks the capability", () => {
+    const opts = baseOpts({ model: "gpt-5.5", resolvedMcp: jinnResolvedWithCapability() });
+    const args = buildCodexFreshArgs(opts, "the prompt", /* homeActive */ true);
+    expect(args).not.toContain("--profile");
+    expect(args.join(" ")).not.toContain(CAPABILITY);
+    // jinn server rides config.toml (home active) → NOT re-emitted on argv…
+    expect(args.join(" ")).not.toContain("mcp_servers.jinn.command");
+  });
+
+  it("resume argv has no --profile, no -C, carries the resume id, and never leaks the capability", () => {
+    const opts = baseOpts({
+      model: "gpt-5.5",
+      resumeSessionId: "thread-abc",
+      resolvedMcp: jinnResolvedWithCapability(),
+    });
+    const args = buildCodexResumeArgs(opts, "the prompt", /* homeActive */ true);
+    expect(args.slice(0, 2)).toEqual(["exec", "resume"]);
+    expect(args).not.toContain("--profile");
+    expect(args).not.toContain("-C"); // codex exec resume rejects -C
+    expect(args).toContain("thread-abc");
+    expect(args.join(" ")).not.toContain(CAPABILITY);
+    expect(args.join(" ")).not.toContain("mcp_servers.jinn.command");
+  });
+
+  it("still emits third-party stdio servers on argv even when the jinn home is active", () => {
+    const resolved: ResolvedMcpConfig = {
+      mcpServers: {
+        ...jinnResolvedWithCapability().mcpServers,
+        search: { command: "npx", args: ["-y", "brave-search-mcp"] },
+      },
+    };
+    const args = buildCodexFreshArgs(baseOpts({ resolvedMcp: resolved }), "p", true);
+    expect(args.join(" ")).toContain('mcp_servers.search.command="npx"');
+    expect(args.join(" ")).not.toContain("mcp_servers.jinn.command");
+  });
+});
+
+describe("codexChildEnv — CODEX_HOME wiring", () => {
+  it("points CODEX_HOME at the per-session home and strips inherited CODEX_*", () => {
+    const base = { PATH: "/usr/bin", CODEX_HOME: "/real/.codex", CODEX_API_KEY: "x", CLAUDECODE: "1" };
+    const env = codexChildEnv(base, "sess-1", "/jinn/tmp/codex-homes/sess-1");
+    expect(env.CODEX_HOME).toBe("/jinn/tmp/codex-homes/sess-1");
+    expect(env.CODEX_API_KEY).toBeUndefined(); // inherited CODEX_* stripped
+    expect(env.CLAUDECODE).toBeUndefined();
+    expect(env.JINN_SESSION_ID).toBe("sess-1");
+    expect(env.PATH).toBe("/usr/bin");
+  });
+
+  it("omits CODEX_HOME when no per-session home is active (default ~/.codex path)", () => {
+    const env = codexChildEnv({ PATH: "/usr/bin" }, "sess-1");
+    expect(env.CODEX_HOME).toBeUndefined();
+    expect(env.JINN_SESSION_ID).toBe("sess-1");
   });
 });

@@ -25,7 +25,7 @@ import path from "node:path";
 import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile, MCP_CAPABLE_ENGINES } from "../resolver.js";
 import { setJinnAttachGate } from "../attachment.js";
 import { JINN_SESSION_CAPABILITY_ENV, attachSessionIdentity } from "../identity.js";
-import { codexMcpConfigArgs, writeCodexMcpProfile } from "../../engines/codex.js";
+import { codexMcpConfigArgs, prepareCodexSessionHome } from "../../engines/codex.js";
 import { prepareGrokProjectMcpConfig, cleanupGrokProjectMcpConfig, grokJinnSessionEnv, JINN_GROK_MCP_MARKER } from "../../engines/grok-mcp.js";
 import { buildAcpMcpServers } from "../../engines/hermes-mcp.js";
 import { writePiJinnMcpExtension, cleanupPiJinnMcpExtension, piJinnSessionEnv } from "../../engines/pi-mcp.js";
@@ -148,27 +148,29 @@ describe("per-engine jinn-server wiring (GRS-018 seam for GRS-017 default-on)", 
       }
     });
 
-    it("codex: argv never carries the capability; a 0600 profile file carries the bound jinn env", () => {
+    it("codex: argv never carries the capability; the per-session CODEX_HOME config.toml (0600) carries the bound jinn env", () => {
       const resolved = stamped();
       const capability = capabilityOf(resolved);
       const args = codexMcpConfigArgs(resolved);
       expect(args.join(" ")).not.toContain(String(capability));
       expect(args.join(" ")).not.toContain("JINN_SESSION_CAPABILITY");
 
-      const profile = writeCodexMcpProfile(resolved, SID);
-      expect(profile).toBeDefined();
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-wiring-"));
+      const home = prepareCodexSessionHome(resolved, SID, { baseDir });
+      expect(home).toBeDefined();
       try {
-        expect(fs.statSync(profile!.filePath).mode & 0o777).toBe(0o600);
-        const toml = fs.readFileSync(profile!.filePath, "utf-8");
+        const cfgPath = path.join(home!.home, "config.toml");
+        expect(fs.statSync(cfgPath).mode & 0o777).toBe(0o600);
+        const toml = fs.readFileSync(cfgPath, "utf-8");
         expect(toml).toContain(`JINN_GATEWAY_URL = ${JSON.stringify(GATEWAY_URL)}`);
         expect(toml).toContain(`JINN_SESSION_ID = ${JSON.stringify(SID)}`);
         expect(toml).toContain(`JINN_SESSION_CAPABILITY = ${JSON.stringify(capability)}`);
         expect(toml).toContain("JINN_HOME = ");
         expect(toml).not.toContain(TOKEN);
       } finally {
-        profile?.cleanup();
+        home?.cleanup();
       }
-      expect(profile && fs.existsSync(profile.filePath)).toBe(false);
+      expect(home && fs.existsSync(home.home)).toBe(false);
     });
 
     it("codex: the wider allowlist is a BUILTIN privilege — a third-party spec smuggling the same keys stays URL-only", () => {

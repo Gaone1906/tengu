@@ -72,6 +72,7 @@ import {
 } from "../sessions/registry.js";
 import { blockFallbackText, validateBlockEnvelope } from "../shared/blocks.js";
 import { forkEngineSession } from "../sessions/fork.js";
+import { removeCodexSessionHome } from "../engines/codex.js";
 import {
   deriveRunState,
   resolveWorkflowEvidenceRoot,
@@ -2216,6 +2217,9 @@ export async function handleApiRequest(
       maybeEmitTalkGraph(params.id, "removed", { getSession, emit: context.emit });
       const deleted = deleteSession(params.id);
       if (!deleted) return notFound(res);
+      // Remove any per-session Codex CODEX_HOME overlay (holds a session-scoped
+      // capability in its config.toml). No-op for non-codex sessions. Idempotent.
+      removeCodexSessionHome(params.id);
       logger.info(`Session deleted: ${params.id}`);
       context.emit("session:deleted", { sessionId: params.id });
       return json(res, { status: "deleted" });
@@ -2410,6 +2414,9 @@ export async function handleApiRequest(
       }
       const count = deleteSessions(ids);
       for (const id of ids) {
+        // Remove any per-session Codex CODEX_HOME overlay for each deleted id
+        // (session-scoped capability on disk). No-op for non-codex sessions.
+        removeCodexSessionHome(id);
         context.emit("session:deleted", { sessionId: id });
       }
       logger.info(`Bulk deleted ${count} sessions`);

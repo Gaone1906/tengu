@@ -324,14 +324,21 @@ describe("CodexEngine — systemPrompt / developer_instructions injection", () =
     expect(call.args).toContain("prev-thread");
   });
 
-  it("passes bound jinn capability through a 0600 Codex profile, never argv, and cleans it up", async () => {
+  it("carries the bound jinn capability via a per-session CODEX_HOME config.toml, never argv, and persists the home across the turn", async () => {
     const prevCodexHome = process.env.CODEX_HOME;
-    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-mcp-profile-"));
-    process.env.CODEX_HOME = codexHome;
-    const capability = "capability-secret-for-profile";
-    const sessionId = "sess-capability-profile";
+    // A stand-in "real" ~/.codex the overlay links auth.json from + merges config.
+    const realHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-real-home-"));
+    fs.writeFileSync(path.join(realHome, "auth.json"), JSON.stringify({ token: "login" }));
+    fs.writeFileSync(path.join(realHome, "config.toml"), 'approval_policy = "never"\n');
+    process.env.CODEX_HOME = realHome;
+    const homesBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-homes-base-"));
+    const capability = "capability-secret-for-home";
+    const sessionId = "sess-capability-home";
     try {
-      const engine = new CodexEngine({ codexSessionsDir: fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-sessions-")) });
+      const engine = new CodexEngine({
+        codexSessionsDir: fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-sessions-")),
+        codexHomesBaseDir: homesBaseDir,
+      });
       const promise = engine.run({
         prompt: "hello",
         cwd: "/tmp",
@@ -354,23 +361,34 @@ describe("CodexEngine — systemPrompt / developer_instructions injection", () =
       await flush();
       const call = spawnCalls[spawnCalls.length - 1];
       const joined = call.args.join(" ");
+      // Capability + --profile never touch argv (the whole point of the fix).
       expect(joined).not.toContain(capability);
       expect(joined).not.toContain("JINN_SESSION_CAPABILITY");
-      const profileFlag = call.args.indexOf("--profile");
-      expect(profileFlag).toBeGreaterThan(-1);
-      const profileName = call.args[profileFlag + 1];
-      const profilePath = path.join(codexHome, `${profileName}.config.toml`);
-      expect(fs.statSync(profilePath).mode & 0o777).toBe(0o600);
-      expect(fs.readFileSync(profilePath, "utf-8")).toContain(`JINN_SESSION_CAPABILITY = ${JSON.stringify(capability)}`);
+      expect(call.args).not.toContain("--profile");
 
-      call.proc.emitStdout(`${threadStarted("t-profile")}\n${agentMessage("ok")}\n`);
+      // CODEX_HOME points at the stable per-session overlay dir.
+      const expectedHome = path.join(homesBaseDir, sessionId);
+      expect((call.opts as { env?: Record<string, string> }).env?.CODEX_HOME).toBe(expectedHome);
+
+      // config.toml is 0600, carries the capability, and merged the operator base.
+      const cfgPath = path.join(expectedHome, "config.toml");
+      expect(fs.statSync(cfgPath).mode & 0o777).toBe(0o600);
+      const cfg = fs.readFileSync(cfgPath, "utf-8");
+      expect(cfg).toContain(`JINN_SESSION_CAPABILITY = ${JSON.stringify(capability)}`);
+      expect(cfg).toContain('approval_policy = "never"'); // operator base preserved
+      // auth.json symlinked back to the real codex home.
+      expect(fs.lstatSync(path.join(expectedHome, "auth.json")).isSymbolicLink()).toBe(true);
+
+      call.proc.emitStdout(`${threadStarted("t-home")}\n${agentMessage("ok")}\n`);
       call.proc.close(0);
       await promise;
-      expect(fs.existsSync(profilePath)).toBe(false);
+      // The overlay PERSISTS after the turn — resume needs the rollout under it.
+      expect(fs.existsSync(cfgPath)).toBe(true);
     } finally {
       if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = prevCodexHome;
-      fs.rmSync(codexHome, { recursive: true, force: true });
+      fs.rmSync(realHome, { recursive: true, force: true });
+      fs.rmSync(homesBaseDir, { recursive: true, force: true });
     }
   });
 });
