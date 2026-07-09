@@ -251,8 +251,7 @@ async function reconcileSopTriggerBindings(
 export function buildWorkflowTools(): JinnMcpTool[] {
   const listWorkflows: JinnMcpTool = {
     name: "list_workflows",
-    description:
-      "List workflow definitions on this gateway: id, title, version, status, updatedAt. Read-only. Start here to discover workflow ids.",
+    description: "List workflow definitions.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args, ctx) => {
       assertBoundCaller(ctx);
@@ -274,8 +273,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const getWorkflow: JinnMcpTool = {
     name: "get_workflow",
-    description:
-      "Get one workflow DEFINITION by id, in its full editable shape (nodes, edges, gates, loop, version). Read-only. For run state use get_workflow_run.",
+    description: "Get one workflow definition.",
     inputSchema: {
       type: "object",
       properties: { workflowId: { type: "string" } },
@@ -292,8 +290,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const listWorkflowRuns: JinnMcpTool = {
     name: "list_workflow_runs",
-    description:
-      "List runs of a workflow (newest first): runId, status (running|parked|completed|failed), trigger, timestamps. Read-only.",
+    description: "List runs of a workflow.",
     inputSchema: {
       type: "object",
       properties: { workflowId: { type: "string" } },
@@ -310,8 +307,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const getWorkflowRun: JinnMcpTool = {
     name: "get_workflow_run",
-    description:
-      "Get one workflow run record: status, per-step receipts in steps[] (ARRAY ORDER IS EXECUTION ORDER — loop rounds appear as repeated nodes with a round field), parked gate state, rounds, errors. Read-only; returns { run, hint }.",
+    description: "Get one workflow run record with status, steps, gates, rounds, and errors.",
     inputSchema: {
       type: "object",
       properties: {
@@ -333,8 +329,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const planWorkflow: JinnMcpTool = {
     name: "plan_workflow",
-    description:
-      "Dry-run a workflow before saving. Prefer SOP input: {sop:{id,title,wakeUp,steps}}. Returns the compiled raw graph, validation result, execution plan/errors, and any event/poll trigger binding plan. Makes no gateway write.",
+    description: "Dry-run workflow authoring input without saving.",
     inputSchema: {
       type: "object",
       properties: {
@@ -353,8 +348,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const validateWorkflow: JinnMcpTool = {
     name: "validate_workflow",
-    description:
-      "Validate a workflow without saving it. Prefer SOP input; raw graph remains available for power users. Returns structured validation and execution-mapping errors so the author can fix and retry.",
+    description: "Validate workflow authoring input without saving.",
     inputSchema: {
       type: "object",
       properties: {
@@ -373,8 +367,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const createWorkflow: JinnMcpTool = {
     name: "create_workflow",
-    description:
-      "Create a workflow. DEFAULT: author an SOP ({id,title,wakeUp,steps}) and Jinn compiles it to the raw graph. Power users may pass definition. Structural problems come back as structured errors to fix and retry. Requires a gateway with a workflow evidence root.",
+    description: "Create a workflow from SOP or raw graph.",
     inputSchema: {
       type: "object",
       properties: {
@@ -400,8 +393,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const updateWorkflow: JinnMcpTool = {
     name: "update_workflow",
-    description:
-      "Update a workflow. DEFAULT: pass SOP to replace the authored graph from ordered steps+wake-up. Power users may pass a raw shallow patch (nodes/edges/runGates arrays REPLACE stored ones). Pass expectedVersion for optimistic locking.",
+    description: "Update a workflow from SOP or raw patch with optimistic locking.",
     inputSchema: {
       type: "object",
       properties: {
@@ -431,8 +423,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const retireWorkflow: JinnMcpTool = {
     name: "retire_workflow",
-    description:
-      "Retire a workflow definition through the authorized workflow route. Retired definitions remain readable/history-backed but are no longer active authoring targets.",
+    description: "Retire a workflow definition.",
     inputSchema: {
       type: "object",
       properties: { workflowId: { type: "string" } },
@@ -457,8 +448,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
   // cannot substitute for that, hence removal.
   const startWorkflowRun: JinnMcpTool = {
     name: "start_workflow_run",
-    description:
-      "Start a run of a workflow definition: mints a durable run record, then executes steps SEQUENTIALLY (real AI sessions; each step's output hands off to the next; approval gates park the run for a HUMAN to resolve). Returns { run, hint }. Requires a workflow evidence root (sandbox — live gateways refuse with 503).",
+    description: "Start a sandbox-gated workflow run.",
     inputSchema: {
       type: "object",
       properties: { workflowId: { type: "string" } },
@@ -484,8 +474,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const listTriggers: JinnMcpTool = {
     name: "list_triggers",
-    description:
-      "List custom workflow trigger bindings on this gateway. Read-only; webhook secrets are never returned. Poll triggers show whether activation is still pending approval.",
+    description: "List custom workflow trigger bindings.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args, ctx) => {
       assertBoundCaller(ctx);
@@ -497,8 +486,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const createTrigger: JinnMcpTool = {
     name: "create_trigger",
-    description:
-      "Create a custom workflow trigger binding. kind='webhook' activates directly and accepts inbound /api/workflow-events with the binding token; kind='poll' creates a COO approval for the exact command/interval/bounds contract and will not execute until that contract is approved.",
+    description: "Create a webhook or approval-gated poll workflow trigger binding.",
     inputSchema: {
       type: "object",
       properties: {
@@ -538,7 +526,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const deleteTrigger: JinnMcpTool = {
     name: "delete_trigger",
-    description: "Delete a custom workflow trigger binding by name. Requires the caller session capability on the gateway write route.",
+    description: "Delete a custom workflow trigger binding by name.",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string" } },

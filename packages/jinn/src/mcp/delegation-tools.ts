@@ -84,7 +84,7 @@ export function buildDelegationTools(): JinnMcpTool[] {
   const delegateTask: JinnMcpTool = {
     name: "delegate_task",
     description:
-      "Delegate TRACKED company work to an employee (or a bare engine): one atomic gateway transaction mints a durable work item (the accountability record), spawns a session briefed with your task, and links the two. The session is automatically your CHILD. For a quick untracked question, use spawn_session instead. Protocol: after delegating, END YOUR TURN — the gateway wakes you when the child replies ('📩 replied'); never poll in a loop. Callbacks are best-effort: if you resume for another reason, check the child with read_session (status 'idle' = finished).",
+      "Delegate TRACKED company work: mint Todo, spawn child, link both. After delegating, END YOUR TURN; never poll in a loop.",
     inputSchema: {
       type: "object",
       properties: {

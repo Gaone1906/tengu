@@ -65,8 +65,7 @@ async function fetchOrgEmployees(ctx: JinnMcpContext): Promise<OrgEmployeeRecord
 export function buildOrgTools(): JinnMcpTool[] {
   const listEmployees: JinnMcpTool = {
     name: "list_employees",
-    description:
-      "List the AI employees in this Jinn organization — their names, roles, ranks, departments, and reporting lines. Read-only. Use this to discover who works here instead of relying on a pasted roster.",
+    description: "List employees with compact org fields and reporting lines. Read-only.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args, ctx) => {
       assertBoundCaller(ctx);
@@ -80,8 +79,7 @@ export function buildOrgTools(): JinnMcpTool[] {
 
   const getEmployee: JinnMcpTool = {
     name: "get_employee",
-    description:
-      "Get one employee's FULL record by slug: persona, department, rank, engine/model defaults, manager, direct reports. Read-only. Use before delegating to understand who you're briefing.",
+    description: "Get one employee full record by slug. Read-only.",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string" } },
@@ -106,8 +104,7 @@ export function buildOrgTools(): JinnMcpTool[] {
 
   const findEmployees: JinnMcpTool = {
     name: "find_employees",
-    description:
-      "Find employees by exact department, rank, and/or engine (AND of the filters you pass; at least one required). Deterministic filter on declared fields — YOU judge which match fits the task. Read-only; returns compact rows without personas.",
+    description: "Find employees by exact department, rank, and/or engine; returns compact rows. Read-only.",
     inputSchema: {
       type: "object",
       properties: {

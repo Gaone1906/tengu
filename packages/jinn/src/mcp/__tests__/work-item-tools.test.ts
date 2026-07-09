@@ -74,11 +74,11 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toHaveLength(41);
   });
 
-  it("positions list as structured/recent and search as text search", () => {
-    expect(tool("list_work_items").description).toMatch(/recent or structured-filtered/i);
-    expect(tool("list_work_items").description).toMatch(/needsAttentionFor.*me/i);
-    expect(tool("search_work_items").description).toMatch(/text search/i);
-    expect(tool("search_work_items").description).toMatch(/title.*body/i);
+  it("positions list as recent/filter summaries and search as text/filter hits", () => {
+    expect(tool("list_work_items").description).toMatch(/recent or filtered/i);
+    expect(tool("list_work_items").description).toMatch(/compact summaries/i);
+    expect(tool("search_work_items").description).toMatch(/by text/i);
+    expect(tool("search_work_items").description).toMatch(/structured filters/i);
   });
 
   it("create schema has no approval fields and update schema excludes cancelled", () => {

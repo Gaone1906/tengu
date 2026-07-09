@@ -53,8 +53,7 @@ function shapeRun(run: Record<string, unknown>): Record<string, unknown> {
 export function buildCronTools(): JinnMcpTool[] {
   const list: JinnMcpTool = {
     name: "list_cron_jobs",
-    description:
-      "List configured cron jobs and latest run status. Read-only: editing schedules, enabling/disabling jobs, and triggering runs are operator/COO operations, not agent operations. Prompt bodies are intentionally omitted.",
+    description: "List cron jobs and latest safe run metadata; prompt bodies omitted.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args, ctx) => {
       assertBoundCaller(ctx);
@@ -70,7 +69,7 @@ export function buildCronTools(): JinnMcpTool[] {
 
   const history: JinnMcpTool = {
     name: "get_cron_run_history",
-    description: `Read safe run metadata for one cron job. Read-only; capped to last ${CRON_RUN_LIMIT_MAX} runs. Omits prompt/env/command/result/error/message bodies.`,
+    description: "Read capped safe run metadata for one cron job.",
     inputSchema: {
       type: "object",
       properties: {

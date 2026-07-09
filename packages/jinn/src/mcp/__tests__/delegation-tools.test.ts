@@ -79,9 +79,10 @@ describe("delegate_task — registry + schema", () => {
 
   it("teaches the division of labor and the end-turn protocol in its description", () => {
     const d = delegateTool().description;
-    expect(d).toMatch(/work item/i);
-    expect(d).toMatch(/spawn_session/);
+    expect(d).toMatch(/TRACKED company work/);
+    expect(d).toMatch(/Todo/);
     expect(d).toMatch(/END YOUR TURN/);
+    expect(d).toMatch(/never poll/i);
   });
 });
 

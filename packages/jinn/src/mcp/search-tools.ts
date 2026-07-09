@@ -145,8 +145,7 @@ function qs(params: Record<string, string | number | undefined>): string {
 export function buildSearchTools(): JinnMcpTool[] {
   const searchMessages: JinnMcpTool = {
     name: "search_messages",
-    description:
-      "Full-text search across OTHER sessions' user/assistant messages — the company reference layer: find where something was discussed, decided, or reported, then expand a hit with get_message_context and see the session's current state with read_session. Your OWN session is excluded by default (your search request would otherwise match itself); pass includeOwnSession true to search your own history. Query is plain words (a multi-word query requires ALL words; operators like OR/NEAR/* are treated as literal text). Newest hits first. Returns snippets only, never full messages.",
+    description: "Search other sessions messages; own session excluded by default; snippets only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -213,8 +212,7 @@ export function buildSearchTools(): JinnMcpTool[] {
 
   const searchSessions: JinnMcpTool = {
     name: "search_sessions",
-    description:
-      "Find sessions by AND-composed filters: text (matches title/prompt-excerpt/id as a literal substring), employee, engine, status, source, parentSessionId, activeSince/activeBefore (ISO-8601), needsAttention (status error|interrupted). At least one filter required. Returns capped summaries newest-first — no message bodies.",
+    description: "Find sessions by structured filters; summaries only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -271,8 +269,7 @@ export function buildSearchTools(): JinnMcpTool[] {
 
   const getMessageContext: JinnMcpTool = {
     name: "get_message_context",
-    description:
-      `Read the messages around a search hit from search_messages: given { sessionId, messageId }, returns the ±radius surrounding messages (default ${CONTEXT_RADIUS_DEFAULT}, max ${CONTEXT_RADIUS_MAX}; long messages truncated). Read-only; there is no full-transcript mode — if the window isn't enough, ask the session to summarize.`,
+    description: "Read bounded context around a search_messages hit.",
     inputSchema: {
       type: "object",
       properties: {

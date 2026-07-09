@@ -48,8 +48,7 @@ export function buildCostTools(): JinnMcpTool[] {
   return [
     {
       name: "cost_report",
-      description:
-        "Report deterministic spend from existing session accounting. Groups sessions.total_cost/total_turns by employee or day with optional time range and employee filter. Cost-only read surface: no budgets, thresholds, work-item joins, or mutations.",
+      description: "Report deterministic session spend grouped by employee or day.",
       inputSchema: {
         type: "object",
         properties: {

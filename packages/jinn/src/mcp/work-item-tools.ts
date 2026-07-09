@@ -158,8 +158,7 @@ function rejectProvenance(args: Record<string, unknown>): void {
 export function buildWorkItemTools(): JinnMcpTool[] {
   const list: JinnMcpTool = {
     name: "list_work_items",
-    description:
-      "List recent or structured-filtered Todos (substrate: work_items) by status/source/assignee/department, or pass needsAttentionFor='me' for your own approval/blocked queue. Read-only, compact summaries only. Use get_work_item for full acceptance, approval, spend, rounds, and workflow-run detail.",
+    description: "List recent or filtered Todos as compact summaries.",
     inputSchema: {
       type: "object",
       properties: {
@@ -190,8 +189,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const get: JinnMcpTool = {
     name: "get_work_item",
-    description:
-      "Get one Todo's full detail: body, acceptance, verify policy, rounds, approval fields, live spend, workflowRun reference, and event log. Read-only.",
+    description: "Get one Todo full detail.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" } },
@@ -208,8 +206,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const search: JinnMcpTool = {
     name: "search_work_items",
-    description:
-      "Text search Todos with deterministic escaped-LIKE text over title+body AND-composed with status/source/assignee/department filters. Operators like %, _, and backslash are literal. Returns <=20 compact hits, never body dumps.",
+    description: "Search Todos by text and structured filters; compact hits only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -242,8 +239,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const create: JinnMcpTool = {
     name: "create_work_item",
-    description:
-      "Create a Todo for COO decomposition or agent-captured work. Agent-legal live write. Approval is deliberately impossible here: fresh Todos never attach approvals; approval decisions use the separate routed authority tools.",
+    description: "Create a Todo for decomposition or captured work; approvals are excluded.",
     inputSchema: {
       type: "object",
       properties: {
@@ -275,8 +271,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const update: JinnMcpTool = {
     name: "update_work_item",
-    description:
-      "Update your Todo status through the guarded transition rules. Agent-legal statuses: in_review, blocked, escalated, done. Own executing item -> done is refused by the self-review ban; cancellation and approval decisions are human-surface only.",
+    description: "Update a Todo through agent-legal status transitions.",
     inputSchema: {
       type: "object",
       properties: {
@@ -308,8 +303,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const assign: JinnMcpTool = {
     name: "assign_work_item",
-    description:
-      "Assign a Todo to a named employee. Agent-legal collaborative write; the gateway validates the employee against the org roster and returns near-match hints on typos.",
+    description: "Assign a Todo to an employee.",
     inputSchema: {
       type: "object",
       properties: {
@@ -331,8 +325,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const archive: JinnMcpTool = {
     name: "archive_work_item",
-    description:
-      "Archive a Todo without deleting it. This moves the item to the closed/archived status used by the ledger, preserves the row and audit trail, and records an optional note.",
+    description: "Archive a Todo without deleting its row or audit trail.",
     inputSchema: {
       type: "object",
       properties: {

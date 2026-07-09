@@ -153,7 +153,7 @@ export function buildSessionTools(): JinnMcpTool[] {
   const spawnSession: JinnMcpTool = {
     name: "spawn_session",
     description:
-      "Spawn a quick untracked AI session (optionally as a named employee) with a task prompt. For tracked company work that needs a durable Todo/accountability record, use delegate_task instead. It is automatically linked to you as a CHILD when you run inside a Jinn session. Protocol: after spawning, END YOUR TURN — the gateway wakes you when the child replies ('📩 replied'); never poll in a loop. Callbacks are best-effort: if you resume for another reason, check the child with read_session (status 'idle' = finished).",
+      "Spawn a quick untracked child session; for tracked company work use delegate_task. After spawning, END YOUR TURN; never poll in a loop.",
     inputSchema: {
       type: "object",
       properties: {
@@ -191,8 +191,7 @@ export function buildSessionTools(): JinnMcpTool[] {
 
   const sendToSession: JinnMcpTool = {
     name: "send_to_session",
-    description:
-      "Send a message to another session (a child follow-up or a LATERAL peer). Delivered as a sender-tagged notification that wakes the target (queues if it is mid-turn). Gateway guards apply: no self-messages, a per-sender rate cap, and a relay hop budget.",
+    description: "Send a follow-up message to another session; gateway guards apply.",
     inputSchema: {
       type: "object",
       properties: {
@@ -221,8 +220,7 @@ export function buildSessionTools(): JinnMcpTool[] {
 
   const readSession: JinnMcpTool = {
     name: "read_session",
-    description:
-      `Read one session's status and its last N messages (N ≤ ${READ_LAST_MAX}, default ${READ_LAST_DEFAULT}; long messages truncated). Read-only. Returns { session..., messages, hint }. There is no full-transcript mode — ask the session to summarize or write a report file instead.`,
+    description: "Read one session status and last N messages; long messages are capped.",
     inputSchema: {
       type: "object",
       properties: {
@@ -259,8 +257,7 @@ export function buildSessionTools(): JinnMcpTool[] {
 
   const listSessions: JinnMcpTool = {
     name: "list_sessions",
-    description:
-      "List sessions as capped summaries (no message bodies): scope 'children' = your child sessions (default), 'employee' = a named employee's sessions, 'recent' = recent sessions across the gateway (lateral discovery). Read-only; ids are the addresses for send_to_session / read_session.",
+    description: "List capped session summaries by children, employee, or recent scope.",
     inputSchema: {
       type: "object",
       properties: {
@@ -311,8 +308,7 @@ export function buildSessionTools(): JinnMcpTool[] {
 
   const stopSession: JinnMcpTool = {
     name: "stop_session",
-    description:
-      "Stop a running session you spawned (your own descendants only). Recoverable — the record and messages survive, and a follow-up message resumes it. Not a delete: deleting sessions is an operator action and has no agent tool.",
+    description: "Stop a running descendant session without deleting its record.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" } },

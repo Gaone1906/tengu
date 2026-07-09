@@ -104,10 +104,9 @@ describe("search tools — registry + schemas", () => {
   });
 
   it("domain teaching lives on search_messages; the others stay short", () => {
-    expect(tool("search_messages").description).toMatch(/plain words/i);
-    expect(tool("search_messages").description).toMatch(/get_message_context/);
-    expect(tool("get_message_context").description).toMatch(/no full-transcript mode/i);
-    expect(tool("get_message_context").description).toMatch(/around a search hit/i);
+    expect(tool("search_messages").description).toMatch(/own session excluded/i);
+    expect(tool("search_messages").description).toMatch(/snippets only/i);
+    expect(tool("get_message_context").description).toMatch(/search_messages hit/i);
   });
 });
 

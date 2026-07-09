@@ -92,8 +92,7 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
 export function buildFileTools(): JinnMcpTool[] {
   const list: JinnMcpTool = {
     name: "list_files",
-    description:
-      "List managed company files as relative managedPath values under files/ or uploads/. Read-only; never returns host absolute paths. Use read_file with managedPath to read one.",
+    description: "List managed company files as relative managedPath values.",
     inputSchema: {
       type: "object",
       properties: {
@@ -122,8 +121,7 @@ export function buildFileTools(): JinnMcpTool[] {
 
   const read: JinnMcpTool = {
     name: "read_file",
-    description:
-      "Read one managed company file by relative path under files/ or uploads/. Reuses the gateway containment guard: control-byte reject, realpath containment, symlink-escape blocked, canary-safe.",
+    description: "Read one managed company file under files/ or uploads/.",
     inputSchema: {
       type: "object",
       properties: { path: { type: "string" } },

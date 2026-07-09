@@ -70,8 +70,7 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
 export function buildKnowledgeTools(): JinnMcpTool[] {
   const searchKnowledge: JinnMcpTool = {
     name: "search_knowledge",
-    description:
-      "Search the company's institutional knowledge — the operator-curated markdown libraries in knowledge/ (research, strategies, profiles) and docs/ (platform docs). Query is plain words (case-insensitive; ALL words must appear in a file's name or content; deterministic, no LLM). Returns up to 20 hits {path, title, snippet, matchCount} — snippets only, never file bodies; read a hit with read_knowledge { path }. Nothing outside knowledge/ and docs/ is searchable or readable.",
+    description: "Search knowledge/ and docs/ markdown; snippets only.",
     inputSchema: {
       type: "object",
       properties: {
@@ -99,8 +98,7 @@ export function buildKnowledgeTools(): JinnMcpTool[] {
 
   const readKnowledge: JinnMcpTool = {
     name: "read_knowledge",
-    description:
-      'Read ONE knowledge file by the relative path a search_knowledge hit returned (e.g. "knowledge/pricing-strategy.md" or "docs/architecture.md"). Long files are truncated at ~20 KB with a marker. Only files inside knowledge/ and docs/ are reachable.',
+    description: "Read one knowledge/docs file by relative path; long files are capped.",
     inputSchema: {
       type: "object",
       properties: {

@@ -95,9 +95,9 @@ describe("knowledge tools — registry + schemas", () => {
   });
 
   it("domain teaching lives on search_knowledge; read stays short and names the roots", () => {
-    expect(tool("search_knowledge").description).toMatch(/never file bodies/i);
-    expect(tool("search_knowledge").description).toMatch(/read_knowledge/);
-    expect(tool("read_knowledge").description).toMatch(/knowledge\/ and docs\//);
+    expect(tool("search_knowledge").description).toMatch(/knowledge\/ and docs\//);
+    expect(tool("search_knowledge").description).toMatch(/snippets only/i);
+    expect(tool("read_knowledge").description).toMatch(/knowledge\/docs file/i);
   });
 });
 
