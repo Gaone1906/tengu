@@ -141,6 +141,8 @@ export interface ListWorkItemsFilter {
   assignee?: string;
   source?: WorkItemSource;
   needsAttentionFor?: string;
+  /** Cap rows in SQL (LIMIT) instead of the caller slicing after a full-table load. */
+  limit?: number;
 }
 
 export interface SearchWorkItemsFilter extends ListWorkItemsFilter {
@@ -408,8 +410,11 @@ export function listWorkItems(filter?: ListWorkItemsFilter): WorkItem[] {
     values.push(filter.needsAttentionFor, filter.needsAttentionFor);
   }
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const hasLimit = typeof filter?.limit === 'number' && Number.isFinite(filter.limit);
+  const limitSql = hasLimit ? ' LIMIT ?' : '';
+  if (hasLimit) values.push(Math.max(0, Math.floor(filter!.limit!)));
   const rows = db
-    .prepare(`SELECT * FROM work_items ${where} ORDER BY updated_at DESC, created_at DESC`)
+    .prepare(`SELECT * FROM work_items ${where} ORDER BY updated_at DESC, created_at DESC${limitSql}`)
     .all(...values) as Record<string, unknown>[];
   return rows.map(rowToWorkItem);
 }

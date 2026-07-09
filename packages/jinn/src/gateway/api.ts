@@ -2499,7 +2499,7 @@ export async function handleApiRequest(
         filter.needsAttentionFor = target;
       }
       const limit = Math.max(1, Math.min(parseInt(url.searchParams.get("limit") || "10", 10) || 10, 20));
-      return json(res, { workItems: listWorkItems(filter).slice(0, limit).map(compactWorkItem) });
+      return json(res, { workItems: listWorkItems({ ...filter, limit }).map(compactWorkItem) });
     }
 
     // POST /api/work-items — GRS-021c create. Tool callers must carry identity;

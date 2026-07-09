@@ -63,6 +63,9 @@ CREATE INDEX IF NOT EXISTS idx_work_items_status     ON work_items(status);
 CREATE INDEX IF NOT EXISTS idx_work_items_department ON work_items(department);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_work_items_source_ref
   ON work_items(source, source_ref) WHERE source_ref IS NOT NULL;
+-- Backs the default list/search ORDER BY (updated_at DESC, created_at DESC) so a
+-- LIMIT-ed read walks the index tail instead of sorting the whole table.
+CREATE INDEX IF NOT EXISTS idx_work_items_recent     ON work_items(updated_at DESC, created_at DESC);
 `;
 
 /** Append-only audit of Todo lifecycle (design §1.2 — earned by the approvals/

@@ -79,7 +79,7 @@ describe("migrateWorkItemsSchema — the GRS-021a vocabulary rebuild", () => {
     expect(done.closed_at).toBe("2026-07-02T00:00:00.000Z");
   });
 
-  it("recreates the three indexes (incl. the partial UNIQUE) and the new CHECKs hold", () => {
+  it("recreates the indexes (incl. the partial UNIQUE and the recency index) and the new CHECKs hold", () => {
     const db = oldShapeDb();
     insertOld(db, "wi_1", "open", "cron", "cron:j:1");
     migrateWorkItemsSchema(db);
@@ -88,7 +88,12 @@ describe("migrateWorkItemsSchema — the GRS-021a vocabulary rebuild", () => {
       .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='work_items' AND name NOT LIKE 'sqlite_%'")
       .all() as Array<{ name: string }>;
     expect(new Set(indexes.map((i) => i.name))).toEqual(
-      new Set(["idx_work_items_status", "idx_work_items_department", "uq_work_items_source_ref"]),
+      new Set([
+        "idx_work_items_status",
+        "idx_work_items_department",
+        "idx_work_items_recent",
+        "uq_work_items_source_ref",
+      ]),
     );
     // Partial UNIQUE still enforces machine-mint idempotency…
     expect(() =>
