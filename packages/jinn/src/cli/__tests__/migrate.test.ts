@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import jsYaml from "js-yaml";
 
 // Mock child_process before importing the module under test
 vi.mock("node:child_process", () => ({
@@ -188,8 +189,9 @@ describe("migrate: prompt dispenser", () => {
     });
 
     it("applies but does NOT write when the config shape can't be safely stamped", async () => {
-      // Agent runs fine, but the marker can't be advanced (inline jinn mapping).
-      mockReadFileSync.mockReturnValueOnce('jinn: { version: "1.0.0" }\n');
+      // Agent runs fine, but the marker can't be advanced (config.yaml is not
+      // valid YAML — tab indentation — so the stamper refuses rather than guess).
+      mockReadFileSync.mockReturnValueOnce("jinn:\n\tversion: 1.0.0\n");
       const log = vi.spyOn(console, "log").mockImplementation(() => {});
       vi.spyOn(console, "error").mockImplementation(() => {});
       const { runMigrate } = await import("../migrate.js");
@@ -254,7 +256,7 @@ describe("migrate: prompt dispenser", () => {
     });
 
     it("exits without writing when --mark-done can't safely stamp the config shape", async () => {
-      mockReadFileSync.mockReturnValueOnce('jinn: { version: "1.0.0" }\n');
+      mockReadFileSync.mockReturnValueOnce("jinn:\n\tversion: 1.0.0\n");
       const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
         throw new Error("process.exit called");
       }) as never);
@@ -287,30 +289,27 @@ describe("migrate: prompt dispenser", () => {
 
 /**
  * The version marker lives in the user-owned config.yaml, which the live gateway
- * hot-reloads. Stamping must be a surgical text edit — comments, quoting, and
- * key order are the user's and must survive byte-for-byte. Only the version line
- * may change. This is the shared path behind both --mark-done and --apply.
+ * hot-reloads. Stamping is a FORMAT-PRESERVING document edit (the `yaml` package):
+ * comments and quoting on untouched nodes must survive, EVERY valid shape of
+ * `jinn.version` must end up correct, and the function must NEVER return text
+ * that reads back as a different (or unset) marker — the exact
+ * succeeds-while-corrupting failure this replaced. This is the shared path
+ * behind both --mark-done and --apply.
  */
-describe("stampVersionInYaml: surgical-or-refuse version stamp", () => {
+describe("stampVersionInYaml: format-preserving version stamp", () => {
   /** Unwrap a successful stamp, failing the test if it refused. */
   function okText(res: ReturnType<typeof stampVersionInYaml>): string {
     expect(res.ok).toBe(true);
-    if (!res.ok) throw new Error("expected ok stamp"); // narrows the union
+    if (!res.ok) throw new Error(`expected ok stamp, refused: ${res.reason}`); // narrows the union
     return res.text;
   }
 
-  /** Assert exactly one line differs between two texts, and return it. */
-  function soleChangedLine(before: string, after: string): { from: string; to: string } {
-    const a = before.split("\n");
-    const b = after.split("\n");
-    expect(b.length).toBe(a.length);
-    const changed: number[] = [];
-    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) changed.push(i);
-    expect(changed).toHaveLength(1);
-    return { from: a[changed[0]], to: b[changed[0]] };
+  /** Read jinn.version back out of stamped text with an independent parser. */
+  function markerOf(text: string): unknown {
+    return (jsYaml.load(text) as { jinn?: { version?: unknown } } | null)?.jinn?.version;
   }
 
-  it("changes ONLY the version line, preserving comments and odd quoting", () => {
+  it("updates the version and preserves comments and odd quoting on other nodes", () => {
     const before = [
       "# top-of-file comment",
       "engines:",
@@ -327,46 +326,100 @@ describe("stampVersionInYaml: surgical-or-refuse version stamp", () => {
     ].join("\n");
 
     const after = okText(stampVersionInYaml(before, "0.26.0"));
-    const { from, to } = soleChangedLine(before, after);
-    expect(from).toBe("  version: 0.20.0");
-    expect(to).toBe('  version: "0.26.0"');
 
-    // Everything else is byte-identical.
+    // The marker is updated and reads back exactly.
+    expect(after).toContain('version: "0.26.0"');
+    expect(markerOf(after)).toBe("0.26.0");
+    // The old value is gone.
+    expect(after).not.toContain("0.20.0");
+
+    // Comments and quoting on untouched nodes survive (the yaml lib may
+    // normalize whitespace before an inline comment, so assert the comment text,
+    // not byte-exact spacing).
     expect(after).toContain("# top-of-file comment");
-    expect(after).toContain("  default: claude   # inline comment stays");
-    expect(after).toContain("    model: 'opus'");
-    expect(after).toContain("  # marker for the last applied migration");
-    expect(after).toContain('  slack: { token: "xoxb-abc" }');
+    expect(after).toContain("# inline comment stays");
+    expect(after).toContain("# marker for the last applied migration");
+    expect(after).toContain("model: 'opus'");
+    expect(after).toContain('slack: { token: "xoxb-abc" }');
+    // Sibling keys are untouched.
+    expect(after).toContain("telemetry: false");
   });
 
   it("appends version into an existing jinn block that lacks the key", () => {
     const before = ["jinn:", "  telemetry: false", "other:", "  x: 1", ""].join("\n");
     const after = okText(stampVersionInYaml(before, "0.26.0"));
 
-    expect(after).toContain('  version: "0.26.0"');
-    // Inserted inside the jinn block (before the next top-level key), key kept.
+    expect(after).toContain('version: "0.26.0"');
+    expect(markerOf(after)).toBe("0.26.0");
+    // The new key landed inside the jinn block, not under `other:`.
     expect(after.indexOf('version: "0.26.0"')).toBeLessThan(after.indexOf("other:"));
     expect(after).toContain("  telemetry: false");
     expect(after).toContain("  x: 1");
   });
 
-  it("appends a jinn block when none exists, keeping the rest intact", () => {
+  it("creates a jinn block when none exists, keeping the rest intact", () => {
     const before = ["engines:", "  default: claude", ""].join("\n");
     const after = okText(stampVersionInYaml(before, "0.26.0"));
 
     expect(after).toContain("engines:");
     expect(after).toContain("  default: claude");
+    expect(markerOf(after)).toBe("0.26.0");
     expect(after).toMatch(/jinn:\n {2}version: "0\.26\.0"\n$/);
   });
 
-  it("preserves a trailing CR on a CRLF version line", () => {
-    const before = "jinn:\r\n  version: 0.20.0\r\n";
-    const after = okText(stampVersionInYaml(before, "0.26.0"));
-    expect(after).toBe('jinn:\r\n  version: "0.26.0"\r\n');
+  it("creates the jinn block from a completely empty file", () => {
+    const after = okText(stampVersionInYaml("", "0.26.0"));
+    expect(after).toBe('jinn:\n  version: "0.26.0"\n');
+    expect(markerOf(after)).toBe("0.26.0");
   });
 
-  // Round-3 HIGH 2: a nested `metadata.version` must NEVER be mistaken for the
-  // marker — only the DIRECT child of `jinn:` is the marker.
+  it("updates a CRLF file (line endings may normalize to LF, marker still correct)", () => {
+    const before = "jinn:\r\n  version: 0.20.0\r\n";
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
+    expect(after).toContain('version: "0.26.0"');
+    expect(markerOf(after)).toBe("0.26.0");
+  });
+
+  // Round-3 QA HIGH: version written as a PARENT key (its value is a nested map).
+  // The old text patcher wrote `version: "0.26.0"` then left the orphaned deeper-
+  // indented `major: 0` behind → invalid YAML that read back as 0.0.0 while
+  // exiting 0. setIn collapses the whole map to the scalar — no orphan survives.
+  it("collapses a version-as-parent-key map to the scalar with no orphaned children", () => {
+    const before = ["jinn:", "  version:", "    major: 0", "  telemetry: false", ""].join("\n");
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
+
+    expect(after).toContain('version: "0.26.0"');
+    expect(after).not.toContain("major: 0"); // the orphan is gone
+    expect(after).toContain("telemetry: false");
+    // Crucially, the output is valid YAML and the marker reads back exactly.
+    expect(markerOf(after)).toBe("0.26.0");
+  });
+
+  it("collapses a version parent-key that has a comment then a deeper child", () => {
+    const before = ["jinn:", "  version: # stale", "    major: 0", "  telemetry: false", ""].join("\n");
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
+
+    expect(after).not.toContain("major: 0");
+    expect(after).toContain("telemetry: false");
+    expect(markerOf(after)).toBe("0.26.0");
+  });
+
+  // Round-3 HIGH → now IMPROVED: an inline/flow `jinn: { … }` UPDATES in place
+  // (the document model edits the flow mapping) rather than refusing.
+  it("updates an inline/flow jinn mapping in place", () => {
+    const before = 'jinn: { version: "0.20.0", telemetry: false }\nother: 1\n';
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
+
+    expect(after).toContain('version: "0.26.0"');
+    expect(markerOf(after)).toBe("0.26.0");
+    // Still a single jinn key, sibling preserved, unrelated key intact.
+    expect((after.match(/^jinn:/gm) ?? []).length).toBe(1);
+    expect(after).toContain("telemetry: false");
+    expect(after).toContain("other: 1");
+  });
+
+  // A nested `metadata.version` must NEVER be mistaken for the marker — only the
+  // DIRECT `jinn.version` child is the marker.
   it("adds a direct-child version and leaves a nested metadata.version untouched", () => {
     const before = [
       "jinn:",
@@ -379,36 +432,34 @@ describe("stampVersionInYaml: surgical-or-refuse version stamp", () => {
 
     // The nested value is preserved verbatim.
     expect(after).toContain("    version: custom-metadata");
-    // A direct-child jinn.version was added at the block's own indent.
-    expect(after).toContain('\n  version: "0.26.0"');
-    // Exactly one new line (the inserted direct child); nothing else changed.
-    expect(after.split("\n").length).toBe(before.split("\n").length + 1);
+    // The direct-child jinn.version is what reads back — not the nested one.
+    expect(markerOf(after)).toBe("0.26.0");
+    expect(after).toContain('version: "0.26.0"');
   });
 
-  // Round-3 HIGH 1: an inline/flow `jinn: { ... }` must REFUSE (no second block,
-  // no corruption) with a clear reason and zero change to the input.
-  it("REFUSES an inline/flow jinn mapping instead of appending a duplicate block", () => {
-    const before = 'jinn: { version: "0.20.0", telemetry: false }\nother: 1\n';
+  it("REFUSES (no text) when the config isn't valid YAML — a tab-indented file", () => {
+    const before = "jinn:\n\tversion: 0.20.0\n";
     const res = stampVersionInYaml(before, "0.26.0");
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error("expected refusal");
-    expect(res.reason).toMatch(/inline\/flow mapping|scalar/i);
-    // No jinn block was duplicated.
-    expect((before.match(/^jinn:/gm) ?? []).length).toBe(1);
+    expect(res.reason).toMatch(/valid YAML|parse|tab/i);
   });
 
-  it("REFUSES a jinn.version written as a YAML anchor", () => {
+  it("REFUSES a jinn.version written as a YAML anchor referenced by an alias", () => {
+    // Replacing the anchored node orphans the `*v` alias; serialization throws
+    // and the stamper refuses rather than emit broken YAML.
     const before = "jinn:\n  version: &v 0.20.0\nrefs:\n  x: *v\n";
     const res = stampVersionInYaml(before, "0.26.0");
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error("expected refusal");
-    expect(res.reason).toMatch(/anchor|alias|block scalar/i);
+    expect(res.reason).toMatch(/anchor|alias|serialize/i);
   });
 
   it("does not confuse a `versioning:` sibling key for `version:`", () => {
     const before = ["jinn:", "  versioning: semver", "  telemetry: false", ""].join("\n");
     const after = okText(stampVersionInYaml(before, "0.26.0"));
-    expect(after).toContain("  versioning: semver"); // untouched
-    expect(after).toContain('  version: "0.26.0"'); // added as a new direct child
+    expect(after).toContain("versioning: semver"); // untouched
+    expect(after).toContain('version: "0.26.0"'); // added as a new direct child
+    expect(markerOf(after)).toBe("0.26.0");
   });
 });

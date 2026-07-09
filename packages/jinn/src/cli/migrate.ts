@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { parseDocument, Scalar } from "yaml";
 import {
   JINN_HOME,
   CONFIG_PATH,
@@ -32,116 +33,91 @@ export type StampResult =
   | { ok: false; reason: string };
 
 /**
- * Surgically set `jinn.version` inside a config.yaml's text, preserving every
- * other byte. A full `yaml.load` → `yaml.dump` round-trip strips comments and
- * re-quotes a user-owned file, so instead this is a SAFE-SUBSET text patcher:
- * it handles the three shapes it can edit without ambiguity and REFUSES every
- * other shape rather than risk corrupting the file. Refusing is acceptable;
- * corrupting (duplicating the `jinn:` key, or rewriting an unrelated nested
- * `version:`) is not.
+ * Set `jinn.version` inside a config.yaml's text, preserving comments, quoting,
+ * and formatting on every node we don't touch. This is a FORMAT-PRESERVING
+ * document edit via the `yaml` package: `parseDocument` keeps the concrete
+ * syntax tree (including comments) intact, `setIn` mutates only the target node,
+ * and `toString` re-serializes with the untouched nodes verbatim.
  *
- * Handled (→ `{ ok: true, text }`):
- *   1. block-style `jinn:` with a DIRECT-child `version:` → replace its value.
- *   2. block-style `jinn:` without a direct `version:`   → insert one first.
- *   3. no top-level `jinn:` key at all                    → append a fresh block.
+ * This replaces an earlier hand-rolled text patcher that played whack-a-mole
+ * with edge shapes and, in the worst case, wrote a file that read back as a
+ * different (or unset) marker while still exiting 0. The document model makes
+ * every VALID shape correct in one path:
+ *   - block-style `jinn:` with/without a direct `version:` → set/insert it.
+ *   - inline/flow `jinn: { version: … }`                   → update in place.
+ *   - `version:` written as a PARENT key (a nested map)     → collapse to the
+ *     scalar (no orphaned deeper-indented children survive — the round-3 bug).
+ *   - a nested `jinn.metadata.version`                      → left untouched;
+ *     only the direct `jinn.version` child is the marker.
+ *   - no `jinn:` block, or an empty file                    → created.
  *
- * Refused (→ `{ ok: false, reason }`, no write):
- *   - `jinn:` written as an inline/flow mapping (`jinn: { ... }`), a scalar, an
- *     anchor/alias, or anything other than a plain block-mapping header.
- *   - a direct-child `version:` whose value is an anchor/alias/merge or a block
- *     scalar (editing it could break references elsewhere).
- * Nested keys (e.g. `jinn.metadata.version`) are never matched — only the
- * DIRECT child at the block's own child indentation.
+ * Safety is layered so we NEVER write a file that succeeds-while-corrupting:
+ *   1. refuse if the input isn't valid YAML (`doc.errors`) — no blind edit.
+ *   2. refuse if serialization throws (e.g. replacing an anchored value orphans
+ *      an alias elsewhere) — that shape can't be edited without breaking refs.
+ *   3. parse the produced text BACK and refuse unless `jinn.version` reads back
+ *      exactly the target — the write site only ever sees verified text.
+ *
+ * The value is emitted as a double-quoted string scalar so the marker is
+ * unambiguously a string regardless of how numeric it looks.
  *
  * Exported for unit testing (pure string → StampResult).
  */
 export function stampVersionInYaml(raw: string, version: string): StampResult {
-  const value = JSON.stringify(version); // safe double-quoted scalar, e.g. "0.26.0"
-  const lines = raw.split("\n");
-
-  const stripCr = (s: string) => (s.endsWith("\r") ? s.slice(0, -1) : s);
-
-  // Locate a top-level `jinn:` key line (column 0). Capture whatever follows the
-  // colon so we can tell a plain block header from an inline/flow/scalar value.
-  let jinnIdx = -1;
-  let jinnRest = "";
-  for (let i = 0; i < lines.length; i++) {
-    const m = stripCr(lines[i]).match(/^jinn:(.*)$/);
-    if (m) {
-      jinnIdx = i;
-      jinnRest = m[1];
-      break;
-    }
-  }
-
-  // Case 3: no jinn key at all — append a minimal block, one trailing newline.
-  if (jinnIdx === -1) {
-    const block = `jinn:\n  version: ${value}\n`;
-    if (raw.length === 0) return { ok: true, text: block };
-    return { ok: true, text: raw.endsWith("\n") ? `${raw}${block}` : `${raw}\n${block}` };
-  }
-
-  // The jinn line must be a plain block-mapping header: nothing after the colon
-  // except optional whitespace and a comment. Anything else (inline `{ ... }`,
-  // a scalar value, `&anchor`, `*alias`) is a shape we won't edit blind.
-  if (!/^\s*(#.*)?$/.test(jinnRest)) {
+  const doc = parseDocument(raw);
+  if (doc.errors.length > 0) {
     return {
       ok: false,
-      reason: `jinn is written as an inline/flow mapping or scalar ("jinn:${jinnRest}"), not a plain block`,
+      reason: `config.yaml isn't valid YAML (${firstLine(doc.errors[0].message)})`,
     };
   }
 
-  // Block body: from jinnIdx+1 until the next column-0 line that is a real key
-  // (non-space, non-comment). Blank and column-0 comment lines stay in the block
-  // so a stray comment can't prematurely end it and hide an existing key.
-  let blockEnd = lines.length;
-  for (let i = jinnIdx + 1; i < lines.length; i++) {
-    const line = stripCr(lines[i]);
-    if (line.trim() === "") continue;
-    if (/^\s/.test(line)) continue; // indented → still in block
-    if (line.startsWith("#")) continue; // column-0 comment → still in block
-    blockEnd = i;
-    break;
+  // Force a double-quoted string scalar: the marker is always a string, and the
+  // quoting keeps the write stable no matter the current node's shape.
+  const node = new Scalar(version);
+  node.type = Scalar.QUOTE_DOUBLE;
+  // setIn replaces jinn.version wholesale — a scalar, an inline-mapping value,
+  // or a version-as-parent map ({ major: 0 }) all collapse to this scalar, and
+  // an absent `jinn:` map is created for us.
+  doc.setIn(["jinn", "version"], node);
+
+  let text: string;
+  try {
+    text = doc.toString();
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `couldn't serialize the version update safely (${firstLine(
+        (err as Error).message,
+      )})`,
+    };
   }
 
-  // The block's direct-child indentation = the indent of its first real member.
-  let childIndent: string | null = null;
-  for (let i = jinnIdx + 1; i < blockEnd; i++) {
-    const line = stripCr(lines[i]);
-    if (line.trim() === "" || line.startsWith("#")) continue;
-    const indentMatch = line.match(/^(\s+)\S/);
-    if (indentMatch) {
-      childIndent = indentMatch[1];
-      break;
-    }
+  // Parse-back guard: never return text we can't read the marker out of. This is
+  // what makes "rc=0 while the file is corrupt" impossible.
+  const check = parseDocument(text);
+  if (check.errors.length > 0) {
+    return {
+      ok: false,
+      reason: `the updated config.yaml failed to re-parse (${firstLine(
+        check.errors[0].message,
+      )})`,
+    };
   }
-  const indent = childIndent ?? "  ";
-
-  // Case 1: replace an existing DIRECT-child `version:` (exactly `indent`, not a
-  // deeper nested key). Preserve indentation and any trailing CR.
-  for (let i = jinnIdx + 1; i < blockEnd; i++) {
-    const cr = lines[i].endsWith("\r") ? "\r" : "";
-    const bare = stripCr(lines[i]);
-    if (!bare.startsWith(`${indent}version:`)) continue;
-    // Guard against a deeper-indented `version:` sharing the prefix.
-    if (bare[indent.length] === " ") continue;
-    const after = bare.slice(`${indent}version:`.length);
-    if (after !== "" && !/^\s/.test(after)) continue; // e.g. `versioning:` — not our key
-    const valuePart = after.trim();
-    if (/^[&*]|^<<|^[|>]/.test(valuePart)) {
-      return {
-        ok: false,
-        reason: `jinn.version uses a YAML anchor/alias/block scalar ("${bare.trim()}") that can't be edited safely`,
-      };
-    }
-    lines[i] = `${indent}version: ${value}${cr}`;
-    return { ok: true, text: lines.join("\n") };
+  const readback = check.getIn(["jinn", "version"]);
+  if (readback !== version) {
+    return {
+      ok: false,
+      reason: `version marker didn't round-trip (read back "${String(readback)}")`,
+    };
   }
 
-  // Case 2: block exists but has no direct `version:` — insert as the first
-  // member, at the block's own child indentation.
-  lines.splice(jinnIdx + 1, 0, `${indent}version: ${value}`);
-  return { ok: true, text: lines.join("\n") };
+  return { ok: true, text };
+}
+
+/** First line of a (possibly multi-line, caret-annotated) yaml error message. */
+function firstLine(msg: string): string {
+  return msg.split("\n")[0].trim();
 }
 
 /**
