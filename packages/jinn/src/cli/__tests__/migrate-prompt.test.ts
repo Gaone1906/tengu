@@ -8,6 +8,7 @@ import {
   composeMigrationPrompt,
   scanFutureMigrations,
   formatStagedFutureNotice,
+  findMalformedMigrationDirs,
 } from "../migrate-prompt.js";
 
 /**
@@ -272,6 +273,64 @@ describe("scanFutureMigrations: dirs staged above the package version", () => {
 
   it("returns empty when the migrations dir does not exist", () => {
     expect(scanFutureMigrations("/nonexistent/xyz", "0.25.0")).toEqual([]);
+  });
+});
+
+describe("findMalformedMigrationDirs: version-looking but not plain X.Y.Z", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    while (dirs.length) fs.rmSync(dirs.pop()!, { recursive: true, force: true });
+  });
+  function fixture(entries: Array<[string, boolean]>): string {
+    const d = makeMigrationsDir(entries);
+    dirs.push(d);
+    return d;
+  }
+
+  it("reports prerelease/build dir names, ignores plain semver and non-version names", () => {
+    const dir = fixture([
+      ["0.25.0", true],
+      ["0.26.0-beta.1", true], // prerelease → would NaN the naive comparator
+      ["0.27.0+build", true], // build metadata
+      ["latest", true], // not version-looking → not reported
+      ["next", false],
+    ]);
+    expect(findMalformedMigrationDirs(dir)).toEqual(["0.26.0-beta.1", "0.27.0+build"]);
+  });
+
+  it("returns empty when every dir is a plain X.Y.Z", () => {
+    const dir = fixture([
+      ["0.9.0", true],
+      ["0.10.0", true],
+    ]);
+    expect(findMalformedMigrationDirs(dir)).toEqual([]);
+  });
+
+  it("returns empty when the migrations dir does not exist", () => {
+    expect(findMalformedMigrationDirs("/nonexistent/xyz")).toEqual([]);
+  });
+});
+
+describe("scanMigrationPrompts / scanFutureMigrations: prerelease dirs are skipped", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    while (dirs.length) fs.rmSync(dirs.pop()!, { recursive: true, force: true });
+  });
+  function fixture(entries: Array<[string, boolean]>): string {
+    const d = makeMigrationsDir(entries);
+    dirs.push(d);
+    return d;
+  }
+
+  it("never surfaces a prerelease-named dir as a reachable or future prompt", () => {
+    const dir = fixture([
+      ["0.25.0", true],
+      ["0.26.0-beta.1", true],
+      ["0.26.0", true],
+    ]);
+    // The prerelease dir is excluded from both scans (only plain X.Y.Z pass).
+    expect(scanMigrationPrompts(dir, "0.24.0", "0.26.0")).toEqual(["0.25.0", "0.26.0"]);
+    expect(scanFutureMigrations(dir, "0.26.0")).toEqual([]);
   });
 });
 

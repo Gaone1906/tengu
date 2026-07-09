@@ -91,12 +91,15 @@ match while keeping any user-specific customizations.
 
 ### Config
 
-- **Workflows default-on with an evidence root.** Workflow runs need a workflow
-  evidence root configured; ensure the user's `config.yaml` has the workflows
-  section enabled with its evidence root (add the key with its default if
-  missing — never overwrite a value the user already set).
-- Add any other new config keys the gateway expects with their defaults; leave
-  all existing user values untouched.
+- **Workflows need NO config change.** Workflows are on by default and their
+  evidence root resolves automatically: the gateway uses
+  `<JINN_HOME>/workflow-evidence` (created lazily, with its `workflows/`
+  subdir) unless the `JINN_WORKFLOW_EVIDENCE_ROOT` environment variable points
+  elsewhere. There is no `workflows:` / evidence-root key in `config.yaml` —
+  **do not add one** (it would be inert and misleading). Only set the env var if
+  the user wants the evidence stored outside their instance folder.
+- If a later note introduces a genuine new config key, add it with its default
+  and leave all existing user values untouched. This release adds none.
 
 ### Engine note (no instance file change)
 

@@ -37,6 +37,7 @@ vi.mock("../../shared/config.js", () => ({
 
 vi.mock("../../shared/version.js", () => ({
   compareSemver: vi.fn(() => -1), // instance behind package by default
+  isStrictSemver: vi.fn((v: string) => /^\d+\.\d+\.\d+$/.test(v)), // real predicate
   getPackageVersion: vi.fn(() => "1.1.0"),
   getInstanceVersion: vi.fn(() => "1.0.0"),
 }));
@@ -59,6 +60,7 @@ vi.mock("../migrate-prompt.js", async () => {
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { scanMigrationPrompts, scanFutureMigrations } from "../migrate-prompt.js";
+import { getInstanceVersion } from "../../shared/version.js";
 import { stampVersionInYaml } from "../migrate.js";
 
 const mockExecFileSync = vi.mocked(execFileSync);
@@ -70,6 +72,8 @@ const mockCopyFileSync = vi.mocked(fs.copyFileSync);
 const mockRmSync = vi.mocked(fs.rmSync);
 const mockScan = vi.mocked(scanMigrationPrompts);
 const mockScanFuture = vi.mocked(scanFutureMigrations);
+const mockReadFileSync = vi.mocked(fs.readFileSync);
+const mockGetInstanceVersion = vi.mocked(getInstanceVersion);
 
 function assertNoFsWrites() {
   expect(mockWriteFileSync).not.toHaveBeenCalled();
@@ -133,6 +137,26 @@ describe("migrate: prompt dispenser", () => {
       expect(printed).toContain("1.2.0");
       log.mockRestore();
     });
+
+    it("errors clearly (not a silent 0.0.0) when the instance marker is a prerelease", async () => {
+      mockGetInstanceVersion.mockReturnValueOnce("1.0.0-beta.1");
+      const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+        throw new Error("process.exit called");
+      }) as never);
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const { runMigrate } = await import("../migrate.js");
+
+      await expect(runMigrate({})).rejects.toThrow("process.exit called");
+      assertNoFsWrites();
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+      const printed = err.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(printed).toMatch(/not a plain X\.Y\.Z/i);
+      expect(printed).toContain("1.0.0-beta.1");
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      exitSpy.mockRestore();
+    });
   });
 
   describe("--apply mode", () => {
@@ -161,6 +185,24 @@ describe("migrate: prompt dispenser", () => {
       // Marker advanced after a successful agent run (atomic write).
       expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
       expect(mockRenameSync).toHaveBeenCalledTimes(1);
+    });
+
+    it("applies but does NOT write when the config shape can't be safely stamped", async () => {
+      // Agent runs fine, but the marker can't be advanced (inline jinn mapping).
+      mockReadFileSync.mockReturnValueOnce('jinn: { version: "1.0.0" }\n');
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { runMigrate } = await import("../migrate.js");
+
+      await runMigrate({ apply: true });
+
+      // Agent was launched; no marker write; no crash.
+      expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      expect(mockRenameSync).not.toHaveBeenCalled();
+      const printed = log.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(printed).toMatch(/Marker NOT advanced/i);
+      log.mockRestore();
     });
 
     it("does NOT stamp the marker when the agent exits with an error", async () => {
@@ -211,6 +253,22 @@ describe("migrate: prompt dispenser", () => {
       expect(written).toContain("1.1.0"); // package version from mock
     });
 
+    it("exits without writing when --mark-done can't safely stamp the config shape", async () => {
+      mockReadFileSync.mockReturnValueOnce('jinn: { version: "1.0.0" }\n');
+      const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+        throw new Error("process.exit called");
+      }) as never);
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { runMigrate } = await import("../migrate.js");
+
+      await expect(runMigrate({ markDone: "1.1.0" })).rejects.toThrow("process.exit called");
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      expect(mockRenameSync).not.toHaveBeenCalled();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      exitSpy.mockRestore();
+    });
+
     it("rejects a non-semver mark-done value", async () => {
       const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
         throw new Error("process.exit called");
@@ -233,7 +291,14 @@ describe("migrate: prompt dispenser", () => {
  * key order are the user's and must survive byte-for-byte. Only the version line
  * may change. This is the shared path behind both --mark-done and --apply.
  */
-describe("stampVersionInYaml: surgical, comment-preserving version stamp", () => {
+describe("stampVersionInYaml: surgical-or-refuse version stamp", () => {
+  /** Unwrap a successful stamp, failing the test if it refused. */
+  function okText(res: ReturnType<typeof stampVersionInYaml>): string {
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("expected ok stamp"); // narrows the union
+    return res.text;
+  }
+
   /** Assert exactly one line differs between two texts, and return it. */
   function soleChangedLine(before: string, after: string): { from: string; to: string } {
     const a = before.split("\n");
@@ -261,7 +326,7 @@ describe("stampVersionInYaml: surgical, comment-preserving version stamp", () =>
       "",
     ].join("\n");
 
-    const after = stampVersionInYaml(before, "0.26.0");
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
     const { from, to } = soleChangedLine(before, after);
     expect(from).toBe("  version: 0.20.0");
     expect(to).toBe('  version: "0.26.0"');
@@ -276,7 +341,7 @@ describe("stampVersionInYaml: surgical, comment-preserving version stamp", () =>
 
   it("appends version into an existing jinn block that lacks the key", () => {
     const before = ["jinn:", "  telemetry: false", "other:", "  x: 1", ""].join("\n");
-    const after = stampVersionInYaml(before, "0.26.0");
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
 
     expect(after).toContain('  version: "0.26.0"');
     // Inserted inside the jinn block (before the next top-level key), key kept.
@@ -287,7 +352,7 @@ describe("stampVersionInYaml: surgical, comment-preserving version stamp", () =>
 
   it("appends a jinn block when none exists, keeping the rest intact", () => {
     const before = ["engines:", "  default: claude", ""].join("\n");
-    const after = stampVersionInYaml(before, "0.26.0");
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
 
     expect(after).toContain("engines:");
     expect(after).toContain("  default: claude");
@@ -296,7 +361,54 @@ describe("stampVersionInYaml: surgical, comment-preserving version stamp", () =>
 
   it("preserves a trailing CR on a CRLF version line", () => {
     const before = "jinn:\r\n  version: 0.20.0\r\n";
-    const after = stampVersionInYaml(before, "0.26.0");
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
     expect(after).toBe('jinn:\r\n  version: "0.26.0"\r\n');
+  });
+
+  // Round-3 HIGH 2: a nested `metadata.version` must NEVER be mistaken for the
+  // marker — only the DIRECT child of `jinn:` is the marker.
+  it("adds a direct-child version and leaves a nested metadata.version untouched", () => {
+    const before = [
+      "jinn:",
+      "  metadata:",
+      "    version: custom-metadata",
+      "  telemetry: false",
+      "",
+    ].join("\n");
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
+
+    // The nested value is preserved verbatim.
+    expect(after).toContain("    version: custom-metadata");
+    // A direct-child jinn.version was added at the block's own indent.
+    expect(after).toContain('\n  version: "0.26.0"');
+    // Exactly one new line (the inserted direct child); nothing else changed.
+    expect(after.split("\n").length).toBe(before.split("\n").length + 1);
+  });
+
+  // Round-3 HIGH 1: an inline/flow `jinn: { ... }` must REFUSE (no second block,
+  // no corruption) with a clear reason and zero change to the input.
+  it("REFUSES an inline/flow jinn mapping instead of appending a duplicate block", () => {
+    const before = 'jinn: { version: "0.20.0", telemetry: false }\nother: 1\n';
+    const res = stampVersionInYaml(before, "0.26.0");
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected refusal");
+    expect(res.reason).toMatch(/inline\/flow mapping|scalar/i);
+    // No jinn block was duplicated.
+    expect((before.match(/^jinn:/gm) ?? []).length).toBe(1);
+  });
+
+  it("REFUSES a jinn.version written as a YAML anchor", () => {
+    const before = "jinn:\n  version: &v 0.20.0\nrefs:\n  x: *v\n";
+    const res = stampVersionInYaml(before, "0.26.0");
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("expected refusal");
+    expect(res.reason).toMatch(/anchor|alias|block scalar/i);
+  });
+
+  it("does not confuse a `versioning:` sibling key for `version:`", () => {
+    const before = ["jinn:", "  versioning: semver", "  telemetry: false", ""].join("\n");
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
+    expect(after).toContain("  versioning: semver"); // untouched
+    expect(after).toContain('  version: "0.26.0"'); // added as a new direct child
   });
 });

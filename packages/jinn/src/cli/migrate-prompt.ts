@@ -55,6 +55,23 @@ export function scanFutureMigrations(
 }
 
 /**
+ * Return version-LOOKING migration dir names that are not plain `X.Y.Z` (e.g. a
+ * prerelease `0.26.0-beta.1`). The scans silently skip these — surfacing them
+ * lets the CLI warn by name so a mis-named dir isn't invisibly ignored. Names
+ * that don't even look like a version (`latest`, `next`) are not reported.
+ */
+export function findMalformedMigrationDirs(templateMigrationsDir: string): string[] {
+  if (!fs.existsSync(templateMigrationsDir)) return [];
+
+  return fs
+    .readdirSync(templateMigrationsDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .filter((v) => /\d/.test(v) && v.includes(".") && !/^\d+\.\d+\.\d+$/.test(v))
+    .sort();
+}
+
+/**
  * Build the one-line informational notice shown when migration prompts are
  * staged for a future release. Returns null when nothing is staged.
  */
