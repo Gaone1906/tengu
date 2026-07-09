@@ -515,6 +515,9 @@ export interface ModelInfo {
   effortLevels: string[];
   /** Context window size in tokens (for the UI context meter). Omit if unknown. */
   contextWindow?: number;
+  /** Model is in the engine's featured set — shown by default in the picker
+   *  before the "More models…" expansion. Config-driven (engines.<name>.featuredModels). */
+  featured?: boolean;
 }
 
 /** Resolved per-engine registry entry. */
@@ -649,6 +652,9 @@ export interface JinnConfig {
       childEffortOverride?: string;
       /** Max concurrent live PTYs across all sessions (CLI/xterm view only). Default 8. */
       maxLivePtys?: number;
+      /** Model ids shown by default in the picker (before "More models…"). Defaults
+       *  to the three latest alias families (opus/sonnet/fable). Explicit [] = none. */
+      featuredModels?: string[];
     };
     codex: { bin: string; model: string; effortLevel?: string; childEffortOverride?: string };
     /** Antigravity (`agy`) engine. `bin` is optional — resolved dynamically

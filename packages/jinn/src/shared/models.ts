@@ -10,6 +10,7 @@ import { logger } from "./logger.js";
 import { resolveBin, isInstalled } from "./resolve-bin.js";
 import { discoverPiModels } from "./pi-models.js";
 import {
+  CLAUDE_ALIAS_IDS,
   discoverClaudeEffortLevels,
   discoverClaudeModels,
   knownClaudeModels,
@@ -357,6 +358,18 @@ export function buildRegistry(config: JinnConfig): ModelRegistry {
   return registry;
 }
 
+/**
+ * Mark the picker's featured set. Featured models show by default in the UI
+ * before the "More models…" expansion; the rest stay one click away. `featuredIds`
+ * absent → default set; explicit [] → nothing featured. Order/membership of
+ * `models` is untouched — only the `featured` flag is set.
+ */
+function applyFeatured(models: ModelInfo[], featuredIds: readonly string[] | undefined): ModelInfo[] {
+  if (!featuredIds || featuredIds.length === 0) return models;
+  const set = new Set(featuredIds);
+  return models.map((m) => (set.has(m.id) ? { ...m, featured: true } : m));
+}
+
 /** Claude registry entry: discovered aliases/catalog > config additions > alias fallback. */
 function buildClaudeEntry(
   config: JinnConfig,
@@ -367,7 +380,10 @@ function buildClaudeEntry(
   const pinned = config.engines.claude?.model;
   const discovered = discoveredClaudeModels?.models.length ? discoveredClaudeModels : null;
   const base = discovered ?? knownClaudeModels(pinned, discoveredClaudeEffortLevels ?? undefined);
-  const models = mergeDiscoveredModels(base.models, claudeBlock, { configuredOverridesDiscovered: false });
+  const merged = mergeDiscoveredModels(base.models, claudeBlock, { configuredOverridesDiscovered: false });
+  // Featured set: config override, else the three latest alias families.
+  const featuredIds = config.engines.claude?.featuredModels ?? [...CLAUDE_ALIAS_IDS];
+  const models = applyFeatured(merged, featuredIds);
   const valid = (id?: string) => (id && models.some((m) => m.id === id) ? id : undefined);
   const defaultModel = valid(pinned) ?? valid(claudeBlock?.default) ?? valid(base.defaultModel) ?? models[0]?.id ?? synthEntry.defaultModel;
   return { name: "claude", available, defaultModel, effortMechanism: "claude-flag", models };

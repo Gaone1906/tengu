@@ -161,6 +161,8 @@ export interface ModelInfo {
   supportsEffort: boolean;
   effortLevels: string[];
   contextWindow?: number;
+  /** Model is in the engine's featured set — shown by default in the picker. */
+  featured?: boolean;
 }
 export interface EngineRegistryEntry {
   name: string;

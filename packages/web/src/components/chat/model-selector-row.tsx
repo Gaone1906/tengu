@@ -13,6 +13,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { useModelRegistry, engineList, effortLevelsFor, findModel, defaultEffort, clampEffort, contextWindowFor } from '@/hooks/use-model-registry'
+import { loadExpandedByEngine, setEngineExpanded } from '@/lib/model-picker-prefs'
 
 /** Round a token count to a compact `k` string (e.g. 23148 → "23k", 980 → "980"). */
 export function fmtK(n: number): string {
@@ -150,6 +151,10 @@ export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote
   const [dir, setDir] = useState<1 | -1>(1)
   const reduceMotion = usePrefersReducedMotion()
 
+  // Per-engine "show all models" preference — the picker shows an engine's
+  // featured models by default; expanding to the full list is remembered.
+  const [expandedByEngine, setExpandedByEngine] = useState<Record<string, boolean>>(() => loadExpandedByEngine())
+
   // Focus-parking target: a tabindex=-1 wrapper INSIDE the menu layer. Parking
   // focus here before a panel swap keeps focus within the layer so Radix's
   // focus-outside dismissal never fires when the active item unmounts.
@@ -224,6 +229,22 @@ export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote
   const modelLabel = models.find((m) => m.id === modelId)?.label ?? modelId ?? 'Model'
   const usage = formatContextUsage(contextTokens, contextWindowFor(registry, engine, modelId))
 
+  // Featured/expand: when the engine has a featured set, show only those by
+  // default (plus the current model if it isn't featured — include-current-always),
+  // with a "More models…" affordance to reveal the full registry. Engines with no
+  // featured marking keep the full list (unchanged behaviour).
+  const hasFeatured = models.some((m) => m.featured)
+  const collapsedModels = hasFeatured ? models.filter((m) => m.featured || m.id === modelId) : models
+  const expanded = expandedByEngine[engine] ?? false
+  const shownModels = hasFeatured && !expanded ? collapsedModels : models
+  const hiddenCount = models.length - collapsedModels.length
+  const showExpandToggle = hasFeatured && hiddenCount > 0
+  const toggleExpanded = () => {
+    const next = !expanded
+    setEngineExpanded(engine, next)
+    setExpandedByEngine((prev) => ({ ...prev, [engine]: next }))
+  }
+
   // Other installed engines, for deciding whether the engine panel is useful.
   const otherEngines = engines.filter((e) => e.name !== engine)
   const canSwitchEngine = otherEngines.length > 0
@@ -288,18 +309,28 @@ export function ModelSelectorRow({ mode, value, onChange, pendingNote, errorNote
           No models discovered yet.
         </div>
       ) : (
-        <DropdownMenuRadioGroup value={modelId} onValueChange={pickModel}>
-          {models.map((m) => (
-            <DropdownMenuRadioItem
-              key={m.id}
-              value={m.id}
-              className="justify-between rounded-[9px] py-1.5 pl-2 pr-2 text-[length:var(--text-footnote)] text-[var(--text-secondary)] data-[state=checked]:font-[var(--weight-semibold)] data-[state=checked]:text-[var(--text-primary)] [&>span:first-child]:hidden"
+        <>
+          <DropdownMenuRadioGroup value={modelId} onValueChange={pickModel}>
+            {shownModels.map((m) => (
+              <DropdownMenuRadioItem
+                key={m.id}
+                value={m.id}
+                className="justify-between rounded-[9px] py-1.5 pl-2 pr-2 text-[length:var(--text-footnote)] text-[var(--text-secondary)] data-[state=checked]:font-[var(--weight-semibold)] data-[state=checked]:text-[var(--text-primary)] [&>span:first-child]:hidden"
+              >
+                <span className="truncate">{m.label}</span>
+                {m.id === modelId && <CheckIcon className="size-3.5 shrink-0 text-[var(--accent)]" />}
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+          {showExpandToggle && (
+            <DropdownMenuItem
+              onSelect={(e) => { e.preventDefault(); toggleExpanded() }}
+              className="rounded-[9px] py-1.5 px-2 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]"
             >
-              <span className="truncate">{m.label}</span>
-              {m.id === modelId && <CheckIcon className="size-3.5 shrink-0 text-[var(--accent)]" />}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
+              {expanded ? 'Show fewer' : `More models (${hiddenCount})`}
+            </DropdownMenuItem>
+          )}
+        </>
       )}
 
       {/* Effort — pill row; hidden when the model has no effort levels. */}

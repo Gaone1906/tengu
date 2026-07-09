@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll } from 'vitest'
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { useState } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -64,10 +64,31 @@ const REG: EnginesResponse = {
   },
 }
 
+// A claude entry with a featured set (opus/sonnet/fable) plus two non-featured
+// concrete ids — exercises the collapsed/expand picker behaviour.
+const FEATURED_REG: EnginesResponse = {
+  default: 'claude',
+  engines: {
+    claude: {
+      name: 'claude', available: true, defaultModel: 'opus', effortMechanism: 'claude-flag',
+      models: [
+        { id: 'opus', label: 'Opus (Latest)', supportsEffort: true, effortLevels: ['low', 'medium', 'high'], featured: true },
+        { id: 'sonnet', label: 'Sonnet (Latest)', supportsEffort: true, effortLevels: ['low', 'medium', 'high'], featured: true },
+        { id: 'fable', label: 'Fable (Latest)', supportsEffort: true, effortLevels: ['low', 'medium', 'high'], featured: true },
+        { id: 'claude-opus-4-8', label: 'Opus 4.8', supportsEffort: true, effortLevels: ['low', 'medium', 'high'] },
+        { id: 'claude-haiku-4-5', label: 'Haiku 4.5', supportsEffort: true, effortLevels: ['low', 'medium', 'high'] },
+      ],
+    },
+  },
+}
+
+// Mutable holder so a test can swap the registry the mocked hook returns.
+const regHolder: { current: EnginesResponse } = { current: REG }
+
 // Mock only the query hook; keep the real pure helpers.
 vi.mock('@/hooks/use-model-registry', async (importActual) => {
   const actual = await importActual<typeof import('@/hooks/use-model-registry')>()
-  return { ...actual, useModelRegistry: () => ({ data: REG, isLoading: false }) }
+  return { ...actual, useModelRegistry: () => ({ data: regHolder.current, isLoading: false }) }
 })
 
 import { ModelSelectorRow } from '../model-selector-row'
@@ -227,5 +248,81 @@ describe('ModelSelectorRow in-place engine panel', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: /switch engine/i }))
     fireEvent.click(await screen.findByRole('menuitem', { name: /codex/i }))
     expect(onChange).toHaveBeenCalledWith({ engine: 'codex', model: 'gpt-5.5', effortLevel: 'medium' })
+  })
+})
+
+describe('ModelSelectorRow featured / expand', () => {
+  beforeEach(() => {
+    regHolder.current = FEATURED_REG
+    if (typeof localStorage !== 'undefined') localStorage.clear()
+  })
+  afterEach(() => {
+    regHolder.current = REG
+    if (typeof localStorage !== 'undefined') localStorage.clear()
+  })
+
+  it('collapsed: shows exactly the featured models, hiding the rest behind "More models…"', async () => {
+    renderRow(<Harness initial={{ engine: 'claude', model: 'opus', effortLevel: 'high' }} />)
+    openMenu()
+    await screen.findByRole('menuitemradio', { name: /opus \(latest\)/i })
+
+    const radios = screen.getAllByRole('menuitemradio')
+    expect(radios.map((r) => r.textContent)).toEqual(['Opus (Latest)', 'Sonnet (Latest)', 'Fable (Latest)'])
+    // The two non-featured concrete ids are not listed while collapsed.
+    expect(screen.queryByRole('menuitemradio', { name: /opus 4\.8/i })).toBeNull()
+    expect(screen.queryByRole('menuitemradio', { name: /haiku 4\.5/i })).toBeNull()
+    // Expand affordance names the hidden count.
+    expect(screen.getByRole('menuitem', { name: /more models \(2\)/i })).toBeTruthy()
+  })
+
+  it('expanded: "More models…" reveals the full registry and swaps to "Show fewer"', async () => {
+    renderRow(<Harness initial={{ engine: 'claude', model: 'opus', effortLevel: 'high' }} />)
+    openMenu()
+    fireEvent.click(await screen.findByRole('menuitem', { name: /more models/i }))
+
+    // All five models now listed.
+    const radios = screen.getAllByRole('menuitemradio')
+    expect(radios).toHaveLength(5)
+    expect(screen.getByRole('menuitemradio', { name: /opus 4\.8/i })).toBeTruthy()
+    expect(screen.getByRole('menuitemradio', { name: /haiku 4\.5/i })).toBeTruthy()
+    // Toggle flips to collapse.
+    expect(screen.getByRole('menuitem', { name: /show fewer/i })).toBeTruthy()
+  })
+
+  it('include-current-always: a non-featured pinned model still shows collapsed', async () => {
+    renderRow(<Harness initial={{ engine: 'claude', model: 'claude-haiku-4-5', effortLevel: 'medium' }} />)
+    openMenu()
+    await screen.findByRole('menuitemradio', { name: /haiku 4\.5/i })
+
+    const radios = screen.getAllByRole('menuitemradio')
+    // 3 featured + the current (non-featured) haiku = 4; only opus-4-8 stays hidden.
+    expect(radios.map((r) => r.textContent)).toEqual([
+      'Opus (Latest)', 'Sonnet (Latest)', 'Fable (Latest)', 'Haiku 4.5',
+    ])
+    expect(screen.getByRole('menuitem', { name: /more models \(1\)/i })).toBeTruthy()
+  })
+
+  it('persists the expand choice across remounts (localStorage)', async () => {
+    const { unmount } = renderRow(<Harness initial={{ engine: 'claude', model: 'opus', effortLevel: 'high' }} />)
+    openMenu()
+    fireEvent.click(await screen.findByRole('menuitem', { name: /more models/i }))
+    expect(screen.getAllByRole('menuitemradio')).toHaveLength(5)
+    unmount()
+
+    // Fresh mount reads the persisted pref — full list without re-expanding.
+    renderRow(<Harness initial={{ engine: 'claude', model: 'opus', effortLevel: 'high' }} />)
+    openMenu()
+    expect(await screen.findByRole('menuitem', { name: /show fewer/i })).toBeTruthy()
+    expect(screen.getAllByRole('menuitemradio')).toHaveLength(5)
+  })
+
+  it('engines with no featured marking keep the full list (no expand affordance)', async () => {
+    regHolder.current = REG // claude entry here has no featured flags
+    renderRow(<Harness initial={{ engine: 'claude', model: 'opus', effortLevel: 'high' }} />)
+    openMenu()
+    await screen.findByRole('menuitemradio', { name: /opus 4\.8/i })
+    expect(screen.getAllByRole('menuitemradio')).toHaveLength(2)
+    expect(screen.queryByRole('menuitem', { name: /more models/i })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: /show fewer/i })).toBeNull()
   })
 })

@@ -172,6 +172,58 @@ describe("getModelRegistry with a models: block", () => {
   });
 });
 
+describe("featured models (registry marking)", () => {
+  it("marks the three latest alias families (opus/sonnet/fable) featured by default; concrete ids are not", () => {
+    setDiscoveredClaudeModelsForTest({
+      defaultModel: "opus",
+      models: [
+        { id: "opus", label: "Opus (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        { id: "sonnet", label: "Sonnet (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        { id: "fable", label: "Fable (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        { id: "claude-opus-4-8", label: "Opus 4.8", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        { id: "claude-haiku-4-5", label: "Haiku 4.5", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+      ],
+    });
+    const reg = getModelRegistry(cfg({}));
+    const featured = reg.claude.models.filter((m) => m.featured).map((m) => m.id);
+    expect(featured).toEqual(["opus", "sonnet", "fable"]);
+    expect(reg.claude.models.find((m) => m.id === "claude-opus-4-8")?.featured).toBeFalsy();
+  });
+
+  it("honors engines.claude.featuredModels as an override", () => {
+    setDiscoveredClaudeModelsForTest({
+      defaultModel: "opus",
+      models: [
+        { id: "opus", label: "Opus (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        { id: "sonnet", label: "Sonnet (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        { id: "fable", label: "Fable (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        { id: "claude-haiku-4-5", label: "Haiku 4.5", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+      ],
+    });
+    const reg = getModelRegistry(cfg({ claude: { bin: "claude", model: "opus", featuredModels: ["opus", "claude-haiku-4-5"] } }));
+    const featured = reg.claude.models.filter((m) => m.featured).map((m) => m.id);
+    expect(featured).toEqual(["opus", "claude-haiku-4-5"]);
+  });
+
+  it("treats an explicit empty featuredModels as no featured marking", () => {
+    setDiscoveredClaudeModelsForTest({
+      defaultModel: "opus",
+      models: [
+        { id: "opus", label: "Opus (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+        { id: "sonnet", label: "Sonnet (Latest)", supportsEffort: true, effortLevels: ["low", "medium", "high"] },
+      ],
+    });
+    const reg = getModelRegistry(cfg({ claude: { bin: "claude", model: "opus", featuredModels: [] } }));
+    expect(reg.claude.models.some((m) => m.featured)).toBe(false);
+  });
+
+  it("marks aliases featured on the synthesized fallback (no discovery, no models block)", () => {
+    const reg = getModelRegistry(cfg({}));
+    const featured = reg.claude.models.filter((m) => m.featured).map((m) => m.id);
+    expect(featured).toEqual(["opus", "sonnet", "fable"]);
+  });
+});
+
 describe("cache + invalidate", () => {
   it("caches across calls and refreshes only after invalidate", () => {
     const a = getModelRegistry(cfg({}));
