@@ -1035,6 +1035,29 @@ export function listSessions(filter?: ListSessionsFilter): Session[] {
   return rows.map(rowToSession);
 }
 
+/**
+ * The N most-recently-active sessions, newest first — a bounded window for
+ * polled endpoints (e.g. /api/activity) that only ever surface the recent tail.
+ * Backed by idx_sessions_last_activity; avoids hydrating + JSON-parsing every row.
+ */
+export function listRecentSessions(limit: number): Session[] {
+  const db = initDb();
+  const rows = db
+    .prepare('SELECT * FROM sessions ORDER BY last_activity DESC LIMIT ?')
+    .all(Math.max(0, Math.floor(limit))) as Record<string, unknown>[];
+  return rows.map(rowToSession);
+}
+
+/**
+ * Total session count. A pure `COUNT(*)` — no row hydration or JSON parse —
+ * for endpoints (e.g. /api/onboarding) that only need the number, not the rows.
+ */
+export function countSessions(): number {
+  const db = initDb();
+  const row = db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number };
+  return row.n;
+}
+
 // Sidebar groups sessions into cron, "direct" (no employee), and per-employee
 // buckets. These sentinels mirror that grouping so the server can paginate and
 // count per group without the client having to load every row. Keep this SQL in

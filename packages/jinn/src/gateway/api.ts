@@ -25,6 +25,8 @@ import type { SessionManager } from "../sessions/manager.js";
 import { buildContext } from "../sessions/context.js";
 import {
   listSessions,
+  listRecentSessions,
+  countSessions,
   listRecentPerGroup,
   listSessionsForGroup,
   getSessionGroupCounts,
@@ -1792,8 +1794,10 @@ export async function handleApiRequest(
     // GET /api/status
     if (method === "GET" && pathname === "/api/status") {
       const config = context.getConfig();
-      const sessions = listSessions();
-      const running = sessions.filter((s) => isSessionLiveRunning(s, context)).length;
+      // Only running rows can be "live running" (isSessionLiveRunning short-circuits
+      // on status!=='running'), so hydrate just those (~handful, idx_sessions_status)
+      // instead of materializing + JSON-parsing every session to count them.
+      const running = listSessions({ status: "running" }).filter((s) => isSessionLiveRunning(s, context)).length;
       const connectors = Object.fromEntries(
         Array.from(context.connectors.values()).map((connector) => [connector.name, connector.getHealth()]),
       );
@@ -1812,7 +1816,7 @@ export async function handleApiRequest(
             ]),
           ),
         },
-        sessions: { total: sessions.length, running, active: running },
+        sessions: { total: countSessions(), running, active: running },
         connectors,
       });
     }
@@ -4355,7 +4359,11 @@ export async function handleApiRequest(
 
     // GET /api/activity — recent activity derived from sessions
     if (method === "GET" && pathname === "/api/activity") {
-      const sessions = listSessions();
+      // Only the 30 most-recent events are returned, and event ts == last_activity
+      // (ordered DESC), so a bounded recent window suffices. Cap generously (100)
+      // so statuses that emit no event (e.g. interrupted) can't starve the top 30,
+      // instead of hydrating + JSON-parsing all ~2.5k sessions every poll.
+      const sessions = listRecentSessions(100);
       const events: Array<{ event: string; payload: unknown; ts: number }> = [];
       for (const s of sessions) {
         const ts = new Date(s.lastActivity || s.createdAt).getTime();
@@ -4376,7 +4384,9 @@ export async function handleApiRequest(
 
     // GET /api/onboarding — check if onboarding is needed
     if (method === "GET" && pathname === "/api/onboarding") {
-      const sessions = listSessions();
+      // Only the count is surfaced — use a pure COUNT(*) instead of hydrating +
+      // JSON-parsing every session row on this polled endpoint.
+      const sessionsCount = countSessions();
       const hasEmployees = fs.existsSync(ORG_DIR) &&
         fs.readdirSync(ORG_DIR, { recursive: true }).some(
           (f) => String(f).endsWith(".yaml") && !String(f).endsWith("department.yaml")
@@ -4389,7 +4399,7 @@ export async function handleApiRequest(
         onboarded,
         setupComplete,
         conversationNeeded: !setupComplete,
-        sessionsCount: sessions.length,
+        sessionsCount,
         hasEmployees,
         portalName: config.portal?.portalName ?? null,
         operatorName: config.portal?.operatorName ?? null,
