@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { parseDocument, Scalar } from "yaml";
+import { parseDocument, Scalar, YAMLMap, isScalar } from "yaml";
 import {
   JINN_HOME,
   CONFIG_PATH,
@@ -47,15 +47,21 @@ export type StampResult =
  *   - inline/flow `jinn: { version: … }`                   → update in place.
  *   - `version:` written as a PARENT key (a nested map)     → collapse to the
  *     scalar (no orphaned deeper-indented children survive — the round-3 bug).
+ *   - an empty `jinn:` (null value)                         → treated as an
+ *     empty block and the version is created under it.
  *   - a nested `jinn.metadata.version`                      → left untouched;
  *     only the direct `jinn.version` child is the marker.
  *   - no `jinn:` block, or an empty file                    → created.
  *
  * Safety is layered so we NEVER write a file that succeeds-while-corrupting:
  *   1. refuse if the input isn't valid YAML (`doc.errors`) — no blind edit.
- *   2. refuse if serialization throws (e.g. replacing an anchored value orphans
+ *   2. refuse if `jinn` is a genuinely non-collection node (a non-null scalar
+ *      like `false`, or a sequence) — `setIn` can't place a child there and
+ *      throws; we catch and refuse CLEANLY so both call sites stay on their
+ *      no-stack-trace paths rather than crashing with a raw exception.
+ *   3. refuse if serialization throws (e.g. replacing an anchored value orphans
  *      an alias elsewhere) — that shape can't be edited without breaking refs.
- *   3. parse the produced text BACK and refuse unless `jinn.version` reads back
+ *   4. parse the produced text BACK and refuse unless `jinn.version` reads back
  *      exactly the target — the write site only ever sees verified text.
  *
  * The value is emitted as a double-quoted string scalar so the marker is
@@ -76,10 +82,46 @@ export function stampVersionInYaml(raw: string, version: string): StampResult {
   // quoting keeps the write stable no matter the current node's shape.
   const node = new Scalar(version);
   node.type = Scalar.QUOTE_DOUBLE;
+
+  // Carry an inline/leading comment that was attached to the OLD version VALUE
+  // onto the replacement scalar. setIn swaps the value node wholesale, which
+  // would otherwise drop a `version: 0.20.0  # note` comment while every other
+  // comment in the file survives. (A comment on the `version:` KEY rides along
+  // on the retained Pair, so only the value node's own comment needs carrying.)
+  const oldVersion = doc.getIn(["jinn", "version"], true);
+  if (isScalar(oldVersion)) {
+    if (oldVersion.comment != null) node.comment = oldVersion.comment;
+    if (oldVersion.commentBefore != null) node.commentBefore = oldVersion.commentBefore;
+  }
+
+  // An empty `jinn:` (null value) is a sane user shape — the marker simply
+  // hasn't been written yet. setIn can't descend into a null scalar, so
+  // materialize an empty map in its place first; the version is then created
+  // under it. Any comment on the bare `jinn:` line is carried onto the new map.
+  const jinnNode = doc.get("jinn", true);
+  if (isScalar(jinnNode) && jinnNode.value == null) {
+    const map = new YAMLMap();
+    if (jinnNode.comment != null) map.comment = jinnNode.comment;
+    if (jinnNode.commentBefore != null) map.commentBefore = jinnNode.commentBefore;
+    doc.set("jinn", map);
+  }
+
   // setIn replaces jinn.version wholesale — a scalar, an inline-mapping value,
   // or a version-as-parent map ({ major: 0 }) all collapse to this scalar, and
-  // an absent `jinn:` map is created for us.
-  doc.setIn(["jinn", "version"], node);
+  // an absent `jinn:` map is created for us. But a genuinely non-collection
+  // `jinn` (a non-null scalar like `false`, or a sequence) can't hold a child:
+  // setIn throws. Catch it and REFUSE cleanly so --mark-done exits 1 without a
+  // stack trace and --apply prints its "Marker NOT advanced" message normally.
+  try {
+    doc.setIn(["jinn", "version"], node);
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `config.yaml's "jinn" isn't a mapping, so jinn.version can't be set under it (${firstLine(
+        (err as Error).message,
+      )})`,
+    };
+  }
 
   let text: string;
   try {

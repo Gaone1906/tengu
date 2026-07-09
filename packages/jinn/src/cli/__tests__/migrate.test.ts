@@ -207,6 +207,25 @@ describe("migrate: prompt dispenser", () => {
       log.mockRestore();
     });
 
+    it("does NOT crash and prints 'Marker NOT advanced' when jinn is a bare scalar", async () => {
+      // `jinn: false` is valid YAML but not a collection — setIn would throw.
+      // The agent runs successfully; the marker refuses cleanly; --apply must
+      // finish normally and print its message rather than crash with a trace.
+      mockReadFileSync.mockReturnValueOnce("jinn: false\n");
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const { runMigrate } = await import("../migrate.js");
+
+      await expect(runMigrate({ apply: true })).resolves.toBeUndefined();
+
+      expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      expect(mockRenameSync).not.toHaveBeenCalled();
+      const printed = log.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(printed).toMatch(/Marker NOT advanced/i);
+      log.mockRestore();
+    });
+
     it("does NOT stamp the marker when the agent exits with an error", async () => {
       mockExecFileSync.mockImplementationOnce(() => {
         throw new Error("agent failed");
@@ -257,6 +276,25 @@ describe("migrate: prompt dispenser", () => {
 
     it("exits without writing when --mark-done can't safely stamp the config shape", async () => {
       mockReadFileSync.mockReturnValueOnce("jinn:\n\tversion: 1.0.0\n");
+      const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
+        throw new Error("process.exit called");
+      }) as never);
+      vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { runMigrate } = await import("../migrate.js");
+
+      await expect(runMigrate({ markDone: "1.1.0" })).rejects.toThrow("process.exit called");
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      expect(mockRenameSync).not.toHaveBeenCalled();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      exitSpy.mockRestore();
+    });
+
+    it("exits 1 cleanly (no stack trace) when jinn is a bare scalar like `false`", async () => {
+      // Previously setIn threw here and --mark-done died with a stack trace.
+      // Now it refuses cleanly → exit(1), no write, and the only error thrown is
+      // the mocked process.exit (proving the refusal path, not a raw setIn throw).
+      mockReadFileSync.mockReturnValueOnce("jinn: false\n");
       const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
         throw new Error("process.exit called");
       }) as never);
@@ -461,5 +499,58 @@ describe("stampVersionInYaml: format-preserving version stamp", () => {
     expect(after).toContain("versioning: semver"); // untouched
     expect(after).toContain('version: "0.26.0"'); // added as a new direct child
     expect(markerOf(after)).toBe("0.26.0");
+  });
+
+  // MEDIUM (a): an empty `jinn:` (null value) is a sane user shape — the marker
+  // just hasn't been written yet. setIn can't descend into a null scalar, so we
+  // materialize an empty map first and SET the version (success, not refusal).
+  it("treats an empty `jinn:` (null value) as an empty block and sets the version", () => {
+    const after = okText(stampVersionInYaml("jinn:\n", "0.26.0"));
+    expect(after).toContain('version: "0.26.0"');
+    expect(markerOf(after)).toBe("0.26.0"); // valid YAML out (independent parse)
+  });
+
+  it("sets the version on an empty `jinn:` that has sibling keys after it", () => {
+    const before = ["jinn:", "other:", "  x: 1", ""].join("\n");
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
+    expect(after).toContain('version: "0.26.0"');
+    expect(markerOf(after)).toBe("0.26.0");
+    // The new key landed under jinn, not merged into `other:`.
+    expect(after.indexOf('version: "0.26.0"')).toBeLessThan(after.indexOf("other:"));
+    expect(after).toContain("  x: 1");
+  });
+
+  // MEDIUM (b): a genuinely non-collection `jinn` (a non-null scalar) can't hold
+  // a version child. setIn throws; the stamper must REFUSE cleanly (no throw
+  // escapes) so both call sites stay on their no-stack-trace paths.
+  it("REFUSES cleanly (no throw) when `jinn` is a non-null scalar like `false`", () => {
+    let res: ReturnType<typeof stampVersionInYaml>;
+    expect(() => {
+      res = stampVersionInYaml("jinn: false\n", "0.26.0");
+    }).not.toThrow();
+    expect(res!.ok).toBe(false);
+    if (res!.ok) throw new Error("expected refusal");
+    expect(res!.reason).toMatch(/jinn|mapping|collection/i);
+  });
+
+  it("REFUSES cleanly when `jinn` is a sequence, not a mapping", () => {
+    const before = ["jinn:", "  - a", "  - b", ""].join("\n");
+    let res: ReturnType<typeof stampVersionInYaml>;
+    expect(() => {
+      res = stampVersionInYaml(before, "0.26.0");
+    }).not.toThrow();
+    expect(res!.ok).toBe(false);
+  });
+
+  // LOW: an inline comment attached to the version VALUE node is dropped by a
+  // naive setIn (which replaces the value wholesale). Carry it onto the new
+  // scalar so it survives like every other comment does.
+  it("preserves an inline comment attached to the version value", () => {
+    const before = "jinn:\n  version: '0.20.0' # version inline comment\nother: 1\n";
+    const after = okText(stampVersionInYaml(before, "0.26.0"));
+    expect(after).toContain('version: "0.26.0"');
+    expect(after).toContain("# version inline comment");
+    expect(markerOf(after)).toBe("0.26.0");
+    expect(after).toContain("other: 1");
   });
 });
