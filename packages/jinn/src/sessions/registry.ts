@@ -340,6 +340,17 @@ function setMeta(database: Database.Database, key: string, value: string): void 
     .run(key, value);
 }
 
+/** Read a value from the generic key/value meta store (one-off progress flags /
+ * watermarks). Returns null when the key was never written. */
+export function getMetaValue(key: string): string | null {
+  return getMeta(initDb(), key);
+}
+
+/** Upsert a value into the generic key/value meta store. Keep entries tiny. */
+export function setMetaValue(key: string, value: string): void {
+  setMeta(initDb(), key, value);
+}
+
 /**
  * Create the FTS5 search index + sync triggers, and record the backfill watermark.
  *

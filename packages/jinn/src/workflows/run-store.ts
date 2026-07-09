@@ -482,7 +482,110 @@ export function saveRun(root: string, run: WorkflowRun): WorkflowRun {
   assertSafeId(run.workflowId, 'workflow id');
   assertSafeId(run.runId, 'run id');
   writeAtomic(runFile(root, run.workflowId, run.runId), JSON.stringify(run, null, 2) + '\n');
+  // Keep the active-run index in lockstep so the reconciler sweep and the Todo
+  // trigger read O(active) instead of O(all-lifetime-runs). Best-effort: a failed
+  // update is corrected by rebuild-on-miss and the boot-time rebuild, so it must
+  // never fail the save.
+  try {
+    updateActiveRunIndexForRun(root, run);
+  } catch {
+    /* index self-heals (rebuild-on-miss + startup rebuild) */
+  }
   return run;
+}
+
+/* ── Active-run index (GRS perf batch) ─────────────────────────────────────────
+ * A run is TERMINAL once completed/failed/cancelled; everything else
+ * (running/parked/dispatched) is still "active" and may need advancing or
+ * dedup-checking. Reading every lifetime run file every 15s (sweep) and on every
+ * Todo status change scaled O(total runs). Instead we persist a tiny index of
+ * active run refs, maintained on save, and rebuildable from a full scan whenever
+ * it is missing/corrupt (crash-safe by construction — a stale entry is a harmless
+ * re-read; a missed entry is corrected at the next boot rebuild). */
+
+const TERMINAL_RUN_STATUSES: ReadonlySet<WorkflowRunStatus> = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+]);
+
+/** True once a run reaches a terminal status (no further advancing/dedup needed). */
+export function isTerminalRunStatus(status: WorkflowRunStatus): boolean {
+  return TERMINAL_RUN_STATUSES.has(status);
+}
+
+export interface ActiveRunRef {
+  workflowId: string;
+  runId: string;
+}
+
+function activeIndexFile(root: string): string {
+  return path.join(root, 'reports', 'runs', '_active-index.json');
+}
+
+/** Read the index; null if missing or unreadable/corrupt (→ caller rebuilds). */
+function readActiveRunIndex(root: string): ActiveRunRef[] | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(activeIndexFile(root), 'utf8');
+  } catch {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    const out: ActiveRunRef[] = [];
+    for (const entry of parsed) {
+      const wf = entry?.workflowId;
+      const rn = entry?.runId;
+      if (typeof wf === 'string' && typeof rn === 'string' && SAFE_ID.test(wf) && SAFE_ID.test(rn)) {
+        out.push({ workflowId: wf, runId: rn });
+      }
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function writeActiveRunIndex(root: string, refs: ActiveRunRef[]): void {
+  writeAtomic(activeIndexFile(root), JSON.stringify(refs) + '\n');
+}
+
+/** Full scan → rewrite the index. Boot recovery + rebuild-on-miss. */
+export function rebuildActiveRunIndex(root: string): ActiveRunRef[] {
+  const refs: ActiveRunRef[] = [];
+  for (const workflowId of listRunWorkflowIds(root)) {
+    for (const summary of listRuns(root, workflowId)) {
+      if (!isTerminalRunStatus(summary.status)) refs.push({ workflowId, runId: summary.runId });
+    }
+  }
+  writeActiveRunIndex(root, refs);
+  return refs;
+}
+
+/** Active (non-terminal) run refs. Rebuilds from a full scan if the index is
+ * missing/corrupt, so a fresh install or a crash-truncated index self-heals. */
+export function listActiveRunRefs(root: string): ActiveRunRef[] {
+  return readActiveRunIndex(root) ?? rebuildActiveRunIndex(root);
+}
+
+function updateActiveRunIndexForRun(root: string, run: WorkflowRun): void {
+  const idx = readActiveRunIndex(root);
+  if (!idx) {
+    // Missing/corrupt → a full rebuild reads the just-saved file and includes it.
+    rebuildActiveRunIndex(root);
+    return;
+  }
+  const present = idx.findIndex((r) => r.workflowId === run.workflowId && r.runId === run.runId);
+  const active = !isTerminalRunStatus(run.status);
+  if (active && present === -1) {
+    idx.push({ workflowId: run.workflowId, runId: run.runId });
+    writeActiveRunIndex(root, idx);
+  } else if (!active && present !== -1) {
+    idx.splice(present, 1);
+    writeActiveRunIndex(root, idx);
+  }
 }
 
 /**

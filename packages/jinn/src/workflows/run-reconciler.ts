@@ -35,8 +35,8 @@ import {
   getRun,
   hasInFlightSteps,
   isWorkflowTriggerEvent,
-  listRuns,
-  listRunWorkflowIds,
+  listActiveRunRefs,
+  rebuildActiveRunIndex,
   newRunId,
   normalizeWorkflowTrigger,
   saveRun,
@@ -910,25 +910,27 @@ export async function resolveWorkflowRunGate(
  * were examined. Per-run failures are logged, never fatal to the sweep. */
 export async function sweepWorkflowRuns(deps: RunDriverDeps): Promise<number> {
   let examined = 0;
-  for (const workflowId of listRunWorkflowIds(deps.root)) {
-    let summaries;
+  // Only active (non-terminal) runs can be sweepable — read the active-run index
+  // (O(active)) instead of parsing every lifetime run file for every workflow.
+  // getRun re-checks the live status, so a stale index entry is a harmless skip.
+  for (const { workflowId, runId } of listActiveRunRefs(deps.root)) {
+    let run;
     try {
-      summaries = listRuns(deps.root, workflowId);
+      run = getRun(deps.root, workflowId, runId);
     } catch (err) {
-      deps.log?.('warn', `[workflow-runs] listRuns failed for ${workflowId}: ${(err as Error).message}`);
+      deps.log?.('warn', `[workflow-runs] getRun failed for ${workflowId}/${runId}: ${(err as Error).message}`);
       continue;
     }
-    for (const summary of summaries) {
-      // Sweepable (GRS-016a): running runs, plus parked runs whose sibling sessions
-      // are still in flight (probe-only settles — a park freezes dispatch, not
-      // evidence). Parked-and-quiet runs wait on a human; terminals are done.
-      if (summary.status !== 'running' && !(summary.status === 'parked' && summary.inFlight)) continue;
-      examined++;
-      try {
-        await advanceWorkflowRunById(deps, workflowId, summary.runId);
-      } catch (err) {
-        deps.log?.('warn', `[workflow-runs] advancing ${summary.runId} failed: ${(err as Error).message}`);
-      }
+    if (!run) continue; // run file gone — stale index entry, pruned on next rebuild
+    // Sweepable (GRS-016a): running runs, plus parked runs whose sibling sessions
+    // are still in flight (probe-only settles — a park freezes dispatch, not
+    // evidence). Parked-and-quiet runs wait on a human; terminals are done.
+    if (run.status !== 'running' && !(run.status === 'parked' && hasInFlightSteps(run))) continue;
+    examined++;
+    try {
+      await advanceWorkflowRunById(deps, workflowId, runId);
+    } catch (err) {
+      deps.log?.('warn', `[workflow-runs] advancing ${runId} failed: ${(err as Error).message}`);
     }
   }
   return examined;
@@ -961,6 +963,14 @@ export function startWorkflowRunReconciler(deps: RunDriverDeps, opts: RunReconci
       sweeping = false;
     }
   };
+  // Rebuild the active-run index once at boot from a full scan, so any staleness
+  // left by a crash (a run that went terminal without its pruning save landing) is
+  // corrected before steady-state O(active) sweeps rely on it.
+  try {
+    rebuildActiveRunIndex(deps.root);
+  } catch (err) {
+    deps.log?.('warn', `[workflow-runs] active-run index rebuild failed at boot: ${(err as Error).message}`);
+  }
   void sweep('startup');
   const timer = setInterval(() => void sweep('interval'), opts.intervalMs ?? DEFAULT_INTERVAL_MS);
   timer.unref?.();

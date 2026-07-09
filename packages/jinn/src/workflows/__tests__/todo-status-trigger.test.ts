@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createDefinition, getDefinition } from '../definition-store.js';
 import { fireTodoStatusChangeWorkflows, replayMissedTodoStatusChangeWorkflowFires } from '../todo-status-trigger.js';
+import { listRuns, normalizeWorkflowTrigger } from '../run-store.js';
 import { WORKFLOW_DEFINITION_SCHEMA_VERSION, type EditableWorkflowDefinition, type WorkflowNode } from '../definition.js';
 import type { RunDriverDeps } from '../run-reconciler.js';
 import { stepSessionKey, type StepSessionProbe } from '../advance.js';
@@ -155,7 +156,16 @@ describe('todo-status-change workflow trigger', () => {
       const secondHit = second.filter((entry) => entry.eventId === transition.event?.id);
 
       expect(firstHit).toEqual([{ eventId: transition.event?.id, outcomes: [{ workflowId: 'verify-wf', outcome: 'started' }] }]);
-      expect(secondHit).toEqual([{ eventId: transition.event?.id, outcomes: [{ workflowId: 'verify-wf', outcome: 'duplicate' }] }]);
+      // The replay watermark advanced past this event on the first pass, so the
+      // second replay does not even re-scan it (no wasted O(runs) dedup work) —
+      // stronger than the previous "re-scan and report duplicate" behaviour.
+      expect(secondHit).toEqual([]);
+      // The workflow ran exactly once for this event: the sole run carries this
+      // transition's id as its trigger fireRef.
+      const firedRuns = listRuns(root, 'verify-wf').filter(
+        (r) => normalizeWorkflowTrigger(r.trigger).fireRef === transition.event?.id,
+      );
+      expect(firedRuns).toHaveLength(1);
     } finally {
       transitions.setTodoStatusChangeListener(null);
       fs.rmSync(home, { recursive: true, force: true });
