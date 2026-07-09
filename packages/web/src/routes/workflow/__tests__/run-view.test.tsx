@@ -254,10 +254,10 @@ describe("DefinitionRunView (container)", () => {
     expect(getWorkflowRun).not.toHaveBeenCalled()
   })
 
-  it("notes when the gateway has no evidence root", async () => {
+  it("notes when workflow storage is misconfigured", async () => {
     listWorkflowRuns.mockResolvedValue({ evidenceConfigured: false, runs: [] })
     render(<DefinitionRunView workflowId="sample-autonomy" />)
-    await waitFor(() => expect(screen.getByText(/no workflow evidence root/i)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/misconfigured/i)).toBeTruthy())
   })
 
   it("surfaces a load error without wedging", async () => {

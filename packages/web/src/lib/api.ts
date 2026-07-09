@@ -707,7 +707,7 @@ export const api = {
   listWorkflows: () => get<{ workflows: string[]; evidenceConfigured: boolean }>("/api/workflows"),
   /** GRS-011c: list editable workflow definitions (Edit view rail). */
   listWorkflowDefinitions: () =>
-    get<{ definitions: WorkflowDefinitionSummaryWire[]; evidenceConfigured: boolean }>(
+    get<{ definitions: WorkflowDefinitionSummaryWire[]; evidenceConfigured: boolean; evidenceReason?: string }>(
       "/api/workflow-definitions",
     ),
   /** GRS-019: create a new editable definition (the list's "+ New Workflow").

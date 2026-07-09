@@ -75,6 +75,7 @@ import { forkEngineSession } from "../sessions/fork.js";
 import { removeCodexSessionHome } from "../engines/codex.js";
 import {
   deriveRunState,
+  resolveWorkflowEvidence,
   resolveWorkflowEvidenceRoot,
   listWorkflowIds,
   listDefinitions,
@@ -2767,9 +2768,9 @@ export async function handleApiRequest(
     // this endpoint reads definition + evidence files under JINN_WORKFLOW_EVIDENCE_ROOT
     // and computes state. It writes nothing.
     if (method === "GET" && pathname === "/api/workflows") {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { workflows: [], evidenceConfigured: false });
-      return json(res, { workflows: listWorkflowIds(root), evidenceConfigured: true });
+      const ev = resolveWorkflowEvidence();
+      if (!ev.root) return json(res, { workflows: [], evidenceConfigured: false, ...(ev.reason ? { evidenceReason: ev.reason } : {}) });
+      return json(res, { workflows: listWorkflowIds(ev.root), evidenceConfigured: true });
     }
 
     // GET /api/workflows/:id — one workflow's definition + derived run state.
@@ -2836,9 +2837,10 @@ export async function handleApiRequest(
     }
 
     if (pathname === "/api/workflow-triggers") {
-      const root = resolveWorkflowEvidenceRoot();
+      const ev = resolveWorkflowEvidence();
+      const root = ev.root;
       if (method === "GET") {
-        if (!root) return json(res, { triggers: [], evidenceConfigured: false });
+        if (!root) return json(res, { triggers: [], evidenceConfigured: false, ...(ev.reason ? { evidenceReason: ev.reason } : {}) });
         try {
           return json(res, { triggers: listPublicWorkflowTriggerBindings(root), evidenceConfigured: true });
         } catch (err) {
@@ -2846,7 +2848,7 @@ export async function handleApiRequest(
         }
       }
       if (method === "POST") {
-        if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+        if (!root) return json(res, { error: ev.reason ?? "Workflow evidence root is not configured" }, 503);
         const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
         if (!parsed.ok) return;
         if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
@@ -2966,15 +2968,16 @@ export async function handleApiRequest(
     }
 
     if (pathname === "/api/workflow-definitions") {
-      const root = resolveWorkflowEvidenceRoot();
+      const ev = resolveWorkflowEvidence();
+      const root = ev.root;
       if (method === "GET") {
-        if (!root) return json(res, { definitions: [], evidenceConfigured: false });
+        if (!root) return json(res, { definitions: [], evidenceConfigured: false, ...(ev.reason ? { evidenceReason: ev.reason } : {}) });
         return json(res, { definitions: listDefinitions(root), evidenceConfigured: true });
       }
       if (method === "POST") {
         // Resolve the root BEFORE reading the body so an unconfigured gateway 503s
         // without buffering a (capped) request body.
-        if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+        if (!root) return json(res, { error: ev.reason ?? "Workflow evidence root is not configured" }, 503);
         const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
         if (!parsed.ok) return;
         if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
@@ -3170,8 +3173,9 @@ export async function handleApiRequest(
     // GET /api/workflow-definitions/:id/runs — list runs of a definition (newest first).
     params = matchRoute("/api/workflow-definitions/:id/runs", pathname);
     if (method === "GET" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { runs: [], evidenceConfigured: false });
+      const ev = resolveWorkflowEvidence();
+      const root = ev.root;
+      if (!root) return json(res, { runs: [], evidenceConfigured: false, ...(ev.reason ? { evidenceReason: ev.reason } : {}) });
       try {
         return json(res, { runs: listRuns(root, params.id), evidenceConfigured: true });
       } catch (err) {

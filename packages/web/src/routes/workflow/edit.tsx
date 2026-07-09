@@ -1546,7 +1546,7 @@ export function WorkflowEditView({
       <div className="m-[var(--space-4)] rounded-[var(--radius-md)] border border-[var(--system-red)] bg-[color-mix(in_srgb,var(--system-red)_8%,transparent)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]">
         {error ?? "No definition."}
         <div className="mt-1 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
-          The gateway may not have <code>JINN_WORKFLOW_EVIDENCE_ROOT</code> configured, or this workflow has no editable definition yet.
+          This workflow has no editable definition yet, or workflow storage is misconfigured on the gateway (check the logs, or the <code>JINN_WORKFLOW_EVIDENCE_ROOT</code> override if set).
         </div>
       </div>
     )

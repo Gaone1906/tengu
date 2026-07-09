@@ -45,7 +45,7 @@ import {
   applyWorkflowCronSync,
   fireTodoStatusChangeWorkflows,
   replayMissedTodoStatusChangeWorkflowFires,
-  resolveWorkflowEvidenceRoot,
+  resolveWorkflowEvidence,
   startPollTriggerRunner,
   startWorkflowRunReconciler,
 } from "../workflows/index.js";
@@ -859,7 +859,19 @@ export async function startGateway(
   // place before the first possible tick (GRS-014d-fix, Codex finding 3). Nothing in
   // between serves cron: the HTTP server, watchers, and connector routes all come up
   // after that point.
-  const workflowEvidenceRoot = resolveWorkflowEvidenceRoot();
+  // Workflows are on by default now: the evidence root defaults to
+  // <JINN_HOME>/workflow-evidence (created here at boot) unless an explicit
+  // JINN_WORKFLOW_EVIDENCE_ROOT override is set. A config error (bad override,
+  // or an uncreatable default on a read-only JINN_HOME) fails LOUD and leaves
+  // every workflow route/tool reporting evidenceConfigured:false with a reason —
+  // it never silently falls back to a second root.
+  const workflowEvidence = resolveWorkflowEvidence();
+  const workflowEvidenceRoot = workflowEvidence.root;
+  if (!workflowEvidence.configured) {
+    logger.error(`Workflow evidence root is misconfigured — workflows are DISABLED: ${workflowEvidence.reason}`);
+  } else {
+    logger.info(`Workflow evidence root: ${workflowEvidenceRoot}`);
+  }
 
   // Mutable config reference for hot-reload
   let currentConfig = config;

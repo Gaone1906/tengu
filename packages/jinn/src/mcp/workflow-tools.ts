@@ -260,7 +260,13 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       if (status >= 400) throw gatewayFailure("listing workflows", status, body);
       const rec = (body ?? {}) as Record<string, unknown>;
       if (rec.evidenceConfigured === false) {
-        return { ...rec, hint: "No workflow evidence root is configured on this gateway — workflow storage is disabled here (live-gateway safety)." };
+        const reason = typeof rec.evidenceReason === "string" ? rec.evidenceReason : undefined;
+        return {
+          ...rec,
+          hint: reason
+            ? `Workflow storage is misconfigured on this gateway: ${reason}`
+            : "The workflow evidence root is misconfigured on this gateway — workflow storage is disabled here.",
+        };
       }
       return body;
     },

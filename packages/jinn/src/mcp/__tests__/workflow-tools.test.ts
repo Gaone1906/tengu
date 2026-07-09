@@ -142,10 +142,19 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(out.hint).toBeUndefined(); // configured gateway → no warning hint
   });
 
-  it("list_workflows surfaces the unconfigured-evidence-root state as a hint", async () => {
+  it("list_workflows surfaces the misconfigured-evidence-root state as a hint", async () => {
     const { ctx } = stub(() => ({ status: 200, body: { definitions: [], evidenceConfigured: false } }));
     const out = (await tool("list_workflows").handler({}, ctx)) as Record<string, unknown>;
-    expect(String(out.hint)).toMatch(/no workflow evidence root/i);
+    expect(String(out.hint)).toMatch(/misconfigured/i);
+  });
+
+  it("list_workflows includes the server-provided reason in the hint when present", async () => {
+    const { ctx } = stub(() => ({
+      status: 200,
+      body: { definitions: [], evidenceConfigured: false, evidenceReason: 'JINN_WORKFLOW_EVIDENCE_ROOT is set to "/nope" but no such directory exists.' },
+    }));
+    const out = (await tool("list_workflows").handler({}, ctx)) as Record<string, unknown>;
+    expect(String(out.hint)).toMatch(/no such directory exists/i);
   });
 
   it("list_workflow_runs GETs the runs route for the encoded id", async () => {

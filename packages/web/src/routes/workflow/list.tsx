@@ -176,6 +176,7 @@ export default function WorkflowListPage() {
   const navigate = useNavigate()
   const [cards, setCards] = useState<WorkflowCardModel[] | null>(null)
   const [evidenceConfigured, setEvidenceConfigured] = useState(true)
+  const [evidenceReason, setEvidenceReason] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
 
@@ -186,6 +187,7 @@ export default function WorkflowListPage() {
         const list = await api.listWorkflowDefinitions()
         if (cancelled) return
         setEvidenceConfigured(list.evidenceConfigured)
+        setEvidenceReason(list.evidenceReason ?? null)
         const visible = list.definitions.filter((d) => d.status !== "retired").slice(0, LIST_DETAIL_CAP)
         // One calm line each needs the trigger node + the newest run — fetched in
         // parallel per definition; a single failure degrades that card, not the list.
@@ -246,8 +248,10 @@ export default function WorkflowListPage() {
           )}
 
           {!error && !evidenceConfigured && (
-            <div className="rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] p-4 text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
-              The gateway has no workflow evidence root configured (<code>JINN_WORKFLOW_EVIDENCE_ROOT</code>), so workflows cannot be stored.
+            <div className="rounded-[var(--radius-lg)] bg-[color-mix(in_srgb,var(--system-orange)_10%,transparent)] p-4 text-[length:var(--text-subheadline)] text-[var(--text-secondary)]" data-testid="wf-evidence-error">
+              {evidenceReason
+                ? <>Workflow storage is misconfigured, so workflows can&rsquo;t be stored: {evidenceReason}</>
+                : <>Workflow storage is misconfigured on the gateway, so workflows can&rsquo;t be stored.</>}
             </div>
           )}
 

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { resolveJinnHome } from '../shared/paths.js';
 
 export * from './derive.js';
 export * from './definition.js';
@@ -16,22 +17,90 @@ export * from './custom-triggers.js';
 export * from './poll-trigger.js';
 export * from './authoring.js';
 
+/** Default evidence root under JINN_HOME when no explicit override is set. */
+export function defaultWorkflowEvidenceRoot(): string {
+  return path.join(resolveJinnHome(), 'workflow-evidence');
+}
+
 /**
- * Where workflow definitions and run evidence live. This is deliberately
- * decoupled from JINN_HOME and disabled by default: the gateway reads only an
- * explicit JINN_WORKFLOW_EVIDENCE_ROOT. When unset or invalid, workflow routes
- * return their normal unavailable/not-found responses instead of discovering a
- * local test/sprint directory by accident.
+ * Outcome of resolving where workflow definitions and run evidence live.
+ * `configured: true` means workflows are operational and `root` is a usable
+ * directory. `configured: false` is a CONFIG ERROR (never a silent default):
+ * `root` is null and `reason` explains what to fix.
+ */
+export interface WorkflowEvidenceResolution {
+  root: string | null;
+  configured: boolean;
+  reason?: string;
+}
+
+/**
+ * Resolve the workflow evidence root. Resolution order:
+ *
+ *  1. `JINN_WORKFLOW_EVIDENCE_ROOT` if set — an explicit override that MUST be
+ *     a writable directory. Missing / not-a-dir / unwritable is a config error
+ *     surfaced with a reason; we deliberately do NOT fall back to the default,
+ *     because a silent fallback would hide the misconfig and split state across
+ *     two roots.
+ *  2. Otherwise the default `<JINN_HOME>/workflow-evidence`, created lazily
+ *     (with its `workflows/` subdir) so MCP tools / CLI paths that run before or
+ *     without the server boot hook still work. Only an uncreatable default
+ *     (e.g. a read-only JINN_HOME) is a config error.
+ */
+export function resolveWorkflowEvidence(): WorkflowEvidenceResolution {
+  const env = process.env.JINN_WORKFLOW_EVIDENCE_ROOT?.trim();
+  if (env) {
+    const root = path.resolve(env);
+    let isDir = false;
+    try {
+      isDir = fs.statSync(root).isDirectory();
+    } catch {
+      return {
+        root: null,
+        configured: false,
+        reason: `JINN_WORKFLOW_EVIDENCE_ROOT is set to "${root}" but no such directory exists.`,
+      };
+    }
+    if (!isDir) {
+      return {
+        root: null,
+        configured: false,
+        reason: `JINN_WORKFLOW_EVIDENCE_ROOT is set to "${root}" but that path is not a directory.`,
+      };
+    }
+    try {
+      fs.accessSync(root, fs.constants.W_OK);
+    } catch {
+      return {
+        root: null,
+        configured: false,
+        reason: `JINN_WORKFLOW_EVIDENCE_ROOT is set to "${root}" but that directory is not writable.`,
+      };
+    }
+    return { root, configured: true };
+  }
+
+  const root = defaultWorkflowEvidenceRoot();
+  try {
+    fs.mkdirSync(path.join(root, 'workflows'), { recursive: true, mode: 0o700 });
+    return { root, configured: true };
+  } catch (err) {
+    return {
+      root: null,
+      configured: false,
+      reason: `Default workflow evidence root "${root}" could not be created: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * The usable evidence root, or null on a config error. Thin wrapper over
+ * {@link resolveWorkflowEvidence} for the many call sites that only need the
+ * path; surfaces that report status to the UI use the full resolution so they
+ * can include the reason.
  */
 export function resolveWorkflowEvidenceRoot(): string | null {
-  const env = process.env.JINN_WORKFLOW_EVIDENCE_ROOT?.trim();
-  if (!env) return null;
-  const root = path.resolve(env);
-  try {
-    return fs.statSync(root).isDirectory() ? root : null;
-  } catch {
-    return null;
-  }
+  return resolveWorkflowEvidence().root;
 }
 
 /** List workflow ids by scanning `<evidenceRoot>/workflows/*.workflow.yaml`. */

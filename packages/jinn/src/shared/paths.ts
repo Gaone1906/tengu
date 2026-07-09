@@ -5,14 +5,20 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/** Resolve the home directory for the current instance. */
-function resolveHome(): string {
+/**
+ * Resolve the home directory for the current instance from the environment at
+ * call time. `JINN_HOME` below captures this once at module load (the value
+ * never changes during a gateway's life); callers that need the live env value
+ * — e.g. tests that set `process.env.JINN_HOME` before exercising a code path —
+ * call this directly instead of reading the frozen constant.
+ */
+export function resolveJinnHome(): string {
   if (process.env.JINN_HOME) return process.env.JINN_HOME;
   const instance = process.env.JINN_INSTANCE || "jinn";
   return path.join(os.homedir(), `.${instance}`);
 }
 
-export const JINN_HOME = resolveHome();
+export const JINN_HOME = resolveJinnHome();
 export const CONFIG_PATH = path.join(JINN_HOME, "config.yaml");
 export const SESSIONS_DB = path.join(JINN_HOME, "sessions", "registry.db");
 export const CRON_JOBS = path.join(JINN_HOME, "cron", "jobs.json");

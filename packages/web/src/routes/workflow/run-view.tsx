@@ -650,7 +650,7 @@ export function DefinitionRunView({ workflowId }: { workflowId: string }) {
 
       {!error && !evidenceConfigured && (
         <div className="m-[var(--space-4)] rounded-[var(--radius-md)] border border-[var(--separator)] p-4 text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
-          The gateway has no workflow evidence root configured (<code>JINN_WORKFLOW_EVIDENCE_ROOT</code>), so it stores no runs.
+          Workflow storage is misconfigured on the gateway, so it stores no runs. Check the gateway logs (or the <code>JINN_WORKFLOW_EVIDENCE_ROOT</code> override, if set).
         </div>
       )}
 

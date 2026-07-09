@@ -160,10 +160,16 @@ describe("WorkflowListPage", () => {
     expect(navigate).not.toHaveBeenCalled()
   })
 
-  it("notes when the gateway has no evidence root", async () => {
-    listWorkflowDefinitions.mockResolvedValue({ evidenceConfigured: false, definitions: [] })
+  it("shows a misconfiguration banner (with reason) when evidence is not configured", async () => {
+    listWorkflowDefinitions.mockResolvedValue({
+      evidenceConfigured: false,
+      definitions: [],
+      evidenceReason: 'JINN_WORKFLOW_EVIDENCE_ROOT is set to "/nope" but no such directory exists.',
+    })
     render(<WorkflowListPage />)
-    await waitFor(() => expect(screen.getByText(/no workflow evidence root/i)).toBeTruthy())
+    await waitFor(() => expect(screen.getByTestId("wf-evidence-error")).toBeTruthy())
+    expect(screen.getByText(/misconfigured/i)).toBeTruthy()
+    expect(screen.getByText(/no such directory exists/i)).toBeTruthy()
   })
 
   it("a failed detail fetch degrades that card, not the list", async () => {
