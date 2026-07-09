@@ -59,5 +59,9 @@ This release adds the Child Session Protocol to both CLAUDE.md and AGENTS.md tem
 
 ## Files
 
+These ship with the installed package under this migration's template source
+directory (the read-only path named at the top of this section) — read them
+there; nothing is staged into your instance folder.
+
 - `files/CLAUDE.md` — updated CLAUDE.md template (full file for reference)
 - `files/AGENTS.md` — updated AGENTS.md template (full file for reference)

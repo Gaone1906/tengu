@@ -30,6 +30,50 @@ export function scanMigrationPrompts(
     .sort(compareSemver);
 }
 
+/**
+ * Scan the template `migrations/` dir for version dirs staged ABOVE the current
+ * package version — i.e. a MIGRATION.md whose directory version is greater than
+ * `packageVersion`. Pre-staging the next release's migration dir during
+ * development is intentional (the release skill verifies/renames it at release
+ * time, and the next publish makes it reachable), so these are surfaced as an
+ * informational notice rather than treated as reachable prompts. Ascending.
+ */
+export function scanFutureMigrations(
+  templateMigrationsDir: string,
+  packageVersion: string,
+): string[] {
+  if (!fs.existsSync(templateMigrationsDir)) return [];
+
+  return fs
+    .readdirSync(templateMigrationsDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .filter((v) => /^\d+\.\d+\.\d+$/.test(v))
+    .filter((v) => compareSemver(v, packageVersion) > 0)
+    .filter((v) => fs.existsSync(path.join(templateMigrationsDir, v, "MIGRATION.md")))
+    .sort(compareSemver);
+}
+
+/**
+ * Build the one-line informational notice shown when migration prompts are
+ * staged for a future release. Returns null when nothing is staged.
+ */
+export function formatStagedFutureNotice(
+  futureVersions: string[],
+  packageVersion: string,
+): string | null {
+  if (futureVersions.length === 0) return null;
+  const n = futureVersions.length;
+  const noun = n === 1 ? "migration" : "migrations";
+  const release = n === 1 ? "a future release" : "future releases";
+  const verb = n === 1 ? "activates" : "activate";
+  const when = n === 1 ? "that version ships" : "those versions ship";
+  return (
+    `${n} ${noun} staged for ${release} (${futureVersions.join(", ")}) — ` +
+    `${verb} when ${when} (current package v${packageVersion}).`
+  );
+}
+
 export interface ComposeOptions {
   templateMigrationsDir: string;
   /** Versions to compose, already range-scanned. Composed in ascending order. */
@@ -69,6 +113,11 @@ export function composeMigrationPrompt(opts: ComposeOptions): string {
     `- **Never delete user content.** Only remove something if a note explicitly`,
     `  says to, and back it up first (\`<file>.pre-migration.bak\`).`,
     `- **Work only inside \`${instanceHome}\`.** Do not touch the jinn package itself.`,
+    `- **Reading the template source is fine.** Each section below names the`,
+    `  read-only template source directory for that release, on this same machine.`,
+    `  Any \`files/…\` path a section mentions is relative to that directory (those`,
+    `  payloads ship with the installed package) — read them straight from there.`,
+    `  Nothing is staged into your instance folder; there is no copy to look for.`,
     `- **Report what you changed** at the end: files added, files merged (with a`,
     `  one-line summary of each), and anything you skipped or that needs the user's`,
     `  attention.`,
@@ -82,10 +131,18 @@ export function composeMigrationPrompt(opts: ComposeOptions): string {
   ].join("\n");
 
   const sections = versions.map((v) => {
-    const md = fs
-      .readFileSync(path.join(templateMigrationsDir, v, "MIGRATION.md"), "utf-8")
-      .trim();
-    return [``, `## ===== Migration ${v} =====`, ``, md, ``].join("\n");
+    const versionDir = path.join(templateMigrationsDir, v);
+    const md = fs.readFileSync(path.join(versionDir, "MIGRATION.md"), "utf-8").trim();
+    return [
+      ``,
+      `## ===== Migration ${v} =====`,
+      ``,
+      `> Template source (read-only, on this machine): \`${versionDir}\``,
+      `> Any \`files/…\` path below is relative to that directory — read it there.`,
+      ``,
+      md,
+      ``,
+    ].join("\n");
   });
 
   return `${preamble}\n${sections.join("\n")}`;

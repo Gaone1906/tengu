@@ -38,4 +38,8 @@ Existing sessions are backfilled from `source_ref` and `source` fields. **No man
 
 ## Files
 
+This ships with the installed package under this migration's template source
+directory (the read-only path named at the top of this section) — read it there;
+nothing is staged into your instance folder.
+
 - `files/config.default.yaml` — updated default config for reference

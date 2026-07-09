@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import yaml from "js-yaml";
 import {
   JINN_HOME,
   CONFIG_PATH,
@@ -13,7 +12,12 @@ import {
   getPackageVersion,
   getInstanceVersion,
 } from "../shared/version.js";
-import { scanMigrationPrompts, composeMigrationPrompt } from "./migrate-prompt.js";
+import {
+  scanMigrationPrompts,
+  composeMigrationPrompt,
+  scanFutureMigrations,
+  formatStagedFutureNotice,
+} from "./migrate-prompt.js";
 
 const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
@@ -22,19 +26,77 @@ const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
 
 /**
+ * Surgically set `jinn.version` inside a config.yaml's text, preserving every
+ * other byte — comments, quoting style, key order, and blank lines are the
+ * user's, so a full `yaml.load` → `yaml.dump` round-trip (which strips comments
+ * and re-quotes) is wrong for a user-owned file. Only the version line changes.
+ *
+ *   - `jinn:` block with a `version:` key → replace that line's value only.
+ *   - `jinn:` block without a `version:` key → insert one as its first member.
+ *   - no `jinn:` block → append a minimal `jinn:` block at the end.
+ *
+ * Exported for unit testing (pure string → string).
+ */
+export function stampVersionInYaml(raw: string, version: string): string {
+  const value = JSON.stringify(version); // safe double-quoted scalar, e.g. "0.26.0"
+
+  const lines = raw.split("\n");
+
+  // Locate the top-level `jinn:` mapping key (column 0, optional trailing comment).
+  let jinnIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^jinn:\s*(#.*)?$/.test(lines[i])) {
+      jinnIdx = i;
+      break;
+    }
+  }
+
+  if (jinnIdx === -1) {
+    // No jinn block — append a minimal one, keeping exactly one trailing newline.
+    const block = `jinn:\n  version: ${value}\n`;
+    if (raw.length === 0) return block;
+    return raw.endsWith("\n") ? `${raw}${block}` : `${raw}\n${block}`;
+  }
+
+  // The block body runs until the next column-0, non-space line (next top-level
+  // key or a `---` document marker); blank and indented lines stay in the block.
+  let blockEnd = lines.length;
+  for (let i = jinnIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "") continue;
+    if (/^\s/.test(line)) continue;
+    blockEnd = i;
+    break;
+  }
+
+  // Replace an existing indented `version:` key's value, preserving indentation
+  // (and a trailing CR on CRLF files); drop only that line's old value/comment.
+  for (let i = jinnIdx + 1; i < blockEnd; i++) {
+    const cr = lines[i].endsWith("\r") ? "\r" : "";
+    const bare = cr ? lines[i].slice(0, -1) : lines[i];
+    const m = bare.match(/^(\s+)version:(?:\s.*|)$/);
+    if (m) {
+      lines[i] = `${m[1]}version: ${value}${cr}`;
+      return lines.join("\n");
+    }
+  }
+
+  // jinn block exists but has no version key — insert one as the first member.
+  lines.splice(jinnIdx + 1, 0, `  version: ${value}`);
+  return lines.join("\n");
+}
+
+/**
  * Stamp the jinn.version field in config.yaml — the instance's "last migrated"
  * marker. The live gateway hot-reloads config.yaml, so write atomically
  * (tmp file + rename) to avoid a partial-write corruption window.
  */
 function stampVersion(version: string): void {
   const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
-  const config = yaml.load(raw) as any;
-
-  if (!config.jinn) config.jinn = {};
-  config.jinn.version = version;
+  const updated = stampVersionInYaml(raw, version);
 
   const tmpPath = `${CONFIG_PATH}.tmp`;
-  fs.writeFileSync(tmpPath, yaml.dump(config, { lineWidth: -1 }), "utf-8");
+  fs.writeFileSync(tmpPath, updated, "utf-8");
   fs.renameSync(tmpPath, CONFIG_PATH);
 }
 
@@ -93,6 +155,15 @@ export async function runMigrate(opts: MigrateOptions = {}): Promise<void> {
 
   console.log(`\n${DIM}Instance version:${RESET} ${instanceVersion}`);
   console.log(`${DIM}Package version:${RESET}  ${packageVersion}\n`);
+
+  // Surface migrations staged for a future release (dirs above the package
+  // version). Pre-staging the next release's dir is intentional — make the state
+  // visible instead of leaving it silently unreachable.
+  const futureNotice = formatStagedFutureNotice(
+    scanFutureMigrations(TEMPLATE_MIGRATIONS_DIR, packageVersion),
+    packageVersion,
+  );
+  if (futureNotice) console.log(`${DIM}${futureNotice}${RESET}\n`);
 
   // Range-scan the template migrations for prompts in (instance, package].
   const versions = scanMigrationPrompts(TEMPLATE_MIGRATIONS_DIR, instanceVersion, packageVersion);

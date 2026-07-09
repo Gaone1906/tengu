@@ -41,7 +41,7 @@ New columns added to the sessions table (handled automatically on gateway start)
 
 ## Merge instructions
 
-1. **New file**: Copy `files/docs/mcp.md` to `~/.jinn/docs/mcp.md`. This is a new file — no conflict possible.
+1. **New file**: Copy `files/docs/mcp.md` — found under this migration's template source directory (the read-only path named at the top of this section) — into `docs/mcp.md` in your instance folder. This is a new file — no conflict possible.
 
 2. **Config**: Add the following sections to `config.yaml` if not already present. Do NOT overwrite existing values — only add missing keys:
    - Add the `mcp:` section (with browser, search, fetch, gateway sub-keys) after `connectors:`
@@ -52,6 +52,10 @@ New columns added to the sessions table (handled automatically on gateway start)
 4. **Database**: Handled automatically on gateway start.
 
 ## Files
+
+These ship with the installed package under this migration's template source
+directory (the read-only path named at the top of this section) — read them
+there; nothing is staged into your instance folder.
 
 - `files/config.default.yaml` — updated default config for reference
 - `files/docs/mcp.md` — new MCP integration documentation
