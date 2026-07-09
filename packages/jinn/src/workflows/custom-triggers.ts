@@ -13,6 +13,13 @@ const MAX_NAME_CHARS = 128;
 const MAX_EVENT_CHARS = 160;
 const MAX_FILTERS = 16;
 const MAX_FILTER_PATH_CHARS = 160;
+// ReDoS stance for webhook `matches` filters: the pattern is length-capped here
+// and compile-guarded at creation (below), and compiled patterns are re-tested
+// per event inside a try/catch. A safe-regex analyzer or RE2 is deliberately not
+// used — these filters are operator-authored and approval-gated, and a tight
+// length cap plus a compile guard is a proportionate mitigation for the blast
+// radius (one gateway-local trigger burning CPU on its own inbound events).
+const MAX_FILTER_REGEX_CHARS = 256;
 const MAX_PAYLOAD_DEPTH = 8;
 const MAX_PAYLOAD_KEYS = 200;
 const MAX_PAYLOAD_ARRAY = 100;
@@ -21,7 +28,13 @@ export const POLL_DEFAULT_TIMEOUT_MS = 30_000;
 export const POLL_DEFAULT_STDOUT_MAX_BYTES = 64 * 1024;
 export const POLL_DEFAULT_STDERR_MAX_BYTES = 16 * 1024;
 export const POLL_CWD_POLICY = 'jinn-home-or-process-cwd';
-export const POLL_ENV_POLICY = 'inherit-gateway-process-env';
+// Poll commands run with a SCRUBBED environment (allowlist only) so an approved
+// command — or a later-edited script — can never read the gateway's secrets.
+// The exact allowlist is baked into POLL_ENV_POLICY so it appears verbatim in the
+// approval request the operator signs off on, and changing it rehashes the
+// activation contract (forcing re-approval) by construction.
+export const POLL_ENV_ALLOWLIST = ['PATH', 'HOME', 'JINN_HOME', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR'] as const;
+export const POLL_ENV_POLICY = `scrubbed-allowlist:${POLL_ENV_ALLOWLIST.join(',')}`;
 
 export type WorkflowTriggerKind = 'webhook' | 'poll';
 export type WorkflowTriggerActivation = 'active' | 'pending_approval' | 'disabled';
@@ -376,8 +389,20 @@ function cleanFilter(input: unknown): WorkflowTriggerFilter[] | undefined {
     if (op !== 'equals' && op !== 'notEquals' && op !== 'exists' && op !== 'matches') {
       throw new WorkflowTriggerStoreError('invalid-input', 'filter.op must be equals, notEquals, exists, or matches');
     }
-    if (op === 'matches' && typeof rec.value !== 'string') {
-      throw new WorkflowTriggerStoreError('invalid-input', 'filter.value must be a string for matches');
+    if (op === 'matches') {
+      if (typeof rec.value !== 'string') {
+        throw new WorkflowTriggerStoreError('invalid-input', 'filter.value must be a string for matches');
+      }
+      if (rec.value.length > MAX_FILTER_REGEX_CHARS) {
+        throw new WorkflowTriggerStoreError('invalid-input', `filter.value regex must be <= ${MAX_FILTER_REGEX_CHARS} chars`);
+      }
+      // Compile-guard at creation so an invalid pattern is rejected up front
+      // rather than silently never-matching at event time.
+      try {
+        new RegExp(rec.value);
+      } catch {
+        throw new WorkflowTriggerStoreError('invalid-input', 'filter.value is not a valid regular expression');
+      }
     }
     out.push({ path: pathValue, op, ...(rec.value !== undefined ? { value: sanitizeJsonValue(rec.value) } : {}) });
   }

@@ -5,6 +5,7 @@ import {
   createWorkflowTriggerBinding,
   listWorkflowTriggerBindings,
   pollActivationContractMatches,
+  POLL_ENV_ALLOWLIST,
   POLL_DEFAULT_STDERR_MAX_BYTES,
   POLL_DEFAULT_STDOUT_MAX_BYTES,
   POLL_DEFAULT_TIMEOUT_MS,
@@ -78,6 +79,24 @@ function killCommandProcess(child: ReturnType<typeof spawn>): void {
   try { child.kill('SIGKILL'); } catch { /* already gone */ }
 }
 
+/**
+ * A poll command runs with a SCRUBBED environment — only the allowlisted vars
+ * (PATH/HOME/JINN_HOME/locale/tmp), never `process.env`. This bounds the blast
+ * radius: an approved command (or a later-edited script it calls) cannot read the
+ * gateway's API keys, tokens, or connector secrets even if it is compromised.
+ * `shell: true` is retained because the command contract is a free-form shell
+ * string (pipes/redirects/globs); the env scrub, not argv parsing, is what closes
+ * the secret-exfil hole.
+ */
+function scrubbedPollEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of POLL_ENV_ALLOWLIST) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 function runCommand(binding: PollWorkflowTriggerBinding): Promise<CommandResult> {
   const timeoutMs = binding.timeoutMs ?? POLL_DEFAULT_TIMEOUT_MS;
   const stdoutMaxBytes = binding.stdoutMaxBytes ?? POLL_DEFAULT_STDOUT_MAX_BYTES;
@@ -86,7 +105,7 @@ function runCommand(binding: PollWorkflowTriggerBinding): Promise<CommandResult>
     const child = spawn(binding.command, {
       shell: true,
       cwd: process.env.JINN_HOME || process.cwd(),
-      env: process.env,
+      env: scrubbedPollEnv(),
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
     });

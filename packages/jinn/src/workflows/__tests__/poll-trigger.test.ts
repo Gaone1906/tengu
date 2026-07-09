@@ -349,4 +349,45 @@ setTimeout(() => {}, 10000);
 
     expect(fs.existsSync(marker)).toBe(false);
   });
+
+  it('runs the poll command with a scrubbed env — gateway secrets never leak, allowlisted vars survive', async () => {
+    createDefinition(root, def('poll-env-workflow', [trigger, step('a')]), { now });
+    const approvalWorkItemId = await approvedWorkItem('poll-env');
+    process.env.JINN_TEST_SECRET = 'top-secret-token';
+    try {
+      const binding = poll.createWorkflowTriggerBinding(root, {
+        kind: 'poll',
+        name: 'poll-env',
+        event: 'poll.ready',
+        targetWorkflowId: 'poll-env-workflow',
+        command: `${nodeBin} -e "process.stdout.write(JSON.stringify({fire:true,payload:{secret:process.env.JINN_TEST_SECRET ?? null,hasPath:!!process.env.PATH}}))"`,
+        intervalSeconds: 60,
+        timeoutMs: 1000,
+        approvalWorkItemId,
+      }, { now }).binding;
+
+      const result = await poll.runPollTriggerOnce(harness(), binding, { now });
+      expect(result.outcome).toBe('fired');
+      // The gateway secret was NOT inherited by the child; an allowlisted var
+      // (PATH) still is, so commands can find their tools.
+      expect(result.run?.trigger).toMatchObject({ payload: { secret: null, hasPath: true } });
+    } finally {
+      delete process.env.JINN_TEST_SECRET;
+    }
+  });
+
+  it('rejects an oversized or invalid webhook matches-filter regex at creation, accepts a safe one', () => {
+    const mk = (name: string, value: string) => () => customTriggers.createWorkflowTriggerBinding(root, {
+      kind: 'webhook',
+      name,
+      event: 'inbound.event',
+      targetWorkflowId: 'poll-workflow',
+      filter: [{ path: 'payload.kind', op: 'matches', value }],
+    }, { now });
+
+    expect(mk('wh-long', 'a'.repeat(257))).toThrow(/256 chars/);
+    expect(mk('wh-bad', '([')).toThrow(/valid regular expression/);
+    // A short, well-formed regex is accepted.
+    expect(mk('wh-ok', '^trial-[0-9]+$')).not.toThrow();
+  });
 });
