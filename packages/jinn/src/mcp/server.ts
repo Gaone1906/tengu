@@ -207,7 +207,7 @@ export async function handleMcpRequest(
     }
     try {
       const result = await tool.handler(args, ctx);
-      const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+      const text = typeof result === "string" ? result : JSON.stringify(result);
       return ok(id, { content: [{ type: "text", text }] });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

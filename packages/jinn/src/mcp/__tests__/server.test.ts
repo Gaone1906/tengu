@@ -223,6 +223,24 @@ describe("handleMcpRequest — tools/call", () => {
     expect(JSON.parse(result.content[0].text)).toEqual(def);
   });
 
+  it("serializes structured tool results as compact JSON text", async () => {
+    const tool: JinnMcpTool = {
+      name: "structured",
+      description: "returns an object",
+      inputSchema: { type: "object", properties: {} },
+      handler: async () => ({ ok: true, nested: { value: 1 } }),
+    };
+    const ctx = stubCtx(() => ({ status: 200, body: {} }));
+    const resp = await handleMcpRequest(
+      { id: 4, method: "tools/call", params: { name: "structured", arguments: {} } },
+      [tool],
+      ctx,
+    );
+    const result = resp!.result as { content: Array<{ text: string }>; isError?: boolean };
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toBe('{"ok":true,"nested":{"value":1}}');
+  });
+
   it("get_workflow with a missing id returns an isError tool result (not a crash)", async () => {
     const ctx = stubCtx(() => ({ status: 200, body: {} }));
     const resp = await handleMcpRequest(
