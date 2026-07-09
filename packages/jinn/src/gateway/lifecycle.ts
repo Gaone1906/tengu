@@ -102,12 +102,37 @@ export function buildGatewayChildEnv(
 ): NodeJS.ProcessEnv {
   const port = config.gateway.port || 7777;
   const host = config.gateway.host || "127.0.0.1";
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (shouldScrubGatewayChildEnv(key)) continue;
+    if (value !== undefined) env[key] = value;
+  }
   return {
-    ...baseEnv,
+    ...env,
     JINN_HOME,
     JINN_GATEWAY_URL: gatewayBaseUrl({ port, host }),
     JINN_GATEWAY_TOKEN: ensureGatewayAuthToken(JINN_HOME),
   };
+}
+
+const GATEWAY_CHILD_ENV_SCRUB_EXACT: ReadonlySet<string> = new Set([
+  "CODEX",
+  "CLAUDECODE",
+  "JINN_SESSION_ID",
+  "JINN_SESSION_CAPABILITY",
+  "ANTHROPIC_BASE_URL",
+  "GROK_CLAUDE_MCPS_ENABLED",
+  "GROK_CURSOR_MCPS_ENABLED",
+  "HERMES_YOLO_MODE",
+  "HERMES_ACCEPT_HOOKS",
+]);
+
+function shouldScrubGatewayChildEnv(key: string): boolean {
+  return (
+    GATEWAY_CHILD_ENV_SCRUB_EXACT.has(key) ||
+    key.startsWith("CODEX_") ||
+    key.startsWith("CLAUDE_CODE_")
+  );
 }
 
 /**

@@ -123,9 +123,18 @@ export interface CodexSessionHome {
   cleanup: () => void;
 }
 
+function pathIsInsideOrEqual(child: string, parent: string): boolean {
+  const childPath = path.resolve(child);
+  const parentPath = path.resolve(parent);
+  const relative = path.relative(parentPath, childPath);
+  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 /** The operator's real codex home — source of `auth.json` + base `config.toml`. */
-function realCodexHome(): string {
-  return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+export function realCodexHome(codexHomesBaseDir: string = CODEX_HOMES_DIR): string {
+  const envHome = process.env.CODEX_HOME?.trim();
+  if (envHome && !pathIsInsideOrEqual(envHome, codexHomesBaseDir)) return envHome;
+  return path.join(os.homedir(), ".codex");
 }
 
 function tomlString(value: string): string {
@@ -142,6 +151,32 @@ function buildJinnMcpStanza(name: string, spec: McpServerStdioConfig): string {
     for (const [key, value] of Object.entries(env)) lines.push(`${key} = ${tomlString(value)}`);
   }
   return `${lines.join("\n")}\n`;
+}
+
+function tomlTableName(line: string): string | undefined {
+  const match = line.trim().match(/^\[{1,2}\s*([^\[\]]+?)\s*\]{1,2}$/);
+  return match?.[1]?.trim();
+}
+
+function isJinnMcpTable(name: string): boolean {
+  return name === "mcp_servers.jinn" || name.startsWith("mcp_servers.jinn.");
+}
+
+function stripJinnMcpStanzas(configText: string): string {
+  const lines = configText.split(/\r?\n/);
+  const kept: string[] = [];
+  let skippingJinnTable = false;
+
+  for (const line of lines) {
+    const table = tomlTableName(line);
+    if (table) {
+      skippingJinnTable = isJinnMcpTable(table);
+      if (skippingJinnTable) continue;
+    }
+    if (!skippingJinnTable) kept.push(line);
+  }
+
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
 }
 
 /** Filesystem-safe per-session dir name derived from the jinn session id. */
@@ -178,7 +213,7 @@ export function prepareCodexSessionHome(
 
   // Symlink auth.json back to the real codex home so login (and token refreshes)
   // propagate — the overlay never owns credentials.
-  const realHome = realCodexHome();
+  const realHome = realCodexHome(baseDir);
   const realAuth = path.join(realHome, "auth.json");
   const linkAuth = path.join(home, "auth.json");
   try {
@@ -204,7 +239,8 @@ export function prepareCodexSessionHome(
     const realConfig = path.join(realHome, "config.toml");
     if (fs.existsSync(realConfig)) baseConfig = fs.readFileSync(realConfig, "utf8");
   } catch { /* no base config — fine, start empty */ }
-  const merged = (baseConfig.trimEnd() + "\n\n" + buildJinnMcpStanza("jinn", spec)).replace(/^\n+/, "");
+  const cleanBaseConfig = stripJinnMcpStanzas(baseConfig);
+  const merged = (cleanBaseConfig.trimEnd() + "\n\n" + buildJinnMcpStanza("jinn", spec)).replace(/^\n+/, "");
   const cfgPath = path.join(home, "config.toml");
   fs.writeFileSync(cfgPath, merged, { mode: 0o600 });
   try { fs.chmodSync(cfgPath, 0o600); } catch { /* best effort */ }

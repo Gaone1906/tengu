@@ -9,6 +9,7 @@ import {
   buildCodexFreshArgs,
   buildCodexResumeArgs,
   codexChildEnv,
+  realCodexHome,
 } from "../codex.js";
 import type { ResolvedMcpConfig, EngineRunOpts } from "../../shared/types.js";
 
@@ -217,6 +218,58 @@ describe("prepareCodexSessionHome", () => {
     expect(cfg).not.toContain("cap-round-1"); // rewritten, not appended
   });
 
+  it("strips any existing jinn MCP stanza from the base config before appending the fresh one", () => {
+    fs.writeFileSync(
+      path.join(realHome, "config.toml"),
+      [
+        'model = "gpt-5.5"',
+        "[mcp_servers.search]",
+        'command = "search"',
+        "[mcp_servers.jinn]",
+        'command = "old-node"',
+        'args = ["old-entry.js"]',
+        "[mcp_servers.jinn.env]",
+        'JINN_SESSION_ID = "old-session"',
+        'JINN_SESSION_CAPABILITY = "old-capability"',
+        "[mcp_servers.filesystem]",
+        'command = "filesystem"',
+        "",
+      ].join("\n"),
+    );
+
+    const first = prepareCodexSessionHome(jinnResolvedWithCapability("cap-round-1"), "sess-1", { baseDir })!;
+    const firstCfg = fs.readFileSync(path.join(first.home, "config.toml"), "utf8");
+
+    expect(countTomlTable(firstCfg, "mcp_servers.jinn")).toBe(1);
+    expect(countTomlTable(firstCfg, "mcp_servers.jinn.env")).toBe(1);
+    expect(firstCfg).not.toContain("old-node");
+    expect(firstCfg).not.toContain("old-capability");
+    expect(firstCfg).toContain("[mcp_servers.search]");
+    expect(firstCfg).toContain("[mcp_servers.filesystem]");
+    expect(firstCfg).toContain("cap-round-1");
+
+    fs.writeFileSync(path.join(realHome, "config.toml"), firstCfg);
+    const second = prepareCodexSessionHome(jinnResolvedWithCapability("cap-round-2"), "sess-1", { baseDir })!;
+    const secondCfg = fs.readFileSync(path.join(second.home, "config.toml"), "utf8");
+
+    expect(countTomlTable(secondCfg, "mcp_servers.jinn")).toBe(1);
+    expect(countTomlTable(secondCfg, "mcp_servers.jinn.env")).toBe(1);
+    expect(secondCfg).not.toContain("cap-round-1");
+    expect(secondCfg).toContain("cap-round-2");
+  });
+
+  it("ignores CODEX_HOME when it points inside the per-session codex-homes base dir", () => {
+    process.env.CODEX_HOME = path.join(baseDir, "poisoned-session-home");
+
+    expect(realCodexHome(baseDir)).toBe(path.join(os.homedir(), ".codex"));
+  });
+
+  it("honors an external CODEX_HOME outside the per-session codex-homes base dir", () => {
+    process.env.CODEX_HOME = realHome;
+
+    expect(realCodexHome(baseDir)).toBe(realHome);
+  });
+
   it("cleanup() removes the per-session dir; removeCodexSessionHome is a no-op when absent", () => {
     const home = prepareCodexSessionHome(jinnResolvedWithCapability(), "sess-1", { baseDir })!;
     expect(fs.existsSync(home.home)).toBe(true);
@@ -227,6 +280,11 @@ describe("prepareCodexSessionHome", () => {
     expect(() => removeCodexSessionHome("never-existed", baseDir)).not.toThrow();
   });
 });
+
+function countTomlTable(config: string, table: string): number {
+  const escaped = table.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return (config.match(new RegExp(`^\\s*\\[${escaped}\\]\\s*$`, "gm")) ?? []).length;
+}
 
 describe("buildCodexFreshArgs / buildCodexResumeArgs — no --profile, no capability on argv", () => {
   it("fresh argv has no --profile and never leaks the capability", () => {

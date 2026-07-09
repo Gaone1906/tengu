@@ -238,4 +238,44 @@ describe("buildGatewayChildEnv", () => {
     expect(env.JINN_GATEWAY_TOKEN).not.toBe("wrong-token");
     expect(env.JINN_GATEWAY_TOKEN).toBeTruthy();
   });
+
+  it("scrubs inherited session and engine child env before spawning a daemon", () => {
+    const env = buildGatewayChildEnv({
+      gateway: { port: 7789, host: "127.0.0.1" },
+      engines: { default: "claude" },
+    } as any, {
+      PATH: "/usr/bin",
+      CODEX: "1",
+      CODEX_HOME: "/tmp/jinn/tmp/codex-homes/session-1",
+      CODEX_API_KEY: "should-not-parent-daemon",
+      JINN_SESSION_ID: "session-1",
+      JINN_SESSION_CAPABILITY: "capability-secret",
+      CLAUDECODE: "1",
+      CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1",
+      CLAUDE_CODE_RESUME_TOKEN_THRESHOLD: "999999999",
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:12345",
+      GROK_CLAUDE_MCPS_ENABLED: "false",
+      GROK_CURSOR_MCPS_ENABLED: "false",
+      HERMES_YOLO_MODE: "1",
+      HERMES_ACCEPT_HOOKS: "1",
+    });
+
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.CODEX).toBeUndefined();
+    expect(env.CODEX_HOME).toBeUndefined();
+    expect(env.CODEX_API_KEY).toBeUndefined();
+    expect(env.JINN_SESSION_ID).toBeUndefined();
+    expect(env.JINN_SESSION_CAPABILITY).toBeUndefined();
+    expect(env.CLAUDECODE).toBeUndefined();
+    expect(env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN).toBeUndefined();
+    expect(env.CLAUDE_CODE_RESUME_TOKEN_THRESHOLD).toBeUndefined();
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(env.GROK_CLAUDE_MCPS_ENABLED).toBeUndefined();
+    expect(env.GROK_CURSOR_MCPS_ENABLED).toBeUndefined();
+    expect(env.HERMES_YOLO_MODE).toBeUndefined();
+    expect(env.HERMES_ACCEPT_HOOKS).toBeUndefined();
+    expect(env.JINN_HOME).toBe(tmpHome);
+    expect(env.JINN_GATEWAY_URL).toBe("http://127.0.0.1:7789");
+    expect(env.JINN_GATEWAY_TOKEN).toBeTruthy();
+  });
 });
