@@ -265,6 +265,24 @@ export function normalizeBlockDeltaForTurn(delta: StreamDelta, turnStartedAt: nu
   };
 }
 
+/**
+ * Fold a streamed text/text_snapshot delta into the accumulated partial text.
+ *
+ * `text` appends the incremental chunk. `text_snapshot` REPLACES the whole
+ * accumulation UNCONDITIONALLY — a snapshot is the authoritative current text,
+ * so a shorter/rewritten one (e.g. a hermes redaction transform whose final
+ * frame is shorter than the streamed increments) must win, not just a longer
+ * one. The old length gate here leaked the pre-replace text via a mid-turn
+ * GET/refresh until the turn completed. Monotonic snapshot emitters (grok /
+ * antigravity, which only ever grow) are unaffected — replace equals their old
+ * "if longer" for a non-shrinking sequence.
+ */
+export function foldPartialText(curText: string, delta: StreamDelta): string {
+  if (delta.type === "text_snapshot") return typeof delta.content === "string" ? delta.content : curText;
+  if (delta.type === "text") return curText + (typeof delta.content === "string" ? delta.content : "");
+  return curText;
+}
+
 export function shouldPersistFinalAssistantMessage(options: {
   resultText: string;
   finalBlockCount: number;
@@ -5086,12 +5104,17 @@ async function runWebSession(
     const persistPartialDelta = (delta: StreamDelta) => {
       if (delta.type === "text" || delta.type === "text_snapshot") {
         if (typeof delta.content !== "string") return;
+        curText = foldPartialText(curText, delta);
         if (delta.type === "text_snapshot") {
-          if (delta.content.length > curText.length) curText = delta.content;
-        } else {
-          curText += delta.content;
+          // A snapshot is authoritative and typically terminal (e.g. a hermes
+          // final/redaction frame). Flush the replacement to the partial row NOW
+          // — don't leave the pre-replace text readable via a mid-turn GET while
+          // the debounce is pending.
+          if (partialFlushTimer) { clearTimeout(partialFlushTimer); partialFlushTimer = null; }
+          flushPartialText();
+        } else if (!partialFlushTimer) {
+          partialFlushTimer = setTimeout(flushPartialText, 600);
         }
-        if (!partialFlushTimer) partialFlushTimer = setTimeout(flushPartialText, 600);
       } else if (delta.type === "tool_use") {
         flushPartialText(); // finalize the text block before the tool
         if (partialFlushTimer) { clearTimeout(partialFlushTimer); partialFlushTimer = null; }

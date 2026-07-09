@@ -10,6 +10,10 @@ process.env.JINN_HOME = tmp;
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
+// Imported dynamically in beforeAll (after JINN_HOME is set + the registry binds
+// to the tmp DB) so api.js's transitive registry import can't bind the DB
+// singleton to the default JINN_HOME at static-import time.
+let foldPartialText: typeof import("../../gateway/api.js").foldPartialText;
 
 function newSession(id: string): void {
   reg.initDb().prepare(
@@ -19,6 +23,7 @@ function newSession(id: string): void {
 
 beforeAll(async () => {
   reg = await import("../registry.js");
+  ({ foldPartialText } = await import("../../gateway/api.js"));
 });
 
 describe("messages partial (mid-turn streaming) blocks", () => {
@@ -361,6 +366,28 @@ describe("messages partial (mid-turn streaming) blocks", () => {
     expect(msgs).toHaveLength(1);
     expect(msgs[0].content).toBe("Keep this answer text");
     expect(msgs[0].blocks?.[0]?.status).toBe("done");
+  });
+
+  it("mid-turn partial row equals a shorter redaction snapshot (no length-gate leak)", () => {
+    newSession("redact1");
+    // Stream increments the way persistPartialDelta does, via the real fold.
+    let curText = "";
+    curText = foldPartialText(curText, { type: "text", content: "secret " });
+    curText = foldPartialText(curText, { type: "text", content: "answer" });
+    const rowId = reg.insertPartialMessage("redact1", "assistant", curText, 0);
+    expect(reg.getMessages("redact1")[0].content).toBe("secret answer");
+
+    // A marked final redaction frame arrives as a SHORTER snapshot — it must
+    // replace the partial row, not be dropped by a length gate.
+    curText = foldPartialText(curText, { type: "text_snapshot", content: "[REDACTED]" });
+    reg.updatePartialMessage(rowId, curText);
+
+    // A mid-turn read (what QA's GET /api/sessions/:id hit) must NOT leak the
+    // pre-redaction text.
+    const mid = reg.getMessages("redact1");
+    expect(mid).toHaveLength(1);
+    expect(mid[0].content).toBe("[REDACTED]");
+    expect(mid[0].content).not.toContain("secret");
   });
 
   it("migrates a legacy message DB lacking the new columns", () => {

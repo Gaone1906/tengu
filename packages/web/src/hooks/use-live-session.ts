@@ -386,11 +386,13 @@ export function useLiveSession(
           setStreamingText(streamingTextRef.current)
         } else if (deltaType === 'text_snapshot') {
           clearStatusMessage()
+          // A snapshot is the authoritative current answer — replace
+          // unconditionally. A shorter/rewritten snapshot (e.g. a hermes
+          // redaction transform) must win; the old length gate left the
+          // pre-redaction streamed text visible for the rest of the turn.
           const snapshot = String(p.content || '')
-          if (snapshot.length >= streamingTextRef.current.length) {
-            streamingTextRef.current = snapshot
-            setStreamingText(snapshot)
-          }
+          streamingTextRef.current = snapshot
+          setStreamingText(snapshot)
         } else if (deltaType === 'tool_use') {
           clearStatusMessage()
           if (streamingTextRef.current) {

@@ -199,6 +199,30 @@ describe("useLiveSession (read-only)", () => {
     expect(result.current.messages.at(-1)?.content).toBe("Hello there.")
   })
 
+  it("replaces the live view on a shorter snapshot (redaction must win, no length gate)", async () => {
+    getSession.mockResolvedValue({ status: "running", messages: [] })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() =>
+      useLiveSession("s1", { subscribe, readOnly: true }),
+    )
+    await act(async () => { await Promise.resolve() })
+
+    act(() => {
+      // Streamed increments make the live view show the pre-redaction text.
+      emit("session:delta", { sessionId: "s1", type: "text", content: "secret " })
+      emit("session:delta", { sessionId: "s1", type: "text", content: "answer" })
+    })
+    expect(result.current.streamingText).toBe("secret answer")
+
+    act(() => {
+      // A shorter marked-final snapshot (hermes redaction) must REPLACE the live
+      // view — the old length gate left "secret answer" visible for the turn.
+      emit("session:delta", { sessionId: "s1", type: "text_snapshot", content: "[REDACTED]" })
+    })
+    expect(result.current.streamingText).toBe("[REDACTED]")
+    expect(result.current.streamingText).not.toContain("secret")
+  })
+
   it("does not duplicate the answer when a late tool_use froze the streamed text (grok dedup)", async () => {
     // Reproduces the grok duplicate: answer text streams live, then a transcript
     // tool_use lands LATE and freezes that streamed text into a permanent assistant
