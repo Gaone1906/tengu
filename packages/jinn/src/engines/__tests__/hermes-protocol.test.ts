@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import {
   encodeModelChoice, splitModelChoice, rpcRequest, mapSessionUpdate,
-  accumulateAgentText,
+  reduceAgentText, isFinalMessageUpdate, initAdvertisesFinalMarker,
 } from "../hermes-protocol.js";
 
 describe("model choice encoding", () => {
@@ -128,58 +128,92 @@ describe("mapSessionUpdate", () => {
   });
 });
 
-// Regression: Hermes delivers streamed answer text as incremental
-// agent_message_chunk frames AND (on some turns — e.g. after a
-// transform_llm_output plugin sets response_transformed, or when streaming was
-// skipped) a FINAL agent_message_chunk carrying the FULL reply. Both share the
-// same wire kind, so a naive `resultText += chunk` doubles the reply
-// ("pineapplepineapple"). accumulateAgentText treats a cumulative full-text
-// frame (one that starts with everything accumulated so far) as a snapshot and
-// REPLACES instead of appending. Frame shapes captured from real hermes acp
-// (hermes-agent v0.17.0, openai-codex:gpt-5.5).
-describe("accumulateAgentText", () => {
-  // Helper: fold a sequence of chunks the way hermes-acp onNote does.
-  const fold = (chunks: string[]) =>
-    chunks.reduce(
-      (acc, chunk) => accumulateAgentText(acc, chunk).text,
-      "",
-    );
-
-  it("appends pure incremental chunks (chunks-only stream)", () => {
-    expect(fold(["hel", "lo"])).toBe("hello");
-    expect(fold(["The", " quick", " brown", " fox"])).toBe("The quick brown fox");
+// Hermes delivers streamed answer text as incremental agent_message_chunk
+// frames AND (on some turns — after a transform_llm_output plugin, or when
+// streaming was skipped) a FINAL agent_message_chunk carrying the FULL reply.
+// Both share the same wire kind, so content alone cannot tell them apart:
+// a transform can REPLACE the reply with shorter/unrelated text (redaction),
+// and a legitimate repeated chunk looks like a re-send. hermes-agent >= 0.17.1
+// tags the final frame with `_meta.hermes.final`, so the regime is explicit:
+// marked -> REPLACE unconditionally; unmarked -> APPEND (repeats never
+// swallowed). Older binaries omit the marker; the caller then enables an
+// exact-equality dedupe fallback to keep the original doubling bug fixed.
+describe("reduceAgentText (marker-driven)", () => {
+  it("APPENDS pure incremental unmarked chunks (chunks-only stream)", () => {
+    expect(reduceAgentText("hel", "lo", { final: false, legacyDedupe: false }))
+      .toEqual({ text: "hello", op: "append" });
+    expect(reduceAgentText("", "The", { final: false, legacyDedupe: false }))
+      .toEqual({ text: "The", op: "append" });
   });
 
-  it("replaces (does not double) a full-text snapshot after chunks", () => {
-    // Real capture: "pine" + "apple" increments, then a full "pineapple" frame.
-    expect(fold(["pine", "apple", "pineapple"])).toBe("pineapple");
+  it("never swallows a legitimate repeated chunk ('ha','ha' -> 'haha')", () => {
+    // The MEDIUM defect in the content heuristic: this MUST append.
+    const first = reduceAgentText("", "ha", { final: false, legacyDedupe: false });
+    expect(first).toEqual({ text: "ha", op: "append" });
+    expect(reduceAgentText(first.text, "ha", { final: false, legacyDedupe: false }))
+      .toEqual({ text: "haha", op: "append" });
   });
 
-  it("replaces when a one-shot reply is followed by its identical snapshot", () => {
-    // Real capture: "banana" (single chunk == full reply), then "banana" snapshot.
-    expect(fold(["banana", "banana"])).toBe("banana");
+  it("REPLACES unconditionally on a marked final frame (even shorter/unrelated)", () => {
+    // The HIGH defect: a redaction transform replaces the reply with arbitrary
+    // text that does NOT start with the streamed prefix — replace must still win
+    // so the original streamed text never survives into the transcript.
+    expect(reduceAgentText("original secret answer", "[redacted]", { final: true, legacyDedupe: false }))
+      .toEqual({ text: "[redacted]", op: "replace" });
+    // Shorter replacement.
+    expect(reduceAgentText("hello world", "hi", { final: true, legacyDedupe: false }))
+      .toEqual({ text: "hi", op: "replace" });
+    // Prefix-extending transform (common case) also replaces cleanly.
+    expect(reduceAgentText("hello", "hello world", { final: true, legacyDedupe: false }))
+      .toEqual({ text: "hello world", op: "replace" });
   });
 
-  it("handles a snapshots-only stream (no prior increments)", () => {
-    expect(fold(["hello"])).toBe("hello");
-    expect(fold(["hello", "hello world"])).toBe("hello world");
+  it("handles a marked-final-only stream (unstreamed turn, single full frame)", () => {
+    expect(reduceAgentText("", "the whole reply", { final: true, legacyDedupe: false }))
+      .toEqual({ text: "the whole reply", op: "replace" });
   });
 
-  it("keeps a transformed snapshot that extends the streamed prefix", () => {
-    // Increments stream "hello"; a transform rewrites the final to "hello world".
-    expect(fold(["hel", "lo", "hello world"])).toBe("hello world");
+  it("legacy fallback: exact-equality dedupe drops a re-sent full reply", () => {
+    // Old binary (no marker): a final unmarked frame equal to everything so far
+    // is the re-sent full reply — drop it so the reply doesn't double.
+    expect(reduceAgentText("pineapple", "pineapple", { final: false, legacyDedupe: true }))
+      .toEqual({ text: "pineapple", op: "drop" });
+    // A non-equal unmarked frame still appends under the fallback.
+    expect(reduceAgentText("pine", "apple", { final: false, legacyDedupe: true }))
+      .toEqual({ text: "pineapple", op: "append" });
   });
 
-  it("does NOT treat a fresh suffix as a snapshot (no false replace)", () => {
-    // A legitimate continuation is a suffix, never a re-send of the whole prefix.
-    expect(fold(["hello", " world"])).toBe("hello world");
-    // Repeated word with a separator streams as a suffix — must append.
-    expect(fold(["banana", " banana"])).toBe("banana banana");
+  it("marker path ignores legacyDedupe (repeats append even if dedupe on)", () => {
+    // With markers available the caller keeps legacyDedupe off; but even if set,
+    // an unmarked exact repeat under the MARKER binary must not be swallowed —
+    // guarded by the caller passing legacyDedupe=false when the marker is
+    // advertised. This asserts the two inputs are independent knobs.
+    expect(reduceAgentText("ha", "ha", { final: false, legacyDedupe: false }))
+      .toEqual({ text: "haha", op: "append" });
   });
+});
 
-  it("reports isSnapshot so the caller can emit text_snapshot vs text", () => {
-    expect(accumulateAgentText("pineapple", "pineapple")).toEqual({ text: "pineapple", isSnapshot: true });
-    expect(accumulateAgentText("pine", "apple")).toEqual({ text: "pineapple", isSnapshot: false });
-    expect(accumulateAgentText("", "pine")).toEqual({ text: "pine", isSnapshot: false });
+describe("isFinalMessageUpdate", () => {
+  it("detects the _meta.hermes.final marker on an update", () => {
+    expect(isFinalMessageUpdate({ sessionUpdate: "agent_message_chunk", content: { text: "x" }, _meta: { hermes: { final: true } } })).toBe(true);
+  });
+  it("is false for unmarked / partial / malformed meta", () => {
+    expect(isFinalMessageUpdate({ sessionUpdate: "agent_message_chunk", content: { text: "x" } })).toBe(false);
+    expect(isFinalMessageUpdate({ _meta: { hermes: { final: false } } })).toBe(false);
+    expect(isFinalMessageUpdate({ _meta: { other: { final: true } } })).toBe(false);
+    expect(isFinalMessageUpdate({ _meta: "nope" } as any)).toBe(false);
+    expect(isFinalMessageUpdate({})).toBe(false);
+  });
+});
+
+describe("initAdvertisesFinalMarker", () => {
+  it("reads agentCapabilities._meta.hermes.finalMessageMarker from the initialize result", () => {
+    expect(initAdvertisesFinalMarker({ agentCapabilities: { _meta: { hermes: { finalMessageMarker: true } } } })).toBe(true);
+  });
+  it("is false for older binaries that omit the capability", () => {
+    expect(initAdvertisesFinalMarker({ agentCapabilities: { loadSession: true } })).toBe(false);
+    expect(initAdvertisesFinalMarker({})).toBe(false);
+    expect(initAdvertisesFinalMarker(undefined)).toBe(false);
+    expect(initAdvertisesFinalMarker(null)).toBe(false);
   });
 });

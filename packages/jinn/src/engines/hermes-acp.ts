@@ -4,7 +4,7 @@ import type { InterruptibleEngine, EngineRunOpts, EngineResult } from "../shared
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import { HermesRpc } from "./hermes-jsonrpc.js";
-import { mapSessionUpdate, extractPromptText, accumulateAgentText } from "./hermes-protocol.js";
+import { mapSessionUpdate, extractPromptText, reduceAgentText, isFinalMessageUpdate, initAdvertisesFinalMarker } from "./hermes-protocol.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
 import { buildAcpMcpServers } from "./hermes-mcp.js";
 
@@ -26,6 +26,11 @@ interface HermesProc {
   hermesSessionId?: string;
   currentModelId?: string;
   initialized: Promise<void>;
+  /** True once the initialize handshake confirmed this hermes build tags its
+   *  final full-reply frame (_meta.hermes.final). When false (older binary or
+   *  handshake error), the answer accumulator uses the exact-equality dedupe
+   *  fallback instead of the explicit marker. */
+  marksFinal: boolean;
 }
 
 export class HermesAcpEngine implements InterruptibleEngine {
@@ -71,7 +76,10 @@ export class HermesAcpEngine implements InterruptibleEngine {
     const entry: HermesProc = {
       handle,
       alive: true,
-      initialized: handle.rpc.request("initialize", { protocolVersion: 1, clientCapabilities: {} }).then(() => {}),
+      marksFinal: false,
+      initialized: handle.rpc
+        .request<Record<string, unknown>>("initialize", { protocolVersion: 1, clientCapabilities: {} })
+        .then((res) => { entry.marksFinal = initAdvertisesFinalMarker(res); }),
     };
     handle.onExit(() => {
       entry.alive = false;
@@ -168,16 +176,24 @@ export class HermesAcpEngine implements InterruptibleEngine {
 
     const onNote = (m: string, params: Record<string, unknown>) => {
       if (m !== "session/update" || params.sessionId !== hermesSessionId) return;
-      const u = mapSessionUpdate((params.update ?? {}) as Record<string, unknown>);
+      const rawUpdate = (params.update ?? {}) as Record<string, unknown>;
+      // Hermes streams answer text as incremental agent_message_chunk frames and
+      // may end with a FINAL full-reply frame of the SAME kind; the marker tells
+      // them apart. Marked -> REPLACE (redaction/transform wins); unmarked ->
+      // APPEND (repeats kept). Older binaries omit the marker, so fall back to
+      // exact-equality dedupe (marksFinal=false => legacyDedupe=true).
+      const isFinal = isFinalMessageUpdate(rawUpdate);
+      const legacyDedupe = !p.marksFinal;
+      const u = mapSessionUpdate(rawUpdate);
       for (const d of u.deltas) {
         if (d.type === "text") {
-          // Hermes emits streamed increments AND a final full-text frame under
-          // the same wire kind; accumulateAgentText replaces on the cumulative
-          // frame instead of appending (else the reply doubles). Forward it as a
-          // text_snapshot so the live UI + partial persistence replace too.
-          const { text, isSnapshot } = accumulateAgentText(resultText, d.content);
+          const { text, op } = reduceAgentText(resultText, d.content, { final: isFinal, legacyDedupe });
           resultText = text;
-          opts.onStream?.(isSnapshot ? { type: "text_snapshot", content: text } : d);
+          // Forward the matching live-stream signal: replace -> text_snapshot
+          // (UI + partial persistence replace); append -> the incremental delta;
+          // drop -> nothing (the re-sent full reply is already accumulated).
+          if (op === "replace") opts.onStream?.({ type: "text_snapshot", content: text });
+          else if (op === "append") opts.onStream?.(d);
         } else {
           opts.onStream?.(d);
         }

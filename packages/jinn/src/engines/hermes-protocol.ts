@@ -138,34 +138,63 @@ export function mapSessionUpdate(update: Record<string, unknown>): HermesUpdate 
   }
 }
 
+export type HermesTextOp = "append" | "replace" | "drop";
+
 /**
  * Fold one streamed answer-text chunk into the accumulated reply.
  *
  * Hermes delivers answer text as incremental `agent_message_chunk` frames while
  * streaming, then may emit a FINAL `agent_message_chunk` carrying the ENTIRE
  * reply (the acp server's `update_agent_message_text` path — fired when a
- * `transform_llm_output` plugin rewrote the output, i.e. `response_transformed`,
- * or when token streaming was skipped). Both the increments and the full-text
- * frame share the same wire kind (`agent_message_chunk`), so appending the
- * full-text frame on top of the increments doubles the reply
- * ("pineapple" + snapshot "pineapple" → "pineapplepineapple").
+ * `transform_llm_output` plugin rewrote the output, or when token streaming was
+ * skipped). Both share the same wire kind, so a naive `acc += chunk` doubles the
+ * reply, and content alone cannot tell an increment from the final full frame:
+ * a transform can REPLACE the reply with shorter/unrelated text (a redaction —
+ * whose prefix does NOT match the streamed text), and a legitimately repeated
+ * chunk ("ha","ha") looks like a re-send. A content heuristic gets both wrong.
  *
- * A cumulative full-text frame contains everything accumulated so far as a
- * prefix, so we treat a chunk that starts with the whole accumulation as a
- * snapshot and REPLACE; anything else is a fresh suffix and appends. This
- * mirrors the `text` (append) vs `text_snapshot` (replace) split the grok and
- * antigravity adapters already use. `isSnapshot` lets the caller forward the
- * right delta type to the UI so the live stream doesn't double-render either.
+ * So the regime is EXPLICIT on the wire. hermes-agent >= 0.17.1 tags the final
+ * frame with `_meta.hermes.final` (see {@link isFinalMessageUpdate}):
+ *   - `final` (marked)  → REPLACE unconditionally — even if shorter/unrelated,
+ *     so a redaction wins and the streamed text never survives.
+ *   - otherwise         → APPEND — legitimate repeats are never swallowed.
  *
- * Ambiguity note: a reply that legitimately re-sends its full prefix as a single
- * separator-less chunk (e.g. streamed as "banana" + "banana" meaning the literal
- * "bananabanana") is indistinguishable at the wire from the snapshot case and
- * collapses to one copy. Real hermes snapshots are common; that pathological
- * double is not, so replace is the correct trade.
+ * `legacyDedupe` is the compatibility fallback for OLD hermes binaries that
+ * don't send the marker (the caller enables it only when the initialize
+ * capability is absent — see {@link initAdvertisesFinalMarker}): an unmarked
+ * frame that exactly equals everything accumulated so far is the re-sent full
+ * reply and is DROPPED, keeping the original doubling bug fixed. A pre-marker
+ * binary whose transform REPLACED the reply with new text (rare) cannot be
+ * distinguished and will append — accepted; the marker fixes it going forward.
  */
-export function accumulateAgentText(acc: string, chunk: string): { text: string; isSnapshot: boolean } {
-  if (acc && chunk.startsWith(acc)) return { text: chunk, isSnapshot: true };
-  return { text: acc + chunk, isSnapshot: false };
+export function reduceAgentText(
+  acc: string,
+  chunk: string,
+  opts: { final: boolean; legacyDedupe: boolean },
+): { text: string; op: HermesTextOp } {
+  if (opts.final) return { text: chunk, op: "replace" };
+  if (opts.legacyDedupe && acc && chunk === acc) return { text: acc, op: "drop" };
+  return { text: acc + chunk, op: "append" };
+}
+
+/** True when an ACP `session/update` carries the hermes final-full-reply marker. */
+export function isFinalMessageUpdate(update: Record<string, unknown> | null | undefined): boolean {
+  const meta = update && typeof update === "object" ? (update as Record<string, unknown>)._meta : undefined;
+  const hermes = meta && typeof meta === "object" ? (meta as Record<string, unknown>).hermes : undefined;
+  return !!(hermes && typeof hermes === "object" && (hermes as Record<string, unknown>).final === true);
+}
+
+/**
+ * True when the `initialize` result advertises that this hermes build tags its
+ * final full-reply frame (`agentCapabilities._meta.hermes.finalMessageMarker`).
+ * When false (older binary), the caller falls back to exact-equality dedupe.
+ */
+export function initAdvertisesFinalMarker(initResult: unknown): boolean {
+  const r = initResult && typeof initResult === "object" ? (initResult as Record<string, unknown>) : undefined;
+  const caps = r && typeof r.agentCapabilities === "object" ? (r.agentCapabilities as Record<string, unknown>) : undefined;
+  const meta = caps && typeof caps._meta === "object" ? (caps._meta as Record<string, unknown>) : undefined;
+  const hermes = meta && typeof meta.hermes === "object" ? (meta.hermes as Record<string, unknown>) : undefined;
+  return !!(hermes && hermes.finalMessageMarker === true);
 }
 
 export function extractPromptText(prompt: string): { type: "text"; text: string }[] {

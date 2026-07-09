@@ -115,11 +115,18 @@ function fakeServerEmptyPromptResult() {
   return rpc;
 }
 
-/** Fake server that streams incremental answer chunks and THEN a final
- *  full-text `agent_message_chunk` carrying the whole reply — the real hermes
- *  shape when `response_transformed` is set (or streaming was skipped). Before
- *  the snapshot-aware accumulation this doubled the reply ("pineapplepineapple"). */
-function fakeServerFullTextAfterChunks() {
+/** Fake server that streams incremental chunks and THEN a final full-text frame
+ *  carrying the whole reply — the real hermes shape when a turn is transformed
+ *  or streaming was skipped. Parametrized:
+ *   - `advertiseMarker`: initialize advertises agentCapabilities._meta.hermes.finalMessageMarker
+ *   - `markFinal`: the final frame carries update._meta.hermes.final
+ *   - `chunks` / `finalText`: the streamed increments and the final full frame. */
+function fakeServerFinalFrame(opts: {
+  advertiseMarker: boolean;
+  markFinal: boolean;
+  chunks: string[];
+  finalText: string;
+}) {
   const toServer = new PassThrough();
   const fromServer = new PassThrough();
   const rpc = new HermesRpc(toServer, fromServer);
@@ -131,15 +138,26 @@ function fakeServerFullTextAfterChunks() {
         fromServer.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }) + "\n");
       const note = (params: unknown) =>
         fromServer.write(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params }) + "\n");
-      if (msg.method === "initialize") reply({ protocolVersion: 1 });
+      if (msg.method === "initialize")
+        reply({
+          protocolVersion: 1,
+          agentCapabilities: opts.advertiseMarker ? { _meta: { hermes: { finalMessageMarker: true } } } : {},
+        });
       else if (msg.method === "session/new")
         reply({ sessionId: "S1", models: { currentModelId: "openai-codex:gpt-5.5", availableModels: [] } });
       else if (msg.method === "session/set_mode") reply({});
       else if (msg.method === "session/prompt") {
-        const c = (text: string) => note({ sessionId: "S1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
-        c("pine");
-        c("apple");
-        c("pineapple"); // FINAL full-text frame — must replace, not append
+        for (const text of opts.chunks)
+          note({ sessionId: "S1", update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
+        // Final full-reply frame — same wire kind, optionally marked.
+        note({
+          sessionId: "S1",
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: opts.finalText },
+            ...(opts.markFinal ? { _meta: { hermes: { final: true } } } : {}),
+          },
+        });
         reply({ stopReason: "end_turn" });
       }
     }
@@ -175,23 +193,42 @@ describe("HermesAcpEngine.run", () => {
   });
 
   // Regression: a final full-text agent_message_chunk after streamed increments
-  // must not double the reply, and must reach the UI as a REPLACE (text_snapshot)
-  // rather than an appended text delta.
-  it("does not double the reply when a full-text frame follows streamed chunks", async () => {
-    class DupEngine extends HermesAcpEngine {
+  // must not double the reply. Marker binary REPLACES on the marked frame;
+  // legacy binary DROPS the re-sent full frame via exact-equality fallback.
+  const engineWith = (rpc: HermesRpc) =>
+    new (class extends HermesAcpEngine {
       protected spawnProc() {
-        const rpc = fakeServerFullTextAfterChunks();
         return { rpc, killProc: () => {}, isAliveProc: () => true, onExit: (_cb: () => void) => {}, onError: (_cb: (e: Error) => void) => {} };
       }
-    }
-    const eng = new DupEngine();
+    })();
+
+  it("marker binary: marked final frame REPLACES, streamed as text_snapshot", async () => {
+    const eng = engineWith(fakeServerFinalFrame({ advertiseMarker: true, markFinal: true, chunks: ["pine", "apple"], finalText: "pineapple" }));
     const deltas: any[] = [];
-    const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-dup", onStream: (d) => deltas.push(d) });
+    const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-mark", onStream: (d) => deltas.push(d) });
     expect(r.result).toBe("pineapple"); // NOT "pineapplepineapple"
-    // Increments stream as text; the cumulative full-text frame streams as a
-    // replace so the FE live view doesn't double either.
     expect(deltas.filter((d) => d.type === "text").map((d) => d.content)).toEqual(["pine", "apple"]);
     expect(deltas.filter((d) => d.type === "text_snapshot").map((d) => d.content)).toEqual(["pineapple"]);
+  });
+
+  it("marker binary: a redaction transform (shorter, unrelated) still wins", async () => {
+    // Streamed "secret answer" then a marked final "[redacted]" — the transcript
+    // must be "[redacted]", never the streamed original.
+    const eng = engineWith(fakeServerFinalFrame({ advertiseMarker: true, markFinal: true, chunks: ["secret ", "answer"], finalText: "[redacted]" }));
+    const deltas: any[] = [];
+    const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-redact", onStream: (d) => deltas.push(d) });
+    expect(r.result).toBe("[redacted]");
+    expect(deltas.filter((d) => d.type === "text_snapshot").map((d) => d.content)).toEqual(["[redacted]"]);
+  });
+
+  it("legacy binary (no marker capability): exact-equality dedupe drops the re-send", async () => {
+    const eng = engineWith(fakeServerFinalFrame({ advertiseMarker: false, markFinal: false, chunks: ["pine", "apple"], finalText: "pineapple" }));
+    const deltas: any[] = [];
+    const r = await eng.run({ prompt: "hi", cwd: "/tmp", sessionId: "jinn-legacy", onStream: (d) => deltas.push(d) });
+    expect(r.result).toBe("pineapple"); // NOT doubled
+    // The re-sent full frame is dropped, not re-streamed.
+    expect(deltas.filter((d) => d.type === "text").map((d) => d.content)).toEqual(["pine", "apple"]);
+    expect(deltas.filter((d) => d.type === "text_snapshot")).toEqual([]);
   });
 
   // Fix 1 — systemPrompt prepended on fresh session
