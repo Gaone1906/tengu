@@ -74,8 +74,8 @@ export function buildCronTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Cron job id." },
-        limit: { type: "number", description: `Max runs (1-${CRON_RUN_LIMIT_MAX}, default ${CRON_RUN_LIMIT_DEFAULT}).` },
+        id: { type: "string" },
+        limit: { type: "number" },
       },
       required: ["id"],
     },

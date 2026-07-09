@@ -75,7 +75,7 @@ export function buildKnowledgeTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: `Plain words to search for (all must appear; max ${KNOWLEDGE_QUERY_CHAR_CAP} chars).` },
+        query: { type: "string" },
       },
       required: ["query"],
     },
@@ -104,7 +104,7 @@ export function buildKnowledgeTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: 'Relative path from a search hit — "knowledge/<file>.md" or "docs/<file>.md".' },
+        path: { type: "string" },
       },
       required: ["path"],
     },

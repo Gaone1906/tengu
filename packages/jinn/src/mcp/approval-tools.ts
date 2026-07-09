@@ -44,9 +44,9 @@ export function buildApprovalTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Work item id." },
-        decision: { type: "string", enum: [...DECISIONS], description: "approve or reject." },
-        note: { type: "string", description: "Optional decision note." },
+        id: { type: "string" },
+        decision: { type: "string", enum: [...DECISIONS] },
+        note: { type: "string" },
       },
       required: ["id", "decision"],
     },
@@ -73,8 +73,8 @@ export function buildApprovalTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Work item id." },
-        reason: { type: "string", description: "Optional escalation reason." },
+        id: { type: "string" },
+        reason: { type: "string" },
       },
       required: ["id"],
     },

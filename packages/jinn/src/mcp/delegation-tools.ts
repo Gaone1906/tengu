@@ -88,12 +88,12 @@ export function buildDelegationTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        task: { type: "string", description: "The full task brief for the delegate. You write it — context, acceptance, constraints; the delegate does not see your conversation." },
-        employee: { type: "string", description: "Employee slug to delegate to (list_employees / find_employees show the roster). Provide this or engine." },
-        engine: { type: "string", description: "Bare engine to delegate to (e.g. claude, codex) when no employee fits. Provide this or employee." },
-        model: { type: "string", description: "Model override. Omit to use the employee's/gateway default." },
-        effortLevel: { type: "string", description: "Effort override (e.g. low, medium, high). Omit to use defaults." },
-        title: { type: "string", description: "Short work-item title (≤200 chars). Omit to derive one from the task." },
+        task: { type: "string" },
+        employee: { type: "string" },
+        engine: { type: "string" },
+        model: { type: "string" },
+        effortLevel: { type: "string" },
+        title: { type: "string" },
       },
       required: ["task"],
     },

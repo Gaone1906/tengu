@@ -97,7 +97,7 @@ export function buildFileTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        limit: { type: "number", description: `Max files (${LIST_LIMIT_MAX} cap, default ${LIST_LIMIT_DEFAULT}).` },
+        limit: { type: "number" },
       },
     },
     handler: async (args, ctx) => {
@@ -126,7 +126,7 @@ export function buildFileTools(): JinnMcpTool[] {
       "Read one managed company file by relative path under files/ or uploads/. Reuses the gateway containment guard: control-byte reject, realpath containment, symlink-escape blocked, canary-safe.",
     inputSchema: {
       type: "object",
-      properties: { path: { type: "string", description: "Managed relative path from list_files, e.g. files/<id>/note.md." } },
+      properties: { path: { type: "string" } },
       required: ["path"],
     },
     handler: async (args, ctx: JinnMcpContext) => {

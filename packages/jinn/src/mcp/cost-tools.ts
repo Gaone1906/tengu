@@ -54,10 +54,10 @@ export function buildCostTools(): JinnMcpTool[] {
         type: "object",
         properties: {
           groupBy: { type: "string", enum: [...GROUP_BY], description: 'Group rows by "employee" or "day" (default employee).' },
-          since: { type: "string", description: "Only sessions created at/after this ISO-8601 time." },
-          until: { type: "string", description: "Only sessions created at/before this ISO-8601 time." },
-          employee: { type: "string", description: "Only sessions for this exact employee slug." },
-          limit: { type: "number", description: "Max rows (1-100, default 100)." },
+          since: { type: "string" },
+          until: { type: "string" },
+          employee: { type: "string" },
+          limit: { type: "number" },
         },
       },
       handler: async (args, ctx) => {

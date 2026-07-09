@@ -163,12 +163,12 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        status: { type: "string", enum: [...STATUSES], description: "Todo status." },
-        source: { type: "string", enum: [...SOURCES], description: "Provenance source." },
-        assignee: { type: "string", description: "Exact employee slug assigned to the Todo." },
-        department: { type: "string", description: "Exact department slug." },
-        needsAttentionFor: { type: "string", description: "Use 'me' to list the capability-scoped queue needing your attention." },
-        limit: { type: "number", description: `Max results (1-${WORK_ITEM_SEARCH_LIMIT_MAX}, default ${WORK_ITEM_SEARCH_LIMIT_DEFAULT}).` },
+        status: { type: "string", enum: [...STATUSES] },
+        source: { type: "string", enum: [...SOURCES] },
+        assignee: { type: "string" },
+        department: { type: "string" },
+        needsAttentionFor: { type: "string" },
+        limit: { type: "number" },
       },
     },
     handler: async (args, ctx) => {
@@ -194,7 +194,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       "Get one Todo's full detail: body, acceptance, verify policy, rounds, approval fields, live spend, workflowRun reference, and event log. Read-only.",
     inputSchema: {
       type: "object",
-      properties: { id: { type: "string", description: "Work item id, e.g. wi_abc123." } },
+      properties: { id: { type: "string" } },
       required: ["id"],
     },
     handler: async (args, ctx) => {
@@ -213,12 +213,12 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        text: { type: "string", description: `Literal substring over title + body (max ${WORK_ITEM_QUERY_CHAR_CAP} chars).` },
-        status: { type: "string", enum: [...STATUSES], description: "Todo status." },
-        source: { type: "string", enum: [...SOURCES], description: "Provenance source." },
-        assignee: { type: "string", description: "Exact assignee slug." },
-        department: { type: "string", description: "Exact department slug." },
-        limit: { type: "number", description: `Max hits (1-${WORK_ITEM_SEARCH_LIMIT_MAX}, default ${WORK_ITEM_SEARCH_LIMIT_DEFAULT}).` },
+        text: { type: "string" },
+        status: { type: "string", enum: [...STATUSES] },
+        source: { type: "string", enum: [...SOURCES] },
+        assignee: { type: "string" },
+        department: { type: "string" },
+        limit: { type: "number" },
       },
     },
     handler: async (args, ctx) => {
@@ -247,12 +247,12 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        title: { type: "string", description: "Short Todo title." },
-        body: { type: "string", description: "Brief/spec body." },
-        acceptance: { type: "string", description: "Acceptance criteria/checklist." },
-        assignee: { type: "string", description: "Optional assignee slug; use assign_work_item for roster-validated assignment." },
-        department: { type: "string", description: "Optional department slug." },
-        verifyPolicy: { type: "object", description: "{ mode: 'trust'|'verify'|'thorough', maxRounds? }." },
+        title: { type: "string" },
+        body: { type: "string" },
+        acceptance: { type: "string" },
+        assignee: { type: "string" },
+        department: { type: "string" },
+        verifyPolicy: { type: "object" },
       },
       required: ["title"],
     },
@@ -280,9 +280,9 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Work item id." },
-        status: { type: "string", enum: [...AGENT_UPDATE_STATUSES], description: "Target status. No cancelled here: cancellation is a human surface." },
-        note: { type: "string", description: "Reason/status note, required for blocked/escalated in practice." },
+        id: { type: "string" },
+        status: { type: "string", enum: [...AGENT_UPDATE_STATUSES] },
+        note: { type: "string" },
       },
       required: ["id", "status"],
     },
@@ -313,8 +313,8 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Work item id." },
-        assignee: { type: "string", description: "Employee slug from find_employees / list_employees." },
+        id: { type: "string" },
+        assignee: { type: "string" },
       },
       required: ["id", "assignee"],
     },
@@ -336,8 +336,8 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        id: { type: "string", description: "Work item id." },
-        note: { type: "string", description: "Optional reason for archiving." },
+        id: { type: "string" },
+        note: { type: "string" },
       },
       required: ["id"],
     },

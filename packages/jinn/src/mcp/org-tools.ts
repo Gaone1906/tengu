@@ -84,7 +84,7 @@ export function buildOrgTools(): JinnMcpTool[] {
       "Get one employee's FULL record by slug: persona, department, rank, engine/model defaults, manager, direct reports. Read-only. Use before delegating to understand who you're briefing.",
     inputSchema: {
       type: "object",
-      properties: { name: { type: "string", description: "Employee slug (from list_employees / find_employees)." } },
+      properties: { name: { type: "string" } },
       required: ["name"],
     },
     handler: async (args, ctx) => {
@@ -111,9 +111,9 @@ export function buildOrgTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        department: { type: "string", description: "Exact department slug (case-insensitive)." },
-        rank: { type: "string", description: "Exact rank, e.g. junior|senior|manager|executive (case-insensitive)." },
-        engine: { type: "string", description: "Exact engine, e.g. claude|codex|hermes|grok (case-insensitive)." },
+        department: { type: "string" },
+        rank: { type: "string" },
+        engine: { type: "string" },
       },
     },
     handler: async (args, ctx) => {

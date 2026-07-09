@@ -157,11 +157,11 @@ export function buildSessionTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        prompt: { type: "string", description: "The task brief for the new session. You write it — full context, acceptance, constraints." },
-        employee: { type: "string", description: "Employee slug to spawn as (persona + engine/model defaults). Omit for a plain session." },
-        engine: { type: "string", description: "Engine override (e.g. claude, codex). Omit to use the employee's/gateway default." },
-        model: { type: "string", description: "Model override. Omit to use defaults." },
-        effortLevel: { type: "string", description: "Effort override (e.g. low, medium, high). Omit to use defaults." },
+        prompt: { type: "string" },
+        employee: { type: "string" },
+        engine: { type: "string" },
+        model: { type: "string" },
+        effortLevel: { type: "string" },
       },
       required: ["prompt"],
     },
@@ -196,8 +196,8 @@ export function buildSessionTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        sessionId: { type: "string", description: "Target session id (from list_sessions or a spawn result)." },
-        message: { type: "string", description: "The message. Include the context the target needs — it does not see your conversation." },
+        sessionId: { type: "string" },
+        message: { type: "string" },
       },
       required: ["sessionId", "message"],
     },
@@ -226,7 +226,7 @@ export function buildSessionTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        sessionId: { type: "string", description: "Session id to read." },
+        sessionId: { type: "string" },
         last: { type: "number", description: `How many recent messages (1–${READ_LAST_MAX}, default ${READ_LAST_DEFAULT}).` },
       },
       required: ["sessionId"],
@@ -265,8 +265,8 @@ export function buildSessionTools(): JinnMcpTool[] {
       type: "object",
       properties: {
         scope: { type: "string", enum: ["children", "employee", "recent"], description: "Which sessions (default children)." },
-        employee: { type: "string", description: "Employee slug — required when scope is 'employee'." },
-        limit: { type: "number", description: `Max results (1–${LIST_LIMIT_MAX}, default ${LIST_LIMIT_DEFAULT}).` },
+        employee: { type: "string" },
+        limit: { type: "number" },
       },
     },
     handler: async (args, ctx) => {
@@ -315,7 +315,7 @@ export function buildSessionTools(): JinnMcpTool[] {
       "Stop a running session you spawned (your own descendants only). Recoverable — the record and messages survive, and a follow-up message resumes it. Not a delete: deleting sessions is an operator action and has no agent tool.",
     inputSchema: {
       type: "object",
-      properties: { sessionId: { type: "string", description: "The descendant session id to stop." } },
+      properties: { sessionId: { type: "string" } },
       required: ["sessionId"],
     },
     handler: async (args, ctx) => {

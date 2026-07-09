@@ -278,7 +278,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       "Get one workflow DEFINITION by id, in its full editable shape (nodes, edges, gates, loop, version). Read-only. For run state use get_workflow_run.",
     inputSchema: {
       type: "object",
-      properties: { workflowId: { type: "string", description: "Workflow definition id." } },
+      properties: { workflowId: { type: "string" } },
       required: ["workflowId"],
     },
     handler: async (args, ctx) => {
@@ -296,7 +296,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       "List runs of a workflow (newest first): runId, status (running|parked|completed|failed), trigger, timestamps. Read-only.",
     inputSchema: {
       type: "object",
-      properties: { workflowId: { type: "string", description: "Workflow definition id." } },
+      properties: { workflowId: { type: "string" } },
       required: ["workflowId"],
     },
     handler: async (args, ctx) => {
@@ -315,8 +315,8 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        workflowId: { type: "string", description: "Workflow definition id." },
-        runId: { type: "string", description: "Run id from list_workflow_runs or start_workflow_run." },
+        workflowId: { type: "string" },
+        runId: { type: "string" },
       },
       required: ["workflowId", "runId"],
     },
@@ -338,8 +338,8 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        sop: { type: "object", description: "Preferred SOP shape: ordered steps plus a wake-up." },
-        definition: { type: "object", description: `Power-user raw graph. ${DEFINITION_SHAPE}` },
+        sop: { type: "object", description: "SOP object: {id,title,wakeUp,steps}." },
+        definition: { type: "object", description: "Raw workflow graph; prefer sop." },
       },
       required: [],
     },
@@ -358,8 +358,8 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        sop: { type: "object", description: "Preferred SOP shape: ordered steps plus a wake-up." },
-        definition: { type: "object", description: `Power-user raw graph. ${DEFINITION_SHAPE}` },
+        sop: { type: "object", description: "SOP object: {id,title,wakeUp,steps}." },
+        definition: { type: "object", description: "Raw workflow graph; prefer sop." },
       },
       required: [],
     },
@@ -378,8 +378,8 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        sop: { type: "object", description: "Preferred authoring shape: ordered employee/engine steps plus a wake-up." },
-        definition: { type: "object", description: `Power-user raw graph. ${DEFINITION_SHAPE}` },
+        sop: { type: "object", description: "SOP object: {id,title,wakeUp,steps}." },
+        definition: { type: "object", description: "Raw workflow graph; prefer sop." },
       },
       required: [],
     },
@@ -405,10 +405,10 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        workflowId: { type: "string", description: "Workflow definition id (immutable)." },
-        sop: { type: "object", description: "Preferred SOP shape: ordered steps plus a wake-up." },
-        patch: { type: "object", description: `Fields to change. ${DEFINITION_SHAPE}` },
-        expectedVersion: { type: "number", description: "The version you read; the update is refused (409) if the definition changed since." },
+        workflowId: { type: "string" },
+        sop: { type: "object", description: "Replacement SOP object." },
+        patch: { type: "object", description: "Raw shallow patch; arrays replace stored arrays." },
+        expectedVersion: { type: "number", description: "Optimistic lock version." },
       },
       required: ["workflowId"],
     },
@@ -435,7 +435,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       "Retire a workflow definition through the authorized workflow route. Retired definitions remain readable/history-backed but are no longer active authoring targets.",
     inputSchema: {
       type: "object",
-      properties: { workflowId: { type: "string", description: "Workflow definition id." } },
+      properties: { workflowId: { type: "string" } },
       required: ["workflowId"],
     },
     handler: async (args, ctx) => {
@@ -461,7 +461,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       "Start a run of a workflow definition: mints a durable run record, then executes steps SEQUENTIALLY (real AI sessions; each step's output hands off to the next; approval gates park the run for a HUMAN to resolve). Returns { run, hint }. Requires a workflow evidence root (sandbox — live gateways refuse with 503).",
     inputSchema: {
       type: "object",
-      properties: { workflowId: { type: "string", description: "Workflow definition id." } },
+      properties: { workflowId: { type: "string" } },
       required: ["workflowId"],
     },
     handler: async (args, ctx) => {
@@ -503,16 +503,16 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       type: "object",
       properties: {
         kind: { type: "string", enum: ["webhook", "poll"], description: "Trigger type." },
-        name: { type: "string", description: "Safe unique binding name." },
-        event: { type: "string", description: "Event name emitted into the uniform trigger envelope." },
-        targetWorkflowId: { type: "string", description: "Workflow definition id to run." },
+        name: { type: "string" },
+        event: { type: "string" },
+        targetWorkflowId: { type: "string" },
         filter: { type: "array", description: "Optional match filters, e.g. [{path:'payload.kind',op:'equals',value:'trial'}]." },
         secretToken: { type: "string", description: "Webhook token. If omitted, the gateway generates one and returns it once." },
-        command: { type: "string", description: "Poll command to run after COO approval." },
-        intervalSeconds: { type: "number", description: "Poll interval in seconds." },
-        timeoutMs: { type: "number", description: "Hard command timeout in milliseconds." },
-        stdoutMaxBytes: { type: "number", description: "Maximum stdout captured before the run is killed." },
-        stderrMaxBytes: { type: "number", description: "Maximum stderr captured before the run is killed." },
+        command: { type: "string" },
+        intervalSeconds: { type: "number" },
+        timeoutMs: { type: "number" },
+        stdoutMaxBytes: { type: "number" },
+        stderrMaxBytes: { type: "number" },
       },
       required: ["kind", "name", "event", "targetWorkflowId"],
     },
@@ -541,7 +541,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     description: "Delete a custom workflow trigger binding by name. Requires the caller session capability on the gateway write route.",
     inputSchema: {
       type: "object",
-      properties: { name: { type: "string", description: "Trigger binding name." } },
+      properties: { name: { type: "string" } },
       required: ["name"],
     },
     handler: async (args, ctx) => {
