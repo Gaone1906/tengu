@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, vi } from "vitest";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
@@ -22,20 +22,27 @@ beforeAll(async () => {
 
 describe("getPartialMessages (bounded turn-settle read)", () => {
   it("returns only partial rows, in stream (seq) order, leaving final history out", () => {
-    newSession("gp1");
-    reg.insertMessage("gp1", "user", "question");
-    reg.insertMessage("gp1", "assistant", "an older final answer");
-    reg.insertPartialMessage("gp1", "assistant", "third", 2);
-    reg.insertPartialMessage("gp1", "assistant", "first", 0);
-    reg.insertPartialMessage("gp1", "assistant", "second", 1, "Bash");
+    newSession("getpartial-s1");
+    reg.insertMessage("getpartial-s1", "user", "question");
+    reg.insertMessage("getpartial-s1", "assistant", "an older final answer");
+    // Pin the clock so all three partials share a timestamp — then `seq` (not
+    // insertion time) must order them, which is exactly the tie-break we assert.
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      reg.insertPartialMessage("getpartial-s1", "assistant", "third", 2);
+      reg.insertPartialMessage("getpartial-s1", "assistant", "first", 0);
+      reg.insertPartialMessage("getpartial-s1", "assistant", "second", 1, "Bash");
+    } finally {
+      clock.mockRestore();
+    }
 
-    const partials = reg.getPartialMessages("gp1");
+    const partials = reg.getPartialMessages("getpartial-s1");
     expect(partials.map((m) => m.content)).toEqual(["first", "second", "third"]);
     expect(partials.every((m) => m.partial === true)).toBe(true);
     expect(partials[1].toolCall).toBe("Bash");
 
     // Equivalent to the old getMessages(...).filter(m => m.partial) it replaces.
-    const viaFull = reg.getMessages("gp1").filter((m) => m.partial);
+    const viaFull = reg.getMessages("getpartial-s1").filter((m) => m.partial);
     expect(partials.map((m) => m.content)).toEqual(viaFull.map((m) => m.content));
   });
 
@@ -45,7 +52,7 @@ describe("getPartialMessages (bounded turn-settle read)", () => {
       .prepare(
         "EXPLAIN QUERY PLAN SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks FROM messages WHERE session_id = ? AND partial = 1 ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC",
       )
-      .all("gp1") as Array<{ detail: string }>;
+      .all("getpartial-s1") as Array<{ detail: string }>;
     const text = plan.map((r) => r.detail).join("\n");
     // The point of the change is bounded materialization: the DB seeks by
     // session_id (SEARCH ... USING INDEX) so it never full-SCANs the messages
@@ -61,8 +68,8 @@ describe("getPartialMessages (bounded turn-settle read)", () => {
   });
 
   it("returns nothing for a session with no live partials", () => {
-    newSession("gp2");
-    reg.insertMessage("gp2", "assistant", "only a final message");
-    expect(reg.getPartialMessages("gp2")).toEqual([]);
+    newSession("getpartial-s2");
+    reg.insertMessage("getpartial-s2", "assistant", "only a final message");
+    expect(reg.getPartialMessages("getpartial-s2")).toEqual([]);
   });
 });
