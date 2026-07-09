@@ -72,6 +72,24 @@ const CREATE_PARENT_INDEX = `
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions (parent_session_id)
 `;
 
+// Backs the highly-selective status filter (running ~6 of 2.5k rows) used on
+// every boot (recoverStaleSessions / getInterruptedSessions) and every
+// status-reconciler tick (listSessions({status:'running'})) — all of which were
+// SCANning the full sessions table. Composite with last_activity DESC so the
+// status-filtered list read also gets its ORDER BY from the index.
+const CREATE_STATUS_INDEX = `
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions (status, last_activity DESC)
+`;
+
+// Backs the `WHERE partial = 1` hot path — the boot sweep (clearAllPartialMessages)
+// and every turn-settle (deletePartialMessages / finalizePartialMessages /
+// getPartialMessages), which were full-SCANning the (largest) messages table to
+// touch a handful of live mid-turn rows. Partial index: only the tiny set of
+// currently-partial rows is indexed, so it stays cheap regardless of history size.
+const CREATE_MESSAGES_PARTIAL_INDEX = `
+CREATE INDEX IF NOT EXISTS idx_messages_partial ON messages (session_id) WHERE partial = 1
+`;
+
 const CREATE_FILES_TABLE = `
 CREATE TABLE IF NOT EXISTS files (
   id TEXT PRIMARY KEY,
@@ -226,6 +244,8 @@ export function initDb(): Database.Database {
   db.exec(CREATE_META_TABLE);
   migrateMessagesSchema(db);
   db.exec(CREATE_MESSAGES_ORDER_INDEX);
+  // Partial-message index needs the `partial` column, added by migrateMessagesSchema above.
+  db.exec(CREATE_MESSAGES_PARTIAL_INDEX);
   migrateFtsSchema(db);
   // Seed the FTS index for pre-existing rows synchronously at boot — BEFORE the
   // gateway serves any request. The AD/AU sync triggers issue an FTS `'delete'`
@@ -246,6 +266,7 @@ export function initDb(): Database.Database {
   db.exec(CREATE_SESSION_KEY_INDEX);
   db.exec(CREATE_LAST_ACTIVITY_INDEX);
   db.exec(CREATE_PARENT_INDEX);
+  db.exec(CREATE_STATUS_INDEX);
   // Work-item primitive (GRS-002 → GRS-021a Todos model): the vocabulary rebuild
   // runs FIRST (a GRS-002-shape table is remapped onto the 8-status/7-source
   // enums inside one rollback-safe transaction; a migration failure aborts boot
