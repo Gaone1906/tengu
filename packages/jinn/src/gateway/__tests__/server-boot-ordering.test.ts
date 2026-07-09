@@ -47,4 +47,17 @@ describe('gateway boot ordering — managed cron fires can never land half-wired
     const clear = callIndex('setWorkflowCronFire(undefined)');
     expect(clear).toBeGreaterThan(stop);
   });
+
+  it('defers the work-item startup reconcile past server.listen() (perf: accept requests first)', () => {
+    const listen = callIndex('server.listen(port, host)');
+    const reconcile = callIndex('reconcileWorkItemsOnStartup()');
+    // The only invocation of the startup reconcile must run AFTER listen() — it is
+    // best-effort + idempotent + covered by the periodic reconciler, so it must not
+    // block boot. A refactor that re-adds a pre-listen synchronous call fails here.
+    expect(reconcile).toBeGreaterThan(listen);
+    expect(serverSource.indexOf('reconcileWorkItemsOnStartup()', reconcile + 1)).toBe(-1);
+    // And it is deferred onto a setImmediate tick rather than run inline post-listen.
+    const immediate = callIndex('setImmediate(() => {');
+    expect(reconcile).toBeGreaterThan(immediate);
+  });
 });

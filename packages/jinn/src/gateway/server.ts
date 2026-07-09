@@ -296,8 +296,10 @@ export async function startGateway(
   }
   // GRS-003a split-brain fix: the sessions just flipped running→interrupted above, so any
   // work item still marked `executing` on the strength of one of those sessions is now stale.
-  // Re-derive work-item status from linked-session evidence. Best-effort — never blocks boot.
-  reconcileWorkItemsOnStartup();
+  // Re-derive work-item status from linked-session evidence. Best-effort and idempotent, and
+  // the 20s periodic reconciler (startWorkItemReconciler) covers it anyway — so it is DEFERRED
+  // past server.listen() (see the setImmediate below) to let the gateway accept requests first
+  // instead of blocking boot on an O(active work items) synchronous re-derivation.
 
   // Log resumable sessions so operators know what can be picked up
   const resumable = getInterruptedSessions();
@@ -1286,6 +1288,24 @@ export async function startGateway(
       server.listen(port, host);
     };
     listen();
+  });
+
+  // Deferred non-critical startup work (perf: the gateway is now accepting
+  // requests). The work-item startup reconcile is best-effort, idempotent, and
+  // already covered by the 20s periodic reconciler — so it runs on a setImmediate
+  // tick after listen() rather than blocking boot. Everything genuinely
+  // order-critical stayed pre-listen by design:
+  //   • recoverStaleSessions / getInterruptedSessions — must stamp dead sessions
+  //     `interrupted` BEFORE we serve /api/status|/api/sessions, or we'd report
+  //     previous-process sessions as still "running".
+  //   • clearAllPartialMessages — a correctness sweep (now index-backed and cheap).
+  //   • FTS backfill (initDb) — synchronous by design: the AD/AU triggers raise
+  //     "malformed" on a not-yet-indexed rowid, so the index must be drained
+  //     before any delete/update can race; it no-ops on every boot after the first.
+  //   • applyWorkflowCronSync + fire-handler wiring — must precede startScheduler
+  //     (GRS-014d boot-ordering invariant), which itself is pre-listen.
+  setImmediate(() => {
+    reconcileWorkItemsOnStartup();
   });
 
   // GRS-017e: arm the jinn-attachment authed smoke gate. Runs right after
