@@ -18,11 +18,13 @@ export interface NavItem {
   icon: LucideIcon
 }
 
+// Order is deliberate: the three day-to-day surfaces (Chat, Todos, Workflows)
+// lead, mirroring the mobile tab bar's primary set; the rest follow.
 export const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Chat", icon: MessageSquare },
+  { href: "/todos", label: "Todos", icon: ListChecks },
   { href: "/workflow", label: "Workflows", icon: Workflow },
   { href: "/org", label: "Organization", icon: Users },
-  { href: "/todos", label: "Todos", icon: ListChecks },
   { href: "/cron", label: "Cron", icon: Clock },
   { href: "/limits", label: "Limits", icon: Gauge },
   { href: "/logs", label: "Activity", icon: Activity },

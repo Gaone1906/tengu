@@ -75,7 +75,7 @@ export function RemoteAccessPanel({ authState, devices = [], onCreatePairingCode
       </div>
 
       {dashboardUrl && (
-        <div className="rounded-[var(--radius-md)] bg-[var(--bg-secondary)] px-[var(--space-3)] py-[var(--space-2)] shadow-[inset_0_0_0_1px_var(--separator)]">
+        <div className="rounded-[13px] bg-[var(--fill-quaternary)] px-[var(--space-3)] py-[var(--space-2)]">
           <div className="text-[length:var(--text-caption2)] uppercase text-[var(--text-quaternary)]">Dashboard URL</div>
           <div className="mt-1 truncate font-[var(--font-code)] text-[length:var(--text-footnote)] text-[var(--text-secondary)]">{dashboardUrl}</div>
         </div>
@@ -111,7 +111,7 @@ export function RemoteAccessPanel({ authState, devices = [], onCreatePairingCode
       )}
 
       {pairingCode && (
-        <div key={pairingCode.code} role="status" aria-live="polite" className="animate-auth-reveal rounded-[var(--radius-lg)] bg-[var(--bg-secondary)] p-[var(--space-4)] shadow-[inset_0_0_0_1px_var(--separator)]">
+        <div key={pairingCode.code} role="status" aria-live="polite" className="animate-auth-reveal rounded-[13px] bg-[var(--fill-quaternary)] p-[var(--space-4)]">
           <div className="flex items-center justify-between gap-[var(--space-3)]">
             <div className="min-w-0 truncate font-[var(--font-code)] text-[length:var(--text-body)] font-[var(--weight-semibold)] tracking-[0.08em] text-[var(--text-primary)]">
               {pairingCode.code}
@@ -137,13 +137,13 @@ export function RemoteAccessPanel({ authState, devices = [], onCreatePairingCode
         </div>
         <div className="flex flex-col gap-2">
           {devices.length === 0 ? (
-            <div className="rounded-[var(--radius-md)] bg-[var(--bg-secondary)] px-[var(--space-3)] py-[var(--space-3)] shadow-[inset_0_0_0_1px_var(--separator)] text-pretty text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">
+            <div className="rounded-[13px] bg-[var(--fill-quaternary)] px-[var(--space-3)] py-[var(--space-3)] text-pretty text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">
               Paired browsers will appear here after local bootstrap or remote pairing.
             </div>
           ) : devices.map((device) => (
             <div
               key={device.id}
-              className="flex items-center gap-[var(--space-3)] rounded-[var(--radius-md)] bg-[var(--bg-secondary)] px-[var(--space-3)] py-[var(--space-3)] shadow-[inset_0_0_0_1px_var(--separator)] transition-[background-color,box-shadow] duration-150 [transition-timing-function:var(--ease-smooth)] hover:bg-[var(--fill-tertiary)] hover:shadow-[inset_0_0_0_1px_var(--separator),var(--shadow-subtle)]"
+              className="flex items-center gap-[var(--space-3)] rounded-[13px] bg-[var(--fill-quaternary)] px-[var(--space-3)] py-[var(--space-3)] transition-[background-color] duration-150 [transition-timing-function:var(--ease-smooth)] hover:bg-[var(--fill-tertiary)]"
             >
               <div className="size-8 shrink-0 rounded-full bg-[var(--fill-tertiary)] text-[var(--text-secondary)] flex items-center justify-center">
                 {isMobileDevice(device) ? <Smartphone size={15} /> : <Laptop size={15} />}

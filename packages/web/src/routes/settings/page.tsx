@@ -12,6 +12,7 @@ import { EmojiPicker } from "@/components/ui/emoji-picker"
 import { useModelRegistry } from "@/hooks/use-model-registry"
 import { RemoteAccessPanel } from "@/components/auth/remote-access-panel"
 import { useAuth } from "@/routes/auth-provider"
+import { cn } from "@/lib/utils"
 import {
   addModelOverride,
   hideModelOverride,
@@ -134,20 +135,31 @@ function Section({
   children: React.ReactNode
 }) {
   return (
-    <section className="mb-[var(--space-6)]">
+    <section className="mb-7">
       <div
-        className="text-[length:var(--text-caption1)] font-[var(--weight-semibold)] tracking-[var(--tracking-wide)] uppercase text-[var(--text-tertiary)] px-[var(--space-2)] pb-[var(--space-2)]"
+        className="text-[length:var(--text-caption1)] font-[var(--weight-semibold)] tracking-[var(--tracking-wide)] uppercase text-[var(--text-tertiary)] px-[var(--space-3)] pb-[var(--space-2)]"
       >
         {title}
       </div>
+      {/* Grouped-inset card (shared visual language): --bg-secondary carrying
+          the card shadow — no hairline ring at rest. */}
       <div
-        className="rounded-[var(--radius-lg)] bg-[var(--material-regular)] p-[var(--space-4)] shadow-[inset_0_0_0_1px_var(--separator)]"
+        className="rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-[var(--space-4)] shadow-[var(--shadow-card)]"
       >
         {children}
       </div>
     </section>
   )
 }
+
+// One control recipe for every text input and select on the page: soft
+// --fill-tertiary well, no border at rest, accent focus ring (mirrors
+// .apple-input, sized for dense form rows).
+const CONTROL_CLASS =
+  "w-full rounded-[10px] border-none bg-[var(--fill-tertiary)] px-[12px] py-[7px] " +
+  "text-[length:var(--text-footnote)] text-[var(--text-primary)] outline-none " +
+  "placeholder:text-[var(--text-tertiary)] transition-[box-shadow] duration-150 " +
+  "focus:shadow-[0_0_0_3px_var(--accent-fill)]"
 
 function FieldRow({
   label,
@@ -187,7 +199,7 @@ function SettingsInput({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className="apple-input w-full bg-[var(--bg-secondary)] border border-[var(--separator)] rounded-[var(--radius-sm)] px-[10px] py-[6px] text-[length:var(--text-footnote)] text-[var(--text-primary)]"
+      className={CONTROL_CLASS}
     />
   )
 }
@@ -205,7 +217,7 @@ function SettingsSelect({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="w-full bg-[var(--bg-secondary)] border border-[var(--separator)] rounded-[var(--radius-sm)] px-[10px] py-[6px] text-[length:var(--text-footnote)] text-[var(--text-primary)] cursor-pointer"
+      className={`${CONTROL_CLASS} cursor-pointer`}
     >
       {options.map((o) => (
         <option key={o.value} value={o.value}>
@@ -412,7 +424,7 @@ function SttSettingsSection() {
               <select
                 value={addLang}
                 onChange={(e) => setAddLang(e.target.value)}
-                className="flex-1 bg-[var(--bg-secondary)] border border-[var(--separator)] rounded-[var(--radius-sm)] px-[10px] py-[6px] text-[length:var(--text-footnote)] cursor-pointer"
+                className={cn(CONTROL_CLASS, "flex-1 cursor-pointer")}
                 style={{
                   color: addLang ? "var(--text-primary)" : "var(--text-tertiary)",
                 }}
@@ -636,18 +648,18 @@ export default function SettingsPage() {
 
   return (
     <PageLayout>
-      <div
-        className="h-full overflow-y-auto bg-[var(--bg)]"
-      >
-        <div
-          className="max-w-[640px] mx-auto px-[var(--space-4)] py-[var(--space-6)] pb-[var(--space-12)]"
-        >
-          {/* Page header */}
-          <h1
-            className="text-[length:var(--text-title1)] font-[var(--weight-bold)] tracking-[var(--tracking-tight)] text-[var(--text-primary)] mb-[var(--space-6)]"
-          >
-            Settings
-          </h1>
+      {/* Same page frame as Todos/Limits: one scrolling column, inline
+          large-title header. Forms read best narrow, so the column is 640px. */}
+      <div className="h-full overflow-y-auto" data-scrollable>
+        <div className="mx-auto max-w-[640px] px-5 pb-20 pt-6 md:pt-11">
+          <header className="mb-6">
+            <h1 className="font-[var(--font-display)] text-[length:var(--text-title1)] font-bold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] md:text-[length:var(--text-large-title)]">
+              Settings
+            </h1>
+            <div className="mt-1 text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">
+              Portal, gateway and connectors
+            </div>
+          </header>
 
           {/* -- Section 1: Appearance -- */}
           <Section title="Appearance">
@@ -666,11 +678,10 @@ export default function SettingsPage() {
                   <button
                     key={t.id}
                     onClick={() => setTheme(t.id)}
-                    className="flex flex-col items-center gap-[var(--space-1)] px-[var(--space-2)] py-[var(--space-3)] rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] cursor-pointer transition-all duration-150 ease-[var(--ease-smooth)]"
+                    aria-pressed={isActive}
+                    className="flex cursor-pointer flex-col items-center gap-[var(--space-1)] rounded-[13px] border-none px-[var(--space-2)] py-[var(--space-3)] transition-colors duration-150 ease-[var(--ease-smooth)]"
                     style={{
-                      border: isActive
-                        ? "2px solid var(--accent)"
-                        : "2px solid var(--separator)",
+                      background: isActive ? "var(--accent-fill)" : "var(--fill-quaternary)",
                     }}
                   >
                     <span className="text-[24px]">{t.emoji}</span>
@@ -708,17 +719,16 @@ export default function SettingsPage() {
                     key={preset.value}
                     onClick={() => setAccentColor(preset.value)}
                     aria-label={preset.label}
+                    aria-pressed={isActive}
                     title={preset.label}
-                    className="w-[32px] h-[32px] rounded-full cursor-pointer transition-all duration-100 ease-[var(--ease-smooth)] flex items-center justify-center"
+                    className="flex h-[30px] w-[30px] cursor-pointer items-center justify-center rounded-full border-none transition-transform duration-100 ease-[var(--ease-smooth)] hover:scale-105"
                     style={{
                       background: preset.value,
-                      border: isActive
-                        ? "2px solid var(--text-primary)"
-                        : "2px solid transparent",
-                      outline: isActive
-                        ? `2px solid ${preset.value}`
+                      // Selection ring floats off the swatch on a bg-colored gap —
+                      // a control affordance, not a resting hairline.
+                      boxShadow: isActive
+                        ? `0 0 0 2px var(--bg-secondary), 0 0 0 4px ${preset.value}`
                         : "none",
-                      outlineOffset: 2,
                     }}
                   >
                     {isActive && (
@@ -754,7 +764,7 @@ export default function SettingsPage() {
                     setAccentColor(e.target.value)
                   }
                 }}
-                className="apple-input w-[90px] px-[8px] py-[4px] text-[length:var(--text-caption1)] bg-[var(--bg-secondary)] border border-[var(--separator)] rounded-[var(--radius-sm)] text-[var(--text-primary)] font-mono"
+                className={cn(CONTROL_CLASS, "w-[96px] font-mono text-[length:var(--text-caption1)]")}
               />
               {settings.accentColor && (
                 <button
@@ -765,41 +775,6 @@ export default function SettingsPage() {
                   Reset
                 </button>
               )}
-            </div>
-          </Section>
-
-          {/* -- COO Emoji -- */}
-          <Section title="COO Emoji">
-            <div>
-              <div className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)] mb-[var(--space-3)]">
-                Choose an emoji for the COO shown in the sidebar.
-              </div>
-              <div className="relative flex items-center gap-[var(--space-4)]">
-                <button
-                  onClick={() => setShowCooEmojiPicker(!showCooEmojiPicker)}
-                  className="text-4xl cursor-pointer bg-transparent border-none p-0"
-                >
-                  {settings.portalEmoji ?? "\u{1F9DE}"}
-                </button>
-                <div>
-                  <div className="text-[length:var(--text-body)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
-                    {settings.operatorName || "Jimbo"}
-                  </div>
-                  <div className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
-                    Click emoji to change
-                  </div>
-                </div>
-                {showCooEmojiPicker && (
-                  <EmojiPicker
-                    current={settings.portalEmoji ?? "\u{1F9DE}"}
-                    onSelect={(emoji) => {
-                      setPortalEmoji(emoji)
-                      setShowCooEmojiPicker(false)
-                    }}
-                    onClose={() => setShowCooEmojiPicker(false)}
-                  />
-                )}
-              </div>
             </div>
           </Section>
 
@@ -816,7 +791,7 @@ export default function SettingsPage() {
                 </label>
                 <input
                   type="text"
-                  className="apple-input w-full bg-[var(--bg-secondary)] border border-[var(--separator)] rounded-[var(--radius-sm)] px-[10px] py-[6px] text-[length:var(--text-footnote)] text-[var(--text-primary)]"
+                  className={CONTROL_CLASS}
                   placeholder="Jinn"
                   value={nameValue}
                   onChange={(e) => setNameValue(e.target.value)}
@@ -835,7 +810,7 @@ export default function SettingsPage() {
                 </label>
                 <input
                   type="text"
-                  className="apple-input w-full bg-[var(--bg-secondary)] border border-[var(--separator)] rounded-[var(--radius-sm)] px-[10px] py-[6px] text-[length:var(--text-footnote)] text-[var(--text-primary)]"
+                  className={CONTROL_CLASS}
                   placeholder="Command Centre"
                   value={subtitleValue}
                   onChange={(e) => setSubtitleValue(e.target.value)}
@@ -851,7 +826,7 @@ export default function SettingsPage() {
                 </label>
                 <input
                   type="text"
-                  className="apple-input w-full bg-[var(--bg-secondary)] border border-[var(--separator)] rounded-[var(--radius-sm)] px-[10px] py-[6px] text-[length:var(--text-footnote)] text-[var(--text-primary)]"
+                  className={CONTROL_CLASS}
                   placeholder="Your Name"
                   value={operatorNameValue}
                   onChange={(e) => setOperatorNameValue(e.target.value)}
@@ -862,20 +837,45 @@ export default function SettingsPage() {
                 />
               </div>
 
+              {/* Portal emoji \u2014 one control instead of the old duplicate pair
+                  (a picker section + a raw text input both writing the same
+                  setting). The button opens the searchable picker; the small
+                  field still accepts free-form marks (letters, custom glyphs). */}
               <div>
                 <label
                   className="block text-[length:var(--text-caption1)] text-[var(--text-tertiary)] mb-[var(--space-1)]"
                 >
                   Portal Emoji
                 </label>
-                <input
-                  type="text"
-                  className="apple-input w-[80px] text-center text-[length:var(--text-title2)] px-[8px] py-[6px] bg-[var(--bg-secondary)] border border-[var(--separator)] rounded-[var(--radius-sm)]"
-                  placeholder="\ud83e\uddde"
-                  value={emojiValue}
-                  onChange={(e) => setEmojiValue(e.target.value)}
-                  onBlur={() => setPortalEmoji(emojiValue || null)}
-                />
+                <div className="relative flex items-center gap-[var(--space-3)]">
+                  <button
+                    type="button"
+                    onClick={() => setShowCooEmojiPicker(!showCooEmojiPicker)}
+                    aria-label="Choose portal emoji"
+                    aria-expanded={showCooEmojiPicker}
+                    className="flex size-[44px] cursor-pointer items-center justify-center rounded-[13px] border-none bg-[var(--fill-quaternary)] text-[26px] leading-none transition-colors hover:bg-[var(--fill-tertiary)]"
+                  >
+                    {settings.portalEmoji ?? "\u{1F9DE}"}
+                  </button>
+                  <input
+                    type="text"
+                    className={cn(CONTROL_CLASS, "w-[96px] text-center")}
+                    placeholder={"\u{1F9DE}\u{FE0F}"}
+                    value={emojiValue}
+                    onChange={(e) => setEmojiValue(e.target.value)}
+                    onBlur={() => setPortalEmoji(emojiValue || null)}
+                  />
+                  {showCooEmojiPicker && (
+                    <EmojiPicker
+                      current={settings.portalEmoji ?? "\u{1F9DE}"}
+                      onSelect={(emoji) => {
+                        setPortalEmoji(emoji)
+                        setShowCooEmojiPicker(false)
+                      }}
+                      onClose={() => setShowCooEmojiPicker(false)}
+                    />
+                  )}
+                </div>
               </div>
 
               <div>
@@ -891,7 +891,7 @@ export default function SettingsPage() {
                     setLanguage(languageValue || "English")
                     api.completeOnboarding({ language: languageValue || undefined }).catch(() => {})
                   }}
-                  className="w-full bg-[var(--bg-secondary)] border border-[var(--separator)] rounded-[var(--radius-sm)] px-[10px] py-[6px] text-[length:var(--text-footnote)] text-[var(--text-primary)] cursor-pointer"
+                  className={`${CONTROL_CLASS} cursor-pointer`}
                 >
                   <option value="English">English</option>
                   <option value="Spanish">Spanish</option>
@@ -926,17 +926,11 @@ export default function SettingsPage() {
           {/* Gateway config feedback */}
           {feedback && (
             <div
-              className="mb-[var(--space-4)] px-[var(--space-4)] py-[var(--space-3)] rounded-[var(--radius-md)] text-[length:var(--text-footnote)]"
+              className="mb-[var(--space-4)] rounded-[var(--radius-lg)] p-[10px_13px] text-[length:var(--text-footnote)]"
               style={{
-                background:
-                  feedback.type === "success"
-                    ? "rgba(34,197,94,0.1)"
-                    : "rgba(239,68,68,0.1)",
-                border: `1px solid ${
-                  feedback.type === "success"
-                    ? "rgba(34,197,94,0.3)"
-                    : "rgba(239,68,68,0.3)"
-                }`,
+                background: `color-mix(in srgb, ${
+                  feedback.type === "success" ? "var(--system-green)" : "var(--system-red)"
+                } 8%, transparent)`,
                 color:
                   feedback.type === "success"
                     ? "var(--system-green)"
@@ -959,11 +953,8 @@ export default function SettingsPage() {
             </div>
           ) : configError ? (
             <div
-              className="mb-[var(--space-6)] px-[var(--space-4)] py-[var(--space-3)] rounded-[var(--radius-md)] text-[length:var(--text-footnote)] text-[var(--system-red)]"
-              style={{
-                background: "rgba(239,68,68,0.1)",
-                border: "1px solid rgba(239,68,68,0.3)",
-              }}
+              className="mb-[var(--space-6)] rounded-[var(--radius-lg)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
+              style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}
             >
               Failed to load config: {configError}
             </div>
@@ -1239,7 +1230,7 @@ export default function SettingsPage() {
                   />
                 </FieldRow>
                 <div
-                  className="text-[length:var(--text-caption1)] text-[var(--label-secondary)] mt-[4px]"
+                  className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)] mt-[4px]"
                 >
                   When enabled, sending a new message to a running session will stop the
                   current agent and start processing your new message immediately. When
@@ -1263,7 +1254,7 @@ export default function SettingsPage() {
                   />
                 </FieldRow>
                 <div
-                  className="text-[length:var(--text-caption1)] text-[var(--label-secondary)] mt-[4px]"
+                  className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)] mt-[4px]"
                 >
                   "Wait" pauses the session and continues automatically when Claude resets.
                   "Switch" answers immediately using GPT, then returns to Claude once the reset window passes.
@@ -1469,7 +1460,7 @@ export default function SettingsPage() {
                     <img
                       src={waQr}
                       alt="WhatsApp QR Code"
-                      className="w-[200px] h-[200px] rounded-[var(--radius-md)] border border-[var(--separator)] bg-white p-[8px]"
+                      className="h-[200px] w-[200px] rounded-[var(--radius-md)] bg-white p-[8px] shadow-[var(--shadow-subtle)]"
                     />
                     <div
                       className="text-[length:var(--text-caption2)] text-[var(--text-tertiary)]"
@@ -1530,7 +1521,7 @@ export default function SettingsPage() {
                 {(config.connectors?.instances || []).map((instance: any, idx: number) => (
                   <div
                     key={instance.id || idx}
-                    className="mb-[var(--space-4)] p-[var(--space-3)] rounded-[var(--radius-md)] border border-[var(--separator)] bg-[var(--bg-secondary)]"
+                    className="mb-[var(--space-4)] rounded-[13px] bg-[var(--fill-quaternary)] p-[var(--space-3)]"
                   >
                     <div className="flex items-center justify-between mb-[var(--space-2)]">
                       <div className="text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
@@ -1779,47 +1770,52 @@ export default function SettingsPage() {
               {/* -- Section 8: Voice Input (STT) -- */}
               <SttSettingsSection />
 
-              {/* Save button for gateway config */}
+              {/* Save row for gateway config — pill buttons in the app's shared
+                  grammar (accent-fill primary, quiet fill secondary). */}
               <div
-                className="flex justify-end gap-[var(--space-3)] mb-[var(--space-6)]"
+                className="mb-7 flex justify-end gap-[var(--space-3)]"
               >
                 <button
                   onClick={() => loadConfig()}
-                  className="px-[var(--space-4)] py-[var(--space-2)] rounded-[var(--radius-md)] bg-[var(--fill-tertiary)] text-[var(--text-secondary)] border-none cursor-pointer text-[length:var(--text-footnote)] font-[var(--weight-medium)] inline-flex items-center gap-[6px]"
+                  className="inline-flex h-[38px] cursor-pointer items-center gap-1.5 rounded-full border-none bg-[var(--fill-tertiary)] px-4 text-[length:var(--text-subheadline)] font-[var(--weight-medium)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]"
                 >
-                  <RotateCcw size={14} />
+                  <RotateCcw size={15} />
                   Reload
                 </button>
                 <button
                   onClick={handleSave}
                   disabled={saving}
-                  className="px-[var(--space-5)] py-[var(--space-2)] rounded-[var(--radius-md)] bg-[var(--accent)] text-[var(--accent-contrast)] border-none text-[length:var(--text-footnote)] font-[var(--weight-semibold)] inline-flex items-center gap-[6px] transition-all duration-150 ease-[var(--ease-smooth)]"
+                  className="inline-flex h-[38px] items-center gap-1.5 rounded-full border-none px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98]"
                   style={{
+                    background: "var(--accent-fill)",
+                    color: "var(--accent)",
+                    boxShadow: "var(--inset-shine)",
                     cursor: saving ? "wait" : "pointer",
                     opacity: saving ? 0.7 : 1,
                   }}
                 >
-                  <Save size={14} />
-                  {saving ? "Saving..." : "Save Config"}
+                  <Save size={15} />
+                  {saving ? "Saving…" : "Save Config"}
                 </button>
               </div>
             </>
           )}
 
-          {/* -- Section 7: Reset -- */}
+          {/* -- Section 7: Reset — quiet pills; destructive reads as a red wash,
+                not a solid alarm block. */}
           <Section title="Reset">
             <div
-              className="flex items-center justify-center gap-[var(--space-3)] flex-wrap"
+              className="flex flex-wrap items-center gap-[var(--space-3)]"
             >
               <button
                 onClick={() => {
                   localStorage.removeItem("jinn-onboarded")
                   window.location.reload()
                 }}
-                className="px-[var(--space-5)] py-[var(--space-2)] rounded-[var(--radius-md)] bg-[var(--accent)] text-[var(--accent-contrast)] border-none cursor-pointer text-[length:var(--text-footnote)] font-[var(--weight-semibold)] transition-all duration-150 ease-[var(--ease-spring)] inline-flex items-center gap-[var(--space-2)]"
+                className="inline-flex h-[38px] cursor-pointer items-center gap-1.5 rounded-full border-none bg-[var(--fill-tertiary)] px-4 text-[length:var(--text-subheadline)] font-[var(--weight-medium)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]"
               >
-                <RotateCcw size={14} />
-                Re-run Onboarding Wizard
+                <RotateCcw size={15} />
+                Re-run Onboarding
               </button>
               <button
                 onClick={() => {
@@ -1832,9 +1828,10 @@ export default function SettingsPage() {
                     window.location.reload()
                   }
                 }}
-                className="px-[var(--space-5)] py-[var(--space-2)] rounded-[var(--radius-md)] bg-[var(--system-red)] text-white border-none cursor-pointer text-[length:var(--text-footnote)] font-[var(--weight-semibold)] transition-all duration-150 ease-[var(--ease-spring)] inline-flex items-center gap-[var(--space-2)]"
+                className="inline-flex h-[38px] cursor-pointer items-center gap-1.5 rounded-full border-none px-4 text-[length:var(--text-subheadline)] font-semibold text-[var(--system-red)] transition-transform hover:scale-[0.98]"
+                style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}
               >
-                <Trash2 size={14} />
+                <Trash2 size={15} />
                 Reset All Settings
               </button>
             </div>

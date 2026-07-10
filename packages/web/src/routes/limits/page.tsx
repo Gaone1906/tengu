@@ -6,7 +6,7 @@ import type {
   EngineLimitsResponse,
   EngineLimitWindow,
 } from "@/lib/api"
-import { PageLayout, ToolbarActions } from "@/components/page-layout"
+import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { Skeleton } from "@/components/ui/skeleton"
 
@@ -106,9 +106,11 @@ function EngineCard({ engine }: { engine: EngineLimitEngineSnapshot }) {
   const note = engine.error || (engine.stale ? "Snapshot is over 30 minutes old — may be out of date." : null)
 
   return (
-    <section className="rounded-[var(--radius-lg)] bg-[var(--bg-secondary)] border border-[var(--separator)] p-[var(--space-6)]">
+    // Grouped-inset card (shared visual language): --bg-secondary carrying the
+    // page's only card shadow — no border at rest.
+    <section className="rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-[var(--space-6)] shadow-[var(--shadow-card)]">
       <div className="flex items-center justify-between gap-[var(--space-3)]">
-        <div className="flex items-center gap-[var(--space-3)] min-w-0">
+        <div className="flex items-baseline gap-[var(--space-3)] min-w-0">
           <h2 className="text-[length:var(--text-body)] font-[var(--weight-semibold)] text-[var(--text-primary)] capitalize truncate">
             {engine.name}
           </h2>
@@ -183,52 +185,50 @@ export default function LimitsPage() {
 
   return (
     <PageLayout>
-      <div className="h-full flex flex-col overflow-hidden animate-fade-in bg-[var(--bg)]">
-        <header
-          className="sticky top-0 z-10 flex-shrink-0 bg-[var(--material-regular)] border-b border-[var(--separator)]"
-          style={{
-            backdropFilter: "blur(40px) saturate(180%)",
-            WebkitBackdropFilter: "blur(40px) saturate(180%)",
-          }}
-        >
-          <div className="flex items-center justify-between px-[var(--space-6)] py-[var(--space-3)]">
-            <h1 className="text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
-              Limits
-            </h1>
-            <ToolbarActions>
-              <button
-                onClick={refresh}
-                className="focus-ring w-8 h-8 flex items-center justify-center rounded-[var(--radius-sm)] border-none bg-transparent text-[var(--text-tertiary)] cursor-pointer transition-colors duration-150 ease-[var(--ease-smooth)]"
-                aria-label="Refresh engine limits"
-              >
-                <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />
-              </button>
-            </ToolbarActions>
-          </div>
-        </header>
+      {/* Same page frame as Todos: one scrolling column, inline large-title
+          header — no sticky chrome bar. */}
+      <div className="h-full overflow-y-auto" data-scrollable>
+        <div className="mx-auto max-w-[840px] px-5 pb-20 pt-6 md:pt-11">
+          <header className="mb-6 flex items-end justify-between gap-3">
+            <div>
+              <h1 className="font-[var(--font-display)] text-[length:var(--text-title1)] font-bold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] md:text-[length:var(--text-large-title)]">
+                Limits
+              </h1>
+              <div className="mt-1 text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">
+                Engine usage windows and quotas
+              </div>
+            </div>
+            <button
+              onClick={refresh}
+              aria-label="Refresh engine limits"
+              className="inline-flex size-[38px] shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]"
+            >
+              <RefreshCw size={17} className={refreshing ? "animate-spin" : ""} />
+            </button>
+          </header>
 
-        <main className="flex-1 overflow-y-auto px-[var(--space-6)] pt-[var(--space-5)] pb-[var(--space-8)]">
-          <div className="max-w-[920px] mx-auto">
-            {error && (
-              <div className="mb-[var(--space-5)] px-[var(--space-4)] py-[var(--space-3)] rounded-[var(--radius-md)] border border-[var(--system-red)] text-[length:var(--text-footnote)] text-[var(--system-red)]">
-                {error}
-              </div>
-            )}
+          {error && (
+            <div
+              className="mb-5 rounded-[var(--radius-lg)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
+              style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}
+            >
+              {error}
+            </div>
+          )}
 
-            {loading ? (
-              <div className="grid gap-[var(--space-4)] md:grid-cols-2">
-                <Skeleton height={180} className="rounded-[var(--radius-lg)]" />
-                <Skeleton height={180} className="rounded-[var(--radius-lg)]" />
-              </div>
-            ) : (
-              <div className="grid gap-[var(--space-4)] md:grid-cols-2 items-start">
-                {engines.map((engine) => (
-                  <EngineCard key={engine.name} engine={engine} />
-                ))}
-              </div>
-            )}
-          </div>
-        </main>
+          {loading ? (
+            <div className="grid gap-4 md:grid-cols-2">
+              <Skeleton height={180} className="rounded-[var(--radius-xl)]" />
+              <Skeleton height={180} className="rounded-[var(--radius-xl)]" />
+            </div>
+          ) : (
+            <div className="grid items-start gap-4 md:grid-cols-2">
+              {engines.map((engine) => (
+                <EngineCard key={engine.name} engine={engine} />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </PageLayout>
   )
