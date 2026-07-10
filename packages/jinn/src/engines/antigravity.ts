@@ -4,6 +4,7 @@ import type { InterruptibleEngine, EngineRunOpts, EngineResult } from "../shared
 import { logger } from "../shared/logger.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { resolveBin } from "../shared/resolve-bin.js";
+import { buildEngineChildEnv } from "../shared/child-env.js";
 import { PtyLifecycleManager, type PtyHandle } from "./pty-lifecycle.js";
 import { PtyStreamManager, createPtyHandle, setCapped } from "./pty-stream.js";
 import { tailTranscriptLines, type TranscriptTailer } from "./transcript-tailer.js";
@@ -520,10 +521,7 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
  * only when the resolved built-in jinn MCP server is attached.
  */
 export function buildAntigravityPtyEnv(sessionId?: string, resolvedMcp?: EngineRunOpts["resolvedMcp"]): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined) env[k] = v;
-  }
+  const env = buildEngineChildEnv(process.env);
   env.TERM = "xterm-256color";
   if (sessionId) env.JINN_SESSION_ID = sessionId;
   Object.assign(env, antigravityJinnSessionEnv(resolvedMcp));

@@ -5,6 +5,7 @@ import type { InterruptibleEngine, EngineRunOpts, EngineResult } from "../shared
 import { logger } from "../shared/logger.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { resolveBin } from "../shared/resolve-bin.js";
+import { buildEngineChildEnv } from "../shared/child-env.js";
 import { neutralizeForPaste } from "../shared/skill-commands.js";
 import { PtyLifecycleManager, type PtyHandle } from "./pty-lifecycle.js";
 import { PtyStreamManager, createPtyHandle, setCapped } from "./pty-stream.js";
@@ -336,12 +337,7 @@ export class GrokInteractiveEngine implements InterruptibleEngine, PtyViewEngine
   }
 
   private buildEnv(sessionId?: string): Record<string, string> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
-      if (k === "CODEX" || k.startsWith("CODEX_")) continue;
-      if (v !== undefined) env[k] = v;
-    }
+    const env = buildEngineChildEnv(process.env, { scrubClaudeCode: true, scrubCodex: true });
     env.TERM = "xterm-256color";
     if (sessionId) env.JINN_SESSION_ID = sessionId;
     // The TUI blocks prompt execution while inherited MCP compatibility servers

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONFIG_PATH, PID_FILE, JINN_HOME } from "../shared/paths.js";
+import { CONFIG_PATH, PID_FILE, JINN_HOME, canonicalizeJinnHome } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 import type { JinnConfig } from "../shared/types.js";
 import { startGateway } from "./server.js";
@@ -87,14 +87,13 @@ export function restartDetached(options: LifecycleKillOptions = {}): void {
   ];
   const entryScript = candidateEntryScripts.find((p) => fs.existsSync(p)) ?? candidateEntryScripts[0];
 
-  const env = buildGatewayChildEnv(config);
-  if (options.takePort) env.JINN_TAKE_PORT = "1";
-  else delete env.JINN_TAKE_PORT;
+  const args = [entryScript];
+  if (options.takePort) args.push("--take-port");
 
-  const child = spawn(process.execPath, [entryScript], {
+  const child = spawn(process.execPath, args, {
     detached: true,
     stdio: "ignore",
-    env,
+    env: buildGatewayChildEnv(config),
   });
 
   if (child.pid) {
@@ -245,15 +244,7 @@ function assertPidBelongsToThisInstance(
 }
 
 function sameJinnHome(a: string, b: string): boolean {
-  return normalizeJinnHomeForCompare(a) === normalizeJinnHomeForCompare(b);
-}
-
-function normalizeJinnHomeForCompare(home: string): string {
-  try {
-    return fs.realpathSync.native(home);
-  } catch {
-    return path.resolve(home);
-  }
+  return canonicalizeJinnHome(a) === canonicalizeJinnHome(b);
 }
 
 function pidIsAlive(pid: number): boolean {

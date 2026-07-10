@@ -5,6 +5,7 @@ import os from "node:os";
 import type { InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
+import { buildEngineChildEnv } from "../shared/child-env.js";
 import { tailTranscriptLines, type TranscriptTailer } from "./transcript-tailer.js";
 import { prepareGrokProjectMcpConfig, cleanupGrokProjectMcpConfig, grokJinnSessionEnv, type GrokMcpAttachHandle } from "./grok-mcp.js";
 
@@ -753,12 +754,7 @@ export class GrokEngine implements InterruptibleEngine {
   }
 
   private buildCleanEnv(sessionId?: string): Record<string, string> {
-    const cleanEnv: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
-      if (k === "CODEX" || k.startsWith("CODEX_")) continue;
-      if (v !== undefined) cleanEnv[k] = v;
-    }
+    const cleanEnv = buildEngineChildEnv(process.env, { scrubClaudeCode: true, scrubCodex: true });
     if (sessionId) cleanEnv.JINN_SESSION_ID = sessionId;
     cleanEnv.GROK_CLAUDE_MCPS_ENABLED = "false";
     cleanEnv.GROK_CURSOR_MCPS_ENABLED = "false";

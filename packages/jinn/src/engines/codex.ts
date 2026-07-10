@@ -6,6 +6,7 @@ import type { InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta, Res
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import { CODEX_HOMES_DIR } from "../shared/paths.js";
+import { buildEngineChildEnv } from "../shared/child-env.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
 
 const CODEX_SESSIONS_DIR = path.join(os.homedir(), ".codex", "sessions");
@@ -312,12 +313,7 @@ export function codexChildEnv(
   sessionId?: string,
   codexHome?: string,
 ): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(baseEnv)) {
-    if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
-    if (k === "CODEX" || k.startsWith("CODEX_")) continue;
-    if (v !== undefined) env[k] = v;
-  }
+  const env = buildEngineChildEnv(baseEnv, { scrubClaudeCode: true, scrubCodex: true });
   if (sessionId) env.JINN_SESSION_ID = sessionId;
   if (codexHome) env.CODEX_HOME = codexHome;
   return env;

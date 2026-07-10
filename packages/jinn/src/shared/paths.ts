@@ -1,5 +1,6 @@
 import path from "node:path";
 import os from "node:os";
+import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -13,9 +14,23 @@ const __dirname = path.dirname(__filename);
  * call this directly instead of reading the frozen constant.
  */
 export function resolveJinnHome(): string {
-  if (process.env.JINN_HOME) return process.env.JINN_HOME;
+  if (process.env.JINN_HOME) return canonicalizeJinnHome(process.env.JINN_HOME);
   const instance = process.env.JINN_INSTANCE || "jinn";
-  return path.join(os.homedir(), `.${instance}`);
+  return canonicalizeJinnHome(path.join(os.homedir(), `.${instance}`));
+}
+
+export function canonicalizeJinnHome(home: string): string {
+  const absolute = path.resolve(home);
+  try {
+    return fs.realpathSync.native(absolute);
+  } catch {
+    const parent = path.dirname(absolute);
+    try {
+      return path.join(fs.realpathSync.native(parent), path.basename(absolute));
+    } catch {
+      return absolute;
+    }
+  }
 }
 
 export const JINN_HOME = resolveJinnHome();

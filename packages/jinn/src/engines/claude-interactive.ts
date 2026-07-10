@@ -7,6 +7,7 @@ import { logger } from "../shared/logger.js";
 import { JINN_HOME, CLAUDE_SETTINGS_DIR, HOOK_RELAY_SCRIPT, CLAUDE_LIMITS_DIR } from "../shared/paths.js";
 import { cleanupSessionSettings, writeSessionSettings } from "../shared/claude-settings.js";
 import { resolveBin } from "../shared/resolve-bin.js";
+import { buildEngineChildEnv } from "../shared/child-env.js";
 import { PtyLifecycleManager, type PtyHandle } from "./pty-lifecycle.js";
 import { PtyStreamManager, createPtyHandle, setCapped } from "./pty-stream.js";
 import type { PtyControlEvent, PtyViewEngine, PtyIdleSpawnOpts } from "./pty-view-engine.js";
@@ -828,15 +829,13 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
    *  forward proxy on 127.0.0.1 — subscription OAuth token is passed separately
    *  by claude, so this stays cc_entrypoint=cli / subsidy-safe (verified Item A). */
   private buildPtyEnv(proxyPort?: number, sessionId?: string): Record<string, string> {
-    const env: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
+    const env = buildEngineChildEnv(process.env, {
+      scrubClaudeCode: true,
       // Belt-and-suspenders: a stray API key/token would flip the child to metered
       // API billing instead of the Max subscription. Strip both so the PTY session
       // always resolves to subscription auth (cc_entrypoint=cli).
-      if (k === "ANTHROPIC_API_KEY" || k === "ANTHROPIC_AUTH_TOKEN") continue;
-      if (v !== undefined) env[k] = v;
-    }
+      denyExact: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+    });
     // Use claude's main-screen renderer (NOT the alt-screen fullscreen one).
     // xterm.js's `scrollback` ring only applies to the main buffer — the alt
     // screen has no scrollback at all, so wheel-scroll in our CLI view is

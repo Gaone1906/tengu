@@ -10,6 +10,7 @@
 import { loadConfig } from "../shared/config.js";
 import { stopAndWait, startDaemon, waitForDashboardReady, waitForPortFree, waitForPortListening } from "./lifecycle.js";
 import { closeLogger, configureLogger, logger } from "../shared/logger.js";
+import { restartEntryTakePortFromArgv } from "./restart-entry-options.js";
 
 // stdio is ignored in detached mode — surface crashes to the log file instead of
 // letting them vanish.
@@ -25,7 +26,7 @@ async function main(): Promise<number> {
   const config = loadConfig();
   configureLogger({ level: config.logging.level, stdout: false, file: true });
   const port = config.gateway?.port ?? 7777;
-  const takePort = process.env.JINN_TAKE_PORT === "1";
+  const takePort = restartEntryTakePortFromArgv();
 
   logger.info("restart-entry: stopping current gateway…");
   // Waits for the old process to actually exit before removing the PID file,

@@ -6,6 +6,7 @@ import type { InterruptibleEngine, EngineRunOpts, EngineResult } from "../shared
 import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import { JINN_HOME } from "../shared/paths.js";
+import { buildEngineChildEnv } from "../shared/child-env.js";
 import { cleanupPiJinnMcpExtension, piJinnSessionEnv, writePiJinnMcpExtension, type PiMcpExtensionHandle } from "./pi-mcp.js";
 
 interface LiveProcess {
@@ -404,12 +405,7 @@ export class PiEngine implements InterruptibleEngine {
   }
 
   private buildCleanEnv(sessionId?: string): Record<string, string> {
-    const cleanEnv: Record<string, string> = {};
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) continue;
-      if (k === "CODEX" || k.startsWith("CODEX_")) continue;
-      if (v !== undefined) cleanEnv[k] = v;
-    }
+    const cleanEnv = buildEngineChildEnv(process.env, { scrubClaudeCode: true, scrubCodex: true });
     if (sessionId) cleanEnv.JINN_SESSION_ID = sessionId;
     return cleanEnv;
   }
