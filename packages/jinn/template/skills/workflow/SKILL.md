@@ -68,14 +68,15 @@ jinn workflow run <name> --input '{"candidate":"v2.4.0"}' --idempotency-key 'rel
 
 - Call `list_workflow_runs` with `workflowId` to find recent runs.
 - Call `get_workflow_run` with `workflowId` and `runId` for the current status, ordered `steps[]` receipts, errors, and linked phase-session evidence.
-- `running` means work is still in flight. `parked` means a human decision is required. `completed` is terminal success. `failed` is an honest terminal failure; report the failed phase and `errors[]` instead of papering over it.
+- `running` means work is still in flight. `parked` means the run is waiting on a routed Todo approval. `completed` is terminal success. `failed` is an honest terminal failure; report the failed phase and `errors[]` instead of papering over it.
 - Do not busy-poll. Check when asked, when a callback/event wakes the session, or at a sensible operational boundary.
 - Report the canonical name, run id, terminal status, evidence/artifacts, and any failed or parked phase.
 
 ## Loops, gates, and triggers
 
 - Every loop must be bounded with `loop.maxRoundsPerRun`. Give it a deterministic exit gate where possible. Exhausting the bound must remain a visible failure, not silent success.
-- Approval gates are human-only. Agents can observe a parked run with `get_workflow_run` but must route the decision to the operator; never self-approve.
+- When an approval gate parks a run, Jinn mirrors it as a pending approval on the run's Todo. The routed manager/COO can call `decide_work_item_approval` with that Todo id and `decision: "approve"` or `decision: "reject"`; the decision resolves the workflow gate and clears the mirror. A worker or Todo owner cannot decide their own approval.
+- Do not substitute `update_work_item` for a gate decision: it does not resolve the mirrored workflow gate. If the routed manager/COO deliberately needs operator/aCEO involvement, call `escalate_work_item_approval`; operator escalation is not the default path for every gate.
 - Choose the wake-up that matches the job: `manual`, `schedule`, `todo-status`, `event`, or `poll`.
   - A schedule-backed SOP is synchronized to its managed cron trigger.
   - Event/webhook and poll bindings can be inspected with `list_triggers`; use `create_trigger` only for supported webhook or poll bindings.
@@ -84,4 +85,4 @@ jinn workflow run <name> --input '{"candidate":"v2.4.0"}' --idempotency-key 'rel
 
 ## Stop and escalate
 
-Stop and ask the manager/COO when authority is unclear, a human gate is parked, a requested loop has no safe bound, or the requested trigger would execute an unapproved command. Include the definition name/version and run id in the escalation.
+Stop and ask the routed manager/COO when authority is unclear, a requested loop has no safe bound, or the requested trigger would execute an unapproved command. For a pending approval that truly needs operator/aCEO authority, use `escalate_work_item_approval`. Include the definition name/version, Todo id, and run id in the escalation.

@@ -127,6 +127,8 @@ describe("template company doctrine", () => {
           "run_workflow_by_name",
           "list_workflow_runs",
           "get_workflow_run",
+          "decide_work_item_approval",
+          "escalate_work_item_approval",
           "jinn workflow run <name>",
           "idempotencyKey",
           "PLAN",
@@ -145,6 +147,9 @@ describe("template company doctrine", () => {
           "assign_work_item",
           "update_work_item",
           "archive_work_item",
+          "request_work_item_approval",
+          "decide_work_item_approval",
+          "escalate_work_item_approval",
           "in_review",
           "blocked",
           "escalated",
@@ -162,6 +167,7 @@ describe("template company doctrine", () => {
           "read_session",
           "stop_session",
           "idempotencyKey",
+          "managed file IDs",
         ],
       },
     ];
@@ -180,6 +186,21 @@ describe("template company doctrine", () => {
       expect(content, rel).not.toContain("gateway API");
       for (const expected of tools) expect(content, `${rel}: ${expected}`).toContain(expected);
     }
+
+    const workflowSkill = readTemplate("skills/workflow/SKILL.md");
+    expect(workflowSkill).not.toContain("Approval gates are human-only");
+    expect(workflowSkill).not.toContain("must route the decision to the operator");
+    expect(workflowSkill).toContain("routed manager/COO");
+    expect(workflowSkill).toContain("cannot decide their own approval");
+
+    const todoSkill = readTemplate("skills/todo-handling/SKILL.md");
+    expect(todoSkill).toContain("identical pending request");
+    expect(todoSkill).toContain("does not perform approval decisions");
+    expect(todoSkill).toContain("mirrored workflow gate");
+    expect(todoSkill).toContain("maxRounds");
+
+    const delegationSkill = readTemplate("skills/delegation/SKILL.md");
+    expect(delegationSkill).toContain("never workspace or absolute paths");
 
     const setup = fs.readFileSync(path.join(process.cwd(), "src", "cli", "setup.ts"), "utf-8");
     expect(setup).toContain('copyTemplateDir(path.join(TEMPLATE_DIR, "skills"), SKILLS_DIR');

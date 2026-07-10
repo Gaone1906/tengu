@@ -29,7 +29,7 @@ Use `delegate_task` for company work that needs ownership, status, review, or a 
 
 - Pass `workItemId` when an existing Todo already tracks the outcome.
 - Use one stable `idempotencyKey` for retrying the same delegation. If a spawn fails after the Todo is minted, preserve and report the returned work-item id; do not blindly create another delegation.
-- Attach only files the child genuinely needs.
+- If you pass `attachments`, every entry must be a managed file ID returned by `list_files` — never workspace or absolute paths. Missing or stale managed file IDs are rejected before Jinn creates the Todo or child session. Attach only files the child genuinely needs.
 
 Use `spawn_session` for a quick, untracked question or short consultation:
 
