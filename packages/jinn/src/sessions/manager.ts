@@ -678,7 +678,7 @@ export class SessionManager {
 
               await connector.replyMessage(target, retryText).catch(() => {});
               const retryCompletedAt = new Date().toISOString();
-              if (retryResult.sessionId?.trim()) {
+              if (!retryResult.error && retryResult.sessionId?.trim()) {
                 recordEngineSessionId(session.id, engineAtTurnStart, retryResult.sessionId, {
                   model: session.model ?? engineConfig.model,
                   effortLevel,
@@ -747,7 +747,7 @@ export class SessionManager {
       }
       const completedAt = new Date().toISOString();
       const acceptedNativeId = result.sessionId?.trim() || resumeRefAtTurnStart.id;
-      if (!wasInterrupted && acceptedNativeId) {
+      if (!wasInterrupted && !result.error && acceptedNativeId) {
         recordEngineSessionId(session.id, engineAtTurnStart, acceptedNativeId, {
           model: modelForTurn,
           effortLevel,

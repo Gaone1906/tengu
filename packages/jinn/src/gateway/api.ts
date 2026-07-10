@@ -5728,7 +5728,7 @@ async function runWebSession(
             }
 
             const retryCompletedAt = new Date().toISOString();
-            if (retryResult.sessionId?.trim()) {
+            if (!retryResult.error && retryResult.sessionId?.trim()) {
               recordEngineSessionId(currentSession.id, engineAtTurnStart, retryResult.sessionId, {
                 model: modelForTurn,
                 effortLevel,
@@ -5817,7 +5817,7 @@ async function runWebSession(
 
     const completedAt = new Date().toISOString();
     const acceptedNativeId = result.sessionId?.trim() || resumeRefAtTurnStart.id;
-    if (!quietPreempted && acceptedNativeId) {
+    if (!quietPreempted && !result.error && acceptedNativeId) {
       recordEngineSessionId(currentSession.id, engineAtTurnStart, acceptedNativeId, {
         model: modelForTurn,
         effortLevel,

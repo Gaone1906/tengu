@@ -3,10 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   Connector,
   Engine,
+  EngineResult,
   EngineRunOpts,
   IncomingMessage,
   JinnConfig,
@@ -15,6 +16,15 @@ import type {
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-platform-dispatch-"));
 process.env.JINN_HOME = home;
+
+vi.mock("../../shared/rateLimit.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../shared/rateLimit.js")>();
+  return {
+    ...actual,
+    computeNextRetryDelayMs: () => ({ delayMs: 0 }),
+    computeRateLimitDeadlineMs: () => Date.now() + 60_000,
+  };
+});
 
 type Registry = typeof import("../registry.js");
 type ManagerModule = typeof import("../manager.js");
@@ -44,12 +54,16 @@ function makeConfig(port = 7799): JinnConfig {
   } as JinnConfig;
 }
 
-function capturingEngine(name: string, runs: EngineRunOpts[]): Engine {
+function capturingEngine(
+  name: string,
+  runs: EngineRunOpts[],
+  resultForRun: (runNumber: number) => EngineResult = () => ({ sessionId: `${name}-native`, result: "ok" }),
+): Engine {
   return {
     name,
     run: async (opts) => {
       runs.push(opts);
-      return { sessionId: `${name}-native`, result: "ok" };
+      return resultForRun(runs.length);
     },
   };
 }
@@ -137,6 +151,13 @@ async function waitForRuns(runs: EngineRunOpts[], count: number): Promise<void> 
   expect(runs).toHaveLength(count);
 }
 
+async function waitForStatus(sessionId: string, status: "idle" | "error"): Promise<void> {
+  for (let i = 0; i < 100 && registry.getSession(sessionId)?.status !== status; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  expect(registry.getSession(sessionId)?.status).toBe(status);
+}
+
 beforeAll(async () => {
   registry = await import("../registry.js");
   managerModule = await import("../manager.js");
@@ -149,6 +170,71 @@ beforeEach(() => {
 });
 
 describe("SessionManager platform context dispatch", () => {
+  it("keeps a refresh pending when a rate-limit retry fails", async () => {
+    const runs: EngineRunOpts[] = [];
+    const results: EngineResult[] = [
+      { sessionId: "codex-native", result: "ok" },
+      { sessionId: "codex-native", result: "", error: "usage limit", rateLimit: { status: "rejected" } },
+      { sessionId: "codex-native", result: "", error: "transient retry failure", cost: 0.01 },
+      { sessionId: "codex-native", result: "ok" },
+      { sessionId: "codex-native", result: "ok" },
+    ];
+    const engine = capturingEngine("codex", runs, (runNumber) => results[runNumber - 1]);
+    const manager = new managerModule.SessionManager(makeConfig(), new Map([["codex", engine]]), [], "boot-a" as any);
+    const connector = connectorStub();
+
+    await manager.route(incoming("initial success"), connector);
+    const session = registry.getSessionBySessionKey("test:platform-context")!;
+    const initialFingerprint = registry.getEngineSessionRef(session, "codex").platformContextFingerprint;
+
+    manager.setConfig(makeConfig(7800));
+    await manager.route(incoming("failed retry refresh"), connector);
+    expect(runs.slice(1, 3).map(headingCount)).toEqual([1, 1]);
+    expect(registry.getEngineSessionRef(registry.getSession(session.id)!, "codex").platformContextFingerprint).toBe(initialFingerprint);
+
+    await manager.route(incoming("successful refresh"), connector);
+    expect(headingCount(runs[3])).toBe(1);
+    const acceptedFingerprint = registry.getEngineSessionRef(registry.getSession(session.id)!, "codex").platformContextFingerprint;
+    expect(acceptedFingerprint).not.toBe(initialFingerprint);
+
+    await manager.route(incoming("stable after success"), connector);
+    expect(headingCount(runs[4])).toBe(0);
+  });
+
+  it("keeps a failed refresh pending until a successful turn accepts it", async () => {
+    const runs: EngineRunOpts[] = [];
+    let failNext = false;
+    const engine = capturingEngine("codex", runs, () => {
+      if (failNext) {
+        failNext = false;
+        return { sessionId: "codex-native", result: "", error: "transient engine failure", cost: 0.01 };
+      }
+      return { sessionId: "codex-native", result: "ok" };
+    });
+    const engines = new Map<string, Engine>([["codex", engine]]);
+    const manager = new managerModule.SessionManager(makeConfig(), engines, [], "boot-a" as any);
+    const connector = connectorStub();
+
+    await manager.route(incoming("initial success"), connector);
+    const session = registry.getSessionBySessionKey("test:platform-context")!;
+    const initialFingerprint = registry.getEngineSessionRef(session, "codex").platformContextFingerprint;
+
+    manager.setConfig(makeConfig(7800));
+    failNext = true;
+    await manager.route(incoming("failed refresh"), connector);
+    expect(headingCount(runs[1])).toBe(1);
+    expect(registry.getEngineSessionRef(registry.getSession(session.id)!, "codex").platformContextFingerprint).toBe(initialFingerprint);
+
+    await manager.route(incoming("successful refresh"), connector);
+    expect(headingCount(runs[2])).toBe(1);
+    const acceptedFingerprint = registry.getEngineSessionRef(registry.getSession(session.id)!, "codex").platformContextFingerprint;
+    expect(acceptedFingerprint).not.toBe(initialFingerprint);
+
+    await manager.route(incoming("stable after success"), connector);
+    expect(headingCount(runs[3])).toBe(0);
+    expect(registry.getEngineSessionRef(registry.getSession(session.id)!, "codex").platformContextFingerprint).toBe(acceptedFingerprint);
+  });
+
   it("refreshes exactly once per relevant mismatch and preserves per-engine fingerprints", async () => {
     const alphaRuns: EngineRunOpts[] = [];
     const betaRuns: EngineRunOpts[] = [];
@@ -216,6 +302,124 @@ describe("SessionManager platform context dispatch", () => {
 });
 
 describe("web API platform context dispatch", () => {
+  it("keeps a refresh pending when a rate-limit retry fails", async () => {
+    const runs: EngineRunOpts[] = [];
+    const results: EngineResult[] = [
+      { sessionId: "codex-native", result: "ok" },
+      { sessionId: "codex-native", result: "", error: "usage limit", rateLimit: { status: "rejected" } },
+      { sessionId: "codex-native", result: "", error: "transient retry failure", cost: 0.01 },
+      { sessionId: "codex-native", result: "ok" },
+      { sessionId: "codex-native", result: "ok" },
+    ];
+    const engine = capturingEngine("codex", runs, (runNumber) => results[runNumber - 1]);
+    const queue = new (await import("../queue.js")).SessionQueue();
+    let config = makeConfig();
+    const context = {
+      config,
+      gatewayBootId: "boot-a",
+      getConfig: () => config,
+      connectors: new Map(),
+      startTime: Date.now(),
+      gatewayAuthToken: "test-token",
+      emit: () => {},
+      sessionManager: {
+        getEngine: () => engine,
+        getEngines: () => new Map([["codex", engine]]),
+        getQueue: () => queue,
+      },
+    } as unknown as import("../../gateway/api.js").ApiContext;
+
+    const created = await request(context, "POST", "/api/sessions", {
+      prompt: "initial success",
+      engine: "codex",
+      model: "model-alpha",
+    });
+    const sessionId = created.body.id as string;
+    await waitForRuns(runs, 1);
+    await waitForStatus(sessionId, "idle");
+    const initialFingerprint = registry.getEngineSessionRef(registry.getSession(sessionId)!, "codex").platformContextFingerprint;
+
+    config = makeConfig(7800);
+    context.config = config;
+    await request(context, "POST", `/api/sessions/${sessionId}/message`, { message: "failed retry refresh" });
+    await waitForRuns(runs, 3);
+    await waitForStatus(sessionId, "error");
+    expect(runs.slice(1, 3).map(headingCount)).toEqual([1, 1]);
+    expect(registry.getEngineSessionRef(registry.getSession(sessionId)!, "codex").platformContextFingerprint).toBe(initialFingerprint);
+
+    await request(context, "POST", `/api/sessions/${sessionId}/message`, { message: "successful refresh" });
+    await waitForRuns(runs, 4);
+    await waitForStatus(sessionId, "idle");
+    expect(headingCount(runs[3])).toBe(1);
+    const acceptedFingerprint = registry.getEngineSessionRef(registry.getSession(sessionId)!, "codex").platformContextFingerprint;
+    expect(acceptedFingerprint).not.toBe(initialFingerprint);
+
+    await request(context, "POST", `/api/sessions/${sessionId}/message`, { message: "stable after success" });
+    await waitForRuns(runs, 5);
+    await waitForStatus(sessionId, "idle");
+    expect(headingCount(runs[4])).toBe(0);
+  });
+
+  it("keeps a failed refresh pending until a successful turn accepts it", async () => {
+    const runs: EngineRunOpts[] = [];
+    let failNext = false;
+    const engine = capturingEngine("codex", runs, () => {
+      if (failNext) {
+        failNext = false;
+        return { sessionId: "codex-native", result: "", error: "transient engine failure", cost: 0.01 };
+      }
+      return { sessionId: "codex-native", result: "ok" };
+    });
+    const queue = new (await import("../queue.js")).SessionQueue();
+    let config = makeConfig();
+    const context = {
+      config,
+      gatewayBootId: "boot-a",
+      getConfig: () => config,
+      connectors: new Map(),
+      startTime: Date.now(),
+      gatewayAuthToken: "test-token",
+      emit: () => {},
+      sessionManager: {
+        getEngine: () => engine,
+        getEngines: () => new Map([["codex", engine]]),
+        getQueue: () => queue,
+      },
+    } as unknown as import("../../gateway/api.js").ApiContext;
+
+    const created = await request(context, "POST", "/api/sessions", {
+      prompt: "initial success",
+      engine: "codex",
+      model: "model-alpha",
+    });
+    const sessionId = created.body.id as string;
+    await waitForRuns(runs, 1);
+    await waitForStatus(sessionId, "idle");
+    const initialFingerprint = registry.getEngineSessionRef(registry.getSession(sessionId)!, "codex").platformContextFingerprint;
+
+    config = makeConfig(7800);
+    context.config = config;
+    failNext = true;
+    await request(context, "POST", `/api/sessions/${sessionId}/message`, { message: "failed refresh" });
+    await waitForRuns(runs, 2);
+    await waitForStatus(sessionId, "error");
+    expect(headingCount(runs[1])).toBe(1);
+    expect(registry.getEngineSessionRef(registry.getSession(sessionId)!, "codex").platformContextFingerprint).toBe(initialFingerprint);
+
+    await request(context, "POST", `/api/sessions/${sessionId}/message`, { message: "successful refresh" });
+    await waitForRuns(runs, 3);
+    await waitForStatus(sessionId, "idle");
+    expect(headingCount(runs[2])).toBe(1);
+    const acceptedFingerprint = registry.getEngineSessionRef(registry.getSession(sessionId)!, "codex").platformContextFingerprint;
+    expect(acceptedFingerprint).not.toBe(initialFingerprint);
+
+    await request(context, "POST", `/api/sessions/${sessionId}/message`, { message: "stable after success" });
+    await waitForRuns(runs, 4);
+    await waitForStatus(sessionId, "idle");
+    expect(headingCount(runs[3])).toBe(0);
+    expect(registry.getEngineSessionRef(registry.getSession(sessionId)!, "codex").platformContextFingerprint).toBe(acceptedFingerprint);
+  });
+
   it("persists accepted fingerprints and emits one refresh after config or boot changes", async () => {
     const runs: EngineRunOpts[] = [];
     const engine = capturingEngine("codex", runs);
