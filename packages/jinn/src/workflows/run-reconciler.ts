@@ -17,6 +17,7 @@ import {
   markFollowUpDeferred,
   markRunning,
   markSpawnFailure,
+  requestWorkflowRunTerminal,
   mintSequentialRun,
   resolveParkedGate,
   sharedSessionKey,
@@ -179,7 +180,7 @@ function applyTodoTransitions(
   after: WorkflowRun,
 ): WorkflowRun {
   const triggerTodoId = workflowRunTriggerTodoId(after);
-  if (!triggerTodoId || after.status === 'failed' || after.status === 'cancelled') return after;
+  if (!triggerTodoId || after.status === 'failed' || after.status === 'cancelled' || after.stopping) return after;
   const beforeSettled = settledStepKeys(before);
   let current = after;
   for (const receipt of after.steps) {
@@ -196,19 +197,11 @@ function applyTodoTransitions(
       });
     } catch (err) {
       const now = deps.now ?? (() => new Date().toISOString());
-      current = {
-        ...current,
-        status: 'failed',
-        endedAt: now(),
-        errors: [
-          ...(current.errors ?? []),
-          {
-            code: 'todo-transition-failed',
-            message: `step "${receipt.nodeId}" could not transition Todo ${triggerTodoId} to ${toStatus}: ${(err as Error).message}`,
-            ref: receipt.nodeId,
-          },
-        ],
-      };
+      current = requestWorkflowRunTerminal(current, 'failed', [{
+        code: 'todo-transition-failed',
+        message: `step "${receipt.nodeId}" could not transition Todo ${triggerTodoId} to ${toStatus}: ${(err as Error).message}`,
+        ref: receipt.nodeId,
+      }], now());
       saveRun(deps.root, current);
       return current;
     }
@@ -422,11 +415,13 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
     });
     current = result.run;
     if (result.changed) saveRun(deps.root, current);
+    let transitionRequestedStop = false;
     if (result.changed) {
       const progressed = applyTodoTransitions(deps, def, beforeAdvance, current);
       if (progressed !== current) {
         current = progressed;
         if (current.status !== 'running') return current;
+        transitionRequestedStop = !!current.stopping && !beforeAdvance.stopping;
       }
     }
 
@@ -449,6 +444,10 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
         deps.log?.('warn', `[workflow-runs] run ${current.runId}: stopping step session ${stop.sessionKey} failed: ${(err as Error).message}`);
       }
     }
+    // A Todo-transition failure can be discovered after the planner already
+    // collected this pass's dispatch batch. Re-plan under `stopping` before using
+    // those stale intents; a failing run must never start new siblings.
+    if (transitionRequestedStop) continue;
     // Quiescent only when a pass neither changed state nor asked for a dispatch. A
     // changed-but-dispatchless pass (a settle at an undecided loop boundary, a loop
     // splice, a loopExit stamp — GRS-014e; a drain settle or a parked probe-only
@@ -841,8 +840,8 @@ export type ResolveGateOutcome =
  * settles as operator-approved checkpoint / runGate key recorded), the record is
  * persisted, and the run is DRIVEN forward through the same driver path the sweep
  * uses (compiled from the frozen definitionSnapshot; the store is only a legacy
- * fallback). reject → the run persists as `failed` with the operator-rejection
- * receipt; nothing is driven (rejection is terminal).
+ * fallback). reject → the operator-rejection receipt requests a failed terminal;
+ * any live siblings are cancelled/probed through the ordinary stopping drain.
  */
 export async function resolveWorkflowRunGate(
   deps: RunDriverDeps,
@@ -858,9 +857,9 @@ export async function resolveWorkflowRunGate(
     const resolved = resolveParkedGate(run, decision, now, opts);
     if (!resolved.ok) return { outcome: 'not-parked' as const, run };
 
-    saveRun(deps.root, resolved.run); // the decision is durable before any drive
+    saveRun(deps.root, resolved.run); // the decision/drain request is durable before any drive
     if (resolved.run.status !== 'running') {
-      return { outcome: 'resolved' as const, run: resolved.run }; // rejection — terminal
+      return { outcome: 'resolved' as const, run: resolved.run }; // already drained rejection — terminal
     }
 
     const def = resolved.run.definitionSnapshot ?? deps.getDefinition(deps.root, workflowId);

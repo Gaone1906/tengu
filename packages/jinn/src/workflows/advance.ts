@@ -457,6 +457,46 @@ export interface AdvanceResult {
   stops?: StopIntent[];
 }
 
+export interface WorkflowRunTerminalError {
+  code: string;
+  message: string;
+  ref?: string;
+}
+
+/**
+ * The single transition for a requested run terminal. Live receipts force the run
+ * through `stopping`; only an already-drained run receives its terminal receipt.
+ */
+export function requestWorkflowRunTerminal(
+  run: WorkflowRun,
+  to: 'failed' | 'cancelled',
+  errors: WorkflowRunTerminalError[],
+  at: string,
+): WorkflowRun {
+  const next: WorkflowRun = { ...run, steps: run.steps.map((receipt) => ({ ...receipt })), parked: null };
+  cancelWaitingReceipts(next.steps, at);
+  const pendingErrors = [...(next.stopping?.errors ?? []), ...errors];
+  if (next.steps.some((receipt) => IN_FLIGHT_STEP_STATUSES.has(receipt.status))) {
+    return {
+      ...next,
+      status: 'running',
+      endedAt: null,
+      stopping: {
+        to: next.stopping?.to ?? to,
+        at: next.stopping?.at ?? at,
+        errors: pendingErrors,
+      },
+    };
+  }
+  return {
+    ...next,
+    status: to,
+    endedAt: at,
+    errors: [...(next.errors ?? []), ...pendingErrors],
+    ...(next.stopping ? { stopping: { ...next.stopping, errors: [] } } : {}),
+  };
+}
+
 /**
  * Cancel every `waiting` receipt on a run that is ending (GRS-016d): a wait holds
  * NO session, so nothing ever drains it — left alone it would sit non-terminal
@@ -1468,6 +1508,18 @@ export function advanceRun(
             continue;
           }
         }
+        if (next.stopping && step?.sessionMode !== 'existing') {
+          stops.push({
+            nodeId: receipt.nodeId,
+            attempt,
+            round: receipt.round ?? 1,
+            ...(receipt.sessionId ?? p.sessionId ? { sessionId: receipt.sessionId ?? p.sessionId } : {}),
+            sessionKey: step?.sessionMode === 'workflow'
+              ? sharedSessionKey(run.runId)
+              : sessionKey,
+            reason: `run-stopping: terminal ${next.stopping.to} requested`,
+          });
+        }
         sequentialFrontBlocked = true;
         continue; // in flight — later receipts may still settle/dispatch (budget > 1)
       }
@@ -1875,9 +1927,9 @@ export interface ResolveParkedGateOptions {
  *     durable approval — the terminal check skips it) and the run returns to `running`;
  *     the next advance pass either completes the run or parks on the NEXT unresolved
  *     blocking run gate (multi-gate definitions resolve one at a time, honestly).
- *   reject (either scope)    → the run FAILS with `gate-rejected`; a gateNode's
- *     receipt records "rejected by operator". Rejection is terminal — re-running the
- *     workflow is a new run.
+ *   reject (either scope)    → request a failed terminal with `gate-rejected`; a
+ *     gateNode's receipt records "rejected by operator". Live siblings are first
+ *     cancelled/probed through `stopping`; re-running the workflow is a new run.
  *
  * Parked runs are excluded from sweeps (nothing polls a human) — this transition is
  * the ONLY way a parked run moves again.
@@ -1906,21 +1958,14 @@ export function resolveParkedGate(
         receipt.at = at;
       }
     }
-    // A rejected run never honors a pause (GRS-016d): a `waiting` sibling would
-    // otherwise sit non-terminal inside this terminal record.
-    cancelWaitingReceipts(next.steps, at);
-    next.status = 'failed';
-    next.endedAt = at;
-    next.parked = null;
-    next.errors = [
-      ...(next.errors ?? []),
-      {
+    return {
+      ok: true,
+      run: requestWorkflowRunTerminal(next, 'failed', [{
         code: 'gate-rejected',
         message: `${decidedBy} rejected the ${parked.scope === 'runGate' ? 'workflow run gate' : `gate "${parked.nodeId}"`}: ${parked.description}`,
         ...(parked.nodeId ? { ref: parked.nodeId } : {}),
-      },
-    ];
-    return { ok: true, run: next };
+      }], at),
+    };
   }
 
   // approve

@@ -266,6 +266,46 @@ describe('parallel fan-out through the real driver (GRS-016a)', () => {
     expect((resolved as { run: { status: string } }).run.status).toBe('completed');
   });
 
+  it('gate rejection drains a live sibling before writing the failed terminal', async () => {
+    const def = createDefinition(root, {
+      schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
+      id: 'reject-inflight', title: 'reject-inflight', version: 1, status: 'active',
+      nodes: [
+        trigger, step('a'),
+        { id: 'g', type: 'gate', label: 'G', position: { x: 0, y: 0 }, gate: { kind: 'approval', description: 'approve', approvalRef: 'ap' } },
+        step('c'),
+      ],
+      edges: [e('trg', 'a'), e('a', 'g'), e('trg', 'c')],
+      concurrency: 2,
+    }, { now });
+    const { deps, settle } = harness();
+    const stopped: string[] = [];
+    deps.stopStepSession = async (stop) => { stopped.push(stop.nodeId); };
+
+    const started = await startWorkflowRun(deps, def);
+    settle(started.runId, 'a', 1);
+    await sweepWorkflowRuns(deps);
+    expect(getRun(root, def.id, started.runId)?.status).toBe('parked');
+
+    const rejected = await resolveWorkflowRunGate(deps, def.id, started.runId, 'reject');
+    expect(rejected.outcome).toBe('resolved');
+    let run = getRun(root, def.id, started.runId)!;
+    expect(run.status).toBe('running');
+    expect(run.endedAt).toBeNull();
+    expect(run.stopping?.errors).toEqual([
+      expect.objectContaining({ code: 'gate-rejected', ref: 'g' }),
+    ]);
+    expect(run.steps.find((receipt) => receipt.nodeId === 'c')?.status).toBe('running');
+    expect(stopped).toContain('c');
+
+    settle(started.runId, 'c', 1, 'c stopped cleanly');
+    await sweepWorkflowRuns(deps);
+    run = getRun(root, def.id, started.runId)!;
+    expect(run.status).toBe('failed');
+    expect(run.steps.find((receipt) => receipt.nodeId === 'c')?.status).toBe('done');
+    expect(run.errors).toEqual([expect.objectContaining({ code: 'gate-rejected', ref: 'g' })]);
+  });
+
   it('spawn failure on one branch drains instead of freezing the other mid-batch', async () => {
     const def = createDefinition(root, diamondDef('spawnfail-diamond'), { now });
     const { deps, settle, sessions } = harness();

@@ -49,6 +49,15 @@ function inlineStep(id: string, todoTransition: string): WorkflowNode {
     todoTransition: todoTransition as never,
   };
 }
+function plainStep(id: string): WorkflowNode {
+  return {
+    id,
+    type: 'step',
+    label: id.toUpperCase(),
+    position: { x: 0, y: 140 },
+    actor: { kind: 'engine', ref: 'codex' },
+  };
+}
 function chainDef(id: string, nodes: WorkflowNode[]): EditableWorkflowDefinition {
   return {
     schemaVersion: defMod.WORKFLOW_DEFINITION_SCHEMA_VERSION,
@@ -121,6 +130,46 @@ describe('step todoTransition', () => {
     expect(store.getWorkItem(todo.id)?.status).toBe('executing');
     expect(run.status).toBe('failed');
     expect(run.errors?.at(-1)).toMatchObject({ code: 'todo-transition-failed', ref: 'a' });
+  });
+
+  it('an illegal Todo transition drains a live parallel sibling before terminalizing', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jinn-runrec-todo-transition-'));
+    const todo = store.createWorkItem({ title: 'parallel illegal todo', status: 'executing', source: 'human' });
+    const parallel: EditableWorkflowDefinition = {
+      schemaVersion: defMod.WORKFLOW_DEFINITION_SCHEMA_VERSION,
+      id: 'illegal-parallel-todo',
+      title: 'illegal-parallel-todo',
+      version: 1,
+      status: 'active',
+      nodes: [trigger(), step('a', 'assigned'), plainStep('c')],
+      edges: [
+        { id: 'e-a', from: 'trg', to: 'a', kind: 'sequence' },
+        { id: 'e-c', from: 'trg', to: 'c', kind: 'sequence' },
+      ],
+      concurrency: 2,
+    };
+    const def = defStore.createDefinition(root, parallel, { now });
+    const { deps, settle } = harness(root);
+
+    const started = await wf.startWorkflowRun(deps, def, { triggerTodoId: todo.id });
+    settle(started.runId, 'a');
+    await wf.sweepWorkflowRuns(deps);
+    let run = (await import('../run-store.js')).getRun(root, def.id, started.runId)!;
+
+    expect(store.getWorkItem(todo.id)?.status).toBe('executing');
+    expect(run.status).toBe('running');
+    expect(run.endedAt).toBeNull();
+    expect(run.stopping?.errors).toEqual([
+      expect.objectContaining({ code: 'todo-transition-failed', ref: 'a' }),
+    ]);
+    expect(run.steps.find((receipt) => receipt.nodeId === 'c')?.status).toBe('running');
+
+    settle(started.runId, 'c');
+    await wf.sweepWorkflowRuns(deps);
+    run = (await import('../run-store.js')).getRun(root, def.id, started.runId)!;
+    expect(run.status).toBe('failed');
+    expect(run.steps.find((receipt) => receipt.nodeId === 'c')?.status).toBe('done');
+    expect(run.errors).toEqual([expect.objectContaining({ code: 'todo-transition-failed', ref: 'a' })]);
   });
 
   it('a self-triggering todo workflow terminates at escalated via the rounds ceiling', async () => {
