@@ -245,6 +245,7 @@ import { isTalkMuted } from "../talk/mute-state.js";
 import { maybeEmitTalkGraph } from "../talk/graph.js";
 import { onboardingNeeded, applyEngineChoice } from "./onboarding-policy.js";
 import { restartDetached } from "./lifecycle.js";
+import { updateSkillContent } from "./skills.js";
 
 /** Max bytes accepted on /api/internal/hook (loopback-only relay payloads are tiny). */
 const HOOK_BODY_MAX_BYTES = 64 * 1024;
@@ -254,6 +255,8 @@ const AUTH_BODY_MAX_BYTES = 16 * 1024;
 const WORKFLOW_DEFINITION_BODY_MAX_BYTES = 512 * 1024;
 /** Cap for inbound workflow events. Payloads become prompt context, so keep them small. */
 const WORKFLOW_EVENT_BODY_MAX_BYTES = 64 * 1024;
+/** Cap for editable SKILL.md bodies. */
+const SKILL_CONTENT_BODY_MAX_BYTES = 2 * 1024 * 1024;
 const SESSION_LIST_PER_GROUP = 50;
 const BACKGROUND_ACTIVITY_STALE_MS = 5 * 60 * 1000;
 const SUPERSEDED_TURN_META_KEY = "supersededRunningTurnAt";
@@ -1870,6 +1873,7 @@ function operatorOnlyControlPlaneRoute(method: string, pathname: string): string
   if (method === "PATCH" && matchRoute("/api/org/employees/:name", pathname)) return "org employee update";
   if (method === "PUT" && matchRoute("/api/org/departments/:name/board", pathname)) return "legacy org board write";
   if (method === "DELETE" && matchRoute("/api/skills/:name", pathname)) return "skill removal";
+  if (method === "PUT" && matchRoute("/api/skills/:name", pathname)) return "skill update";
   return null;
 }
 
@@ -5207,6 +5211,22 @@ export async function handleApiRequest(
       if (!fs.existsSync(skillMd)) return notFound(res);
       const content = fs.readFileSync(skillMd, "utf-8");
       return json(res, { name: params.name, content });
+    }
+
+    // PUT /api/skills/:name — replace an existing skill's SKILL.md
+    params = matchRoute("/api/skills/:name", pathname);
+    if (method === "PUT" && params) {
+      const parsed = await readJsonBody(req, res, { maxBytes: SKILL_CONTENT_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      const body = parsed.body && typeof parsed.body === "object" && !Array.isArray(parsed.body)
+        ? parsed.body as Record<string, unknown>
+        : {};
+      const result = updateSkillContent(params.name, body.content);
+      if (!result.ok) return json(res, { error: result.error }, result.status);
+      skillDescriptionCache.delete(params.name);
+      context.emit("skills:updated", { name: params.name });
+      logger.info(`Skill updated via API: ${params.name}`);
+      return json(res, { status: "updated", name: params.name, content: result.content });
     }
 
     // DELETE /api/skills/:name — remove a skill
