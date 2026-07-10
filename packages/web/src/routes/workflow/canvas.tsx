@@ -17,7 +17,7 @@ import { CheckCircle2, Circle, Clock, Map as MapIcon, X } from "lucide-react"
 import { stateGlyph } from "./node-card"
 import { nodeStatusLine } from "./status-line"
 import { jinnNodeTypes, type JinnNodeData } from "./node-components"
-import { CanvasControls, useIsCanvasMobile, pickFocusNode, tidyLayout, minimapNodeColor } from "./canvas-view"
+import { CanvasControls, useIsCanvasMobile, tidyLayout, minimapNodeColor } from "./canvas-view"
 
 import type { WorkflowRunView, WorkflowStepView, WorkflowGateResult } from "@/lib/api"
 import {
@@ -382,7 +382,6 @@ export function WorkflowCanvas({
   selectedId,
   onSelect,
   edges,
-  activeNodeId,
   minimap = true,
   controls = true,
 }: {
@@ -391,8 +390,6 @@ export function WorkflowCanvas({
   onSelect: (id: string) => void
   /** Real definition edges (run snapshot topology); absent = declaration chain. */
   edges?: CanvasEdgeSpec[]
-  /** Node the mobile canvas opens focused on; absent = the picker chooses. */
-  activeNodeId?: string | null
   minimap?: boolean
   controls?: boolean
 }) {
@@ -426,20 +423,15 @@ export function WorkflowCanvas({
 
   type Inst = ReactFlowInstance<FlowNode<JinnNodeData>, FlowEdge>
   const instanceRef = useRef<Inst | null>(null)
-  const focus = useMemo(() => pickFocusNode(expNodes, activeNodeId), [expNodes, activeNodeId])
 
-  // Open framing: desktop fits the whole graph; mobile opens FOCUSED on the most
-  // relevant node at a readable zoom (operator decision 1) — the minimap carries
-  // the whole-shape overview, fit is one tap away. Never a fit-tiny phone canvas.
+  // Open framing: EVERY breakpoint fits the whole graph. A phone that opens
+  // zoomed onto one node reads as "the graph is off-screen" (QA re-verify);
+  // focused-node framing belongs to explicit user actions, never the mount —
+  // pinch-zoom and the minimap carry the close-up from there.
   const onInit = useCallback((inst: Inst) => {
     instanceRef.current = inst
-    if (isMobile && focus?.position) {
-      const { w, h } = nodeGeometry(focus)
-      inst.setCenter(focus.position.x + w / 2, focus.position.y + h / 2, { zoom: 0.9, duration: 0 })
-    } else {
-      inst.fitView({ padding: 0.2 })
-    }
-  }, [isMobile, focus])
+    inst.fitView({ padding: 0.2 })
+  }, [])
 
   const onTidy = useCallback(() => {
     setTidyPos(tidyLayout(nodes, (edges ?? []).map((e) => ({ from: e.from, to: e.to, lane: e.lane }))))

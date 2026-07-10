@@ -8,20 +8,18 @@ import { WorkflowCanvas, type CanvasEdgeSpec } from "./canvas"
  * pannable/zoomable node canvas on desktop AND mobile, the chrome collapsing
  * around it rather than the graph turning into a list. WorkflowGraph is now a
  * thin pass-through to that canvas — kept as the callers' seam (page/run views)
- * so the mobile focused-view + minimap live in one place. */
+ * so the shared framing + minimap live in one place. */
 
 export function WorkflowGraph({
   nodes,
   selectedId,
   onSelect,
   edges,
-  activeNodeId,
 }: {
   nodes: CanvasNode[]
   selectedId: string | null
   onSelect: (id: string) => void
   edges?: CanvasEdgeSpec[]
-  activeNodeId?: string | null
 }) {
   return (
     <WorkflowCanvas
@@ -29,7 +27,6 @@ export function WorkflowGraph({
       selectedId={selectedId}
       onSelect={onSelect}
       edges={edges}
-      activeNodeId={activeNodeId}
     />
   )
 }
