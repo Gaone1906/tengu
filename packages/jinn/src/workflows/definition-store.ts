@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
+  MAX_WORKFLOW_NAME_LENGTH,
   WORKFLOW_DEFINITION_SCHEMA_VERSION,
+  WORKFLOW_NAME_PATTERN,
   serializeDefinition,
   validateDefinition,
   type EditableWorkflowDefinition,
@@ -37,6 +39,7 @@ const DEFINITION_SUFFIX = '.definition.json';
 /** Compact list-view row. Full graphs are only returned by `getDefinition`. */
 export interface WorkflowDefinitionSummary {
   id: string;
+  name: string;
   title: string;
   status: EditableWorkflowDefinition['status'];
   version: number;
@@ -47,6 +50,7 @@ export interface WorkflowDefinitionSummary {
 
 export type WorkflowStoreErrorCode =
   | 'invalid-id'
+  | 'invalid-name'
   | 'bad-input'
   | 'validation'
   | 'not-found'
@@ -119,6 +123,20 @@ function assertSafeId(id: unknown): asserts id is string {
   }
 }
 
+function assertValidName(name: unknown): asserts name is string {
+  if (
+    typeof name !== 'string' ||
+    name.length === 0 ||
+    name.length > MAX_WORKFLOW_NAME_LENGTH ||
+    !WORKFLOW_NAME_PATTERN.test(name)
+  ) {
+    throw new WorkflowStoreError(
+      'invalid-name',
+      `workflow name must be kebab-case, match ${WORKFLOW_NAME_PATTERN.source}, and be at most ${MAX_WORKFLOW_NAME_LENGTH} characters`,
+    );
+  }
+}
+
 function definitionsDir(root: string): string {
   return path.join(root, 'workflows');
 }
@@ -188,6 +206,42 @@ function readOne(root: string, id: string): EditableWorkflowDefinition | null {
   }
 }
 
+function definitionName(def: EditableWorkflowDefinition): string {
+  return def.name ?? def.id;
+}
+
+function definitions(root: string): EditableWorkflowDefinition[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(definitionsDir(root));
+  } catch {
+    return [];
+  }
+  const out: EditableWorkflowDefinition[] = [];
+  for (const fileName of names) {
+    if (!fileName.endsWith(DEFINITION_SUFFIX)) continue;
+    const id = fileName.slice(0, -DEFINITION_SUFFIX.length);
+    if (!id) continue;
+    try {
+      const def = readOne(root, id);
+      if (def) out.push(def);
+    } catch {
+      // A corrupt definition must not hide the rest of the registry.
+    }
+  }
+  return out;
+}
+
+function assertNameAvailable(root: string, name: string, exceptId?: string): void {
+  const existing = definitions(root).find((def) => def.id !== exceptId && definitionName(def) === name);
+  if (existing) {
+    throw new WorkflowStoreError(
+      'conflict',
+      `workflow name "${name}" is already used by workflow "${existing.id}"`,
+    );
+  }
+}
+
 /** Validate a to-be-written definition; throw a `validation` error carrying every problem. */
 function assertValid(def: EditableWorkflowDefinition, what: string): void {
   const result = validateDefinition(def);
@@ -202,27 +256,12 @@ function assertValid(def: EditableWorkflowDefinition, what: string): void {
  * never breaks the workflow rail.
  */
 export function listDefinitions(root: string): WorkflowDefinitionSummary[] {
-  let names: string[];
-  try {
-    names = fs.readdirSync(definitionsDir(root));
-  } catch {
-    return [];
-  }
   const out: WorkflowDefinitionSummary[] = [];
-  for (const name of names) {
-    if (!name.endsWith(DEFINITION_SUFFIX)) continue;
-    const id = name.slice(0, -DEFINITION_SUFFIX.length);
-    if (!id) continue;
-    let def: EditableWorkflowDefinition | null;
-    try {
-      def = readOne(root, id);
-    } catch {
-      continue; // skip corrupt/unsafe-named files
-    }
-    if (!def) continue;
+  for (const def of definitions(root)) {
     out.push({
-      id: def.id ?? id,
-      title: def.title ?? id,
+      id: def.id,
+      name: definitionName(def),
+      title: def.title ?? def.id,
       status: def.status ?? 'active',
       version: typeof def.version === 'number' ? def.version : 0,
       ...(def.updatedAt ? { updatedAt: def.updatedAt } : {}),
@@ -236,6 +275,19 @@ export function listDefinitions(root: string): WorkflowDefinitionSummary[] {
 /** Full definition, or null if it does not exist. */
 export function getDefinition(root: string, id: string): EditableWorkflowDefinition | null {
   return readOne(root, id);
+}
+
+/** Resolve the one canonical workflow name. Duplicate hand-corrupted records fail loudly. */
+export function getDefinitionByName(root: string, name: string): EditableWorkflowDefinition | null {
+  assertValidName(name);
+  const matches = definitions(root).filter((def) => definitionName(def) === name);
+  if (matches.length > 1) {
+    throw new WorkflowStoreError(
+      'conflict',
+      `workflow name "${name}" is ambiguous across ids: ${matches.map((def) => def.id).sort().join(', ')}`,
+    );
+  }
+  return matches[0] ?? null;
 }
 
 /**
@@ -252,8 +304,14 @@ export function createDefinition(
   }
   assertSafeId(input.id);
   const now = (opts.now ?? defaultNow)();
+  const name = input.name ?? input.id;
+  assertValidName(name);
+  // Preserve the existing duplicate-id contract: the exclusive file create below
+  // remains authoritative when the matching registry row has this same id.
+  assertNameAvailable(root, name, input.id);
   const def: EditableWorkflowDefinition = {
     ...input,
+    name,
     schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
     version: 1,
     status: input.status ?? 'active',
@@ -289,11 +347,16 @@ export function updateDefinition(
   if (patch && typeof patch === 'object' && patch.id !== undefined && patch.id !== id) {
     throw new WorkflowStoreError('bad-input', 'workflow id cannot be changed via update');
   }
+  const existingName = definitionName(existing);
+  if (patch && typeof patch === 'object' && patch.name !== undefined && patch.name !== existingName) {
+    throw new WorkflowStoreError('bad-input', 'workflow name cannot be changed via update');
+  }
   const now = (opts.now ?? defaultNow)();
   const merged: EditableWorkflowDefinition = {
     ...existing,
     ...patch,
     id, // id is immutable regardless of patch
+    name: existingName,
     schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
     version: existing.version + 1,
     updatedAt: now,
@@ -329,10 +392,16 @@ export function duplicateDefinition(
     assertSafeId(newId);
   }
 
+  const requestedName = opts.definitionPatch?.name;
+  const newName = typeof requestedName === 'string' ? requestedName : newId;
+  assertValidName(newName);
+  assertNameAvailable(root, newName);
+
   const dup: EditableWorkflowDefinition = {
     ...existing,
     ...(opts.definitionPatch ?? {}),
     id: newId,
+    name: newName,
     title: opts.title ?? `${existing.title} (copy)`,
     schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
     version: 1,

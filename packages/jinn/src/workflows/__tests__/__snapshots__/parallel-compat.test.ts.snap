@@ -172,6 +172,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
         "kind": "sequence"
       }
     ],
+    "name": "golden-linear",
     "updatedAt": "2026-07-04T18:00:00.000Z"
   }
 }
@@ -202,6 +203,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
       },
     ],
     "id": "golden-linear",
+    "name": "golden-linear",
     "nodes": [
       {
         "id": "trg",
@@ -607,6 +609,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
         "kind": "sequence"
       }
     ],
+    "name": "golden-branch",
     "updatedAt": "2026-07-04T18:00:00.000Z"
   }
 }
@@ -655,6 +658,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
       },
     ],
     "id": "golden-branch",
+    "name": "golden-branch",
     "nodes": [
       {
         "id": "trg",
@@ -900,6 +904,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
       },
     ],
     "id": "golden-park",
+    "name": "golden-park",
     "nodes": [
       {
         "id": "trg",
@@ -1285,6 +1290,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
         "kind": "sequence"
       }
     ],
+    "name": "golden-park",
     "updatedAt": "2026-07-04T18:00:00.000Z"
   }
 }
@@ -1327,6 +1333,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
       },
     ],
     "id": "golden-park",
+    "name": "golden-park",
     "nodes": [
       {
         "id": "trg",
@@ -1706,6 +1713,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
         "kind": "sequence"
       }
     ],
+    "name": "golden-park",
     "updatedAt": "2026-07-04T18:00:00.000Z"
   }
 }
@@ -1924,6 +1932,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
     "loop": {
       "maxRoundsPerRun": 2
     },
+    "name": "golden-loop",
     "updatedAt": "2026-07-04T18:00:00.000Z"
   },
   "loopExit": {
@@ -1968,6 +1977,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
     "loop": {
       "maxRoundsPerRun": 2,
     },
+    "name": "golden-loop",
     "nodes": [
       {
         "id": "trg",
@@ -2303,6 +2313,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
         "kind": "sequence"
       }
     ],
+    "name": "golden-fail",
     "updatedAt": "2026-07-04T18:00:00.000Z"
   },
   "errors": [
@@ -2340,6 +2351,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
       },
     ],
     "id": "golden-fail",
+    "name": "golden-fail",
     "nodes": [
       {
         "id": "trg",
@@ -2590,6 +2602,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
         "kind": "sequence"
       }
     ],
+    "name": "golden-skip",
     "updatedAt": "2026-07-04T18:00:00.000Z"
   }
 }
@@ -2614,6 +2627,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
       },
     ],
     "id": "golden-skip",
+    "name": "golden-skip",
     "nodes": [
       {
         "id": "trg",
@@ -2837,6 +2851,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
         "kind": "sequence"
       }
     ],
+    "name": "golden-respawn",
     "updatedAt": "2026-07-04T18:00:00.000Z"
   }
 }
@@ -2861,6 +2876,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
       },
     ],
     "id": "golden-respawn",
+    "name": "golden-respawn",
     "nodes": [
       {
         "id": "trg",
@@ -3048,6 +3064,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
         "kind": "sequence"
       }
     ],
+    "name": "golden-byid",
     "updatedAt": "2026-07-04T18:00:00.000Z"
   }
 }
@@ -3066,6 +3083,7 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
       },
     ],
     "id": "golden-byid",
+    "name": "golden-byid",
     "nodes": [
       {
         "id": "trg",

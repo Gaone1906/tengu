@@ -20,6 +20,7 @@ function validDef(): EditableWorkflowDefinition {
   return {
     schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
     id: 'demo',
+    name: 'demo-workflow',
     title: 'Demo Workflow',
     version: 1,
     status: 'active',
@@ -41,6 +42,22 @@ describe('validateDefinition', () => {
     const r = validateDefinition(validDef());
     expect(r.ok).toBe(true);
     expect(r.errors).toEqual([]);
+  });
+
+  it.each([
+    'Full-Cycle-Workflow',
+    'full_cycle_workflow',
+    'full cycle workflow',
+    '-full-cycle',
+    'full-cycle-',
+    'full--cycle',
+    '',
+  ])('rejects non-canonical workflow name %j', (name) => {
+    const d = validDef();
+    d.name = name;
+    const r = validateDefinition(d);
+    expect(r.ok).toBe(false);
+    expect(r.errors.map((e) => e.code)).toContain('bad-name');
   });
 
   it('rejects schedule cron, timezone, and until values that runtime cannot execute', () => {

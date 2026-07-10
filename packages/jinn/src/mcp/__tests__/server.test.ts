@@ -117,6 +117,7 @@ describe("buildTools", () => {
       "read_knowledge",
       "read_session",
       "retire_workflow",
+      "run_workflow_by_name",
       "search_knowledge",
       "search_messages",
       "search_sessions",

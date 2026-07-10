@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   listDefinitions,
   getDefinition,
+  getDefinitionByName,
   createDefinition,
   updateDefinition,
   duplicateDefinition,
@@ -22,6 +23,7 @@ function makeDef(id: string, over: Partial<EditableWorkflowDefinition> = {}): Ed
   return {
     schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
     id,
+    name: id,
     title: `Workflow ${id}`,
     version: 1,
     status: 'active',
@@ -64,7 +66,20 @@ describe('createDefinition', () => {
     expect(fs.existsSync(onDisk)).toBe(true);
     const parsed = JSON.parse(fs.readFileSync(onDisk, 'utf8'));
     expect(parsed.id).toBe('alpha');
+    expect(parsed.name).toBe('alpha');
     expect(parsed.version).toBe(1);
+  });
+
+  it('rejects duplicate canonical names even when storage ids differ', () => {
+    createDefinition(root, makeDef('record-a', { name: 'full-cycle-workflow' }), { now });
+    try {
+      createDefinition(root, makeDef('record-b', { name: 'full-cycle-workflow' }), { now });
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(WorkflowStoreError);
+      expect((e as WorkflowStoreError).code).toBe('conflict');
+      expect((e as Error).message).toMatch(/name.*full-cycle-workflow.*already/i);
+    }
   });
 
   it('rejects an invalid graph with a validation error carrying every problem', () => {
@@ -119,6 +134,14 @@ describe('getDefinition', () => {
     // File content equals canonical serialization of the returned object.
     const onDisk = fs.readFileSync(path.join(root, 'workflows', 'rt.definition.json'), 'utf8');
     expect(onDisk).toBe(serializeDefinition(created));
+  });
+});
+
+describe('getDefinitionByName', () => {
+  it('resolves a stored workflow by canonical name rather than storage id', () => {
+    createDefinition(root, makeDef('record-42', { name: 'full-cycle-workflow' }), { now });
+    expect(getDefinitionByName(root, 'full-cycle-workflow')?.id).toBe('record-42');
+    expect(getDefinitionByName(root, 'missing-workflow')).toBeNull();
   });
 });
 
@@ -188,6 +211,12 @@ describe('updateDefinition', () => {
     } catch (e) {
       expect((e as WorkflowStoreError).code).toBe('bad-input');
     }
+  });
+
+  it('refuses changing the stable canonical name', () => {
+    createDefinition(root, makeDef('stable-name'), { now });
+    expect(() => updateDefinition(root, 'stable-name', { name: 'renamed-workflow' }, { now }))
+      .toThrowError(/workflow name cannot be changed/i);
   });
 
   it('rejects a patch that makes the graph invalid and leaves the file unchanged', () => {

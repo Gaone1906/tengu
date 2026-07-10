@@ -88,6 +88,7 @@ import {
   listWorkflowIds,
   listDefinitions,
   getDefinition,
+  getDefinitionByName,
   createDefinition,
   updateDefinition,
   duplicateDefinition,
@@ -896,6 +897,84 @@ export function workflowRunDriverDeps(root: string, context: ApiContext): RunDri
     workItems: createWorkflowTodoBridge(),
     log: (level, message) => logger[level](message),
   };
+}
+
+interface WorkflowRunRequestBody {
+  trigger?: "manual" | "schedule";
+  input?: unknown;
+  idempotencyKey?: unknown;
+}
+
+function validateWorkflowRunRequestBody(
+  body: WorkflowRunRequestBody,
+): { ok: true; input?: Record<string, unknown>; idempotencyKey?: string } | { ok: false; error: string } {
+  if (body.input !== undefined && (!body.input || typeof body.input !== "object" || Array.isArray(body.input))) {
+    return { ok: false, error: "input must be a JSON object" };
+  }
+  let idempotencyKey: string | undefined;
+  if (body.idempotencyKey !== undefined) {
+    if (typeof body.idempotencyKey !== "string" || !body.idempotencyKey.trim()) {
+      return { ok: false, error: "idempotencyKey must be a non-empty string" };
+    }
+    idempotencyKey = body.idempotencyKey.trim();
+    if (idempotencyKey.length > 256) {
+      return { ok: false, error: "idempotencyKey is too long (max 256 characters)" };
+    }
+    if (/[\x00-\x1f\x7f]/.test(idempotencyKey)) {
+      return { ok: false, error: "idempotencyKey must not contain control characters" };
+    }
+  }
+  return {
+    ok: true,
+    ...(body.input !== undefined ? { input: body.input as Record<string, unknown> } : {}),
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+  };
+}
+
+async function runWorkflowDefinitionFromHttp(
+  req: HttpRequest,
+  res: ServerResponse,
+  context: ApiContext,
+  root: string,
+  def: EditableWorkflowDefinition,
+  body: WorkflowRunRequestBody,
+  expectedId?: string,
+): Promise<void> {
+  const validated = validateWorkflowRunRequestBody(body);
+  if (!validated.ok) return badRequest(res, validated.error);
+  const authority = authorizeWorkflowOperation(req.headers, def, "run", context);
+  if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+  if (expectedId !== undefined && def.id !== expectedId) {
+    return badRequest(res, `definition file "${expectedId}" has mismatched id "${def.id}"`);
+  }
+  const { scanOrg } = await import("./org.js");
+  const knownEmployees = [...scanOrg().keys()];
+  const knownEngines = [...context.sessionManager.getEngines().keys()];
+  const trigger = body.trigger === "schedule"
+    ? {
+        source: "schedule" as const,
+        event: "schedule.fire",
+        payload: { workflowId: def.id, requestedBy: "api" },
+        ...(validated.idempotencyKey ? { fireRef: validated.idempotencyKey } : {}),
+      }
+    : {
+        source: "manual" as const,
+        event: "workflow.manual_started",
+        payload: { workflowId: def.id, requestedBy: "api" },
+        ...(validated.idempotencyKey ? { fireRef: validated.idempotencyKey } : {}),
+      };
+  const invocation = validated.input !== undefined || validated.idempotencyKey !== undefined
+    ? {
+        input: validated.input ?? {},
+        ...(validated.idempotencyKey ? { idempotencyKey: validated.idempotencyKey } : {}),
+      }
+    : undefined;
+  const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context), def, trigger, {
+    knownEmployees,
+    knownEngines,
+    ...(invocation ? { invocation } : {}),
+  });
+  return json(res, run, run.status === "failed" ? 422 : 201);
 }
 
 /**
@@ -3277,6 +3356,36 @@ export async function handleApiRequest(
       }
     }
 
+    // POST /api/workflow-runs/by-name — agent/operator manual invocation using the
+    // canonical kebab-case registry name. External/webhook and schedule paths remain
+    // independent typed trigger paths; this one is always a manual invocation.
+    if (method === "POST" && pathname === "/api/workflow-runs/by-name") {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_EVENT_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "workflow run body must be a JSON object");
+      }
+      const raw = parsed.body as Record<string, unknown>;
+      const name = typeof raw.name === "string" ? raw.name.trim() : "";
+      if (!name) return badRequest(res, "name is required and must be a non-empty string");
+      try {
+        const def = getDefinitionByName(root, name);
+        if (!def) return json(res, { error: `workflow name "${name}" not found` }, 404);
+        return await runWorkflowDefinitionFromHttp(req, res, context, root, def, {
+          input: raw.input,
+          idempotencyKey: raw.idempotencyKey,
+          trigger: "manual",
+        });
+      } catch (err) {
+        if (err instanceof WorkflowRunStoreError) {
+          return json(res, { error: err.message, code: err.code }, err.code === "not-found" ? 404 : 400);
+        }
+        return workflowStoreErrorResponse(res, err);
+      }
+    }
+
     // POST /api/workflow-definitions/:id/run — START a run of the definition (GRS-014b).
     // Sequential engine: mint the durable pending-receipts record (edge-implied topo order,
     // declaration tiebreak) BEFORE any spawn, then drive the first advancement — pass-through
@@ -3302,54 +3411,11 @@ export async function handleApiRequest(
       if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
         return badRequest(res, "workflow run body must be a JSON object");
       }
-      const body = rawBody as { trigger?: "manual" | "schedule"; input?: unknown; idempotencyKey?: unknown };
-      if (body.input !== undefined && (!body.input || typeof body.input !== "object" || Array.isArray(body.input))) {
-        return badRequest(res, "input must be a JSON object");
-      }
-      let idempotencyKey: string | undefined;
-      if (body.idempotencyKey !== undefined) {
-        if (typeof body.idempotencyKey !== "string" || !body.idempotencyKey.trim()) {
-          return badRequest(res, "idempotencyKey must be a non-empty string");
-        }
-        idempotencyKey = body.idempotencyKey.trim();
-        if (idempotencyKey.length > 256) {
-          return badRequest(res, "idempotencyKey is too long (max 256 characters)");
-        }
-        if (/[\x00-\x1f\x7f]/.test(idempotencyKey)) {
-          return badRequest(res, "idempotencyKey must not contain control characters");
-        }
-      }
+      const body = rawBody as WorkflowRunRequestBody;
       try {
         const def = getDefinition(root, params.id);
         if (!def) return notFound(res);
-        const authority = authorizeWorkflowOperation(req.headers, def, "run", context);
-        if (!authority.ok) {
-          return json(res, { error: authority.error }, authority.status);
-        }
-        // Store invariant: the on-disk file named <id> must carry id===<id> (createDefinition
-        // enforces it, update keeps it immutable). Guard against a hand-corrupted file so a run
-        // never persists under a different workflowId than the route id (Codex Major 2 sub-point).
-        if (def.id !== params.id) {
-          return badRequest(res, `definition file "${params.id}" has mismatched id "${def.id}"`);
-        }
-        const { scanOrg } = await import("./org.js");
-        const knownEmployees = [...scanOrg().keys()];
-        const knownEngines = [...context.sessionManager.getEngines().keys()];
-        const trigger = body.trigger === "schedule"
-          ? { source: "schedule" as const, event: "schedule.fire", payload: { workflowId: def.id, requestedBy: "api" }, ...(idempotencyKey ? { fireRef: idempotencyKey } : {}) }
-          : { source: "manual" as const, event: "workflow.manual_started", payload: { workflowId: def.id, requestedBy: "api" }, ...(idempotencyKey ? { fireRef: idempotencyKey } : {}) };
-        const invocation = body.input !== undefined || idempotencyKey !== undefined
-          ? {
-              input: body.input !== undefined ? body.input as Record<string, unknown> : {},
-              ...(idempotencyKey ? { idempotencyKey } : {}),
-            }
-          : undefined;
-        const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context), def, trigger, {
-          knownEmployees,
-          knownEngines,
-          ...(invocation ? { invocation } : {}),
-        });
-        return json(res, run, run.status === "failed" ? 422 : 201);
+        return await runWorkflowDefinitionFromHttp(req, res, context, root, def, body, params.id);
       } catch (err) {
         if (err instanceof WorkflowRunStoreError) {
           return json(res, { error: err.message, code: err.code }, err.code === "not-found" ? 404 : 400);

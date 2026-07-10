@@ -248,6 +248,7 @@ export function compileWorkflowSop(input: unknown): WorkflowSopCompileResult {
   const sop = asRecord(input, 'sop');
   const id = stringValue(sop.id, 'sop.id');
   const title = stringValue(sop.title, 'sop.title');
+  const name = stringValue(sop.name, 'sop.name', false) ?? id;
   const rawSteps = sop.steps;
   if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
     throw new Error('sop.steps must be a non-empty array');
@@ -278,6 +279,7 @@ export function compileWorkflowSop(input: unknown): WorkflowSopCompileResult {
   const definition: EditableWorkflowDefinition = {
     schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
     id,
+    name,
     title,
     version: 1,
     status: 'active',

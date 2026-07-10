@@ -139,6 +139,24 @@ program
     await runMigrate(opts);
   });
 
+// Workflow subcommands (jinn workflow run <canonical-name>)
+{
+  const workflowCmd = program
+    .command("workflow")
+    .description("Operate workflow definitions and runs");
+
+  workflowCmd
+    .command("run <name>")
+    .description("Run a canonical workflow name")
+    .option("--input <json>", "Structured workflow input as a JSON object")
+    .option("--idempotency-key <key>", "Deduplicate repeated invocations")
+    .option("--json", "Print the full run record as JSON")
+    .action(async (name: string, opts: { input?: string; idempotencyKey?: string; json?: boolean }) => {
+      const { runWorkflowByName } = await import("../src/cli/workflow.js");
+      await runWorkflowByName(name, opts);
+    });
+}
+
 // Skills subcommands (jinn skills find|add|remove|list|update|restore)
 {
   const skillsCmd = program

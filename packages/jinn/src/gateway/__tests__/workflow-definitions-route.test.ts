@@ -337,6 +337,54 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     expect(files.filter((name) => name.endsWith('.json'))).toEqual([`${firstRun.runId}.json`]);
   });
 
+  it('POST /api/workflow-runs/by-name resolves the canonical name, forwards input, and deduplicates', async () => {
+    const definition = {
+      ...inlineDef('run-by-name-record', [
+        { id: 'e0', from: 'trg', to: 'sa' },
+        { id: 'e1', from: 'sa', to: 'sb' },
+      ]),
+      name: 'full-cycle-workflow',
+    };
+    await call('POST', '/api/workflow-definitions', definition);
+
+    const first = await call('POST', '/api/workflow-runs/by-name', {
+      name: 'full-cycle-workflow',
+      input: { request: 'implement this', ticket: 'ABC-42' },
+      idempotencyKey: 'agent-request-42',
+    }, runCtx);
+    expect(first.status).toBe(201);
+    const firstRun = first.body as {
+      runId: string;
+      workflowId: string;
+      invocation: { input: Record<string, unknown>; idempotencyKey: string };
+      trigger: { source: string; event: string };
+    };
+    expect(firstRun.workflowId).toBe('run-by-name-record');
+    expect(firstRun.trigger).toMatchObject({ source: 'manual', event: 'workflow.manual_started' });
+    expect(firstRun.invocation).toEqual({
+      input: { request: 'implement this', ticket: 'ABC-42' },
+      idempotencyKey: 'agent-request-42',
+    });
+
+    const duplicate = await call('POST', '/api/workflow-runs/by-name', {
+      name: 'full-cycle-workflow',
+      input: { request: 'must not replace the original input' },
+      idempotencyKey: 'agent-request-42',
+    }, runCtx);
+    expect(duplicate.status).toBe(201);
+    expect((duplicate.body as typeof firstRun).runId).toBe(firstRun.runId);
+    expect((duplicate.body as typeof firstRun).invocation).toEqual(firstRun.invocation);
+  });
+
+  it('POST /api/workflow-runs/by-name returns a clear 404 for an unknown canonical name', async () => {
+    const res = await call('POST', '/api/workflow-runs/by-name', {
+      name: 'missing-workflow',
+      input: { request: 'implement this' },
+    }, runCtx);
+    expect(res.status).toBe(404);
+    expect((res.body as { error: string }).error).toMatch(/workflow name "missing-workflow" not found/i);
+  });
+
   it('POST :id/run rejects malformed invocation input and idempotency keys', async () => {
     const definition = inlineDef('run-input-invalid', [
       { id: 'e0', from: 'trg', to: 'sa' },

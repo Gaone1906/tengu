@@ -87,11 +87,11 @@ describe("knowledge tools — registry + schemas", () => {
     }
   });
 
-  it("the belt registers the knowledge group — 41 tools total after SOP/file tools", () => {
+  it("the belt registers the knowledge group — 42 tools total after workflow naming", () => {
     const names = buildTools().map((t) => t.name);
     expect(names).toContain("search_knowledge");
     expect(names).toContain("read_knowledge");
-    expect(names).toHaveLength(41);
+    expect(names).toHaveLength(42);
   });
 
   it("domain teaching lives on search_knowledge; read stays short and names the roots", () => {

@@ -40,6 +40,10 @@ import {
 
 export const WORKFLOW_DEFINITION_SCHEMA_VERSION = 1;
 
+/** Public workflow names are agent-facing command identifiers, matching skill names. */
+export const WORKFLOW_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const MAX_WORKFLOW_NAME_LENGTH = 128;
+
 /** Upper bound for `concurrency` (GRS-016a): engine sessions are heavyweight —
  * a run keeping more than this in flight is a runaway, not a workflow. */
 export const MAX_WORKFLOW_CONCURRENCY = 8;
@@ -287,6 +291,8 @@ export interface EditableWorkflowDefinition {
   /** Schema version of THIS document shape (not the workflow's edit version). */
   schemaVersion: number;
   id: string;
+  /** Stable, globally unique agent-facing name. Legacy records fall back to `id`. */
+  name?: string;
   title: string;
   description?: string;
   /** Monotonic edit version; bumped on each save. */
@@ -317,6 +323,7 @@ export interface EditableWorkflowDefinition {
 export type ValidationCode =
   | 'bad-schema-version'
   | 'missing-id'
+  | 'bad-name'
   | 'missing-title'
   | 'bad-version'
   | 'bad-status'
@@ -607,6 +614,17 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
     err('bad-schema-version', `schemaVersion must be ${WORKFLOW_DEFINITION_SCHEMA_VERSION}`);
   }
   if (isBlank(def.id)) err('missing-id', 'definition id is required');
+  if (
+    def.name !== undefined &&
+    (isBlank(def.name) ||
+      def.name.length > MAX_WORKFLOW_NAME_LENGTH ||
+      !WORKFLOW_NAME_PATTERN.test(def.name))
+  ) {
+    err(
+      'bad-name',
+      `name must be kebab-case, match ${WORKFLOW_NAME_PATTERN.source}, and be at most ${MAX_WORKFLOW_NAME_LENGTH} characters`,
+    );
+  }
   if (isBlank(def.title)) err('missing-title', 'definition title is required');
   if (!Number.isInteger(def.version) || def.version < 1) {
     err('bad-version', 'version must be a positive integer');

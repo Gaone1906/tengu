@@ -98,7 +98,8 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
     return new JinnMcpToolError(`${what} conflicted (409): ${detail}${runStatus}`);
   }
   if (status === 404) {
-    return new JinnMcpToolError(`${what} failed (404): not found. Use list_workflows to see existing workflow ids.`);
+    const detail = typeof rec.error === "string" ? rec.error : "not found";
+    return new JinnMcpToolError(`${what} failed (404): ${detail}. Use list_workflows to see existing workflow names.`);
   }
   const detail = typeof rec.error === "string" ? rec.error : asText(body);
   return new JinnMcpToolError(`${what} failed (HTTP ${status}): ${detail}`);
@@ -139,8 +140,8 @@ const wfPath = (id: string): string => `/api/workflow-definitions/${encodeURICom
 /* ── The definition shape recipe (the one schema that must teach) ───────────── */
 
 const DEFINITION_SHAPE =
-  "Default authoring shape is SOP: { id, title, wakeUp: { kind: 'manual'|'schedule'|'todo-status'|'event'|'poll', ... }, steps: [{ employee? | engine?, role?, instruction }] }. " +
-  "The SOP compiles to the raw graph below. Power users may pass raw definition: { id, title, nodes: [...], edges: [...], loop?, runGates? }. " +
+  "Default authoring shape is SOP: { id, name?, title, wakeUp: { kind: 'manual'|'schedule'|'todo-status'|'event'|'poll', ... }, steps: [{ employee? | engine?, role?, instruction }] }. " +
+  "The SOP compiles to the raw graph below. Power users may pass raw definition: { id, name?, title, nodes: [...], edges: [...], loop?, runGates? }. " +
   "Node: { id, type: 'trigger'|'step'|'gate', label, ... }. Exactly one trigger node " +
   "({ trigger: { kind: 'manual' } } or { kind: 'schedule', cron: '0 */2 * * *' }). " +
   "A step runs one AI session: actor { kind: 'engine'|'employee', ref: e.g. 'codex' }, " +
@@ -267,7 +268,7 @@ async function reconcileSopTriggerBindings(
 export function buildWorkflowTools(): JinnMcpTool[] {
   const listWorkflows: JinnMcpTool = {
     name: "list_workflows",
-    description: "List workflow definitions.",
+    description: "List workflows.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args, ctx) => {
       assertBoundCaller(ctx);
@@ -289,7 +290,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const getWorkflow: JinnMcpTool = {
     name: "get_workflow",
-    description: "Get one workflow definition.",
+    description: "Get workflow.",
     inputSchema: {
       type: "object",
       properties: { workflowId: { type: "string" } },
@@ -306,7 +307,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const listWorkflowRuns: JinnMcpTool = {
     name: "list_workflow_runs",
-    description: "List runs of a workflow.",
+    description: "List workflow runs.",
     inputSchema: {
       type: "object",
       properties: { workflowId: { type: "string" } },
@@ -323,7 +324,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const getWorkflowRun: JinnMcpTool = {
     name: "get_workflow_run",
-    description: "Get one workflow run.",
+    description: "Get workflow run.",
     inputSchema: {
       type: "object",
       properties: {
@@ -345,12 +346,12 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const planWorkflow: JinnMcpTool = {
     name: "plan_workflow",
-    description: "Dry-run workflow authoring input without saving.",
+    description: "Plan workflow without saving.",
     inputSchema: {
       type: "object",
       properties: {
-        sop: { type: "object", description: "SOP object: {id,title,wakeUp,steps}." },
-        definition: { type: "object", description: "Raw workflow graph; prefer sop." },
+        sop: { type: "object" },
+        definition: { type: "object" },
       },
       required: [],
     },
@@ -364,12 +365,12 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const validateWorkflow: JinnMcpTool = {
     name: "validate_workflow",
-    description: "Validate workflow authoring input without saving.",
+    description: "Validate workflow without saving.",
     inputSchema: {
       type: "object",
       properties: {
-        sop: { type: "object", description: "SOP object: {id,title,wakeUp,steps}." },
-        definition: { type: "object", description: "Raw workflow graph; prefer sop." },
+        sop: { type: "object" },
+        definition: { type: "object" },
       },
       required: [],
     },
@@ -383,12 +384,12 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const createWorkflow: JinnMcpTool = {
     name: "create_workflow",
-    description: "Create a workflow from SOP or raw graph.",
+    description: "Create workflow.",
     inputSchema: {
       type: "object",
       properties: {
-        sop: { type: "object", description: "SOP object: {id,title,wakeUp,steps}." },
-        definition: { type: "object", description: "Raw workflow graph; prefer sop." },
+        sop: { type: "object" },
+        definition: { type: "object" },
       },
       required: [],
     },
@@ -402,21 +403,21 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       return {
         definition: body,
         trigger,
-        hint: `Created from ${args.sop !== undefined ? "SOP" : "raw graph"} v${String(created.version ?? 1)}. Next: start_workflow_run { workflowId: "${String(created.id ?? "")}" }.`,
+        hint: `Created from ${args.sop !== undefined ? "SOP" : "raw graph"} v${String(created.version ?? 1)}. Next: run_workflow_by_name { name: "${String(created.name ?? created.id ?? "")}" }.`,
       };
     },
   };
 
   const updateWorkflow: JinnMcpTool = {
     name: "update_workflow",
-    description: "Update a workflow.",
+    description: "Update workflow.",
     inputSchema: {
       type: "object",
       properties: {
         workflowId: { type: "string" },
-        sop: { type: "object", description: "Replacement SOP object." },
-        patch: { type: "object", description: "Shallow patch." },
-        expectedVersion: { type: "number", description: "Lock version." },
+        sop: { type: "object" },
+        patch: { type: "object" },
+        expectedVersion: { type: "number" },
       },
       required: ["workflowId"],
     },
@@ -439,7 +440,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const retireWorkflow: JinnMcpTool = {
     name: "retire_workflow",
-    description: "Retire a workflow definition.",
+    description: "Retire workflow.",
     inputSchema: {
       type: "object",
       properties: { workflowId: { type: "string" } },
@@ -464,7 +465,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
   // cannot substitute for that, hence removal.
   const startWorkflowRun: JinnMcpTool = {
     name: "start_workflow_run",
-    description: "Run with input and dedupe.",
+    description: "Run workflow by id.",
     inputSchema: {
       type: "object",
       properties: {
@@ -498,9 +499,44 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     },
   };
 
+  const runWorkflowByName: JinnMcpTool = {
+    name: "run_workflow_by_name",
+    description: "Run workflow by name.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        input: { type: "object" },
+        idempotencyKey: { type: "string", maxLength: 256 },
+      },
+      required: ["name"],
+    },
+    handler: async (args, ctx) => {
+      assertBoundCaller(ctx);
+      const name = requireString(args, "name");
+      const input = optionalObject(args, "input");
+      const idempotencyKey = optionalString(args, "idempotencyKey", 256);
+      const requestBody = {
+        name,
+        ...(input ? { input } : {}),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+      };
+      const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-runs/by-name", requestBody);
+      if (status === 422) {
+        const failed = (body ?? {}) as RunView;
+        throw new JinnMcpToolError(
+          `run refused to start (422) — the definition cannot execute. Fix these and retry:\n${asText(failed.errors ?? body)}`,
+        );
+      }
+      if (status >= 400) throw gatewayFailure(`running workflow name "${name}"`, status, body);
+      const run = (body ?? {}) as RunView;
+      return { run: body, hint: `Started ${String(run.runId ?? "?")}. ${runHint(run)}` };
+    },
+  };
+
   const listTriggers: JinnMcpTool = {
     name: "list_triggers",
-    description: "List custom workflow trigger bindings.",
+    description: "List workflow triggers.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args, ctx) => {
       assertBoundCaller(ctx);
@@ -512,16 +548,16 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const createTrigger: JinnMcpTool = {
     name: "create_trigger",
-    description: "Create a webhook or approval-gated poll workflow trigger binding.",
+    description: "Create workflow trigger.",
     inputSchema: {
       type: "object",
       properties: {
-        kind: { type: "string", enum: ["webhook", "poll"], description: "Trigger type." },
+        kind: { type: "string", enum: ["webhook", "poll"] },
         name: { type: "string" },
         event: { type: "string" },
         targetWorkflowId: { type: "string" },
-        filter: { type: "array", description: "Match filters." },
-        secretToken: { type: "string", description: "Webhook token." },
+        filter: { type: "array" },
+        secretToken: { type: "string" },
         command: { type: "string" },
         intervalSeconds: { type: "number" },
         timeoutMs: { type: "number" },
@@ -552,7 +588,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const deleteTrigger: JinnMcpTool = {
     name: "delete_trigger",
-    description: "Delete a custom workflow trigger binding by name.",
+    description: "Delete workflow trigger.",
     inputSchema: {
       type: "object",
       properties: { name: { type: "string" } },
@@ -586,6 +622,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     updateWorkflow,
     retireWorkflow,
     startWorkflowRun,
+    runWorkflowByName,
     listTriggers,
     createTrigger,
     deleteTrigger,

@@ -89,6 +89,7 @@ describe("workflow tools — registry + schemas", () => {
       "update_workflow",
       "retire_workflow",
       "start_workflow_run",
+      "run_workflow_by_name",
       "list_triggers",
       "create_trigger",
       "delete_trigger",
@@ -125,6 +126,7 @@ describe("workflow tools — registry + schemas", () => {
     expect(tool("update_workflow").inputSchema.required).toEqual(["workflowId"]);
     expect(tool("retire_workflow").inputSchema.required).toEqual(["workflowId"]);
     expect(tool("start_workflow_run").inputSchema.required).toEqual(["workflowId"]);
+    expect(tool("run_workflow_by_name").inputSchema.required).toEqual(["name"]);
     expect(tool("create_trigger").inputSchema.required).toEqual(["kind", "name", "event", "targetWorkflowId"]);
     expect(tool("delete_trigger").inputSchema.required).toEqual(["name"]);
   });
@@ -135,6 +137,11 @@ describe("workflow tools — registry + schemas", () => {
     };
     expect(schema.properties.input).toMatchObject({ type: "object" });
     expect(schema.properties.idempotencyKey).toMatchObject({ type: "string", maxLength: 256 });
+    const byNameSchema = tool("run_workflow_by_name").inputSchema as {
+      properties: Record<string, { type?: string; maxLength?: number }>;
+    };
+    expect(byNameSchema.properties.input).toMatchObject({ type: "object" });
+    expect(byNameSchema.properties.idempotencyKey).toMatchObject({ type: "string", maxLength: 256 });
   });
 });
 
@@ -240,6 +247,7 @@ describe("workflow tools — unit (stub gateway)", () => {
       {
         sop: {
           id: "daily-brief",
+          name: "daily-research-brief",
           title: "Daily brief",
           wakeUp: { kind: "schedule", cron: "0 9 * * *", timezone: "Europe/Sofia" },
           steps: [
@@ -263,6 +271,7 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(out.validation.ok).toBe(true);
     expect(out.execution.ok).toBe(true);
     expect(out.definition.id).toBe("daily-brief");
+    expect((out.definition as { name?: string }).name).toBe("daily-research-brief");
     expect(out.definition.nodes.map((n) => n.id)).toEqual(["wake", "research", "summarize"]);
     expect(out.definition.nodes[0]).toMatchObject({ type: "trigger", trigger: { kind: "schedule", cron: "0 9 * * *", timezone: "Europe/Sofia" } });
     expect(out.definition.nodes[1]).toMatchObject({ type: "step", actor: { kind: "employee", ref: "analyst" }, instructions: "Collect the signals." });
@@ -373,13 +382,13 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(out.hint).toMatch(/retired/i);
   });
 
-  it("create_workflow's success hint points at start_workflow_run", async () => {
-    const { ctx } = stub(() => ({ status: 201, body: { id: "wf-new", version: 1 } }));
+  it("create_workflow's success hint points at canonical run-by-name invocation", async () => {
+    const { ctx } = stub(() => ({ status: 201, body: { id: "wf-new", name: "new-workflow", version: 1 } }));
     const out = (await tool("create_workflow").handler(
       { definition: { id: "wf-new", title: "New", nodes: [], edges: [] } },
       ctx,
     )) as { hint: string };
-    expect(out.hint).toContain("start_workflow_run");
+    expect(out.hint).toContain('run_workflow_by_name { name: "new-workflow" }');
   });
 
   it("create_workflow passes the validator's STRUCTURED errors through for self-correction", async () => {
@@ -470,6 +479,34 @@ describe("workflow tools — unit (stub gateway)", () => {
       input: { ticket: { id: "ABC-42" }, priority: 2 },
       idempotencyKey: "request-42",
     });
+  });
+
+  it("run_workflow_by_name invokes the canonical-name route with input and idempotency", async () => {
+    const { calls, ctx } = stub(() => ({
+      status: 201,
+      body: { runId: "run-by-name", workflowId: "record-42", status: "completed", steps: [] },
+    }));
+    const out = (await tool("run_workflow_by_name").handler({
+      name: "full-cycle-workflow",
+      input: { request: "implement this" },
+      idempotencyKey: "request-42",
+    }, ctx)) as { run: { runId: string }; hint: string };
+    expect(calls[0]).toMatchObject({
+      url: "http://127.0.0.1:7777/api/workflow-runs/by-name",
+      method: "POST",
+      body: {
+        name: "full-cycle-workflow",
+        input: { request: "implement this" },
+        idempotencyKey: "request-42",
+      },
+    });
+    expect(out.run.runId).toBe("run-by-name");
+  });
+
+  it("run_workflow_by_name surfaces an unknown canonical name clearly", async () => {
+    const { ctx } = stub(() => ({ status: 404, body: { error: 'workflow name "missing-workflow" not found' } }));
+    await expect(tool("run_workflow_by_name").handler({ name: "missing-workflow" }, ctx))
+      .rejects.toThrow(/missing-workflow.*not found/i);
   });
 
   it("start_workflow_run surfaces a 422 failed-at-start run's structured errors", async () => {
