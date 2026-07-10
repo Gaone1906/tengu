@@ -188,7 +188,7 @@ import {
   linkSession,
   listWorkItemEvents,
   listWorkItems,
-  searchWorkItems,
+  queryWorkItems,
   STICKY_STATUSES,
   type CreateWorkItemInput,
   type SearchWorkItemsFilter,
@@ -1564,6 +1564,7 @@ function compactWorkItem(item: WorkItem): Record<string, unknown> {
     department: item.department,
     source: item.source,
     sourceRef: item.sourceRef,
+    rank: item.rank,
     approvalState: item.approvalState,
     approvalRequest: item.approvalRequest,
     approvalRef: item.approvalRef,
@@ -1611,6 +1612,100 @@ function readWorkItemSourceParam(url: URL): WorkItemSource | undefined | null {
   if (!source) return undefined;
   if (!(WORK_ITEM_SOURCES as readonly string[]).includes(source)) return null;
   return source as WorkItemSource;
+}
+
+const WORK_ITEM_PAGE_DEFAULT_LIMIT = 20;
+const WORK_ITEM_PAGE_MAX_LIMIT = 100;
+const ISO_DATE_OR_INSTANT = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
+
+interface WorkItemQueryParams {
+  filter: SearchWorkItemsFilter;
+  limit: number;
+  offset: number;
+}
+
+function readWorkItemIntegerParam(
+  url: URL,
+  name: 'limit' | 'offset',
+  fallback: number,
+): { ok: true; value: number } | { ok: false; error: string } {
+  const raw = url.searchParams.get(name);
+  if (raw === null) return { ok: true, value: fallback };
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return { ok: false, error: `${name} must be a non-negative integer` };
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value)) return { ok: false, error: `${name} must be a safe integer` };
+  if (name === 'limit') {
+    if (value < 1) return { ok: false, error: 'limit must be at least 1' };
+    return { ok: true, value: Math.min(value, WORK_ITEM_PAGE_MAX_LIMIT) };
+  }
+  return { ok: true, value };
+}
+
+function readWorkItemDateParam(
+  url: URL,
+  name: 'since' | 'until',
+): { ok: true; value?: string } | { ok: false; error: string } {
+  const raw = readCleanSearchParam(url, name);
+  if (!raw) return { ok: true };
+  if (!ISO_DATE_OR_INSTANT.test(raw)) {
+    return { ok: false, error: `${name} must be an ISO date or timezone-qualified ISO timestamp` };
+  }
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+  const expanded = dateOnly
+    ? `${raw}T${name === 'since' ? '00:00:00.000' : '23:59:59.999'}Z`
+    : raw;
+  const parsed = new Date(expanded);
+  if (Number.isNaN(parsed.getTime()) || (dateOnly && parsed.toISOString().slice(0, 10) !== raw)) {
+    return { ok: false, error: `${name} must be a valid ISO date or timestamp` };
+  }
+  return { ok: true, value: parsed.toISOString() };
+}
+
+function readWorkItemQueryParams(url: URL): { ok: true; value: WorkItemQueryParams } | { ok: false; error: string } {
+  const filter: SearchWorkItemsFilter = {};
+  const status = readWorkItemStatusParam(url);
+  if (status === null) return { ok: false, error: `status must be one of ${WORK_ITEM_STATUSES.join(', ')}` };
+  if (status) filter.status = status;
+  const source = readWorkItemSourceParam(url);
+  if (source === null) return { ok: false, error: `source must be one of ${WORK_ITEM_SOURCES.join(', ')}` };
+  if (source) filter.source = source;
+  const assignee = readCleanSearchParam(url, 'assignee');
+  if (assignee) filter.assignee = assignee;
+  const department = readCleanSearchParam(url, 'department');
+  if (department) filter.department = department;
+  const text = readCleanSearchParam(url, 'q') ?? readCleanSearchParam(url, 'text');
+  if (text) {
+    if (text.length > SEARCH_QUERY_ROUTE_CHAR_CAP) {
+      return { ok: false, error: `q is too long (${text.length} chars, max ${SEARCH_QUERY_ROUTE_CHAR_CAP}) — shorten the query` };
+    }
+    filter.text = text;
+  }
+  const since = readWorkItemDateParam(url, 'since');
+  if (!since.ok) return since;
+  if (since.value) filter.since = since.value;
+  const until = readWorkItemDateParam(url, 'until');
+  if (!until.ok) return until;
+  if (until.value) filter.until = until.value;
+  if (filter.since && filter.until && filter.since > filter.until) {
+    return { ok: false, error: 'since must be earlier than or equal to until' };
+  }
+  const limit = readWorkItemIntegerParam(url, 'limit', WORK_ITEM_PAGE_DEFAULT_LIMIT);
+  if (!limit.ok) return limit;
+  const offset = readWorkItemIntegerParam(url, 'offset', 0);
+  if (!offset.ok) return offset;
+  return { ok: true, value: { filter, limit: limit.value, offset: offset.value } };
+}
+
+function workItemPagePayload(page: ReturnType<typeof queryWorkItems>): Record<string, unknown> {
+  return {
+    workItems: page.workItems.map(compactWorkItem),
+    total: page.total,
+    totals: page.totals,
+    limit: page.limit,
+    offset: page.offset,
+    nextOffset: page.nextOffset,
+  };
 }
 
 type WorkItemCaller =
@@ -2434,24 +2529,9 @@ export async function handleApiRequest(
     // structured filters are exact. Compact summaries only — body/acceptance
     // dumps stay behind GET /api/work-items/:id.
     if (method === "GET" && pathname === "/api/search/work-items") {
-      const text = readCleanSearchParam(url, "text");
-      const filter: SearchWorkItemsFilter = {};
-      if (text) {
-        if (text.length > SEARCH_QUERY_ROUTE_CHAR_CAP) {
-          return badRequest(res, `text is too long (${text.length} chars, max ${SEARCH_QUERY_ROUTE_CHAR_CAP}) — shorten the query`);
-        }
-        filter.text = text;
-      }
-      const status = readWorkItemStatusParam(url);
-      if (status === null) return badRequest(res, `status must be one of ${WORK_ITEM_STATUSES.join(", ")}`);
-      if (status) filter.status = status;
-      const source = readWorkItemSourceParam(url);
-      if (source === null) return badRequest(res, `source must be one of ${WORK_ITEM_SOURCES.join(", ")}`);
-      if (source) filter.source = source;
-      const assignee = readCleanSearchParam(url, "assignee");
-      if (assignee) filter.assignee = assignee;
-      const department = readCleanSearchParam(url, "department");
-      if (department) filter.department = department;
+      const parsedQuery = readWorkItemQueryParams(url);
+      if (!parsedQuery.ok) return badRequest(res, parsedQuery.error);
+      const { filter, limit, offset } = parsedQuery.value;
       const needsAttentionFor = readCleanSearchParam(url, "needsAttentionFor");
       if (needsAttentionFor) {
         const target = resolveNeedsAttentionTarget(req, res, needsAttentionFor, context);
@@ -2459,11 +2539,9 @@ export async function handleApiRequest(
         filter.needsAttentionFor = target;
       }
       if (Object.keys(filter).length === 0) {
-        return badRequest(res, "at least one filter is required (text, status, source, assignee, department, needsAttentionFor)");
+        return badRequest(res, "at least one filter is required (q, text, status, source, assignee, department, since, until, needsAttentionFor)");
       }
-      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get("limit") || "10", 10) || 10, 20));
-      const workItems = searchWorkItems(filter, limit);
-      return json(res, { workItems: workItems.map(compactWorkItem) });
+      return json(res, workItemPagePayload(queryWorkItems({ ...filter, limit, offset })));
     }
 
     // GET /api/knowledge/search — GRS-020b: deterministic token-AND search over
@@ -2949,25 +3027,16 @@ export async function handleApiRequest(
 
     // GET /api/work-items — compact Todo list for MCP/web surfaces.
     if (method === "GET" && pathname === "/api/work-items") {
-      const filter: SearchWorkItemsFilter = {};
-      const status = readWorkItemStatusParam(url);
-      if (status === null) return badRequest(res, `status must be one of ${WORK_ITEM_STATUSES.join(", ")}`);
-      if (status) filter.status = status;
-      const source = readWorkItemSourceParam(url);
-      if (source === null) return badRequest(res, `source must be one of ${WORK_ITEM_SOURCES.join(", ")}`);
-      if (source) filter.source = source;
-      const assignee = readCleanSearchParam(url, "assignee");
-      if (assignee) filter.assignee = assignee;
-      const department = readCleanSearchParam(url, "department");
-      if (department) filter.department = department;
+      const parsedQuery = readWorkItemQueryParams(url);
+      if (!parsedQuery.ok) return badRequest(res, parsedQuery.error);
+      const { filter, limit, offset } = parsedQuery.value;
       const needsAttentionFor = readCleanSearchParam(url, "needsAttentionFor");
       if (needsAttentionFor) {
         const target = resolveNeedsAttentionTarget(req, res, needsAttentionFor, context);
         if (!target) return;
         filter.needsAttentionFor = target;
       }
-      const limit = Math.max(1, Math.min(parseInt(url.searchParams.get("limit") || "10", 10) || 10, 20));
-      return json(res, { workItems: listWorkItems({ ...filter, limit }).map(compactWorkItem) });
+      return json(res, workItemPagePayload(queryWorkItems({ ...filter, limit, offset })));
     }
 
     // POST /api/work-items — GRS-021c create. Tool callers must carry identity;
