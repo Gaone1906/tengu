@@ -22,6 +22,40 @@ export default defineConfig(() => {
       outDir: 'out',
       emptyOutDir: true,
       sourcemap: false,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            const normalized = id.split(path.sep).join('/')
+            if (!normalized.includes('/node_modules/')) return
+            if (
+              normalized.includes('/node_modules/react/') ||
+              normalized.includes('/node_modules/react-dom/') ||
+              normalized.includes('/node_modules/scheduler/')
+            ) {
+              return 'vendor-react'
+            }
+            if (
+              normalized.includes('/node_modules/react-router/') ||
+              normalized.includes('/node_modules/react-router-dom/')
+            ) {
+              return 'vendor-router'
+            }
+            if (
+              normalized.includes('/node_modules/@tanstack/react-query/') ||
+              normalized.includes('/node_modules/@tanstack/query-core/')
+            ) {
+              return 'vendor-query'
+            }
+            if (
+              normalized.includes('/node_modules/radix-ui/') ||
+              normalized.includes('/node_modules/@radix-ui/') ||
+              normalized.includes('/node_modules/cmdk/')
+            ) {
+              return 'vendor-radix'
+            }
+          },
+        },
+      },
     },
     server: {
       proxy: {
