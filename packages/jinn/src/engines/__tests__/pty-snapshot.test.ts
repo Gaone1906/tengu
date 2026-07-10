@@ -74,9 +74,43 @@ describe("PtySnapshot", () => {
     expect((await source.capture()).visible).toBe(true);
     source.dispose();
   });
+
+  it("never returns an empty ready snapshot when a color-dense viewport exceeds the byte cap", async () => {
+    const source = new PtySnapshot({ cols: 500, rows: 250 });
+    let output = "";
+    for (let row = 0; row < 250; row += 1) {
+      output += `\u001b[${row + 1};1H`;
+      for (let col = 0; col < 500; col += 1) {
+        output += `\u001b[38;2;${row % 256};${col % 256};${(row + col) % 256}mX`;
+      }
+    }
+    await source.write(output);
+
+    const serialized = await source.capture();
+
+    expect(Buffer.byteLength(serialized.data, "utf8")).toBeLessThanOrEqual(PTY_SNAPSHOT_MAX_BYTES);
+    expect(serialized.visible).toBe(true);
+    expect(serialized.data.length).toBeGreaterThan(0);
+    const restored = new Terminal({ cols: 500, rows: 250, scrollback: 5000, allowProposedApi: true });
+    await write(restored, serialized.data);
+    expect(viewport(restored)).toEqual(source.viewport());
+    source.dispose();
+    restored.dispose();
+  });
 });
 
 describe("PtySnapshotStore", () => {
+  it("rejects a persisted empty snapshot that claims to be visible", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pty-snapshot-empty-ready-"));
+    tempDirs.push(dir);
+    const store = new PtySnapshotStore(dir, { debounceMs: 0 });
+
+    store.schedule("invalid-empty-ready", { data: "", cols: 80, rows: 24, visible: true });
+    await store.flush("invalid-empty-ready");
+
+    expect(await store.load("invalid-empty-ready")).toBeUndefined();
+  });
+
   it("atomically persists, reloads, and deletes a versioned session snapshot", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pty-snapshot-"));
     tempDirs.push(dir);
@@ -105,18 +139,23 @@ describe("PtySnapshotStore", () => {
     const store = new PtySnapshotStore(dir, { debounceMs: 0 });
     const originalRename = fs.promises.rename.bind(fs.promises);
     let releaseRename!: () => void;
+    let markRenameStarted!: () => void;
     const gate = new Promise<void>((resolve) => { releaseRename = resolve; });
+    const renameStarted = new Promise<void>((resolve) => { markRenameStarted = resolve; });
     const rename = vi.spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+      markRenameStarted();
       await gate;
       return originalRename(from, to);
     });
 
     store.schedule("deleted-during-write", { data: "stale", cols: 80, rows: 24, visible: true });
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await renameStarted;
+    const writing = (store as unknown as {
+      pending: Map<string, { writing: Promise<void> }>;
+    }).pending.get("deleted-during-write")!.writing;
     store.deleteSync("deleted-during-write");
     releaseRename();
-    await store.flush("deleted-during-write");
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await writing;
 
     expect(await store.load("deleted-during-write")).toBeUndefined();
     rename.mockRestore();

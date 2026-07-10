@@ -2,8 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { SerializeAddon } from "@xterm/addon-serialize";
-import { Terminal } from "@xterm/headless";
+import headlessXterm from "@xterm/headless";
+import type { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { PTY_SNAPSHOTS_DIR } from "../shared/paths.js";
+
+// @xterm/headless 6 publishes CommonJS at its Node `main`. A named ESM import
+// works under Vitest's transform but crashes plain Node when loading built dist.
+const { Terminal } = headlessXterm;
 
 export const PTY_SNAPSHOT_SCROLLBACK_LINES = 1_500;
 export const PTY_SNAPSHOT_MAX_BYTES = 512 * 1024;
@@ -32,7 +37,7 @@ interface PtySnapshotOptions {
  * boundaries retain the PTY's exact order.
  */
 export class PtySnapshot {
-  private readonly terminal: Terminal;
+  private readonly terminal: HeadlessTerminal;
   private readonly serializeAddon: SerializeAddon;
   private pending: Promise<void> = Promise.resolve();
 
@@ -93,16 +98,20 @@ export class PtySnapshot {
       data = this.serializeAddon.serialize({ scrollback: low });
     }
 
-    // The viewport is bounded by the validated PTY geometry. If a future xterm
-    // release produces more than the hard cap even with zero scrollback, fail
-    // closed to an empty snapshot rather than persist a truncated ANSI suffix.
-    if (Buffer.byteLength(data, "utf8") > PTY_SNAPSHOT_MAX_BYTES) data = "";
+    // A color-dense maximum-size viewport can exceed the cap even with no
+    // scrollback. Fall back to a colorless viewport reconstruction rather than
+    // claiming an empty snapshot is ready and blanking the browser.
+    if (Buffer.byteLength(data, "utf8") > PTY_SNAPSHOT_MAX_BYTES) {
+      data = this.serializePlainViewport();
+    }
+    const bounded = Buffer.byteLength(data, "utf8") <= PTY_SNAPSHOT_MAX_BYTES;
+    if (!bounded) data = "";
 
     return {
       data,
       cols: this.terminal.cols,
       rows: this.terminal.rows,
-      visible: this.hasVisibleContent(),
+      visible: data.length > 0 && this.hasVisibleContent(),
     };
   }
 
@@ -129,6 +138,17 @@ export class PtySnapshot {
       if ((buffer.getLine(i)?.translateToString(true) ?? "").length > 0) return true;
     }
     return false;
+  }
+
+  private serializePlainViewport(): string {
+    const buffer = this.terminal.buffer.active;
+    const chunks = ["\u001b[2J\u001b[H"];
+    for (let row = 0; row < this.terminal.rows; row += 1) {
+      const line = buffer.getLine(buffer.baseY + row)?.translateToString(true) ?? "";
+      if (line) chunks.push(`\u001b[${row + 1};1H${line}`);
+    }
+    chunks.push(`\u001b[${buffer.cursorY + 1};${buffer.cursorX + 1}H`);
+    return chunks.join("");
   }
 }
 
@@ -171,6 +191,7 @@ export class PtySnapshotStore {
         || parsed.cols > 500
         || parsed.rows > 250
         || Buffer.byteLength(parsed.data, "utf8") > PTY_SNAPSHOT_MAX_BYTES
+        || (parsed.visible && parsed.data.length === 0)
       ) return undefined;
       return { data: parsed.data, cols: parsed.cols, rows: parsed.rows, visible: parsed.visible };
     } catch (error) {

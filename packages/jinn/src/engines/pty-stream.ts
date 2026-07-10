@@ -17,6 +17,8 @@ import type { PtyHandle } from "./pty-lifecycle.js";
 export const SESSION_MAP_CAP = 512;
 /** Bound live headless terminal instances in the long-running gateway. */
 export const STREAM_MAP_CAP = 128;
+const PENDING_GENERATION_MAX_CHUNKS = 2_048;
+const PENDING_GENERATION_MAX_BYTES = 512 * 1024;
 
 export function setCapped<V>(map: Map<string, V>, key: string, value: V, cap = SESSION_MAP_CAP): void {
   if (map.has(key)) map.delete(key);
@@ -55,6 +57,8 @@ interface StreamEntry {
   loadPromise: Promise<void>;
   fallbackPromise: Promise<void>;
   pendingGeneration: SequencedChunk[];
+  pendingGenerationBytes: number;
+  pendingGenerationDroppedThrough: number;
   checkingReadiness: boolean;
   captureTimer?: ReturnType<typeof setTimeout>;
 }
@@ -87,6 +91,8 @@ export class PtyStreamManager {
     stream.generation += 1;
     stream.generationReady = false;
     stream.pendingGeneration = [];
+    stream.pendingGenerationBytes = 0;
+    stream.pendingGenerationDroppedThrough = 0;
     stream.checkingReadiness = false;
     if (stream.captureTimer) clearTimeout(stream.captureTimer);
 
@@ -127,7 +133,7 @@ export class PtyStreamManager {
         this.emitData(stream, data);
         this.scheduleCapture(sessionId, stream);
       } else {
-        stream.pendingGeneration.push({ sequence, data });
+        this.queuePendingGeneration(stream, { sequence, data });
         this.checkReadiness(sessionId, stream, stream.generation);
       }
     });
@@ -196,6 +202,9 @@ export class PtyStreamManager {
       }).catch(() => undefined);
     }
     stream.generationReady = false;
+    stream.pendingGeneration = [];
+    stream.pendingGenerationBytes = 0;
+    stream.pendingGenerationDroppedThrough = 0;
     this.emitControl(stream, { type: "exited", exitCode: event.exitCode, signal: event.signal ?? 0 });
   }
 
@@ -229,6 +238,14 @@ export class PtyStreamManager {
         return;
       }
 
+      // If the bounded queue evicted bytes newer than this capture boundary,
+      // recapture at the latest head. Otherwise reset+snapshot would omit the
+      // dropped mutation before releasing the remaining deltas.
+      if (stream.pendingGenerationDroppedThrough > boundarySequence) {
+        this.checkReadiness(sessionId, stream, generation);
+        return;
+      }
+
       stream.generationReady = true;
       stream.lastGood = snapshot;
       this.snapshotStore.schedule(sessionId, snapshot);
@@ -238,6 +255,8 @@ export class PtyStreamManager {
 
       const later = stream.pendingGeneration.filter((item) => item.sequence > boundarySequence);
       stream.pendingGeneration = [];
+      stream.pendingGenerationBytes = 0;
+      stream.pendingGenerationDroppedThrough = 0;
       for (const item of later) this.emitData(stream, item.data);
       this.scheduleCapture(sessionId, stream);
     }).catch((error) => {
@@ -259,6 +278,20 @@ export class PtyStreamManager {
       }).catch(() => undefined);
     }, 75);
     stream.captureTimer.unref?.();
+  }
+
+  private queuePendingGeneration(stream: StreamEntry, chunk: SequencedChunk): void {
+    stream.pendingGeneration.push(chunk);
+    stream.pendingGenerationBytes += chunk.data.byteLength;
+    while (
+      stream.pendingGeneration.length > PENDING_GENERATION_MAX_CHUNKS
+      || stream.pendingGenerationBytes > PENDING_GENERATION_MAX_BYTES
+    ) {
+      const dropped = stream.pendingGeneration.shift();
+      if (!dropped) break;
+      stream.pendingGenerationBytes -= dropped.data.byteLength;
+      stream.pendingGenerationDroppedThrough = dropped.sequence;
+    }
   }
 
   private emitData(stream: StreamEntry, data: Buffer): void {
@@ -296,6 +329,8 @@ export class PtyStreamManager {
         loadPromise: Promise.resolve(),
         fallbackPromise: Promise.resolve(),
         pendingGeneration: [],
+        pendingGenerationBytes: 0,
+        pendingGenerationDroppedThrough: 0,
         checkingReadiness: false,
       };
       const created = stream;

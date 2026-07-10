@@ -9,8 +9,13 @@ import type { PtyControlEvent } from "../pty-view-engine.js";
 
 const tempDirs: string[] = [];
 
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+afterEach(async () => {
+  // Readiness schedules a final capture after 75ms. Let that unref'd timer and
+  // the store's 1ms atomic write settle before removing its temporary home.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  for (const dir of tempDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 10 });
+  }
 });
 
 /** Minimal fake IPty: lets the test drive onData/onExit and inspect handlers. */
@@ -217,6 +222,49 @@ describe("PtyStreamManager snapshot subscriptions", () => {
     expect(hits).toBe(2);
     expect(() => proc.emitError(new Error("EIO"))).not.toThrow();
   });
+
+  it("bounds stalled pre-ready control output while preserving the eventual authoritative paint", async () => {
+    const manager = makeManager();
+    const proc = makeFakePty(80, 24);
+    manager.attach("stalled", proc);
+    const deltas: Buffer[] = [];
+    const controls: PtyControlEvent[] = [];
+    const sub = manager.subscribeWithSnapshot(
+      "stalled",
+      (data) => deltas.push(data),
+      (event) => controls.push(event),
+    );
+    expect((await sub.snapshot).ready).toBe(false);
+    sub.start();
+
+    const controlOnly = "\u001b[H";
+    for (let i = 0; i < 2_100; i += 1) proc.emitData(controlOnly);
+
+    const entry = (manager as unknown as {
+      streams: Map<string, { pendingGeneration: Array<{ data: Buffer }> }>;
+    }).streams.get("stalled")!;
+    expect(entry.pendingGeneration.length).toBeLessThanOrEqual(2_048);
+
+    const largeControlOnly = `\u001b]0;${"x".repeat(16 * 1_024)}\u0007`;
+    for (let i = 0; i < 33; i += 1) proc.emitData(largeControlOnly);
+    expect(entry.pendingGeneration.reduce((bytes, chunk) => bytes + chunk.data.byteLength, 0))
+      .toBeLessThanOrEqual(512 * 1024);
+
+    proc.emitData("authoritative paint");
+    proc.emitData(" + ordered tail");
+    await manager.flushSnapshot("stalled");
+    await settle();
+
+    const snapshot = controls.find((event) => event.type === "snapshot");
+    expect(snapshot?.type).toBe("snapshot");
+    expect(controls.at(-1)?.type).toBe("ready");
+    const restored = new Terminal({ cols: 80, rows: 24, scrollback: 5000, allowProposedApi: true });
+    if (snapshot?.type === "snapshot") await write(restored, snapshot.snapshot.data);
+    await write(restored, Buffer.concat(deltas).toString("utf8"));
+    expect(viewport(restored).join("\n")).toContain("authoritative paint + ordered tail");
+    restored.dispose();
+    sub.unsubscribe();
+  }, 30_000);
 
   it("caps stream bookkeeping and preserves recently touched sessions", async () => {
     const manager = makeManager();
