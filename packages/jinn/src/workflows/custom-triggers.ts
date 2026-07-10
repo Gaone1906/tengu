@@ -6,6 +6,7 @@ import { startWorkflowRunFromTrigger, type RunDriverDeps } from './run-reconcile
 import type { WorkflowRun, WorkflowTriggerEvent } from './run-store.js';
 import { evaluateRegexMatch } from './regex-eval.js';
 import { logger } from '../shared/logger.js';
+import { snapshotPollExecutableArtifacts, type PollExecutableArtifact } from './poll-artifacts.js';
 
 const TRIGGER_STORE_SCHEMA_VERSION = 1;
 const TRIGGER_DIR = 'workflow-triggers';
@@ -116,11 +117,12 @@ export const POLL_DEFAULT_TIMEOUT_MS = 30_000;
 export const POLL_DEFAULT_STDOUT_MAX_BYTES = 64 * 1024;
 export const POLL_DEFAULT_STDERR_MAX_BYTES = 16 * 1024;
 export const POLL_CWD_POLICY = 'jinn-home-or-process-cwd';
-// Poll commands run with a SCRUBBED environment (allowlist only) so an approved
-// command — or a later-edited script — can never read the gateway's secrets.
-// The exact allowlist is baked into POLL_ENV_POLICY so it appears verbatim in the
-// approval request the operator signs off on, and changing it rehashes the
-// activation contract (forcing re-approval) by construction.
+// Poll commands run with a SCRUBBED inherited environment (allowlist only), so
+// secret environment variables are not handed to the child. This is not a
+// filesystem/network sandbox: the artifact manifest below prevents silent code
+// replacement, while least-privilege process isolation remains follow-up work.
+// The exact allowlist is baked into POLL_ENV_POLICY so changing it rehashes the
+// activation contract and forces re-approval.
 export const POLL_ENV_ALLOWLIST = ['PATH', 'HOME', 'JINN_HOME', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR'] as const;
 export const POLL_ENV_POLICY = `scrubbed-allowlist:${POLL_ENV_ALLOWLIST.join(',')}`;
 
@@ -179,6 +181,7 @@ export interface PollWorkflowActivationContract {
   timeoutMs: number;
   stdoutMaxBytes: number;
   stderrMaxBytes: number;
+  executableArtifacts: PollExecutableArtifact[];
 }
 
 export type WorkflowTriggerBinding = WebhookWorkflowTriggerBinding | PollWorkflowTriggerBinding;
@@ -356,7 +359,11 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function pollActivationContract(binding: Pick<PollWorkflowTriggerBinding, 'command' | 'intervalSeconds' | 'timeoutMs' | 'stdoutMaxBytes' | 'stderrMaxBytes'>): PollWorkflowActivationContract {
+function pollExecutionCwd(): string {
+  return process.env.JINN_HOME || process.cwd();
+}
+
+function pollActivationPolicy(binding: Pick<PollWorkflowTriggerBinding, 'command' | 'intervalSeconds' | 'timeoutMs' | 'stdoutMaxBytes' | 'stderrMaxBytes'>): Omit<PollWorkflowActivationContract, 'executableArtifacts'> {
   return {
     command: binding.command,
     intervalSeconds: binding.intervalSeconds,
@@ -365,6 +372,16 @@ export function pollActivationContract(binding: Pick<PollWorkflowTriggerBinding,
     timeoutMs: binding.timeoutMs ?? POLL_DEFAULT_TIMEOUT_MS,
     stdoutMaxBytes: binding.stdoutMaxBytes ?? POLL_DEFAULT_STDOUT_MAX_BYTES,
     stderrMaxBytes: binding.stderrMaxBytes ?? POLL_DEFAULT_STDERR_MAX_BYTES,
+  };
+}
+
+export function pollActivationContract(binding: Pick<PollWorkflowTriggerBinding, 'command' | 'intervalSeconds' | 'timeoutMs' | 'stdoutMaxBytes' | 'stderrMaxBytes'>): PollWorkflowActivationContract {
+  return {
+    ...pollActivationPolicy(binding),
+    executableArtifacts: snapshotPollExecutableArtifacts(binding.command, {
+      cwd: pollExecutionCwd(),
+      env: process.env,
+    }),
   };
 }
 
@@ -382,12 +399,19 @@ export function withPollActivationContract(binding: PollWorkflowTriggerBinding):
 }
 
 export function pollActivationContractMatches(binding: PollWorkflowTriggerBinding): boolean {
-  return !!binding.activationContractHash && binding.activationContractHash === pollActivationContractHash(binding);
+  try {
+    return !!binding.activationContractHash
+      && !!binding.activationContract?.executableArtifacts?.length
+      && binding.activationContractHash === pollActivationContractHash(binding);
+  } catch {
+    return false;
+  }
 }
 
 export function formatPollActivationApprovalRequest(binding: PollWorkflowTriggerBinding): string {
-  const contract = pollActivationContract(binding);
-  const hash = pollActivationContractHash(binding);
+  const contract = binding.activationContract ?? pollActivationContract(binding);
+  const hash = binding.activationContractHash
+    ?? crypto.createHash('sha256').update(stableJson(contract)).digest('hex');
   return [
     `Activate poll trigger "${binding.name}" for workflow "${binding.targetWorkflowId}".`,
     '',
@@ -399,6 +423,8 @@ export function formatPollActivationApprovalRequest(binding: PollWorkflowTrigger
     `timeoutMs: ${contract.timeoutMs}`,
     `stdoutMaxBytes: ${contract.stdoutMaxBytes}`,
     `stderrMaxBytes: ${contract.stderrMaxBytes}`,
+    ...contract.executableArtifacts.map((artifact) =>
+      `artifact: ${artifact.role} ${artifact.path} sha256:${artifact.sha256}`),
     `activationContractHash: ${hash}`,
   ].join('\n');
 }
@@ -680,7 +706,7 @@ export function updateWorkflowTriggerBinding(root: string, binding: WorkflowTrig
   const previous = store.triggers[idx];
   let updated = { ...binding, updatedAt: defaultNow() } as WorkflowTriggerBinding;
   if (previous.kind === 'poll' && updated.kind === 'poll') {
-    const contractChanged = pollActivationContractHash(previous) !== pollActivationContractHash(updated);
+    const contractChanged = stableJson(pollActivationPolicy(previous)) !== stableJson(pollActivationPolicy(updated));
     if (contractChanged) {
       const {
         approvalWorkItemId: _approvalWorkItemId,

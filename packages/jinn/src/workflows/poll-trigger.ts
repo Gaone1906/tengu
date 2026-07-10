@@ -55,12 +55,16 @@ interface CommandResult {
   detail?: string;
 }
 
-function approvalSatisfied(binding: PollWorkflowTriggerBinding): boolean {
-  if (binding.activation === 'disabled') return false;
-  if (!binding.approvalWorkItemId) return false;
-  if (!pollActivationContractMatches(binding)) return false;
+function approvalSatisfied(binding: PollWorkflowTriggerBinding): { ok: true } | { ok: false; detail: string } {
+  if (binding.activation === 'disabled') return { ok: false, detail: 'poll trigger is disabled' };
+  if (!binding.approvalWorkItemId) return { ok: false, detail: 'poll trigger has no approval' };
+  if (!pollActivationContractMatches(binding)) {
+    return { ok: false, detail: 'approved executable artifact changed or can no longer be resolved' };
+  }
   const item = getWorkItem(binding.approvalWorkItemId);
-  return item?.approvalState === 'approved';
+  return item?.approvalState === 'approved'
+    ? { ok: true }
+    : { ok: false, detail: 'poll trigger approval is not approved' };
 }
 
 function killCommandProcess(child: ReturnType<typeof spawn>): void {
@@ -80,13 +84,11 @@ function killCommandProcess(child: ReturnType<typeof spawn>): void {
 }
 
 /**
- * A poll command runs with a SCRUBBED environment — only the allowlisted vars
- * (PATH/HOME/JINN_HOME/locale/tmp), never `process.env`. This bounds the blast
- * radius: an approved command (or a later-edited script it calls) cannot read the
- * gateway's API keys, tokens, or connector secrets even if it is compromised.
- * `shell: true` is retained because the command contract is a free-form shell
- * string (pipes/redirects/globs); the env scrub, not argv parsing, is what closes
- * the secret-exfil hole.
+ * A poll command runs with a SCRUBBED inherited environment — only the allowlisted
+ * vars (PATH/HOME/JINN_HOME/locale/tmp), never the complete `process.env`. The
+ * approved artifact manifest prevents later executable replacement. This does not
+ * isolate the child from files readable by the gateway UID or from the network;
+ * those require a separate least-privilege sandbox.
  */
 function scrubbedPollEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
@@ -210,10 +212,10 @@ function asPollBinding(binding: WorkflowTriggerBinding): PollWorkflowTriggerBind
 /**
  * Trust boundary: activating a poll trigger means the gateway will execute a command
  * authored through an agent-facing surface. That is intentionally gated by a COO
- * approval work item before the command can run, and every invocation is bounded by
- * a hard timeout plus stdout/stderr caps so a loop or noisy script cannot wedge the
- * gateway process. Approval is the authorization decision; these runtime bounds are
- * the blast-radius limits after that decision.
+ * approval work item before the command can run. The approval pins the resolved
+ * executable inputs by content hash, rechecked before every invocation, and every
+ * invocation is bounded by a hard timeout plus stdout/stderr caps. Full filesystem,
+ * identity, and network sandboxing is deliberately not claimed here.
  */
 export async function runPollTriggerOnce(
   deps: RunDriverDeps,
@@ -221,7 +223,8 @@ export async function runPollTriggerOnce(
   opts: PollTriggerRunOptions = {},
 ): Promise<PollTriggerRunResult> {
   if (binding.activation === 'disabled') return { outcome: 'disabled' };
-  if (!approvalSatisfied(binding)) return { outcome: 'not-approved' };
+  const approval = approvalSatisfied(binding);
+  if (!approval.ok) return { outcome: 'not-approved', detail: approval.detail };
 
   const command = await runCommand(binding);
   if (command.outcome !== 'ok') {

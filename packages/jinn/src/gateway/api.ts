@@ -3020,7 +3020,8 @@ export async function handleApiRequest(
             const triggerName = created.binding.name;
             try {
               const target = resolveRootApprovalTarget();
-              const approvalRequest = formatPollActivationApprovalRequest(created.binding);
+              const pinnedBinding = withPollActivationContract(created.binding);
+              const approvalRequest = formatPollActivationApprovalRequest(pinnedBinding);
               const item = createWorkItem({
                 title: `Activate poll trigger "${triggerName}"`,
                 body: approvalRequest,
@@ -3036,7 +3037,7 @@ export async function handleApiRequest(
                 actor,
               });
               const updated = updateWorkflowTriggerBinding(root, {
-                ...withPollActivationContract(created.binding),
+                ...pinnedBinding,
                 approvalWorkItemId: workItem.id,
                 activation: "pending_approval",
               });

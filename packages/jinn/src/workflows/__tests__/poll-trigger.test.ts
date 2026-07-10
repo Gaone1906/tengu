@@ -185,6 +185,33 @@ describe('workflow poll/check custom triggers', () => {
     expect((stored as { approvalWorkItemId?: string } | null)?.approvalWorkItemId).toBeUndefined();
   });
 
+  it('fails closed when an approved script is replaced without changing the command', async () => {
+    createDefinition(root, def('poll-swap-workflow', [trigger, step('a')]), { now });
+    const script = path.join(root, 'poll-swap.sh');
+    fs.writeFileSync(script, '#!/bin/sh\nprintf \'%s\' \'{"fire":true,"payload":{"id":"approved"}}\'\n', 'utf8');
+    fs.chmodSync(script, 0o700);
+    const approvalWorkItemId = await approvedWorkItem('poll-swap');
+    const binding = poll.createWorkflowTriggerBinding(root, {
+      kind: 'poll',
+      name: 'poll-swap',
+      event: 'poll.ready',
+      targetWorkflowId: 'poll-swap-workflow',
+      command: script,
+      intervalSeconds: 60,
+      timeoutMs: 1000,
+      approvalWorkItemId,
+    }, { now }).binding;
+
+    fs.writeFileSync(script, '#!/bin/sh\nprintf \'%s\' \'{"fire":true,"payload":{"id":"replaced"}}\'\n', 'utf8');
+    fs.chmodSync(script, 0o700);
+
+    const result = await poll.runPollTriggerOnce(harness(), binding, { now });
+
+    expect(result).toMatchObject({ outcome: 'not-approved' });
+    expect(result.detail).toMatch(/executable artifact changed/i);
+    expect(runStore.listRuns(root, 'poll-swap-workflow')).toHaveLength(0);
+  });
+
   it('does not auto-approve a legacy poll binding that has an approval item but no activation contract', async () => {
     createDefinition(root, def('poll-legacy-workflow', [trigger, step('a')]), { now });
     const approvalWorkItemId = await approvedWorkItem('poll-legacy');
