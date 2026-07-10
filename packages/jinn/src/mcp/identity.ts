@@ -1,5 +1,8 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type { ResolvedMcpConfig, McpServerStdioConfig } from "../shared/types.js";
+import { resolveMcpSessionCapabilityKeyFile } from "../shared/home.js";
 
 /**
  * GRS-017a — the caller-identity seam.
@@ -59,23 +62,88 @@ export const UNIDENTIFIED_TOOL_CALL_ERROR =
   "unrestricted access: fix the engine's env wiring (or launch the server with " +
   "JINN_SESSION_ID and JINN_SESSION_CAPABILITY), or perform the operation as the operator via the web UI / HTTP API.";
 
-const sessionCapabilities = new Map<string, string>();
+const SESSION_CAPABILITY_KEY_BYTES = 32;
+const SESSION_CAPABILITY_DOMAIN = "jinn:mcp-session-capability:v1\0";
+const BASE64URL_256_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
-/**
- * Return the gateway-side capability for a session, minting one on first use.
- * Reusing the value matters: multiple warm/resumed MCP servers for the same
- * session should not invalidate each other.
- */
-export function ensureSessionCapability(sessionId: string): string {
-  const existing = sessionCapabilities.get(sessionId);
-  if (existing) return existing;
-  const minted = crypto.randomBytes(32).toString("base64url");
-  sessionCapabilities.set(sessionId, minted);
-  return minted;
+function decodeKey(raw: string, keyFile: string): Buffer {
+  const encoded = raw.trim();
+  if (!BASE64URL_256_PATTERN.test(encoded)) {
+    throw new Error(`Invalid MCP session capability key at ${keyFile}`);
+  }
+  const key = Buffer.from(encoded, "base64url");
+  if (key.length !== SESSION_CAPABILITY_KEY_BYTES) {
+    throw new Error(`Invalid MCP session capability key at ${keyFile}`);
+  }
+  return key;
 }
 
-export function verifySessionCapability(sessionId: string, capability: string): boolean {
-  return sessionCapabilities.get(sessionId) === capability;
+function readSessionCapabilityKey(keyFile: string): Buffer {
+  return decodeKey(fs.readFileSync(keyFile, "utf-8"), keyFile);
+}
+
+function ensureSessionCapabilityKey(keyFile: string): Buffer {
+  try {
+    const key = readSessionCapabilityKey(keyFile);
+    fs.chmodSync(keyFile, 0o600);
+    return key;
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+
+  const keyDir = path.dirname(keyFile);
+  fs.mkdirSync(keyDir, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(keyDir, 0o700); } catch {}
+
+  const encoded = crypto.randomBytes(SESSION_CAPABILITY_KEY_BYTES).toString("base64url");
+  try {
+    fs.writeFileSync(keyFile, `${encoded}\n`, {
+      encoding: "utf-8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    fs.chmodSync(keyFile, 0o600);
+    return Buffer.from(encoded, "base64url");
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    // Another gateway process won the first-creation race. Its key is the
+    // authority for both processes; never overwrite or silently rotate it.
+    const key = readSessionCapabilityKey(keyFile);
+    fs.chmodSync(keyFile, 0o600);
+    return key;
+  }
+}
+
+function deriveSessionCapability(sessionId: string, key: Buffer): Buffer {
+  return crypto
+    .createHmac("sha256", key)
+    .update(SESSION_CAPABILITY_DOMAIN, "utf-8")
+    .update(sessionId, "utf-8")
+    .digest();
+}
+
+/**
+ * Return the gateway-side capability for a session. The per-instance key is
+ * persisted, but never propagated to engine children; only the derived,
+ * session-scoped capability leaves the gateway. Determinism keeps warm/resumed
+ * MCP servers valid across gateway process replacement.
+ */
+export function ensureSessionCapability(sessionId: string, keyFile = resolveMcpSessionCapabilityKeyFile()): string {
+  if (!sessionId) throw new Error("Cannot derive an MCP session capability without a session id");
+  return deriveSessionCapability(sessionId, ensureSessionCapabilityKey(keyFile)).toString("base64url");
+}
+
+export function verifySessionCapability(sessionId: string, capability: string, keyFile = resolveMcpSessionCapabilityKeyFile()): boolean {
+  if (!sessionId || !BASE64URL_256_PATTERN.test(capability)) return false;
+  try {
+    const expected = deriveSessionCapability(sessionId, readSessionCapabilityKey(keyFile));
+    const candidate = Buffer.from(capability, "base64url");
+    return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
+  } catch {
+    // Missing, unreadable, or malformed authority state must never fall back to
+    // operator access. The caller resolver treats false as unidentified-tool.
+    return false;
+  }
 }
 
 /**
