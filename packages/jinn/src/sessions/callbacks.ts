@@ -7,6 +7,49 @@ import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
 import { hydrateAllAttachments, talkSessionsAttachedTo } from "../talk/attachments.js";
 import type { ChatBlockEnvelope, JsonObject } from "../shared/types.js";
 
+export interface ManagerVisibilityDetails {
+  manager: string;
+  managerDisplay: string;
+  delegator: string | null;
+  delegatorDisplay: string;
+  employee: string;
+  employeeDisplay: string;
+  childSessionId: string;
+  workItemId: string;
+  title: string;
+}
+
+/**
+ * Give a manager lightweight visibility into one skip-level delegation. The
+ * session-message route persists this notification in the restart-safe internal
+ * queue before its manager turn starts. Fire-and-forget, like parent callbacks.
+ */
+export function notifyManagerVisibility(
+  managerSessionId: string,
+  details: ManagerVisibilityDetails,
+): void {
+  const message =
+    `👀 Skip-level visibility: ${details.delegatorDisplay} delegated directly to ${details.employeeDisplay}.\n\n` +
+    `Task: ${details.title}\n` +
+    `Todo: ${details.workItemId}\n` +
+    `Child session: ${details.childSessionId}\n\n` +
+    `You retain manager visibility; no action is required unless coordination or review is needed.`;
+  const displayMessage =
+    `👀 Skip-level visibility · ${details.employeeDisplay}\n${_clean(details.title, 220)}`;
+  const meta: JsonObject = {
+    kind: "manager-visibility",
+    manager: details.manager,
+    delegator: details.delegator ?? "operator",
+    employee: details.employee,
+    childSessionId: details.childSessionId,
+    workItemId: details.workItemId,
+  };
+
+  _sendRaw(managerSessionId, message, displayMessage, { meta }).catch((error) => {
+    logger.warn(`[callbacks] Failed to notify manager session ${managerSessionId}: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
 /**
  * Notify the parent session that a child session has replied.
  * Sends an internal message to the parent via the local HTTP API.

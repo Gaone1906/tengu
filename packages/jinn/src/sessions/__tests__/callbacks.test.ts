@@ -19,7 +19,7 @@ vi.mock("../../shared/logger.js", () => ({
   },
 }));
 
-import { notifyParentSession, notifyRateLimitResumed } from "../callbacks.js";
+import { notifyManagerVisibility, notifyParentSession, notifyRateLimitResumed } from "../callbacks.js";
 import { getSession, listSessionsBySource } from "../registry.js";
 import { attach, __resetAttachmentsForTest } from "../../talk/attachments.js";
 import type { Session } from "../../shared/types.js";
@@ -52,6 +52,46 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 const originalFetch = globalThis.fetch;
+
+describe("notifyManagerVisibility", () => {
+  it("posts one structured notification through the durable session-message route", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    notifyManagerVisibility("manager-session", {
+      manager: "team-lead",
+      managerDisplay: "Team Lead",
+      delegator: "org-root",
+      delegatorDisplay: "Org Root",
+      employee: "worker",
+      employeeDisplay: "Worker",
+      childSessionId: "worker-child",
+      workItemId: "wi_visibility",
+      title: "Inspect a bounded incident",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(url).toBe("http://127.0.0.1:7777/api/sessions/manager-session/message");
+    const body = JSON.parse(opts.body);
+    expect(body.role).toBe("notification");
+    expect(body.message).toContain("Org Root delegated directly to Worker");
+    expect(body.message).toContain("Inspect a bounded incident");
+    expect(body.message).toContain("wi_visibility");
+    expect(body.displayMessage).toContain("Skip-level visibility");
+    expect(body.meta).toEqual({
+      kind: "manager-visibility",
+      manager: "team-lead",
+      delegator: "org-root",
+      employee: "worker",
+      childSessionId: "worker-child",
+      workItemId: "wi_visibility",
+    });
+
+    globalThis.fetch = originalFetch;
+  });
+});
 
 describe("notifyParentSession — no parent", () => {
   it("does nothing if child has no parentSessionId", async () => {

@@ -192,6 +192,7 @@ import { archiveWorkItem, decideWorkItemApproval, escalateApproval, requestAppro
 import { resolveApprovalDecisionAuthority, resolveApprovalRouteTarget, resolveRootApprovalTarget } from "./approval-authority.js";
 import { scanOrg } from "./org.js";
 import { resolveOrgHierarchy } from "./org-hierarchy.js";
+import { surfaceManagerVisibility } from "./manager-visibility.js";
 import { searchKnowledge, readKnowledgeFile } from "../knowledge/store.js";
 import { planWorkflowAuthoringInput } from "../workflows/authoring.js";
 import { loadInstances } from "../cli/instances.js";
@@ -3820,10 +3821,11 @@ export async function handleApiRequest(
         }
       }
       const config = context.getConfig();
-      let delegateEmployee: import("../shared/types.js").Employee | undefined;
+      let orgRegistry: Map<string, Employee> | undefined;
+      let delegateEmployee: Employee | undefined;
       if (employeeName) {
-        const { scanOrg } = await import("./org.js");
-        delegateEmployee = scanOrg().get(employeeName);
+        orgRegistry = scanOrg();
+        delegateEmployee = orgRegistry.get(employeeName);
         if (!delegateEmployee) {
           return badRequest(res, `unknown employee "${employeeName}" — GET /api/org lists valid employees`);
         }
@@ -3859,6 +3861,7 @@ export async function handleApiRequest(
           logger.warn(`Ignoring unknown x-jinn-caller-session "${delegationCaller.callerId}" on delegation`);
         }
       }
+      const delegatorSession = parentSessionId ? getSession(parentSessionId) : undefined;
 
       const title = (
         typeof body.title === "string" && body.title.trim() ? (body.title as string).trim() : task.split("\n")[0].trim()
@@ -4059,6 +4062,16 @@ export async function handleApiRequest(
         queueItemId: delegationQueueItemId,
         attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
       });
+      if (employeeName && orgRegistry) {
+        surfaceManagerVisibility({
+          roster: orgRegistry,
+          employee: employeeName,
+          delegatorSession,
+          childSession: session,
+          workItemId: workItem.id,
+          title,
+        });
+      }
       maybeEmitTalkGraph(session.id, "added", { getSession, emit: context.emit });
 
       return json(res, {
@@ -4305,6 +4318,20 @@ export async function handleApiRequest(
             ...(employeeDisplay ? { employeeDisplay } : {}),
             childSessionId,
           };
+        } else if (rawMeta.kind === "manager-visibility" && employee && childSessionId) {
+          const manager = typeof rawMeta.manager === "string" ? stripControlChars(rawMeta.manager).trim().slice(0, 160) : "";
+          const delegator = typeof rawMeta.delegator === "string" ? stripControlChars(rawMeta.delegator).trim().slice(0, 160) : "";
+          const workItemId = typeof rawMeta.workItemId === "string" ? stripControlChars(rawMeta.workItemId).trim().slice(0, 160) : "";
+          if (manager && delegator && workItemId) {
+            notificationMeta = {
+              kind: "manager-visibility",
+              manager,
+              delegator,
+              employee,
+              childSessionId,
+              workItemId,
+            };
+          }
         }
       }
 

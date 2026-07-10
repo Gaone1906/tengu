@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, vi, type Mock } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi, type Mock } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -42,7 +42,15 @@ process.env.JINN_HOME = tmpHome;
 fs.mkdirSync(path.join(tmpHome, "org"), { recursive: true });
 fs.writeFileSync(
   path.join(tmpHome, "org", "qa-emp.yaml"),
-  ["name: qa-emp", "displayName: QA Employee", "department: qa", "engine: codex", "model: gpt-5.5", "persona: QA employee for route tests", ""].join("\n"),
+  ["name: qa-emp", "displayName: QA Employee", "department: qa", "rank: employee", "reportsTo: qa-manager", "engine: codex", "model: gpt-5.5", "persona: QA employee for route tests", ""].join("\n"),
+);
+fs.writeFileSync(
+  path.join(tmpHome, "org", "qa-manager.yaml"),
+  ["name: qa-manager", "displayName: QA Manager", "department: qa", "rank: manager", "reportsTo: org-root", "engine: codex", "model: gpt-5.5", "persona: QA manager for route tests", ""].join("\n"),
+);
+fs.writeFileSync(
+  path.join(tmpHome, "org", "org-root.yaml"),
+  ["name: org-root", "displayName: Org Root", "department: operations", "rank: executive", "engine: codex", "model: gpt-5.5", "persona: Root coordinator for route tests", ""].join("\n"),
 );
 // GRS-017f: an employee whose CONFIGURED model this gateway doesn't register
 // (only gpt-5.5 is known for codex here) — the misconfig the clear error targets.
@@ -57,6 +65,8 @@ type Store = typeof import("../../work-items/store.js");
 let api: Api;
 let reg: Reg;
 let store: Store;
+const processFetch = globalThis.fetch;
+const routeFetchStub = vi.fn().mockResolvedValue({ ok: true });
 
 function makeRes() {
   let status = 200;
@@ -170,11 +180,36 @@ async function createOperatorSession(prompt: string): Promise<string> {
   return resp.body.id as string;
 }
 
+function createEmployeeSession(employee: string, suffix: string): string {
+  return reg.createSession({
+    engine: "codex",
+    source: "web",
+    sourceRef: `web:${employee}:${suffix}`,
+    sessionKey: `web:${employee}:${suffix}`,
+    connector: "web",
+    employee,
+    prompt: `${employee} coordination session`,
+    title: `${employee} coordination`,
+  }).id;
+}
+
+function managerVisibilityRequests(fetchSpy: ReturnType<typeof vi.fn>, managerSessionId: string) {
+  return fetchSpy.mock.calls.filter(([url, opts]) => {
+    if (url !== `http://127.0.0.1:7777/api/sessions/${managerSessionId}/message`) return false;
+    const body = JSON.parse(opts.body);
+    return body.role === "notification" && body.meta?.kind === "manager-visibility";
+  });
+}
+
 function workItemCount(): number {
   return store.listWorkItems().length;
 }
 
 beforeAll(async () => {
+  // This route dispatches fire-and-forget parent/manager callbacks. Keep the
+  // route suite fully in-process: no callback may inherit the process fetch and
+  // contact an installed gateway while the test harness is running.
+  globalThis.fetch = routeFetchStub as unknown as typeof fetch;
   api = await import("../api.js");
   reg = await import("../../sessions/registry.js");
   store = await import("../../work-items/store.js");
@@ -187,7 +222,80 @@ beforeAll(async () => {
   setJinnAttachGate({ ok: true });
 });
 
+afterAll(async () => {
+  await new Promise((resolve) => setImmediate(resolve));
+  globalThis.fetch = processFetch;
+});
+
 describe("POST /api/delegations — the transaction (happy paths)", () => {
+  it("notifies the IC manager exactly once for a skip-level delegation and still dispatches to the IC", async () => {
+    const managerSessionId = createEmployeeSession("qa-manager", "visibility");
+    const rootSessionId = createEmployeeSession("org-root", "skip-level");
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const beforeRuns = engineRuns.length;
+
+    try {
+      const request = {
+        employee: "qa-emp",
+        task: "Inspect a bounded incident and report the evidence.",
+        title: "Bounded incident inspection",
+        idempotencyKey: "skip-level-visibility-once",
+      };
+      const headers = {
+        [CALLER_SESSION_HEADER]: rootSessionId,
+        [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(rootSessionId),
+      };
+
+      const first = await call("POST", "/api/delegations", request, headers);
+      const replay = await call("POST", "/api/delegations", request, headers);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(first.status).toBe(201);
+      expect(replay.status).toBe(200);
+      expect(replay.body).toMatchObject({ replayed: true, sessionId: first.body.sessionId });
+      expect(first.body.employee).toBe("qa-emp");
+      expect(reg.getSession(first.body.sessionId)).toMatchObject({
+        employee: "qa-emp",
+        parentSessionId: rootSessionId,
+      });
+      expect(engineRuns.slice(beforeRuns)).toContainEqual(expect.objectContaining({
+        sessionId: first.body.sessionId,
+      }));
+      expect(managerVisibilityRequests(fetchSpy, managerSessionId)).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not generate manager visibility for a direct-report delegation", async () => {
+    const managerSessionId = createEmployeeSession("qa-manager", "direct-report");
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    try {
+      const response = await call(
+        "POST",
+        "/api/delegations",
+        { employee: "qa-emp", task: "Run a direct-report check.", title: "Direct-report check" },
+        {
+          [CALLER_SESSION_HEADER]: managerSessionId,
+          [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(managerSessionId),
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(response.status).toBe(201);
+      expect(response.body.employee).toBe("qa-emp");
+      expect(reg.getSession(response.body.sessionId)?.employee).toBe("qa-emp");
+      expect(managerVisibilityRequests(fetchSpy, managerSessionId)).toHaveLength(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("one call mints + spawns + links: employee delegation, operator caller (parentless)", async () => {
     const resp = await call("POST", "/api/delegations", {
       employee: "qa-emp",

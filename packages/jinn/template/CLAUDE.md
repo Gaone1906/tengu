@@ -131,9 +131,8 @@ provides:                    # optional - services this employee offers to the o
 
 ### Delegation
 
-- **Advisory**: the hierarchy informs delegation via context prompts but never blocks direct access
-- Prefer delegating through managers - they delegate to their reports
-- You can still reach any employee directly when needed (no enforcement)
+- Prefer delegating through managers. You MAY delegate skip-level directly to an IC when it is faster, but the IC's manager is notified so they retain visibility.
+- The hierarchy remains advisory: it informs routing but never blocks or reroutes direct access.
 - Each employee's system prompt shows their chain of command, direct reports, and escalation path
 - Apply oversight levels when reviewing employee work: TRUST (relay directly), VERIFY (spot-check), THOROUGH (full review + multi-turn follow-ups)
 - When a department grows (3+ employees), promote a reliable senior to manager - managers handle their own delegation
