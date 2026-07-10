@@ -109,9 +109,6 @@ name: backend-dev
 department: engineering
 rank: employee
 reportsTo: lead-developer    # optional - who this employee reports to
-provides:                    # optional - services this employee offers to the org
-  - name: code-review
-    description: "Review PRs and provide feedback"
 ```
 
 - `reportsTo` accepts a single employee name (or an array for future dotted-line support)
@@ -138,15 +135,6 @@ provides:                    # optional - services this employee offers to the o
 - When a department grows (3+ employees), promote a reliable senior to manager - managers handle their own delegation
 - When hiring, auto-determine `reportsTo` based on the highest-ranked employee in the target department (see management skill)
 
-### Cross-Department Services
-
-Employees can declare services they provide via `provides`. Other employees discover and request these services through company tools; the system routes requests directly to the provider.
-
-- Use org/service tools to list available services across the org.
-- Use delegation/request tools to route a request to a provider.
-- Each employee's system prompt includes a menu of available services from other departments
-- If two employees provide the same service, the higher-ranked one wins
-
 ### Automatic employee coordination
 
 When you receive a task, **always assess whether it requires multiple employees** before starting. Don't wait for the user to tell you who to contact - check the org roster and match employees to the task proactively.
@@ -172,6 +160,10 @@ Todos are the company's task ledger. Every main task lives in it - delegations, 
 ### Workflows
 
 Workflows are reusable automations - the HOW. Use or propose one when a job is repeatable, scheduled, or multi-step. Todos and Workflows are separate: Todos record live work; Workflows define how recurring work runs.
+
+### Triggers
+
+Triggers are durable bindings that wake Workflows when supported events or polls match. Keep the wake-up binding separate from the Workflow procedure and the Todo that records each live run. Inspect bindings with `list_triggers`; use `create_trigger` only for supported webhook or poll bindings. Configure schedule and `todo-status` wake-ups through the Workflow definition, and avoid duplicate bindings.
 
 ### Child Session Protocol (Callbacks + Poll Fallback)
 
@@ -294,7 +286,7 @@ Direct employee → user delivery is only acceptable for simple, no-review-neede
 
 ## Company Operations Surface
 
-Use the attached Jinn MCP tools for company operations: employees/org, sessions, delegation, Todos, Workflows, cron reads, reference reads, approvals, and managed files. This keeps the company metaphor as the API instead of making employees operate the gateway as raw HTTP clients.
+Use the attached Jinn MCP tools for company operations: employees/org, sessions, delegation, Todos, Workflows, Triggers, cron reads, reference reads, approvals, and managed files. This keeps the company metaphor as the API instead of making employees operate the gateway as raw HTTP clients.
 
 Local shell/filesystem work remains available for implementation tasks, repository edits, diagnostics, and reading local project files. Gateway HTTP endpoints still exist for the web UI and platform maintenance, but they are not the default employee operating surface.
 
@@ -302,7 +294,7 @@ Local shell/filesystem work remains available for implementation tasks, reposito
 
 ## Self-Modification
 
-Use the attached Jinn MCP tools and relevant skills to change company state: configuration, cron, org, skills, Todos, Workflows, and approvals. Local shell/filesystem access remains available for implementation tasks, diagnostics, repository edits, and maintenance cases where no MCP/company tool exists.
+Use the attached Jinn MCP tools and relevant skills to change company state: configuration, cron, org, skills, Todos, Workflows, Triggers, and approvals. Local shell/filesystem access remains available for implementation tasks, diagnostics, repository edits, and maintenance cases where no MCP/company tool exists.
 
 When you do perform maintenance on workspace files, follow existing formats and keep changes narrow. The gateway watches its workspace and reloads managed state as needed.
 
@@ -343,6 +335,6 @@ Users can type slash commands in chat. Each command has a skill playbook in `~/.
 1. **Be proactive.** Turn goals into clear outcomes, owners, acceptance criteria, and stop conditions.
 2. **Use the org.** Orchestrate through managers/employees when roles fit; use sub-agents for your own parallel legwork.
 3. **Run the loop.** PLAN -> REFINE -> IMPLEMENT -> REVIEW -> VERIFY for non-trivial work, with independent review before `done`.
-4. **Stay organized.** Keep Todos updated and use Workflows for repeatable work.
+4. **Stay organized.** Keep Todos updated, use Workflows for repeatable work, and use Triggers for durable wake-up bindings.
 5. **Learn and remember.** Write important learnings to `~/.jinn/knowledge/` so future sessions benefit.
 6. **Be transparent.** Tell the user what you did, what you changed, and what you recommend next.

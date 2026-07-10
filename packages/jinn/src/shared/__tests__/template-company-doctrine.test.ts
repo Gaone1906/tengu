@@ -73,6 +73,22 @@ describe("template company doctrine", () => {
     expect(template).not.toContain("org/` changes");
   });
 
+  it("teaches the complete company surface without obsolete service routing", () => {
+    const template = readTemplate("CLAUDE.md");
+
+    expect(template).toContain("### Todos");
+    expect(template).toContain("### Workflows");
+    expect(template).toContain("### Triggers");
+    expect(template).toContain("list_triggers");
+    expect(template).toContain("create_trigger");
+    expect(template).toContain("the IC's manager is notified");
+
+    expect(template).not.toContain("### Cross-Department Services");
+    expect(template).not.toContain("org/service tools");
+    expect(template).not.toContain("menu of available services");
+    expect(template).not.toContain("provides:");
+  });
+
   it("ships compact delegation doctrine for nested callbacks and execution quality", () => {
     const template = readTemplate("CLAUDE.md");
 

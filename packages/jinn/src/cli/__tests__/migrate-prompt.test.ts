@@ -208,6 +208,51 @@ describe("composeMigrationPrompt: against the REAL shipped template migrations",
     "../../../template/migrations",
   );
 
+  it("makes the current package's autonomy migration reachable and complete", () => {
+    const packageJsonPath = path.resolve(templateMigrationsDir, "../../package.json");
+    const packageVersion = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")).version as string;
+    const versions = scanMigrationPrompts(templateMigrationsDir, "0.25.0", packageVersion);
+    const autonomyVersion = "0.26.0";
+
+    expect(fs.existsSync(path.join(templateMigrationsDir, autonomyVersion, "MIGRATION.md"))).toBe(true);
+    expect(versions).toContain(autonomyVersion);
+    expect(scanFutureMigrations(templateMigrationsDir, packageVersion)).not.toContain(autonomyVersion);
+
+    const releaseReferences = [
+      "../../CLAUDE.md",
+      "../../docs/company-doctrine.md",
+      "../../docs/mcp.md",
+      "../../docs/org.md",
+      "../../docs/overview.md",
+      "../../docs/self-modification.md",
+      "../../docs/cron.md",
+      "../../skills/management/SKILL.md",
+      "../../skills/self-heal/SKILL.md",
+      "../../skills/cron-manager/SKILL.md",
+      "../../skills/migrate/SKILL.md",
+    ];
+    for (const ref of releaseReferences) {
+      expect(fs.existsSync(path.resolve(templateMigrationsDir, autonomyVersion, ref)), ref).toBe(true);
+    }
+
+    const prompt = composeMigrationPrompt({
+      templateMigrationsDir,
+      versions,
+      fromVersion: "0.25.0",
+      toVersion: packageVersion,
+      instanceHome: "/home/user/.jinn",
+    });
+
+    expect(prompt).toContain("Employees, Todos, Workflows, and Triggers");
+    expect(prompt).toContain("replace legacy board-first");
+    expect(prompt).toContain("raw-HTTP-first");
+    expect(prompt).toContain("manager is notified");
+    expect(prompt).toContain("CLAUDE.md is canonical");
+    expect(prompt).toContain("preserve every user-specific and operator-specific section");
+    expect(prompt).toContain(`jinn.version\` should read \`"${autonomyVersion}"`);
+    expect(prompt).not.toContain("confirmed release version");
+  });
+
   it("composes every shipped migration with no dead ~/.jinn/migrations staging references", () => {
     const versions = scanMigrationPrompts(templateMigrationsDir, "0.0.0", "999.0.0");
     expect(versions.length).toBeGreaterThan(0);

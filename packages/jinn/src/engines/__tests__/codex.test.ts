@@ -617,7 +617,9 @@ describe("CodexEngine — process lifecycle", () => {
   });
 
   it("tracks a live process and clears it after close (isAlive)", async () => {
-    const engine = new CodexEngine();
+    const engine = new CodexEngine({
+      codexSessionsDir: fs.mkdtempSync(path.join(os.tmpdir(), "codex-alive-")),
+    });
     const promise = engine.run({
       prompt: "hi",
       cwd: "/tmp",

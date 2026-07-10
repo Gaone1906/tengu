@@ -1,11 +1,3 @@
-<!--
-  RELEASE ENGINEER: this migration is versioned 0.26.0 as the expected next
-  minor after 0.25.0 (the autonomy surface is a feature release). If the release
-  that ships this surface lands under a DIFFERENT version, rename this directory
-  to match that version before publishing — `jinn migrate` only surfaces a
-  migration once the package version reaches the directory's version.
--->
-
 # Migration: 0.26.0 — Company Autonomy Surface (Todos, Workflows, MCP-as-hands)
 
 ## Summary
@@ -14,18 +6,30 @@ This release reframes the instance around the **company metaphor as the API**:
 Employees, Todos, Workflows, and Triggers are the public model, and the **Jinn
 MCP is every employee's primary hands** for company state. Workflows are on by
 default with a workflow evidence root, the MCP tool belt is the default
-operating surface (shell/filesystem drops to implementation-only), and the
+operating surface (shell/filesystem remains for implementation, diagnostics,
+repository work, and maintenance gaps), and the
 `CLAUDE.md`/`AGENTS.md` doctrine gains anti-bottleneck escalation, the Todo
 ledger, Workflows-vs-Todos separation, persistent-delegation discipline, and
 bounded autonomy.
 
 You are updating a **user-owned, customized instance**. Merge these changes into
-whatever the user already has — preserve their edits, append what's new, never
-delete their content.
+whatever the user already has: preserve every user-specific and operator-specific section,
+append what is genuinely new, and never replace the whole manual with the template.
+
+The canonical 0.26.0 reference files ship in the same read-only template tree.
+Paths in this note beginning with `../../` are relative to the migration's
+template source directory printed above. In particular, `../../CLAUDE.md` is the
+fresh-install reference manual; use it for comparison, not as an overwrite.
 
 ## What changed on the instance surface
 
-### `CLAUDE.md` and `AGENTS.md` (same content — apply to both)
+### `CLAUDE.md` and `AGENTS.md` (one canonical manual)
+
+CLAUDE.md is canonical. `AGENTS.md` is normally a symlink to it, so edit only
+`CLAUDE.md` when that link is intact. If `AGENTS.md` is an independent regular
+file, apply the same doctrine reconciliation to both while preserving each
+file's user customizations. Never replace either whole file with
+`../../CLAUDE.md`.
 
 The operating instructions gained new doctrine. For each item below, check
 whether the user's file already has an equivalent section; if not, append it
@@ -40,6 +44,10 @@ match while keeping any user-specific customizations.
   installed `CLAUDE.md` and `AGENTS.md`: pick by role/persona fit, reuse the
   relevant employee for parallel child sessions instead of spreading to
   unrelated employees, and propose a hire if none fits.
+- **Manager-aware skip-level delegation** — prefer routing through managers.
+  Direct skip-level delegation remains allowed when it is faster, but the IC's
+  manager is notified so the manager retains visibility; hierarchy is advisory
+  and does not block or reroute direct access.
 - **Todos** — the company's task ledger. Delegations, cron fires, and workflow
   runs enter it automatically; the COO creates one Todo per sub-task when
   decomposing a goal. Employees keep their own Todo current (`in_review` when
@@ -47,6 +55,11 @@ match while keeping any user-specific customizations.
   and never mark their own item `done` — the reviewer does.
 - **Workflows** — reusable automations (the HOW). Todos and Workflows are
   separate: Todos record live work; Workflows define how recurring work runs.
+- **Triggers** — durable bindings that wake Workflows. Keep the wake-up binding
+  separate from the Workflow procedure and the Todo for each live run. Inspect
+  them with `list_triggers`; use `create_trigger` only for supported webhook or
+  poll bindings. Configure schedule and `todo-status` wake-ups through the
+  Workflow definition.
 - **Anti-bottleneck escalation** — fresh work must NOT ping the operator by
   default. Employees handle their lane; questions and approvals route to a
   manager/COO; the operator is reserved for money, irreversible, public, or
@@ -58,10 +71,37 @@ match while keeping any user-specific customizations.
   condition + budget for every autonomous or long-running run.
 - **Company Operations Surface / Self-Modification via MCP** — the Jinn MCP
   tools are the default surface for company operations and company-state changes
-  (org, sessions, delegation, Todos, Workflows, cron reads, reference reads,
+  (org, sessions, delegation, Todos, Workflows, Triggers, cron reads, reference reads,
   approvals, managed files). Local shell/filesystem access remains for
   implementation, diagnostics, and repository edits, but is no longer the
   default way to operate the company.
+
+### Replace stale stock doctrine without deleting custom content
+
+Reconcile the old stock passages in place; do not append contradictory rules:
+
+- **Boards → Todos:** replace legacy board-first tracking (`board.json`,
+  `todo -> in_progress -> done`, or executive board visibility) with the Todo
+  ledger rules above. Preserve unrelated project boards if the user explicitly
+  uses them for a separate application; they are simply not Jinn's company work
+  ledger.
+- **Raw HTTP → MCP tools:** replace any raw-HTTP-first child-session protocol
+  (`POST /api/sessions`, `GET /api/sessions/{id}`, message POSTs, or busy
+  polling) with `spawn_session` / `delegate_task`, `read_session`, and
+  `send_to_session`. Keep the callback-and-end-turn discipline and poll only as
+  fallback after a missed callback.
+- **Self-modification:** replace blanket "edit any workspace file" primacy with
+  Jinn MCP tools and relevant skills for company-state changes. Retain local
+  shell/filesystem access for implementation, diagnostics, repository work, and
+  maintenance gaps where no MCP/company tool exists.
+- **Gateway endpoint tables:** raw HTTP endpoints may remain only as a clearly
+  labeled web-UI/platform-maintenance fallback. They must not be the normal
+  employee operating surface.
+- **Obsolete service menu:** remove the old stock `Cross-Department Services`
+  claims about `org/service` tools, automatic request routing, or an injected
+  service menu; that public MCP surface does not exist. Preserve any genuinely
+  user-authored service procedures, but do not present them as built-in Jinn
+  behavior.
 
 > The template ships neutral placeholders (`{{portalName}}`, `{{portalSlug}}`).
 > When merging into the user's file, use the names their instance already uses —
@@ -69,19 +109,29 @@ match while keeping any user-specific customizations.
 
 ### `docs/`
 
+The read-only 0.26.0 references are `../../docs/company-doctrine.md`,
+`../../docs/mcp.md`, `../../docs/org.md`, `../../docs/overview.md`,
+`../../docs/self-modification.md`, and `../../docs/cron.md`. Copy a missing file
+or merge the relevant sections into an existing customized file; never assume a
+user-owned doc is unmodified.
+
 - **New file `docs/company-doctrine.md`** — the seven doctrine principles
   (KISS/Minecraft, the company metaphor is the API, anti-bottleneck, one
   interface (MCP), uniform contracts, lean identity context, progressive
   disclosure). Copy it in as-is if the user doesn't have it.
 - **`docs/mcp.md`** — updated to describe the built-in Jinn company MCP belt
-  (org, sessions, delegation, Todos, Workflows, cron, reference, approvals,
+  (org, sessions, delegation, Todos, Workflows, Triggers, cron, reference, approvals,
   managed files) alongside the browser/search/fetch servers. Merge the new
   sections; keep any user-added server config.
 - **`docs/org.md`**, **`docs/overview.md`**, **`docs/self-modification.md`**,
-  **`docs/cron.md`** — reference-doc refreshes for the company metaphor. These
-  are not user-customized; apply the updates directly.
+  **`docs/cron.md`** — reference-doc refreshes for the company metaphor. Merge
+  the current sections while preserving any local additions.
 
 ### `skills/`
+
+The read-only references are `../../skills/management/SKILL.md`,
+`../../skills/self-heal/SKILL.md`, `../../skills/cron-manager/SKILL.md`, and
+`../../skills/migrate/SKILL.md`. Merge them like other user-owned files.
 
 - **`skills/management/SKILL.md`** — updated for the company metaphor: hiring,
   firing, and promotion now think in Employees/Todos/Workflows and route work
@@ -122,9 +172,8 @@ match while keeping any user-specific customizations.
 
 ## Version marker
 
-After applying, the instance's `config.yaml` `jinn.version` should read
-`"0.26.0"` (or the confirmed release version — see the note at the top of this
-file). If you were launched by `jinn migrate --apply`, jinn stamps this for you;
+After applying, the instance's `config.yaml` `jinn.version` should read `"0.26.0"`.
+If you were launched by `jinn migrate --apply`, jinn stamps this for you;
 otherwise the user runs `jinn migrate --mark-done 0.26.0`.
 
 ## Report
