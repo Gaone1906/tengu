@@ -7,6 +7,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-restart-test-"));
 process.env.JINN_HOME = tmpHome;
 
 const lifecycle = vi.hoisted(() => ({
+  assertPortTakeoverAllowed: vi.fn(),
   restartDetached: vi.fn(),
 }));
 const restartRequest = vi.hoisted(() => ({
@@ -15,6 +16,9 @@ const restartRequest = vi.hoisted(() => ({
 
 vi.mock("../../gateway/lifecycle.js", () => lifecycle);
 vi.mock("../restart-request.js", () => restartRequest);
+vi.mock("../../shared/config.js", () => ({
+  loadConfig: () => ({ gateway: { host: "127.0.0.1", port: 7777 }, engines: { default: "claude" } }),
+}));
 
 const { runRestart } = await import("../restart.js");
 
@@ -37,5 +41,13 @@ describe("runRestart", () => {
     await runRestart();
 
     expect(lifecycle.restartDetached).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes --take-port to the detached helper when explicitly requested", async () => {
+    restartRequest.requestRestartFromGateway.mockResolvedValueOnce(false);
+
+    await runRestart({ takePort: true });
+
+    expect(lifecycle.restartDetached).toHaveBeenCalledWith({ takePort: true });
   });
 });

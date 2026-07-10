@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { JINN_HOME } from "../shared/paths.js";
 import { loadConfig } from "../shared/config.js";
-import { startForeground, startDaemon, getStatus, restartDetached } from "../gateway/lifecycle.js";
+import { assertPortTakeoverAllowed, startForeground, startDaemon, getStatus, restartDetached } from "../gateway/lifecycle.js";
 import { compareSemver, getPackageVersion, getInstanceVersion } from "../shared/version.js";
 import { requestRestartFromGateway } from "./restart-request.js";
 
@@ -24,7 +24,21 @@ function openBrowser(url: string): void {
   }
 }
 
-export async function runStart(opts: { daemon?: boolean; port?: number }): Promise<void> {
+export interface StartOptions {
+  daemon?: boolean;
+  port?: number;
+  takePort?: boolean;
+}
+
+function exitOnPortOwnershipError(err: unknown): never {
+  if (err instanceof Error && err.name === "PortOwnershipError") {
+    console.error(err.message);
+    process.exit(1);
+  }
+  throw err;
+}
+
+export async function runStart(opts: StartOptions): Promise<void> {
   if (!fs.existsSync(JINN_HOME)) {
     console.error(
       `Error: ${JINN_HOME} does not exist. Run "jinn setup" first.`
@@ -48,6 +62,12 @@ export async function runStart(opts: { daemon?: boolean; port?: number }): Promi
     config.gateway.port = opts.port;
   }
 
+  try {
+    assertPortTakeoverAllowed(config.gateway.port || 7777, { takePort: opts.takePort });
+  } catch (err) {
+    exitOnPortOwnershipError(err);
+  }
+
   // If a gateway is already running, `start` becomes a clean restart. Prefer
   // asking the gateway to spawn the helper itself; when this CLI is running
   // inside a Jinn session, that keeps the restart handoff out of the engine
@@ -57,7 +77,7 @@ export async function runStart(opts: { daemon?: boolean; port?: number }): Promi
       console.log("Gateway already running — restart requested from gateway.");
       return;
     }
-    restartDetached();
+    restartDetached({ takePort: opts.takePort });
     console.log("Gateway already running — restarting in background.");
     return;
   }

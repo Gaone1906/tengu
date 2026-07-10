@@ -11,7 +11,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-lifecycle-stop-"));
 process.env.JINN_HOME = tmpHome;
 
 const { buildGatewayChildEnv, lookupPidOnPort, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
-const { PID_FILE } = await import("../../shared/paths.js");
+const { CONFIG_PATH, PID_FILE } = await import("../../shared/paths.js");
 
 /** Pick a free ephemeral port (nothing will be listening on it afterwards). */
 async function freePort(): Promise<number> {
@@ -38,7 +38,10 @@ function spawnIgnoringSigtermChild(): ChildProcess {
   return spawn(process.execPath, ["-e", script], { stdio: "ignore" });
 }
 
-function spawnListeningGatewayChild(port: number, opts: { sigtermDelayMs?: number; ignoreSigterm?: boolean }): ChildProcess {
+function spawnListeningGatewayChild(
+  port: number,
+  opts: { sigtermDelayMs?: number; ignoreSigterm?: boolean; jinnHome?: string },
+): ChildProcess {
   const sigtermHandler = opts.ignoreSigterm
     ? `process.on("SIGTERM", () => {});`
     : `process.on("SIGTERM", () => setTimeout(() => process.exit(0), ${opts.sigtermDelayMs ?? 0}));`;
@@ -49,7 +52,10 @@ function spawnListeningGatewayChild(port: number, opts: { sigtermDelayMs?: numbe
     ${sigtermHandler}
     setInterval(() => {}, 1000);
   `;
-  return spawn(process.execPath, ["-e", script], { stdio: "ignore" });
+  return spawn(process.execPath, ["-e", script], {
+    stdio: "ignore",
+    env: { ...process.env, ...(opts.jinnHome ? { JINN_HOME: opts.jinnHome } : {}) },
+  });
 }
 
 function spawnClientChild(port: number): ChildProcess {
@@ -96,6 +102,7 @@ async function waitForListening(port: number): Promise<void> {
 
 describe("stop / stopAndWait PID-file race", () => {
   const children: ChildProcess[] = [];
+  const tempDirs: string[] = [];
 
   afterEach(async () => {
     for (const child of children.splice(0)) {
@@ -105,6 +112,9 @@ describe("stop / stopAndWait PID-file race", () => {
         /* already gone */
       }
       await waitForExit(child);
+    }
+    for (const dir of tempDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
     fs.rmSync(PID_FILE, { force: true });
   });
@@ -159,6 +169,54 @@ describe("stop / stopAndWait PID-file race", () => {
     await waitForExit(child);
     expect(() => process.kill(child.pid!, 0)).toThrow();
     expect(fs.existsSync(PID_FILE)).toBe(false);
+  });
+
+  it("stop() allows a same-home owner discovered by port even without a PID file", async () => {
+    const port = await freePort();
+    const child = spawnListeningGatewayChild(port, { sigtermDelayMs: 0 });
+    children.push(child);
+    await waitForSpawn(child);
+    await waitForListening(port);
+
+    const stopped = stop(port);
+    expect(stopped).toBe(true);
+    await waitForExit(child);
+    expect(() => process.kill(child.pid!, 0)).toThrow();
+  });
+
+  it("stop() refuses a foreign Jinn owner with a clear remediation error", async () => {
+    const port = await freePort();
+    const foreignHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-foreign-home-"));
+    tempDirs.push(foreignHome);
+    const child = spawnListeningGatewayChild(port, { sigtermDelayMs: 0, jinnHome: foreignHome });
+    children.push(child);
+    await waitForSpawn(child);
+    await waitForListening(port);
+
+    const expected = `port ${port} is owned by another jinn instance (JINN_HOME=${foreignHome}); change this instance's port in ${CONFIG_PATH}, or pass --take-port to override.`;
+    try {
+      stop(port);
+      throw new Error("expected stop() to refuse the foreign owner");
+    } catch (err) {
+      expect((err as Error).message).toBe(expected);
+    }
+
+    expect(() => process.kill(child.pid!, 0)).not.toThrow();
+  });
+
+  it("stop() honors --take-port for an explicit foreign-owner takeover", async () => {
+    const port = await freePort();
+    const foreignHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-foreign-home-"));
+    tempDirs.push(foreignHome);
+    const child = spawnListeningGatewayChild(port, { sigtermDelayMs: 0, jinnHome: foreignHome });
+    children.push(child);
+    await waitForSpawn(child);
+    await waitForListening(port);
+
+    const stopped = stop(port, { takePort: true });
+    expect(stopped).toBe(true);
+    await waitForExit(child);
+    expect(() => process.kill(child.pid!, 0)).toThrow();
   });
 
   it("stopAndWait() does not kill a stale PID-file process that does not own the gateway port", async () => {

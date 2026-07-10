@@ -7,6 +7,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-start-test-"));
 process.env.JINN_HOME = tmpHome;
 
 const lifecycle = vi.hoisted(() => ({
+  assertPortTakeoverAllowed: vi.fn(),
   getStatus: vi.fn(() => ({ running: true, pid: 123 })),
   restartDetached: vi.fn(),
   startForeground: vi.fn(),
@@ -54,5 +55,13 @@ describe("runStart", () => {
     await runStart({ daemon: false });
 
     expect(lifecycle.restartDetached).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes --take-port to the detached restart helper when explicitly requested", async () => {
+    restartRequest.requestRestartFromGateway.mockResolvedValueOnce(false);
+
+    await runStart({ daemon: false, takePort: true });
+
+    expect(lifecycle.restartDetached).toHaveBeenCalledWith({ takePort: true });
   });
 });

@@ -34,26 +34,29 @@ program
   .description("Start the gateway daemon")
   .option("--daemon", "Run in background")
   .option("-p, --port <port>", "Override the gateway port from config")
+  .option("--take-port", "Take over a port owned by another Jinn instance")
   .action(async (opts) => {
     const { runStart } = await import("../src/cli/start.js");
-    await runStart({ daemon: opts.daemon, port: opts.port ? parseInt(opts.port, 10) : undefined });
+    await runStart({ daemon: opts.daemon, port: opts.port ? parseInt(opts.port, 10) : undefined, takePort: opts.takePort });
   });
 
 program
   .command("stop")
   .description("Stop the gateway daemon")
   .option("-p, --port <port>", "Port to kill the process on (default: from config or 7777)")
-  .action(async (opts: { port?: string }) => {
+  .option("--take-port", "Stop a process on the target port even when it belongs to another Jinn instance")
+  .action(async (opts: { port?: string; takePort?: boolean }) => {
     const { runStop } = await import("../src/cli/stop.js");
-    await runStop(opts.port ? parseInt(opts.port, 10) : undefined);
+    await runStop(opts.port ? parseInt(opts.port, 10) : undefined, { takePort: opts.takePort });
   });
 
 program
   .command("restart")
   .description("Restart the gateway (detached — safe to run from inside a session)")
-  .action(async () => {
+  .option("--take-port", "Take over a port owned by another Jinn instance")
+  .action(async (opts: { takePort?: boolean }) => {
     const { runRestart } = await import("../src/cli/restart.js");
-    await runRestart();
+    await runRestart({ takePort: opts.takePort });
   });
 
 program

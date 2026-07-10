@@ -1,9 +1,9 @@
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PID_FILE, JINN_HOME } from "../shared/paths.js";
+import { CONFIG_PATH, PID_FILE, JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 import type { JinnConfig } from "../shared/types.js";
 import { startGateway } from "./server.js";
@@ -74,7 +74,11 @@ export function startDaemon(config: JinnConfig): void {
  * helper does stop → waitForPortFree → startDaemon out of band. The returning
  * gateway then resumes the interrupted session.
  */
-export function restartDetached(): void {
+export interface LifecycleKillOptions {
+  takePort?: boolean;
+}
+
+export function restartDetached(options: LifecycleKillOptions = {}): void {
   const config = loadConfig();
   const __filename = fileURLToPath(import.meta.url);
   const candidateEntryScripts = [
@@ -83,10 +87,14 @@ export function restartDetached(): void {
   ];
   const entryScript = candidateEntryScripts.find((p) => fs.existsSync(p)) ?? candidateEntryScripts[0];
 
+  const env = buildGatewayChildEnv(config);
+  if (options.takePort) env.JINN_TAKE_PORT = "1";
+  else delete env.JINN_TAKE_PORT;
+
   const child = spawn(process.execPath, [entryScript], {
     detached: true,
     stdio: "ignore",
-    env: buildGatewayChildEnv(config),
+    env,
   });
 
   if (child.pid) {
@@ -120,6 +128,7 @@ const GATEWAY_CHILD_ENV_SCRUB_EXACT: ReadonlySet<string> = new Set([
   "CLAUDECODE",
   "JINN_SESSION_ID",
   "JINN_SESSION_CAPABILITY",
+  "JINN_TAKE_PORT",
   "ANTHROPIC_BASE_URL",
   "GROK_CLAUDE_MCPS_ENABLED",
   "GROK_CURSOR_MCPS_ENABLED",
@@ -152,6 +161,22 @@ export type PortOwnerLookup =
   | { status: "none" }
   | { status: "unknown" };
 
+export type ProcessJinnHomeLookup =
+  | { status: "found"; jinnHome: string }
+  | { status: "none" }
+  | { status: "unknown" };
+
+export class PortOwnershipError extends Error {
+  constructor(port: number, ownerJinnHome: string) {
+    super(formatPortOwnedByAnotherInstanceError(port, ownerJinnHome));
+    this.name = "PortOwnershipError";
+  }
+}
+
+export function formatPortOwnedByAnotherInstanceError(port: number, ownerJinnHome: string): string {
+  return `port ${port} is owned by another jinn instance (JINN_HOME=${ownerJinnHome}); change this instance's port in ${CONFIG_PATH}, or pass --take-port to override.`;
+}
+
 export function shouldSignalPidFileProcess(
   pid: number,
   portOwner: PortOwnerLookup,
@@ -161,7 +186,86 @@ export function shouldSignalPidFileProcess(
   return commandLooksLikeGateway;
 }
 
-function signalGateway(port?: number): number | null {
+export function assertPortTakeoverAllowed(port: number, options: LifecycleKillOptions = {}): void {
+  if (options.takePort) return;
+
+  const portOwner = lookupPidOnPort(port);
+  if (portOwner.status === "none") return;
+  if (portOwner.status === "unknown") throw new PortOwnershipError(port, "unknown");
+
+  assertPidBelongsToThisInstance(portOwner.pid, port, options);
+}
+
+export function readProcessJinnHome(pid: number): ProcessJinnHomeLookup {
+  if (process.platform === "win32") return { status: "unknown" };
+
+  const procEnvPath = `/proc/${pid}/environ`;
+  if (fs.existsSync(procEnvPath)) {
+    try {
+      const raw = fs.readFileSync(procEnvPath, "utf-8");
+      return jinnHomeFromEnvEntries(raw.split("\0"));
+    } catch {
+      return { status: "unknown" };
+    }
+  }
+
+  try {
+    const output = execFileSync("ps", ["eww", "-p", String(pid), "-o", "command="], {
+      encoding: "utf-8",
+      timeout: 1_000,
+    });
+    const match = output.match(/(?:^|\s)JINN_HOME=([^\s]+)/);
+    return match ? { status: "found", jinnHome: match[1] } : { status: "none" };
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
+function jinnHomeFromEnvEntries(entries: string[]): ProcessJinnHomeLookup {
+  for (const entry of entries) {
+    if (entry.startsWith("JINN_HOME=")) {
+      return { status: "found", jinnHome: entry.slice("JINN_HOME=".length) };
+    }
+  }
+  return { status: "none" };
+}
+
+function assertPidBelongsToThisInstance(
+  pid: number,
+  port: number,
+  options: LifecycleKillOptions,
+): void {
+  if (options.takePort) return;
+
+  const owner = readProcessJinnHome(pid);
+  if (owner.status === "found" && sameJinnHome(owner.jinnHome, JINN_HOME)) return;
+
+  if (!pidIsAlive(pid)) return;
+  throw new PortOwnershipError(port, owner.status === "found" ? owner.jinnHome : "unknown");
+}
+
+function sameJinnHome(a: string, b: string): boolean {
+  return normalizeJinnHomeForCompare(a) === normalizeJinnHomeForCompare(b);
+}
+
+function normalizeJinnHomeForCompare(home: string): string {
+  try {
+    return fs.realpathSync.native(home);
+  } catch {
+    return path.resolve(home);
+  }
+}
+
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function signalGateway(port?: number, options: LifecycleKillOptions = {}): number | null {
   const targetPort = port ?? resolvePort();
 
   // Try PID file first
@@ -179,6 +283,7 @@ function signalGateway(port?: number): number | null {
       );
       fs.unlinkSync(PID_FILE);
     } else {
+      assertPidBelongsToThisInstance(pid, targetPort, options);
       try {
         process.kill(pid, "SIGTERM");
         logger.info(`Sent SIGTERM to gateway process ${pid}`);
@@ -201,6 +306,7 @@ function signalGateway(port?: number): number | null {
   const portOwner = lookupPidOnPort(targetPort);
   if (portOwner.status === "found") {
     const pid = portOwner.pid;
+    assertPidBelongsToThisInstance(pid, targetPort, options);
     try {
       process.kill(pid, "SIGTERM");
       logger.info(`Killed process ${pid} on port ${targetPort}`);
@@ -223,8 +329,8 @@ function signalGateway(port?: number): number | null {
   return null;
 }
 
-export function stop(port?: number): boolean {
-  return signalGateway(port) !== null;
+export function stop(port?: number, options: LifecycleKillOptions = {}): boolean {
+  return signalGateway(port, options) !== null;
 }
 
 /**
@@ -235,9 +341,13 @@ export function stop(port?: number): boolean {
  * released. Returns true if something was signaled, false if nothing was
  * running.
  */
-export async function stopAndWait(port?: number, timeoutMs = 10_000): Promise<boolean> {
+export async function stopAndWait(
+  port?: number,
+  timeoutMs = 10_000,
+  options: LifecycleKillOptions = {},
+): Promise<boolean> {
   const targetPort = port ?? resolvePort();
-  const pid = signalGateway(targetPort);
+  const pid = signalGateway(targetPort, options);
   if (pid === null) return false;
 
   const exited = await waitForPidExit(pid, timeoutMs);
@@ -257,6 +367,7 @@ export async function stopAndWait(port?: number, timeoutMs = 10_000): Promise<bo
       }
       return true;
     }
+    assertPidBelongsToThisInstance(pid, targetPort, options);
     logger.warn(`Process ${pid} still alive after ${timeoutMs}ms — forcing exit`);
     try {
       process.kill(pid, "SIGKILL");

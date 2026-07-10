@@ -25,12 +25,13 @@ async function main(): Promise<number> {
   const config = loadConfig();
   configureLogger({ level: config.logging.level, stdout: false, file: true });
   const port = config.gateway?.port ?? 7777;
+  const takePort = process.env.JINN_TAKE_PORT === "1";
 
   logger.info("restart-entry: stopping current gateway…");
   // Waits for the old process to actually exit before removing the PID file,
   // so a concurrent start/status never sees "not running" while the port is
   // still held. Best-effort; no-op if already down.
-  await stopAndWait(port);
+  await stopAndWait(port, 10_000, { takePort });
 
   const freed = await waitForPortFree(port);
   if (!freed) {
