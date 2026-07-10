@@ -160,7 +160,7 @@ function badCapabilityHeaders(): Record<string, string> {
 const toolWithoutCallerHeaders = { [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE };
 
 const callers = [
-  { name: 'operator', headers: () => ({}), allowed: true },
+  { name: 'operator', headers: () => ({ authorization: 'Bearer gateway-secret' }), allowed: true },
   { name: 'coo', headers: () => verifiedHeaders('coo'), allowed: true },
   { name: 'owner', headers: () => verifiedHeaders('owner'), allowed: true },
   { name: 'department-manager', headers: () => verifiedHeaders('platform-manager'), allowed: true },

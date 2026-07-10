@@ -81,7 +81,7 @@ async function call(method: string, urlPath: string, body?: unknown) {
   const req = Object.assign(Readable.from(payload), {
     method,
     url: urlPath,
-    headers: { host: "localhost", "content-type": "application/json" },
+    headers: { host: "localhost", "content-type": "application/json", authorization: "Bearer test-token" },
     socket: { remoteAddress: "127.0.0.1" },
   });
   const cap = makeRes();

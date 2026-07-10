@@ -398,6 +398,7 @@ const apiCtx = {
   getConfig: () => ({ gateway: {}, engines: { default: "codex" }, sessions: {} }),
   connectors: new Map(),
   startTime: Date.now(),
+  gatewayAuthToken: "test-token",
   emit: () => {},
   sessionManager: {
     getEngines: () => new Map(),
@@ -440,7 +441,7 @@ function ctxFor(callerSessionId?: string): JinnMcpContext {
 async function createOperatorSession(prompt: string): Promise<string> {
   const resp = await apiFetch()("http://gateway.test/api/sessions", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", authorization: "Bearer test-token" },
     body: JSON.stringify({ prompt, engine: "codex" }),
   });
   expect(resp.status).toBe(201);
@@ -472,7 +473,10 @@ describe("session tools — integration against the real routes/registry", () =>
     registry.accumulateSessionCost(sessionId, 4.25, 3);
     registry.updateSession(sessionId, { status: "running" });
 
-    const response = await apiFetch()(`http://gateway.test/api/sessions/${sessionId}`, { method: "DELETE" });
+    const response = await apiFetch()(`http://gateway.test/api/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers: { authorization: "Bearer test-token" },
+    });
     expect(response.status).toBe(409);
     expect(JSON.parse(await response.text())).toMatchObject({ preserved: true, workItemId: item.id });
     expect(registry.getSession(sessionId)).toMatchObject({
@@ -496,7 +500,10 @@ describe("session tools — integration against the real routes/registry", () =>
     workItems.linkSession(item.id, sessionId);
     registry.updateSession(sessionId, { status: "running" });
 
-    const response = await apiFetch()(`http://gateway.test/api/sessions/${sessionId}/${action}`, { method: "POST" });
+    const response = await apiFetch()(`http://gateway.test/api/sessions/${sessionId}/${action}`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-token" },
+    });
     expect(response.status).toBe(200);
     expect(registry.getSession(sessionId)).toMatchObject({ status: "interrupted", attemptOutcome: "interrupted" });
 
@@ -627,7 +634,7 @@ describe("session tools — integration against the real routes/registry", () =>
     // A genuine operator message to A resets its chain — A can send again.
     const op = await apiFetch()(`http://gateway.test/api/sessions/${a}/message`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: "Bearer test-token" },
       body: JSON.stringify({ message: "operator says: wrap up" }),
     });
     expect(op.status).toBe(200);
@@ -637,7 +644,7 @@ describe("session tools — integration against the real routes/registry", () =>
     expect(again.status).toBe("queued");
   });
 
-  it("stop is scoped to descendants for agents: grandchild ok, peer 403, operator (no header) unrestricted", async () => {
+  it("stop is scoped to descendants for agents: grandchild ok, peer 403, bearer operator unrestricted", async () => {
     const root = await createOperatorSession("root");
     const rootCtx = ctxFor(root);
     const child = (await tool("spawn_session").handler({ prompt: "c", engine: "codex" }, rootCtx)) as { sessionId: string };
@@ -653,8 +660,11 @@ describe("session tools — integration against the real routes/registry", () =>
     // a peer is not root's descendant → 403 through the tool, readable
     await expect(tool("stop_session").handler({ sessionId: peer }, rootCtx)).rejects.toThrow(/403.*descendant/is);
 
-    // the operator path (no header) keeps full access
-    const op = await apiFetch()(`http://gateway.test/api/sessions/${peer}/stop`, { method: "POST" });
+    // authenticated operator authority keeps full access
+    const op = await apiFetch()(`http://gateway.test/api/sessions/${peer}/stop`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-token" },
+    });
     expect(op.status).toBe(200);
   });
 });
@@ -688,10 +698,10 @@ describe("fail-closed session-tool authority (codex review finding 2 regression)
     expect(registry.getMessages(target).length).toBe(before);
   });
 
-  it("operator/UI requests (no tool marker) keep today's paths byte-for-byte: parentless spawn 201, plain message 200, unrestricted stop 200", async () => {
+  it("bearer operator requests keep parentless spawn, plain message, and unrestricted stop working", async () => {
     const anon = await apiFetch()("http://gateway.test/api/sessions", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: "Bearer test-token" },
       body: JSON.stringify({ prompt: "operator spawn", engine: "codex" }),
     });
     expect(anon.status).toBe(201);
@@ -700,12 +710,15 @@ describe("fail-closed session-tool authority (codex review finding 2 regression)
 
     const msg = await apiFetch()(`http://gateway.test/api/sessions/${anonId}/message`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", authorization: "Bearer test-token" },
       body: JSON.stringify({ message: "operator note" }),
     });
     expect(msg.status).toBe(200);
 
-    const stop = await apiFetch()(`http://gateway.test/api/sessions/${anonId}/stop`, { method: "POST" });
+    const stop = await apiFetch()(`http://gateway.test/api/sessions/${anonId}/stop`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-token" },
+    });
     expect(stop.status).toBe(200);
     expect((JSON.parse(await stop.text()) as { status: string }).status).toBe("stopped");
   });

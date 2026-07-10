@@ -202,6 +202,7 @@ import {
   listAuthSessions,
   revokeAuthSession,
   touchAuthSession,
+  verifyGatewayAuth,
 } from "./auth.js";
 import { markTranscriptSyncedThrough, scheduleOnLoadTailSync, transcriptEntryText } from "./external-turns.js";
 import { getOrchestratorPersona } from "../talk/orchestrator-persona.js";
@@ -1296,9 +1297,9 @@ type WorkItemCaller =
   | { kind: 'operator'; session?: undefined; callerId?: undefined }
   | { kind: 'session'; session: Session; callerId: string };
 
-function resolveWorkItemCaller(req: HttpRequest, res: ServerResponse): WorkItemCaller | undefined {
-  const identity = resolveScopedWriteCallerIdentity(req.headers);
-  if (identity.kind === "unidentified-tool") {
+function resolveWorkItemCaller(req: HttpRequest, res: ServerResponse, context: ApiContext): WorkItemCaller | undefined {
+  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  if (identity.kind === "unidentified-tool" || identity.kind === "unauthenticated") {
     json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
     return undefined;
   }
@@ -1311,9 +1312,9 @@ function resolveWorkItemCaller(req: HttpRequest, res: ServerResponse): WorkItemC
   return { kind: 'session', callerId: identity.callerId, session };
 }
 
-function resolveNeedsAttentionTarget(req: HttpRequest, res: ServerResponse, requested: string): string | undefined {
-  const identity = resolveScopedWriteCallerIdentity(req.headers);
-  if (identity.kind === "unidentified-tool") {
+function resolveNeedsAttentionTarget(req: HttpRequest, res: ServerResponse, requested: string, context: ApiContext): string | undefined {
+  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  if (identity.kind === "unidentified-tool" || identity.kind === "unauthenticated") {
     json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
     return undefined;
   }
@@ -1338,11 +1339,12 @@ function resolveNeedsAttentionTarget(req: HttpRequest, res: ServerResponse, requ
   return requested;
 }
 
-function resolveScopedWriteCallerIdentity(headers: HttpRequest["headers"]) {
+function resolveScopedWriteCallerIdentity(headers: HttpRequest["headers"], context: ApiContext) {
   return resolveCallerIdentity(headers, {
     sessionExists: (sessionId) => !!getSession(sessionId),
     verifySessionCapability,
     requireCapability: true,
+    operatorAuthenticated: verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
   });
 }
 
@@ -1354,10 +1356,24 @@ function isPublicIdentifiedCallerRoute(method: string, pathname: string): boolea
   return false;
 }
 
-function rejectUnverifiedIdentifiedApiCaller(req: HttpRequest, res: ServerResponse, method: string, pathname: string): boolean {
+function allowsUnauthenticatedMutation(method: string, pathname: string): boolean {
+  if (method !== "POST") return false;
+  return pathname === "/api/auth/bootstrap"
+    || pathname === "/api/auth/pair"
+    || pathname === "/api/auth/logout"
+    || pathname === "/api/internal/hook"
+    || pathname === "/api/workflow-events";
+}
+
+function rejectUnverifiedIdentifiedApiCaller(req: HttpRequest, res: ServerResponse, method: string, pathname: string, context: ApiContext): boolean {
   if (isPublicIdentifiedCallerRoute(method, pathname)) return false;
-  const identity = resolveScopedWriteCallerIdentity(req.headers);
-  if (identity.kind !== "unidentified-tool") return false;
+  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  if (identity.kind === "unauthenticated") {
+    const mutating = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+    if (!mutating || allowsUnauthenticatedMutation(method, pathname)) return false;
+  } else if (identity.kind !== "unidentified-tool") {
+    return false;
+  }
   json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
   return true;
 }
@@ -1391,9 +1407,9 @@ function operatorOnlyControlPlaneRoute(method: string, pathname: string): string
   return null;
 }
 
-function requireOperatorControlPlaneAuthority(req: HttpRequest, res: ServerResponse, action: string): boolean {
-  const identity = resolveScopedWriteCallerIdentity(req.headers);
-  if (identity.kind === "unidentified-tool") {
+function requireOperatorControlPlaneAuthority(req: HttpRequest, res: ServerResponse, action: string, context: ApiContext): boolean {
+  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  if (identity.kind === "unidentified-tool" || identity.kind === "unauthenticated") {
     json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
     return false;
   }
@@ -1404,9 +1420,9 @@ function requireOperatorControlPlaneAuthority(req: HttpRequest, res: ServerRespo
   return true;
 }
 
-function rejectScopedIdentityGrant(req: HttpRequest, res: ServerResponse, action: string): boolean {
-  const identity = resolveScopedWriteCallerIdentity(req.headers);
-  if (identity.kind === "operator") return false;
+function rejectScopedIdentityGrant(req: HttpRequest, res: ServerResponse, action: string, context: ApiContext): boolean {
+  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  if (identity.kind === "operator" || identity.kind === "unauthenticated") return false;
   if (identity.kind === "unidentified-tool") {
     json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
     return true;
@@ -1474,9 +1490,10 @@ function authorizeWorkflowOperation(
   headers: HttpRequest["headers"],
   def: EditableWorkflowDefinition | null,
   op: WorkflowOperation,
+  context: ApiContext,
 ): WorkflowOperationAuthority {
-  const identity = resolveScopedWriteCallerIdentity(headers);
-  if (identity.kind === "unidentified-tool") {
+  const identity = resolveScopedWriteCallerIdentity(headers, context);
+  if (identity.kind === "unidentified-tool" || identity.kind === "unauthenticated") {
     return { ok: false, status: 403, error: UNIDENTIFIED_TOOL_CALL_ERROR };
   }
   if (identity.kind === "operator") {
@@ -1776,12 +1793,12 @@ export async function handleApiRequest(
   try {
     const jinnHome = context.jinnHome ?? JINN_HOME;
 
-    if (rejectUnverifiedIdentifiedApiCaller(req, res, method, pathname)) {
+    if (rejectUnverifiedIdentifiedApiCaller(req, res, method, pathname, context)) {
       return;
     }
 
     const controlPlaneAction = operatorOnlyControlPlaneRoute(method, pathname);
-    if (controlPlaneAction && !requireOperatorControlPlaneAuthority(req, res, controlPlaneAction)) {
+    if (controlPlaneAction && !requireOperatorControlPlaneAuthority(req, res, controlPlaneAction, context)) {
       return;
     }
 
@@ -1796,7 +1813,7 @@ export async function handleApiRequest(
     // from a local browser session so daily local use does not require a login form.
     if (method === "POST" && pathname === "/api/auth/bootstrap") {
       if (!context.gatewayAuthToken) return json(res, { authRequired: false });
-      if (rejectScopedIdentityGrant(req, res, "auth bootstrap")) return;
+      if (rejectScopedIdentityGrant(req, res, "auth bootstrap", context)) return;
       if (!isLoopback(req.socket.remoteAddress) || !isLoopbackHost(Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host)) {
         return json(res, { error: "Bootstrap is loopback-only" }, 403);
       }
@@ -1832,7 +1849,7 @@ export async function handleApiRequest(
     // POST /api/auth/pair — exchange a one-time pairing code for the HttpOnly
     // browser cookie used by APIs and WebSockets.
     if (method === "POST" && pathname === "/api/auth/pair") {
-      if (rejectScopedIdentityGrant(req, res, "auth pair")) return;
+      if (rejectScopedIdentityGrant(req, res, "auth pair", context)) return;
       const parsed = await readJsonBody(req, res, { maxBytes: AUTH_BODY_MAX_BYTES });
       if (!parsed.ok) return;
       const body = parsed.body && typeof parsed.body === "object" ? parsed.body as Record<string, unknown> : {};
@@ -2105,7 +2122,7 @@ export async function handleApiRequest(
       if (department) filter.department = department;
       const needsAttentionFor = readCleanSearchParam(url, "needsAttentionFor");
       if (needsAttentionFor) {
-        const target = resolveNeedsAttentionTarget(req, res, needsAttentionFor);
+        const target = resolveNeedsAttentionTarget(req, res, needsAttentionFor, context);
         if (!target) return;
         filter.needsAttentionFor = target;
       }
@@ -2364,7 +2381,7 @@ export async function handleApiRequest(
       // (codex finding 2). Honor-system caveat (design §5): with a shared
       // bearer token the scoping is best-effort — it refuses to TEACH the
       // pattern, it cannot police curl.
-      const stopCaller = resolveScopedWriteCallerIdentity(req.headers);
+      const stopCaller = resolveScopedWriteCallerIdentity(req.headers, context);
       if (stopCaller.kind === "unidentified-tool") {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
@@ -2610,7 +2627,7 @@ export async function handleApiRequest(
       if (department) filter.department = department;
       const needsAttentionFor = readCleanSearchParam(url, "needsAttentionFor");
       if (needsAttentionFor) {
-        const target = resolveNeedsAttentionTarget(req, res, needsAttentionFor);
+        const target = resolveNeedsAttentionTarget(req, res, needsAttentionFor, context);
         if (!target) return;
         filter.needsAttentionFor = target;
       }
@@ -2621,7 +2638,7 @@ export async function handleApiRequest(
     // POST /api/work-items — GRS-021c create. Tool callers must carry identity;
     // create structurally cannot attach approvals (anti-bottleneck LAW).
     if (method === "POST" && pathname === "/api/work-items") {
-      const caller = resolveWorkItemCaller(req, res);
+      const caller = resolveWorkItemCaller(req, res, context);
       if (!caller) return;
       const parsed = await readJsonBody(req, res);
       if (!parsed.ok) return;
@@ -2672,7 +2689,7 @@ export async function handleApiRequest(
     // refused readably.
     params = matchRoute("/api/work-items/:id/status", pathname);
     if (method === "POST" && params) {
-      const caller = resolveWorkItemCaller(req, res);
+      const caller = resolveWorkItemCaller(req, res, context);
       if (!caller) return;
       const parsed = await readJsonBody(req, res);
       if (!parsed.ok) return;
@@ -2721,7 +2738,7 @@ export async function handleApiRequest(
     // POST /api/work-items/:id/assign — roster-validated collaborative write.
     params = matchRoute("/api/work-items/:id/assign", pathname);
     if (method === "POST" && params) {
-      const caller = resolveWorkItemCaller(req, res);
+      const caller = resolveWorkItemCaller(req, res, context);
       if (!caller) return;
       const parsed = await readJsonBody(req, res);
       if (!parsed.ok) return;
@@ -2779,7 +2796,7 @@ export async function handleApiRequest(
     // terminal internally while presenting the action as archive on tool surfaces.
     params = matchRoute("/api/work-items/:id/archive", pathname);
     if (method === "POST" && params) {
-      const caller = resolveWorkItemCaller(req, res);
+      const caller = resolveWorkItemCaller(req, res, context);
       if (!caller) return;
       const parsed = await readJsonBody(req, res, { allowEmpty: true });
       if (!parsed.ok) return;
@@ -2844,7 +2861,10 @@ export async function handleApiRequest(
       const note = typeof noteRaw === "string" ? noteRaw : undefined;
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
-      const authority = resolveApprovalDecisionAuthority(req.headers, item, { operatorCanActOnRootTarget: true });
+      const authority = resolveApprovalDecisionAuthority(req.headers, item, {
+        operatorCanActOnRootTarget: true,
+        operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+      });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
 
       // The resolve-gate authority is wired only when a workflow evidence root
@@ -2892,7 +2912,10 @@ export async function handleApiRequest(
       if (!parsed.ok) return;
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
-      const authority = resolveApprovalDecisionAuthority(req.headers, item, { operatorCanActOnRootTarget: true });
+      const authority = resolveApprovalDecisionAuthority(req.headers, item, {
+        operatorCanActOnRootTarget: true,
+        operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+      });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
       const body = (parsed.body ?? {}) as { reason?: unknown };
       const reason = typeof body.reason === "string" ? body.reason : undefined;
@@ -3003,7 +3026,7 @@ export async function handleApiRequest(
         if (!targetWorkflow) {
           return json(res, { error: "target workflow not found" }, 404);
         }
-        const authority = authorizeWorkflowOperation(req.headers, targetWorkflow, "bind-trigger");
+        const authority = authorizeWorkflowOperation(req.headers, targetWorkflow, "bind-trigger", context);
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
@@ -3072,7 +3095,7 @@ export async function handleApiRequest(
         if (!binding) return notFound(res);
         const targetWorkflow = getDefinition(root, binding.targetWorkflowId);
         if (!targetWorkflow) {
-          const authority = authorizeWorkflowOperation(req.headers, null, "bind-trigger");
+          const authority = authorizeWorkflowOperation(req.headers, null, "bind-trigger", context);
           if (!authority.ok) {
             return json(res, { error: authority.error }, authority.status);
           }
@@ -3080,7 +3103,7 @@ export async function handleApiRequest(
           if (!deleted) return notFound(res);
           return json(res, { deleted: true, name: params.name, orphaned: true });
         }
-        const authority = authorizeWorkflowOperation(req.headers, targetWorkflow, "bind-trigger");
+        const authority = authorizeWorkflowOperation(req.headers, targetWorkflow, "bind-trigger", context);
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
@@ -3129,7 +3152,7 @@ export async function handleApiRequest(
         }
         try {
           const body = parsed.body as Record<string, unknown>;
-          const authority = authorizeWorkflowOperation(req.headers, null, "create");
+          const authority = authorizeWorkflowOperation(req.headers, null, "create", context);
           if (!authority.ok) {
             return json(res, { error: authority.error }, authority.status);
           }
@@ -3154,7 +3177,7 @@ export async function handleApiRequest(
       try {
         const existing = getDefinition(root, params.id);
         if (!existing) return notFound(res);
-        const authority = authorizeWorkflowOperation(req.headers, existing, "duplicate");
+        const authority = authorizeWorkflowOperation(req.headers, existing, "duplicate", context);
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
@@ -3180,7 +3203,7 @@ export async function handleApiRequest(
       try {
         const existing = getDefinition(root, params.id);
         if (!existing) return notFound(res);
-        const authority = authorizeWorkflowOperation(req.headers, existing, "retire");
+        const authority = authorizeWorkflowOperation(req.headers, existing, "retire", context);
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
@@ -3237,7 +3260,7 @@ export async function handleApiRequest(
       try {
         const def = getDefinition(root, params.id);
         if (!def) return notFound(res);
-        const authority = authorizeWorkflowOperation(req.headers, def, "run");
+        const authority = authorizeWorkflowOperation(req.headers, def, "run", context);
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
@@ -3297,7 +3320,9 @@ export async function handleApiRequest(
       if (!item) {
         return json(res, { error: "workflow gate resolution requires the mirrored Todo approval record" }, 409);
       }
-      const authority = resolveApprovalDecisionAuthority(req.headers, item);
+      const authority = resolveApprovalDecisionAuthority(req.headers, item, {
+        operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+      });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
       try {
         const result = await resolveWorkflowRunGate(workflowRunDriverDeps(root, context), params.id, params.runId, decision, { decidedBy: authority.authority.actor });
@@ -3372,7 +3397,7 @@ export async function handleApiRequest(
       try {
         const existing = getDefinition(root, params.id);
         if (!existing) return notFound(res);
-        const authority = authorizeWorkflowOperation(req.headers, existing, "update");
+        const authority = authorizeWorkflowOperation(req.headers, existing, "update", context);
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
@@ -3425,7 +3450,7 @@ export async function handleApiRequest(
       // a delegation always acts on behalf of a session, so a tool call whose
       // identity got lost must never fall through to the operator path. Headers
       // only — the identity gate outranks body validation.
-      const delegationCaller = resolveScopedWriteCallerIdentity(req.headers);
+      const delegationCaller = resolveScopedWriteCallerIdentity(req.headers, context);
       if (delegationCaller.kind === "unidentified-tool") {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
@@ -3616,7 +3641,7 @@ export async function handleApiRequest(
       // A TOOL spawn that LOST its identity fails CLOSED (codex finding 2):
       // silently inheriting the operator's parentless spawn would orphan the
       // child and break the callback protocol without anyone noticing.
-      const spawnCaller = resolveScopedWriteCallerIdentity(req.headers);
+      const spawnCaller = resolveScopedWriteCallerIdentity(req.headers, context);
       if (spawnCaller.kind === "unidentified-tool") {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
@@ -3755,7 +3780,7 @@ export async function handleApiRequest(
       // are untouched. A TOOL send that LOST its identity fails CLOSED (codex
       // finding 2): without a caller it would bypass every guard and land as an
       // unprefixed operator-grade user message.
-      const msgCaller = resolveScopedWriteCallerIdentity(req.headers);
+      const msgCaller = resolveScopedWriteCallerIdentity(req.headers, context);
       if (msgCaller.kind === "unidentified-tool") {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));

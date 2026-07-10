@@ -40,6 +40,8 @@ export type ApprovalAuthorityResult =
 export interface ApprovalDecisionAuthorityOptions {
   /** Browser/operator console acts as the root/COO only on the Todo approval surface. */
   operatorCanActOnRootTarget?: boolean;
+  /** Set only after gateway bearer/cookie verification at the HTTP boundary. */
+  operatorAuthenticated?: boolean;
 }
 
 function employeeDepartment(registry: Map<string, Employee>, employee: string | null): string | null {
@@ -185,13 +187,14 @@ export function resolveRootApprovalTarget(): RootApprovalTarget | null {
   return resolveRootApprovalTargetFrom(registry, root);
 }
 
-function callerSession(headers: IncomingHttpHeaders): { ok: true; session: Session } | { ok: false; error: string } | { ok: true; operator: true } {
+function callerSession(headers: IncomingHttpHeaders, operatorAuthenticated = false): { ok: true; session: Session } | { ok: false; error: string } | { ok: true; operator: true } {
   const identity = resolveCallerIdentity(headers, {
     sessionExists: (sessionId) => !!getSession(sessionId),
     verifySessionCapability,
     requireCapability: true,
+    operatorAuthenticated,
   });
-  if (identity.kind === "unidentified-tool") return { ok: false, error: UNIDENTIFIED_TOOL_CALL_ERROR };
+  if (identity.kind === "unidentified-tool" || identity.kind === "unauthenticated") return { ok: false, error: UNIDENTIFIED_TOOL_CALL_ERROR };
   if (identity.kind === "operator") return { ok: true, operator: true };
   const session = getSession(identity.callerId);
   return session ? { ok: true, session } : { ok: false, error: UNIDENTIFIED_TOOL_CALL_ERROR };
@@ -203,7 +206,7 @@ export function resolveApprovalDecisionAuthority(
   opts: ApprovalDecisionAuthorityOptions = {},
 ): ApprovalAuthorityResult {
   const route = resolveApprovalRouteTarget(item);
-  const caller = callerSession(headers);
+  const caller = callerSession(headers, opts.operatorAuthenticated);
   if (!caller.ok) return { ok: false, status: 403, error: caller.error };
 
   if ("operator" in caller) {

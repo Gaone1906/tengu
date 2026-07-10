@@ -80,7 +80,7 @@ describe("POST /api/system/restart", () => {
 
     await handleApiRequest(makeReq("POST", "/api/system/restart"), cap.res, ctx(restartGateway));
 
-    expect(cap.status).toBe(401);
+    expect(cap.status).toBe(403);
     expect(restartGateway).not.toHaveBeenCalled();
   });
 

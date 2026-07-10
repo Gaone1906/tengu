@@ -54,7 +54,7 @@ function makeReq(method: string, url: string, body?: unknown): IncomingMessage {
   const req = Readable.from(raw ? [Buffer.from(raw)] : []) as IncomingMessage;
   req.method = method;
   req.url = url;
-  req.headers = { host: "localhost" };
+  req.headers = { host: "localhost", authorization: "Bearer test-token" };
   (req as any).socket = { remoteAddress: "127.0.0.1" };
   return req;
 }
@@ -89,6 +89,7 @@ function ctx(transportState: "idle" | "queued" | "running" | "error" | "interrup
     getConfig: cfg,
     connectors: new Map(),
     startTime: Date.now(),
+    gatewayAuthToken: "test-token",
     emit: vi.fn(),
     sessionManager: {
       getQueue: () => ({

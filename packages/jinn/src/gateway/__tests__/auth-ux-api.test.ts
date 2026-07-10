@@ -137,7 +137,7 @@ describe("auth UX API routes", () => {
       unauthenticated.res,
       context,
     );
-    expect(unauthenticated.status).toBe(401);
+    expect(unauthenticated.status).toBe(403);
     expect(unauthenticated.body.code).toBeUndefined();
   });
 

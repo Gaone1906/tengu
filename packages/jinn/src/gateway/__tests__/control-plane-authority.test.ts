@@ -174,6 +174,38 @@ beforeAll(async () => {
 });
 
 describe("control-plane writes require operator authority", () => {
+  it("fails anonymous Todo writes closed while bearer, cookie, and session capabilities keep their exact authority", async () => {
+    const anonymousAssign = store.createWorkItem({ title: "Anonymous assign target", status: "assigned", assignee: "platform-worker", source: "human" });
+    const anonymousArchive = store.createWorkItem({ title: "Anonymous archive target", status: "assigned", assignee: "platform-worker", source: "human" });
+
+    expect((await call("POST", `/api/work-items/${anonymousAssign.id}/assign`, { assignee: "platform-peer" })).status).toBe(403);
+    expect((await call("POST", `/api/work-items/${anonymousArchive.id}/archive`, { note: "anonymous" })).status).toBe(403);
+    expect(store.getWorkItem(anonymousAssign.id)).toMatchObject({ assignee: "platform-worker", status: "assigned" });
+    expect(store.getWorkItem(anonymousArchive.id)?.status).toBe("assigned");
+
+    const bearerHeaders = { authorization: "Bearer test-token" };
+    const bearerAssign = store.createWorkItem({ title: "Bearer assign target", status: "assigned", assignee: "platform-worker", source: "human" });
+    const bearerArchive = store.createWorkItem({ title: "Bearer archive target", status: "assigned", assignee: "platform-worker", source: "human" });
+    expect((await call("POST", `/api/work-items/${bearerAssign.id}/assign`, { assignee: "platform-peer" }, bearerHeaders)).status).toBe(200);
+    expect((await call("POST", `/api/work-items/${bearerArchive.id}/archive`, {}, bearerHeaders)).status).toBe(200);
+
+    const bootstrap = await call("POST", "/api/auth/bootstrap", {});
+    expect(bootstrap.status).toBe(200);
+    const rawCookies = Array.isArray(bootstrap.header("set-cookie")) ? bootstrap.header("set-cookie") : [bootstrap.header("set-cookie")];
+    const cookie = (rawCookies as string[]).map((part) => part.split(";")[0]).join("; ");
+    const cookieAssign = store.createWorkItem({ title: "Cookie assign target", status: "assigned", assignee: "platform-worker", source: "human" });
+    const cookieArchive = store.createWorkItem({ title: "Cookie archive target", status: "assigned", assignee: "platform-worker", source: "human" });
+    expect((await call("POST", `/api/work-items/${cookieAssign.id}/assign`, { assignee: "platform-peer" }, { cookie })).status).toBe(200);
+    expect((await call("POST", `/api/work-items/${cookieArchive.id}/archive`, {}, { cookie })).status).toBe(200);
+
+    const scopedTarget = store.createWorkItem({ title: "Scoped authority target", status: "assigned", assignee: "platform-worker", source: "human" });
+    expect((await call("POST", `/api/work-items/${scopedTarget.id}/assign`, { assignee: "platform-peer" }, toolHeaders(peer))).status).toBe(403);
+    expect(store.getWorkItem(scopedTarget.id)?.assignee).toBe("platform-worker");
+    const claimable = store.createWorkItem({ title: "Scoped self claim", status: "backlog", assignee: null, source: "human" });
+    expect((await call("POST", `/api/work-items/${claimable.id}/assign`, { assignee: "platform-peer" }, toolHeaders(peer))).status).toBe(200);
+    expect(store.getWorkItem(claimable.id)).toMatchObject({ assignee: "platform-peer", status: "assigned" });
+  });
+
   it("rejects a capability-bound worker PUT /api/config and leaves portalName unchanged", async () => {
     writeConfig();
 
@@ -187,7 +219,7 @@ describe("control-plane writes require operator authority", () => {
   it("keeps operator/browser config writes working", async () => {
     writeConfig();
 
-    const resp = await call("PUT", "/api/config", { portal: { portalName: "Operator Portal" } });
+    const resp = await call("PUT", "/api/config", { portal: { portalName: "Operator Portal" } }, { authorization: "Bearer test-token" });
 
     expect(resp.status).toBe(200);
     expect(readConfig().portal.portalName).toBe("Operator Portal");
@@ -326,7 +358,7 @@ describe("portal fallback is a virtual root, not employee authority", () => {
     const peerDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" }, toolHeaders(peer));
     expect(peerDecision.status).toBe(403);
 
-    const operatorDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" });
+    const operatorDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" }, { authorization: "Bearer test-token" });
     expect(operatorDecision.status).toBe(200);
     expect(operatorDecision.body.workItem).toMatchObject({ approvalState: "approved", approvalDecidedBy: "operator", approvalTarget: root?.name });
   });
@@ -351,7 +383,7 @@ describe("portal fallback is a virtual root, not employee authority", () => {
     const employeeDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" }, toolHeaders(driftSession));
     expect(employeeDecision.status).toBe(403);
 
-    const operatorDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" });
+    const operatorDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" }, { authorization: "Bearer test-token" });
     expect(operatorDecision.status).toBe(200);
     expect(operatorDecision.body.workItem).toMatchObject({ approvalState: "approved", approvalDecidedBy: "operator", approvalTarget: driftRoot });
 
@@ -380,7 +412,7 @@ describe("portal fallback is a virtual root, not employee authority", () => {
     const employeeDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" }, toolHeaders(legacySession));
     expect(employeeDecision.status).toBe(403);
 
-    const operatorDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" });
+    const operatorDecision = await call("POST", `/api/work-items/${approval.id}/approval`, { decision: "approve" }, { authorization: "Bearer test-token" });
     expect(operatorDecision.status).toBe(200);
 
     fs.rmSync(legacyFile, { force: true });

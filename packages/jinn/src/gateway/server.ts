@@ -33,7 +33,7 @@ import { HermesInteractiveEngine } from "../engines/hermes-interactive.js";
 import type { PtyViewEngine } from "../engines/pty-view-engine.js";
 import { HookRegistry } from "./hook-registry.js";
 import { writeGatewayInfo, readGatewayInfo, updateGatewayPtyPids, staleGatewayPids, gatewayBaseUrl } from "./gateway-info.js";
-import { authenticateGatewayRequest, authRequiredForRequest, ensureGatewayAuthToken, shouldRequireGatewayAuth, validateGatewayExposure } from "./auth.js";
+import { authenticateGatewayRequest, authRequiredForRequest, ensureGatewayAuthToken, shouldRequireGatewayAuth, validateGatewayExposure, verifyGatewayAuth } from "./auth.js";
 import { reconcileWorkItemsOnStartup, startWorkItemReconciler } from "../work-items/reconcile.js";
 import { setTodoStatusChangeListener } from "../work-items/transitions.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
@@ -146,12 +146,13 @@ export function rejectUnverifiedIdentifiedUpgradeCaller(
 export function rejectNonOperatorPtyUpgradeCaller(
   req: http.IncomingMessage,
   socket: UpgradeRejectionSocket,
-  options: Pick<CallerIdentityOptions, "sessionExists"> = {},
+  options: Pick<CallerIdentityOptions, "sessionExists" | "operatorAuthenticated"> = {},
 ): boolean {
   const identity = resolveCallerIdentity(req.headers, {
     sessionExists: options.sessionExists ?? ((sessionId) => !!getSession(sessionId)),
     verifySessionCapability,
     requireCapability: true,
+    operatorAuthenticated: options.operatorAuthenticated,
   });
   if (identity.kind === "operator") return false;
   const error = identity.kind === "unidentified-tool"
@@ -1204,7 +1205,9 @@ export async function startGateway(
     // Dedicated per-session PTY channel for the live xterm CLI view.
     const ptyMatch = reqUrl.split("?")[0].match(/^\/ws\/pty\/([^/]+)$/);
     if (ptyMatch) {
-      if (rejectNonOperatorPtyUpgradeCaller(req, socket)) return;
+      if (rejectNonOperatorPtyUpgradeCaller(req, socket, {
+        operatorAuthenticated: verifyGatewayAuth(req.headers, gatewayAuthToken, JINN_HOME),
+      })) return;
       let sessionId: string;
       try {
         sessionId = decodeURIComponent(ptyMatch[1]);

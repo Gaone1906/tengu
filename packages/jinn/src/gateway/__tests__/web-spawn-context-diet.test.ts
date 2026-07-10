@@ -101,6 +101,7 @@ const apiCtx = {
   }),
   connectors: new Map(),
   startTime: Date.now(),
+  gatewayAuthToken: "test-token",
   emit: () => {},
   sessionManager: {
     getEngines: () => new Map(),
@@ -113,7 +114,7 @@ async function spawnWebSession(prompt: string): Promise<Record<string, unknown>>
   const req = Object.assign(Readable.from([Buffer.from(JSON.stringify({ prompt, employee: "qa-emp" }))]), {
     method: "POST",
     url: "/api/sessions",
-    headers: { host: "localhost", "content-type": "application/json" },
+    headers: { host: "localhost", "content-type": "application/json", authorization: "Bearer test-token" },
   });
   const cap = makeRes();
   await api.handleApiRequest(req as unknown as Parameters<Api["handleApiRequest"]>[0], cap.res, apiCtx);

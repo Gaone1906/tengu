@@ -275,8 +275,8 @@ describe("headerString", () => {
 });
 
 describe("resolveCallerIdentity — the tool-origin discriminator (GRS-017 finding 2)", () => {
-  it("no marker, no caller header → operator (UI/curl/internal callbacks keep the unrestricted path)", () => {
-    expect(resolveCallerIdentity({})).toEqual({ kind: "operator" });
+  it("no marker, no caller header → unauthenticated, never implicit operator", () => {
+    expect(resolveCallerIdentity({})).toEqual({ kind: "unauthenticated" });
   });
 
   it("caller header present → session identity, with or without the marker (curl-with-header scoping parity preserved)", () => {

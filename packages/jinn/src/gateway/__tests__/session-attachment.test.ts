@@ -27,7 +27,10 @@ beforeAll(async () => {
 // Minimal fake req/res + context so we can drive the handler without a live server.
 function fakeReq(body: string, contentType: string): import("node:http").IncomingMessage {
   const r = Readable.from([Buffer.from(body)]) as unknown as import("node:http").IncomingMessage;
-  (r as unknown as { headers: Record<string, string> }).headers = { "content-type": contentType };
+  (r as unknown as { headers: Record<string, string> }).headers = {
+    "content-type": contentType,
+    authorization: "Bearer test-token",
+  };
   return r;
 }
 
@@ -44,6 +47,8 @@ function fakeContext(events: Array<{ event: string; payload: unknown }>) {
   return {
     emit: (event: string, payload: unknown) => events.push({ event, payload }),
     getConfig: () => ({}),
+    gatewayAuthToken: "test-token",
+    jinnHome: tmp,
   } as unknown as import("../api.js").ApiContext;
 }
 

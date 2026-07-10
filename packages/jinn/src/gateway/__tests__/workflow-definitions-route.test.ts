@@ -71,7 +71,7 @@ function makeReq(method: string, urlPath: string, body?: unknown, headers: Recor
     body === undefined
       ? Readable.from([])
       : Readable.from([Buffer.from(JSON.stringify(body))]);
-  Object.assign(base, { method, url: urlPath, headers: { host: 'localhost', 'content-type': 'application/json', ...headers } });
+  Object.assign(base, { method, url: urlPath, headers: { host: 'localhost', 'content-type': 'application/json', authorization: 'Bearer test-token', ...headers } });
   return base as unknown as Parameters<Api['handleApiRequest']>[0];
 }
 
@@ -79,6 +79,7 @@ const ctx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
   connectors: new Map(),
   startTime: Date.now(),
+  gatewayAuthToken: 'test-token',
 } as unknown as import('../api.js').ApiContext;
 
 /** Run-route context: POST …/run resolves the engine roster off sessionManager. An

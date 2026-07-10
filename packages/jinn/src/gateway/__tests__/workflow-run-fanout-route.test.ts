@@ -42,7 +42,7 @@ function makeRes() {
 
 function makeReq(method: string, urlPath: string, body?: unknown) {
   const base = body === undefined ? Readable.from([]) : Readable.from([Buffer.from(JSON.stringify(body))]);
-  Object.assign(base, { method, url: urlPath, headers: { host: 'localhost' } });
+  Object.assign(base, { method, url: urlPath, headers: { host: 'localhost', authorization: 'Bearer test-token' } });
   return base as unknown as Parameters<Api['handleApiRequest']>[0];
 }
 
@@ -50,6 +50,7 @@ const ctx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
   connectors: new Map(),
   startTime: Date.now(),
+  gatewayAuthToken: 'test-token',
   sessionManager: { getEngines: () => new Map(), getEngine: () => undefined },
 } as unknown as import('../api.js').ApiContext;
 

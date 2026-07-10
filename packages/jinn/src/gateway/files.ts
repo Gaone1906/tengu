@@ -14,6 +14,7 @@ import { insertFile, getFile, getSession, listFiles, deleteFile, setFilePath, in
 import type { ApiContext } from "./api.js";
 import { CALLER_SESSION_HEADER, TOOL_CALL_HEADER, UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
 import { resolveCallerIdentity } from "./session-comm-guards.js";
+import { verifyGatewayAuth } from "./auth.js";
 
 // Ensure managed files directory exists
 export function ensureFilesDir(): void {
@@ -88,13 +89,14 @@ function rejectUnidentifiedToolCaller(req: HttpRequest, res: ServerResponse): bo
   return true;
 }
 
-function requireOperatorFileAuthority(req: HttpRequest, res: ServerResponse, action: string): boolean {
+function requireOperatorFileAuthority(req: HttpRequest, res: ServerResponse, action: string, context: ApiContext): boolean {
   const identity = resolveCallerIdentity(req.headers, {
     sessionExists: (sessionId) => !!getSession(sessionId),
     verifySessionCapability,
     requireCapability: true,
+    operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
   });
-  if (identity.kind === "unidentified-tool") {
+  if (identity.kind === "unidentified-tool" || identity.kind === "unauthenticated") {
     json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
     return false;
   }
@@ -1137,7 +1139,7 @@ async function handleAttachmentJson(
   let buffer: Buffer;
 
   if (localPath) {
-    if (!requireOperatorFileAuthority(req, res, "path attachment")) return;
+    if (!requireOperatorFileAuthority(req, res, "path attachment", context)) return;
     const expanded = expandPath(localPath);
     if (!fs.existsSync(expanded) || !fs.statSync(expanded).isFile()) {
       return badRequest(res, `File not found: ${localPath}`);
@@ -1269,7 +1271,7 @@ export async function handleFilesRequest(
 
   // POST /api/files/transfer — send files to remote gateway
   if (method === "POST" && pathname === "/api/files/transfer") {
-    if (!requireOperatorFileAuthority(req, res, "file transfer")) return true;
+    if (!requireOperatorFileAuthority(req, res, "file transfer", context)) return true;
     await handleTransfer(req, res, context);
     return true;
   }
@@ -1349,7 +1351,7 @@ export async function handleFilesRequest(
   // DELETE /api/files/:id
   const delMatch = pathname.match(/^\/api\/files\/([^/]+)$/);
   if (method === "DELETE" && delMatch) {
-    if (!requireOperatorFileAuthority(req, res, "file delete")) return true;
+    if (!requireOperatorFileAuthority(req, res, "file delete", context)) return true;
     const id = delMatch[1];
     const meta = getFile(id);
     if (!meta) { notFound(res); return true; }

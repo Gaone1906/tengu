@@ -59,6 +59,7 @@ const apiCtx = {
   }),
   connectors: new Map(),
   startTime: Date.now(),
+  gatewayAuthToken: "test-token",
   emit: () => {},
   sessionManager: {
     getEngines: () => new Map([["codex", {}]]),
@@ -106,7 +107,7 @@ async function call(method: string, urlPath: string, body?: unknown): Promise<{ 
   const req = Object.assign(Readable.from(payload), {
     method,
     url: urlPath,
-    headers: { host: "localhost", "content-type": "application/json" },
+    headers: { host: "localhost", "content-type": "application/json", authorization: "Bearer test-token" },
   });
   const cap = makeRes();
   await api.handleApiRequest(req as unknown as Parameters<Api["handleApiRequest"]>[0], cap.res, apiCtx);

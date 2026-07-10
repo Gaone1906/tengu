@@ -208,6 +208,7 @@ const apiCtx = {
   getConfig: () => ({ gateway: {}, engines: { default: "codex" }, sessions: {} }),
   connectors: new Map(),
   startTime: Date.now(),
+  gatewayAuthToken: "test-token",
   emit: () => {},
   sessionManager: {
     getEngines: () => new Map(),
@@ -221,7 +222,7 @@ function apiFetch(): typeof fetch {
   return (async (input: string | URL, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input.toString());
     const body = typeof init?.body === "string" ? [Buffer.from(init.body)] : [];
-    const headers: Record<string, string> = { host: url.host };
+    const headers: Record<string, string> = { host: url.host, authorization: "Bearer test-token" };
     for (const [k, v] of Object.entries((init?.headers as Record<string, string>) ?? {})) {
       headers[k.toLowerCase()] = v;
     }

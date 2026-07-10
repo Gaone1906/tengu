@@ -293,18 +293,22 @@ function hasHeader(headers: Record<string, string | string[] | undefined>, name:
  *     identity. An MCP tool always runs on behalf of a session, so a marker with
  *     no identity/capability means the identity got LOST or spoofed — the routes
  *     must FAIL CLOSED (403), never fall through to the operator path.
- *   - `operator`: neither header — the web UI, operator curl, and internal
- *     callers (parent callbacks, cron); genuinely privileged, unchanged.
+ *   - `operator`: no session claim AND the caller has already proved gateway
+ *     bearer/cookie authority. Absence of identity is never privilege.
+ *   - `unauthenticated`: no verified operator auth and no scoped session
+ *     identity. Mutation routes must fail this principal closed.
  */
 export type CallerIdentity =
   | { kind: "operator" }
   | { kind: "session"; callerId: string }
-  | { kind: "unidentified-tool" };
+  | { kind: "unidentified-tool" }
+  | { kind: "unauthenticated" };
 
 export interface CallerIdentityOptions {
   sessionExists?: (sessionId: string) => boolean;
   verifySessionCapability?: (sessionId: string, capability: string) => boolean;
   requireCapability?: boolean;
+  operatorAuthenticated?: boolean;
 }
 
 export function resolveCallerIdentity(
@@ -329,5 +333,5 @@ export function resolveCallerIdentity(
     return { kind: "session", callerId };
   }
   if (isToolCall) return { kind: "unidentified-tool" };
-  return { kind: "operator" };
+  return opts.operatorAuthenticated ? { kind: "operator" } : { kind: "unauthenticated" };
 }
