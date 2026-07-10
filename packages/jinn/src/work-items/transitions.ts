@@ -214,6 +214,9 @@ export function assignWorkItem(
   const txn = db.transaction((): TransitionResult | undefined => {
     const item = getWorkItem(id);
     if (!item) return undefined;
+    if (STICKY_STATUSES.has(item.status)) {
+      throw new TransitionError('illegal-edge', `cannot assign work item ${id} while it is in terminal state ${item.status}`);
+    }
     const target = item.status === 'backlog' ? 'assigned' : item.status;
     const now = new Date().toISOString();
     const result = db

@@ -169,6 +169,7 @@ import {
   listWorkItemEvents,
   listWorkItems,
   searchWorkItems,
+  STICKY_STATUSES,
   type CreateWorkItemInput,
   type SearchWorkItemsFilter,
   type VerifyPolicy,
@@ -2693,9 +2694,31 @@ export async function handleApiRequest(
           `unknown employee "${assignee}"${near ? `. Did you mean "${near}"?` : ""} Check find_employees or GET /api/org for valid employees`,
         );
       }
-      const item = assignWorkItem(params.id, assignee, employee.department ?? null, workItemActor(caller));
-      if (!item) return notFound(res);
-      return json(res, { workItem: item });
+      const current = getWorkItem(params.id);
+      if (!current) return notFound(res);
+      if (STICKY_STATUSES.has(current.status)) {
+        return json(res, { error: `cannot assign Todo ${current.id} while it is in terminal state ${current.status}` }, 409);
+      }
+      const explicitSelfClaim =
+        caller.kind === "session" &&
+        current.status === "backlog" &&
+        current.assignee === null &&
+        caller.session.employee === assignee;
+      if (!explicitSelfClaim) {
+        const authorized = authorizeWorkItemOwnerManagerOrRoot(caller, current, "assign");
+        if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
+      }
+      try {
+        const item = assignWorkItem(params.id, assignee, employee.department ?? null, workItemActor(caller));
+        if (!item) return notFound(res);
+        return json(res, { workItem: item });
+      } catch (err) {
+        if (err instanceof TransitionError) {
+          const statusCode = err.code === "conflict" ? 409 : 400;
+          return json(res, { error: err.message }, statusCode);
+        }
+        throw err;
+      }
     }
 
     // POST /api/work-items/:id/archive — non-deleting Todo archive. This preserves

@@ -369,7 +369,7 @@ beforeAll(async () => {
 
 describe("work-item tools — integration against the real API + store", () => {
   it("create → search → assign → update → read round-trips through MCP only", async () => {
-    const caller = registry.createSession({ engine: "codex", source: "web", sourceRef: "caller", title: "caller" });
+    const caller = registry.createSession({ engine: "codex", source: "web", sourceRef: "caller", title: "caller", employee: "platform-dev" });
     const ctx = ctxFor(caller.id);
 
     const created = (await tool("create_work_item").handler(
@@ -400,6 +400,41 @@ describe("work-item tools — integration against the real API + store", () => {
     expect(read.workItem.acceptance).toBe("- ship");
     expect(read.workItem.verifyPolicy.mode).toBe("verify");
     expect(read.spendUsd).toBe(0);
+  });
+
+  it("rejects unrelated self-assignment and terminal assignment while preserving authorized reassignment and unassigned self-claim", async () => {
+    const owner = registry.createSession({ engine: "codex", source: "web", sourceRef: "assign-owner", title: "assign owner", employee: "platform-dev" });
+    const outsider = registry.createSession({ engine: "codex", source: "web", sourceRef: "assign-outsider", title: "assign outsider", employee: "outsider" });
+    const manager = registry.createSession({ engine: "codex", source: "web", sourceRef: "assign-manager", title: "assign manager", employee: "platform-manager" });
+    const root = registry.createSession({ engine: "codex", source: "web", sourceRef: "assign-root", title: "assign root", employee: "coo" });
+
+    const protectedItem = store.createWorkItem({ title: "Protected assignment", status: "assigned", assignee: "platform-dev", source: "session" });
+    await expect(tool("assign_work_item").handler({ id: protectedItem.id, assignee: "outsider" }, ctxFor(outsider.id))).rejects.toThrow(
+      /403.*does not own|403.*cannot assign/i,
+    );
+    expect(store.getWorkItem(protectedItem.id)?.assignee).toBe("platform-dev");
+
+    const ownerAssigned = (await tool("assign_work_item").handler({ id: protectedItem.id, assignee: "outsider" }, ctxFor(owner.id))) as {
+      workItem: { assignee: string };
+    };
+    expect(ownerAssigned.workItem.assignee).toBe("outsider");
+
+    const managedItem = store.createWorkItem({ title: "Manager assignment", status: "assigned", assignee: "platform-dev", source: "session" });
+    expect(((await tool("assign_work_item").handler({ id: managedItem.id, assignee: "outsider" }, ctxFor(manager.id))) as { workItem: { assignee: string } }).workItem.assignee).toBe("outsider");
+    const rootItem = store.createWorkItem({ title: "Root assignment", status: "assigned", assignee: "platform-dev", source: "session" });
+    expect(((await tool("assign_work_item").handler({ id: rootItem.id, assignee: "outsider" }, ctxFor(root.id))) as { workItem: { assignee: string } }).workItem.assignee).toBe("outsider");
+
+    const unassigned = store.createWorkItem({ title: "Claimable backlog", status: "backlog", assignee: null, source: "human" });
+    const claimed = (await tool("assign_work_item").handler({ id: unassigned.id, assignee: "outsider" }, ctxFor(outsider.id))) as {
+      workItem: { assignee: string; status: string };
+    };
+    expect(claimed.workItem).toMatchObject({ assignee: "outsider", status: "assigned" });
+
+    const terminal = store.createWorkItem({ title: "Closed assignment", status: "done", assignee: "platform-dev", source: "session" });
+    await expect(tool("assign_work_item").handler({ id: terminal.id, assignee: "outsider" }, ctxFor(owner.id))).rejects.toThrow(
+      /cannot assign.*done|terminal/i,
+    );
+    expect(store.getWorkItem(terminal.id)?.assignee).toBe("platform-dev");
   });
 
   it("linked executor can move its delegated item to in_review, but cannot mark it done", async () => {
