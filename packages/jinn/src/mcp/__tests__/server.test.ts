@@ -96,6 +96,7 @@ describe("buildTools", () => {
       "decide_work_item_approval",
       "delegate_task",
       "delete_trigger",
+      "edit_workflow_run_step_prompt",
       "escalate_work_item_approval",
       "find_employees",
       "get_cron_run_history",

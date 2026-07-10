@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   advanceWorkflowRunById,
+  editPendingWorkflowStepPrompt,
   resolveWorkflowRunGate,
   startWorkflowRun,
   startWorkflowRunReconciler,
@@ -132,6 +133,99 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     input.ticket.id = 'MUTATED';
     expect(getRun(root, def.id, started.runId)?.invocation?.input).toMatchObject({ ticket: { id: 'ABC-42' } });
     expect(spawnCalls[0].prompt).not.toContain('MUTATED');
+  });
+
+  it('uses a frozen per-phase prompt override only for the targeted pending phase', async () => {
+    const def = createDefinition(root, chainDef('prompt-override', [
+      trigger,
+      step('plan', { instructions: 'Write the authored plan.' }),
+      step('verify', { instructions: 'Run the authored verification.' }),
+    ]), { now });
+    const { deps, spawnCalls, settle } = harness();
+    const input = { ticket: { id: 'ABC-42' } };
+    const stepOverrides = { verify: { prompt: 'Verify only the migration safety checks.' } };
+
+    const started = await startWorkflowRun(deps, def, {
+      invocation: { input },
+      stepOverrides,
+    } as never);
+
+    expect(spawnCalls[0].nodeId).toBe('plan');
+    expect(spawnCalls[0].prompt).toContain('Write the authored plan.');
+    expect(spawnCalls[0].prompt).not.toContain('Verify only the migration safety checks.');
+
+    input.ticket.id = 'MUTATED-INPUT';
+    stepOverrides.verify.prompt = 'MUTATED-OVERRIDE';
+    settle(started.runId, 'plan', 1);
+    await sweepWorkflowRuns(deps);
+
+    const verifySpawn = spawnCalls.find((call) => call.nodeId === 'verify')!;
+    expect(verifySpawn.prompt).toContain('Verify only the migration safety checks.');
+    expect(verifySpawn.prompt).not.toContain('Run the authored verification.');
+    expect(verifySpawn.prompt).not.toContain('MUTATED-OVERRIDE');
+    const persisted = getRun(root, def.id, started.runId)!;
+    expect(persisted.invocation?.input).toEqual({ ticket: { id: 'ABC-42' } });
+    expect(persisted.stepOverrides).toEqual({
+      verify: { prompt: 'Verify only the migration safety checks.' },
+    });
+  });
+
+  it('applies an audited prompt edit only while a phase is pending', async () => {
+    const def = createDefinition(root, chainDef('prompt-edit', [
+      trigger,
+      step('plan', { instructions: 'Write the plan.' }),
+      step('verify', { instructions: 'Run the original checks.' }),
+    ]), { now });
+    const { deps, spawnCalls, settle } = harness();
+    const started = await startWorkflowRun(deps, def, {
+      invocation: { input: { ticket: 'ABC-42' } },
+    });
+
+    const edited = await editPendingWorkflowStepPrompt(
+      deps,
+      def.id,
+      started.runId,
+      'verify',
+      'Run the revised migration checks.',
+      { actor: 'release-manager' },
+    );
+    expect(edited.outcome).toBe('edited');
+    if (edited.outcome !== 'edited') throw new Error(`unexpected edit outcome ${edited.outcome}`);
+    expect(edited.run.stepPromptRevision).toBe(1);
+    expect(edited.run.stepPromptEdits).toEqual([{
+      revision: 1,
+      nodeId: 'verify',
+      actor: 'release-manager',
+      at: FIXED,
+      before: 'Run the original checks.',
+      after: 'Run the revised migration checks.',
+    }]);
+    expect(edited.run.invocation?.input).toEqual({ ticket: 'ABC-42' });
+
+    settle(started.runId, 'plan', 1);
+    await sweepWorkflowRuns(deps);
+    const verifySpawn = spawnCalls.find((call) => call.nodeId === 'verify')!;
+    expect(verifySpawn.prompt).toContain('Run the revised migration checks.');
+    expect(verifySpawn.prompt).not.toContain('Run the original checks.');
+
+    const completedPhaseEdit = await editPendingWorkflowStepPrompt(
+      deps, def.id, started.runId, 'plan', 'Rewrite the plan.', { actor: 'release-manager' },
+    );
+    expect(completedPhaseEdit).toMatchObject({ outcome: 'not-pending', status: 'done' });
+    const runningPhaseEdit = await editPendingWorkflowStepPrompt(
+      deps, def.id, started.runId, 'verify', 'Change while running.', { actor: 'release-manager' },
+    );
+    expect(runningPhaseEdit).toMatchObject({ outcome: 'not-pending', status: 'running' });
+
+    settle(started.runId, 'verify', 1);
+    await sweepWorkflowRuns(deps);
+    const settledPhaseEdit = await editPendingWorkflowStepPrompt(
+      deps, def.id, started.runId, 'verify', 'Change after completion.', { actor: 'release-manager' },
+    );
+    expect(settledPhaseEdit).toMatchObject({ outcome: 'not-pending', status: 'done' });
+    const persisted = getRun(root, def.id, started.runId)!;
+    expect(persisted.stepPromptEdits).toHaveLength(1);
+    expect(persisted.invocation?.input).toEqual({ ticket: 'ABC-42' });
   });
 
   it('runs a two-step chain: B spawns ONLY after A settles; completed only after B settles', async () => {
@@ -637,6 +731,59 @@ describe('bounded loops through the driver (GRS-014e)', () => {
     expect(run.rounds).toBe(2);
     expect(run.loopExit?.reason).toBe('gate-passed');
     expect(spawnCalls).toHaveLength(4);
+  });
+
+  it("branches a plan → implement → verify loop on the verifier's declared handoff field", async () => {
+    const d = chainDef('loop-verifier-field', [
+      trigger,
+      step('plan', { instructions: 'Plan once.' }),
+      step('implement', { instructions: 'Implement the plan or reviewer feedback.' }),
+      step('verify', { instructions: 'Verify the implementation.' }),
+    ]);
+    d.edges.push({
+      id: 'lp',
+      from: 'verify',
+      to: 'implement',
+      kind: 'loop',
+      when: [{ path: 'steps.verify.outcome.fields.approved', op: 'eq', value: true }],
+    } as never);
+    d.loop = { maxRoundsPerRun: 3 };
+    const def = createDefinition(root, d, { now });
+    const { deps, spawnCalls, settle } = harness();
+
+    const started = await startWorkflowRun(deps, def);
+    expect(started.status).toBe('running');
+    settle(started.runId, 'plan', 1);
+    await sweepWorkflowRuns(deps);
+    settle(started.runId, 'implement', 1);
+    await sweepWorkflowRuns(deps);
+
+    const verify1 = spawnCalls.find((call) => call.nodeId === 'verify' && call.round === 1)!;
+    expect(verify1.prompt).toContain('"approved"');
+    settle(started.runId, 'verify', 1, 'idle',
+      'needs revision\n```handoff\n{ "summary": "retry", "fields": { "approved": false } }\n```');
+    await sweepWorkflowRuns(deps);
+
+    let run = getRun(root, def.id, started.runId)!;
+    expect(run.rounds).toBe(2);
+    expect(run.loopExit).toBeUndefined();
+    expect(spawnCalls.map((call) => `${call.nodeId}@r${call.round}`)).toEqual([
+      'plan@r1', 'implement@r1', 'verify@r1', 'implement@r2',
+    ]);
+
+    settle(started.runId, 'implement', 1, 'idle', undefined, 2);
+    await sweepWorkflowRuns(deps);
+    settle(started.runId, 'verify', 1, 'idle',
+      'approved\n```handoff\n{ "summary": "ship", "fields": { "approved": true } }\n```', 2);
+    await sweepWorkflowRuns(deps);
+
+    run = getRun(root, def.id, started.runId)!;
+    expect(run.status).toBe('completed');
+    expect(run.rounds).toBe(2);
+    expect(run.loopExit).toEqual({ round: 2, at: FIXED, reason: 'gate-passed' });
+    expect(spawnCalls.map((call) => `${call.nodeId}@r${call.round}`)).toEqual([
+      'plan@r1', 'implement@r1', 'verify@r1', 'implement@r2', 'verify@r2',
+    ]);
   });
 });
 

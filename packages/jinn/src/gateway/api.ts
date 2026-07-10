@@ -106,6 +106,8 @@ import {
   applyWorkflowCronSync,
   fireWorkflowCronJob,
   resolveWorkflowRunGate,
+  editPendingWorkflowStepPrompt,
+  MAX_WORKFLOW_STEP_PROMPT_CHARS,
   workflowRunTriggerTodoId,
   workflowTriggerSource,
   artifactGatePasses,
@@ -994,14 +996,59 @@ export function workflowRunDriverDeps(root: string, context: ApiContext): RunDri
 interface WorkflowRunRequestBody {
   trigger?: "manual" | "schedule";
   input?: unknown;
+  stepOverrides?: unknown;
   idempotencyKey?: unknown;
+}
+
+function validateWorkflowStepPrompt(value: unknown, field: string): { ok: true; prompt: string } | { ok: false; error: string } {
+  if (typeof value !== "string" || !value.trim()) {
+    return { ok: false, error: `${field} must be a non-empty string` };
+  }
+  const prompt = value.trim();
+  if (prompt.length > MAX_WORKFLOW_STEP_PROMPT_CHARS) {
+    return { ok: false, error: `${field} is too long (max ${MAX_WORKFLOW_STEP_PROMPT_CHARS} characters)` };
+  }
+  if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(prompt)) {
+    return { ok: false, error: `${field} must not contain control characters other than tabs or newlines` };
+  }
+  return { ok: true, prompt };
 }
 
 function validateWorkflowRunRequestBody(
   body: WorkflowRunRequestBody,
-): { ok: true; input?: Record<string, unknown>; idempotencyKey?: string } | { ok: false; error: string } {
+  def: EditableWorkflowDefinition,
+): {
+  ok: true;
+  input?: Record<string, unknown>;
+  stepOverrides?: Record<string, { prompt: string }>;
+  idempotencyKey?: string;
+} | { ok: false; error: string } {
   if (body.input !== undefined && (!body.input || typeof body.input !== "object" || Array.isArray(body.input))) {
     return { ok: false, error: "input must be a JSON object" };
+  }
+  let stepOverrides: Record<string, { prompt: string }> | undefined;
+  if (body.stepOverrides !== undefined) {
+    if (!body.stepOverrides || typeof body.stepOverrides !== "object" || Array.isArray(body.stepOverrides)) {
+      return { ok: false, error: "stepOverrides must be a JSON object keyed by step node id" };
+    }
+    stepOverrides = Object.create(null) as Record<string, { prompt: string }>;
+    for (const [nodeId, rawOverride] of Object.entries(body.stepOverrides as Record<string, unknown>)) {
+      if (!rawOverride || typeof rawOverride !== "object" || Array.isArray(rawOverride)) {
+        return { ok: false, error: `stepOverrides.${nodeId} must be an object with exactly one prompt field` };
+      }
+      const override = rawOverride as Record<string, unknown>;
+      const extraKeys = Object.keys(override).filter((key) => key !== "prompt");
+      if (extraKeys.length > 0) {
+        return { ok: false, error: `stepOverrides.${nodeId} has unknown field(s): ${extraKeys.join(", ")}; only prompt is allowed` };
+      }
+      const checked = validateWorkflowStepPrompt(override.prompt, `stepOverrides.${nodeId}.prompt`);
+      if (!checked.ok) return checked;
+      const node = def.nodes.find((candidate) => candidate.id === nodeId);
+      if (!node || node.type !== "step" || !node.actor) {
+        return { ok: false, error: `stepOverrides references unknown actor-backed step "${nodeId}"` };
+      }
+      stepOverrides[nodeId] = { prompt: checked.prompt };
+    }
   }
   let idempotencyKey: string | undefined;
   if (body.idempotencyKey !== undefined) {
@@ -1019,6 +1066,7 @@ function validateWorkflowRunRequestBody(
   return {
     ok: true,
     ...(body.input !== undefined ? { input: body.input as Record<string, unknown> } : {}),
+    ...(stepOverrides ? { stepOverrides } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
   };
 }
@@ -1032,10 +1080,10 @@ async function runWorkflowDefinitionFromHttp(
   body: WorkflowRunRequestBody,
   expectedId?: string,
 ): Promise<void> {
-  const validated = validateWorkflowRunRequestBody(body);
-  if (!validated.ok) return badRequest(res, validated.error);
   const authority = authorizeWorkflowOperation(req.headers, def, "run", context);
   if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+  const validated = validateWorkflowRunRequestBody(body, def);
+  if (!validated.ok) return badRequest(res, validated.error);
   if (expectedId !== undefined && def.id !== expectedId) {
     return badRequest(res, `definition file "${expectedId}" has mismatched id "${def.id}"`);
   }
@@ -1065,6 +1113,7 @@ async function runWorkflowDefinitionFromHttp(
     knownEmployees,
     knownEngines,
     ...(invocation ? { invocation } : {}),
+    ...(validated.stepOverrides ? { stepOverrides: validated.stepOverrides } : {}),
   });
   return json(res, run, run.status === "failed" ? 422 : 201);
 }
@@ -3885,6 +3934,7 @@ export async function handleApiRequest(
         if (!def) return json(res, { error: `workflow name "${name}" not found` }, 404);
         return await runWorkflowDefinitionFromHttp(req, res, context, root, def, {
           input: raw.input,
+          stepOverrides: raw.stepOverrides,
           idempotencyKey: raw.idempotencyKey,
           trigger: "manual",
         });
@@ -3932,6 +3982,50 @@ export async function handleApiRequest(
         }
         return workflowStoreErrorResponse(res, err);
       }
+    }
+
+    // PATCH /api/workflow-definitions/:id/runs/:runId/pending-steps/:nodeId —
+    // replace one run-local phase prompt before that phase starts. The run driver
+    // serializes this with dispatch and appends actor/time/before/after evidence;
+    // invocation.input and the frozen definition snapshot remain untouched.
+    params = matchRoute("/api/workflow-definitions/:id/runs/:runId/pending-steps/:nodeId", pathname);
+    if (method === "PATCH" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+      const existingRun = getRun(root, params.id, params.runId);
+      if (!existingRun) return notFound(res);
+      const authorityDef = existingRun.definitionSnapshot ?? getDefinition(root, params.id);
+      const authority = authorizeWorkflowOperation(req.headers, authorityDef, "run", context);
+      if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_EVENT_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "pending step prompt edit body must be a JSON object");
+      }
+      const raw = parsed.body as Record<string, unknown>;
+      const extraKeys = Object.keys(raw).filter((key) => key !== "prompt");
+      if (extraKeys.length > 0) return badRequest(res, `prompt edit has unknown field(s): ${extraKeys.join(", ")}; only prompt is allowed`);
+      const checked = validateWorkflowStepPrompt(raw.prompt, "prompt");
+      if (!checked.ok) return badRequest(res, checked.error);
+      const outcome = await editPendingWorkflowStepPrompt(
+        workflowRunDriverDeps(root, context),
+        params.id,
+        params.runId,
+        params.nodeId,
+        checked.prompt,
+        { actor: authority.actor },
+      );
+      if (outcome.outcome === "not-found") return notFound(res);
+      if (outcome.outcome === "step-not-found") {
+        return json(res, { error: `workflow run has no actor-backed step "${params.nodeId}"` }, 404);
+      }
+      if (outcome.outcome === "not-pending") {
+        return json(res, {
+          error: `step "${params.nodeId}" is ${outcome.status}; only pending phase prompts can be edited`,
+          status: outcome.status,
+        }, 409);
+      }
+      return json(res, outcome.run);
     }
 
     // POST /api/workflow-definitions/:id/runs/:runId/resolve-gate — resolve a PARKED

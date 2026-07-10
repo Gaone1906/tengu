@@ -80,7 +80,7 @@ export function assertBoundCaller(ctx: JinnMcpContext): asserts ctx is JinnMcpCo
  */
 export async function gatewayRequest(
   ctx: JinnMcpContext,
-  method: "GET" | "POST" | "PUT" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   pathAndQuery: string,
   body?: unknown,
 ): Promise<{ status: number; body: unknown }> {

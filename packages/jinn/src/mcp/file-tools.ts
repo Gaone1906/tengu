@@ -92,7 +92,7 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
 export function buildFileTools(): JinnMcpTool[] {
   const list: JinnMcpTool = {
     name: "list_files",
-    description: "List managed company files as relative managedPath values.",
+    description: "List managed files.",
     inputSchema: {
       type: "object",
       properties: {
@@ -121,7 +121,7 @@ export function buildFileTools(): JinnMcpTool[] {
 
   const read: JinnMcpTool = {
     name: "read_file",
-    description: "Read one managed company file under files/ or uploads/.",
+    description: "Read a managed file.",
     inputSchema: {
       type: "object",
       properties: { path: { type: "string" } },

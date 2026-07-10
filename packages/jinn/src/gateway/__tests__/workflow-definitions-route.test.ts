@@ -337,6 +337,78 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     expect(files.filter((name) => name.endsWith('.json'))).toEqual([`${firstRun.runId}.json`]);
   });
 
+  it('accepts per-phase prompt overrides and audits an operator edit to a pending phase', async () => {
+    const definition = {
+      id: 'run-prompt-edit',
+      title: 'Run Prompt Edit',
+      nodes: [
+        { id: 'trg', type: 'trigger', label: 'Manual', position: { x: 0, y: 0 }, trigger: { kind: 'manual' } },
+        { id: 'gate', type: 'gate', label: 'Approve', position: { x: 0, y: 140 }, gate: { kind: 'approval', description: 'approve execution', approvalRef: 'run' } },
+        { id: 'verify', type: 'step', label: 'Verify', position: { x: 0, y: 280 }, actor: { kind: 'engine', ref: 'codex' }, instructions: 'Run the authored checks.' },
+      ],
+      edges: [
+        { id: 'e0', from: 'trg', to: 'gate', kind: 'sequence' },
+        { id: 'e1', from: 'gate', to: 'verify', kind: 'sequence' },
+      ],
+    };
+    await call('POST', '/api/workflow-definitions', definition);
+    const promptRunCtx = {
+      ...(runCtx as unknown as Record<string, unknown>),
+      sessionManager: { getEngines: () => new Map([['codex', {}]]), getEngine: () => undefined },
+    } as unknown as import('../api.js').ApiContext;
+
+    const started = await call('POST', '/api/workflow-definitions/run-prompt-edit/run', {
+      input: { ticket: 'ABC-42' },
+      stepOverrides: { verify: { prompt: 'Run the invocation-specific checks.' } },
+    }, promptRunCtx);
+    expect(started.status).toBe(201);
+    const run = started.body as {
+      runId: string;
+      status: string;
+      invocation: { input: Record<string, unknown> };
+      stepOverrides: Record<string, { prompt: string }>;
+    };
+    expect(run.status).toBe('parked');
+    expect(run.stepOverrides.verify.prompt).toBe('Run the invocation-specific checks.');
+
+    const edited = await call('PATCH', `/api/workflow-definitions/run-prompt-edit/runs/${run.runId}/pending-steps/verify`, {
+      prompt: 'Run the revised pending-phase checks.',
+    }, promptRunCtx);
+    expect(edited.status).toBe(200);
+    expect(edited.body).toMatchObject({
+      invocation: { input: { ticket: 'ABC-42' } },
+      stepOverrides: { verify: { prompt: 'Run the revised pending-phase checks.' } },
+      stepPromptRevision: 1,
+      stepPromptEdits: [{
+        revision: 1,
+        nodeId: 'verify',
+        actor: 'operator',
+        before: 'Run the invocation-specific checks.',
+        after: 'Run the revised pending-phase checks.',
+      }],
+    });
+  });
+
+  it('rejects malformed or unknown per-phase prompt overrides', async () => {
+    const definition = inlineDef('run-prompt-invalid', [
+      { id: 'e0', from: 'trg', to: 'sa' },
+      { id: 'e1', from: 'sa', to: 'sb' },
+    ]);
+    await call('POST', '/api/workflow-definitions', definition);
+
+    const malformed = await call('POST', '/api/workflow-definitions/run-prompt-invalid/run', {
+      stepOverrides: { sa: { prompt: '' } },
+    }, runCtx);
+    expect(malformed.status).toBe(400);
+    expect((malformed.body as { error: string }).error).toMatch(/stepOverrides.*prompt/i);
+
+    const unknown = await call('POST', '/api/workflow-definitions/run-prompt-invalid/run', {
+      stepOverrides: { missing: { prompt: 'Do this.' } },
+    }, runCtx);
+    expect(unknown.status).toBe(400);
+    expect((unknown.body as { error: string }).error).toMatch(/unknown.*step/i);
+  });
+
   it('POST /api/workflow-runs/by-name resolves the canonical name, forwards input, and deduplicates', async () => {
     const definition = {
       ...inlineDef('run-by-name-record', [

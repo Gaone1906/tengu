@@ -45,6 +45,8 @@ import {
   workflowRunTriggerTodoId,
   type WorkflowRun,
   type WorkflowRunInvocation,
+  type WorkflowStepPromptOverride,
+  type RunStepStatus,
   type WorkflowTriggerEvent,
   type WorkflowRunTrigger,
 } from './run-store.js';
@@ -242,6 +244,8 @@ export interface StartRunOptions {
   trigger?: WorkflowRunTrigger;
   /** Frozen structured context supplied for this invocation of the workflow. */
   invocation?: WorkflowRunInvocation;
+  /** Frozen-at-start run-local prompt replacements, keyed by step node id. */
+  stepOverrides?: Record<string, WorkflowStepPromptOverride>;
   knownEmployees?: Iterable<string>;
   knownEngines?: Iterable<string>;
   maxNodes?: number;
@@ -314,6 +318,8 @@ function driveIterationCap(run: WorkflowRun): number {
 function stepPromptFor(def: EditableWorkflowDefinition, plan: ExecutionPlan, run: WorkflowRun, nodeId: string, round: number): string {
   const node = def.nodes.find((n) => n.id === nodeId);
   if (!node) throw new Error(`definition has no node "${nodeId}"`); // driver guards before calling
+  const promptOverride = run.stepOverrides?.[nodeId]?.prompt;
+  const effectiveNode = promptOverride === undefined ? node : { ...node, instructions: promptOverride };
   const dispatchIndex = run.steps.findIndex((r) => r.nodeId === nodeId && (r.round ?? 1) === round);
   const scanEnd = dispatchIndex === -1 ? run.steps.length : dispatchIndex; // -1 unreachable: markDispatching already resolved this receipt
   const activity = createRunEdgeActivity(run.steps, plan);
@@ -397,7 +403,7 @@ function stepPromptFor(def: EditableWorkflowDefinition, plan: ExecutionPlan, run
     workflowId: run.workflowId,
     workflowTitle: run.title,
     runId: run.runId,
-    node,
+    node: effectiveNode,
     predecessors,
     ...(failedPredecessors.length > 0 ? { failedPredecessors } : {}),
     ...(advertisedFieldKeys.length > 0 ? { advertisedFieldKeys } : {}),
@@ -644,6 +650,9 @@ export async function startWorkflowRun(
   const invocation: WorkflowRunInvocation | undefined = opts.invocation
     ? JSON.parse(JSON.stringify(opts.invocation)) as WorkflowRunInvocation
     : undefined;
+  const stepOverrides: Record<string, WorkflowStepPromptOverride> | undefined = opts.stepOverrides
+    ? JSON.parse(JSON.stringify(opts.stepOverrides)) as Record<string, WorkflowStepPromptOverride>
+    : undefined;
 
   // ONE RUN PER (workflowId, source, event, fireRef). A re-invocation of the same
   // logical fire (scheduler retry, replay, double tick) finds the run that already
@@ -672,6 +681,7 @@ export async function startWorkflowRun(
     title: def.title,
     trigger,
     ...(invocation ? { invocation } : {}),
+    ...(stepOverrides ? { stepOverrides } : {}),
     status: 'failed',
     startedAt: now(),
     endedAt: now(),
@@ -734,6 +744,7 @@ export async function startWorkflowRun(
   const run: WorkflowRun = {
     ...minted.run,
     ...(invocation ? { invocation } : {}),
+    ...(stepOverrides ? { stepOverrides } : {}),
     definitionSnapshot: def,
   };
 
@@ -858,6 +869,68 @@ export async function advanceWorkflowRunById(
   // probe-only pass) keeps the operator queue truthful — idempotent re-mirror.
   mirrorParkOnTodo(deps, result);
   return result;
+}
+
+/* ── Pending-phase prompt edits ─────────────────────────────────────────────── */
+
+export type EditPendingWorkflowStepPromptOutcome =
+  | { outcome: 'edited'; run: WorkflowRun }
+  | { outcome: 'not-found' }
+  | { outcome: 'step-not-found'; run: WorkflowRun }
+  | { outcome: 'not-pending'; run: WorkflowRun; status: RunStepStatus };
+
+/**
+ * Replace one run-local phase prompt while that phase is still wholly pending.
+ * The edit shares the run's advancement mutex with dispatch, closing the only race
+ * that matters: either this save lands first and dispatch reads the new prompt, or
+ * dispatch marks the receipt non-pending first and this edit is rejected. A node
+ * that already ran in an earlier loop round is immutable even if a later receipt is
+ * pending because the override is node-scoped and would otherwise rewrite behavior
+ * after that phase had already started.
+ */
+export async function editPendingWorkflowStepPrompt(
+  deps: RunDriverDeps,
+  workflowId: string,
+  runId: string,
+  nodeId: string,
+  prompt: string,
+  opts: { actor: string },
+): Promise<EditPendingWorkflowStepPromptOutcome> {
+  const now = deps.now ?? (() => new Date().toISOString());
+  return withRunAdvanceLock(runId, async () => {
+    const run = getRun(deps.root, workflowId, runId);
+    if (!run) return { outcome: 'not-found' as const };
+
+    const node = (run.definitionSnapshot ?? deps.getDefinition(deps.root, workflowId))
+      ?.nodes.find((candidate) => candidate.id === nodeId && candidate.type === 'step' && !!candidate.actor);
+    const receipts = run.steps.filter((receipt) => receipt.nodeId === nodeId);
+    if (!node || receipts.length === 0) return { outcome: 'step-not-found' as const, run };
+
+    const startedReceipt = receipts.find((receipt) => receipt.status !== 'pending');
+    if (startedReceipt) {
+      return { outcome: 'not-pending' as const, run, status: startedReceipt.status };
+    }
+
+    const before = run.stepOverrides?.[nodeId]?.prompt
+      ?? (typeof node.instructions === 'string' && node.instructions.trim() !== ''
+        ? node.instructions.trim()
+        : "Perform this step's work and report a concise result.");
+    const revision = (run.stepPromptRevision ?? 0) + 1;
+    const edited: WorkflowRun = {
+      ...run,
+      stepOverrides: {
+        ...(run.stepOverrides ?? {}),
+        [nodeId]: { prompt },
+      },
+      stepPromptRevision: revision,
+      stepPromptEdits: [
+        ...(run.stepPromptEdits ?? []),
+        { revision, nodeId, actor: opts.actor, at: now(), before, after: prompt },
+      ],
+    };
+    persistRun(deps, edited);
+    return { outcome: 'edited' as const, run: edited };
+  });
 }
 
 /* ── Gate resolution (GRS-014e) ─────────────────────────────────────────────── */

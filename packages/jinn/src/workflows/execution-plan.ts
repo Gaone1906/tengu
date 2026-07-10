@@ -218,9 +218,8 @@ export interface WaitNodePlan {
  * The bounded loop a definition declares (GRS-014e, design D4): ONE back-edge marked
  * `kind:'loop'` whose segment `[targetId..sourceId]` (in the non-loop topological
  * order) the run repeats while `rounds < maxRoundsPerRun` AND the optional exit gate
- * has not passed. Continuation is DETERMINISTIC — the exit gate is artifact/flag only
- * (the definition validator refuses approval), evaluated by the injected evidence
- * evaluator, never a model or a human.
+ * has not passed. Continuation is DETERMINISTIC — either a legacy artifact/flag gate
+ * or conditions over frozen run/handoff evidence, never a model or a human.
  */
 export interface LoopPlan {
   edgeId: string;
@@ -231,6 +230,9 @@ export interface LoopPlan {
   maxRoundsPerRun: number;
   /** Early-exit gate; null = pure count-bounded loop (runs exactly maxRoundsPerRun rounds). */
   exitGate: GatePlan | null;
+  /** Early-exit conditions over frozen run evidence; mutually exclusive with
+   * `exitGate`. In particular this can read verifier-declared handoff fields. */
+  exitWhen?: WorkflowCondition[];
   /**
    * The loop BODY, by GRAPH REACHABILITY (GRS-016a-fix, Codex findings 1+2): every
    * node on a non-loop-edge path target→…→source (= descendants of the target ∩
@@ -635,6 +637,7 @@ export function resolveExecutionPlan(
     const postLoopNodeIds = topoForLoop.filter((id) => id !== e.from && fromSource.has(id));
 
     const exitGate = e.gate ? planGate(e.gate) : null;
+    const exitWhen = Array.isArray(e.when) && e.when.length > 0 ? e.when.map((condition) => ({ ...condition })) : null;
     if (errors.length === 0) {
       loop = {
         edgeId: e.id,
@@ -642,6 +645,7 @@ export function resolveExecutionPlan(
         targetId: e.to,
         maxRoundsPerRun: maxRounds as number,
         exitGate,
+        ...(exitWhen ? { exitWhen } : {}),
         segmentNodeIds,
         postLoopNodeIds,
       };

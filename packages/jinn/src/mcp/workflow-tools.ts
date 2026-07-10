@@ -1,6 +1,7 @@
 import { assertBoundCaller, gatewayRequest, JinnMcpToolError, type JinnMcpContext, type JinnMcpTool } from "./toolkit.js";
 import type { WorkflowSopCompileResult } from "../workflows/sop.js";
 import { autoPlaceWorkflowNodes, compileWorkflowAuthoringInput } from "../workflows/authoring.js";
+import { MAX_WORKFLOW_STEP_PROMPT_CHARS } from "../workflows/run-store.js";
 
 /**
  * GRS-015 — the WORKFLOW tool group of the `jinn` MCP server: agents create,
@@ -372,12 +373,13 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const startWorkflowRun: JinnMcpTool = {
     name: "start_workflow_run",
-    description: "Live workflow run by id; may spawn real sessions on current gateway. Use isolated instance for experiments.",
+    description: "Live workflow run by id; may spawn real sessions on current gateway.",
     inputSchema: {
       type: "object",
       properties: {
         workflowId: { type: "string" },
         input: { type: "object" },
+        stepOverrides: { type: "object", description: "Map stepId to {prompt}." },
         idempotencyKey: { type: "string", maxLength: 256 },
       },
       required: ["workflowId"],
@@ -386,9 +388,11 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       assertBoundCaller(ctx);
       const id = requireString(args, "workflowId");
       const input = optionalObject(args, "input");
+      const stepOverrides = optionalObject(args, "stepOverrides");
       const idempotencyKey = optionalString(args, "idempotencyKey", 256);
       const requestBody = {
         ...(input ? { input } : {}),
+        ...(stepOverrides ? { stepOverrides } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
       };
       const { status, body } = await gatewayRequest(ctx, "POST", `${wfPath(id)}/run`, requestBody);
@@ -408,12 +412,13 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const runWorkflowByName: JinnMcpTool = {
     name: "run_workflow_by_name",
-    description: "Live workflow run by name; may spawn real sessions on current gateway. Use isolated instance for experiments.",
+    description: "Live workflow run by name; may spawn real sessions on current gateway.",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string" },
         input: { type: "object" },
+        stepOverrides: { type: "object", description: "Map stepId to {prompt}." },
         idempotencyKey: { type: "string", maxLength: 256 },
       },
       required: ["name"],
@@ -422,10 +427,12 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       assertBoundCaller(ctx);
       const name = requireString(args, "name");
       const input = optionalObject(args, "input");
+      const stepOverrides = optionalObject(args, "stepOverrides");
       const idempotencyKey = optionalString(args, "idempotencyKey", 256);
       const requestBody = {
         name,
         ...(input ? { input } : {}),
+        ...(stepOverrides ? { stepOverrides } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
       };
       const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-runs/by-name", requestBody);
@@ -438,6 +445,36 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       if (status >= 400) throw gatewayFailure(`running workflow name "${name}"`, status, body);
       const run = (body ?? {}) as RunView;
       return { run: body, hint: `Started ${String(run.runId ?? "?")}. ${runHint(run)}` };
+    },
+  };
+
+  const editWorkflowRunStepPrompt: JinnMcpTool = {
+    name: "edit_workflow_run_step_prompt",
+    description: "Audit-edit a pending phase prompt.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workflowId: { type: "string" },
+        runId: { type: "string" },
+        nodeId: { type: "string" },
+        prompt: { type: "string", maxLength: MAX_WORKFLOW_STEP_PROMPT_CHARS },
+      },
+      required: ["workflowId", "runId", "nodeId", "prompt"],
+    },
+    handler: async (args, ctx) => {
+      assertBoundCaller(ctx);
+      const workflowId = requireString(args, "workflowId");
+      const runId = requireString(args, "runId");
+      const nodeId = requireString(args, "nodeId");
+      const prompt = requireString(args, "prompt");
+      if (prompt.length > MAX_WORKFLOW_STEP_PROMPT_CHARS) {
+        throw new JinnMcpToolError(`prompt is too long (max ${MAX_WORKFLOW_STEP_PROMPT_CHARS} characters)`);
+      }
+      const route = `${wfPath(workflowId)}/runs/${encodeURIComponent(runId)}/pending-steps/${encodeURIComponent(nodeId)}`;
+      const { status, body } = await gatewayRequest(ctx, "PATCH", route, { prompt });
+      if (status >= 400) throw gatewayFailure(`editing pending step "${nodeId}" on run "${runId}"`, status, body);
+      const run = (body ?? {}) as { stepPromptRevision?: unknown };
+      return { run: body, hint: `Prompt edit recorded at revision ${String(run.stepPromptRevision ?? "?")}.` };
     },
   };
 
@@ -530,6 +567,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     retireWorkflow,
     startWorkflowRun,
     runWorkflowByName,
+    editWorkflowRunStepPrompt,
     listTriggers,
     createTrigger,
     deleteTrigger,

@@ -239,7 +239,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const create: JinnMcpTool = {
     name: "create_work_item",
-    description: "Create a Todo for decomposition or captured work; approvals are excluded.",
+    description: "Create a Todo; approvals excluded.",
     inputSchema: {
       type: "object",
       properties: {
@@ -271,7 +271,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const update: JinnMcpTool = {
     name: "update_work_item",
-    description: "Update a Todo through agent-legal status transitions.",
+    description: "Update Todo status.",
     inputSchema: {
       type: "object",
       properties: {
@@ -303,7 +303,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const assign: JinnMcpTool = {
     name: "assign_work_item",
-    description: "Assign a Todo to an employee.",
+    description: "Assign a Todo.",
     inputSchema: {
       type: "object",
       properties: {
@@ -325,7 +325,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const archive: JinnMcpTool = {
     name: "archive_work_item",
-    description: "Archive a Todo without deleting its row or audit trail.",
+    description: "Archive a Todo; retain its audit.",
     inputSchema: {
       type: "object",
       properties: {

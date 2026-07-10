@@ -950,6 +950,24 @@ export function advanceRun(
     return true;
   };
 
+  /** Latest SETTLED receipt strictly before a position — shared by switch routing
+   * and loop-exit conditions so both read the same frozen handoff evidence frame. */
+  const latestSettledBefore = (nodeId: string, beforeIndex: number): RunStepReceipt | null => {
+    for (let i = beforeIndex - 1; i >= 0; i--) {
+      const r = steps[i];
+      if (r.nodeId !== nodeId) continue;
+      if (SETTLED_STEP_STATUSES.has(r.status) || r.status === 'failed') return r;
+    }
+    return null;
+  };
+  const conditionEvidenceAt = (atIndex: number): ConditionEvidence => ({
+    receiptFor: (nodeId) => latestSettledBefore(nodeId, atIndex),
+    ...(next.rounds !== undefined ? { rounds: next.rounds } : {}),
+    runStatus: next.status,
+    triggerKind: 'kind' in next.trigger ? next.trigger.kind : next.trigger.source,
+    trigger: normalizeWorkflowTrigger(next.trigger, next.triggerTodoId),
+  });
+
   // ── Bounded loop continuation (GRS-014e, design D4; GRS-016a: segment-settled) ──
   // Decided at the ROUND BOUNDARY: when every receipt of the current round's segment
   // has settled, either exit (gate passed / gate-less count reached — stamped durably
@@ -966,7 +984,10 @@ export function advanceRun(
       if (steps[i].nodeId === loop.sourceId) { sIndex = i; break; }
     }
     if (sIndex >= 0 && segmentSettled(loop)) {
-      const gatePassed = loop.exitGate ? opts.evaluateGate?.(loop.exitGate) === true : false;
+      const conditionPassed = loop.exitWhen
+        ? evaluateConditions(loop.exitWhen, conditionEvidenceAt(sIndex + 1))
+        : false;
+      const gatePassed = conditionPassed || (loop.exitGate ? opts.evaluateGate?.(loop.exitGate) === true : false);
       if (gatePassed) {
         next.loopExit = { round: rounds, at: now(), reason: 'gate-passed' };
         changed = true;
@@ -994,14 +1015,16 @@ export function advanceRun(
         next.rounds = rounds + 1;
         changed = true;
         // fall through — the walk dispatches the new round's first step
-      } else if (loop.exitGate) {
+      } else if (loop.exitGate || loop.exitWhen) {
         // Gated loop exhausted: the declared success criterion never passed within
         // the budget — completing would be the old `passed` lie. rounds stays ===
         // maxRoundsPerRun as the honest evidence.
         return recordFailure(
           null,
           'loop-exhausted',
-          `loop exit gate "${loop.exitGate.description}" never passed within ${loop.maxRoundsPerRun} round(s)`,
+          loop.exitWhen
+            ? `loop exit conditions never passed within ${loop.maxRoundsPerRun} round(s)`
+            : `loop exit gate "${loop.exitGate!.description}" never passed within ${loop.maxRoundsPerRun} round(s)`,
           loop.edgeId,
         );
       } else {
@@ -1047,30 +1070,6 @@ export function advanceRun(
     }
     return true;
   };
-
-  /** Latest SETTLED receipt of a node strictly before a position — the condition
-   * language's resolution rule (design §2.5): conditions and the prompt builder use
-   * the same position frame, so routing and handoffs always see the same
-   * predecessor state. Unlike readiness, an unsettled latest receipt is SKIPPED
-   * (a condition may reference a non-ancestor that is legitimately still running —
-   * then the settled receipt of an earlier round, or nothing, is the evidence).
-   * `failed` receipts are readable — routing around a continue-node failure via
-   * `steps.<id>.status` is the honest use of the status path. */
-  const latestSettledBefore = (nodeId: string, beforeIndex: number): RunStepReceipt | null => {
-    for (let i = beforeIndex - 1; i >= 0; i--) {
-      const r = steps[i];
-      if (r.nodeId !== nodeId) continue;
-      if (SETTLED_STEP_STATUSES.has(r.status) || r.status === 'failed') return r;
-    }
-    return null;
-  };
-  const conditionEvidenceAt = (atIndex: number): ConditionEvidence => ({
-    receiptFor: (nodeId) => latestSettledBefore(nodeId, atIndex),
-    ...(next.rounds !== undefined ? { rounds: next.rounds } : {}),
-    runStatus: next.status,
-    triggerKind: 'kind' in next.trigger ? next.trigger.kind : next.trigger.source,
-    trigger: normalizeWorkflowTrigger(next.trigger, next.triggerTodoId),
-  });
 
   /** Loop guard for skips (GRS-016c × §3.5): a node OUTSIDE the loop body fed by a
    * body node must not settle "branch not taken" while the loop may still re-enter

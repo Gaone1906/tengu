@@ -53,7 +53,7 @@ function shapeRun(run: Record<string, unknown>): Record<string, unknown> {
 export function buildCronTools(): JinnMcpTool[] {
   const list: JinnMcpTool = {
     name: "list_cron_jobs",
-    description: "List cron jobs and latest safe run metadata; prompt bodies omitted.",
+    description: "List cron jobs.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args, ctx) => {
       assertBoundCaller(ctx);
@@ -69,7 +69,7 @@ export function buildCronTools(): JinnMcpTool[] {
 
   const history: JinnMcpTool = {
     name: "get_cron_run_history",
-    description: "Read capped safe run metadata for one cron job.",
+    description: "Read safe cron run history.",
     inputSchema: {
       type: "object",
       properties: {

@@ -232,6 +232,28 @@ export interface WorkflowRunInvocation {
   idempotencyKey?: string;
 }
 
+/** A run-local replacement for one step's authored task text. This is deliberately
+ * separate from both immutable invocation input and the frozen definition snapshot:
+ * the definition remains honest evidence while the effective pending-phase prompt
+ * can be tailored for this run. */
+export interface WorkflowStepPromptOverride {
+  prompt: string;
+}
+
+/** Prompt text becomes an engine user turn; cap it below the gateway run-body cap
+ * so one override cannot crowd out trigger/input/audit metadata. */
+export const MAX_WORKFLOW_STEP_PROMPT_CHARS = 32_000;
+
+/** Append-only evidence for an on-the-go edit to a phase that had not started. */
+export interface WorkflowStepPromptEdit {
+  revision: number;
+  nodeId: string;
+  actor: string;
+  at: string;
+  before: string;
+  after: string;
+}
+
 /**
  * Honest v2 run statuses (GRS-014a, design D5):
  *   - `running`    — steps pending/in-flight; the run is genuinely working.
@@ -267,6 +289,14 @@ export interface WorkflowRun {
   trigger: WorkflowRunTrigger;
   /** Frozen structured context supplied when this particular run was invoked. */
   invocation?: WorkflowRunInvocation;
+  /** Current effective per-step prompt replacements for this run. Initial values
+   * are frozen at start; later changes are admitted only for pending phases and
+   * every such change is recorded in `stepPromptEdits`. */
+  stepOverrides?: Record<string, WorkflowStepPromptOverride>;
+  /** Monotonic revision of the run-local prompt layer. Absent means no live edit. */
+  stepPromptRevision?: number;
+  /** Append-only audit trail for edits made after the run started. */
+  stepPromptEdits?: WorkflowStepPromptEdit[];
   /** Legacy field: new todo-status runs carry this as trigger.payload.todoId. */
   triggerTodoId?: string;
   status: WorkflowRunStatus;

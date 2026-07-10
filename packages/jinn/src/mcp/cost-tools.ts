@@ -48,7 +48,7 @@ export function buildCostTools(): JinnMcpTool[] {
   return [
     {
       name: "cost_report",
-      description: "Report deterministic session spend grouped by employee or day.",
+      description: "Session spend.",
       inputSchema: {
         type: "object",
         properties: {

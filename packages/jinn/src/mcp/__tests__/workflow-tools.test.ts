@@ -90,6 +90,7 @@ describe("workflow tools — registry + schemas", () => {
       "retire_workflow",
       "start_workflow_run",
       "run_workflow_by_name",
+      "edit_workflow_run_step_prompt",
       "list_triggers",
       "create_trigger",
       "delete_trigger",
@@ -127,20 +128,23 @@ describe("workflow tools — registry + schemas", () => {
     expect(tool("retire_workflow").inputSchema.required).toEqual(["workflowId"]);
     expect(tool("start_workflow_run").inputSchema.required).toEqual(["workflowId"]);
     expect(tool("run_workflow_by_name").inputSchema.required).toEqual(["name"]);
+    expect(tool("edit_workflow_run_step_prompt").inputSchema.required).toEqual(["workflowId", "runId", "nodeId", "prompt"]);
     expect(tool("create_trigger").inputSchema.required).toEqual(["kind", "name", "event", "targetWorkflowId"]);
     expect(tool("delete_trigger").inputSchema.required).toEqual(["name"]);
   });
 
-  it("declares structured optional run input and an optional bounded idempotency key", () => {
+  it("declares structured optional run input, per-step overrides, and a bounded idempotency key", () => {
     const schema = tool("start_workflow_run").inputSchema as {
       properties: Record<string, { type?: string; maxLength?: number }>;
     };
     expect(schema.properties.input).toMatchObject({ type: "object" });
+    expect(schema.properties.stepOverrides).toMatchObject({ type: "object" });
     expect(schema.properties.idempotencyKey).toMatchObject({ type: "string", maxLength: 256 });
     const byNameSchema = tool("run_workflow_by_name").inputSchema as {
       properties: Record<string, { type?: string; maxLength?: number }>;
     };
     expect(byNameSchema.properties.input).toMatchObject({ type: "object" });
+    expect(byNameSchema.properties.stepOverrides).toMatchObject({ type: "object" });
     expect(byNameSchema.properties.idempotencyKey).toMatchObject({ type: "string", maxLength: 256 });
   });
 
@@ -508,15 +512,37 @@ describe("workflow tools — unit (stub gateway)", () => {
     await tool("start_workflow_run").handler({
       workflowId: "wf",
       input: { ticket: { id: "ABC-42" }, priority: 2 },
+      stepOverrides: { verify: { prompt: "Check migrations." } },
       idempotencyKey: "request-42",
     }, ctx);
     expect(calls[0].body).toEqual({
       input: { ticket: { id: "ABC-42" }, priority: 2 },
+      stepOverrides: { verify: { prompt: "Check migrations." } },
       idempotencyKey: "request-42",
     });
   });
 
-  it("run_workflow_by_name invokes the canonical-name route with input and idempotency", async () => {
+  it("edit_workflow_run_step_prompt PATCHes the audited pending-step route", async () => {
+    const { calls, ctx } = stub(() => ({
+      status: 200,
+      body: { runId: "run-1", stepPromptRevision: 1 },
+    }));
+    const out = await tool("edit_workflow_run_step_prompt").handler({
+      workflowId: "wf",
+      runId: "run-1",
+      nodeId: "verify",
+      prompt: "Run the revised checks.",
+    }, ctx) as { run: { stepPromptRevision: number }; hint: string };
+    expect(calls[0]).toMatchObject({
+      url: "http://127.0.0.1:7777/api/workflow-definitions/wf/runs/run-1/pending-steps/verify",
+      method: "PATCH",
+      body: { prompt: "Run the revised checks." },
+    });
+    expect(out.run.stepPromptRevision).toBe(1);
+    expect(out.hint).toMatch(/revision 1/i);
+  });
+
+  it("run_workflow_by_name invokes the canonical-name route with input, prompt overrides, and idempotency", async () => {
     const { calls, ctx } = stub(() => ({
       status: 201,
       body: { runId: "run-by-name", workflowId: "record-42", status: "completed", steps: [] },
@@ -524,6 +550,7 @@ describe("workflow tools — unit (stub gateway)", () => {
     const out = (await tool("run_workflow_by_name").handler({
       name: "full-cycle-workflow",
       input: { request: "implement this" },
+      stepOverrides: { verify: { prompt: "Check the acceptance criteria." } },
       idempotencyKey: "request-42",
     }, ctx)) as { run: { runId: string }; hint: string };
     expect(calls[0]).toMatchObject({
@@ -532,6 +559,7 @@ describe("workflow tools — unit (stub gateway)", () => {
       body: {
         name: "full-cycle-workflow",
         input: { request: "implement this" },
+        stepOverrides: { verify: { prompt: "Check the acceptance criteria." } },
         idempotencyKey: "request-42",
       },
     });

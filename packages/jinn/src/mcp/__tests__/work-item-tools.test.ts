@@ -72,7 +72,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("archive_work_item");
     expect(names).toContain("delete_trigger");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(43);
+    expect(names).toHaveLength(44);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {

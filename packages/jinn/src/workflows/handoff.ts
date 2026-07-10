@@ -321,7 +321,8 @@ export interface StepPromptContext {
   /** Failed-but-continued predecessors (GRS-016b) — notice-only, no outcome. */
   failedPredecessors?: FailedPredecessor[];
   /**
-   * Handoff field keys a DOWNSTREAM SWITCH references on this node (GRS-016c),
+   * Handoff field keys a downstream switch or loop-exit condition references on
+   * this node (GRS-016c),
    * computed by the driver from the frozen definition (`referencedHandoffFieldKeys`).
    * When non-empty the handoff instruction advertises the `fields` member and names
    * these keys — the author's condition is what makes the contract discoverable to
@@ -335,7 +336,7 @@ export interface StepPromptContext {
 }
 
 /**
- * The handoff-field keys downstream switch conditions reference on `nodeId`:
+ * The handoff-field keys downstream switch/loop-exit conditions reference on `nodeId`:
  * every `steps.<nodeId>.outcome.fields.<key>` path in any edge's `when` array,
  * deduplicated, in edge-then-condition declaration order. Pure; used by the driver
  * to advertise the fields contract in the node's own prompt.

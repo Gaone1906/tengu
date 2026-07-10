@@ -265,15 +265,15 @@ export interface WorkflowEdge {
   label?: string;
   /**
    * Loop EXIT gate (GRS-014e, loop edges only): when it passes at the end of a
-   * round, the loop exits early. Deterministic evaluators only (`artifact`/`flag`
-   * — no approval: loop continuation never waits on a human or a model).
+   * round, the loop exits early. Legacy artifact/flag gates remain supported; a
+   * loop may instead use `when` below to read frozen run/handoff evidence.
    */
   gate?: WorkflowGate;
   /**
-   * Routing conditions (GRS-016c) — legal ONLY on an edge whose source is a
-   * `switch` node (and never on loop edges). AND within the array; evaluated by the
-   * pure condition language over the frozen run record (condition.ts). An edge with
-   * no `when` from a switch is the default/fallback branch.
+   * Deterministic conditions (GRS-016c): on a switch out-edge these select a branch;
+   * on a loop edge they are the early-exit criterion evaluated at the round boundary.
+   * AND within the array, over the frozen run record (condition.ts). A loop edge may
+   * declare `gate` OR `when`, never both.
    */
   when?: WorkflowCondition[];
   /**
@@ -886,16 +886,17 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
         }
       }
     }
-    // Routing conditions (GRS-016c): `when` belongs ONLY on a non-loop edge whose
-    // source is a switch node. Each condition is shape-checked strictly (grammar,
+    // Deterministic conditions (GRS-016c): `when` belongs on either a switch
+    // out-edge (branch selection) or a loop edge (round-boundary early exit).
+    // Each condition is shape-checked strictly (grammar,
     // op, value kinds — condition.ts), and a stepPath must reference a node that
     // exists: a typo'd node id would evaluate to `absent` forever, which is a
     // dead branch the author meant to be live. Never silently ignored.
     if (e.when !== undefined) {
       const source = nodeById.get(e.from);
-      if (e.kind === 'loop') {
-        err('misplaced-edge-when', `edge "${e.id}" is a loop edge and cannot carry "when" (the loop machinery owns cross-round decisions)`, e.id);
-      } else if (source && source.type !== 'switch') {
+      if (e.kind === 'loop' && e.gate !== undefined) {
+        err('bad-edge-condition', `loop edge "${e.id}" cannot declare both gate and when; choose one exit criterion`, e.id);
+      } else if (e.kind !== 'loop' && source && source.type !== 'switch') {
         err('misplaced-edge-when', `edge "${e.id}" has "when" but its source "${e.from}" is a ${source.type} node — conditions live only on switch out-edges`, e.id);
       }
       if (!Array.isArray(e.when) || e.when.length === 0) {

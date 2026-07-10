@@ -124,13 +124,31 @@ describe('edge `when` validation', () => {
     expect(validateDefinition(switchDef({ when: [{ path: 'trigger.kind', op: 'eq', value: 'schedule' }] })).ok).toBe(true);
   });
 
-  it('when on a loop edge is refused (routing never owns the loop decision)', () => {
+  it('when on a loop edge declares deterministic loop exit conditions', () => {
+    const loopExit: WorkflowCondition = { path: 'steps.b.outcome.fields.verdict', op: 'eq', value: 'ship' };
     const d = def(
       [trigger, step('a'), step('b')],
-      [e('trg', 'a'), e('a', 'b'), { id: 'loop', from: 'b', to: 'a', kind: 'loop', when: [verdictShip] } as WorkflowEdge],
+      [e('trg', 'a'), e('a', 'b'), { id: 'loop', from: 'b', to: 'a', kind: 'loop', when: [loopExit] } as WorkflowEdge],
       { loop: { maxRoundsPerRun: 2 } },
     );
-    expect(codes(d)).toContain('misplaced-edge-when');
+    expect(validateDefinition(d).errors).toEqual([]);
+  });
+
+  it('a loop edge cannot declare both a legacy gate and field conditions', () => {
+    const loopExit: WorkflowCondition = { path: 'steps.b.outcome.fields.verdict', op: 'eq', value: 'ship' };
+    const d = def(
+      [trigger, step('a'), step('b')],
+      [e('trg', 'a'), e('a', 'b'), {
+        id: 'loop',
+        from: 'b',
+        to: 'a',
+        kind: 'loop',
+        when: [loopExit],
+        gate: { kind: 'flag', flag: 'approved', description: 'approved flag exists' },
+      } as WorkflowEdge],
+      { loop: { maxRoundsPerRun: 2 } },
+    );
+    expect(codes(d)).toContain('bad-edge-condition');
   });
 
   it('a loop edge whose source is a switch is refused', () => {

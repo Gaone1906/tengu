@@ -11,6 +11,7 @@ const EXPECTED_TOOL_NAMES = [
   "decide_work_item_approval",
   "delegate_task",
   "delete_trigger",
+  "edit_workflow_run_step_prompt",
   "escalate_work_item_approval",
   "find_employees",
   "get_cron_run_history",
@@ -57,6 +58,7 @@ const EXPECTED_REQUIRED = {
   decide_work_item_approval: ["id", "decision"],
   delegate_task: ["task"],
   delete_trigger: ["name"],
+  edit_workflow_run_step_prompt: ["workflowId", "runId", "nodeId", "prompt"],
   escalate_work_item_approval: ["id"],
   find_employees: [],
   get_cron_run_history: ["id"],
@@ -135,7 +137,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(43);
+    expect(tools).toHaveLength(44);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);

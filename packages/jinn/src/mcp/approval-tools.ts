@@ -39,7 +39,7 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
 export function buildApprovalTools(): JinnMcpTool[] {
   const request: JinnMcpTool = {
     name: "request_work_item_approval",
-    description: "Request an idempotent routed approval on a Todo you own or execute.",
+    description: "Request Todo approval.",
     inputSchema: {
       type: "object",
       properties: {
@@ -63,7 +63,7 @@ export function buildApprovalTools(): JinnMcpTool[] {
 
   const decide: JinnMcpTool = {
     name: "decide_work_item_approval",
-    description: "Approve or reject a routed pending Todo approval.",
+    description: "Decide Todo approval.",
     inputSchema: {
       type: "object",
       properties: {
@@ -91,7 +91,7 @@ export function buildApprovalTools(): JinnMcpTool[] {
 
   const escalate: JinnMcpTool = {
     name: "escalate_work_item_approval",
-    description: "Escalate a pending Todo approval to the operator path.",
+    description: "Escalate Todo approval.",
     inputSchema: {
       type: "object",
       properties: {
