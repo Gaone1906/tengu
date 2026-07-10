@@ -38,7 +38,7 @@ describe("delegation completion contract atomic guard", () => {
     workItems.linkSession(item.id, session.id);
     const idleChild = registry.getSession(session.id)!;
     const postFollowUp = vi.fn(async () => undefined);
-    const result = { result: "Progress update: implementation is in progress; tests are still running." };
+    const result = { result: "Progress update: the implementation is still in progress; tests are still running." };
 
     const outcomes = await Promise.all([
       contract.enforceDelegationCompletionContract(idleChild, result, { postFollowUp }),

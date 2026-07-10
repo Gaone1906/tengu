@@ -196,7 +196,7 @@ describe("notifyParentSession", () => {
     const child = makeSession({ workItemId: "wi-open", transportMeta: { delegationCompletionTracked: true } });
 
     notifyParentSession(child, {
-      result: "Progress update: implementation is in progress. Next step is the remaining test run.",
+      result: "Progress update: the implementation is still in progress. I will continue with the test run.",
     });
 
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -214,7 +214,7 @@ describe("notifyParentSession", () => {
 
     notifyParentSession(
       child,
-      { result: "Progress update: continuing with the remaining implementation." },
+      { result: "Progress update: I will continue with the remaining implementation." },
       { alwaysNotify: false },
     );
 

@@ -84,7 +84,7 @@ describe("delegation completion contract", () => {
 
     const outcome = await enforceDelegationCompletionContract(
       child(),
-      { result: "Progress update: implementation is in progress. Next step is running the tests." },
+      { result: "Progress update: the implementation is still in progress. I will continue with the tests." },
       { postFollowUp },
     );
 
@@ -105,7 +105,7 @@ describe("delegation completion contract", () => {
 
     const outcome = await enforceDelegationCompletionContract(
       child(),
-      { result: "Progress update: continuing with the remaining checks." },
+      { result: "Progress update: I will continue with the remaining checks." },
       { postFollowUp },
     );
 
@@ -133,7 +133,9 @@ describe("delegation completion contract", () => {
     "Progress update: not done; tests are still running.",
     "Progress update: not finished; tests are still running.",
     "Progress update: not complete; tests are still running.",
-  ])("nudges an explicitly unfinished negated report: %s", async (message) => {
+    "I am still working on the migration.",
+    "I will continue after this.",
+  ])("nudges an explicit task-unfinished report: %s", async (message) => {
     getWorkItem.mockReturnValue(openItem("executing"));
     const postFollowUp = vi.fn().mockResolvedValue(undefined);
 
@@ -147,6 +149,22 @@ describe("delegation completion contract", () => {
     "Status update: all checks are green and the deliverable is ready",
     "Progress update: success. No further action is required",
   ])("does not let a generic update header authorize a nudge: %s", async (message) => {
+    getWorkItem.mockReturnValue(openItem("executing"));
+    const postFollowUp = vi.fn().mockResolvedValue(undefined);
+
+    const outcome = await enforceDelegationCompletionContract(child(), { result: message }, { postFollowUp });
+
+    expect(outcome).toBe("pass");
+    expect(postFollowUp).not.toHaveBeenCalled();
+    expect(claimDelegationCompletionNudge).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "There is no remaining work.",
+    "The fix is verified. Next step: merge when convenient.",
+    "The feature is working on both iOS and Android; verification is green.",
+    "The service is still running and healthy after the rollout.",
+  ])("does not let incidental operational language authorize a nudge: %s", async (message) => {
     getWorkItem.mockReturnValue(openItem("executing"));
     const postFollowUp = vi.fn().mockResolvedValue(undefined);
 
@@ -206,7 +224,7 @@ describe("delegation completion contract", () => {
 
     const outcome = await enforceDelegationCompletionContract(
       child(),
-      { result: "Progress update: continuing with the remaining checks." },
+      { result: "Progress update: I will continue with the remaining checks." },
       { postFollowUp },
     );
 
@@ -234,7 +252,7 @@ describe("delegation completion contract", () => {
 
     const outcome = await enforceDelegationCompletionContract(
       child(),
-      { result: "Tests pass for the API, but the migration remains in progress." },
+      { result: "Tests pass for the API, but the migration remains incomplete." },
       { postFollowUp },
     );
 
