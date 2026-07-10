@@ -1,12 +1,96 @@
-
-import { lazy, Suspense } from "react"
+import { lazy, Suspense, useEffect, useState } from "react"
 import { NavRibbon } from "./pill-nav"
 import { MobileTabBar } from "./chat/mobile-tab-bar"
 import { cn } from "@/lib/utils"
+import { api } from "@/lib/api"
+import { runAfterIdle, useIdleMount } from "@/hooks/use-idle-mount"
 
-const GlobalSearch = lazy(() => import("./global-search").then(m => ({ default: m.GlobalSearch })))
-const LiveStreamWidget = lazy(() => import("./live-stream-widget").then(m => ({ default: m.LiveStreamWidget })))
-const OnboardingWizard = lazy(() => import("./onboarding-wizard").then(m => ({ default: m.OnboardingWizard })))
+const loadGlobalSearch = () => import("./global-search")
+const loadLiveStreamWidget = () => import("./live-stream-widget")
+const loadOnboardingWizard = () => import("./onboarding-wizard")
+
+const GlobalSearch = lazy(() => loadGlobalSearch().then(m => ({ default: m.GlobalSearch })))
+const LiveStreamWidget = lazy(() => loadLiveStreamWidget().then(m => ({ default: m.LiveStreamWidget })))
+const OnboardingWizard = lazy(() => loadOnboardingWizard().then(m => ({ default: m.OnboardingWizard })))
+
+function isCommandPaletteShortcut(e: KeyboardEvent): boolean {
+  return (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k"
+}
+
+function DeferredGlobalSearch() {
+  const [mounted, setMounted] = useState(false)
+  const [initialOpen, setInitialOpen] = useState(false)
+
+  useEffect(() => runAfterIdle(() => {
+    void loadGlobalSearch()
+  }), [])
+
+  useEffect(() => {
+    if (mounted) return
+    function handleKeyDown(e: KeyboardEvent) {
+      if (!isCommandPaletteShortcut(e)) return
+      e.preventDefault()
+      setInitialOpen(true)
+      setMounted(true)
+    }
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [mounted])
+
+  if (!mounted) return null
+
+  return (
+    <Suspense fallback={null}>
+      <GlobalSearch initialOpen={initialOpen} />
+    </Suspense>
+  )
+}
+
+function DeferredLiveStreamWidget() {
+  const mounted = useIdleMount()
+  if (!mounted) return null
+  return (
+    <Suspense fallback={null}>
+      <LiveStreamWidget />
+    </Suspense>
+  )
+}
+
+function DeferredOnboardingWizard() {
+  const [needed, setNeeded] = useState(false)
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && localStorage.getItem("jinn-onboarded")) {
+      return
+    }
+
+    let cancelled = false
+    api.getOnboarding().then((data) => {
+      if (cancelled) return
+      if (data.onboarded) {
+        localStorage.setItem("jinn-onboarded", "true")
+      } else if (data.needed) {
+        setNeeded(true)
+      }
+    }).catch(() => {
+      if (!cancelled && !localStorage.getItem("jinn-onboarded")) {
+        setNeeded(true)
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (!needed) return null
+
+  return (
+    <Suspense fallback={null}>
+      <OnboardingWizard initialVisible />
+    </Suspense>
+  )
+}
 
 export function ToolbarActions({ children }: { children?: React.ReactNode }) {
   return (
@@ -35,9 +119,7 @@ export function ToolbarActions({ children }: { children?: React.ReactNode }) {
 export function PageLayout({ children, headerActions: _headerActions, chromeless }: { children: React.ReactNode; headerActions?: React.ReactNode; chromeless?: boolean }) {
   return (
     <div className="flex h-dvh overflow-hidden bg-background">
-      <Suspense fallback={null}>
-        <GlobalSearch />
-      </Suspense>
+      <DeferredGlobalSearch />
       {/* Global desktop nav rail (hidden < lg from inside NavRibbon). Sibling of
           <main> so its per-icon label pills can escape rightward over content. */}
       {!chromeless && <NavRibbon />}
@@ -59,12 +141,8 @@ export function PageLayout({ children, headerActions: _headerActions, chromeless
             page so nav never disappears (Chat draws its own on the list screen). */}
         {!chromeless && <MobileTabBar />}
       </main>
-      <Suspense fallback={null}>
-        <LiveStreamWidget />
-      </Suspense>
-      <Suspense fallback={null}>
-        <OnboardingWizard />
-      </Suspense>
+      <DeferredLiveStreamWidget />
+      <DeferredOnboardingWizard />
     </div>
   )
 }

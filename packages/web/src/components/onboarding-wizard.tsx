@@ -79,10 +79,11 @@ function engineDisplayName(key: string): string {
 
 interface OnboardingWizardProps {
   forceOpen?: boolean
+  initialVisible?: boolean
   onClose?: () => void
 }
 
-export function OnboardingWizard({ forceOpen, onClose }: OnboardingWizardProps) {
+export function OnboardingWizard({ forceOpen, initialVisible, onClose }: OnboardingWizardProps) {
   const {
     settings,
     setPortalName,
@@ -129,7 +130,7 @@ export function OnboardingWizard({ forceOpen, onClose }: OnboardingWizardProps) 
 
   // First-run detection — check server-side flag, not just localStorage
   useEffect(() => {
-    if (forceOpen) {
+    if (forceOpen || initialVisible) {
       setLocalName(settings.portalName ?? "")
       setLocalOperator(settings.operatorName ?? "")
       setVisible(true)
@@ -152,7 +153,7 @@ export function OnboardingWizard({ forceOpen, onClose }: OnboardingWizardProps) 
         setVisible(true)
       }
     })
-  }, [forceOpen]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [forceOpen, initialVisible]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load the full engine registry so step 3 is driven by config, not hardcoded IDs.
   useEffect(() => {

@@ -60,10 +60,14 @@ const STATIC_PAGES = [
   { id: "page-settings", label: "Settings", icon: Settings, href: "/settings" },
 ]
 
-export function GlobalSearch() {
+interface GlobalSearchProps {
+  initialOpen?: boolean
+}
+
+export function GlobalSearch({ initialOpen = false }: GlobalSearchProps) {
   const { settings } = useSettings()
   const portalName = settings.portalName ?? "Jinn"
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(initialOpen)
   const [recents, setRecents] = useState<RecentItem[]>([])
   const goTo = useNavigate()
 
