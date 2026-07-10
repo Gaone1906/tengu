@@ -590,7 +590,6 @@ describe("CodexEngine — process lifecycle", () => {
       cwd: "/tmp",
       sessionId: "sess-env",
     } as any);
-    await flush();
 
     const call = spawnCalls[spawnCalls.length - 1];
     expect((call.opts as any).env.JINN_SESSION_ID).toBe("sess-env");
@@ -607,7 +606,6 @@ describe("CodexEngine — process lifecycle", () => {
       cwd: "/tmp",
       sessionId: "sess-1",
     } as any);
-    await flush();
     expect(engine.isAlive("sess-1")).toBe(true);
 
     const call = spawnCalls[spawnCalls.length - 1];
