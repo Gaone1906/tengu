@@ -43,6 +43,7 @@ import {
   saveRun,
   workflowRunTriggerTodoId,
   type WorkflowRun,
+  type WorkflowRunInvocation,
   type WorkflowTriggerEvent,
   type WorkflowRunTrigger,
 } from './run-store.js';
@@ -219,6 +220,8 @@ export interface StartRunOptions {
    * (file-enforced — the run store scans the run dir; the run store is the registry).
    */
   trigger?: WorkflowRunTrigger;
+  /** Frozen structured context supplied for this invocation of the workflow. */
+  invocation?: WorkflowRunInvocation;
   knownEmployees?: Iterable<string>;
   knownEngines?: Iterable<string>;
   maxNodes?: number;
@@ -379,6 +382,7 @@ function stepPromptFor(def: EditableWorkflowDefinition, plan: ExecutionPlan, run
     ...(failedPredecessors.length > 0 ? { failedPredecessors } : {}),
     ...(advertisedFieldKeys.length > 0 ? { advertisedFieldKeys } : {}),
     ...(isWorkflowTriggerEvent(run.trigger) ? { trigger: run.trigger } : {}),
+    ...(run.invocation ? { input: run.invocation.input } : {}),
   });
 }
 
@@ -611,6 +615,12 @@ export async function startWorkflowRun(
   const trigger: WorkflowRunTrigger = opts.triggerTodoId
     ? normalizeWorkflowTrigger(baseTrigger, opts.triggerTodoId)
     : baseTrigger;
+  // Freeze caller-owned data before any persistence or async spawn. Invocation input
+  // comes from JSON APIs, so a JSON round-trip is both the deep copy and the durable
+  // wire-format boundary; later caller mutation cannot rewrite phase context.
+  const invocation: WorkflowRunInvocation | undefined = opts.invocation
+    ? JSON.parse(JSON.stringify(opts.invocation)) as WorkflowRunInvocation
+    : undefined;
 
   // ONE RUN PER (workflowId, source, event, fireRef). A re-invocation of the same
   // logical fire (scheduler retry, replay, double tick) finds the run that already
@@ -638,6 +648,7 @@ export async function startWorkflowRun(
     definitionVersion: def.version,
     title: def.title,
     trigger,
+    ...(invocation ? { invocation } : {}),
     status: 'failed',
     startedAt: now(),
     endedAt: now(),
@@ -699,6 +710,7 @@ export async function startWorkflowRun(
   // store can never change what this run does.
   const run: WorkflowRun = {
     ...minted.run,
+    ...(invocation ? { invocation } : {}),
     definitionSnapshot: def,
   };
 

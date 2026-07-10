@@ -44,6 +44,20 @@ function requireObject(args: Record<string, unknown>, name: string): Record<stri
   return v as Record<string, unknown>;
 }
 
+function optionalObject(args: Record<string, unknown>, name: string): Record<string, unknown> | undefined {
+  if (args[name] === undefined) return undefined;
+  return requireObject(args, name);
+}
+
+function optionalString(args: Record<string, unknown>, name: string, max: number): string | undefined {
+  const value = args[name];
+  if (value === undefined) return undefined;
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text) throw new JinnMcpToolError(`${name} must be a non-empty string when provided`);
+  if (text.length > max) throw new JinnMcpToolError(`${name} is too long (max ${max} characters)`);
+  return text;
+}
+
 /** Pretty-print a body for error text without flooding the model. */
 function asText(body: unknown, max = 4000): string {
   const text = typeof body === "string" ? body : JSON.stringify(body, null, 2);
@@ -450,16 +464,26 @@ export function buildWorkflowTools(): JinnMcpTool[] {
   // cannot substitute for that, hence removal.
   const startWorkflowRun: JinnMcpTool = {
     name: "start_workflow_run",
-    description: "Start a sandbox-gated workflow run.",
+    description: "Run with input and dedupe.",
     inputSchema: {
       type: "object",
-      properties: { workflowId: { type: "string" } },
+      properties: {
+        workflowId: { type: "string" },
+        input: { type: "object" },
+        idempotencyKey: { type: "string", maxLength: 256 },
+      },
       required: ["workflowId"],
     },
     handler: async (args, ctx) => {
       assertBoundCaller(ctx);
       const id = requireString(args, "workflowId");
-      const { status, body } = await gatewayRequest(ctx, "POST", `${wfPath(id)}/run`, {});
+      const input = optionalObject(args, "input");
+      const idempotencyKey = optionalString(args, "idempotencyKey", 256);
+      const requestBody = {
+        ...(input ? { input } : {}),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+      };
+      const { status, body } = await gatewayRequest(ctx, "POST", `${wfPath(id)}/run`, requestBody);
       if (status === 422) {
         // The route persists a FAILED run and returns it — surface its structured
         // errors (unsupported-cycle, unknown-actor, loop-unbounded, …) for self-correction.

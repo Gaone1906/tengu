@@ -287,17 +287,70 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     await call('POST', '/api/workflow-definitions', linear);
     const res = await call('POST', '/api/workflow-definitions/run-linear/run', undefined, runCtx);
     expect(res.status).toBe(201);
-    const run = res.body as { runId: string; schemaVersion: number; status: string; order: string[]; orderWarning?: unknown };
+    const run = res.body as { runId: string; schemaVersion: number; status: string; order: string[]; orderWarning?: unknown; invocation?: unknown };
     expect(run.schemaVersion).toBe(2);
     expect(run.status).toBe('completed'); // all-inline: every step genuinely finished in the drive
     expect(run.order).toEqual(['sa', 'sb']);
     expect(run.orderWarning).toBeUndefined();
+    expect(run.invocation).toBeUndefined(); // bodyless/manual callers remain compatible
     // The persisted record carries the same v2 stamp.
     const onDisk = JSON.parse(
       fs.readFileSync(path.join(evidenceRoot, 'reports', 'runs', 'run-linear', `${run.runId}.json`), 'utf8'),
     );
     expect(onDisk.schemaVersion).toBe(2);
     expect(onDisk.status).toBe('completed');
+  });
+
+  it('POST :id/run accepts frozen input and returns the original run for a repeated idempotency key', async () => {
+    const definition = inlineDef('run-input', [
+      { id: 'e0', from: 'trg', to: 'sa' },
+      { id: 'e1', from: 'sa', to: 'sb' },
+    ]);
+    await call('POST', '/api/workflow-definitions', definition);
+
+    const first = await call('POST', '/api/workflow-definitions/run-input/run', {
+      input: { ticket: { id: 'ABC-42' }, priority: 2 },
+      idempotencyKey: 'request-42',
+    }, runCtx);
+    expect(first.status).toBe(201);
+    const firstRun = first.body as {
+      runId: string;
+      invocation: { input: Record<string, unknown>; idempotencyKey: string };
+      trigger: { fireRef?: string };
+    };
+    expect(firstRun.invocation).toEqual({
+      input: { ticket: { id: 'ABC-42' }, priority: 2 },
+      idempotencyKey: 'request-42',
+    });
+    expect(firstRun.trigger.fireRef).toBe('request-42');
+
+    const duplicate = await call('POST', '/api/workflow-definitions/run-input/run', {
+      input: { ticket: { id: 'SHOULD-NOT-REPLACE' } },
+      idempotencyKey: 'request-42',
+    }, runCtx);
+    expect(duplicate.status).toBe(201);
+    const duplicateRun = duplicate.body as typeof firstRun;
+    expect(duplicateRun.runId).toBe(firstRun.runId);
+    expect(duplicateRun.invocation).toEqual(firstRun.invocation);
+
+    const files = fs.readdirSync(path.join(evidenceRoot, 'reports', 'runs', 'run-input'));
+    expect(files.filter((name) => name.endsWith('.json'))).toEqual([`${firstRun.runId}.json`]);
+  });
+
+  it('POST :id/run rejects malformed invocation input and idempotency keys', async () => {
+    const definition = inlineDef('run-input-invalid', [
+      { id: 'e0', from: 'trg', to: 'sa' },
+      { id: 'e1', from: 'sa', to: 'sb' },
+    ]);
+    await call('POST', '/api/workflow-definitions', definition);
+
+    const arrayInput = await call('POST', '/api/workflow-definitions/run-input-invalid/run', { input: ['not', 'an', 'object'] }, runCtx);
+    expect(arrayInput.status).toBe(400);
+    expect((arrayInput.body as { error: string }).error).toMatch(/input.*JSON object/i);
+
+    const emptyKey = await call('POST', '/api/workflow-definitions/run-input-invalid/run', { idempotencyKey: '   ' }, runCtx);
+    expect(emptyKey.status).toBe(400);
+    expect((emptyKey.body as { error: string }).error).toMatch(/idempotencyKey/i);
   });
 
   it('POST :id/run EXECUTES the edge-implied order (GRS-014b) — no warning shim, edges win', async () => {

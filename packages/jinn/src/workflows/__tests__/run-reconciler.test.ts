@@ -100,6 +100,40 @@ function harness(overrides: Partial<RunDriverDeps> = {}) {
 }
 
 describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
+  it('freezes structured per-run input and makes it available to the first phase prompt', async () => {
+    const def = createDefinition(root, chainDef('parameterized', [trigger, step('a')]), { now });
+    const { deps, spawnCalls } = harness();
+    const input = {
+      ticket: { id: 'ABC-42', constraints: ['preserve compatibility'] },
+      dryRun: false,
+    };
+
+    const started = await startWorkflowRun(deps, def, {
+      trigger: {
+        source: 'manual',
+        event: 'workflow.manual_started',
+        payload: { workflowId: def.id, requestedBy: 'api' },
+        fireRef: 'request-42',
+      },
+      invocation: { input, idempotencyKey: 'request-42' },
+    });
+
+    expect(started.invocation).toEqual({ input, idempotencyKey: 'request-42' });
+    expect(getRun(root, def.id, started.runId)?.invocation).toEqual(started.invocation);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0].prompt).toContain('## Run input (data)');
+    expect(spawnCalls[0].prompt).toContain('"id": "ABC-42"');
+    expect(spawnCalls[0].prompt).toContain('"preserve compatibility"');
+    expect(spawnCalls[0].prompt.indexOf('## Run input (data)')).toBeLessThan(
+      spawnCalls[0].prompt.indexOf('## Your task'),
+    );
+
+    // The caller cannot mutate the persisted/promoted snapshot after invocation.
+    input.ticket.id = 'MUTATED';
+    expect(getRun(root, def.id, started.runId)?.invocation?.input).toMatchObject({ ticket: { id: 'ABC-42' } });
+    expect(spawnCalls[0].prompt).not.toContain('MUTATED');
+  });
+
   it('runs a two-step chain: B spawns ONLY after A settles; completed only after B settles', async () => {
     const def = createDefinition(root, chainDef('two-step', [trigger, step('a'), step('b')]), { now });
     const { deps, spawnCalls, settle } = harness();

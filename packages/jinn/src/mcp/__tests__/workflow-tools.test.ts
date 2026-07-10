@@ -128,6 +128,14 @@ describe("workflow tools — registry + schemas", () => {
     expect(tool("create_trigger").inputSchema.required).toEqual(["kind", "name", "event", "targetWorkflowId"]);
     expect(tool("delete_trigger").inputSchema.required).toEqual(["name"]);
   });
+
+  it("declares structured optional run input and an optional bounded idempotency key", () => {
+    const schema = tool("start_workflow_run").inputSchema as {
+      properties: Record<string, { type?: string; maxLength?: number }>;
+    };
+    expect(schema.properties.input).toMatchObject({ type: "object" });
+    expect(schema.properties.idempotencyKey).toMatchObject({ type: "string", maxLength: 256 });
+  });
 });
 
 describe("workflow tools — unit (stub gateway)", () => {
@@ -442,9 +450,26 @@ describe("workflow tools — unit (stub gateway)", () => {
     }));
     const out = (await tool("start_workflow_run").handler({ workflowId: "wf" }, ctx)) as { run: { runId: string }; hint: string };
     expect(calls[0]).toMatchObject({ url: "http://127.0.0.1:7777/api/workflow-definitions/wf/run", method: "POST" });
+    expect(calls[0].body).toEqual({});
     expect(out.run.runId).toBe("run-1");
     expect(out.hint).toContain("run-1");
     expect(out.hint).toMatch(/get_workflow_run/);
+  });
+
+  it("start_workflow_run forwards structured input and idempotencyKey verbatim", async () => {
+    const { calls, ctx } = stub(() => ({
+      status: 201,
+      body: { runId: "run-input", status: "completed", steps: [] },
+    }));
+    await tool("start_workflow_run").handler({
+      workflowId: "wf",
+      input: { ticket: { id: "ABC-42" }, priority: 2 },
+      idempotencyKey: "request-42",
+    }, ctx);
+    expect(calls[0].body).toEqual({
+      input: { ticket: { id: "ABC-42" }, priority: 2 },
+      idempotencyKey: "request-42",
+    });
   });
 
   it("start_workflow_run surfaces a 422 failed-at-start run's structured errors", async () => {

@@ -216,6 +216,18 @@ export interface LegacyWorkflowRunTrigger {
 export type WorkflowRunTrigger = WorkflowTriggerEvent | LegacyWorkflowRunTrigger;
 
 /**
+ * Frozen caller-supplied context for one invocation of a reusable workflow. Input is
+ * persisted separately from trigger metadata so every phase receives the same
+ * structured data without promoting it to workflow instructions. The optional key is
+ * also copied to the manual trigger's fireRef by the run route for file-enforced
+ * idempotency.
+ */
+export interface WorkflowRunInvocation {
+  input: Record<string, unknown>;
+  idempotencyKey?: string;
+}
+
+/**
  * Honest v2 run statuses (GRS-014a, design D5):
  *   - `running`    — steps pending/in-flight; the run is genuinely working.
  *   - `parked`     — halted on a human-approval gate.
@@ -248,6 +260,8 @@ export interface WorkflowRun {
   definitionVersion: number;
   title: string;
   trigger: WorkflowRunTrigger;
+  /** Frozen structured context supplied when this particular run was invoked. */
+  invocation?: WorkflowRunInvocation;
   /** Legacy field: new todo-status runs carry this as trigger.payload.todoId. */
   triggerTodoId?: string;
   status: WorkflowRunStatus;

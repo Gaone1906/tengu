@@ -3286,9 +3286,29 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const root = resolveWorkflowEvidenceRoot();
       if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_EVENT_BODY_MAX_BYTES });
       if (!parsed.ok) return;
-      const body = (parsed.body ?? {}) as { trigger?: "manual" | "schedule" };
+      const rawBody = parsed.body ?? {};
+      if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+        return badRequest(res, "workflow run body must be a JSON object");
+      }
+      const body = rawBody as { trigger?: "manual" | "schedule"; input?: unknown; idempotencyKey?: unknown };
+      if (body.input !== undefined && (!body.input || typeof body.input !== "object" || Array.isArray(body.input))) {
+        return badRequest(res, "input must be a JSON object");
+      }
+      let idempotencyKey: string | undefined;
+      if (body.idempotencyKey !== undefined) {
+        if (typeof body.idempotencyKey !== "string" || !body.idempotencyKey.trim()) {
+          return badRequest(res, "idempotencyKey must be a non-empty string");
+        }
+        idempotencyKey = body.idempotencyKey.trim();
+        if (idempotencyKey.length > 256) {
+          return badRequest(res, "idempotencyKey is too long (max 256 characters)");
+        }
+        if (/[\x00-\x1f\x7f]/.test(idempotencyKey)) {
+          return badRequest(res, "idempotencyKey must not contain control characters");
+        }
+      }
       try {
         const def = getDefinition(root, params.id);
         if (!def) return notFound(res);
@@ -3306,11 +3326,18 @@ export async function handleApiRequest(
         const knownEmployees = [...scanOrg().keys()];
         const knownEngines = [...context.sessionManager.getEngines().keys()];
         const trigger = body.trigger === "schedule"
-          ? { source: "schedule" as const, event: "schedule.fire", payload: { workflowId: def.id, requestedBy: "api" } }
-          : { source: "manual" as const, event: "workflow.manual_started", payload: { workflowId: def.id, requestedBy: "api" } };
+          ? { source: "schedule" as const, event: "schedule.fire", payload: { workflowId: def.id, requestedBy: "api" }, ...(idempotencyKey ? { fireRef: idempotencyKey } : {}) }
+          : { source: "manual" as const, event: "workflow.manual_started", payload: { workflowId: def.id, requestedBy: "api" }, ...(idempotencyKey ? { fireRef: idempotencyKey } : {}) };
+        const invocation = body.input !== undefined || idempotencyKey !== undefined
+          ? {
+              input: body.input !== undefined ? body.input as Record<string, unknown> : {},
+              ...(idempotencyKey ? { idempotencyKey } : {}),
+            }
+          : undefined;
         const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context), def, trigger, {
           knownEmployees,
           knownEngines,
+          ...(invocation ? { invocation } : {}),
         });
         return json(res, run, run.status === "failed" ? 422 : 201);
       } catch (err) {
