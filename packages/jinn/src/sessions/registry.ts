@@ -305,6 +305,7 @@ export function initDb(): Database.Database {
       session_key TEXT NOT NULL,
       prompt TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
+      internal INTEGER NOT NULL DEFAULT 0,
       position INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       started_at TEXT,
@@ -313,6 +314,7 @@ export function initDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_queue_session
       ON queue_items (session_key, status, position);
   `);
+  migrateQueueItemsSchema(db);
   db.exec(CREATE_FILES_TABLE);
 
   return db;
@@ -348,6 +350,16 @@ export function migrateMessagesSchema(database: Database.Database): void {
   }
   if (!colNames.has('meta')) {
     database.exec('ALTER TABLE messages ADD COLUMN meta TEXT');
+  }
+}
+
+/** Additive migration for restart-safe system work. Internal queue rows use the
+ * same durable ordering/replay machinery as user messages, but stay out of the
+ * operator-facing queue panel and its cancel/clear controls. */
+export function migrateQueueItemsSchema(database: Database.Database): void {
+  const columns = database.prepare('PRAGMA table_info(queue_items)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'internal')) {
+    database.exec('ALTER TABLE queue_items ADD COLUMN internal INTEGER NOT NULL DEFAULT 0');
   }
 }
 
@@ -2051,21 +2063,38 @@ export interface QueueItem {
   sessionKey: string;
   prompt: string;
   status: "pending" | "running" | "cancelled" | "completed";
+  internal: boolean;
   position: number;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
 }
 
-export function enqueueQueueItem(sessionId: string, sessionKey: string, prompt: string): string {
+interface QueueItemRow extends Omit<QueueItem, "internal"> {
+  internal: number;
+}
+
+function rowToQueueItem(row: QueueItemRow): QueueItem {
+  return { ...row, internal: row.internal === 1 };
+}
+
+const QUEUE_ITEM_SELECT =
+  "SELECT id, session_id as sessionId, session_key as sessionKey, prompt, status, internal, position, created_at as createdAt, started_at as startedAt, completed_at as completedAt FROM queue_items";
+
+export function enqueueQueueItem(
+  sessionId: string,
+  sessionKey: string,
+  prompt: string,
+  options: { internal?: boolean } = {},
+): string {
   const db = initDb();
   const id = randomUUID();
   const position = (db.prepare(
     "SELECT COALESCE(MAX(position), 0) + 1 as pos FROM queue_items WHERE session_key = ? AND status = 'pending'"
   ).get(sessionKey) as { pos: number }).pos;
   db.prepare(
-    "INSERT INTO queue_items (id, session_id, session_key, prompt, status, position, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)"
-  ).run(id, sessionId, sessionKey, prompt, position, new Date().toISOString());
+    "INSERT INTO queue_items (id, session_id, session_key, prompt, status, internal, position, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)"
+  ).run(id, sessionId, sessionKey, prompt, options.internal ? 1 : 0, position, new Date().toISOString());
   return id;
 }
 
@@ -2091,9 +2120,8 @@ export function markRunningQueueItemsCompletedForSession(sessionId: string): num
 
 export function getQueueItem(itemId: string): QueueItem | undefined {
   const db = initDb();
-  return db.prepare(
-    "SELECT id, session_id as sessionId, session_key as sessionKey, prompt, status, position, created_at as createdAt, started_at as startedAt, completed_at as completedAt FROM queue_items WHERE id = ?"
-  ).get(itemId) as QueueItem | undefined;
+  const row = db.prepare(`${QUEUE_ITEM_SELECT} WHERE id = ?`).get(itemId) as QueueItemRow | undefined;
+  return row ? rowToQueueItem(row) : undefined;
 }
 
 export function cancelQueueItem(itemId: string): boolean {
@@ -2106,15 +2134,16 @@ export function cancelQueueItem(itemId: string): boolean {
 
 export function getQueueItems(sessionKey: string): QueueItem[] {
   const db = initDb();
-  return db.prepare(
-    "SELECT id, session_id as sessionId, session_key as sessionKey, prompt, status, position, created_at as createdAt, started_at as startedAt, completed_at as completedAt FROM queue_items WHERE session_key = ? AND status IN ('pending', 'running') ORDER BY position ASC"
-  ).all(sessionKey) as QueueItem[];
+  const rows = db.prepare(
+    `${QUEUE_ITEM_SELECT} WHERE session_key = ? AND internal = 0 AND status IN ('pending', 'running') ORDER BY position ASC`
+  ).all(sessionKey) as QueueItemRow[];
+  return rows.map(rowToQueueItem);
 }
 
 export function cancelAllPendingQueueItems(sessionKey: string): number {
   const db = initDb();
   const result = db.prepare(
-    "UPDATE queue_items SET status = 'cancelled' WHERE session_key = ? AND status = 'pending'"
+    "UPDATE queue_items SET status = 'cancelled' WHERE session_key = ? AND internal = 0 AND status = 'pending'"
   ).run(sessionKey);
   return result.changes;
 }
@@ -2131,9 +2160,10 @@ export function recoverStaleQueueItems(): number {
 
 export function listAllPendingQueueItems(): QueueItem[] {
   const db = initDb();
-  return db.prepare(
-    "SELECT id, session_id as sessionId, session_key as sessionKey, prompt, status, position, created_at as createdAt, started_at as startedAt, completed_at as completedAt FROM queue_items WHERE status = 'pending' ORDER BY created_at ASC, position ASC"
-  ).all() as QueueItem[];
+  const rows = db.prepare(
+    `${QUEUE_ITEM_SELECT} WHERE status = 'pending' ORDER BY created_at ASC, position ASC`
+  ).all() as QueueItemRow[];
+  return rows.map(rowToQueueItem);
 }
 
 // ── File management ──────────────────────────────────────────────────

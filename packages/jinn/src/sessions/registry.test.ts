@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import Database from "better-sqlite3";
-import { migrateSessionsSchema } from "./registry.js";
+import { migrateQueueItemsSchema, migrateSessionsSchema } from "./registry.js";
 
 test("migrateSessionsSchema upgrades an old sessions table before session_key usage", () => {
   const db = new Database(":memory:");
@@ -43,4 +43,32 @@ test("migrateSessionsSchema upgrades an old sessions table before session_key us
   };
   expect(row.session_key).toBe("slack:C123");
   expect(row.connector).toBe("slack");
+});
+
+test("migrateQueueItemsSchema adds an internal flag to legacy queue tables", () => {
+  const db = new Database(":memory:");
+  db.exec(`
+    CREATE TABLE queue_items (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      session_key TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      position INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT
+    )
+  `);
+
+  migrateQueueItemsSchema(db);
+
+  const columns = db.prepare("PRAGMA table_info(queue_items)").all() as Array<{
+    name: string;
+    notnull: number;
+    dflt_value: string | null;
+  }>;
+  expect(columns).toEqual(expect.arrayContaining([
+    expect.objectContaining({ name: "internal", notnull: 1, dflt_value: "0" }),
+  ]));
 });

@@ -2627,7 +2627,9 @@ export async function handleApiRequest(
       const session = getSession(params.id);
       if (!session) return notFound(res);
       const sessionKey = session.sessionKey || session.sourceRef || session.id;
-      context.sessionManager.getQueue().clearQueue(sessionKey);
+      // Cancel only operator-visible rows. SessionQueue checks each durable row
+      // before execution, so no coarse in-memory cancellation is needed here;
+      // setting one would also discard protected internal callback rows.
       const cancelled = cancelAllPendingQueueItems(sessionKey);
       context.emit("queue:updated", { sessionId: params.id, sessionKey, depth: 0 });
       return json(res, { status: "cleared", cancelled });
@@ -4192,6 +4194,15 @@ export async function handleApiRequest(
       // Re-home any attachments uploaded without a sessionId (defensive; usually a no-op
       // since the web client now scopes uploads to the session).
       if (!isNotification) rehomeAttachmentsToSession(body.attachments, session.id);
+      const sessionKey = session.sessionKey || session.sourceRef || session.id;
+      // Parent callbacks and agent-to-agent notifications must survive a crash
+      // after this route accepts them but before their engine turn starts. Persist
+      // the full engine-facing prompt before the display-only message below; the
+      // internal flag keeps it out of operator queue controls while boot replay
+      // still sees it. User messages retain their existing enqueue point below.
+      let queueItemId = isNotification
+        ? enqueueQueueItem(session.id, sessionKey, prompt, { internal: true })
+        : undefined;
       insertMessage(
         session.id,
         messageRole,
@@ -4263,12 +4274,8 @@ export async function handleApiRequest(
 
       const attachmentPaths = resolveAttachmentPaths(body.attachments);
 
-      const sessionKey = session.sessionKey || session.sourceRef || session.id;
-      // Internal notification-role messages (child-completion callbacks) are
-      // serialized via the in-memory queue but must NOT appear in the user's
-      // queue panel — they already surface as banners. Only real user messages
-      // get a visible queue item.
-      let queueItemId: string | undefined;
+      // Internal notification-role messages are already durably queued above;
+      // only real user messages create a visible queue-panel item here.
       if (!isNotification) {
         queueItemId = enqueueQueueItem(session.id, sessionKey, prompt);
         context.emit("queue:updated", { sessionId: session.id, sessionKey });
