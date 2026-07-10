@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Employee, JinnConfig, OrgHierarchy, OrgNode } from "../shared/types.js";
+import { compactEmployeeRole } from "../shared/employee-role.js";
 import { JINN_HOME, ORG_DIR, CRON_JOBS, DOCS_DIR } from "../shared/paths.js";
 import { gatewayBaseUrl } from "../gateway/gateway-info.js";
 
@@ -299,6 +300,17 @@ export function buildContext(opts: BuildContextOptions): string {
     });
   }
 
+  // ── STANDARD: Relationship-scoped role orientation ──────────
+  const scopedRoster = buildScopedRosterSection(opts.employee, opts.hierarchy, portalName);
+  if (scopedRoster) {
+    sections.push({
+      tier: Tier.STANDARD,
+      marker: "## Working roster",
+      content: scopedRoster,
+      summary: buildScopedRosterSummary(opts.employee, opts.hierarchy, portalName),
+    });
+  }
+
   // ── STANDARD: Organization (COO only — employees get their chain of command) ──
   if (!opts.employee) {
     const orgCtx = buildOrgContext(opts.hierarchy, opts.jinnMcpAttached);
@@ -568,6 +580,143 @@ function buildCooCompanyAnchor(engine?: string, jinnMcpAttached = false): string
     "- Use company-reference reads before asking the operator: sessions/search, knowledge, cost, and cron.",
     "- Keep the operator out of the firehose: route questions and approvals through managers/COO by default, escalating to the operator only for money, irreversible, public, legal/security, or explicit escalation cases.",
   ].filter(Boolean).join("\n");
+}
+
+const WORKING_ROSTER_HEADING = "## Working roster (scoped orientation; not exhaustive)";
+const FULL_ROSTER_HINT = "Use `find_employees` / `list_employees` for the full roster and `get_employee` for a finalist's full persona.";
+
+function rosterRole(employee: Employee): string {
+  const role = compactEmployeeRole(employee.persona) ?? employee.displayName;
+  return role.replace(/[`|]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function rosterRow(employee: Employee, includeEngine: boolean): string {
+  const engine = includeEngine ? ` · ${employee.engine}` : "";
+  return `- \`${employee.name}\` — ${rosterRole(employee)} · ${employee.department}${engine}`;
+}
+
+function stablePriority(
+  names: string[],
+  hierarchy: OrgHierarchy,
+  score: (node: OrgNode) => number,
+): string[] {
+  return names
+    .map((name, index) => ({ name, index, score: score(hierarchy.nodes[name]) }))
+    .sort((a, b) => a.score - b.score || a.index - b.index)
+    .map(({ name }) => name);
+}
+
+function topLevelRosterNames(hierarchy: OrgHierarchy, employee?: Employee): string[] {
+  const executiveName = hierarchy.root ?? (employee?.rank === "executive" ? employee.name : null);
+  const executive = executiveName ? hierarchy.nodes[executiveName] : undefined;
+  const roots = hierarchy.sorted.filter((name) => hierarchy.nodes[name]?.parentName === null && name !== executiveName);
+  const names = executive?.directReports.length
+    ? [...executive.directReports, ...roots]
+    : hierarchy.sorted.filter((name) => hierarchy.nodes[name]?.parentName === null);
+  return [...new Set(names)].filter((name) => name !== employee?.name && hierarchy.nodes[name]);
+}
+
+function appendRosterGroup(
+  lines: string[],
+  heading: string,
+  names: string[],
+  hierarchy: OrgHierarchy,
+  cap: number,
+  includeEngine = false,
+): void {
+  if (names.length === 0 || cap === 0) return;
+  const shown = names.slice(0, cap);
+  lines.push("", `${heading}:`);
+  for (const name of shown) lines.push(rosterRow(hierarchy.nodes[name].employee, includeEngine));
+  const omitted = names.length - shown.length;
+  if (omitted > 0) lines.push(`+${omitted} more — use \`list_employees\`.`);
+}
+
+function renderScopedRoster(
+  employee: Employee | undefined,
+  hierarchy: OrgHierarchy | undefined,
+  portalName: string,
+  compact: boolean,
+): string | null {
+  if (!hierarchy || Object.keys(hierarchy.nodes).length === 0) return null;
+  const lines = [WORKING_ROSTER_HEADING];
+
+  if (!employee || employee.rank === "executive") {
+    let names = topLevelRosterNames(hierarchy, employee);
+    names = stablePriority(names, hierarchy, (node) => {
+      if (node.directReports.length > 0) return 0;
+      if (node.employee.rank === "manager") return 1;
+      return 2;
+    });
+
+    if (employee?.rank === "executive") {
+      const node = hierarchy.nodes[employee.name];
+      if (node?.parentName && hierarchy.nodes[node.parentName]) {
+        appendRosterGroup(lines, "Your manager", [node.parentName], hierarchy, 1);
+      }
+    }
+    appendRosterGroup(lines, "Top-level employees", names, hierarchy, compact ? 6 : 20, true);
+  } else {
+    const node = hierarchy.nodes[employee.name];
+    if (!node) return null;
+
+    if (node.parentName && hierarchy.nodes[node.parentName]) {
+      appendRosterGroup(lines, "Your manager", [node.parentName], hierarchy, 1);
+    } else {
+      lines.push("", "Your manager:", `- ${portalName} (COO) — Company coordination and escalation · company`);
+    }
+
+    const isReportHolder = node.directReports.length > 0;
+    if (isReportHolder) {
+      appendRosterGroup(lines, "Your direct reports", node.directReports, hierarchy, compact ? 4 : 12);
+
+      const peerNames = node.parentName && hierarchy.nodes[node.parentName]
+        ? hierarchy.nodes[node.parentName].directReports.filter((name) => name !== employee.name)
+        : hierarchy.sorted.filter((name) => {
+            const peer = hierarchy.nodes[name];
+            return peer.parentName === null && name !== employee.name;
+          });
+      const prioritizedPeers = stablePriority(peerNames, hierarchy, (peer) => {
+        if (peer.directReports.length > 0) return 0;
+        if (peer.employee.rank === "manager") return 1;
+        return 2;
+      });
+      appendRosterGroup(lines, "Your peers", prioritizedPeers, hierarchy, compact ? 0 : 6);
+    } else {
+      const siblingNames = node.parentName && hierarchy.nodes[node.parentName]
+        ? hierarchy.nodes[node.parentName].directReports.filter((name) => name !== employee.name)
+        : hierarchy.sorted.filter((name) => {
+            const sibling = hierarchy.nodes[name];
+            return sibling.parentName === null && name !== employee.name && sibling.employee.department === employee.department;
+          });
+      const prioritizedSiblings = stablePriority(
+        siblingNames,
+        hierarchy,
+        (sibling) => sibling.employee.department === employee.department ? 0 : 1,
+      );
+      appendRosterGroup(lines, "Your siblings", prioritizedSiblings, hierarchy, compact ? 4 : 8);
+    }
+  }
+
+  lines.push("", FULL_ROSTER_HINT);
+  return lines.join("\n");
+}
+
+/** Build the bounded role-oriented slice injected into fresh session context. */
+export function buildScopedRosterSection(
+  employee: Employee | undefined,
+  hierarchy: OrgHierarchy | undefined,
+  portalName = "Jinn",
+): string | null {
+  return renderScopedRoster(employee, hierarchy, portalName, false);
+}
+
+function buildScopedRosterSummary(
+  employee: Employee | undefined,
+  hierarchy: OrgHierarchy | undefined,
+  portalName: string,
+): string {
+  return renderScopedRoster(employee, hierarchy, portalName, true) ?? `${WORKING_ROSTER_HEADING}\n${FULL_ROSTER_HINT}`;
 }
 
 function buildOrgContext(

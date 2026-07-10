@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { buildContext, buildTalkThreadsSection } from "../context.js";
-import type { Employee, JinnConfig } from "../../shared/types.js";
+import type { Employee, JinnConfig, OrgHierarchy } from "../../shared/types.js";
 
 // These tests lock the CURRENT output of buildContext after the "context hygiene"
 // refactor: the static COO operating-manual base was dropped (engines auto-ingest
@@ -353,16 +353,17 @@ describe("buildContext — compact org roster", () => {
   });
   const hierarchy = {
     nodes: {
-      lead: { employee: emp("lead", "manager", "Secret persona preview text"), parentName: null, directReports: ["dev"], depth: 0, chain: [] },
-      dev: { employee: emp("dev", "employee", "Another secret persona"), parentName: "lead", directReports: [], depth: 1, chain: ["lead"] },
+      lead: { employee: emp("lead", "manager", "You are the engineering lead.\nSecret persona preview text"), parentName: null, directReports: ["dev"], depth: 0, chain: [] },
+      dev: { employee: emp("dev", "employee", "You are an implementation specialist.\nAnother secret persona"), parentName: "lead", directReports: [], depth: 1, chain: ["lead"] },
     },
     sorted: ["lead", "dev"],
   } as any;
 
-  it("lists name/dept/rank but NOT persona previews", () => {
+  it("lists the compact first-line role but NOT the rest of each persona", () => {
     const out = buildContext({ ...baseOpts, hierarchy });
     expect(out).toContain("## Organization (2 employee(s))");
     expect(out).toContain("- **lead** (lead) — eng, manager");
+    expect(out).toContain("`lead` — engineering lead · eng · claude");
     expect(out).not.toContain("Secret persona preview");
     expect(out).not.toContain("Another secret persona");
   });
@@ -449,6 +450,171 @@ describe("buildContext — audience scoping", () => {
   it("chain of command carries slugs for delegation", () => {
     const out = buildContext({ ...baseOpts, employee: minimalEmployee, hierarchy });
     expect(out).toContain("`writer`"); // direct report slug
+  });
+});
+
+describe("buildContext — scoped working roster", () => {
+  const employee = (
+    name: string,
+    options: Partial<Employee> & { role: string },
+  ): Employee => ({
+    name,
+    displayName: options.displayName ?? name,
+    department: options.department ?? "platform",
+    rank: options.rank ?? "employee",
+    engine: options.engine ?? "codex",
+    model: options.model ?? "test-model",
+    persona: `You are the ${options.role}.\nHidden operating procedure for ${name}.`,
+    reportsTo: options.reportsTo,
+  });
+
+  const hierarchy = (employees: Employee[], parents: Record<string, string | null>): OrgHierarchy => {
+    const nodes: OrgHierarchy["nodes"] = {};
+    for (const member of employees) {
+      const parentName = parents[member.name] ?? null;
+      nodes[member.name] = {
+        employee: member,
+        parentName,
+        directReports: [],
+        depth: parentName ? 1 : 0,
+        chain: parentName ? [parentName, member.name] : [member.name],
+      };
+    }
+    for (const [name, node] of Object.entries(nodes)) {
+      if (node.parentName && nodes[node.parentName]) nodes[node.parentName].directReports.push(name);
+    }
+    return { root: null, nodes, sorted: employees.map((member) => member.name), warnings: [] };
+  };
+
+  const workingRoster = (context: string): string => {
+    const marker = "## Working roster (scoped orientation; not exhaustive)";
+    const start = context.indexOf(marker);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = context.indexOf("\n## ", start + marker.length);
+    return context.slice(start, end < 0 ? undefined : end);
+  };
+
+  it("gives the COO every top-level routing lane with compact roles, departments, and engines", () => {
+    const roots = Array.from({ length: 18 }, (_, index) => employee(`lane-${index + 1}`, {
+      role: `routing lead for lane ${index + 1}`,
+      department: `department-${index + 1}`,
+      rank: "manager",
+      engine: index % 2 === 0 ? "codex" : "claude",
+    }));
+    const nested = employee("nested-specialist", { role: "deep specialist", reportsTo: "lane-1" });
+    const org = hierarchy([...roots, nested], {
+      ...Object.fromEntries(roots.map((root) => [root.name, null])),
+      "nested-specialist": "lane-1",
+    });
+
+    const roster = workingRoster(buildContext({ ...baseOpts, hierarchy: org, jinnMcpAttached: true }));
+
+    for (const [index, root] of roots.entries()) {
+      expect(roster).toContain(
+        `- \`${root.name}\` — routing lead for lane ${index + 1} · department-${index + 1} · ${root.engine}`,
+      );
+    }
+    expect(roster).not.toContain("nested-specialist");
+    expect(roster).not.toContain("Hidden operating procedure");
+    expect(roster).toContain("find_employees");
+    expect(roster).toContain("list_employees");
+    expect(roster).toContain("get_employee");
+  });
+
+  it("gives a report-holder its manager, direct reports, and same-manager peers only", () => {
+    const chief = employee("company-chief", { role: "company coordination", rank: "executive", department: "company" });
+    const lead = employee("platform-lead", { role: "platform delivery", rank: "senior", reportsTo: "company-chief" });
+    const peer = employee("design-lead", { role: "product design", rank: "manager", department: "design", reportsTo: "company-chief" });
+    const peerIc = employee("operations-peer", { role: "operational planning", department: "operations", reportsTo: "company-chief" });
+    const developer = employee("platform-developer", { role: "gateway engineering", reportsTo: "platform-lead" });
+    const qa = employee("platform-qa", { role: "release verification", department: "quality", reportsTo: "platform-lead" });
+    const cousin = employee("design-ic", { role: "interface implementation", department: "design", reportsTo: "design-lead" });
+    const unrelated = employee("independent-root", { role: "independent research", department: "research" });
+    const org = hierarchy([chief, lead, peer, peerIc, developer, qa, cousin, unrelated], {
+      "company-chief": null,
+      "platform-lead": "company-chief",
+      "design-lead": "company-chief",
+      "operations-peer": "company-chief",
+      "platform-developer": "platform-lead",
+      "platform-qa": "platform-lead",
+      "design-ic": "design-lead",
+      "independent-root": null,
+    });
+
+    const roster = workingRoster(buildContext({ ...baseOpts, employee: lead, hierarchy: org, jinnMcpAttached: true }));
+
+    expect(roster).toContain("Your manager:");
+    expect(roster).toContain("`company-chief` — company coordination · company");
+    expect(roster).toContain("Your direct reports:");
+    expect(roster).toContain("`platform-developer` — gateway engineering · platform");
+    expect(roster).toContain("`platform-qa` — release verification · quality");
+    expect(roster).toContain("Your peers:");
+    expect(roster).toContain("`design-lead` — product design · design");
+    expect(roster).toContain("`operations-peer` — operational planning · operations");
+    expect(roster).not.toContain("platform-lead");
+    expect(roster).not.toContain("design-ic");
+    expect(roster).not.toContain("independent-root");
+  });
+
+  it("gives an IC its manager and same-manager siblings without the wider org", () => {
+    const chief = employee("company-chief", { role: "company coordination", rank: "executive", department: "company" });
+    const lead = employee("platform-lead", { role: "platform delivery", rank: "manager", reportsTo: "company-chief" });
+    const developer = employee("platform-developer", { role: "gateway engineering", reportsTo: "platform-lead" });
+    const qa = employee("platform-qa", { role: "release verification", department: "quality", reportsTo: "platform-lead" });
+    const operator = employee("runtime-operator", { role: "runtime operations", reportsTo: "platform-lead" });
+    const peerLead = employee("design-lead", { role: "product design", rank: "manager", department: "design", reportsTo: "company-chief" });
+    const org = hierarchy([chief, lead, developer, qa, operator, peerLead], {
+      "company-chief": null,
+      "platform-lead": "company-chief",
+      "platform-developer": "platform-lead",
+      "platform-qa": "platform-lead",
+      "runtime-operator": "platform-lead",
+      "design-lead": "company-chief",
+    });
+
+    const roster = workingRoster(buildContext({ ...baseOpts, employee: developer, hierarchy: org, jinnMcpAttached: true }));
+
+    expect(roster).toContain("Your manager:");
+    expect(roster).toContain("`platform-lead` — platform delivery · platform");
+    expect(roster).toContain("Your siblings:");
+    expect(roster).toContain("`platform-qa` — release verification · quality");
+    expect(roster).toContain("`runtime-operator` — runtime operations · platform");
+    expect(roster).not.toContain("platform-developer");
+    expect(roster).not.toContain("company-chief");
+    expect(roster).not.toContain("design-lead");
+  });
+
+  it("caps each audience slice and keeps the injected roster token-small", () => {
+    const roots = Array.from({ length: 30 }, (_, index) => employee(`root-${index + 1}`, {
+      role: `routing lane ${index + 1}`,
+      department: `department-${index + 1}`,
+      rank: "manager",
+    }));
+    const cooOrg = hierarchy(roots, Object.fromEntries(roots.map((root) => [root.name, null])));
+    const cooRoster = workingRoster(buildContext({ ...baseOpts, hierarchy: cooOrg, jinnMcpAttached: true }));
+    const cooRows = cooRoster.match(/^- `/gm) ?? [];
+
+    expect(cooRows).toHaveLength(20);
+    expect(cooRoster).toContain("+10 more");
+    expect(Math.ceil(cooRoster.length / 4)).toBeLessThan(600);
+
+    const manager = employee("manager", { role: "team leadership", rank: "manager" });
+    const siblings = Array.from({ length: 20 }, (_, index) => employee(`sibling-${index + 1}`, {
+      role: `specialist ${index + 1}`,
+      reportsTo: "manager",
+    }));
+    const current = employee("current-ic", { role: "current specialist", reportsTo: "manager" });
+    const icOrg = hierarchy([manager, current, ...siblings], {
+      manager: null,
+      "current-ic": "manager",
+      ...Object.fromEntries(siblings.map((sibling) => [sibling.name, "manager"])),
+    });
+    const icRoster = workingRoster(buildContext({ ...baseOpts, employee: current, hierarchy: icOrg, jinnMcpAttached: true }));
+    const icRows = icRoster.match(/^- `/gm) ?? [];
+
+    expect(icRows).toHaveLength(9); // manager + eight siblings
+    expect(icRoster).toContain("+12 more");
+    expect(Math.ceil(icRoster.length / 4)).toBeLessThan(300);
   });
 });
 
