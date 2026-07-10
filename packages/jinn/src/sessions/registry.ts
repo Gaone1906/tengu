@@ -65,6 +65,14 @@ const CREATE_SESSION_KEY_INDEX = `
 CREATE INDEX IF NOT EXISTS idx_sessions_session_key ON sessions (session_key, last_activity)
 `;
 
+/** Caller-supplied delegation idempotency keys map to one durable session. The
+ * key stored in session_key is a scoped hash, so the unique index is both
+ * restart-safe and safe to add to existing databases. */
+const CREATE_DELEGATION_IDEMPOTENCY_INDEX = `
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_delegation_idempotency
+  ON sessions (session_key) WHERE session_key LIKE 'delegation-idempotency:%'
+`;
+
 // Backs `ORDER BY last_activity DESC` in the session list (was a full scan + sort).
 const CREATE_LAST_ACTIVITY_INDEX = `
 CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions (last_activity DESC)
@@ -274,6 +282,7 @@ export function initDb(): Database.Database {
   }
   migrateSessionsSchema(db);
   db.exec(CREATE_SESSION_KEY_INDEX);
+  db.exec(CREATE_DELEGATION_IDEMPOTENCY_INDEX);
   db.exec(CREATE_LAST_ACTIVITY_INDEX);
   db.exec(CREATE_PARENT_INDEX);
   db.exec(CREATE_STATUS_INDEX);

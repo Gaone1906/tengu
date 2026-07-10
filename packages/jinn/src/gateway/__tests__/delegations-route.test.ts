@@ -277,6 +277,82 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
     store.linkSession(resp.body.workItemId, resp.body.sessionId); // the re-link
     expect(store.getWorkItem(resp.body.workItemId)!.updatedAt).toBe(before);
   });
+
+  it("links an existing caller-owned Todo instead of minting a duplicate", async () => {
+    const parentId = await createOperatorSession("canonical Todo owner");
+    const item = store.createWorkItem({
+      title: "Canonical objective",
+      body: "Preserve this brief",
+      source: "session",
+      sourceRef: `session:${parentId}:canonical`,
+    });
+    const before = workItemCount();
+
+    const resp = await call(
+      "POST",
+      "/api/delegations",
+      { workItemId: item.id, engine: "codex", task: "Execute the canonical objective" },
+      { [CALLER_SESSION_HEADER]: parentId, [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(parentId) },
+    );
+
+    expect(resp.status).toBe(201);
+    expect(resp.body.workItemId).toBe(item.id);
+    expect(workItemCount()).toBe(before);
+    expect(reg.getSession(resp.body.sessionId)?.workItemId).toBe(item.id);
+    expect(store.getWorkItem(item.id)).toMatchObject({
+      title: "Canonical objective",
+      body: "Preserve this brief",
+      status: "executing",
+    });
+  });
+
+  it("replays the original Todo/session for the same caller idempotency key", async () => {
+    const beforeItems = workItemCount();
+    const beforeSessions = reg.listSessions().length;
+    const request = { engine: "codex", task: "Exactly once", idempotencyKey: "delegate-once-42" };
+
+    const first = await call("POST", "/api/delegations", request);
+    const second = await call("POST", "/api/delegations", request);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(200);
+    expect(second.body).toMatchObject({
+      workItemId: first.body.workItemId,
+      sessionId: first.body.sessionId,
+      replayed: true,
+    });
+    expect(workItemCount()).toBe(beforeItems + 1);
+    expect(reg.listSessions().length).toBe(beforeSessions + 1);
+  });
+
+  it("passes managed attachments through to the delegated child engine turn", async () => {
+    const filePath = path.join(tmpHome, "delegation-context.txt");
+    fs.writeFileSync(filePath, "delegated context");
+    reg.insertFile({
+      id: "delegation-file",
+      filename: "delegation-context.txt",
+      size: fs.statSync(filePath).size,
+      mimetype: "text/plain",
+      path: filePath,
+    });
+
+    const resp = await call("POST", "/api/delegations", {
+      engine: "codex",
+      task: "Read the attachment",
+      attachments: ["delegation-file"],
+    });
+    expect(resp.status).toBe(201);
+
+    let run: Record<string, unknown> | undefined;
+    for (let i = 0; i < 100 && !run; i++) {
+      run = engineRuns.find((candidate) => candidate.sessionId === resp.body.sessionId);
+      if (!run) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(run?.attachments).toEqual([filePath]);
+    expect(reg.getMessages(resp.body.sessionId)[0]?.media).toMatchObject([
+      { name: "delegation-context.txt", mimeType: "text/plain" },
+    ]);
+  });
 });
 
 describe("web dispatch path — the GRS-017a identity seam reaches the engine (QA catch)", () => {

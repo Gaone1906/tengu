@@ -69,6 +69,10 @@ export function deriveWorkItemStatus(
 ): WorkItemStatus {
   if (STICKY_STATUSES.has(current)) return current;
   if (attempts.length === 0) return current;
+  // Review is a governance phase, not a reflection of session transport state.
+  // Parent callbacks and review conversations may run on linked sessions after
+  // submission; only an explicit review bounce may reopen execution.
+  if (current === 'in_review') return current;
   if (attempts.some((attempt) => IN_FLIGHT.has(attempt.status))) return 'executing';
   // Workflow items: settles between steps are NOT review-ready evidence — the
   // run driver owns their terminal truth (see module docstring).

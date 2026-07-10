@@ -66,14 +66,16 @@ describe("delegate_task — registry + schema", () => {
     expect(names).toContain("spawn_session");
   });
 
-  it("has a flat schema: string params only, task required", () => {
+  it("accepts canonical Todo, idempotency, and managed-attachment context while keeping task required", () => {
     const t = delegateTool();
     expect(t.inputSchema.required).toEqual(["task"]);
-    for (const prop of Object.values(t.inputSchema.properties) as Array<{ type: string }>) {
-      expect(prop.type).toBe("string");
+    const props = t.inputSchema.properties as Record<string, { type: string; items?: { type: string } }>;
+    expect(props.attachments).toMatchObject({ type: "array", items: { type: "string" } });
+    for (const [name, prop] of Object.entries(props)) {
+      if (name !== "attachments") expect(prop.type).toBe("string");
     }
     expect(Object.keys(t.inputSchema.properties).sort()).toEqual(
-      ["effortLevel", "employee", "engine", "model", "task", "title"].sort(),
+      ["attachments", "effortLevel", "employee", "engine", "idempotencyKey", "model", "task", "title", "workItemId"].sort(),
     );
   });
 
@@ -110,7 +112,7 @@ describe("delegate_task — unit (stub gateway)", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("POSTs /api/delegations with the marker + identity headers and only the provided params", async () => {
+  it("POSTs /api/delegations with canonical Todo, idempotency, attachments, and identity headers", async () => {
     const { calls, ctx } = stub(
       () => ({
         status: 201,
@@ -119,7 +121,14 @@ describe("delegate_task — unit (stub gateway)", () => {
       "caller-1",
     );
     const out = (await delegateTool().handler(
-      { task: "Do the thing", employee: "qa-emp", title: "The thing" },
+      {
+        task: "Do the thing",
+        employee: "qa-emp",
+        title: "The thing",
+        workItemId: "wi_existing",
+        idempotencyKey: "request-42",
+        attachments: ["file-a", "file-b"],
+      },
       ctx,
     )) as Record<string, unknown>;
 
@@ -128,7 +137,14 @@ describe("delegate_task — unit (stub gateway)", () => {
     expect(calls[0].url).toBe("http://127.0.0.1:7777/api/delegations");
     expect(calls[0].headers[CALLER_SESSION_HEADER]).toBe("caller-1");
     expect(calls[0].headers[TOOL_CALL_HEADER]).toBe(TOOL_CALL_HEADER_VALUE);
-    expect(calls[0].body).toEqual({ task: "Do the thing", employee: "qa-emp", title: "The thing" });
+    expect(calls[0].body).toEqual({
+      task: "Do the thing",
+      employee: "qa-emp",
+      title: "The thing",
+      workItemId: "wi_existing",
+      idempotencyKey: "request-42",
+      attachments: ["file-a", "file-b"],
+    });
 
     expect(out.workItemId).toBe("wi_abc");
     expect(out.sessionId).toBe("sess-1");

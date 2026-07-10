@@ -4,15 +4,15 @@ import { UNIDENTIFIED_TOOL_CALL_ERROR } from "./identity.js";
 /**
  * GRS-017d — `delegate_task`, the delegation transaction (the design's §4
  * "company verb"). One tool call = tracked delegation: the gateway's
- * POST /api/delegations mints a durable WORK ITEM (the record of intent),
- * spawns the target session with the caller's brief, and links the two —
+ * POST /api/delegations resolves or mints a durable WORK ITEM (the record of
+ * intent), spawns the target session with the caller's brief, and links the two —
  * atomically, in-process, mint-before-spawn (the GRS-003b-2b contract). The
  * tool is a thin wrapper over that ONE route; composing mint→spawn→link as
  * three HTTP calls here would reopen exactly the partial-failure windows the
  * cron bridge spent a wave closing.
  *
  * Division of labor (stated here and in spawn_session, nowhere else):
- * delegate = company work, TRACKED (mints the accountability record);
+ * delegate = company work, TRACKED (uses or mints the accountability record);
  * spawn = quick question to a colleague, untracked.
  *
  * Policy tier: live-write, agent-allowed (design §5.2) — spawning children is
@@ -42,6 +42,15 @@ function optionalString(args: Record<string, unknown>, name: string): string | u
   return v.trim();
 }
 
+function optionalStringArray(args: Record<string, unknown>, name: string): string[] | undefined {
+  const value = args[name];
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || !entry.trim())) {
+    throw new JinnMcpToolError(`${name} must be an array of non-empty strings when provided`);
+  }
+  return value.map((entry) => (entry as string).trim());
+}
+
 function asText(body: unknown, max = 2000): string {
   const text = typeof body === "string" ? body : JSON.stringify(body);
   return text.length > max ? `${text.slice(0, max)}…` : text;
@@ -57,6 +66,7 @@ interface DelegationResponse {
   model?: string | null;
   status?: string;
   title?: string;
+  replayed?: boolean;
   error?: string;
 }
 
@@ -74,7 +84,7 @@ function delegationFailure(status: number, body: unknown): JinnMcpToolError {
   }
   if (rec.workItemId) {
     return new JinnMcpToolError(
-      `delegation spawn failed (HTTP ${status}): ${detail}. Work item ${rec.workItemId} was minted BEFORE the spawn and is preserved as backlog — the intent is durable, not lost. Report this to your parent/operator rather than re-delegating blindly (a retry mints a NEW work item).`,
+      `delegation spawn failed (HTTP ${status}): ${detail}. Work item ${rec.workItemId} is preserved — the intent is durable, not lost. Report this to your parent/operator rather than re-delegating blindly; only a retry with the same idempotencyKey is replay-safe.`,
     );
   }
   return new JinnMcpToolError(`delegation failed (HTTP ${status}): ${detail}`);
@@ -84,7 +94,7 @@ export function buildDelegationTools(): JinnMcpTool[] {
   const delegateTask: JinnMcpTool = {
     name: "delegate_task",
     description:
-      "Delegate TRACKED company work: mint Todo, spawn child, link both. After delegating, END YOUR TURN; never poll in a loop. Choose employee by role/persona fit; one employee may have multiple parallel delegations, so reuse the relevant employee instead of picking an unrelated one.",
+      "Delegate TRACKED company work to an existing Todo (workItemId) or a new one. Use idempotencyKey for retries. END YOUR TURN; never poll. Choose employee by role/persona fit.",
     inputSchema: {
       type: "object",
       properties: {
@@ -98,6 +108,12 @@ export function buildDelegationTools(): JinnMcpTool[] {
         model: { type: "string" },
         effortLevel: { type: "string" },
         title: { type: "string" },
+        workItemId: { type: "string" },
+        idempotencyKey: { type: "string" },
+        attachments: {
+          type: "array",
+          items: { type: "string" },
+        },
       },
       required: ["task"],
     },
@@ -107,10 +123,12 @@ export function buildDelegationTools(): JinnMcpTool[] {
       if (!ctx.callerSessionId) throw new JinnMcpToolError(UNIDENTIFIED_TOOL_CALL_ERROR);
       const task = requireString(args, "task");
       const body: Record<string, unknown> = { task };
-      for (const key of ["employee", "engine", "model", "effortLevel", "title"] as const) {
+      for (const key of ["employee", "engine", "model", "effortLevel", "title", "workItemId", "idempotencyKey"] as const) {
         const v = optionalString(args, key);
         if (v !== undefined) body[key] = v;
       }
+      const attachments = optionalStringArray(args, "attachments");
+      if (attachments !== undefined) body.attachments = attachments;
       if (!body.employee && !body.engine) {
         throw new JinnMcpToolError(
           "provide employee or engine — delegate to a named employee (list_employees / find_employees show the roster) or to a bare engine.",
@@ -126,6 +144,7 @@ export function buildDelegationTools(): JinnMcpTool[] {
         engine: d.engine,
         model: d.model ?? null,
         status: d.status,
+        replayed: d.replayed === true,
         hint:
           `Work item ${String(d.workItemId ?? "?")} tracks this; session ${String(d.sessionId ?? "?")} is executing. ` +
           "END YOUR TURN; reply wakes you. Next: read_session; never poll.",

@@ -3454,9 +3454,9 @@ export async function handleApiRequest(
     }
 
     // POST /api/delegations — the delegation transaction (GRS-017d, design §4).
-    // ONE atomic in-process handler: mint the work item (the durable record of
-    // INTENT), spawn the delegate session, link the two, derive the item's live
-    // status — all before responding. It lives HERE, where the store functions
+    // ONE atomic in-process handler: resolve or mint the work item (the durable
+    // record of INTENT), spawn the delegate session, link the two, derive the
+    // item's live status — all before responding. It lives HERE, where the store functions
     // live, because composing mint→spawn→link as three HTTP calls from a client
     // (the MCP tool) would re-create exactly the partial-failure windows
     // GRS-003b-2b spent a wave closing (crash after spawn, before link → orphan).
@@ -3498,6 +3498,47 @@ export async function handleApiRequest(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
 
+      const callerRef = delegationCaller.kind === "session" ? delegationCaller.callerId : "operator";
+      const idempotencyKey = typeof body.idempotencyKey === "string" && body.idempotencyKey.trim()
+        ? body.idempotencyKey.trim()
+        : undefined;
+      if (body.idempotencyKey !== undefined && !idempotencyKey) {
+        return badRequest(res, "idempotencyKey must be a non-empty string when provided");
+      }
+      if (idempotencyKey && idempotencyKey.length > 256) {
+        return badRequest(res, "idempotencyKey must be at most 256 characters");
+      }
+      const idempotencyDigest = idempotencyKey
+        ? crypto.createHash("sha256").update(`${callerRef}\0${idempotencyKey}`).digest("hex")
+        : undefined;
+      const idempotencySessionKey = idempotencyDigest
+        ? `delegation-idempotency:${idempotencyDigest}`
+        : undefined;
+
+      // A completed first call is the durable idempotency receipt. Resolve it
+      // before re-validating mutable request context: the caller-chosen key owns
+      // the result, and a retry must return that original pair without effects.
+      if (idempotencySessionKey) {
+        const replay = getSessionBySessionKey(idempotencySessionKey);
+        if (replay) {
+          if (!replay.workItemId) {
+            return json(res, { error: "delegation idempotency receipt exists without a linked Todo", sessionId: replay.id }, 409);
+          }
+          const replayItem = getWorkItem(replay.workItemId);
+          return json(res, {
+            workItemId: replay.workItemId,
+            sessionId: replay.id,
+            employee: replay.employee ?? null,
+            engine: replay.engine,
+            model: replay.model ?? null,
+            effortLevel: replay.effortLevel ?? null,
+            status: replay.status,
+            title: replayItem?.title ?? replay.title ?? null,
+            replayed: true,
+          });
+        }
+      }
+
       // Validation — ALL of it before the mint, so a 400 never litters the
       // work-item table with garbage intent records.
       const task = typeof body.task === "string" && body.task.trim() ? (body.task as string) : undefined;
@@ -3506,6 +3547,16 @@ export async function handleApiRequest(
       const engineParam = typeof body.engine === "string" && body.engine.trim() ? (body.engine as string).trim() : undefined;
       if (!employeeName && !engineParam) {
         return badRequest(res, "employee or engine is required — delegate to a named employee (GET /api/org lists them) or to a bare engine");
+      }
+      let attachments: string[] | undefined;
+      if (body.attachments !== undefined) {
+        if (!Array.isArray(body.attachments) || body.attachments.length > 20) {
+          return badRequest(res, "attachments must be an array of at most 20 managed file IDs");
+        }
+        if (body.attachments.some((entry: unknown) => typeof entry !== "string" || !entry.trim())) {
+          return badRequest(res, "attachments must contain only non-empty managed file IDs");
+        }
+        attachments = body.attachments.map((entry: string) => entry.trim());
       }
       const config = context.getConfig();
       let delegateEmployee: import("../shared/types.js").Employee | undefined;
@@ -3552,28 +3603,64 @@ export async function handleApiRequest(
         typeof body.title === "string" && body.title.trim() ? (body.title as string).trim() : task.split("\n")[0].trim()
       ).slice(0, 200);
 
-      // 1. MINT — before any spawn step, including the engine lookup. The
-      //    sourceRef mirrors the cron bridge's shape (`delegate:<caller>:<nonce>`);
-      //    the nonce makes every delegation a distinct intent (there is no
-      //    natural idempotency key for "delegate this again"). Provenance is
-      //    first-class `delegation` since the GRS-021a vocabulary rebuild
-      //    (pre-rebuild rows carried source 'session' + this ref shape and were
-      //    remapped by the migration).
-      const callerRef = delegationCaller.kind === "session" ? delegationCaller.callerId : "operator";
-      let workItem;
-      try {
-        workItem = createWorkItem({
-          title,
-          body: task,
-          status: "backlog",
-          source: "delegation",
-          sourceRef: `delegate:${callerRef}:${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
-          assignee: employeeName ?? null,
-          department: delegateEmployee?.department ?? null,
-        });
-      } catch (mintErr) {
-        logger.warn(`Delegation work-item mint failed: ${mintErr instanceof Error ? mintErr.message : mintErr}`);
-        return json(res, { error: "delegation failed before any work started — the work item could not be minted; nothing was spawned" }, 500);
+      const requestedWorkItemId = typeof body.workItemId === "string" && body.workItemId.trim()
+        ? body.workItemId.trim()
+        : undefined;
+      if (body.workItemId !== undefined && !requestedWorkItemId) {
+        return badRequest(res, "workItemId must be a non-empty string when provided");
+      }
+
+      // 1. RESOLVE/MINT — workItemId preserves the canonical Todo; otherwise
+      //    mint as before. An idempotency key makes the minted sourceRef stable,
+      //    so a retry after a pre-session failure reuses the same intent.
+      let workItem: WorkItem;
+      if (requestedWorkItemId) {
+        const existingWorkItem = getWorkItem(requestedWorkItemId);
+        if (!existingWorkItem) return json(res, { error: `Todo ${requestedWorkItemId} not found` }, 404);
+        workItem = existingWorkItem;
+        if (STICKY_STATUSES.has(workItem.status)) {
+          return json(res, { error: `Todo ${requestedWorkItemId} is ${workItem.status} and cannot accept a new delegation` }, 409);
+        }
+        if (delegationCaller.kind === "session") {
+          const callerSession = getSession(delegationCaller.callerId)!;
+          const callerCreated = workItem.sourceRef?.startsWith(`session:${delegationCaller.callerId}:`)
+            || workItem.sourceRef?.startsWith(`delegate:${delegationCaller.callerId}:`);
+          const authorized = callerCreated
+            ? { ok: true as const }
+            : authorizeWorkItemOwnerManagerOrRoot(
+                { kind: "session", callerId: delegationCaller.callerId, session: callerSession },
+                workItem,
+                "delegate",
+              );
+          if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
+        }
+        const liveAttempt = listSessionsByWorkItem(workItem.id).find((attempt) =>
+          attempt.status === "running" || attempt.status === "waiting",
+        );
+        if (liveAttempt) {
+          return json(res, {
+            error: `Todo ${workItem.id} already has live execution session ${liveAttempt.id}`,
+            workItemId: workItem.id,
+            sessionId: liveAttempt.id,
+          }, 409);
+        }
+      } else {
+        try {
+          workItem = createWorkItem({
+            title,
+            body: task,
+            status: "backlog",
+            source: "delegation",
+            sourceRef: idempotencyDigest
+              ? `delegate:${callerRef}:idempotency:${idempotencyDigest}`
+              : `delegate:${callerRef}:${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+            assignee: employeeName ?? null,
+            department: delegateEmployee?.department ?? null,
+          });
+        } catch (mintErr) {
+          logger.warn(`Delegation work-item mint failed: ${mintErr instanceof Error ? mintErr.message : mintErr}`);
+          return json(res, { error: "delegation failed before any work started — the work item could not be minted; nothing was spawned" }, 500);
+        }
       }
 
       // 2. SPAWN — the irreversible step. A failure here PRESERVES the minted
@@ -3586,23 +3673,55 @@ export async function handleApiRequest(
           hint: "the work item was minted before the spawn and is preserved as backlog — the delegation intent is durable, not lost",
         }, 502);
       }
-      const sessionKey = `delegation:${workItem.id}`;
-      const session = createSession({
-        engine: engineName,
-        source: "web",
-        sourceRef: sessionKey,
-        connector: "web",
-        sessionKey,
-        replyContext: { source: "web" },
-        employee: employeeName ?? null,
-        parentSessionId,
-        model: selection.model,
-        effortLevel: selection.effortLevel,
-        prompt: task,
-        title,
-        portalName: config.portal?.portalName,
-      });
-      insertMessage(session.id, "user", task);
+      if (requestedWorkItemId && employeeName) {
+        try {
+          workItem = assignWorkItem(workItem.id, employeeName, delegateEmployee?.department ?? null, workItemActor(
+            delegationCaller.kind === "session"
+              ? { kind: "session", callerId: delegationCaller.callerId, session: getSession(delegationCaller.callerId)! }
+              : { kind: "operator" },
+          )) ?? workItem;
+        } catch (assignmentErr) {
+          return json(res, { error: assignmentErr instanceof Error ? assignmentErr.message : String(assignmentErr) }, 409);
+        }
+      }
+      const sessionKey = idempotencySessionKey ?? `delegation:${workItem.id}`;
+      let session: Session;
+      try {
+        session = createSession({
+          engine: engineName,
+          source: "web",
+          sourceRef: sessionKey,
+          connector: "web",
+          sessionKey,
+          replyContext: { source: "web" },
+          employee: employeeName ?? null,
+          parentSessionId,
+          model: selection.model,
+          effortLevel: selection.effortLevel,
+          prompt: task,
+          title,
+          portalName: config.portal?.portalName,
+        });
+      } catch (spawnErr) {
+        const replay = idempotencySessionKey ? getSessionBySessionKey(idempotencySessionKey) : undefined;
+        if (replay?.workItemId) {
+          return json(res, {
+            workItemId: replay.workItemId,
+            sessionId: replay.id,
+            employee: replay.employee ?? null,
+            engine: replay.engine,
+            model: replay.model ?? null,
+            effortLevel: replay.effortLevel ?? null,
+            status: replay.status,
+            title: getWorkItem(replay.workItemId)?.title ?? replay.title ?? null,
+            replayed: true,
+          });
+        }
+        throw spawnErr;
+      }
+      rehomeAttachmentsToSession(attachments, session.id);
+      const delegationMedia = fileIdsToMedia(attachments);
+      insertMessage(session.id, "user", task, delegationMedia.length > 0 ? delegationMedia : undefined);
 
       // 3. LINK — BEFORE any dispatch step (017d codex review finding 1). The
       //    whole point of the in-process transaction is that the work item ↔
@@ -3641,7 +3760,11 @@ export async function handleApiRequest(
       const delegationQueueKey = session.sessionKey || session.sourceRef || session.id;
       const delegationQueueItemId = enqueueQueueItem(session.id, delegationQueueKey, task);
       context.emit("queue:updated", { sessionId: session.id, sessionKey: delegationQueueKey });
-      dispatchWebSessionRun(session, task, engine, config, context, { queueItemId: delegationQueueItemId });
+      const attachmentPaths = resolveAttachmentPaths(attachments);
+      dispatchWebSessionRun(session, task, engine, config, context, {
+        queueItemId: delegationQueueItemId,
+        attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined,
+      });
       maybeEmitTalkGraph(session.id, "added", { getSession, emit: context.emit });
 
       return json(res, {

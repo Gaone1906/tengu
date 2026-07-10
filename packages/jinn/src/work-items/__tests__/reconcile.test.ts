@@ -70,6 +70,11 @@ describe("deriveWorkItemStatus — pure truth table (GRS-021a elevated vocabular
     expect(D()("blocked", ["error", "waiting"])).toBe("executing");
   });
 
+  it("does not regress a reviewed Todo to executing because a linked session is active", () => {
+    expect(D()("in_review", ["running"], "delegation")).toBe("in_review");
+    expect(D()("in_review", ["waiting", "idle"], "delegation")).toBe("in_review");
+  });
+
   it("derives IN_REVIEW when the NEWEST attempt settled idle (the vision's settle ≠ done)", () => {
     // Arrays are newest-first: idle is the latest attempt, the older error is superseded.
     expect(D()("backlog", ["idle"])).toBe("in_review");
@@ -134,6 +139,21 @@ describe("reconcileWorkItem — integration against real store + registry", () =
     // A second pass is a no-op: verify-tier items wait for their reviewer.
     expect(reconcile.reconcileWorkItem(wi.id)?.changed).toBe(false);
     expect(store.getWorkItem(wi.id)?.status).toBe("in_review");
+  });
+
+  it("keeps a delegated in_review Todo in review while its linked callback session is running", () => {
+    const wi = store.createWorkItem({
+      title: "review callback",
+      status: "in_review",
+      source: "delegation",
+      sourceRef: "delegate:reviewer:callback",
+    });
+    linkedSession("s-review-callback", wi.id, "running", "2026-07-01T01:30:00.000Z");
+
+    const result = reconcile.reconcileWorkItem(wi.id);
+    expect(result?.changed).toBe(false);
+    expect(result?.item.status).toBe("in_review");
+    expect(store.listWorkItemEvents(wi.id).filter((event) => event.toStatus === "executing")).toHaveLength(0);
   });
 
   it("TRUST-tier settle auto-closes: executing → in_review → done in ONE pass, both event-audited", () => {
