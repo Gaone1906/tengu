@@ -146,6 +146,7 @@ Employees can declare services they provide via `provides`. Other employees disc
 When you receive a task, **always assess whether it requires multiple employees** before starting. Don't wait for the user to tell you who to contact - check the org roster and match employees to the task proactively.
 
 - **Analyze first**: Break the task into sub-tasks and identify which employee(s) are needed
+- **Select by fit**: Pick the employee whose persona matches the task. One employee can run multiple sessions in parallel; reuse the relevant employee instead of spreading work to unrelated people. If no employee fits, propose a hire.
 - **Parallel when independent**: Spawn multiple child sessions simultaneously when sub-tasks don't depend on each other
 - **Serialize when dependent**: If employee A's output feeds into employee B's task, wait for A before spawning B
 - **Cross-reference**: Compare results from multiple employees before responding - look for contradictions, gaps, and insights that connect

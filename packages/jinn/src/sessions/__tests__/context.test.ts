@@ -180,6 +180,7 @@ describe("buildContext — Jinn MCP usage directive", () => {
     expect(out).toContain("Todos/work-items are the source of truth for task tracking");
     expect(out).toContain("Use Workflows for multi-step or scheduled orchestration");
     expect(out).toContain("Use company-reference reads before asking the operator");
+    expect(out).toContain("role/persona matches the task");
     expect(out).not.toContain("## Company Identity");
   });
 
@@ -243,6 +244,7 @@ describe("buildContext — Jinn MCP usage directive", () => {
     expect(out).toContain("Todos are your live work ledger");
     expect(out).toContain("Workflows are reusable automations (the HOW)");
     expect(out).toContain("Todos and Workflows are SEPARATE");
+    expect(out).toContain("One employee may run multiple child sessions");
     expect(out).toContain("Questions and approvals route to your manager/COO by default");
     expect(out).toContain("aCEO/operator is the exception");
     expect(out).not.toContain("## COO Company Anchor");

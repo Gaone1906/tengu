@@ -383,6 +383,7 @@ function buildCompanyIdentityBlock(
     `You are ${employee.displayName} (\`${employee.name}\`), a ${employee.rank} in ${employee.department}, level ${level} of the company.`,
     `You report to ${manager}; direct reports: ${directReports}.`,
     mcpLine,
+    "Pick colleagues by role/persona fit. One employee may run multiple child sessions in parallel; reuse the fit instead of spreading to unrelated employees. If none fits, propose a hire.",
     "Todos are your live work ledger - find and update your Todo; create one only for durable work you own.",
     "Workflows are reusable automations (the HOW) - use or propose one when a job is repeatable/scheduled/multi-step; Todos and Workflows are SEPARATE.",
     "You have autonomy in your lane; end your turn when waiting on another employee.",
@@ -521,6 +522,7 @@ function buildCooCompanyAnchor(engine?: string, jinnMcpAttached = false): string
   return [
     "## COO Company Anchor",
     mcpLine,
+    "- Pick the employee whose role/persona matches the task. One employee may run multiple child sessions in parallel; reuse the fit instead of spreading to unrelated employees. If none fits, propose a hire.",
     "- Todos/work-items are the source of truth for task tracking: list/search/read/create/update/assign them through the MCP.",
     "- Use Workflows for multi-step or scheduled orchestration.",
     "- Use company-reference reads before asking the operator: sessions/search, knowledge, cost, and cron.",

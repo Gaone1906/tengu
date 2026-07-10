@@ -36,6 +36,10 @@ match while keeping any user-specific customizations.
 - **Employees vs Sub-agents** — employees (via `spawn_session` / `delegate_task`)
   are org roles for cross-role, durable, reviewed work; sub-agents are the
   engine's ephemeral in-session parallel workers for your own legwork.
+- **Selection/reuse doctrine** — apply the same "Select by fit" rule to both
+  installed `CLAUDE.md` and `AGENTS.md`: pick by role/persona fit, reuse the
+  relevant employee for parallel child sessions instead of spreading to
+  unrelated employees, and propose a hire if none fits.
 - **Todos** — the company's task ledger. Delegations, cron fires, and workflow
   runs enter it automatically; the COO creates one Todo per sub-task when
   decomposing a goal. Employees keep their own Todo current (`in_review` when

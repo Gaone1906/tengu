@@ -80,6 +80,7 @@ describe("template company doctrine", () => {
     expect(template).toContain("Employees =");
     expect(template).toContain("Sub-agents =");
     expect(template).toContain("different role -> employee; more hands for your own task -> sub-agents");
+    expect(template).toContain("Select by fit");
     expect(template).not.toContain("Agent teams for multi-phase tasks");
 
     expect(template).toContain("PLAN -> REFINE -> IMPLEMENT -> REVIEW -> VERIFY");
