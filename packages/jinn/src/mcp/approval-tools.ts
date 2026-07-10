@@ -37,6 +37,30 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
 }
 
 export function buildApprovalTools(): JinnMcpTool[] {
+  const request: JinnMcpTool = {
+    name: "request_work_item_approval",
+    description: "Request an idempotent routed approval on a Todo you own or execute.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        request: { type: "string" },
+        target: { type: "string" },
+      },
+      required: ["id", "request"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      const id = requireString(args, "id");
+      const payload: Record<string, unknown> = { request: requireString(args, "request") };
+      const target = optionalString(args, "target");
+      if (target !== undefined) payload.target = target;
+      const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/approval/request`, payload);
+      if (status >= 400) throw gatewayFailure(`requesting approval for work item "${id}"`, status, body);
+      return body;
+    },
+  };
+
   const decide: JinnMcpTool = {
     name: "decide_work_item_approval",
     description: "Approve or reject a routed pending Todo approval.",
@@ -88,5 +112,5 @@ export function buildApprovalTools(): JinnMcpTool[] {
     },
   };
 
-  return [decide, escalate];
+  return [request, decide, escalate];
 }

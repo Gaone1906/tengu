@@ -2961,6 +2961,48 @@ export async function handleApiRequest(
       return json(res, linked.map((s) => serializeSession(s, context)));
     }
 
+    // POST /api/work-items/:id/approval/request — agent-legal request surface.
+    // Persistence/default routing stays in requestApproval; this route only
+    // validates identity, Todo ownership/execution authority, and explicit targets.
+    params = matchRoute("/api/work-items/:id/approval/request", pathname);
+    if (method === "POST" && params) {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      const request = typeof body.request === "string" ? body.request.trim() : "";
+      if (!request) return badRequest(res, "request is required");
+      if (body.target !== undefined && (typeof body.target !== "string" || !body.target.trim())) {
+        return badRequest(res, "target must be a non-empty string when provided");
+      }
+      const target = typeof body.target === "string" ? body.target.trim() : undefined;
+      const item = getWorkItem(params.id);
+      if (!item) return notFound(res);
+      const linkedOwner = caller.kind === "session" && ownsWorkItem(caller.session, item, listSessionsByWorkItem(item.id));
+      const authorized = linkedOwner
+        ? { ok: true as const }
+        : authorizeWorkItemOwnerManagerOrRoot(caller, item, "request approval on");
+      if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
+      if (target) {
+        const roster = scanOrg();
+        const root = resolveRootApprovalTarget();
+        if (!roster.has(target) && root?.name !== target) {
+          return badRequest(res, `approval target "${target}" is not an org employee or the configured root approval target`);
+        }
+      }
+      return json(res, {
+        workItem: requestApproval(params.id, {
+          request,
+          ...(target ? { target } : {}),
+          actor: workItemActor(caller),
+        }),
+      });
+    }
+
     // POST /api/work-items/:id/approval — approval DECISION surface.
     // COO-default: routed manager or root/COO can decide through the same
     // identity/capability seam MCP uses; operator/aCEO HTTP can decide only after

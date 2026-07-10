@@ -31,6 +31,7 @@ const EXPECTED_TOOL_NAMES = [
   "read_file",
   "read_knowledge",
   "read_session",
+  "request_work_item_approval",
   "retire_workflow",
   "run_workflow_by_name",
   "search_knowledge",
@@ -76,6 +77,7 @@ const EXPECTED_REQUIRED = {
   read_file: ["path"],
   read_knowledge: ["path"],
   read_session: ["sessionId"],
+  request_work_item_approval: ["id", "request"],
   retire_workflow: ["workflowId"],
   run_workflow_by_name: ["name"],
   search_knowledge: ["query"],
@@ -133,7 +135,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(42);
+    expect(tools).toHaveLength(43);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);

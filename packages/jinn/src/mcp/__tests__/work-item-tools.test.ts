@@ -66,12 +66,13 @@ describe("work-item tools — registry + schemas", () => {
     const names = buildTools().map((t) => t.name).sort();
     expect(names).toContain("create_work_item");
     expect(names).toContain("assign_work_item");
+    expect(names).toContain("request_work_item_approval");
     expect(names).toContain("decide_work_item_approval");
     expect(names).toContain("escalate_work_item_approval");
     expect(names).toContain("archive_work_item");
     expect(names).toContain("delete_trigger");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(42);
+    expect(names).toHaveLength(43);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {
@@ -184,19 +185,23 @@ describe("work-item tools — unit (stub gateway)", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("COO approval tools post to the separate approval decision/escalation routes", async () => {
+  it("approval tools post to the separate request/decision/escalation routes", async () => {
     const names = new Set(buildTools().map((t) => t.name));
+    expect(names.has("request_work_item_approval")).toBe(true);
     expect(names.has("decide_work_item_approval")).toBe(true);
     expect(names.has("escalate_work_item_approval")).toBe(true);
 
+    const requestTool = buildTools().find((t) => t.name === "request_work_item_approval")!;
     const decideTool = buildTools().find((t) => t.name === "decide_work_item_approval")!;
     const escalateTool = buildTools().find((t) => t.name === "escalate_work_item_approval")!;
     const { calls, ctx } = stub((call) => ({ status: 200, body: { ok: true, route: new URL(call.url).pathname } }), "sess-coo");
 
+    await requestTool.handler({ id: "wi_approval", request: "Approve release", target: "platform-manager" }, ctx);
     await decideTool.handler({ id: "wi_approval", decision: "approve", note: "ship" }, ctx);
     await escalateTool.handler({ id: "wi_approval", reason: "operator needed" }, ctx);
 
     expect(calls.map((c) => [c.method, new URL(c.url).pathname, c.body])).toEqual([
+      ["POST", "/api/work-items/wi_approval/approval/request", { request: "Approve release", target: "platform-manager" }],
       ["POST", "/api/work-items/wi_approval/approval", { decision: "approve", note: "ship" }],
       ["POST", "/api/work-items/wi_approval/approval/escalate", { reason: "operator needed" }],
     ]);
@@ -515,6 +520,79 @@ describe("work-item tools — integration against the real API + store", () => {
       workItem: { status: string };
     };
     expect(blocked.workItem.status).toBe("blocked");
+  });
+
+  it("requests a default-routed approval idempotently", async () => {
+    const owner = registry.createSession({ engine: "codex", source: "web", sourceRef: "approval-owner", title: "approval owner", employee: "platform-dev" });
+    const requestTool = buildTools().find((t) => t.name === "request_work_item_approval")!;
+    const item = store.createWorkItem({ title: "Request routed approval", status: "assigned", assignee: "platform-dev", source: "session" });
+    const first = (await requestTool.handler({ id: item.id, request: "Approve release" }, ctxFor(owner.id))) as {
+      workItem: { approvalState: string; approvalTarget: string };
+    };
+    const second = (await requestTool.handler({ id: item.id, request: "Approve release" }, ctxFor(owner.id))) as typeof first;
+
+    expect(second).toEqual(first);
+    expect(first.workItem).toMatchObject({ approvalState: "pending", approvalTarget: "platform-manager" });
+    expect(store.listWorkItemEvents(item.id).filter((event) => event.kind === "approval_requested")).toHaveLength(1);
+  });
+
+  it("permits linked executors and accepts a valid explicit approval target", async () => {
+    const owner = registry.createSession({ engine: "codex", source: "web", sourceRef: "approval-explicit-owner", title: "approval explicit owner", employee: "platform-dev" });
+    const linkedExecutor = registry.createSession({ engine: "codex", source: "web", sourceRef: "approval-executor", title: "approval executor" });
+    const requestTool = buildTools().find((t) => t.name === "request_work_item_approval")!;
+
+    const explicitItem = store.createWorkItem({ title: "Explicit approval target", status: "assigned", assignee: "platform-dev", source: "session" });
+    const explicit = (await requestTool.handler({ id: explicitItem.id, request: "Root review", target: "coo" }, ctxFor(owner.id))) as {
+      workItem: { approvalState: string; approvalTarget: string };
+    };
+    expect(explicit.workItem).toMatchObject({ approvalState: "pending", approvalTarget: "coo" });
+
+    const linkedItem = store.createWorkItem({ title: "Linked executor request", status: "executing", source: "delegation" });
+    store.linkSession(linkedItem.id, linkedExecutor.id);
+    const linked = (await requestTool.handler({ id: linkedItem.id, request: "Review linked work" }, ctxFor(linkedExecutor.id))) as {
+      workItem: { approvalState: string; approvalTarget: string };
+    };
+    expect(linked.workItem).toMatchObject({ approvalState: "pending", approvalTarget: "coo" });
+  });
+
+  it("rejects missing, foreign, and invalid-target approval requests without writing events", async () => {
+    const owner = registry.createSession({ engine: "codex", source: "web", sourceRef: "approval-reject-owner", title: "approval reject owner", employee: "platform-dev" });
+    const outsider = registry.createSession({ engine: "codex", source: "web", sourceRef: "approval-outsider", title: "approval outsider", employee: "outsider" });
+    const requestTool = buildTools().find((t) => t.name === "request_work_item_approval")!;
+    const item = store.createWorkItem({ title: "Reject unsafe approval requests", status: "assigned", assignee: "platform-dev", source: "session" });
+
+    await expect(requestTool.handler({ id: item.id, request: "Steal review" }, ctxFor(outsider.id))).rejects.toThrow(
+      /403.*does not own|403.*cannot request approval/i,
+    );
+    await expect(requestTool.handler({ id: "wi_missing", request: "Missing" }, ctxFor(owner.id))).rejects.toThrow(/404.*not found/i);
+    await expect(requestTool.handler({ id: item.id, request: "Bad route", target: "unknown-reviewer" }, ctxFor(owner.id))).rejects.toThrow(
+      /400.*not an org employee|400.*approval target/i,
+    );
+    expect(store.listWorkItemEvents(item.id).filter((event) => event.kind === "approval_requested")).toHaveLength(0);
+    expect(store.getWorkItem(item.id)?.approvalState).toBeNull();
+  });
+
+  it("keeps requested approvals compatible with decision and escalation", async () => {
+    const owner = registry.createSession({ engine: "codex", source: "web", sourceRef: "approval-compat-owner", title: "approval compatibility owner", employee: "platform-dev" });
+    const manager = registry.createSession({ engine: "codex", source: "web", sourceRef: "approval-manager", title: "approval manager", employee: "platform-manager" });
+    const requestTool = buildTools().find((t) => t.name === "request_work_item_approval")!;
+    const decideTool = buildTools().find((t) => t.name === "decide_work_item_approval")!;
+    const escalateTool = buildTools().find((t) => t.name === "escalate_work_item_approval")!;
+    const item = store.createWorkItem({ title: "Decide requested approval", status: "assigned", assignee: "platform-dev", source: "session" });
+
+    await requestTool.handler({ id: item.id, request: "Approve release" }, ctxFor(owner.id));
+    const decided = (await decideTool.handler({ id: item.id, decision: "approve", note: "ship" }, ctxFor(manager.id))) as {
+      workItem: { approvalState: string };
+    };
+    expect(decided.workItem.approvalState).toBe("approved");
+
+    const escalationItem = store.createWorkItem({ title: "Escalate requested approval", status: "assigned", assignee: "platform-dev", source: "session" });
+    await requestTool.handler({ id: escalationItem.id, request: "Escalate release" }, ctxFor(owner.id));
+    const escalated = (await escalateTool.handler({ id: escalationItem.id, reason: "operator needed" }, ctxFor(manager.id))) as {
+      workItem: { approvalState: string; approvalEscalatedAt: string | null };
+    };
+    expect(escalated.workItem).toMatchObject({ approvalState: "pending" });
+    expect(escalated.workItem.approvalEscalatedAt).toBeTruthy();
   });
 
   it("refuses unrelated archive, while owner/root archive resolves pending approval without deleting evidence", async () => {
