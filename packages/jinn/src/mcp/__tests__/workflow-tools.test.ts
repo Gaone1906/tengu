@@ -675,6 +675,14 @@ function apiFetch(): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
+function writePinnablePollScript(name: string, output = "{\"fire\":false}"): string {
+  if (output.includes("'")) throw new Error("poll test output cannot contain a single quote");
+  const file = path.join(evidenceRoot, `${name}.sh`);
+  fs.writeFileSync(file, `#!/bin/sh\nprintf '%s' '${output}'\n`, { mode: 0o700 });
+  fs.chmodSync(file, 0o700);
+  return file;
+}
+
 beforeAll(async () => {
   api = await import("../../gateway/api.js");
   const registry = await import("../../sessions/registry.js");
@@ -1046,5 +1054,168 @@ describe("workflow tools — integration against the real routes/stores", () => 
     expect(listed.triggers).toEqual([
       expect.objectContaining({ name: "reserved-hook", event: "lead.created", sopOwnerWorkflowId: "existing-owner" }),
     ]);
+  });
+
+  it("does not lose a standalone trigger acknowledged during a failing SOP update", async () => {
+    const ctx: JinnMcpContext = { gatewayUrl: "http://gateway.test", fetchFn: apiFetch(), ...cooMcpIdentity };
+    const triggerStore = await import("../../workflows/custom-triggers.js");
+    const pollExecutions = await import("../../workflows/poll-executions.js");
+    const steps = [{ id: "handle", engine: "codex", instruction: "Handle the event." }];
+
+    await tool("create_workflow").handler({
+      sop: {
+        id: "concurrent-owner",
+        title: "Concurrent owner",
+        wakeUp: { kind: "event", name: "concurrent-old-hook", event: "lead.created" },
+        steps,
+      },
+    }, ctx);
+    await tool("create_workflow").handler({
+      sop: { id: "concurrent-target", title: "Concurrent target", wakeUp: { kind: "manual" }, steps },
+    }, ctx);
+
+    const original = triggerStore.getWorkflowTriggerBinding(evidenceRoot, "concurrent-old-hook");
+    expect(original).not.toBeNull();
+    let releaseSettled!: () => void;
+    const settled = new Promise<void>((resolve) => { releaseSettled = resolve; });
+    const controller = new AbortController();
+    const unregister = pollExecutions.registerPollExecution({
+      root: evidenceRoot,
+      name: original!.name,
+      bindingRevision: triggerStore.workflowTriggerBindingRevision(original!),
+      controller,
+      settled,
+    });
+    const deletionPaused = new Promise<{ kind: "deletion-paused" }>((resolve) => {
+      controller.signal.addEventListener("abort", () => resolve({ kind: "deletion-paused" }), { once: true });
+    });
+
+    try {
+      const failingUpdate = tool("update_workflow").handler({
+        workflowId: "concurrent-owner",
+        sop: {
+          id: "concurrent-owner",
+          title: "Must roll back",
+          wakeUp: {
+            kind: "poll",
+            name: "invalid-replacement",
+            event: "lead.changed",
+            command: path.join(evidenceRoot, "missing-poll-script"),
+            intervalSeconds: 60,
+          },
+          steps,
+        },
+      }, ctx);
+      const failingOutcome = failingUpdate.then(
+        () => ({ kind: "unexpected-success" as const }),
+        (error: unknown) => ({ kind: "failed" as const, error }),
+      );
+      const mutationPhase = await Promise.race([failingOutcome, deletionPaused]);
+      const createRequest = apiFetch()("http://gateway.test/api/workflow-triggers", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...cooHeaders },
+        body: JSON.stringify({
+          kind: "webhook",
+          name: "concurrent-acknowledged-hook",
+          event: "lead.concurrent",
+          targetWorkflowId: "concurrent-target",
+        }),
+      });
+      const created = await createRequest;
+      expect(created.status).toBe(201);
+      releaseSettled();
+      const failure = mutationPhase.kind === "failed" ? mutationPhase : await failingOutcome;
+      expect(failure.kind).toBe("failed");
+      if (failure.kind === "failed") expect(String(failure.error)).toMatch(/fully pinnable|workflow trigger operation failed/i);
+
+      const acknowledged = triggerStore.getWorkflowTriggerBinding(evidenceRoot, "concurrent-acknowledged-hook");
+      expect(acknowledged).toMatchObject({
+        name: "concurrent-acknowledged-hook",
+        event: "lead.concurrent",
+        targetWorkflowId: "concurrent-target",
+      });
+    } finally {
+      releaseSettled();
+      unregister();
+    }
+  });
+
+  it("a failed poll replacement keeps the original poll trigger fully usable", async () => {
+    const ctx: JinnMcpContext = { gatewayUrl: "http://gateway.test", fetchFn: apiFetch(), ...cooMcpIdentity };
+    const triggerStore = await import("../../workflows/custom-triggers.js");
+    const pollExecutions = await import("../../workflows/poll-executions.js");
+    const approvals = await import("../../work-items/approvals.js");
+    const command = writePinnablePollScript("atomic-original-poll");
+    const steps = [{ id: "handle", engine: "codex", instruction: "Handle the event." }];
+
+    await tool("create_workflow").handler({
+      sop: {
+        id: "poll-rollback-owner",
+        title: "Poll rollback owner",
+        wakeUp: {
+          kind: "poll",
+          name: "original-poll-hook",
+          event: "feed.changed",
+          command,
+          intervalSeconds: 60,
+        },
+        steps,
+      },
+    }, ctx);
+    const original = triggerStore.getWorkflowTriggerBinding(evidenceRoot, "original-poll-hook");
+    expect(original?.kind).toBe("poll");
+    if (!original || original.kind !== "poll") throw new Error("expected original poll binding");
+    expect(original.approvalWorkItemId).toBeTruthy();
+    const approval = await approvals.decideWorkItemApproval({
+      id: original.approvalWorkItemId!,
+      decision: "approve",
+      decidedBy: "coo",
+    }, {});
+    expect(approval.ok).toBe(true);
+    expect(triggerStore.publicWorkflowTriggerBinding(original).activation).toBe("active");
+    const stagedPaths = original.activationContract?.executableArtifacts
+      .filter((artifact) => artifact.role === "executable")
+      .map((artifact) => artifact.path) ?? [];
+    expect(stagedPaths).not.toHaveLength(0);
+    expect(stagedPaths.every((artifactPath) => fs.existsSync(artifactPath))).toBe(true);
+
+    const controller = new AbortController();
+    const unregister = pollExecutions.registerPollExecution({
+      root: evidenceRoot,
+      name: original.name,
+      bindingRevision: triggerStore.workflowTriggerBindingRevision(original),
+      controller,
+      settled: Promise.resolve(),
+    });
+    try {
+      await expect(tool("update_workflow").handler({
+        workflowId: "poll-rollback-owner",
+        sop: {
+          id: "poll-rollback-owner",
+          title: "Must roll back",
+          wakeUp: {
+            kind: "poll",
+            name: "replacement-poll-hook",
+            event: "feed.changed",
+            command: path.join(evidenceRoot, "missing-replacement-poll"),
+            intervalSeconds: 60,
+          },
+          steps,
+        },
+      }, ctx)).rejects.toThrow(/fully pinnable|workflow trigger operation failed/i);
+
+      const restored = triggerStore.getWorkflowTriggerBinding(evidenceRoot, original.name);
+      expect(restored).toEqual(original);
+      expect(restored?.kind).toBe("poll");
+      if (!restored || restored.kind !== "poll") throw new Error("expected restored poll binding");
+      expect(triggerStore.pollActivationContractMatches(restored)).toBe(true);
+      expect(triggerStore.publicWorkflowTriggerBinding(restored).activation).toBe("active");
+      expect(stagedPaths.every((artifactPath) => fs.existsSync(artifactPath))).toBe(true);
+      expect(controller.signal.aborted).toBe(false);
+    } finally {
+      unregister();
+      await triggerStore.deleteWorkflowTriggerBinding(evidenceRoot, original.name);
+      fs.rmSync(command, { force: true });
+    }
   });
 });

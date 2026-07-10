@@ -305,8 +305,17 @@ function triggerStoreFile(root: string): string {
   return path.join(root, TRIGGER_DIR, TRIGGER_FILE);
 }
 
-/** Exact durable state used by the gateway's definition+trigger transaction. */
-export type WorkflowTriggerStoreStateSnapshot = string | null;
+/** Trigger bindings captured before a composite mutation. Rollback restores only touched names. */
+export type WorkflowTriggerBindingsStateSnapshot = WorkflowTriggerBinding[];
+
+export interface WorkflowTriggerMutationEffects {
+  supersededPollRevisions: Array<{ name: string; bindingRevision: string }>;
+}
+
+export interface WorkflowTriggerMutationOptions {
+  effects?: WorkflowTriggerMutationEffects;
+  expectedRevision?: string;
+}
 
 function assertSafeName(name: unknown, label: string): asserts name is string {
   if (typeof name !== 'string' || !name.trim()) {
@@ -496,26 +505,6 @@ function writeAtomic(file: string, contents: string): void {
   fs.renameSync(tmp, file);
 }
 
-export function captureWorkflowTriggerStoreState(root: string): WorkflowTriggerStoreStateSnapshot {
-  const file = triggerStoreFile(root);
-  try {
-    return fs.readFileSync(file, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw err;
-  }
-}
-
-/** Restore bytes verbatim, including webhook hashes and binding revisions. */
-export function restoreWorkflowTriggerStoreState(root: string, snapshot: WorkflowTriggerStoreStateSnapshot): void {
-  const file = triggerStoreFile(root);
-  if (snapshot === null) {
-    fs.rmSync(file, { force: true });
-    return;
-  }
-  writeAtomic(file, snapshot);
-}
-
 function readStore(root: string): StoredWorkflowTriggerBindings {
   const file = triggerStoreFile(root);
   let raw: string;
@@ -541,6 +530,60 @@ function readStore(root: string): StoredWorkflowTriggerBindings {
 function saveStore(root: string, store: StoredWorkflowTriggerBindings): void {
   const sorted = [...store.triggers].sort((a, b) => a.name.localeCompare(b.name));
   writeAtomic(triggerStoreFile(root), JSON.stringify({ schemaVersion: TRIGGER_STORE_SCHEMA_VERSION, triggers: sorted }, null, 2));
+}
+
+export function captureWorkflowTriggerBindingsState(root: string): WorkflowTriggerBindingsStateSnapshot {
+  return readStore(root).triggers;
+}
+
+/** Restore only names this mutation actually wrote; unrelated concurrent writes survive. */
+export function restoreWorkflowTriggerBindingsState(
+  root: string,
+  snapshot: WorkflowTriggerBindingsStateSnapshot,
+  touchedNames: Iterable<string>,
+): void {
+  const names = new Set(touchedNames);
+  if (names.size === 0) return;
+  const store = readStore(root);
+  const restored = snapshot.filter((binding) => names.has(binding.name));
+  saveStore(root, {
+    ...store,
+    triggers: [...store.triggers.filter((binding) => !names.has(binding.name)), ...restored],
+  });
+}
+
+export function createWorkflowTriggerMutationEffects(): WorkflowTriggerMutationEffects {
+  return { supersededPollRevisions: [] };
+}
+
+function recordSupersededPollBinding(
+  effects: WorkflowTriggerMutationEffects | undefined,
+  binding: WorkflowTriggerBinding,
+): void {
+  if (!effects || binding.kind !== 'poll') return;
+  effects.supersededPollRevisions.push({
+    name: binding.name,
+    bindingRevision: workflowTriggerBindingRevision(binding),
+  });
+}
+
+export async function commitWorkflowTriggerMutationEffects(
+  root: string,
+  effects: WorkflowTriggerMutationEffects,
+): Promise<void> {
+  const seen = new Set<string>();
+  for (const superseded of effects.supersededPollRevisions) {
+    const key = `${superseded.name}\0${superseded.bindingRevision}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    await abortPollExecutions(root, superseded.name, superseded.bindingRevision);
+  }
+  cleanupUnusedPollExecutableArtifacts(readStore(root).triggers);
+}
+
+/** Rollback never aborts restored executions; it only removes newly-staged, unreferenced bytes. */
+export function discardWorkflowTriggerMutationEffects(root: string): void {
+  cleanupUnusedPollExecutableArtifacts(readStore(root).triggers);
 }
 
 function cleanTargetWorkflowId(targetWorkflowId: unknown): string {
@@ -761,22 +804,40 @@ export function createWorkflowTriggerBinding(
   return { binding, ...(generatedSecret ? { secretToken: generatedSecret } : {}) };
 }
 
-export async function deleteWorkflowTriggerBinding(root: string, name: string): Promise<boolean> {
+export async function deleteWorkflowTriggerBinding(
+  root: string,
+  name: string,
+  opts: WorkflowTriggerMutationOptions = {},
+): Promise<boolean> {
   assertSafeName(name, 'name');
   const store = readStore(root);
+  const previous = store.triggers.find((t) => t.name === name);
+  if (!previous) return false;
   const next = store.triggers.filter((t) => t.name !== name);
-  if (next.length === store.triggers.length) return false;
   saveStore(root, { ...store, triggers: next });
-  await abortPollExecutions(root, name);
-  cleanupUnusedPollExecutableArtifacts(next);
+  if (opts.effects) {
+    recordSupersededPollBinding(opts.effects, previous);
+  } else {
+    if (previous.kind === 'poll') {
+      await abortPollExecutions(root, name, workflowTriggerBindingRevision(previous));
+    }
+    cleanupUnusedPollExecutableArtifacts(next);
+  }
   return true;
 }
 
-export async function updateWorkflowTriggerBinding(root: string, binding: WorkflowTriggerBinding): Promise<WorkflowTriggerBinding> {
+export async function updateWorkflowTriggerBinding(
+  root: string,
+  binding: WorkflowTriggerBinding,
+  opts: WorkflowTriggerMutationOptions = {},
+): Promise<WorkflowTriggerBinding> {
   const store = readStore(root);
   const idx = store.triggers.findIndex((t) => t.name === binding.name);
   if (idx < 0) throw new WorkflowTriggerStoreError('not-found', `workflow trigger "${binding.name}" not found`);
   const previous = store.triggers[idx];
+  if (opts.expectedRevision !== undefined && workflowTriggerBindingRevision(previous) !== opts.expectedRevision) {
+    throw new WorkflowTriggerStoreError('conflict', `workflow trigger "${binding.name}" changed before update`);
+  }
   let updated = { ...binding, updatedAt: defaultNow() } as WorkflowTriggerBinding;
   if (previous.kind === 'poll' && updated.kind === 'poll') {
     const contractChanged = stableJson(pollActivationPolicy(previous)) !== stableJson(pollActivationPolicy(updated));
@@ -802,9 +863,10 @@ export async function updateWorkflowTriggerBinding(root: string, binding: Workfl
   store.triggers[idx] = updated;
   saveStore(root, store);
   if (workflowTriggerBindingRevision(updated) !== previousRevision) {
-    await abortPollExecutions(root, updated.name, previousRevision);
+    if (opts.effects) recordSupersededPollBinding(opts.effects, previous);
+    else if (previous.kind === 'poll') await abortPollExecutions(root, updated.name, previousRevision);
   }
-  cleanupUnusedPollExecutableArtifacts(store.triggers);
+  if (!opts.effects) cleanupUnusedPollExecutableArtifacts(store.triggers);
   return updated;
 }
 

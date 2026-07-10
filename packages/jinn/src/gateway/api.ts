@@ -113,8 +113,11 @@ import {
   checkWorkflowEventRateLimit,
   createWorkflowTriggerBinding,
   deleteWorkflowTriggerBinding,
-  captureWorkflowTriggerStoreState,
-  restoreWorkflowTriggerStoreState,
+  captureWorkflowTriggerBindingsState,
+  restoreWorkflowTriggerBindingsState,
+  createWorkflowTriggerMutationEffects,
+  commitWorkflowTriggerMutationEffects,
+  discardWorkflowTriggerMutationEffects,
   fireWorkflowEvent,
   formatPollActivationApprovalRequest,
   getWorkflowTriggerBinding,
@@ -124,6 +127,7 @@ import {
   updateWorkflowTriggerBinding,
   verifyAnyWorkflowTriggerBindingToken,
   withPollActivationContract,
+  withWorkflowMutationLock,
   workflowEventRateLimitKeyFromToken,
   WorkflowStoreError,
   WorkflowRunStoreError,
@@ -1249,28 +1253,11 @@ function workflowTriggerStoreErrorResponse(res: ServerResponse, err: unknown): v
   return serverError(res, "workflow trigger operation failed");
 }
 
-const workflowMutationTails = new Map<string, Promise<void>>();
-
-/** Serialize composite workflow mutations so one failed rollback cannot overwrite another. */
-async function withWorkflowMutationLock<T>(root: string, mutate: () => Promise<T>): Promise<T> {
-  const previous = workflowMutationTails.get(root) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((resolve) => { release = resolve; });
-  const tail = previous.then(() => current);
-  workflowMutationTails.set(root, tail);
-  await previous;
-  try {
-    return await mutate();
-  } finally {
-    release();
-    if (workflowMutationTails.get(root) === tail) workflowMutationTails.delete(root);
-  }
-}
-
 async function createWorkflowTriggerForActor(
   root: string,
   body: Record<string, unknown>,
   actor: string,
+  effects?: ReturnType<typeof createWorkflowTriggerMutationEffects>,
 ): Promise<Record<string, unknown>> {
   let approvalPayload: Record<string, unknown> | undefined;
   const input: Record<string, unknown> = { ...body, createdBy: actor };
@@ -1306,11 +1293,11 @@ async function createWorkflowTriggerForActor(
         ...pinnedBinding,
         approvalWorkItemId: workItem.id,
         activation: "pending_approval",
-      });
+      }, { effects });
       bindingName = updated.name;
       approvalPayload = { workItem };
     } catch (approvalErr) {
-      await deleteWorkflowTriggerBinding(root, created.binding.name);
+      await deleteWorkflowTriggerBinding(root, created.binding.name, { effects });
       throw approvalErr;
     }
   }
@@ -1326,6 +1313,8 @@ async function reconcileOwnedSopTriggers(
   workflowId: string,
   nextPlan: CreateWorkflowTriggerBindingInput | undefined,
   actor: string,
+  effects: ReturnType<typeof createWorkflowTriggerMutationEffects>,
+  touchedNames: Set<string>,
 ): Promise<Record<string, unknown> | undefined> {
   const all = listWorkflowTriggerBindings(root);
   const owned = all.filter((trigger) => trigger.sopOwnerWorkflowId === workflowId);
@@ -1338,10 +1327,17 @@ async function reconcileOwnedSopTriggers(
     }
   }
   for (const trigger of owned) {
-    await deleteWorkflowTriggerBinding(root, trigger.name);
+    touchedNames.add(trigger.name);
+    await deleteWorkflowTriggerBinding(root, trigger.name, { effects });
   }
   if (!nextPlan) return undefined;
-  const created = await createWorkflowTriggerForActor(root, nextPlan as unknown as Record<string, unknown>, actor);
+  touchedNames.add(nextPlan.name);
+  const created = await createWorkflowTriggerForActor(
+    root,
+    nextPlan as unknown as Record<string, unknown>,
+    actor,
+    effects,
+  );
   return created.trigger as Record<string, unknown>;
 }
 
@@ -1349,7 +1345,8 @@ function restoreWorkflowMutationState(
   root: string,
   workflowId: string,
   definitionState: ReturnType<typeof captureDefinitionState>,
-  triggerState: ReturnType<typeof captureWorkflowTriggerStoreState>,
+  triggerState: ReturnType<typeof captureWorkflowTriggerBindingsState>,
+  touchedTriggerNames: Set<string>,
 ): void {
   const failures: string[] = [];
   try {
@@ -1358,7 +1355,7 @@ function restoreWorkflowMutationState(
     failures.push(`definition rollback failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   try {
-    restoreWorkflowTriggerStoreState(root, triggerState);
+    restoreWorkflowTriggerBindingsState(root, triggerState, touchedTriggerNames);
   } catch (err) {
     failures.push(`trigger rollback failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -3412,7 +3409,9 @@ export async function handleApiRequest(
         }
         const actor = authority.actor;
         try {
-          return json(res, await createWorkflowTriggerForActor(root, body, actor), 201);
+          return await withWorkflowMutationLock(root, async () => {
+            return json(res, await createWorkflowTriggerForActor(root, body, actor), 201);
+          });
         } catch (err) {
           return workflowTriggerStoreErrorResponse(res, err);
         }
@@ -3421,28 +3420,31 @@ export async function handleApiRequest(
 
     params = matchRoute("/api/workflow-triggers/:name", pathname);
     if (method === "DELETE" && params) {
+      const triggerName = params.name;
       const root = resolveWorkflowEvidenceRoot();
       if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
       try {
-        const binding = getWorkflowTriggerBinding(root, params.name);
-        if (!binding) return notFound(res);
-        const targetWorkflow = getDefinition(root, binding.targetWorkflowId);
-        if (!targetWorkflow) {
-          const authority = authorizeWorkflowOperation(req.headers, null, "bind-trigger", context);
+        return await withWorkflowMutationLock(root, async () => {
+          const binding = getWorkflowTriggerBinding(root, triggerName);
+          if (!binding) return notFound(res);
+          const targetWorkflow = getDefinition(root, binding.targetWorkflowId);
+          if (!targetWorkflow) {
+            const authority = authorizeWorkflowOperation(req.headers, null, "bind-trigger", context);
+            if (!authority.ok) {
+              return json(res, { error: authority.error }, authority.status);
+            }
+            const deleted = await deleteWorkflowTriggerBinding(root, triggerName);
+            if (!deleted) return notFound(res);
+            return json(res, { deleted: true, name: triggerName, orphaned: true });
+          }
+          const authority = authorizeWorkflowOperation(req.headers, targetWorkflow, "bind-trigger", context);
           if (!authority.ok) {
             return json(res, { error: authority.error }, authority.status);
           }
-          const deleted = await deleteWorkflowTriggerBinding(root, params.name);
+          const deleted = await deleteWorkflowTriggerBinding(root, triggerName);
           if (!deleted) return notFound(res);
-          return json(res, { deleted: true, name: params.name, orphaned: true });
-        }
-        const authority = authorizeWorkflowOperation(req.headers, targetWorkflow, "bind-trigger", context);
-        if (!authority.ok) {
-          return json(res, { error: authority.error }, authority.status);
-        }
-        const deleted = await deleteWorkflowTriggerBinding(root, params.name);
-        if (!deleted) return notFound(res);
-        return json(res, { deleted: true, name: params.name });
+          return json(res, { deleted: true, name: triggerName });
+        });
       } catch (err) {
         return workflowTriggerStoreErrorResponse(res, err);
       }
@@ -3554,34 +3556,64 @@ export async function handleApiRequest(
         }
 
         let definitionState: ReturnType<typeof captureDefinitionState>;
-        let triggerState: ReturnType<typeof captureWorkflowTriggerStoreState>;
+        let triggerState: ReturnType<typeof captureWorkflowTriggerBindingsState>;
         try {
           definitionState = captureDefinitionState(root, workflowId);
-          triggerState = captureWorkflowTriggerStoreState(root);
+          triggerState = captureWorkflowTriggerBindingsState(root);
         } catch (err) {
           return workflowMutationErrorResponse(res, err);
         }
 
+        const triggerEffects = createWorkflowTriggerMutationEffects();
+        const touchedTriggerNames = new Set<string>();
+        let committed: {
+          definition: EditableWorkflowDefinition;
+          trigger: Record<string, unknown> | undefined;
+        };
         try {
           const definition = operation === "create"
             ? createDefinition(root, definitionInput!)
             : updateDefinition(root, workflowId, patch!, { expectedVersion });
           const trigger = reconcileSopTriggers
-            ? await reconcileOwnedSopTriggers(root, workflowId, triggerPlan, actor)
+            ? await reconcileOwnedSopTriggers(
+                root,
+                workflowId,
+                triggerPlan,
+                actor,
+                triggerEffects,
+                touchedTriggerNames,
+              )
             : undefined;
           syncWorkflowCronJobsForRoot(root);
-          return json(res, { definition, trigger }, operation === "create" ? 201 : 200);
+          committed = { definition, trigger };
         } catch (err) {
           try {
-            restoreWorkflowMutationState(root, workflowId, definitionState, triggerState);
+            restoreWorkflowMutationState(
+              root,
+              workflowId,
+              definitionState,
+              triggerState,
+              touchedTriggerNames,
+            );
           } catch (rollbackErr) {
             logger.error(
               `workflow mutation rollback failed after ${err instanceof Error ? err.message : String(err)}: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
             );
             return serverError(res, "workflow mutation failed and rollback could not be completed");
           }
+          try {
+            discardWorkflowTriggerMutationEffects(root);
+          } catch (cleanupErr) {
+            logger.warn(`workflow mutation rollback artifact cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
+          }
           return workflowMutationErrorResponse(res, err);
         }
+        try {
+          await commitWorkflowTriggerMutationEffects(root, triggerEffects);
+        } catch (cleanupErr) {
+          logger.warn(`workflow mutation post-commit trigger cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
+        }
+        return json(res, committed, operation === "create" ? 201 : 200);
       });
     }
 

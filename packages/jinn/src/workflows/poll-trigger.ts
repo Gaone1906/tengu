@@ -22,6 +22,7 @@ import type { WorkflowRun, WorkflowTriggerEvent } from './run-store.js';
 import { abortPollExecutions, registerPollExecution } from './poll-executions.js';
 import { resolveActiveTriggerDefinition } from './trigger-dispatch.js';
 import { openVerifiedStagedPollExecutableArtifacts } from './poll-artifacts.js';
+import { withWorkflowMutationLock } from './mutation-lock.js';
 
 export { createWorkflowTriggerBinding };
 
@@ -335,21 +336,27 @@ export function startPollTriggerRunner(
         running.add(binding.name);
         const checked: PollWorkflowTriggerBinding = { ...binding, lastCheckedAt: atIso };
         try {
-          await updateWorkflowTriggerBinding(deps.root, checked);
+          await withWorkflowMutationLock(deps.root, () => updateWorkflowTriggerBinding(
+            deps.root,
+            checked,
+            { expectedRevision: workflowTriggerBindingRevision(binding) },
+          ));
         } catch {
           running.delete(binding.name);
           continue;
         }
         void runPollTriggerOnce(deps, checked, opts)
           .then(async (result) => {
-            const latestRaw = listWorkflowTriggerBindings(deps.root).find((t) => t.name === binding.name);
-            if (!latestRaw) return;
-            const latest = asPollBinding(latestRaw);
-            if (!latest) return;
-            await updateWorkflowTriggerBinding(deps.root, {
-              ...latest,
-              lastOutcome: result.outcome,
-              ...(result.outcome === 'fired' ? { lastFiredAt: now() } : {}),
+            await withWorkflowMutationLock(deps.root, async () => {
+              const latestRaw = listWorkflowTriggerBindings(deps.root).find((t) => t.name === binding.name);
+              if (!latestRaw) return;
+              const latest = asPollBinding(latestRaw);
+              if (!latest) return;
+              await updateWorkflowTriggerBinding(deps.root, {
+                ...latest,
+                lastOutcome: result.outcome,
+                ...(result.outcome === 'fired' ? { lastFiredAt: now() } : {}),
+              }, { expectedRevision: workflowTriggerBindingRevision(latest) });
             });
           })
           .catch((err) => {

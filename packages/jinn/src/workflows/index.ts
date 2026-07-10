@@ -14,6 +14,7 @@ export * from './run-reconciler.js';
 export * from './cron-sync.js';
 export * from './todo-status-trigger.js';
 export * from './custom-triggers.js';
+export * from './mutation-lock.js';
 export * from './poll-trigger.js';
 export * from './authoring.js';
 
