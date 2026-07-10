@@ -91,6 +91,8 @@ import {
   getDefinitionByName,
   createDefinition,
   updateDefinition,
+  captureDefinitionState,
+  restoreDefinitionState,
   duplicateDefinition,
   retireDefinition,
   resolveExecutionPlan,
@@ -109,9 +111,12 @@ import {
   checkWorkflowEventRateLimit,
   createWorkflowTriggerBinding,
   deleteWorkflowTriggerBinding,
+  captureWorkflowTriggerStoreState,
+  restoreWorkflowTriggerStoreState,
   fireWorkflowEvent,
   formatPollActivationApprovalRequest,
   getWorkflowTriggerBinding,
+  listWorkflowTriggerBindings,
   listPublicWorkflowTriggerBindings,
   sanitizeWorkflowTriggerPayload,
   updateWorkflowTriggerBinding,
@@ -123,6 +128,7 @@ import {
   WorkflowTriggerStoreError,
   correlateSessionTurn,
   type EditableWorkflowDefinition,
+  type CreateWorkflowTriggerBindingInput,
   type FollowUpContext,
   type FollowUpPostResult,
   type RunDriverDeps,
@@ -1262,6 +1268,127 @@ function workflowTriggerStoreErrorResponse(res: ServerResponse, err: unknown): v
   }
   logger.error(`workflow-trigger route error: ${(err as Error).message}`);
   return serverError(res, "workflow trigger operation failed");
+}
+
+const workflowMutationTails = new Map<string, Promise<void>>();
+
+/** Serialize composite workflow mutations so one failed rollback cannot overwrite another. */
+async function withWorkflowMutationLock<T>(root: string, mutate: () => Promise<T>): Promise<T> {
+  const previous = workflowMutationTails.get(root) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  const tail = previous.then(() => current);
+  workflowMutationTails.set(root, tail);
+  await previous;
+  try {
+    return await mutate();
+  } finally {
+    release();
+    if (workflowMutationTails.get(root) === tail) workflowMutationTails.delete(root);
+  }
+}
+
+async function createWorkflowTriggerForActor(
+  root: string,
+  body: Record<string, unknown>,
+  actor: string,
+): Promise<Record<string, unknown>> {
+  let approvalPayload: Record<string, unknown> | undefined;
+  const input: Record<string, unknown> = { ...body, createdBy: actor };
+  const created = createWorkflowTriggerBinding(
+    root,
+    input as unknown as Parameters<typeof createWorkflowTriggerBinding>[1],
+  );
+  let bindingName = created.binding.name;
+  if (body.kind === "poll") {
+    if (created.binding.kind !== "poll") {
+      throw new Error("poll trigger creation returned a non-poll binding");
+    }
+    const triggerName = created.binding.name;
+    try {
+      const target = resolveRootApprovalTarget();
+      const pinnedBinding = withPollActivationContract(created.binding);
+      const approvalRequest = formatPollActivationApprovalRequest(pinnedBinding);
+      const item = createWorkItem({
+        title: `Activate poll trigger "${triggerName}"`,
+        body: approvalRequest,
+        status: "backlog",
+        source: "workflow",
+        sourceRef: `workflow-trigger:${triggerName}:activation`,
+        assignee: target?.name ?? null,
+        department: target?.department ?? null,
+      });
+      const workItem = requestApproval(item.id, {
+        request: approvalRequest,
+        target: target?.name ?? null,
+        actor,
+      });
+      const updated = await updateWorkflowTriggerBinding(root, {
+        ...pinnedBinding,
+        approvalWorkItemId: workItem.id,
+        activation: "pending_approval",
+      });
+      bindingName = updated.name;
+      approvalPayload = { workItem };
+    } catch (approvalErr) {
+      await deleteWorkflowTriggerBinding(root, created.binding.name);
+      throw approvalErr;
+    }
+  }
+  return {
+    trigger: listPublicWorkflowTriggerBindings(root).find((trigger) => trigger.name === bindingName) ?? created.binding,
+    ...(created.secretToken ? { secretToken: created.secretToken } : {}),
+    ...(approvalPayload ? { approval: approvalPayload } : {}),
+  };
+}
+
+async function reconcileOwnedSopTriggers(
+  root: string,
+  workflowId: string,
+  nextPlan: CreateWorkflowTriggerBindingInput | undefined,
+  actor: string,
+): Promise<Record<string, unknown> | undefined> {
+  const all = listWorkflowTriggerBindings(root);
+  const owned = all.filter((trigger) => trigger.sopOwnerWorkflowId === workflowId);
+  if (nextPlan) {
+    const collision = all.find(
+      (trigger) => trigger.name === nextPlan.name && trigger.sopOwnerWorkflowId !== workflowId,
+    );
+    if (collision) {
+      throw new WorkflowTriggerStoreError("conflict", `workflow trigger "${nextPlan.name}" already exists`);
+    }
+  }
+  for (const trigger of owned) {
+    await deleteWorkflowTriggerBinding(root, trigger.name);
+  }
+  if (!nextPlan) return undefined;
+  const created = await createWorkflowTriggerForActor(root, nextPlan as unknown as Record<string, unknown>, actor);
+  return created.trigger as Record<string, unknown>;
+}
+
+function restoreWorkflowMutationState(
+  root: string,
+  workflowId: string,
+  definitionState: ReturnType<typeof captureDefinitionState>,
+  triggerState: ReturnType<typeof captureWorkflowTriggerStoreState>,
+): void {
+  const failures: string[] = [];
+  try {
+    restoreDefinitionState(root, workflowId, definitionState);
+  } catch (err) {
+    failures.push(`definition rollback failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    restoreWorkflowTriggerStoreState(root, triggerState);
+  } catch (err) {
+    failures.push(`trigger rollback failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (failures.length > 0) throw new Error(failures.join("; "));
+}
+
+function workflowMutationErrorResponse(res: ServerResponse, err: unknown): void {
+  if (err instanceof WorkflowTriggerStoreError) return workflowTriggerStoreErrorResponse(res, err);
+  return workflowStoreErrorResponse(res, err);
 }
 
 function bearerToken(headers: HttpRequest["headers"]): string | undefined {
@@ -3304,54 +3431,7 @@ export async function handleApiRequest(
         }
         const actor = authority.actor;
         try {
-          let approvalPayload: Record<string, unknown> | undefined;
-          const input: Record<string, unknown> = { ...body, createdBy: actor };
-          const created = createWorkflowTriggerBinding(root, input as unknown as Parameters<typeof createWorkflowTriggerBinding>[1]);
-          let bindingName = created.binding.name;
-          if (body.kind === "poll") {
-            if (created.binding.kind !== "poll") {
-              throw new Error("poll trigger creation returned a non-poll binding");
-            }
-            const triggerName = created.binding.name;
-            try {
-              const target = resolveRootApprovalTarget();
-              const pinnedBinding = withPollActivationContract(created.binding);
-              const approvalRequest = formatPollActivationApprovalRequest(pinnedBinding);
-              const item = createWorkItem({
-                title: `Activate poll trigger "${triggerName}"`,
-                body: approvalRequest,
-                status: "backlog",
-                source: "workflow",
-                sourceRef: `workflow-trigger:${triggerName}:activation`,
-                assignee: target?.name ?? null,
-                department: target?.department ?? null,
-              });
-              const workItem = requestApproval(item.id, {
-                request: approvalRequest,
-                target: target?.name ?? null,
-                actor,
-              });
-              const updated = await updateWorkflowTriggerBinding(root, {
-                ...pinnedBinding,
-                approvalWorkItemId: workItem.id,
-                activation: "pending_approval",
-              });
-              bindingName = updated.name;
-              approvalPayload = { workItem };
-            } catch (approvalErr) {
-              await deleteWorkflowTriggerBinding(root, created.binding.name);
-              throw approvalErr;
-            }
-          }
-          return json(
-            res,
-            {
-              trigger: listPublicWorkflowTriggerBindings(root).find((t) => t.name === bindingName) ?? created.binding,
-              ...(created.secretToken ? { secretToken: created.secretToken } : {}),
-              ...(approvalPayload ? { approval: approvalPayload } : {}),
-            },
-            201,
-          );
+          return json(res, await createWorkflowTriggerForActor(root, body, actor), 201);
         } catch (err) {
           return workflowTriggerStoreErrorResponse(res, err);
         }
@@ -3404,6 +3484,124 @@ export async function handleApiRequest(
       } catch (err) {
         return badRequest(res, err instanceof Error ? err.message : String(err));
       }
+    }
+
+    // One durable outcome for MCP authoring: definition + SOP-owned trigger bindings
+    // commit together, or both exact pre-call file states are restored before failure.
+    if (method === "POST" && pathname === "/api/workflow-definitions/mutate") {
+      const ev = resolveWorkflowEvidence();
+      const root = ev.root;
+      if (!root) return json(res, { error: ev.reason ?? "Workflow evidence root is not configured" }, 503);
+      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "Request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      const operation = body.operation;
+      if (operation !== "create" && operation !== "update") {
+        return badRequest(res, "operation must be create or update");
+      }
+      const reconcileSopTriggers = body.reconcileSopTriggers === true;
+      const rawTriggerPlan = body.triggerBindingPlan;
+      if (rawTriggerPlan !== undefined && (!rawTriggerPlan || typeof rawTriggerPlan !== "object" || Array.isArray(rawTriggerPlan))) {
+        return badRequest(res, "triggerBindingPlan must be a JSON object");
+      }
+      if (rawTriggerPlan !== undefined && !reconcileSopTriggers) {
+        return badRequest(res, "triggerBindingPlan requires reconcileSopTriggers");
+      }
+      const triggerPlan = rawTriggerPlan as CreateWorkflowTriggerBindingInput | undefined;
+
+      return withWorkflowMutationLock(root, async () => {
+        let workflowId: string;
+        let definitionInput: EditableWorkflowDefinition | undefined;
+        let patch: Partial<EditableWorkflowDefinition> | undefined;
+        let expectedVersion: number | undefined;
+        let actor: string;
+
+        if (operation === "create") {
+          if (!body.definition || typeof body.definition !== "object" || Array.isArray(body.definition)) {
+            return badRequest(res, "definition must be a JSON object");
+          }
+          const rawDefinition = body.definition as Record<string, unknown>;
+          if (typeof rawDefinition.id !== "string" || !rawDefinition.id.trim()) {
+            return badRequest(res, "definition.id is required");
+          }
+          workflowId = rawDefinition.id;
+          const authority = authorizeWorkflowOperation(req.headers, null, "create", context);
+          if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+          actor = authority.actor;
+          const safeBody = actor === "operator"
+            ? rawDefinition
+            : stripWorkflowAuthorityFields(rawDefinition as Partial<EditableWorkflowDefinition>);
+          definitionInput = {
+            ...safeBody,
+            ...workflowDefinitionAuthorPatch(authority),
+          } as unknown as EditableWorkflowDefinition;
+          if (reconcileSopTriggers) {
+            const bindingAuthority = authorizeWorkflowOperation(req.headers, definitionInput, "bind-trigger", context);
+            if (!bindingAuthority.ok) return json(res, { error: bindingAuthority.error }, bindingAuthority.status);
+          }
+        } else {
+          if (typeof body.workflowId !== "string" || !body.workflowId.trim()) {
+            return badRequest(res, "workflowId is required");
+          }
+          workflowId = body.workflowId;
+          if (!body.patch || typeof body.patch !== "object" || Array.isArray(body.patch)) {
+            return badRequest(res, "patch must be a JSON object");
+          }
+          const existing = getDefinition(root, workflowId);
+          if (!existing) return notFound(res);
+          const authority = authorizeWorkflowOperation(req.headers, existing, "update", context);
+          if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+          actor = authority.actor;
+          patch = authority.canSetWorkflowAuthority
+            ? body.patch as Partial<EditableWorkflowDefinition>
+            : stripWorkflowAuthorityFields(body.patch as Partial<EditableWorkflowDefinition>);
+          if (body.expectedVersion !== undefined) {
+            if (typeof body.expectedVersion !== "number") return badRequest(res, "expectedVersion must be a number");
+            expectedVersion = body.expectedVersion;
+          }
+          if (reconcileSopTriggers) {
+            const bindingAuthority = authorizeWorkflowOperation(req.headers, existing, "bind-trigger", context);
+            if (!bindingAuthority.ok) return json(res, { error: bindingAuthority.error }, bindingAuthority.status);
+          }
+        }
+
+        if (triggerPlan && (triggerPlan.targetWorkflowId !== workflowId || triggerPlan.sopOwnerWorkflowId !== workflowId)) {
+          return badRequest(res, "triggerBindingPlan must target and be owned by the mutated workflow");
+        }
+
+        let definitionState: ReturnType<typeof captureDefinitionState>;
+        let triggerState: ReturnType<typeof captureWorkflowTriggerStoreState>;
+        try {
+          definitionState = captureDefinitionState(root, workflowId);
+          triggerState = captureWorkflowTriggerStoreState(root);
+        } catch (err) {
+          return workflowMutationErrorResponse(res, err);
+        }
+
+        try {
+          const definition = operation === "create"
+            ? createDefinition(root, definitionInput!)
+            : updateDefinition(root, workflowId, patch!, { expectedVersion });
+          const trigger = reconcileSopTriggers
+            ? await reconcileOwnedSopTriggers(root, workflowId, triggerPlan, actor)
+            : undefined;
+          syncWorkflowCronJobsForRoot(root);
+          return json(res, { definition, trigger }, operation === "create" ? 201 : 200);
+        } catch (err) {
+          try {
+            restoreWorkflowMutationState(root, workflowId, definitionState, triggerState);
+          } catch (rollbackErr) {
+            logger.error(
+              `workflow mutation rollback failed after ${err instanceof Error ? err.message : String(err)}: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+            );
+            return serverError(res, "workflow mutation failed and rollback could not be completed");
+          }
+          return workflowMutationErrorResponse(res, err);
+        }
+      });
     }
 
     if (pathname === "/api/workflow-definitions") {
@@ -3549,8 +3747,8 @@ export async function handleApiRequest(
     //
     // HONEST SANDBOX SCOPE: running a workflow spawns REAL sessions on whichever
     // gateway serves this request. The evidence root only says where definition/run
-    // files live, not that the target is isolated. Without an explicit
-    // JINN_WORKFLOW_EVIDENCE_ROOT this route 503s and is inert.
+    // files live, not that the target is isolated; by default it is created beneath
+    // JINN_HOME. Use a separate gateway instance for experimental runs.
     // Sessions it spawns are linked/tagged (sourceRef `workflow-run:<runId>:<nodeId>:<attempt>`).
     params = matchRoute("/api/workflow-definitions/:id/run", pathname);
     if (method === "POST" && params) {

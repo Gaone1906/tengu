@@ -70,8 +70,8 @@ function serverLog(message: string): void {
  * HTTP route; see `workflow-tools.ts`). It is a *thin HTTP client
  * to the local gateway* — it holds no state of its own (no org model, scheduler,
  * memory store, workflow runtime, or session engine) and simply calls the same
- * gateway routes the web UI and tests call; write tools inherit those routes'
- * evidence-root gating (live gateways refuse with 503). This is the KISS
+ * gateway routes the web UI and tests call. Workflow runs are live operations on
+ * that gateway and may spawn real sessions; isolated instances are for experiments. This is the KISS
  * guardrail from `reports/research/GRS-012-mcp-auto-attach-design.md` §3/§8.
  *
  * Why hand-rolled instead of `@modelcontextprotocol/sdk`: the repo has no MCP SDK

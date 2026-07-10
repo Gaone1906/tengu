@@ -146,6 +146,29 @@ function definitionFile(root: string, id: string): string {
   return path.join(definitionsDir(root), `${id}${DEFINITION_SUFFIX}`);
 }
 
+/** Exact durable state used by the gateway's definition+trigger transaction. */
+export type WorkflowDefinitionStateSnapshot = string | null;
+
+export function captureDefinitionState(root: string, id: string): WorkflowDefinitionStateSnapshot {
+  const file = definitionFile(root, id);
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/** Restore bytes verbatim so rollback does not bump versions or rewrite metadata. */
+export function restoreDefinitionState(root: string, id: string, snapshot: WorkflowDefinitionStateSnapshot): void {
+  const file = definitionFile(root, id);
+  if (snapshot === null) {
+    fs.rmSync(file, { force: true });
+    return;
+  }
+  writeOverwrite(file, snapshot);
+}
+
 /**
  * Overwrite `file` atomically (unique temp write + rename). Used to persist an update
  * to an ALREADY-EXISTING definition. The rename is atomic, so a reader never sees a

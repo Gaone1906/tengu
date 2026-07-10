@@ -143,6 +143,15 @@ describe("workflow tools — registry + schemas", () => {
     expect(byNameSchema.properties.input).toMatchObject({ type: "object" });
     expect(byNameSchema.properties.idempotencyKey).toMatchObject({ type: "string", maxLength: 256 });
   });
+
+  it("describes workflow starts as live operations on the current gateway", () => {
+    for (const name of ["start_workflow_run", "run_workflow_by_name"]) {
+      expect(tool(name).description).toMatch(/live workflow run/i);
+      expect(tool(name).description).toMatch(/spawn real sessions/i);
+      expect(tool(name).description).toMatch(/current gateway/i);
+      expect(tool(name).description).not.toMatch(/sandbox[- ]gated/i);
+    }
+  });
 });
 
 describe("workflow tools — unit (stub gateway)", () => {
@@ -214,7 +223,7 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(out.hint).not.toContain("jinn_resolve_workflow_gate");
   });
 
-  it("create_workflow POSTs the definition and auto-places nodes that omit position", async () => {
+  it("create_workflow POSTs one atomic mutation and auto-places nodes that omit position", async () => {
     const { calls, ctx } = stub(() => ({ status: 201, body: { id: "wf-new", version: 1 } }));
     await tool("create_workflow").handler(
       {
@@ -230,8 +239,9 @@ describe("workflow tools — unit (stub gateway)", () => {
       },
       ctx,
     );
-    expect(calls[0]).toMatchObject({ url: "http://127.0.0.1:7777/api/workflow-definitions", method: "POST" });
-    const sent = calls[0].body as { nodes: Array<{ id: string; position: { x: number; y: number } }> };
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ url: "http://127.0.0.1:7777/api/workflow-definitions/mutate", method: "POST" });
+    const sent = (calls[0].body as { definition: { nodes: Array<{ id: string; position: { x: number; y: number } }> } }).definition;
     expect(sent.nodes[0].position).toEqual({ x: 0, y: 0 }); // auto-placed
     expect(sent.nodes[1].position).toEqual({ x: 7, y: 7 }); // explicit position kept
   });
@@ -344,10 +354,17 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("create_workflow accepts SOP input, saves the compiled graph, and binds custom wake-ups through gateway routes", async () => {
+  it("create_workflow accepts SOP input and sends definition plus custom wake-up as one atomic mutation", async () => {
     const { calls, ctx } = stub((call) => {
-      if (call.url.endsWith("/api/workflow-definitions")) return { status: 201, body: { id: "lead-sop", version: 1 } };
-      if (call.url.endsWith("/api/workflow-triggers")) return { status: 201, body: { trigger: { name: "lead-hook", kind: "webhook" } } };
+      if (call.url.endsWith("/api/workflow-definitions/mutate")) {
+        return {
+          status: 201,
+          body: {
+            definition: { id: "lead-sop", version: 1 },
+            trigger: { name: "lead-hook", kind: "webhook" },
+          },
+        };
+      }
       return { status: 500, body: { error: "unexpected route" } };
     });
     const out = (await tool("create_workflow").handler(
@@ -363,11 +380,18 @@ describe("workflow tools — unit (stub gateway)", () => {
     )) as { definition: Record<string, unknown>; trigger?: Record<string, unknown>; hint: string };
 
     expect(calls.map((c) => [c.method, c.url])).toEqual([
-      ["POST", "http://127.0.0.1:7777/api/workflow-definitions"],
-      ["POST", "http://127.0.0.1:7777/api/workflow-triggers"],
+      ["POST", "http://127.0.0.1:7777/api/workflow-definitions/mutate"],
     ]);
-    expect((calls[0].body as { nodes: Array<Record<string, unknown>> }).nodes[0]).toMatchObject({ type: "trigger", trigger: { kind: "manual" } });
-    expect(calls[1].body).toMatchObject({ kind: "webhook", name: "lead-hook", event: "lead.created", targetWorkflowId: "lead-sop" });
+    const mutation = calls[0].body as {
+      operation: string;
+      definition: { nodes: Array<Record<string, unknown>> };
+      reconcileSopTriggers: boolean;
+      triggerBindingPlan: Record<string, unknown>;
+    };
+    expect(mutation.operation).toBe("create");
+    expect(mutation.definition.nodes[0]).toMatchObject({ type: "trigger", trigger: { kind: "manual" } });
+    expect(mutation.reconcileSopTriggers).toBe(true);
+    expect(mutation.triggerBindingPlan).toMatchObject({ kind: "webhook", name: "lead-hook", event: "lead.created", targetWorkflowId: "lead-sop" });
     expect(out.trigger).toMatchObject({ name: "lead-hook", kind: "webhook" });
     expect(out.hint).toContain("SOP");
   });
@@ -407,12 +431,12 @@ describe("workflow tools — unit (stub gateway)", () => {
     ).rejects.toThrow(/retry[\s\S]*missing-trigger[\s\S]*dangling-edge/i);
   });
 
-  it("write tools surface the 503 evidence-root refusal as the intended live-gateway safety", async () => {
+  it("write tools surface a 503 evidence-root response as a gateway configuration failure", async () => {
     const { ctx } = stub(() => ({ status: 503, body: { error: "Workflow evidence root is not configured" } }));
     await expect(
       tool("create_workflow").handler({ definition: { id: "x", title: "X", nodes: [], edges: [] } }, ctx),
-    ).rejects.toThrow(/evidence root.*intended safety.*JINN_WORKFLOW_EVIDENCE_ROOT/is);
-    await expect(tool("start_workflow_run").handler({ workflowId: "x" }, ctx)).rejects.toThrow(/intended safety/i);
+    ).rejects.toThrow(/evidence root.*configuration.*JINN_WORKFLOW_EVIDENCE_ROOT/is);
+    await expect(tool("start_workflow_run").handler({ workflowId: "x" }, ctx)).rejects.toThrow(/configuration/i);
   });
 
   it("workflow write and run tools fail closed locally when MCP caller identity is missing", async () => {
@@ -429,9 +453,9 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("update_workflow PUTs {patch + expectedVersion} and maps a stale version to a readable 409", async () => {
+  it("update_workflow atomically posts {patch + expectedVersion} and maps a stale version to a readable 409", async () => {
     const { calls, ctx } = stub((call) =>
-      call.method === "PUT"
+      (call.body as { expectedVersion?: number } | undefined)?.expectedVersion === 1
         ? { status: 409, body: { error: "version conflict: expected 1, on disk 3" } }
         : { status: 200, body: {} },
     );
@@ -439,16 +463,27 @@ describe("workflow tools — unit (stub gateway)", () => {
       tool("update_workflow").handler({ workflowId: "wf", patch: { title: "T2" }, expectedVersion: 1 }, ctx),
     ).rejects.toThrow(/conflicted \(409\).*expected 1, on disk 3/is);
     expect(calls[0]).toMatchObject({
-      url: "http://127.0.0.1:7777/api/workflow-definitions/wf",
-      method: "PUT",
-      body: { title: "T2", expectedVersion: 1 },
+      url: "http://127.0.0.1:7777/api/workflow-definitions/mutate",
+      method: "POST",
+      body: {
+        operation: "update",
+        workflowId: "wf",
+        patch: { title: "T2" },
+        expectedVersion: 1,
+        reconcileSopTriggers: false,
+      },
     });
   });
 
   it("update_workflow omits expectedVersion from the body when not given", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { id: "wf", version: 4 } }));
     const out = (await tool("update_workflow").handler({ workflowId: "wf", patch: { title: "T3" } }, ctx)) as { hint: string };
-    expect(calls[0].body).toEqual({ title: "T3" });
+    expect(calls[0].body).toEqual({
+      operation: "update",
+      workflowId: "wf",
+      patch: { title: "T3" },
+      reconcileSopTriggers: false,
+    });
     expect(out.hint).toContain("version 4");
   });
 
@@ -946,13 +981,18 @@ describe("workflow tools — integration against the real routes/stores", () => 
       ctx,
     );
 
+    const definitionFile = path.join(evidenceRoot, "workflows", "sop-conflict-owner.definition.json");
+    const triggerFile = path.join(evidenceRoot, "workflow-triggers", "triggers.json");
+    const definitionBytesBefore = fs.readFileSync(definitionFile, "utf8");
+    const triggerBytesBefore = fs.readFileSync(triggerFile, "utf8");
+
     await expect(
       tool("update_workflow").handler(
         {
           workflowId: "sop-conflict-owner",
           sop: {
             id: "sop-conflict-owner",
-            title: "Conflict owner",
+            title: "Must roll back",
             wakeUp: { kind: "event", name: "taken-hook", event: "lead.won" },
             steps: baseStep,
           },
@@ -961,12 +1001,50 @@ describe("workflow tools — integration against the real routes/stores", () => 
       ),
     ).rejects.toThrow(/409|conflict/i);
 
+    const definition = (await tool("get_workflow").handler({ workflowId: "sop-conflict-owner" }, ctx)) as {
+      title: string;
+      version: number;
+    };
+    expect(definition).toMatchObject({ title: "Conflict owner", version: 1 });
+    expect(fs.readFileSync(definitionFile, "utf8")).toBe(definitionBytesBefore);
+    expect(fs.readFileSync(triggerFile, "utf8")).toBe(triggerBytesBefore);
+
     const listed = (await tool("list_triggers").handler({}, ctx)) as {
       triggers: Array<{ name: string; event: string; sopOwnerWorkflowId?: string }>;
     };
     expect(listed.triggers.map((t) => [t.name, t.event, t.sopOwnerWorkflowId]).sort()).toEqual([
       ["stable-hook", "lead.created", "sop-conflict-owner"],
       ["taken-hook", "lead.updated", "sop-conflict-other"],
+    ]);
+  });
+
+  it("SOP create rolls the definition back when trigger binding fails after the definition write", async () => {
+    const ctx: JinnMcpContext = { gatewayUrl: "http://gateway.test", fetchFn: apiFetch(), ...cooMcpIdentity };
+    const steps = [{ id: "handle", engine: "codex", instruction: "Handle the event." }];
+    await tool("create_workflow").handler({
+      sop: {
+        id: "existing-owner",
+        title: "Existing owner",
+        wakeUp: { kind: "event", name: "reserved-hook", event: "lead.created" },
+        steps,
+      },
+    }, ctx);
+
+    await expect(tool("create_workflow").handler({
+      sop: {
+        id: "failed-create",
+        title: "Must not persist",
+        wakeUp: { kind: "event", name: "reserved-hook", event: "lead.updated" },
+        steps,
+      },
+    }, ctx)).rejects.toThrow(/409|conflict/i);
+
+    await expect(tool("get_workflow").handler({ workflowId: "failed-create" }, ctx)).rejects.toThrow(/404|not found/i);
+    const listed = (await tool("list_triggers").handler({}, ctx)) as {
+      triggers: Array<{ name: string; event: string; sopOwnerWorkflowId?: string }>;
+    };
+    expect(listed.triggers).toEqual([
+      expect.objectContaining({ name: "reserved-hook", event: "lead.created", sopOwnerWorkflowId: "existing-owner" }),
     ]);
   });
 });

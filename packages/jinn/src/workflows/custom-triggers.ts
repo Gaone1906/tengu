@@ -305,6 +305,9 @@ function triggerStoreFile(root: string): string {
   return path.join(root, TRIGGER_DIR, TRIGGER_FILE);
 }
 
+/** Exact durable state used by the gateway's definition+trigger transaction. */
+export type WorkflowTriggerStoreStateSnapshot = string | null;
+
 function assertSafeName(name: unknown, label: string): asserts name is string {
   if (typeof name !== 'string' || !name.trim()) {
     throw new WorkflowTriggerStoreError('invalid-name', `${label} is required`);
@@ -491,6 +494,26 @@ function writeAtomic(file: string, contents: string): void {
   const tmp = `${file}.tmp-${randomUUID()}`;
   fs.writeFileSync(tmp, contents, 'utf8');
   fs.renameSync(tmp, file);
+}
+
+export function captureWorkflowTriggerStoreState(root: string): WorkflowTriggerStoreStateSnapshot {
+  const file = triggerStoreFile(root);
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+/** Restore bytes verbatim, including webhook hashes and binding revisions. */
+export function restoreWorkflowTriggerStoreState(root: string, snapshot: WorkflowTriggerStoreStateSnapshot): void {
+  const file = triggerStoreFile(root);
+  if (snapshot === null) {
+    fs.rmSync(file, { force: true });
+    return;
+  }
+  writeAtomic(file, snapshot);
 }
 
 function readStore(root: string): StoredWorkflowTriggerBindings {

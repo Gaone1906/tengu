@@ -1,8 +1,6 @@
 import { assertBoundCaller, gatewayRequest, JinnMcpToolError, type JinnMcpContext, type JinnMcpTool } from "./toolkit.js";
-import type { EditableWorkflowDefinition } from "../workflows/definition.js";
 import type { WorkflowSopCompileResult } from "../workflows/sop.js";
 import { autoPlaceWorkflowNodes, compileWorkflowAuthoringInput } from "../workflows/authoring.js";
-import type { CreateWorkflowTriggerBindingInput } from "../workflows/custom-triggers.js";
 
 /**
  * GRS-015 — the WORKFLOW tool group of the `jinn` MCP server: agents create,
@@ -18,9 +16,8 @@ import type { CreateWorkflowTriggerBindingInput } from "../workflows/custom-trig
  *     tool call the state calls for (parked → resolve, running → poll, …);
  *   - validator errors pass through STRUCTURED so an agent can self-correct its
  *     definition and retry;
- *   - write tools inherit the routes' evidence-root gating — a gateway without a
- *     workflow evidence root refuses writes with 503, which is the intended
- *     live-gateway safety (catalog §3: sandbox-gated).
+ *   - write tools act on the current gateway. Workflow runs are live operations
+ *     that may spawn real sessions; experiments belong on an isolated instance.
  *
  * Wire-shape invariant (Codex GRS-014e structural rule): `run.steps[]` array order
  * IS execution order — loop rounds are spliced in place. Every tool passes run
@@ -67,7 +64,7 @@ function asText(body: unknown, max = 4000): string {
 /**
  * Convert a non-2xx gateway response into a decision-shaped tool error. The
  * structured cases an agent must be able to act on:
- *   503 evidence-root → explain the live-gateway safety, name the fix;
+ *   503 evidence-root → explain the gateway configuration failure;
  *   400 with errors[] → the validator's structured errors, verbatim, plus "retry";
  *   409 → conflict (stale version / not-parked) with the body's specifics;
  *   404 → not found, point at the discovery tool.
@@ -76,9 +73,8 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
   const rec = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
   if (status === 503) {
     return new JinnMcpToolError(
-      `${what} refused (503): this gateway has no workflow evidence root configured — workflow storage is` +
-        ` disabled here, which is the intended safety on a live gateway. Use a sandbox/isolated gateway` +
-        ` started with JINN_WORKFLOW_EVIDENCE_ROOT set.`,
+      `${what} refused (503): this gateway's workflow evidence root configuration is unavailable.` +
+        ` Fix JINN_WORKFLOW_EVIDENCE_ROOT (or the default JINN_HOME workflow directory) and retry.`,
     );
   }
   if (status === 400 && Array.isArray(rec.errors) && rec.errors.length > 0) {
@@ -169,98 +165,6 @@ function compilePatchInput(args: Record<string, unknown>): { patch: Record<strin
   }
   if (args.patch !== undefined) return { patch: autoPlaceWorkflowNodes(requireObject(args, "patch")), sopAuthored: false };
   throw new JinnMcpToolError("sop or patch is required");
-}
-
-async function bindTriggerIfNeeded(
-  compiled: WorkflowSopCompileResult,
-  ctx: JinnMcpContext,
-  what: string,
-): Promise<Record<string, unknown> | undefined> {
-  if (!compiled.triggerBindingPlan) return undefined;
-  const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-triggers", compiled.triggerBindingPlan);
-  if (status >= 400) throw gatewayFailure(`${what} custom wake-up trigger`, status, body);
-  const rec = (body ?? {}) as Record<string, unknown>;
-  return (rec.trigger ?? rec.binding ?? rec) as Record<string, unknown>;
-}
-
-function publicTriggerToCreateInput(trigger: Record<string, unknown>): CreateWorkflowTriggerBindingInput | undefined {
-  const kind = trigger.kind;
-  const name = typeof trigger.name === "string" ? trigger.name : "";
-  const event = typeof trigger.event === "string" ? trigger.event : "";
-  const targetWorkflowId = typeof trigger.targetWorkflowId === "string" ? trigger.targetWorkflowId : "";
-  if ((kind !== "webhook" && kind !== "poll") || !name || !event || !targetWorkflowId) return undefined;
-  const input: CreateWorkflowTriggerBindingInput = { kind, name, event, targetWorkflowId };
-  if (typeof trigger.sopOwnerWorkflowId === "string") input.sopOwnerWorkflowId = trigger.sopOwnerWorkflowId;
-  if (Array.isArray(trigger.filter)) input.filter = trigger.filter as CreateWorkflowTriggerBindingInput["filter"];
-  if (kind === "poll") {
-    if (typeof trigger.command !== "string" || typeof trigger.intervalSeconds !== "number") return undefined;
-    input.command = trigger.command;
-    input.intervalSeconds = trigger.intervalSeconds;
-    for (const key of ["timeoutMs", "stdoutMaxBytes", "stderrMaxBytes"] as const) {
-      if (typeof trigger[key] === "number") input[key] = trigger[key];
-    }
-    if (typeof trigger.approvalWorkItemId === "string") input.approvalWorkItemId = trigger.approvalWorkItemId;
-    if (trigger.activation === "active" || trigger.activation === "pending_approval" || trigger.activation === "disabled") {
-      input.activation = trigger.activation;
-    }
-  }
-  return input;
-}
-
-async function reconcileSopTriggerBindings(
-  ctx: JinnMcpContext,
-  workflowId: string,
-  nextPlan: CreateWorkflowTriggerBindingInput | undefined,
-  what: string,
-): Promise<Record<string, unknown> | undefined> {
-  const listed = await gatewayRequest(ctx, "GET", "/api/workflow-triggers");
-  if (listed.status >= 400) throw gatewayFailure(`${what} listing existing SOP wake-up triggers`, listed.status, listed.body);
-  const rec = (listed.body ?? {}) as Record<string, unknown>;
-  const triggers = Array.isArray(rec.triggers) ? rec.triggers as Array<Record<string, unknown>> : [];
-  const owned = triggers.filter((t) => t.sopOwnerWorkflowId === workflowId);
-  if (!nextPlan) {
-    for (const trigger of owned) {
-      if (typeof trigger.name !== "string" || !trigger.name) continue;
-      const deleted = await gatewayRequest(ctx, "DELETE", `/api/workflow-triggers/${encodeURIComponent(trigger.name)}`);
-      if (deleted.status >= 400) throw gatewayFailure(`${what} deleting stale SOP wake-up trigger "${trigger.name}"`, deleted.status, deleted.body);
-    }
-    return undefined;
-  }
-
-  const replacingSameName = owned.some((trigger) => trigger.name === nextPlan.name);
-  if (!replacingSameName) {
-    const created = await gatewayRequest(ctx, "POST", "/api/workflow-triggers", nextPlan);
-    if (created.status >= 400) throw gatewayFailure(`${what} binding new SOP wake-up trigger`, created.status, created.body);
-    const body = (created.body ?? {}) as Record<string, unknown>;
-    const createdTrigger = (body.trigger ?? body.binding ?? body) as Record<string, unknown>;
-    try {
-      for (const trigger of owned) {
-        if (typeof trigger.name !== "string" || !trigger.name) continue;
-        const deleted = await gatewayRequest(ctx, "DELETE", `/api/workflow-triggers/${encodeURIComponent(trigger.name)}`);
-        if (deleted.status >= 400) throw gatewayFailure(`${what} deleting stale SOP wake-up trigger "${trigger.name}"`, deleted.status, deleted.body);
-      }
-    } catch (err) {
-      await gatewayRequest(ctx, "DELETE", `/api/workflow-triggers/${encodeURIComponent(nextPlan.name)}`);
-      throw err;
-    }
-    return createdTrigger;
-  }
-
-  for (const trigger of owned) {
-    if (typeof trigger.name !== "string" || !trigger.name) continue;
-    const deleted = await gatewayRequest(ctx, "DELETE", `/api/workflow-triggers/${encodeURIComponent(trigger.name)}`);
-    if (deleted.status >= 400) throw gatewayFailure(`${what} deleting stale SOP wake-up trigger "${trigger.name}"`, deleted.status, deleted.body);
-  }
-  const created = await gatewayRequest(ctx, "POST", "/api/workflow-triggers", nextPlan);
-  if (created.status >= 400) {
-    for (const trigger of owned) {
-      const input = publicTriggerToCreateInput(trigger);
-      if (input) await gatewayRequest(ctx, "POST", "/api/workflow-triggers", input);
-    }
-    throw gatewayFailure(`${what} binding new SOP wake-up trigger`, created.status, created.body);
-  }
-  const body = (created.body ?? {}) as Record<string, unknown>;
-  return (body.trigger ?? body.binding ?? body) as Record<string, unknown>;
 }
 
 /* ── The tool group ─────────────────────────────────────────────────────────── */
@@ -396,13 +300,19 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     handler: async (args, ctx) => {
       assertBoundCaller(ctx);
       const compiled = compileInput(args);
-      const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-definitions", compiled.definition);
+      const payload = {
+        operation: "create",
+        definition: compiled.definition,
+        reconcileSopTriggers: args.sop !== undefined,
+        ...(compiled.triggerBindingPlan ? { triggerBindingPlan: compiled.triggerBindingPlan } : {}),
+      };
+      const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-definitions/mutate", payload);
       if (status >= 400) throw gatewayFailure("creating the workflow", status, body);
-      const created = (body ?? {}) as Record<string, unknown>;
-      const trigger = await bindTriggerIfNeeded(compiled, ctx, "creating workflow");
+      const response = (body ?? {}) as Record<string, unknown>;
+      const created = (response.definition ?? response) as Record<string, unknown>;
       return {
-        definition: body,
-        trigger,
+        definition: created,
+        trigger: response.trigger,
         hint: `Created from ${args.sop !== undefined ? "SOP" : "raw graph"} v${String(created.version ?? 1)}. Next: run_workflow_by_name { name: "${String(created.name ?? created.id ?? "")}" }.`,
       };
     },
@@ -427,14 +337,19 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const compiled = compilePatchInput(args);
       const patch = compiled.patch;
       const expectedVersion = typeof args.expectedVersion === "number" ? args.expectedVersion : undefined;
-      const payload = expectedVersion === undefined ? patch : { ...patch, expectedVersion };
-      const { status, body } = await gatewayRequest(ctx, "PUT", wfPath(id), payload);
+      const payload = {
+        operation: "update",
+        workflowId: id,
+        patch,
+        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+        reconcileSopTriggers: compiled.sopAuthored,
+        ...(compiled.triggerBindingPlan ? { triggerBindingPlan: compiled.triggerBindingPlan } : {}),
+      };
+      const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-definitions/mutate", payload);
       if (status >= 400) throw gatewayFailure(`updating workflow "${id}"`, status, body);
-      const updated = (body ?? {}) as Record<string, unknown>;
-      const trigger = compiled.sopAuthored
-        ? await reconcileSopTriggerBindings(ctx, id, compiled.triggerBindingPlan, `updating workflow "${id}"`)
-        : await bindTriggerIfNeeded({ definition: body as EditableWorkflowDefinition, triggerBindingPlan: compiled.triggerBindingPlan }, ctx, `updating workflow "${id}"`);
-      return { definition: body, trigger, hint: `Updated to version ${String(updated.version ?? "?")}.` };
+      const response = (body ?? {}) as Record<string, unknown>;
+      const updated = (response.definition ?? response) as Record<string, unknown>;
+      return { definition: updated, trigger: response.trigger, hint: `Updated to version ${String(updated.version ?? "?")}.` };
     },
   };
 
@@ -455,17 +370,9 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     },
   };
 
-  // Tier note (catalog §3 row `jinn_run_workflow_sandbox`: approval-required,
-  // "sandbox-gated … keep gated until write-gates land"): this tool STAYS on the
-  // belt because its gate is STRUCTURAL, not honorary — a production home resolves
-  // no workflow evidence root by construction, so the wrapped route is inert (503)
-  // everywhere except a deliberately configured sandbox. That is exactly the
-  // sandbox-gating the catalog row asks for. Contrast gate RESOLUTION above, where
-  // the missing check is actor authority (human vs agent) — an environment gate
-  // cannot substitute for that, hence removal.
   const startWorkflowRun: JinnMcpTool = {
     name: "start_workflow_run",
-    description: "Run workflow by id.",
+    description: "Live workflow run by id; may spawn real sessions on current gateway. Use isolated instance for experiments.",
     inputSchema: {
       type: "object",
       properties: {
@@ -501,7 +408,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const runWorkflowByName: JinnMcpTool = {
     name: "run_workflow_by_name",
-    description: "Run workflow by name.",
+    description: "Live workflow run by name; may spawn real sessions on current gateway. Use isolated instance for experiments.",
     inputSchema: {
       type: "object",
       properties: {
