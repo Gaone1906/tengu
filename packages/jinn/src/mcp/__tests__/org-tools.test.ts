@@ -52,9 +52,9 @@ function tool(name: string): JinnMcpTool {
 const ORG_BODY = {
   departments: ["platform", "growth"],
   employees: [
-    { name: "platform-lead", displayName: "Platform Lead", department: "platform", rank: "manager", engine: "codex", parentName: null, directReports: ["platform-worker"] },
-    { name: "platform-worker", displayName: "Platform Worker", department: "platform", rank: "senior", engine: "claude", parentName: "platform-lead", directReports: [] },
-    { name: "growth-writer", displayName: "Growth Writer", department: "growth", rank: "senior", engine: "claude", parentName: null, directReports: [] },
+    { name: "platform-lead", displayName: "Platform Lead", department: "platform", rank: "manager", engine: "codex", role: "Leads platform", parentName: null, directReports: ["platform-worker"] },
+    { name: "platform-worker", displayName: "Platform Worker", department: "platform", rank: "senior", engine: "claude", role: "Builds platform", parentName: "platform-lead", directReports: [] },
+    { name: "growth-writer", displayName: "Growth Writer", department: "growth", rank: "senior", engine: "claude", role: "Writes growth", parentName: null, directReports: [] },
   ],
   hierarchy: { root: null, sorted: [], warnings: [] },
 };
@@ -77,7 +77,7 @@ describe("org tools — unit (stub gateway)", () => {
     };
     expect(calls[0].url).toBe("http://127.0.0.1:7777/api/org");
     expect(out.matches).toHaveLength(1);
-    expect(out.matches[0]).toMatchObject({ name: "platform-worker", reportsTo: "platform-lead" });
+    expect(out.matches[0]).toMatchObject({ name: "platform-worker", role: "Builds platform", reportsTo: "platform-lead" });
     expect(JSON.stringify(out.matches)).not.toContain("persona");
     expect(out.hint).toContain("get_employee");
   });
@@ -199,7 +199,7 @@ beforeAll(async () => {
   write("platform/a-lead.yaml", "name: a-lead\ndisplayName: A Lead\nrank: manager\nengine: codex\npersona: Leads the platform team.\n");
   write(
     "platform/a-worker.yaml",
-    "name: a-worker\ndisplayName: A Worker\nrank: senior\nengine: claude\nreportsTo: a-lead\npersona: Builds the platform.\n",
+    "name: a-worker\ndisplayName: A Worker\nrank: senior\nengine: claude\nreportsTo: a-lead\npersona: You are Builds the platform.\n",
   );
   write("growth/b-writer.yaml", "name: b-writer\ndisplayName: B Writer\nrank: senior\nengine: claude\npersona: Writes growth content.\n");
 });
@@ -214,16 +214,17 @@ describe("org tools — integration against the real org routes", () => {
     };
 
     const found = (await tool("find_employees").handler({ department: "platform", rank: "senior" }, ctx)) as {
-      matches: Array<{ name: string; reportsTo: string | null }>;
+      matches: Array<{ name: string; role: string; reportsTo: string | null }>;
     };
     expect(found.matches).toHaveLength(1);
-    expect(found.matches[0]).toMatchObject({ name: "a-worker", reportsTo: "a-lead" });
+    expect(found.matches[0]).toMatchObject({ name: "a-worker", role: "Builds the platform", reportsTo: "a-lead" });
+    expect(JSON.stringify(found.matches)).not.toContain("persona");
 
     const got = (await tool("get_employee").handler({ name: "a-worker" }, ctx)) as {
       employee: { persona: string; parentName: string | null };
       hint: string;
     };
-    expect(got.employee.persona).toBe("Builds the platform.");
+    expect(got.employee.persona).toBe("You are Builds the platform.");
     expect(got.employee.parentName).toBe("a-lead");
     expect(got.hint).toContain("spawn_session");
 

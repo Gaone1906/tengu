@@ -20,6 +20,7 @@ interface OrgEmployeeRecord {
   name?: string;
   displayName?: string;
   department?: string;
+  role?: string;
   rank?: string;
   engine?: string;
   model?: string;
@@ -47,6 +48,7 @@ function summarize(e: OrgEmployeeRecord): Record<string, unknown> {
     name: e.name,
     displayName: e.displayName,
     department: e.department,
+    role: e.role,
     rank: e.rank,
     engine: e.engine,
     reportsTo: e.parentName ?? null,

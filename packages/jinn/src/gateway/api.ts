@@ -228,6 +228,29 @@ const BACKGROUND_ACTIVITY_STALE_MS = 5 * 60 * 1000;
 const SUPERSEDED_TURN_META_KEY = "supersededRunningTurnAt";
 const RESTART_ACK_META_KEY = "restartAcknowledgedAt";
 
+export function compactEmployeeRole(persona?: string): string | undefined {
+  const firstLine = persona
+    ?.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!firstLine) return undefined;
+
+  let role = firstLine
+    .replace(/^\s*(?:#{1,6}\s*)?(?:[-*+]\s+|\d+\.\s+|>\s*)?/, "")
+    .replace(/^you\s+are\s+(?:an?\s+|the\s+)?/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!role) return undefined;
+
+  role = role.split(/\s+/).slice(0, 12).join(" ");
+  if (role.length > 72) {
+    const capped = role.slice(0, 72).replace(/\s+\S*$/, "").trim();
+    role = capped || role.slice(0, 72).trim();
+  }
+  role = role.replace(/\.$/, "").trim();
+  return role || undefined;
+}
+
 function headerValue(req: HttpRequest, name: string): string | undefined {
   const value = req.headers[name.toLowerCase()];
   return Array.isArray(value) ? value[0] : value;
@@ -3940,8 +3963,10 @@ export async function handleApiRequest(
         const node = hierarchy.nodes[name];
         const emp = node.employee;
         const { persona, ...rest } = emp;
+        const role = compactEmployeeRole(persona);
         return {
           ...rest,
+          ...(role ? { role } : {}),
           parentName: node.parentName,
           directReports: node.directReports,
           depth: node.depth,
