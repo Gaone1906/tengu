@@ -449,6 +449,7 @@ export class SessionManager {
           }
           const recovered = updateSession(session.id, {
             status: "idle",
+            attemptOutcome: "succeeded",
             lastActivity: new Date().toISOString(),
             lastError: null,
           });
@@ -566,6 +567,7 @@ export class SessionManager {
               const updated = updateSession(session.id, {
                 ...(typeof fallbackResult.contextTokens === "number" ? { lastContextTokens: fallbackResult.contextTokens } : {}),
                 status: fallbackResult.error ? "error" : "idle",
+                attemptOutcome: fallbackResult.error ? "failed" : "succeeded",
                 replyContext: msg.replyContext,
                 messageId: msg.messageId ?? null,
                 transportMeta: mergeTransportMeta(getSessionBySessionKey(msg.sessionKey)?.transportMeta ?? session.transportMeta, msg.transportMeta),
@@ -660,6 +662,7 @@ export class SessionManager {
               const retryUpdated = updateSession(session.id, {
                 ...(typeof retryResult.contextTokens === "number" ? { lastContextTokens: retryResult.contextTokens } : {}),
                 status: retryResult.error ? "error" : "idle",
+                attemptOutcome: retryResult.error ? "failed" : "succeeded",
                 replyContext: msg.replyContext,
                 messageId: msg.messageId ?? null,
                 transportMeta: mergeTransportMeta(getSessionBySessionKey(msg.sessionKey)?.transportMeta ?? session.transportMeta, msg.transportMeta),
@@ -725,7 +728,8 @@ export class SessionManager {
       }
       const updatedSession = updateSession(session.id, {
         ...(typeof result.contextTokens === "number" ? { lastContextTokens: result.contextTokens } : {}),
-        status: wasInterrupted ? "idle" : (result.error ? "error" : "idle"),
+        status: wasInterrupted ? "interrupted" : (result.error ? "error" : "idle"),
+        attemptOutcome: wasInterrupted ? "interrupted" : (result.error ? "failed" : "succeeded"),
         replyContext: msg.replyContext,
         messageId: msg.messageId ?? null,
         transportMeta: (() => {
@@ -738,7 +742,7 @@ export class SessionManager {
           return merged as any;
         })(),
         lastActivity: completedAt,
-        lastError: wasInterrupted ? null : (result.error ?? null),
+        lastError: wasInterrupted ? (result.error ?? "Interrupted") : (result.error ?? null),
       });
       if (!wasInterrupted && engineAtTurnStart === "claude") {
         markTranscriptSyncedThrough(session.id, result.sessionId);

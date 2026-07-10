@@ -10,6 +10,7 @@ import {
 import { transitionDerived } from './transitions.js';
 import { listSessionsByWorkItem } from '../sessions/registry.js';
 import { logger } from '../shared/logger.js';
+import type { SessionAttemptOutcome } from '../shared/types.js';
 
 /**
  * Work-item status reconciler (GRS-003a, elevated to the Todos vocabulary by
@@ -24,12 +25,12 @@ import { logger } from '../shared/logger.js';
  *     pulls an item off his queue.
  *   - ZERO linked sessions → untouched (`backlog`/`assigned` are never clobbered).
  *   - Any session in flight (`running`/`waiting`) → `executing`.
- *   - Newest attempt `idle` → `in_review` (the vision's "session completes →
+ *   - Newest attempt with an explicit `succeeded` receipt → `in_review` (the vision's "session completes →
  *     in_review, NOT done" made structural) — then the TRUST policy hook runs in
  *     the same pass: an item whose effective verify mode is `trust` auto-closes
  *     to `done` (actor `policy:trust`, event-audited), so cron/fire-and-forget
  *     items never pile into a fake review queue.
- *   - Newest attempt `error`/`interrupted` → `blocked`.
+ *   - Newest attempt with an explicit `failed`/`interrupted` receipt → `blocked`.
  *   - EXCEPTION — `source: 'workflow'` items derive ONLY `executing` (in-flight
  *     evidence). A run's step sessions settle between steps, and deriving
  *     `in_review` there would lie (the run is mid-flight) — worse, a trust
@@ -46,31 +47,39 @@ import { logger } from '../shared/logger.js';
 /** Session lifecycle states, mirrored from `Session.status` in shared/types.ts. */
 type SessionStatus = 'idle' | 'running' | 'error' | 'waiting' | 'interrupted';
 
+export interface WorkItemAttemptEvidence {
+  status: SessionStatus;
+  outcome: SessionAttemptOutcome | null;
+}
+
 /** A session is "in flight" (work is actively happening) in these states. */
 const IN_FLIGHT: ReadonlySet<SessionStatus> = new Set<SessionStatus>(['running', 'waiting']);
 
 /**
  * Pure derivation: given an item's current status, its provenance, and the
- * statuses of its linked sessions **ordered newest-first** (as
+ * terminal receipts of its linked sessions **ordered newest-first** (as
  * `listSessionsByWorkItem` returns them, by `last_activity DESC`), return the
  * status the item SHOULD have. Never yields a sticky terminal — `done` is a
  * policy/run/human decision layered on top (the TRUST hook / workflow bridge).
  */
 export function deriveWorkItemStatus(
   current: WorkItemStatus,
-  sessionStatuses: readonly SessionStatus[],
+  attempts: readonly WorkItemAttemptEvidence[],
   source?: WorkItemSource,
 ): WorkItemStatus {
   if (STICKY_STATUSES.has(current)) return current;
-  if (sessionStatuses.length === 0) return current;
-  if (sessionStatuses.some((s) => IN_FLIGHT.has(s))) return 'executing';
+  if (attempts.length === 0) return current;
+  if (attempts.some((attempt) => IN_FLIGHT.has(attempt.status))) return 'executing';
   // Workflow items: settles between steps are NOT review-ready evidence — the
   // run driver owns their terminal truth (see module docstring).
   if (source === 'workflow') return current;
   // Nothing in flight — the most recent attempt (index 0, newest-first) is the
   // authority (an old clean settle must not mask a newer failure, and a newer
   // clean retry must clear an older failure).
-  return sessionStatuses[0] === 'idle' ? 'in_review' : 'blocked';
+  const newest = attempts[0].outcome;
+  if (newest === 'succeeded') return 'in_review';
+  if (newest === 'failed' || newest === 'interrupted') return 'blocked';
+  return current;
 }
 
 export interface ReconcileResult {
@@ -87,8 +96,11 @@ export interface ReconcileResult {
 export function reconcileWorkItem(id: string): ReconcileResult | undefined {
   const item = getWorkItem(id);
   if (!item) return undefined;
-  const statuses = listSessionsByWorkItem(id).map((s) => s.status as SessionStatus);
-  const derived = deriveWorkItemStatus(item.status, statuses, item.source);
+  const attempts = listSessionsByWorkItem(id).map((s) => ({
+    status: s.status as SessionStatus,
+    outcome: s.attemptOutcome ?? null,
+  }));
+  const derived = deriveWorkItemStatus(item.status, attempts, item.source);
 
   let current = item;
   let changed = false;

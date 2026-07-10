@@ -65,9 +65,10 @@ export function sweepOnce(deps: StatusReconcilerDeps): number {
     }
     pending?.delete(session.id);
     updateSession(session.id, {
-      status: "idle",
+      status: "interrupted",
+      attemptOutcome: "interrupted",
       lastActivity: new Date(now).toISOString(),
-      lastError: null,
+      lastError: "Interrupted: engine turn ended without a terminal result",
     });
     deps.emit("session:completed", {
       sessionId: session.id,
@@ -78,7 +79,7 @@ export function sweepOnce(deps: StatusReconcilerDeps): number {
     });
     logger.warn(
       `[reconciler] session ${session.id} (${session.engine}) was stuck status=running with no live turn ` +
-      `(heartbeat stale ${Math.round(staleFor / 1000)}s) — reset to idle`,
+      `(heartbeat stale ${Math.round(staleFor / 1000)}s) — marked interrupted`,
     );
     fixed++;
   }

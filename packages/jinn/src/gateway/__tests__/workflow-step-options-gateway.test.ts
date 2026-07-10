@@ -175,7 +175,7 @@ describe('spawnWorkflowStepSession — model/effort overrides (GRS-016b)', () =>
 });
 
 describe('workflowRunDriverDeps.stopStepSession — the timeout stop (GRS-016b)', () => {
-  it('idles the live session found by sessionKey and clears its queue lane', async () => {
+  it('interrupts the live session found by sessionKey and clears its queue lane', async () => {
     const key = 'workflow-run:run-gw-stop:sb:1';
     const session = registry.createSession({
       engine: 'codex', source: 'web', sourceRef: key, sessionKey: key,
@@ -192,7 +192,10 @@ describe('workflowRunDriverDeps.stopStepSession — the timeout stop (GRS-016b)'
       runId: 'run-gw-stop', workflowId: 'wf-gw',
     });
 
-    expect(registry.getSession(session.id)?.status).toBe('idle');
+    expect(registry.getSession(session.id)).toMatchObject({
+      status: 'interrupted',
+      attemptOutcome: 'interrupted',
+    });
     expect(cleared).toContain(key);
   });
 

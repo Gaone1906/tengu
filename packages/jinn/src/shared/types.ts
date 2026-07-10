@@ -196,6 +196,7 @@ export interface EngineSessionRef {
 }
 
 export type EngineSessionRefs = Record<string, EngineSessionRef>;
+export type SessionAttemptOutcome = "succeeded" | "failed" | "interrupted";
 
 export interface Session {
   id: string;
@@ -219,6 +220,9 @@ export interface Session {
    *  `gateway.userHeader`). Null/undefined for single-user installs. */
   userId?: string | null;
   status: "idle" | "running" | "error" | "waiting" | "interrupted";
+  /** Durable terminal receipt for the latest execution attempt. Conversational
+   * `idle` alone is never proof that work completed successfully. */
+  attemptOutcome?: SessionAttemptOutcome | null;
   effortLevel: string | null;
   totalCost: number;
   totalTurns: number;

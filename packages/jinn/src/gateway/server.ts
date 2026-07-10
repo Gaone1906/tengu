@@ -1393,6 +1393,7 @@ export async function startGateway(
       if (consumedRestartMeta !== undefined) {
         updateSession(session.id, {
           status: "idle",
+          attemptOutcome: "interrupted",
           lastActivity: new Date().toISOString(),
           lastError: null,
           transportMeta: consumedRestartMeta,
@@ -1402,6 +1403,7 @@ export async function startGateway(
       }
       updateSession(session.id, {
         status: "interrupted",
+        attemptOutcome: "interrupted",
         lastActivity: new Date().toISOString(),
         lastError: "Interrupted: gateway shutting down gracefully",
       });

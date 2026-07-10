@@ -345,6 +345,10 @@ type Api = typeof import("../../gateway/api.js");
 let api: Api;
 type Registry = typeof import("../../sessions/registry.js");
 let registry: Registry;
+type WorkItemStore = typeof import("../../work-items/store.js");
+type WorkItemReconcile = typeof import("../../work-items/reconcile.js");
+let workItems: WorkItemStore;
+let workItemReconcile: WorkItemReconcile;
 
 function makeRes() {
   let status = 200;
@@ -446,6 +450,8 @@ async function createOperatorSession(prompt: string): Promise<string> {
 beforeAll(async () => {
   api = await import("../../gateway/api.js");
   registry = await import("../../sessions/registry.js");
+  workItems = await import("../../work-items/store.js");
+  workItemReconcile = await import("../../work-items/reconcile.js");
 });
 
 beforeEach(() => {
@@ -454,6 +460,26 @@ beforeEach(() => {
 });
 
 describe("session tools — integration against the real routes/registry", () => {
+  it.each(["stop", "reset"])("%s records interruption so linked unfinished TRUST work cannot reconcile to done", async (action) => {
+    const sessionId = await createOperatorSession(`unfinished ${action}`);
+    const item = workItems.createWorkItem({
+      title: `Unfinished ${action}`,
+      status: "executing",
+      source: "cron",
+      verifyPolicy: { mode: "trust" },
+    });
+    workItems.linkSession(item.id, sessionId);
+    registry.updateSession(sessionId, { status: "running" });
+
+    const response = await apiFetch()(`http://gateway.test/api/sessions/${sessionId}/${action}`, { method: "POST" });
+    expect(response.status).toBe(200);
+    expect(registry.getSession(sessionId)).toMatchObject({ status: "interrupted", attemptOutcome: "interrupted" });
+
+    const reconciled = workItemReconcile.reconcileWorkItem(item.id);
+    expect(reconciled?.item.status).toBe("blocked");
+    expect(workItems.getWorkItem(item.id)?.status).not.toBe("done");
+  });
+
   it("the headline loop: spawn (auto parent link) → list children → read (capped) → lateral send (sender-tagged, wakes) → stop", async () => {
     const parentId = await createOperatorSession("I am the COO");
     const ctx = ctxFor(parentId);
@@ -491,7 +517,7 @@ describe("session tools — integration against the real routes/registry", () =>
     // 5. Stop the child (own descendant → allowed); the record survives.
     const stopped = (await tool("stop_session").handler({ sessionId: spawned.sessionId }, ctx)) as { action: string };
     expect(stopped.action).toBe("stopped");
-    expect(registry.getSession(spawned.sessionId)!.status).toBe("idle");
+    expect(registry.getSession(spawned.sessionId)).toMatchObject({ status: "interrupted", attemptOutcome: "interrupted" });
   });
 
   it("a tool spawn that lost identity or claims an unknown caller id is refused at the route", async () => {

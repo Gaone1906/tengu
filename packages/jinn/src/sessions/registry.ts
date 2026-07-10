@@ -11,7 +11,7 @@ import {
   WORK_ITEMS_INDEX_DDL,
   WORK_ITEM_EVENTS_DDL,
 } from '../work-items/migrate.js';
-import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session } from '../shared/types.js';
+import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
 
 let db: Database.Database;
@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   parent_session_id TEXT,
   user_id TEXT,
   status TEXT DEFAULT 'idle',
+  attempt_outcome TEXT,
   created_at TEXT NOT NULL,
   last_activity TEXT NOT NULL,
   last_error TEXT
@@ -224,6 +225,7 @@ function rowToSession(row: Record<string, unknown>): Session {
     userId: (row.user_id as string) ?? null,
     effortLevel: (row.effort_level as string) ?? null,
     status: row.status as Session['status'],
+    attemptOutcome: (row.attempt_outcome as SessionAttemptOutcome) ?? null,
     totalCost: (row.total_cost as number) ?? 0,
     totalTurns: (row.total_turns as number) ?? 0,
     lastContextTokens: (row.last_context_tokens as number) ?? null,
@@ -662,6 +664,9 @@ export function migrateSessionsSchema(database: Database.Database): void {
     // Work-item link (GRS-002). Nullable; NULL = unchanged legacy behavior. The
     // partial index idx_sessions_work_item is created in initDb.
     ['work_item_id', 'TEXT'],
+    // Explicit latest-attempt receipt. NULL means no successful/failed terminal
+    // engine result has been recorded; `idle` by itself is not completion proof.
+    ['attempt_outcome', 'TEXT'],
   ];
 
   for (const [name, type, defaultVal] of missingColumns) {
@@ -789,6 +794,7 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     userId: opts.userId ?? null,
     effortLevel: opts.effortLevel ?? null,
     status: 'idle',
+    attemptOutcome: null,
     totalCost: 0,
     totalTurns: 0,
     lastContextTokens: null,
@@ -819,6 +825,7 @@ export interface UpdateSessionFields {
   engineSessionId?: string | null;
   engineSessions?: EngineSessionRefs | null;
   status?: Session['status'];
+  attemptOutcome?: SessionAttemptOutcome | null;
   model?: string | null;
   effortLevel?: string | null;
   lastContextTokens?: number | null;
@@ -852,6 +859,16 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
   if (updates.status !== undefined) {
     sets.push('status = ?');
     values.push(updates.status);
+  }
+  if (updates.attemptOutcome !== undefined) {
+    sets.push('attempt_outcome = ?');
+    values.push(updates.attemptOutcome);
+  } else if (updates.status === 'running' || updates.status === 'waiting') {
+    sets.push('attempt_outcome = NULL');
+  } else if (updates.status === 'error') {
+    sets.push("attempt_outcome = 'failed'");
+  } else if (updates.status === 'interrupted') {
+    sets.push("attempt_outcome = 'interrupted'");
   }
   if (updates.model !== undefined) {
     sets.push('model = ?');
@@ -1302,7 +1319,7 @@ export function recoverStaleSessions(): number {
   const db = initDb();
   const now = new Date().toISOString();
   const result = db.prepare(
-    "UPDATE sessions SET status = 'interrupted', last_activity = ?, last_error = 'Interrupted: gateway restarted while session was running' WHERE status = 'running'",
+    "UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted', last_activity = ?, last_error = 'Interrupted: gateway restarted while session was running' WHERE status = 'running'",
   ).run(now);
   return result.changes;
 }

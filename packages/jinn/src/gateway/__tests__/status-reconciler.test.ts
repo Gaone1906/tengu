@@ -48,7 +48,7 @@ describe("status reconciler sweepOnce", () => {
       now: () => NOW,
     });
     expect(fixed).toBe(1);
-    expect(reg.getSession("stuck-1")?.status).toBe("idle");
+    expect(reg.getSession("stuck-1")).toMatchObject({ status: "interrupted", attemptOutcome: "interrupted" });
     expect(events).toEqual([
       { event: "session:completed", payload: expect.objectContaining({ sessionId: "stuck-1" }) },
     ]);
@@ -75,7 +75,7 @@ describe("status reconciler sweepOnce", () => {
     // Unknown engine → no live turn possible → unstick it too.
     expect(fixed).toBe(1);
     expect(reg.getSession("idle-1")?.status).toBe("idle");
-    expect(reg.getSession("ghost-1")?.status).toBe("idle");
+    expect(reg.getSession("ghost-1")).toMatchObject({ status: "interrupted", attemptOutcome: "interrupted" });
   });
 
   it("leaves a stale 'waiting' session untouched (rate-limit wait)", () => {
@@ -92,7 +92,7 @@ describe("status reconciler sweepOnce", () => {
     const fixed = rec.sweepOnce({ engines: new Map([["codex", aliveEngine]]), emit: () => {}, now: () => NOW });
     expect(fixed).toBe(1);
     expect(reg.getSession("headless-live")?.status).toBe("running");
-    expect(reg.getSession("headless-dead")?.status).toBe("idle");
+    expect(reg.getSession("headless-dead")).toMatchObject({ status: "interrupted", attemptOutcome: "interrupted" });
   });
 
   it("isTurnRunning wins over isAlive (warm-but-idle PTY must be unstuck)", () => {
@@ -100,7 +100,7 @@ describe("status reconciler sweepOnce", () => {
     const warmIdle = { name: "claude", run: async () => ({ sessionId: "", result: "" }), isTurnRunning: () => false, isAlive: () => true } as any;
     const fixed = rec.sweepOnce({ engines: new Map([["claude", warmIdle]]), emit: () => {}, now: () => NOW });
     expect(fixed).toBe(1);
-    expect(reg.getSession("warm-idle")?.status).toBe("idle");
+    expect(reg.getSession("warm-idle")).toMatchObject({ status: "interrupted", attemptOutcome: "interrupted" });
   });
 
   it("two-sweep confirmation: first sweep marks, second sweep fixes, recovery clears the mark", () => {
@@ -110,7 +110,7 @@ describe("status reconciler sweepOnce", () => {
     expect(rec.sweepOnce(deps)).toBe(0); // first observation — candidate only
     expect(reg.getSession("boundary-1")?.status).toBe("running");
     expect(rec.sweepOnce(deps)).toBe(1); // second consecutive observation — fixed
-    expect(reg.getSession("boundary-1")?.status).toBe("idle");
+    expect(reg.getSession("boundary-1")).toMatchObject({ status: "interrupted", attemptOutcome: "interrupted" });
 
     // A candidate that recovers (fresh heartbeat) is cleared, not fixed later.
     insert("boundary-2", "running", iso(120_000));
@@ -122,12 +122,12 @@ describe("status reconciler sweepOnce", () => {
     expect(rec.sweepOnce(deps)).toBe(1); // now fixed
   });
 
-  it("clears lastError and restamps lastActivity on fix", () => {
+  it("records an interruption error and restamps lastActivity on fix", () => {
     insert("stuck-meta", "running", iso(120_000));
     db.prepare("UPDATE sessions SET last_error = 'boom' WHERE id = ?").run("stuck-meta");
     rec.sweepOnce({ engines: new Map(), emit: () => {}, now: () => NOW });
     const s = reg.getSession("stuck-meta");
-    expect(s?.lastError ?? null).toBeNull();
+    expect(s?.lastError).toBe("Interrupted: engine turn ended without a terminal result");
     expect(new Date(s!.lastActivity).getTime()).toBe(NOW);
   });
 });

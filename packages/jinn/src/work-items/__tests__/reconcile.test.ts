@@ -18,14 +18,19 @@ let reg: Reg;
 let db: import("better-sqlite3").Database;
 
 type SessionStatus = "idle" | "running" | "error" | "waiting" | "interrupted";
+type AttemptOutcome = "succeeded" | "failed" | "interrupted" | null;
+
+function evidence(status: SessionStatus, outcome: AttemptOutcome = status === "idle" ? "succeeded" : status === "error" ? "failed" : status === "interrupted" ? "interrupted" : null) {
+  return { status, outcome };
+}
 
 /** Insert a session in a given status and link it to a work item. `at` sets last_activity
  *  so newest-first ordering in listSessionsByWorkItem is deterministic. */
-function linkedSession(id: string, workItemId: string, status: SessionStatus, at: string): void {
+function linkedSession(id: string, workItemId: string, status: SessionStatus, at: string, outcome: AttemptOutcome = evidence(status).outcome): void {
   db.prepare(
-    `INSERT INTO sessions (id, engine, source, source_ref, status, work_item_id, created_at, last_activity)
-     VALUES (?, 'claude', 'cron', ?, ?, ?, ?, ?)`,
-  ).run(id, `cron:${id}`, status, workItemId, at, at);
+    `INSERT INTO sessions (id, engine, source, source_ref, status, attempt_outcome, work_item_id, created_at, last_activity)
+     VALUES (?, 'claude', 'cron', ?, ?, ?, ?, ?, ?)`,
+  ).run(id, `cron:${id}`, status, outcome, workItemId, at, at);
 }
 
 beforeAll(async () => {
@@ -36,7 +41,11 @@ beforeAll(async () => {
 });
 
 describe("deriveWorkItemStatus — pure truth table (GRS-021a elevated vocabulary)", () => {
-  const D = () => reconcile.deriveWorkItemStatus;
+  const D = () => (
+    current: Parameters<Reconcile["deriveWorkItemStatus"]>[0],
+    statuses: SessionStatus[],
+    source?: Parameters<Reconcile["deriveWorkItemStatus"]>[2],
+  ) => reconcile.deriveWorkItemStatus(current, statuses.map((status) => evidence(status)), source);
 
   it("keeps sticky terminals (done/cancelled/ESCALATED) regardless of session evidence", () => {
     expect(D()("done", ["running"])).toBe("done");
@@ -68,6 +77,11 @@ describe("deriveWorkItemStatus — pure truth table (GRS-021a elevated vocabular
     expect(D()("executing", ["idle", "interrupted"])).toBe("in_review");
     // Never done from derivation alone — the TRUST hook / a reviewer decides.
     expect(D()("executing", ["idle", "idle"])).toBe("in_review");
+  });
+
+  it("does not treat conversational idle without a successful terminal receipt as completed work", () => {
+    expect(reconcile.deriveWorkItemStatus("executing", [evidence("idle", null)])).toBe("executing");
+    expect(reconcile.deriveWorkItemStatus("assigned", [evidence("idle", null)])).toBe("assigned");
   });
 
   it("is blocked when the NEWEST attempt failed, even if an older attempt settled idle", () => {

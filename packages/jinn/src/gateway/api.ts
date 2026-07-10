@@ -820,7 +820,12 @@ export function workflowRunDriverDeps(root: string, context: ApiContext): RunDri
       if (!session) return; // already gone — the settle stands, nothing burns
       killSessionEngines(context, session, `Interrupted: workflow step timeout (${stop.reason})`);
       context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
-      updateSession(session.id, { status: "idle", lastActivity: new Date().toISOString(), lastError: null });
+      updateSession(session.id, {
+        status: "interrupted",
+        attemptOutcome: "interrupted",
+        lastActivity: new Date().toISOString(),
+        lastError: `Interrupted: workflow step timeout (${stop.reason})`,
+      });
       context.emit("session:stopped", { sessionId: session.id });
     },
     // Deterministic loop exit-gate evaluation (GRS-014e): the same evidence checks
@@ -2340,7 +2345,7 @@ export async function handleApiRequest(
       }
       killSessionEngines(context, session, "Interrupted by user");
       context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
-      updateSession(params.id, { status: "idle", lastActivity: new Date().toISOString(), lastError: null });
+      updateSession(params.id, { status: "interrupted", attemptOutcome: "interrupted", lastActivity: new Date().toISOString(), lastError: "Interrupted by user" });
       context.emit("session:stopped", { sessionId: params.id });
       return json(res, { status: "stopped", sessionId: params.id });
     }
@@ -2357,9 +2362,10 @@ export async function handleApiRequest(
       delete meta["engineOverride"];
       clearEngineSessionRefs(params.id);
       updateSession(params.id, {
-        status: "idle",
+        status: "interrupted",
+        attemptOutcome: "interrupted",
         lastActivity: new Date().toISOString(),
-        lastError: null,
+        lastError: "Interrupted: session reset",
         transportMeta: meta as any,
       });
       logger.info(`Session ${params.id} reset via API (cleared engineSessions, engineOverride, engineSessionId, lastError)`);
@@ -5054,14 +5060,12 @@ async function runWebSession(
   engine = runtimeEngine;
   logger.info(`Web session ${currentSession.id} running engine "${engineAtTurnStart}" (model: ${currentSession.model || "default"})`);
 
-  // Ensure status is "running" (may already be set by the POST handler)
-  const currentStatus = getSession(currentSession.id);
-  if (currentStatus && currentStatus.status !== "running") {
-    updateSession(currentSession.id, {
-      status: "running",
-      lastActivity: new Date().toISOString(),
-    });
-  }
+  // A new turn owns the session now. Writing running even when the POST handler
+  // already did so clears any terminal receipt left by the previous attempt.
+  updateSession(currentSession.id, {
+    status: "running",
+    lastActivity: new Date().toISOString(),
+  });
 
   // If this session has an assigned employee, load their persona
   let employee: import("../shared/types.js").Employee | undefined;
@@ -5361,6 +5365,7 @@ async function runWebSession(
         }
         const recovered = updateSession(currentSession.id, {
           status: "idle",
+          attemptOutcome: "succeeded",
           lastActivity: new Date().toISOString(),
           lastError: null,
         });
@@ -5535,6 +5540,7 @@ async function runWebSession(
             }
             const completedFallback = updateSession(currentSession.id, {
               status: fallbackResult.error ? "error" : "idle",
+              attemptOutcome: fallbackResult.error ? "failed" : "succeeded",
               lastActivity: fallbackCompletedAt,
               lastError: fallbackResult.error ?? null,
             });
@@ -5602,6 +5608,7 @@ async function runWebSession(
             }
             const completedAfterRetry = updateSession(currentSession.id, {
               status: retryResult.error ? "error" : "idle",
+              attemptOutcome: retryResult.error ? "failed" : "succeeded",
               lastActivity: retryCompletedAt,
               lastError: retryResult.error ?? null,
             });
@@ -5684,13 +5691,12 @@ async function runWebSession(
     }
     const completedSession = updateSession(currentSession.id, {
       ...(typeof result.contextTokens === "number" ? { lastContextTokens: result.contextTokens } : {}),
-      // An interrupt (new message arrived / user stopped) is NOT an error — land idle
-      // with no lastError, mirroring the connector path (manager.ts). Otherwise the
-      // session would stick in "error" with a misleading "Interrupted" message and
-      // fire a false parent-callback failure when the interrupt is the last action.
-      status: quietPreempted ? "idle" : (result.error ? "error" : "idle"),
+      // Preserve interruption as an explicit terminal receipt. Conversational
+      // idleness is not proof that an execution attempt succeeded.
+      status: quietPreempted ? "interrupted" : (result.error ? "error" : "idle"),
+      attemptOutcome: quietPreempted ? "interrupted" : (result.error ? "failed" : "succeeded"),
       lastActivity: completedAt,
-      lastError: quietPreempted ? null : (result.error ?? null),
+      lastError: quietPreempted ? (result.error ?? "Interrupted") : (result.error ?? null),
     });
     if (!quietPreempted && engineAtTurnStart === "claude") {
       markTranscriptSyncedThrough(currentSession.id, result.sessionId);
