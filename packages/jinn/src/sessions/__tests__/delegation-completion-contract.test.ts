@@ -134,7 +134,9 @@ describe("delegation completion contract", () => {
     "Progress update: not finished; tests are still running.",
     "Progress update: not complete; tests are still running.",
     "I am still working on the migration.",
-    "I will continue after this.",
+    "I will continue with this task.",
+    "I will continue working on the migration.",
+    "I'll continue working on the migration.",
   ])("nudges an explicit task-unfinished report: %s", async (message) => {
     getWorkItem.mockReturnValue(openItem("executing"));
     const postFollowUp = vi.fn().mockResolvedValue(undefined);
@@ -164,6 +166,9 @@ describe("delegation completion contract", () => {
     "The fix is verified. Next step: merge when convenient.",
     "The feature is working on both iOS and Android; verification is green.",
     "The service is still running and healthy after the rollout.",
+    "I will continue after this.",
+    "Everything is green. I will continue monitoring for regressions.",
+    "Everything is green. I'll continue monitoring for regressions.",
   ])("does not let incidental operational language authorize a nudge: %s", async (message) => {
     getWorkItem.mockReturnValue(openItem("executing"));
     const postFollowUp = vi.fn().mockResolvedValue(undefined);

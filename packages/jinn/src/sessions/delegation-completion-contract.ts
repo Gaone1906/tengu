@@ -1,3 +1,11 @@
+/**
+ * KNOWN LIMITATION: completion classification is heuristic and fail-safe-biased.
+ * It nudges only explicit task-incomplete assertions and surfaces everything
+ * else—including finished, ambiguous, and awaiting-parent replies—to the parent.
+ * A rare mis-nudge is one redundant continue-message to a done child and then
+ * self-corrects. The real contract is structural: delegation provenance, an
+ * atomic once-per-idle claim, and startup recovery for orphaned claims.
+ */
 import type { Session } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 import { getWorkItem } from "../work-items/store.js";
@@ -13,7 +21,7 @@ const META_KEY = "delegationCompletionContract";
 export const DELEGATION_COMPLETION_TRACKED_META_KEY = "delegationCompletionTracked";
 const OPEN_EXECUTION_STATUSES = new Set(["backlog", "assigned", "executing"]);
 
-const EXPLICIT_UNFINISHED_SIGNAL = /\b(?:i (?:am|['’]m) still working (?:on|through)|i (?:will|['’]ll) continue|(?:(?:the|this|my)\s+)?(?:task|work|implementation|fix|patch|change|migration|feature|deliverable)\s+(?:is|remains)\s+(?:incomplete|still in progress)|not (?:done|finished|complete))\b/i;
+const EXPLICIT_UNFINISHED_SIGNAL = /\b(?:i(?: am|['’]m) still working (?:on|through)|i(?: will|['’]ll) continue (?:working\b|(?:with\s+)?(?:this|the|my)\s+(?:task|work|implementation|fix|patch|change|migration|feature|deliverable|test run)|with (?:the )?remaining (?:work|implementation|checks|tests?))|(?:(?:the|this|my)\s+)?(?:task|work|implementation|fix|patch|change|migration|feature|deliverable)\s+(?:is|remains)\s+(?:incomplete|still in progress)|not (?:done|finished|complete))\b/i;
 const TERMINAL_SIGNAL = /\b(final report|completed|complete|done|finished|shipped|implemented|resolved|all tests pass(?:ed)?|(?:tests?|checks?) (?:now )?pass(?:ed)?|ready for review|ready to merge|(?:the )?(?:pr|patch) (?:is )?ready|commit (?:sha|hash)|hand(?:-| )?off)\b/i;
 const PARENT_WAIT_SIGNAL = /\?|\b(need (?:your|the parent's) input|please confirm|which (?:option|approach)|should i|would you|let me know|blocked (?:on|by)|waiting on|awaiting (?:approval|confirmation|input)|waiting for (?:approval|confirmation|input|you|the parent)|(?:need|missing|without|awaiting) (?:the )?(?:credentials?|access|permissions?|api key|token|secret))\b/i;
 
