@@ -6,7 +6,12 @@ import { startWorkflowRunFromTrigger, type RunDriverDeps } from './run-reconcile
 import type { WorkflowRun, WorkflowTriggerEvent } from './run-store.js';
 import { evaluateRegexMatch } from './regex-eval.js';
 import { logger } from '../shared/logger.js';
-import { snapshotPollExecutableArtifacts, type PollExecutableArtifact } from './poll-artifacts.js';
+import {
+  cleanupStagedPollExecutableArtifacts,
+  snapshotPollExecutableArtifacts,
+  verifyStagedPollExecutableArtifacts,
+  type PollExecutableArtifact,
+} from './poll-artifacts.js';
 import { abortPollExecutions } from './poll-executions.js';
 import { resolveActiveTriggerDefinition } from './trigger-dispatch.js';
 
@@ -398,12 +403,21 @@ function pollActivationPolicy(binding: Pick<PollWorkflowTriggerBinding, 'command
 }
 
 export function pollActivationContract(binding: Pick<PollWorkflowTriggerBinding, 'command' | 'intervalSeconds' | 'timeoutMs' | 'stdoutMaxBytes' | 'stderrMaxBytes'>): PollWorkflowActivationContract {
-  return {
-    ...pollActivationPolicy(binding),
-    executableArtifacts: snapshotPollExecutableArtifacts(binding.command, {
+  let executableArtifacts: PollExecutableArtifact[];
+  try {
+    executableArtifacts = snapshotPollExecutableArtifacts(binding.command, {
       cwd: pollExecutionCwd(),
       env: process.env,
-    }),
+    });
+  } catch (err) {
+    throw new WorkflowTriggerStoreError(
+      'invalid-input',
+      err instanceof Error ? err.message : 'poll command is not fully pinnable',
+    );
+  }
+  return {
+    ...pollActivationPolicy(binding),
+    executableArtifacts,
   };
 }
 
@@ -422,12 +436,23 @@ export function withPollActivationContract(binding: PollWorkflowTriggerBinding):
 
 export function pollActivationContractMatches(binding: PollWorkflowTriggerBinding): boolean {
   try {
-    return !!binding.activationContractHash
-      && !!binding.activationContract?.executableArtifacts?.length
-      && binding.activationContractHash === pollActivationContractHash(binding);
+    if (!binding.activationContractHash || !binding.activationContract?.executableArtifacts?.length) return false;
+    const contractHash = crypto.createHash('sha256').update(stableJson(binding.activationContract)).digest('hex');
+    if (binding.activationContractHash !== contractHash) return false;
+    verifyStagedPollExecutableArtifacts(binding.activationContract.executableArtifacts, { cwd: pollExecutionCwd() });
+    return true;
   } catch {
     return false;
   }
+}
+
+function cleanupUnusedPollExecutableArtifacts(bindings: WorkflowTriggerBinding[]): void {
+  cleanupStagedPollExecutableArtifacts(
+    bindings.flatMap((binding) => binding.kind === 'poll'
+      ? binding.activationContract?.executableArtifacts ?? []
+      : []),
+    { cwd: pollExecutionCwd() },
+  );
 }
 
 export function formatPollActivationApprovalRequest(binding: PollWorkflowTriggerBinding): string {
@@ -720,6 +745,7 @@ export async function deleteWorkflowTriggerBinding(root: string, name: string): 
   if (next.length === store.triggers.length) return false;
   saveStore(root, { ...store, triggers: next });
   await abortPollExecutions(root, name);
+  cleanupUnusedPollExecutableArtifacts(next);
   return true;
 }
 
@@ -755,6 +781,7 @@ export async function updateWorkflowTriggerBinding(root: string, binding: Workfl
   if (workflowTriggerBindingRevision(updated) !== previousRevision) {
     await abortPollExecutions(root, updated.name, previousRevision);
   }
+  cleanupUnusedPollExecutableArtifacts(store.triggers);
   return updated;
 }
 

@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { getWorkItem } from '../work-items/store.js';
 import {
   createWorkflowTriggerBinding,
@@ -20,6 +21,7 @@ import { startWorkflowRunFromTrigger, type RunDriverDeps } from './run-reconcile
 import type { WorkflowRun, WorkflowTriggerEvent } from './run-store.js';
 import { abortPollExecutions, registerPollExecution } from './poll-executions.js';
 import { resolveActiveTriggerDefinition } from './trigger-dispatch.js';
+import { openVerifiedStagedPollExecutableArtifacts } from './poll-artifacts.js';
 
 export { createWorkflowTriggerBinding };
 
@@ -108,14 +110,23 @@ function runCommand(binding: PollWorkflowTriggerBinding, signal: AbortSignal): P
   const timeoutMs = binding.timeoutMs ?? POLL_DEFAULT_TIMEOUT_MS;
   const stdoutMaxBytes = binding.stdoutMaxBytes ?? POLL_DEFAULT_STDOUT_MAX_BYTES;
   const stderrMaxBytes = binding.stderrMaxBytes ?? POLL_DEFAULT_STDERR_MAX_BYTES;
+  const staged = openVerifiedStagedPollExecutableArtifacts(
+    binding.activationContract?.executableArtifacts ?? [],
+    { cwd: process.env.JINN_HOME || process.cwd() },
+  );
   return new Promise((resolve) => {
-    const child = spawn(binding.command, {
-      shell: true,
-      cwd: process.env.JINN_HOME || process.cwd(),
-      env: scrubbedPollEnv(),
-      detached: process.platform !== 'win32',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(staged.interpreterPath, ['/dev/fd/3'], {
+        shell: false,
+        cwd: process.env.JINN_HOME || process.cwd(),
+        env: scrubbedPollEnv(),
+        detached: process.platform !== 'win32',
+        stdio: ['ignore', 'pipe', 'pipe', staged.executableFd],
+      });
+    } finally {
+      fs.closeSync(staged.executableFd);
+    }
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
     let settled = false;

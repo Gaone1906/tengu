@@ -10,232 +10,291 @@ export interface PollExecutableArtifact {
   sha256: string;
 }
 
-interface ArtifactStatKey {
-  key: string;
-  resolvedPath: string;
+export interface StagedPollCommand {
+  executablePath: string;
+  interpreterPath: string;
 }
 
-const hashCache = new Map<string, string>();
-const CONTROL_OPERATORS = new Set([';', '&', '&&', '|', '||', '\n']);
-const SHELL_RESERVED_WORDS = new Set([
-  'if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done',
-  'case', 'esac', 'in', 'function', '{', '}', '!',
-]);
-const INTERPRETER_NAMES = new Set([
-  'bash', 'bun', 'deno', 'fish', 'node', 'nodejs', 'perl', 'php', 'python',
-  'python2', 'python3', 'ruby', 'sh', 'zsh',
-]);
-const INLINE_CODE_FLAGS = new Set(['-c', '-e', '--eval', '--evaluate', '--command']);
-
-function artifactStatKey(file: string): ArtifactStatKey {
-  const resolvedPath = fs.realpathSync(file);
-  const stat = fs.statSync(resolvedPath, { bigint: true });
-  if (!stat.isFile()) throw new Error(`poll executable artifact is not a file: ${resolvedPath}`);
-  return {
-    resolvedPath,
-    key: [resolvedPath, stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join('\0'),
-  };
+export interface OpenStagedPollCommand extends StagedPollCommand {
+  executableFd: number;
 }
 
-function hashFile(file: string): { path: string; sha256: string } {
-  const stat = artifactStatKey(file);
-  let sha256 = hashCache.get(stat.key);
-  if (!sha256) {
-    sha256 = crypto.createHash('sha256').update(fs.readFileSync(stat.resolvedPath)).digest('hex');
-    hashCache.set(stat.key, sha256);
+const PINNABLE_GUIDANCE = 'poll command is not a fully pinnable poll command; use a single absolute path to an executable static poll script with no arguments';
+const FORBIDDEN_COMMAND_CHARS = /[\s;&|<>`$\\*?\[\]{}()]/;
+const STAGING_DIR = 'workflow-trigger-artifacts';
+
+function rejectUnpinnable(reason: string): never {
+  throw new Error(`${PINNABLE_GUIDANCE} (${reason})`);
+}
+
+function sha256(bytes: Buffer): string {
+  return crypto.createHash('sha256').update(bytes).digest('hex');
+}
+
+function isGatewayOwned(stat: fs.Stats): boolean {
+  return typeof process.getuid !== 'function' || stat.uid === process.getuid();
+}
+
+function privateStagingRoot(cwd: string): string {
+  const root = path.resolve(cwd, STAGING_DIR);
+  return fs.existsSync(root) ? fs.realpathSync(root) : root;
+}
+
+function ensurePrivateStagingRoot(cwd: string): string {
+  const root = privateStagingRoot(cwd);
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(root);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || !isGatewayOwned(stat)) {
+    throw new Error('poll artifact staging root is not a private directory');
   }
-  return { path: stat.resolvedPath, sha256 };
+  fs.chmodSync(root, 0o700);
+  return fs.realpathSync(root);
 }
 
-function resolveExecutable(command: string, cwd: string, env: NodeJS.ProcessEnv): string {
-  if (command.includes('/') || (process.platform === 'win32' && command.includes('\\'))) {
-    const candidate = path.isAbsolute(command) ? command : path.resolve(cwd, command);
-    fs.accessSync(candidate, fs.constants.X_OK);
-    return candidate;
-  }
-  for (const dir of (env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
-    const candidate = path.join(dir, command);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      if (fs.statSync(candidate).isFile()) return candidate;
-    } catch {
-      // Keep searching PATH.
-    }
-  }
-  throw new Error(`poll executable could not be resolved on PATH: ${command}`);
-}
-
-function shellExecutable(env: NodeJS.ProcessEnv): string {
-  if (process.platform === 'win32') return env.ComSpec || env.COMSPEC || 'cmd.exe';
-  return '/bin/sh';
-}
-
-/**
- * Tokenize only enough shell syntax to identify executable inputs. Quoted text is
- * kept as one word and control operators split commands. Expansion in a command
- * position is rejected later instead of guessed, because approval must fail closed.
- */
-function tokenizeShell(command: string): string[] {
-  const tokens: string[] = [];
-  let word = '';
-  let quote: "'" | '"' | null = null;
-  let escaped = false;
-  const flush = () => {
-    if (word) tokens.push(word);
-    word = '';
-  };
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i];
-    if (escaped) {
-      word += ch;
-      escaped = false;
-      continue;
-    }
-    if (ch === '\\' && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (ch === quote) quote = null;
-      else word += ch;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      continue;
-    }
-    if (ch === '\n') {
-      flush();
-      tokens.push('\n');
-      continue;
-    }
-    if (/\s/.test(ch)) {
-      flush();
-      continue;
-    }
-    if (ch === ';' || ch === '&' || ch === '|') {
-      flush();
-      const doubled = command[i + 1] === ch && ch !== ';';
-      tokens.push(doubled ? `${ch}${ch}` : ch);
-      if (doubled) i++;
-      continue;
-    }
-    word += ch;
-  }
-  if (escaped || quote) throw new Error('poll command has an unterminated escape or quote');
-  flush();
-  return tokens;
-}
-
-function commandSegments(command: string): string[][] {
-  const segments: string[][] = [];
-  let current: string[] = [];
-  for (const token of tokenizeShell(command)) {
-    if (CONTROL_OPERATORS.has(token)) {
-      if (current.length) segments.push(current);
-      current = [];
-    } else {
-      current.push(token);
-    }
-  }
-  if (current.length) segments.push(current);
-  return segments;
-}
-
-function addArtifact(
-  artifacts: PollExecutableArtifact[],
-  seen: Set<string>,
-  role: PollExecutableArtifactRole,
-  file: string,
-): string {
-  const hashed = hashFile(file);
-  const key = `${role}\0${hashed.path}`;
-  if (!seen.has(key)) {
-    seen.add(key);
-    artifacts.push({ role, ...hashed });
-  }
-  return hashed.path;
-}
-
-function maybeAddShebangInterpreter(
-  artifacts: PollExecutableArtifact[],
-  seen: Set<string>,
-  executablePath: string,
-  cwd: string,
-  env: NodeJS.ProcessEnv,
-): void {
-  const fd = fs.openSync(executablePath, 'r');
+function resolveSourceCommand(command: string): string {
+  if (process.platform === 'win32') rejectUnpinnable('static poll scripts are not supported on this platform');
+  if (!command || command !== command.trim()) rejectUnpinnable('command must not contain surrounding whitespace');
+  if (!path.isAbsolute(command)) rejectUnpinnable('PATH lookup and relative paths are not allowed');
+  if (FORBIDDEN_COMMAND_CHARS.test(command)) rejectUnpinnable('arguments, shell syntax, expansion, and indirection are not allowed');
   try {
-    const buf = Buffer.alloc(512);
-    const bytes = fs.readSync(fd, buf, 0, buf.length, 0);
-    const firstLine = buf.subarray(0, bytes).toString('utf8').split(/\r?\n/, 1)[0];
-    if (!firstLine.startsWith('#!')) return;
-    const shebang = firstLine.slice(2).trim().split(/\s+/).filter(Boolean);
-    if (!shebang.length) return;
-    const interpreter = addArtifact(artifacts, seen, 'interpreter', resolveExecutable(shebang[0], cwd, env));
-    if (path.basename(interpreter) === 'env') {
-      const delegated = shebang.slice(1).find((part) => !part.startsWith('-'));
-      if (delegated) addArtifact(artifacts, seen, 'interpreter', resolveExecutable(delegated, cwd, env));
-    }
+    fs.accessSync(command, fs.constants.X_OK);
+    const resolved = fs.realpathSync(command);
+    if (!fs.statSync(resolved).isFile()) rejectUnpinnable('the absolute script path must resolve to a regular file');
+    return resolved;
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith(PINNABLE_GUIDANCE)) throw err;
+    rejectUnpinnable('the absolute script path must resolve to an executable file');
+  }
+}
+
+function inspectPinnableScriptBytes(bytes: Buffer): string {
+  const source = bytes.toString('utf8');
+  if (!Buffer.from(source, 'utf8').equals(bytes) || source.includes('\0') || source.includes('\r')) {
+    rejectUnpinnable('script encoding is not supported');
+  }
+  const newline = source.indexOf('\n');
+  if (newline < 0 || !source.startsWith('#!')) rejectUnpinnable('script must have a pinned absolute interpreter');
+  const interpreter = source.slice(2, newline);
+  if (!path.isAbsolute(interpreter) || /\s/.test(interpreter)) {
+    rejectUnpinnable('interpreter must be one absolute path with no options or delegation');
+  }
+
+  let interpreterPath: string;
+  try {
+    interpreterPath = fs.realpathSync(interpreter);
+  } catch {
+    rejectUnpinnable('interpreter path cannot be resolved');
+  }
+  if (interpreterPath !== fs.realpathSync('/bin/sh')) {
+    rejectUnpinnable('only the constrained system shell script format is supported');
+  }
+
+  const body = source.slice(newline + 1).replace(/\n$/, '');
+  const staticOutput = /^printf '%s' '[^'\n]*'$/.test(body);
+  const fixedExit = /^exit (?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$/.test(body);
+  const fixedBusyLoop = body === 'while :; do :; done';
+  if (!staticOutput && !fixedExit && !fixedBusyLoop) {
+    rejectUnpinnable('script body is outside the static poll allowlist');
+  }
+  return interpreterPath;
+}
+
+function writePrivateFile(file: string, bytes: Buffer): void {
+  const fd = fs.openSync(file, 'wx', 0o500);
+  try {
+    fs.writeFileSync(fd, bytes);
+    fs.fsyncSync(fd);
+    fs.fchmodSync(fd, 0o500);
   } finally {
     fs.closeSync(fd);
   }
 }
 
-function scriptArgument(tokens: string[], executablePath: string): string | undefined {
-  const name = path.basename(executablePath).replace(/\.exe$/i, '').toLowerCase();
-  if (!INTERPRETER_NAMES.has(name)) return undefined;
-  for (let i = 1; i < tokens.length; i++) {
-    const token = tokens[i];
-    if (INLINE_CODE_FLAGS.has(token)) return undefined;
-    if (token === '--') return tokens[i + 1];
-    if (!token.startsWith('-')) return token;
-    if ((token === '-r' || token === '--require' || token === '-m') && tokens[i + 1]) i++;
+function openVerifiedPrivateFile(file: string, expectedHash: string, root: string): { path: string; fd: number } {
+  const absolute = path.resolve(file);
+  const relative = path.relative(root, absolute);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('poll staged artifact escaped its private staging root');
   }
-  return undefined;
+  const stat = fs.lstatSync(absolute);
+  if (!stat.isFile() || stat.isSymbolicLink() || !isGatewayOwned(stat) || (stat.mode & 0o777) !== 0o500) {
+    throw new Error('poll staged artifact is not a read-only regular file');
+  }
+  if (fs.realpathSync(absolute) !== absolute) {
+    throw new Error('poll staged artifact path is not canonical');
+  }
+  const fd = fs.openSync(absolute, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = fs.fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino) {
+      throw new Error('poll staged artifact changed while it was opened');
+    }
+    const bytes = Buffer.alloc(opened.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (read === 0) throw new Error('poll staged artifact could not be read completely');
+      offset += read;
+    }
+    if (sha256(bytes) !== expectedHash) throw new Error('poll staged artifact hash changed');
+    return { path: absolute, fd };
+  } catch (err) {
+    fs.closeSync(fd);
+    throw err;
+  }
+}
+
+function verifyPrivateFile(file: string, expectedHash: string, root: string): string {
+  const opened = openVerifiedPrivateFile(file, expectedHash, root);
+  fs.closeSync(opened.fd);
+  return opened.path;
+}
+
+function verifyTrustedInterpreter(file: string, expectedHash: string): string {
+  const absolute = path.resolve(file);
+  const stat = fs.lstatSync(absolute);
+  if (!stat.isFile() || stat.isSymbolicLink() || fs.realpathSync(absolute) !== absolute) {
+    throw new Error('poll interpreter is not a canonical regular file');
+  }
+  if (stat.uid !== 0 || (stat.mode & 0o022) !== 0) {
+    throw new Error('poll interpreter is not a root-owned system executable');
+  }
+  if (sha256(fs.readFileSync(absolute)) !== expectedHash) {
+    throw new Error('poll interpreter hash changed');
+  }
+  return absolute;
+}
+
+function materializeStagedScript(
+  root: string,
+  scriptBytes: Buffer,
+  interpreterHash: string,
+): PollExecutableArtifact {
+  const scriptHash = sha256(scriptBytes);
+  const pairHash = sha256(Buffer.from(`${scriptHash}\0${interpreterHash}`));
+  const finalDir = path.join(root, pairHash);
+  const executablePath = path.join(finalDir, 'poll-script');
+
+  if (!fs.existsSync(finalDir)) {
+    const tempDir = fs.mkdtempSync(path.join(root, `.${pairHash}.`));
+    try {
+      fs.chmodSync(tempDir, 0o700);
+      writePrivateFile(path.join(tempDir, 'poll-script'), scriptBytes);
+      try {
+        fs.renameSync(tempDir, finalDir);
+        fs.chmodSync(finalDir, 0o500);
+      } catch (err) {
+        if (!fs.existsSync(finalDir)) throw err;
+      }
+    } finally {
+      if (fs.existsSync(tempDir)) {
+        fs.chmodSync(tempDir, 0o700);
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }
+  }
+
+  const dirStat = fs.lstatSync(finalDir);
+  if (!dirStat.isDirectory() || dirStat.isSymbolicLink() || !isGatewayOwned(dirStat) || (dirStat.mode & 0o777) !== 0o500) {
+    throw new Error('poll artifact staging directory is not private');
+  }
+  fs.chmodSync(finalDir, 0o500);
+  verifyPrivateFile(executablePath, scriptHash, root);
+  return { role: 'executable', path: executablePath, sha256: scriptHash };
 }
 
 export function snapshotPollExecutableArtifacts(
   command: string,
   opts: { cwd: string; env: NodeJS.ProcessEnv },
 ): PollExecutableArtifact[] {
-  const artifacts: PollExecutableArtifact[] = [];
-  const seen = new Set<string>();
-  addArtifact(artifacts, seen, 'shell', resolveExecutable(shellExecutable(opts.env), opts.cwd, opts.env));
+  void opts.env;
+  const sourcePath = resolveSourceCommand(command);
+  const scriptBytes = fs.readFileSync(sourcePath);
+  const interpreterSourcePath = inspectPinnableScriptBytes(scriptBytes);
+  const interpreterBytes = fs.readFileSync(interpreterSourcePath);
+  const interpreterHash = sha256(interpreterBytes);
+  return [
+    materializeStagedScript(ensurePrivateStagingRoot(opts.cwd), scriptBytes, interpreterHash),
+    { role: 'interpreter', path: interpreterSourcePath, sha256: interpreterHash },
+  ];
+}
 
-  for (const rawSegment of commandSegments(command)) {
-    const segment = [...rawSegment];
-    while (segment[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(segment[0])) segment.shift();
-    while (segment[0] && SHELL_RESERVED_WORDS.has(segment[0])) segment.shift();
-    if (!segment.length) continue;
-    if (segment[0].includes('$') || segment[0].includes('`')) {
-      throw new Error(`poll executable uses dynamic shell expansion and cannot be pinned: ${segment[0]}`);
-    }
-    if (segment[0] === '.' || segment[0] === 'source') {
-      const script = segment[1];
-      if (!script) throw new Error('poll source command is missing its script path');
-      addArtifact(artifacts, seen, 'script', path.isAbsolute(script) ? script : path.resolve(opts.cwd, script));
-      continue;
-    }
-    const executablePath = addArtifact(
-      artifacts,
-      seen,
-      'executable',
-      resolveExecutable(segment[0], opts.cwd, opts.env),
-    );
-    maybeAddShebangInterpreter(artifacts, seen, executablePath, opts.cwd, opts.env);
-    const script = scriptArgument(segment, executablePath);
-    if (script) {
-      const scriptPath = path.isAbsolute(script) ? script : path.resolve(opts.cwd, script);
-      if (fs.existsSync(scriptPath) && fs.statSync(scriptPath).isFile()) {
-        addArtifact(artifacts, seen, 'script', scriptPath);
-      }
-    }
+function stagedArtifacts(
+  artifacts: PollExecutableArtifact[],
+  opts: { cwd: string },
+): { root: string; executable: PollExecutableArtifact; interpreter: PollExecutableArtifact } {
+  const root = privateStagingRoot(opts.cwd);
+  const rootStat = fs.lstatSync(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || !isGatewayOwned(rootStat) || (rootStat.mode & 0o777) !== 0o700) {
+    throw new Error('poll artifact staging root is not private');
   }
+  if (artifacts.length !== 2) throw new Error('poll activation contract does not contain exactly two staged artifacts');
+  const executable = artifacts.find((artifact) => artifact.role === 'executable');
+  const interpreter = artifacts.find((artifact) => artifact.role === 'interpreter');
+  if (!executable || !interpreter) throw new Error('poll activation contract is missing a staged executable or interpreter');
+  return { root, executable, interpreter };
+}
 
-  return artifacts.sort((a, b) => a.role.localeCompare(b.role) || a.path.localeCompare(b.path));
+export function verifyStagedPollExecutableArtifacts(
+  artifacts: PollExecutableArtifact[],
+  opts: { cwd: string },
+): StagedPollCommand {
+  const { root, executable, interpreter } = stagedArtifacts(artifacts, opts);
+  const executablePath = verifyPrivateFile(executable.path, executable.sha256, root);
+  const interpreterPath = verifyTrustedInterpreter(interpreter.path, interpreter.sha256);
+  return { executablePath, interpreterPath };
+}
+
+export function openVerifiedStagedPollExecutableArtifacts(
+  artifacts: PollExecutableArtifact[],
+  opts: { cwd: string },
+): OpenStagedPollCommand {
+  const { root, executable, interpreter } = stagedArtifacts(artifacts, opts);
+  const opened = openVerifiedPrivateFile(executable.path, executable.sha256, root);
+  try {
+    return {
+      executablePath: opened.path,
+      executableFd: opened.fd,
+      interpreterPath: verifyTrustedInterpreter(interpreter.path, interpreter.sha256),
+    };
+  } catch (err) {
+    fs.closeSync(opened.fd);
+    throw err;
+  }
+}
+
+function makeTreeRemovable(dir: string): void {
+  fs.chmodSync(dir, 0o700);
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const child = path.join(dir, entry.name);
+    if (entry.isDirectory() && !entry.isSymbolicLink()) makeTreeRemovable(child);
+    else if (!entry.isSymbolicLink()) fs.chmodSync(child, 0o600);
+  }
+}
+
+export function cleanupStagedPollExecutableArtifacts(
+  inUse: PollExecutableArtifact[],
+  opts: { cwd: string },
+): void {
+  const root = privateStagingRoot(opts.cwd);
+  if (!fs.existsSync(root)) return;
+  const rootStat = fs.lstatSync(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return;
+  const referencedDirs = new Set(
+    inUse
+      .map((artifact) => path.dirname(path.resolve(artifact.path)))
+      .filter((dir) => path.dirname(dir) === root),
+  );
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith('.')) continue;
+    const dir = path.join(root, entry.name);
+    if (referencedDirs.has(dir)) continue;
+    makeTreeRemovable(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  if (fs.readdirSync(root).length === 0) fs.rmSync(root, { recursive: true, force: true });
 }
 
 export function resetPollArtifactHashCacheForTests(): void {
-  hashCache.clear();
+  // Kept for compatibility with existing test callers; staged verification is uncached.
 }

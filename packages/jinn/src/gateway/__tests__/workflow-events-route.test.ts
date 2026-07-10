@@ -249,6 +249,9 @@ describe('workflow trigger authoring routes', () => {
 
   it('poll trigger creation mints a pending COO approval bound to the exact execution contract', async () => {
     seedWorkflow('poll-wf');
+    const checkScript = path.join(home, 'check.sh');
+    fs.writeFileSync(checkScript, '#!/bin/sh\nprintf \'%s\' \'{"fire":false}\'\n', 'utf8');
+    fs.chmodSync(checkScript, 0o700);
     const session = registry.createSession({ engine: 'codex', source: 'web', sourceRef: 'poll-caller', employee: 'coo' });
     const headers = {
       [identity.TOOL_CALL_HEADER]: identity.TOOL_CALL_HEADER_VALUE,
@@ -263,7 +266,7 @@ describe('workflow trigger authoring routes', () => {
         name: 'poll-ready',
         event: 'poll.ready',
         targetWorkflowId: 'poll-wf',
-        command: 'node check.js',
+        command: checkScript,
         intervalSeconds: 60,
         timeoutMs: 1200,
         stdoutMaxBytes: 2048,
@@ -285,7 +288,7 @@ describe('workflow trigger authoring routes', () => {
       activation: 'pending_approval',
       activationContractHash: expect.any(String),
       activationContract: {
-        command: 'node check.js',
+        command: checkScript,
         intervalSeconds: 60,
         cwdPolicy: expect.any(String),
         envPolicy: expect.any(String),
@@ -297,7 +300,7 @@ describe('workflow trigger authoring routes', () => {
     expect(body.approval.workItem).toMatchObject({ approvalState: 'pending', approvalTarget: 'coo' });
     const approvalText = `${body.approval.workItem.body ?? ''}\n${body.approval.workItem.approvalRequest ?? ''}`;
     for (const expected of [
-      'node check.js',
+      checkScript,
       'intervalSeconds: 60',
       'cwdPolicy:',
       'envPolicy:',
@@ -314,6 +317,32 @@ describe('workflow trigger authoring routes', () => {
       expect.objectContaining({ name: 'poll-ready', activation: 'pending_approval' }),
     );
     expect(JSON.stringify(listed.json())).not.toContain('binding-secret');
+  });
+
+  it('returns a clear client rejection when a poll command is not fully pinnable', async () => {
+    seedWorkflow('poll-unpinnable-wf');
+    const session = registry.createSession({ engine: 'codex', source: 'web', sourceRef: 'poll-unpinnable-caller', employee: 'coo' });
+    const headers = {
+      [identity.TOOL_CALL_HEADER]: identity.TOOL_CALL_HEADER_VALUE,
+      [identity.CALLER_SESSION_HEADER]: session.id,
+      [identity.CALLER_SESSION_CAPABILITY_HEADER]: identity.ensureSessionCapability(session.id),
+    };
+
+    const response = await request('POST', '/api/workflow-triggers', {
+      headers,
+      body: {
+        kind: 'poll',
+        name: 'poll-unpinnable',
+        event: 'poll.ready',
+        targetWorkflowId: 'poll-unpinnable-wf',
+        command: 'node check.js',
+        intervalSeconds: 60,
+      },
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.json<{ error: string }>().error).toMatch(/not a fully pinnable poll command.*use a single absolute path/i);
+    expect(triggers.getWorkflowTriggerBinding(evidenceRoot, 'poll-unpinnable')).toBeNull();
   });
 
   it('refuses a non-COO worker creating or deleting triggers for a COO-owned critical workflow', async () => {

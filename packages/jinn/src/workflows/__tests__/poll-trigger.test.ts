@@ -86,10 +86,16 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForFile(file: string): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  while (!fs.existsSync(file) && Date.now() < deadline) await wait(10);
-  expect(fs.existsSync(file)).toBe(true);
+function pinnableScript(name: string, body: string): string {
+  const script = path.join(root, `${name}.sh`);
+  fs.writeFileSync(script, `#!/bin/sh\n${body}\n`, 'utf8');
+  fs.chmodSync(script, 0o700);
+  return script;
+}
+
+function staticOutputScript(name: string, output: string): string {
+  if (output.includes("'")) throw new Error('static poll test output cannot contain a single quote');
+  return pinnableScript(name, `printf '%s' '${output}'`);
 }
 
 describe('workflow poll/check custom triggers', () => {
@@ -115,7 +121,7 @@ describe('workflow poll/check custom triggers', () => {
       name: 'poll-ok',
       event: 'poll.ready',
       targetWorkflowId: 'poll-workflow',
-      command: `${nodeBin} -e "process.stdout.write(JSON.stringify({fire:true,payload:{ready:true,id:'42'}}))"`,
+      command: staticOutputScript('poll-ok', JSON.stringify({ fire: true, payload: { ready: true, id: '42' } })),
       intervalSeconds: 60,
       timeoutMs: 1000,
       approvalWorkItemId,
@@ -141,7 +147,7 @@ describe('workflow poll/check custom triggers', () => {
       name: 'poll-dedupe',
       event: 'poll.ready',
       targetWorkflowId: 'poll-dedupe-workflow',
-      command: `${nodeBin} -e "process.stdout.write(JSON.stringify({fire:true,payload:{ready:true,id:'same'}}))"`,
+      command: staticOutputScript('poll-dedupe', JSON.stringify({ fire: true, payload: { ready: true, id: 'same' } })),
       intervalSeconds: 60,
       timeoutMs: 1000,
       approvalWorkItemId,
@@ -170,7 +176,7 @@ describe('workflow poll/check custom triggers', () => {
       name: 'poll-mutate',
       event: 'poll.ready',
       targetWorkflowId: 'poll-mutate-workflow',
-      command: `${nodeBin} -e "process.stdout.write(JSON.stringify({fire:true,payload:{id:'original'}}))"`,
+      command: staticOutputScript('poll-mutate-original', JSON.stringify({ fire: true, payload: { id: 'original' } })),
       intervalSeconds: 60,
       timeoutMs: 1000,
       approvalWorkItemId,
@@ -178,7 +184,7 @@ describe('workflow poll/check custom triggers', () => {
 
     const mutated = await customTriggers.updateWorkflowTriggerBinding(root, {
       ...original,
-      command: `${nodeBin} -e "process.stdout.write(JSON.stringify({fire:true,payload:{id:'mutated'}}))"`,
+      command: staticOutputScript('poll-mutate-updated', JSON.stringify({ fire: true, payload: { id: 'mutated' } })),
     });
     expect(mutated.kind).toBe('poll');
     if (mutated.kind !== 'poll') throw new Error('expected poll binding');
@@ -191,7 +197,7 @@ describe('workflow poll/check custom triggers', () => {
     expect((stored as { approvalWorkItemId?: string } | null)?.approvalWorkItemId).toBeUndefined();
   });
 
-  it('fails closed when an approved script is replaced without changing the command', async () => {
+  it('runs the staged approved bytes when the original script is replaced', async () => {
     createDefinition(root, def('poll-swap-workflow', [trigger, step('a')]), { now });
     const script = path.join(root, 'poll-swap.sh');
     fs.writeFileSync(script, '#!/bin/sh\nprintf \'%s\' \'{"fire":true,"payload":{"id":"approved"}}\'\n', 'utf8');
@@ -213,9 +219,87 @@ describe('workflow poll/check custom triggers', () => {
 
     const result = await poll.runPollTriggerOnce(harness(), binding, { now });
 
-    expect(result).toMatchObject({ outcome: 'not-approved' });
-    expect(result.detail).toMatch(/executable artifact changed/i);
-    expect(runStore.listRuns(root, 'poll-swap-workflow')).toHaveLength(0);
+    expect(result.outcome).toBe('fired');
+    expect(result.run?.trigger).toMatchObject({ payload: { id: 'approved' } });
+    const stagedArtifacts = binding.activationContract?.executableArtifacts.filter((artifact) => artifact.role === 'executable') ?? [];
+    expect(stagedArtifacts.every((artifact) => artifact.path !== fs.realpathSync(script))).toBe(true);
+    for (const artifact of stagedArtifacts) {
+      expect(fs.statSync(artifact.path).mode & 0o222).toBe(0);
+    }
+  });
+
+  it('refuses approval for opaque inline interpreter code', async () => {
+    createDefinition(root, def('poll-inline-workflow', [trigger, step('a')]), { now });
+    const script = path.join(root, 'poll-inline.sh');
+    fs.writeFileSync(script, '#!/bin/sh\nprintf \'%s\' \'{"fire":true,"payload":{"id":"approved"}}\'\n', 'utf8');
+    fs.chmodSync(script, 0o700);
+    const approvalWorkItemId = await approvedWorkItem('poll-inline');
+
+    expect(() => poll.createWorkflowTriggerBinding(root, {
+      kind: 'poll',
+      name: 'poll-inline',
+      event: 'poll.ready',
+      targetWorkflowId: 'poll-inline-workflow',
+      command: `/bin/sh -c ${JSON.stringify(script)}`,
+      intervalSeconds: 60,
+      timeoutMs: 1000,
+      approvalWorkItemId,
+    }, { now })).toThrow(/not a fully pinnable poll command.*use a single absolute path/i);
+
+    expect(runStore.listRuns(root, 'poll-inline-workflow')).toHaveLength(0);
+  });
+
+  it('refuses approval when the complete executable input set cannot be proven', async () => {
+    createDefinition(root, def('poll-unprovable-workflow', [trigger, step('a')]), { now });
+    const helper = path.join(root, 'poll-unprovable-helper.sh');
+    const wrapper = path.join(root, 'poll-unprovable-wrapper.sh');
+    fs.writeFileSync(helper, '#!/bin/sh\nprintf \'%s\' \'{"fire":true,"payload":{"id":"helper"}}\'\n', 'utf8');
+    fs.writeFileSync(wrapper, `#!/bin/sh\n${helper}\n`, 'utf8');
+    fs.chmodSync(helper, 0o700);
+    fs.chmodSync(wrapper, 0o700);
+    const approvalWorkItemId = await approvedWorkItem('poll-unprovable');
+    const attempt = (name: string, command: string) => () => poll.createWorkflowTriggerBinding(root, {
+      kind: 'poll',
+      name,
+      event: 'poll.ready',
+      targetWorkflowId: 'poll-unprovable-workflow',
+      command,
+      intervalSeconds: 60,
+      timeoutMs: 1000,
+      approvalWorkItemId,
+    }, { now });
+
+    expect(attempt('poll-unprovable-wrapper', wrapper))
+      .toThrow(/not a fully pinnable poll command.*use a single absolute path/i);
+    expect(attempt('poll-unprovable-delegator', `/usr/bin/env ${wrapper}`))
+      .toThrow(/not a fully pinnable poll command.*use a single absolute path/i);
+  });
+
+  it('approves and runs a fully pinnable poll command', async () => {
+    createDefinition(root, def('poll-pinnable-workflow', [trigger, step('a')]), { now });
+    const script = path.join(root, 'poll-pinnable.sh');
+    fs.writeFileSync(script, '#!/bin/sh\nprintf \'%s\' \'{"fire":true,"payload":{"id":"pinned"}}\'\n', 'utf8');
+    fs.chmodSync(script, 0o700);
+    const approvalWorkItemId = await approvedWorkItem('poll-pinnable');
+    const binding = poll.createWorkflowTriggerBinding(root, {
+      kind: 'poll',
+      name: 'poll-pinnable',
+      event: 'poll.ready',
+      targetWorkflowId: 'poll-pinnable-workflow',
+      command: script,
+      intervalSeconds: 60,
+      timeoutMs: 1000,
+      approvalWorkItemId,
+    }, { now }).binding;
+
+    const result = await poll.runPollTriggerOnce(harness(), binding, { now });
+
+    expect(binding.activationContract?.executableArtifacts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'executable', path: expect.stringContaining('workflow-trigger-artifacts'), sha256: expect.any(String) }),
+      expect.objectContaining({ role: 'interpreter', path: fs.realpathSync('/bin/sh'), sha256: expect.any(String) }),
+    ]));
+    expect(result.outcome).toBe('fired');
+    expect(result.run?.trigger).toMatchObject({ payload: { id: 'pinned' } });
   });
 
   it('does not auto-approve a legacy poll binding that has an approval item but no activation contract', async () => {
@@ -248,25 +332,25 @@ describe('workflow poll/check custom triggers', () => {
   it('treats fire:false, missing fire, and non-boolean fire as no-ops', async () => {
     createDefinition(root, def('poll-workflow', [trigger, step('a')]), { now });
     const approvalWorkItemId = await approvedWorkItem('poll-fire-flag');
-    const mk = (name: string, stdoutObject: string) => poll.createWorkflowTriggerBinding(root, {
+    const mk = (name: string, stdoutObject: Record<string, unknown>) => poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name,
       event: 'poll.ready',
       targetWorkflowId: 'poll-workflow',
-      command: `${nodeBin} -e "process.stdout.write(JSON.stringify(${stdoutObject}))"`,
+      command: staticOutputScript(name, JSON.stringify(stdoutObject)),
       intervalSeconds: 60,
       timeoutMs: 1000,
       approvalWorkItemId,
     }, { now }).binding;
 
-    await expect(poll.runPollTriggerOnce(harness(), mk('poll-fire-false', "{fire:false,payload:{ready:true}}"), { now }))
+    await expect(poll.runPollTriggerOnce(harness(), mk('poll-fire-false', { fire: false, payload: { ready: true } }), { now }))
       .resolves.toMatchObject({ outcome: 'no-fire' });
-    await expect(poll.runPollTriggerOnce(harness(), mk('poll-fire-absent', "{payload:{ready:true}}"), { now }))
+    await expect(poll.runPollTriggerOnce(harness(), mk('poll-fire-absent', { payload: { ready: true } }), { now }))
       .resolves.toMatchObject({ outcome: 'no-fire' });
-    await expect(poll.runPollTriggerOnce(harness(), mk('poll-fire-string', "{fire:'true',payload:{ready:true}}"), { now }))
+    await expect(poll.runPollTriggerOnce(harness(), mk('poll-fire-string', { fire: 'true', payload: { ready: true } }), { now }))
       .resolves.toMatchObject({ outcome: 'no-fire' });
 
-    const fired = await poll.runPollTriggerOnce(harness(), mk('poll-fire-true', "{fire:true,payload:{ready:true}}"), { now });
+    const fired = await poll.runPollTriggerOnce(harness(), mk('poll-fire-true', { fire: true, payload: { ready: true } }), { now });
     expect(fired.outcome).toBe('fired');
     expect(fired.run?.trigger).toMatchObject({
       source: 'poll',
@@ -284,7 +368,7 @@ describe('workflow poll/check custom triggers', () => {
       name: 'poll-pending',
       event: 'poll.ready',
       targetWorkflowId: 'poll-workflow',
-      command: `${nodeBin} -e "process.stdout.write(JSON.stringify({ready:true}))"`,
+      command: staticOutputScript('poll-pending', JSON.stringify({ ready: true })),
       intervalSeconds: 60,
       timeoutMs: 1000,
       approvalWorkItemId: item.id,
@@ -303,7 +387,7 @@ describe('workflow poll/check custom triggers', () => {
       name: 'poll-nonzero',
       event: 'poll.ready',
       targetWorkflowId: 'poll-workflow',
-      command: `${nodeBin} -e "process.exit(2)"`,
+      command: pinnableScript('poll-nonzero', 'exit 2'),
       intervalSeconds: 60,
       timeoutMs: 1000,
       approvalWorkItemId,
@@ -313,7 +397,7 @@ describe('workflow poll/check custom triggers', () => {
       name: 'poll-invalid',
       event: 'poll.ready',
       targetWorkflowId: 'poll-workflow',
-      command: `${nodeBin} -e "process.stdout.write('not json')"`,
+      command: staticOutputScript('poll-invalid', 'not json'),
       intervalSeconds: 60,
       timeoutMs: 1000,
       approvalWorkItemId,
@@ -331,7 +415,7 @@ describe('workflow poll/check custom triggers', () => {
       name: 'poll-hung',
       event: 'poll.ready',
       targetWorkflowId: 'poll-workflow',
-      command: `${nodeBin} -e "setTimeout(() => {}, 10000)"`,
+      command: pinnableScript('poll-hung', 'while :; do :; done'),
       intervalSeconds: 60,
       timeoutMs: 50,
       approvalWorkItemId,
@@ -341,7 +425,7 @@ describe('workflow poll/check custom triggers', () => {
       name: 'poll-noisy',
       event: 'poll.ready',
       targetWorkflowId: 'poll-workflow',
-      command: `${nodeBin} -e "process.stdout.write('x'.repeat(1000))"`,
+      command: staticOutputScript('poll-noisy', 'x'.repeat(1000)),
       intervalSeconds: 60,
       timeoutMs: 1000,
       stdoutMaxBytes: 32,
@@ -352,100 +436,71 @@ describe('workflow poll/check custom triggers', () => {
     await expect(poll.runPollTriggerOnce(harness(), noisy, { now })).resolves.toMatchObject({ outcome: 'output-too-large' });
   });
 
-  it.skipIf(process.platform === 'win32')('kills the poll command process group on timeout', async () => {
+  it('rejects multi-process shell commands before approval', async () => {
     createDefinition(root, def('poll-timeout-group-workflow', [trigger, step('a')]), { now });
-    const marker = path.join(root, 'survived.txt');
-    const writeLater = path.join(root, 'write-later.cjs');
-    const sleepForever = path.join(root, 'sleep-forever.cjs');
-    fs.writeFileSync(writeLater, `
-const marker = process.argv[2];
-setTimeout(() => {}, 10000);
-setTimeout(() => require('node:fs').writeFileSync(marker, 'alive'), 250);
-`, 'utf8');
-    fs.writeFileSync(sleepForever, `
-setTimeout(() => {}, 10000);
-`, 'utf8');
+    const first = staticOutputScript('poll-first', JSON.stringify({ fire: false }));
+    const second = staticOutputScript('poll-second', JSON.stringify({ fire: false }));
     const approvalWorkItemId = await approvedWorkItem('poll-timeout-group');
-    const binding = poll.createWorkflowTriggerBinding(root, {
+
+    expect(() => poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-timeout-group',
       event: 'poll.ready',
       targetWorkflowId: 'poll-timeout-group-workflow',
-      command: `${nodeBin} ${writeLater} ${marker} & ${nodeBin} ${sleepForever}`,
+      command: `${first} & ${second}`,
       intervalSeconds: 60,
       timeoutMs: 50,
       approvalWorkItemId,
-    }, { now }).binding;
-
-    await expect(poll.runPollTriggerOnce(harness(), binding, { now })).resolves.toMatchObject({ outcome: 'timeout' });
-    await wait(500);
-
-    expect(fs.existsSync(marker)).toBe(false);
+    }, { now })).toThrow(/not a fully pinnable poll command/i);
   });
 
   it('deleting an in-flight poll binding aborts and awaits the command before returning', async () => {
     createDefinition(root, def('poll-delete-workflow', [trigger, step('a')]), { now });
-    const started = path.join(root, 'delete-started.txt');
-    const completed = path.join(root, 'delete-completed.txt');
-    const script = path.join(root, 'delete-in-flight.cjs');
-    fs.writeFileSync(script, `
-const fs = require('node:fs');
-fs.writeFileSync(${JSON.stringify(started)}, 'started');
-setTimeout(() => {
-  fs.writeFileSync(${JSON.stringify(completed)}, 'completed');
-  process.stdout.write(JSON.stringify({ fire: true, payload: { id: 'too-late' } }));
-}, 500);
-`, 'utf8');
+    const script = pinnableScript('delete-in-flight', 'while :; do :; done');
     const approvalWorkItemId = await approvedWorkItem('poll-delete-in-flight');
     const binding = poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-delete-in-flight',
       event: 'poll.ready',
       targetWorkflowId: 'poll-delete-workflow',
-      command: `${nodeBin} ${script}`,
+      command: script,
       intervalSeconds: 60,
       timeoutMs: 5_000,
       approvalWorkItemId,
     }, { now }).binding;
+    const stagedPaths = binding.activationContract?.executableArtifacts
+      .filter((artifact) => artifact.role === 'executable')
+      .map((artifact) => artifact.path) ?? [];
 
     const execution = poll.runPollTriggerOnce(harness(), binding, { now });
-    await waitForFile(started);
+    await wait(20);
     const deleted = await customTriggers.deleteWorkflowTriggerBinding(root, binding.name);
     const result = await execution;
 
     expect(deleted).toBe(true);
     expect(result).toMatchObject({ outcome: 'revoked' });
-    expect(fs.existsSync(completed)).toBe(false);
     expect(runStore.listRuns(root, 'poll-delete-workflow')).toHaveLength(0);
+    expect(stagedPaths).not.toHaveLength(0);
+    expect(stagedPaths.every((artifactPath) => !fs.existsSync(artifactPath))).toBe(true);
   });
 
   it('disabling an in-flight poll binding aborts and awaits the command before returning', async () => {
     createDefinition(root, def('poll-disable-workflow', [trigger, step('a')]), { now });
-    const started = path.join(root, 'disable-started.txt');
-    const completed = path.join(root, 'disable-completed.txt');
-    const script = path.join(root, 'disable-in-flight.cjs');
-    fs.writeFileSync(script, `
-const fs = require('node:fs');
-fs.writeFileSync(${JSON.stringify(started)}, 'started');
-setTimeout(() => {
-  fs.writeFileSync(${JSON.stringify(completed)}, 'completed');
-  process.stdout.write(JSON.stringify({ fire: true, payload: { id: 'too-late' } }));
-}, 500);
-`, 'utf8');
+    const script = pinnableScript('disable-in-flight', 'while :; do :; done');
     const approvalWorkItemId = await approvedWorkItem('poll-disable-in-flight');
     const binding = poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-disable-in-flight',
       event: 'poll.ready',
       targetWorkflowId: 'poll-disable-workflow',
-      command: `${nodeBin} ${script}`,
+      command: script,
       intervalSeconds: 60,
       timeoutMs: 5_000,
       approvalWorkItemId,
     }, { now }).binding;
 
     const execution = poll.runPollTriggerOnce(harness(), binding, { now });
-    await waitForFile(started);
+    await wait(20);
     const disabled = await customTriggers.updateWorkflowTriggerBinding(root, {
       ...binding,
       activation: 'disabled',
@@ -454,34 +509,24 @@ setTimeout(() => {
 
     expect(disabled).toMatchObject({ activation: 'disabled' });
     expect(result).toMatchObject({ outcome: 'revoked' });
-    expect(fs.existsSync(completed)).toBe(false);
     expect(runStore.listRuns(root, 'poll-disable-workflow')).toHaveLength(0);
   });
 
-  it('runs the poll command with a scrubbed env — gateway secrets never leak, allowlisted vars survive', async () => {
+  it('rejects poll scripts that dynamically resolve environment inputs', async () => {
     createDefinition(root, def('poll-env-workflow', [trigger, step('a')]), { now });
     const approvalWorkItemId = await approvedWorkItem('poll-env');
-    process.env.JINN_TEST_SECRET = 'top-secret-token';
-    try {
-      const binding = poll.createWorkflowTriggerBinding(root, {
-        kind: 'poll',
-        name: 'poll-env',
-        event: 'poll.ready',
-        targetWorkflowId: 'poll-env-workflow',
-        command: `${nodeBin} -e "process.stdout.write(JSON.stringify({fire:true,payload:{secret:process.env.JINN_TEST_SECRET ?? null,hasPath:!!process.env.PATH}}))"`,
-        intervalSeconds: 60,
-        timeoutMs: 1000,
-        approvalWorkItemId,
-      }, { now }).binding;
+    const script = pinnableScript('poll-env', `printf '%s' "$JINN_TEST_SECRET"`);
 
-      const result = await poll.runPollTriggerOnce(harness(), binding, { now });
-      expect(result.outcome).toBe('fired');
-      // The gateway secret was NOT inherited by the child; an allowlisted var
-      // (PATH) still is, so commands can find their tools.
-      expect(result.run?.trigger).toMatchObject({ payload: { secret: null, hasPath: true } });
-    } finally {
-      delete process.env.JINN_TEST_SECRET;
-    }
+    expect(() => poll.createWorkflowTriggerBinding(root, {
+      kind: 'poll',
+      name: 'poll-env',
+      event: 'poll.ready',
+      targetWorkflowId: 'poll-env-workflow',
+      command: script,
+      intervalSeconds: 60,
+      timeoutMs: 1000,
+      approvalWorkItemId,
+    }, { now })).toThrow(/not a fully pinnable poll command/i);
   });
 
   it('rejects an oversized or invalid webhook matches-filter regex at creation, accepts a safe one', () => {
