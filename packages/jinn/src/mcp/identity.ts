@@ -138,6 +138,7 @@ export function verifySessionCapability(sessionId: string, capability: string, k
   try {
     const expected = deriveSessionCapability(sessionId, readSessionCapabilityKey(keyFile));
     const candidate = Buffer.from(capability, "base64url");
+    if (candidate.toString("base64url") !== capability) return false;
     return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
   } catch {
     // Missing, unreadable, or malformed authority state must never fall back to

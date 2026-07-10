@@ -70,6 +70,20 @@ describe("restart-stable MCP session capability authority", () => {
     }, options)).toEqual({ kind: "unidentified-tool" });
   });
 
+  it("accepts only the exact canonical capability encoding", async () => {
+    const identity = await import("../identity.js");
+    const capability = identity.ensureSessionCapability("session-a", keyFile);
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const finalIndex = alphabet.indexOf(capability.at(-1)!);
+    const alternateFinalIndex = (finalIndex & ~0b11) | ((finalIndex + 1) & 0b11);
+    const alternate = `${capability.slice(0, -1)}${alphabet[alternateFinalIndex]}`;
+
+    expect(alternate).not.toBe(capability);
+    expect(Buffer.from(alternate, "base64url")).toEqual(Buffer.from(capability, "base64url"));
+    expect(identity.verifySessionCapability("session-a", capability, keyFile)).toBe(true);
+    expect(identity.verifySessionCapability("session-a", alternate, keyFile)).toBe(false);
+  });
+
   it("derives deterministic opaque proof from an owner-only per-instance key", async () => {
     const first = await import("../identity.js");
     const sessionId = "stable-session-identity";
