@@ -353,6 +353,34 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
       { name: "delegation-context.txt", mimeType: "text/plain" },
     ]);
   });
+
+  it("rejects missing or stale managed attachments before creating a Todo or session", async () => {
+    const stalePath = path.join(tmpHome, "deleted-delegation-context.txt");
+    reg.insertFile({
+      id: "stale-delegation-file",
+      filename: "deleted-delegation-context.txt",
+      size: 19,
+      mimetype: "text/plain",
+      path: stalePath,
+    });
+    const beforeItems = workItemCount();
+    const beforeSessions = reg.listSessions().length;
+
+    const resp = await call("POST", "/api/delegations", {
+      engine: "codex",
+      task: "Do not run without every attachment",
+      attachments: ["missing-delegation-file", "stale-delegation-file"],
+    });
+
+    expect(resp.status).toBe(400);
+    expect(resp.body.error).toMatch(/could not be resolved/i);
+    expect(resp.body.unresolvedAttachments).toEqual([
+      "missing-delegation-file",
+      "stale-delegation-file",
+    ]);
+    expect(workItemCount()).toBe(beforeItems);
+    expect(reg.listSessions().length).toBe(beforeSessions);
+  });
 });
 
 describe("web dispatch path — the GRS-017a identity seam reaches the engine (QA catch)", () => {

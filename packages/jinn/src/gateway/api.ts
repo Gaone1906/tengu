@@ -1007,6 +1007,16 @@ function resolveAttachmentPaths(fileIds: unknown): string[] {
   return paths;
 }
 
+/** Find managed attachment IDs that have no registry row or readable file. */
+function findUnresolvedAttachmentIds(fileIds: string[]): string[] {
+  return fileIds.filter((id) => {
+    const meta = getFile(id);
+    if (!meta) return true;
+    const managedPath = path.join(FILES_DIR, meta.id, meta.filename);
+    return !fs.existsSync(managedPath) && (!meta.path || !fs.existsSync(meta.path));
+  });
+}
+
 /** Per-request Accept-Encoding, stashed by handleApiRequest so json() can compress. */
 type ResWithEncoding = ServerResponse & { __acceptEncoding?: string };
 
@@ -3583,7 +3593,15 @@ export async function handleApiRequest(
         if (body.attachments.some((entry: unknown) => typeof entry !== "string" || !entry.trim())) {
           return badRequest(res, "attachments must contain only non-empty managed file IDs");
         }
-        attachments = body.attachments.map((entry: string) => entry.trim());
+        const normalizedAttachments = body.attachments.map((entry: string) => entry.trim());
+        attachments = normalizedAttachments;
+        const unresolvedAttachments = findUnresolvedAttachmentIds(normalizedAttachments);
+        if (unresolvedAttachments.length > 0) {
+          return json(res, {
+            error: "One or more managed attachments could not be resolved",
+            unresolvedAttachments,
+          }, 400);
+        }
       }
       const config = context.getConfig();
       let delegateEmployee: import("../shared/types.js").Employee | undefined;
