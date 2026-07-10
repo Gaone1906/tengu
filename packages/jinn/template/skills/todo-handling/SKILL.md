@@ -66,7 +66,7 @@ Approvals are routed records on a Todo, separate from its lifecycle status. Gene
 }
 ```
 
-   A worker who owns or executed the Todo cannot decide their own approval. For a native approval on an `in_review` Todo, `approve` atomically records the decision and moves the Todo to `done`. `reject` records the critique, returns it to `executing`, and increments `rounds`; when the increment reaches `verifyPolicy.maxRounds`, it moves to `escalated` instead. Without an explicit limit, the effective ceilings are 2 rounds for `trust`/`verify` and 3 for `thorough`. On another status, the decision is recorded but status stays unchanged.
+   The resolved routed owner cannot decide their own approval, but an employee hierarchy root/COO is exempt from that enforcement check. Linked execution alone is not checked, so routed managers/COO should avoid approving work they personally executed and use another authorized reviewer when possible. For a native approval on an `in_review` Todo, `approve` atomically records the decision and moves the Todo to `done`. `reject` records the critique, returns it to `executing`, and increments `rounds`; when the increment reaches `verifyPolicy.maxRounds`, it moves to `escalated` instead. Without an explicit limit, the effective ceilings are 2 rounds for `trust`/`verify` and 3 for `thorough`. On another status, the decision is recorded but status stays unchanged.
 
 3. After a rejection, the worker revises the work, uses `update_work_item` to return it to `in_review`, and calls `request_work_item_approval` again for the next bounded review. Do not create a duplicate Todo.
 

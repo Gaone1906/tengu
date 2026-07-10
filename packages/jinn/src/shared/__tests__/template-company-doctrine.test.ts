@@ -191,13 +191,20 @@ describe("template company doctrine", () => {
     expect(workflowSkill).not.toContain("Approval gates are human-only");
     expect(workflowSkill).not.toContain("must route the decision to the operator");
     expect(workflowSkill).toContain("routed manager/COO");
-    expect(workflowSkill).toContain("cannot decide their own approval");
 
     const todoSkill = readTemplate("skills/todo-handling/SKILL.md");
     expect(todoSkill).toContain("identical pending request");
     expect(todoSkill).toContain("does not perform approval decisions");
     expect(todoSkill).toContain("mirrored workflow gate");
     expect(todoSkill).toContain("maxRounds");
+
+    for (const [name, skill] of [["workflow", workflowSkill], ["todo-handling", todoSkill]] as const) {
+      expect(skill, name).toContain("resolved routed owner");
+      expect(skill, name).toContain("hierarchy root/COO is exempt");
+      expect(skill, name).toContain("avoid approving work they personally executed");
+      expect(skill, name).not.toContain("A worker or Todo owner cannot decide their own approval");
+      expect(skill, name).not.toContain("A worker who owns or executed the Todo cannot decide their own approval");
+    }
 
     const delegationSkill = readTemplate("skills/delegation/SKILL.md");
     expect(delegationSkill).toContain("never workspace or absolute paths");

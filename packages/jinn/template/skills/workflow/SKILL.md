@@ -75,7 +75,7 @@ jinn workflow run <name> --input '{"candidate":"v2.4.0"}' --idempotency-key 'rel
 ## Loops, gates, and triggers
 
 - Every loop must be bounded with `loop.maxRoundsPerRun`. Give it a deterministic exit gate where possible. Exhausting the bound must remain a visible failure, not silent success.
-- When an approval gate parks a run, Jinn mirrors it as a pending approval on the run's Todo. The routed manager/COO can call `decide_work_item_approval` with that Todo id and `decision: "approve"` or `decision: "reject"`; the decision resolves the workflow gate and clears the mirror. A worker or Todo owner cannot decide their own approval.
+- When an approval gate parks a run, Jinn mirrors it as a pending approval on the run's Todo. The routed manager/COO can call `decide_work_item_approval` with that Todo id and `decision: "approve"` or `decision: "reject"`; the decision resolves the workflow gate and clears the mirror. The resolved routed owner cannot decide their own approval, but an employee hierarchy root/COO is exempt from that enforcement check. Linked execution sessions are not independently barred, so routed approvers should avoid approving work they personally executed and hand the decision to another authorized reviewer when possible.
 - Do not substitute `update_work_item` for a gate decision: it does not resolve the mirrored workflow gate. If the routed manager/COO deliberately needs operator/aCEO involvement, call `escalate_work_item_approval`; operator escalation is not the default path for every gate.
 - Choose the wake-up that matches the job: `manual`, `schedule`, `todo-status`, `event`, or `poll`.
   - A schedule-backed SOP is synchronized to its managed cron trigger.
