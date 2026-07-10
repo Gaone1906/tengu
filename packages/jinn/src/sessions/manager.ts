@@ -10,6 +10,7 @@ import type {
 } from "../shared/types.js";
 import { isInterruptibleEngine } from "../shared/types.js";
 import { removeCodexSessionHome } from "../engines/codex.js";
+import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import {
   accumulateSessionCost,
   createSession,
@@ -27,7 +28,7 @@ import {
   updateSessionForAttempt,
 } from "./registry.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel } from "./callbacks.js";
-import { buildContext } from "./context.js";
+import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "./context.js";
 import { SessionQueue } from "./queue.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
@@ -120,6 +121,7 @@ export class SessionManager {
   private config: JinnConfig;
   private engines: Map<string, Engine>;
   private connectorNames: string[];
+  private gatewayBootId: string;
   private queue = new SessionQueue();
   private connectorProvider: () => Map<string, Connector> = () => new Map();
 
@@ -127,10 +129,12 @@ export class SessionManager {
     config: JinnConfig,
     engines: Map<string, Engine>,
     connectorNames: string[] = [],
+    gatewayBootId = "",
   ) {
     this.config = config;
     this.engines = engines;
     this.connectorNames = connectorNames;
+    this.gatewayBootId = gatewayBootId;
   }
 
   setConnectorProvider(provider: () => Map<string, Connector>): void {
@@ -304,23 +308,6 @@ export class SessionManager {
         sessionId: session.id,
       }));
 
-      const systemPrompt = buildContext({
-        source: session.source,
-        channel: msg.channel,
-        thread: msg.thread,
-        user: msg.user,
-        employee,
-        engine: session.engine,
-        connectors: this.connectorNames,
-        config: this.config,
-        sessionId: session.id,
-        channelName: (msg.transportMeta?.channelName as string) || undefined,
-        hierarchy,
-        // The diet keys off the built-in jinn server specifically — custom MCP
-        // servers don't carry the company tools.
-        jinnMcpAttached: Boolean(resolvedMcp?.mcpServers?.["jinn"]),
-      });
-
       // Per-engine config keyed by engine name; unconfigured optional engines
       // resolve to {} (engine falls back to dynamic bin/model resolution).
       const engineConfig =
@@ -334,6 +321,33 @@ export class SessionManager {
         employee,
         effortLevelsForModel(this.config, session.engine, session.model ?? undefined),
       );
+      const modelForTurn = session.model ?? engineConfig.model;
+      const contextOptions: BuildContextOptions = {
+        source: session.source,
+        channel: msg.channel,
+        thread: msg.thread,
+        user: msg.user,
+        employee,
+        engine: session.engine,
+        connectors: this.connectorNames,
+        config: this.config,
+        gatewayBootId: this.gatewayBootId,
+        sessionId: session.id,
+        model: modelForTurn,
+        effortLevel,
+        channelName: (msg.transportMeta?.channelName as string) || undefined,
+        hierarchy,
+        // The diet keys off the built-in jinn server specifically — custom MCP
+        // servers don't carry the company tools.
+        jinnMcpAttached: Boolean(resolvedMcp?.mcpServers?.["jinn"]),
+      };
+      const platformContext = buildPlatformContextSnapshot(contextOptions);
+      const platformContextFingerprint = fingerprintPlatformContext(platformContext);
+      const platformContextRefresh = resumeRefAtTurnStart.id
+        && resumeRefAtTurnStart.platformContextFingerprint !== platformContextFingerprint
+        ? buildPlatformContextRefresh(platformContext)
+        : undefined;
+      const systemPrompt = buildContext(contextOptions);
 
       // Mark running only after preflight (system prompt / engine config / effort)
       // succeeded — and inside the try, so any failure transitions to "error" in the
@@ -433,9 +447,10 @@ export class SessionManager {
         prompt: promptToRun,
         resumeSessionId: resumeRefAtTurnStart.id ?? undefined,
         systemPrompt,
+        platformContextRefresh,
         cwd: JINN_HOME,
         bin: engineConfig.bin,
-        model: session.model ?? engineConfig.model,
+        model: modelForTurn,
         effortLevel,
         cliFlags: employee?.cliFlags,
         mcpConfigPath,
@@ -457,6 +472,7 @@ export class SessionManager {
               model: session.model ?? engineConfig.model,
               effortLevel,
               lastSyncedAt: new Date().toISOString(),
+              platformContextFingerprint,
             });
           }
           // The parent/channel already saw this turn fail — label the late answer
@@ -513,6 +529,7 @@ export class SessionManager {
           attemptToken,
           prompt: msg.text,
           systemPrompt,
+          platformContextRefresh,
           engineConfig,
           effortLevel,
           cliFlags: employee?.cliFlags,
@@ -666,6 +683,7 @@ export class SessionManager {
                   model: session.model ?? engineConfig.model,
                   effortLevel,
                   lastSyncedAt: retryCompletedAt,
+                  platformContextFingerprint,
                 });
               }
               const retryUpdated = completeSessionAttempt(session.id, attemptToken, {
@@ -728,11 +746,13 @@ export class SessionManager {
         await connector.removeReaction(target, "eyes").catch(() => {});
       }
       const completedAt = new Date().toISOString();
-      if (result.sessionId?.trim()) {
-        recordEngineSessionId(session.id, engineAtTurnStart, result.sessionId, {
-          model: session.model ?? engineConfig.model,
+      const acceptedNativeId = result.sessionId?.trim() || resumeRefAtTurnStart.id;
+      if (!wasInterrupted && acceptedNativeId) {
+        recordEngineSessionId(session.id, engineAtTurnStart, acceptedNativeId, {
+          model: modelForTurn,
           effortLevel,
           lastSyncedAt: completedAt,
+          platformContextFingerprint,
         });
       }
       const updatedSession = completeSessionAttempt(session.id, attemptToken, {

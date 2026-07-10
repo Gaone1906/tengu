@@ -22,7 +22,8 @@ import {
 } from "../shared/models.js";
 import { validateNewSessionSelection, validateSessionPatch } from "../sessions/session-patch.js";
 import type { SessionManager } from "../sessions/manager.js";
-import { buildContext } from "../sessions/context.js";
+import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "../sessions/context.js";
+import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import {
   listSessions,
   listRecentSessions,
@@ -343,6 +344,8 @@ export interface ApiContext {
   config: JinnConfig;
   sessionManager: SessionManager;
   startTime: number;
+  /** Opaque process-generation id used only in platform-context fingerprints. */
+  gatewayBootId?: string;
   getConfig: () => JinnConfig;
   emit: (event: string, payload: unknown) => void;
   connectors: Map<string, import("../shared/types.js").Connector>;
@@ -5214,33 +5217,6 @@ async function runWebSession(
       sessionId: currentSession.id,
     }));
 
-    const systemPrompt = buildContext({
-      source: currentSession.source,
-      channel: currentSession.sourceRef,
-      user: currentSession.userId ?? "web-user",
-      employee,
-      engine: currentSession.engine,
-      connectors: Array.from(context.connectors.keys()),
-      config,
-      sessionId: currentSession.id,
-      hierarchy: orgHierarchy,
-      // The diet keys off the built-in jinn server specifically — custom MCP
-      // servers don't carry the company tools (same rule as manager.ts).
-      jinnMcpAttached: Boolean(resolvedMcp?.mcpServers?.["jinn"]),
-      // Hands-free voice orchestrator: layer the AURA persona on top of the
-      // base identity so it behaves as the thin voice layer above the COO.
-      voicePersona: currentSession.source === "talk" ? getOrchestratorPersona() : undefined,
-      talkThreads:
-        currentSession.source === "talk"
-          ? listChildSessions(currentSession.id).slice(0, 12).map((c) => ({
-              id: c.id,
-              label: c.title || "(untitled)",
-              status: c.status,
-              lastActivity: c.lastActivity,
-            }))
-          : undefined,
-    });
-
     // Per-engine config is keyed by engine name; unconfigured optional engines
     // (antigravity/pi) resolve to {} so the engine falls back to dynamic bin/model
     // resolution. Adding an engine needs no change here.
@@ -5254,6 +5230,48 @@ async function runWebSession(
       employee,
       effortLevelsForModel(config, currentSession.engine, currentSession.model ?? undefined),
     );
+    let modelForTurn = currentSession.model ?? engineConfig.model;
+    const baseContextOptions: Omit<BuildContextOptions, "model"> = {
+      source: currentSession.source,
+      channel: currentSession.sourceRef,
+      user: currentSession.userId ?? "web-user",
+      employee,
+      engine: currentSession.engine,
+      connectors: Array.from(context.connectors.keys()),
+      config,
+      gatewayBootId: context.gatewayBootId,
+      sessionId: currentSession.id,
+      effortLevel,
+      hierarchy: orgHierarchy,
+      // The diet keys off the built-in jinn server specifically — custom MCP
+      // servers don't carry the company tools (same rule as manager.ts).
+      jinnMcpAttached: Boolean(resolvedMcp?.mcpServers?.["jinn"]),
+      // Hands-free voice orchestrator: layer its persona on top of the base
+      // identity so it behaves as the thin voice layer above the COO.
+      voicePersona: currentSession.source === "talk" ? getOrchestratorPersona() : undefined,
+      talkThreads:
+        currentSession.source === "talk"
+          ? listChildSessions(currentSession.id).slice(0, 12).map((c) => ({
+              id: c.id,
+              label: c.title || "(untitled)",
+              status: c.status,
+              lastActivity: c.lastActivity,
+            }))
+          : undefined,
+    };
+    const preparePlatformContext = (model: string | undefined) => {
+      const contextOptions: BuildContextOptions = { ...baseContextOptions, model };
+      const snapshot = buildPlatformContextSnapshot(contextOptions);
+      const fingerprint = fingerprintPlatformContext(snapshot);
+      const refresh = resumeRefAtTurnStart.id
+        && resumeRefAtTurnStart.platformContextFingerprint !== fingerprint
+        ? buildPlatformContextRefresh(snapshot)
+        : undefined;
+      return { fingerprint, refresh, systemPrompt: buildContext(contextOptions) };
+    };
+    let platformContextFingerprint = "";
+    let platformContextRefresh: string | undefined;
+    let systemPrompt = "";
 
     let lastHeartbeatAt = 0;
     runHeartbeat = setInterval(() => {
@@ -5364,11 +5382,16 @@ async function runWebSession(
       : prompt;
 
     const turnStartedAt = Date.now();
-    let modelForTurn = currentSession.model ?? engineConfig.model;
-    const runAttempt = (modelForAttempt: string | undefined) => engine.run({
+    const runAttempt = (modelForAttempt: string | undefined) => {
+      const prepared = preparePlatformContext(modelForAttempt);
+      platformContextFingerprint = prepared.fingerprint;
+      platformContextRefresh = prepared.refresh;
+      systemPrompt = prepared.systemPrompt;
+      return engine.run({
       prompt: promptToRun,
       resumeSessionId: resumeRefAtTurnStart.id ?? undefined,
       systemPrompt,
+      platformContextRefresh,
       cwd: JINN_HOME,
       bin: engineConfig.bin,
       model: modelForAttempt,
@@ -5460,6 +5483,7 @@ async function runWebSession(
             model: modelForAttempt,
             effortLevel,
             lastSyncedAt: new Date().toISOString(),
+            platformContextFingerprint: prepared.fingerprint,
           });
         }
         // The parent/channel already saw this turn fail — label the late answer
@@ -5478,12 +5502,13 @@ async function runWebSession(
         });
         logger.info(`Web session ${currentSession.id} recovered by late Stop after a failed turn`);
       },
-    }).finally(() => {
+      }).finally(() => {
       // Stop any pending debounced text flush so it can't re-insert a partial row
       // after the turn-end cleanup below deletes them.
       if (partialFlushTimer) { clearTimeout(partialFlushTimer); partialFlushTimer = null; }
       flushPartialText();
-    });
+      });
+    };
     let result = await runAttempt(modelForTurn);
 
     if (
@@ -5588,6 +5613,7 @@ async function runWebSession(
         attemptToken,
         prompt,
         systemPrompt,
+        platformContextRefresh,
         engineConfig,
         effortLevel,
         cliFlags: employee?.cliFlags,
@@ -5707,6 +5733,7 @@ async function runWebSession(
                 model: modelForTurn,
                 effortLevel,
                 lastSyncedAt: retryCompletedAt,
+                platformContextFingerprint,
               });
             }
             const completedAfterRetry = completeSessionAttempt(currentSession.id, attemptToken, {
@@ -5789,11 +5816,13 @@ async function runWebSession(
     }
 
     const completedAt = new Date().toISOString();
-    if (result.sessionId?.trim()) {
-      recordEngineSessionId(currentSession.id, engineAtTurnStart, result.sessionId, {
+    const acceptedNativeId = result.sessionId?.trim() || resumeRefAtTurnStart.id;
+    if (!quietPreempted && acceptedNativeId) {
+      recordEngineSessionId(currentSession.id, engineAtTurnStart, acceptedNativeId, {
         model: modelForTurn,
         effortLevel,
         lastSyncedAt: completedAt,
+        platformContextFingerprint,
       });
     }
     const completedSession = completeSessionAttempt(currentSession.id, attemptToken, {

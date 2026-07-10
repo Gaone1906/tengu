@@ -131,6 +131,45 @@ describe("buildContext — config awareness", () => {
     expect(out).toContain("http://127.0.0.1:7799");
   });
 
+  it("includes the active session's resolved engine, model, and effort", () => {
+    const config = {
+      gateway: { host: "127.0.0.1", port: 7799 },
+      engines: { default: "claude", claude: { model: "configured-opus" }, codex: { model: "configured-codex" } },
+      logging: { level: "info" },
+    } as unknown as JinnConfig;
+    const out = buildContext({
+      ...baseOpts,
+      config,
+      engine: "codex",
+      model: "resolved-codex",
+      effortLevel: "high",
+    } as Parameters<typeof buildContext>[0] & { model: string; effortLevel: string });
+
+    expect(out).toContain("- Active engine: codex");
+    expect(out).toContain("- Active model: resolved-codex");
+    expect(out).toContain("- Active effort: high");
+  });
+
+  it("preserves implicit configured model defaults and normalizes an empty log level", () => {
+    const config = {
+      gateway: { host: "127.0.0.1", port: 7799 },
+      engines: {
+        default: "antigravity",
+        claude: { model: "opus" },
+        codex: { model: "gpt-5.5" },
+        antigravity: {},
+        grok: {},
+      },
+      logging: { level: "" },
+    } as unknown as JinnConfig;
+
+    const out = buildContext({ ...baseOpts, config });
+
+    expect(out).toContain("- Antigravity model: Gemini 3.5 Flash (Medium)");
+    expect(out).toContain("- Grok model: grok-build");
+    expect(out).toContain("- Log level: info");
+  });
+
   it("omits the configuration section when no config is passed", () => {
     const out = buildContext({ ...baseOpts });
     expect(out).not.toContain("## Current configuration");

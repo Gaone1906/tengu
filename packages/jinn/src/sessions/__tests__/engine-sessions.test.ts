@@ -53,6 +53,7 @@ describe("engine session refs", () => {
       model: "opus",
       effortLevel: "high",
       lastSyncedAt: "2026-07-07T08:00:00.000Z",
+      platformContextFingerprint: "claude-fingerprint",
     });
     expect(claude?.engineSessionId).toBe("claude-native-1");
     expect(reg.getEngineSessionRef(claude!, "claude")).toEqual({
@@ -60,17 +61,20 @@ describe("engine session refs", () => {
       model: "opus",
       effortLevel: "high",
       lastSyncedAt: "2026-07-07T08:00:00.000Z",
+      platformContextFingerprint: "claude-fingerprint",
     });
 
     const codex = reg.recordEngineSessionId(s.id, "codex", "codex-native-1", {
       model: "gpt-5.5",
       effortLevel: "medium",
+      platformContextFingerprint: "codex-fingerprint",
     });
     expect(codex?.engineSessionId).toBe("claude-native-1");
     expect(reg.getEngineSessionRef(codex!, "codex")).toEqual({
       id: "codex-native-1",
       model: "gpt-5.5",
       effortLevel: "medium",
+      platformContextFingerprint: "codex-fingerprint",
     });
   });
 
@@ -86,6 +90,7 @@ describe("engine session refs", () => {
       model: "opus",
       effortLevel: "high",
       lastSyncedAt: "2026-07-07T08:00:00.000Z",
+      platformContextFingerprint: "claude-fingerprint",
     });
 
     const switchedToCodex = reg.switchSessionEngine(s.id, "codex", {
@@ -103,6 +108,7 @@ describe("engine session refs", () => {
       model: "gpt-5.5",
       effortLevel: "medium",
       lastSyncedAt: "2026-07-07T08:05:00.000Z",
+      platformContextFingerprint: "codex-fingerprint",
     });
 
     const switchedBack = reg.switchSessionEngine(s.id, "claude", {
@@ -115,6 +121,19 @@ describe("engine session refs", () => {
     expect(switchedBack?.effortLevel).toBe("high");
     expect(switchedBack?.transportMeta?.engineSyncTarget).toBe("claude");
     expect(switchedBack?.transportMeta?.engineSyncSince).toBe("2026-07-07T08:00:00.000Z");
+    expect(reg.getEngineSessionRef(switchedBack!, "claude").platformContextFingerprint).toBe("claude-fingerprint");
+    expect(reg.getEngineSessionRef(switchedBack!, "codex").platformContextFingerprint).toBe("codex-fingerprint");
+  });
+
+  it("clears only the reset engine's platform context fingerprint", () => {
+    const s = reg.createSession({ engine: "claude", source: "web", sourceRef: "web:reset-fingerprint" });
+    reg.recordEngineSessionId(s.id, "claude", "claude-native", { platformContextFingerprint: "claude-fingerprint" });
+    reg.recordEngineSessionId(s.id, "codex", "codex-native", { platformContextFingerprint: "codex-fingerprint" });
+
+    const reset = reg.clearEngineSessionRefs(s.id, "claude")!;
+
+    expect(reg.getEngineSessionRef(reset, "claude").platformContextFingerprint).toBeUndefined();
+    expect(reg.getEngineSessionRef(reset, "codex").platformContextFingerprint).toBe("codex-fingerprint");
   });
 
   it("preserves a legacy active engine_session_id when switching away", () => {

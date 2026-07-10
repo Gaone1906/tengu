@@ -1021,7 +1021,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
   private injectPrompt(handle: PtyHandle, opts: EngineRunOpts): void {
     const proc = (handle as any)._proc as pty.IPty | undefined;
     if (!proc) return;
-    let text = opts.prompt;
+    let text = buildPromptWithPlatformContext(opts);
     if (opts.attachments?.length) {
       text += "\n\nAttached files:\n" + opts.attachments.map((a) => `- ${a}`).join("\n");
     }

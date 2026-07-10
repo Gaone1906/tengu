@@ -175,6 +175,9 @@ function parseEngineSessions(value: unknown): EngineSessionRefs | null {
     if (typeof obj.model === 'string' && obj.model.trim()) ref.model = obj.model;
     if (typeof obj.effortLevel === 'string' && obj.effortLevel.trim()) ref.effortLevel = obj.effortLevel;
     if (typeof obj.lastSyncedAt === 'string' && obj.lastSyncedAt.trim()) ref.lastSyncedAt = obj.lastSyncedAt;
+    if (typeof obj.platformContextFingerprint === 'string' && obj.platformContextFingerprint.trim()) {
+      ref.platformContextFingerprint = obj.platformContextFingerprint;
+    }
     if (Object.keys(ref).length > 0) refs[engine] = ref;
   }
   return Object.keys(refs).length > 0 ? refs : null;
@@ -186,6 +189,7 @@ function cleanEngineSessionRef(ref: EngineSessionRef): EngineSessionRef {
   if (ref.model?.trim()) cleaned.model = ref.model;
   if (ref.effortLevel?.trim()) cleaned.effortLevel = ref.effortLevel;
   if (ref.lastSyncedAt?.trim()) cleaned.lastSyncedAt = ref.lastSyncedAt;
+  if (ref.platformContextFingerprint?.trim()) cleaned.platformContextFingerprint = ref.platformContextFingerprint;
   return cleaned;
 }
 
@@ -1049,6 +1053,7 @@ export function switchSessionEngine(
       ...target,
       id: undefined,
       lastSyncedAt: undefined,
+      platformContextFingerprint: undefined,
       model: requestedTargetModel,
     });
   }

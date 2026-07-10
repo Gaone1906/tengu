@@ -254,7 +254,7 @@ describe("HermesAcpEngine.run", () => {
     expect(capturedPromptText).toContain("user question");
   });
 
-  it("refreshes platform session context when resumeSessionId is set", async () => {
+  it("does not refresh platform session context on a plain resume", async () => {
     let capturedPromptText = "";
 
     class ResumeEngine extends HermesAcpEngine {
@@ -288,12 +288,41 @@ describe("HermesAcpEngine.run", () => {
         "- Should not be repeated on resume",
       ].join("\n"),
     });
-    expect(capturedPromptText).toContain("## Jinn platform context refresh");
-    expect(capturedPromptText).toContain("- Session ID: duplicated-jinn-session");
-    expect(capturedPromptText).toContain("- Gateway: http://127.0.0.1:7777");
+    expect(capturedPromptText).not.toContain("## Jinn platform context refresh");
+    expect(capturedPromptText).not.toContain("- Session ID: duplicated-jinn-session");
+    expect(capturedPromptText).not.toContain("- Gateway: http://127.0.0.1:7777");
     expect(capturedPromptText).not.toContain("PERSONA-XYZ");
     expect(capturedPromptText).not.toContain("Should not be repeated on resume");
     expect(capturedPromptText).toContain("user question");
+  });
+
+  it("includes an explicitly supplied platform context refresh on resume", async () => {
+    let capturedPromptText = "";
+
+    class ExplicitRefreshEngine extends HermesAcpEngine {
+      protected spawnProc() {
+        const rpc = fakeServer((msg) => {
+          if (msg.method === "session/prompt") {
+            const params = msg.params as Record<string, unknown>;
+            const arr = params?.prompt as Array<{ text: string }> | undefined;
+            capturedPromptText = arr?.[0]?.text ?? "";
+          }
+        });
+        return { rpc, killProc: () => {}, isAliveProc: () => true, onExit: (_cb: () => void) => {}, onError: (_cb: (e: Error) => void) => {} };
+      }
+    }
+
+    const refresh = "## Jinn platform context refresh\n- Active engine: hermes";
+    await new ExplicitRefreshEngine().run({
+      prompt: "user question",
+      cwd: "/tmp",
+      sessionId: "jinn-explicit-refresh",
+      resumeSessionId: "S1",
+      systemPrompt: "# Full system context",
+      platformContextRefresh: refresh,
+    } as any);
+
+    expect(capturedPromptText).toBe(`${refresh}\n\nuser question`);
   });
 
   // Fix 2(b) — handshake timeout: run() resolves with error instead of hanging

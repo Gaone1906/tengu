@@ -159,4 +159,29 @@ describe("handleRateLimit — wait cancellation", () => {
     expect(outcome.kind).toBe("cancelled");
     expect(retryEngine.run).not.toHaveBeenCalled();
   });
+
+  it("forwards an explicit platform context refresh to the resumed retry", async () => {
+    vi.useFakeTimers();
+    engineAvailableMock.mockReturnValue(false);
+    vi.mocked(computeNextRetryDelayMs).mockReturnValue({ delayMs: 0, resumeAt: undefined });
+    vi.mocked(computeRateLimitDeadlineMs).mockReturnValue(Date.now() + 60_000);
+    getSessionMock.mockImplementation(() => makeSession({ status: "waiting" }));
+    const retryEngine = { run: vi.fn(async () => ({ result: "retry", sessionId: "claude-thread-1" }) as EngineResult) };
+    const refresh = "## Jinn platform context refresh\n- Active model: opus";
+    const opts = {
+      ...makeOpts(vi.fn()),
+      config: {
+        sessions: { rateLimitStrategy: "wait" },
+        engines: { claude: { bin: "claude", model: "opus" } },
+      } as unknown as RateLimitHandlerOpts["config"],
+      engine: retryEngine as unknown as RateLimitHandlerOpts["engine"],
+      platformContextRefresh: refresh,
+      hooks: {},
+    } as RateLimitHandlerOpts & { platformContextRefresh: string };
+
+    const outcome = await handleRateLimit(opts);
+
+    expect(outcome.kind).toBe("resumed");
+    expect(retryEngine.run).toHaveBeenCalledWith(expect.objectContaining({ platformContextRefresh: refresh }));
+  });
 });

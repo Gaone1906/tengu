@@ -44,6 +44,132 @@ export interface TalkThreadSummary {
   lastActivity: string;
 }
 
+export interface PlatformContextSnapshot {
+  schemaVersion: 1;
+  gatewayBootId: string;
+  jinnSessionId: string;
+  source: string;
+  channel: string;
+  thread: string;
+  user: string;
+  workingDirectory: string;
+  gatewayBaseUrl: string;
+  selectedEngine: string;
+  resolvedModel: string;
+  resolvedEffort: string;
+  configuredDefaultEngine: string;
+  configuredModels: Record<string, string>;
+  logLevel: string;
+}
+
+export interface BuildContextOptions {
+  source: string;
+  channel: string;
+  thread?: string;
+  user: string;
+  employee?: Employee;
+  connectors?: string[];
+  config?: JinnConfig;
+  engine?: string;
+  model?: string;
+  effortLevel?: string;
+  gatewayBootId?: string;
+  sessionId?: string;
+  portalName?: string;
+  operatorName?: string;
+  language?: string;
+  channelName?: string;
+  hierarchy?: OrgHierarchy;
+  /** Extra ESSENTIAL persona for source:"talk" sessions. */
+  voicePersona?: string;
+  /** Live COO child-thread roster for source:"talk" sessions. */
+  talkThreads?: TalkThreadSummary[];
+  /** Whether the built-in Jinn MCP toolset is attached for context dieting. */
+  jinnMcpAttached?: boolean;
+}
+
+function implicitEngineModel(engine: string): string | undefined {
+  if (engine === "antigravity") return "Gemini 3.5 Flash (Medium)";
+  if (engine === "grok") return "grok-build";
+  return undefined;
+}
+
+function engineConfig(config: JinnConfig | undefined, engine: string): { model?: string; effortLevel?: string } {
+  if (!config || !engine) return {};
+  const configured = (config.engines as unknown as Record<string, { model?: string; effortLevel?: string } | undefined>)[engine];
+  if (!configured) return {};
+  return { ...configured, model: configured.model ?? implicitEngineModel(engine) };
+}
+
+function channelDisplay(opts: Pick<BuildContextOptions, "source" | "channel" | "channelName">): string {
+  if (opts.channelName) return `#${opts.channelName} (${opts.channel})`;
+  if (opts.source === "slack" && opts.channel.startsWith("D")) return `Direct Message (${opts.channel})`;
+  return opts.channel;
+}
+
+export function buildPlatformContextSnapshot(opts: BuildContextOptions): PlatformContextSnapshot {
+  const selectedEngine = opts.engine ?? opts.employee?.engine ?? opts.config?.engines.default ?? "";
+  const selectedConfig = engineConfig(opts.config, selectedEngine);
+  const configuredModels: Record<string, string> = {};
+  if (opts.config) {
+    for (const [engine, raw] of Object.entries(opts.config.engines)) {
+      if (engine === "default" || !raw || typeof raw !== "object") continue;
+      const model = (raw as { model?: unknown }).model;
+      const resolved = typeof model === "string" && model.trim() ? model : implicitEngineModel(engine);
+      if (resolved) configuredModels[engine] = resolved;
+    }
+  }
+  const gatewayUrl = opts.config
+    ? gatewayBaseUrl({ port: opts.config.gateway.port || 7777, host: opts.config.gateway.host })
+    : "http://127.0.0.1:7777";
+
+  return {
+    schemaVersion: 1,
+    gatewayBootId: opts.gatewayBootId ?? "",
+    jinnSessionId: opts.sessionId ?? "",
+    source: opts.source,
+    channel: channelDisplay(opts),
+    thread: opts.thread ?? "",
+    user: opts.user,
+    workingDirectory: JINN_HOME,
+    gatewayBaseUrl: gatewayUrl,
+    selectedEngine,
+    resolvedModel: opts.model ?? opts.employee?.model ?? selectedConfig.model ?? "",
+    resolvedEffort: opts.effortLevel ?? opts.employee?.effortLevel ?? selectedConfig.effortLevel ?? "",
+    configuredDefaultEngine: opts.config?.engines.default ?? "",
+    configuredModels,
+    logLevel: opts.config?.logging ? opts.config.logging.level || "info" : "",
+  };
+}
+
+export function renderPlatformSessionContext(snapshot: PlatformContextSnapshot): string {
+  const lines = ["## Current session"];
+  if (snapshot.jinnSessionId) lines.push(`- Session ID: ${snapshot.jinnSessionId}`);
+  lines.push(`- Source: ${snapshot.source}`);
+  lines.push(`- Channel: ${snapshot.channel}`);
+  if (snapshot.thread) lines.push(`- Thread: ${snapshot.thread}`);
+  lines.push(`- User: ${snapshot.user}`);
+  lines.push(`- Working directory: ${snapshot.workingDirectory}`);
+  return lines.join("\n");
+}
+
+function engineLabel(engine: string): string {
+  return engine ? `${engine[0].toUpperCase()}${engine.slice(1)}` : engine;
+}
+
+export function renderPlatformConfigContext(snapshot: PlatformContextSnapshot): string {
+  const lines = ["## Current configuration", `- Gateway: ${snapshot.gatewayBaseUrl}`];
+  if (snapshot.configuredDefaultEngine) lines.push(`- Default engine: ${snapshot.configuredDefaultEngine}`);
+  for (const [engine, model] of Object.entries(snapshot.configuredModels).sort(([a], [b]) => a.localeCompare(b))) {
+    lines.push(`- ${engineLabel(engine)} model: ${model}`);
+  }
+  if (snapshot.logLevel) lines.push(`- Log level: ${snapshot.logLevel}`);
+  if (snapshot.selectedEngine) lines.push(`- Active engine: ${snapshot.selectedEngine}`);
+  if (snapshot.resolvedModel) lines.push(`- Active model: ${snapshot.resolvedModel}`);
+  if (snapshot.resolvedEffort) lines.push(`- Active effort: ${snapshot.resolvedEffort}`);
+  return lines.join("\n");
+}
+
 /**
  * Compact live roster of the talk session's COO threads, rebuilt every turn so
  * the orchestrator's reuse-vs-spawn decision is grounded in real state instead
@@ -67,51 +193,11 @@ export function buildTalkThreadsSection(threads?: TalkThreadSummary[]): string |
  * This is what makes Jinn "smart" — the engine sees all of this context
  * before responding to the user.
  */
-export function buildContext(opts: {
-  source: string;
-  channel: string;
-  thread?: string;
-  user: string;
-  employee?: Employee;
-  connectors?: string[];
-  config?: JinnConfig;
-  engine?: string;
-  sessionId?: string;
-  portalName?: string;
-  operatorName?: string;
-  language?: string;
-  channelName?: string;
-  hierarchy?: OrgHierarchy;
-  /**
-   * Extra ESSENTIAL persona injected for the hands-free voice orchestrator
-   * (source:"talk"). Layered on top of the base identity so the session keeps
-   * the gateway/delegation knowledge from CLAUDE.md while behaving as the thin
-   * voice layer above the COO. Empty/undefined for all normal sessions.
-   */
-  voicePersona?: string;
-  /**
-   * Live roster of the orchestrator's COO child threads (source:"talk" only).
-   * Rebuilt every turn so reuse-vs-spawn decisions are grounded in real state.
-   * Undefined/empty for all normal sessions — section is omitted.
-   */
-  talkThreads?: TalkThreadSummary[];
-  /**
-   * GRS-017b context diet: true when this session's engine gets the built-in
-   * `jinn` MCP toolset (org/sessions/workflow tools). The pasted org roster,
-   * the escalation-path prose, and the delegation-curl recipes are then
-   * replaced by short manifests pointing at the tools — the measured net
-   * saving is the slice's acceptance (mcp/__tests__/context-diet.test.ts).
-   * False/undefined → the full prose, byte-identical to before.
-   */
-  jinnMcpAttached?: boolean;
-}): string {
+export function buildContext(opts: BuildContextOptions): string {
   const maxChars = opts.config?.context?.maxChars ?? DEFAULT_MAX_CONTEXT_CHARS;
   const sections: Section[] = [];
-
-  // Compute gateway URL once — used by multiple sections
-  const gatewayUrl = opts.config
-    ? gatewayBaseUrl({ port: opts.config.gateway.port || 7777, host: opts.config.gateway.host })
-    : "http://127.0.0.1:7777";
+  const platformContext = buildPlatformContextSnapshot(opts);
+  const gatewayUrl = platformContext.gatewayBaseUrl;
 
   // Resolve personalized names from config
   const portalName = opts.portalName || opts.config?.portal?.portalName || "Jinn";
@@ -187,7 +273,7 @@ export function buildContext(opts: {
   sections.push({
     tier: Tier.ESSENTIAL,
     marker: "## Current session",
-    content: buildSessionContext({ ...opts, sessionId: opts.sessionId }),
+    content: renderPlatformSessionContext(platformContext),
     summary: "", // always included, no trimming
   });
 
@@ -196,7 +282,7 @@ export function buildContext(opts: {
     sections.push({
       tier: Tier.ESSENTIAL,
       marker: "## Current configuration",
-      content: buildConfigContext(opts.config, gatewayUrl),
+      content: renderPlatformConfigContext(platformContext),
       summary: "", // always included
     });
   }
@@ -466,52 +552,6 @@ export function buildIdentity(portalName: string, operatorName?: string, languag
   return `# You are ${portalName}
 
 You are ${portalName}, COO of ${operatorName ? `${operatorName}'s` : "the user's"} AI organization. Your full operating manual is in \`CLAUDE.md\` / \`AGENTS.md\` at \`~/.jinn\` (${JINN_HOME}) — auto-loaded by your engine. Follow it.${operatorLine}${languageInstruction}`;
-}
-
-function buildSessionContext(opts: {
-  source: string;
-  channel: string;
-  thread?: string;
-  user: string;
-  sessionId?: string;
-  channelName?: string;
-}): string {
-  let ctx = `## Current session\n`;
-  if (opts.sessionId) ctx += `- Session ID: ${opts.sessionId}\n`;
-  ctx += `- Source: ${opts.source}\n`;
-  if (opts.channelName) {
-    ctx += `- Channel: #${opts.channelName} (${opts.channel})\n`;
-  } else if (opts.source === "slack" && opts.channel.startsWith("D")) {
-    ctx += `- Channel: Direct Message (${opts.channel})\n`;
-  } else {
-    ctx += `- Channel: ${opts.channel}\n`;
-  }
-  if (opts.thread) ctx += `- Thread: ${opts.thread}\n`;
-  ctx += `- User: ${opts.user}\n`;
-  ctx += `- Working directory: ${JINN_HOME}`;
-  return ctx;
-}
-
-function buildConfigContext(config: JinnConfig, gatewayUrl: string): string {
-  const lines: string[] = [`## Current configuration`];
-  lines.push(`- Gateway: ${gatewayUrl}`);
-  lines.push(`- Default engine: ${config.engines.default}`);
-  if (config.engines.claude?.model) {
-    lines.push(`- Claude model: ${config.engines.claude.model}`);
-  }
-  if (config.engines.codex?.model) {
-    lines.push(`- Codex model: ${config.engines.codex.model}`);
-  }
-  if (config.engines.antigravity) {
-    lines.push(`- Antigravity model: ${config.engines.antigravity.model ?? "Gemini 3.5 Flash (Medium)"}`);
-  }
-  if (config.engines.grok) {
-    lines.push(`- Grok model: ${config.engines.grok.model ?? "grok-build"}`);
-  }
-  if (config.logging) {
-    lines.push(`- Log level: ${config.logging.level || "info"}`);
-  }
-  return lines.join("\n");
 }
 
 function buildCooCompanyAnchor(engine?: string, jinnMcpAttached = false): string {

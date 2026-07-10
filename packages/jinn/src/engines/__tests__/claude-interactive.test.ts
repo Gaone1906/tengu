@@ -139,7 +139,7 @@ describe("buildInteractiveArgs — system prompt + sentinel via CLI flag", () =>
     expect(args).not.toContain("--append-system-prompt");
   });
 
-  it("can carry a current platform context refresh in the positional resume prompt", () => {
+  it("leaves an unchanged positional resume prompt raw", () => {
     const prompt = buildPromptWithPlatformContext({
       prompt: "spawn the child now",
       resumeSessionId: "original-claude-id",
@@ -155,10 +155,20 @@ describe("buildInteractiveArgs — system prompt + sentinel via CLI flag", () =>
     });
     const args = buildInteractiveArgs({ prompt, settingsPath: "/tmp/s.json", resumeSessionId: "original-claude-id" });
     const positionalPrompt = args[args.indexOf("original-claude-id") + 1];
-    expect(positionalPrompt).toContain("## Jinn platform context refresh");
-    expect(positionalPrompt).toContain("- Session ID: duplicated-jinn-session");
-    expect(positionalPrompt).not.toContain("Should not be repeated on resume");
-    expect(positionalPrompt).toContain("spawn the child now");
+    expect(positionalPrompt).toBe("spawn the child now");
+  });
+
+  it("can carry an explicit platform context refresh in the positional resume prompt", () => {
+    const refresh = "## Jinn platform context refresh\n- Active model: opus";
+    const prompt = buildPromptWithPlatformContext({
+      prompt: "spawn the child now",
+      resumeSessionId: "original-claude-id",
+      systemPrompt: "# Full system context",
+      platformContextRefresh: refresh,
+    } as any);
+    const args = buildInteractiveArgs({ prompt, settingsPath: "/tmp/s.json", resumeSessionId: "original-claude-id" });
+    const positionalPrompt = args[args.indexOf("original-claude-id") + 1];
+    expect(positionalPrompt).toBe(`${refresh}\n\nspawn the child now`);
   });
 });
 

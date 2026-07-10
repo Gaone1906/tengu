@@ -10,15 +10,17 @@ import fs from "node:fs";
 
 // Records, per pty.spawn() call, whether the --settings file existed at that instant.
 const settingsExistedAtSpawn: boolean[] = [];
+const spawnArgs: string[][] = [];
 
 interface FakePty {
   pid: number;
   _exitCode: number | null;
   _exitCb?: (e: { exitCode: number }) => void;
+  _writes: string[];
   onData: (cb: (d: string) => void) => void;
   onExit: (cb: (e: { exitCode: number }) => void) => void;
   kill: () => void;
-  write: () => void;
+  write: (data: string) => void;
   resize: () => void;
   on: () => void;
 }
@@ -27,10 +29,11 @@ function makeFakePty(): FakePty {
   const p: FakePty = {
     pid: 2000 + ptys.length,
     _exitCode: null,
+    _writes: [],
     onData() {},
     onExit(cb) { p._exitCb = cb; },
     kill() {},
-    write() {},
+    write(data) { p._writes.push(data); },
     resize() {},
     on() {},
   };
@@ -39,6 +42,7 @@ function makeFakePty(): FakePty {
 
 vi.mock("node-pty", () => ({
   spawn: vi.fn((_bin: string, args: string[]) => {
+    spawnArgs.push(args);
     const i = args.indexOf("--settings");
     const settingsPath = i >= 0 ? args[i + 1] : "";
     settingsExistedAtSpawn.push(settingsPath ? fs.existsSync(settingsPath) : false);
@@ -75,6 +79,7 @@ describe("InteractiveClaudeEngine — settings file survives model-switch cold r
   beforeEach(() => {
     ptys.length = 0;
     settingsExistedAtSpawn.length = 0;
+    spawnArgs.length = 0;
     hookCb = undefined;
     // Mirror the gateway wiring: onCleanup deletes the per-session --settings file.
     lifecycle = new PtyLifecycleManager({
@@ -116,5 +121,81 @@ describe("InteractiveClaudeEngine — settings file survives model-switch cold r
     hookCb!({ hook_event_name: "SessionStart", session_id: "c2" });
     hookCb!({ hook_event_name: "Stop", last_assistant_message: "done2" });
     await flush();
+  });
+
+  it("injects raw unchanged warm prompts and decorates only explicit dirty warm prompts", async () => {
+    const first = engine.run({
+      sessionId: SID,
+      prompt: "turn one",
+      cwd: "/tmp",
+      systemPrompt: "# Full system context",
+    } as any);
+    await flush();
+    hookCb!({ hook_event_name: "SessionStart", session_id: "c1" });
+    hookCb!({ hook_event_name: "Stop", last_assistant_message: "done1" });
+    await first;
+
+    const unchanged = engine.run({
+      sessionId: SID,
+      prompt: "turn two",
+      cwd: "/tmp",
+      resumeSessionId: "c1",
+      systemPrompt: "# Full system context",
+    } as any);
+    await flush();
+    expect(ptys).toHaveLength(1);
+    expect(ptys[0]._writes.at(-1)).toContain("turn two");
+    expect(ptys[0]._writes.at(-1)).not.toContain("## Jinn platform context refresh");
+    hookCb!({ hook_event_name: "Stop", last_assistant_message: "done2" });
+    await unchanged;
+
+    const refresh = "## Jinn platform context refresh\n- Active model: opus";
+    const dirty = engine.run({
+      sessionId: SID,
+      prompt: "turn three",
+      cwd: "/tmp",
+      resumeSessionId: "c1",
+      systemPrompt: "# Full system context",
+      platformContextRefresh: refresh,
+    } as any);
+    await flush();
+    expect(ptys).toHaveLength(1);
+    expect(ptys[0]._writes.at(-1)).toContain(refresh);
+    expect(ptys[0]._writes.at(-1)).toContain("turn three");
+    hookCb!({ hook_event_name: "Stop", last_assistant_message: "done3" });
+    await dirty;
+  });
+
+  it("uses raw unchanged and decorated dirty prompts on cold resume", async () => {
+    const unchanged = engine.run({
+      sessionId: SID,
+      prompt: "cold unchanged",
+      cwd: "/tmp",
+      resumeSessionId: "c1",
+      systemPrompt: "# Full system context",
+    } as any);
+    await flush();
+    const unchangedPrompt = spawnArgs[0][spawnArgs[0].indexOf("c1") + 1];
+    expect(unchangedPrompt).toBe("cold unchanged");
+    hookCb!({ hook_event_name: "SessionStart", session_id: "c1" });
+    hookCb!({ hook_event_name: "Stop", last_assistant_message: "done" });
+    await unchanged;
+
+    lifecycle.releaseSession(SID);
+    const refresh = "## Jinn platform context refresh\n- Active model: sonnet";
+    const dirty = engine.run({
+      sessionId: SID,
+      prompt: "cold dirty",
+      cwd: "/tmp",
+      resumeSessionId: "c1",
+      systemPrompt: "# Full system context",
+      platformContextRefresh: refresh,
+    } as any);
+    await flush();
+    const dirtyPrompt = spawnArgs[1][spawnArgs[1].indexOf("c1") + 1];
+    expect(dirtyPrompt).toBe(`${refresh}\n\ncold dirty`);
+    hookCb!({ hook_event_name: "SessionStart", session_id: "c1" });
+    hookCb!({ hook_event_name: "Stop", last_assistant_message: "done" });
+    await dirty;
   });
 });

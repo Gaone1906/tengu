@@ -61,6 +61,10 @@ export interface EngineRunOpts {
   prompt: string;
   resumeSessionId?: string;
   systemPrompt?: string;
+  /** Canonical platform/session metadata refresh for a resumed native transcript.
+   *  Presence is an explicit dispatch-layer decision; resumeSessionId alone must
+   *  never imply that platform context is dirty. */
+  platformContextRefresh?: string;
   cwd: string;
   bin?: string;
   model?: string;
@@ -193,6 +197,7 @@ export interface EngineSessionRef {
   model?: string;
   effortLevel?: string;
   lastSyncedAt?: string;
+  platformContextFingerprint?: string;
 }
 
 export type EngineSessionRefs = Record<string, EngineSessionRef>;

@@ -265,7 +265,7 @@ describe("CodexEngine — systemPrompt / developer_instructions injection", () =
     expect(call.args).not.toContain("resume");
   });
 
-  it("refreshes platform session context on a resume turn (resumeSessionId present)", async () => {
+  it("does not refresh platform session context on a plain resume turn", async () => {
     const { call } = await runWith(
       {
         systemPrompt: [
@@ -284,15 +284,30 @@ describe("CodexEngine — systemPrompt / developer_instructions injection", () =
     );
     // Resume args: ["exec", "resume", ..., <resumeId>, <prompt>] — prompt last.
     const finalArg = call.args[call.args.length - 1];
-    expect(finalArg).toContain("## Jinn platform context refresh");
-    expect(finalArg).toContain("- Session ID: duplicated-jinn-session");
-    expect(finalArg).toContain("- Gateway: http://127.0.0.1:7777");
+    expect(finalArg).not.toContain("## Jinn platform context refresh");
+    expect(finalArg).not.toContain("- Session ID: duplicated-jinn-session");
+    expect(finalArg).not.toContain("- Gateway: http://127.0.0.1:7777");
     expect(finalArg).not.toContain("YOU ARE JIMBO");
     expect(finalArg).not.toContain("Should not be repeated on resume");
     expect(finalArg).toContain("hello");
     expect(call.args[0]).toBe("exec");
     expect(call.args[1]).toBe("resume");
     expect(call.args).toContain("prev-thread");
+  });
+
+  it("includes an explicitly supplied platform context refresh on resume", async () => {
+    const refresh = "## Jinn platform context refresh\n- Active engine: codex";
+    const { call } = await runWith(
+      {
+        systemPrompt: "# Full system context",
+        resumeSessionId: "prev-thread",
+        platformContextRefresh: refresh,
+      } as any,
+      [threadStarted("t2"), agentMessage("ok")],
+    );
+
+    const finalArg = call.args[call.args.length - 1];
+    expect(finalArg).toBe(`${refresh}\n\nhello`);
   });
 
   it("appends attachments to the prompt", async () => {

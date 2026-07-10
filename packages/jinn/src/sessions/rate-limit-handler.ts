@@ -120,6 +120,9 @@ export interface RateLimitHandlerOpts {
   /** The original prompt that hit the rate limit — used unchanged for retries. */
   prompt: string;
   systemPrompt?: string;
+  /** Explicit refresh for retries on the same resumed native transcript. Never
+   *  forwarded to a different fallback engine. */
+  platformContextRefresh?: string;
   /** Engine config used by the original turn (bin + model + …). */
   engineConfig: { bin?: string; model?: string };
   effortLevel?: string;
@@ -156,7 +159,7 @@ export interface RateLimitHandlerOpts {
  */
 export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateLimitOutcome> {
   const {
-    session, attemptToken, prompt, systemPrompt, engineConfig, effortLevel, cliFlags,
+    session, attemptToken, prompt, systemPrompt, platformContextRefresh, engineConfig, effortLevel, cliFlags,
     mcpConfigPath, resolvedMcp, attachments, config, engines, employee, engine,
     rateLimit, originalResult, hooks,
   } = opts;
@@ -335,6 +338,7 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
         prompt,
         resumeSessionId: currentSession.engineSessionId ?? undefined,
         systemPrompt,
+        platformContextRefresh,
         cwd: JINN_HOME,
         bin: engineConfig.bin,
         model: currentSession.model ?? engineConfig.model,

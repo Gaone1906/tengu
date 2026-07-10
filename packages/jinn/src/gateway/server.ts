@@ -512,7 +512,7 @@ export async function startGateway(
   }
 
   // Session manager
-  const sessionManager = new SessionManager(config, engines, connectorNames);
+  const sessionManager = new SessionManager(config, engines, connectorNames, bootId);
 
   // Build employee registry
   let employeeRegistry = scanOrg();
@@ -974,6 +974,7 @@ export async function startGateway(
     config: currentConfig,
     sessionManager,
     startTime,
+    gatewayBootId: bootId,
     getConfig: () => currentConfig,
     emit,
     connectors: connectorMap,
