@@ -1,13 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "../../shared/types.js";
 
-const { getWorkItem, updateSession } = vi.hoisted(() => ({
+const { getWorkItem, getSession, updateSession, claimDelegationCompletionNudge, markDelegationCompletionSurfaced, releaseDelegationCompletionNudge } = vi.hoisted(() => ({
   getWorkItem: vi.fn(),
+  getSession: vi.fn(),
   updateSession: vi.fn(),
+  claimDelegationCompletionNudge: vi.fn(),
+  markDelegationCompletionSurfaced: vi.fn(),
+  releaseDelegationCompletionNudge: vi.fn(),
 }));
 
 vi.mock("../../work-items/store.js", () => ({ getWorkItem }));
-vi.mock("../registry.js", () => ({ updateSession }));
+vi.mock("../registry.js", () => ({
+  updateSession,
+  getSession,
+  claimDelegationCompletionNudge,
+  markDelegationCompletionSurfaced,
+  releaseDelegationCompletionNudge,
+}));
 
 import { enforceDelegationCompletionContract } from "../delegation-completion-contract.js";
 
@@ -43,7 +53,7 @@ function child(overrides: Partial<Session> = {}): Session {
 }
 
 function openItem(status: "backlog" | "assigned" | "executing" | "in_review" | "done" = "executing") {
-  return { id: "wi_open", status };
+  return { id: "wi_open", status, source: "delegation" };
 }
 
 describe("delegation completion contract", () => {
@@ -51,6 +61,18 @@ describe("delegation completion contract", () => {
     getWorkItem.mockReset();
     updateSession.mockReset();
     updateSession.mockImplementation((id: string, updates: Partial<Session>) => ({ ...child({ id }), ...updates }));
+    claimDelegationCompletionNudge.mockReset();
+    claimDelegationCompletionNudge.mockImplementation((id: string, workItemId: string) => child({
+      id,
+      transportMeta: { delegationCompletionContract: { workItemId, state: "nudged" } },
+    }));
+    markDelegationCompletionSurfaced.mockReset();
+    markDelegationCompletionSurfaced.mockImplementation((id: string, workItemId: string) => child({
+      id,
+      transportMeta: { delegationCompletionContract: { workItemId, state: "surfaced" } },
+    }));
+    releaseDelegationCompletionNudge.mockReset();
+    getSession.mockReset();
   });
 
   it("nudges a qualifying idle progress-only child exactly once", async () => {
@@ -70,10 +92,8 @@ describe("delegation completion contract", () => {
       expect.stringContaining("Continue"),
       expect.stringContaining("Completion contract"),
     );
-    expect(updateSession).toHaveBeenCalledOnce();
-    expect(updateSession.mock.calls[0][1].transportMeta).toMatchObject({
-      delegationCompletionContract: { workItemId: "wi_open", state: "nudged" },
-    });
+    expect(claimDelegationCompletionNudge).toHaveBeenCalledOnce();
+    expect(claimDelegationCompletionNudge).toHaveBeenCalledWith("child-1", "wi_open");
   });
 
   it.each(["in_review", "done"] as const)("does not nudge a %s child", async (status) => {
@@ -88,7 +108,7 @@ describe("delegation completion contract", () => {
 
     expect(outcome).toBe("pass");
     expect(postFollowUp).not.toHaveBeenCalled();
-    expect(updateSession).not.toHaveBeenCalled();
+    expect(claimDelegationCompletionNudge).not.toHaveBeenCalled();
   });
 
   it("does not nudge a child awaiting the parent", async () => {
@@ -103,7 +123,63 @@ describe("delegation completion contract", () => {
 
     expect(outcome).toBe("pass");
     expect(postFollowUp).not.toHaveBeenCalled();
-    expect(updateSession).not.toHaveBeenCalled();
+    expect(claimDelegationCompletionNudge).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "Progress update: not done; tests are still running.",
+    "Progress update: not finished; tests are still running.",
+    "Progress update: not complete; tests are still running.",
+  ])("nudges an explicitly unfinished negated report: %s", async (message) => {
+    getWorkItem.mockReturnValue(openItem("executing"));
+    const postFollowUp = vi.fn().mockResolvedValue(undefined);
+
+    const outcome = await enforceDelegationCompletionContract(child(), { result: message }, { postFollowUp });
+
+    expect(outcome).toBe("nudged");
+    expect(postFollowUp).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "Remaining checks now pass; the patch is ready for review.",
+    "Progress update: tests pass and the PR is ready.",
+    "Remaining checks pass; ready to merge.",
+  ])("does not nudge terminal handoff language: %s", async (message) => {
+    getWorkItem.mockReturnValue(openItem("executing"));
+    const postFollowUp = vi.fn().mockResolvedValue(undefined);
+
+    const outcome = await enforceDelegationCompletionContract(child(), { result: message }, { postFollowUp });
+
+    expect(outcome).toBe("pass");
+    expect(postFollowUp).not.toHaveBeenCalled();
+  });
+
+  it("does not nudge a direction request without a question mark", async () => {
+    getWorkItem.mockReturnValue(openItem("executing"));
+    const postFollowUp = vi.fn().mockResolvedValue(undefined);
+
+    const outcome = await enforceDelegationCompletionContract(
+      child(),
+      { result: "Progress update: blocked on the API choice. Let me know whether to use REST or GraphQL." },
+      { postFollowUp },
+    );
+
+    expect(outcome).toBe("pass");
+    expect(postFollowUp).not.toHaveBeenCalled();
+  });
+
+  it("does not nudge an open work item that is not a tracked delegation", async () => {
+    getWorkItem.mockReturnValue({ ...openItem("executing"), source: "cron" });
+    const postFollowUp = vi.fn().mockResolvedValue(undefined);
+
+    const outcome = await enforceDelegationCompletionContract(
+      child(),
+      { result: "Progress update: continuing with the remaining checks." },
+      { postFollowUp },
+    );
+
+    expect(outcome).toBe("pass");
+    expect(postFollowUp).not.toHaveBeenCalled();
   });
 
   it("does not nudge a direct conversation without a parent", async () => {
@@ -152,9 +228,7 @@ describe("delegation completion contract", () => {
 
     expect(outcome).toBe("surface");
     expect(postFollowUp).not.toHaveBeenCalled();
-    expect(updateSession).toHaveBeenCalledOnce();
-    expect(updateSession.mock.calls[0][1].transportMeta).toMatchObject({
-      delegationCompletionContract: { workItemId: "wi_open", state: "surfaced" },
-    });
+    expect(markDelegationCompletionSurfaced).toHaveBeenCalledOnce();
+    expect(markDelegationCompletionSurfaced).toHaveBeenCalledWith("child-1", "wi_open");
   });
 });

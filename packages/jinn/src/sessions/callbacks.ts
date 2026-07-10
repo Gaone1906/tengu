@@ -214,7 +214,7 @@ async function _sendNotification(
   const contract = await enforceDelegationCompletionContract(childSession, result, {
     postFollowUp: (sessionId, message, displayMessage) => _sendRaw(sessionId, message, displayMessage),
   });
-  if (contract === "nudged") return;
+  if (contract === "nudged" || contract === "suppress") return;
   if (contract === "surface") {
     const latest = result.result?.trim() || "(no output)";
     result = {

@@ -1060,6 +1060,59 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
   return getSession(id);
 }
 
+/**
+ * Atomically claim the single delegation-completion nudge for a work item.
+ * The JSON guard and its compare predicate live in one SQLite UPDATE so two
+ * duplicate idle callbacks cannot both observe an empty guard and both win.
+ */
+export function claimDelegationCompletionNudge(id: string, workItemId: string): Session | undefined {
+  const db = initDb();
+  const result = db.prepare(`
+    UPDATE sessions
+    SET transport_meta = json_set(
+      COALESCE(transport_meta, '{}'),
+      '$.delegationCompletionContract',
+      json_object('workItemId', ?, 'state', 'nudged')
+    )
+    WHERE id = ?
+      AND (
+        json_extract(transport_meta, '$.delegationCompletionContract.workItemId') IS NULL
+        OR json_extract(transport_meta, '$.delegationCompletionContract.workItemId') <> ?
+      )
+  `).run(workItemId, id, workItemId);
+  return result.changes === 1 ? getSession(id) : undefined;
+}
+
+/** Atomically consume a previously claimed nudge before surfacing to parent. */
+export function markDelegationCompletionSurfaced(id: string, workItemId: string): Session | undefined {
+  const db = initDb();
+  const result = db.prepare(`
+    UPDATE sessions
+    SET transport_meta = json_set(
+      COALESCE(transport_meta, '{}'),
+      '$.delegationCompletionContract.state',
+      'surfaced'
+    )
+    WHERE id = ?
+      AND json_extract(transport_meta, '$.delegationCompletionContract.workItemId') = ?
+      AND json_extract(transport_meta, '$.delegationCompletionContract.state') = 'nudged'
+  `).run(id, workItemId);
+  return result.changes === 1 ? getSession(id) : undefined;
+}
+
+/** Release only the nudge this caller owns; never erase a later surfaced state. */
+export function releaseDelegationCompletionNudge(id: string, workItemId: string): Session | undefined {
+  const db = initDb();
+  const result = db.prepare(`
+    UPDATE sessions
+    SET transport_meta = json_remove(transport_meta, '$.delegationCompletionContract')
+    WHERE id = ?
+      AND json_extract(transport_meta, '$.delegationCompletionContract.workItemId') = ?
+      AND json_extract(transport_meta, '$.delegationCompletionContract.state') = 'nudged'
+  `).run(id, workItemId);
+  return result.changes === 1 ? getSession(id) : undefined;
+}
+
 /** Start a new execution generation and make it the sole owner of terminal
  * writes for this session. The token is durable so stop/reset wins across
  * asynchronous engine completion and process boundaries. */

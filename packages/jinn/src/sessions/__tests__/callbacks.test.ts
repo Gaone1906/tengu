@@ -5,6 +5,17 @@ vi.mock("../registry.js", () => ({
   getSession: vi.fn(),
   listSessionsBySource: vi.fn(() => []),
   updateSession: vi.fn((id: string, updates: Partial<Session>) => ({ ...makeSession({ id }), ...updates })),
+  claimDelegationCompletionNudge: vi.fn((id: string, workItemId: string) => makeSession({
+    id,
+    workItemId,
+    transportMeta: { delegationCompletionContract: { workItemId, state: "nudged" } },
+  })),
+  markDelegationCompletionSurfaced: vi.fn((id: string, workItemId: string) => makeSession({
+    id,
+    workItemId,
+    transportMeta: { delegationCompletionContract: { workItemId, state: "surfaced" } },
+  })),
+  releaseDelegationCompletionNudge: vi.fn(),
 }));
 
 vi.mock("../../work-items/store.js", () => ({
@@ -155,7 +166,7 @@ describe("notifyParentSession", () => {
   });
 
   it("routes a qualifying progress-only child back to itself and suppresses the parent callback", async () => {
-    vi.mocked(getWorkItem).mockReturnValue({ id: "wi-open", status: "executing" } as never);
+    vi.mocked(getWorkItem).mockReturnValue({ id: "wi-open", status: "executing", source: "delegation" } as never);
     const child = makeSession({ workItemId: "wi-open" });
 
     notifyParentSession(child, {
@@ -172,7 +183,7 @@ describe("notifyParentSession", () => {
   });
 
   it("enforces the completion contract even when ordinary parent replies are suppressed", async () => {
-    vi.mocked(getWorkItem).mockReturnValue({ id: "wi-open", status: "executing" } as never);
+    vi.mocked(getWorkItem).mockReturnValue({ id: "wi-open", status: "executing", source: "delegation" } as never);
     const child = makeSession({ workItemId: "wi-open" });
 
     notifyParentSession(
