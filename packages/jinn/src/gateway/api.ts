@@ -190,8 +190,10 @@ import {
   listWorkItems,
   queryWorkItems,
   STICKY_STATUSES,
+  updateWorkItem,
   type CreateWorkItemInput,
   type SearchWorkItemsFilter,
+  type UpdateWorkItemInput,
   type VerifyPolicy,
   type WorkItem,
   type WorkItemSource,
@@ -3086,6 +3088,83 @@ export async function handleApiRequest(
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
       return json(res, fullWorkItemPayload(item));
+    }
+
+    // PATCH /api/work-items/:id — the operator's metadata pen + manual rank.
+    // Status is intentionally excluded: lifecycle changes remain behind the
+    // guarded transition/archive/approval surfaces below.
+    params = matchRoute("/api/work-items/:id", pathname);
+    if (method === "PATCH" && params) {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      if (caller.kind !== "operator") {
+        return json(res, { error: "editing Todo metadata and manual rank requires the authenticated operator surface" }, 403);
+      }
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      if (Object.prototype.hasOwnProperty.call(body, "status")) {
+        return badRequest(res, "status cannot be edited through metadata PATCH — use the guarded Todo status transition surface");
+      }
+      const allowed = new Set(["title", "body", "assignee", "department", "priority", "rank"]);
+      const unsupported = Object.keys(body).filter((key) => !allowed.has(key));
+      if (unsupported.length > 0) {
+        return badRequest(res, `unsupported Todo metadata field${unsupported.length === 1 ? "" : "s"}: ${unsupported.join(", ")}`);
+      }
+      if (Object.keys(body).length === 0) return badRequest(res, "at least one metadata field is required");
+
+      const patch: UpdateWorkItemInput = {};
+      if (Object.prototype.hasOwnProperty.call(body, "title")) {
+        if (typeof body.title !== "string") return badRequest(res, "title must be a string");
+        const title = stripControlChars(body.title).trim();
+        if (!title) return badRequest(res, "title must not be empty");
+        if (title.length > 200) return badRequest(res, "title must be at most 200 characters");
+        patch.title = title;
+      }
+      if (Object.prototype.hasOwnProperty.call(body, "body")) {
+        if (body.body !== null && typeof body.body !== "string") return badRequest(res, "body must be a string or null");
+        patch.body = body.body as string | null;
+      }
+      if (Object.prototype.hasOwnProperty.call(body, "assignee")) {
+        if (body.assignee !== null && typeof body.assignee !== "string") return badRequest(res, "assignee must be a non-empty string or null");
+        if (typeof body.assignee === "string") {
+          const assignee = body.assignee.trim();
+          if (!assignee) return badRequest(res, "assignee must be a non-empty string or null");
+          if (!scanOrg().has(assignee)) return badRequest(res, `unknown employee "${assignee}"; check GET /api/org for valid employees`);
+          patch.assignee = assignee;
+        } else {
+          patch.assignee = null;
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(body, "department")) {
+        if (body.department !== null && typeof body.department !== "string") return badRequest(res, "department must be a non-empty string or null");
+        if (typeof body.department === "string") {
+          const department = body.department.trim();
+          if (!department) return badRequest(res, "department must be a non-empty string or null");
+          patch.department = department;
+        } else {
+          patch.department = null;
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(body, "priority")) {
+        if (typeof body.priority !== "number" || !Number.isInteger(body.priority) || body.priority < 0 || body.priority > 3) {
+          return badRequest(res, "priority must be an integer from 0 through 3");
+        }
+        patch.priority = body.priority;
+      }
+      if (Object.prototype.hasOwnProperty.call(body, "rank")) {
+        if (body.rank !== null && (typeof body.rank !== "number" || !Number.isFinite(body.rank))) {
+          return badRequest(res, "rank must be a finite number or null");
+        }
+        patch.rank = body.rank as number | null;
+      }
+
+      const item = updateWorkItem(params.id, patch, "operator");
+      if (!item) return notFound(res);
+      return json(res, { workItem: item });
     }
 
     // POST /api/work-items/:id/status — GRS-021c guarded status update. Agents

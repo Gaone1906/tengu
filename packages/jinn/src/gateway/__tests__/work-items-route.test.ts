@@ -15,6 +15,11 @@ import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, TOOL_CALL_HEAD
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-route-"));
 process.env.JINN_HOME = tmp;
+fs.mkdirSync(path.join(tmp, "org"), { recursive: true });
+fs.writeFileSync(
+  path.join(tmp, "org", "platform-worker.yaml"),
+  "name: platform-worker\ndisplayName: Platform Worker\ndepartment: platform\nrank: employee\nengine: codex\nmodel: default\npersona: Generic route-test worker.\n",
+);
 
 type Api = typeof import("../api.js");
 type Reg = typeof import("../../sessions/registry.js");
@@ -70,6 +75,7 @@ const ctx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
   connectors: new Map(),
   startTime: Date.now(),
+  gatewayAuthToken: "test-token",
   sessionManager: {
     getQueue: () => ({
       getPendingCount: () => 0,
@@ -221,6 +227,119 @@ describe("GET /api/work-items and /api/search/work-items — pagination, totals,
   ])("rejects invalid list query %s", async (query, message) => {
     const cap = makeRes();
     await api.handleApiRequest(makeReq("GET", `/api/work-items?${query}`), cap.res, ctx);
+    expect(cap.status).toBe(400);
+    expect(cap.body.error).toMatch(message);
+  });
+});
+
+describe("PATCH /api/work-items/:id — operator metadata editing", () => {
+  const operatorHeaders = { authorization: "Bearer test-token" };
+
+  function toolHeaders(sessionId: string): Record<string, string> {
+    return {
+      [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+      [CALLER_SESSION_HEADER]: sessionId,
+      [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(sessionId),
+    };
+  }
+
+  it("lets the authenticated operator edit metadata and manual rank without changing status", async () => {
+    const item = store.createWorkItem({ title: "Before edit", body: "old body", status: "backlog" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}`, {
+        title: "After edit",
+        body: "new body",
+        assignee: "platform-worker",
+        department: "platform",
+        priority: 3,
+        rank: 12.5,
+      }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+
+    expect(cap.status).toBe(200);
+    expect(cap.body.workItem).toMatchObject({
+      id: item.id,
+      title: "After edit",
+      body: "new body",
+      assignee: "platform-worker",
+      department: "platform",
+      priority: 3,
+      rank: 12.5,
+      status: "backlog",
+    });
+    expect(store.getWorkItem(item.id)).toMatchObject({ title: "After edit", body: "new body", status: "backlog" });
+  });
+
+  it("rejects unauthenticated and capability-scoped session callers, even when assigned", async () => {
+    const caller = reg.createSession({ engine: "codex", source: "web", sourceRef: "patch-caller", employee: "platform-worker" });
+    const item = store.createWorkItem({ title: "Protected edit", assignee: "platform-worker", department: "platform" });
+
+    const unauthenticated = makeRes();
+    await api.handleApiRequest(makeReq("PATCH", `/api/work-items/${item.id}`, { title: "Spoofed" }), unauthenticated.res, ctx);
+    expect(unauthenticated.status).toBe(403);
+
+    const session = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}`, { title: "Session edit" }, toolHeaders(caller.id)),
+      session.res,
+      ctx,
+    );
+    expect(session.status).toBe(403);
+    expect(session.body.error).toMatch(/operator/i);
+
+    const badCapability = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}`, { title: "Bad cap" }, {
+        [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+        [CALLER_SESSION_HEADER]: caller.id,
+        [CALLER_SESSION_CAPABILITY_HEADER]: "bad-capability",
+      }),
+      badCapability.res,
+      ctx,
+    );
+    expect(badCapability.status).toBe(403);
+    expect(store.getWorkItem(item.id)?.title).toBe("Protected edit");
+  });
+
+  it("rejects status in PATCH and keeps lifecycle changes on the guarded transition route", async () => {
+    const item = store.createWorkItem({ title: "Lifecycle separation", status: "backlog" });
+    const patch = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}`, { status: "done" }, operatorHeaders),
+      patch.res,
+      ctx,
+    );
+    expect(patch.status).toBe(400);
+    expect(patch.body.error).toMatch(/status.*transition|transition.*status/i);
+    expect(store.getWorkItem(item.id)?.status).toBe("backlog");
+
+    const transition = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", `/api/work-items/${item.id}/status`, { status: "done" }, operatorHeaders),
+      transition.res,
+      ctx,
+    );
+    expect(transition.status).toBe(200);
+    expect(transition.body.workItem.status).toBe("done");
+  });
+
+  it.each([
+    [{}, /at least one|empty/i],
+    [{ source: "cron" }, /source|unsupported|field/i],
+    [{ title: "   " }, /title/i],
+    [{ body: 7 }, /body/i],
+    [{ assignee: "" }, /assignee/i],
+    [{ assignee: "missing-worker" }, /unknown employee/i],
+    [{ department: "" }, /department/i],
+    [{ priority: 4 }, /priority/i],
+    [{ rank: "not-a-rank" }, /rank/i],
+  ])("rejects invalid metadata patch %o", async (body, message) => {
+    const item = store.createWorkItem({ title: "Validation target" });
+    const cap = makeRes();
+    await api.handleApiRequest(makeReq("PATCH", `/api/work-items/${item.id}`, body, operatorHeaders), cap.res, ctx);
     expect(cap.status).toBe(400);
     expect(cap.body.error).toMatch(message);
   });
