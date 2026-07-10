@@ -1543,9 +1543,10 @@ function readCleanSearchParam(url: URL, name: string): string | null {
 }
 
 /** The compact summary shape the GRS-020 reference-layer routes return
- *  (GRS-020a-fix finding 5): exactly the documented fields — never the full
+ *  (GRS-020a-fix finding 5): only the documented fields — never the full
  *  serialized session (sourceRef/replyContext/transportMeta/promptExcerpt/cost
- *  fields stay off the reference surface), never message bodies. */
+ *  fields stay off the reference surface), never message bodies. Workflow-owned
+ *  records retain their explicit provenance so compact search hits are attributable. */
 function compactSessionSummary(session: Session): Record<string, unknown> {
   return {
     id: session.id,
@@ -1555,6 +1556,7 @@ function compactSessionSummary(session: Session): Record<string, unknown> {
     status: session.status,
     lastActivity: session.lastActivity ?? null,
     parentSessionId: session.parentSessionId ?? null,
+    ...(session.workflowProvenance ? { workflowProvenance: session.workflowProvenance } : {}),
   };
 }
 

@@ -144,8 +144,16 @@ describe('workflow run session grouping', () => {
     expect((listed.body as Array<{ id: string }>).map((s) => s.id)).toEqual(expect.arrayContaining([parent!.id, phase!.id]));
     const searched = await get('/api/search/sessions?workflowRunId=run-manual-group');
     expect(searched.status).toBe(200);
-    expect((searched.body as { sessions: Array<{ id: string }> }).sessions.map((s) => s.id))
+    const searchedSessions = (searched.body as { sessions: Array<Record<string, unknown>> }).sessions;
+    expect(searchedSessions.map((s) => s.id))
       .toEqual(expect.arrayContaining([parent!.id, phase!.id]));
+    expect(searchedSessions.find((session) => session.id === phase!.id)).toMatchObject({
+      workflowProvenance: {
+        kind: 'phase', workflowId: 'manual-record', workflowName: 'release-check',
+        runId: 'run-manual-group', triggerSource: 'manual',
+        phase: { nodeId: 'review', name: 'REVIEW', index: 1, round: 1, attempt: 1 },
+      },
+    });
     const children = await get(`/api/sessions/${parent!.id}/children`);
     expect(children.status).toBe(200);
     expect(children.body).toEqual([expect.objectContaining({ id: phase!.id, parentSessionId: parent!.id })]);
