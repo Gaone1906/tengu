@@ -207,6 +207,9 @@ export interface Session {
   sourceRef: string;
   connector: string | null;
   sessionKey: string;
+  /** Durable execution-attempt link. Linked sessions are audit evidence and
+   * cannot be hard-deleted. */
+  workItemId?: string | null;
   replyContext: ReplyContext | null;
   messageId: string | null;
   transportMeta: JsonObject | null;

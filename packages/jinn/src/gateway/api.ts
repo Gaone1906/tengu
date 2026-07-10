@@ -384,6 +384,30 @@ function killSessionEngines(context: ApiContext, session: Session, reason: strin
   }
 }
 
+/** Preserve a linked execution attempt as durable evidence when deletion is
+ * requested. Unsettled work becomes explicitly interrupted; an existing
+ * terminal receipt remains authoritative. The periodic reconciler is also a
+ * crash-safe backstop if the process exits between these durable writes. */
+function preserveLinkedAttempt(
+  context: ApiContext,
+  session: Session,
+  reason: string,
+): Session {
+  killSessionEngines(context, session, reason);
+  context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
+  const unresolved = !session.attemptOutcome || session.status === "running" || session.status === "waiting";
+  const preserved = unresolved
+    ? (updateSession(session.id, {
+        status: "interrupted",
+        attemptOutcome: "interrupted",
+        lastActivity: new Date().toISOString(),
+        lastError: reason,
+      }) ?? session)
+    : session;
+  if (session.workItemId) reconcileWorkItem(session.workItemId);
+  return preserved;
+}
+
 export function resumePendingWebQueueItems(context: ApiContext): void {
   const pending = listAllPendingQueueItems();
   if (pending.length === 0) return;
@@ -2299,6 +2323,16 @@ export async function handleApiRequest(
       const session = getSession(params.id);
       if (!session) return notFound(res);
 
+      if (session.workItemId) {
+        preserveLinkedAttempt(context, session, "Interrupted: deletion refused for linked execution attempt");
+        return json(res, {
+          error: "Linked execution attempts are durable Todo evidence and cannot be deleted",
+          preserved: true,
+          sessionId: session.id,
+          workItemId: session.workItemId,
+        }, 409);
+      }
+
       // Tear down any live/warm engine processes for this session before deleting it.
       // kill() is safe to call unconditionally — it's a no-op when nothing is running.
       logger.info(`Killing engine process for deleted session ${params.id}`);
@@ -2492,27 +2526,40 @@ export async function handleApiRequest(
       const ids: string[] = body.ids;
       if (!Array.isArray(ids) || ids.length === 0) return badRequest(res, "ids array is required");
 
+      const sessions = ids.flatMap((id) => {
+        const session = getSession(id);
+        return session ? [session] : [];
+      });
+      const preserved = sessions.filter((session) => session.workItemId);
+      const deletable = sessions.filter((session) => !session.workItemId);
+
+      for (const session of preserved) {
+        preserveLinkedAttempt(context, session, "Interrupted: bulk deletion refused for linked execution attempt");
+      }
       // Tear down any live/warm engine processes before deleting. kill() is safe
       // to call unconditionally — it's a no-op when nothing is running.
-      for (const id of ids) {
-        const session = getSession(id);
-        if (!session) continue;
+      for (const session of deletable) {
         killSessionEngines(context, session, "Interrupted: session deleted");
         context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
       }
 
-      for (const id of ids) {
-        maybeEmitTalkGraph(id, "removed", { getSession, emit: context.emit });
+      for (const session of deletable) {
+        maybeEmitTalkGraph(session.id, "removed", { getSession, emit: context.emit });
       }
-      const count = deleteSessions(ids);
-      for (const id of ids) {
+      const deletableIds = deletable.map((session) => session.id);
+      const count = deleteSessions(deletableIds);
+      for (const id of deletableIds) {
         // Remove any per-session Codex CODEX_HOME overlay for each deleted id
         // (session-scoped capability on disk). No-op for non-codex sessions.
         removeCodexSessionHome(id);
         context.emit("session:deleted", { sessionId: id });
       }
       logger.info(`Bulk deleted ${count} sessions`);
-      return json(res, { status: "deleted", count });
+      return json(res, {
+        status: "deleted",
+        count,
+        preserved: preserved.map((session) => ({ sessionId: session.id, workItemId: session.workItemId })),
+      });
     }
 
     // GET /api/sessions/:id/children

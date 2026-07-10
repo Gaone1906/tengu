@@ -460,6 +460,31 @@ beforeEach(() => {
 });
 
 describe("session tools — integration against the real routes/registry", () => {
+  it("refuses to erase a linked attempt and preserves its spend while interrupting unfinished work", async () => {
+    const sessionId = await createOperatorSession("costly unfinished attempt");
+    const item = workItems.createWorkItem({
+      title: "Preserve attempt evidence",
+      status: "executing",
+      source: "cron",
+      verifyPolicy: { mode: "trust" },
+    });
+    workItems.linkSession(item.id, sessionId);
+    registry.accumulateSessionCost(sessionId, 4.25, 3);
+    registry.updateSession(sessionId, { status: "running" });
+
+    const response = await apiFetch()(`http://gateway.test/api/sessions/${sessionId}`, { method: "DELETE" });
+    expect(response.status).toBe(409);
+    expect(JSON.parse(await response.text())).toMatchObject({ preserved: true, workItemId: item.id });
+    expect(registry.getSession(sessionId)).toMatchObject({
+      totalCost: 4.25,
+      totalTurns: 3,
+      status: "interrupted",
+      attemptOutcome: "interrupted",
+      workItemId: item.id,
+    });
+    expect(workItems.getWorkItem(item.id)?.status).toBe("blocked");
+  });
+
   it.each(["stop", "reset"])("%s records interruption so linked unfinished TRUST work cannot reconcile to done", async (action) => {
     const sessionId = await createOperatorSession(`unfinished ${action}`);
     const item = workItems.createWorkItem({

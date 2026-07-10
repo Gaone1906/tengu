@@ -214,6 +214,7 @@ function rowToSession(row: Record<string, unknown>): Session {
     sourceRef: row.source_ref as string,
     connector,
     sessionKey,
+    workItemId: (row.work_item_id as string) ?? null,
     replyContext: replyContext as ReplyContext | null,
     messageId: (row.message_id as string) ?? null,
     transportMeta,
@@ -783,6 +784,7 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     sourceRef: opts.sourceRef,
     connector,
     sessionKey,
+    workItemId: null,
     replyContext: opts.replyContext ?? null,
     messageId: opts.messageId ?? null,
     transportMeta: opts.transportMeta ?? null,
@@ -821,6 +823,7 @@ export function getSessionBySessionKey(sessionKey: string): Session | undefined 
 }
 
 export interface UpdateSessionFields {
+  sessionKey?: string;
   engine?: string;
   engineSessionId?: string | null;
   engineSessions?: EngineSessionRefs | null;
@@ -842,6 +845,11 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
   const db = initDb();
   const sets: string[] = [];
   const values: unknown[] = [];
+
+  if (updates.sessionKey !== undefined) {
+    sets.push('session_key = ?');
+    values.push(updates.sessionKey);
+  }
 
   if (updates.engine !== undefined) {
     sets.push('engine = ?');
@@ -1495,20 +1503,29 @@ export function duplicateSession(sourceId: string, newTitle?: string): { session
 
 export function deleteSession(id: string): boolean {
   const db = initDb();
-  db.prepare('DELETE FROM messages WHERE session_id = ?').run(id);
-  db.prepare('DELETE FROM queue_items WHERE session_id = ?').run(id);
-  const result = db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
-  return result.changes > 0;
+  const txn = db.transaction(() => {
+    const session = db.prepare('SELECT work_item_id FROM sessions WHERE id = ?').get(id) as { work_item_id: string | null } | undefined;
+    if (!session || session.work_item_id) return false;
+    db.prepare('DELETE FROM messages WHERE session_id = ?').run(id);
+    db.prepare('DELETE FROM queue_items WHERE session_id = ?').run(id);
+    return db.prepare('DELETE FROM sessions WHERE id = ? AND work_item_id IS NULL').run(id).changes > 0;
+  });
+  return txn();
 }
 
 export function deleteSessions(ids: string[]): number {
   if (ids.length === 0) return 0;
   const db = initDb();
-  const placeholders = ids.map(() => '?').join(',');
   const txn = db.transaction(() => {
-    db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...ids);
-    db.prepare(`DELETE FROM queue_items WHERE session_id IN (${placeholders})`).run(...ids);
-    const result = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders})`).run(...ids);
+    const requestedPlaceholders = ids.map(() => '?').join(',');
+    const deletable = (db.prepare(
+      `SELECT id FROM sessions WHERE id IN (${requestedPlaceholders}) AND work_item_id IS NULL`,
+    ).all(...ids) as Array<{ id: string }>).map((row) => row.id);
+    if (deletable.length === 0) return 0;
+    const placeholders = deletable.map(() => '?').join(',');
+    db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...deletable);
+    db.prepare(`DELETE FROM queue_items WHERE session_id IN (${placeholders})`).run(...deletable);
+    const result = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders}) AND work_item_id IS NULL`).run(...deletable);
     return result.changes;
   });
   return txn();

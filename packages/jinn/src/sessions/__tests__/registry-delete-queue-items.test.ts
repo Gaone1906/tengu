@@ -10,9 +10,15 @@ process.env.JINN_HOME = tmp;
 
 type Reg = typeof import("../registry.js");
 let reg: Reg;
+type WorkItems = typeof import("../../work-items/store.js");
+let workItems: WorkItems;
+type Manager = typeof import("../manager.js");
+let managerModule: Manager;
 
 beforeAll(async () => {
   reg = await import("../registry.js");
+  workItems = await import("../../work-items/store.js");
+  managerModule = await import("../manager.js");
   reg.initDb();
 });
 
@@ -51,6 +57,43 @@ describe("deleteSession/deleteSessions queue_items cleanup", () => {
     expect(reg.deleteSessions([a.id, b.id])).toBe(2);
     expect(queueRowCount(a.id)).toBe(0);
     expect(queueRowCount(b.id)).toBe(0);
+  });
+
+  it("keeps linked execution evidence out of single and bulk hard deletion", () => {
+    const linked = reg.createSession({ engine: "claude", source: "web", sourceRef: "web:linked-evidence" });
+    const ordinary = reg.createSession({ engine: "claude", source: "web", sourceRef: "web:ordinary-delete" });
+    const item = workItems.createWorkItem({ title: "Durable execution evidence", status: "executing", source: "session" });
+    workItems.linkSession(item.id, linked.id);
+    reg.enqueueQueueItem(linked.id, linked.sessionKey, "retained prompt");
+    reg.accumulateSessionCost(linked.id, 2.5, 2);
+
+    expect(reg.deleteSession(linked.id)).toBe(false);
+    expect(reg.getSession(linked.id)).toMatchObject({ workItemId: item.id, totalCost: 2.5, totalTurns: 2 });
+    expect(queueRowCount(linked.id)).toBe(1);
+
+    expect(reg.deleteSessions([linked.id, ordinary.id])).toBe(1);
+    expect(reg.getSession(linked.id)).toBeDefined();
+    expect(reg.getSession(ordinary.id)).toBeUndefined();
+  });
+
+  it("connector reset detaches but retains a linked unfinished attempt", () => {
+    const key = "slack:linked-reset";
+    const linked = reg.createSession({ engine: "claude", source: "slack", sourceRef: key, sessionKey: key });
+    const item = workItems.createWorkItem({ title: "Reset evidence", status: "executing", source: "session" });
+    workItems.linkSession(item.id, linked.id);
+    reg.updateSession(linked.id, { status: "running" });
+    const manager = new managerModule.SessionManager({ engines: { default: "claude" } } as never, new Map());
+
+    manager.resetSession(key);
+
+    expect(reg.getSession(linked.id)).toMatchObject({
+      workItemId: item.id,
+      status: "interrupted",
+      attemptOutcome: "interrupted",
+      sessionKey: `archived:${linked.id}`,
+    });
+    expect(reg.getSessionBySessionKey(key)).toBeUndefined();
+    expect(workItems.getWorkItem(item.id)?.status).toBe("blocked");
   });
 });
 

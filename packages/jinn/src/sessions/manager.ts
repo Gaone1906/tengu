@@ -39,6 +39,7 @@ import { markTranscriptSyncedThrough } from "../gateway/external-turns.js";
 import { cleanupMcpConfigFile } from "../mcp/resolver.js";
 import { handleRateLimit } from "./rate-limit-handler.js";
 import { resolveEngineRunMcp } from "./engine-run-mcp.js";
+import { reconcileWorkItem } from "../work-items/reconcile.js";
 
 export interface RouteOptions {
   employee?: Employee;
@@ -898,11 +899,29 @@ export class SessionManager {
   resetSession(sessionKey: string): void {
     const session = getSessionBySessionKey(sessionKey);
     if (session) {
-      // Tear down any live/warm engine process before deleting the session.
+      // Tear down any live/warm engine process before deleting or preserving the session.
       for (const engine of this.engines.values()) {
         if (isInterruptibleEngine(engine)) {
           engine.kill(session.id, "Interrupted: session reset");
         }
+      }
+      this.queue.clearQueue(session.sessionKey || session.sourceRef || session.id);
+      if (session.workItemId) {
+        const unresolved = !session.attemptOutcome || session.status === "running" || session.status === "waiting";
+        updateSession(session.id, {
+          // Detach the retained evidence from the connector thread so /new still
+          // creates a fresh conversational session on the next message.
+          sessionKey: `archived:${session.id}`,
+          ...(unresolved ? {
+            status: "interrupted" as const,
+            attemptOutcome: "interrupted" as const,
+            lastError: "Interrupted: session reset",
+          } : {}),
+          lastActivity: new Date().toISOString(),
+        });
+        reconcileWorkItem(session.workItemId);
+        logger.info(`Preserved linked session ${session.id} as Todo execution evidence`);
+        return;
       }
       deleteSession(session.id);
       // Remove any per-session Codex CODEX_HOME overlay (no-op for non-codex
