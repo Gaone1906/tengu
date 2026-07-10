@@ -378,8 +378,10 @@ export function statusesFor(f: TodoFilters): WorkItemStatusWire[] {
   return [f.status]
 }
 
-/** since/until ISO bounds for a date filter (until is open — "now"). */
-export function dateBounds(date: DateFilter | undefined, now: number): { since?: string } {
+/** since/until ISO bounds for a date filter. `until` pins the window's upper
+ *  edge explicitly so date-filtered queries (list AND search) are bounded on
+ *  both sides server-side. */
+export function dateBounds(date: DateFilter | undefined, now: number): { since?: string; until?: string } {
   if (!date) return {}
   const d = new Date(now)
   if (date === "today") {
@@ -391,7 +393,7 @@ export function dateBounds(date: DateFilter | undefined, now: number): { since?:
     d.setHours(0, 0, 0, 0)
     d.setMonth(d.getMonth() - 1)
   }
-  return { since: d.toISOString() }
+  return { since: d.toISOString(), until: new Date(now).toISOString() }
 }
 
 // NOTE: there is deliberately NO client-side re-filter of server results. The

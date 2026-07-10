@@ -1,15 +1,16 @@
-import { useMemo } from "react"
-import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query"
+import { useCallback, useMemo } from "react"
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query"
 import { api, type Employee, type WorkItemCompactWire, type WorkItemDetailWire, type WorkItemStatusWire } from "@/lib/api"
 import { dateBounds, statusesFor, type TodoFilters } from "@/lib/todos"
 import { queryKeys } from "@/lib/query-keys"
 
-/* GRS-021d/027 + design-todos §7 — the Todos data layer. The ledger fans out
- * one paginated query per status (the gateway pages with limit ≤100 + offset
- * and reports `total` / `nextOffset` per query), merges, and carries the TRUE
- * per-status totals. "Show N more" raises a group's `want` and the fetcher
- * walks `nextOffset` until it has that many rows — the 20-cap is gone. The COO
- * attention inbox stays a single server-derived feed (`needsAttentionFor=me`). */
+/* GRS-021d/027 + design-todos §7 — the Todos data layer. The ledger keeps one
+ * INFINITE query per status: every request is one fixed-size page
+ * (limit=20 + offset), "Show N more" appends the NEXT server page
+ * (fetchNextPage → offset=20, 40, …) instead of refetching what's already on
+ * screen, and the gateway's `total` per status stays the truth for headers.
+ * The COO attention inbox stays a single server-derived feed
+ * (`needsAttentionFor=me`). */
 
 const OPEN_STATUSES: ReadonlySet<WorkItemStatusWire> = new Set<WorkItemStatusWire>([
   "backlog",
@@ -20,13 +21,16 @@ const OPEN_STATUSES: ReadonlySet<WorkItemStatusWire> = new Set<WorkItemStatusWir
   "escalated",
 ])
 
-/** One page of ledger rows per Show-more step (mirrors the gateway default). */
+/** Fixed server page size — every ledger request asks for exactly one page. */
 export const LEDGER_PAGE_SIZE = 20
 const GATEWAY_MAX_LIMIT = 100
 const DAY_MS = 24 * 60 * 60 * 1000
 
-/** How many rows the view wants per status; absent = one page. */
-export type LedgerWants = Partial<Record<WorkItemStatusWire, number>>
+/** Hooks must be called unconditionally, so the ledger mounts one infinite
+ *  query per status in this fixed order and enables the ones the filter needs. */
+const LEDGER_STATUSES: readonly WorkItemStatusWire[] = [
+  "backlog", "assigned", "executing", "blocked", "in_review", "escalated", "done", "cancelled",
+]
 
 export interface LedgerData {
   items: WorkItemCompactWire[]
@@ -34,85 +38,134 @@ export interface LedgerData {
   totalsByStatus: Partial<Record<WorkItemStatusWire, number>>
 }
 
-interface StatusPage {
-  status: WorkItemStatusWire
-  rows: WorkItemCompactWire[]
+export interface LedgerPage {
+  workItems: WorkItemCompactWire[]
   total: number
+  nextOffset: number | null
 }
 
-/** Fetch up to `want` rows of one status, walking `nextOffset` pages.
- *  Exported for unit tests — the pagination walk is the 20-cap fix. */
-export async function fetchStatusRows(
+/** Fetch exactly ONE fixed-size page of one status at `offset`. Exported for
+ *  unit tests — incremental paging (never a refetch-all) is the contract. */
+export async function fetchStatusPage(
   status: WorkItemStatusWire,
   filters: TodoFilters,
   since: string | undefined,
-  want: number,
-): Promise<StatusPage> {
+  until: string | undefined,
+  offset: number,
+): Promise<LedgerPage> {
   const shared = {
     assignee: filters.assignee,
     department: filters.department,
     source: filters.source,
     since,
+    until,
+    offset,
+    limit: LEDGER_PAGE_SIZE,
   }
-  const rows: WorkItemCompactWire[] = []
-  let offset = 0
-  let total = 0
-  for (;;) {
-    const limit = Math.min(GATEWAY_MAX_LIMIT, want - rows.length)
-    const r = filters.q
-      ? await api.searchWorkItems({ text: filters.q, status, ...shared, offset, limit })
-      : await api.listWorkItems({ status, ...shared, offset, limit })
-    rows.push(...r.workItems)
-    total = r.total ?? rows.length
-    if (r.nextOffset == null || rows.length >= want) break
-    offset = r.nextOffset
-  }
-  return { status, rows, total }
+  const r = filters.q
+    ? await api.searchWorkItems({ text: filters.q, status, ...shared })
+    : await api.listWorkItems({ status, ...shared })
+  return { workItems: r.workItems, total: r.total ?? r.workItems.length, nextOffset: r.nextOffset ?? null }
 }
 
-/** The ledger fetch: filters map 1:1 to server query params (§4.3); `q` rides
- *  the search endpoint (title+body — the server owns text matching, the client
- *  never re-filters). In the open lens the Done group is scoped to the recent
- *  7-day window server-side, so its rows AND its total mean "done this week". */
-export function useLedgerItems(filters: TodoFilters, now: number, wants: LedgerWants = {}) {
-  const statuses = statusesFor(filters)
-  const { since } = dateBounds(filters.date, now)
-  const wantsKey = statuses.map((s) => `${s}:${wants[s] ?? LEDGER_PAGE_SIZE}`).join(",")
-  const key = [
-    "work-items", "ledger",
-    filters.status, filters.assignee ?? "", filters.department ?? "", filters.source ?? "", filters.date ?? "", filters.q ?? "",
-    wantsKey,
-  ]
-  return useQuery({
-    queryKey: key,
-    queryFn: async (): Promise<LedgerData> => {
-      const doneWindowStart = new Date(now - 7 * DAY_MS).toISOString()
-      const results = await Promise.all(
-        statuses.map((status) => {
-          // Open lens: Done means the recent window (the later of the week
-          // window and any explicit date filter). History lenses fetch it all.
-          const effectiveSince =
-            filters.status === "open" && status === "done"
-              ? since && since > doneWindowStart ? since : doneWindowStart
-              : since
-          return fetchStatusRows(status, filters, effectiveSince, wants[status] ?? LEDGER_PAGE_SIZE)
-        }),
-      )
-      // An item has exactly one status, so per-status calls never overlap; the
-      // map is just an id-keyed merge (defensive against any future overlap).
-      const map = new Map<string, WorkItemCompactWire>()
-      const totalsByStatus: Partial<Record<WorkItemStatusWire, number>> = {}
-      for (const r of results) {
-        for (const it of r.rows) map.set(it.id, it)
-        totalsByStatus[r.status] = r.total
-      }
-      return { items: [...map.values()], totalsByStatus }
-    },
-    // Show-more changes the key; keep the current rows on screen while the
-    // wider fetch lands (no flicker, no scroll jump).
+/** One status's paged rows. The key carries the filter identity plus the Done
+ *  window marker (open lens scopes Done to the recent week); the concrete
+ *  since/until instants live in the closure so the key doesn't churn with
+ *  `now`. */
+function useStatusPages(
+  status: WorkItemStatusWire,
+  filters: TodoFilters,
+  since: string | undefined,
+  until: string | undefined,
+  windowMark: string,
+  enabled: boolean,
+) {
+  return useInfiniteQuery({
+    queryKey: [
+      "work-items", "ledger", status,
+      filters.assignee ?? "", filters.department ?? "", filters.source ?? "", filters.date ?? "", filters.q ?? "",
+      windowMark,
+    ],
+    queryFn: ({ pageParam }) => fetchStatusPage(status, filters, since, until, pageParam),
+    initialPageParam: 0,
+    getNextPageParam: (last) => last.nextOffset ?? undefined,
+    enabled,
+    // Keep the previous filter's rows on screen while a new filter's first
+    // page lands (no skeleton flash); appends never blank existing pages.
     placeholderData: keepPreviousData,
     staleTime: 10_000,
   })
+}
+
+/** The ledger: filters map 1:1 to server query params (§4.3); `q` rides the
+ *  search endpoint (title+body — the server owns text matching, the client
+ *  never re-filters) and carries the same since/until window + page offsets as
+ *  the list endpoint. In the open lens the Done group is scoped to the recent
+ *  7-day window server-side, so its rows AND total mean "done this week". */
+export function useLedgerItems(filters: TodoFilters, now: number) {
+  const active = new Set(statusesFor(filters))
+  const { since, until } = dateBounds(filters.date, now)
+  const doneWindowStart = new Date(now - 7 * DAY_MS).toISOString()
+  // Open lens: Done means the recent window (the later of the week window and
+  // any explicit date filter). History lenses fetch the full past.
+  const doneScoped = filters.status === "open"
+  const doneSince = doneScoped ? (since && since > doneWindowStart ? since : doneWindowStart) : since
+  const sinceFor = (s: WorkItemStatusWire) => (s === "done" ? doneSince : since)
+  const markFor = (s: WorkItemStatusWire) => (s === "done" && doneScoped ? "recent" : "all")
+
+  // One hook per status, fixed order (see LEDGER_STATUSES).
+  const backlog = useStatusPages("backlog", filters, sinceFor("backlog"), until, markFor("backlog"), active.has("backlog"))
+  const assigned = useStatusPages("assigned", filters, sinceFor("assigned"), until, markFor("assigned"), active.has("assigned"))
+  const executing = useStatusPages("executing", filters, sinceFor("executing"), until, markFor("executing"), active.has("executing"))
+  const blocked = useStatusPages("blocked", filters, sinceFor("blocked"), until, markFor("blocked"), active.has("blocked"))
+  const inReview = useStatusPages("in_review", filters, sinceFor("in_review"), until, markFor("in_review"), active.has("in_review"))
+  const escalated = useStatusPages("escalated", filters, sinceFor("escalated"), until, markFor("escalated"), active.has("escalated"))
+  const done = useStatusPages("done", filters, sinceFor("done"), until, markFor("done"), active.has("done"))
+  const cancelled = useStatusPages("cancelled", filters, sinceFor("cancelled"), until, markFor("cancelled"), active.has("cancelled"))
+  const queries = [backlog, assigned, executing, blocked, inReview, escalated, done, cancelled]
+  const pairs = LEDGER_STATUSES.map((status, i) => ({ status, query: queries[i] }))
+  const activePairs = pairs.filter((p) => active.has(p.status))
+
+  const isLoading = activePairs.some((p) => p.query.isPending && !p.query.isPlaceholderData)
+  const firstError = activePairs.find((p) => p.query.isError)
+  const loadingMore = activePairs.some((p) => p.query.isFetchingNextPage || p.query.isPlaceholderData)
+
+  const data = useMemo((): LedgerData | undefined => {
+    if (activePairs.some((p) => p.query.data == null)) return undefined
+    // An item has exactly one status, so per-status queries never overlap; the
+    // map is just an id-keyed merge (defensive against any future overlap).
+    const map = new Map<string, WorkItemCompactWire>()
+    const totalsByStatus: Partial<Record<WorkItemStatusWire, number>> = {}
+    for (const p of activePairs) {
+      const pages = p.query.data!.pages
+      for (const page of pages) for (const it of page.workItems) map.set(it.id, it)
+      totalsByStatus[p.status] = pages[pages.length - 1]?.total ?? 0
+    }
+    return { items: [...map.values()], totalsByStatus }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- pairs derive from the 8 stable queries below
+  }, [backlog.data, assigned.data, executing.data, blocked.data, inReview.data, escalated.data, done.data, cancelled.data, filters])
+
+  /** "Show N more": append the NEXT server page for these statuses. */
+  const loadMore = useCallback(
+    (statuses: readonly WorkItemStatusWire[]) => {
+      for (const p of pairs) {
+        if (statuses.includes(p.status) && p.query.hasNextPage && !p.query.isFetchingNextPage) {
+          void p.query.fetchNextPage()
+        }
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetchNextPage/hasNextPage are stable per query
+    [backlog, assigned, executing, blocked, inReview, escalated, done, cancelled],
+  )
+
+  return {
+    data,
+    isLoading,
+    isError: !!firstError,
+    error: firstError?.query.error ?? null,
+    loadingMore,
+    loadMore,
+  }
 }
 
 /** The People lens needs the FULL open set (per-person counts must come from

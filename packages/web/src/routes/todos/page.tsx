@@ -32,8 +32,6 @@ import {
   useNeedsAttentionItems,
   useEscalateApproval,
   useUpdateWorkItem,
-  LEDGER_PAGE_SIZE,
-  type LedgerWants,
 } from "./use-todos"
 
 /* design-todos §2 — the frame. ONE column (max-w 840px) for every lens, so a
@@ -168,36 +166,25 @@ export default function TodosPage() {
   const [creating, setCreating] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
 
-  // Filters live in the URL (§4.3): shareable, refresh-proof. Changing them
-  // resets the per-status page depth back to one page.
+  // Filters live in the URL (§4.3): shareable, refresh-proof.
   const [searchParams, setSearchParams] = useSearchParams()
   const filters = useMemo(() => filtersFromSearchParams(searchParams), [searchParams])
-  const [wants, setWants] = useState<LedgerWants>({})
   const setFilters = useCallback(
-    (next: TodoFilters) => {
-      setWants({})
-      setSearchParams(filtersToSearchParams(next), { replace: true })
-    },
+    (next: TodoFilters) => setSearchParams(filtersToSearchParams(next), { replace: true }),
     [setSearchParams],
   )
   const filtered = !isDefaultFilters(filters)
 
   // The default ledger always loads (header counts come from its server
-  // totals); a filtered Active lens adds its own query on top. `wants` applies
-  // to whichever query the Active lens is showing.
-  const baseLedger = useLedgerItems({ status: "open" }, now, filtered ? {} : wants)
-  const filteredLedger = useLedgerItems(filters, now, wants)
+  // totals); a filtered Active lens adds its own queries on top. "Show N more"
+  // appends the NEXT server page for the group's statuses (offset=20, 40, …).
+  const baseLedger = useLedgerItems({ status: "open" }, now)
+  const filteredLedger = useLedgerItems(filters, now)
   const ledger = filtered ? filteredLedger : baseLedger
-
-  // "Show N more": raise the want for the group's statuses — the data layer
-  // fetches the subsequent server offsets (design-todos §3).
-  const onLoadMore = useCallback((statuses: readonly WorkItemStatusWire[]) => {
-    setWants((w) => {
-      const next = { ...w }
-      for (const s of statuses) next[s] = (next[s] ?? LEDGER_PAGE_SIZE) + LEDGER_PAGE_SIZE
-      return next
-    })
-  }, [])
+  const onLoadMore = useCallback(
+    (statuses: readonly WorkItemStatusWire[]) => ledger.loadMore(statuses),
+    [ledger],
+  )
 
   const ledgerItems: WorkItemCompactWire[] = useMemo(() => ledger.data?.items ?? [], [ledger.data])
 
@@ -371,7 +358,7 @@ export default function TodosPage() {
                     onLoadMore={onLoadMore}
                     onClearFilters={() => setFilters({ status: "open" })}
                     filtered={filtered}
-                    loadingMore={ledger.isPlaceholderData}
+                    loadingMore={ledger.loadingMore}
                     now={now}
                   />
                 )}
