@@ -46,13 +46,18 @@ describe("nodeGeometry — size carries meaning", () => {
     expect(wide.w).toBeGreaterThan(std.w)
     expect(mini.w).toBeLessThan(trig.w)
   })
-  it("grows the wide node with its summary and the condition with its outputs", () => {
+  it("keeps the wide box FIXED regardless of summary length (2-line clamp — no estimate drift)", () => {
     const short = nodeGeometry(node({ id: "a", kind: "step", summary: "short" }))
-    const long = nodeGeometry(node({ id: "b", kind: "step", summary: "x".repeat(120) }))
-    expect(long.h).toBeGreaterThan(short.h)
+    const long = nodeGeometry(node({ id: "b", kind: "step", summary: "x".repeat(400) }))
+    expect(long).toEqual(short)
+    // Only the dock-slot row changes the box, by a fixed constant.
+    const docked = nodeGeometry(node({ id: "c", kind: "step", summary: "x", subNodes: [{ role: "model", kind: "MODEL", label: "Opus" }] }))
+    expect(docked.h).toBeGreaterThan(short.h)
+  })
+  it("grows the condition by output count only: h = COND_HEADER + n×COND_ROW + pad", () => {
     const two = nodeGeometry(node({ id: "if", kind: "switch", outputs: [{ id: "1", label: "t" }, { id: "2", label: "f" }] }))
     const four = nodeGeometry(node({ id: "sw", kind: "switch", outputs: [1, 2, 3, 4].map((i) => ({ id: `${i}`, label: `${i}` })) }))
-    expect(four.h).toBeGreaterThan(two.h)
+    expect(four.h - two.h).toBe(2 * 32)
   })
 })
 
@@ -127,7 +132,7 @@ describe("buildFlowGraph — decorated edges (GRS-019c)", () => {
     const { flowEdges } = buildFlowGraph(en, null, vi.fn(), ee)
     const sub = flowEdges.find((e) => e.sourceHandle === "d0")
     expect(sub).toBeTruthy()
-    expect(sub!.targetHandle).toBe("tt")
+    expect(sub!.targetHandle).toBe("in")
     expect(sub!.animated).toBe(false)
     expect(sub!.style?.strokeDasharray).toBeTruthy()
   })

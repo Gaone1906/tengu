@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react"
 import { useReactFlow, useViewport, type Node as FlowNode } from "@xyflow/react"
-import Dagre from "@dagrejs/dagre"
 import { Maximize2, Plus, Minus, Network } from "lucide-react"
-import { nodeGeometry, type CanvasNode } from "./canvas-model"
+import { dagreLayout, type CanvasNode, type LayoutEdge } from "./canvas-model"
 
 /* GRS-019c — canvas chrome + view behaviour (kept out of canvas.tsx so the
  * render surface stays lean). Frosted Ledger controls (fit / zoom / tidy) + a
@@ -44,33 +43,15 @@ export function pickFocusNode(nodes: CanvasNode[], activeNodeId?: string | null)
   )
 }
 
-/** Dagre left→right auto-layout → new top-left positions per node id. Dock
- * discs stay pinned under their parent (skipped here; the canvas re-docks them).
- * Pure (Dagre needs no DOM) so the button's effect is testable. */
+/** Dagre left→right auto-layout → new top-left positions per node id, snapped
+ * to the 20px grid. Dock discs stay pinned under their parent (skipped; the
+ * canvas re-docks them). Thin alias over the shared dagreLayout so "tidy up"
+ * and the position-less default can never produce different geometry. */
 export function tidyLayout(
   nodes: CanvasNode[],
-  edges: { from: string; to: string; lane?: string }[],
+  edges: LayoutEdge[],
 ): Record<string, { x: number; y: number }> {
-  const g = new Dagre.graphlib.Graph()
-  g.setGraph({ rankdir: "LR", nodesep: 46, ranksep: 96, marginx: 24, marginy: 24 })
-  g.setDefaultEdgeLabel(() => ({}))
-  const laidOut = nodes.filter((n) => n.visual !== "sub")
-  const ids = new Set(laidOut.map((n) => n.id))
-  for (const n of laidOut) {
-    const { w, h } = nodeGeometry(n)
-    g.setNode(n.id, { width: w, height: h })
-  }
-  for (const e of edges) {
-    if (e.lane === "sub") continue
-    if (ids.has(e.from) && ids.has(e.to)) g.setEdge(e.from, e.to)
-  }
-  Dagre.layout(g)
-  const out: Record<string, { x: number; y: number }> = {}
-  for (const n of laidOut) {
-    const d = g.node(n.id)
-    if (d) out[n.id] = { x: d.x - d.width / 2, y: d.y - d.height / 2 }
-  }
-  return out
+  return dagreLayout(nodes, edges)
 }
 
 /** Frosted control cluster: zoom% · fit · zoom in/out · tidy. Sits bottom-left,

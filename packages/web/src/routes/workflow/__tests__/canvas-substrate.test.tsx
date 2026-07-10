@@ -56,9 +56,10 @@ describe("WorkflowCanvas — React Flow substrate", () => {
       vi.fn(),
     )
     expect(flowEdges.map((e) => e.id)).toEqual(["a->b", "b->c"])
-    // Horizontal pair exits right / enters left; vertical pair exits bottom / enters top.
-    expect(flowEdges[0]).toMatchObject({ sourceHandle: "sr", targetHandle: "tl", type: "default" })
-    expect(flowEdges[1]).toMatchObject({ sourceHandle: "sb", targetHandle: "tt", type: "default" })
+    // Strict LTR port discipline: EVERY main-lane wire exits the right output
+    // port and enters the left input port — even a vertically-offset pair.
+    expect(flowEdges[0]).toMatchObject({ sourceHandle: "out", targetHandle: "in", type: "jinn" })
+    expect(flowEdges[1]).toMatchObject({ sourceHandle: "out", targetHandle: "in", type: "jinn" })
     // Completed segment renders solid green; the in-flight one stays dashed and marches.
     expect(flowEdges[0].style).toMatchObject({ stroke: "var(--system-green)", strokeDasharray: undefined })
     expect(flowEdges[0].animated ?? false).toBe(false)

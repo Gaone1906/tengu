@@ -4,12 +4,16 @@ import {
   ReactFlow,
   Background,
   BackgroundVariant,
+  BaseEdge,
+  EdgeLabelRenderer,
+  getBezierPath,
   MiniMap,
   type Node as FlowNode,
   type Edge as FlowEdge,
+  type EdgeProps,
   type ReactFlowInstance,
 } from "@xyflow/react"
-import { CheckCircle2, Circle, Clock, X } from "lucide-react"
+import { CheckCircle2, Circle, Clock, Map as MapIcon, X } from "lucide-react"
 import { stateGlyph } from "./node-card"
 import { nodeStatusLine } from "./status-line"
 import { jinnNodeTypes, type JinnNodeData } from "./node-components"
@@ -19,13 +23,10 @@ import type { WorkflowRunView, WorkflowStepView, WorkflowGateResult } from "@/li
 import {
   buildCanvasNodes,
   resolveNodePositions,
-  edgeAnchors,
   nodeStatusColor,
   nodeGeometry,
   visualNodeType,
   expandCanvas,
-  NODE_W,
-  NODE_H,
   type CanvasNode,
   type CanvasEdgeSpec,
 } from "./canvas-model"
@@ -48,8 +49,50 @@ import {
  * property panel (GRS-011c-2 owns topology editing). */
 
 // Re-export the model so existing imports (`from "./canvas"`) keep working.
-export { nodeStatusColor, buildCanvasNodes, resolveNodePositions, edgeAnchors, nodeGeometry, visualNodeType, expandCanvas, deriveDisplayFields } from "./canvas-model"
+export { nodeStatusColor, buildCanvasNodes, resolveNodePositions, nodeGeometry, visualNodeType, expandCanvas, deriveDisplayFields } from "./canvas-model"
 export type { CanvasNode, CanvasNodeSeed, CanvasGraphSpec, CanvasEdgeSpec, VisualNodeType, CanvasSubNode } from "./canvas-model"
+
+/* ── The wire (spec §2.4) ─────────────────────────────────────────────────────
+ * One custom bezier edge: curvature 0.35 (short hops stay gently curved, long
+ * fans sweep), stroke/dash decided by the caller's honest-state style, and the
+ * item-count pill as a calm frosted capsule riding the bezier midpoint. Custom
+ * (rather than RF's default) so the curvature and the pill are exact — the
+ * wire is the product. */
+function JinnEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, style, label, markerEnd }: EdgeProps) {
+  const [path, labelX, labelY] = getBezierPath({
+    sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, curvature: 0.35,
+  })
+  return (
+    <>
+      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd as string | undefined} />
+      {label != null && label !== "" && (
+        <EdgeLabelRenderer>
+          <div
+            className="nodrag nopan"
+            style={{
+              position: "absolute",
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+              background: "var(--material-regular)",
+              borderRadius: 7,
+              padding: "3px 6px",
+              fontFamily: "var(--font-code)",
+              fontSize: 10.5,
+              fontWeight: 600,
+              color: "var(--text-secondary)",
+              boxShadow: "var(--shadow-subtle)",
+              pointerEvents: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {label}
+          </div>
+        </EdgeLabelRenderer>
+      )}
+    </>
+  )
+}
+
+const jinnEdgeTypes = { jinn: JinnEdge }
 
 /** Inspector header glyph — the same state visual the node card carries. */
 export function InspectorStateCircle({ node }: { node: CanvasNode }) {
@@ -224,13 +267,17 @@ export function NodeInspector({
  * green-solid when both endpoints passed, dashed otherwise, with a marching
  * dash into the node that is actively working. Pan/zoom state is view-local. */
 /** Map canvas nodes to the React Flow graph: per-type geometry + spatial
- * positions resolved once, ports picked per edge by dominant axis (or the
- * explicit dock/output handle a decorated edge names). When the caller supplies
- * the REAL definition edges (a run's frozen snapshot), those are drawn — every
- * branch connected, nothing severed; without them the declaration-order chain
- * remains the honest fallback. Sub-dock edges render as dashed grey diamonds;
- * error lanes dashed red; item counts as a calm mid-edge pill. Exported pure so
- * the derivation unit-tests without a layout engine (jsdom can't measure handle
+ * positions resolved once (Dagre-LR when the definition carries none), strict
+ * left→right ports per edge — source = the named output port (`out`, a
+ * condition row's `out-<i>`, or a dock's `d<i>`), target = the one input port.
+ * No dominant-axis anchor picking: direction is meaning; a loop-back still
+ * leaves right and enters left, curving around, exactly like n8n. When the
+ * caller supplies the REAL definition edges (a run's frozen snapshot), those
+ * are drawn — every branch connected, nothing severed; without them the
+ * declaration-order chain remains the honest fallback. Sub-dock edges render
+ * as dashed grey docks; error lanes dashed red; item counts as a calm mid-edge
+ * pill (`0 items` included — honesty beats blankness). Exported pure so the
+ * derivation unit-tests without a layout engine (jsdom can't measure handle
  * bounds, so edge PATHS only materialize in a real browser). */
 export function buildFlowGraph(
   nodes: CanvasNode[],
@@ -238,7 +285,7 @@ export function buildFlowGraph(
   onSelect: (id: string) => void,
   edges?: CanvasEdgeSpec[],
 ): { flowNodes: FlowNode<JinnNodeData>[]; flowEdges: FlowEdge[] } {
-  const positions = resolveNodePositions(nodes)
+  const positions = resolveNodePositions(nodes, edges?.map((e) => ({ from: e.from, to: e.to, lane: e.lane })))
   const byId = new Map(nodes.map((n) => [n.id, n]))
   const flowNodes: FlowNode<JinnNodeData>[] = nodes.map((n) => {
     const { w, h } = nodeGeometry(n)
@@ -260,25 +307,28 @@ export function buildFlowGraph(
     const lane = spec?.lane
     const isError = lane === "error"
     const isSub = lane === "sub"
-    const anchors = edgeAnchors(positions[a.id], positions[b.id])
-    // Explicit handle for decorated edges: a wide node's underside dock, or a
-    // switch/IF output row; otherwise the dominant-axis anchor pair.
+    // Strict port discipline (spec §2.2): the source is the NAMED output port —
+    // a dock (`d<i>`), a condition row (`out-<i>`), or the single `out`; the
+    // target is always the one `in` port. edgeAnchors is gone.
     const sourceHandle = isSub && spec?.dockIndex != null ? `d${spec.dockIndex}`
       : spec?.outIndex != null ? `out-${spec.outIndex}`
-      : anchors.source
-    const targetHandle = isSub ? "tt" : anchors.target
+      : "out"
+    const targetHandle = "in"
     const done = settled(a.status) && settled(b.status)
     const active = settled(a.status) && (b.status === "active" || b.status === "running" || b.status === "parked")
     // A wire touching a genuinely-failed step reads red (the honest failed lane) —
     // distinct from an authored error-edge (dashed red) and from the calm greys.
     const failed = a.status === "blocked" || b.status === "blocked"
+    // The editor lens has no run state (every node is a draft) — its wires rest
+    // SOLID grey; only a run's untaken/pending lanes read dashed.
+    const draft = a.status === "draft" && b.status === "draft"
     const edge: FlowEdge = {
       id,
       source: a.id,
       target: b.id,
       sourceHandle,
       targetHandle,
-      type: "default", // bezier — the visible curve in the gap
+      type: "jinn", // bezier, curvature 0.35 — the visible curve in the gap
       animated: !isError && !isSub && active,
       style: isSub
         ? { stroke: "var(--separator-opaque)", strokeWidth: 1.5, strokeDasharray: "5 5", opacity: 0.75 }
@@ -289,18 +339,14 @@ export function buildFlowGraph(
             : {
                 stroke: done ? "var(--system-green)" : active ? nodeStatusColor(b.status) : "var(--separator-opaque)",
                 strokeWidth: 2,
-                strokeDasharray: done ? undefined : "5 5",
+                strokeDasharray: done || draft ? undefined : "5 5",
                 opacity: done ? 0.75 : 0.9,
               },
     }
     // Run-view item count: a calm frosted pill riding the wire (mock: "1 item").
+    // Zero on a taken path renders "0 items"; untaken branches carry no pill.
     if (spec?.items != null && !isSub && !isError) {
       edge.label = `${spec.items} ${spec.items === 1 ? "item" : "items"}`
-      edge.labelShowBg = true
-      edge.labelBgPadding = [6, 3]
-      edge.labelBgBorderRadius = 7
-      edge.labelStyle = { fill: "var(--text-secondary)", fontFamily: "var(--font-code)", fontSize: 10.5, fontWeight: 600 }
-      edge.labelBgStyle = { fill: "var(--material-regular)" }
     }
     return edge
   }
@@ -355,6 +401,9 @@ export function WorkflowCanvas({
   // changes so a new run/definition starts from its own honest positions.
   const [tidyPos, setTidyPos] = useState<Record<string, { x: number; y: number }> | null>(null)
   useEffect(() => { setTidyPos(null) }, [nodes, edges])
+  // Mobile: the minimap collapses behind a map-icon toggle (spec §7) — the
+  // phone canvas keeps its pixels; the whole-shape overview is one tap away.
+  const [mapOpen, setMapOpen] = useState(false)
 
   // Sub-node docks are synthesized here (decision 2) so the ONE canvas renders
   // every attachable. expandCanvas is a no-op for graphs without wide docks, so
@@ -398,6 +447,7 @@ export function WorkflowCanvas({
         nodes={flowNodes}
         edges={flowEdges}
         nodeTypes={jinnNodeTypes}
+        edgeTypes={jinnEdgeTypes}
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
@@ -413,7 +463,7 @@ export function WorkflowCanvas({
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={24} size={1.5} color="var(--separator)" />
-        {minimap && (
+        {minimap && (!isMobile || mapOpen) && (
           <MiniMap
             pannable
             zoomable
@@ -423,12 +473,32 @@ export function WorkflowCanvas({
             style={{
               width: isMobile ? 128 : 190,
               height: isMobile ? 80 : 120,
+              marginBottom: isMobile ? 64 : undefined,
               borderRadius: "var(--radius-md)",
               background: "var(--material-regular)",
               boxShadow: "var(--shadow-overlay)",
               backdropFilter: "blur(20px)",
             }}
           />
+        )}
+        {minimap && isMobile && (
+          <button
+            type="button"
+            aria-label={mapOpen ? "Hide minimap" : "Show minimap"}
+            aria-pressed={mapOpen}
+            data-testid="wf-minimap-toggle"
+            onClick={() => setMapOpen((v) => !v)}
+            className="absolute bottom-4 right-4 z-10 grid size-11 place-items-center rounded-[11px] transition-colors"
+            style={{
+              color: mapOpen ? "var(--text-primary)" : "var(--text-secondary)",
+              background: "var(--material-regular)",
+              boxShadow: "var(--shadow-overlay)",
+              backdropFilter: "blur(20px)",
+              WebkitBackdropFilter: "blur(20px)",
+            }}
+          >
+            <MapIcon className="size-[20px]" />
+          </button>
         )}
         {controls && <CanvasControls onTidy={onTidy} mobile={isMobile} />}
       </ReactFlow>

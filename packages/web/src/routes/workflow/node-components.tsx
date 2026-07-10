@@ -2,9 +2,13 @@ import { Handle, Position, type Node as FlowNode, type NodeProps } from "@xyflow
 import {
   Clock, Zap, Sparkles, User, ShieldCheck, Diamond, Shuffle,
   Split as SplitIcon, Merge as MergeIcon, AlertTriangle, Hourglass,
-  FileText, Wrench,
+  FileText, Wrench, Plus,
 } from "lucide-react"
-import { nodeStatusColor, visualNodeType, dockFraction, type CanvasNode, type VisualNodeType } from "./canvas-model"
+import { AvatarPreview } from "@/components/ui/employee-avatar"
+import {
+  nodeStatusColor, visualNodeType, dockFraction, condPortTop,
+  type CanvasNode, type VisualNodeType,
+} from "./canvas-model"
 import { nodeStatusLine } from "./status-line"
 
 /* GRS-019c — the per-type node components on the ONE spatial canvas.
@@ -17,9 +21,18 @@ import { nodeStatusLine } from "./status-line"
  * soft fills + shadow + radius, NO rest hairlines, colour lives on the type
  * icon + the one status dot. Theme-aware by construction (all tokens).
  *
+ * Port discipline (the geometry spec, normative): data flows strictly left →
+ * right. Every node exposes ONE input port centered on its left wall and its
+ * output port(s) centered on its right wall — a condition gets one output per
+ * row at that row's center-line, a wide node's dock ports sit on its bottom
+ * wall. Ports are VISIBLE 8px dots with a 2px bg halo (a socket, not a
+ * blemish); they belong to the card element, never to a padded inner row, so
+ * their anchors sit exactly on the wall. The retired 8-anchor set picked walls
+ * per-edge by dominant axis — direction stopped meaning anything.
+ *
  * The card contract the tests + inspectors depend on is preserved on every
  * INTERACTIVE type: data-testid=`wf-node-<id>`, aria-pressed, data-current,
- * click → onSelect. Sub/split/merge are non-interactive visual decoration. */
+ * click → onSelect. Sub/split/merge/ghost are non-interactive decoration. */
 
 export interface JinnNodeData extends Record<string, unknown> {
   node: CanvasNode
@@ -51,7 +64,7 @@ function typeIcon(node: CanvasNode, t: VisualNodeType) {
   const cls = "size-[21px]"
   switch (t) {
     case "trigger": return (node.role === "trigger" && node.detail?.includes("manual")) || node.who === "manual"
-      ? <Zap className={cls} /> : <Clock className={cls} />
+      ? <Zap className="size-[17px]" /> : <Clock className="size-[17px]" />
     case "employee": return <User className={cls} />
     case "engine": return <Sparkles className={cls} />
     case "wide": return <Sparkles className="size-[23px]" />
@@ -63,29 +76,73 @@ function typeIcon(node: CanvasNode, t: VisualNodeType) {
   }
 }
 
-/* ── shared bits ─────────────────────────────────────────────────────────── */
+/* ── visible ports (spec §2.3) ─────────────────────────────────────────────── */
 
-const HANDLE_HIDDEN: React.CSSProperties = {
-  opacity: 0, width: 1, height: 1, minWidth: 1, minHeight: 1,
-  border: "none", background: "transparent", pointerEvents: "none",
+type PortTone = "true" | "false" | "neutral"
+
+function portFill(tone?: PortTone): string {
+  if (tone === "true") return "color-mix(in srgb, var(--system-green) 70%, var(--separator-opaque))"
+  if (tone === "false") return "color-mix(in srgb, var(--system-red) 70%, var(--separator-opaque))"
+  return "var(--separator-opaque)"
 }
 
-/** The 8 edge-anchor handles every node exposes (invisible, non-connectable);
- * edgeAnchors() picks the pair per edge by dominant axis. */
-function AnchorHandles() {
+/** 8px dot centered ON the wall; the 2px bg-ring halo lifts it off the card
+ * and the dots grid (a shadow, not a hairline). Non-connectable in this phase;
+ * the 24px touch hit-area lives on .jinn-port in globals.css. */
+const PORT_BASE: React.CSSProperties = {
+  width: 8, height: 8, minWidth: 8, minHeight: 8,
+  border: "none", borderRadius: 999,
+  boxShadow: "0 0 0 2px var(--bg)",
+  pointerEvents: "none",
+}
+
+/** The one input port: left wall, vertical center. */
+function InPort() {
   return (
-    <>
-      <Handle type="source" position={Position.Right} id="sr" style={HANDLE_HIDDEN} isConnectable={false} />
-      <Handle type="source" position={Position.Bottom} id="sb" style={HANDLE_HIDDEN} isConnectable={false} />
-      <Handle type="source" position={Position.Left} id="sl" style={HANDLE_HIDDEN} isConnectable={false} />
-      <Handle type="source" position={Position.Top} id="st" style={HANDLE_HIDDEN} isConnectable={false} />
-      <Handle type="target" position={Position.Left} id="tl" style={HANDLE_HIDDEN} isConnectable={false} />
-      <Handle type="target" position={Position.Top} id="tt" style={HANDLE_HIDDEN} isConnectable={false} />
-      <Handle type="target" position={Position.Right} id="tr" style={HANDLE_HIDDEN} isConnectable={false} />
-      <Handle type="target" position={Position.Bottom} id="tb" style={HANDLE_HIDDEN} isConnectable={false} />
-    </>
+    <Handle
+      type="target" position={Position.Left} id="in" isConnectable={false}
+      className="jinn-port"
+      style={{ ...PORT_BASE, background: portFill(), left: 0, top: "50%", transform: "translate(-50%, -50%)" }}
+    />
   )
 }
+
+/** An output port on the right wall. Single-output nodes anchor at 50%; a
+ * condition names one per output row at that row's center-line. */
+function OutPort({ id = "out", top = "50%", tone }: { id?: string; top?: string; tone?: PortTone }) {
+  return (
+    <Handle
+      type="source" position={Position.Right} id={id} isConnectable={false}
+      className="jinn-port"
+      style={{ ...PORT_BASE, background: portFill(tone), left: "auto", right: 0, top, transform: "translate(50%, -50%)" }}
+    />
+  )
+}
+
+/** A wide node's underside dock port, one per attachable, at its disc's x. */
+function DockPort({ i, total }: { i: number; total: number }) {
+  return (
+    <Handle
+      type="source" position={Position.Bottom} id={`d${i}`} isConnectable={false}
+      className="jinn-port"
+      style={{ ...PORT_BASE, background: portFill(), left: `${dockFraction(i, total) * 100}%`, top: "auto", bottom: 0, transform: "translate(-50%, 50%)" }}
+    />
+  )
+}
+
+/** The sub-disc's single target port: top wall, horizontal center (the dashed
+ * dock wire arrives from above). */
+function TopInPort() {
+  return (
+    <Handle
+      type="target" position={Position.Top} id="in" isConnectable={false}
+      className="jinn-port"
+      style={{ ...PORT_BASE, background: portFill(), top: 0, left: "50%", transform: "translate(-50%, -50%)" }}
+    />
+  )
+}
+
+/* ── shared bits ─────────────────────────────────────────────────────────── */
 
 /** Colour + presence of the one status dot/line. Idle/queued reads muted. */
 function StatusLine({ node, className = "" }: { node: CanvasNode; className?: string }) {
@@ -99,8 +156,6 @@ function StatusLine({ node, className = "" }: { node: CanvasNode; className?: st
   )
 }
 
-const RADIUS: Record<string, string> = { lg: "var(--radius-lg)", xl: "var(--radius-xl)" }
-
 /** Node card box-shadow: rest card, plus a state ring (selected / running /
  * failed / waiting / current) — the calm eye-draw the mock uses, never a rest
  * hairline. */
@@ -111,6 +166,14 @@ function cardShadow(node: CanvasNode, selected: boolean): string {
   if (node.status === "parked") return "var(--shadow-card), 0 0 0 1.5px color-mix(in srgb, var(--system-yellow) 55%, transparent)"
   if (node.isCurrent) return "var(--shadow-card), 0 0 0 3px var(--accent-fill)"
   return "var(--shadow-card)"
+}
+
+/** A genuinely-failed card gets a quiet red wash under its ring — the
+ * operator's failed=red, kept calm (6% mix, theme-aware). */
+function cardBg(node: CanvasNode): string {
+  return node.status === "blocked"
+    ? "color-mix(in srgb, var(--system-red) 6%, var(--bg-secondary))"
+    : "var(--bg-secondary)"
 }
 
 const isDim = (node: CanvasNode) => node.status === "idle" || node.status === "cancelled"
@@ -129,18 +192,42 @@ function nodeButtonProps(node: CanvasNode, selected: boolean, onSelect: (id: str
   }
 }
 
-/* ── standard card (employee / engine / error / wait) ─────────────────────── */
-function StandardNode({ node, selected, onSelect, t }: InnerProps & { t: VisualNodeType }) {
+/** The shared-language attribution rule: an employee actor renders as the
+ * emoji EmployeeChip avatar (emoji on a --fill-secondary circle) — the same
+ * unit as chat/Todos. Engines keep the tinted glyph tile. */
+function ActorTile({ node, t, size }: { node: CanvasNode; t: VisualNodeType; size: number }) {
+  const employee = node.actorKind === "employee" && node.actorRef
+  if (employee) {
+    return (
+      <AvatarPreview
+        name={node.actorRef!}
+        size={size}
+        fontSize={Math.round(size * 0.5)}
+        className="shrink-0 bg-[var(--fill-secondary)]"
+      />
+    )
+  }
   const tint = TINT[t] ?? TINT.engine
+  return (
+    <span
+      className="grid shrink-0 place-items-center"
+      style={{ width: size, height: size, borderRadius: size >= 40 ? 11 : 10, background: tint.bg, color: tint.fg }}
+      aria-hidden
+    >
+      {typeIcon(node, t)}
+    </span>
+  )
+}
+
+/* ── standard card (employee / engine / error / wait) — 220×64 ────────────── */
+function StandardNode({ node, selected, onSelect, t }: InnerProps & { t: VisualNodeType }) {
   return (
     <button
       {...nodeButtonProps(node, selected, onSelect)}
       className="flex h-full w-full items-center gap-3 rounded-[var(--radius-lg)] px-3.5 text-left transition-[box-shadow,transform] duration-200"
-      style={{ background: "var(--bg-secondary)", boxShadow: cardShadow(node, selected), opacity: isDim(node) ? 0.55 : 1 }}
+      style={{ background: cardBg(node), boxShadow: cardShadow(node, selected), opacity: isDim(node) ? 0.55 : 1 }}
     >
-      <span className="grid size-[38px] shrink-0 place-items-center rounded-[10px]" style={{ background: tint.bg, color: tint.fg }} aria-hidden>
-        {typeIcon(node, t)}
-      </span>
+      <ActorTile node={node} t={t} size={38} />
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="truncate text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] leading-tight text-[var(--text-primary)]" title={node.title}>
           {node.title}
@@ -151,7 +238,7 @@ function StandardNode({ node, selected, onSelect, t }: InnerProps & { t: VisualN
   )
 }
 
-/* ── trigger pill ─────────────────────────────────────────────────────────── */
+/* ── trigger pill — 188×56, output port only ──────────────────────────────── */
 function TriggerNode({ node, selected, onSelect }: InnerProps) {
   const tint = TINT.trigger
   return (
@@ -175,14 +262,14 @@ function TriggerNode({ node, selected, onSelect }: InnerProps) {
   )
 }
 
-/* ── approval gate ────────────────────────────────────────────────────────── */
+/* ── approval gate — 232×72 ───────────────────────────────────────────────── */
 function GateNode({ node, selected, onSelect }: InnerProps) {
   const tint = TINT.gate
   return (
     <button
       {...nodeButtonProps(node, selected, onSelect)}
       className="flex h-full w-full items-center gap-3 rounded-[var(--radius-lg)] px-3.5 text-left transition-[box-shadow] duration-200"
-      style={{ background: "var(--bg-secondary)", boxShadow: cardShadow(node, selected) }}
+      style={{ background: cardBg(node), boxShadow: cardShadow(node, selected) }}
     >
       <span className="grid size-[38px] shrink-0 place-items-center rounded-[10px]" style={{ background: tint.bg, color: tint.fg }} aria-hidden>
         {typeIcon(node, "gate")}
@@ -197,9 +284,8 @@ function GateNode({ node, selected, onSelect }: InnerProps) {
   )
 }
 
-/* ── WIDE AI / engine node + sub-node docks ───────────────────────────────── */
+/* ── WIDE AI / engine node — fixed 300×118 / 300×148 with docks ───────────── */
 function WideNode({ node, selected, onSelect }: InnerProps) {
-  const tint = TINT.engine
   const docks = node.subNodes ?? []
   const engineLabel = node.model
     ? `${node.actorRef ?? (node.actorKind === "engine" ? "Engine" : "Claude")} · ${node.model}`
@@ -207,13 +293,11 @@ function WideNode({ node, selected, onSelect }: InnerProps) {
   return (
     <button
       {...nodeButtonProps(node, selected, onSelect)}
-      className="flex h-full w-full flex-col rounded-[var(--radius-xl)] px-4 py-3 text-left transition-[box-shadow] duration-200"
-      style={{ background: "var(--bg-secondary)", boxShadow: cardShadow(node, selected) }}
+      className="flex h-full w-full flex-col rounded-[var(--radius-xl)] px-4 py-3.5 text-left transition-[box-shadow] duration-200"
+      style={{ background: cardBg(node), boxShadow: cardShadow(node, selected), opacity: isDim(node) ? 0.55 : 1 }}
     >
       <span className="flex items-center gap-3">
-        <span className="grid size-10 shrink-0 place-items-center rounded-[11px]" style={{ background: tint.bg, color: tint.fg }} aria-hidden>
-          {typeIcon(node, "wide")}
-        </span>
+        <ActorTile node={node} t="wide" size={40} />
         <span className="flex min-w-0 flex-1 flex-col">
           <span className="truncate text-[length:var(--text-body)] font-[var(--weight-semibold)] leading-tight text-[var(--text-primary)]" title={node.title}>
             {node.title}
@@ -223,10 +307,11 @@ function WideNode({ node, selected, onSelect }: InnerProps) {
           </span>
         </span>
       </span>
+      {/* Fixed 2-line clamp — the box never grows with prose; the inspector has it all. */}
       {node.summary && (
-        <span className="mt-2 line-clamp-3 text-[length:var(--text-caption1)] leading-snug text-[var(--text-secondary)]">{node.summary}</span>
+        <span className="mt-2 line-clamp-2 text-[length:var(--text-caption1)] leading-snug text-[var(--text-secondary)]">{node.summary}</span>
       )}
-      <span className="mt-2.5 flex items-center justify-between gap-2">
+      <span className="mt-auto flex items-center justify-between gap-2 pt-2">
         <span className="flex gap-1.5">
           {docks.map((d) => (
             <span key={d.role} className="rounded-[7px] px-2 py-1 text-[9.5px] font-[var(--weight-semibold)] uppercase tracking-[0.04em]" style={{ background: "var(--fill-tertiary)", color: "var(--text-tertiary)" }}>
@@ -236,36 +321,27 @@ function WideNode({ node, selected, onSelect }: InnerProps) {
         </span>
         <StatusLine node={node} className="mt-0 shrink-0" />
       </span>
-      {/* Underside dock source handles, one per attachable, aligned to its disc. */}
-      {docks.map((d, i) => (
-        <Handle
-          key={`d${i}`}
-          type="source"
-          position={Position.Bottom}
-          id={`d${i}`}
-          style={{ ...HANDLE_HIDDEN, left: `${dockFraction(i, docks.length) * 100}%` }}
-          isConnectable={false}
-        />
-      ))}
     </button>
   )
 }
 
-/* ── condition (IF / Switch) — grows with outputs ─────────────────────────── */
+/* ── condition (IF / Switch) — 220×(50 + n×32 + 8), one port per row ──────── */
+export const DEFAULT_IF_OUTPUTS = [
+  { id: "true", label: "true", tone: "true" as const },
+  { id: "false", label: "false", tone: "false" as const },
+]
+
 function CondNode({ node, selected, onSelect }: InnerProps) {
   const tint = TINT.cond
-  const outs = node.outputs ?? [
-    { id: "true", label: "true", tone: "true" as const },
-    { id: "false", label: "false", tone: "false" as const },
-  ]
+  const outs = node.outputs ?? DEFAULT_IF_OUTPUTS
   const isSwitch = outs.length > 2
   return (
     <button
       {...nodeButtonProps(node, selected, onSelect)}
-      className="flex h-full w-full flex-col rounded-[var(--radius-lg)] px-3.5 py-3 text-left transition-[box-shadow] duration-200"
-      style={{ background: "var(--bg-secondary)", boxShadow: cardShadow(node, selected) }}
+      className="flex h-full w-full flex-col rounded-[var(--radius-lg)] px-3.5 pt-2 text-left transition-[box-shadow] duration-200"
+      style={{ background: cardBg(node), boxShadow: cardShadow(node, selected), opacity: isDim(node) ? 0.55 : 1 }}
     >
-      <span className="flex items-center gap-2.5">
+      <span className="flex h-[42px] items-center gap-2.5">
         <span className="grid size-[34px] shrink-0 place-items-center rounded-[9px]" style={{ background: tint.bg, color: tint.fg }} aria-hidden>
           {typeIcon(node, "cond")}
         </span>
@@ -278,60 +354,74 @@ function CondNode({ node, selected, onSelect }: InnerProps) {
           </span>
         </span>
       </span>
-      <span className="mt-2.5 flex flex-col gap-1.5">
-        {outs.map((o, i) => {
-          const tone = o.tone ?? "neutral"
-          const c = tone === "true" ? "var(--system-green)" : tone === "false" ? "var(--system-red)" : "var(--text-secondary)"
-          const bg = tone === "true"
-            ? "color-mix(in srgb, var(--system-green) 14%, transparent)"
-            : tone === "false"
-              ? "color-mix(in srgb, var(--system-red) 13%, transparent)"
-              : "var(--fill-tertiary)"
-          return (
-            <span key={o.id} className="relative flex items-center justify-end">
-              <span className="rounded-[7px] px-2.5 py-1 text-[length:var(--text-caption2)] font-[var(--weight-semibold)]" style={{ background: bg, color: c }}>
-                {isSwitch ? `${i} · ${o.label}` : o.label}
-              </span>
-              <Handle
-                type="source"
-                position={Position.Right}
-                id={`out-${i}`}
-                style={{ ...HANDLE_HIDDEN, top: "50%" }}
-                isConnectable={false}
-              />
+      {/* Output rows: right-aligned tone capsules on the COND_ROW rhythm. Their
+        * port dots are NOT here — they belong to the card wall (dispatcher). */}
+      {outs.map((o) => {
+        const tone = o.tone ?? "neutral"
+        const c = tone === "true" ? "var(--system-green)" : tone === "false" ? "var(--system-red)" : "var(--text-secondary)"
+        const bg = tone === "true"
+          ? "color-mix(in srgb, var(--system-green) 14%, transparent)"
+          : tone === "false"
+            ? "color-mix(in srgb, var(--system-red) 13%, transparent)"
+            : "var(--fill-tertiary)"
+        return (
+          <span key={o.id} className="flex h-8 items-center justify-end">
+            <span className="max-w-full truncate rounded-[7px] px-2.5 py-1 text-[length:var(--text-caption2)] font-[var(--weight-semibold)]" style={{ background: bg, color: c }}>
+              {o.label}
             </span>
-          )
-        })}
-      </span>
+          </span>
+        )
+      })}
     </button>
   )
 }
 
-/* ── split / merge glyphs (tiny, dedicated) ───────────────────────────────── */
+/* ── split / merge glyphs — the box IS the 52×52 disc ─────────────────────── */
 function MiniGlyphNode({ node, t }: { node: CanvasNode; t: "split" | "merge" }) {
   return (
-    <div data-node-id={node.id} className="flex h-full w-full flex-col items-center gap-1.5">
-      <span className="grid size-[52px] place-items-center rounded-[15px]" style={{ background: "var(--bg-secondary)", boxShadow: "var(--shadow-card)", color: "var(--text-tertiary)" }} aria-hidden>
+    <div data-node-id={node.id} className="relative h-full w-full">
+      <span className="grid h-full w-full place-items-center rounded-[15px]" style={{ background: "var(--bg-secondary)", boxShadow: "var(--shadow-card)", color: "var(--text-tertiary)" }} aria-hidden>
         {t === "split" ? <SplitIcon className="size-[22px] rotate-90" /> : <MergeIcon className="size-[22px] rotate-90" />}
       </span>
-      <span className="text-[10px] font-[var(--weight-semibold)] uppercase tracking-[0.05em] text-[var(--text-tertiary)]">{t}</span>
-      <AnchorHandles />
+      {/* Caption below the disc — a decoration OUTSIDE the box, out of the wire path. */}
+      <span className="pointer-events-none absolute left-1/2 top-full w-[120px] -translate-x-1/2 pt-1.5 text-center text-[10px] font-[var(--weight-semibold)] uppercase tracking-[0.05em] text-[var(--text-tertiary)]">{t}</span>
+      <InPort />
+      <OutPort />
     </div>
   )
 }
 
-/* ── sub-node disc (attachable) ───────────────────────────────────────────── */
+/* ── sub-node disc (attachable) — the box IS the 46×46 disc ───────────────── */
 function SubNode({ node }: { node: CanvasNode }) {
   const role = node.subRole ?? "tool"
   const Icon = role === "model" ? FileText : role === "employee" ? User : Wrench
   return (
-    <div data-node-id={node.id} className="flex h-full w-full flex-col items-center gap-1.5">
-      <span className="text-[10px] font-[var(--weight-semibold)] uppercase tracking-[0.05em] text-[var(--text-quaternary)]">{node.subKind}</span>
-      <span className="grid size-[46px] place-items-center rounded-full" style={{ background: "var(--bg-secondary)", boxShadow: "var(--shadow-card)", color: SUB_TINT[role] }} aria-hidden>
-        <Icon className="size-[22px]" />
+    <div data-node-id={node.id} className="relative h-full w-full">
+      <span className="grid h-full w-full place-items-center rounded-full" style={{ background: "var(--bg-secondary)", boxShadow: "var(--shadow-card)", color: SUB_TINT[role] }} aria-hidden>
+        {role === "employee" && node.title
+          ? <AvatarPreview name={node.title} size={46} fontSize={20} className="bg-transparent" />
+          : <Icon className="size-[20px]" />}
       </span>
-      <span className="max-w-[76px] text-center text-[length:var(--text-caption2)] font-[var(--weight-semibold)] leading-tight text-[var(--text-secondary)]">{node.title}</span>
-      <AnchorHandles />
+      {/* Slot label + value stacked BELOW the disc (never above — the dock wire
+        * arrives from above and must not pass through text). Outside the box. */}
+      <span className="pointer-events-none absolute left-1/2 top-full w-[120px] -translate-x-1/2 pt-2 text-center">
+        <span className="block text-[10px] font-[var(--weight-semibold)] uppercase tracking-[0.05em] text-[var(--text-quaternary)]">{node.subKind}</span>
+        <span className="block text-[length:var(--text-caption2)] font-[var(--weight-semibold)] leading-tight text-[var(--text-secondary)]">{node.title}</span>
+      </span>
+      <TopInPort />
+    </div>
+  )
+}
+
+/* ── ghost add-node (empty canvas teaching affordance, spec §7) ───────────── */
+function GhostNode() {
+  return (
+    <div
+      aria-hidden
+      className="flex h-full w-full items-center justify-center gap-1.5 rounded-[var(--radius-lg)] text-[length:var(--text-subheadline)] font-[var(--weight-medium)] text-[var(--text-tertiary)]"
+      style={{ border: "2px dashed var(--separator)" }}
+    >
+      <Plus className="size-4" /> Add step
     </div>
   )
 }
@@ -340,21 +430,36 @@ function SubNode({ node }: { node: CanvasNode }) {
 export function JinnNode({ data }: NP) {
   const { node, selected, onSelect } = data
   const t = visualNodeType(node)
+  // Disc + decoration types own their ports (disc-wall centers).
+  if (t === "split") return <MiniGlyphNode node={node} t="split" />
+  if (t === "merge") return <MiniGlyphNode node={node} t="merge" />
+  if (t === "sub") return <SubNode node={node} />
+  if (t === "ghost") return <GhostNode />
+
   let inner: React.ReactNode
   switch (t) {
     case "trigger": inner = <TriggerNode node={node} selected={selected} onSelect={onSelect} />; break
     case "wide": inner = <WideNode node={node} selected={selected} onSelect={onSelect} />; break
     case "gate": inner = <GateNode node={node} selected={selected} onSelect={onSelect} />; break
     case "cond": inner = <CondNode node={node} selected={selected} onSelect={onSelect} />; break
-    case "split": return <MiniGlyphNode node={node} t="split" />
-    case "merge": return <MiniGlyphNode node={node} t="merge" />
-    case "sub": return <SubNode node={node} />
     default: inner = <StandardNode node={node} selected={selected} onSelect={onSelect} t={t} />
   }
+
+  // Strict LTR ports, attached to the CARD (the node root), never a padded row:
+  // one left input (triggers have none), right output(s) — a condition gets one
+  // per output row at condPortTop(i), a wide node adds its underside dock ports.
+  const condOuts = t === "cond" ? node.outputs ?? DEFAULT_IF_OUTPUTS : null
+  const docks = t === "wide" ? node.subNodes ?? [] : []
   return (
     <div className="relative h-full w-full">
       {inner}
-      <AnchorHandles />
+      {t !== "trigger" && <InPort />}
+      {condOuts
+        ? condOuts.map((o, i) => (
+            <OutPort key={o.id} id={`out-${i}`} top={`${condPortTop(i)}px`} tone={o.tone ?? "neutral"} />
+          ))
+        : <OutPort />}
+      {docks.map((_, i) => <DockPort key={i} i={i} total={docks.length} />)}
     </div>
   )
 }

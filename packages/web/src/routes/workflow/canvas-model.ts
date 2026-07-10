@@ -1,3 +1,4 @@
+import Dagre from "@dagrejs/dagre"
 import type { WorkflowGateResult, WorkflowNodePosition, WorkflowNodeWire, WorkflowEdgeWire } from "@/lib/api"
 
 /* GRS-013 — the ONE CanvasNode-builder contract (KISS-audit simplify item 2).
@@ -93,7 +94,7 @@ export interface CanvasEdgeSpec {
  * rendered type; `nodeGeometry` gives each its box. Both pure → unit-tested. */
 export type VisualNodeType =
   | "trigger" | "employee" | "engine" | "wide"
-  | "gate" | "cond" | "split" | "merge" | "sub" | "error" | "wait"
+  | "gate" | "cond" | "split" | "merge" | "sub" | "error" | "wait" | "ghost"
 
 export function visualNodeType(node: CanvasNode): VisualNodeType {
   if (node.visual) return node.visual
@@ -104,6 +105,11 @@ export function visualNodeType(node: CanvasNode): VisualNodeType {
     case "gate": return "gate"
     case "switch": return "cond"
     default: {
+      // Derived switch/IF outputs promote the node to the condition card even
+      // when the seed's structural kind is a plain receipt "step" (run views
+      // carry the type on the frozen snapshot, not the receipt) — the branch
+      // wires name out-<i> ports, which only the cond card exposes.
+      if (node.outputs && node.outputs.length > 0) return "cond"
       // A step with a written task summary is the WIDE AI/engine node (room for
       // the engine·model chip, the summary, and MODEL/EMPLOYEE/TOOLS docks).
       if (node.summary && node.summary.trim()) return "wide"
@@ -265,22 +271,61 @@ export function buildCanvasNodes(spec: CanvasGraphSpec): CanvasNode[] {
 }
 
 /* ── Spatial layout ───────────────────────────────────────────────────────────
- * Definitions carry x/y — use them (done-bar #6). Views without positions (the
- * derived Live projection) get a trivial deterministic left-to-right lane by
- * declaration order — no auto-layout engine in this slice. */
+ * Definitions carry x/y — use them (spatial memory is the point). Views without
+ * usable positions (the derived Live projection, degenerate migrations) get a
+ * Dagre left→right auto-layout snapped to the 20px grid — the same "tidy up"
+ * geometry, so a position-less graph opens already tidy. */
 
 /* GRS-019 card geometry: the shared glyph+label+status-line card is wider and
  * shorter than the retired role-chip card. */
 export const NODE_W = 220
 export const NODE_H = 64
-const LANE_GAP_X = 80
-const LANE_GAP_Y = 64
+/** Canvas grid (n8n's GRID_SIZE): every derived position snaps to it. */
+export const GRID = 20
+export const snapToGrid = (v: number) => Math.round(v / GRID) * GRID
 /** Stored positions are honoured only when they're plausibly pixel coordinates:
  * index-like or all-identical positions (old fixtures/migrations) would stack
  * every card on one spot, which is exactly the failure this slice kills. */
 const MIN_POSITION_SPREAD = 80
 
-export function resolveNodePositions(nodes: CanvasNode[]): Record<string, WorkflowNodePosition> {
+/** Minimal edge shape the layout needs — main-lane topology only. */
+export interface LayoutEdge { from: string; to: string; lane?: string }
+
+/** Dagre left→right layout → top-left positions per node id, snapped to the
+ * 20px grid. Dock discs (visual "sub") and their dashed lanes are skipped —
+ * expandCanvas pins them under their parent. Pure (Dagre needs no DOM), shared
+ * by the position-less default AND the "tidy up" button so both produce the
+ * exact same geometry. */
+export function dagreLayout(
+  nodes: CanvasNode[],
+  edges: LayoutEdge[],
+): Record<string, WorkflowNodePosition> {
+  const g = new Dagre.graphlib.Graph()
+  g.setGraph({ rankdir: "LR", nodesep: 46, ranksep: 96, marginx: 24, marginy: 24 })
+  g.setDefaultEdgeLabel(() => ({}))
+  const laidOut = nodes.filter((n) => n.visual !== "sub")
+  const ids = new Set(laidOut.map((n) => n.id))
+  for (const n of laidOut) {
+    const { w, h } = nodeGeometry(n)
+    g.setNode(n.id, { width: w, height: h })
+  }
+  for (const e of edges) {
+    if (e.lane === "sub") continue
+    if (ids.has(e.from) && ids.has(e.to)) g.setEdge(e.from, e.to)
+  }
+  Dagre.layout(g)
+  const out: Record<string, WorkflowNodePosition> = {}
+  for (const n of laidOut) {
+    const d = g.node(n.id)
+    if (d) out[n.id] = { x: snapToGrid(d.x - d.width / 2), y: snapToGrid(d.y - d.height / 2) }
+  }
+  return out
+}
+
+export function resolveNodePositions(
+  nodes: CanvasNode[],
+  edges?: LayoutEdge[],
+): Record<string, WorkflowNodePosition> {
   const out: Record<string, WorkflowNodePosition> = {}
   const positioned = nodes.filter((n) => n.position)
   const xs = positioned.map((n) => n.position!.x)
@@ -290,11 +335,12 @@ export function resolveNodePositions(nodes: CanvasNode[]): Record<string, Workfl
   const usable = positioned.length >= 2 && (spreadX >= MIN_POSITION_SPREAD || spreadY >= MIN_POSITION_SPREAD)
 
   if (!usable) {
-    // Left-to-right lane by declaration order.
-    nodes.forEach((n, i) => {
-      out[n.id] = { x: i * (NODE_W + LANE_GAP_X), y: 0 }
-    })
-    return out
+    // Dagre-LR default (spec §4): position-less graphs open tidy. Without a
+    // topology, the declaration order IS the chain.
+    const layoutEdges = edges && edges.length > 0
+      ? edges
+      : nodes.slice(0, -1).map((n, i) => ({ from: n.id, to: nodes[i + 1].id }))
+    return dagreLayout(nodes, layoutEdges)
   }
 
   for (const n of positioned) out[n.id] = n.position!
@@ -305,58 +351,57 @@ export function resolveNodePositions(nodes: CanvasNode[]): Record<string, Workfl
   let cursor = vertical ? Math.max(...ys) : Math.max(...xs)
   for (const n of nodes) {
     if (out[n.id]) continue
-    cursor += vertical ? NODE_H + LANE_GAP_Y : NODE_W + LANE_GAP_X
+    cursor += vertical ? NODE_H + GRID * 3 : NODE_W + GRID * 4
     out[n.id] = vertical ? { x: last.x, y: cursor } : { x: cursor, y: last.y }
   }
   return out
 }
 
-/** Pick the port pair for an edge by the dominant axis between the two laid-out
- * nodes: horizontal flow exits right / enters left, vertical flow exits bottom /
- * enters top — the curve stays visible in the gap instead of hiding behind cards. */
-export function edgeAnchors(
-  from: WorkflowNodePosition,
-  to: WorkflowNodePosition,
-): { source: "sr" | "sb" | "sl" | "st"; target: "tl" | "tt" | "tr" | "tb" } {
-  const dx = to.x - from.x
-  const dy = to.y - from.y
-  if (Math.abs(dx) >= Math.abs(dy)) {
-    return dx >= 0 ? { source: "sr", target: "tl" } : { source: "sl", target: "tr" }
-  }
-  return dy >= 0 ? { source: "sb", target: "tt" } : { source: "st", target: "tb" }
-}
-
-/* ── Per-type geometry (GRS-019c legend spec) ───────────────────────────────
- * Each visual type gets its own box; size carries meaning. The custom node
- * components render at exactly these dimensions so React Flow's handle anchors
- * and the minimap stay in register. Wide/condition heights grow with content. */
+/* ── Per-type geometry (spec §2.1/§3 — FIXED, normative) ────────────────────
+ * The declared React Flow node box IS the rendered card: every visual type has
+ * a fixed height (the wide node's summary is a fixed 2-line clamp; full text
+ * lives in the inspector), and the condition grows only by output count with
+ * both constants fixed. React Flow anchors handles to the declared box, so any
+ * estimate drift would pull every wire off the visible wall — the root cause
+ * of the off-center-connector complaint. No formulas from character counts. */
 export interface NodeBox { w: number; h: number }
 
-const WIDE_W = 300
-/** Approx chars per line inside the 300px wide-node summary at 12.5px. */
-const WIDE_SUMMARY_CPL = 40
+/** Condition card: header block (8px top pad + 42px head row). */
+export const COND_HEADER = 50
+/** One condition output row. Port dots sit at each row's vertical center. */
+export const COND_ROW = 32
+/** Bottom padding under the last output row. */
+export const COND_PAD = 8
+/** Wide (AI step) node: fixed box, 2-line clamped summary. */
+export const WIDE_W = 300
+export const WIDE_H = 118
+export const WIDE_H_DOCKS = 148
 
 export function nodeGeometry(node: CanvasNode): NodeBox {
   switch (visualNodeType(node)) {
-    case "trigger": return { w: 188, h: 58 }
-    case "gate": return { w: 232, h: 76 }
-    case "wide": {
-      const chars = node.summary?.trim().length ?? 0
-      const lines = Math.min(3, Math.max(1, Math.ceil(chars / WIDE_SUMMARY_CPL)))
-      const hasDocks = (node.subNodes?.length ?? 0) > 0
-      // header(52) + summary + slots row(hasDocks?30:0) + paddings(26)
-      return { w: WIDE_W, h: 78 + lines * 18 + (hasDocks ? 30 : 0) }
-    }
+    case "trigger": return { w: 188, h: 56 }
+    case "gate": return { w: 232, h: 72 }
+    case "wide": return { w: WIDE_W, h: (node.subNodes?.length ?? 0) > 0 ? WIDE_H_DOCKS : WIDE_H }
     case "cond": {
       const outs = Math.max(2, node.outputs?.length ?? 2)
-      return { w: 210, h: 54 + outs * 30 }
+      return { w: 220, h: COND_HEADER + outs * COND_ROW + COND_PAD }
     }
+    // Split/merge/sub: the box IS the disc — captions render below as
+    // overflow decorations excluded from the box, so wall centers = disc centers.
     case "split":
-    case "merge": return { w: 60, h: 76 }
-    case "sub": return { w: 68, h: 84 }
+    case "merge": return { w: 52, h: 52 }
+    case "sub": return { w: 46, h: 46 }
+    case "ghost": return { w: 220, h: 64 }
     // employee / engine / error / wait — the standard card
-    default: return { w: 214, h: 66 }
+    default: return { w: 220, h: 64 }
   }
+}
+
+/** The vertical center of condition output row `i` — where its port dot sits,
+ * measured from the top of the (fixed) cond box. Shared by the node component
+ * and any geometry test so the two can never drift. */
+export function condPortTop(i: number): number {
+  return COND_HEADER + i * COND_ROW + COND_ROW / 2
 }
 
 /* ── Sub-node dock expansion (GRS-019c decision 2) ──────────────────────────
@@ -368,8 +413,8 @@ export function nodeGeometry(node: CanvasNode): NodeBox {
  *
  * Pure: nodes+edges in, augmented nodes+edges out. Idempotent-safe (skips nodes
  * that already carry a subRole). Unit-tested without a DOM. */
-const DOCK_GAP_Y = 116
-const SUB_W = 68
+const DOCK_GAP_Y = 86
+const SUB_W = 46
 
 /** The horizontal fraction (0..1) of a wide node's underside where dock `i` of
  * `total` sits — evenly spread so the disc and its bottom source handle align. */
@@ -415,10 +460,16 @@ export function deriveDisplayFields(node: WorkflowNodeWire, outEdges: WorkflowEd
     if (subs.length > 0) f.subNodes = subs
   }
   // Switch outputs → stacked ports (skip the error lane; it draws its own).
+  // IF-shaped routes read their tone from the label (true=green / false=red,
+  // spec §2.3) — a quiet echo of the row capsules, visible at far zoom.
   if (node.type === "switch") {
     const outs = outEdges.filter((e) => e.lane !== "error")
     if (outs.length > 0) {
-      f.outputs = outs.map((e, i) => ({ id: e.id, label: outputLabel(e, i), tone: "neutral" as const }))
+      f.outputs = outs.map((e, i) => {
+        const label = outputLabel(e, i)
+        const tone = label === "true" ? "true" as const : label === "false" ? "false" as const : "neutral" as const
+        return { id: e.id, label, tone }
+      })
     }
   }
   return f

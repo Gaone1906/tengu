@@ -12,7 +12,7 @@ import {
   type WorkflowValidationError,
   type WorkItemStatusWire,
 } from "@/lib/api"
-import { WorkflowCanvas, buildCanvasNodes, deriveDisplayFields, type CanvasNode } from "./canvas"
+import { WorkflowCanvas, buildCanvasNodes, deriveDisplayFields, type CanvasNode, type CanvasEdgeSpec } from "./canvas"
 import { InspectorPanel, InspectorSheet } from "./inspector-shell"
 
 /* GRS-011c-1 — canvas Edit mode (MVP).
@@ -456,6 +456,51 @@ export function nodesForDefinition(
       }
     }),
   })
+}
+
+/** The definition's REAL edges for the spatial canvas — the Editor lens draws
+ * the same topology the run lens replays, so switching lens moves zero
+ * geometry. Switch/IF out-edges carry their output-row index (the same
+ * lane!=='error' ordering deriveDisplayFields builds the port rows from), so
+ * each branch wire leaves its row's port on the card wall. Pure; unit-tested. */
+export function edgesForDefinition(def: EditableWorkflowDefinitionWire): CanvasEdgeSpec[] {
+  const outsBySwitch = new Map<string, string[]>()
+  for (const n of def.nodes) {
+    if (n.type !== "switch") continue
+    outsBySwitch.set(n.id, def.edges.filter((e) => e.from === n.id && e.lane !== "error").map((e) => e.id))
+  }
+  return def.edges.map((e) => {
+    const spec: CanvasEdgeSpec = { id: e.id, from: e.from, to: e.to }
+    if (e.lane !== undefined) spec.lane = e.lane
+    const outs = outsBySwitch.get(e.from)
+    if (outs) {
+      const i = outs.indexOf(e.id)
+      if (i >= 0) spec.outIndex = i
+    }
+    return spec
+  })
+}
+
+/** An EMPTY definition (trigger only) teaches the wire direction with a ghost
+ * "+ Add step" outline one gap right of the trigger's output port (spec §7).
+ * Decoration only — node authoring (the palette) is the Phase-3 editor scope. */
+export function ghostNodeForDefinition(def: EditableWorkflowDefinitionWire): CanvasNode | null {
+  const hasSteps = def.nodes.some((n) => n.type !== "trigger")
+  if (hasSteps) return null
+  const trigger = def.nodes.find((n) => n.type === "trigger")
+  if (!trigger?.position) return null
+  return {
+    id: "__ghost__",
+    kind: "step",
+    visual: "ghost",
+    title: "Add step",
+    role: "ghost",
+    who: "",
+    status: "draft",
+    isCurrent: false,
+    gates: [],
+    position: { x: trigger.position.x + 188 + 96, y: trigger.position.y - 4 },
+  }
 }
 
 /** Hydrate one persisted condition into a drafted row: the value is string-drafted
@@ -1476,7 +1521,13 @@ export function WorkflowEditView({
   )
   const dirty = nodeDirty || triggerDirty
   useEffect(() => { onDirtyChange?.(dirty) }, [dirty, onDirtyChange])
-  const nodes = useMemo(() => (def ? nodesForDefinition(def, drafts) : []), [def, drafts])
+  const nodes = useMemo(() => {
+    if (!def) return []
+    const built = nodesForDefinition(def, drafts)
+    const ghost = ghostNodeForDefinition(def)
+    return ghost ? [...built, ghost] : built
+  }, [def, drafts])
+  const canvasEdges = useMemo(() => (def ? edgesForDefinition(def) : []), [def])
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null
 
   const onNodeDraftChange = useCallback(
@@ -1630,7 +1681,7 @@ export function WorkflowEditView({
       <div className="relative flex min-h-0 flex-1">
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="min-h-0 flex-1">
-            <WorkflowCanvas nodes={nodes} selectedId={selectedNodeId} onSelect={setSelectedNodeId} />
+            <WorkflowCanvas nodes={nodes} edges={canvasEdges} selectedId={selectedNodeId} onSelect={setSelectedNodeId} />
           </div>
           <div className="shrink-0 border-t border-[var(--separator)] px-[var(--space-4)] py-[var(--space-2)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
             Edit mode · changes save to the workflow definition (v{def.version}), never to past runs · tap a node to edit

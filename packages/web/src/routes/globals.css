@@ -631,9 +631,10 @@ h1, h2, h3, h4, h5, h6 {
    ============================================ */
 
 .react-flow__background { background: var(--bg) !important; }
-.react-flow__minimap { background: var(--material-regular) !important; border: 1px solid var(--separator); border-radius: var(--radius-md); overflow: hidden; }
-.react-flow__controls { background: var(--material-regular) !important; border: 1px solid var(--separator) !important; border-radius: var(--radius-md) !important; overflow: hidden; box-shadow: var(--shadow-card); }
-.react-flow__controls-button { background: var(--material-regular) !important; border-color: var(--separator) !important; color: var(--text-secondary) !important; }
+/* No rest hairlines on RF chrome — --shadow-overlay carries the faint ring. */
+.react-flow__minimap { background: var(--material-regular) !important; border: none; border-radius: var(--radius-md); overflow: hidden; box-shadow: var(--shadow-overlay); }
+.react-flow__controls { background: var(--material-regular) !important; border: none !important; border-radius: var(--radius-md) !important; overflow: hidden; box-shadow: var(--shadow-overlay); }
+.react-flow__controls-button { background: var(--material-regular) !important; border: none !important; color: var(--text-secondary) !important; }
 .react-flow__controls-button:hover { background: var(--material-thin) !important; color: var(--text-primary) !important; }
 /* Edge stroke/width/opacity are set per-edge inline by the layout seam. */
 .react-flow__node { transition: transform 200ms var(--ease-spring); }
@@ -642,6 +643,16 @@ h1, h2, h3, h4, h5, h6 {
    the read-only workflow canvas (selection is OURS, via the card button).
    Re-enable hit-testing on the node wrapper; the pane still pans/zooms. */
 .react-flow__node { pointer-events: all !important; }
+/* Workflow canvas ports: a 24px touch hit-area around every 8px dot (inert
+   until connect-by-drag lands; the dot + halo are inline on the handle). */
+.jinn-port { position: absolute; }
+.jinn-port::after { content: ""; position: absolute; inset: -8px; border-radius: 999px; }
+/* Reduced motion on the canvas: no marching dash, no pulse/spin, instant tidy. */
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__edge.animated .react-flow__edge-path { animation: none !important; stroke-dasharray: none !important; }
+  .react-flow .animate-spin, .react-flow .animate-pulse { animation: none !important; }
+  .react-flow__node { transition: none; }
+}
 
 /* Per-department hue (org map group containers). Hue comes from --dept-h set
    inline on the node; S/L is fixed per theme so it stays low-saturation and

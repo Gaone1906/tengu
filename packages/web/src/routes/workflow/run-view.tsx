@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { RefreshCw, Clock, X, ExternalLink, Bell, Loader2, CheckCircle2, AlertCircle } from "lucide-react"
-import { api, type WorkflowRunWire, type WorkflowRunSummaryWire, type RunStepReceiptWire, type WorkflowNodeWire } from "@/lib/api"
-import { buildCanvasNodes, nodeStatusColor, InspectorStateCircle, deriveDisplayFields, type CanvasNode, type CanvasEdgeSpec } from "./canvas"
+import {
+  api,
+  type WorkflowRunWire, type WorkflowRunSummaryWire, type RunStepReceiptWire,
+  type WorkflowNodeWire, type DerivedWorkflow, type WorkflowRunView,
+} from "@/lib/api"
+import {
+  buildCanvasNodes, nodeStatusColor, InspectorStateCircle, deriveDisplayFields,
+  nodesForRun, NodeInspector, type CanvasNode, type CanvasEdgeSpec,
+} from "./canvas"
 import { WorkflowGraph } from "./graph"
 import { InspectorPanel, InspectorSheet } from "./inspector-shell"
 import { nodeStatusLine, relativeTime, triggerSummaryOf } from "./status-line"
@@ -136,17 +143,29 @@ export function nodesForDefinitionRun(run: WorkflowRunWire): CanvasNode[] {
 
 /** The run's REAL topology for the spatial canvas (GRS-019): the frozen
  * snapshot's edges, with the snapshot's trigger node id remapped to the
- * synthetic canvas trigger. Edges to nodes the run never materialized are
- * dropped by the canvas. Pure — unit-tests without a DOM. */
+ * synthetic canvas trigger. Switch/IF out-edges carry their output-row index
+ * (same lane!=='error' ordering the port rows derive from) so each branch wire
+ * leaves its row's port on the card wall. Edges to nodes the run never
+ * materialized are dropped by the canvas. Pure — unit-tests without a DOM. */
 export function edgesForDefinitionRun(run: WorkflowRunWire, nodes: CanvasNode[]): CanvasEdgeSpec[] {
   const snap = run.definitionSnapshot
   if (!snap) return []
   const canvasTrigger = nodes.find((n) => n.kind === "trigger")?.id
   const snapTrigger = snap.nodes.find((n) => n.type === "trigger")?.id
   const remap = (id: string) => (snapTrigger && id === snapTrigger && canvasTrigger ? canvasTrigger : id)
+  const outsBySwitch = new Map<string, string[]>()
+  for (const n of snap.nodes) {
+    if (n.type !== "switch") continue
+    outsBySwitch.set(n.id, snap.edges.filter((e) => e.from === n.id && e.lane !== "error").map((e) => e.id))
+  }
   return snap.edges.map((e) => {
     const spec: CanvasEdgeSpec = { id: e.id, from: remap(e.from), to: remap(e.to) }
     if (e.lane !== undefined) spec.lane = e.lane
+    const outs = outsBySwitch.get(e.from)
+    if (outs) {
+      const i = outs.indexOf(e.id)
+      if (i >= 0) spec.outIndex = i
+    }
     return spec
   })
 }
@@ -168,18 +187,43 @@ export function RunStatusPill({ status }: { status: string }) {
   )
 }
 
-/* Run selector: pick one execution. Newest first (the API already sorts). */
+/* Run selector: pick one execution. Newest first (the API already sorts).
+ * When the gateway serves a derived dogfood projection for this workflow it
+ * appears as a PINNED first chip ("Live") — it IS an execution view, not a
+ * third mode (spec §6). */
 export function DefinitionRunSelector({
   runs,
   selected,
   onSelect,
+  liveAvailable = false,
+  liveSelected = false,
+  onSelectLive,
 }: {
   runs: WorkflowRunSummaryWire[]
   selected: string | null
   onSelect: (runId: string) => void
+  liveAvailable?: boolean
+  liveSelected?: boolean
+  onSelectLive?: () => void
 }) {
   return (
     <div className="flex items-center gap-1.5 overflow-x-auto pb-1" data-scrollable>
+      {liveAvailable && (
+        <button
+          type="button"
+          onClick={onSelectLive}
+          data-testid="wf-run-live"
+          className="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-[length:var(--text-caption1)] font-[var(--weight-medium)] transition-colors"
+          style={{
+            background: liveSelected ? "color-mix(in srgb, var(--system-green) 18%, transparent)" : "var(--fill-quaternary)",
+            color: liveSelected ? "var(--text-primary)" : "var(--text-secondary)",
+            boxShadow: liveSelected ? "var(--inset-shine)" : undefined,
+          }}
+        >
+          <span className="size-1.5 rounded-full" style={{ background: "var(--system-green)" }} />
+          Live
+        </button>
+      )}
       {runs.map((r) => {
         const active = r.runId === selected
         const color = nodeStatusColor(r.status)
@@ -205,6 +249,131 @@ export function DefinitionRunSelector({
           </button>
         )
       })}
+    </div>
+  )
+}
+
+/* ── The derived "Live" projection (dogfood) ─────────────────────────────────
+ * Folded into the Executions lens as the pinned "Live" chip (spec §6) — it is
+ * an execution view over derived wave receipts, not a third mode. Owns its
+ * wave selector + fetch; renders on the same WorkflowGraph canvas. */
+
+function WaveSelector({ runs, selected, onSelect }: { runs: WorkflowRunView[]; selected: number | null; onSelect: (w: number) => void }) {
+  return (
+    <div className="flex items-center gap-1.5 overflow-x-auto pb-1" data-scrollable>
+      {runs.map((r) => {
+        const active = r.wave === selected
+        const color = nodeStatusColor(r.status)
+        return (
+          <button
+            key={r.wave}
+            type="button"
+            onClick={() => onSelect(r.wave)}
+            title={`Wave ${r.wave} · ${r.item ?? "—"} · ${r.status}`}
+            className="flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-[length:var(--text-caption1)] font-[var(--weight-medium)] transition-colors"
+            style={{
+              background: active ? `color-mix(in srgb, ${color} 14%, transparent)` : "var(--fill-quaternary)",
+              color: active ? "var(--text-primary)" : "var(--text-secondary)",
+            }}
+          >
+            <span className="size-1.5 rounded-full" style={{ background: color }} />
+            Wave {r.wave}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+export function LiveProjectionView({ workflowId }: { workflowId: string }) {
+  const [data, setData] = useState<DerivedWorkflow | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [selectedWave, setSelectedWave] = useState<number | null>(null)
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+
+  const refresh = useCallback(() => {
+    setRefreshing(true)
+    setError(null)
+    api.getWorkflow(workflowId)
+      .then((d) => {
+        setData(d)
+        setSelectedWave((prev) => prev ?? d.latest?.wave ?? null)
+      })
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load workflow"))
+      .finally(() => { setLoading(false); setRefreshing(false) })
+  }, [workflowId])
+
+  useEffect(() => { refresh() }, [refresh])
+
+  const selectedRun = data?.runs.find((r) => r.wave === selectedWave) ?? data?.latest ?? null
+  const nodes: CanvasNode[] = useMemo(
+    () => (selectedRun && data ? nodesForRun(selectedRun, data.triggerSummary, data.definition.orchestrator) : []),
+    [selectedRun, data],
+  )
+  const selectRun = useCallback((w: number) => {
+    setSelectedWave(w)
+    setSelectedNodeId(null)
+  }, [])
+  const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null
+
+  if (loading) {
+    return <div className="flex h-40 items-center justify-center text-[var(--text-tertiary)]">Loading workflow…</div>
+  }
+  if (error) {
+    return (
+      <div className="m-[var(--space-4)] rounded-[var(--radius-lg)] bg-[color-mix(in_srgb,var(--system-red)_8%,transparent)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]">
+        {error}
+      </div>
+    )
+  }
+  if (!data) return null
+
+  return (
+    <div className="flex h-full w-full flex-col">
+      <div className="flex items-center gap-2 px-5 pb-1 pt-1">
+        <WaveSelector runs={data.runs} selected={selectedWave} onSelect={selectRun} />
+        <button
+          onClick={refresh}
+          disabled={refreshing}
+          aria-label="Refresh"
+          className="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]"
+        >
+          <RefreshCw className={refreshing ? "size-3.5 animate-spin" : "size-3.5"} />
+        </button>
+      </div>
+
+      <div className="relative flex min-h-0 flex-1">
+        <div className="min-h-0 min-w-0 flex-1">
+          {nodes.length > 0 ? (
+            <WorkflowGraph nodes={nodes} selectedId={selectedNodeId} onSelect={setSelectedNodeId} />
+          ) : (
+            <div className="flex h-40 items-center justify-center text-[var(--text-tertiary)]">No run selected.</div>
+          )}
+        </div>
+
+        {selectedNode && (
+          <InspectorPanel>
+            <NodeInspector
+              node={selectedNode}
+              evidenceRoot={data.evidenceRoot}
+              runItem={selectedRun?.item}
+              onClose={() => setSelectedNodeId(null)}
+            />
+          </InspectorPanel>
+        )}
+        {selectedNode && (
+          <InspectorSheet onClose={() => setSelectedNodeId(null)}>
+            <NodeInspector
+              node={selectedNode}
+              evidenceRoot={data.evidenceRoot}
+              runItem={selectedRun?.item}
+              onClose={() => setSelectedNodeId(null)}
+            />
+          </InspectorSheet>
+        )}
+      </div>
     </div>
   )
 }
@@ -537,8 +706,20 @@ function SetupRows({ node }: { node: WorkflowNodeWire }) {
 }
 
 /* Container: fetch the definition's runs, default to the newest (the parked run),
- * render it on the canvas with the run-aware inspector. */
-export function DefinitionRunView({ workflowId }: { workflowId: string }) {
+ * render it on the canvas with the run-aware inspector. The Executions lens:
+ * when the gateway serves a derived projection, "Live" rides the same strip as
+ * a pinned chip and replays on the same canvas — no third mode. */
+export function DefinitionRunView({
+  workflowId,
+  liveAvailable = false,
+  initialLive = false,
+}: {
+  workflowId: string
+  liveAvailable?: boolean
+  /** Deep link (?mode=live): open with the pinned Live chip selected. */
+  initialLive?: boolean
+}) {
+  const [showLive, setShowLive] = useState(initialLive)
   const [runs, setRuns] = useState<WorkflowRunSummaryWire[] | null>(null)
   const [evidenceConfigured, setEvidenceConfigured] = useState(true)
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
@@ -611,11 +792,17 @@ export function DefinitionRunView({ workflowId }: { workflowId: string }) {
   }, [workflowId, selectedRunId, refreshKey])
 
   const selectRun = useCallback((runId: string) => {
+    setShowLive(false)
     setSelectedRunId(runId)
     setSelectedNodeId(null)
     setRunError(null)
     if (runId === selectedRunId) setRefreshKey((k) => k + 1)
   }, [selectedRunId])
+
+  // A derived-only workflow (no definition runs yet) opens on its Live chip.
+  useEffect(() => {
+    if (liveAvailable && runs && runs.length === 0) setShowLive(true)
+  }, [liveAvailable, runs])
 
   // GRS-014e: resolve the selected (parked) run's gate, then re-fetch — the returned
   // snapshot is applied immediately so the doorbell clears without waiting a refresh.
@@ -654,30 +841,45 @@ export function DefinitionRunView({ workflowId }: { workflowId: string }) {
         </div>
       )}
 
-      {!error && evidenceConfigured && runs && runs.length === 0 && (
+      {!error && evidenceConfigured && runs && runs.length === 0 && !liveAvailable && (
         <div className="m-[var(--space-4)] rounded-[var(--radius-md)] border border-[var(--separator)] p-4 text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
           No runs yet. Start one with <code>POST /api/workflow-definitions/{workflowId}/run</code>.
         </div>
       )}
 
-      {!error && runs && runs.length > 0 && (
+      {!error && runs && (runs.length > 0 || liveAvailable) && (
         <>
           {/* Quiet run strip: selector chips + status, no duplicated title
            * (the page header names the workflow), no receipt jargon. */}
           <div className="flex items-center gap-2 px-5 pb-1 pt-1">
-            <DefinitionRunSelector runs={runs} selected={selectedRunId} onSelect={selectRun} />
-            {activeRun && <RunStatusPill status={activeRun.status} />}
-            <button
-              onClick={refresh}
-              disabled={refreshing}
-              aria-label="Refresh"
-              className="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]"
-            >
-              <RefreshCw className={refreshing ? "size-3.5 animate-spin" : "size-3.5"} />
-            </button>
+            <DefinitionRunSelector
+              runs={runs}
+              selected={showLive ? null : selectedRunId}
+              onSelect={selectRun}
+              liveAvailable={liveAvailable}
+              liveSelected={showLive}
+              onSelectLive={() => { setShowLive(true); setSelectedNodeId(null) }}
+            />
+            {!showLive && activeRun && <RunStatusPill status={activeRun.status} />}
+            {!showLive && (
+              <button
+                onClick={refresh}
+                disabled={refreshing}
+                aria-label="Refresh"
+                className="ml-auto grid size-8 shrink-0 place-items-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]"
+              >
+                <RefreshCw className={refreshing ? "size-3.5 animate-spin" : "size-3.5"} />
+              </button>
+            )}
           </div>
 
-          {runError && (
+          {showLive && (
+            <div className="min-h-0 flex-1">
+              <LiveProjectionView workflowId={workflowId} />
+            </div>
+          )}
+
+          {!showLive && runError && (
             <div
               data-testid="wf-run-fetch-error"
               role="alert"
@@ -687,7 +889,7 @@ export function DefinitionRunView({ workflowId }: { workflowId: string }) {
             </div>
           )}
 
-          {activeRun?.status === "failed" && activeRun.errors && activeRun.errors.length > 0 && (
+          {!showLive && activeRun?.status === "failed" && activeRun.errors && activeRun.errors.length > 0 && (
             <div className="mx-[var(--space-4)] mt-[var(--space-3)] rounded-[var(--radius-md)] border border-[color-mix(in_srgb,var(--system-red)_45%,transparent)] bg-[color-mix(in_srgb,var(--system-red)_8%,transparent)] p-3 text-[length:var(--text-caption1)] text-[var(--system-red)]">
               Run failed: {activeRun.errors.map((e) => e.message).join("; ")}
             </div>
@@ -695,7 +897,7 @@ export function DefinitionRunView({ workflowId }: { workflowId: string }) {
 
           {/* GRS-014a interim branching guard — loud, not silent: this run's definition
            * has edges implying a different order than the declaration order it walked. */}
-          {activeRun?.orderWarning && (
+          {!showLive && activeRun?.orderWarning && (
             <div
               data-testid="wf-run-order-warning"
               className="mx-[var(--space-4)] mt-[var(--space-3)] rounded-[var(--radius-md)] border border-[color-mix(in_srgb,var(--system-yellow)_45%,transparent)] bg-[color-mix(in_srgb,var(--system-yellow)_10%,transparent)] p-3 text-[length:var(--text-caption1)] text-[var(--text-primary)]"
@@ -707,27 +909,29 @@ export function DefinitionRunView({ workflowId }: { workflowId: string }) {
             </div>
           )}
 
-          <div className="relative flex min-h-0 flex-1">
-            <div className="min-h-0 min-w-0 flex-1">
-              {nodes.length > 0 ? (
-                <WorkflowGraph nodes={nodes} selectedId={selectedNodeId} onSelect={setSelectedNodeId} edges={graphEdges} />
-              ) : (
-                <div className="flex h-40 items-center justify-center text-[var(--text-tertiary)]">No run selected.</div>
+          {!showLive && (
+            <div className="relative flex min-h-0 flex-1">
+              <div className="min-h-0 min-w-0 flex-1">
+                {nodes.length > 0 ? (
+                  <WorkflowGraph nodes={nodes} selectedId={selectedNodeId} onSelect={setSelectedNodeId} edges={graphEdges} />
+                ) : (
+                  <div className="flex h-40 items-center justify-center text-[var(--text-tertiary)]">No run selected.</div>
+                )}
+              </div>
+
+              {selectedNode && activeRun && (
+                <InspectorPanel>
+                  <RunNodeInspector run={activeRun} node={selectedNode} onClose={() => setSelectedNodeId(null)} onResolveGate={resolveGate} />
+                </InspectorPanel>
+              )}
+
+              {selectedNode && activeRun && (
+                <InspectorSheet onClose={() => setSelectedNodeId(null)}>
+                  <RunNodeInspector run={activeRun} node={selectedNode} onClose={() => setSelectedNodeId(null)} onResolveGate={resolveGate} />
+                </InspectorSheet>
               )}
             </div>
-
-            {selectedNode && activeRun && (
-              <InspectorPanel>
-                <RunNodeInspector run={activeRun} node={selectedNode} onClose={() => setSelectedNodeId(null)} onResolveGate={resolveGate} />
-              </InspectorPanel>
-            )}
-
-            {selectedNode && activeRun && (
-              <InspectorSheet onClose={() => setSelectedNodeId(null)}>
-                <RunNodeInspector run={activeRun} node={selectedNode} onClose={() => setSelectedNodeId(null)} onResolveGate={resolveGate} />
-              </InspectorSheet>
-            )}
-          </div>
+          )}
         </>
       )}
     </div>

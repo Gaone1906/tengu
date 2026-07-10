@@ -2,9 +2,9 @@ import { describe, it, expect } from "vitest"
 import {
   buildCanvasNodes,
   resolveNodePositions,
-  edgeAnchors,
   NODE_W,
   NODE_H,
+  GRID,
   type CanvasNode,
   type CanvasNodeSeed,
 } from "../canvas-model"
@@ -100,13 +100,27 @@ const node = (id: string, position?: { x: number; y: number }): CanvasNode => ({
   ...(position ? { position } : {}),
 })
 
-describe("resolveNodePositions — definition x/y honoured, lane fallback otherwise", () => {
-  it("lays unpositioned graphs out as a deterministic left-to-right lane", () => {
+describe("resolveNodePositions — definition x/y honoured, Dagre-LR fallback otherwise", () => {
+  it("lays unpositioned graphs out left→right (Dagre), snapped to the 20px grid", () => {
     const pos = resolveNodePositions([node("a"), node("b"), node("c")])
-    expect(pos.a).toEqual({ x: 0, y: 0 })
     expect(pos.b.x).toBeGreaterThan(pos.a.x)
     expect(pos.c.x).toBeGreaterThan(pos.b.x)
     expect(pos.a.y).toBe(pos.b.y)
+    for (const p of Object.values(pos)) {
+      expect(p.x % GRID).toBe(0)
+      expect(p.y % GRID).toBe(0)
+    }
+  })
+
+  it("uses the supplied topology for the fallback layout (branches fan into ranks)", () => {
+    const pos = resolveNodePositions(
+      [node("sw"), node("a"), node("b")],
+      [{ from: "sw", to: "a" }, { from: "sw", to: "b" }],
+    )
+    // Both branch targets rank one column right of the switch, spread vertically.
+    expect(pos.a.x).toBe(pos.b.x)
+    expect(pos.a.x).toBeGreaterThan(pos.sw.x)
+    expect(pos.a.y).not.toBe(pos.b.y)
   })
 
   it("honours stored pixel positions when they are meaningfully spread", () => {
@@ -142,17 +156,6 @@ describe("resolveNodePositions — definition x/y honoured, lane fallback otherw
   })
 })
 
-describe("edgeAnchors — port-anchored edges pick the dominant axis", () => {
-  it("horizontal flow exits right, enters left", () => {
-    expect(edgeAnchors({ x: 0, y: 0 }, { x: 250, y: 20 })).toEqual({ source: "sr", target: "tl" })
-  })
-  it("vertical flow exits bottom, enters top", () => {
-    expect(edgeAnchors({ x: 240, y: 0 }, { x: 240, y: 140 })).toEqual({ source: "sb", target: "tt" })
-  })
-  it("leftward flow exits left, enters right", () => {
-    expect(edgeAnchors({ x: 400, y: 0 }, { x: 0, y: 30 })).toEqual({ source: "sl", target: "tr" })
-  })
-  it("upward flow exits top, enters bottom", () => {
-    expect(edgeAnchors({ x: 0, y: 400 }, { x: 20, y: 0 })).toEqual({ source: "st", target: "tb" })
-  })
-})
+/* edgeAnchors (dominant-axis anchor picking) is deliberately GONE: direction is
+ * meaning. Strict left-in/right-out port discipline is covered by the geometry
+ * suite (canvas-geometry.test.tsx) and buildFlowGraph's handle assertions. */
