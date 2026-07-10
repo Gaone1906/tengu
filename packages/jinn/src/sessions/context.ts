@@ -10,9 +10,9 @@ import { gatewayBaseUrl } from "../gateway/gateway-info.js";
  *
  * Sections are split into three tiers that are assembled in order.
  * If the accumulated prompt exceeds the configurable budget (default 100K chars),
- * lower-tier sections are progressively summarized and omitted. Essential
- * sections are compacted only as a last resort, then the configured hard cap
- * is applied deterministically.
+ * lower-tier sections are progressively summarized. Oversized essential
+ * sections are then compacted before summarized orientation is omitted, and
+ * the configured hard cap is applied deterministically as a final fallback.
  *
  *   ESSENTIAL  – identity, session, config                (always included)
  *   STANDARD   – org summary, cron summary, connectors,
@@ -223,7 +223,11 @@ export function buildContext(opts: BuildContextOptions): string {
         opts.hierarchy,
         opts.jinnMcpAttached,
       ),
-      summary: `# You are ${opts.employee.displayName}\nEmployee: ${opts.employee.name}, ${opts.employee.department}, ${opts.employee.rank}`,
+      summary: buildEmployeeIdentitySummary(
+        opts.employee,
+        opts.hierarchy?.nodes[opts.employee.name],
+        opts.hierarchy,
+      ),
     });
   } else {
     sections.push({
@@ -473,6 +477,34 @@ ${languageInstruction}
 - **Model**: ${employee.model}
 ${chainOfCommand}
 ${systemContext}`;
+}
+
+function buildEmployeeIdentitySummary(
+  employee: Employee,
+  node?: OrgNode,
+  hierarchy?: OrgHierarchy,
+): string {
+  const personaLines = employee.persona
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const roleLine = personaLines[0];
+  const safetyLine = personaLines.find((line) =>
+    /\b(?:safety|never|must not|do not|approval|authori[sz]ed|credentials?|secrets?)\b/i.test(line),
+  );
+  const manager = node?.parentName
+    ? hierarchy?.nodes[node.parentName]?.employee
+    : undefined;
+
+  return [
+    `# You are ${employee.displayName}`,
+    `Employee: ${employee.name}, ${employee.department}, ${employee.rank}`,
+    roleLine,
+    safetyLine && safetyLine !== roleLine ? safetyLine : undefined,
+    node?.parentName
+      ? `Manager: ${manager?.displayName ?? node.parentName} (\`${node.parentName}\`)`
+      : undefined,
+  ].filter(Boolean).join("\n");
 }
 
 function buildCompanyIdentityBlock(
@@ -1044,8 +1076,8 @@ function buildApiReference(
 
 /**
  * Progressive trimming by tier. Summaries preserve orientation first, then
- * lower tiers are omitted. Essential summaries are the last semantic fallback;
- * an exact final bound handles pathological configurations.
+ * oversized essentials are compacted before lower tiers are omitted. An exact
+ * final bound handles pathological configurations.
  */
 function trimContext(sections: Section[], maxChars: number): string {
   if (maxChars === 0) return "";
@@ -1056,6 +1088,16 @@ function trimContext(sections: Section[], maxChars: number): string {
   if (result.length <= maxChars) return result;
 
   // Preserve orientation with compact summaries before omitting whole tiers.
+  // Oversized personas and voice instructions can dominate the budget. Compact
+  // them before dropping summarized orientation such as the scoped roster.
+  for (let i = sections.length - 1; i >= 0; i--) {
+    if (result.length <= maxChars) break;
+    if (sections[i].tier === Tier.ESSENTIAL && sections[i].summary) {
+      parts[i] = sections[i].summary;
+      result = assemble();
+    }
+  }
+
   for (const tier of [Tier.OPTIONAL, Tier.STANDARD]) {
     for (let i = sections.length - 1; i >= 0; i--) {
       if (result.length <= maxChars) break;
@@ -1073,16 +1115,6 @@ function trimContext(sections: Section[], maxChars: number): string {
         parts[i] = null;
         result = assemble();
       }
-    }
-  }
-
-  // Oversized personas and voice instructions can dominate the essential tier.
-  // Compact every essential section before resorting to a character-level bound.
-  for (let i = sections.length - 1; i >= 0; i--) {
-    if (result.length <= maxChars) break;
-    if (sections[i].tier === Tier.ESSENTIAL && sections[i].summary) {
-      parts[i] = sections[i].summary;
-      result = assemble();
     }
   }
 

@@ -653,12 +653,46 @@ describe("buildContext — maxChars trimming", () => {
       ...minimalEmployee,
       name: "oversized-employee",
       displayName: "Oversized Employee",
-      persona: "Critical role instruction. ".repeat(1000),
+      rank: "employee",
+      reportsTo: "safety-manager",
+      persona: [
+        "You own a high-volume content pipeline.",
+        "SAFETY: Never publish externally without manager approval.",
+        "Detailed operating procedure. ".repeat(1000),
+      ].join("\n"),
+    };
+    const manager: Employee = {
+      ...minimalEmployee,
+      name: "safety-manager",
+      displayName: "Safety Manager",
+      persona: "You manage safety-sensitive publishing.",
+    };
+    const hierarchy: OrgHierarchy = {
+      root: null,
+      sorted: [manager.name, oversizedEmployee.name],
+      warnings: [],
+      nodes: {
+        [manager.name]: {
+          employee: manager,
+          parentName: null,
+          directReports: [oversizedEmployee.name],
+          depth: 0,
+          chain: [manager.name],
+        },
+        [oversizedEmployee.name]: {
+          employee: oversizedEmployee,
+          parentName: manager.name,
+          directReports: [],
+          depth: 1,
+          chain: [manager.name, oversizedEmployee.name],
+        },
+      },
     };
     const out = buildContext({
       ...baseOpts,
       config,
       employee: oversizedEmployee,
+      hierarchy,
       connectors: ["slack"],
       jinnMcpAttached: true,
     });
@@ -666,6 +700,10 @@ describe("buildContext — maxChars trimming", () => {
     expect(out).toContain("# You are Oversized Employee");
     expect(out).toContain("## Current session");
     expect(out).toContain("## Company Identity");
+    expect(out).toContain("## Working roster (scoped orientation; not exhaustive)");
+    expect(out).toContain("Safety Manager");
+    expect(out).toContain("Use the attached Jinn MCP");
+    expect(out).toContain("SAFETY: Never publish externally without manager approval.");
   });
 
   it("does not trim when output is under the default cap", () => {
