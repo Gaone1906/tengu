@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { getWorkItem } from '../work-items/store.js';
 import {
   createWorkflowTriggerBinding,
+  getWorkflowTriggerBinding,
   listWorkflowTriggerBindings,
   pollActivationContractMatches,
   POLL_ENV_ALLOWLIST,
@@ -11,11 +12,14 @@ import {
   POLL_DEFAULT_TIMEOUT_MS,
   sanitizeWorkflowTriggerPayload,
   updateWorkflowTriggerBinding,
+  workflowTriggerBindingRevision,
   type PollWorkflowTriggerBinding,
   type WorkflowTriggerBinding,
 } from './custom-triggers.js';
 import { startWorkflowRunFromTrigger, type RunDriverDeps } from './run-reconciler.js';
 import type { WorkflowRun, WorkflowTriggerEvent } from './run-store.js';
+import { abortPollExecutions, registerPollExecution } from './poll-executions.js';
+import { resolveActiveTriggerDefinition } from './trigger-dispatch.js';
 
 export { createWorkflowTriggerBinding };
 
@@ -32,6 +36,7 @@ export type PollTriggerOutcome =
   | 'invalid-json'
   | 'timeout'
   | 'output-too-large'
+  | 'revoked'
   | 'error';
 
 export interface PollTriggerRunResult {
@@ -47,7 +52,7 @@ export interface PollTriggerRunOptions {
 }
 
 interface CommandResult {
-  outcome: 'ok' | 'nonzero' | 'timeout' | 'output-too-large' | 'error';
+  outcome: 'ok' | 'nonzero' | 'timeout' | 'output-too-large' | 'revoked' | 'error';
   stdout: string;
   stderr: string;
   code?: number | null;
@@ -99,7 +104,7 @@ function scrubbedPollEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function runCommand(binding: PollWorkflowTriggerBinding): Promise<CommandResult> {
+function runCommand(binding: PollWorkflowTriggerBinding, signal: AbortSignal): Promise<CommandResult> {
   const timeoutMs = binding.timeoutMs ?? POLL_DEFAULT_TIMEOUT_MS;
   const stdoutMaxBytes = binding.stdoutMaxBytes ?? POLL_DEFAULT_STDOUT_MAX_BYTES;
   const stderrMaxBytes = binding.stderrMaxBytes ?? POLL_DEFAULT_STDERR_MAX_BYTES;
@@ -114,17 +119,19 @@ function runCommand(binding: PollWorkflowTriggerBinding): Promise<CommandResult>
     let stdout = Buffer.alloc(0);
     let stderr = Buffer.alloc(0);
     let settled = false;
+    let pendingStop: CommandResult | undefined;
     let timer: NodeJS.Timeout | undefined;
     const settle = (result: CommandResult) => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
+      if (settled || pendingStop) return;
+      pendingStop = result;
       killCommandProcess(child);
-      resolve(result);
     };
     timer = setTimeout(() => {
       settle({ outcome: 'timeout', stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8') });
     }, timeoutMs);
+    const onAbort = () => settle({ outcome: 'revoked', stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8') });
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
 
     child.stdout?.on('data', (chunk: Buffer) => {
       stdout = Buffer.concat([stdout, chunk]);
@@ -141,16 +148,24 @@ function runCommand(binding: PollWorkflowTriggerBinding): Promise<CommandResult>
     child.on('error', (err) => {
       settle({ outcome: 'error', stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8'), detail: err.message });
     });
-    child.on('close', (code, signal) => {
+    child.on('close', (code, closeSignal) => {
       if (settled) return;
+      settled = true;
       if (timer) clearTimeout(timer);
+      // `close` is the process-lifecycle barrier: revocation/delete does not
+      // return until the killed child and its stdio handles have actually closed.
+      const requested = pendingStop;
+      if (requested) {
+        resolve(requested);
+        return;
+      }
       const out = stdout.toString('utf8');
       const err = stderr.toString('utf8');
       if (code !== 0) {
-        resolve({ outcome: 'nonzero', stdout: out, stderr: err, code, signal });
+        resolve({ outcome: 'nonzero', stdout: out, stderr: err, code, signal: closeSignal });
         return;
       }
-      resolve({ outcome: 'ok', stdout: out, stderr: err, code, signal });
+      resolve({ outcome: 'ok', stdout: out, stderr: err, code, signal: closeSignal });
     });
   });
 }
@@ -225,16 +240,49 @@ export async function runPollTriggerOnce(
   if (binding.activation === 'disabled') return { outcome: 'disabled' };
   const approval = approvalSatisfied(binding);
   if (!approval.ok) return { outcome: 'not-approved', detail: approval.detail };
+  const stored = getWorkflowTriggerBinding(deps.root, binding.name);
+  const revision = workflowTriggerBindingRevision(binding);
+  if (!stored || workflowTriggerBindingRevision(stored) !== revision) {
+    return { outcome: 'revoked', detail: 'poll trigger binding was deleted or replaced' };
+  }
+  const initialDefinition = resolveActiveTriggerDefinition(deps, binding.targetWorkflowId);
+  if (initialDefinition.state === 'missing') {
+    return { outcome: 'missing-workflow', detail: `workflow "${binding.targetWorkflowId}" not found` };
+  }
+  if (initialDefinition.state === 'inactive') return { outcome: 'disabled', detail: 'target workflow is not active' };
 
-  const command = await runCommand(binding);
+  const controller = new AbortController();
+  let markSettled!: () => void;
+  const settled = new Promise<void>((resolve) => { markSettled = resolve; });
+  const unregister = registerPollExecution({
+    root: deps.root,
+    name: binding.name,
+    bindingRevision: revision,
+    controller,
+    settled,
+  });
+  let command: CommandResult;
+  try {
+    command = await runCommand(binding, controller.signal);
+  } finally {
+    unregister();
+    markSettled();
+  }
   if (command.outcome !== 'ok') {
     return { outcome: command.outcome, detail: command.detail ?? command.stderr.slice(0, 500) };
   }
+  const latest = getWorkflowTriggerBinding(deps.root, binding.name);
+  if (!latest || latest.kind !== 'poll' || workflowTriggerBindingRevision(latest) !== revision) {
+    return { outcome: 'revoked', detail: 'poll trigger binding was deleted or replaced while its command ran' };
+  }
+  const latestApproval = approvalSatisfied(latest);
+  if (!latestApproval.ok) return { outcome: 'revoked', detail: latestApproval.detail };
   const parsed = parsePollPayload(command.stdout);
   if (!parsed.ok) return { outcome: parsed.outcome };
 
-  const def = deps.getDefinition(deps.root, binding.targetWorkflowId);
-  if (!def) return { outcome: 'missing-workflow', detail: `workflow "${binding.targetWorkflowId}" not found` };
+  const definitionState = resolveActiveTriggerDefinition(deps, binding.targetWorkflowId);
+  if (definitionState.state === 'missing') return { outcome: 'missing-workflow', detail: `workflow "${binding.targetWorkflowId}" not found` };
+  if (definitionState.state === 'inactive') return { outcome: 'revoked', detail: 'target workflow became inactive while its poll ran' };
 
   const trigger: WorkflowTriggerEvent = {
     source: 'poll',
@@ -242,7 +290,7 @@ export async function runPollTriggerOnce(
     payload: parsed.payload,
     fireRef: parsed.fireRef ?? derivePollFireRef(binding, parsed.payload),
   };
-  const run = await startWorkflowRunFromTrigger(deps, def, trigger, {
+  const run = await startWorkflowRunFromTrigger(deps, definitionState.definition, trigger, {
     ...(opts.knownEmployees ? { knownEmployees: opts.knownEmployees } : {}),
     ...(opts.knownEngines ? { knownEngines: opts.knownEngines } : {}),
   });
@@ -252,7 +300,7 @@ export async function runPollTriggerOnce(
 export function startPollTriggerRunner(
   deps: RunDriverDeps,
   opts: { tickMs?: number; now?: () => string } = {},
-): () => void {
+): () => Promise<void> {
   const running = new Set<string>();
   const now = opts.now ?? (() => new Date().toISOString());
   const tickMs = opts.tickMs ?? RUNNER_TICK_MS;
@@ -265,7 +313,7 @@ export function startPollTriggerRunner(
     return at.getTime() - last.getTime() >= binding.intervalSeconds * 1000;
   };
 
-  const tick = () => {
+  const tick = async () => {
     try {
       const atIso = now();
       const at = new Date(atIso);
@@ -276,18 +324,18 @@ export function startPollTriggerRunner(
         running.add(binding.name);
         const checked: PollWorkflowTriggerBinding = { ...binding, lastCheckedAt: atIso };
         try {
-          updateWorkflowTriggerBinding(deps.root, checked);
+          await updateWorkflowTriggerBinding(deps.root, checked);
         } catch {
           running.delete(binding.name);
           continue;
         }
         void runPollTriggerOnce(deps, checked, opts)
-          .then((result) => {
+          .then(async (result) => {
             const latestRaw = listWorkflowTriggerBindings(deps.root).find((t) => t.name === binding.name);
             if (!latestRaw) return;
             const latest = asPollBinding(latestRaw);
             if (!latest) return;
-            updateWorkflowTriggerBinding(deps.root, {
+            await updateWorkflowTriggerBinding(deps.root, {
               ...latest,
               lastOutcome: result.outcome,
               ...(result.outcome === 'fired' ? { lastFiredAt: now() } : {}),
@@ -303,7 +351,10 @@ export function startPollTriggerRunner(
     }
   };
 
-  const timer = setInterval(tick, tickMs);
-  tick();
-  return () => clearInterval(timer);
+  const timer = setInterval(() => { void tick(); }, tickMs);
+  void tick();
+  return async () => {
+    clearInterval(timer);
+    await abortPollExecutions(deps.root);
+  };
 }

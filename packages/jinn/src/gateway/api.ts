@@ -3036,7 +3036,7 @@ export async function handleApiRequest(
                 target: target?.name ?? null,
                 actor,
               });
-              const updated = updateWorkflowTriggerBinding(root, {
+              const updated = await updateWorkflowTriggerBinding(root, {
                 ...pinnedBinding,
                 approvalWorkItemId: workItem.id,
                 activation: "pending_approval",
@@ -3044,7 +3044,7 @@ export async function handleApiRequest(
               bindingName = updated.name;
               approvalPayload = { workItem };
             } catch (approvalErr) {
-              deleteWorkflowTriggerBinding(root, created.binding.name);
+              await deleteWorkflowTriggerBinding(root, created.binding.name);
               throw approvalErr;
             }
           }
@@ -3076,7 +3076,7 @@ export async function handleApiRequest(
           if (!authority.ok) {
             return json(res, { error: authority.error }, authority.status);
           }
-          const deleted = deleteWorkflowTriggerBinding(root, params.name);
+          const deleted = await deleteWorkflowTriggerBinding(root, params.name);
           if (!deleted) return notFound(res);
           return json(res, { deleted: true, name: params.name, orphaned: true });
         }
@@ -3084,7 +3084,7 @@ export async function handleApiRequest(
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
-        const deleted = deleteWorkflowTriggerBinding(root, params.name);
+        const deleted = await deleteWorkflowTriggerBinding(root, params.name);
         if (!deleted) return notFound(res);
         return json(res, { deleted: true, name: params.name });
       } catch (err) {

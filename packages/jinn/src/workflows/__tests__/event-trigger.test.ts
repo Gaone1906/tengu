@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createDefinition, getDefinition } from '../definition-store.js';
+import { createDefinition, getDefinition, retireDefinition } from '../definition-store.js';
 import { getRun } from '../run-store.js';
 import type { EditableWorkflowDefinition, WorkflowEdge, WorkflowNode } from '../definition.js';
 import type { RunDriverDeps } from '../run-reconciler.js';
@@ -108,6 +108,27 @@ describe('workflow event/webhook custom triggers', () => {
 
     expect(result.rejected).toBe('no-matching-binding');
     expect(result.outcomes).toEqual([]);
+  });
+
+  it('rejects a matching webhook when its workflow has been retired', async () => {
+    createDefinition(root, def('retired-workflow', [trigger, step('a')]), { now });
+    createWorkflowTriggerBinding(root, {
+      kind: 'webhook',
+      name: 'retired-hook',
+      event: 'lead.created',
+      targetWorkflowId: 'retired-workflow',
+      secretToken: 'secret-token',
+    }, { now });
+    retireDefinition(root, 'retired-workflow', { now });
+    const { deps } = harness();
+
+    const result = await fireWorkflowEvent(deps, {
+      event: 'lead.created',
+      payload: { kind: 'trial' },
+      fireRef: 'delivery-retired',
+    });
+
+    expect(result).toEqual({ rejected: 'no-matching-binding', outcomes: [] });
   });
 
   it('contains hostile payload text inside the trigger-data envelope before step instructions', async () => {

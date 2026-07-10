@@ -7,6 +7,8 @@ import type { WorkflowRun, WorkflowTriggerEvent } from './run-store.js';
 import { evaluateRegexMatch } from './regex-eval.js';
 import { logger } from '../shared/logger.js';
 import { snapshotPollExecutableArtifacts, type PollExecutableArtifact } from './poll-artifacts.js';
+import { abortPollExecutions } from './poll-executions.js';
+import { resolveActiveTriggerDefinition } from './trigger-dispatch.js';
 
 const TRIGGER_STORE_SCHEMA_VERSION = 1;
 const TRIGGER_DIR = 'workflow-triggers';
@@ -148,6 +150,8 @@ export interface WorkflowTriggerBindingBase {
   createdAt: string;
   updatedAt: string;
   createdBy?: string;
+  /** Immutable identity for one authored binding revision; operational stamps do not change it. */
+  bindingRevision?: string;
 }
 
 export interface WebhookWorkflowTriggerBinding extends WorkflowTriggerBindingBase {
@@ -357,6 +361,24 @@ function stableJson(value: unknown): string {
     return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(',')}}`;
   }
   return JSON.stringify(value);
+}
+
+function bindingSemanticValue(binding: WorkflowTriggerBinding): Record<string, unknown> {
+  const value = { ...binding } as Record<string, unknown>;
+  delete value.bindingRevision;
+  delete value.createdAt;
+  delete value.updatedAt;
+  if (binding.kind === 'poll') {
+    delete value.lastCheckedAt;
+    delete value.lastFiredAt;
+    delete value.lastOutcome;
+  }
+  return value;
+}
+
+export function workflowTriggerBindingRevision(binding: WorkflowTriggerBinding): string {
+  return binding.bindingRevision
+    ?? `legacy-${crypto.createHash('sha256').update(stableJson(bindingSemanticValue(binding))).digest('hex')}`;
 }
 
 function pollExecutionCwd(): string {
@@ -645,6 +667,7 @@ export function createWorkflowTriggerBinding(
     ...(cleanFilter(input.filter) ? { filter: cleanFilter(input.filter) } : {}),
     createdAt: now,
     updatedAt: now,
+    bindingRevision: randomUUID(),
     ...(typeof input.createdBy === 'string' && input.createdBy.trim() ? { createdBy: input.createdBy.trim() } : {}),
   };
   let generatedSecret: string | undefined;
@@ -690,16 +713,17 @@ export function createWorkflowTriggerBinding(
   return { binding, ...(generatedSecret ? { secretToken: generatedSecret } : {}) };
 }
 
-export function deleteWorkflowTriggerBinding(root: string, name: string): boolean {
+export async function deleteWorkflowTriggerBinding(root: string, name: string): Promise<boolean> {
   assertSafeName(name, 'name');
   const store = readStore(root);
   const next = store.triggers.filter((t) => t.name !== name);
   if (next.length === store.triggers.length) return false;
   saveStore(root, { ...store, triggers: next });
+  await abortPollExecutions(root, name);
   return true;
 }
 
-export function updateWorkflowTriggerBinding(root: string, binding: WorkflowTriggerBinding): WorkflowTriggerBinding {
+export async function updateWorkflowTriggerBinding(root: string, binding: WorkflowTriggerBinding): Promise<WorkflowTriggerBinding> {
   const store = readStore(root);
   const idx = store.triggers.findIndex((t) => t.name === binding.name);
   if (idx < 0) throw new WorkflowTriggerStoreError('not-found', `workflow trigger "${binding.name}" not found`);
@@ -720,8 +744,17 @@ export function updateWorkflowTriggerBinding(root: string, binding: WorkflowTrig
       } as PollWorkflowTriggerBinding;
     }
   }
+  const previousRevision = workflowTriggerBindingRevision(previous);
+  if (stableJson(bindingSemanticValue(previous)) !== stableJson(bindingSemanticValue(updated))) {
+    updated = { ...updated, bindingRevision: randomUUID() };
+  } else {
+    updated = { ...updated, bindingRevision: previousRevision };
+  }
   store.triggers[idx] = updated;
   saveStore(root, store);
+  if (workflowTriggerBindingRevision(updated) !== previousRevision) {
+    await abortPollExecutions(root, updated.name, previousRevision);
+  }
   return updated;
 }
 
@@ -814,17 +847,31 @@ export async function fireWorkflowEvent(
   // Filter eval is async (regexes run in an isolated worker), so select
   // sequentially rather than via Array.filter. Cheap gates (kind/activation/event/
   // token) short-circuit before any worker round-trip.
-  const candidates: WorkflowTriggerBinding[] = [];
+  const candidates: Array<{
+    binding: WorkflowTriggerBinding;
+    definitionState: ReturnType<typeof resolveActiveTriggerDefinition>;
+  }> = [];
   for (const binding of listWorkflowTriggerBindings(deps.root)) {
     if (!tokenAuthorized(binding)) continue;
-    if (await bindingMatchesEvent(binding, fireInput)) candidates.push(binding);
+    if (!(await bindingMatchesEvent(binding, fireInput))) continue;
+    const latest = getWorkflowTriggerBinding(deps.root, binding.name);
+    if (!latest || workflowTriggerBindingRevision(latest) !== workflowTriggerBindingRevision(binding)) continue;
+    if (!tokenAuthorized(latest)) continue;
+    const definitionState = resolveActiveTriggerDefinition(deps, latest.targetWorkflowId);
+    if (definitionState.state === 'inactive') continue;
+    candidates.push({ binding: latest, definitionState });
   }
   if (candidates.length === 0) return { rejected: 'no-matching-binding', outcomes: [] };
 
   const outcomes: FireWorkflowEventOutcome[] = [];
-  for (const binding of candidates) {
-    const def = deps.getDefinition(deps.root, binding.targetWorkflowId);
-    if (!def) {
+  for (const candidate of candidates) {
+    const { binding } = candidate;
+    const latest = getWorkflowTriggerBinding(deps.root, binding.name);
+    if (!latest || workflowTriggerBindingRevision(latest) !== workflowTriggerBindingRevision(binding)) continue;
+    if (!tokenAuthorized(latest)) continue;
+    const definitionState = resolveActiveTriggerDefinition(deps, latest.targetWorkflowId);
+    if (definitionState.state === 'inactive') continue;
+    if (definitionState.state === 'missing') {
       outcomes.push({ triggerName: binding.name, outcome: 'missing-workflow', targetWorkflowId: binding.targetWorkflowId });
       continue;
     }
@@ -834,13 +881,13 @@ export async function fireWorkflowEvent(
       payload,
       ...(fireInput.fireRef ? { fireRef: fireInput.fireRef } : {}),
     };
-    const run = await startWorkflowRunFromTrigger(deps, def, trigger, {
+    const run = await startWorkflowRunFromTrigger(deps, definitionState.definition, trigger, {
       ...(opts.knownEmployees ? { knownEmployees: opts.knownEmployees } : {}),
       ...(opts.knownEngines ? { knownEngines: opts.knownEngines } : {}),
     });
     outcomes.push({ triggerName: binding.name, outcome: 'started', run });
   }
-  return { outcomes };
+  return outcomes.length > 0 ? { outcomes } : { rejected: 'no-matching-binding', outcomes: [] };
 }
 
 export function workflowEventRateLimitKeyFromToken(prefix: string, token: string): string {

@@ -86,6 +86,12 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForFile(file: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!fs.existsSync(file) && Date.now() < deadline) await wait(10);
+  expect(fs.existsSync(file)).toBe(true);
+}
+
 describe('workflow poll/check custom triggers', () => {
   it('does not throw when the trigger store is corrupt at runner startup', () => {
     fs.mkdirSync(path.join(root, 'workflow-triggers'), { recursive: true });
@@ -170,7 +176,7 @@ describe('workflow poll/check custom triggers', () => {
       approvalWorkItemId,
     }, { now }).binding;
 
-    const mutated = customTriggers.updateWorkflowTriggerBinding(root, {
+    const mutated = await customTriggers.updateWorkflowTriggerBinding(root, {
       ...original,
       command: `${nodeBin} -e "process.stdout.write(JSON.stringify({fire:true,payload:{id:'mutated'}}))"`,
     });
@@ -225,7 +231,7 @@ describe('workflow poll/check custom triggers', () => {
       timeoutMs: 1000,
     }, { now }).binding;
 
-    const legacy = customTriggers.updateWorkflowTriggerBinding(root, {
+    const legacy = await customTriggers.updateWorkflowTriggerBinding(root, {
       ...created,
       approvalWorkItemId,
       lastCheckedAt: FIXED,
@@ -375,6 +381,81 @@ setTimeout(() => {}, 10000);
     await wait(500);
 
     expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it('deleting an in-flight poll binding aborts and awaits the command before returning', async () => {
+    createDefinition(root, def('poll-delete-workflow', [trigger, step('a')]), { now });
+    const started = path.join(root, 'delete-started.txt');
+    const completed = path.join(root, 'delete-completed.txt');
+    const script = path.join(root, 'delete-in-flight.cjs');
+    fs.writeFileSync(script, `
+const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(started)}, 'started');
+setTimeout(() => {
+  fs.writeFileSync(${JSON.stringify(completed)}, 'completed');
+  process.stdout.write(JSON.stringify({ fire: true, payload: { id: 'too-late' } }));
+}, 500);
+`, 'utf8');
+    const approvalWorkItemId = await approvedWorkItem('poll-delete-in-flight');
+    const binding = poll.createWorkflowTriggerBinding(root, {
+      kind: 'poll',
+      name: 'poll-delete-in-flight',
+      event: 'poll.ready',
+      targetWorkflowId: 'poll-delete-workflow',
+      command: `${nodeBin} ${script}`,
+      intervalSeconds: 60,
+      timeoutMs: 5_000,
+      approvalWorkItemId,
+    }, { now }).binding;
+
+    const execution = poll.runPollTriggerOnce(harness(), binding, { now });
+    await waitForFile(started);
+    const deleted = await customTriggers.deleteWorkflowTriggerBinding(root, binding.name);
+    const result = await execution;
+
+    expect(deleted).toBe(true);
+    expect(result).toMatchObject({ outcome: 'revoked' });
+    expect(fs.existsSync(completed)).toBe(false);
+    expect(runStore.listRuns(root, 'poll-delete-workflow')).toHaveLength(0);
+  });
+
+  it('disabling an in-flight poll binding aborts and awaits the command before returning', async () => {
+    createDefinition(root, def('poll-disable-workflow', [trigger, step('a')]), { now });
+    const started = path.join(root, 'disable-started.txt');
+    const completed = path.join(root, 'disable-completed.txt');
+    const script = path.join(root, 'disable-in-flight.cjs');
+    fs.writeFileSync(script, `
+const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(started)}, 'started');
+setTimeout(() => {
+  fs.writeFileSync(${JSON.stringify(completed)}, 'completed');
+  process.stdout.write(JSON.stringify({ fire: true, payload: { id: 'too-late' } }));
+}, 500);
+`, 'utf8');
+    const approvalWorkItemId = await approvedWorkItem('poll-disable-in-flight');
+    const binding = poll.createWorkflowTriggerBinding(root, {
+      kind: 'poll',
+      name: 'poll-disable-in-flight',
+      event: 'poll.ready',
+      targetWorkflowId: 'poll-disable-workflow',
+      command: `${nodeBin} ${script}`,
+      intervalSeconds: 60,
+      timeoutMs: 5_000,
+      approvalWorkItemId,
+    }, { now }).binding;
+
+    const execution = poll.runPollTriggerOnce(harness(), binding, { now });
+    await waitForFile(started);
+    const disabled = await customTriggers.updateWorkflowTriggerBinding(root, {
+      ...binding,
+      activation: 'disabled',
+    });
+    const result = await execution;
+
+    expect(disabled).toMatchObject({ activation: 'disabled' });
+    expect(result).toMatchObject({ outcome: 'revoked' });
+    expect(fs.existsSync(completed)).toBe(false);
+    expect(runStore.listRuns(root, 'poll-disable-workflow')).toHaveLength(0);
   });
 
   it('runs the poll command with a scrubbed env — gateway secrets never leak, allowlisted vars survive', async () => {

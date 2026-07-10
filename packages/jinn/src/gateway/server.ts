@@ -1377,7 +1377,7 @@ export async function startGateway(
     // Same for the workflow run reconciler — a mid-shutdown sweep must not spawn
     // a step session into a dying gateway.
     stopWorkflowRunReconciler?.();
-    stopPollTriggerRunner?.();
+    await stopPollTriggerRunner?.();
 
     // Stop caffeinate
     if (caffeinate && caffeinate.exitCode === null) {
