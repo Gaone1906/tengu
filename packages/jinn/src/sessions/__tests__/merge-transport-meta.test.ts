@@ -36,11 +36,15 @@ describe("mergeTransportMeta", () => {
       engineOverride: { originalEngine: "claude", until: "2099-01-01T00:00:00Z" },
       engineSessions: { claude: "c-1", codex: "x-1" },
       claudeSyncSince: "2026-06-10T00:00:00Z",
+      delegationCompletionTracked: true,
+      delegationCompletionContract: { workItemId: "wi-live", state: "nudged" },
     } as any;
     const incoming = {
       engineOverride: null,
       engineSessions: {},
       claudeSyncSince: "stomped",
+      delegationCompletionTracked: false,
+      delegationCompletionContract: null,
       channelName: "general",
     } as any;
 
@@ -48,6 +52,8 @@ describe("mergeTransportMeta", () => {
     expect(merged.engineOverride).toEqual(existing.engineOverride);
     expect(merged.engineSessions).toEqual(existing.engineSessions);
     expect(merged.claudeSyncSince).toBe("2026-06-10T00:00:00Z");
+    expect(merged.delegationCompletionTracked).toBe(true);
+    expect(merged.delegationCompletionContract).toEqual(existing.delegationCompletionContract);
     expect(merged.channelName).toBe("general");
   });
 

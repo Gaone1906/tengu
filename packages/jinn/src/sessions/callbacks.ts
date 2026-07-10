@@ -1,4 +1,9 @@
-import { getSession, listSessionsBySource } from "./registry.js";
+import {
+  getSession,
+  listDelegationCompletionNudgedSessions,
+  listSessionsBySource,
+  markDelegationCompletionSurfaced,
+} from "./registry.js";
 import { loadConfig } from "../shared/config.js";
 import { logger } from "../shared/logger.js";
 import type { Session } from "../shared/types.js";
@@ -73,6 +78,34 @@ export function notifyParentSession(
   _sendNotification(childSession, result, options).catch((err) => {
     logger.warn(`[callbacks] Failed to notify parent session ${childSession.parentSessionId}: ${err instanceof Error ? err.message : String(err)}`);
   });
+}
+
+/**
+ * Post-listen restart recovery for a claim persisted before its continuation
+ * notification reached the durable queue. Surface first; mark surfaced only
+ * after the parent-message route accepts it. Failure leaves `nudged` intact so
+ * the next restart retries instead of silently stranding the delegation.
+ */
+export async function recoverOrphanedDelegationCompletionClaims(): Promise<number> {
+  let recovered = 0;
+  for (const child of listDelegationCompletionNudgedSessions()) {
+    if (!child.parentSessionId || !child.workItemId) continue;
+    const parent = getSession(child.parentSessionId);
+    if (!parent || parent.status === "error" || parent.workflowProvenance?.kind === "run") continue;
+    try {
+      await _sendNotification(child, {
+        error:
+          "Delegation completion recovery: a restart occurred after the automatic continuation was claimed, " +
+          "so completion could not be confirmed. The child was not nudged again; parent review is required.",
+      }, { skipCompletionContract: true });
+      if (markDelegationCompletionSurfaced(child.id, child.workItemId)) recovered++;
+    } catch (error) {
+      logger.warn(
+        `[delegation-contract] restart recovery could not surface child ${child.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return recovered;
 }
 
 /** Label for a talk wake: title → employee → "a thread". */
@@ -198,7 +231,7 @@ export function notifyRateLimitResumed(
 async function _sendNotification(
   childSession: Session,
   result: { result?: string | null; error?: string | null; cost?: number; durationMs?: number },
-  options?: { alwaysNotify?: boolean },
+  options?: { alwaysNotify?: boolean; skipCompletionContract?: boolean },
 ): Promise<void> {
   const parent = getSession(childSession.parentSessionId!);
   if (!parent) return; // Parent gone or expired
@@ -211,9 +244,11 @@ async function _sendNotification(
   // Delegation completion contract: a narrowly-qualified progress-only idle
   // settlement gets one durable follow-up instead of prematurely waking the
   // parent. The next idle settlement is surfaced and can never nudge again.
-  const contract = await enforceDelegationCompletionContract(childSession, result, {
-    postFollowUp: (sessionId, message, displayMessage) => _sendRaw(sessionId, message, displayMessage),
-  });
+  const contract = options?.skipCompletionContract
+    ? "pass"
+    : await enforceDelegationCompletionContract(childSession, result, {
+        postFollowUp: (sessionId, message, displayMessage) => _sendRaw(sessionId, message, displayMessage),
+      });
   if (contract === "nudged" || contract === "suppress") return;
   if (contract === "surface") {
     const latest = result.result?.trim() || "(no output)";

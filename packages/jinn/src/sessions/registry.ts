@@ -1113,6 +1113,38 @@ export function releaseDelegationCompletionNudge(id: string, workItemId: string)
   return result.changes === 1 ? getSession(id) : undefined;
 }
 
+/**
+ * Atomically clear only the guard observed by the caller. A newer work-item
+ * claim wins over a stale operator-cycle reset, and unrelated live metadata is
+ * preserved because json_remove executes against the current row.
+ */
+export function clearDelegationCompletionGuard(id: string, expectedWorkItemId: string): Session | undefined {
+  const db = initDb();
+  const result = db.prepare(`
+    UPDATE sessions
+    SET transport_meta = json_remove(transport_meta, '$.delegationCompletionContract')
+    WHERE id = ?
+      AND json_extract(transport_meta, '$.delegationCompletionContract.workItemId') = ?
+  `).run(id, expectedWorkItemId);
+  return result.changes === 1 ? getSession(id) : undefined;
+}
+
+/** Persisted nudge claims whose queue post may have been lost to a restart. */
+export function listDelegationCompletionNudgedSessions(): Session[] {
+  const db = initDb();
+  const rows = db.prepare(`
+    SELECT s.* FROM sessions s
+    WHERE json_extract(s.transport_meta, '$.delegationCompletionContract.state') = 'nudged'
+      AND NOT EXISTS (
+        SELECT 1 FROM queue_items q
+        WHERE q.session_id = s.id
+          AND q.internal = 1
+          AND q.status IN ('pending', 'running')
+      )
+  `).all() as Record<string, unknown>[];
+  return rows.map(rowToSession);
+}
+
 /** Start a new execution generation and make it the sole owner of terminal
  * writes for this session. The token is durable so stop/reset wins across
  * asynchronous engine completion and process boundaries. */

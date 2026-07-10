@@ -478,6 +478,9 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
     expect(resp.body.workItemId).toBe(item.id);
     expect(workItemCount()).toBe(before);
     expect(reg.getSession(resp.body.sessionId)?.workItemId).toBe(item.id);
+    expect(reg.getSession(resp.body.sessionId)?.transportMeta).toMatchObject({
+      delegationCompletionTracked: true,
+    });
     expect(store.getWorkItem(item.id)).toMatchObject({
       title: "Canonical objective",
       body: "Preserve this brief",

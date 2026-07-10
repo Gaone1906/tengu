@@ -33,6 +33,7 @@ describe("delegation completion contract atomic guard", () => {
       source: "api",
       sourceRef: "api:atomic-contract",
       parentSessionId: "parent-atomic",
+      transportMeta: { delegationCompletionTracked: true },
     });
     workItems.linkSession(item.id, session.id);
     const idleChild = registry.getSession(session.id)!;
@@ -46,5 +47,28 @@ describe("delegation completion contract atomic guard", () => {
 
     expect(postFollowUp).toHaveBeenCalledOnce();
     expect(outcomes.sort()).toEqual(["nudged", "suppress"]);
+  });
+
+  it("atomically clears only the stale guard under a racing claim", () => {
+    const oldItem = workItems.createWorkItem({ title: "Old cycle", status: "executing", source: "delegation" });
+    const newItem = workItems.createWorkItem({ title: "New cycle", status: "executing", source: "delegation" });
+    const session = registry.createSession({
+      engine: "codex",
+      source: "api",
+      sourceRef: "api:atomic-clear",
+      parentSessionId: "parent-clear",
+      transportMeta: { delegationCompletionTracked: true, preserved: "live" },
+    });
+    registry.claimDelegationCompletionNudge(session.id, oldItem.id);
+    const staleSession = registry.getSession(session.id)!;
+    registry.claimDelegationCompletionNudge(session.id, newItem.id);
+
+    contract.clearDelegationCompletionContract(staleSession);
+
+    expect(registry.getSession(session.id)?.transportMeta).toMatchObject({
+      delegationCompletionTracked: true,
+      preserved: "live",
+      delegationCompletionContract: { workItemId: newItem.id, state: "nudged" },
+    });
   });
 });

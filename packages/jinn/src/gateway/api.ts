@@ -180,7 +180,7 @@ import { readJsonBody, readBodyRaw } from "./http-helpers.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { resultAlreadyInStreamedBlocks, shouldPreserveStreamedBlocks } from "./streamed-blocks.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions } from "../sessions/callbacks.js";
-import { clearDelegationCompletionContract } from "../sessions/delegation-completion-contract.js";
+import { clearDelegationCompletionContract, DELEGATION_COMPLETION_TRACKED_META_KEY } from "../sessions/delegation-completion-contract.js";
 import { sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
 import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
 import {
@@ -4423,9 +4423,10 @@ export async function handleApiRequest(
           prompt: task,
           title,
           portalName: config.portal?.portalName,
-          transportMeta: delegateEmployee?.displayName
-            ? { delegationEmployeeDisplay: delegateEmployee.displayName }
-            : undefined,
+          transportMeta: {
+            [DELEGATION_COMPLETION_TRACKED_META_KEY]: true,
+            ...(delegateEmployee?.displayName ? { delegationEmployeeDisplay: delegateEmployee.displayName } : {}),
+          },
         });
       } catch (spawnErr) {
         const replay = idempotencySessionKey ? getSessionBySessionKey(idempotencySessionKey) : undefined;

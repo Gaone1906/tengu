@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "../../shared/types.js";
 
-const { getWorkItem, getSession, updateSession, claimDelegationCompletionNudge, markDelegationCompletionSurfaced, releaseDelegationCompletionNudge } = vi.hoisted(() => ({
+const { getWorkItem, getSession, updateSession, claimDelegationCompletionNudge, clearDelegationCompletionGuard, markDelegationCompletionSurfaced, releaseDelegationCompletionNudge } = vi.hoisted(() => ({
   getWorkItem: vi.fn(),
   getSession: vi.fn(),
   updateSession: vi.fn(),
   claimDelegationCompletionNudge: vi.fn(),
+  clearDelegationCompletionGuard: vi.fn(),
   markDelegationCompletionSurfaced: vi.fn(),
   releaseDelegationCompletionNudge: vi.fn(),
 }));
@@ -15,6 +16,7 @@ vi.mock("../registry.js", () => ({
   updateSession,
   getSession,
   claimDelegationCompletionNudge,
+  clearDelegationCompletionGuard,
   markDelegationCompletionSurfaced,
   releaseDelegationCompletionNudge,
 }));
@@ -33,7 +35,7 @@ function child(overrides: Partial<Session> = {}): Session {
     workItemId: "wi_open",
     replyContext: null,
     messageId: null,
-    transportMeta: null,
+    transportMeta: { delegationCompletionTracked: true },
     employee: "worker",
     model: "gpt",
     title: "Implement bounded change",
@@ -72,6 +74,7 @@ describe("delegation completion contract", () => {
       transportMeta: { delegationCompletionContract: { workItemId, state: "surfaced" } },
     }));
     releaseDelegationCompletionNudge.mockReset();
+    clearDelegationCompletionGuard.mockReset();
     getSession.mockReset();
   });
 
@@ -168,13 +171,41 @@ describe("delegation completion contract", () => {
     expect(postFollowUp).not.toHaveBeenCalled();
   });
 
-  it("does not nudge an open work item that is not a tracked delegation", async () => {
-    getWorkItem.mockReturnValue({ ...openItem("executing"), source: "cron" });
+  it("nudges a spawned delegation linked to an existing human Todo", async () => {
+    getWorkItem.mockReturnValue({ ...openItem("executing"), source: "human" });
     const postFollowUp = vi.fn().mockResolvedValue(undefined);
 
     const outcome = await enforceDelegationCompletionContract(
       child(),
       { result: "Progress update: continuing with the remaining checks." },
+      { postFollowUp },
+    );
+
+    expect(outcome).toBe("nudged");
+    expect(postFollowUp).toHaveBeenCalledOnce();
+  });
+
+  it("does not nudge an unmarked session even when its Todo is open", async () => {
+    getWorkItem.mockReturnValue(openItem("executing"));
+    const postFollowUp = vi.fn().mockResolvedValue(undefined);
+
+    const outcome = await enforceDelegationCompletionContract(
+      child({ transportMeta: null }),
+      { result: "Progress update: continuing with the remaining checks." },
+      { postFollowUp },
+    );
+
+    expect(outcome).toBe("pass");
+    expect(postFollowUp).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a mixed terminal and unfinished report as ambiguous", async () => {
+    getWorkItem.mockReturnValue(openItem("executing"));
+    const postFollowUp = vi.fn().mockResolvedValue(undefined);
+
+    const outcome = await enforceDelegationCompletionContract(
+      child(),
+      { result: "Tests pass for the API, but the migration remains in progress." },
       { postFollowUp },
     );
 
@@ -216,6 +247,7 @@ describe("delegation completion contract", () => {
     const alreadyNudged = child({
       attemptToken: "attempt-2",
       transportMeta: {
+        delegationCompletionTracked: true,
         delegationCompletionContract: { workItemId: "wi_open", state: "nudged" },
       },
     });

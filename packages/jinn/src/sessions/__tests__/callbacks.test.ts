@@ -16,6 +16,8 @@ vi.mock("../registry.js", () => ({
     transportMeta: { delegationCompletionContract: { workItemId, state: "surfaced" } },
   })),
   releaseDelegationCompletionNudge: vi.fn(),
+  clearDelegationCompletionGuard: vi.fn(),
+  listDelegationCompletionNudgedSessions: vi.fn(() => []),
 }));
 
 vi.mock("../../work-items/store.js", () => ({
@@ -35,8 +37,8 @@ vi.mock("../../shared/logger.js", () => ({
   },
 }));
 
-import { notifyManagerVisibility, notifyParentSession, notifyRateLimitResumed } from "../callbacks.js";
-import { getSession, listSessionsBySource } from "../registry.js";
+import { notifyManagerVisibility, notifyParentSession, notifyRateLimitResumed, recoverOrphanedDelegationCompletionClaims } from "../callbacks.js";
+import { getSession, listSessionsBySource, listDelegationCompletionNudgedSessions, markDelegationCompletionSurfaced } from "../registry.js";
 import { getWorkItem } from "../../work-items/store.js";
 import { attach, __resetAttachmentsForTest } from "../../talk/attachments.js";
 import type { Session } from "../../shared/types.js";
@@ -125,6 +127,30 @@ describe("notifyParentSession — no parent", () => {
   });
 });
 
+describe("delegation completion startup recovery", () => {
+  it("surfaces an orphaned nudged claim to its parent before marking it surfaced", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const child = makeSession({
+      workItemId: "wi-orphan",
+      transportMeta: {
+        delegationCompletionTracked: true,
+        delegationCompletionContract: { workItemId: "wi-orphan", state: "nudged" },
+      },
+    });
+    vi.mocked(listDelegationCompletionNudgedSessions).mockReturnValue([child]);
+    vi.mocked(getSession).mockReturnValue(makeSession({ id: "parent-001", parentSessionId: null }));
+
+    await expect(recoverOrphanedDelegationCompletionClaims()).resolves.toBe(1);
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(fetchSpy.mock.calls[0][0]).toBe("http://127.0.0.1:7777/api/sessions/parent-001/message");
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).message).toContain("restart");
+    expect(markDelegationCompletionSurfaced).toHaveBeenCalledWith("child-001", "wi-orphan");
+    globalThis.fetch = originalFetch;
+  });
+});
+
 describe("notifyParentSession", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
@@ -167,7 +193,7 @@ describe("notifyParentSession", () => {
 
   it("routes a qualifying progress-only child back to itself and suppresses the parent callback", async () => {
     vi.mocked(getWorkItem).mockReturnValue({ id: "wi-open", status: "executing", source: "delegation" } as never);
-    const child = makeSession({ workItemId: "wi-open" });
+    const child = makeSession({ workItemId: "wi-open", transportMeta: { delegationCompletionTracked: true } });
 
     notifyParentSession(child, {
       result: "Progress update: implementation is in progress. Next step is the remaining test run.",
@@ -184,7 +210,7 @@ describe("notifyParentSession", () => {
 
   it("enforces the completion contract even when ordinary parent replies are suppressed", async () => {
     vi.mocked(getWorkItem).mockReturnValue({ id: "wi-open", status: "executing", source: "delegation" } as never);
-    const child = makeSession({ workItemId: "wi-open" });
+    const child = makeSession({ workItemId: "wi-open", transportMeta: { delegationCompletionTracked: true } });
 
     notifyParentSession(
       child,

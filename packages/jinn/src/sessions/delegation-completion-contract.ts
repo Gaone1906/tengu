@@ -1,15 +1,16 @@
-import type { JsonObject, Session } from "../shared/types.js";
+import type { Session } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 import { getWorkItem } from "../work-items/store.js";
 import {
   claimDelegationCompletionNudge,
+  clearDelegationCompletionGuard,
   getSession,
   markDelegationCompletionSurfaced,
   releaseDelegationCompletionNudge,
-  updateSession,
 } from "./registry.js";
 
 const META_KEY = "delegationCompletionContract";
+export const DELEGATION_COMPLETION_TRACKED_META_KEY = "delegationCompletionTracked";
 const OPEN_EXECUTION_STATUSES = new Set(["backlog", "assigned", "executing"]);
 
 const PROGRESS_SIGNAL = /\b(progress(?: update)?|status update|in progress|working (?:on|through)|continu(?:e|ing)|next step|remaining|not (?:done|finished|complete))\b/i;
@@ -35,12 +36,6 @@ export interface DelegationCompletionDeps {
   postFollowUp: (sessionId: string, message: string, displayMessage: string) => Promise<void>;
 }
 
-function transportMeta(session: Session): JsonObject {
-  return session.transportMeta && typeof session.transportMeta === "object" && !Array.isArray(session.transportMeta)
-    ? { ...session.transportMeta }
-    : {};
-}
-
 function readGuard(session: Session): Guard | null {
   const raw = session.transportMeta?.[META_KEY];
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
@@ -50,16 +45,14 @@ function readGuard(session: Session): Guard | null {
   return { workItemId: guard.workItemId, state: guard.state };
 }
 
-function clearGuard(session: Session): Session | undefined {
-  const meta = transportMeta(session);
-  if (!(META_KEY in meta)) return session;
-  delete meta[META_KEY];
-  return updateSession(session.id, { transportMeta: meta });
-}
-
 function isProgressOnly(text: string): boolean {
   const terminalCandidate = text.replace(/\bnot\s+(?:done|finished|complete)\b/gi, " ");
-  return PROGRESS_SIGNAL.test(text) && !TERMINAL_SIGNAL.test(terminalCandidate) && !PARENT_WAIT_SIGNAL.test(text);
+  const hasProgress = PROGRESS_SIGNAL.test(text);
+  const hasTerminal = TERMINAL_SIGNAL.test(terminalCandidate);
+  // Mixed terminal + unfinished clauses are ambiguous. Under the fail-safe
+  // contract, ambiguity surfaces to the parent; it never authorizes a nudge.
+  if (hasTerminal && hasProgress) return false;
+  return hasProgress && !hasTerminal && !PARENT_WAIT_SIGNAL.test(text);
 }
 
 function isStructurallyAwaitingParent(session: Session): boolean {
@@ -68,6 +61,14 @@ function isStructurallyAwaitingParent(session: Session): boolean {
 
 /**
  * Gate the ordinary parent-completion callback for a narrowly qualified child.
+ *
+ * DESIGN BIAS — conservative and fail-safe:
+ * The auto-nudge is only an additive optimization over the existing parent
+ * callback. Structural provenance is mandatory and text is only a secondary
+ * refinement. Any missing evidence, ambiguity, parse collision, or failed CAS
+ * returns `pass`, preserving the normal surface-to-parent behavior. Missed
+ * nudges are acceptable; false nudges are the harm this contract prevents.
+ *
  * The persisted guard is deliberately independent of engine attempt ids: the
  * contract nudge creates a new attempt, and that next idle settlement must
  * surface instead of becoming another nudge.
@@ -79,10 +80,11 @@ export async function enforceDelegationCompletionContract(
 ): Promise<DelegationCompletionOutcome> {
   if (!session.parentSessionId || session.status !== "idle" || result.error) return "pass";
   if (!session.workItemId) return "pass";
+  if (session.transportMeta?.[DELEGATION_COMPLETION_TRACKED_META_KEY] !== true) return "pass";
   if (isStructurallyAwaitingParent(session)) return "pass";
 
   const item = getWorkItem(session.workItemId);
-  if (!item || item.source !== "delegation" || !OPEN_EXECUTION_STATUSES.has(item.status)) return "pass";
+  if (!item || !OPEN_EXECUTION_STATUSES.has(item.status)) return "pass";
 
   const existing = readGuard(session);
   if (existing?.workItemId === session.workItemId) {
@@ -116,5 +118,7 @@ export async function enforceDelegationCompletionContract(
 
 /** A genuine operator/user follow-up starts a fresh completion-contract cycle. */
 export function clearDelegationCompletionContract(session: Session): Session {
-  return clearGuard(session) ?? session;
+  const guard = readGuard(session);
+  if (!guard) return session;
+  return clearDelegationCompletionGuard(session.id, guard.workItemId) ?? getSession(session.id) ?? session;
 }

@@ -20,6 +20,7 @@ import {
 import { configureLogger, logger } from "../shared/logger.js";
 import { initDb, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, getInterruptedSessions, listSessions, updateSession, getSession } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
+import { recoverOrphanedDelegationCompletionClaims } from "../sessions/callbacks.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
 import { enforcePtyIdleCap, PtyLifecycleManager, type PtyLifecycleOpts } from "../engines/pty-lifecycle.js";
 import { CodexEngine } from "../engines/codex.js";
@@ -1337,6 +1338,13 @@ export async function startGateway(
   // resolved builtin-jinn server as normal web/connector turns so their rollout
   // is written under the per-session CODEX_HOME that later resumes will use.
   resumePendingWebQueueItems(apiContext);
+
+  // Any claim with no replayable internal queue intent died in the narrow
+  // claim→POST crash window. The server and MCP gate are live now, so surface
+  // those claims to their parents; recovery never sends a second auto-nudge.
+  void recoverOrphanedDelegationCompletionClaims().then((count) => {
+    if (count > 0) logger.warn(`Surfaced ${count} orphaned delegation completion claim(s) after restart`);
+  });
 
   // Notify connected WebSocket clients about interrupted sessions available for resume
   if (resumable.length > 0) {
