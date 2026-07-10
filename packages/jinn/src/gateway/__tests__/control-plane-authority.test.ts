@@ -67,12 +67,14 @@ type Registry = typeof import("../../sessions/registry.js");
 type Store = typeof import("../../work-items/store.js");
 type Approvals = typeof import("../../work-items/approvals.js");
 type ApprovalAuthority = typeof import("../approval-authority.js");
+type Auth = typeof import("../auth.js");
 
 let api: Api;
 let registry: Registry;
 let store: Store;
 let approvals: Approvals;
 let approvalAuthority: ApprovalAuthority;
+let auth: Auth;
 let worker: import("../../shared/types.js").Session;
 let peer: import("../../shared/types.js").Session;
 
@@ -168,6 +170,7 @@ beforeAll(async () => {
   store = await import("../../work-items/store.js");
   approvals = await import("../../work-items/approvals.js");
   approvalAuthority = await import("../approval-authority.js");
+  auth = await import("../auth.js");
   registry.initDb();
   worker = registry.createSession({ engine: "codex", source: "web", sourceRef: "worker", title: "worker", employee: "platform-worker" });
   peer = registry.createSession({ engine: "codex", source: "web", sourceRef: "peer", title: "peer", employee: "platform-peer" });
@@ -189,7 +192,9 @@ describe("control-plane writes require operator authority", () => {
     expect((await call("POST", `/api/work-items/${bearerAssign.id}/assign`, { assignee: "platform-peer" }, bearerHeaders)).status).toBe(200);
     expect((await call("POST", `/api/work-items/${bearerArchive.id}/archive`, {}, bearerHeaders)).status).toBe(200);
 
-    const bootstrap = await call("POST", "/api/auth/bootstrap", {});
+    const bootstrap = await call("POST", "/api/auth/bootstrap", {}, {
+      [auth.LOCAL_BOOTSTRAP_GRANT_HEADER]: auth.issueLocalBootstrapGrant(),
+    });
     expect(bootstrap.status).toBe(200);
     const rawCookies = Array.isArray(bootstrap.header("set-cookie")) ? bootstrap.header("set-cookie") : [bootstrap.header("set-cookie")];
     const cookie = (rawCookies as string[]).map((part) => part.split(";")[0]).join("; ");
@@ -236,6 +241,26 @@ describe("control-plane writes require operator authority", () => {
     expect(pair.header("set-cookie")).toBeUndefined();
   });
 
+  it("rejects anonymous loopback bootstrap before it can mint operator cookies", async () => {
+    const bootstrap = await call("POST", "/api/auth/bootstrap", {});
+
+    expect(bootstrap.status).toBe(401);
+    expect(bootstrap.header("set-cookie")).toBeUndefined();
+  });
+
+  it("accepts a genuine one-time UI launch grant and rejects its replay", async () => {
+    const grant = auth.issueLocalBootstrapGrant();
+    const headers = { [auth.LOCAL_BOOTSTRAP_GRANT_HEADER]: grant };
+
+    const bootstrap = await call("POST", "/api/auth/bootstrap", {}, headers);
+    expect(bootstrap.status).toBe(200);
+    expect(String(bootstrap.header("set-cookie"))).toContain("jinn_auth=");
+
+    const replay = await call("POST", "/api/auth/bootstrap", {}, headers);
+    expect(replay.status).toBe(401);
+    expect(replay.header("set-cookie")).toBeUndefined();
+  });
+
   it("rejects no-scoped-header token pairing so global gateway tokens cannot mint browser cookies", async () => {
     const pair = await call("POST", "/api/auth/pair", { token: "test-token" });
 
@@ -256,7 +281,9 @@ describe("control-plane writes require operator authority", () => {
   it("keeps genuine browser bootstrap/pairing-code pair and cookie-backed config writes working", async () => {
     writeConfig();
 
-    const bootstrap = await call("POST", "/api/auth/bootstrap", {});
+    const bootstrap = await call("POST", "/api/auth/bootstrap", {}, {
+      [auth.LOCAL_BOOTSTRAP_GRANT_HEADER]: auth.issueLocalBootstrapGrant(),
+    });
     expect(bootstrap.status).toBe(200);
     expect(String(bootstrap.header("set-cookie"))).toContain("jinn_auth=");
 

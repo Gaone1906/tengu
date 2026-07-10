@@ -5,12 +5,16 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleApiRequest, type ApiContext } from "../api.js";
-import { createAuthSession } from "../auth.js";
+import {
+  createAuthSession,
+  issueLocalBootstrapGrant,
+  LOCAL_BOOTSTRAP_GRANT_HEADER,
+} from "../auth.js";
 
 function makeReq(
   method: string,
   url: string,
-  opts: { body?: unknown; cookie?: string; remoteAddress?: string; userAgent?: string; authorization?: string; host?: string } = {},
+  opts: { body?: unknown; cookie?: string; remoteAddress?: string; userAgent?: string; authorization?: string; host?: string; bootstrapGrant?: string } = {},
 ): IncomingMessage {
   const raw = opts.body === undefined ? "" : JSON.stringify(opts.body);
   const req = Readable.from(raw ? [Buffer.from(raw)] : []) as IncomingMessage;
@@ -21,6 +25,7 @@ function makeReq(
     ...(opts.cookie ? { cookie: opts.cookie } : {}),
     ...(opts.userAgent ? { "user-agent": opts.userAgent } : {}),
     ...(opts.authorization ? { authorization: opts.authorization } : {}),
+    ...(opts.bootstrapGrant ? { [LOCAL_BOOTSTRAP_GRANT_HEADER]: opts.bootstrapGrant } : {}),
   };
   (req as any).socket = { remoteAddress: opts.remoteAddress ?? "127.0.0.1" };
   return req;
@@ -246,7 +251,7 @@ describe("auth UX API routes", () => {
     const created = makeRes();
     await handleApiRequest(
       makeReq("POST", "/api/auth/bootstrap", {
-        cookie: "jinn_auth=gateway-token",
+        bootstrapGrant: issueLocalBootstrapGrant(),
         remoteAddress: "127.0.0.1",
         userAgent: "Mozilla/5.0 Macintosh",
         body: {},
@@ -279,7 +284,7 @@ describe("auth UX API routes", () => {
     const local = makeRes();
     await handleApiRequest(
       makeReq("POST", "/api/auth/bootstrap", {
-        cookie: "jinn_auth=gateway-token",
+        bootstrapGrant: issueLocalBootstrapGrant(),
         remoteAddress: "127.0.0.1",
         userAgent: "Mozilla/5.0 Macintosh",
         body: {},

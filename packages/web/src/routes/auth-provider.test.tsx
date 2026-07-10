@@ -62,7 +62,7 @@ describe("AuthProvider/AuthGate", () => {
         canBootstrapLocal: true,
         networkExposed: false,
       })
-    bootstrapLocalAuth.mockResolvedValue(undefined)
+    bootstrapLocalAuth.mockResolvedValue(true)
 
     render(
       <AuthProvider>

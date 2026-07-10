@@ -6,6 +6,12 @@ import path from "node:path";
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-start-test-"));
 process.env.JINN_HOME = tmpHome;
 
+const childProcess = vi.hoisted(() => ({
+  child: { on: vi.fn(), unref: vi.fn() },
+  spawn: vi.fn(),
+}));
+childProcess.spawn.mockImplementation(() => childProcess.child);
+
 const lifecycle = vi.hoisted(() => ({
   assertPortTakeoverAllowed: vi.fn(),
   getStatus: vi.fn(() => ({ running: true, pid: 123 })),
@@ -18,6 +24,7 @@ const restartRequest = vi.hoisted(() => ({
 }));
 
 vi.mock("../../gateway/lifecycle.js", () => lifecycle);
+vi.mock("node:child_process", () => ({ spawn: childProcess.spawn }));
 vi.mock("../restart-request.js", () => restartRequest);
 vi.mock("../../shared/config.js", () => ({
   loadConfig: () => ({ gateway: { host: "127.0.0.1", port: 7777 }, engines: { default: "claude" } }),
@@ -29,6 +36,7 @@ vi.mock("../../shared/version.js", () => ({
 }));
 
 const { runStart } = await import("../start.js");
+const { consumeLocalBootstrapGrant } = await import("../../gateway/auth.js");
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -63,5 +71,30 @@ describe("runStart", () => {
     await runStart({ daemon: false, takePort: true });
 
     expect(lifecycle.restartDetached).toHaveBeenCalledWith({ takePort: true });
+  });
+
+  it("opens an interactive dashboard with a valid one-time bootstrap grant", async () => {
+    lifecycle.getStatus.mockReturnValueOnce({ running: false, pid: 0 });
+    lifecycle.startForeground.mockResolvedValueOnce(undefined);
+    const originalTty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    vi.useFakeTimers();
+
+    try {
+      await runStart({ daemon: false });
+      await vi.advanceTimersByTimeAsync(1_200);
+
+      expect(childProcess.spawn).toHaveBeenCalledTimes(1);
+      const args = childProcess.spawn.mock.calls[0][1] as string[];
+      const launched = new URL(args.at(-1)!);
+      const grant = new URLSearchParams(launched.hash.slice(1)).get("jinn-bootstrap");
+      expect(grant).toBeTruthy();
+      expect(consumeLocalBootstrapGrant(grant)).toBe(true);
+      expect(consumeLocalBootstrapGrant(grant)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      if (originalTty) Object.defineProperty(process.stdout, "isTTY", originalTty);
+      else Reflect.deleteProperty(process.stdout, "isTTY");
+    }
   });
 });

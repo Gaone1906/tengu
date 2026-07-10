@@ -5,6 +5,8 @@ import { loadConfig } from "../shared/config.js";
 import { assertPortTakeoverAllowed, startForeground, startDaemon, getStatus, restartDetached } from "../gateway/lifecycle.js";
 import { compareSemver, getPackageVersion, getInstanceVersion } from "../shared/version.js";
 import { requestRestartFromGateway } from "./restart-request.js";
+import { issueLocalBootstrapGrant } from "../gateway/auth.js";
+import { gatewayBaseUrl } from "../gateway/gateway-info.js";
 
 const YELLOW = "\x1b[33m";
 const DIM = "\x1b[2m";
@@ -86,7 +88,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
     startDaemon(config);
     console.log("Gateway started in background.");
   } else {
-    const url = `http://${config.gateway.host}:${config.gateway.port}`;
+    const url = gatewayBaseUrl({ host: config.gateway.host, port: config.gateway.port });
     console.log(`Starting gateway on ${config.gateway.host}:${config.gateway.port}...`);
     // Open the dashboard once the server is up. Interactive foreground only, so
     // it never fires for the detached daemon child or in CI; opt out via
@@ -95,7 +97,9 @@ export async function runStart(opts: StartOptions): Promise<void> {
     // don't open a browser to a gateway that failed to bind.
     let openTimer: ReturnType<typeof setTimeout> | undefined;
     if (process.stdout.isTTY && !process.env.JINN_NO_OPEN) {
-      openTimer = setTimeout(() => openBrowser(url), 1200);
+      const launchUrl = new URL(url);
+      launchUrl.hash = new URLSearchParams({ "jinn-bootstrap": issueLocalBootstrapGrant() }).toString();
+      openTimer = setTimeout(() => openBrowser(launchUrl.toString()), 1200);
       openTimer.unref?.();
     }
     try {

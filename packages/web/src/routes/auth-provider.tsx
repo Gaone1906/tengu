@@ -55,8 +55,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       let state = await getAuthState()
       if (shouldBootstrapLocal && state.authRequired && !state.authenticated && state.canBootstrapLocal) {
-        await bootstrapLocalAuth()
-        state = await getAuthState()
+        if (await bootstrapLocalAuth()) state = await getAuthState()
       }
       setAuthState(state)
       const paired = !state.authRequired || state.authenticated

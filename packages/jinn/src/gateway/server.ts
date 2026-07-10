@@ -178,7 +178,7 @@ function setCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): bo
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Credentials", "true");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Jinn-Workflow-Event-Token");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Jinn-Bootstrap-Grant, X-Jinn-Workflow-Event-Token");
   }
   return allowed;
 }

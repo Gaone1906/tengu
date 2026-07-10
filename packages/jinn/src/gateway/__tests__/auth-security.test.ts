@@ -7,6 +7,7 @@ import {
   authRequiredForRequest,
   clearAuthCookieHeader,
   createAuthSession,
+  consumeLocalBootstrapGrant,
   consumePairingCode,
   createAuthState,
   createPairingCode,
@@ -16,6 +17,7 @@ import {
   isNetworkHost,
   matchesGatewayAuthToken,
   issuePairingCode,
+  issueLocalBootstrapGrant,
   normalizePairingCode,
   revokeAuthSession,
   shouldRequireGatewayAuth,
@@ -115,6 +117,19 @@ describe("gateway auth", () => {
     expect(normalizePairingCode("abcd efgh-jklm")).toBe("ABCDEFGHJKLM");
     expect(consumePairingCode(store, "abcd efgh jklm", 2_000)).toBe(true);
     expect(consumePairingCode(store, "ABCD-EFGH-JKLM", 2_001)).toBe(false);
+  });
+
+  it("creates short-lived single-use local bootstrap grants without storing the raw grant", () => {
+    const store = new Map<string, { expiresAt: number }>();
+    const grant = issueLocalBootstrapGrant(store, 1_000, () => "test-launch-grant-long");
+
+    expect(grant).toBe("test-launch-grant-long");
+    expect([...store.keys()]).not.toContain(grant);
+    expect(consumeLocalBootstrapGrant(grant, store, 1_001)).toBe(true);
+    expect(consumeLocalBootstrapGrant(grant, store, 1_002)).toBe(false);
+
+    const expired = issueLocalBootstrapGrant(store, 2_000, () => "test-expired-grant-long");
+    expect(consumeLocalBootstrapGrant(expired, store, 2_000 + 60_001)).toBe(false);
   });
 
   it("rejects expired pairing codes and keeps gateway token fallback timing-safe", () => {

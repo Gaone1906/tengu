@@ -12,9 +12,11 @@ describe("web auth helpers", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn())
     localStorage.clear()
+    window.history.replaceState(null, "", "/")
   })
 
-  it("uses cookies and silently bootstraps local auth once before retrying", async () => {
+  it("uses a one-time UI launch grant to bootstrap local auth before retrying", async () => {
+    window.history.replaceState(null, "", "/#jinn-bootstrap=launch-grant")
     const fetchMock = vi.mocked(fetch)
     fetchMock
       .mockResolvedValueOnce(jsonResponse(401, { error: "Unauthorized" }))
@@ -41,6 +43,27 @@ describe("web auth helpers", () => {
       expect((init as RequestInit | undefined)?.credentials).toBe("include")
     }
     expect(localStorage.length).toBe(0)
+    expect(window.location.hash).toBe("")
+    expect((fetchMock.mock.calls[2][1] as RequestInit).headers).toMatchObject({
+      "X-Jinn-Bootstrap-Grant": "launch-grant",
+    })
+  })
+
+  it("does not bootstrap a local browser without a launch grant", async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(401, { error: "Unauthorized" }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        authRequired: true,
+        authenticated: false,
+        canBootstrapLocal: true,
+        networkExposed: false,
+      }))
+
+    const res = await authFetch("/api/sessions")
+
+    expect(res.status).toBe(401)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   it("does not retry remote auth failures without local bootstrap", async () => {

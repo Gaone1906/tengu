@@ -27,6 +27,23 @@ const BASE =
     ? window.location.origin
     : "http://localhost:3000"
 
+const LOCAL_BOOTSTRAP_HASH_KEY = "jinn-bootstrap"
+
+function takeLocalBootstrapGrant(): string | undefined {
+  if (typeof window === "undefined") return undefined
+  const params = new URLSearchParams(window.location.hash.replace(/^#/, ""))
+  const grant = params.get(LOCAL_BOOTSTRAP_HASH_KEY)?.trim()
+  if (!grant) return undefined
+  params.delete(LOCAL_BOOTSTRAP_HASH_KEY)
+  const nextHash = params.toString()
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${window.location.pathname}${window.location.search}${nextHash ? `#${nextHash}` : ""}`,
+  )
+  return grant
+}
+
 function urlFor(path: string): string {
   if (/^https?:\/\//i.test(path)) return path
   return `${BASE}${path.startsWith("/") ? path : `/${path}`}`
@@ -56,9 +73,15 @@ export async function getAuthState(): Promise<AuthState> {
   return jsonOrThrow<AuthState>(res)
 }
 
-export async function bootstrapLocalAuth(): Promise<void> {
-  const res = await fetch(urlFor("/api/auth/bootstrap"), withCredentials({ method: "POST" }))
+export async function bootstrapLocalAuth(): Promise<boolean> {
+  const grant = takeLocalBootstrapGrant()
+  if (!grant) return false
+  const res = await fetch(urlFor("/api/auth/bootstrap"), withCredentials({
+    method: "POST",
+    headers: { "X-Jinn-Bootstrap-Grant": grant },
+  }))
   await jsonOrThrow(res)
+  return true
 }
 
 export async function pairBrowser(secret: string, mode: "code" | "token" = "code"): Promise<void> {
@@ -118,7 +141,7 @@ export async function authFetch(input: string, init: RequestInit = {}): Promise<
   if (!state.authRequired || state.authenticated || !state.canBootstrapLocal) return first
 
   try {
-    await bootstrapLocalAuth()
+    if (!await bootstrapLocalAuth()) return first
   } catch {
     return first
   }

@@ -6,6 +6,8 @@ import type { JinnConfig } from "../shared/types.js";
 
 export const AUTH_COOKIE = "jinn_auth";
 export const AUTH_DEVICE_COOKIE = "jinn_device";
+export const LOCAL_BOOTSTRAP_GRANT_HEADER = "x-jinn-bootstrap-grant";
+export const LOCAL_BOOTSTRAP_GRANT_TTL_MS = 60_000;
 const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export const PAIRING_CODE_TTL_MS = 5 * 60 * 1000;
 
@@ -16,6 +18,14 @@ export interface PairingCodeEntry {
 export type PairingCodeStore = Map<string, PairingCodeEntry>;
 
 const pairingCodes: PairingCodeStore = new Map();
+
+export interface LocalBootstrapGrantEntry {
+  expiresAt: number;
+}
+
+export type LocalBootstrapGrantStore = Map<string, LocalBootstrapGrantEntry>;
+
+const localBootstrapGrants: LocalBootstrapGrantStore = new Map();
 
 export type AuthSessionKind = "local" | "remote" | "token";
 
@@ -39,6 +49,43 @@ export interface PublicAuthSessionDevice extends AuthSessionDevice {
 
 export function createAuthToken(): string {
   return crypto.randomBytes(32).toString("base64url");
+}
+
+function hashLocalBootstrapGrant(grant: string): string {
+  return crypto.createHash("sha256").update(`jinn-local-bootstrap:${grant}`).digest("base64url");
+}
+
+export function issueLocalBootstrapGrant(
+  store: LocalBootstrapGrantStore = localBootstrapGrants,
+  now = Date.now(),
+  grantFactory: () => string = createAuthToken,
+): string {
+  cleanupExpiredLocalBootstrapGrants(store, now);
+  const grant = grantFactory();
+  store.set(hashLocalBootstrapGrant(grant), { expiresAt: now + LOCAL_BOOTSTRAP_GRANT_TTL_MS });
+  return grant;
+}
+
+export function consumeLocalBootstrapGrant(
+  rawGrant: string | undefined | null,
+  store: LocalBootstrapGrantStore = localBootstrapGrants,
+  now = Date.now(),
+): boolean {
+  if (typeof rawGrant !== "string" || rawGrant.length < 16) return false;
+  const hash = hashLocalBootstrapGrant(rawGrant);
+  const entry = store.get(hash);
+  if (!entry) return false;
+  store.delete(hash);
+  return entry.expiresAt >= now;
+}
+
+export function cleanupExpiredLocalBootstrapGrants(
+  store: LocalBootstrapGrantStore = localBootstrapGrants,
+  now = Date.now(),
+): void {
+  for (const [hash, entry] of store.entries()) {
+    if (entry.expiresAt < now) store.delete(hash);
+  }
 }
 
 export function ensureGatewayAuthToken(jinnHome: string): string {

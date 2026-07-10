@@ -195,6 +195,7 @@ import {
   authenticateGatewayRequest,
   authCookieHeaders,
   clearAuthCookieHeaders,
+  consumeLocalBootstrapGrant,
   consumePairingCode,
   createAuthSession,
   createAuthState,
@@ -202,6 +203,7 @@ import {
   hasGatewayBearerAuth,
   issuePairingCode,
   isLoopbackHost,
+  LOCAL_BOOTSTRAP_GRANT_HEADER,
   listAuthSessions,
   revokeAuthSession,
   touchAuthSession,
@@ -1828,13 +1830,19 @@ export async function handleApiRequest(
       return json(res, state);
     }
 
-    // POST /api/auth/bootstrap — loopback/local convenience: set the browser cookie
-    // from a local browser session so daily local use does not require a login form.
+    // POST /api/auth/bootstrap — exchange the short-lived, single-use credential
+    // embedded by the trusted CLI launch path for a revocable browser session.
+    // Loopback alone is not identity: local agent sessions can issue raw HTTP.
     if (method === "POST" && pathname === "/api/auth/bootstrap") {
       if (!context.gatewayAuthToken) return json(res, { authRequired: false });
       if (rejectScopedIdentityGrant(req, res, "auth bootstrap", context)) return;
       if (!isLoopback(req.socket.remoteAddress) || !isLoopbackHost(Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host)) {
         return json(res, { error: "Bootstrap is loopback-only" }, 403);
+      }
+      const rawGrant = req.headers[LOCAL_BOOTSTRAP_GRANT_HEADER];
+      const grant = Array.isArray(rawGrant) ? rawGrant[0] : rawGrant;
+      if (!consumeLocalBootstrapGrant(grant)) {
+        return json(res, { error: "Missing, invalid, or expired local bootstrap grant" }, 401);
       }
       const session = createAuthSession(jinnHome, req, { kind: "local" });
       res.setHeader("Set-Cookie", authCookieHeaders(session.secret, session.device.id));
