@@ -36,10 +36,9 @@ import { loadJobs } from "../cron/jobs.js";
 import { setCronJobEnabled, triggerCronJob } from "../cron/scheduler.js";
 import { checkBudget } from "../gateway/budgets.js";
 import { markTranscriptSyncedThrough } from "../gateway/external-turns.js";
-import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile, isMcpCapableEngine } from "../mcp/resolver.js";
-import { attachSessionIdentity } from "../mcp/identity.js";
-import type { ResolvedMcpConfig } from "../shared/types.js";
+import { cleanupMcpConfigFile } from "../mcp/resolver.js";
 import { handleRateLimit } from "./rate-limit-handler.js";
+import { resolveEngineRunMcp } from "./engine-run-mcp.js";
 
 export interface RouteOptions {
   employee?: Employee;
@@ -280,8 +279,7 @@ export class SessionManager {
 
     // Resolve MCP config before try block so it's accessible in catch for cleanup
     let mcpConfigPath: string | undefined;
-    // In-memory resolved MCP server set, threaded to all MCP-capable engines.
-    let resolvedMcp: ResolvedMcpConfig | undefined;
+    let resolvedMcp: import("../shared/types.js").ResolvedMcpConfig | undefined;
 
     let hierarchy: import("../shared/types.js").OrgHierarchy | undefined;
     try {
@@ -294,34 +292,12 @@ export class SessionManager {
     try {
       engineAtTurnStart = session.engine;
       const resumeRefAtTurnStart = getEngineSessionRef(session, engineAtTurnStart);
-      // Resolve MCP for ALL MCP-capable engines (Tier 1: claude/codex/hermes),
-      // not just Claude, so the same server set the resolver produces is threaded
-      // uniformly. The `mcp:`-absent default is unchanged and defined in one place
-      // (resolveMcpServers): no global `mcp` config → empty set → resolvedMcp stays
-      // undefined and no engine gets MCP. Claude additionally consumes its servers
-      // via the `--mcp-config` temp file exactly as before (zero behavior change);
-      // other capable engines carry only the in-memory payload (no disk write, so
-      // this does not extend the resolver's temp-file secret exposure to them).
-      // Their adapters begin reading `resolvedMcp` in GRS-012b/012c — until then
-      // this is a pure passthrough with no observable effect for non-Claude engines.
-      // Resolved BEFORE buildContext (GRS-017b) so the context builder knows
-      // whether the jinn belt is attached and can swap the pasted org roster /
-      // delegation-curl prose for the tool manifest (the context diet).
-      if (isMcpCapableEngine(session.engine)) {
-        // engine threaded for the GRS-017e per-engine opt-out (mcp.gateway.engines).
-        const mcpConfig = resolveMcpServers(this.config.mcp, employee, session.engine);
-        if (Object.keys(mcpConfig.mcpServers).length > 0) {
-          // GRS-017a identity seam: stamp the session's id on the built-in jinn
-          // server (JINN_SESSION_ID env, non-secret) so its gateway calls carry
-          // x-jinn-caller-session — parent auto-linkage, lateral guards, and
-          // own-descendant stop scoping all key off it. Pure copy; no-op when
-          // the set has no jinn server.
-          resolvedMcp = attachSessionIdentity(mcpConfig, session.id);
-          if (session.engine === "claude") {
-            mcpConfigPath = writeMcpConfigFile(resolvedMcp, session.id);
-          }
-        }
-      }
+      ({ mcpConfigPath, resolvedMcp } = resolveEngineRunMcp({
+        config: this.config,
+        employee,
+        engine: session.engine,
+        sessionId: session.id,
+      }));
 
       const systemPrompt = buildContext({
         source: session.source,

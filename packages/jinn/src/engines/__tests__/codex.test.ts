@@ -504,6 +504,82 @@ describe("CodexEngine — error / failure handling", () => {
     const { result } = await runWith({}, [], { closeCode: 1 });
     expect(result.error).toMatch(/Codex exited with code 1/);
   });
+
+  it("falls back to a fresh thread when resume fails because the rollout is missing", async () => {
+    const prevCodexHome = process.env.CODEX_HOME;
+    const realHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-real-home-"));
+    const homesBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-homes-base-"));
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    process.env.CODEX_HOME = realHome;
+
+    try {
+      const engine = new CodexEngine({
+        codexSessionsDir: fs.mkdtempSync(path.join(os.tmpdir(), "codex-missing-rollout-")),
+        codexHomesBaseDir: homesBaseDir,
+      });
+      const promise = engine.run({
+        prompt: "hello",
+        cwd: "/tmp",
+        sessionId: "sess-missing-rollout",
+        resumeSessionId: "lost-thread",
+        resolvedMcp: {
+          mcpServers: {
+            jinn: {
+              command: "/usr/bin/node",
+              args: ["/abs/server-entry.js"],
+              env: {
+                JINN_GATEWAY_URL: "http://127.0.0.1:7777",
+                JINN_HOME: "/tmp/jinn-home",
+                JINN_SESSION_ID: "sess-missing-rollout",
+                JINN_SESSION_CAPABILITY: "cap-missing-rollout",
+              },
+            },
+          },
+        },
+      } as any);
+
+      await flush();
+      const resumeCall = spawnCalls[0];
+      expect(resumeCall.args.slice(0, 2)).toEqual(["exec", "resume"]);
+      expect(resumeCall.args).toContain("lost-thread");
+      expect((resumeCall.opts as { env?: Record<string, string> }).env?.CODEX_HOME)
+        .toBe(path.join(homesBaseDir, "sess-missing-rollout"));
+
+      resumeCall.proc.emitStderr(
+        'thread/resume failed: no rollout found for thread id "lost-thread" (code -32600)\n',
+      );
+      resumeCall.proc.close(1);
+      await flush();
+
+      expect(spawnCalls).toHaveLength(2);
+      const freshCall = spawnCalls[1];
+      expect(freshCall.args[0]).toBe("exec");
+      expect(freshCall.args[1]).not.toBe("resume");
+      expect(freshCall.args).not.toContain("lost-thread");
+      expect((freshCall.opts as { env?: Record<string, string> }).env?.CODEX_HOME)
+        .toBe(path.join(homesBaseDir, "sess-missing-rollout"));
+
+      freshCall.proc.emitStdout(`${threadStarted("fresh-thread")}\n${agentMessage("fresh answer")}\n`);
+      freshCall.proc.close(0);
+
+      const result = await promise;
+      expect(result).toMatchObject({ sessionId: "fresh-thread", result: "fresh answer" });
+      expect(result.error).toBeUndefined();
+      expect(
+        logSpy.mock.calls.some(([line]) =>
+          String(line).includes("[WARN]") &&
+          String(line).includes("lost-thread") &&
+          String(line).includes("no rollout found"),
+        ),
+      ).toBe(true);
+    } finally {
+      logSpy.mockRestore();
+      if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prevCodexHome;
+      fs.rmSync(realHome, { recursive: true, force: true });
+      fs.rmSync(homesBaseDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("CodexEngine — process lifecycle", () => {

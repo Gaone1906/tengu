@@ -143,7 +143,8 @@ import { detectRateLimit } from "../shared/rateLimit.js";
 import { getClaudeExpectedResetAt } from "../shared/usageAwareness.js";
 import { collectEngineLimits } from "../shared/engine-limits.js";
 import { handleRateLimit } from "../sessions/rate-limit-handler.js";
-import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile, isMcpCapableEngine } from "../mcp/resolver.js";
+import { cleanupMcpConfigFile } from "../mcp/resolver.js";
+import { resolveEngineRunMcp } from "../sessions/engine-run-mcp.js";
 import { pickEncoding, compressBuffer, MIN_COMPRESS_BYTES } from "./compress.js";
 import { canonicalCronJobId, loadJobs, saveJobs } from "../cron/jobs.js";
 import { summarizeCronRun } from "../cron/run-summary.js";
@@ -157,7 +158,7 @@ import { readJsonlTail } from "./jsonl-tail.js";
 import { resultAlreadyInStreamedBlocks, shouldPreserveStreamedBlocks } from "./streamed-blocks.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions } from "../sessions/callbacks.js";
 import { sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
-import { UNIDENTIFIED_TOOL_CALL_ERROR, attachSessionIdentity, verifySessionCapability } from "../mcp/identity.js";
+import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
 import {
   createWorkItem,
   getWorkItem,
@@ -5017,39 +5018,13 @@ async function runWebSession(
 
   try {
 
-    // Resolve MCP servers for MCP-capable engines. This mirrors the connector
-    // path in sessions/manager.ts (runSession) — web-created sessions (POST
-    // /api/sessions) run through THIS function instead, so without this block the
-    // resolved server set (including the built-in `jinn` server) never reaches the
-    // engine. GRS-012b closes that gap so a codex/hermes web session actually
-    // attaches the Jinn MCP tools. The `mcp:`-absent default is centralized in
-    // resolveMcpServers (no global config → empty set → no engine gets MCP).
-    // Claude additionally consumes its servers via the `--mcp-config` temp file
-    // (byte-identical to the connector path); other capable engines read the
-    // in-memory `resolvedMcp` payload in their adapters (no on-disk secret write).
-    // GRS-020b: resolved BEFORE buildContext (the manager.ts ordering, which this
-    // path had drifted from) so the context diet actually applies to web-created
-    // sessions — the live QA caught the composed prompt still carrying the full
-    // knowledge index (and the 017b org prose) because the flag was never passed
-    // here.
     let resolvedMcp: import("../shared/types.js").ResolvedMcpConfig | undefined;
-    if (isMcpCapableEngine(currentSession.engine)) {
-      // engine threaded for the GRS-017e per-engine opt-out (mcp.gateway.engines).
-      const mcpConfig = resolveMcpServers(config.mcp, employee, currentSession.engine);
-      if (Object.keys(mcpConfig.mcpServers).length > 0) {
-        // GRS-017d QA catch: stamp the caller identity here exactly as the
-        // connector path does (manager.ts runSession). This block predated the
-        // GRS-017a identity seam and was missed by it, so every WEB-created
-        // session's jinn server launched without JINN_SESSION_ID — and since
-        // the fail-closed rule (codex finding 2), all its scoped MCP writes
-        // (spawn/send/stop/delegate) were refused with "caller identity
-        // unavailable". Pinned by the delegations-route identity-seam tests.
-        resolvedMcp = attachSessionIdentity(mcpConfig, currentSession.id);
-        if (currentSession.engine === "claude") {
-          mcpConfigPath = writeMcpConfigFile(resolvedMcp, currentSession.id);
-        }
-      }
-    }
+    ({ mcpConfigPath, resolvedMcp } = resolveEngineRunMcp({
+      config,
+      employee,
+      engine: currentSession.engine,
+      sessionId: currentSession.id,
+    }));
 
     const systemPrompt = buildContext({
       source: currentSession.source,

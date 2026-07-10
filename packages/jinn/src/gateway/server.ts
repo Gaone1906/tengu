@@ -1021,9 +1021,6 @@ export async function startGateway(
   };
   apiContext.reloadConfig = reloadConfig;
 
-  // Replay any pending web queue items (e.g. gateway restart mid-run)
-  resumePendingWebQueueItems(apiContext);
-
   // Unstick sessions whose completion event was lost (status:"running" with no
   // live turn). 15s sweep; logs one line per fix.
   const stopStatusReconciler = startStatusReconciler({ engines, emit });
@@ -1330,6 +1327,12 @@ export async function startGateway(
   // decision side ALSO fails closed on an unarmed gate, so nothing attaches
   // before this line runs.
   await armJinnAttachGate(currentConfig.mcp, { gatewayUrl: process.env.JINN_GATEWAY_URL!, log: logger, employees: employeeRegistry.values() });
+
+  // Replay any pending web queue items (e.g. gateway restart mid-run) only after
+  // the jinn MCP attach gate is armed. Recovered Codex first turns need the same
+  // resolved builtin-jinn server as normal web/connector turns so their rollout
+  // is written under the per-session CODEX_HOME that later resumes will use.
+  resumePendingWebQueueItems(apiContext);
 
   // Notify connected WebSocket clients about interrupted sessions available for resume
   if (resumable.length > 0) {

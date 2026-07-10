@@ -60,4 +60,13 @@ describe('gateway boot ordering — managed cron fires can never land half-wired
     const immediate = callIndex('setImmediate(() => {');
     expect(reconcile).toBeGreaterThan(immediate);
   });
+
+  it('arms the jinn MCP attach gate before replaying pending web queue items', () => {
+    const listen = callIndex('server.listen(port, host)');
+    const arm = callIndex('await armJinnAttachGate(currentConfig.mcp');
+    const replay = callIndex('resumePendingWebQueueItems(apiContext)');
+
+    expect(arm).toBeGreaterThan(listen);
+    expect(replay).toBeGreaterThan(arm);
+  });
 });

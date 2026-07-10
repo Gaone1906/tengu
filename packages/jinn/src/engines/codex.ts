@@ -294,6 +294,13 @@ export function buildCodexResumeArgs(opts: EngineRunOpts, prompt: string, homeAc
   return args;
 }
 
+function missingRolloutThreadId(message: string, resumeSessionId: string | undefined): string | undefined {
+  if (!resumeSessionId) return undefined;
+  if (!/no rollout found|code -32600|thread\/resume failed/i.test(message)) return undefined;
+  const match = message.match(/thread id\s+"?([A-Za-z0-9_.:-]+)"?/i);
+  return match?.[1] || resumeSessionId;
+}
+
 /**
  * The child-process env for a codex spawn: strip inherited CLAUDE_ and CODEX_
  * env (a clean baseline — see GRS-018), then set JINN_SESSION_ID and, when a per-session
@@ -686,6 +693,14 @@ export class CodexEngine implements InterruptibleEngine {
         }
 
         const errMsg = turnError || `Codex exited with code ${code}: ${stderr.slice(0, 500)}`;
+        const missingThreadId = missingRolloutThreadId(errMsg, opts.resumeSessionId);
+        if (missingThreadId) {
+          logger.warn(
+            `Codex resume failed: no rollout found for thread ${missingThreadId}; starting a fresh thread for Jinn session ${sessionId}`,
+          );
+          this.run({ ...opts, resumeSessionId: undefined }).then(resolve, reject);
+          return;
+        }
         logger.error(errMsg);
         resolve({
           sessionId: resolvedThreadId,
