@@ -1,6 +1,7 @@
 import { useMemo } from "react"
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
 import { api, type Employee, type WorkItemCompactWire, type WorkItemDetailWire, type WorkItemStatusWire } from "@/lib/api"
+import { queryKeys } from "@/lib/query-keys"
 
 /* GRS-021d/027 — the Todos data layer. The active board still uses compact
  * status lists; the COO attention inbox is now a single server-derived compact
@@ -73,7 +74,7 @@ export function useNeedsAttentionItems() {
 }
 
 export function useOrg() {
-  return useQuery({ queryKey: ["org"], queryFn: () => api.getOrg(), staleTime: 60_000 })
+  return useQuery({ queryKey: queryKeys.org.all, queryFn: () => api.getOrg(), staleTime: 60_000 })
 }
 
 export function useEmployeesByName(employees: Employee[] | undefined): Map<string, Employee> {

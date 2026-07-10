@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
-import { api } from '@/lib/api'
 import type { MediaAttachment } from '@/lib/conversations'
 import { MediaPreview } from './media-preview'
 import { useStt } from '@/hooks/use-stt'
+import { useOrg } from '@/hooks/use-employees'
+import { useSkills } from '@/hooks/use-skills'
 import { WhisperDownloadModal } from '@/components/stt/whisper-download-modal'
 import { MicWaveform } from './mic-waveform'
 import { EmployeeAvatar } from '@/components/ui/employee-avatar'
@@ -231,6 +232,9 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const rafRef = useRef<number | null>(null)
+  const previousSkillsVersionRef = useRef(skillsVersion)
+  const { data: orgData } = useOrg()
+  const { data: skillsData, refetch: refetchSkills } = useSkills()
 
   // Live mirrors so the async transcript-landing handler reads the latest value
   // without re-creating itself (and without stale-closure races on send).
@@ -295,37 +299,34 @@ export function ChatInput({
 
   // Load employees for @mention (with full details)
   useEffect(() => {
-    api
-      .getOrg()
-      .then((data) => {
-        if (!Array.isArray(data.employees)) return
-        setEmployees(data.employees.map((emp) => ({
-          name: emp.name,
-          displayName: emp.displayName,
-          department: emp.department,
-          rank: emp.rank,
-          engine: emp.engine,
-        })))
-      })
-      .catch(() => {})
-  }, [])
+    if (!Array.isArray(orgData?.employees)) return
+    setEmployees(orgData.employees.map((emp) => ({
+      name: emp.name,
+      displayName: emp.displayName,
+      department: emp.department,
+      rank: emp.rank,
+      engine: emp.engine,
+    })))
+  }, [orgData])
 
-  // Load skills as slash commands (re-fetches when skills change on gateway)
+  // Load skills as slash commands.
   useEffect(() => {
-    api.getSkills()
-      .then((skills) => {
-        if (!Array.isArray(skills)) return
-        const skillCommands: SlashCommand[] = skills
-          .filter((s) => !BUILTIN_COMMANDS.some((b) => b.name === s.name))
-          .map((s) => ({
-            name: s.name as string,
-            description: (s.description as string) || '',
-            needsEmployee: s.name === 'sync',
-          }))
-        setSlashCommands([...BUILTIN_COMMANDS, ...skillCommands])
-      })
-      .catch(() => {})
-  }, [skillsVersion])
+    if (!Array.isArray(skillsData)) return
+    const skillCommands: SlashCommand[] = skillsData
+      .filter((s) => !BUILTIN_COMMANDS.some((b) => b.name === s.name))
+      .map((s) => ({
+        name: s.name as string,
+        description: (s.description as string) || '',
+        needsEmployee: s.name === 'sync',
+      }))
+    setSlashCommands([...BUILTIN_COMMANDS, ...skillCommands])
+  }, [skillsData])
+
+  useEffect(() => {
+    if (previousSkillsVersionRef.current === skillsVersion) return
+    previousSkillsVersionRef.current = skillsVersion
+    void refetchSkills()
+  }, [skillsVersion, refetchSkills])
 
 
   const handleMentionSelect = useCallback(

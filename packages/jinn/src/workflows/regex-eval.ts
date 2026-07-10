@@ -18,15 +18,22 @@ import { logger } from '../shared/logger.js';
  * keeps the process (or a test runner) alive.
  */
 
-// CommonJS is fine for an eval worker regardless of the host module system.
+// The worker MUST be authored as ESM (`import`, not `require`): the package is
+// "type": "module", so under the real dist/live launch the worker executes as an
+// ES module and a CommonJS `require` throws "require is not defined" — which makes
+// EVERY evaluation fail closed, breaking legit filters too. A `data:` URL worker
+// is always loaded as an ES module regardless of the host launch shape (vitest
+// source vs. built dist), so it needs no file-path resolution and behaves
+// identically in both — the property a `{ eval: true }` string worker did not have.
 const WORKER_SOURCE = `
-const { parentPort } = require('worker_threads');
+import { parentPort } from 'node:worker_threads';
 parentPort.on('message', (msg) => {
   let match = false;
   try { match = new RegExp(msg.pattern).test(msg.input); } catch { match = false; }
   parentPort.postMessage(match);
 });
 `;
+const WORKER_URL = new URL(`data:text/javascript,${encodeURIComponent(WORKER_SOURCE)}`);
 
 export const DEFAULT_REGEX_EVAL_TIMEOUT_MS = 50;
 
@@ -34,7 +41,7 @@ let worker: Worker | null = null;
 let chain: Promise<unknown> = Promise.resolve();
 
 function spawnWorker(): Worker {
-  const w = new Worker(WORKER_SOURCE, { eval: true });
+  const w = new Worker(WORKER_URL);
   // Never let the evaluation worker keep the event loop alive.
   w.unref();
   // Swallow async errors on a worker we may already have abandoned; each

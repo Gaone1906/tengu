@@ -15,7 +15,8 @@ import {
 import { useSettings } from "@/routes/settings-provider"
 import { useTheme } from "@/routes/providers"
 import { THEMES } from "@/lib/themes"
-import { api, type ModelInfo, type EnginesResponse } from "@/lib/api"
+import { api, type ModelInfo } from "@/lib/api"
+import { useModelRegistry } from "@/hooks/use-model-registry"
 import { buildNewSessionParams } from "@/components/chat/new-chat-helpers"
 
 // ---------------------------------------------------------------------------
@@ -112,10 +113,7 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
   const [localLanguage, setLocalLanguage] = useState(settings.language ?? "English")
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
-  /** Full engine registry from /api/engines.
-   *  null = still loading; non-null empty = load failed / fallback mode. */
-  const [enginesLoading, setEnginesLoading] = useState(true)
-  const [enginesData, setEnginesData] = useState<EnginesResponse | null>(null)
+  const { data: enginesData, isLoading: enginesLoading } = useModelRegistry()
   const [engineChoice, setEngineChoice] = useState<{
     engine: string | undefined
     model: string | undefined
@@ -155,26 +153,16 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
     })
   }, [forceOpen, initialVisible]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load the full engine registry so step 3 is driven by config, not hardcoded IDs.
+  // Select the default engine/model once the shared registry is available.
   useEffect(() => {
-    api.getEngines().then((data) => {
-      setEnginesData(data)
-      setEnginesLoading(false)
-      // Pre-select the default engine + its default model.
-      const defaultEng = data.default
-      const defaultEntry = data.engines?.[defaultEng]
-      const models: ModelInfo[] = defaultEntry?.models ?? []
-      if (models.length > 0) {
-        const defaultModel = defaultEntry?.defaultModel ?? models[0]?.id
-        setEngineChoice({ engine: defaultEng, model: defaultModel, effortLevel: "medium" })
-      }
-      // If no models available, leave engineChoice.engine undefined so
-      // applyEngineChoice will no-op and the server default is preserved.
-    }).catch(() => {
-      // API unreachable — leave engine undefined so server default is preserved.
-      setEnginesLoading(false)
-    })
-  }, []) // run once on mount
+    if (engineChoice.engine || !enginesData) return
+    const defaultEng = enginesData.default
+    const defaultEntry = enginesData.engines?.[defaultEng]
+    const models: ModelInfo[] = defaultEntry?.models ?? []
+    if (models.length === 0) return
+    const defaultModel = defaultEntry?.defaultModel ?? models[0]?.id
+    setEngineChoice({ engine: defaultEng, model: defaultModel, effortLevel: "medium" })
+  }, [engineChoice.engine, enginesData])
 
   // Dismiss the loading bridge once ChatPage's deep-link effect has consumed
   // the ?session= param. ChatPage calls handleSelect(id) then clears the param
