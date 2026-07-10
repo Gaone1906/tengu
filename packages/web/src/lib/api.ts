@@ -546,11 +546,12 @@ export type WorkItemSourceWire =
 export type ApprovalStateWire = "pending" | "approved" | "rejected"
 export type VerifyModeWire = "trust" | "verify" | "thorough"
 
+/** The compact row's session provenance (gateway `sessionRef()`): the session
+ *  id parsed from a `session:`/`delegate:` sourceRef, plus the optional
+ *  human-readable ref suffix. */
 export interface WorkItemSessionRefWire {
-  id: string
-  status?: string | null
-  title?: string | null
-  lastActivity?: string | null
+  sessionId: string
+  ref?: string | null
 }
 
 /** The compact row GET /api/work-items returns (list/board/people). */
@@ -570,15 +571,20 @@ export interface WorkItemCompactWire {
   workflowRun?: { workflowId: string; runId: string } | null
   sessionRef?: WorkItemSessionRefWire | null
   updatedAt: string
-  /** Manual sort rank (design-todos §7.3). Absent until the gateway ships it. */
+  /** Manual sort rank (design-todos §7.3). Null until the operator reorders. */
   rank?: number | null
 }
 
-/** GET /api/work-items response. `total` is the true match count (design-todos
- *  §7.1) — absent on gateways that predate pagination, so callers must guard. */
+/** GET /api/work-items and /api/search/work-items page payload
+ *  (`workItemPagePayload`): one page of rows plus the TRUE match counts for
+ *  the whole filtered set and the offset to fetch next (null = exhausted). */
 export interface WorkItemListWire {
   workItems: WorkItemCompactWire[]
   total?: number
+  totals?: Partial<Record<WorkItemStatusWire, number>>
+  limit?: number
+  offset?: number
+  nextOffset?: number | null
 }
 
 export interface VerifyPolicyWire {
@@ -972,13 +978,17 @@ export const api = {
     return get<WorkItemListWire>(`/api/work-items?${q.toString()}`)
   },
   /** GRS-021c: deterministic AND-composed Todo search (escaped-LIKE text over
-   *  title + body). Used by the filter bar's search field. */
+   *  title + body). Same page params/payload as the list endpoint — the filter
+   *  bar's search must carry the date window and page like any other query. */
   searchWorkItems: (params: {
     text: string
     status?: WorkItemStatusWire
     assignee?: string
     department?: string
     source?: WorkItemSourceWire
+    since?: string
+    until?: string
+    offset?: number
     limit?: number
   }) => {
     const q = new URLSearchParams()
@@ -987,6 +997,9 @@ export const api = {
     if (params.assignee) q.set("assignee", params.assignee)
     if (params.department) q.set("department", params.department)
     if (params.source) q.set("source", params.source)
+    if (params.since) q.set("since", params.since)
+    if (params.until) q.set("until", params.until)
+    if (params.offset) q.set("offset", String(params.offset))
     q.set("limit", String(params.limit ?? 20))
     return get<WorkItemListWire>(`/api/search/work-items?${q.toString()}`)
   },

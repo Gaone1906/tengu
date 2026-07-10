@@ -2,16 +2,15 @@ import { useCallback, useMemo, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useSearchParams } from "react-router-dom"
 import { Plus } from "lucide-react"
-import { api, type WorkItemCompactWire } from "@/lib/api"
+import { api, type WorkItemCompactWire, type WorkItemStatusWire } from "@/lib/api"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import {
-  applyClientFilters,
   deriveNeedsYou,
   filtersFromSearchParams,
   filtersToSearchParams,
   groupPeople,
-  headerCounts,
+  headerCountsFromTotals,
   isDefaultFilters,
   needsYouCount,
   type TodoFilters,
@@ -24,6 +23,7 @@ import { PeopleView } from "./people-view"
 import { DetailSheet } from "./detail-sheet"
 import {
   useLedgerItems,
+  usePeopleItems,
   useOpenDetails,
   openIdsOf,
   useOrg,
@@ -32,6 +32,8 @@ import {
   useNeedsAttentionItems,
   useEscalateApproval,
   useUpdateWorkItem,
+  LEDGER_PAGE_SIZE,
+  type LedgerWants,
 } from "./use-todos"
 
 /* design-todos §2 — the frame. ONE column (max-w 840px) for every lens, so a
@@ -166,26 +168,38 @@ export default function TodosPage() {
   const [creating, setCreating] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
 
-  // Filters live in the URL (§4.3): shareable, refresh-proof.
+  // Filters live in the URL (§4.3): shareable, refresh-proof. Changing them
+  // resets the per-status page depth back to one page.
   const [searchParams, setSearchParams] = useSearchParams()
   const filters = useMemo(() => filtersFromSearchParams(searchParams), [searchParams])
+  const [wants, setWants] = useState<LedgerWants>({})
   const setFilters = useCallback(
-    (next: TodoFilters) => setSearchParams(filtersToSearchParams(next), { replace: true }),
+    (next: TodoFilters) => {
+      setWants({})
+      setSearchParams(filtersToSearchParams(next), { replace: true })
+    },
     [setSearchParams],
   )
   const filtered = !isDefaultFilters(filters)
 
-  // The default ledger always loads (header counts + People + the unfiltered
-  // Active lens); a filtered Active lens adds its own query on top.
-  const baseLedger = useLedgerItems({ status: "open" }, now)
-  const filteredLedger = useLedgerItems(filters, now)
+  // The default ledger always loads (header counts come from its server
+  // totals); a filtered Active lens adds its own query on top. `wants` applies
+  // to whichever query the Active lens is showing.
+  const baseLedger = useLedgerItems({ status: "open" }, now, filtered ? {} : wants)
+  const filteredLedger = useLedgerItems(filters, now, wants)
   const ledger = filtered ? filteredLedger : baseLedger
 
-  const baseItems: WorkItemCompactWire[] = useMemo(() => baseLedger.data?.items ?? [], [baseLedger.data])
-  const ledgerItems: WorkItemCompactWire[] = useMemo(
-    () => applyClientFilters(ledger.data?.items ?? [], filters, now),
-    [ledger.data, filters, now],
-  )
+  // "Show N more": raise the want for the group's statuses — the data layer
+  // fetches the subsequent server offsets (design-todos §3).
+  const onLoadMore = useCallback((statuses: readonly WorkItemStatusWire[]) => {
+    setWants((w) => {
+      const next = { ...w }
+      for (const s of statuses) next[s] = (next[s] ?? LEDGER_PAGE_SIZE) + LEDGER_PAGE_SIZE
+      return next
+    })
+  }, [])
+
+  const ledgerItems: WorkItemCompactWire[] = useMemo(() => ledger.data?.items ?? [], [ledger.data])
 
   const openIds = useMemo(() => openIdsOf(ledgerItems), [ledgerItems])
   const details = useOpenDetails(openIds, tab === "active")
@@ -196,11 +210,21 @@ export default function TodosPage() {
   const escalate = useEscalateApproval()
   const update = useUpdateWorkItem()
 
-  const counts = useMemo(() => headerCounts(baseItems, now), [baseItems, now])
+  // People needs the FULL open set (true per-person counts), not a capped page.
+  const peopleItems = usePeopleItems()
+
+  // Header counts from the gateway's true totals, never from fetched rows.
+  const counts = useMemo(
+    () => headerCountsFromTotals(baseLedger.data?.totalsByStatus ?? {}),
+    [baseLedger.data],
+  )
   const detailById = useMemo(() => new Map((details.data ?? []).map((d) => [d.workItem.id, d])), [details.data])
   const needsYou = useMemo(() => deriveNeedsYou(needs.data ?? []), [needs.data])
   const needsCount = needs.data ? needsYouCount(needsYou) : null
-  const people = useMemo(() => groupPeople(baseItems, org.data?.employees ?? []), [baseItems, org.data?.employees])
+  const people = useMemo(
+    () => groupPeople(peopleItems.data ?? [], org.data?.employees ?? []),
+    [peopleItems.data, org.data?.employees],
+  )
   const peopleWithWork = useMemo(() => people.filter((p) => p.openCount > 0).length, [people])
 
   const onOpen = useCallback((id: string) => setOpenId(id), [])
@@ -337,15 +361,17 @@ export default function TodosPage() {
                   </>
                 ) : (
                   <ActiveView
-                    data={{ ...(ledger.data ?? { totalsByStatus: {}, paginated: false, items: [] }), items: ledgerItems }}
+                    data={ledger.data ?? { totalsByStatus: {}, items: [] }}
                     filters={filters}
                     detailById={detailById}
                     byName={byName}
                     onOpen={onOpen}
                     onRename={onRename}
                     onRankChange={onRankChange}
+                    onLoadMore={onLoadMore}
                     onClearFilters={() => setFilters({ status: "open" })}
                     filtered={filtered}
+                    loadingMore={ledger.isPlaceholderData}
                     now={now}
                   />
                 )}
@@ -364,7 +390,7 @@ export default function TodosPage() {
               ))}
 
             {tab === "people" &&
-              (baseLedger.isLoading ? (
+              (peopleItems.isLoading ? (
                 <GroupSkeleton />
               ) : (
                 <PeopleView queues={people} expanded={expanded} onToggle={onToggle} onOpen={onOpen} />

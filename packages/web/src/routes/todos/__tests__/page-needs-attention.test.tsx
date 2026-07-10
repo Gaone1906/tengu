@@ -97,7 +97,7 @@ describe("TodosPage Needs You inbox", () => {
 
     await waitFor(() => expect(screen.getByText("Approve the plan?")).toBeTruthy())
 
-    expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ needsAttentionFor: "me", limit: 20 }))
+    expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ needsAttentionFor: "me", limit: 100 }))
     expect(getWorkItem).not.toHaveBeenCalled()
     expect(screen.getAllByTestId(/needs-item-/).map((el) => el.getAttribute("data-testid"))).toEqual([
       "needs-item-wi_blocked",

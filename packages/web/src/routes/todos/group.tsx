@@ -55,6 +55,7 @@ export function TodoGroup({
   defaultOpen = true,
   hiddenCount = 0,
   onShowMore,
+  loadingMore = false,
   now,
   testId,
 }: {
@@ -75,6 +76,8 @@ export function TodoGroup({
   defaultOpen?: boolean
   hiddenCount?: number
   onShowMore?: () => void
+  /** A wider server page is in flight for this group's Show-more. */
+  loadingMore?: boolean
   now?: number
   testId?: string
 }) {
@@ -268,11 +271,12 @@ export function TodoGroup({
             <button
               type="button"
               onClick={onShowMore}
+              disabled={loadingMore}
               data-testid={testId ? `${testId}-more` : undefined}
-              className="flex h-[38px] w-full items-center gap-1.5 rounded-[13px] pl-[42px] pr-3 text-[length:var(--text-footnote)] font-medium text-[var(--text-tertiary)] transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] hover:text-[var(--text-secondary)] max-[500px]:pl-[46px]"
+              className="flex h-[38px] w-full items-center gap-1.5 rounded-[13px] pl-[42px] pr-3 text-[length:var(--text-footnote)] font-medium text-[var(--text-tertiary)] transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] hover:text-[var(--text-secondary)] disabled:opacity-50 max-[500px]:pl-[46px]"
             >
               <ChevronDown size={11} strokeWidth={2.4} aria-hidden />
-              Show {hiddenCount} more
+              {loadingMore ? "Loading…" : `Show ${hiddenCount} more`}
             </button>
           )}
         </div>

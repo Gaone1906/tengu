@@ -1,12 +1,11 @@
 import { useCallback, useMemo, useState } from "react"
-import type { Employee, WorkItemCompactWire, WorkItemDetailWire } from "@/lib/api"
+import type { Employee, WorkItemCompactWire, WorkItemDetailWire, WorkItemStatusWire } from "@/lib/api"
 import {
   groupBoard,
   groupHistory,
   isHistoryView,
-  isOpen,
-  isRecentDone,
   rankBetween,
+  statusesFor,
   type DisplayGroup,
   type TodoFilters,
 } from "@/lib/todos"
@@ -16,11 +15,11 @@ import { TodoGroup, LedgerEmpty, FilteredEmpty } from "./group"
 
 /* design-todos §2–4 — Active is the ledger: every status group is ONE grouped
  * inset in a single 840px column (the kanban is retired), Done is a collapsed
- * disclosure, and a closed-status filter regroups the same list by date. The
- * page default (20 rows) caps each group with a quiet Show-more; headers show
- * the truest total the gateway can report — nothing is silently hidden. */
-
-const PAGE_SIZE = 20
+ * disclosure, and a closed-status filter regroups the same list by date.
+ * Pagination is REAL: the data layer fetches a page per status and the header
+ * shows the gateway's true total; "Show N more" asks the page for more rows
+ * (`onLoadMore` raises the per-status want → subsequent offsets are fetched).
+ * Nothing is silently hidden at any count. */
 
 const GROUP_GLYPH: Record<DisplayGroup, StateGlyphKey> = {
   executing: "executing",
@@ -31,7 +30,7 @@ const GROUP_GLYPH: Record<DisplayGroup, StateGlyphKey> = {
 }
 
 /** The underlying statuses whose server totals a display group aggregates. */
-const GROUP_STATUSES: Record<DisplayGroup, readonly ("backlog" | "assigned" | "executing" | "blocked" | "in_review" | "escalated" | "done")[]> = {
+export const GROUP_STATUSES: Record<DisplayGroup, readonly WorkItemStatusWire[]> = {
   executing: ["executing", "blocked"],
   review: ["in_review", "escalated"],
   assigned: ["assigned"],
@@ -47,8 +46,10 @@ export function ActiveView({
   onOpen,
   onRename,
   onRankChange,
+  onLoadMore,
   onClearFilters,
   filtered,
+  loadingMore = false,
   now,
 }: {
   data: LedgerData
@@ -59,28 +60,21 @@ export function ActiveView({
   onRename: (id: string, title: string) => Promise<void>
   /** Persist a manual rank (fire-and-forget; the view keeps its local order). */
   onRankChange: (id: string, rank: number) => void
+  /** Fetch the next server page for these statuses (raises their `want`). */
+  onLoadMore: (statuses: readonly WorkItemStatusWire[]) => void
   onClearFilters: () => void
   /** Any filter set → empty state offers Clear instead of All-quiet. */
   filtered: boolean
+  /** A wider page is in flight (Show-more clicked; placeholder rows showing). */
+  loadingMore?: boolean
   now: number
 }) {
-  const [visible, setVisible] = useState<Record<string, number>>({})
-  // Manual order overrides, per group, applied over the server order until the
-  // gateway persists rank (§7.3) — a successful PATCH makes these permanent.
+  // Manual order overrides, per group, applied over the server order so a drag
+  // never snaps back while the rank PATCH round-trips.
   const [orderOverride, setOrderOverride] = useState<Record<string, string[]>>({})
 
   const history = isHistoryView(filters)
-  const showMore = useCallback((key: string, total: number) => {
-    setVisible((v) => ({ ...v, [key]: Math.min((v[key] ?? PAGE_SIZE) + PAGE_SIZE, total) }))
-  }, [])
-
-  // The ledger shows open work + done inside the recent window; a history view
-  // (closed-status filter) shows everything it fetched, regrouped by date.
-  const ledgerItems = useMemo(
-    () => data.items.filter((i) => isOpen(i.status) || isRecentDone(i, now)),
-    [data.items, now],
-  )
-  const groups = useMemo(() => (history ? [] : groupBoard(ledgerItems)), [history, ledgerItems])
+  const groups = useMemo(() => (history ? [] : groupBoard(data.items)), [history, data.items])
   const historyGroups = useMemo(() => (history ? groupHistory(data.items, now) : []), [history, data.items, now])
 
   const orderedItems = useCallback(
@@ -108,34 +102,44 @@ export function ActiveView({
     [onRankChange],
   )
 
-  if ((history ? data.items : ledgerItems).length === 0) {
+  if (data.items.length === 0) {
     return filtered ? <FilteredEmpty onClear={onClearFilters} /> : <LedgerEmpty />
   }
 
   if (history) {
+    // History regroups by date; the server pages by status underneath. Fetched
+    // rows all render; one trailing Show-more pulls the next page(s).
+    const fetched = data.items.length
+    const total = Object.values(data.totalsByStatus).reduce((sum, n) => sum + (n ?? 0), 0)
+    const remaining = Math.max(0, total - fetched)
     return (
       <div data-testid="todos-history">
-        {historyGroups.map((g) => {
-          const shown = visible[g.bucket] ?? PAGE_SIZE
-          const items = g.items.slice(0, shown)
-          return (
-            <TodoGroup
-              key={g.bucket}
-              glyph={filters.status === "cancelled" ? "cancelled" : "done"}
-              label={g.label}
-              count={g.items.length}
-              items={items}
-              detailById={detailById}
-              byName={byName}
-              onOpen={onOpen}
-              onRename={onRename}
-              hiddenCount={Math.max(0, g.items.length - shown)}
-              onShowMore={() => showMore(g.bucket, g.items.length)}
-              now={now}
-              testId={`todos-group-${g.bucket}`}
-            />
-          )
-        })}
+        {historyGroups.map((g) => (
+          <TodoGroup
+            key={g.bucket}
+            glyph={filters.status === "cancelled" ? "cancelled" : "done"}
+            label={g.label}
+            count={g.items.length}
+            items={g.items}
+            detailById={detailById}
+            byName={byName}
+            onOpen={onOpen}
+            onRename={onRename}
+            now={now}
+            testId={`todos-group-${g.bucket}`}
+          />
+        ))}
+        {remaining > 0 && (
+          <button
+            type="button"
+            data-testid="todos-history-more"
+            disabled={loadingMore}
+            onClick={() => onLoadMore(statusesFor(filters))}
+            className="mx-auto flex h-[38px] items-center gap-1.5 rounded-full px-4 text-[length:var(--text-footnote)] font-medium text-[var(--text-tertiary)] transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] hover:text-[var(--text-secondary)] disabled:opacity-50"
+          >
+            {loadingMore ? "Loading…" : `Show ${remaining} more`}
+          </button>
+        )}
       </div>
     )
   }
@@ -147,19 +151,18 @@ export function ActiveView({
         .map((g) => {
           const isDone = g.group === "done"
           const ordered = orderedItems(g.group, g.items)
-          const shown = visible[g.group] ?? PAGE_SIZE
-          const items = ordered.slice(0, shown)
-          // Truest total: the per-status server totals when the gateway reports
-          // them, else what we actually fetched.
-          const total = GROUP_STATUSES[g.group].reduce((sum, s) => sum + (data.totalsByStatus[s] ?? 0), 0) || g.items.length
+          // TRUE total straight from the gateway (per-status counts of the
+          // whole filtered set, not the fetched page).
+          const total = GROUP_STATUSES[g.group].reduce((sum, s) => sum + (data.totalsByStatus[s] ?? 0), 0)
+          const remaining = Math.max(0, total - ordered.length)
           return (
             <TodoGroup
               key={g.group}
               glyph={GROUP_GLYPH[g.group]}
               label={g.label}
-              count={total}
+              count={total || ordered.length}
               countSuffix={isDone ? "this week" : undefined}
-              items={items}
+              items={ordered}
               detailById={detailById}
               byName={byName}
               onOpen={onOpen}
@@ -167,8 +170,9 @@ export function ActiveView({
               onReorder={isDone ? undefined : reorder(g.group, ordered)}
               collapsible={isDone}
               defaultOpen={!isDone}
-              hiddenCount={Math.max(0, ordered.length - shown)}
-              onShowMore={() => showMore(g.group, ordered.length)}
+              hiddenCount={remaining}
+              loadingMore={loadingMore}
+              onShowMore={() => onLoadMore(GROUP_STATUSES[g.group])}
               now={now}
               testId={`todos-group-${g.group}`}
             />

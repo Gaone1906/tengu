@@ -40,10 +40,12 @@ function WorkRef({ item }: { item: WorkItemCompactWire }) {
     )
   }
   if (item.sessionRef) {
+    // Gateway shape is { sessionId, ref? } — the ref suffix is the human label
+    // when present, else the shortened session id.
     return (
       <span className="inline-flex min-w-0 items-center gap-1.5 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
         <MessageSquareText size={12.5} strokeWidth={1.75} aria-hidden />
-        <span className="truncate">Session · {item.sessionRef.title?.trim() || shortRef(item.sessionRef.id)}</span>
+        <span className="truncate">Session · {item.sessionRef.ref?.trim() || shortRef(item.sessionRef.sessionId)}</span>
       </span>
     )
   }

@@ -94,4 +94,26 @@ describe("NeedsYouView", () => {
     expect(screen.queryByTestId("approve-ap")).toBeNull()
     expect(screen.getByTestId("needs-you-empty")).toBeTruthy()
   })
+
+  // QA regression 2026-07-10: the gateway's sessionRef is { sessionId, ref? } —
+  // an unassigned session-sourced approval must render (it used to crash the
+  // whole lens reading `.id` off the real shape).
+  it("renders an unassigned session-sourced approval from the real sessionRef shape", () => {
+    renderView([
+      item("sess", "in_review", "pending", {
+        source: "session",
+        sourceRef: "session:sess_1234567890abcdef:launch-note",
+        sessionRef: { sessionId: "sess_1234567890abcdef", ref: "launch-note" },
+      }),
+      item("bare", "in_review", "pending", {
+        source: "session",
+        sourceRef: "session:sess_zz999",
+        sessionRef: { sessionId: "sess_zz999" },
+      }),
+    ])
+    expect(screen.getByTestId("needs-item-sess")).toBeTruthy()
+    expect(screen.getByText("Session · launch-note")).toBeTruthy()
+    // No ref suffix → the shortened session id, never a crash.
+    expect(screen.getByText("Session · sess_zz999")).toBeTruthy()
+  })
 })

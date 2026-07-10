@@ -159,23 +159,19 @@ export function rankBetween(before: number | null | undefined, after: number | n
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
-/** A done item counts for the recent window (default 7 days) by its updatedAt. */
-export function isRecentDone(item: WorkItemCompactWire, now: number, windowDays = 7): boolean {
-  if (item.status !== "done") return false
-  const t = Date.parse(item.updatedAt)
-  if (Number.isNaN(t)) return true // undated → keep rather than silently hide
-  return now - t <= windowDays * DAY_MS
-}
 
-/** The header counts: open work + done in the recent window. */
-export function headerCounts(items: WorkItemCompactWire[], now: number, windowDays = 7): { open: number; doneRecent: number } {
-  let open = 0
-  let doneRecent = 0
-  for (const it of items) {
-    if (isOpen(it.status)) open += 1
-    else if (isRecentDone(it, now, windowDays)) doneRecent += 1
-  }
-  return { open, doneRecent }
+const OPEN_STATUS_LIST: readonly WorkItemStatusWire[] = [
+  "backlog", "assigned", "executing", "blocked", "in_review", "escalated",
+]
+
+/** Header counts from the gateway's TRUE per-status totals — never from a
+ *  capped page of rows. The open-lens Done query is server-scoped to the
+ *  recent window, so its total already means "done this week". */
+export function headerCountsFromTotals(
+  totals: Partial<Record<WorkItemStatusWire, number>>,
+): { open: number; doneRecent: number } {
+  const open = OPEN_STATUS_LIST.reduce((sum, s) => sum + (totals[s] ?? 0), 0)
+  return { open, doneRecent: totals.done ?? 0 }
 }
 
 // ── Needs-you inbox ─────────────────────────────────────────────────────────
@@ -398,21 +394,10 @@ export function dateBounds(date: DateFilter | undefined, now: number): { since?:
   return { since: d.toISOString() }
 }
 
-/** Defensive client pass for the params older gateways ignore (`since`, `q`).
- *  When the server starts honouring them this becomes a no-op re-filter. */
-export function applyClientFilters(items: WorkItemCompactWire[], f: TodoFilters, now: number): WorkItemCompactWire[] {
-  let out = items
-  const { since } = dateBounds(f.date, now)
-  if (since) {
-    const t = Date.parse(since)
-    out = out.filter((i) => (Date.parse(i.updatedAt) || 0) >= t)
-  }
-  if (f.q) {
-    const needle = f.q.toLowerCase()
-    out = out.filter((i) => i.title.toLowerCase().includes(needle))
-  }
-  return out
-}
+// NOTE: there is deliberately NO client-side re-filter of server results. The
+// gateway owns `q` (escaped-LIKE over title+body) and `since`/`until` on both
+// list and search endpoints — a title-only client pass would silently discard
+// body-only matches (shipped bug, QA 2026-07-10).
 
 /** URL ⇄ filter mapping, so a filtered view is shareable and survives refresh. */
 export function filtersToSearchParams(f: TodoFilters): URLSearchParams {

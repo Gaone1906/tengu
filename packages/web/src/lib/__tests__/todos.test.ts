@@ -5,8 +5,7 @@ import {
   attentionOf,
   stateKeyOf,
   groupBoard,
-  isRecentDone,
-  headerCounts,
+  headerCountsFromTotals,
   deriveNeedsYou,
   needsYouCount,
   groupPeople,
@@ -20,7 +19,6 @@ import {
   isHistoryView,
   isDefaultFilters,
   activeFilterCount,
-  applyClientFilters,
   filtersToSearchParams,
   filtersFromSearchParams,
   dateBucketOf,
@@ -91,24 +89,15 @@ describe("groupBoard", () => {
   })
 })
 
-describe("recent-done window + header counts", () => {
-  it("counts a done item as recent within the window and not outside it", () => {
-    expect(isRecentDone(compact({ id: "d", status: "done", updatedAt: "2026-07-04T12:00:00.000Z" }), NOW)).toBe(true)
-    expect(isRecentDone(compact({ id: "d", status: "done", updatedAt: "2026-06-01T12:00:00.000Z" }), NOW)).toBe(false)
-    expect(isRecentDone(compact({ id: "x", status: "executing" }), NOW)).toBe(false)
+describe("header counts (from gateway totals — never capped rows)", () => {
+  it("sums the open-status totals and passes the recent-done total through", () => {
+    expect(
+      headerCountsFromTotals({ backlog: 27, assigned: 4, executing: 3, blocked: 1, in_review: 2, escalated: 1, done: 12 }),
+    ).toEqual({ open: 38, doneRecent: 12 })
   })
-  it("splits open vs done-recent", () => {
-    const counts = headerCounts(
-      [
-        compact({ id: "a", status: "executing" }),
-        compact({ id: "b", status: "blocked" }),
-        compact({ id: "c", status: "done", updatedAt: "2026-07-05T09:00:00.000Z" }),
-        compact({ id: "e", status: "done", updatedAt: "2026-05-01T09:00:00.000Z" }),
-        compact({ id: "f", status: "cancelled" }),
-      ],
-      NOW,
-    )
-    expect(counts).toEqual({ open: 2, doneRecent: 1 })
+  it("treats missing totals as zero (loading / cancelled excluded)", () => {
+    expect(headerCountsFromTotals({})).toEqual({ open: 0, doneRecent: 0 })
+    expect(headerCountsFromTotals({ cancelled: 9, done: 2 })).toEqual({ open: 0, doneRecent: 2 })
   })
 })
 
@@ -220,17 +209,6 @@ describe("filters (design-todos §4.3)", () => {
   it("counts set chips for the Clear control", () => {
     expect(activeFilterCount({ status: "open" })).toBe(0)
     expect(activeFilterCount({ status: "done", assignee: "x", date: "today" })).toBe(3)
-  })
-  it("applies the defensive client pass for date + text", () => {
-    const items = [
-      compact({ id: "old", status: "done", title: "Old digest", updatedAt: "2026-06-01T10:00:00.000Z" }),
-      compact({ id: "new", status: "done", title: "New digest", updatedAt: "2026-07-05T10:00:00.000Z" }),
-      compact({ id: "other", status: "done", title: "Unrelated", updatedAt: "2026-07-05T09:00:00.000Z" }),
-    ]
-    const filtered = applyClientFilters(items, { status: "done", date: "week", q: "digest" }, NOW)
-    expect(filtered.map((i) => i.id)).toEqual(["new"])
-    // No date/text filter → untouched.
-    expect(applyClientFilters(items, { status: "done" }, NOW)).toHaveLength(3)
   })
 })
 
