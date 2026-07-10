@@ -1,9 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createDefinition, getDefinition } from '../definition-store.js';
-import { fireTodoStatusChangeWorkflows, replayMissedTodoStatusChangeWorkflowFires } from '../todo-status-trigger.js';
 import { listRuns, normalizeWorkflowTrigger } from '../run-store.js';
 import { WORKFLOW_DEFINITION_SCHEMA_VERSION, type EditableWorkflowDefinition, type WorkflowNode } from '../definition.js';
 import type { RunDriverDeps } from '../run-reconciler.js';
@@ -11,6 +10,20 @@ import { stepSessionKey, type StepSessionProbe } from '../advance.js';
 
 const FIXED = '2026-07-06T10:00:00.000Z';
 const now = () => FIXED;
+const suiteHome = fs.mkdtempSync(path.join(os.tmpdir(), 'jinn-todo-trigger-home-'));
+process.env.JINN_HOME = suiteHome;
+
+type TodoStatusTrigger = typeof import('../todo-status-trigger.js');
+let fireTodoStatusChangeWorkflows: TodoStatusTrigger['fireTodoStatusChangeWorkflows'];
+let replayMissedTodoStatusChangeWorkflowFires: TodoStatusTrigger['replayMissedTodoStatusChangeWorkflowFires'];
+
+beforeAll(async () => {
+  ({ fireTodoStatusChangeWorkflows, replayMissedTodoStatusChangeWorkflowFires } = await import('../todo-status-trigger.js'));
+});
+
+afterAll(() => {
+  fs.rmSync(suiteHome, { recursive: true, force: true });
+});
 
 const trigger = (toStatus: string, extra: Record<string, unknown> = {}): WorkflowNode => ({
   id: 'trg',
@@ -138,8 +151,6 @@ describe('todo-status-change workflow trigger', () => {
   });
 
   it('replays a transition event that committed before the listener was installed exactly once', async () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'jinn-todo-trigger-home-'));
-    process.env.JINN_HOME = home;
     const store = await import('../../work-items/store.js');
     const transitions = await import('../../work-items/transitions.js');
     try {
@@ -167,7 +178,6 @@ describe('todo-status-change workflow trigger', () => {
       expect(firedRuns).toHaveLength(1);
     } finally {
       transitions.setTodoStatusChangeListener(null);
-      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 });

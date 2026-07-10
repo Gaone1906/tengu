@@ -475,6 +475,21 @@ describe('managed workflow cron jobs (GRS-014d) — definition CRUD keeps jobs.j
     expect(loadCron()).toEqual([]);
   });
 
+  it('rejects non-string workflow schedule fields before definition or cron persistence', async () => {
+    for (const [field, value] of [['timezone', 7], ['cron', 7], ['until', 7]] as const) {
+      const id = `bad-schedule-${field}`;
+      const trigger = { kind: 'schedule', cron: '0 6 * * *', [field]: value };
+      const attempted = await call('POST', '/api/workflow-definitions', {
+        ...schedDef,
+        id,
+        nodes: [{ ...schedDef.nodes[0], trigger }, schedDef.nodes[1]],
+      });
+      expect(attempted.status).toBe(400);
+      expect(await call('GET', `/api/workflow-definitions/${id}`)).toMatchObject({ status: 404 });
+      expect(loadCron()).toEqual([]);
+    }
+  });
+
   it('POST/PUT /api/cron reject a managed job without workflowId (managed ⇒ workflowId)', async () => {
     const bad = await call('POST', '/api/cron', { name: 'broken', schedule: '0 * * * *', managedBy: 'workflow' });
     expect(bad.status).toBe(400);

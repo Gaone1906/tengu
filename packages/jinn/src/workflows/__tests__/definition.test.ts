@@ -55,6 +55,18 @@ describe('validateDefinition', () => {
     const invalidUntil = validDef();
     invalidUntil.nodes[0].trigger = { kind: 'schedule', cron: '0 * * * *', until: 'eventually' };
     expect(validateDefinition(invalidUntil).errors.map((e) => e.code)).toContain('trigger-schedule-bad-until');
+
+    const nonStringTimezone = validDef();
+    (nonStringTimezone.nodes[0].trigger as { timezone?: unknown }).timezone = 7;
+    expect(validateDefinition(nonStringTimezone).errors.map((e) => e.code)).toContain('trigger-schedule-bad-timezone');
+
+    const nonStringCron = validDef();
+    (nonStringCron.nodes[0].trigger as { cron?: unknown }).cron = 7;
+    expect(validateDefinition(nonStringCron).errors.map((e) => e.code)).toContain('trigger-schedule-bad-cron');
+
+    const nonStringUntil = validDef();
+    (nonStringUntil.nodes[0].trigger as { until?: unknown }).until = 7;
+    expect(validateDefinition(nonStringUntil).errors.map((e) => e.code)).toContain('trigger-schedule-bad-until');
   });
 
   it('rejects a missing trigger', () => {

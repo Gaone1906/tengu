@@ -670,15 +670,15 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
         if (!TRIGGER_KINDS.has(n.trigger.kind)) {
           err('bad-trigger-kind', `trigger node "${n.id}" kind "${n.trigger.kind}" is invalid`, n.id);
         } else if (n.trigger.kind === 'schedule') {
-          if (isBlank(n.trigger.cron)) {
+          if (n.trigger.cron === undefined || (typeof n.trigger.cron === 'string' && n.trigger.cron.trim() === '')) {
             err('trigger-schedule-missing-cron', `schedule trigger "${n.id}" needs a cron`, n.id);
           } else {
             for (const scheduleError of validateCronSchedule({
               schedule: n.trigger.cron,
-              // Legacy hand-authored definitions may carry junk in optional
-              // fields. Resolution already ignores non-string timezones; keep
-              // that compatibility while validating every usable IANA value.
-              ...(typeof n.trigger.timezone === 'string' ? { timezone: n.trigger.timezone } : {}),
+              // Optional schedule fields are validated exactly as supplied.
+              // Omitting a malformed non-string value here would allow it to
+              // persist and fail later during scheduler reload.
+              ...(n.trigger.timezone !== undefined ? { timezone: n.trigger.timezone } : {}),
               ...(n.trigger.until !== undefined ? { until: n.trigger.until } : {}),
             })) {
               const code = scheduleError.field === 'schedule'

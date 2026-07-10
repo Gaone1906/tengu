@@ -75,14 +75,17 @@ describe('resolveExecutionPlan — happy path', () => {
     expect(r.plan.trigger.cronJobId).toBeUndefined();
   });
 
-  it('ignores a non-string optional trigger field rather than copying it verbatim', () => {
+  it('rejects a non-string optional schedule field before plan resolution', () => {
     const d = validDef();
     // A hand-crafted def with a bad optional field the validator does not type-check.
     (d.nodes[0].trigger as { timezone?: unknown }).timezone = 123;
     const r = resolveExecutionPlan(d);
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.plan.trigger.timezone).toBeUndefined();
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.errors).toContainEqual(expect.objectContaining({
+      code: 'definition-invalid',
+      message: expect.stringContaining('trigger-schedule-bad-timezone'),
+    }));
   });
 
   it('treats a manual trigger as not declaring a cron job', () => {
