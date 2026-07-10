@@ -657,7 +657,9 @@ describe("buildContext — maxChars trimming", () => {
       reportsTo: "safety-manager",
       persona: [
         "You own a high-volume content pipeline.",
+        "You coordinate approval workflows across the publishing team.",
         "SAFETY: Never publish externally without manager approval.",
+        "DO NOT expose credentials in generated content.",
         "Detailed operating procedure. ".repeat(1000),
       ].join("\n"),
     };
@@ -704,6 +706,8 @@ describe("buildContext — maxChars trimming", () => {
     expect(out).toContain("Safety Manager");
     expect(out).toContain("Use the attached Jinn MCP");
     expect(out).toContain("SAFETY: Never publish externally without manager approval.");
+    expect(out).toContain("DO NOT expose credentials in generated content.");
+    expect(out).not.toContain("You coordinate approval workflows");
   });
 
   it("does not trim when output is under the default cap", () => {

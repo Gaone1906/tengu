@@ -488,10 +488,14 @@ function buildEmployeeIdentitySummary(
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
-  const roleLine = personaLines[0];
-  const safetyLine = personaLines.find((line) =>
-    /\b(?:safety|never|must not|do not|approval|authori[sz]ed|credentials?|secrets?)\b/i.test(line),
-  );
+  const compactLine = (line: string): string =>
+    line.length <= 200 ? line : `${line.slice(0, 199).trimEnd()}…`;
+  const roleLine = personaLines[0] ? compactLine(personaLines[0]) : undefined;
+  const prohibitionLines = personaLines
+    .filter((line) => /(?:\bSAFETY\b|\bNEVER\b|\bMUST\s+NOT\b|\bDO\s+NOT\b|\bPROHIBITED\b)/i.test(line))
+    .filter((line) => line !== personaLines[0])
+    .slice(0, 3)
+    .map(compactLine);
   const manager = node?.parentName
     ? hierarchy?.nodes[node.parentName]?.employee
     : undefined;
@@ -500,7 +504,7 @@ function buildEmployeeIdentitySummary(
     `# You are ${employee.displayName}`,
     `Employee: ${employee.name}, ${employee.department}, ${employee.rank}`,
     roleLine,
-    safetyLine && safetyLine !== roleLine ? safetyLine : undefined,
+    ...prohibitionLines,
     node?.parentName
       ? `Manager: ${manager?.displayName ?? node.parentName} (\`${node.parentName}\`)`
       : undefined,
