@@ -301,13 +301,24 @@ export function buildContext(opts: BuildContextOptions): string {
   }
 
   // ── STANDARD: Relationship-scoped role orientation ──────────
-  const scopedRoster = buildScopedRosterSection(opts.employee, opts.hierarchy, portalName);
+  const jinnMcpAttached = opts.jinnMcpAttached === true;
+  const scopedRoster = buildScopedRosterSection(
+    opts.employee,
+    opts.hierarchy,
+    portalName,
+    jinnMcpAttached,
+  );
   if (scopedRoster) {
     sections.push({
       tier: Tier.STANDARD,
       marker: "## Working roster",
       content: scopedRoster,
-      summary: buildScopedRosterSummary(opts.employee, opts.hierarchy, portalName),
+      summary: buildScopedRosterSummary(
+        opts.employee,
+        opts.hierarchy,
+        portalName,
+        jinnMcpAttached,
+      ),
     });
   }
 
@@ -622,6 +633,7 @@ function appendRosterGroup(
   names: string[],
   hierarchy: OrgHierarchy,
   cap: number,
+  jinnMcpAttached: boolean,
   includeEngine = false,
 ): void {
   if (names.length === 0 || cap === 0) return;
@@ -629,7 +641,9 @@ function appendRosterGroup(
   lines.push("", `${heading}:`);
   for (const name of shown) lines.push(rosterRow(hierarchy.nodes[name].employee, includeEngine));
   const omitted = names.length - shown.length;
-  if (omitted > 0) lines.push(`+${omitted} more — use \`list_employees\`.`);
+  if (omitted > 0) {
+    lines.push(jinnMcpAttached ? `+${omitted} more — use \`list_employees\`.` : `+${omitted} more not shown.`);
+  }
 }
 
 function renderScopedRoster(
@@ -637,6 +651,7 @@ function renderScopedRoster(
   hierarchy: OrgHierarchy | undefined,
   portalName: string,
   compact: boolean,
+  jinnMcpAttached: boolean,
 ): string | null {
   if (!hierarchy || Object.keys(hierarchy.nodes).length === 0) return null;
   const lines = [WORKING_ROSTER_HEADING];
@@ -652,23 +667,23 @@ function renderScopedRoster(
     if (employee?.rank === "executive") {
       const node = hierarchy.nodes[employee.name];
       if (node?.parentName && hierarchy.nodes[node.parentName]) {
-        appendRosterGroup(lines, "Your manager", [node.parentName], hierarchy, 1);
+        appendRosterGroup(lines, "Your manager", [node.parentName], hierarchy, 1, jinnMcpAttached);
       }
     }
-    appendRosterGroup(lines, "Top-level employees", names, hierarchy, compact ? 6 : 20, true);
+    appendRosterGroup(lines, "Top-level employees", names, hierarchy, compact ? 6 : 20, jinnMcpAttached, true);
   } else {
     const node = hierarchy.nodes[employee.name];
     if (!node) return null;
 
     if (node.parentName && hierarchy.nodes[node.parentName]) {
-      appendRosterGroup(lines, "Your manager", [node.parentName], hierarchy, 1);
+      appendRosterGroup(lines, "Your manager", [node.parentName], hierarchy, 1, jinnMcpAttached);
     } else {
       lines.push("", "Your manager:", `- ${portalName} (COO) — Company coordination and escalation · company`);
     }
 
     const isReportHolder = node.directReports.length > 0;
     if (isReportHolder) {
-      appendRosterGroup(lines, "Your direct reports", node.directReports, hierarchy, compact ? 4 : 12);
+      appendRosterGroup(lines, "Your direct reports", node.directReports, hierarchy, compact ? 4 : 12, jinnMcpAttached);
 
       const peerNames = node.parentName && hierarchy.nodes[node.parentName]
         ? hierarchy.nodes[node.parentName].directReports.filter((name) => name !== employee.name)
@@ -681,7 +696,7 @@ function renderScopedRoster(
         if (peer.employee.rank === "manager") return 1;
         return 2;
       });
-      appendRosterGroup(lines, "Your peers", prioritizedPeers, hierarchy, compact ? 0 : 6);
+      appendRosterGroup(lines, "Your peers", prioritizedPeers, hierarchy, compact ? 0 : 6, jinnMcpAttached);
     } else {
       const siblingNames = node.parentName && hierarchy.nodes[node.parentName]
         ? hierarchy.nodes[node.parentName].directReports.filter((name) => name !== employee.name)
@@ -694,11 +709,11 @@ function renderScopedRoster(
         hierarchy,
         (sibling) => sibling.employee.department === employee.department ? 0 : 1,
       );
-      appendRosterGroup(lines, "Your siblings", prioritizedSiblings, hierarchy, compact ? 4 : 8);
+      appendRosterGroup(lines, "Your siblings", prioritizedSiblings, hierarchy, compact ? 4 : 8, jinnMcpAttached);
     }
   }
 
-  lines.push("", FULL_ROSTER_HINT);
+  if (jinnMcpAttached) lines.push("", FULL_ROSTER_HINT);
   return lines.join("\n");
 }
 
@@ -707,16 +722,19 @@ export function buildScopedRosterSection(
   employee: Employee | undefined,
   hierarchy: OrgHierarchy | undefined,
   portalName = "Jinn",
+  jinnMcpAttached = false,
 ): string | null {
-  return renderScopedRoster(employee, hierarchy, portalName, false);
+  return renderScopedRoster(employee, hierarchy, portalName, false, jinnMcpAttached);
 }
 
 function buildScopedRosterSummary(
   employee: Employee | undefined,
   hierarchy: OrgHierarchy | undefined,
   portalName: string,
+  jinnMcpAttached: boolean,
 ): string {
-  return renderScopedRoster(employee, hierarchy, portalName, true) ?? `${WORKING_ROSTER_HEADING}\n${FULL_ROSTER_HINT}`;
+  return renderScopedRoster(employee, hierarchy, portalName, true, jinnMcpAttached)
+    ?? (jinnMcpAttached ? `${WORKING_ROSTER_HEADING}\n${FULL_ROSTER_HINT}` : WORKING_ROSTER_HEADING);
 }
 
 function buildOrgContext(

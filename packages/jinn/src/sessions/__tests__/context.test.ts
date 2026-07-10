@@ -521,6 +521,28 @@ describe("buildContext — scoped working roster", () => {
     expect(roster).toContain("get_employee");
   });
 
+  it("recommends org MCP tools only when the Jinn MCP is attached", () => {
+    const lead = employee("platform-lead", {
+      role: "platform delivery",
+      rank: "manager",
+    });
+    const org = hierarchy([lead], { "platform-lead": null });
+
+    const withoutMcp = buildContext({ ...baseOpts, hierarchy: org, jinnMcpAttached: false });
+    const withoutMcpRoster = workingRoster(withoutMcp);
+    expect(withoutMcpRoster).toContain("`platform-lead` — platform delivery · platform · codex");
+    expect(withoutMcp).not.toContain("find_employees");
+    expect(withoutMcp).not.toContain("list_employees");
+    expect(withoutMcp).not.toContain("get_employee");
+
+    const withMcp = buildContext({ ...baseOpts, hierarchy: org, jinnMcpAttached: true });
+    const withMcpRoster = workingRoster(withMcp);
+    expect(withMcpRoster).toContain("`platform-lead` — platform delivery · platform · codex");
+    expect(withMcpRoster).toContain("find_employees");
+    expect(withMcpRoster).toContain("list_employees");
+    expect(withMcpRoster).toContain("get_employee");
+  });
+
   it("gives a report-holder its manager, direct reports, and same-manager peers only", () => {
     const chief = employee("company-chief", { role: "company coordination", rank: "executive", department: "company" });
     const lead = employee("platform-lead", { role: "platform delivery", rank: "senior", reportsTo: "company-chief" });
