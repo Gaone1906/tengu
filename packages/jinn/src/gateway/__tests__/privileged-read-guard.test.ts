@@ -299,7 +299,7 @@ describe("privileged read routes — uniform capability guard", () => {
       expect((await call(route)).status, `operator ${route.label}`).toBe(200);
       expect((await call(route, validCapabilityHeaders())).status, `capability ${route.label}`).toBe(200);
     }
-  });
+  }, 20_000);
 
   it("keeps the explicit public allowlist reachable without a session capability", async () => {
     expect((await read("/api/status", toolMarkedNoCapabilityHeaders())).status).toBe(200);

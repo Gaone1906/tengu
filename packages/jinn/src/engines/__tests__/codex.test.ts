@@ -599,7 +599,9 @@ describe("CodexEngine — error / failure handling", () => {
 
 describe("CodexEngine — process lifecycle", () => {
   it("exports the Jinn session id to spawned commands", async () => {
-    const engine = new CodexEngine();
+    const engine = new CodexEngine({
+      codexSessionsDir: fs.mkdtempSync(path.join(os.tmpdir(), "codex-env-")),
+    });
     const promise = engine.run({
       prompt: "hi",
       cwd: "/tmp",
