@@ -488,7 +488,10 @@ export function useLiveSession(
           }
           setMessages((prev) => {
             if (intermediateStartRef.current < 0) intermediateStartRef.current = prev.length
-            return applyBlockEnvelopeToMessages(prev, envelope, String(p.content || ''), Date.now())
+            const fallback = envelope.op === 'patch' && envelope.block.type === 'delegation'
+              ? ''
+              : String(p.content || '')
+            return applyBlockEnvelopeToMessages(prev, envelope, fallback, Date.now())
           })
         } else if (deltaType === 'context') {
           const n = Number(p.content)

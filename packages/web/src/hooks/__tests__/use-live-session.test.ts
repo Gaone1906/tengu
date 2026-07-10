@@ -406,6 +406,77 @@ describe("useLiveSession (read-only)", () => {
     expect(result.current.messages.filter((m) => m.content === "Intro")).toHaveLength(1)
   })
 
+  it.each([
+    {
+      label: "successful",
+      status: "done",
+      displayMessage: "📩 Design Lead replied\nThe design is ready.",
+      meta: { kind: "child-reply", employee: "design-lead", childSessionId: "child-1" },
+    },
+    {
+      label: "failed",
+      status: "error",
+      displayMessage: "⚠️ Design Lead couldn't finish\nThe build failed.",
+      meta: { kind: "child-error", employee: "design-lead", childSessionId: "child-1" },
+    },
+  ])("renders a $label live child callback exactly once", async ({ status, displayMessage, meta }) => {
+    const taskTitle = "Redesign the workflow canvas"
+    getSession.mockResolvedValue({
+      status: "running",
+      messages: [{
+        id: "handoff-message",
+        role: "assistant",
+        content: taskTitle,
+        timestamp: 100,
+        blocks: [{
+          id: "dg-wi-1",
+          type: "delegation",
+          version: 1,
+          status: "running",
+          payload: {
+            employee: "design-lead",
+            employeeDisplay: "Design Lead",
+            title: taskTitle,
+            childSessionId: "child-1",
+            workItemId: "wi-1",
+            dispatchedAt: 100,
+          },
+        }],
+      }],
+    })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() =>
+      useLiveSession("s1", { subscribe, readOnly: true }),
+    )
+    await act(async () => { await Promise.resolve() })
+
+    act(() => {
+      emit("session:delta", {
+        sessionId: "s1",
+        type: "block",
+        content: displayMessage,
+        block: {
+          op: "patch",
+          block: {
+            id: "dg-wi-1",
+            type: "delegation",
+            version: 1,
+            status,
+            payload: { repliedAt: 200 },
+          },
+        },
+      })
+      emit("session:notification", { sessionId: "s1", message: displayMessage, meta })
+    })
+
+    expect(result.current.messages.filter((message) => message.content === displayMessage)).toHaveLength(1)
+    expect(result.current.messages.find((message) => message.blocks?.[0]?.id === "dg-wi-1")).toMatchObject({
+      content: taskTitle,
+      blocks: [{ status }],
+    })
+    expect(result.current.messages.at(-1)).toMatchObject({ role: "notification", content: displayMessage, meta })
+  })
+
   it("keeps live task-list blocks separate from tool-call rows", async () => {
     getSession.mockResolvedValue({ status: "running", messages: [] })
     const { subscribe, emit } = makeBus()

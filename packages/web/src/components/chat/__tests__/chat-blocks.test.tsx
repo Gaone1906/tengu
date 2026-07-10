@@ -65,4 +65,31 @@ describe('ChatBlockInline', () => {
     expect(delegationStateForBlock(done)).toMatchObject({ state: 'replied', label: 'Replied' })
     expect(delegationStateForBlock(failed)).toMatchObject({ state: 'error', label: "Couldn't finish" })
   })
+
+  it('uses the mobile-safe two-line clamp for a long title at 390px', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+    const longTitle = 'Research a deliberately long mobile delegation title that would otherwise wrap onto three or four visible lines'
+    const block = {
+      id: 'dg-mobile',
+      type: 'delegation',
+      version: 1,
+      status: 'running',
+      payload: {
+        employee: 'design-lead',
+        employeeDisplay: 'Design Lead',
+        title: longTitle,
+        childSessionId: 'child-mobile',
+        workItemId: 'wi-mobile',
+        dispatchedAt: Date.now(),
+      },
+    } as ChatBlock
+
+    render(<ChatBlockInline block={block} />)
+
+    const title = screen.getByText(longTitle)
+    expect(window.innerWidth).toBe(390)
+    expect(title.classList).toContain('line-clamp-2')
+    expect(title.classList).not.toContain('block')
+    expect(title.classList).not.toContain('[display:-webkit-box]')
+  })
 })

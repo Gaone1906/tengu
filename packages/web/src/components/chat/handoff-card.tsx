@@ -52,7 +52,7 @@ export function HandoffCard({ block, onOpenThread }: HandoffCardProps) {
           <span className="truncate font-[var(--weight-semibold)] text-[var(--text-primary)]">{employeeDisplay}</span>
           <span className="shrink-0 font-[var(--weight-regular)] text-[var(--text-tertiary)]">— handed off</span>
         </span>
-        <span className="mt-px block overflow-hidden text-ellipsis text-pretty text-[length:var(--text-footnote)] leading-[var(--leading-normal)] text-[var(--text-secondary)] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [display:-webkit-box]">
+        <span className="mt-px line-clamp-2 text-pretty text-[length:var(--text-footnote)] leading-[var(--leading-normal)] text-[var(--text-secondary)]">
           {title}
         </span>
         <StateLine
