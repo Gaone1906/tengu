@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
+import { parse as parseYaml } from "yaml";
 
 function readTemplate(rel: string): string {
   return fs.readFileSync(path.join(process.cwd(), "template", rel), "utf-8");
@@ -111,6 +112,77 @@ describe("template company doctrine", () => {
     expect(readTemplate("skills/onboarding/SKILL.md")).toContain("spawn_session");
     expect(readTemplate("skills/sync/SKILL.md")).toContain("list_sessions");
     expect(readTemplate("skills/sync/SKILL.md")).toContain("read_session");
+  });
+
+  it("ships discoverable MCP-first playbooks for workflows, Todos, and delegation", () => {
+    const shipped = [
+      {
+        directory: "workflow",
+        tools: [
+          "list_workflows",
+          "get_workflow",
+          "plan_workflow",
+          "validate_workflow",
+          "create_workflow",
+          "run_workflow_by_name",
+          "list_workflow_runs",
+          "get_workflow_run",
+          "jinn workflow run <name>",
+          "idempotencyKey",
+          "PLAN",
+          "IMPLEMENT",
+          "VERIFY",
+          "todo-status",
+        ],
+      },
+      {
+        directory: "todo-handling",
+        tools: [
+          "list_work_items",
+          "search_work_items",
+          "get_work_item",
+          "create_work_item",
+          "assign_work_item",
+          "update_work_item",
+          "archive_work_item",
+          "in_review",
+          "blocked",
+          "escalated",
+        ],
+      },
+      {
+        directory: "delegation",
+        tools: [
+          "list_employees",
+          "find_employees",
+          "get_employee",
+          "delegate_task",
+          "spawn_session",
+          "send_to_session",
+          "read_session",
+          "stop_session",
+          "idempotencyKey",
+        ],
+      },
+    ];
+
+    for (const { directory, tools } of shipped) {
+      const rel = `skills/${directory}/SKILL.md`;
+      const content = readTemplate(rel);
+      const frontmatter = content.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
+      expect(frontmatter, `${rel} frontmatter`).not.toBeNull();
+      const metadata = parseYaml(frontmatter![1]) as Record<string, unknown>;
+      expect(metadata.name, rel).toBe(directory);
+      expect(typeof metadata.description, rel).toBe("string");
+      expect(String(metadata.description).trim().length, rel).toBeGreaterThan(0);
+      expect(content, rel).not.toMatch(/\b(?:GET|POST|PUT|PATCH|DELETE)\s+\/api\//);
+      expect(content, rel).not.toMatch(/\bcurl\b.*\/api\//);
+      expect(content, rel).not.toContain("gateway API");
+      for (const expected of tools) expect(content, `${rel}: ${expected}`).toContain(expected);
+    }
+
+    const setup = fs.readFileSync(path.join(process.cwd(), "src", "cli", "setup.ts"), "utf-8");
+    expect(setup).toContain('copyTemplateDir(path.join(TEMPLATE_DIR, "skills"), SKILLS_DIR');
   });
 
   it("includes the pre-merge template staleness audit report", () => {
