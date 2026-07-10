@@ -1,5 +1,6 @@
 import { AlertTriangle, Check, Circle, Loader2 } from 'lucide-react'
 import type { ChatBlock, JsonObject, JsonValue } from '@/lib/blocks'
+import { HandoffCard } from './handoff-card'
 
 function asRecord(value: JsonValue | undefined): JsonObject | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : null
@@ -28,7 +29,17 @@ export function statusMark(status: string | undefined) {
 
 const INLINE_MAX_WIDTH = 'max-w-[min(620px,calc(100vw_-_var(--space-10)))]'
 
-export function ChatBlockInline({ block }: { block: ChatBlock }) {
+export function ChatBlockInline({
+  block,
+  onOpenThread,
+}: {
+  block: ChatBlock
+  onOpenThread?: (sessionId: string) => void
+}) {
+  if (block.type === 'delegation') {
+    return <HandoffCard block={block} onOpenThread={onOpenThread} />
+  }
+
   const all = asArray(block.payload.items)
   const items = all.slice(0, 6)
   const done = all.filter((raw) => isDoneStatus(asText(asRecord(raw)?.status))).length

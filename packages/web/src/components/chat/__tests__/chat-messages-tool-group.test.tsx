@@ -176,4 +176,65 @@ describe('ChatMessages tool groups', () => {
     expect(within(group).getByText('tool_12')).toBeTruthy()
     expect(within(group).queryByRole('button', { name: /show 2 more/i })).toBeNull()
   })
+
+  it('filters delegate_task from the generic tool pill', () => {
+    const messages: Message[] = [
+      {
+        id: 'delegate',
+        role: 'assistant',
+        content: 'Used delegate_task',
+        timestamp: 100,
+        toolCall: 'delegate_task',
+      },
+      {
+        id: 'read',
+        role: 'assistant',
+        content: 'Used read_session',
+        timestamp: 101,
+        toolCall: 'read_session',
+      },
+      {
+        id: 'handoff',
+        role: 'assistant',
+        content: 'Handed off',
+        timestamp: 102,
+        blocks: [{
+          id: 'dg-1',
+          type: 'delegation',
+          version: 1,
+          status: 'running',
+          payload: {
+            employee: 'researcher',
+            employeeDisplay: 'Researcher',
+            title: 'Research the issue',
+            childSessionId: 'child-1',
+            workItemId: 'wi-1',
+            dispatchedAt: 100,
+          },
+        }],
+      },
+    ]
+
+    render(<ChatMessages messages={messages} loading={false} />)
+
+    expect(screen.getByRole('button', { name: /^1 tool$/i })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /^1 tool$/i }))
+    expect(screen.queryByText('delegate_task')).toBeNull()
+    expect(screen.getByText('read_session')).toBeTruthy()
+  })
+
+  it('keeps legacy delegate_task rows when no handoff card exists', () => {
+    const messages: Message[] = [{
+      id: 'delegate',
+      role: 'assistant',
+      content: 'Used delegate_task',
+      timestamp: 100,
+      toolCall: 'delegate_task',
+    }]
+
+    render(<ChatMessages messages={messages} loading={false} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /^1 tool$/i }))
+    expect(screen.getByText('delegate_task')).toBeTruthy()
+  })
 })

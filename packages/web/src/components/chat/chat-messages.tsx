@@ -8,6 +8,7 @@ import { useMessageTts, stopMessageTts } from './use-message-tts'
 import { ChatBlockInline, statusMark } from './chat-blocks'
 import { blockFallbackContent } from '@/lib/blocks'
 import { ChevronDown, Wrench } from 'lucide-react'
+import { parseTeammateReply, TeammateReply } from './teammate-reply'
 
 /* ── Tool grouping ──────────────────────────────────────── */
 
@@ -28,18 +29,30 @@ function findActiveToolIndex(msgs: Message[]): number {
   return -1
 }
 
+function isDelegationToolCall(msg: Message): boolean {
+  const name = msg.toolCall || ''
+  return name === 'delegate_task' || name.endsWith('__delegate_task')
+}
+
 function groupMessages(messages: Message[]): MessageItem[] {
   const items: MessageItem[] = []
+  const hasDelegationBlock = messages.some((message) =>
+    message.blocks?.some((block) => block.type === 'delegation'),
+  )
   let i = 0
   while (i < messages.length) {
+    if (hasDelegationBlock && messages[i].role === 'assistant' && messages[i].toolCall && isDelegationToolCall(messages[i])) {
+      i++
+      continue
+    }
     if (messages[i].role === 'assistant' && messages[i].toolCall) {
       const toolMsgs: Message[] = []
       const start = i
       while (i < messages.length && messages[i].role === 'assistant' && messages[i].toolCall) {
-        toolMsgs.push(messages[i])
+        if (!hasDelegationBlock || !isDelegationToolCall(messages[i])) toolMsgs.push(messages[i])
         i++
       }
-      items.push({ kind: 'tool-group', msgs: toolMsgs, startIndex: start })
+      if (toolMsgs.length > 0) items.push({ kind: 'tool-group', msgs: toolMsgs, startIndex: start })
     } else {
       items.push({ kind: 'message', msg: messages[i], index: i })
       i++
@@ -680,15 +693,17 @@ interface MessageRowProps {
   messages: Message[]
   loading?: boolean
   onRetry?: (text: string) => void
+  onOpenThread?: (sessionId: string) => void
 }
 
-const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loading, onRetry }: MessageRowProps) {
+const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loading, onRetry, onOpenThread }: MessageRowProps) {
   const isUser = msg.role === 'user'
   const isNotification = msg.role === 'notification'
   const showTimestamp = shouldShowTimestamp(messages, i)
   const media = msg.media || parseMedia(msg.content)
   const blocks = msg.blocks || []
   const hasBlocks = blocks.length > 0
+  const teammate = useMemo(() => parseTeammateReply(msg), [msg])
 
   // Strip media URLs from text for display
   let textContent = msg.content
@@ -717,6 +732,10 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
 
   // Memoize the expensive formatting — re-runs only when textContent changes
   const formattedContent = useMemo(() => formatMessage(textContent), [textContent])
+  const formattedTeammatePreview = useMemo(
+    () => teammate ? formatMessage(teammate.preview) : null,
+    [teammate],
+  )
 
   // Memoize timestamp formatting — avoids Date allocations on every parent re-render
   const formattedTimestamp = useMemo(() => formatTimestamp(msg.timestamp), [msg.timestamp])
@@ -746,7 +765,7 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
       )}
 
       {/* Notification message — centered system-style banner */}
-      {isNotification && (
+      {isNotification && !teammate && (
         <div className="flex justify-center px-[var(--space-4)] mb-[var(--space-1)]">
           <div className="notification-msg-bubble flex items-start gap-[var(--space-2)] py-[var(--space-3)] px-[var(--space-4)] rounded-[var(--radius-md)] bg-[var(--fill-secondary)] text-[var(--text-secondary)] text-[length:var(--text-caption1)] leading-[var(--leading-relaxed)] max-w-[85%]">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-0.5 opacity-60">
@@ -755,6 +774,17 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
             </svg>
             <span>{formattedContent}</span>
           </div>
+        </div>
+      )}
+
+      {teammate && (
+        <div className="assistant-msg-row mb-[var(--space-1)] min-w-0">
+          <TeammateReply
+            data={teammate}
+            timestamp={msg.timestamp}
+            formattedPreview={formattedTeammatePreview}
+            onOpenThread={onOpenThread}
+          />
         </div>
       )}
 
@@ -791,6 +821,7 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
                   <ChatBlockInline
                     key={block.id}
                     block={block}
+                    onOpenThread={onOpenThread}
                   />
                 ))}
               </div>
@@ -846,6 +877,8 @@ interface ChatMessagesProps {
   loadingOlderMessages?: boolean
   olderMessagesError?: Error | null
   onLoadOlderMessages?: () => Promise<void> | void
+  /** Navigate to a child session from a handoff card or teammate reply. */
+  onOpenThread?: (sessionId: string) => void
 }
 
 const JUMP_EXIT_MS = 140
@@ -969,6 +1002,7 @@ export function ChatMessages({
   loadingOlderMessages = false,
   olderMessagesError = null,
   onLoadOlderMessages,
+  onOpenThread,
 }: ChatMessagesProps) {
   // Stick-to-bottom: one hook owns follow-intent, growth-follow, resize/keyboard,
   // tab-return, mount-snap, and the jump affordance. See use-stick-to-bottom.ts.
@@ -1103,6 +1137,7 @@ export function ChatMessages({
                 messages={messages}
                 loading={loading}
                 onRetry={onRetry}
+                onOpenThread={onOpenThread}
               />
             )
           })}

@@ -3746,6 +3746,9 @@ export async function handleApiRequest(
           prompt: task,
           title,
           portalName: config.portal?.portalName,
+          transportMeta: delegateEmployee?.displayName
+            ? { delegationEmployeeDisplay: delegateEmployee.displayName }
+            : undefined,
         });
       } catch (spawnErr) {
         const replay = idempotencySessionKey ? getSessionBySessionKey(idempotencySessionKey) : undefined;
@@ -3800,6 +3803,36 @@ export async function handleApiRequest(
         reconcileWorkItem(workItem.id);
       } catch (reconcileErr) {
         logger.warn(`Delegation ${workItem.id} reconcile failed: ${reconcileErr instanceof Error ? reconcileErr.message : reconcileErr}`);
+      }
+      if (parentSessionId && getSession(parentSessionId)) {
+        const handoffEnvelope: ChatBlockEnvelope = {
+          op: "put",
+          block: {
+            id: `dg-${workItem.id}`,
+            type: "delegation",
+            version: 1,
+            status: "running",
+            payload: {
+              employee: employeeName ?? engineName,
+              employeeDisplay: delegateEmployee?.displayName ?? employeeName ?? engineName,
+              title,
+              childSessionId: session.id,
+              workItemId: workItem.id,
+              dispatchedAt: Date.parse(session.createdAt) || Date.now(),
+            },
+          },
+        };
+        try {
+          applyBlockEnvelope(parentSessionId, handoffEnvelope, title);
+          context.emit("session:delta", {
+            sessionId: parentSessionId,
+            type: "block",
+            content: title,
+            block: handoffEnvelope,
+          });
+        } catch (blockErr) {
+          logger.warn(`Delegation ${workItem.id} handoff block failed: ${blockErr instanceof Error ? blockErr.message : blockErr}`);
+        }
       }
       logger.info(`Delegation ${workItem.id}: session ${session.id} linked + dispatching for ${employeeName ?? engineName}`);
       const delegationQueueKey = session.sessionKey || session.sourceRef || session.id;
@@ -4042,6 +4075,29 @@ export async function handleApiRequest(
         typeof body.displayMessage === "string" && body.displayMessage.trim()
           ? body.displayMessage
           : prompt;
+      let notificationMeta: JsonObject | undefined;
+      if (isNotification && body.meta && typeof body.meta === "object" && !Array.isArray(body.meta)) {
+        const rawMeta = body.meta as Record<string, unknown>;
+        const kind = rawMeta.kind === "child-reply" || rawMeta.kind === "child-error" ? rawMeta.kind : undefined;
+        const employee = typeof rawMeta.employee === "string" ? stripControlChars(rawMeta.employee).trim().slice(0, 160) : "";
+        const employeeDisplay = typeof rawMeta.employeeDisplay === "string" ? stripControlChars(rawMeta.employeeDisplay).trim().slice(0, 160) : "";
+        const childSessionId = typeof rawMeta.childSessionId === "string" ? stripControlChars(rawMeta.childSessionId).trim().slice(0, 160) : "";
+        if (kind && employee && childSessionId) {
+          notificationMeta = {
+            kind,
+            employee,
+            ...(employeeDisplay ? { employeeDisplay } : {}),
+            childSessionId,
+          };
+        }
+      }
+
+      let notificationBlock: ChatBlockEnvelope | undefined;
+      if (isNotification && body.block !== undefined) {
+        const validated = validateBlockEnvelope(body.block);
+        if (!validated.ok) return badRequest(res, validated.error);
+        notificationBlock = validated.envelope;
+      }
 
       const config = context.getConfig();
       // CLI-mode sends route to the engine's PTY view when one exists so the
@@ -4075,10 +4131,26 @@ export async function handleApiRequest(
         messageRole,
         isNotification ? displayMessage : prompt,
         userMedia.length > 0 ? userMedia : undefined,
+        undefined,
+        undefined,
+        notificationMeta,
       );
+      if (notificationBlock) {
+        applyBlockEnvelope(session.id, notificationBlock);
+        context.emit("session:delta", {
+          sessionId: session.id,
+          type: "block",
+          content: displayMessage,
+          block: notificationBlock,
+        });
+      }
       // Push the banner live to any connected web client viewing the parent.
       if (isNotification) {
-        context.emit("session:notification", { sessionId: session.id, message: displayMessage });
+        context.emit("session:notification", {
+          sessionId: session.id,
+          message: displayMessage,
+          ...(notificationMeta ? { meta: notificationMeta } : {}),
+        });
       }
       // Note: notification-role messages (e.g. child session callbacks) fall
       // through to enqueue + dispatch so the engine (e.g. the COO) actually

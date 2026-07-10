@@ -9,6 +9,7 @@ import type {
 
 const BLOCK_TYPES = new Set<ChatBlockType>([
   "task-list",
+  "delegation",
 ]);
 const STATUSES = new Set<ChatBlockStatus>(["queued", "running", "done", "error"]);
 const OPS = new Set(["put", "patch", "remove"]);
@@ -77,6 +78,16 @@ function validatePayload(type: ChatBlockType, payload: JsonObject, op: string): 
       }
     }
   }
+  if (type === "delegation" && op === "put") {
+    for (const field of ["employee", "employeeDisplay", "title", "childSessionId", "workItemId"] as const) {
+      if (typeof payload[field] !== "string" || !payload[field].trim()) {
+        return `delegation payload requires ${field}`;
+      }
+    }
+    if (typeof payload.dispatchedAt !== "number" || !Number.isFinite(payload.dispatchedAt)) {
+      return "delegation payload requires dispatchedAt";
+    }
+  }
   return null;
 }
 
@@ -140,6 +151,11 @@ export function blockFallbackText(block: ChatBlock): string {
   if (block.type === "task-list") {
     const items = Array.isArray(block.payload.items) ? block.payload.items : [];
     return `${prefix}: ${items.length} item${items.length === 1 ? "" : "s"}`;
+  }
+  if (block.type === "delegation") {
+    return typeof block.payload.title === "string" && block.payload.title.trim()
+      ? block.payload.title
+      : prefix;
   }
   return prefix;
 }

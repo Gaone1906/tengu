@@ -86,7 +86,10 @@ describe("notifyParentSession", () => {
   });
 
   it("sends a full LLM message plus a clean display banner on success", async () => {
-    const child = makeSession();
+    const child = makeSession({
+      workItemId: "wi_123",
+      transportMeta: { delegationEmployeeDisplay: "Test Employee" },
+    });
 
     notifyParentSession(child, { result: "Some result" });
     await new Promise((r) => setTimeout(r, 50));
@@ -105,6 +108,21 @@ describe("notifyParentSession", () => {
     expect(body.displayMessage).toContain("test-employee replied");
     expect(body.displayMessage).toContain("Some result");
     expect(body.displayMessage).not.toContain("GET /api/sessions");
+    expect(body.meta).toMatchObject({
+      kind: "child-reply",
+      employee: "test-employee",
+      employeeDisplay: "Test Employee",
+      childSessionId: "child-001",
+    });
+    expect(body.block).toMatchObject({
+      op: "patch",
+      block: {
+        id: "dg-wi_123",
+        type: "delegation",
+        status: "done",
+      },
+    });
+    expect(typeof body.block.block.payload.repliedAt).toBe("number");
   });
 
   it("caps the LLM preview at 500 chars and keeps the display preview shorter", async () => {
@@ -138,7 +156,7 @@ describe("notifyParentSession", () => {
   });
 
   it("error notifications contain the error message", async () => {
-    const child = makeSession();
+    const child = makeSession({ workItemId: "wi_123" });
 
     notifyParentSession(child, { error: "Something broke" });
     await new Promise((r) => setTimeout(r, 50));
@@ -147,6 +165,12 @@ describe("notifyParentSession", () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.message).toContain("Something broke");
     expect(body.message).toContain("⚠️");
+    expect(body.displayMessage).toBe("⚠️ test-employee couldn't finish\nSomething broke");
+    expect(body.meta).toMatchObject({ kind: "child-error", childSessionId: "child-001" });
+    expect(body.block).toMatchObject({
+      op: "patch",
+      block: { id: "dg-wi_123", type: "delegation", status: "error" },
+    });
   });
 
   it('sends with "notification" role', async () => {
@@ -335,7 +359,7 @@ describe("notifyParentSession — talk parent (voice-friendly message)", () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     const expectedMessage = `⚠️ Employee "test-employee" (child session child-001) hit an error and could not finish: Something broke`;
     expect(body.message).toBe(expectedMessage);
-    expect(body.displayMessage).toBe(`⚠️ test-employee couldn't finish`);
+    expect(body.displayMessage).toBe(`⚠️ test-employee couldn't finish\nSomething broke`);
   });
 });
 

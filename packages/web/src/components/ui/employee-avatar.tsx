@@ -5,6 +5,7 @@ import { emojiForName } from "@/lib/emoji-pool"
 interface EmployeeAvatarProps {
   name: string
   size?: number
+  fontSize?: number
   className?: string
   onClick?: () => void
 }
@@ -12,13 +13,14 @@ interface EmployeeAvatarProps {
 export function EmployeeAvatar({
   name,
   size = 32,
+  fontSize: fontSizeOverride,
   className,
   onClick,
 }: EmployeeAvatarProps) {
   const { settings } = useSettings()
   const override = name ? settings.employeeOverrides[name] : undefined
   const emoji = override?.emoji || emojiForName(name || '')
-  const fontSize = Math.round(size * 0.6)
+  const fontSize = fontSizeOverride ?? Math.round(size * 0.6)
 
   return (
     <span
@@ -48,12 +50,13 @@ export function EmployeeAvatar({
 export function AvatarPreview({
   name,
   size = 32,
+  fontSize: fontSizeOverride,
   className,
   onClick,
   emoji: overrideEmoji,
 }: EmployeeAvatarProps & { emoji?: string }) {
   const emoji = overrideEmoji || emojiForName(name)
-  const fontSize = Math.round(size * 0.6)
+  const fontSize = fontSizeOverride ?? Math.round(size * 0.6)
 
   return (
     <span

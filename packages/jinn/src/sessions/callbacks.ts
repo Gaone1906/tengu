@@ -5,6 +5,7 @@ import type { Session } from "../shared/types.js";
 import { GATEWAY_INFO_FILE } from "../shared/paths.js";
 import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
 import { hydrateAllAttachments, talkSessionsAttachedTo } from "../talk/attachments.js";
+import type { ChatBlockEnvelope, JsonObject } from "../shared/types.js";
 
 /**
  * Notify the parent session that a child session has replied.
@@ -173,11 +174,14 @@ async function _sendNotification(
 
   let message: string;
   let displayMessage: string;
+  let notificationMeta: JsonObject | undefined;
+  let notificationBlock: ChatBlockEnvelope | undefined;
   if (isTalkParent) {
     ({ message, displayMessage } = buildTalkWake(talkLabel(childSession), result));
   } else if (result.error) {
     message = `⚠️ Employee "${employeeName}" (child session ${childId}) hit an error and could not finish: ${result.error}`;
-    displayMessage = `⚠️ ${employeeName} couldn't finish`;
+    displayMessage = `⚠️ ${employeeName} couldn't finish\n${_clean(result.error, 220)}`;
+    notificationMeta = childNotificationMeta("child-error", childSession);
   } else {
     const raw = (result.result || "").trim() || "(no output)";
     const llmPreview = raw.length > 500 ? raw.slice(0, 500) + "…" : raw;
@@ -187,9 +191,39 @@ async function _sendNotification(
       `To read the full reply: GET /api/sessions/${childId}?last=N · ` +
       `to follow up: POST /api/sessions/${childId}/message`;
     displayMessage = `📩 ${employeeName} replied\n${_clean(raw, 220)}`;
+    notificationMeta = childNotificationMeta("child-reply", childSession);
   }
 
-  await _sendRaw(childSession.parentSessionId!, message, displayMessage);
+  if (!isTalkParent && childSession.workItemId) {
+    notificationBlock = {
+      op: "patch",
+      block: {
+        id: `dg-${childSession.workItemId}`,
+        type: "delegation",
+        version: 1,
+        status: result.error ? "error" : "done",
+        payload: { repliedAt: Date.now() },
+      },
+    };
+  }
+
+  await _sendRaw(childSession.parentSessionId!, message, displayMessage, {
+    meta: notificationMeta,
+    block: notificationBlock,
+  });
+}
+
+function childNotificationMeta(kind: "child-reply" | "child-error", childSession: Session): JsonObject {
+  const employee = childSession.employee || "Unknown";
+  const storedDisplay = childSession.transportMeta?.delegationEmployeeDisplay;
+  const employeeDisplay = typeof storedDisplay === "string" && storedDisplay.trim()
+    ? storedDisplay.trim()
+    : employee
+        .split(/[-_\s]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+  return { kind, employee, employeeDisplay, childSessionId: childSession.id };
 }
 
 /** Trim to a word boundary for a tidy human-facing preview. */
@@ -242,6 +276,7 @@ async function _sendRaw(
   parentSessionId: string,
   message: string,
   displayMessage?: string,
+  structured?: { meta?: JsonObject; block?: ChatBlockEnvelope },
 ): Promise<void> {
   const gateway = internalGatewayConnection();
 
@@ -252,6 +287,8 @@ async function _sendRaw(
       message,
       role: "notification",
       ...(displayMessage ? { displayMessage } : {}),
+      ...(structured?.meta ? { meta: structured.meta } : {}),
+      ...(structured?.block ? { block: structured.block } : {}),
     }),
   });
   if (!response.ok) throw new Error(`parent notification failed (${response.status})`);

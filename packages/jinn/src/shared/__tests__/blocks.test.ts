@@ -29,6 +29,52 @@ describe("chat blocks", () => {
     }
   });
 
+  it("accepts delegation puts and partial callback patches", () => {
+    const put = validateBlockEnvelope({
+      op: "put",
+      block: {
+        id: "dg-wi_123",
+        type: "delegation",
+        version: 1,
+        status: "running",
+        payload: {
+          employee: "design-lead",
+          employeeDisplay: "Design Lead",
+          title: "Redesign the workflow canvas",
+          childSessionId: "child-123",
+          workItemId: "wi_123",
+          dispatchedAt: 1_780_000_000_000,
+        },
+      },
+    });
+
+    expect(put.ok).toBe(true);
+    if (put.ok) expect(blockFallbackText(put.envelope.block)).toBe("Redesign the workflow canvas");
+
+    expect(validateBlockEnvelope({
+      op: "patch",
+      block: {
+        id: "dg-wi_123",
+        type: "delegation",
+        version: 1,
+        status: "done",
+        payload: { repliedAt: 1_780_000_120_000 },
+      },
+    }).ok).toBe(true);
+  });
+
+  it("rejects incomplete delegation puts", () => {
+    expect(validateBlockEnvelope({
+      op: "put",
+      block: {
+        id: "dg-wi_123",
+        type: "delegation",
+        version: 1,
+        payload: { employee: "design-lead" },
+      },
+    })).toMatchObject({ ok: false, error: "delegation payload requires employeeDisplay" });
+  });
+
   it("rejects unsupported block types", () => {
     const result = validateBlockEnvelope({
       op: "put",

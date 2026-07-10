@@ -42,7 +42,7 @@ process.env.JINN_HOME = tmpHome;
 fs.mkdirSync(path.join(tmpHome, "org"), { recursive: true });
 fs.writeFileSync(
   path.join(tmpHome, "org", "qa-emp.yaml"),
-  ["name: qa-emp", "department: qa", "engine: codex", "model: gpt-5.5", "persona: QA employee for route tests", ""].join("\n"),
+  ["name: qa-emp", "displayName: QA Employee", "department: qa", "engine: codex", "model: gpt-5.5", "persona: QA employee for route tests", ""].join("\n"),
 );
 // GRS-017f: an employee whose CONFIGURED model this gateway doesn't register
 // (only gpt-5.5 is known for codex here) — the misconfig the clear error targets.
@@ -95,6 +95,7 @@ let engineAvailable = true;
 // Every engine.run invocation is captured so tests can assert what the web
 // dispatch path actually hands the engine (the identity-stamped resolvedMcp).
 const engineRuns: Array<Record<string, unknown>> = [];
+const emittedEvents: Array<{ event: string; payload: any }> = [];
 const engineStub = {
   name: "stub",
   run: async (opts: Record<string, unknown>) => {
@@ -138,7 +139,7 @@ const apiCtx = {
   connectors: new Map(),
   startTime: Date.now(),
   gatewayAuthToken: "test-token",
-  emit: () => {},
+  emit: (event: string, payload: unknown) => emittedEvents.push({ event, payload }),
   sessionManager: {
     getEngines: () => new Map(),
     getEngine: () => (engineAvailable ? engineStub : undefined),
@@ -228,7 +229,7 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
     const resp = await call(
       "POST",
       "/api/delegations",
-      { engine: "codex", task: "child chore", title: "child chore" },
+      { employee: "qa-emp", task: "child chore", title: "child chore" },
       { [CALLER_SESSION_HEADER]: parentId, [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(parentId) },
     );
     expect(resp.status).toBe(201);
@@ -236,6 +237,76 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
     expect(session.parentSessionId).toBe(parentId);
     const item = store.getWorkItem(resp.body.workItemId)!;
     expect(item.sourceRef).toMatch(new RegExp(`^delegate:${parentId}:`));
+
+    const parentMessages = reg.getMessages(parentId);
+    const handoff = parentMessages.flatMap((message) => message.blocks ?? []).find((block) => block.id === `dg-${resp.body.workItemId}`);
+    expect(handoff).toMatchObject({
+      type: "delegation",
+      status: "running",
+      payload: {
+        employee: "qa-emp",
+        employeeDisplay: "QA Employee",
+        title: "child chore",
+        childSessionId: resp.body.sessionId,
+        workItemId: resp.body.workItemId,
+      },
+    });
+    expect(typeof handoff?.payload.dispatchedAt).toBe("number");
+    expect(emittedEvents).toContainEqual(expect.objectContaining({
+      event: "session:delta",
+      payload: expect.objectContaining({
+        sessionId: parentId,
+        type: "block",
+        block: expect.objectContaining({ op: "put" }),
+      }),
+    }));
+  });
+
+  it("persists callback metadata and patches the durable handoff block", async () => {
+    const parentId = await createOperatorSession("delegate and receive a callback");
+    const delegated = await call(
+      "POST",
+      "/api/delegations",
+      { employee: "qa-emp", task: "Review the release", title: "Release review" },
+      { [CALLER_SESSION_HEADER]: parentId, [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(parentId) },
+    );
+    const repliedAt = Date.now();
+    const block = {
+      op: "patch",
+      block: {
+        id: `dg-${delegated.body.workItemId}`,
+        type: "delegation",
+        version: 1,
+        status: "done",
+        payload: { repliedAt },
+      },
+    };
+    const meta = {
+      kind: "child-reply",
+      employee: "qa-emp",
+      employeeDisplay: "QA Employee",
+      childSessionId: delegated.body.sessionId,
+    };
+
+    const callback = await call("POST", `/api/sessions/${parentId}/message`, {
+      message: "engine-facing callback",
+      role: "notification",
+      displayMessage: "📩 QA Employee replied\nRelease is ready.",
+      meta,
+      block,
+    });
+    expect(callback.status).toBe(200);
+
+    const messages = reg.getMessages(parentId);
+    expect(messages.find((message) => message.role === "notification")).toMatchObject({ meta });
+    expect(messages.flatMap((message) => message.blocks ?? []).find((candidate) => candidate.id === block.block.id)).toMatchObject({
+      status: "done",
+      payload: expect.objectContaining({ repliedAt }),
+    });
+    expect(emittedEvents).toContainEqual(expect.objectContaining({
+      event: "session:notification",
+      payload: expect.objectContaining({ message: "📩 QA Employee replied\nRelease is ready.", meta }),
+    }));
   });
 
   it("an explicit body parentSessionId wins over the header (internal callers unchanged)", async () => {

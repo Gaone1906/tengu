@@ -346,6 +346,9 @@ export function migrateMessagesSchema(database: Database.Database): void {
   if (!colNames.has('blocks')) {
     database.exec('ALTER TABLE messages ADD COLUMN blocks TEXT');
   }
+  if (!colNames.has('meta')) {
+    database.exec('ALTER TABLE messages ADD COLUMN meta TEXT');
+  }
 }
 
 function getMeta(database: Database.Database, key: string): string | null {
@@ -1528,8 +1531,8 @@ export function duplicateSession(sourceId: string, newTitle?: string): { session
 
   // Copy session + messages in a single transaction for consistency
   const messages = db.prepare(
-    'SELECT role, content, timestamp, media, blocks FROM messages WHERE session_id = ? ORDER BY timestamp ASC',
-  ).all(sourceId) as Array<{ role: string; content: string; timestamp: number; media: string | null; blocks: string | null }>;
+    'SELECT role, content, timestamp, media, blocks, meta FROM messages WHERE session_id = ? ORDER BY timestamp ASC',
+  ).all(sourceId) as Array<{ role: string; content: string; timestamp: number; media: string | null; blocks: string | null; meta: string | null }>;
 
   const txn = db.transaction(() => {
     db.prepare(`
@@ -1559,10 +1562,10 @@ export function duplicateSession(sourceId: string, newTitle?: string): { session
     );
 
     const insertMsg = db.prepare(
-      'INSERT INTO messages (id, session_id, role, content, timestamp, media, blocks) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO messages (id, session_id, role, content, timestamp, media, blocks, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     );
     for (const msg of messages) {
-      insertMsg.run(uuidv4(), newId, msg.role, msg.content, msg.timestamp, msg.media ?? null, msg.blocks ?? null);
+      insertMsg.run(uuidv4(), newId, msg.role, msg.content, msg.timestamp, msg.media ?? null, msg.blocks ?? null, msg.meta ?? null);
     }
   });
   txn();
@@ -1627,6 +1630,8 @@ export interface SessionMessage {
   toolCall?: string;
   /** Structured Chat Mode blocks rendered by the web UI. */
   blocks?: ChatBlock[];
+  /** Safe structured UI metadata, used for reload-stable callback attribution. */
+  meta?: JsonObject;
 }
 
 interface MessageRow {
@@ -1640,6 +1645,7 @@ interface MessageRow {
   seq: number | null;
   tool_call: string | null;
   blocks: string | null;
+  meta: string | null;
 }
 
 export interface MessagePage {
@@ -1679,12 +1685,24 @@ function parseBlocksColumn(value: unknown): ChatBlock[] | undefined {
   }
 }
 
+function parseMetaColumn(value: unknown): JsonObject | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as JsonObject : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function rowToMessage(r: MessageRow): SessionMessage {
   const msg: SessionMessage = { id: r.id, role: r.role, content: r.content, timestamp: r.timestamp };
   const media = parseMediaColumn(r.media);
   const blocks = parseBlocksColumn(r.blocks);
+  const meta = parseMetaColumn(r.meta);
   if (media) msg.media = media;
   if (blocks) msg.blocks = blocks;
+  if (meta) msg.meta = meta;
   if (r.partial) msg.partial = true;
   if (r.tool_call) msg.toolCall = r.tool_call;
   return msg;
@@ -1717,7 +1735,15 @@ function isSyntheticBlockRow(rowId: string, content: string, block: ChatBlock | 
   return isSyntheticBlockContent(content, block, fallbackText);
 }
 
-export function insertMessage(sessionId: string, role: string, content: string, media?: MessageMedia[], blocks?: ChatBlock[], presetId?: string): string {
+export function insertMessage(
+  sessionId: string,
+  role: string,
+  content: string,
+  media?: MessageMedia[],
+  blocks?: ChatBlock[],
+  presetId?: string,
+  meta?: JsonObject,
+): string {
   const db = initDb();
   // presetId (GRS-016e-fix2): workflow follow-up turns pre-mint the row id and
   // persist it as the receipt's settle anchor BEFORE this insert — the row must
@@ -1726,8 +1752,9 @@ export function insertMessage(sessionId: string, role: string, content: string, 
   const id = presetId ?? uuidv4();
   const mediaJson = media && media.length > 0 ? JSON.stringify(media) : null;
   const blocksJson = blocks && blocks.length > 0 ? JSON.stringify(blocks) : null;
-  db.prepare('INSERT INTO messages (id, session_id, role, content, timestamp, media, blocks) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
-    id, sessionId, role, content, Date.now(), mediaJson, blocksJson,
+  const metaJson = meta ? JSON.stringify(meta) : null;
+  db.prepare('INSERT INTO messages (id, session_id, role, content, timestamp, media, blocks, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    id, sessionId, role, content, Date.now(), mediaJson, blocksJson, metaJson,
   );
   return id;
 }
@@ -1735,7 +1762,7 @@ export function insertMessage(sessionId: string, role: string, content: string, 
 export function getMessages(sessionId: string): SessionMessage[] {
   const db = initDb();
   const rows = db
-    .prepare('SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks FROM messages WHERE session_id = ? ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC')
+    .prepare('SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks, meta FROM messages WHERE session_id = ? ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC')
     .all(sessionId) as MessageRow[];
   return rows.map(rowToMessage);
 }
@@ -1749,7 +1776,7 @@ export function getMessages(sessionId: string): SessionMessage[] {
 export function getPartialMessages(sessionId: string): SessionMessage[] {
   const db = initDb();
   const rows = db
-    .prepare('SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks FROM messages WHERE session_id = ? AND partial = 1 ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC')
+    .prepare('SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks, meta FROM messages WHERE session_id = ? AND partial = 1 ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC')
     .all(sessionId) as MessageRow[];
   return rows.map(rowToMessage);
 }
@@ -1768,7 +1795,7 @@ export function getMessagePage(sessionId: string, options: MessagePageOptions = 
 
     rows = db
       .prepare(`
-        SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks
+        SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks, meta
         FROM messages
         WHERE session_id = ?
           AND (
@@ -1792,7 +1819,7 @@ export function getMessagePage(sessionId: string, options: MessagePageOptions = 
   } else {
     rows = db
       .prepare(`
-        SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks
+        SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks, meta
         FROM messages
         WHERE session_id = ?
         ORDER BY timestamp DESC, COALESCE(seq, 0) DESC, rowid DESC

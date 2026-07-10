@@ -21,6 +21,7 @@ describe("messages.media column", () => {
     const db = reg.initDb();
     const cols = db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
     expect(cols.map((c) => c.name)).toContain("media");
+    expect(cols.map((c) => c.name)).toContain("meta");
   });
 
   it("round-trips media as parsed JSON, defaulting to undefined", () => {
@@ -39,6 +40,17 @@ describe("messages.media column", () => {
     expect(msgs[1].media).toEqual(media);
   });
 
+  it("round-trips structured notification metadata", () => {
+    const meta = {
+      kind: "child-reply",
+      employee: "design-lead",
+      childSessionId: "child-123",
+    };
+    reg.insertMessage("s1", "notification", "A teammate replied", undefined, undefined, undefined, meta);
+
+    expect(reg.getMessages("s1").at(-1)).toMatchObject({ meta });
+  });
+
   it("migrates an existing message DB that predates the media column", () => {
     // Build a legacy DB by hand (no media column), then run the migration.
     const legacyPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "jinn-legacy-")), "legacy.db");
@@ -54,6 +66,7 @@ describe("messages.media column", () => {
 
     const cols = legacy.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
     expect(cols.map((c) => c.name)).toContain("media");
+    expect(cols.map((c) => c.name)).toContain("meta");
     // existing row preserved, media null
     const row = legacy.prepare("SELECT content, media FROM messages WHERE id='m1'").get() as {
       content: string;

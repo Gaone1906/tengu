@@ -92,6 +92,8 @@ interface ChatPaneProps {
   onShortcutsClick?: () => void
   /** Pre-selected employee for a NEW chat (e.g. contacting a session-less employee or an ?employee= deep-link). */
   initialEmployee?: string | null
+  /** Open a child thread from inline delegation/callback affordances. */
+  onOpenThread?: (sessionId: string) => void
 }
 
 export function ChatPane({
@@ -112,6 +114,7 @@ export function ChatPane({
   onShortcutsClick,
   pendingUserMessage,
   initialEmployee,
+  onOpenThread,
 }: ChatPaneProps) {
   // If this pane was opened from the onboarding wizard, the wizard stored the
   // seed user message in sessionStorage so we can display it immediately
@@ -536,6 +539,7 @@ export function ChatPane({
           loadingOlderMessages={loadingOlderMessages}
           olderMessagesError={olderMessagesError}
           onLoadOlderMessages={loadOlderMessages}
+          onOpenThread={onOpenThread}
         />
       ) : null}
 

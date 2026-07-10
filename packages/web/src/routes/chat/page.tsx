@@ -788,6 +788,7 @@ function ChatPage() {
                     ? pendingUserMessage.message
                     : undefined
                 }
+                onOpenThread={handleSelect}
               />
             )}
           </div>

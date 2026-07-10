@@ -147,6 +147,12 @@ function cloneMessages(messages: Message[]): Message[] {
   return messages.map((message) => ({ ...message }))
 }
 
+function messageMeta(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
 function pruneLiveSessionSnapshotCache(now = Date.now()) {
   for (const [id, snapshot] of liveSessionSnapshotCache) {
     if (now - snapshot.updatedAt > SESSION_SNAPSHOT_CACHE_TTL_MS) {
@@ -210,6 +216,7 @@ function normalizeHistoryMessages(history: unknown): { messages: Message[]; firs
       ...(blocks.length > 0
         ? { blocks }
         : {}),
+      ...(messageMeta(m.meta) ? { meta: messageMeta(m.meta) } : {}),
     } satisfies Message
   })
   return { messages, firstPartialIndex }
@@ -501,6 +508,7 @@ export function useLiveSession(
               role: 'notification' as const,
               content: notifMessage,
               timestamp: Date.now(),
+              ...(messageMeta(p.meta) ? { meta: messageMeta(p.meta) } : {}),
             },
           ])
         }

@@ -1,6 +1,6 @@
 export type StreamDeltaType = "text" | "text_snapshot" | "tool_use" | "tool_result" | "status" | "error" | "context" | "block";
 
-export type ChatBlockType = "task-list";
+export type ChatBlockType = "task-list" | "delegation";
 export type ChatBlockStatus = "queued" | "running" | "done" | "error";
 export type ChatBlockOp = "put" | "patch" | "remove";
 

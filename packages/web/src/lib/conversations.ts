@@ -30,6 +30,8 @@ export interface Message {
   toolCall?: string
   toolId?: string
   blocks?: ChatBlock[]
+  /** Safe structured UI metadata persisted with notification messages. */
+  meta?: Record<string, unknown>
 }
 
 /**
