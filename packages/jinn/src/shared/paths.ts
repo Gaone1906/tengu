@@ -44,6 +44,8 @@ export const SKILLS_DIR = path.join(JINN_HOME, "skills");
 export const DOCS_DIR = path.join(JINN_HOME, "docs");
 export const LOGS_DIR = path.join(JINN_HOME, "logs");
 export const TMP_DIR = path.join(JINN_HOME, "tmp");
+/** Durable, bounded terminal snapshots used to restore CLI views after restart. */
+export const PTY_SNAPSHOTS_DIR = path.join(JINN_HOME, "state", "pty-snapshots");
 export const ENGINE_LIMITS_DIR = path.join(TMP_DIR, "engine-limits");
 export const CLAUDE_LIMITS_DIR = path.join(ENGINE_LIMITS_DIR, "claude");
 export const MODELS_DIR = path.join(JINN_HOME, "models");

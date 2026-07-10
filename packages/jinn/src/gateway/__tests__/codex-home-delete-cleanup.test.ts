@@ -33,10 +33,12 @@ fs.writeFileSync(
 type Api = typeof import("../api.js");
 type Registry = typeof import("../../sessions/registry.js");
 type Paths = typeof import("../../shared/paths.js");
+type Snapshot = typeof import("../../engines/pty-snapshot.js");
 
 let api: Api;
 let registry: Registry;
 let CODEX_HOMES_DIR: string;
+let ptySnapshotStore: Snapshot["ptySnapshotStore"];
 
 const apiCtx = {
   getConfig: () => yaml.load(fs.readFileSync(path.join(tmpHome, "config.yaml"), "utf-8")) as Record<string, unknown>,
@@ -105,6 +107,7 @@ beforeAll(async () => {
   api = await import("../api.js");
   registry = await import("../../sessions/registry.js");
   const paths = (await import("../../shared/paths.js")) as Paths;
+  ({ ptySnapshotStore } = await import("../../engines/pty-snapshot.js"));
   CODEX_HOMES_DIR = paths.CODEX_HOMES_DIR;
   registry.initDb();
 });
@@ -135,5 +138,18 @@ describe("session delete removes the per-session Codex CODEX_HOME overlay", () =
     expect(res.body.count).toBe(2);
     expect(fs.existsSync(dirA)).toBe(false);
     expect(fs.existsSync(dirB)).toBe(false);
+  });
+
+  it("POST /api/sessions/:id/reset deletes the durable terminal snapshot", async () => {
+    const session = registry.createSession({ engine: "codex", source: "web", sourceRef: "reset-snapshot", title: "reset-snapshot" });
+    ptySnapshotStore.schedule(session.id, { data: "old terminal", cols: 80, rows: 24, visible: true });
+    await ptySnapshotStore.flush(session.id);
+    expect(await ptySnapshotStore.load(session.id)).toBeDefined();
+
+    const res = await call("POST", `/api/sessions/${session.id}/reset`, {});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: "reset", sessionId: session.id });
+    expect(await ptySnapshotStore.load(session.id)).toBeUndefined();
   });
 });

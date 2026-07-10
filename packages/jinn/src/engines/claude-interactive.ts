@@ -10,7 +10,7 @@ import { resolveBin } from "../shared/resolve-bin.js";
 import { buildEngineChildEnv } from "../shared/child-env.js";
 import { PtyLifecycleManager, type PtyHandle } from "./pty-lifecycle.js";
 import { PtyStreamManager, createPtyHandle, setCapped } from "./pty-stream.js";
-import type { PtyControlEvent, PtyViewEngine, PtyIdleSpawnOpts } from "./pty-view-engine.js";
+import type { PtyControlEvent, PtyViewEngine, PtyIdleSpawnOpts, PtySnapshotSubscription } from "./pty-view-engine.js";
 import type { HookRegistry, HookPayload } from "../gateway/hook-registry.js";
 import { SsePtyProxy, MAIN_AGENT_SENTINEL, type SseDataEvent, type UpstreamActivityInfo } from "./sse-pty-proxy.js";
 import { neutralizeForPaste } from "../shared/skill-commands.js";
@@ -889,7 +889,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
   private wireProcToStream(jinnSessionId: string, proc: pty.IPty, proxy?: SsePtyProxy): PtyHandle {
     const handle = createPtyHandle(proc);
     this.streams.attach(jinnSessionId, proc, () => this.lastOutputAt.set(jinnSessionId, Date.now()));
-    proc.onExit(() => {
+    proc.onExit((event) => {
       // Session-level cleanup MUST be identity-gated. In a kill->respawn race the
       // lifecycle/stream entries already point at the NEW PTY by the time THIS
       // (old, killed) PTY's exit fires. releaseSession is keyed by sessionId, so an
@@ -898,7 +898,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
       // the session's CURRENT warm handle means the cleanup is ours to do.
       const isCurrent = this.lifecycle.getWarm(jinnSessionId) === handle;
       if (isCurrent) {
-        this.streams.onPtyExit(jinnSessionId);
+        this.streams.onPtyExit(jinnSessionId, event ?? { exitCode: 0, signal: 0 });
         // Release the lifecycle entry so the dead handle isn't picked up by a future
         // run() as "warm" — that would inject into a corpse.
         this.lifecycle.releaseSession(jinnSessionId);
@@ -1010,7 +1010,9 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
         this.spawnParams.set(jinnSessionId, { model: opts.model, effortLevel: undefined, appendApplied: false });
         this.lifecycle.adopt(jinnSessionId, handle);
       } catch (err) {
-        logger.warn(`ensureIdleSpawn failed for session ${jinnSessionId}: ${err instanceof Error ? err.message : String(err)}`);
+        const message = err instanceof Error ? err.message : String(err);
+        logger.warn(`ensureIdleSpawn failed for session ${jinnSessionId}: ${message}`);
+        this.streams.reportError(jinnSessionId, `failed to restore terminal: ${message}`);
       } finally {
         this.idleSpawning.delete(jinnSessionId);
       }
@@ -1028,21 +1030,18 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
     pasteAndSubmit(proc, text);
   }
 
-  /** Append-only capped output buffer for the session's current/most-recent PTY (for xterm.js reconnect replay).
-   *  Returns a concatenated Buffer — pty-ws.ts forwards it directly without re-encoding. */
-  getScrollback(sessionId: string): Buffer {
-    return this.streams.getScrollback(sessionId);
-  }
-
-  /** Subscribe to live PTY output for a session. Returns an unsubscribe fn. Survives PTY respawn within the session.
-   *  Optional `onControl` receives out-of-band events (currently just `{type:"reset"}`
-   *  when the PTY is replaced mid-session — the WS should forward this to the client xterm). */
-  subscribeOutput(
+  subscribeWithSnapshot(
     sessionId: string,
     cb: (data: Buffer) => void,
     onControl?: (event: PtyControlEvent) => void,
-  ): () => void {
-    return this.streams.subscribe(sessionId, cb, onControl);
+  ): PtySnapshotSubscription {
+    return this.streams.subscribeWithSnapshot(sessionId, cb, onControl);
+  }
+
+  restartPty(sessionId: string, opts: PtyIdleSpawnOpts): void {
+    this.kill(sessionId, "Interrupted: terminal restart requested");
+    this.idleSpawning.delete(sessionId);
+    this.ensureIdleSpawn(sessionId, opts);
   }
 
   /** Write raw text to the warm PTY as a bracketed-paste + CR (same /@!-guard as injectPrompt). No-op if no warm PTY. */
@@ -1062,6 +1061,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
   /** Resize the warm PTY + remember the geometry for the next cold spawn. */
   resizePty(sessionId: string, cols: number, rows: number): void {
     setCapped(this.lastGeom, sessionId, { cols, rows });
+    this.streams.resize(sessionId, cols, rows);
     const handle = this.lifecycle.getWarm(sessionId);
     if (!handle) return;
     const proc = (handle as any)._proc as pty.IPty | undefined;

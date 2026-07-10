@@ -8,7 +8,7 @@ import { buildEngineChildEnv } from "../shared/child-env.js";
 import { PtyLifecycleManager, type PtyHandle } from "./pty-lifecycle.js";
 import { PtyStreamManager, createPtyHandle, setCapped } from "./pty-stream.js";
 import { tailTranscriptLines, type TranscriptTailer } from "./transcript-tailer.js";
-import type { PtyControlEvent, PtyViewEngine, PtyIdleSpawnOpts } from "./pty-view-engine.js";
+import type { PtyControlEvent, PtyViewEngine, PtyIdleSpawnOpts, PtySnapshotSubscription } from "./pty-view-engine.js";
 import {
   transcriptPathFor,
   transcriptLineToDeltas,
@@ -386,14 +386,14 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
   private wireProcToStream(jinnSessionId: string, proc: pty.IPty, onExitExtra?: () => void): PtyHandle {
     const handle = createPtyHandle(proc);
     this.streams.attach(jinnSessionId, proc);
-    proc.onExit(() => {
+    proc.onExit((event) => {
       // Identity-gate session cleanup. In a kill->respawn race the lifecycle/stream
       // entries already point at the NEW PTY by the time THIS (old, killed) PTY's exit
       // fires; releaseSession is keyed by sessionId, so an unguarded call would kill the
       // freshly-adopted PTY. Only clean up if this PTY is still the session's warm handle.
       const isCurrent = this.lifecycle.getWarm(jinnSessionId) === handle;
       if (isCurrent) {
-        this.streams.onPtyExit(jinnSessionId);
+        this.streams.onPtyExit(jinnSessionId, event ?? { exitCode: 0, signal: 0 });
         this.lifecycle.releaseSession(jinnSessionId);
       }
       // Settle the active turn as interrupted ONLY if this dying proc is the one bound
@@ -443,16 +443,17 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
     this.lifecycle.adopt(jinnSessionId, handle);
   }
 
-  getScrollback(sessionId: string): Buffer {
-    return this.streams.getScrollback(sessionId);
-  }
-
-  subscribeOutput(
+  subscribeWithSnapshot(
     sessionId: string,
     cb: (data: Buffer) => void,
     onControl?: (event: PtyControlEvent) => void,
-  ): () => void {
-    return this.streams.subscribe(sessionId, cb, onControl);
+  ): PtySnapshotSubscription {
+    return this.streams.subscribeWithSnapshot(sessionId, cb, onControl);
+  }
+
+  restartPty(sessionId: string, opts: PtyIdleSpawnOpts): void {
+    this.kill(sessionId, "Interrupted: terminal restart requested");
+    this.ensureIdleSpawn(sessionId, opts);
   }
 
   writeStdin(sessionId: string, text: string): void {
@@ -469,6 +470,7 @@ export class AntigravityEngine implements InterruptibleEngine, PtyViewEngine {
 
   resizePty(sessionId: string, cols: number, rows: number): void {
     setCapped(this.lastGeom, sessionId, { cols, rows });
+    this.streams.resize(sessionId, cols, rows);
     const handle = this.lifecycle.getWarm(sessionId);
     const proc = handle ? ((handle as any)._proc as pty.IPty | undefined) : undefined;
     if (!proc) return;

@@ -273,6 +273,27 @@ describe("CodexInteractiveEngine — effort/model PTY args + respawn", () => {
     lifecycle.dispose();
   });
 
+  it("explicitly restarts a warm PTY and reports its exit to snapshot subscribers", async () => {
+    engine.ensureIdleSpawn("sess-restart", { model: "gpt-5.5", effortLevel: "low" });
+    const first = spawnCalls[0]!.proc;
+    const controls: string[] = [];
+    const subscription = engine.subscribeWithSnapshot(
+      "sess-restart",
+      () => {},
+      (event) => controls.push(event.type),
+    );
+    await subscription.snapshot;
+    subscription.start();
+
+    engine.restartPty("sess-restart", { model: "gpt-5.5", effortLevel: "low" });
+
+    expect(spawnCalls).toHaveLength(2);
+    first._exit(1);
+    expect(controls).toContain("restoring");
+    subscription.unsubscribe();
+    lifecycle.dispose();
+  });
+
   it("respawns the idle PTY when effortLevel changes (CLI binds effort at spawn)", () => {
     engine.ensureIdleSpawn("sess-3", { model: "gpt-5.5", effortLevel: "low" });
     expect(spawnCalls).toHaveLength(1);

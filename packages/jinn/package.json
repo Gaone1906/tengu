@@ -29,6 +29,8 @@
   "dependencies": {
     "@slack/bolt": "^4.3.0",
     "@whiskeysockets/baileys": "7.0.0-rc.9",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
     "better-sqlite3": "^11.8.0",
     "busboy": "^1.6.0",
     "chokidar": "^4.0.0",

@@ -10,7 +10,7 @@ import { neutralizeForPaste } from "../shared/skill-commands.js";
 import { PtyLifecycleManager, type PtyHandle } from "./pty-lifecycle.js";
 import { PtyStreamManager, createPtyHandle, setCapped } from "./pty-stream.js";
 import { tailTranscriptLines, type TranscriptTailer } from "./transcript-tailer.js";
-import type { PtyControlEvent, PtyIdleSpawnOpts, PtyViewEngine } from "./pty-view-engine.js";
+import type { PtyControlEvent, PtyIdleSpawnOpts, PtySnapshotSubscription, PtyViewEngine } from "./pty-view-engine.js";
 import {
   GROK_SESSIONS_DIR,
   grokCliFlags,
@@ -382,10 +382,10 @@ export class GrokInteractiveEngine implements InterruptibleEngine, PtyViewEngine
       if (data.includes("\x1b[6n")) proc.write(CURSOR_POSITION_RESPONSE);
     });
     this.streams.attach(jinnSessionId, proc);
-    proc.onExit(() => {
+    proc.onExit((event) => {
       const isCurrent = this.lifecycle.getWarm(jinnSessionId) === handle;
       if (isCurrent) {
-        this.streams.onPtyExit(jinnSessionId);
+        this.streams.onPtyExit(jinnSessionId, event ?? { exitCode: 0, signal: 0 });
         this.lifecycle.releaseSession(jinnSessionId);
       }
       const e = this.active.get(jinnSessionId);
@@ -404,12 +404,13 @@ export class GrokInteractiveEngine implements InterruptibleEngine, PtyViewEngine
     this.lifecycle.adopt(jinnSessionId, handle);
   }
 
-  getScrollback(sessionId: string): Buffer {
-    return this.streams.getScrollback(sessionId);
+  subscribeWithSnapshot(sessionId: string, cb: (data: Buffer) => void, onControl?: (event: PtyControlEvent) => void): PtySnapshotSubscription {
+    return this.streams.subscribeWithSnapshot(sessionId, cb, onControl);
   }
 
-  subscribeOutput(sessionId: string, cb: (data: Buffer) => void, onControl?: (event: PtyControlEvent) => void): () => void {
-    return this.streams.subscribe(sessionId, cb, onControl);
+  restartPty(sessionId: string, opts: PtyIdleSpawnOpts): void {
+    this.kill(sessionId, "Interrupted: terminal restart requested");
+    this.ensureIdleSpawn(sessionId, opts);
   }
 
   writeStdin(sessionId: string, text: string): void {
@@ -424,6 +425,7 @@ export class GrokInteractiveEngine implements InterruptibleEngine, PtyViewEngine
 
   resizePty(sessionId: string, cols: number, rows: number): void {
     setCapped(this.lastGeom, sessionId, { cols, rows });
+    this.streams.resize(sessionId, cols, rows);
     const proc = (this.lifecycle.getWarm(sessionId) as any)?._proc as pty.IPty | undefined;
     try { proc?.resize(cols, rows); } catch { /* gone */ }
   }

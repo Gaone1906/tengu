@@ -80,6 +80,7 @@ import {
 import { blockFallbackText, validateBlockEnvelope } from "../shared/blocks.js";
 import { forkEngineSession } from "../sessions/fork.js";
 import { removeCodexSessionHome } from "../engines/codex.js";
+import { ptySnapshotStore } from "../engines/pty-snapshot.js";
 import {
   deriveRunState,
   resolveWorkflowEvidence,
@@ -2442,6 +2443,7 @@ export async function handleApiRequest(
       delete meta["engineSessions"];
       delete meta["engineOverride"];
       clearEngineSessionRefs(params.id);
+      ptySnapshotStore.deleteSync(params.id);
       updateSession(params.id, {
         status: "interrupted",
         attemptOutcome: "interrupted",

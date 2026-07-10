@@ -1,84 +1,142 @@
 import type { WebSocket } from "ws";
-import type { PtyViewEngine } from "../engines/pty-view-engine.js";
+import type { PtyControlEvent, PtyIdleSpawnOpts, PtyViewEngine } from "../engines/pty-view-engine.js";
 import { getEngineSessionRef, getSession } from "../sessions/registry.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 
 const RAW_KEY_INPUTS = new Set(["\r", "\x1b", "\t", "\x03", "\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D"]);
+export const PTY_RESUME_DEADLINE_MS = 15_000;
 
-/**
- * Attach a /ws/pty/:sessionId WebSocket to a session's interactive PTY stream.
- *
- * Lifecycle:
- *   - PTY spawn is DEFERRED until the client sends its first `{type:"resize"}`
- *     message so claude starts at the real terminal geometry. Eager-spawning
- *     at default 120×40 then resizing caused claude to lay text body at 120 cols
- *     and never reflow it back, producing "squished" rendering on mobile.
- *   - The frontend sends `{type:"viewing", viewing:true|false}` on mount, unmount, and
- *     Page Visibility changes. Each enter is ref-counted; when the count reaches zero
- *     (and no turn is running), the 10-min keep-alive grace window starts.
- *   - `viewing:true` triggers a follow-up resize from the client (see use-page-visibility
- *     effect in cli-terminal.tsx) which spawns/respawns the PTY at the correct geometry.
- *   - On `ws.close`, decrements the viewer count if this socket reported viewing.
- *     Does NOT directly kill the PTY — the lifecycle manager owns that.
- */
-export function attachPtyWebSocket(ws: WebSocket, sessionId: string, engine: PtyViewEngine): void {
+interface AttachPtyWebSocketOptions {
+  resumeDeadlineMs?: number;
+}
+
+/** Attach a snapshot-first, per-session PTY WebSocket. */
+export function attachPtyWebSocket(
+  ws: WebSocket,
+  sessionId: string,
+  engine: PtyViewEngine,
+  options: AttachPtyWebSocketOptions = {},
+): void {
   let disconnected = false;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+  let terminalReady = false;
+  let lastGeometry: { cols: number; rows: number } | undefined;
+  const resumeDeadlineMs = options.resumeDeadlineMs ?? PTY_RESUME_DEADLINE_MS;
 
-  const closeWithError = (message: string) => {
-    logger.warn(`PTY websocket for ${sessionId}: ${message}`);
-    if (ws.readyState === ws.OPEN) {
-      try { ws.send(JSON.stringify({ type: "error", message })); } catch { /* ignore */ }
-      ws.close();
+  const sendControl = (event: PtyControlEvent) => {
+    if (ws.readyState !== ws.OPEN) return;
+    try { ws.send(JSON.stringify(event)); } catch { /* disconnected mid-send */ }
+  };
+
+  const clearResumeDeadline = () => {
+    if (!resumeTimer) return;
+    clearTimeout(resumeTimer);
+    resumeTimer = undefined;
+  };
+
+  const armResumeDeadline = () => {
+    clearResumeDeadline();
+    resumeTimer = setTimeout(() => {
+      resumeTimer = undefined;
+      if (disconnected || terminalReady) return;
+      sendControl({
+        type: "error",
+        message: "Terminal did not resume in time.",
+        recoverable: true,
+      });
+    }, resumeDeadlineMs);
+    resumeTimer.unref?.();
+  };
+
+  const handleControl = (event: PtyControlEvent) => {
+    if (event.type === "ready") {
+      terminalReady = true;
+      clearResumeDeadline();
+    } else if (event.type === "restoring") {
+      terminalReady = false;
+      const restoreViewing = didEnter || pendingViewing === true;
+      didEnter = false;
+      entryReady = false;
+      pendingViewing = null;
+      if (restoreViewing) queueMicrotask(() => applyViewingWhenReady(true));
+      armResumeDeadline();
+    } else if (event.type === "error" || event.type === "exited") {
+      terminalReady = false;
+      clearResumeDeadline();
     }
+    sendControl(event);
+  };
+
+  // The manager synchronously registers a paused subscriber and captures an
+  // exact sequence boundary. No live callback is released until start().
+  const subscription = engine.subscribeWithSnapshot(
+    sessionId,
+    (data) => { if (ws.readyState === ws.OPEN) ws.send(data); },
+    handleControl,
+  );
+
+  void subscription.snapshot.then((initial) => {
+    if (disconnected || ws.readyState !== ws.OPEN) return;
+    sendControl({ type: "reset" });
+    if (initial.snapshot) sendControl({ type: "snapshot", snapshot: initial.snapshot });
+    if (initial.ready) {
+      terminalReady = true;
+      sendControl({ type: "ready" });
+    } else {
+      terminalReady = false;
+      sendControl({ type: "restoring" });
+    }
+    // Events after the captured boundary can only flow after all framing above.
+    subscription.start();
+  }).catch((error) => {
+    sendControl({
+      type: "error",
+      message: `failed to restore terminal snapshot: ${error instanceof Error ? error.message : String(error)}`,
+      recoverable: true,
+    });
+    subscription.start();
+  });
+
+  const idleSpawnOpts = (cols: number, rows: number): PtyIdleSpawnOpts => {
+    const session = getSession(sessionId);
+    return {
+      engineSessionId: session ? getEngineSessionRef(session).id : undefined,
+      model: session?.model ?? undefined,
+      effortLevel: session?.effortLevel ?? undefined,
+      cwd: JINN_HOME,
+      cols,
+      rows,
+    };
   };
 
   const spawnIfNeeded = (cols: number, rows: number): boolean => {
     try {
-      const session = getSession(sessionId);
-      engine.ensureIdleSpawn(sessionId, {
-        engineSessionId: session ? getEngineSessionRef(session).id : undefined,
-        model: session?.model ?? undefined,
-        effortLevel: session?.effortLevel ?? undefined,
-        cwd: JINN_HOME,
-        cols,
-        rows,
-      });
+      engine.ensureIdleSpawn(sessionId, idleSpawnOpts(cols, rows));
       return true;
-    } catch (err) {
-      closeWithError(`failed to start PTY: ${err instanceof Error ? err.message : String(err)}`);
+    } catch (error) {
+      const message = `failed to start terminal: ${error instanceof Error ? error.message : String(error)}`;
+      logger.warn(`PTY websocket for ${sessionId}: ${message}`);
+      sendControl({ type: "error", message, recoverable: true });
       return false;
     }
   };
 
-  // Subscribe FIRST, then replay scrollback. Reverse order had a race window
-  // between snapshot and subscribe where PTY bytes could be lost — the snapshot
-  // was already captured (so the replay didn't have them) and the subscriber
-  // wasn't attached yet (so the live forward missed them too). With this order
-  // those bytes arrive via the subscriber, slightly out of order vs. scrollback
-  // but never missing.
-  const unsubscribe = engine.subscribeOutput(
-    sessionId,
-    (data) => { if (ws.readyState === ws.OPEN) ws.send(data); },
-    (event) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(event)); },
-  );
-
-  // Replay scrollback if the PTY is already warm from a prior connection.
-  const scrollback = engine.getScrollback(sessionId);
-  if (scrollback.length > 0 && ws.readyState === ws.OPEN) ws.send(scrollback);
-
-  // Track whether this socket has reported viewing:true so close-cleanup can
-  // decrement only if it actually incremented. Guards against double-decrement
-  // on flaky reconnects.
   let didEnter = false;
-  // The client sends `viewing:true` on WS open BEFORE its first resize. With
-  // lazy spawn, the lifecycle entry doesn't exist yet, so a naïve setViewing
-  // is silently dropped — and the freshly-spawned PTY starts with viewerCount=0
-  // and gets reaped by the sweep timer within seconds. Buffer the viewing
-  // state and apply it the moment the first resize creates the entry.
   let pendingViewing: boolean | null = null;
   let entryReady = false;
+
+  const applyViewing = (viewing: boolean) => {
+    if (disconnected) return;
+    if (viewing && !didEnter) {
+      engine.setViewing(sessionId, true);
+      didEnter = true;
+    } else if (!viewing && didEnter) {
+      engine.setViewing(sessionId, false);
+      didEnter = false;
+    }
+  };
 
   const applyViewingWhenReady = (viewing: boolean, attempts = 20) => {
     if (disconnected) return;
@@ -96,35 +154,27 @@ export function attachPtyWebSocket(ws: WebSocket, sessionId: string, engine: Pty
     retryTimer.unref?.();
   };
 
-  const applyViewing = (viewing: boolean) => {
-    if (disconnected) return;
-    if (viewing && !didEnter) {
-      engine.setViewing(sessionId, true);
-      didEnter = true;
-    } else if (!viewing && didEnter) {
-      engine.setViewing(sessionId, false);
-      didEnter = false;
-    }
-  };
-
   ws.on("message", (raw) => {
-    let msg: any;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
-    if (msg?.type === "stdin" && typeof msg.data === "string") {
-      engine.writeStdin(sessionId, msg.data);
-    } else if (msg?.type === "key" && typeof msg.data === "string") {
-      if (RAW_KEY_INPUTS.has(msg.data)) engine.writeRaw(sessionId, msg.data);
-    } else if (msg?.type === "resize" && typeof msg.cols === "number" && typeof msg.rows === "number") {
-      // First resize spawns the PTY at the real client geometry; subsequent
-      // resizes just forward SIGWINCH to claude.
+    let message: any;
+    try { message = JSON.parse(raw.toString()); } catch { return; }
+    if (message?.type === "stdin" && typeof message.data === "string") {
+      engine.writeStdin(sessionId, message.data);
+    } else if (message?.type === "key" && typeof message.data === "string") {
+      if (RAW_KEY_INPUTS.has(message.data)) engine.writeRaw(sessionId, message.data);
+    } else if (message?.type === "resize" && validGeometry(message.cols, message.rows)) {
+      const cols = Math.floor(message.cols);
+      const rows = Math.floor(message.rows);
+      lastGeometry = { cols, rows };
       const hadWarmPty = engine.hasWarmPty(sessionId);
-      if (!spawnIfNeeded(msg.cols, msg.rows)) return;
+      if (!spawnIfNeeded(cols, rows)) return;
       try {
-        engine.resizePty(sessionId, msg.cols, msg.rows);
-      } catch (err) {
-        closeWithError(`failed to resize PTY: ${err instanceof Error ? err.message : String(err)}`);
+        engine.resizePty(sessionId, cols, rows);
+      } catch (error) {
+        const detail = `failed to resize terminal: ${error instanceof Error ? error.message : String(error)}`;
+        sendControl({ type: "error", message: detail, recoverable: true });
         return;
       }
+      if (!terminalReady) armResumeDeadline();
       if (!entryReady && hadWarmPty) {
         entryReady = true;
         if (pendingViewing !== null) {
@@ -136,25 +186,42 @@ export function attachPtyWebSocket(ws: WebSocket, sessionId: string, engine: Pty
         pendingViewing = null;
         applyViewingWhenReady(viewing);
       }
-    } else if (msg?.type === "viewing" && typeof msg.viewing === "boolean") {
-      if (!entryReady) {
-        // Stash for after first resize triggers spawn.
-        pendingViewing = msg.viewing;
+    } else if (message?.type === "restart") {
+      const geometry = lastGeometry;
+      if (!geometry) {
+        sendControl({ type: "error", message: "Terminal geometry is not ready yet.", recoverable: true });
         return;
       }
-      applyViewing(msg.viewing);
+      terminalReady = false;
+      sendControl({ type: "restoring" });
+      const restoreViewing = didEnter || pendingViewing === true;
+      didEnter = false;
+      entryReady = false;
+      pendingViewing = null;
+      try {
+        engine.restartPty(sessionId, idleSpawnOpts(geometry.cols, geometry.rows));
+        armResumeDeadline();
+        if (restoreViewing) applyViewingWhenReady(true);
+      } catch (error) {
+        sendControl({
+          type: "error",
+          message: `failed to restart terminal: ${error instanceof Error ? error.message : String(error)}`,
+          recoverable: true,
+        });
+      }
+    } else if (message?.type === "viewing" && typeof message.viewing === "boolean") {
+      if (!entryReady) pendingViewing = message.viewing;
+      else applyViewing(message.viewing);
     }
   });
 
   const onDisconnect = () => {
     if (disconnected) return;
     disconnected = true;
-    if (retryTimer) {
-      clearTimeout(retryTimer);
-      retryTimer = undefined;
-    }
+    if (retryTimer) clearTimeout(retryTimer);
+    clearResumeDeadline();
     pendingViewing = null;
-    unsubscribe();
+    subscription.unsubscribe();
     if (didEnter) {
       engine.setViewing(sessionId, false);
       didEnter = false;
@@ -162,4 +229,15 @@ export function attachPtyWebSocket(ws: WebSocket, sessionId: string, engine: Pty
   };
   ws.on("close", onDisconnect);
   ws.on("error", onDisconnect);
+}
+
+function validGeometry(cols: unknown, rows: unknown): cols is number {
+  return typeof cols === "number"
+    && typeof rows === "number"
+    && Number.isFinite(cols)
+    && Number.isFinite(rows)
+    && cols > 0
+    && rows > 0
+    && cols <= 500
+    && rows <= 250;
 }

@@ -1,27 +1,25 @@
 import * as pty from "node-pty";
 import { logger } from "../shared/logger.js";
-import type { PtyControlEvent } from "./pty-view-engine.js";
+import {
+  PtySnapshot,
+  PtySnapshotStore,
+  ptySnapshotStore,
+  type SerializedPtySnapshot,
+} from "./pty-snapshot.js";
+import type {
+  PtyControlEvent,
+  PtyInitialSnapshot,
+  PtySnapshotSubscription,
+} from "./pty-view-engine.js";
 import type { PtyHandle } from "./pty-lifecycle.js";
 
-/** Cap for the per-session PTY scrollback ring buffer (xterm.js reconnect replay). */
-export const SCROLLBACK_CAP_BYTES = 262144;
-
-/** Cap for small per-session bookkeeping maps that must survive PTY respawns
- *  (e.g. last-known terminal geometry). Bounds growth in a long-running daemon. */
+/** Cap for small per-session bookkeeping maps that must survive PTY respawns. */
 export const SESSION_MAP_CAP = 512;
-
-/** Cap for the per-session stream-entry map. Each entry can hold up to
- *  SCROLLBACK_CAP_BYTES of scrollback, so this map gets its own (much smaller)
- *  cap: scrollback replay is only useful for the most recent sessions, and 128
- *  is far above maxLivePtys — live sessions are recently-touched (attach/
- *  subscribe refresh recency) and therefore never the eviction victim. */
+/** Bound live headless terminal instances in the long-running gateway. */
 export const STREAM_MAP_CAP = 128;
 
-/** Set a value in an insertion-ordered per-session map, evicting the oldest-touched
- *  entries beyond `cap` so the map can't grow forever in a long-running daemon.
- *  Re-setting an existing key refreshes its recency (delete + re-insert). */
 export function setCapped<V>(map: Map<string, V>, key: string, value: V, cap = SESSION_MAP_CAP): void {
-  if (map.has(key)) map.delete(key); // re-insert so recently-touched keys are evicted last
+  if (map.has(key)) map.delete(key);
   map.set(key, value);
   while (map.size > cap) {
     const oldest = map.keys().next().value as string | undefined;
@@ -30,155 +28,303 @@ export function setCapped<V>(map: Map<string, V>, key: string, value: V, cap = S
   }
 }
 
+type QueuedSubscriberEvent =
+  | { kind: "data"; data: Buffer }
+  | { kind: "control"; event: PtyControlEvent };
+
 interface Subscriber {
-  data: (d: Buffer) => void;
-  control?: (e: PtyControlEvent) => void;
+  data: (data: Buffer) => void;
+  control?: (event: PtyControlEvent) => void;
+  started: boolean;
+  queue: QueuedSubscriberEvent[];
+}
+
+interface SequencedChunk {
+  sequence: number;
+  data: Buffer;
 }
 
 interface StreamEntry {
-  chunks: Buffer[];
-  totalBytes: number;
   subscribers: Set<Subscriber>;
-  /** Set to true the first time a PTY is wired to this stream entry. Subsequent
-   *  wires (subscribers attached or not) are PTY respawns — clients need a reset
-   *  so their xterm doesn't render the new alt-screen atop the old one's cells. */
   hasSeenPty: boolean;
+  generation: number;
+  generationReady: boolean;
+  sequence: number;
+  snapshot?: PtySnapshot;
+  lastGood?: SerializedPtySnapshot;
+  loadPromise: Promise<void>;
+  fallbackPromise: Promise<void>;
+  pendingGeneration: SequencedChunk[];
+  checkingReadiness: boolean;
+  captureTimer?: ReturnType<typeof setTimeout>;
+}
+
+interface PtyStreamManagerOptions {
+  snapshotStore?: PtySnapshotStore;
 }
 
 /**
- * Per-session PTY output streams shared by the interactive engines (claude/codex/agy):
- * scrollback ring buffer (chunk list + running byte total) + live subscribers.
- * Survives PTY respawn. The chunk-list ring avoids the O(N) realloc that a
- * `(buffer + d).slice(-CAP)` per data event would cause at hot output.
- *
- * Engine-specific onExit handling (lifecycle identity-gating, turn interruption,
- * proxy teardown) stays in the engines — they call onPtyExit() from their own
- * onExit handlers when the dying PTY is the session's current one.
+ * Per-session terminal state shared by interactive engines. A real headless
+ * xterm replaces the old raw byte tail, and subscribers pause at an exact
+ * sequence boundary until their authoritative snapshot has been framed.
  */
 export class PtyStreamManager {
-  private streams = new Map<string, StreamEntry>();
+  private readonly streams = new Map<string, StreamEntry>();
+  private readonly snapshotStore: PtySnapshotStore;
 
   constructor(
-    /** Log prefix for PTY socket errors (e.g. "PTY", "Codex PTY", "Antigravity PTY"). */
-    private label: string,
-    /** Whether a warm PTY still exists for a session — gates dropping the stream
-     *  entry when the last subscriber detaches. */
-    private hasWarmPty: (sessionId: string) => boolean,
-  ) {}
+    private readonly label: string,
+    private readonly hasWarmPty: (sessionId: string) => boolean,
+    options: PtyStreamManagerOptions = {},
+  ) {
+    this.snapshotStore = options.snapshotStore ?? ptySnapshotStore;
+  }
 
-  /** Wire a freshly-spawned PTY's output into the session's scrollback ring buffer
-   *  + live subscribers; notify subscribers with a reset event on respawn; absorb
-   *  node-pty socket errors. `onData` (optional) runs first on every data event. */
   attach(sessionId: string, proc: pty.IPty, onData?: () => void): void {
     const stream = this.streamFor(sessionId);
-    // Distinguish initial spawn from respawn via a per-stream flag rather than
-    // subscriber count — clients open their WS on mount (before the user sends
-    // the first message that triggers spawn), so subscriber-count gating would
-    // spuriously reset on the very first PTY for the session.
-    // On respawn, only emit if there are subscribers (no one listens otherwise).
-    if (!stream.hasSeenPty) {
-      stream.hasSeenPty = true;
-    } else if (stream.subscribers.size > 0) {
-      for (const sub of stream.subscribers) {
-        try { sub.control?.({ type: "reset" }); } catch { /* ignore */ }
-      }
+    const respawn = stream.hasSeenPty;
+    stream.hasSeenPty = true;
+    stream.generation += 1;
+    stream.generationReady = false;
+    stream.pendingGeneration = [];
+    stream.checkingReadiness = false;
+    if (stream.captureTimer) clearTimeout(stream.captureTimer);
+
+    const previous = stream.snapshot;
+    if (previous) {
+      const priorFallback = stream.fallbackPromise;
+      stream.fallbackPromise = (async () => {
+        await priorFallback;
+        const captured = await previous.captureAtBoundary();
+        if (captured.visible) {
+          stream.lastGood = captured;
+          this.snapshotStore.schedule(sessionId, captured);
+        }
+      })().catch(() => undefined).finally(() => previous.dispose());
     }
-    // node-pty's internal socket error handler (unixTerminal.js) throws synchronously when
-    // proc.listeners('error').length < 2. Without this listener the count stays at 1 (the
-    // internal handler), so any socket error (EIO on exit, EPIPE, etc.) propagates as an
-    // uncaught exception and kills the daemon. Adding a handler here bumps the count to 2
-    // and prevents the throw; we log it and let the engine's onExit path handle cleanup.
-    (proc as any).on?.("error", (err: Error) => {
-      logger.warn(`${this.label} socket error for session ${sessionId}: ${err.message}`);
+    stream.snapshot = new PtySnapshot({
+      cols: positiveInt((proc as { cols?: number }).cols, 120),
+      rows: positiveInt((proc as { rows?: number }).rows, 40),
+    });
+    if (respawn || stream.subscribers.size > 0) this.emitControl(stream, { type: "restoring" });
+
+    (proc as any).on?.("error", (error: Error) => {
+      logger.warn(`${this.label} socket error for session ${sessionId}: ${error.message}`);
     });
 
-    proc.onData((d) => {
+    proc.onData((raw) => {
       onData?.();
-      // Convert string to Buffer once; push to ring; evict head until under cap.
-      const chunk = Buffer.from(d, "utf-8");
-      stream.chunks.push(chunk);
-      stream.totalBytes += chunk.length;
-      while (stream.totalBytes > SCROLLBACK_CAP_BYTES && stream.chunks.length > 1) {
-        const head = stream.chunks.shift()!;
-        stream.totalBytes -= head.length;
-      }
-      // If a single chunk exceeds the cap, slice it down (rare; keeps invariant tight).
-      if (stream.totalBytes > SCROLLBACK_CAP_BYTES && stream.chunks.length === 1) {
-        const only = stream.chunks[0]!;
-        const sliced = only.subarray(only.length - SCROLLBACK_CAP_BYTES);
-        stream.chunks[0] = sliced;
-        stream.totalBytes = sliced.length;
-      }
-      for (const sub of stream.subscribers) {
-        try { sub.data(chunk); } catch { /* ignore subscriber errors */ }
+      const current = this.streams.get(sessionId);
+      if (current !== stream || !stream.snapshot) return;
+      const data = Buffer.from(raw, "utf8");
+      const sequence = ++stream.sequence;
+      stream.snapshot.write(data).catch((error) => this.reportError(
+        sessionId,
+        `terminal snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+      ));
+
+      if (stream.generationReady) {
+        this.emitData(stream, data);
+        this.scheduleCapture(sessionId, stream);
+      } else {
+        stream.pendingGeneration.push({ sequence, data });
+        this.checkReadiness(sessionId, stream, stream.generation);
       }
     });
   }
 
-  /** Stream-side cleanup when the session's CURRENT PTY exits. Clears scrollback so
-   *  a stale farewell (e.g. Claude's "Resume this session…" hint printed on SIGHUP
-   *  shutdown) doesn't persist into the next PTY incarnation. If no WS subscribers
-   *  are attached the entry is dead weight — drop it so the map doesn't leak entries
-   *  for every session that ever ran. Subscribers, when present, are kept so a
-   *  future respawn can notify them via the reset event. */
-  onPtyExit(sessionId: string): void {
-    const s = this.streams.get(sessionId);
-    if (!s) return;
-    s.chunks = [];
-    s.totalBytes = 0;
-    if (s.subscribers.size === 0) this.streams.delete(sessionId);
+  resize(sessionId: string, cols: number, rows: number): void {
+    const stream = this.streams.get(sessionId);
+    if (!stream?.snapshot) return;
+    void stream.snapshot.resize(cols, rows).then(() => {
+      if (stream.generationReady) this.scheduleCapture(sessionId, stream);
+    });
   }
 
-  /** Append-only capped output buffer for the session's current/most-recent PTY (for
-   *  xterm.js reconnect replay). Returns a concatenated Buffer — pty-ws.ts forwards
-   *  it directly without re-encoding. */
-  getScrollback(sessionId: string): Buffer {
-    const s = this.streams.get(sessionId);
-    if (!s || s.chunks.length === 0) return Buffer.alloc(0);
-    return Buffer.concat(s.chunks, s.totalBytes);
-  }
-
-  /** Subscribe to live PTY output for a session. Returns an unsubscribe fn. Survives
-   *  PTY respawn within the session. Optional `onControl` receives out-of-band events
-   *  (currently just `{type:"reset"}` when the PTY is replaced mid-session — the WS
-   *  should forward this to the client xterm). */
-  subscribe(
+  subscribeWithSnapshot(
     sessionId: string,
-    cb: (data: Buffer) => void,
-    onControl?: (event: PtyControlEvent) => void,
-  ): () => void {
+    data: (chunk: Buffer) => void,
+    control?: (event: PtyControlEvent) => void,
+  ): PtySnapshotSubscription {
     const stream = this.streamFor(sessionId);
-    const sub: Subscriber = { data: cb, control: onControl };
-    stream.subscribers.add(sub);
-    return () => {
-      stream.subscribers.delete(sub);
-      // If this was the last subscriber AND there's no warm PTY producing data,
-      // the streams entry is dead weight — drop it. Mirrors the onPtyExit cleanup
-      // path for sessions whose WS outlived the PTY.
-      if (stream.subscribers.size === 0 && !this.hasWarmPty(sessionId)) {
-        this.streams.delete(sessionId);
-      }
+    const subscriber: Subscriber = { data, control, started: false, queue: [] };
+    stream.subscribers.add(subscriber);
+
+    // Capture both decisions synchronously. Later PTY bytes are queued on the
+    // paused subscriber and cannot move this boundary.
+    const boundaryReady = stream.generationReady && this.hasWarmPty(sessionId);
+    const boundarySnapshot = boundaryReady && stream.snapshot
+      ? stream.snapshot.captureAtBoundary()
+      : undefined;
+    const snapshot = (async (): Promise<PtyInitialSnapshot> => {
+      await stream.loadPromise;
+      await stream.fallbackPromise;
+      const captured = boundarySnapshot ? await boundarySnapshot : stream.lastGood;
+      return { snapshot: captured, ready: boundaryReady && captured?.visible === true };
+    })();
+
+    let unsubscribed = false;
+    const unsubscribe = () => {
+      if (unsubscribed) return;
+      unsubscribed = true;
+      stream.subscribers.delete(subscriber);
+      subscriber.queue = [];
+    };
+    return {
+      snapshot,
+      start: () => {
+        if (unsubscribed || subscriber.started) return;
+        subscriber.started = true;
+        const queued = subscriber.queue;
+        subscriber.queue = [];
+        for (const event of queued) this.deliver(subscriber, event);
+      },
+      unsubscribe,
     };
   }
 
-  /** Lazily create (or fetch) the output stream entry for a Jinn session id.
-   *  The map is LRU-capped at STREAM_MAP_CAP: entries that escape the explicit
-   *  cleanup paths (e.g. a release that kills the PTY after the lifecycle entry
-   *  is gone, so onExit's identity gate skips onPtyExit) are eventually evicted
-   *  rather than pinning 256KB of scrollback forever. Every attach/subscribe
-   *  refreshes recency, so only long-idle sessions lose their scrollback. */
+  onPtyExit(sessionId: string, event: { exitCode: number; signal?: number }): void {
+    const stream = this.streams.get(sessionId);
+    if (!stream) return;
+    if (stream.captureTimer) clearTimeout(stream.captureTimer);
+    const snapshot = stream.snapshot;
+    if (snapshot) {
+      stream.fallbackPromise = snapshot.captureAtBoundary().then((captured) => {
+        if (!captured.visible) return;
+        stream.lastGood = captured;
+        this.snapshotStore.schedule(sessionId, captured);
+      }).catch(() => undefined);
+    }
+    stream.generationReady = false;
+    this.emitControl(stream, { type: "exited", exitCode: event.exitCode, signal: event.signal ?? 0 });
+  }
+
+  reportError(sessionId: string, message: string): void {
+    const stream = this.streamFor(sessionId);
+    this.emitControl(stream, { type: "error", message, recoverable: true });
+  }
+
+  async flushSnapshot(sessionId: string): Promise<void> {
+    const stream = this.streams.get(sessionId);
+    if (stream?.snapshot) {
+      const captured = await stream.snapshot.captureAtBoundary();
+      if (captured.visible) {
+        stream.lastGood = captured;
+        this.snapshotStore.schedule(sessionId, captured);
+      }
+    }
+    await this.snapshotStore.flush(sessionId);
+  }
+
+  private checkReadiness(sessionId: string, stream: StreamEntry, generation: number): void {
+    if (stream.checkingReadiness || !stream.snapshot) return;
+    stream.checkingReadiness = true;
+    const boundarySequence = stream.sequence;
+    const capture = stream.snapshot.captureAtBoundary();
+    void capture.then((snapshot) => {
+      if (this.streams.get(sessionId) !== stream || stream.generation !== generation) return;
+      stream.checkingReadiness = false;
+      if (!snapshot.visible) {
+        if (stream.sequence > boundarySequence) this.checkReadiness(sessionId, stream, generation);
+        return;
+      }
+
+      stream.generationReady = true;
+      stream.lastGood = snapshot;
+      this.snapshotStore.schedule(sessionId, snapshot);
+      this.emitControl(stream, { type: "reset" });
+      this.emitControl(stream, { type: "snapshot", snapshot });
+      this.emitControl(stream, { type: "ready" });
+
+      const later = stream.pendingGeneration.filter((item) => item.sequence > boundarySequence);
+      stream.pendingGeneration = [];
+      for (const item of later) this.emitData(stream, item.data);
+      this.scheduleCapture(sessionId, stream);
+    }).catch((error) => {
+      stream.checkingReadiness = false;
+      this.reportError(sessionId, `terminal snapshot failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+
+  private scheduleCapture(sessionId: string, stream: StreamEntry): void {
+    if (stream.captureTimer) clearTimeout(stream.captureTimer);
+    stream.captureTimer = setTimeout(() => {
+      stream.captureTimer = undefined;
+      const snapshot = stream.snapshot;
+      if (!snapshot || !stream.generationReady) return;
+      void snapshot.captureAtBoundary().then((captured) => {
+        if (!captured.visible || this.streams.get(sessionId) !== stream) return;
+        stream.lastGood = captured;
+        this.snapshotStore.schedule(sessionId, captured);
+      }).catch(() => undefined);
+    }, 75);
+    stream.captureTimer.unref?.();
+  }
+
+  private emitData(stream: StreamEntry, data: Buffer): void {
+    for (const subscriber of stream.subscribers) {
+      const event: QueuedSubscriberEvent = { kind: "data", data };
+      if (subscriber.started) this.deliver(subscriber, event);
+      else subscriber.queue.push(event);
+    }
+  }
+
+  private emitControl(stream: StreamEntry, event: PtyControlEvent): void {
+    for (const subscriber of stream.subscribers) {
+      const queued: QueuedSubscriberEvent = { kind: "control", event };
+      if (subscriber.started) this.deliver(subscriber, queued);
+      else subscriber.queue.push(queued);
+    }
+  }
+
+  private deliver(subscriber: Subscriber, event: QueuedSubscriberEvent): void {
+    try {
+      if (event.kind === "data") subscriber.data(event.data);
+      else subscriber.control?.(event.event);
+    } catch { /* isolate subscriber failures */ }
+  }
+
   private streamFor(sessionId: string): StreamEntry {
     let stream = this.streams.get(sessionId);
     if (!stream) {
-      stream = { chunks: [], totalBytes: 0, subscribers: new Set(), hasSeenPty: false };
+      stream = {
+        subscribers: new Set(),
+        hasSeenPty: false,
+        generation: 0,
+        generationReady: false,
+        sequence: 0,
+        loadPromise: Promise.resolve(),
+        fallbackPromise: Promise.resolve(),
+        pendingGeneration: [],
+        checkingReadiness: false,
+      };
+      const created = stream;
+      created.loadPromise = this.snapshotStore.load(sessionId).then((snapshot) => {
+        if (snapshot && !created.lastGood) created.lastGood = snapshot;
+      });
     }
-    setCapped(this.streams, sessionId, stream, STREAM_MAP_CAP);
+
+    if (this.streams.has(sessionId)) this.streams.delete(sessionId);
+    this.streams.set(sessionId, stream);
+    while (this.streams.size > STREAM_MAP_CAP) {
+      const oldestId = this.streams.keys().next().value as string | undefined;
+      if (oldestId === undefined) break;
+      const oldest = this.streams.get(oldestId);
+      if (oldest?.captureTimer) clearTimeout(oldest.captureTimer);
+      const evictedSnapshot = oldest?.snapshot;
+      if (evictedSnapshot) {
+        void evictedSnapshot.captureAtBoundary().finally(() => evictedSnapshot.dispose());
+      }
+      this.streams.delete(oldestId);
+    }
     return stream;
   }
 }
 
-/** Wrap a live pty.IPty in a PtyHandle (the raw proc stashed on `_proc` for the
- *  engines' inject/resize/write paths). */
+function positiveInt(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && value! > 0 ? Math.floor(value!) : fallback;
+}
+
 export function createPtyHandle(proc: pty.IPty): PtyHandle {
   const handle = {
     pid: proc.pid,

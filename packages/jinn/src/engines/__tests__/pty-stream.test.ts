@@ -1,12 +1,26 @@
-import { describe, it, expect } from "vitest";
-import { PtyStreamManager, createPtyHandle, setCapped, SCROLLBACK_CAP_BYTES, STREAM_MAP_CAP } from "../pty-stream.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { Terminal } from "@xterm/headless";
+import { afterEach, describe, expect, it } from "vitest";
+import { PtySnapshotStore } from "../pty-snapshot.js";
+import { PtyStreamManager, createPtyHandle, setCapped, STREAM_MAP_CAP } from "../pty-stream.js";
+import type { PtyControlEvent } from "../pty-view-engine.js";
 
-/** Minimal fake IPty: lets the test drive onData and inspect handlers. */
-function makeFakePty() {
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+
+/** Minimal fake IPty: lets the test drive onData/onExit and inspect handlers. */
+function makeFakePty(cols = 80, rows = 24) {
   let dataCb: ((d: string) => void) | undefined;
   let errorCb: ((e: Error) => void) | undefined;
   const proc: any = {
     pid: 4242,
+    cols,
+    rows,
     _exitCode: null as number | null,
     _killedWith: undefined as string | undefined,
     onData: (cb: (d: string) => void) => { dataCb = cb; },
@@ -19,144 +33,205 @@ function makeFakePty() {
   return proc;
 }
 
-function makeManager(hasWarm: (id: string) => boolean = () => true) {
-  return new PtyStreamManager("Test PTY", hasWarm);
+function makeStore() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pty-stream-"));
+  tempDirs.push(dir);
+  return new PtySnapshotStore(dir, { debounceMs: 1 });
 }
 
-describe("PtyStreamManager", () => {
-  it("buffers PTY output and replays it via getScrollback", () => {
-    const m = makeManager();
-    const proc = makeFakePty();
-    m.attach("s1", proc);
-    proc.emitData("hello ");
-    proc.emitData("world");
-    expect(m.getScrollback("s1").toString("utf-8")).toBe("hello world");
+function makeManager(store = makeStore(), hasWarm: (id: string) => boolean = () => true) {
+  return new PtyStreamManager("Test PTY", hasWarm, { snapshotStore: store });
+}
+
+function write(term: Terminal, data: string): Promise<void> {
+  return new Promise((resolve) => term.write(data, resolve));
+}
+
+function viewport(term: Terminal): string[] {
+  const buffer = term.buffer.active;
+  const first = buffer.baseY;
+  return Array.from({ length: term.rows }, (_, offset) =>
+    buffer.getLine(first + offset)?.translateToString(true) ?? "",
+  );
+}
+
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
+describe("PtyStreamManager snapshot subscriptions", () => {
+  it("captures an atomic snapshot boundary and releases later bytes in exact order", async () => {
+    const manager = makeManager();
+    const proc = makeFakePty(40, 8);
+    manager.attach("s1", proc);
+    proc.emitData("before\r\n");
+    await settle();
+
+    const deltas: Buffer[] = [];
+    const controls: PtyControlEvent[] = [];
+    const subscription = manager.subscribeWithSnapshot(
+      "s1",
+      (data) => deltas.push(data),
+      (event) => controls.push(event),
+    );
+    proc.emitData("after-a\r\n");
+    proc.emitData("after-b");
+
+    const initial = await subscription.snapshot;
+    expect(initial.ready).toBe(true);
+    expect(deltas).toEqual([]);
+    subscription.start();
+    expect(Buffer.concat(deltas).toString("utf8")).toBe("after-a\r\nafter-b");
+
+    const restored = new Terminal({
+      cols: initial.snapshot!.cols,
+      rows: initial.snapshot!.rows,
+      scrollback: 5000,
+      allowProposedApi: true,
+    });
+    await write(restored, initial.snapshot!.data);
+    await write(restored, Buffer.concat(deltas).toString("utf8"));
+
+    const expected = new Terminal({ cols: 40, rows: 8, scrollback: 5000, allowProposedApi: true });
+    await write(expected, "before\r\nafter-a\r\nafter-b");
+    expect(viewport(restored)).toEqual(viewport(expected));
+    expect(controls).toEqual([]);
+    subscription.unsubscribe();
+    restored.dispose();
+    expected.dispose();
   });
 
-  it("caps the scrollback ring at SCROLLBACK_CAP_BYTES (evicts oldest chunks)", () => {
-    const m = makeManager();
-    const proc = makeFakePty();
-    m.attach("s1", proc);
-    const chunk = "x".repeat(64 * 1024);
-    for (let i = 0; i < 8; i++) proc.emitData(chunk); // 512KB total > 256KB cap
-    const sb = m.getScrollback("s1");
-    expect(sb.length).toBeLessThanOrEqual(SCROLLBACK_CAP_BYTES);
-    expect(sb.length).toBeGreaterThan(0);
+  it("keeps the last good screen during respawn and replaces it only after a visible first paint", async () => {
+    const manager = makeManager();
+    const first = makeFakePty();
+    manager.attach("s1", first);
+    first.emitData("last good screen");
+    await settle();
+
+    const controls: PtyControlEvent[] = [];
+    const sub = manager.subscribeWithSnapshot("s1", () => {}, (event) => controls.push(event));
+    expect((await sub.snapshot).ready).toBe(true);
+    sub.start();
+
+    const second = makeFakePty();
+    manager.attach("s1", second);
+    expect(controls.map((event) => event.type)).toEqual(["restoring"]);
+    second.emitData("\u001b[2J\u001b[H\u001b[?25l");
+    await settle();
+    expect(controls.map((event) => event.type)).toEqual(["restoring"]);
+
+    second.emitData("new screen");
+    await settle();
+    expect(controls.map((event) => event.type)).toEqual([
+      "restoring",
+      "reset",
+      "snapshot",
+      "ready",
+    ]);
+    const snapshotEvent = controls.find((event) => event.type === "snapshot");
+    expect(snapshotEvent?.type === "snapshot" && snapshotEvent.snapshot.data).toContain("new screen");
+    sub.unsubscribe();
   });
 
-  it("slices down a single oversized chunk to the cap", () => {
-    const m = makeManager();
-    const proc = makeFakePty();
-    m.attach("s1", proc);
-    proc.emitData("y".repeat(SCROLLBACK_CAP_BYTES + 100));
-    expect(m.getScrollback("s1").length).toBe(SCROLLBACK_CAP_BYTES);
+  it("captures the final pre-respawn bytes into the stale screen shown while restoring", async () => {
+    const manager = makeManager();
+    const first = makeFakePty();
+    manager.attach("s1", first);
+    first.emitData("initial");
+    await settle();
+    first.emitData(" latest-before-respawn");
+    manager.attach("s1", makeFakePty());
+
+    const sub = manager.subscribeWithSnapshot("s1", () => {});
+    const initial = await sub.snapshot;
+    expect(initial.ready).toBe(false);
+    expect(initial.snapshot?.data).toContain("latest-before-respawn");
+    sub.unsubscribe();
   });
 
-  it("delivers live output to subscribers and stops after unsubscribe", () => {
-    const m = makeManager();
+  it("persists a bounded screen and restores it before any new PTY exists after gateway restart", async () => {
+    const store = makeStore();
+    const firstManager = makeManager(store);
     const proc = makeFakePty();
-    m.attach("s1", proc);
-    const seen: string[] = [];
-    const unsub = m.subscribe("s1", (d) => seen.push(d.toString("utf-8")));
-    proc.emitData("a");
-    unsub();
-    proc.emitData("b");
-    expect(seen).toEqual(["a"]);
+    firstManager.attach("long-session", proc);
+    proc.emitData(Array.from({ length: 5_100 }, (_, i) => `line-${i}\r\n`).join(""));
+    await firstManager.flushSnapshot("long-session");
+
+    const restartedManager = makeManager(store, () => false);
+    const sub = restartedManager.subscribeWithSnapshot("long-session", () => {});
+    const initial = await sub.snapshot;
+
+    expect(initial.ready).toBe(false);
+    expect(initial.snapshot?.visible).toBe(true);
+    expect(initial.snapshot?.data).toContain("line-5099");
+    sub.unsubscribe();
   });
 
-  it("calls the onData hook on every data event", () => {
-    const m = makeManager();
+  it("retains the last good snapshot on exit and emits explicit exited/error controls", async () => {
+    const manager = makeManager();
+    const proc = makeFakePty();
+    manager.attach("s1", proc);
+    proc.emitData("useful screen");
+    await settle();
+
+    const controls: PtyControlEvent[] = [];
+    const sub = manager.subscribeWithSnapshot("s1", () => {}, (event) => controls.push(event));
+    sub.start();
+    await sub.snapshot;
+    manager.onPtyExit("s1", { exitCode: 1, signal: 0 });
+    manager.reportError("s1", "resume failed");
+
+    expect(controls).toContainEqual({ type: "exited", exitCode: 1, signal: 0 });
+    expect(controls).toContainEqual({ type: "error", message: "resume failed", recoverable: true });
+    const reconnect = manager.subscribeWithSnapshot("s1", () => {});
+    expect((await reconnect.snapshot).snapshot?.data).toContain("useful screen");
+    sub.unsubscribe();
+    reconnect.unsubscribe();
+  });
+
+  it("does not duplicate content across repeated reconnect snapshots", async () => {
+    const manager = makeManager();
+    const proc = makeFakePty();
+    manager.attach("s1", proc);
+    proc.emitData("one\r\ntwo");
+    await settle();
+
+    for (let i = 0; i < 4; i += 1) {
+      const deltas: Buffer[] = [];
+      const sub = manager.subscribeWithSnapshot("s1", (data) => deltas.push(data));
+      const initial = await sub.snapshot;
+      sub.start();
+      expect(deltas).toEqual([]);
+      expect(initial.snapshot?.data.match(/one/g)).toHaveLength(1);
+      sub.unsubscribe();
+    }
+  });
+
+  it("calls the onData hook and absorbs node-pty socket errors", () => {
+    const manager = makeManager();
     const proc = makeFakePty();
     let hits = 0;
-    m.attach("s1", proc, () => { hits += 1; });
+    manager.attach("s1", proc, () => { hits += 1; });
     proc.emitData("a");
     proc.emitData("b");
     expect(hits).toBe(2);
+    expect(() => proc.emitError(new Error("EIO"))).not.toThrow();
   });
 
-  it("does NOT emit reset on the FIRST PTY but does on a respawn with subscribers", () => {
-    const m = makeManager();
-    const resets: string[] = [];
-    m.subscribe("s1", () => {}, (e) => resets.push(e.type));
-    const p1 = makeFakePty();
-    m.attach("s1", p1); // first PTY — no reset even though a subscriber is attached
-    expect(resets).toEqual([]);
-    const p2 = makeFakePty();
-    m.attach("s1", p2); // respawn — subscribers get a reset
-    expect(resets).toEqual(["reset"]);
-  });
-
-  it("onPtyExit clears scrollback and drops the entry when no subscribers remain", () => {
-    const m = makeManager();
-    const proc = makeFakePty();
-    m.attach("s1", proc);
-    proc.emitData("stale farewell");
-    m.onPtyExit("s1");
-    expect(m.getScrollback("s1").length).toBe(0);
-    // Entry was dropped: a fresh attach behaves like the first PTY again (no reset).
-    const resets: string[] = [];
-    m.subscribe("s1", () => {}, (e) => resets.push(e.type));
-    m.attach("s1", makeFakePty());
-    expect(resets).toEqual([]);
-  });
-
-  it("onPtyExit keeps the entry (cleared) while subscribers are attached", () => {
-    const m = makeManager();
-    const proc = makeFakePty();
-    const resets: string[] = [];
-    m.subscribe("s1", () => {}, (e) => resets.push(e.type));
-    m.attach("s1", proc);
-    proc.emitData("data");
-    m.onPtyExit("s1");
-    expect(m.getScrollback("s1").length).toBe(0);
-    // hasSeenPty survives → the next PTY is a respawn and notifies the subscriber.
-    m.attach("s1", makeFakePty());
-    expect(resets).toEqual(["reset"]);
-  });
-
-  it("unsubscribing the last subscriber drops the entry when no warm PTY exists", () => {
-    let warm = true;
-    const m = makeManager(() => warm);
-    const proc = makeFakePty();
-    m.attach("s1", proc);
-    proc.emitData("kept");
-    const unsub = m.subscribe("s1", () => {});
-    warm = false; // PTY reaped while the WS was still attached
-    unsub();
-    expect(m.getScrollback("s1").length).toBe(0); // entry gone
-  });
-
-  it("caps the streams map at STREAM_MAP_CAP (evicts the longest-idle session's scrollback)", () => {
-    const m = makeManager();
-    for (let i = 0; i < STREAM_MAP_CAP + 2; i++) {
+  it("caps stream bookkeeping and preserves recently touched sessions", async () => {
+    const manager = makeManager();
+    for (let i = 0; i < STREAM_MAP_CAP + 2; i += 1) {
       const proc = makeFakePty();
-      m.attach(`s${i}`, proc);
+      manager.attach(`s${i}`, proc);
       proc.emitData(`data-${i}`);
     }
-    // The two oldest entries were evicted; the newest survive with scrollback intact.
-    expect(m.getScrollback("s0").length).toBe(0);
-    expect(m.getScrollback("s1").length).toBe(0);
-    expect(m.getScrollback("s2").toString("utf-8")).toBe("data-2");
-    expect(m.getScrollback(`s${STREAM_MAP_CAP + 1}`).toString("utf-8")).toBe(`data-${STREAM_MAP_CAP + 1}`);
-  });
-
-  it("attach/subscribe refresh recency so recently-touched sessions are not evicted", () => {
-    const m = makeManager();
-    const p0 = makeFakePty();
-    m.attach("keep", p0);
-    p0.emitData("kept");
-    for (let i = 0; i < STREAM_MAP_CAP - 1; i++) m.attach(`s${i}`, makeFakePty());
-    m.subscribe("keep", () => {}); // touch → "keep" is now most recent
-    m.attach("overflow", makeFakePty()); // evicts s0, not "keep"
-    expect(m.getScrollback("keep").toString("utf-8")).toBe("kept");
-    expect(m.getScrollback("s0").length).toBe(0);
-  });
-
-  it("absorbs node-pty socket errors without throwing", () => {
-    const m = makeManager();
-    const proc = makeFakePty();
-    m.attach("s1", proc);
-    expect(() => proc.emitError(new Error("EIO"))).not.toThrow();
+    await settle();
+    const old = manager.subscribeWithSnapshot("s0", () => {});
+    const recent = manager.subscribeWithSnapshot(`s${STREAM_MAP_CAP + 1}`, () => {});
+    expect((await old.snapshot).snapshot).toBeUndefined();
+    expect((await recent.snapshot).snapshot?.data).toContain(`data-${STREAM_MAP_CAP + 1}`);
+    old.unsubscribe();
+    recent.unsubscribe();
   });
 });
 
@@ -175,19 +250,11 @@ describe("createPtyHandle", () => {
 });
 
 describe("setCapped", () => {
-  it("evicts the oldest-touched entry beyond the cap", () => {
+  it("evicts the oldest-touched entry and refreshes existing recency", () => {
     const map = new Map<string, number>();
     setCapped(map, "a", 1, 2);
     setCapped(map, "b", 2, 2);
-    setCapped(map, "c", 3, 2);
-    expect([...map.keys()]).toEqual(["b", "c"]);
-  });
-
-  it("re-setting an existing key refreshes its recency", () => {
-    const map = new Map<string, number>();
-    setCapped(map, "a", 1, 2);
-    setCapped(map, "b", 2, 2);
-    setCapped(map, "a", 10, 2); // touch a → b is now oldest
+    setCapped(map, "a", 10, 2);
     setCapped(map, "c", 3, 2);
     expect([...map.keys()]).toEqual(["a", "c"]);
     expect(map.get("a")).toBe(10);

@@ -5,8 +5,30 @@
  * `session.engine` instead of being hardwired to one engine.
  */
 
-/** Out-of-band control event for PTY subscribers (e.g. respawn → client clears xterm). */
-export type PtyControlEvent = { type: "reset" };
+import type { SerializedPtySnapshot } from "./pty-snapshot.js";
+
+/** Structured lifecycle events carried separately from binary PTY deltas. */
+export type PtyControlEvent =
+  | { type: "restoring" }
+  | { type: "reset" }
+  | { type: "snapshot"; snapshot: SerializedPtySnapshot }
+  | { type: "ready" }
+  | { type: "error"; message: string; recoverable: boolean }
+  | { type: "exited"; exitCode: number; signal: number };
+
+export interface PtyInitialSnapshot {
+  snapshot?: SerializedPtySnapshot;
+  /** True only when this snapshot represents the currently warm PTY. */
+  ready: boolean;
+}
+
+export interface PtySnapshotSubscription {
+  /** State captured through the exact synchronous subscription boundary. */
+  snapshot: Promise<PtyInitialSnapshot>;
+  /** Release events produced after the boundary. Call after framing snapshot/ready. */
+  start(): void;
+  unsubscribe(): void;
+}
 
 export interface PtyIdleSpawnOpts {
   /** Engine-side conversation/session id to resume into the idle PTY, if any. */
@@ -22,12 +44,12 @@ export interface PtyIdleSpawnOpts {
 export interface PtyViewEngine {
   hasWarmPty(sessionId: string): boolean;
   ensureIdleSpawn(sessionId: string, opts: PtyIdleSpawnOpts): void;
-  subscribeOutput(
+  restartPty(sessionId: string, opts: PtyIdleSpawnOpts): void;
+  subscribeWithSnapshot(
     sessionId: string,
     cb: (data: Buffer) => void,
     onControl?: (event: PtyControlEvent) => void,
-  ): () => void;
-  getScrollback(sessionId: string): Buffer;
+  ): PtySnapshotSubscription;
   setViewing(sessionId: string, viewing: boolean): void;
   writeStdin(sessionId: string, text: string): void;
   writeRaw(sessionId: string, data: string): void;

@@ -14,11 +14,14 @@ type WorkItems = typeof import("../../work-items/store.js");
 let workItems: WorkItems;
 type Manager = typeof import("../manager.js");
 let managerModule: Manager;
+type PtySnapshotModule = typeof import("../../engines/pty-snapshot.js");
+let ptySnapshots: PtySnapshotModule;
 
 beforeAll(async () => {
   reg = await import("../registry.js");
   workItems = await import("../../work-items/store.js");
   managerModule = await import("../manager.js");
+  ptySnapshots = await import("../../engines/pty-snapshot.js");
   reg.initDb();
 });
 
@@ -76,12 +79,34 @@ describe("deleteSession/deleteSessions queue_items cleanup", () => {
     expect(reg.getSession(ordinary.id)).toBeUndefined();
   });
 
-  it("connector reset detaches but retains a linked unfinished attempt", () => {
+  it("removes durable PTY snapshots only for sessions that are actually deleted", async () => {
+    const single = reg.createSession({ engine: "claude", source: "web", sourceRef: "web:snapshot-single" });
+    const bulk = reg.createSession({ engine: "codex", source: "web", sourceRef: "web:snapshot-bulk" });
+    const linked = reg.createSession({ engine: "claude", source: "web", sourceRef: "web:snapshot-linked" });
+    const item = workItems.createWorkItem({ title: "Retained snapshot evidence", status: "executing", source: "session" });
+    workItems.linkSession(item.id, linked.id);
+    const snapshot = { data: "durable terminal", cols: 80, rows: 24, visible: true };
+    for (const session of [single, bulk, linked]) {
+      ptySnapshots.ptySnapshotStore.schedule(session.id, snapshot);
+      await ptySnapshots.ptySnapshotStore.flush(session.id);
+    }
+
+    expect(reg.deleteSession(single.id)).toBe(true);
+    expect(reg.deleteSessions([bulk.id, linked.id])).toBe(1);
+
+    expect(await ptySnapshots.ptySnapshotStore.load(single.id)).toBeUndefined();
+    expect(await ptySnapshots.ptySnapshotStore.load(bulk.id)).toBeUndefined();
+    expect(await ptySnapshots.ptySnapshotStore.load(linked.id)).toEqual(snapshot);
+  });
+
+  it("connector reset detaches linked evidence but deletes its terminal snapshot", async () => {
     const key = "slack:linked-reset";
     const linked = reg.createSession({ engine: "claude", source: "slack", sourceRef: key, sessionKey: key });
     const item = workItems.createWorkItem({ title: "Reset evidence", status: "executing", source: "session" });
     workItems.linkSession(item.id, linked.id);
     reg.updateSession(linked.id, { status: "running" });
+    ptySnapshots.ptySnapshotStore.schedule(linked.id, { data: "old terminal", cols: 80, rows: 24, visible: true });
+    await ptySnapshots.ptySnapshotStore.flush(linked.id);
     const manager = new managerModule.SessionManager({ engines: { default: "claude" } } as never, new Map());
 
     manager.resetSession(key);
@@ -94,6 +119,7 @@ describe("deleteSession/deleteSessions queue_items cleanup", () => {
     });
     expect(reg.getSessionBySessionKey(key)).toBeUndefined();
     expect(workItems.getWorkItem(item.id)?.status).toBe("blocked");
+    expect(await ptySnapshots.ptySnapshotStore.load(linked.id)).toBeUndefined();
   });
 });
 

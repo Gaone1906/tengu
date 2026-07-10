@@ -108,14 +108,19 @@ function getPtyWsUrl(sessionId: string): string {
  * prompt into this same warm PTY via bracketed-paste, so the user sees it appear in xterm.
  *
  * Resilience: the socket reconnects with backoff on close/error WITHOUT disposing the
- * xterm Terminal — the daemon replays the PTY scrollback on every fresh connection
- * (see pty-ws.ts), so we just reset the terminal and let the replay repaint it. Returning
- * to the tab after a sleep/background also recovers a half-open socket (see the visibility
- * effect). Only a sessionId change (or unmount) tears the Terminal down.
+ * xterm Terminal. The daemon sends an authoritative reset + serialized snapshot before
+ * ordered live deltas (see pty-ws.ts), while the old screen remains visible underneath
+ * the restoring state. Returning after sleep/background also recovers a half-open socket.
+ * Only a sessionId change (or unmount) tears the Terminal down.
  */
 export interface CliTerminalHandle {
   sendKey(data: string): void;
 }
+
+type TerminalRecoveryState =
+  | { status: "restoring" }
+  | { status: "ready" }
+  | { status: "error"; message: string };
 
 export const CliTerminal = forwardRef<CliTerminalHandle, { sessionId: string }>(function CliTerminal({ sessionId }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -124,15 +129,14 @@ export const CliTerminal = forwardRef<CliTerminalHandle, { sessionId: string }>(
   // leaking the per-session connect closure out of the main effect.
   const reconnectRef = useRef<(() => void) | null>(null);
   const visible = usePageVisibility();
-  const [hasOutput, setHasOutput] = useState(false);
+  const [terminalState, setTerminalState] = useState<TerminalRecoveryState>({ status: "restoring" });
   const [reconnecting, setReconnecting] = useState(false);
-  // Mirror of `hasOutput` for use inside the WS onmessage closure, which is
-  // created once per session and would otherwise see a stale `false`.
-  const hasOutputRef = useRef(false);
-  // A reset frame can flip hasOutput back to false; keep the ref in sync.
-  const markHasOutput = (value: boolean) => {
-    hasOutputRef.current = value;
-    setHasOutput(value);
+
+  const restartTerminal = () => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    setTerminalState({ status: "restoring" });
+    ws.send(JSON.stringify({ type: "restart" }));
   };
 
   useImperativeHandle(ref, () => ({
@@ -148,6 +152,7 @@ export const CliTerminal = forwardRef<CliTerminalHandle, { sessionId: string }>(
     // value ever slips through, do nothing rather than open /ws/pty/null.
     if (!sessionId) return;
     if (!containerRef.current) return;
+    setTerminalState({ status: "restoring" });
 
     const term = new Terminal({
       convertEol: true,
@@ -179,39 +184,61 @@ export const CliTerminal = forwardRef<CliTerminalHandle, { sessionId: string }>(
     // Safari 17.4+; this byte-stream fix works everywhere. Decode → patch → write
     // is safe because xterm.write accepts strings and U+FE0E is zero-width.
     const TEXT_PRESENT_GLYPHS = /[⏰-⏿■-◿☀-⛿]/g;
-    const decoder = new TextDecoder("utf-8");
+    let decoder = new TextDecoder("utf-8");
     const forceTextGlyphs = (s: string) => s.replace(TEXT_PRESENT_GLYPHS, (m) => m + "︎");
 
     const onWsMessage = (e: MessageEvent) => {
-      // Text frames carry JSON control messages from the daemon. The PTY
-      // can respawn within the same session (e.g. KEEP ALIVE → daemon
-      // restarts claude); when it does, the daemon emits {"type":"reset"}
-      // so we can clear the previous PTY's scrollback before new bytes
-      // arrive on the (binary) data path. Data is always binary.
+      // Text frames are structured lifecycle controls. Binary frames are the
+      // only live PTY delta path; arbitrary control bytes never imply readiness.
       if (typeof e.data === "string") {
         try {
           const msg = JSON.parse(e.data);
           if (msg?.type === "reset") {
+            decoder.decode();
+            decoder = new TextDecoder("utf-8");
             term.reset();
-            markHasOutput(false);
+            setTerminalState({ status: "restoring" });
+            return;
+          }
+          if (msg?.type === "snapshot" && typeof msg.snapshot?.data === "string") {
+            const cols = Number(msg.snapshot.cols);
+            const rows = Number(msg.snapshot.rows);
+            if (Number.isFinite(cols) && Number.isFinite(rows) && cols > 0 && rows > 0) {
+              try { term.resize(Math.floor(cols), Math.floor(rows)); } catch { /* disposed */ }
+            }
+            term.write(forceTextGlyphs(msg.snapshot.data), scheduleFit);
+            return;
+          }
+          if (msg?.type === "ready") {
+            setTerminalState({ status: "ready" });
+            return;
+          }
+          if (msg?.type === "restoring") {
+            setTerminalState({ status: "restoring" });
+            return;
+          }
+          if (msg?.type === "error" && typeof msg.message === "string") {
+            setTerminalState({ status: "error", message: msg.message });
+            return;
+          }
+          if (msg?.type === "exited") {
+            const code = typeof msg.exitCode === "number" ? msg.exitCode : "unknown";
+            setTerminalState({ status: "error", message: `Terminal exited with code ${code}.` });
             return;
           }
         } catch {
-          // Not JSON — fall through and treat as plain text output.
+          // Control frames must be valid JSON; never paint them as terminal data.
         }
-        term.write(forceTextGlyphs(e.data));
-        if (!hasOutputRef.current && e.data.length > 0) markHasOutput(true);
       } else {
         const bytes = new Uint8Array(e.data as ArrayBuffer);
         term.write(forceTextGlyphs(decoder.decode(bytes, { stream: true })));
-        if (!hasOutputRef.current && bytes.byteLength > 0) markHasOutput(true);
       }
     };
 
     // --- Reconnect machinery -------------------------------------------------
     // The Terminal instance outlives individual sockets; only the WebSocket is
-    // recreated on a drop. The daemon replays scrollback on every connection, so
-    // a reconnect resets the terminal and lets the replay repaint the live view.
+    // recreated on a drop. The daemon restores an authoritative terminal
+    // snapshot before releasing ordered live deltas on every connection.
     let closed = false;
     let attempt = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -229,13 +256,11 @@ export const CliTerminal = forwardRef<CliTerminalHandle, { sessionId: string }>(
         attempt = 0;
         setReconnecting(false);
         dlog("xterm", `ws.onopen${isReconnect ? " (reconnect)" : ""} wrapper=${containerRef.current?.getBoundingClientRect().width.toFixed(0) ?? "?"}x${containerRef.current?.getBoundingClientRect().height.toFixed(0) ?? "?"}`);
-        // On reconnect the daemon will replay the full scrollback; reset first so
-        // the replayed bytes repaint the current screen instead of stacking a
-        // duplicate copy below the stale one. (If the PTY was reaped meanwhile,
-        // the daemon also sends {type:"reset"} + fresh output — harmless overlap.)
+        // Keep the last good screen beneath the restoring state until the server
+        // sends its authoritative reset/snapshot. This avoids a blank canvas if
+        // reconnect succeeds but PTY resume stalls.
         if (isReconnect) {
-          term.reset();
-          markHasOutput(false);
+          setTerminalState({ status: "restoring" });
         }
         // Initial viewing report — backend ref-counts viewers and uses this to
         // keep the PTY warm (or auto-respawn on return if it was reaped).
@@ -497,7 +522,7 @@ export const CliTerminal = forwardRef<CliTerminalHandle, { sessionId: string }>(
           reconnecting…
         </div>
       )}
-      {!hasOutput && (
+      {terminalState.status === "restoring" && (
         <div
           style={{
             position: "absolute",
@@ -512,7 +537,47 @@ export const CliTerminal = forwardRef<CliTerminalHandle, { sessionId: string }>(
             textAlign: "center",
           }}
         >
-          Waiting for the interactive PTY… send a message below to spawn it.
+          Restoring terminal…
+        </div>
+      )}
+      {terminalState.status === "error" && (
+        <div
+          role="alert"
+          style={{
+            position: "absolute",
+            top: "0.75rem",
+            left: "50%",
+            transform: "translateX(-50%)",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.65rem",
+            maxWidth: "calc(100% - 1.5rem)",
+            padding: "0.5rem 0.6rem 0.5rem 0.8rem",
+            borderRadius: 10,
+            background: "var(--bg-secondary, rgba(20,19,15,0.92))",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.16), 0 1px 2px rgba(0,0,0,0.12)",
+            color: "var(--text-secondary)",
+            fontFamily: "var(--font-code)",
+            fontSize: 12,
+            textWrap: "pretty",
+            zIndex: 2,
+          }}
+        >
+          <span>{terminalState.message}</span>
+          <button
+            type="button"
+            onClick={restartTerminal}
+            className="min-h-10 shrink-0 rounded-lg px-3 transition-transform active:scale-[0.96]"
+            style={{
+              background: "var(--accent)",
+              color: "var(--accent-foreground)",
+              fontFamily: "var(--font-code)",
+              fontSize: 12,
+              cursor: "pointer",
+            }}
+          >
+            Restart terminal
+          </button>
         </div>
       )}
     </div>

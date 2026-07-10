@@ -16,7 +16,7 @@ describe("AntigravityEngine (shape)", () => {
     expect(e.name).toBe("antigravity");
     for (const m of [
       "run", "kill", "isAlive", "killAll",
-      "hasWarmPty", "ensureIdleSpawn", "subscribeOutput", "getScrollback",
+      "hasWarmPty", "ensureIdleSpawn", "restartPty", "subscribeWithSnapshot",
       "setViewing", "writeStdin", "resizePty", "isTurnRunning",
     ]) {
       expect(typeof (e as any)[m]).toBe("function");

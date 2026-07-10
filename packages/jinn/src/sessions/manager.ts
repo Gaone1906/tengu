@@ -10,6 +10,7 @@ import type {
 } from "../shared/types.js";
 import { isInterruptibleEngine } from "../shared/types.js";
 import { removeCodexSessionHome } from "../engines/codex.js";
+import { ptySnapshotStore } from "../engines/pty-snapshot.js";
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import {
   accumulateSessionCost,
@@ -934,6 +935,7 @@ export class SessionManager {
         }
       }
       this.queue.clearQueue(session.sessionKey || session.sourceRef || session.id);
+      ptySnapshotStore.deleteSync(session.id);
       if (session.workItemId) {
         const unresolved = !session.attemptOutcome || session.status === "running" || session.status === "waiting";
         updateSession(session.id, {

@@ -13,6 +13,7 @@ import {
 } from '../work-items/migrate.js';
 import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
+import { ptySnapshotStore } from '../engines/pty-snapshot.js';
 
 let db: Database.Database;
 
@@ -1570,25 +1571,29 @@ export function deleteSession(id: string): boolean {
     db.prepare('DELETE FROM queue_items WHERE session_id = ?').run(id);
     return db.prepare('DELETE FROM sessions WHERE id = ? AND work_item_id IS NULL').run(id).changes > 0;
   });
-  return txn();
+  const deleted = txn();
+  if (deleted) ptySnapshotStore.deleteSync(id);
+  return deleted;
 }
 
 export function deleteSessions(ids: string[]): number {
   if (ids.length === 0) return 0;
   const db = initDb();
-  const txn = db.transaction(() => {
+  const txn = db.transaction((): { changes: number; deletedIds: string[] } => {
     const requestedPlaceholders = ids.map(() => '?').join(',');
     const deletable = (db.prepare(
       `SELECT id FROM sessions WHERE id IN (${requestedPlaceholders}) AND work_item_id IS NULL`,
     ).all(...ids) as Array<{ id: string }>).map((row) => row.id);
-    if (deletable.length === 0) return 0;
+    if (deletable.length === 0) return { changes: 0, deletedIds: [] };
     const placeholders = deletable.map(() => '?').join(',');
     db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...deletable);
     db.prepare(`DELETE FROM queue_items WHERE session_id IN (${placeholders})`).run(...deletable);
     const result = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders}) AND work_item_id IS NULL`).run(...deletable);
-    return result.changes;
+    return { changes: result.changes, deletedIds: deletable };
   });
-  return txn();
+  const result = txn();
+  for (const id of result.deletedIds) ptySnapshotStore.deleteSync(id);
+  return result.changes;
 }
 
 /** Attachment descriptor stored alongside a message and rendered by the web UI. */
