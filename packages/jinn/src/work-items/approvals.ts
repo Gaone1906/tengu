@@ -116,6 +116,12 @@ export function requestApproval(id: string, input: RequestApprovalInput): WorkIt
 
 export type ApprovalDecision = 'approve' | 'reject';
 
+export interface ArchiveWorkItemOptions {
+  human?: boolean;
+  callerSessionId?: string;
+  note?: string;
+}
+
 /**
  * Record a human decision on an item's pending approval (raw write): set the
  * `approved`/`rejected` state + the decided-by/at stamps and append ONE
@@ -146,6 +152,30 @@ function decideApproval(id: string, decision: ApprovalDecision, decidedBy: strin
       },
     });
     return getWorkItem(id)!;
+  });
+  return txn();
+}
+
+/**
+ * Cancel a Todo while closing any outstanding native/mirrored approval record in
+ * the same SQLite transaction. Archive is a lifecycle decision, so leaving a
+ * pending approval behind would create a ghost Needs Attention item. Callers are
+ * authority-checked by the gateway before reaching this persistence primitive.
+ */
+export function archiveWorkItem(id: string, actor: string, opts: ArchiveWorkItemOptions = {}): WorkItem {
+  const db = initDb();
+  const txn = db.transaction((): WorkItem => {
+    let item = getWorkItem(id);
+    if (!item) throw new Error(`archiveWorkItem: work item ${id} not found`);
+    if (item.approvalState === 'pending') {
+      item = decideApproval(id, 'reject', actor, opts.note ?? 'Todo archived');
+    }
+    if (item.status === 'cancelled') return item;
+    return transition(id, 'cancelled', actor, {
+      ...(opts.human ? { human: true } : {}),
+      ...(opts.callerSessionId ? { callerSessionId: opts.callerSessionId } : {}),
+      detail: { action: 'archive', ...(opts.note ? { note: opts.note } : {}) },
+    }).item;
   });
   return txn();
 }

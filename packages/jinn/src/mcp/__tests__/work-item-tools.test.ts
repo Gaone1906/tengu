@@ -243,9 +243,11 @@ describe("work-item tools — unit (stub gateway)", () => {
 type Api = typeof import("../../gateway/api.js");
 type Registry = typeof import("../../sessions/registry.js");
 type Store = typeof import("../../work-items/store.js");
+type Approvals = typeof import("../../work-items/approvals.js");
 let api: Api;
 let registry: Registry;
 let store: Store;
+let approvals: Approvals;
 
 function makeRes() {
   let status = 200;
@@ -333,11 +335,26 @@ function ctxFor(callerSessionId?: string, capability: "valid" | "none" | string 
 
 function seedOrg() {
   const dir = path.join(process.env.JINN_HOME!, "org", "platform");
+  const otherDir = path.join(process.env.JINN_HOME!, "org", "other");
   fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(otherDir, { recursive: true });
   fs.writeFileSync(path.join(dir, "department.yaml"), "name: platform\n");
+  fs.writeFileSync(path.join(otherDir, "department.yaml"), "name: other\n");
+  fs.writeFileSync(
+    path.join(dir, "coo.yaml"),
+    "name: coo\ndisplayName: COO\ndepartment: platform\nrank: executive\nengine: codex\nmodel: gpt-5.5\npersona: Runs operations.\n",
+  );
+  fs.writeFileSync(
+    path.join(dir, "platform-manager.yaml"),
+    "name: platform-manager\ndisplayName: Platform Manager\ndepartment: platform\nrank: manager\nengine: codex\nmodel: gpt-5.5\npersona: Manages platform.\nreportsTo: coo\n",
+  );
   fs.writeFileSync(
     path.join(dir, "platform-dev.yaml"),
-    "name: platform-dev\ndisplayName: Platform Dev\ndepartment: platform\nrank: senior\nengine: codex\nmodel: gpt-5.5\npersona: Builds the platform.\n",
+    "name: platform-dev\ndisplayName: Platform Dev\ndepartment: platform\nrank: senior\nengine: codex\nmodel: gpt-5.5\npersona: Builds the platform.\nreportsTo: platform-manager\n",
+  );
+  fs.writeFileSync(
+    path.join(otherDir, "outsider.yaml"),
+    "name: outsider\ndisplayName: Outsider\ndepartment: other\nrank: employee\nengine: codex\nmodel: gpt-5.5\npersona: Works elsewhere.\nreportsTo: coo\n",
   );
 }
 
@@ -346,6 +363,7 @@ beforeAll(async () => {
   api = await import("../../gateway/api.js");
   registry = await import("../../sessions/registry.js");
   store = await import("../../work-items/store.js");
+  approvals = await import("../../work-items/approvals.js");
   registry.initDb();
 });
 
@@ -464,21 +482,39 @@ describe("work-item tools — integration against the real API + store", () => {
     expect(blocked.workItem.status).toBe("blocked");
   });
 
-  it("archives a Todo without deleting its row or audit history", async () => {
-    const caller = registry.createSession({ engine: "codex", source: "web", sourceRef: "archive-caller", title: "archive caller" });
-    const item = store.createWorkItem({ title: "Archive, do not delete", status: "backlog", source: "session" });
+  it("refuses unrelated archive, while owner/root archive resolves pending approval without deleting evidence", async () => {
+    const owner = registry.createSession({ engine: "codex", source: "web", sourceRef: "archive-owner", title: "archive owner", employee: "platform-dev" });
+    const outsider = registry.createSession({ engine: "codex", source: "web", sourceRef: "archive-outsider", title: "archive outsider", employee: "outsider" });
+    const root = registry.createSession({ engine: "codex", source: "web", sourceRef: "archive-root", title: "archive root", employee: "coo" });
+    const item = store.createWorkItem({ title: "Archive, do not delete", status: "assigned", assignee: "platform-dev", source: "session" });
+    approvals.requestApproval(item.id, { request: "Approve release", target: "platform-manager" });
 
-    const archived = (await tool("archive_work_item").handler({ id: item.id, note: "obsolete" }, ctxFor(caller.id))) as {
+    await expect(tool("archive_work_item").handler({ id: item.id, note: "malicious cancellation" }, ctxFor(outsider.id))).rejects.toThrow(
+      /403.*does not own|403.*cannot archive/i,
+    );
+    expect(store.getWorkItem(item.id)).toMatchObject({ status: "assigned", approvalState: "pending" });
+
+    const archived = (await tool("archive_work_item").handler({ id: item.id, note: "obsolete" }, ctxFor(owner.id))) as {
       archived: boolean;
-      workItem: { id: string; status: string; closedAt: string | null };
+      workItem: { id: string; status: string; closedAt: string | null; approvalState: string; approvalDecidedBy: string };
     };
 
     expect(archived.archived).toBe(true);
-    expect(archived.workItem).toMatchObject({ id: item.id, status: "cancelled" });
+    expect(archived.workItem).toMatchObject({
+      id: item.id,
+      status: "cancelled",
+      approvalState: "rejected",
+      approvalDecidedBy: `session:${owner.id}`,
+    });
     expect(archived.workItem.closedAt).toBeTruthy();
     expect(store.getWorkItem(item.id)?.status).toBe("cancelled");
     const events = store.listWorkItemEvents(item.id);
-    expect(events.some((e) => e.kind === "status_change" && e.fromStatus === "backlog" && e.toStatus === "cancelled")).toBe(true);
+    expect(events.some((e) => e.kind === "approval_decided" && e.actor === `session:${owner.id}`)).toBe(true);
+    expect(events.some((e) => e.kind === "status_change" && e.fromStatus === "assigned" && e.toStatus === "cancelled")).toBe(true);
+
+    const rootOwned = store.createWorkItem({ title: "Root may archive", status: "assigned", assignee: "platform-dev", source: "session" });
+    const rootArchived = (await tool("archive_work_item").handler({ id: rootOwned.id }, ctxFor(root.id))) as { workItem: { status: string } };
+    expect(rootArchived.workItem.status).toBe("cancelled");
   });
 
   it("recursively rejects approval keys and validates exact verifyPolicy/provenance schemas", async () => {

@@ -178,9 +178,10 @@ import {
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import { createWorkflowTodoBridge } from "../work-items/workflow-bridge.js";
-import { decideWorkItemApproval, escalateApproval, requestApproval } from "../work-items/approvals.js";
-import { resolveApprovalDecisionAuthority, resolveRootApprovalTarget } from "./approval-authority.js";
+import { archiveWorkItem, decideWorkItemApproval, escalateApproval, requestApproval } from "../work-items/approvals.js";
+import { resolveApprovalDecisionAuthority, resolveApprovalRouteTarget, resolveRootApprovalTarget } from "./approval-authority.js";
 import { scanOrg } from "./org.js";
+import { resolveOrgHierarchy } from "./org-hierarchy.js";
 import { searchKnowledge, readKnowledgeFile } from "../knowledge/store.js";
 import { planWorkflowAuthoringInput } from "../workflows/authoring.js";
 import { loadInstances } from "../cli/instances.js";
@@ -1577,6 +1578,41 @@ function ownsWorkItem(session: Session, item: WorkItem, linked: Session[]): bool
   return item.source === 'session' && !!item.sourceRef?.startsWith(`session:${session.id}:`);
 }
 
+function authorizeWorkItemOwnerManagerOrRoot(
+  caller: WorkItemCaller,
+  item: WorkItem,
+  action: string,
+): { ok: true } | { ok: false; status: 403; error: string } {
+  if (caller.kind === 'operator') return { ok: true };
+  const employeeName = caller.session.employee;
+  if (!employeeName) {
+    return { ok: false, status: 403, error: `session ${caller.callerId} has no employee identity and cannot ${action} Todo ${item.id}` };
+  }
+  const roster = scanOrg();
+  const employee = roster.get(employeeName);
+  if (!employee) {
+    return { ok: false, status: 403, error: `employee "${employeeName}" is not in the org roster and cannot ${action} Todo ${item.id}` };
+  }
+  const root = resolveRootApprovalTarget();
+  if (root?.kind === 'employee' && root.name === employeeName) return { ok: true };
+
+  const owner = resolveApprovalRouteTarget(item).owner;
+  if (owner === employeeName) return { ok: true };
+  if (owner && (employee.rank === 'manager' || employee.rank === 'executive')) {
+    const hierarchy = resolveOrgHierarchy(roster);
+    let ancestor = hierarchy.nodes[owner]?.parentName ?? null;
+    while (ancestor) {
+      if (ancestor === employeeName) return { ok: true };
+      ancestor = hierarchy.nodes[ancestor]?.parentName ?? null;
+    }
+  }
+  return {
+    ok: false,
+    status: 403,
+    error: `employee "${employeeName}" does not own Todo ${item.id} and is not its authorized manager/root; cannot ${action}`,
+  };
+}
+
 function canReviewWorkItemDone(session: Session, item: WorkItem, linked: Session[]): { ok: true } | { ok: false; error: string } {
   if (item.status !== 'in_review') {
     return { ok: false, error: `marking a Todo done through MCP requires an authorized reviewer and an item already in_review; use the human review surface for ${item.status} → done` };
@@ -2681,14 +2717,15 @@ export async function handleApiRequest(
       const note = typeof body.note === "string" ? body.note.trim() : "";
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
-      if (item.status === "cancelled") return json(res, { workItem: item, archived: true });
+      const authorized = authorizeWorkItemOwnerManagerOrRoot(caller, item, "archive");
+      if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
       try {
-        const result = transition(params.id, "cancelled", workItemActor(caller), {
-          human: true,
-          callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
-          detail: { action: "archive", ...(note ? { note } : {}) },
+        const archived = archiveWorkItem(params.id, workItemActor(caller), {
+          ...(caller.kind === "operator" ? { human: true } : {}),
+          ...(caller.kind === "session" ? { callerSessionId: caller.callerId } : {}),
+          ...(note ? { note } : {}),
         });
-        return json(res, { workItem: result.item, archived: true });
+        return json(res, { workItem: archived, archived: true });
       } catch (err) {
         if (err instanceof TransitionError) {
           if (err.code === "not-found") return notFound(res);
