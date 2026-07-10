@@ -35,11 +35,16 @@ describe('OVERFLOW_ITEMS (the More screen)', () => {
     expect(OVERFLOW_ITEMS.map((i) => i.href)).toEqual([
       '/org',
       '/cron',
-      '/skills',
-      '/logs',
       '/limits',
+      '/logs',
+      '/skills',
       '/settings',
     ])
+  })
+
+  it('mirrors the shared NAV_ITEMS order (derived, not a second hardcoded list)', () => {
+    const sharedOrder = NAV_ITEMS.filter((i) => OVERFLOW_ITEMS.includes(i))
+    expect(OVERFLOW_ITEMS).toEqual(sharedOrder)
   })
 
   it('partitions NAV_ITEMS with no gaps and no overlap (Chat + primary tabs + overflow)', () => {

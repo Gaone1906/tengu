@@ -5,7 +5,7 @@ import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { useTheme } from "@/routes/providers"
 import { THEMES, type ThemeId } from "@/lib/themes"
-import { NAV_ITEMS, type NavItem } from "@/lib/nav"
+import { NAV_ITEMS, OVERFLOW_ITEMS, type NavItem } from "@/lib/nav"
 import { cn } from "@/lib/utils"
 
 // GRS-022 — the mobile "More" overflow. The 4th bottom-tab slot opens this
@@ -30,10 +30,10 @@ const TINT: Record<string, { bg: string; fg: string }> = {
   "/settings": { bg: "var(--text-tertiary)", fg: "var(--bg-secondary)" },
 }
 
-const GROUPS: { label: string; hrefs: string[] }[] = [
-  { label: "Manage", hrefs: ["/org", "/cron", "/skills"] },
-  { label: "Monitor", hrefs: ["/logs", "/limits"] },
-]
+// The overflow links derive from the SAME ordered nav list as the desktop and
+// chat rails (OVERFLOW_ITEMS mirrors NAV_ITEMS order) — no page-local order.
+// Settings is held out: it lives in the App group below with Appearance.
+const OVERFLOW_LINKS: NavItem[] = OVERFLOW_ITEMS.filter((item) => item.href !== "/settings")
 
 function RowIcon({ Icon, href }: { Icon: LucideIcon; href: string }) {
   const tint = TINT[href] ?? { bg: "var(--text-tertiary)", fg: "#fff" }
@@ -203,16 +203,13 @@ export default function MorePage() {
             More
           </h1>
 
-          {GROUPS.map((group) => (
-            <div key={group.label}>
-              <GroupLabel>{group.label}</GroupLabel>
-              <Card>
-                {group.hrefs.map((href, i) => (
-                  <LinkRow key={href} item={itemFor(href)} first={i === 0} />
-                ))}
-              </Card>
-            </div>
-          ))}
+          <div className="mt-5">
+            <Card>
+              {OVERFLOW_LINKS.map((item, i) => (
+                <LinkRow key={item.href} item={item} first={i === 0} />
+              ))}
+            </Card>
+          </div>
 
           <GroupLabel>App</GroupLabel>
           <Card>

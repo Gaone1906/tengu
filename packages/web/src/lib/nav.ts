@@ -49,9 +49,11 @@ export const MOBILE_TAB_ITEMS: NavItem[] = [
 ]
 
 // Destinations that live INSIDE the More overflow screen (everything not a
-// primary tab and not Chat). Used both to build the More screen and to keep the
-// More tab lit while the operator is on any of its children.
-export const OVERFLOW_HREFS = ["/org", "/cron", "/skills", "/logs", "/limits", "/settings"] as const
-export const OVERFLOW_ITEMS: NavItem[] = OVERFLOW_HREFS.map(
-  (href) => NAV_ITEMS.find((item) => item.href === href)!,
+// primary tab). Derived from NAV_ITEMS so the overflow order always mirrors
+// the shared nav order — no second hardcoded list. Used both to build the More
+// screen and to keep the More tab lit while the operator is on any of its
+// children.
+export const OVERFLOW_ITEMS: NavItem[] = NAV_ITEMS.filter(
+  (item) => !MOBILE_TAB_PRIMARY_HREFS.includes(item.href as (typeof MOBILE_TAB_PRIMARY_HREFS)[number]),
 )
+export const OVERFLOW_HREFS: string[] = OVERFLOW_ITEMS.map((item) => item.href)
