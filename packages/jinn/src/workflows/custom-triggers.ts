@@ -4,6 +4,8 @@ import path from 'node:path';
 import { getWorkItem } from '../work-items/store.js';
 import { startWorkflowRunFromTrigger, type RunDriverDeps } from './run-reconciler.js';
 import type { WorkflowRun, WorkflowTriggerEvent } from './run-store.js';
+import { evaluateRegexMatch } from './regex-eval.js';
+import { logger } from '../shared/logger.js';
 
 const TRIGGER_STORE_SCHEMA_VERSION = 1;
 const TRIGGER_DIR = 'workflow-triggers';
@@ -20,18 +22,22 @@ const MAX_FILTER_PATH_CHARS = 160;
 // length cap plus a compile guard is a proportionate mitigation for the blast
 // radius (one gateway-local trigger burning CPU on its own inbound events).
 const MAX_FILTER_REGEX_CHARS = 256;
-// Runtime input cap for a `matches` test: catastrophic backtracking needs input
-// length, so bounding the tested string bounds the worst case for polynomial
-// patterns the nested-quantifier check below does not catch.
-const MAX_FILTER_MATCH_INPUT_CHARS = 512;
+// Fail-closed input cap for a `matches` test. This is NOT a backtracking defense
+// (the worker timeout is) — it just bounds serialization/copy cost into the
+// worker. An input longer than this fails closed (non-match); it is NEVER
+// truncated-then-matched, which would change semantics on anchored patterns.
+const MAX_FILTER_MATCH_INPUT_CHARS = 4096;
 
 /**
- * Conservative ReDoS guard: reject a regex with star-height > 1 — a quantified
- * group whose body itself varies (contains a quantifier or an alternation), e.g.
- * `(a+)+`, `(a*)*`, `(a|aa)+`, `([a-z]+)+`, `((a+))+`. These are the classic
- * exponential-backtracking shapes; a plain length cap + compile check does not
- * touch them. Deliberately over-rejects exotic-but-safe nesting — trigger filters
- * do not need it. A hand-written single-pass scanner (no deps, no parser):
+ * UX-only fast feedback (NOT the security boundary — that is the match-time
+ * worker timeout in regex-eval.ts). Rejects the obvious exponential foot-gun at
+ * creation so the author sees an immediate error instead of a filter that later
+ * silently fails closed. It flags star-height > 1 — a quantified group whose body
+ * itself varies (contains a quantifier or an alternation), e.g. `(a+)+`, `(a*)*`,
+ * `(a|aa)+`, `([a-z]+)+`, `((a+))+`. It deliberately does NOT catch polynomial
+ * blowups like `^a*a*a*a*$` (no static detector reliably does); the worker
+ * timeout is what actually bounds those. Over-rejects exotic-but-safe nesting —
+ * trigger filters do not need it. A hand-written single-pass scanner (no deps):
  * tracks group frames, marks a frame "variable" when its body has a quantifier or
  * `|`, and flags DANGER when a variable group is immediately quantified; that
  * variability propagates to the enclosing group so deep nesting is caught too.
@@ -485,8 +491,10 @@ function cleanFilter(input: unknown): WorkflowTriggerFilter[] | undefined {
       } catch {
         throw new WorkflowTriggerStoreError('invalid-input', 'filter.value is not a valid regular expression');
       }
-      // Reject catastrophic-backtracking shapes at creation (the length cap +
-      // compile check do not catch them). This is the primary ReDoS defense.
+      // Reject the obvious exponential foot-gun at creation for fast author
+      // feedback. This is UX, not the security boundary — the match-time worker
+      // timeout (regex-eval.ts) is what actually contains a bad pattern (incl. the
+      // polynomial ones this detector cannot catch, and any that bypass creation).
       if (hasCatastrophicRegexNesting(rec.value)) {
         throw new WorkflowTriggerStoreError(
           'invalid-input',
@@ -711,7 +719,11 @@ function readFilterPath(input: FireWorkflowEventInput, pathValue: string): unkno
   return current;
 }
 
-function filterMatches(input: FireWorkflowEventInput, filter: WorkflowTriggerFilter): boolean {
+async function filterMatches(
+  input: FireWorkflowEventInput,
+  filter: WorkflowTriggerFilter,
+  label?: string,
+): Promise<boolean> {
   const actual = readFilterPath(input, filter.path);
   switch (filter.op) {
     case 'exists':
@@ -722,28 +734,29 @@ function filterMatches(input: FireWorkflowEventInput, filter: WorkflowTriggerFil
       return JSON.stringify(actual) !== JSON.stringify(filter.value);
     case 'matches': {
       if (typeof actual !== 'string' || typeof filter.value !== 'string') return false;
-      // Defense-in-depth for a pattern that bypassed creation validation (e.g. a
-      // hand-edited binding file): a catastrophic-backtracking shape is skipped
-      // outright (fail-safe non-match) rather than executed, and the tested input
-      // is length-capped so any remaining (polynomial) pattern stays bounded.
-      if (hasCatastrophicRegexNesting(filter.value)) return false;
-      const capped = actual.length > MAX_FILTER_MATCH_INPUT_CHARS
-        ? actual.slice(0, MAX_FILTER_MATCH_INPUT_CHARS)
-        : actual;
-      try {
-        return new RegExp(filter.value).test(capped);
-      } catch {
+      // Fail CLOSED on oversize input — never truncate-then-match (that would
+      // flip an anchored pattern like `^…$` to a false positive on the prefix).
+      if (actual.length > MAX_FILTER_MATCH_INPUT_CHARS) {
+        logger.warn(
+          `[workflow-triggers] regex filter input exceeded ${MAX_FILTER_MATCH_INPUT_CHARS} chars — failing closed (non-match)${label ? ` (trigger "${label}")` : ''}`,
+        );
         return false;
       }
+      // The actual security boundary: run the operator-authored regex in an
+      // isolated worker with a hard wall-clock timeout; timeout/error → non-match.
+      return evaluateRegexMatch(filter.value, actual, { label });
     }
   }
 }
 
-function bindingMatchesEvent(binding: WorkflowTriggerBinding, input: FireWorkflowEventInput): boolean {
+async function bindingMatchesEvent(binding: WorkflowTriggerBinding, input: FireWorkflowEventInput): Promise<boolean> {
   if (binding.kind !== 'webhook') return false;
   if (binding.activation !== 'active') return false;
   if (binding.event !== input.event) return false;
-  return (binding.filter ?? []).every((f) => filterMatches(input, f));
+  for (const f of binding.filter ?? []) {
+    if (!(await filterMatches(input, f, binding.name))) return false;
+  }
+  return true;
 }
 
 export async function fireWorkflowEvent(
@@ -767,12 +780,19 @@ export async function fireWorkflowEvent(
     payload,
     ...(typeof input.fireRef === 'string' && input.fireRef.trim() ? { fireRef: input.fireRef.trim().slice(0, 256) } : {}),
   };
-  const candidates = listWorkflowTriggerBindings(deps.root).filter((binding) => {
-    if (!bindingMatchesEvent(binding, fireInput)) return false;
+  const tokenAuthorized = (binding: WorkflowTriggerBinding): boolean => {
     if (opts.gatewayAuthorized !== false && opts.authorizedSecretToken === undefined) return true;
     if (opts.gatewayAuthorized === true) return true;
     return verifyWorkflowTriggerBindingToken(binding, opts.authorizedSecretToken);
-  });
+  };
+  // Filter eval is async (regexes run in an isolated worker), so select
+  // sequentially rather than via Array.filter. Cheap gates (kind/activation/event/
+  // token) short-circuit before any worker round-trip.
+  const candidates: WorkflowTriggerBinding[] = [];
+  for (const binding of listWorkflowTriggerBindings(deps.root)) {
+    if (!tokenAuthorized(binding)) continue;
+    if (await bindingMatchesEvent(binding, fireInput)) candidates.push(binding);
+  }
   if (candidates.length === 0) return { rejected: 'no-matching-binding', outcomes: [] };
 
   const outcomes: FireWorkflowEventOutcome[] = [];

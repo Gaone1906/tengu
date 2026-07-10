@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,6 +8,7 @@ import {
   hasCatastrophicRegexNesting,
   WorkflowTriggerStoreError,
 } from '../custom-triggers.js';
+import { shutdownRegexEvalWorker } from '../regex-eval.js';
 import type { RunDriverDeps } from '../run-reconciler.js';
 
 const now = () => '2026-07-06T09:00:00.000Z';
@@ -18,6 +19,9 @@ beforeEach(() => {
 });
 afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
+});
+afterAll(() => {
+  shutdownRegexEvalWorker();
 });
 
 function deps(): RunDriverDeps {
@@ -40,60 +44,100 @@ function makeWebhookFilter(name: string, value: string) {
   }, { now });
 }
 
-describe('hasCatastrophicRegexNesting — conservative ReDoS detector', () => {
+/** Store a valid binding, then hand-edit triggers.json to inject `pattern` —
+ *  simulating a filter written outside the validated create/update API. */
+function plantBypassPattern(name: string, pattern: string): void {
+  makeWebhookFilter(name, '^placeholder$');
+  const file = path.join(root, 'workflow-triggers', 'triggers.json');
+  const json = fs.readFileSync(file, 'utf8').replace('^placeholder$', pattern.replace(/\\/g, '\\\\'));
+  fs.writeFileSync(file, json);
+}
+
+async function fire(kind: string) {
+  return fireWorkflowEvent(deps(), { event: 'inbound.event', payload: { kind } }, { gatewayAuthorized: true });
+}
+
+describe('hasCatastrophicRegexNesting — creation-time UX detector', () => {
   it('flags classic exponential-backtracking shapes', () => {
     for (const p of ['(a+)+$', '(a*)*', '(a+)*', '(a|aa)+', '(a|a?)+', '([a-z]+)+', '((a+))+', '(?:a+)+', '(\\d+)+$']) {
       expect(hasCatastrophicRegexNesting(p), p).toBe(true);
     }
   });
 
-  it('does not flag safe patterns', () => {
-    for (const p of ['^trial-[0-9]+$', '(?:abc)+', '(abc)+', 'a+b+c+', '[a-z]+', '\\d{1,4}', 'foo|bar', '(cat|dog)s?', '\\(a\\+\\)\\+']) {
+  it('does not flag safe patterns — nor the polynomial blowups only the worker catches', () => {
+    for (const p of ['^trial-[0-9]+$', '(?:abc)+', '(abc)+', 'a+b+c+', '[a-z]+', '\\d{1,4}', 'foo|bar', '(cat|dog)s?', '\\(a\\+\\)\\+', '^a*a*a*a*$']) {
       expect(hasCatastrophicRegexNesting(p), p).toBe(false);
     }
   });
 });
 
-describe('webhook matches-filter ReDoS guards', () => {
-  it('rejects a catastrophic pattern at creation', () => {
+describe('webhook matches-filter — worker-isolated evaluation', () => {
+  it('rejects an obvious exponential pattern at creation (UX fast-feedback)', () => {
     expect(() => makeWebhookFilter('redos-create', '(a+)+$')).toThrow(WorkflowTriggerStoreError);
     expect(() => makeWebhookFilter('redos-create2', '(a+)+$')).toThrow(/catastrophic backtracking|ReDoS/i);
   });
 
-  it('accepts a safe pattern at creation', () => {
+  it('accepts a safe pattern — and a polynomial one (the worker, not the detector, contains it)', () => {
     expect(() => makeWebhookFilter('safe-create', '^trial-[0-9]+$')).not.toThrow();
+    expect(() => makeWebhookFilter('poly-create', '^a*a*a*a*$')).not.toThrow();
   });
 
-  it('a bypass-stored catastrophic pattern cannot hang the fire path (runtime input cap + skip)', async () => {
-    // Create a VALID binding, then hand-edit the stored filter to a catastrophic
-    // pattern — simulating a binding file written outside the validated API.
-    makeWebhookFilter('bypass', '^ok$');
-    const file = path.join(root, 'workflow-triggers', 'triggers.json');
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const bindings = Array.isArray(raw) ? raw : raw.bindings ?? Object.values(raw);
-    // Locate the filter value regardless of top-level shape and swap in the bomb.
-    const json = fs.readFileSync(file, 'utf8').replace('^ok$', '(a+)+$');
-    fs.writeFileSync(file, json);
-    expect(bindings.length).toBeGreaterThan(0);
-
-    // A classic catastrophic input: many 'a's then a non-match char.
-    const evilInput = 'a'.repeat(5000) + '!';
-    const start = performance.now();
-    await fireWorkflowEvent(deps(), { event: 'inbound.event', payload: { kind: evilInput } }, { gatewayAuthorized: true });
-    const elapsed = performance.now() - start;
-    // Without the guard, (a+)+$ on this input backtracks effectively forever.
-    expect(elapsed).toBeLessThan(50);
-  });
-
-  it('normal matching still works for safe patterns through the fire path', async () => {
+  it('normal matching still works for safe patterns through the worker', async () => {
     makeWebhookFilter('works', '^trial-[0-9]+$');
-    const res = await fireWorkflowEvent(
-      deps(),
-      { event: 'inbound.event', payload: { kind: 'trial-42' } },
-      { gatewayAuthorized: true },
-    );
-    // The binding matched (filter passed) → it reached the def lookup and reported
-    // the missing workflow, proving the filter did not reject the event.
+    const res = await fire('trial-42');
+    // Filter matched → reached the def lookup and reported the missing workflow.
     expect(res.outcomes.some((o) => o.outcome === 'missing-workflow')).toBe(true);
+    // A non-matching input yields no candidate.
+    const miss = await fire('nope-99');
+    expect(miss.rejected).toBe('no-matching-binding');
+  });
+
+  it('a bypass-stored POLYNOMIAL pattern (^a*a*a*a*$) cannot hang the fire path', async () => {
+    plantBypassPattern('poly-bypass', '^a*a*a*a*$');
+    // Non-matching inputs that trigger O(n^4) backtracking on the main thread.
+    for (const len of [256, 384]) {
+      const start = performance.now();
+      const res = await fire('a'.repeat(len) + '!');
+      const elapsed = performance.now() - start;
+      expect(res.rejected, `len ${len}`).toBe('no-matching-binding'); // failed closed
+      expect(elapsed, `len ${len} elapsed`).toBeLessThan(150); // worker timeout ~50ms + boot
+    }
+  });
+
+  it('oversize input fails CLOSED without truncation (no anchored false positive)', async () => {
+    plantBypassPattern('poly-oversize', '^a*a*a*a*$');
+    // 5000 > 4096 cap. The OLD truncate-then-match would slice the trailing "!"
+    // and MATCH the all-'a' prefix (false positive). It must NOT match now.
+    const res = await fire('a'.repeat(5000) + '!');
+    expect(res.rejected).toBe('no-matching-binding');
+  });
+
+  it('worker timeout kills a bypass-stored exponential bomb and stays responsive after', async () => {
+    plantBypassPattern('exp-bypass', '(a+)+$');
+    const start = performance.now();
+    const bomb = await fire('a'.repeat(5000) + '!'); // 5000 > cap → oversize fail-closed
+    // Use an in-cap input to force the worker path + timeout for the bomb.
+    const bomb2 = await fire('a'.repeat(40) + '!');
+    const elapsed = performance.now() - start;
+    expect(bomb.rejected).toBe('no-matching-binding');
+    expect(bomb2.rejected).toBe('no-matching-binding');
+    expect(elapsed).toBeLessThan(300);
+
+    // A subsequent LEGIT filter still evaluates correctly (worker respawned).
+    const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'jinn-redos-after-'));
+    try {
+      createWorkflowTriggerBinding(root2, {
+        kind: 'webhook', name: 'after-bomb', event: 'inbound.event', targetWorkflowId: 'wf',
+        filter: [{ path: 'payload.kind', op: 'matches', value: '^trial-[0-9]+$' }],
+      }, { now });
+      const ok = await fireWorkflowEvent(
+        { ...deps(), root: root2 },
+        { event: 'inbound.event', payload: { kind: 'trial-7' } },
+        { gatewayAuthorized: true },
+      );
+      expect(ok.outcomes.some((o) => o.outcome === 'missing-workflow')).toBe(true);
+    } finally {
+      fs.rmSync(root2, { recursive: true, force: true });
+    }
   });
 });
