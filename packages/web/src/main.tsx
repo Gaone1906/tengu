@@ -13,6 +13,7 @@ const LimitsPage = lazyRoute(() => import('./routes/limits/page'), 'limits')
 const OrgPage = lazyRoute(() => import('./routes/org/page'), 'org')
 const SettingsPage = lazyRoute(() => import('./routes/settings/page'), 'settings')
 const SkillsPage = lazyRoute(() => import('./routes/skills/page'), 'skills')
+const SkillDetailPage = lazyRoute(() => import('./routes/skills/detail'), 'skill-detail')
 const FilePage = lazyRoute(() => import('./routes/file/page'), 'file')
 const MorePage = lazyRoute(() => import('./routes/more/page'), 'more')
 const RedesignPage = lazyRoute(() => import('./routes/redesign/page'), 'redesign')
@@ -73,6 +74,7 @@ function App() {
               <Route path="/org" element={<OrgPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/skills" element={<SkillsPage />} />
+              <Route path="/skills/:name" element={<SkillDetailPage />} />
               <Route path="/file" element={<FilePage />} />
               <Route path="/more" element={<MorePage />} />
               <Route path="/workflow" element={<WorkflowListPage />} />

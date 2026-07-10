@@ -889,8 +889,11 @@ export const api = {
     ),
   getDepartmentBoard: (name: string) =>
     get<Record<string, unknown>>(`/api/org/departments/${name}/board`),
-  getSkills: () => get<Record<string, unknown>[]>("/api/skills"),
-  getSkill: (name: string) => get<Record<string, unknown>>(`/api/skills/${name}`),
+  getSkills: () => get<{ name: string; description?: string }[]>("/api/skills"),
+  getSkill: (name: string) =>
+    get<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}`),
+  updateSkill: (name: string, content: string) =>
+    put<{ status: string }>(`/api/skills/${encodeURIComponent(name)}`, { content }),
   getConfig: () => get<Record<string, unknown>>("/api/config"),
   reloadConnectors: () =>
     post<{ started: string[]; stopped: string[]; errors: string[] }>("/api/connectors/reload", {}),
