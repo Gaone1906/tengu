@@ -141,13 +141,30 @@ export interface ListWorkItemsFilter {
   assignee?: string;
   source?: WorkItemSource;
   needsAttentionFor?: string;
-  /** Cap rows in SQL (LIMIT) instead of the caller slicing after a full-table load. */
-  limit?: number;
-}
-
-export interface SearchWorkItemsFilter extends ListWorkItemsFilter {
   /** Escaped-LIKE substring over title + body (%/_/backslash are literal). */
   text?: string;
+  /** Inclusive ISO timestamp bounds over `updated_at`. */
+  since?: string;
+  until?: string;
+  /** Cap rows in SQL (LIMIT) instead of the caller slicing after a full-table load. */
+  limit?: number;
+  /** Zero-based row offset, applied after the canonical ordering. */
+  offset?: number;
+}
+
+export interface SearchWorkItemsFilter extends ListWorkItemsFilter {}
+
+export type WorkItemTotals = Record<WorkItemStatus, number>;
+
+export interface WorkItemPage {
+  workItems: WorkItem[];
+  /** Exact count matching the filters, before LIMIT/OFFSET. */
+  total: number;
+  /** Exact matching counts by raw stored status, before LIMIT/OFFSET. */
+  totals: WorkItemTotals;
+  limit: number;
+  offset: number;
+  nextOffset: number | null;
 }
 
 function parseVerifyPolicy(raw: unknown): VerifyPolicy | null {
@@ -384,45 +401,18 @@ export function getWorkItemBySourceRef(source: WorkItemSource, sourceRef: string
   return row ? rowToWorkItem(row) : undefined;
 }
 
-/** List work items, recently-updated first, optionally filtered. */
-export function listWorkItems(filter?: ListWorkItemsFilter): WorkItem[] {
-  const db = initDb();
-  const conditions: string[] = [];
-  const values: unknown[] = [];
-  if (filter?.status) {
-    conditions.push('status = ?');
-    values.push(filter.status);
-  }
-  if (filter?.department) {
-    conditions.push('department = ?');
-    values.push(filter.department);
-  }
-  if (filter?.assignee) {
-    conditions.push('assignee = ?');
-    values.push(filter.assignee);
-  }
-  if (filter?.source) {
-    conditions.push('source = ?');
-    values.push(filter.source);
-  }
-  if (filter?.needsAttentionFor) {
-    conditions.push("((approval_state = 'pending' AND approval_target = ?) OR (assignee = ? AND status IN ('blocked', 'escalated')))");
-    values.push(filter.needsAttentionFor, filter.needsAttentionFor);
-  }
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const hasLimit = typeof filter?.limit === 'number' && Number.isFinite(filter.limit);
-  const limitSql = hasLimit ? ' LIMIT ?' : '';
-  if (hasLimit) values.push(Math.max(0, Math.floor(filter!.limit!)));
-  const rows = db
-    .prepare(`SELECT * FROM work_items ${where} ORDER BY updated_at DESC, created_at DESC${limitSql}`)
-    .all(...values) as Record<string, unknown>[];
-  return rows.map(rowToWorkItem);
-}
+const WORK_ITEM_STATUS_VALUES: readonly WorkItemStatus[] = [
+  'backlog',
+  'assigned',
+  'executing',
+  'in_review',
+  'done',
+  'blocked',
+  'escalated',
+  'cancelled',
+];
 
-/** Deterministic AND-composed Todo search (GRS-021c): escaped-LIKE text over
- * title+body, plus structured status/source/assignee/department filters. */
-export function searchWorkItems(filter: SearchWorkItemsFilter, limit = 20): WorkItem[] {
-  const db = initDb();
+function workItemWhere(filter: ListWorkItemsFilter): { sql: string; values: unknown[] } {
   const conditions: string[] = [];
   const values: unknown[] = [];
   if (filter.text) {
@@ -434,29 +424,81 @@ export function searchWorkItems(filter: SearchWorkItemsFilter, limit = 20): Work
     conditions.push('status = ?');
     values.push(filter.status);
   }
-  if (filter.source) {
-    conditions.push('source = ?');
-    values.push(filter.source);
+  if (filter.department) {
+    conditions.push('department = ?');
+    values.push(filter.department);
   }
   if (filter.assignee) {
     conditions.push('assignee = ?');
     values.push(filter.assignee);
   }
-  if (filter.department) {
-    conditions.push('department = ?');
-    values.push(filter.department);
+  if (filter.source) {
+    conditions.push('source = ?');
+    values.push(filter.source);
   }
   if (filter.needsAttentionFor) {
     conditions.push("((approval_state = 'pending' AND approval_target = ?) OR (assignee = ? AND status IN ('blocked', 'escalated')))");
     values.push(filter.needsAttentionFor, filter.needsAttentionFor);
   }
-  if (conditions.length === 0) {
+  if (filter.since) {
+    conditions.push('updated_at >= ?');
+    values.push(filter.since);
+  }
+  if (filter.until) {
+    conditions.push('updated_at <= ?');
+    values.push(filter.until);
+  }
+  return {
+    sql: conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '',
+    values,
+  };
+}
+
+/** Paginated, deterministic AND-composed Todo query. Counts are computed from
+ * the identical WHERE clause before pagination, so a capped page can never
+ * masquerade as the full ledger. */
+export function queryWorkItems(filter: ListWorkItemsFilter = {}): WorkItemPage {
+  const db = initDb();
+  const { sql: where, values } = workItemWhere(filter);
+  const limit = typeof filter.limit === 'number' && Number.isFinite(filter.limit)
+    ? Math.max(0, Math.floor(filter.limit))
+    : 20;
+  const offset = typeof filter.offset === 'number' && Number.isFinite(filter.offset)
+    ? Math.max(0, Math.floor(filter.offset))
+    : 0;
+  const rows = db
+    .prepare(`SELECT * FROM work_items ${where} ORDER BY updated_at DESC, created_at DESC, id ASC LIMIT ? OFFSET ?`)
+    .all(...values, limit, offset) as Record<string, unknown>[];
+  const counts = db
+    .prepare(`SELECT status, COUNT(*) AS total FROM work_items ${where} GROUP BY status`)
+    .all(...values) as Array<{ status: WorkItemStatus; total: number }>;
+  const totals = Object.fromEntries(WORK_ITEM_STATUS_VALUES.map((status) => [status, 0])) as WorkItemTotals;
+  for (const count of counts) totals[count.status] = count.total;
+  const total = counts.reduce((sum, count) => sum + count.total, 0);
+  const workItems = rows.map(rowToWorkItem);
+  const consumed = offset + workItems.length;
+  return {
+    workItems,
+    total,
+    totals,
+    limit,
+    offset,
+    nextOffset: workItems.length > 0 && consumed < total ? consumed : null,
+  };
+}
+
+/** List work items, recently-updated first, optionally filtered. Compatibility
+ * wrapper: an omitted limit still means the full matching set. */
+export function listWorkItems(filter?: ListWorkItemsFilter): WorkItem[] {
+  return queryWorkItems({ ...(filter ?? {}), limit: filter?.limit ?? 2_147_483_647 }).workItems;
+}
+
+/** Deterministic AND-composed Todo search (GRS-021c). */
+export function searchWorkItems(filter: SearchWorkItemsFilter, limit = 20): WorkItem[] {
+  if (!filter.text && !filter.status && !filter.source && !filter.assignee && !filter.department && !filter.needsAttentionFor && !filter.since && !filter.until) {
     throw new Error('searchWorkItems requires at least one filter');
   }
-  const rows = db
-    .prepare(`SELECT * FROM work_items WHERE ${conditions.join(' AND ')} ORDER BY updated_at DESC, created_at DESC LIMIT ?`)
-    .all(...values, limit) as Record<string, unknown>[];
-  return rows.map(rowToWorkItem);
+  return queryWorkItems({ ...filter, limit }).workItems;
 }
 
 /** Live spend over an item's execution attempts: `SUM(total_cost)` across linked
