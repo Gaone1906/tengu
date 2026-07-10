@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
-import type { ChatBlock, ChatBlockEnvelope, CronJob, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
+import type { ChatBlock, ChatBlockEnvelope, CronJob, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target, WorkflowSessionProvenance } from "../shared/types.js";
 import { isInterruptibleEngine } from "../shared/types.js";
 import {
   getModelRegistry,
@@ -103,6 +103,7 @@ import {
   fireWorkflowCronJob,
   resolveWorkflowRunGate,
   workflowRunTriggerTodoId,
+  workflowTriggerSource,
   artifactGatePasses,
   stateFlagPasses,
   checkWorkflowEventRateLimit,
@@ -125,6 +126,7 @@ import {
   type FollowUpContext,
   type FollowUpPostResult,
   type RunDriverDeps,
+  type WorkflowRun,
   type SpawnContext,
   type SpawnResult,
 } from "../workflows/index.js";
@@ -581,6 +583,77 @@ function dispatchWebSessionRun(
   }
 }
 
+/** Deterministic list/grouping identity for a workflow run's synthetic parent. */
+export function workflowRunParentSessionKey(runId: string): string {
+  return `workflow-run:${runId}:parent`;
+}
+
+interface WorkflowRunParentIdentity {
+  workflowId: string;
+  workflowName: string;
+  runId: string;
+  triggerSource: string;
+}
+
+function ensureWorkflowRunParentSession(identity: WorkflowRunParentIdentity, context: ApiContext): Session {
+  const sessionKey = workflowRunParentSessionKey(identity.runId);
+  const existing = getSessionBySessionKey(sessionKey);
+  if (existing) return existing;
+  const workflowProvenance: WorkflowSessionProvenance = { kind: 'run', ...identity };
+  const created = createSession({
+    engine: 'workflow',
+    source: 'web',
+    sourceRef: sessionKey,
+    connector: 'web',
+    sessionKey,
+    replyContext: { source: 'web' },
+    title: `Workflow: ${identity.workflowName} · run ${identity.runId}`,
+    promptExcerpt: `Workflow run ${identity.runId} of ${identity.workflowName}`,
+    workflowProvenance,
+    portalName: context.getConfig().portal?.portalName,
+  });
+  context.emit?.('session:created', { sessionId: created.id });
+  return created;
+}
+
+function workflowParentSessionState(run: WorkflowRun): Pick<UpdateSessionFields, 'status' | 'attemptOutcome' | 'lastActivity' | 'lastError'> {
+  const lastStepAt = run.steps.reduce<string | null>((latest, step) => !latest || step.at > latest ? step.at : latest, null);
+  const lastActivity = run.endedAt ?? lastStepAt ?? run.startedAt;
+  switch (run.status) {
+    case 'completed':
+      return { status: 'idle', attemptOutcome: 'succeeded', lastActivity, lastError: null };
+    case 'failed':
+      return {
+        status: 'error',
+        attemptOutcome: 'failed',
+        lastActivity,
+        lastError: run.errors?.at(-1)?.message ?? 'Workflow run failed',
+      };
+    case 'cancelled':
+      return { status: 'interrupted', attemptOutcome: 'interrupted', lastActivity, lastError: 'Workflow run cancelled' };
+    case 'parked':
+      return { status: 'waiting', attemptOutcome: null, lastActivity, lastError: null };
+    case 'running':
+    case 'dispatched':
+      return { status: 'running', attemptOutcome: null, lastActivity, lastError: null };
+  }
+}
+
+/** Project one durable workflow run into the ordinary session list. The run file
+ * remains authoritative; callers deliberately invoke this only after saveRun. */
+export function syncWorkflowRunSession(run: WorkflowRun, context: ApiContext): string {
+  const workflowName = run.definitionSnapshot?.name ?? run.workflowId;
+  const parent = ensureWorkflowRunParentSession({
+    workflowId: run.workflowId,
+    workflowName,
+    runId: run.runId,
+    triggerSource: workflowTriggerSource(run.trigger),
+  }, context);
+  updateSession(parent.id, workflowParentSessionState(run));
+  context.emit?.('session:updated', { sessionId: parent.id });
+  return parent.id;
+}
+
 /**
  * Spawn the real session a workflow-run step maps to (GRS-011d-2c; attempt-keyed and
  * driven by the sequential engine since GRS-014b).
@@ -655,6 +728,16 @@ export async function spawnWorkflowStepSession(ctx: SpawnContext, context: ApiCo
   const engine = context.sessionManager.getEngine(engineName);
   if (!engine) throw new Error(`engine "${engineName}" not available`);
 
+  // Defense in depth behind the run driver's post-save synchronizer: even if the
+  // session-list projection failed at mint, a workflow-owned phase can never be
+  // successfully created parentless.
+  const parent = ensureWorkflowRunParentSession({
+    workflowId: ctx.workflowId,
+    workflowName: ctx.workflowName,
+    runId: ctx.runId,
+    triggerSource: ctx.triggerSource,
+  }, context);
+
   // GRS-016e: the shared-session creation spawn overrides the key
   // (`workflow-run:<runId>:shared`); absent = the ordinary attempt key (v2).
   const sessionKey = ctx.sessionKey ?? stepSessionKey(ctx.runId, ctx.nodeId, ctx.attempt, ctx.round);
@@ -671,6 +754,22 @@ export async function spawnWorkflowStepSession(ctx: SpawnContext, context: ApiCo
     connector: "web",
     sessionKey,
     replyContext: { source: "web" },
+    parentSessionId: parent.id,
+    title: `[Workflow] ${ctx.workflowName} / ${ctx.label}${ctx.round > 1 ? ` / r${ctx.round}` : ''}`,
+    workflowProvenance: {
+      kind: 'phase',
+      workflowId: ctx.workflowId,
+      workflowName: ctx.workflowName,
+      runId: ctx.runId,
+      triggerSource: ctx.triggerSource,
+      phase: {
+        nodeId: ctx.nodeId,
+        name: ctx.label,
+        index: ctx.phaseIndex,
+        round: ctx.round,
+        attempt: ctx.attempt,
+      },
+    },
     employee,
     ...(model ? { model } : {}),
     ...(effortLevel ? { effortLevel } : {}),
@@ -832,6 +931,7 @@ export function workflowRunDriverDeps(root: string, context: ApiContext): RunDri
       };
     },
     spawnStep: (ctx) => spawnWorkflowStepSession(ctx, context),
+    syncRunSession: (run) => syncWorkflowRunSession(run, context),
     // ROW-ANCHORED turn probe (GRS-016e-fix, identity-only since fix2): correlation
     // runs through the shared `correlateSessionTurn` — the anchor is the workflow's
     // own inserted USER row, matched ONLY by its persisted pre-minted row id (no
@@ -2176,6 +2276,12 @@ export async function handleApiRequest(
       if (source) filter.source = source;
       const parentSessionId = readParam("parentSessionId");
       if (parentSessionId) filter.parentSessionId = parentSessionId;
+      const workflowId = readParam("workflowId");
+      if (workflowId) filter.workflowId = workflowId;
+      const workflowRunId = readParam("workflowRunId");
+      if (workflowRunId) filter.workflowRunId = workflowRunId;
+      const workflowPhaseName = readParam("workflowPhaseName");
+      if (workflowPhaseName) filter.workflowPhaseName = workflowPhaseName;
       for (const key of ["activeSince", "activeBefore"] as const) {
         const raw = readParam(key);
         if (raw) {
@@ -2185,7 +2291,7 @@ export async function handleApiRequest(
       }
       if (url.searchParams.get("needsAttention") === "true") filter.needsAttention = true;
       if (Object.keys(filter).length === 0) {
-        return badRequest(res, "at least one filter is required (text, employee, engine, status, source, parentSessionId, activeSince, activeBefore, needsAttention)");
+        return badRequest(res, "at least one filter is required (text, employee, engine, status, source, parentSessionId, workflowId, workflowRunId, workflowPhaseName, activeSince, activeBefore, needsAttention)");
       }
       const limit = Math.max(1, Math.min(parseInt(url.searchParams.get("limit") || "20", 10) || 20, 50));
       const sessions = searchSessionsFiltered(filter, limit);

@@ -80,7 +80,8 @@ const ctx = {
 } as unknown as import('../api.js').ApiContext;
 
 const spawnCtx = (runId: string, anchorId: string, marker: string) => ({
-  runId, workflowId: 'wf-sp', nodeId: 'a', label: 'A',
+  runId, workflowId: 'wf-sp', workflowName: 'workflow-spawn', triggerSource: 'manual',
+  nodeId: 'a', label: 'A', phaseIndex: 1,
   attempt: 1, round: 1,
   spec: { actorKind: 'engine' as const, actorRef: 'codex' },
   prompt: `[workflow-turn ${marker}] do the first shared step`,

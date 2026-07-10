@@ -40,6 +40,7 @@ import {
   rebuildActiveRunIndex,
   newRunId,
   normalizeWorkflowTrigger,
+  workflowTriggerSource,
   saveRun,
   workflowRunTriggerTodoId,
   type WorkflowRun,
@@ -116,8 +117,27 @@ export interface RunDriverDeps {
    * failure must never affect the run (every call site is guarded).
    */
   workItems?: WorkflowTodoBridge;
+  /** Gateway-owned projection of one durable workflow run into the session list.
+   * Best-effort: a projection failure is logged and never changes run execution. */
+  syncRunSession?: (run: WorkflowRun) => string | undefined;
   now?: () => string;
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
+}
+
+function syncRunSessionBestEffort(deps: RunDriverDeps, run: WorkflowRun): string | undefined {
+  try {
+    return deps.syncRunSession?.(run);
+  } catch (err) {
+    deps.log?.('warn', `[workflow-runs] run ${run.runId}: session-list sync failed: ${(err as Error).message}`);
+    return undefined;
+  }
+}
+
+/** Run evidence is authoritative and lands first. The session projection follows
+ * best-effort, so a list/index failure can never roll back or fail execution. */
+function persistRun(deps: RunDriverDeps, run: WorkflowRun): string | undefined {
+  saveRun(deps.root, run);
+  return syncRunSessionBestEffort(deps, run);
 }
 
 /** Clear a mirrored Todo approval to match a gate the RUN AUTHORITY resolved
@@ -203,7 +223,7 @@ function applyTodoTransitions(
         message: `step "${receipt.nodeId}" could not transition Todo ${triggerTodoId} to ${toStatus}: ${(err as Error).message}`,
         ref: receipt.nodeId,
       }], now());
-      saveRun(deps.root, current);
+      persistRun(deps, current);
       return current;
     }
   }
@@ -407,7 +427,7 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
           { code: 'advance-loop-exceeded', message: `run advancement exceeded ${driveIterationCap(current)} iterations` },
         ],
       };
-      saveRun(deps.root, current);
+      persistRun(deps, current);
       deps.log?.('error', `[workflow-runs] run ${current.runId} advancement loop exceeded its cap — failed`);
       return current;
     }
@@ -418,7 +438,7 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
       ...(deps.probeSessionTurn ? { probeSessionTurn: deps.probeSessionTurn } : {}),
     });
     current = result.run;
-    if (result.changed) saveRun(deps.root, current);
+    if (result.changed) persistRun(deps, current);
     let transitionRequestedStop = false;
     if (result.changed) {
       const progressed = applyTodoTransitions(deps, def, beforeAdvance, current);
@@ -475,7 +495,7 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
         // under the run. Fail loudly rather than guess (drain-aware: siblings spawned
         // earlier in this batch settle before the terminal is written).
         current = markSpawnFailure(current, plan, nodeId, 'no spawn spec in the compiled plan', now, round);
-        saveRun(deps.root, current);
+        persistRun(deps, current);
         if (current.status !== 'running') return current;
         break; // stopping (or optional-skip with nothing else to do) → re-plan, never spawn more on a failing run
       }
@@ -503,7 +523,7 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
       // disambiguated by the planner's adoption probe on the next sweep
       // (sessionKey for spawns, the anchor ROW ID for posts).
       current = markDispatching(current, nodeId, attempt, now, round, marker ? { turnMarker: marker, turnAnchor: anchorId } : {});
-      saveRun(deps.root, current);
+      persistRun(deps, current);
       try {
         let spawned: SpawnResult;
         let createdSharedSession = false;
@@ -511,8 +531,11 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
           spawned = await deps.spawnStep({
             runId: current.runId,
             workflowId: current.workflowId,
+            workflowName: def.name ?? def.id,
+            triggerSource: workflowTriggerSource(current.trigger),
             nodeId,
             label: stepPlan.label,
+            phaseIndex: (current.order?.indexOf(nodeId) ?? -1) + 1,
             attempt,
             round,
             spec: stepPlan.spawn,
@@ -544,7 +567,7 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
           // retries once the target frees up.
           if (posted.outcome === 'deferred') {
             current = markFollowUpDeferred(current, nodeId, posted.reason, now, round);
-            saveRun(deps.root, current);
+            persistRun(deps, current);
             deps.log?.('info', `[workflow-runs] run ${current.runId}: step "${nodeId}" follow-up deferred — ${posted.reason}`);
             postDeferred = true;
             continue;
@@ -561,7 +584,7 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
           ? markFired(current, nodeId, spawned, now, round)
           : markRunning(current, nodeId, spawned, now, round);
         if (createdSharedSession) current = { ...current, sharedSessionId: spawned.sessionId };
-        saveRun(deps.root, current);
+        persistRun(deps, current);
         // Todos ledger (GRS-021a): link the attempt the driver just SPAWNED to
         // the run's work item — fresh spawns + the shared session at creation.
         // Follow-up posts are skipped: a 'workflow'-mode reuse is already linked
@@ -576,7 +599,7 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
         }
       } catch (err) {
         current = markSpawnFailure(current, plan, nodeId, (err as Error).message, now, round);
-        saveRun(deps.root, current);
+        persistRun(deps, current);
         if (current.status === 'failed') return current;
         if (current.stopping) break; // drain: stop spawning; the re-plan probes the in-flight batch
         // optional step skipped → keep executing the batch
@@ -660,7 +683,7 @@ export async function startWorkflowRun(
   const resolved = compilePlan(def, opts);
   if (!resolved.ok) {
     const run = failedRun(resolved.errors);
-    saveRun(deps.root, run);
+    persistRun(deps, run);
     return run;
   }
 
@@ -677,7 +700,7 @@ export async function startWorkflowRun(
       message: `step "${followUpStep.nodeId}" uses session mode "${followUpStep.sessionMode}" but this gateway's run driver provides no follow-up session support`,
       ref: followUpStep.nodeId,
     }]);
-    saveRun(deps.root, run);
+    persistRun(deps, run);
     return run;
   }
   if (deps.sessionExists) {
@@ -689,7 +712,7 @@ export async function startWorkflowRun(
           message: `step "${s.nodeId}" targets session "${s.sessionTarget}", which does not exist on this gateway`,
           ref: s.nodeId,
         }]);
-        saveRun(deps.root, run);
+        persistRun(deps, run);
         return run;
       }
     }
@@ -701,7 +724,7 @@ export async function startWorkflowRun(
   });
   if (!minted.ok) {
     const run = failedRun(minted.errors);
-    saveRun(deps.root, run);
+    persistRun(deps, run);
     return run;
   }
 
@@ -717,7 +740,7 @@ export async function startWorkflowRun(
   // Durable intent (incl. the frozen definition) BEFORE any spawn — and saved
   // synchronously with the fireIso dedupe scan above (GRS-014d), so a same-tick
   // duplicate schedule fire sees this file before it can mint a second run.
-  saveRun(deps.root, run);
+  const runSessionId = persistRun(deps, run);
 
   // Todos ledger (GRS-021a, design §2 — the one missing structural mint point):
   // a workflow run is company work, so it lands in the ledger right after its
@@ -727,6 +750,7 @@ export async function startWorkflowRun(
   try {
     if (triggerTodoId) deps.workItems?.linkTriggeredRunItem(run, triggerTodoId);
     else deps.workItems?.mintRunItem(run);
+    if (runSessionId) deps.workItems?.linkRunSession(run, runSessionId);
   } catch (err) {
     deps.log?.('warn', `[workflow-runs] run ${runId}: Todo ${triggerTodoId ? 'trigger-link' : 'mint'} failed: ${(err as Error).message}`);
   }
@@ -785,7 +809,7 @@ export async function advanceWorkflowRunById(
           },
         ],
       };
-      saveRun(deps.root, failed);
+      persistRun(deps, failed);
       deps.log?.('warn', `[workflow-runs] closed pre-sequential running record ${runId} (${workflowId}) as failed`);
       return failed;
     }
@@ -805,7 +829,7 @@ export async function advanceWorkflowRunById(
           { code: 'definition-missing', message: `run has no definition snapshot and definition "${workflowId}" no longer exists on the evidence root` },
         ],
       };
-      saveRun(deps.root, failed);
+      persistRun(deps, failed);
       return failed;
     }
 
@@ -820,7 +844,7 @@ export async function advanceWorkflowRunById(
         endedAt: now(),
         errors: [...(run.errors ?? []), ...resolved.errors],
       };
-      saveRun(deps.root, failed);
+      persistRun(deps, failed);
       return failed;
     }
 
@@ -869,7 +893,7 @@ export async function resolveWorkflowRunGate(
     const resolved = resolveParkedGate(run, decision, now, opts);
     if (!resolved.ok) return { outcome: 'not-parked' as const, run };
 
-    saveRun(deps.root, resolved.run); // the decision/drain request is durable before any drive
+    persistRun(deps, resolved.run); // the decision/drain request is durable before any drive
     if (resolved.run.status !== 'running') {
       return { outcome: 'resolved' as const, run: resolved.run }; // already drained rejection — terminal
     }
@@ -885,7 +909,7 @@ export async function resolveWorkflowRunGate(
           { code: 'definition-missing', message: `run has no definition snapshot and definition "${workflowId}" no longer exists on the evidence root` },
         ],
       };
-      saveRun(deps.root, failed);
+      persistRun(deps, failed);
       return { outcome: 'resolved' as const, run: failed };
     }
     const compiled = compilePlan(def);
@@ -896,7 +920,7 @@ export async function resolveWorkflowRunGate(
         endedAt: now(),
         errors: [...(resolved.run.errors ?? []), ...compiled.errors],
       };
-      saveRun(deps.root, failed);
+      persistRun(deps, failed);
       return { outcome: 'resolved' as const, run: failed };
     }
     const driven = await driveRunLocked(deps, def, compiled.plan, resolved.run);

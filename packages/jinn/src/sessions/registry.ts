@@ -11,7 +11,7 @@ import {
   WORK_ITEMS_INDEX_DDL,
   WORK_ITEM_EVENTS_DDL,
 } from '../work-items/migrate.js';
-import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome } from '../shared/types.js';
+import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome, WorkflowSessionProvenance } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
 import { ptySnapshotStore } from '../engines/pty-snapshot.js';
 
@@ -35,6 +35,16 @@ CREATE TABLE IF NOT EXISTS sessions (
   title TEXT,
   prompt_excerpt TEXT,
   parent_session_id TEXT,
+  workflow_kind TEXT,
+  workflow_id TEXT,
+  workflow_name TEXT,
+  workflow_run_id TEXT,
+  workflow_trigger_source TEXT,
+  workflow_phase_node_id TEXT,
+  workflow_phase_name TEXT,
+  workflow_phase_index INTEGER,
+  workflow_phase_round INTEGER,
+  workflow_phase_attempt INTEGER,
   user_id TEXT,
   status TEXT DEFAULT 'idle',
   attempt_outcome TEXT,
@@ -81,6 +91,13 @@ CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions (last_activity
 // Backs the children lookup (was a full-table deserialization + JS filter).
 const CREATE_PARENT_INDEX = `
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions (parent_session_id)
+`;
+
+// Backs provenance filters and workflow-run grouping lookups without parsing the
+// deterministic sourceRef. Partial because ordinary chats never carry a run id.
+const CREATE_WORKFLOW_RUN_INDEX = `
+CREATE INDEX IF NOT EXISTS idx_sessions_workflow_run ON sessions (workflow_run_id)
+  WHERE workflow_run_id IS NOT NULL
 `;
 
 // Backs the highly-selective status filter (running ~6 of 2.5k rows) used on
@@ -213,6 +230,49 @@ function cleanEngineSessionRefs(refs: EngineSessionRefs | null | undefined): Eng
   return Object.keys(cleaned).length > 0 ? cleaned : null;
 }
 
+function workflowProvenanceFromRow(row: Record<string, unknown>): WorkflowSessionProvenance | null {
+  const kind = row.workflow_kind;
+  const workflowId = row.workflow_id;
+  const workflowName = row.workflow_name;
+  const runId = row.workflow_run_id;
+  const triggerSource = row.workflow_trigger_source;
+  if (
+    (kind !== 'run' && kind !== 'phase') ||
+    typeof workflowId !== 'string' || !workflowId ||
+    typeof workflowName !== 'string' || !workflowName ||
+    typeof runId !== 'string' || !runId ||
+    typeof triggerSource !== 'string' || !triggerSource
+  ) {
+    return null;
+  }
+  const provenance: WorkflowSessionProvenance = {
+    kind,
+    workflowId,
+    workflowName,
+    runId,
+    triggerSource,
+  };
+  if (kind === 'run') return provenance;
+
+  const nodeId = row.workflow_phase_node_id;
+  const name = row.workflow_phase_name;
+  const index = row.workflow_phase_index;
+  const round = row.workflow_phase_round;
+  const attempt = row.workflow_phase_attempt;
+  if (
+    typeof nodeId !== 'string' || !nodeId ||
+    typeof name !== 'string' || !name ||
+    typeof index !== 'number' || !Number.isInteger(index) || index < 1 ||
+    typeof round !== 'number' || !Number.isInteger(round) || round < 1 ||
+    typeof attempt !== 'number' || !Number.isInteger(attempt) || attempt < 1
+  ) {
+    logger.warn(`registry: dropped incomplete workflow phase provenance for session ${String(row.id ?? '')}`);
+    return null;
+  }
+  provenance.phase = { nodeId, name, index, round, attempt };
+  return provenance;
+}
+
 function rowToSession(row: Record<string, unknown>): Session {
   const replyContext = parseJsonObject(row.reply_context, 'reply_context');
   const transportMeta = parseJsonObject(row.transport_meta, 'transport_meta');
@@ -237,6 +297,7 @@ function rowToSession(row: Record<string, unknown>): Session {
     title: (row.title as string) ?? null,
     promptExcerpt: (row.prompt_excerpt as string) ?? null,
     parentSessionId: (row.parent_session_id as string) ?? null,
+    workflowProvenance: workflowProvenanceFromRow(row),
     userId: (row.user_id as string) ?? null,
     effortLevel: (row.effort_level as string) ?? null,
     status: row.status as Session['status'],
@@ -285,6 +346,7 @@ export function initDb(): Database.Database {
   db.exec(CREATE_DELEGATION_IDEMPOTENCY_INDEX);
   db.exec(CREATE_LAST_ACTIVITY_INDEX);
   db.exec(CREATE_PARENT_INDEX);
+  db.exec(CREATE_WORKFLOW_RUN_INDEX);
   db.exec(CREATE_STATUS_INDEX);
   // Work-item primitive (GRS-002 → GRS-021a Todos model): the vocabulary rebuild
   // runs FIRST (a GRS-002-shape table is remapped onto the 8-status/7-source
@@ -680,6 +742,16 @@ export function migrateSessionsSchema(database: Database.Database): void {
   const missingColumns: Array<[string, string, string?]> = [
     ['title', 'TEXT'],
     ['parent_session_id', 'TEXT'],
+    ['workflow_kind', 'TEXT'],
+    ['workflow_id', 'TEXT'],
+    ['workflow_name', 'TEXT'],
+    ['workflow_run_id', 'TEXT'],
+    ['workflow_trigger_source', 'TEXT'],
+    ['workflow_phase_node_id', 'TEXT'],
+    ['workflow_phase_name', 'TEXT'],
+    ['workflow_phase_index', 'INTEGER'],
+    ['workflow_phase_round', 'INTEGER'],
+    ['workflow_phase_attempt', 'INTEGER'],
     ['connector', 'TEXT'],
     ['session_key', 'TEXT'],
     ['reply_context', 'TEXT'],
@@ -733,6 +805,7 @@ export interface CreateSessionOpts {
   model?: string;
   title?: string;
   parentSessionId?: string;
+  workflowProvenance?: WorkflowSessionProvenance | null;
   userId?: string | null;
   effortLevel?: string;
   /**
@@ -779,13 +852,24 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
   const connector = opts.connector ?? opts.source;
   const replyContext = opts.replyContext ? JSON.stringify(opts.replyContext) : null;
   const transportMeta = opts.transportMeta ? JSON.stringify(opts.transportMeta) : null;
+  const workflow = opts.workflowProvenance ?? null;
+  const phase = workflow?.kind === 'phase' ? workflow.phase : undefined;
 
   const stmt = db.prepare(`
     INSERT INTO sessions (
       id, engine, source, source_ref, connector, session_key, reply_context, message_id, transport_meta,
-      employee, model, title, prompt_excerpt, parent_session_id, user_id, effort_level, status, created_at, last_activity
+      employee, model, title, prompt_excerpt, parent_session_id,
+      workflow_kind, workflow_id, workflow_name, workflow_run_id, workflow_trigger_source,
+      workflow_phase_node_id, workflow_phase_name, workflow_phase_index, workflow_phase_round, workflow_phase_attempt,
+      user_id, effort_level, status, created_at, last_activity
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', ?, ?)
+    VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?,
+      ?, ?, 'idle', ?, ?
+    )
   `);
   stmt.run(
     id,
@@ -802,6 +886,16 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     title,
     promptExcerpt,
     opts.parentSessionId ?? null,
+    workflow?.kind ?? null,
+    workflow?.workflowId ?? null,
+    workflow?.workflowName ?? null,
+    workflow?.runId ?? null,
+    workflow?.triggerSource ?? null,
+    phase?.nodeId ?? null,
+    phase?.name ?? null,
+    phase?.index ?? null,
+    phase?.round ?? null,
+    phase?.attempt ?? null,
     opts.userId ?? null,
     opts.effortLevel ?? null,
     now,
@@ -826,6 +920,7 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     title,
     promptExcerpt,
     parentSessionId: opts.parentSessionId ?? null,
+    workflowProvenance: workflow,
     userId: opts.userId ?? null,
     effortLevel: opts.effortLevel ?? null,
     status: 'idle',
@@ -1298,6 +1393,9 @@ export interface SearchSessionsFilter {
   status?: Session['status'];
   source?: string;
   parentSessionId?: string;
+  workflowId?: string;
+  workflowRunId?: string;
+  workflowPhaseName?: string;
   /** Inclusive ISO-8601 bounds on last_activity (ISO strings compare lexicographically). */
   activeSince?: string;
   activeBefore?: string;
@@ -1337,6 +1435,18 @@ export function searchSessionsFiltered(filter: SearchSessionsFilter, limit = 20)
   if (filter.parentSessionId) {
     conditions.push('parent_session_id = ?');
     values.push(filter.parentSessionId);
+  }
+  if (filter.workflowId) {
+    conditions.push('workflow_id = ?');
+    values.push(filter.workflowId);
+  }
+  if (filter.workflowRunId) {
+    conditions.push('workflow_run_id = ?');
+    values.push(filter.workflowRunId);
+  }
+  if (filter.workflowPhaseName) {
+    conditions.push('workflow_phase_name = ?');
+    values.push(filter.workflowPhaseName);
   }
   if (filter.activeSince) {
     conditions.push('last_activity >= ?');

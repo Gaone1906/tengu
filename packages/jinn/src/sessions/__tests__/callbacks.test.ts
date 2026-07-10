@@ -85,6 +85,28 @@ describe("notifyParentSession", () => {
     globalThis.fetch = originalFetch as typeof fetch;
   });
 
+  it("does not dispatch an engine callback into a synthetic workflow-run parent", async () => {
+    vi.mocked(getSession).mockReturnValue(
+      makeSession({
+        id: "parent-001",
+        parentSessionId: null,
+        engine: "workflow",
+        workflowProvenance: {
+          kind: "run",
+          workflowId: "wf-release",
+          workflowName: "release-check",
+          runId: "run-1",
+          triggerSource: "manual",
+        },
+      }),
+    );
+
+    notifyParentSession(makeSession(), { result: "phase complete" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("sends a full LLM message plus a clean display banner on success", async () => {
     const child = makeSession({
       workItemId: "wi_123",

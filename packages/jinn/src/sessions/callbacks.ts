@@ -135,6 +135,7 @@ export function notifyRateLimitResumed(
   if (!childSession.parentSessionId) return;
 
   const parent = getSession(childSession.parentSessionId);
+  if (parent?.workflowProvenance?.kind === "run") return;
   const isTalkParent = parent?.source === "talk";
 
   let message: string;
@@ -158,6 +159,10 @@ async function _sendNotification(
   const parent = getSession(childSession.parentSessionId!);
   if (!parent) return; // Parent gone or expired
   if (parent.status === "error") return; // Parent already in error — skip
+  // Workflow parents reuse parentSessionId strictly for list grouping. They are
+  // synthetic run projections, not engine conversations to wake with delegation
+  // callbacks; phase completion is consumed by the workflow reconciler instead.
+  if (parent.workflowProvenance?.kind === "run") return;
 
   const employeeName = childSession.employee || "Unknown";
   const childId = childSession.id;

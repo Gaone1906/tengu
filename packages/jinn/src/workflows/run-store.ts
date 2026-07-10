@@ -215,6 +215,11 @@ export interface LegacyWorkflowRunTrigger {
 
 export type WorkflowRunTrigger = WorkflowTriggerEvent | LegacyWorkflowRunTrigger;
 
+/** Read the uniform trigger source from both current and legacy run records. */
+export function workflowTriggerSource(trigger: WorkflowRunTrigger): string {
+  return 'source' in trigger ? trigger.source : trigger.kind;
+}
+
 /**
  * Frozen caller-supplied context for one invocation of a reusable workflow. Input is
  * persisted separately from trigger metadata so every phase receives the same

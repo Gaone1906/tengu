@@ -79,8 +79,14 @@ export interface SpawnResult {
 export interface SpawnContext {
   runId: string;
   workflowId: string;
+  /** Canonical definition name (definition.name, falling back to id). */
+  workflowName: string;
+  /** Uniform source of the persisted run trigger. */
+  triggerSource: string;
   nodeId: string;
   label: string;
+  /** One-based position in the run's frozen execution order. */
+  phaseIndex: number;
   /** Dispatch attempt (1 or 2) — part of the deterministic sessionKey. */
   attempt: number;
   /** Loop round (GRS-014e); 1 outside loops — part of the sessionKey for rounds ≥ 2. */

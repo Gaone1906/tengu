@@ -203,6 +203,27 @@ export interface EngineSessionRef {
 export type EngineSessionRefs = Record<string, EngineSessionRef>;
 export type SessionAttemptOutcome = "succeeded" | "failed" | "interrupted";
 
+/** Durable attribution for sessions owned by a workflow run. Run parents omit
+ * `phase`; workflow-owned phase sessions carry the exact frozen execution
+ * identity the list UI needs without parsing sourceRef/sessionKey. */
+export interface WorkflowSessionProvenance {
+  kind: "run" | "phase";
+  workflowId: string;
+  /** Canonical agent-facing workflow name (definition.name, falling back to id). */
+  workflowName: string;
+  runId: string;
+  /** Uniform workflow trigger source: manual, schedule, event-webhook, etc. */
+  triggerSource: string;
+  phase?: {
+    nodeId: string;
+    name: string;
+    /** One-based position in the run's frozen execution order. */
+    index: number;
+    round: number;
+    attempt: number;
+  };
+}
+
 export interface Session {
   id: string;
   engine: string;
@@ -224,6 +245,8 @@ export interface Session {
   /** ≤140-char whitespace-flattened excerpt of the creation prompt — "what was asked". */
   promptExcerpt?: string | null;
   parentSessionId: string | null;
+  /** Explicit workflow/run/phase attribution for grouping and filtered reads. */
+  workflowProvenance?: WorkflowSessionProvenance | null;
   /** Forwarded SSO identity captured from an auth proxy (opt-in via
    *  `gateway.userHeader`). Null/undefined for single-user installs. */
   userId?: string | null;
