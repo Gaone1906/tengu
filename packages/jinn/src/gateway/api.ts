@@ -180,6 +180,7 @@ import { readJsonBody, readBodyRaw } from "./http-helpers.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { resultAlreadyInStreamedBlocks, shouldPreserveStreamedBlocks } from "./streamed-blocks.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions } from "../sessions/callbacks.js";
+import { clearDelegationCompletionContract } from "../sessions/delegation-completion-contract.js";
 import { sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
 import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
 import {
@@ -4735,6 +4736,10 @@ export async function handleApiRequest(
         // A genuine user/operator message resets the target's relay-hop chain —
         // an operator instruction is a fresh start, not hop N of a relay.
         sessionCommGuards.clearInboundHop(params.id);
+        // It also starts a new delegation-completion cycle. Internal callbacks
+        // and the contract's own system-style nudge intentionally retain the
+        // persisted guard so a second idle settlement is surfaced, not looped.
+        session = clearDelegationCompletionContract(session);
       }
 
       const prompt = body.message || body.prompt;

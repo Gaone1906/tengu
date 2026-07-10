@@ -6,6 +6,7 @@ import { GATEWAY_INFO_FILE } from "../shared/paths.js";
 import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
 import { hydrateAllAttachments, talkSessionsAttachedTo } from "../talk/attachments.js";
 import type { ChatBlockEnvelope, JsonObject } from "../shared/types.js";
+import { enforceDelegationCompletionContract } from "./delegation-completion-contract.js";
 
 export interface ManagerVisibilityDetails {
   manager: string;
@@ -67,10 +68,9 @@ export function notifyParentSession(
   notifyAttachedTalkSessions(childSession, result);
 
   if (!childSession.parentSessionId) return;
-  if (options?.alwaysNotify === false) return;
 
   // Run asynchronously — do not await in the caller
-  _sendNotification(childSession, result).catch((err) => {
+  _sendNotification(childSession, result, options).catch((err) => {
     logger.warn(`[callbacks] Failed to notify parent session ${childSession.parentSessionId}: ${err instanceof Error ? err.message : String(err)}`);
   });
 }
@@ -198,6 +198,7 @@ export function notifyRateLimitResumed(
 async function _sendNotification(
   childSession: Session,
   result: { result?: string | null; error?: string | null; cost?: number; durationMs?: number },
+  options?: { alwaysNotify?: boolean },
 ): Promise<void> {
   const parent = getSession(childSession.parentSessionId!);
   if (!parent) return; // Parent gone or expired
@@ -206,6 +207,24 @@ async function _sendNotification(
   // synthetic run projections, not engine conversations to wake with delegation
   // callbacks; phase completion is consumed by the workflow reconciler instead.
   if (parent.workflowProvenance?.kind === "run") return;
+
+  // Delegation completion contract: a narrowly-qualified progress-only idle
+  // settlement gets one durable follow-up instead of prematurely waking the
+  // parent. The next idle settlement is surfaced and can never nudge again.
+  const contract = await enforceDelegationCompletionContract(childSession, result, {
+    postFollowUp: (sessionId, message, displayMessage) => _sendRaw(sessionId, message, displayMessage),
+  });
+  if (contract === "nudged") return;
+  if (contract === "surface") {
+    const latest = result.result?.trim() || "(no output)";
+    result = {
+      ...result,
+      result:
+        `⚠️ Delegation completion contract: the child settled idle again after its single automatic continuation nudge. ` +
+        `No further nudge was sent; parent review is required.\n\nLatest reply:\n${latest}`,
+    };
+  }
+  if (options?.alwaysNotify === false && contract !== "surface") return;
 
   const employeeName = childSession.employee || "Unknown";
   const childId = childSession.id;

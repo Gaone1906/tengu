@@ -4,6 +4,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 vi.mock("../registry.js", () => ({
   getSession: vi.fn(),
   listSessionsBySource: vi.fn(() => []),
+  updateSession: vi.fn((id: string, updates: Partial<Session>) => ({ ...makeSession({ id }), ...updates })),
+}));
+
+vi.mock("../../work-items/store.js", () => ({
+  getWorkItem: vi.fn(),
 }));
 
 vi.mock("../../shared/config.js", () => ({
@@ -21,6 +26,7 @@ vi.mock("../../shared/logger.js", () => ({
 
 import { notifyManagerVisibility, notifyParentSession, notifyRateLimitResumed } from "../callbacks.js";
 import { getSession, listSessionsBySource } from "../registry.js";
+import { getWorkItem } from "../../work-items/store.js";
 import { attach, __resetAttachmentsForTest } from "../../talk/attachments.js";
 import type { Session } from "../../shared/types.js";
 
@@ -118,6 +124,7 @@ describe("notifyParentSession", () => {
     vi.mocked(getSession).mockReturnValue(
       makeSession({ id: "parent-001", parentSessionId: null, status: "idle" }),
     );
+    vi.mocked(getWorkItem).mockReset();
   });
 
   afterEach(() => {
@@ -145,6 +152,38 @@ describe("notifyParentSession", () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("routes a qualifying progress-only child back to itself and suppresses the parent callback", async () => {
+    vi.mocked(getWorkItem).mockReturnValue({ id: "wi-open", status: "executing" } as never);
+    const child = makeSession({ workItemId: "wi-open" });
+
+    notifyParentSession(child, {
+      result: "Progress update: implementation is in progress. Next step is the remaining test run.",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(url).toBe("http://127.0.0.1:7777/api/sessions/child-001/message");
+    const body = JSON.parse(opts.body);
+    expect(body.role).toBe("notification");
+    expect(body.message).toContain("Continue the existing task now");
+  });
+
+  it("enforces the completion contract even when ordinary parent replies are suppressed", async () => {
+    vi.mocked(getWorkItem).mockReturnValue({ id: "wi-open", status: "executing" } as never);
+    const child = makeSession({ workItemId: "wi-open" });
+
+    notifyParentSession(
+      child,
+      { result: "Progress update: continuing with the remaining implementation." },
+      { alwaysNotify: false },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(fetchSpy.mock.calls[0][0]).toBe("http://127.0.0.1:7777/api/sessions/child-001/message");
   });
 
   it("sends a full LLM message plus a clean display banner on success", async () => {
