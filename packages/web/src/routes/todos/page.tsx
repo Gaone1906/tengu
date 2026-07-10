@@ -1,24 +1,29 @@
 import { useCallback, useMemo, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
+import { useSearchParams } from "react-router-dom"
 import { Plus } from "lucide-react"
 import { api, type WorkItemCompactWire } from "@/lib/api"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import {
-  groupBoard,
-  groupPeople,
+  applyClientFilters,
   deriveNeedsYou,
-  needsYouCount,
+  filtersFromSearchParams,
+  filtersToSearchParams,
+  groupPeople,
   headerCounts,
-  isOpen,
-  isRecentDone,
+  isDefaultFilters,
+  needsYouCount,
+  type TodoFilters,
 } from "@/lib/todos"
 import { ActiveView } from "./active-view"
+import { FilterBar } from "./filter-bar"
+import { GroupSkeleton } from "./group"
 import { NeedsYouView } from "./needs-you-view"
 import { PeopleView } from "./people-view"
 import { DetailSheet } from "./detail-sheet"
 import {
-  useBoardItems,
+  useLedgerItems,
   useOpenDetails,
   openIdsOf,
   useOrg,
@@ -26,7 +31,13 @@ import {
   useDecideApproval,
   useNeedsAttentionItems,
   useEscalateApproval,
+  useUpdateWorkItem,
 } from "./use-todos"
+
+/* design-todos §2 — the frame. ONE column (max-w 840px) for every lens, so a
+ * lens switch moves zero chrome: header block and segmented control have fixed
+ * geometry, and only the content region below them swaps (120ms opacity
+ * crossfade — no translate, no height animation). The kanban is retired. */
 
 type Tab = "active" | "needs" | "people"
 
@@ -49,7 +60,7 @@ function Segmented({
     { id: "people", label: "People", count: peopleCount },
   ]
   return (
-    <div className="mb-6 mt-5 flex max-md:justify-center">
+    <div className="mb-3.5 mt-[22px] flex max-md:justify-center">
       <div className="inline-flex gap-0.5 rounded-[12px] bg-[var(--fill-tertiary)] p-[3px]" role="tablist">
         {items.map((it) => {
           const active = tab === it.id
@@ -153,25 +164,43 @@ export default function TodosPage() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [resolving, setResolving] = useState<Set<string>>(new Set())
   const [creating, setCreating] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
 
-  const board = useBoardItems()
-  const items: WorkItemCompactWire[] = useMemo(() => board.data ?? [], [board.data])
-  const openIds = useMemo(() => openIdsOf(items), [items])
+  // Filters live in the URL (§4.3): shareable, refresh-proof.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const filters = useMemo(() => filtersFromSearchParams(searchParams), [searchParams])
+  const setFilters = useCallback(
+    (next: TodoFilters) => setSearchParams(filtersToSearchParams(next), { replace: true }),
+    [setSearchParams],
+  )
+  const filtered = !isDefaultFilters(filters)
+
+  // The default ledger always loads (header counts + People + the unfiltered
+  // Active lens); a filtered Active lens adds its own query on top.
+  const baseLedger = useLedgerItems({ status: "open" }, now)
+  const filteredLedger = useLedgerItems(filters, now)
+  const ledger = filtered ? filteredLedger : baseLedger
+
+  const baseItems: WorkItemCompactWire[] = useMemo(() => baseLedger.data?.items ?? [], [baseLedger.data])
+  const ledgerItems: WorkItemCompactWire[] = useMemo(
+    () => applyClientFilters(ledger.data?.items ?? [], filters, now),
+    [ledger.data, filters, now],
+  )
+
+  const openIds = useMemo(() => openIdsOf(ledgerItems), [ledgerItems])
   const details = useOpenDetails(openIds, tab === "active")
   const needs = useNeedsAttentionItems()
   const org = useOrg()
   const byName = useEmployeesByName(org.data?.employees)
   const decide = useDecideApproval()
   const escalate = useEscalateApproval()
+  const update = useUpdateWorkItem()
 
-  // Board = open work + done inside the recent window.
-  const boardItems = useMemo(() => items.filter((i) => isOpen(i.status) || isRecentDone(i, now)), [items, now])
-  const groups = useMemo(() => groupBoard(boardItems), [boardItems])
-  const counts = useMemo(() => headerCounts(items, now), [items, now])
+  const counts = useMemo(() => headerCounts(baseItems, now), [baseItems, now])
   const detailById = useMemo(() => new Map((details.data ?? []).map((d) => [d.workItem.id, d])), [details.data])
   const needsYou = useMemo(() => deriveNeedsYou(needs.data ?? []), [needs.data])
   const needsCount = needs.data ? needsYouCount(needsYou) : null
-  const people = useMemo(() => groupPeople(items, org.data?.employees ?? []), [items, org.data?.employees])
+  const people = useMemo(() => groupPeople(baseItems, org.data?.employees ?? []), [baseItems, org.data?.employees])
   const peopleWithWork = useMemo(() => people.filter((p) => p.openCount > 0).length, [people])
 
   const onOpen = useCallback((id: string) => setOpenId(id), [])
@@ -183,6 +212,34 @@ export default function TodosPage() {
       return next
     })
   }, [])
+
+  const onRename = useCallback(
+    (id: string, title: string) =>
+      new Promise<void>((resolve) => {
+        setEditError(null)
+        update.mutate(
+          { id, patch: { title } },
+          {
+            onError: (e) => setEditError(e instanceof Error ? e.message : "Couldn't rename"),
+            onSettled: () => resolve(),
+          },
+        )
+      }),
+    [update],
+  )
+
+  const onRankChange = useCallback(
+    (id: string, rank: number) => {
+      setEditError(null)
+      update.mutate(
+        { id, patch: { rank } },
+        // The view keeps its local order either way; a failure just means the
+        // order won't survive a reload until the gateway ships rank (§7.3).
+        { onError: (e) => setEditError(e instanceof Error ? e.message : "Couldn't save the order") },
+      )
+    },
+    [update],
+  )
 
   const runDecision = useCallback(
     (id: string, decision: "approve" | "reject", note?: string) => {
@@ -224,7 +281,7 @@ export default function TodosPage() {
   return (
     <PageLayout>
       <div className="h-full overflow-y-auto" data-scrollable>
-        <div className={`mx-auto px-5 pb-20 pt-6 md:pt-11 ${tab === "active" ? "max-w-[1360px]" : "max-w-[720px]"}`}>
+        <div className="mx-auto max-w-[840px] px-5 pb-20 pt-6 md:pt-11">
           <header className="flex items-end justify-between gap-3">
             <div>
               <h1 className="font-[var(--font-display)] text-[length:var(--text-title1)] font-bold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] md:text-[length:var(--text-large-title)]">
@@ -249,41 +306,70 @@ export default function TodosPage() {
 
           <Segmented tab={tab} onTab={setTab} activeCount={counts.open} needsCount={needsCount} peopleCount={peopleWithWork} />
 
-          {board.isError && (
-            <div className="rounded-[var(--radius-lg)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]" style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}>
-              {board.error instanceof Error ? board.error.message : "Failed to load todos"}
-            </div>
-          )}
-
-          {!board.isError && board.isLoading && (
-            <div className="flex h-40 items-center justify-center text-[var(--text-tertiary)]">Loading todos…</div>
-          )}
-
-          {!board.isError && !board.isLoading && (
-            <>
-              {tab === "active" &&
-                (boardItems.length === 0 ? (
-                  <div className="px-8 py-20 text-center text-[var(--text-tertiary)]" data-testid="active-empty">
-                    <p className="text-[length:var(--text-subheadline)]">All quiet — no open work right now.</p>
+          {/* Content region — everything below the fixed chrome swaps per lens. */}
+          <div key={tab} className="motion-safe:animate-[lensFade_120ms_var(--ease-smooth)]">
+            {tab === "active" && (
+              <>
+                <FilterBar
+                  filters={filters}
+                  onChange={setFilters}
+                  employees={org.data?.employees ?? []}
+                  departments={org.data?.departments ?? []}
+                  byName={byName}
+                />
+                {editError && (
+                  <div
+                    data-testid="todos-edit-error"
+                    className="mb-4 rounded-[var(--radius-md)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
+                    style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}
+                  >
+                    {editError}
                   </div>
-                ) : (
-                  <ActiveView groups={groups} detailById={detailById} byName={byName} onOpen={onOpen} now={now} />
-                ))}
-
-              {tab === "needs" &&
-                (needs.isLoading ? (
-                  <div className="flex h-40 items-center justify-center text-[var(--text-tertiary)]">Loading your inbox…</div>
-                ) : needs.isError ? (
+                )}
+                {ledger.isError ? (
                   <div className="rounded-[var(--radius-lg)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]" style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}>
-                    {needs.error instanceof Error ? needs.error.message : "Failed to load your inbox"}
+                    {ledger.error instanceof Error ? ledger.error.message : "Failed to load todos"}
                   </div>
+                ) : ledger.isLoading ? (
+                  <>
+                    <GroupSkeleton />
+                    <GroupSkeleton />
+                  </>
                 ) : (
-                  <NeedsYouView items={needsYou} resolvingIds={resolving} onApprove={onApprove} onSendBack={onSendBack} onEscalate={onEscalate} onOpen={onOpen} />
-                ))}
+                  <ActiveView
+                    data={{ ...(ledger.data ?? { totalsByStatus: {}, paginated: false, items: [] }), items: ledgerItems }}
+                    filters={filters}
+                    detailById={detailById}
+                    byName={byName}
+                    onOpen={onOpen}
+                    onRename={onRename}
+                    onRankChange={onRankChange}
+                    onClearFilters={() => setFilters({ status: "open" })}
+                    filtered={filtered}
+                    now={now}
+                  />
+                )}
+              </>
+            )}
 
-              {tab === "people" && <PeopleView queues={people} expanded={expanded} onToggle={onToggle} onOpen={onOpen} />}
-            </>
-          )}
+            {tab === "needs" &&
+              (needs.isLoading ? (
+                <GroupSkeleton />
+              ) : needs.isError ? (
+                <div className="rounded-[var(--radius-lg)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]" style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}>
+                  {needs.error instanceof Error ? needs.error.message : "Failed to load your inbox"}
+                </div>
+              ) : (
+                <NeedsYouView items={needsYou} byName={byName} resolvingIds={resolving} onApprove={onApprove} onSendBack={onSendBack} onEscalate={onEscalate} onOpen={onOpen} />
+              ))}
+
+            {tab === "people" &&
+              (baseLedger.isLoading ? (
+                <GroupSkeleton />
+              ) : (
+                <PeopleView queues={people} expanded={expanded} onToggle={onToggle} onOpen={onOpen} />
+              ))}
+          </div>
         </div>
       </div>
 
@@ -292,6 +378,8 @@ export default function TodosPage() {
           id={openId}
           initial={sheetInitial}
           byName={byName}
+          employees={org.data?.employees ?? []}
+          departments={org.data?.departments ?? []}
           resolving={resolving.has(openId)}
           onApprove={onApprove}
           onSendBack={onSendBack}

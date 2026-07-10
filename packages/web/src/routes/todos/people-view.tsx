@@ -1,10 +1,12 @@
 import { ChevronRight } from "lucide-react"
 import type { WorkItemStatusWire } from "@/lib/api"
-import { monogram, STATUS_LABEL, type PersonQueue } from "@/lib/todos"
+import { STATUS_LABEL, type PersonQueue } from "@/lib/todos"
+import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { StatusCircle } from "./state-glyph"
 import { roleLabel, formatRelativeTime } from "./util"
 
-/* GRS-021d — People: one row per employee (monogram, name, role, a status-dot
+/* GRS-021d — People: one row per employee (emoji avatar — the delegation
+ * attribution unit; monograms are retired), name, role, a status-dot
  * distribution, open count), expandable to that employee's queue ordered by
  * status then priority. Idle employees read "All clear". Answers "what is
  * everyone doing" in one glance. The idle tail is capped so a large, mostly-idle
@@ -32,9 +34,9 @@ function QueueRow({ item, onOpen }: { item: PersonQueue["items"][number]; onOpen
       type="button"
       data-testid={`people-queue-row-${item.id}`}
       onClick={() => onOpen(item.id)}
-      className="flex items-center gap-3 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_11px] text-left transition-colors hover:bg-[var(--fill-tertiary)]"
+      className="flex min-h-[46px] items-center gap-2.5 rounded-[13px] px-3 py-[7px] text-left transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)]"
     >
-      <StatusCircle status={item.status} size={25} />
+      <StatusCircle status={item.status} size={24} />
       <span className="min-w-0 flex-1 truncate text-[length:var(--text-subheadline)] font-medium text-[var(--text-primary)]">
         {item.title}
       </span>
@@ -77,9 +79,7 @@ function PersonRow({
         onClick={() => onToggle(employee.name)}
         className="flex w-full items-center gap-3 p-[15px_16px] text-left disabled:cursor-default"
       >
-        <span className="grid size-[34px] flex-none place-items-center rounded-full bg-[var(--fill-secondary)] text-[13px] font-bold text-[var(--text-secondary)]">
-          {monogram(employee.displayName)}
-        </span>
+        <EmployeeAvatar name={employee.name} size={34} fontSize={18} className="bg-[var(--fill-secondary)]" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[16px] font-semibold leading-tight text-[var(--text-primary)]">
             {employee.displayName}
@@ -106,7 +106,7 @@ function PersonRow({
         />
       </button>
       {expanded && !clear && (
-        <div className="flex flex-col gap-[7px] p-[2px_12px_12px]">
+        <div className="flex flex-col p-[2px_8px_8px]">
           {items.map((item) => (
             <QueueRow key={item.id} item={item} onOpen={onOpen} />
           ))}

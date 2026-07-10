@@ -570,6 +570,15 @@ export interface WorkItemCompactWire {
   workflowRun?: { workflowId: string; runId: string } | null
   sessionRef?: WorkItemSessionRefWire | null
   updatedAt: string
+  /** Manual sort rank (design-todos §7.3). Absent until the gateway ships it. */
+  rank?: number | null
+}
+
+/** GET /api/work-items response. `total` is the true match count (design-todos
+ *  §7.1) — absent on gateways that predate pagination, so callers must guard. */
+export interface WorkItemListWire {
+  workItems: WorkItemCompactWire[]
+  total?: number
 }
 
 export interface VerifyPolicyWire {
@@ -934,16 +943,66 @@ export const api = {
 
   // ── Work items (Todos) ──────────────────────────────────────────────────
   /** GRS-021c: compact Todo list, optionally filtered by status. The gateway
-   *  caps `limit` at 20, so the board fetches one call per display status. */
-  listWorkItems: (params?: { status?: WorkItemStatusWire; assignee?: string; department?: string; needsAttentionFor?: string; limit?: number }) => {
+   *  caps `limit` at 20, so the board fetches one call per display status.
+   *  `source`, `since`/`until`, `q`, and `offset` follow design-todos §7.1–2;
+   *  older gateways ignore them (the view applies a defensive client pass). */
+  listWorkItems: (params?: {
+    status?: WorkItemStatusWire
+    assignee?: string
+    department?: string
+    source?: WorkItemSourceWire
+    needsAttentionFor?: string
+    since?: string
+    until?: string
+    q?: string
+    offset?: number
+    limit?: number
+  }) => {
     const q = new URLSearchParams()
     if (params?.status) q.set("status", params.status)
     if (params?.assignee) q.set("assignee", params.assignee)
     if (params?.department) q.set("department", params.department)
+    if (params?.source) q.set("source", params.source)
     if (params?.needsAttentionFor) q.set("needsAttentionFor", params.needsAttentionFor)
+    if (params?.since) q.set("since", params.since)
+    if (params?.until) q.set("until", params.until)
+    if (params?.q) q.set("q", params.q)
+    if (params?.offset) q.set("offset", String(params.offset))
     q.set("limit", String(params?.limit ?? 20))
-    return get<{ workItems: WorkItemCompactWire[] }>(`/api/work-items?${q.toString()}`)
+    return get<WorkItemListWire>(`/api/work-items?${q.toString()}`)
   },
+  /** GRS-021c: deterministic AND-composed Todo search (escaped-LIKE text over
+   *  title + body). Used by the filter bar's search field. */
+  searchWorkItems: (params: {
+    text: string
+    status?: WorkItemStatusWire
+    assignee?: string
+    department?: string
+    source?: WorkItemSourceWire
+    limit?: number
+  }) => {
+    const q = new URLSearchParams()
+    q.set("text", params.text)
+    if (params.status) q.set("status", params.status)
+    if (params.assignee) q.set("assignee", params.assignee)
+    if (params.department) q.set("department", params.department)
+    if (params.source) q.set("source", params.source)
+    q.set("limit", String(params.limit ?? 20))
+    return get<WorkItemListWire>(`/api/search/work-items?${q.toString()}`)
+  },
+  /** The operator's pen (design-todos §7.3–4): PATCH title/body/assignee/
+   *  department/priority/rank. 404s on gateways that predate the endpoint —
+   *  callers surface the failure quietly and keep the read view intact. */
+  updateWorkItem: (
+    id: string,
+    input: Partial<{ title: string; body: string; assignee: string | null; department: string | null; priority: number; rank: number }>,
+  ) => patch<{ workItem: WorkItemFullWire }>(`/api/work-items/${encodeURIComponent(id)}`, input),
+  /** Guarded status transition (legal edges only — the gateway owns legality). */
+  setWorkItemStatus: (id: string, status: WorkItemStatusWire, note?: string) =>
+    post<{ workItem: WorkItemFullWire; escalated: boolean }>(
+      `/api/work-items/${encodeURIComponent(id)}/status`,
+      note ? { status, note } : { status },
+    ),
   /** GRS-021c: create a Todo (the "+ New Todo" affordance). The operator caller
    *  mints a `human`-source item; approvals structurally cannot be attached here. */
   createWorkItem: (input: { title: string; body?: string }) =>

@@ -406,6 +406,25 @@ h1, h2, h3, h4, h5, h6 {
   to { transform: scale(1); opacity: 1; }
 }
 
+/* The shared live-work pulse (StateLine dots, activity pills). Global so any
+   surface can use animate-[jinn-pulse_1.4s_infinite] without a local <style>. */
+@keyframes jinn-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* Lens crossfade (Todos §2): opacity only — no translate, no chrome movement. */
+@keyframes lensFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Skeleton shimmer (Todos §4.8): opacity pulse on token-filled bars. */
+@keyframes skeletonPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
 @keyframes slideUp {
   from { transform: translateY(8px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }

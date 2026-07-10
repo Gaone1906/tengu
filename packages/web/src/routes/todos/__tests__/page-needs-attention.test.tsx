@@ -7,20 +7,29 @@ import TodosPage from "../page"
 
 vi.mock("@/components/page-layout", () => ({ PageLayout: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 vi.mock("@/context/breadcrumb-context", () => ({ useBreadcrumbs: () => {} }))
+vi.mock("@/routes/settings-provider", () => ({
+  useSettings: () => ({ settings: { employeeOverrides: {} } }),
+}))
 
 const listWorkItems = vi.fn()
+const searchWorkItems = vi.fn()
 const getWorkItem = vi.fn()
 const getOrg = vi.fn()
 const decideWorkItemApproval = vi.fn()
 const escalateWorkItemApproval = vi.fn()
+const updateWorkItem = vi.fn()
+const setWorkItemStatus = vi.fn()
 
 vi.mock("@/lib/api", () => ({
   api: {
     listWorkItems: (...a: unknown[]) => listWorkItems(...a),
+    searchWorkItems: (...a: unknown[]) => searchWorkItems(...a),
     getWorkItem: (...a: unknown[]) => getWorkItem(...a),
     getOrg: (...a: unknown[]) => getOrg(...a),
     decideWorkItemApproval: (...a: unknown[]) => decideWorkItemApproval(...a),
     escalateWorkItemApproval: (...a: unknown[]) => escalateWorkItemApproval(...a),
+    updateWorkItem: (...a: unknown[]) => updateWorkItem(...a),
+    setWorkItemStatus: (...a: unknown[]) => setWorkItemStatus(...a),
   },
 }))
 

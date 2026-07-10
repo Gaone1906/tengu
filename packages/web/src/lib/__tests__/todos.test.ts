@@ -14,6 +14,18 @@ import {
   provenanceLabel,
   monogram,
   formatCost,
+  compareRank,
+  rankBetween,
+  statusesFor,
+  isHistoryView,
+  isDefaultFilters,
+  activeFilterCount,
+  applyClientFilters,
+  filtersToSearchParams,
+  filtersFromSearchParams,
+  dateBucketOf,
+  groupHistory,
+  type TodoFilters,
 } from "../todos"
 
 const NOW = Date.parse("2026-07-05T12:00:00.000Z")
@@ -74,8 +86,8 @@ describe("groupBoard", () => {
     // cancelled appears in no group
     expect(groups.flatMap((g) => g.items.map((i) => i.id))).not.toContain("cancel")
   })
-  it("always returns the five groups in order", () => {
-    expect(groupBoard([]).map((g) => g.group)).toEqual(["backlog", "assigned", "executing", "review", "done"])
+  it("always returns the five groups in ledger order (moving work first)", () => {
+    expect(groupBoard([]).map((g) => g.group)).toEqual(["executing", "review", "assigned", "backlog", "done"])
   })
 })
 
@@ -161,5 +173,82 @@ describe("provenance / monogram / cost", () => {
     expect(formatCost(4.6, 10)).toBe("$4.60 / $10")
     expect(formatCost(0, null)).toBeNull()
     expect(formatCost(1.5, 7.5)).toBe("$1.50 / $7.50")
+  })
+})
+
+describe("manual rank (design-todos §4.5/§7.3)", () => {
+  it("orders ranked items ascending, ranked before unranked, unranked by updatedAt desc", () => {
+    const a = compact({ id: "a", status: "backlog", rank: 2 })
+    const b = compact({ id: "b", status: "backlog", rank: 1 })
+    const c = compact({ id: "c", status: "backlog", updatedAt: "2026-07-05T10:00:00.000Z" })
+    const d = compact({ id: "d", status: "backlog", updatedAt: "2026-07-05T11:30:00.000Z" })
+    const sorted = [a, b, c, d].sort(compareRank)
+    expect(sorted.map((i) => i.id)).toEqual(["b", "a", "d", "c"])
+  })
+  it("computes midpoints and open-ended edge ranks", () => {
+    expect(rankBetween(1, 3)).toBe(2)
+    expect(rankBetween(5, null)).toBe(5 + 1024)
+    expect(rankBetween(null, 5)).toBe(5 - 1024)
+    expect(rankBetween(null, null)).toBe(0)
+  })
+})
+
+describe("filters (design-todos §4.3)", () => {
+  it("expands the open/all lenses into their status fan-out", () => {
+    expect(statusesFor({ status: "open" })).toEqual([
+      "backlog", "assigned", "executing", "blocked", "in_review", "escalated", "done",
+    ])
+    expect(statusesFor({ status: "all" })).toContain("cancelled")
+    expect(statusesFor({ status: "done" })).toEqual(["done"])
+  })
+  it("marks closed-status lenses as history views", () => {
+    expect(isHistoryView({ status: "done" })).toBe(true)
+    expect(isHistoryView({ status: "cancelled" })).toBe(true)
+    expect(isHistoryView({ status: "all" })).toBe(true)
+    expect(isHistoryView({ status: "open" })).toBe(false)
+    expect(isHistoryView({ status: "executing" })).toBe(false)
+  })
+  it("round-trips through URL search params", () => {
+    const f: TodoFilters = { status: "done", assignee: "jinn-dev", department: "platform", source: "cron", date: "week", q: "digest" }
+    expect(filtersFromSearchParams(filtersToSearchParams(f))).toEqual(f)
+    // Defaults serialize to an empty string (clean URLs).
+    expect(filtersToSearchParams({ status: "open" }).toString()).toBe("")
+    expect(isDefaultFilters(filtersFromSearchParams(new URLSearchParams()))).toBe(true)
+    // Garbage params are ignored, not thrown.
+    expect(filtersFromSearchParams(new URLSearchParams("status=nope&source=bad&date=huh"))).toEqual({ status: "open" })
+  })
+  it("counts set chips for the Clear control", () => {
+    expect(activeFilterCount({ status: "open" })).toBe(0)
+    expect(activeFilterCount({ status: "done", assignee: "x", date: "today" })).toBe(3)
+  })
+  it("applies the defensive client pass for date + text", () => {
+    const items = [
+      compact({ id: "old", status: "done", title: "Old digest", updatedAt: "2026-06-01T10:00:00.000Z" }),
+      compact({ id: "new", status: "done", title: "New digest", updatedAt: "2026-07-05T10:00:00.000Z" }),
+      compact({ id: "other", status: "done", title: "Unrelated", updatedAt: "2026-07-05T09:00:00.000Z" }),
+    ]
+    const filtered = applyClientFilters(items, { status: "done", date: "week", q: "digest" }, NOW)
+    expect(filtered.map((i) => i.id)).toEqual(["new"])
+    // No date/text filter → untouched.
+    expect(applyClientFilters(items, { status: "done" }, NOW)).toHaveLength(3)
+  })
+})
+
+describe("history grouping (design-todos §3)", () => {
+  it("buckets by day and drops empty buckets, newest-first inside each", () => {
+    // NOW = 2026-07-05T12:00Z; local-midnight boundaries make same-day safe picks.
+    expect(dateBucketOf("2026-07-05T11:00:00.000Z", NOW)).toBe("today")
+    expect(dateBucketOf("invalid", NOW)).toBe("earlier")
+    const groups = groupHistory(
+      [
+        compact({ id: "t1", status: "done", updatedAt: "2026-07-05T09:00:00.000Z" }),
+        compact({ id: "t2", status: "done", updatedAt: "2026-07-05T11:00:00.000Z" }),
+        compact({ id: "old", status: "done", updatedAt: "2026-05-01T10:00:00.000Z" }),
+      ],
+      NOW,
+    )
+    expect(groups.map((g) => g.bucket)).toEqual(["today", "earlier"])
+    expect(groups[0].items.map((i) => i.id)).toEqual(["t2", "t1"])
+    expect(groups[0].label).toBe("Today")
   })
 })

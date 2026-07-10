@@ -4,6 +4,10 @@ import { MemoryRouter } from "react-router-dom"
 import type { WorkItemCompactWire, WorkItemStatusWire, ApprovalStateWire } from "@/lib/api"
 import { NeedsYouView } from "../needs-you-view"
 
+vi.mock("@/routes/settings-provider", () => ({
+  useSettings: () => ({ settings: { employeeOverrides: {} } }),
+}))
+
 function item(
   id: string,
   status: WorkItemStatusWire,
@@ -35,7 +39,7 @@ function renderView(items: WorkItemCompactWire[], resolvingIds = new Set<string>
   const onOpen = handlers.onOpen ?? vi.fn()
   render(
     <MemoryRouter>
-      <NeedsYouView items={items} resolvingIds={resolvingIds} onApprove={onApprove} onSendBack={onSendBack} onEscalate={onEscalate} onOpen={onOpen} />
+      <NeedsYouView items={items} byName={new Map()} resolvingIds={resolvingIds} onApprove={onApprove} onSendBack={onSendBack} onEscalate={onEscalate} onOpen={onOpen} />
     </MemoryRouter>,
   )
   return { onApprove, onSendBack, onEscalate, onOpen }

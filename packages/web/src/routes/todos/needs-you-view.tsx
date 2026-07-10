@@ -1,13 +1,16 @@
 import { useState } from "react"
 import { Check, ExternalLink, MessageSquareText, TerminalSquare, TriangleAlert } from "lucide-react"
-import type { WorkItemCompactWire } from "@/lib/api"
+import type { Employee, WorkItemCompactWire } from "@/lib/api"
+import { EmployeeChip } from "@/components/ui/employee-chip"
 import { StateCircle, type StateGlyphKey } from "./state-glyph"
-import { ProvChip } from "./card"
-import { formatRelativeTime } from "./util"
+import { ProvChip } from "./row"
+import { displayNameOf, formatRelativeTime } from "./util"
 
-/* GRS-027 — Needs You is now a server-derived attention inbox. The gateway
- * chooses what belongs in this queue and returns compact rows newest-first; the
- * UI preserves that order and renders only the relevant decision controls. */
+/* GRS-027 — Needs You is a server-derived attention inbox (the gateway chooses
+ * what belongs here, newest-first). design-todos §4.6 — the request body speaks
+ * the delegation language: an approval IS an employee speaking, so it renders
+ * as an attribution row (22px emoji avatar + name + verb + time) over a 2px
+ * thread-rail quote — never a boxed message. Escalated/blocked tint the rail. */
 
 function attentionKind(item: WorkItemCompactWire): "approval" | "escalated" | "blocked" {
   if (item.approvalState === "pending") return "approval"
@@ -49,6 +52,7 @@ function WorkRef({ item }: { item: WorkItemCompactWire }) {
 
 function NeedsYouCard({
   item,
+  byName,
   resolving,
   onApprove,
   onSendBack,
@@ -56,6 +60,7 @@ function NeedsYouCard({
   onOpen,
 }: {
   item: WorkItemCompactWire
+  byName: Map<string, Employee>
   resolving: boolean
   onApprove: (id: string) => void
   onSendBack: (id: string, note: string) => void
@@ -67,12 +72,14 @@ function NeedsYouCard({
   const kind = attentionKind(item)
   const pending = kind === "approval"
   const tone = kind === "escalated" ? "var(--system-red)" : kind === "blocked" ? "var(--system-orange)" : "var(--accent)"
+  const verb = pending ? "asks" : kind === "escalated" ? "escalated" : "is blocked"
   const message =
     pending
       ? item.approvalRequest ?? "Awaiting your decision."
       : kind === "escalated"
         ? "Escalated to you. Review the Todo and decide the next move."
         : "Blocked and waiting on a decision or missing input."
+  const railColor = pending ? "var(--fill-primary)" : `color-mix(in srgb, ${tone} 38%, transparent)`
 
   return (
     <div
@@ -81,29 +88,44 @@ function NeedsYouCard({
     >
       <button type="button" className="flex items-start gap-3 text-left" onClick={() => onOpen(item.id)}>
         <StateCircle keyOf={stateKey(kind)} size={34} />
-        <span className="min-w-0 flex-1">
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-[16px] font-semibold leading-snug text-[var(--text-primary)]">
-              {item.title}
-            </span>
-            <span
-              className="shrink-0 rounded-[6px] px-1.5 py-0.5 text-[length:var(--text-caption2)] font-semibold"
-              style={{ background: `color-mix(in srgb, ${tone} 14%, transparent)`, color: tone }}
-            >
-              {kindLabel(kind)}
-            </span>
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          <span className="min-w-0 flex-1 truncate text-[16px] font-semibold leading-snug text-[var(--text-primary)]">
+            {item.title}
           </span>
-          <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <WorkRef item={item} />
-            <span className="text-[length:var(--text-caption1)] tabular-nums text-[var(--text-quaternary)]">
-              {formatRelativeTime(item.updatedAt)}
-            </span>
+          <span
+            className="shrink-0 rounded-[6px] px-1.5 py-0.5 text-[length:var(--text-caption2)] font-semibold"
+            style={{ background: `color-mix(in srgb, ${tone} 14%, transparent)`, color: tone }}
+          >
+            {kindLabel(kind)}
           </span>
         </span>
       </button>
 
-      <div className="rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[11px_13px] text-[length:var(--text-subheadline)] leading-relaxed text-[var(--text-secondary)]">
-        {message}
+      {/* The employee speaking + their words behind the thread-rail. */}
+      <div>
+        <div className="flex min-w-0 items-center gap-2">
+          {item.assignee ? (
+            <>
+              <EmployeeChip employee={item.assignee} displayName={displayNameOf(item.assignee, byName)} size={22} />
+              <span className="text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">{verb}</span>
+            </>
+          ) : (
+            <WorkRef item={item} />
+          )}
+          <span className="text-[length:var(--text-caption2)] text-[var(--text-quaternary)]">
+            · {formatRelativeTime(item.updatedAt)}
+          </span>
+        </div>
+        <div className="relative ml-2.5 mt-1.5 pl-4">
+          <span
+            aria-hidden
+            className="absolute bottom-[3px] left-0 top-[3px] w-[2px] rounded-[1px]"
+            style={{ background: railColor }}
+          />
+          <p className="max-w-[62ch] text-[length:var(--text-subheadline)] leading-relaxed text-[var(--text-secondary)]">
+            {message}
+          </p>
+        </div>
       </div>
 
       {pending && composing ? (
@@ -218,6 +240,7 @@ export function NeedsYouEmpty() {
 
 export function NeedsYouView({
   items,
+  byName,
   resolvingIds,
   onApprove,
   onSendBack,
@@ -225,6 +248,7 @@ export function NeedsYouView({
   onOpen,
 }: {
   items: WorkItemCompactWire[]
+  byName: Map<string, Employee>
   resolvingIds: Set<string>
   onApprove: (id: string) => void
   onSendBack: (id: string, note: string) => void
@@ -241,6 +265,7 @@ export function NeedsYouView({
         <NeedsYouCard
           key={item.id}
           item={item}
+          byName={byName}
           resolving={resolvingIds.has(item.id)}
           onApprove={onApprove}
           onSendBack={onSendBack}

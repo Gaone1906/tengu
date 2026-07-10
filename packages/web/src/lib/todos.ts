@@ -18,11 +18,13 @@ import type {
 // truth. `cancelled` is terminal-not-done and never shown on the board.
 export type DisplayGroup = "backlog" | "assigned" | "executing" | "review" | "done"
 
+// Ledger order (design-todos §4.2): in a vertical scan, what's moving right now
+// comes first, what waits on a person beats what's merely queued, done trails.
 export const DISPLAY_GROUPS: readonly DisplayGroup[] = [
-  "backlog",
-  "assigned",
   "executing",
   "review",
+  "assigned",
+  "backlog",
   "done",
 ]
 
@@ -118,7 +120,7 @@ const WITHIN_GROUP_RANK: Record<WorkItemStatusWire, number> = {
   cancelled: 0,
 }
 
-/** Group a flat set of items into the 5 board columns. Cancelled is dropped. */
+/** Group a flat set of items into the 5 ledger sections. Cancelled is dropped. */
 export function groupBoard(items: WorkItemCompactWire[]): BoardGroup[] {
   const buckets = new Map<DisplayGroup, WorkItemCompactWire[]>()
   for (const g of DISPLAY_GROUPS) buckets.set(g, [])
@@ -128,10 +130,32 @@ export function groupBoard(items: WorkItemCompactWire[]): BoardGroup[] {
   }
   return DISPLAY_GROUPS.map((g) => {
     const list = buckets.get(g)!.slice()
-    // Stable sort: native status first, attention last.
-    list.sort((a, b) => WITHIN_GROUP_RANK[a.status] - WITHIN_GROUP_RANK[b.status])
+    // Stable sort: native status first, attention folded after, then manual rank.
+    list.sort((a, b) => WITHIN_GROUP_RANK[a.status] - WITHIN_GROUP_RANK[b.status] || compareRank(a, b))
     return { group: g, label: DISPLAY_GROUP_LABEL[g], items: list }
   })
+}
+
+// ── Manual rank ordering (design-todos §4.5 / §7.3) ─────────────────────────
+// Default sort IS manual: rank ascending when present, then updatedAt desc for
+// never-ranked items. Ranked items always lead unranked ones.
+export function compareRank(a: WorkItemCompactWire, b: WorkItemCompactWire): number {
+  const ar = a.rank ?? null
+  const br = b.rank ?? null
+  if (ar != null && br != null && ar !== br) return ar - br
+  if (ar != null && br == null) return -1
+  if (ar == null && br != null) return 1
+  return (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0)
+}
+
+/** The rank value that lands an item between its new neighbours (midpoint;
+ *  open-ended steps of 1024 at either edge). Neighbours without a rank fall
+ *  back to their list position so a drop into an unranked list still resolves. */
+export function rankBetween(before: number | null | undefined, after: number | null | undefined): number {
+  if (before != null && after != null) return (before + after) / 2
+  if (before != null) return before + 1024
+  if (after != null) return after - 1024
+  return 0
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -307,4 +331,159 @@ function trimNum(n: number): string {
 export function formatCost(spendUsd: number, budgetUsd: number | null | undefined): string | null {
   if (budgetUsd == null) return null
   return `$${spendUsd.toFixed(2)} / $${trimNum(budgetUsd)}`
+}
+
+// ── Filters (design-todos §4.3) ─────────────────────────────────────────────
+// The chips choose WHAT; the grouping adapts. Filters map 1:1 to server query
+// params and persist in the URL. `status: "open"` is the default lens (the 6
+// open statuses + the recent-done window); a closed status regroups by date.
+
+export type StatusFilter = "open" | "all" | WorkItemStatusWire
+export type DateFilter = "today" | "week" | "month"
+
+export interface TodoFilters {
+  status: StatusFilter
+  assignee?: string
+  department?: string
+  source?: WorkItemSourceWire
+  date?: DateFilter
+  q?: string
+}
+
+export const DEFAULT_FILTERS: TodoFilters = { status: "open" }
+
+export function isDefaultFilters(f: TodoFilters): boolean {
+  return f.status === "open" && !f.assignee && !f.department && !f.source && !f.date && !f.q
+}
+
+/** How many chips are set away from their default (drives the Clear control). */
+export function activeFilterCount(f: TodoFilters): number {
+  let n = 0
+  if (f.status !== "open") n++
+  if (f.assignee) n++
+  if (f.department) n++
+  if (f.source) n++
+  if (f.date) n++
+  if (f.q) n++
+  return n
+}
+
+/** Closed-status views (Done, Cancelled, All) regroup the list by date. */
+export function isHistoryView(f: TodoFilters): boolean {
+  return f.status === "done" || f.status === "cancelled" || f.status === "all"
+}
+
+/** The statuses the ledger must fetch for a given filter (server takes one
+ *  status per query, so the data layer fans out and merges). */
+export function statusesFor(f: TodoFilters): WorkItemStatusWire[] {
+  if (f.status === "open") return ["backlog", "assigned", "executing", "blocked", "in_review", "escalated", "done"]
+  if (f.status === "all")
+    return ["backlog", "assigned", "executing", "blocked", "in_review", "escalated", "done", "cancelled"]
+  return [f.status]
+}
+
+/** since/until ISO bounds for a date filter (until is open — "now"). */
+export function dateBounds(date: DateFilter | undefined, now: number): { since?: string } {
+  if (!date) return {}
+  const d = new Date(now)
+  if (date === "today") {
+    d.setHours(0, 0, 0, 0)
+  } else if (date === "week") {
+    d.setHours(0, 0, 0, 0)
+    d.setDate(d.getDate() - 6)
+  } else {
+    d.setHours(0, 0, 0, 0)
+    d.setMonth(d.getMonth() - 1)
+  }
+  return { since: d.toISOString() }
+}
+
+/** Defensive client pass for the params older gateways ignore (`since`, `q`).
+ *  When the server starts honouring them this becomes a no-op re-filter. */
+export function applyClientFilters(items: WorkItemCompactWire[], f: TodoFilters, now: number): WorkItemCompactWire[] {
+  let out = items
+  const { since } = dateBounds(f.date, now)
+  if (since) {
+    const t = Date.parse(since)
+    out = out.filter((i) => (Date.parse(i.updatedAt) || 0) >= t)
+  }
+  if (f.q) {
+    const needle = f.q.toLowerCase()
+    out = out.filter((i) => i.title.toLowerCase().includes(needle))
+  }
+  return out
+}
+
+/** URL ⇄ filter mapping, so a filtered view is shareable and survives refresh. */
+export function filtersToSearchParams(f: TodoFilters): URLSearchParams {
+  const p = new URLSearchParams()
+  if (f.status !== "open") p.set("status", f.status)
+  if (f.assignee) p.set("assignee", f.assignee)
+  if (f.department) p.set("department", f.department)
+  if (f.source) p.set("source", f.source)
+  if (f.date) p.set("date", f.date)
+  if (f.q) p.set("q", f.q)
+  return p
+}
+
+const STATUS_FILTER_VALUES: ReadonlySet<string> = new Set([
+  "all", "backlog", "assigned", "executing", "blocked", "in_review", "escalated", "done", "cancelled",
+])
+const SOURCE_VALUES: ReadonlySet<string> = new Set(["human", "delegation", "cron", "workflow", "session", "connector", "goal"])
+const DATE_VALUES: ReadonlySet<string> = new Set(["today", "week", "month"])
+
+export function filtersFromSearchParams(p: URLSearchParams): TodoFilters {
+  const f: TodoFilters = { status: "open" }
+  const status = p.get("status")
+  if (status && STATUS_FILTER_VALUES.has(status)) f.status = status as StatusFilter
+  const assignee = p.get("assignee")
+  if (assignee) f.assignee = assignee
+  const department = p.get("department")
+  if (department) f.department = department
+  const source = p.get("source")
+  if (source && SOURCE_VALUES.has(source)) f.source = source as WorkItemSourceWire
+  const date = p.get("date")
+  if (date && DATE_VALUES.has(date)) f.date = date as DateFilter
+  const q = p.get("q")
+  if (q) f.q = q
+  return f
+}
+
+// ── History grouping (closed-status filters regroup by date, §3) ────────────
+export type DateBucket = "today" | "yesterday" | "week" | "earlier"
+export const DATE_BUCKETS: readonly DateBucket[] = ["today", "yesterday", "week", "earlier"]
+export const DATE_BUCKET_LABEL: Record<DateBucket, string> = {
+  today: "Today",
+  yesterday: "Yesterday",
+  week: "This week",
+  earlier: "Earlier",
+}
+
+export function dateBucketOf(iso: string, now: number): DateBucket {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return "earlier"
+  const startOfToday = new Date(now)
+  startOfToday.setHours(0, 0, 0, 0)
+  if (t >= startOfToday.getTime()) return "today"
+  if (t >= startOfToday.getTime() - DAY_MS) return "yesterday"
+  if (t >= startOfToday.getTime() - 6 * DAY_MS) return "week"
+  return "earlier"
+}
+
+export interface HistoryGroup {
+  bucket: DateBucket
+  label: string
+  items: WorkItemCompactWire[]
+}
+
+/** Newest-first date grouping for history views. Empty buckets don't render. */
+export function groupHistory(items: WorkItemCompactWire[], now: number): HistoryGroup[] {
+  const buckets = new Map<DateBucket, WorkItemCompactWire[]>()
+  for (const b of DATE_BUCKETS) buckets.set(b, [])
+  for (const it of items) buckets.get(dateBucketOf(it.updatedAt, now))!.push(it)
+  return DATE_BUCKETS.map((b) => {
+    const list = buckets.get(b)!.slice()
+    list.sort((a, x) => (Date.parse(x.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0))
+    return { bucket: b, label: DATE_BUCKET_LABEL[b], items: list }
+  }).filter((g) => g.items.length > 0)
 }
