@@ -14,7 +14,7 @@ const getSessionMock = vi.fn();
 vi.mock("../registry.js", () => ({
   getSession: (...a: unknown[]) => getSessionMock(...a),
   getMessages: vi.fn(() => []),
-  updateSession: vi.fn(),
+  updateSessionForAttempt: vi.fn((_id: string, _token: string, updates: Partial<Session>) => makeSession(updates)),
 }));
 
 vi.mock("../../shared/usageAwareness.js", () => ({
@@ -58,6 +58,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     title: null,
     parentSessionId: null,
     status: "running",
+    attemptToken: "attempt-1",
     effortLevel: null,
     totalCost: 0,
     totalTurns: 0,
@@ -74,6 +75,7 @@ function makeOpts(fallbackRun: ReturnType<typeof vi.fn>): RateLimitHandlerOpts {
   const claudeEngine = { run: vi.fn() } as unknown as RateLimitHandlerOpts["engine"];
   return {
     session,
+    attemptToken: "attempt-1",
     prompt: "hello",
     engineConfig: { bin: "claude", model: "opus" },
     config: {

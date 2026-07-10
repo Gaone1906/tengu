@@ -226,6 +226,10 @@ export interface Session {
   /** Durable terminal receipt for the latest execution attempt. Conversational
    * `idle` alone is never proof that work completed successfully. */
   attemptOutcome?: SessionAttemptOutcome | null;
+  /** Generation token for the currently/latest dispatched attempt. Terminal
+   * writers compare this token so a stale engine result cannot overwrite a
+   * stop/reset or a newer turn. */
+  attemptToken?: string | null;
   effortLevel: string | null;
   totalCost: number;
   totalTurns: number;

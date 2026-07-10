@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_id TEXT,
   status TEXT DEFAULT 'idle',
   attempt_outcome TEXT,
+  attempt_token TEXT,
   created_at TEXT NOT NULL,
   last_activity TEXT NOT NULL,
   last_error TEXT
@@ -227,6 +228,7 @@ function rowToSession(row: Record<string, unknown>): Session {
     effortLevel: (row.effort_level as string) ?? null,
     status: row.status as Session['status'],
     attemptOutcome: (row.attempt_outcome as SessionAttemptOutcome) ?? null,
+    attemptToken: (row.attempt_token as string) ?? null,
     totalCost: (row.total_cost as number) ?? 0,
     totalTurns: (row.total_turns as number) ?? 0,
     lastContextTokens: (row.last_context_tokens as number) ?? null,
@@ -668,6 +670,8 @@ export function migrateSessionsSchema(database: Database.Database): void {
     // Explicit latest-attempt receipt. NULL means no successful/failed terminal
     // engine result has been recorded; `idle` by itself is not completion proof.
     ['attempt_outcome', 'TEXT'],
+    // Per-dispatch generation used for compare-and-set terminal writes.
+    ['attempt_token', 'TEXT'],
   ];
 
   for (const [name, type, defaultVal] of missingColumns) {
@@ -797,6 +801,7 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     effortLevel: opts.effortLevel ?? null,
     status: 'idle',
     attemptOutcome: null,
+    attemptToken: null,
     totalCost: 0,
     totalTurns: 0,
     lastContextTokens: null,
@@ -829,6 +834,7 @@ export interface UpdateSessionFields {
   engineSessions?: EngineSessionRefs | null;
   status?: Session['status'];
   attemptOutcome?: SessionAttemptOutcome | null;
+  attemptToken?: string | null;
   model?: string | null;
   effortLevel?: string | null;
   lastContextTokens?: number | null;
@@ -878,6 +884,10 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
   } else if (updates.status === 'interrupted') {
     sets.push("attempt_outcome = 'interrupted'");
   }
+  if (updates.attemptToken !== undefined) {
+    sets.push('attempt_token = ?');
+    values.push(updates.attemptToken);
+  }
   if (updates.model !== undefined) {
     sets.push('model = ?');
     values.push(updates.model);
@@ -924,6 +934,51 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
   values.push(id);
   db.prepare(`UPDATE sessions SET ${sets.join(', ')} WHERE id = ?`).run(...values);
   return getSession(id);
+}
+
+/** Start a new execution generation and make it the sole owner of terminal
+ * writes for this session. The token is durable so stop/reset wins across
+ * asynchronous engine completion and process boundaries. */
+export function beginSessionAttempt(id: string, updates: UpdateSessionFields = {}): Session | undefined {
+  return updateSession(id, {
+    ...updates,
+    status: 'running',
+    attemptOutcome: null,
+    attemptToken: uuidv4(),
+  });
+}
+
+/** Compare-and-set an update against the active attempt generation and state.
+ * Returns undefined when a stop/reset/newer turn has taken ownership. */
+export function updateSessionForAttempt(
+  id: string,
+  attemptToken: string,
+  updates: UpdateSessionFields,
+  expectedStatuses: readonly Session['status'][] = ['running'],
+): Session | undefined {
+  if (expectedStatuses.length === 0) return undefined;
+  const database = initDb();
+  const before = getSession(id);
+  if (!before || before.attemptToken !== attemptToken || !expectedStatuses.includes(before.status)) return undefined;
+
+  const tx = database.transaction(() => {
+    const current = database
+      .prepare('SELECT status, attempt_token FROM sessions WHERE id = ?')
+      .get(id) as { status: Session['status']; attempt_token: string | null } | undefined;
+    if (!current || current.attempt_token !== attemptToken || !expectedStatuses.includes(current.status)) return undefined;
+    return updateSession(id, updates);
+  });
+  return tx();
+}
+
+/** Terminal attempt receipt. Only the same generation while actively running
+ * may settle; an interrupted row is therefore immutable to late success. */
+export function completeSessionAttempt(
+  id: string,
+  attemptToken: string,
+  updates: UpdateSessionFields,
+): Session | undefined {
+  return updateSessionForAttempt(id, attemptToken, updates, ['running']);
 }
 
 export function getEngineSessionRef(session: Session, engine = session.engine): EngineSessionRef {

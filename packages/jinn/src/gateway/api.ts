@@ -47,6 +47,9 @@ import {
   getEngineSessionRef,
   createSession,
   updateSession,
+  beginSessionAttempt,
+  completeSessionAttempt,
+  updateSessionForAttempt,
   recordEngineSessionId,
   switchSessionEngine,
   clearEngineSessionRefs,
@@ -509,14 +512,24 @@ function dispatchWebSessionRun(
   context: ApiContext,
   opts?: { delayMs?: number; queueItemId?: string; attachments?: string[] },
 ): void {
+  let dispatchedAttemptToken: string | undefined;
   const run = async () => {
     const sessionKey = session.sessionKey || session.sourceRef;
     try {
       await context.sessionManager.getQueue().enqueue(sessionKey, async () => {
+        const startedAttempt = beginSessionAttempt(session.id, {
+          lastActivity: new Date().toISOString(),
+          lastError: null,
+        });
+        if (!startedAttempt?.attemptToken) {
+          logger.info(`Skipping web session ${session.id}: attempt could not be started`);
+          return;
+        }
+        dispatchedAttemptToken = startedAttempt.attemptToken;
         context.emit("session:started", { sessionId: session.id });
         // Item moved pending → running: refresh the queue panel.
         if (opts?.queueItemId) context.emit("queue:updated", { sessionId: session.id, sessionKey });
-        await runWebSession(session, prompt, engine, config, context, opts?.attachments);
+        await runWebSession(startedAttempt, prompt, engine, config, context, startedAttempt.attemptToken, opts?.attachments);
       }, opts?.queueItemId);
     } finally {
       // Item settled (completed/cancelled/errored): refresh so the "N queued"
@@ -530,21 +543,27 @@ function dispatchWebSessionRun(
     run().catch((err) => {
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error(`Web session ${session.id} dispatch error: ${errMsg}`);
-      const erroredOnDispatch = updateSession(session.id, {
-        status: "error",
-        lastActivity: new Date().toISOString(),
-        lastError: errMsg,
-      });
-      context.emit("session:completed", {
-        sessionId: session.id,
-        result: null,
-        error: errMsg,
-      });
+      const erroredOnDispatch = dispatchedAttemptToken
+        ? completeSessionAttempt(session.id, dispatchedAttemptToken, {
+            status: "error",
+            lastActivity: new Date().toISOString(),
+            lastError: errMsg,
+          })
+        : undefined;
+      if (erroredOnDispatch) {
+        context.emit("session:completed", {
+          sessionId: session.id,
+          result: null,
+          error: errMsg,
+        });
+      }
       // This outer dispatch-error path bypasses notifyParentSession (run() failed
       // before its own completion handling), so wake any attached talk sessions
       // here too — otherwise an attachment wake is silently lost on a hard failure.
-      if (erroredOnDispatch) notifyAttachedTalkSessions(erroredOnDispatch, { error: errMsg });
-      maybeEmitTalkGraph(session.id, "completed", { getSession, emit: context.emit });
+      if (erroredOnDispatch) {
+        notifyAttachedTalkSessions(erroredOnDispatch, { error: errMsg });
+        maybeEmitTalkGraph(session.id, "completed", { getSession, emit: context.emit });
+      }
     });
   };
 
@@ -5102,6 +5121,7 @@ async function runWebSession(
   engine: Engine,
   config: JinnConfig,
   context: ApiContext,
+  attemptToken: string,
   attachments?: string[],
 ): Promise<void> {
   const currentSession = getSession(session.id);
@@ -5120,7 +5140,7 @@ async function runWebSession(
     const errMsg = `Engine "${currentSession.engine}" not available`;
     logger.error(`Web session ${currentSession.id} blocked: ${errMsg}`);
     insertMessage(currentSession.id, "assistant", `⛔ ${errMsg}`);
-    const erroredSession = updateSession(currentSession.id, {
+    const erroredSession = completeSessionAttempt(currentSession.id, attemptToken, {
       status: "error",
       lastActivity: new Date().toISOString(),
       lastError: errMsg,
@@ -5132,13 +5152,6 @@ async function runWebSession(
   }
   engine = runtimeEngine;
   logger.info(`Web session ${currentSession.id} running engine "${engineAtTurnStart}" (model: ${currentSession.model || "default"})`);
-
-  // A new turn owns the session now. Writing running even when the POST handler
-  // already did so clears any terminal receipt left by the previous attempt.
-  updateSession(currentSession.id, {
-    status: "running",
-    lastActivity: new Date().toISOString(),
-  });
 
   // If this session has an assigned employee, load their persona
   let employee: import("../shared/types.js").Employee | undefined;
@@ -5158,7 +5171,7 @@ async function runWebSession(
     const errMsg = engineUnavailableMessage(config, currentSession.engine);
     logger.error(`Web session ${currentSession.id} blocked: ${errMsg}`);
     insertMessage(currentSession.id, "assistant", `⛔ ${errMsg}`);
-    const erroredSession = updateSession(currentSession.id, {
+    const erroredSession = completeSessionAttempt(currentSession.id, attemptToken, {
       status: "error",
       lastActivity: new Date().toISOString(),
       lastError: errMsg,
@@ -5245,7 +5258,7 @@ async function runWebSession(
         runHeartbeat = undefined;
         return;
       }
-      updateSession(currentSession.id, {
+      updateSessionForAttempt(currentSession.id, attemptToken, {
         status: "running",
         lastActivity: new Date().toISOString(),
       });
@@ -5377,13 +5390,13 @@ async function runWebSession(
           // sub-agent/auxiliary streams), so its usage drives the session meter.
           const ctx = Number(outgoingDelta.content);
           if (Number.isFinite(ctx) && ctx > 0) {
-            updateSession(currentSession.id, { lastContextTokens: ctx });
+            updateSessionForAttempt(currentSession.id, attemptToken, { lastContextTokens: ctx });
           }
         }
         const now = Date.now();
         if (now - lastHeartbeatAt >= 2000) {
           lastHeartbeatAt = now;
-          updateSession(currentSession.id, {
+          updateSessionForAttempt(currentSession.id, attemptToken, {
             status: "running",
             lastActivity: new Date(now).toISOString(),
           });
@@ -5426,8 +5439,13 @@ async function runWebSession(
       // recovered text here. Append it and restore a clean idle status — unless
       // the session is gone or a NEW turn owns it (status back to "running").
       onLateRecovery: ({ result: lateText, sessionId: engineSid }) => {
-        const live = getSession(currentSession.id);
-        if (!live || live.status === "running" || live.engine !== engineAtTurnStart) return;
+        const recovered = updateSessionForAttempt(currentSession.id, attemptToken, {
+          status: "idle",
+          attemptOutcome: "succeeded",
+          lastActivity: new Date().toISOString(),
+          lastError: null,
+        }, ["error"]);
+        if (!recovered || recovered.engine !== engineAtTurnStart) return;
         insertMessage(currentSession.id, "assistant", lateText);
         if (engineSid.trim()) {
           recordEngineSessionId(currentSession.id, engineAtTurnStart, engineSid, {
@@ -5436,12 +5454,6 @@ async function runWebSession(
             lastSyncedAt: new Date().toISOString(),
           });
         }
-        const recovered = updateSession(currentSession.id, {
-          status: "idle",
-          attemptOutcome: "succeeded",
-          lastActivity: new Date().toISOString(),
-          lastError: null,
-        });
         // The parent/channel already saw this turn fail — label the late answer
         // so it reads as a supersede, not a fresh unprompted turn.
         const labelled = `(recovered — this supersedes the earlier reported failure)\n\n${lateText}`;
@@ -5466,7 +5478,13 @@ async function runWebSession(
     });
     let result = await runAttempt(modelForTurn);
 
-    if (currentSession.engine === "claude" && result.error && !result.result.trim()) {
+    if (
+      currentSession.engine === "claude"
+      && result.error
+      && !result.result.trim()
+      && getSession(currentSession.id)?.attemptToken === attemptToken
+      && getSession(currentSession.id)?.status === "running"
+    ) {
       await refreshClaudeModels(config);
       const refreshedRegistry = getModelRegistry(context.getConfig());
       const fallbackModel = selectClaudeModelFallback({
@@ -5508,7 +5526,8 @@ async function runWebSession(
 
     const wasInterrupted = result.error?.startsWith("Interrupted");
     const wasSuperseded = !wasInterrupted && isTurnSuperseded(currentSession.id, turnStartedAt);
-    const quietPreempted = wasInterrupted || wasSuperseded;
+    const attemptStillRunning = liveAfterRun?.attemptToken === attemptToken && liveAfterRun.status === "running";
+    const quietPreempted = wasInterrupted || wasSuperseded || !attemptStillRunning;
 
     // Turn settled. Mid-turn rows are refresh-only, including tool rows: durable
     // chat history collapses to the final assistant message. If the turn was
@@ -5558,6 +5577,7 @@ async function runWebSession(
 
       const outcome = await handleRateLimit({
         session: currentSession,
+        attemptToken,
         prompt,
         systemPrompt,
         engineConfig,
@@ -5611,7 +5631,7 @@ async function runWebSession(
                 lastSyncedAt: fallbackCompletedAt,
               });
             }
-            const completedFallback = updateSession(currentSession.id, {
+            const completedFallback = completeSessionAttempt(currentSession.id, attemptToken, {
               status: fallbackResult.error ? "error" : "idle",
               attemptOutcome: fallbackResult.error ? "failed" : "succeeded",
               lastActivity: fallbackCompletedAt,
@@ -5623,16 +5643,18 @@ async function runWebSession(
               if (fallbackResult.result) void deliverConnectorReply(completedFallback, fallbackResult.result, context.connectors);
             }
 
-            context.emit("session:completed", {
-              sessionId: currentSession.id,
-              employee: currentSession.employee || config.portal?.portalName || "Jinn",
-              title: currentSession.title,
-              result: fallbackResult.result,
-              error: fallbackResult.error || null,
-              cost: fallbackResult.cost,
-              durationMs: fallbackResult.durationMs,
-            });
-            maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
+            if (completedFallback) {
+              context.emit("session:completed", {
+                sessionId: currentSession.id,
+                employee: currentSession.employee || config.portal?.portalName || "Jinn",
+                title: currentSession.title,
+                result: fallbackResult.result,
+                error: fallbackResult.error || null,
+                cost: fallbackResult.cost,
+                durationMs: fallbackResult.durationMs,
+              });
+              maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
+            }
           },
           onWaitingStart: ({ resumeAt }) => {
             const resumeText = resumeAt
@@ -5679,7 +5701,7 @@ async function runWebSession(
                 lastSyncedAt: retryCompletedAt,
               });
             }
-            const completedAfterRetry = updateSession(currentSession.id, {
+            const completedAfterRetry = completeSessionAttempt(currentSession.id, attemptToken, {
               status: retryResult.error ? "error" : "idle",
               attemptOutcome: retryResult.error ? "failed" : "succeeded",
               lastActivity: retryCompletedAt,
@@ -5696,35 +5718,39 @@ async function runWebSession(
               if (retryResult.result) void deliverConnectorReply(completedAfterRetry, retryResult.result, context.connectors);
             }
 
-            context.emit("session:completed", {
-              sessionId: currentSession.id,
-              employee: currentSession.employee || config.portal?.portalName || "Jinn",
-              title: currentSession.title,
-              result: retryResult.result,
-              error: retryResult.error || null,
-              cost: retryResult.cost,
-              durationMs: retryResult.durationMs,
-            });
-            maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
+            if (completedAfterRetry) {
+              context.emit("session:completed", {
+                sessionId: currentSession.id,
+                employee: currentSession.employee || config.portal?.portalName || "Jinn",
+                title: currentSession.title,
+                result: retryResult.result,
+                error: retryResult.error || null,
+                cost: retryResult.cost,
+                durationMs: retryResult.durationMs,
+              });
+              maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
+            }
           },
           onTimeout: () => {
             notifyDiscordChannel(
               `❌ Claude usage limit did not clear in time. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} has been stopped.`,
             );
-            const erroredSession = updateSession(currentSession.id, {
+            const erroredSession = updateSessionForAttempt(currentSession.id, attemptToken, {
               status: "error",
               lastActivity: new Date().toISOString(),
               lastError: "Claude usage limit did not clear in time",
-            });
+            }, ["waiting", "running"]);
             if (erroredSession) {
               notifyParentSession(erroredSession, { error: "Claude usage limit did not clear in time" }, { alwaysNotify: employee?.alwaysNotify });
             }
-            context.emit("session:completed", {
-              sessionId: currentSession.id,
-              result: null,
-              error: "Claude usage limit did not clear in time",
-            });
-            maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
+            if (erroredSession) {
+              context.emit("session:completed", {
+                sessionId: currentSession.id,
+                result: null,
+                error: "Claude usage limit did not clear in time",
+              });
+              maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
+            }
           },
         },
       });
@@ -5762,7 +5788,7 @@ async function runWebSession(
         lastSyncedAt: completedAt,
       });
     }
-    const completedSession = updateSession(currentSession.id, {
+    const completedSession = completeSessionAttempt(currentSession.id, attemptToken, {
       ...(typeof result.contextTokens === "number" ? { lastContextTokens: result.contextTokens } : {}),
       // Preserve interruption as an explicit terminal receipt. Conversational
       // idleness is not proof that an execution attempt succeeded.
@@ -5797,16 +5823,18 @@ async function runWebSession(
       await deliverConnectorReply(completedSession, result.result, context.connectors);
     }
 
-    context.emit("session:completed", {
-      sessionId: currentSession.id,
-      employee: currentSession.employee || config.portal?.portalName || "Jinn",
-      title: currentSession.title,
-      result: quietPreempted ? null : result.result,
-      error: reportedError,
-      cost: result.cost,
-      durationMs: result.durationMs,
-    });
-    maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
+    if (completedSession) {
+      context.emit("session:completed", {
+        sessionId: currentSession.id,
+        employee: currentSession.employee || config.portal?.portalName || "Jinn",
+        title: currentSession.title,
+        result: quietPreempted ? null : result.result,
+        error: reportedError,
+        cost: result.cost,
+        durationMs: result.durationMs,
+      });
+      maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
+    }
 
     logger.info(
       `Web session ${currentSession.id} completed` +
@@ -5835,7 +5863,7 @@ async function runWebSession(
     }
     // The run threw — drop any orphaned mid-turn partial blocks.
     deletePartialMessages(currentSession.id);
-    const erroredSession = updateSession(currentSession.id, {
+    const erroredSession = completeSessionAttempt(currentSession.id, attemptToken, {
       status: "error",
       lastActivity: new Date().toISOString(),
       lastError: errMsg,
@@ -5843,12 +5871,14 @@ async function runWebSession(
     if (erroredSession) {
       notifyParentSession(erroredSession, { error: errMsg }, { alwaysNotify: employee?.alwaysNotify });
     }
-    context.emit("session:completed", {
-      sessionId: currentSession.id,
-      result: null,
-      error: errMsg,
-    });
-    maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
+    if (erroredSession) {
+      context.emit("session:completed", {
+        sessionId: currentSession.id,
+        result: null,
+        error: errMsg,
+      });
+      maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
+    }
     logger.error(`Web session ${currentSession.id} error: ${errMsg}`);
   } finally {
     if (runHeartbeat) {

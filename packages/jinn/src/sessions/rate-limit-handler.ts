@@ -26,7 +26,7 @@ import { resolveEffort } from "../shared/effort.js";
 import { effortLevelsForModel, engineAvailable, type EngineName } from "../shared/models.js";
 import { computeNextRetryDelayMs, computeRateLimitDeadlineMs, detectRateLimit } from "../shared/rateLimit.js";
 import { recordClaudeRateLimit } from "../shared/usageAwareness.js";
-import { getSession, getMessages, updateSession } from "./registry.js";
+import { getSession, getMessages, updateSessionForAttempt } from "./registry.js";
 
 const WAIT_CANCEL_POLL_MS = 5000;
 
@@ -115,6 +115,8 @@ export interface RateLimitHandlerHooks {
 
 export interface RateLimitHandlerOpts {
   session: Session;
+  /** Generation token minted when this turn entered running state. */
+  attemptToken: string;
   /** The original prompt that hit the rate limit — used unchanged for retries. */
   prompt: string;
   systemPrompt?: string;
@@ -154,7 +156,7 @@ export interface RateLimitHandlerOpts {
  */
 export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateLimitOutcome> {
   const {
-    session, prompt, systemPrompt, engineConfig, effortLevel, cliFlags,
+    session, attemptToken, prompt, systemPrompt, engineConfig, effortLevel, cliFlags,
     mcpConfigPath, resolvedMcp, attachments, config, engines, employee, engine,
     rateLimit, originalResult, hooks,
   } = opts;
@@ -191,7 +193,7 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
         syncSince,
       };
 
-      updateSession(session.id, {
+      const fallbackStarted = updateSessionForAttempt(session.id, attemptToken, {
         engine: fallbackName,
         // Keep Claude engine_session_id intact for later restore; Codex will return its own thread id.
         transportMeta: nextMeta as any,
@@ -201,6 +203,10 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
           ? `Claude usage limit — using GPT until ${resumeAt.toISOString()}`
           : "Claude usage limit — using GPT temporarily",
       });
+      if (!fallbackStarted) {
+        await hooks.onCancelled?.();
+        return { kind: "cancelled" };
+      }
 
       const fallbackConfig = config.engines.codex;
       const fallbackEffort = resolveEffort(
@@ -244,7 +250,7 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
       const liveMeta = (getSession(session.id)?.transportMeta || nextMeta) as Record<string, unknown>;
       const metaAfter = { ...liveMeta } as Record<string, unknown>;
       metaAfter.engineSessions = nextEngineSessions;
-      updateSession(session.id, { transportMeta: metaAfter as any });
+      updateSessionForAttempt(session.id, attemptToken, { transportMeta: metaAfter as any });
 
       await hooks.onFallbackComplete?.(fallbackResult);
 
@@ -264,7 +270,7 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
     `Session ${session.id} hit Claude usage limit — will auto-retry ${resumeAt ? `at ${resumeAt.toISOString()}` : `in ${Math.round(delayMs / 1000)}s`}`,
   );
 
-  updateSession(session.id, {
+  const enteredWaiting = updateSessionForAttempt(session.id, attemptToken, {
     ...(originalResult.sessionId?.trim() ? { engineSessionId: originalResult.sessionId } : {}),
     status: "waiting",
     lastActivity: new Date().toISOString(),
@@ -272,13 +278,17 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
       ? `Claude usage limit — resumes ${resumeAt.toISOString()}`
       : "Claude usage limit — waiting for reset",
   });
+  if (!enteredWaiting) {
+    await hooks.onCancelled?.();
+    return { kind: "cancelled" };
+  }
 
   await hooks.onWaitingStart?.({ resumeAt: resumeAt ?? null, rateLimit });
 
   // Keep lastActivity fresh while waiting (UI / status endpoints).
   const heartbeat = setInterval(() => {
     if (getSession(session.id)?.status === "waiting") {
-      updateSession(session.id, { status: "waiting", lastActivity: new Date().toISOString() });
+      updateSessionForAttempt(session.id, attemptToken, { status: "waiting", lastActivity: new Date().toISOString() }, ["waiting"]);
     }
   }, 60_000);
 
@@ -312,6 +322,15 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
       await hooks.onRetryAttempt?.({ attempt });
       logger.info(`Session ${session.id} retrying after usage limit (attempt ${attempt})`);
 
+      const retryStarted = updateSessionForAttempt(session.id, attemptToken, {
+        status: "running",
+        lastActivity: new Date().toISOString(),
+      }, ["waiting"]);
+      if (!retryStarted) {
+        await hooks.onCancelled?.();
+        return { kind: "cancelled" };
+      }
+
       const retryResult = await engine.run({
         prompt,
         resumeSessionId: currentSession.engineSessionId ?? undefined,
@@ -339,7 +358,7 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
         const next = computeNextRetryDelayMs(retryRateLimit.resetsAt);
         nextDelayMs = next.delayMs;
 
-        updateSession(session.id, {
+        const waitingAgain = updateSessionForAttempt(session.id, attemptToken, {
           ...(retryResult.sessionId?.trim() ? { engineSessionId: retryResult.sessionId } : {}),
           status: "waiting",
           lastActivity: new Date().toISOString(),
@@ -347,6 +366,10 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
             ? `Claude usage limit — resumes ${next.resumeAt.toISOString()}`
             : "Claude usage limit — waiting for reset",
         });
+        if (!waitingAgain) {
+          await hooks.onCancelled?.();
+          return { kind: "cancelled" };
+        }
 
         await hooks.onStillLimited?.({ attempt, resumeAt: next.resumeAt ?? null });
         continue;

@@ -22,6 +22,9 @@ import {
   insertMessage,
   recordEngineSessionId,
   updateSession,
+  beginSessionAttempt,
+  completeSessionAttempt,
+  updateSessionForAttempt,
 } from "./registry.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel } from "./callbacks.js";
 import { buildContext } from "./context.js";
@@ -290,6 +293,7 @@ export class SessionManager {
     } catch { /* fallback to filesystem scan in context builder */ }
 
     let engineAtTurnStart = session.engine;
+    let attemptToken = "";
     try {
       engineAtTurnStart = session.engine;
       const resumeRefAtTurnStart = getEngineSessionRef(session, engineAtTurnStart);
@@ -334,13 +338,15 @@ export class SessionManager {
       // Mark running only after preflight (system prompt / engine config / effort)
       // succeeded — and inside the try, so any failure transitions to "error" in the
       // catch below instead of leaving the session stuck looking "running".
-      updateSession(session.id, {
-        status: "running",
+      const startedAttempt = beginSessionAttempt(session.id, {
         replyContext: msg.replyContext,
         messageId: msg.messageId ?? null,
         transportMeta: mergeTransportMeta(session.transportMeta, msg.transportMeta),
         lastActivity: new Date().toISOString(),
       });
+      if (!startedAttempt?.attemptToken) return;
+      session = startedAttempt;
+      attemptToken = startedAttempt.attemptToken;
 
       // If we previously switched to GPT while Claude was rate-limited, inject a sync transcript
       // so Claude can resume with full context when it comes back online.
@@ -387,7 +393,7 @@ export class SessionManager {
           if (budgetStatus === 'paused') {
             logger.warn(`Session ${session.id} blocked: employee "${session.employee}" has exceeded their budget`);
             const pausedMsg = `Budget limit exceeded for employee "${session.employee}". Session blocked.`;
-            updateSession(session.id, {
+            completeSessionAttempt(session.id, attemptToken, {
               status: 'error',
               lastActivity: new Date().toISOString(),
               lastError: pausedMsg,
@@ -438,8 +444,13 @@ export class SessionManager {
         sessionId: session.id,
         source: session.source,
         onLateRecovery: ({ result: lateText, sessionId: engineSid }) => {
-          const live = getSession(session.id);
-          if (!live || live.status === "running" || live.engine !== engineAtTurnStart) return;
+          const recovered = updateSessionForAttempt(session.id, attemptToken, {
+            status: "idle",
+            attemptOutcome: "succeeded",
+            lastActivity: new Date().toISOString(),
+            lastError: null,
+          }, ["error"]);
+          if (!recovered || recovered.engine !== engineAtTurnStart) return;
           insertMessage(session.id, "assistant", lateText);
           if (engineSid.trim()) {
             recordEngineSessionId(session.id, engineAtTurnStart, engineSid, {
@@ -448,16 +459,10 @@ export class SessionManager {
               lastSyncedAt: new Date().toISOString(),
             });
           }
-          const recovered = updateSession(session.id, {
-            status: "idle",
-            attemptOutcome: "succeeded",
-            lastActivity: new Date().toISOString(),
-            lastError: null,
-          });
           // The parent/channel already saw this turn fail — label the late answer
           // so it reads as a supersede, not a fresh unprompted turn.
           const labelled = `(recovered — this supersedes the earlier reported failure)\n\n${lateText}`;
-          notifyParentSession(recovered ?? live, { result: labelled, error: null }, { alwaysNotify: employee?.alwaysNotify });
+          notifyParentSession(recovered, { result: labelled, error: null }, { alwaysNotify: employee?.alwaysNotify });
           void connector.replyMessage(target, labelled).catch(() => {});
           logger.info(`Session ${session.id} recovered by late Stop after a failed turn`);
         },
@@ -475,7 +480,9 @@ export class SessionManager {
         return;
       }
 
-      const wasInterrupted = result.error?.startsWith("Interrupted");
+      const wasInterrupted = result.error?.startsWith("Interrupted")
+        || liveAfterRun.attemptToken !== attemptToken
+        || liveAfterRun.status !== "running";
 
       // Dead session detection: if the engine session ID is stale (expired/invalid),
       // clear cached engine sessions from transportMeta so the next attempt starts fresh.
@@ -503,6 +510,7 @@ export class SessionManager {
 
         const outcome = await handleRateLimit({
           session,
+          attemptToken,
           prompt: msg.text,
           systemPrompt,
           engineConfig,
@@ -565,7 +573,7 @@ export class SessionManager {
                   lastSyncedAt: fallbackCompletedAt,
                 });
               }
-              const updated = updateSession(session.id, {
+              const updated = completeSessionAttempt(session.id, attemptToken, {
                 ...(typeof fallbackResult.contextTokens === "number" ? { lastContextTokens: fallbackResult.contextTokens } : {}),
                 status: fallbackResult.error ? "error" : "idle",
                 attemptOutcome: fallbackResult.error ? "failed" : "succeeded",
@@ -660,7 +668,7 @@ export class SessionManager {
                   lastSyncedAt: retryCompletedAt,
                 });
               }
-              const retryUpdated = updateSession(session.id, {
+              const retryUpdated = completeSessionAttempt(session.id, attemptToken, {
                 ...(typeof retryResult.contextTokens === "number" ? { lastContextTokens: retryResult.contextTokens } : {}),
                 status: retryResult.error ? "error" : "idle",
                 attemptOutcome: retryResult.error ? "failed" : "succeeded",
@@ -683,11 +691,11 @@ export class SessionManager {
                 `❌ Claude usage limit did not clear in time. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} has been stopped.`,
               );
               await connector.replyMessage(target, "Usage limit didn't reset in time. Please try again later.").catch(() => {});
-              updateSession(session.id, {
+              updateSessionForAttempt(session.id, attemptToken, {
                 status: "error",
                 lastActivity: new Date().toISOString(),
                 lastError: "Claude usage limit did not clear in time",
-              });
+              }, ["waiting", "running"]);
 
               // Clear reactions on failure
               if (decorateMessages && capabilities.reactions) {
@@ -706,7 +714,7 @@ export class SessionManager {
         ? result.result
         : result.error || "(No response from engine)";
 
-      insertMessage(session.id, "assistant", responseText);
+      if (!wasInterrupted) insertMessage(session.id, "assistant", responseText);
       if (result.cost || result.numTurns) {
         accumulateSessionCost(session.id, result.cost ?? 0, result.numTurns ?? 1);
       }
@@ -727,7 +735,7 @@ export class SessionManager {
           lastSyncedAt: completedAt,
         });
       }
-      const updatedSession = updateSession(session.id, {
+      const updatedSession = completeSessionAttempt(session.id, attemptToken, {
         ...(typeof result.contextTokens === "number" ? { lastContextTokens: result.contextTokens } : {}),
         status: wasInterrupted ? "interrupted" : (result.error ? "error" : "idle"),
         attemptOutcome: wasInterrupted ? "interrupted" : (result.error ? "failed" : "succeeded"),
@@ -772,11 +780,11 @@ export class SessionManager {
         return;
       }
 
-      const erroredSession = updateSession(session.id, {
+      const erroredSession = attemptToken ? completeSessionAttempt(session.id, attemptToken, {
         status: "error",
         lastActivity: new Date().toISOString(),
         lastError: errMsg,
-      });
+      }) : undefined;
       if (erroredSession) {
         notifyParentSession(erroredSession, { error: errMsg }, { alwaysNotify: employee?.alwaysNotify });
       }
