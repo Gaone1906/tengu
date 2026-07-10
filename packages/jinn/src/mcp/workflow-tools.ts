@@ -309,7 +309,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const getWorkflowRun: JinnMcpTool = {
     name: "get_workflow_run",
-    description: "Get one workflow run record with status, steps, gates, rounds, and errors.",
+    description: "Get one workflow run.",
     inputSchema: {
       type: "object",
       properties: {
@@ -395,14 +395,14 @@ export function buildWorkflowTools(): JinnMcpTool[] {
 
   const updateWorkflow: JinnMcpTool = {
     name: "update_workflow",
-    description: "Update a workflow from SOP or raw patch with optimistic locking.",
+    description: "Update a workflow.",
     inputSchema: {
       type: "object",
       properties: {
         workflowId: { type: "string" },
         sop: { type: "object", description: "Replacement SOP object." },
-        patch: { type: "object", description: "Raw shallow patch; arrays replace stored arrays." },
-        expectedVersion: { type: "number", description: "Optimistic lock version." },
+        patch: { type: "object", description: "Shallow patch." },
+        expectedVersion: { type: "number", description: "Lock version." },
       },
       required: ["workflowId"],
     },
@@ -496,8 +496,8 @@ export function buildWorkflowTools(): JinnMcpTool[] {
         name: { type: "string" },
         event: { type: "string" },
         targetWorkflowId: { type: "string" },
-        filter: { type: "array", description: "Optional match filters, e.g. [{path:'payload.kind',op:'equals',value:'trial'}]." },
-        secretToken: { type: "string", description: "Webhook token. If omitted, the gateway generates one and returns it once." },
+        filter: { type: "array", description: "Match filters." },
+        secretToken: { type: "string", description: "Webhook token." },
         command: { type: "string" },
         intervalSeconds: { type: "number" },
         timeoutMs: { type: "number" },

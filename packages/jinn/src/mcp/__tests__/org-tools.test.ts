@@ -65,6 +65,10 @@ describe("org tools — registry + schemas", () => {
     expect(tools.map((t) => t.name)).toEqual(["list_employees", "get_employee", "find_employees"]);
     expect(tool("get_employee").inputSchema.required).toEqual(["name"]);
     expect(tool("find_employees").inputSchema.required).toBeUndefined();
+    expect(tool("list_employees").description).toBe(
+      "List compact employee rows: name, role, rank, department, engine, reporting. Use role/persona fit before spawning.",
+    );
+    expect(tool("find_employees").description).toContain("role, not full personas");
   });
 });
 

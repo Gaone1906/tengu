@@ -112,11 +112,19 @@ describe("session tools — registry + schemas", () => {
   it("the protocol teaching (end turn, callback, no polling loops) lives on the spawn tool", () => {
     expect(tool("spawn_session").description).toMatch(/END YOUR TURN/);
     expect(tool("spawn_session").description).toMatch(/never poll/i);
+    expect(tool("spawn_session").description).toMatch(/role\/persona fit/);
   });
 
   it("positions spawn as the quick untracked session verb, distinct from delegate_task", () => {
     expect(tool("spawn_session").description).toMatch(/quick untracked/i);
     expect(tool("spawn_session").description).toMatch(/tracked company work.*delegate_task/i);
+  });
+
+  it("teaches employee selection in the compact employee schema field", () => {
+    const props = tool("spawn_session").inputSchema.properties as Record<string, { description?: string }>;
+    expect(props.employee.description).toBe(
+      "Employee slug; choose by role/persona fit from list_employees/find_employees. Omit for a plain session or if no employee fits.",
+    );
   });
 });
 

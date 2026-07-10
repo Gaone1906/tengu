@@ -52,7 +52,7 @@ export function buildCostTools(): JinnMcpTool[] {
       inputSchema: {
         type: "object",
         properties: {
-          groupBy: { type: "string", enum: [...GROUP_BY], description: 'Group rows by "employee" or "day" (default employee).' },
+          groupBy: { type: "string", enum: [...GROUP_BY], description: "employee or day." },
           since: { type: "string" },
           until: { type: "string" },
           employee: { type: "string" },

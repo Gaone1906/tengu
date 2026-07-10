@@ -149,9 +149,9 @@ export function buildSearchTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        query: { type: "string", description: `Plain words to search for (all must appear; max ${QUERY_CHAR_CAP} chars).` },
+        query: { type: "string", description: `All words, max ${QUERY_CHAR_CAP} chars.` },
         sessionId: { type: "string" },
-        includeOwnSession: { type: "boolean", description: "Include your own session's messages (default false — excluded so the search never matches itself)." },
+        includeOwnSession: { type: "boolean", description: "Include own session." },
         employee: { type: "string" },
         engine: { type: "string" },
         role: { type: "string", enum: ["user", "assistant"] },
@@ -224,7 +224,7 @@ export function buildSearchTools(): JinnMcpTool[] {
         parentSessionId: { type: "string" },
         activeSince: { type: "string" },
         activeBefore: { type: "string" },
-        needsAttention: { type: "boolean", description: "Only sessions in status error or interrupted." },
+        needsAttention: { type: "boolean", description: "Only error/interrupted." },
         limit: { type: "number" },
       },
     },

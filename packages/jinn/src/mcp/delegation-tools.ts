@@ -84,12 +84,16 @@ export function buildDelegationTools(): JinnMcpTool[] {
   const delegateTask: JinnMcpTool = {
     name: "delegate_task",
     description:
-      "Delegate TRACKED company work: mint Todo, spawn child, link both. After delegating, END YOUR TURN; never poll in a loop.",
+      "Delegate TRACKED company work: mint Todo, spawn child, link both. After delegating, END YOUR TURN; never poll in a loop. Choose employee by role/persona fit; one employee may have multiple parallel delegations, so reuse the relevant employee instead of picking an unrelated one.",
     inputSchema: {
       type: "object",
       properties: {
         task: { type: "string" },
-        employee: { type: "string" },
+        employee: {
+          type: "string",
+          description:
+            "Employee slug; choose by role/persona fit from list_employees/find_employees. Provide this or engine.",
+        },
         engine: { type: "string" },
         model: { type: "string" },
         effortLevel: { type: "string" },

@@ -83,6 +83,14 @@ describe("delegate_task — registry + schema", () => {
     expect(d).toMatch(/Todo/);
     expect(d).toMatch(/END YOUR TURN/);
     expect(d).toMatch(/never poll/i);
+    expect(d).toMatch(/role\/persona fit/);
+  });
+
+  it("teaches employee selection in the compact employee schema field", () => {
+    const props = delegateTool().inputSchema.properties as Record<string, { description?: string }>;
+    expect(props.employee.description).toBe(
+      "Employee slug; choose by role/persona fit from list_employees/find_employees. Provide this or engine.",
+    );
   });
 });
 

@@ -67,7 +67,7 @@ async function fetchOrgEmployees(ctx: JinnMcpContext): Promise<OrgEmployeeRecord
 export function buildOrgTools(): JinnMcpTool[] {
   const listEmployees: JinnMcpTool = {
     name: "list_employees",
-    description: "List employees with compact org fields and reporting lines. Read-only.",
+    description: "List compact employee rows: name, role, rank, department, engine, reporting. Use role/persona fit before spawning.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args, ctx) => {
       assertBoundCaller(ctx);
@@ -106,7 +106,7 @@ export function buildOrgTools(): JinnMcpTool[] {
 
   const findEmployees: JinnMcpTool = {
     name: "find_employees",
-    description: "Find employees by exact department, rank, and/or engine; returns compact rows. Read-only.",
+    description: "Returns compact rows with role, not full personas; call get_employee for finalists.",
     inputSchema: {
       type: "object",
       properties: {

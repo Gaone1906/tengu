@@ -155,12 +155,16 @@ export function buildSessionTools(): JinnMcpTool[] {
   const spawnSession: JinnMcpTool = {
     name: "spawn_session",
     description:
-      "Spawn a quick untracked child session; for tracked company work use delegate_task. After spawning, END YOUR TURN; never poll in a loop.",
+      "Spawn a quick untracked child session; for tracked company work use delegate_task. After spawning, END YOUR TURN; never poll in a loop. Choose employee by role/persona fit; one employee may have multiple parallel sessions, so reuse the relevant employee instead of picking an unrelated one.",
     inputSchema: {
       type: "object",
       properties: {
         prompt: { type: "string" },
-        employee: { type: "string" },
+        employee: {
+          type: "string",
+          description:
+            "Employee slug; choose by role/persona fit from list_employees/find_employees. Omit for a plain session or if no employee fits.",
+        },
         engine: { type: "string" },
         model: { type: "string" },
         effortLevel: { type: "string" },
