@@ -487,6 +487,25 @@ describe('managed workflow cron jobs (GRS-014d) — definition CRUD keeps jobs.j
     expect((badPut.body as { error: string }).error).toContain('workflowId');
   });
 
+  it('POST/PUT /api/cron reject runtime-invalid schedules before jobs.json is persisted', async () => {
+    const invalidTimezone = await call('POST', '/api/cron', {
+      id: 'invalid-timezone',
+      name: 'invalid timezone',
+      schedule: '0 * * * *',
+      timezone: 'Mars/Olympus',
+      prompt: 'never persist',
+    });
+    expect(invalidTimezone.status).toBe(400);
+    expect((invalidTimezone.body as { error: string }).error).toMatch(/valid IANA timezone/i);
+    expect(loadCron()).toEqual([]);
+
+    const valid = await call('POST', '/api/cron', { id: 'valid-job', name: 'valid', schedule: '0 * * * *', prompt: 'ok', enabled: false });
+    expect(valid.status).toBe(201);
+    const invalidUpdate = await call('PUT', '/api/cron/valid-job', { schedule: 'not a cron' });
+    expect(invalidUpdate.status).toBe(400);
+    expect(loadCron()[0].schedule).toBe('0 * * * *');
+  });
+
   it('a run started over HTTP records the normalized manual trigger event', async () => {
     const created = await call('POST', '/api/workflow-definitions', { ...schedDef, id: 'trig-wf', nodes: [schedDef.nodes[0], { ...schedDef.nodes[1], actor: undefined }] });
     expect(created.status).toBe(201);

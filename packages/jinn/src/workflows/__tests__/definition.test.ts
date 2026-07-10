@@ -43,6 +43,20 @@ describe('validateDefinition', () => {
     expect(r.errors).toEqual([]);
   });
 
+  it('rejects schedule cron, timezone, and until values that runtime cannot execute', () => {
+    const invalidCron = validDef();
+    invalidCron.nodes[0].trigger = { kind: 'schedule', cron: 'not a cron' };
+    expect(validateDefinition(invalidCron).errors.map((e) => e.code)).toContain('trigger-schedule-bad-cron');
+
+    const invalidTimezone = validDef();
+    invalidTimezone.nodes[0].trigger = { kind: 'schedule', cron: '0 * * * *', timezone: 'Mars/Olympus' };
+    expect(validateDefinition(invalidTimezone).errors.map((e) => e.code)).toContain('trigger-schedule-bad-timezone');
+
+    const invalidUntil = validDef();
+    invalidUntil.nodes[0].trigger = { kind: 'schedule', cron: '0 * * * *', until: 'eventually' };
+    expect(validateDefinition(invalidUntil).errors.map((e) => e.code)).toContain('trigger-schedule-bad-until');
+  });
+
   it('rejects a missing trigger', () => {
     const d = validDef();
     d.nodes = d.nodes.filter((n) => n.type !== 'trigger');

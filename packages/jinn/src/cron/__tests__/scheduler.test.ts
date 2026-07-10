@@ -4,11 +4,16 @@ import type { CronJob, JinnConfig, Connector } from "../../shared/types.js";
 // Capture the callback node-cron would invoke on a scheduled tick so we can fire it
 // manually. cron.schedule/validate are stubbed; stopScheduler needs a `.stop()`.
 let scheduledCallback: (() => void) | undefined;
+let throwExpression: string | undefined;
+const scheduledTasks: Array<{ expression: string; start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> }> = [];
 vi.mock("node-cron", () => ({
   default: {
-    schedule: vi.fn((_expr: string, cb: () => void) => {
+    schedule: vi.fn((expr: string, cb: () => void, opts?: { timezone?: string }) => {
+      if (opts?.timezone === "Mars/Olympus" || expr === throwExpression) throw new RangeError("Invalid time zone specified");
       scheduledCallback = cb;
-      return { stop: vi.fn() };
+      const task = { expression: expr, start: vi.fn(), stop: vi.fn() };
+      scheduledTasks.push(task);
+      return task;
     }),
     validate: vi.fn(() => true),
   },
@@ -35,7 +40,7 @@ vi.mock("../../shared/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-import { startScheduler, triggerCronJob } from "../scheduler.js";
+import { reloadScheduler, startScheduler, stopScheduler, triggerCronJob } from "../scheduler.js";
 import { runCronJob } from "../runner.js";
 
 const sessionManager = {} as any;
@@ -43,8 +48,11 @@ const config = { engines: { default: "claude" } } as unknown as JinnConfig;
 const connectors = new Map<string, Connector>();
 
 beforeEach(() => {
+  stopScheduler();
   vi.clearAllMocks();
   scheduledCallback = undefined;
+  throwExpression = undefined;
+  scheduledTasks.length = 0;
 });
 
 describe("scheduler — manual vs scheduled fire identity (GRS-003b-2a / GRS-003b-1)", () => {
@@ -71,5 +79,24 @@ describe("scheduler — manual vs scheduled fire identity (GRS-003b-2a / GRS-003
     const opts = (runCronJob as any).mock.calls[0][4];
     expect(opts).toBeDefined();
     expect(opts.fireIso).toMatch(/^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$/);
+  });
+
+  it("keeps the old scheduler running when any replacement task cannot be constructed", () => {
+    startScheduler([job], sessionManager, config, connectors);
+    const oldTask = scheduledTasks[0];
+    throwExpression = "5 * * * *";
+
+    expect(reloadScheduler([{ ...job, id: "replacement", schedule: throwExpression }])).toBe(false);
+
+    expect(oldTask.stop).not.toHaveBeenCalled();
+    expect(scheduledTasks).toHaveLength(1);
+  });
+
+  it("isolates a bad persisted managed-workflow job at boot and still schedules valid siblings", () => {
+    const bad = { ...job, id: "workflow:bad-def", name: "Bad persisted definition", timezone: "Mars/Olympus", managedBy: "workflow" as const, workflowId: "bad-def" };
+    const good = { ...job, id: "good", name: "Good", schedule: "15 * * * *" };
+
+    expect(() => startScheduler([bad, good], sessionManager, config, connectors)).not.toThrow();
+    expect(scheduledTasks.map((task) => task.expression)).toEqual([good.schedule]);
   });
 });

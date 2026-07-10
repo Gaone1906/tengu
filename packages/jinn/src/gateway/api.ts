@@ -149,6 +149,7 @@ import { pickEncoding, compressBuffer, MIN_COMPRESS_BYTES } from "./compress.js"
 import { canonicalCronJobId, loadJobs, saveJobs } from "../cron/jobs.js";
 import { summarizeCronRun } from "../cron/run-summary.js";
 import { reloadScheduler } from "../cron/scheduler.js";
+import { validateCronSchedule } from "../cron/validation.js";
 import { runCronJob, type WorkflowCronFire } from "../cron/runner.js";
 import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
@@ -3915,6 +3916,8 @@ export async function handleApiRequest(
         delivery: body.delivery,
         ...(body.managedBy === "workflow" ? { managedBy: "workflow" as const, workflowId: body.workflowId } : {}),
       };
+      const scheduleErrors = validateCronSchedule({ schedule: newJob.schedule, ...(newJob.timezone !== undefined ? { timezone: newJob.timezone } : {}) });
+      if (scheduleErrors.length > 0) return badRequest(res, scheduleErrors.map((entry) => entry.message).join("; "));
       jobs.push(newJob);
       saveJobs(jobs);
       reloadScheduler(jobs);
@@ -3938,6 +3941,8 @@ export async function handleApiRequest(
       if (merged.managedBy === "workflow" && !(typeof merged.workflowId === "string" && merged.workflowId.trim())) {
         return badRequest(res, "managed workflow cron jobs require workflowId");
       }
+      const scheduleErrors = validateCronSchedule({ schedule: merged.schedule, ...(merged.timezone !== undefined ? { timezone: merged.timezone } : {}) });
+      if (scheduleErrors.length > 0) return badRequest(res, scheduleErrors.map((entry) => entry.message).join("; "));
       jobs[idx] = merged;
       saveJobs(jobs);
       reloadScheduler(jobs);

@@ -8,6 +8,7 @@ import { runCronJob, type WorkflowCronFire } from "./runner.js";
 import { logger } from "../shared/logger.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { loadJobs, saveJobs } from "./jobs.js";
+import { validateCronSchedule } from "./validation.js";
 
 let tasks: cron.ScheduledTask[] = [];
 let currentSessionManager: SessionManager;
@@ -35,12 +36,41 @@ export function startScheduler(
   currentSessionManager = sessionManager;
   currentConfig = config;
   currentConnectors = connectors;
-  scheduleJobs(jobs);
+  const started: cron.ScheduledTask[] = [];
+  for (const job of jobs) {
+    if (!job.enabled) continue;
+    try {
+      const task = createTask(job);
+      task.start();
+      started.push(task);
+      logger.info(`Scheduled cron job "${job.name}" (${job.schedule})`);
+    } catch (err) {
+      logger.warn(`Skipping invalid cron job "${job.name}" at boot: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+  for (const task of tasks) task.stop();
+  tasks = started;
 }
 
-export function reloadScheduler(jobs: CronJob[]): void {
-  stopScheduler();
-  scheduleJobs(jobs);
+export function reloadScheduler(jobs: CronJob[]): boolean {
+  const replacements: cron.ScheduledTask[] = [];
+  try {
+    for (const job of jobs) {
+      if (!job.enabled) continue;
+      replacements.push(createTask(job));
+    }
+    for (const task of replacements) task.start();
+  } catch (err) {
+    for (const task of replacements) task.stop();
+    logger.warn(`Cron reload rejected; keeping existing scheduler: ${err instanceof Error ? err.message : err}`);
+    return false;
+  }
+  for (const task of tasks) task.stop();
+  tasks = replacements;
+  for (const job of jobs) {
+    if (job.enabled) logger.info(`Scheduled cron job "${job.name}" (${job.schedule})`);
+  }
+  return true;
 }
 
 export function stopScheduler(): void {
@@ -50,33 +80,24 @@ export function stopScheduler(): void {
   tasks = [];
 }
 
-function scheduleJobs(jobs: CronJob[]): void {
-  for (const job of jobs) {
-    if (!job.enabled) continue;
-    if (!cron.validate(job.schedule)) {
-      logger.warn(
-        `Invalid cron schedule for job "${job.name}": ${job.schedule}`,
-      );
-      continue;
-    }
-    const task = cron.schedule(
-      job.schedule,
-      () => {
-        // Capture the fire identity once, at fire time, so it's owned by this fire
-        // (not recomputed inside runCronJob). A retry reusing this fireIso is
-        // idempotent across session/work-item/link (GRS-003b-1).
-        const fireIso = new Date().toISOString();
-        runCronJob(job, currentSessionManager, currentConfig, currentConnectors, { fireIso, workflowFire: currentWorkflowFire }).catch((err) => {
-          logger.error(
-            `Cron job "${job.name}" crashed: ${err instanceof Error ? err.message : err}`,
-          );
-        });
-      },
-      { timezone: job.timezone },
-    );
-    tasks.push(task);
-    logger.info(`Scheduled cron job "${job.name}" (${job.schedule})`);
+function createTask(job: CronJob): cron.ScheduledTask {
+  const validation = validateCronSchedule({ schedule: job.schedule, ...(job.timezone !== undefined ? { timezone: job.timezone } : {}) });
+  if (validation.length > 0) {
+    throw new Error(validation.map((entry) => entry.message).join('; '));
   }
+  return cron.schedule(
+    job.schedule,
+    () => {
+      // Capture the fire identity once, at fire time, so it's owned by this fire
+      // (not recomputed inside runCronJob). A retry reusing this fireIso is
+      // idempotent across session/work-item/link (GRS-003b-1).
+      const fireIso = new Date().toISOString();
+      runCronJob(job, currentSessionManager, currentConfig, currentConnectors, { fireIso, workflowFire: currentWorkflowFire }).catch((err) => {
+        logger.error(`Cron job "${job.name}" crashed: ${err instanceof Error ? err.message : err}`);
+      });
+    },
+    { timezone: job.timezone, scheduled: false },
+  );
 }
 
 export async function triggerCronJob(idOrName: string): Promise<CronJob | undefined> {

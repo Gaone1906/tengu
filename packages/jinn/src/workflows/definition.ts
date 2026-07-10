@@ -5,6 +5,7 @@ import type {
   WorkflowTrigger,
 } from './derive.js';
 import type { WorkItemStatus } from '../work-items/store.js';
+import { validateCronSchedule } from '../cron/validation.js';
 import {
   MAX_EDGE_CONDITIONS,
   parseConditionPath,
@@ -338,6 +339,9 @@ export type ValidationCode =
   | 'trigger-node-missing-spec'
   | 'bad-trigger-kind'
   | 'trigger-schedule-missing-cron'
+  | 'trigger-schedule-bad-cron'
+  | 'trigger-schedule-bad-timezone'
+  | 'trigger-schedule-bad-until'
   | 'trigger-todo-missing-status'
   | 'trigger-todo-bad-status'
   | 'trigger-todo-bad-filter'
@@ -665,8 +669,26 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
       } else {
         if (!TRIGGER_KINDS.has(n.trigger.kind)) {
           err('bad-trigger-kind', `trigger node "${n.id}" kind "${n.trigger.kind}" is invalid`, n.id);
-        } else if (n.trigger.kind === 'schedule' && isBlank(n.trigger.cron)) {
-          err('trigger-schedule-missing-cron', `schedule trigger "${n.id}" needs a cron`, n.id);
+        } else if (n.trigger.kind === 'schedule') {
+          if (isBlank(n.trigger.cron)) {
+            err('trigger-schedule-missing-cron', `schedule trigger "${n.id}" needs a cron`, n.id);
+          } else {
+            for (const scheduleError of validateCronSchedule({
+              schedule: n.trigger.cron,
+              // Legacy hand-authored definitions may carry junk in optional
+              // fields. Resolution already ignores non-string timezones; keep
+              // that compatibility while validating every usable IANA value.
+              ...(typeof n.trigger.timezone === 'string' ? { timezone: n.trigger.timezone } : {}),
+              ...(n.trigger.until !== undefined ? { until: n.trigger.until } : {}),
+            })) {
+              const code = scheduleError.field === 'schedule'
+                ? 'trigger-schedule-bad-cron'
+                : scheduleError.field === 'timezone'
+                  ? 'trigger-schedule-bad-timezone'
+                  : 'trigger-schedule-bad-until';
+              err(code, `schedule trigger "${n.id}" ${scheduleError.message}`, n.id);
+            }
+          }
         } else if (n.trigger.kind === 'todo-status-change') {
           const target = n.trigger.toStatus ?? n.trigger.status;
           if (isBlank(target)) {
