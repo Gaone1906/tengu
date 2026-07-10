@@ -90,8 +90,8 @@ export function buildKnowledgeTools(): JinnMcpTool[] {
         results,
         hint:
           results.length === 0
-            ? "No knowledge hits. Try fewer or different words (all must appear). The library covers curated company knowledge and platform docs only."
-            : "Read a hit with read_knowledge { path } — cite the path when you use its content.",
+            ? "No hits. Try fewer words."
+            : "Next: read_knowledge { path }.",
       };
     },
   };
@@ -127,7 +127,7 @@ export function buildKnowledgeTools(): JinnMcpTool[] {
         title: rec.title ?? null,
         truncated: rec.truncated === true,
         content: typeof rec.content === "string" ? rec.content : "",
-        hint: "Cite the path when you use this content. Search for related files with search_knowledge.",
+        hint: "Cite path. Next: search_knowledge.",
       };
     },
   };

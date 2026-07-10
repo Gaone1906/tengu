@@ -103,18 +103,20 @@ interface RunView {
 function runHint(run: RunView): string {
   switch (run.status) {
     case "running":
-      return "Run is in flight: step sessions execute and the run advances as each settles (reconciler sweeps ~15s). Poll get_workflow_run.";
+      return "Run in flight. Next: get_workflow_run.";
     case "parked": {
       const g = run.parked ?? {};
-      const where = g.scope === "runGate" ? "a workflow-level gate" : `gate node "${g.nodeId ?? "?"}"`;
-      return `Run is PARKED on ${where}${g.description ? ` — "${g.description}"` : ""}, awaiting a HUMAN decision (the operator approves or rejects via the web doorbell or the HTTP resolve-gate route). Agents cannot resolve approval gates — that authority is the gate's whole point. Poll get_workflow_run to see the outcome.`;
+      const node = String(g.nodeId ?? "?").slice(0, 24);
+      const where = g.scope === "runGate" ? "workflow gate" : `gate node "${node}"`;
+      const detail = g.description ? `: ${String(g.description).slice(0, 30)}` : "";
+      return `Parked on ${where}${detail}. HUMAN decision. Next: get_workflow_run.`;
     }
     case "completed":
-      return "Run completed: every step's session settled and all gates passed.";
+      return "Run completed.";
     case "failed":
-      return "Run failed terminally — see errors[] and the failed step receipt in steps[].";
+      return "Run failed. See errors[] and failed step.";
     default:
-      return "See status and steps[] (array order is execution order).";
+      return "See status and steps[].";
   }
 }
 
@@ -386,7 +388,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       return {
         definition: body,
         trigger,
-        hint: `Created from ${args.sop !== undefined ? "SOP" : "raw graph"} (version ${String(created.version ?? 1)}). Start a run with start_workflow_run { workflowId: "${String(created.id ?? "")}" }; dry-run problems (unknown actors, unbounded loops) surface when the run starts.`,
+        hint: `Created from ${args.sop !== undefined ? "SOP" : "raw graph"} v${String(created.version ?? 1)}. Next: start_workflow_run { workflowId: "${String(created.id ?? "")}" }.`,
       };
     },
   };
@@ -468,7 +470,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       }
       if (status >= 400) throw gatewayFailure(`starting a run of "${id}"`, status, body);
       const run = (body ?? {}) as RunView;
-      return { run: body, hint: `Run ${String(run.runId ?? "?")} started. ${runHint(run)}` };
+      return { run: body, hint: `Started ${String(run.runId ?? "?")}. ${runHint(run)}` };
     },
   };
 
@@ -518,8 +520,8 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-triggers", payload);
       if (status >= 400) throw gatewayFailure("creating workflow trigger", status, body);
       const hint = payload.kind === "poll"
-        ? "Poll trigger created pending COO approval. It will not execute until the approval work item approves the exact command contract."
-        : "Webhook trigger created. Send POST /api/workflow-events with {event,payload,fireRef?} and the gateway token or this binding token.";
+        ? "Poll trigger pending approval."
+        : "Webhook trigger created. Next: POST /api/workflow-events.";
       return { ...(body as Record<string, unknown>), hint };
     },
   };

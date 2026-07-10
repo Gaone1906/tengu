@@ -76,7 +76,7 @@ export function buildCostTools(): JinnMcpTool[] {
         if (status >= 400) throw gatewayFailure("reading cost report", status, body);
         return {
           ...(body as Record<string, unknown>),
-          hint: "Costs are engine-reported per session; missing/zero rows mean the engine reported none.",
+          hint: "Engine-reported costs; zero means none.",
         };
       },
     },

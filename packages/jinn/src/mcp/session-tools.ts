@@ -133,17 +133,19 @@ function summarize(s: SessionRecord): Record<string, unknown> {
 function statusHint(s: SessionRecord): string {
   switch (s.status) {
     case "running":
-      return "Still working. If it is your child, END YOUR TURN — its reply wakes you ('📩 replied'). Otherwise check again next turn with read_session; never poll in a loop within one turn.";
+      return "Running: END YOUR TURN; reply wakes you. Next: read_session; never poll.";
     case "idle":
-      return "Idle — the last assistant message is its latest reply. Follow up with send_to_session if needed.";
+      return "Idle: latest reply shown. Next: send_to_session.";
     case "error":
-      return `Errored${s.lastError ? `: ${asText(s.lastError, 300)}` : ""}. A follow-up message via send_to_session retries it; if it keeps failing, report to your parent/operator.`;
+      return s.lastError
+        ? `Error: ${asText(s.lastError, 32)}. Next: send_to_session or report.`
+        : "Error. Next: send_to_session or report.";
     case "waiting":
-      return "Paused on a usage limit; queued messages run automatically when it resets. No action needed.";
+      return "Waiting on limit. Next: no action.";
     case "interrupted":
-      return "Interrupted by a gateway restart. A follow-up message via send_to_session resumes it.";
+      return "Interrupted. Next: send_to_session.";
     default:
-      return "See status; read more with read_session or follow up with send_to_session.";
+      return "Next: read_session or send_to_session.";
   }
 }
 
@@ -182,9 +184,7 @@ export function buildSessionTools(): JinnMcpTool[] {
         engine: s.engine,
         model: s.model ?? null,
         status: s.status,
-        hint:
-          `Session ${String(s.id ?? "?")} spawned and linked to you as a child. ` +
-          "END YOUR TURN now — the reply wakes you. If you resume otherwise, read_session shows its status.",
+        hint: "Session linked to you as a child. END YOUR TURN; reply wakes you. Next: read_session; never poll.",
       };
     },
   };
@@ -213,7 +213,7 @@ export function buildSessionTools(): JinnMcpTool[] {
       return {
         status: "queued",
         sessionId,
-        hint: "Delivered (the target processes it after any in-flight turn). If you expect a reply, END YOUR TURN — replies arrive as wake messages.",
+        hint: "Queued. Next: END YOUR TURN for reply or read_session.",
       };
     },
   };
@@ -301,7 +301,7 @@ export function buildSessionTools(): JinnMcpTool[] {
       return {
         scope,
         sessions: sessions.slice(0, limit).map(summarize),
-        hint: "Read one with read_session; message one with send_to_session.",
+        hint: "Next: read_session or send_to_session.",
       };
     },
   };
@@ -328,7 +328,7 @@ export function buildSessionTools(): JinnMcpTool[] {
       return {
         action: "stopped",
         sessionId,
-        hint: "Stopped (recoverable). The record survives and read_session shows it as `idle`; send_to_session resumes it with a new instruction.",
+        hint: "Stopped, recoverable. Next: read_session or send_to_session.",
       };
     },
   };

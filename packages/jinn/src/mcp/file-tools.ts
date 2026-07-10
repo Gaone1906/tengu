@@ -115,7 +115,7 @@ export function buildFileTools(): JinnMcpTool[] {
           managedPath: managedPath(meta) ?? null,
         };
       });
-      return { files, hint: files.length ? "Read one with read_file { path: managedPath }." : "No managed files found." };
+      return { files, hint: files.length ? "Next: read_file { path: managedPath }." : "No managed files found." };
     },
   };
 

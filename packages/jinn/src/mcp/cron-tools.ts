@@ -62,7 +62,7 @@ export function buildCronTools(): JinnMcpTool[] {
       const cronJobs = Array.isArray(body) ? body.map((j) => shapeCronJob(j as Record<string, unknown>)) : [];
       return {
         cronJobs,
-        hint: cronJobs.length ? "Read a job's recent runs with get_cron_run_history { id }." : "No cron jobs are configured.",
+        hint: cronJobs.length ? "Next: get_cron_run_history { id }." : "No cron jobs configured.",
       };
     },
   };
@@ -88,7 +88,7 @@ export function buildCronTools(): JinnMcpTool[] {
       return {
         id,
         runs,
-        hint: runs.length ? "Use the linked session/work item for deeper debugging; this tool is a capped run-history read." : "No recorded runs for this cron job.",
+        hint: runs.length ? "Next: read_session or get_work_item from linked ids." : "No recorded runs.",
       };
     },
   };

@@ -183,7 +183,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       const { status, body } = await gatewayRequest(ctx, "GET", `/api/work-items?${params}`);
       if (status >= 400) throw gatewayFailure("listing work items", status, body);
       const workItems = workItemsFrom(body);
-      return { workItems, hint: workItems.length ? "Read full detail with get_work_item { id }." : "No matching Todos. Search text with search_work_items or create one with create_work_item." };
+      return { workItems, hint: workItems.length ? "Next: get_work_item { id }." : "No matches. Next: search_work_items or create_work_item." };
     },
   };
 
@@ -233,7 +233,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       const { status, body } = await gatewayRequest(ctx, "GET", `/api/search/work-items?${qs(params)}`);
       if (status >= 400) throw gatewayFailure("searching work items", status, body);
       const workItems = workItemsFrom(body);
-      return { workItems, hint: workItems.length ? "Read full detail with get_work_item { id }." : "No matching Todos. Try fewer words or drop a structured filter." };
+      return { workItems, hint: workItems.length ? "Next: get_work_item { id }." : "No matches. Try fewer words or filters." };
     },
   };
 
@@ -265,7 +265,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       if (verifyPolicy) body.verifyPolicy = validateVerifyPolicy(verifyPolicy);
       const { status, body: resp } = await gatewayRequest(ctx, "POST", "/api/work-items", body);
       if (status >= 400) throw gatewayFailure("creating work item", status, resp);
-      return { ...(resp as Record<string, unknown>), hint: "Todo created. Assign with assign_work_item or keep it current with update_work_item." };
+      return { ...(resp as Record<string, unknown>), hint: "Next: assign_work_item or update_work_item." };
     },
   };
 

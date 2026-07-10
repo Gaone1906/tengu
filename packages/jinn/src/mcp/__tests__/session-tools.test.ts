@@ -208,10 +208,12 @@ describe("session tools — unit (stub gateway)", () => {
     const r1 = (await tool("read_session").handler({ sessionId: "s" }, running.ctx)) as { hint: string };
     expect(r1.hint).toMatch(/END YOUR TURN/);
     expect(r1.hint).toMatch(/never poll/i);
+    expect(r1.hint.length).toBeLessThanOrEqual(80);
 
     const errored = stub(() => ({ status: 200, body: { id: "s", status: "error", lastError: "engine exploded", messages: [] } }), "reader");
     const r2 = (await tool("read_session").handler({ sessionId: "s" }, errored.ctx)) as { hint: string };
     expect(r2.hint).toContain("engine exploded");
+    expect(r2.hint.length).toBeLessThanOrEqual(80);
   });
 
   it("read_session maps 404 to a discovery hint", async () => {

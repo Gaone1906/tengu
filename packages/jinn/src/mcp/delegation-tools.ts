@@ -123,8 +123,8 @@ export function buildDelegationTools(): JinnMcpTool[] {
         model: d.model ?? null,
         status: d.status,
         hint:
-          `Work item ${String(d.workItemId ?? "?")} tracks this delegation; session ${String(d.sessionId ?? "?")} is executing it as your child. ` +
-          "END YOUR TURN now — the reply wakes you ('📩 replied'). If you resume for another reason, read_session shows the child's status ('idle' = finished).",
+          `Work item ${String(d.workItemId ?? "?")} tracks this; session ${String(d.sessionId ?? "?")} is executing. ` +
+          "END YOUR TURN; reply wakes you. Next: read_session; never poll.",
       };
     },
   };

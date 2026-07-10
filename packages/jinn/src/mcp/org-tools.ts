@@ -97,7 +97,7 @@ export function buildOrgTools(): JinnMcpTool[] {
       if (status >= 400) throw new JinnMcpToolError(`getting employee "${name}" failed (HTTP ${status})`);
       return {
         employee: body,
-        hint: `Delegate to them with spawn_session { employee: "${name}", prompt: ... } — then end your turn; the reply wakes you.`,
+        hint: `Next: spawn_session { employee: "${name}", prompt: ... } or delegate_task.`,
       };
     },
   };
@@ -140,12 +140,12 @@ export function buildOrgTools(): JinnMcpTool[] {
           .join("; ");
         return {
           matches: [],
-          hint: `No employee matches. Observed values: ${observed}. Adjust the filter or use list_employees.`,
+          hint: `No match. Observed ${observed}. Next: list_employees.`,
         };
       }
       return {
         matches: matches.map(summarize),
-        hint: "Full persona: get_employee { name }. Delegate: spawn_session { employee, prompt }.",
+        hint: "Next: get_employee { name } or spawn_session.",
       };
     },
   };

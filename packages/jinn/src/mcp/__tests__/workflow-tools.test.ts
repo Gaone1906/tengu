@@ -184,6 +184,7 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(calls[0].url).toBe("http://127.0.0.1:7777/api/workflow-definitions/wf/runs/r1");
     expect(out.run.steps.map((s) => `${s.nodeId}@${s.round ?? 1}`)).toEqual(["z@1", "a@1", "z@2", "a@2"]);
     expect(out.hint).toMatch(/in flight/i);
+    expect(out.hint.length).toBeLessThanOrEqual(80);
   });
 
   it("a PARKED run's hint says a HUMAN decides — it never offers the agent a resolve tool", async () => {
@@ -194,6 +195,7 @@ describe("workflow tools — unit (stub gateway)", () => {
     const out = (await tool("get_workflow_run").handler({ workflowId: "wf", runId: "r2" }, ctx)) as { hint: string };
     expect(out.hint).toMatch(/HUMAN decision/i);
     expect(out.hint).toContain("operator sign-off");
+    expect(out.hint.length).toBeLessThanOrEqual(100);
     expect(out.hint).not.toContain("jinn_resolve_workflow_gate");
   });
 

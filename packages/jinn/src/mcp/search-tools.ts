@@ -204,8 +204,8 @@ export function buildSearchTools(): JinnMcpTool[] {
         results,
         hint:
           results.length === 0
-            ? `No hits. Try fewer/different words (all words must appear), widen the time range, or drop a filter.${excludeOwn ? " Your own session was excluded (default) — pass includeOwnSession true to search it." : ""}`
-            : "Read around a hit with get_message_context { sessionId, messageId }; check the session's current state with read_session.",
+            ? `No hits. Try fewer words/filters.${excludeOwn ? " Own session excluded; set includeOwnSession true." : ""}`
+            : "Next: get_message_context or read_session.",
       };
     },
   };
@@ -261,8 +261,8 @@ export function buildSearchTools(): JinnMcpTool[] {
         sessions,
         hint:
           sessions.length === 0
-            ? `No sessions match. Valid statuses: ${SESSION_STATUSES.join(", ")}. Check employee slugs with find_employees, or search message CONTENT with search_messages.`
-            : "Read one with read_session; search its content with search_messages { sessionId }; message it with send_to_session.",
+            ? `No matches. Statuses: ${SESSION_STATUSES.join(", ")}. Next: find_employees or search_messages.`
+            : "Next: read_session, search_messages, or send_to_session.",
       };
     },
   };
@@ -296,7 +296,7 @@ export function buildSearchTools(): JinnMcpTool[] {
         session: rec.session ? summarizeSession(rec.session) : null,
         anchorMessageId: rec.anchorMessageId,
         messages: Array.isArray(rec.messages) ? rec.messages : [],
-        hint: "For the session's CURRENT state use read_session; to act on this, message the session (send_to_session) or your manager.",
+        hint: "Next: read_session or send_to_session.",
       };
     },
   };
