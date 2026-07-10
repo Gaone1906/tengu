@@ -2,7 +2,7 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo, startTransition } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { useQueryClient } from "@tanstack/react-query"
-import { ChevronDown, Clock3, Copy, EllipsisVertical, Focus, Layers, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
+import { ChevronDown, Clock3, Copy, EllipsisVertical, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
 import { api, type BackgroundActivity, type Employee, type SessionsResponse } from "@/lib/api"
 import { useOrg } from "@/hooks/use-employees"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
@@ -236,6 +236,18 @@ export function resolveRowIdentity(
 
 function isCronSession(session: Pick<Session, "source" | "sourceRef">): boolean {
   return session.source === "cron" || (session.sourceRef || "").startsWith("cron:")
+}
+
+/** Pinned chats float to a dedicated Pinned section at the top of the list,
+ *  regardless of recency bucket or focus mode (a pin is explicit intent).
+ *  Cron sessions are exempt: Scheduled paginates by loaded-count offsets, so
+ *  pulling a row out of that group would corrupt its "+N more" math — a pinned
+ *  cron session keeps its in-place pin glyph instead. */
+export function shouldFloatPinned(
+  s: Pick<Session, "id" | "source" | "sourceRef">,
+  pinned: Set<string>,
+): boolean {
+  return !isCronSession(s) && pinned.has(s.id)
 }
 
 export function isDirectSession(
@@ -485,7 +497,7 @@ const SessionRow = React.memo(function SessionRow({
           {isPinned ? (
             <Pin className="size-3 shrink-0 text-[var(--text-tertiary)] group-hover/session:lg:hidden group-has-[[data-state=open]]/session:lg:hidden" />
           ) : null}
-          <span className="shrink-0 text-[10px] text-[var(--text-quaternary)] group-hover/session:lg:hidden group-has-[[data-state=open]]/session:lg:hidden">{sessionTime}</span>
+          <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-quaternary)] group-hover/session:lg:hidden group-has-[[data-state=open]]/session:lg:hidden">{sessionTime}</span>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -540,6 +552,9 @@ interface FlatSessionRowProps {
   avatarName: string
   /** Human label shown on line 1 (employee display name or portal name). */
   displayName: string
+  /** Rows inside the Pinned section drop the per-row pin glyph — the section
+   *  header already carries that signal. */
+  hidePin?: boolean
   selectedId: string | null
   readSessions: Set<string>
   pinnedSessions: Set<string>
@@ -562,6 +577,7 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
   session,
   avatarName,
   displayName,
+  hidePin,
   selectedId,
   readSessions,
   pinnedSessions,
@@ -644,7 +660,7 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
                 >
                   {displayName}
                 </span>
-                <span className="shrink-0 text-[10px] text-[var(--text-tertiary)] group-hover/flat:lg:hidden group-has-[[data-state=open]]/flat:lg:hidden">{time}</span>
+                <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-quaternary)] group-hover/flat:lg:hidden group-has-[[data-state=open]]/flat:lg:hidden">{time}</span>
               </div>
               {isRenaming ? (
                 <input
@@ -671,7 +687,7 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
             </div>
           </button>
 
-          {isPinned ? (
+          {isPinned && !hidePin ? (
             <Pin className="size-3 shrink-0 text-[var(--text-tertiary)] group-hover/flat:lg:hidden group-has-[[data-state=open]]/flat:lg:hidden" />
           ) : null}
           <DropdownMenu>
@@ -824,7 +840,7 @@ const EmployeeRow = React.memo(function EmployeeRow({
                 >
                   {displayName}
                 </span>
-                <span className="shrink-0 text-[10px] text-[var(--text-tertiary)] group-hover/emp:lg:hidden group-has-[[data-state=open]]/emp:lg:hidden">{timeLabel}</span>
+                <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-quaternary)] group-hover/emp:lg:hidden group-has-[[data-state=open]]/emp:lg:hidden">{timeLabel}</span>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <button
@@ -851,8 +867,11 @@ const EmployeeRow = React.memo(function EmployeeRow({
               </div>
               <div className="flex items-center gap-1.5 overflow-hidden text-[11px] text-[var(--text-tertiary)]">
                 {department ? <span className="truncate">{department}</span> : null}
+                {department && sessionCount > 1 ? (
+                  <span aria-hidden className="shrink-0 text-[var(--text-quaternary)]">·</span>
+                ) : null}
                 {sessionCount > 1 ? (
-                  <span className="shrink-0 rounded bg-[var(--fill-tertiary)] px-1.5 py-0.5 text-[10px]">
+                  <span className="shrink-0 tabular-nums text-[var(--text-quaternary)]">
                     {sessionCount} chats
                   </span>
                 ) : null}
@@ -1138,6 +1157,7 @@ export function ChatSidebar({
   const {
     searching,
     searchRows,
+    pinnedRows,
     todayRows,
     yesterdayRows,
     olderSummary,
@@ -1170,6 +1190,7 @@ export function ChatSidebar({
       return {
         searching,
         searchRows,
+        pinnedRows: [] as FlatRow[],
         todayRows: [] as FlatRow[],
         yesterdayRows: [] as FlatRow[],
         olderSummary: { chats: 0, employees: 0 },
@@ -1196,6 +1217,7 @@ export function ChatSidebar({
     const cronSessions: Session[] = []
     const directSessions: Session[] = []
     const employeeSessionMap = new Map<string, Session[]>()
+    const pinnedRows: FlatRow[] = []
     const todayRows: FlatRow[] = []
     const yesterdayRows: FlatRow[] = []
     // Focused-mode Older = older user-initiated chats, as flat rows (computed
@@ -1218,6 +1240,15 @@ export function ChatSidebar({
         if (!employeeSessionMap.has(groupKey)) employeeSessionMap.set(groupKey, [])
         employeeSessionMap.get(groupKey)!.push(s)
       }
+      // Pinned chats float to the Pinned section at the top, regardless of
+      // bucket or focus mode. They still feed the employee groups above (the
+      // Older drawer keeps full history; overlap is de-duped in allFlatIds) and
+      // count as "surfaced" so the Older summary doesn't re-count them.
+      if (shouldFloatPinned(s, pinnedSessions)) {
+        pinnedRows.push(toRow(s))
+        recentByGroup[groupKey] = (recentByGroup[groupKey] ?? 0) + 1
+        continue
+      }
       // Focused filter gates only the recency buckets, not the employee groups.
       if (focused && !isFocusedSession(s)) {
         hiddenAutomated += 1
@@ -1235,6 +1266,7 @@ export function ChatSidebar({
       }
     }
 
+    pinnedRows.sort((a, b) => getSessionActivity(b.session).localeCompare(getSessionActivity(a.session)))
     todayRows.sort((a, b) => getSessionActivity(b.session).localeCompare(getSessionActivity(a.session)))
     yesterdayRows.sort((a, b) => getSessionActivity(b.session).localeCompare(getSessionActivity(a.session)))
     olderFocusedRows.sort((a, b) => getSessionActivity(b.session).localeCompare(getSessionActivity(a.session)))
@@ -1316,6 +1348,7 @@ export function ChatSidebar({
     return {
       searching,
       searchRows: [] as FlatRow[],
+      pinnedRows,
       todayRows,
       yesterdayRows,
       olderSummary,
@@ -1366,6 +1399,7 @@ export function ChatSidebar({
       return { sessionIds: ids, employeeNames: [] as string[], employeeSessionMap: {} as Record<string, string[]> }
     }
 
+    for (const r of pinnedRows) push(r.session.id)
     for (const r of todayRows) push(r.session.id)
     for (const r of yesterdayRows) push(r.session.id)
     if (olderExpanded) {
@@ -1391,7 +1425,7 @@ export function ChatSidebar({
       empMap[name] = item.sessions!.map((s) => s.id)
     }
     return { sessionIds: ids, employeeNames: empNames, employeeSessionMap: empMap }
-  }, [searching, searchRows, todayRows, yesterdayRows, olderExpanded, focusMode, olderFocusedRows, olderPinned, olderUnpinned, expanded, sortedCron, pinnedFlat, unpinnedFlat])
+  }, [searching, searchRows, pinnedRows, todayRows, yesterdayRows, olderExpanded, focusMode, olderFocusedRows, olderPinned, olderUnpinned, expanded, sortedCron, pinnedFlat, unpinnedFlat])
 
   useEffect(() => {
     const key = allFlatIds.sessionIds.join(',')
@@ -1475,7 +1509,7 @@ export function ChatSidebar({
   // collapsible Older summary + its per-employee drawer, and the cron section.
   type VirtualItem =
     | { kind: "section"; id: string; label: string; count?: number }
-    | { kind: "flat"; row: FlatRow }
+    | { kind: "flat"; row: FlatRow; hidePin?: boolean }
     | { kind: "older-line" }
     | { kind: "older-header" }
     | { kind: "employee"; item: FlatItem }
@@ -1488,6 +1522,12 @@ export function ChatSidebar({
     if (searching) {
       for (const row of searchRows) list.push({ kind: "flat", row })
       return list
+    }
+    if (pinnedRows.length > 0) {
+      // The section header carries the "pinned" signal, so rows inside it
+      // drop their per-row pin glyph (hidePin) — one signal, not two.
+      list.push({ kind: "section", id: "pinned", label: "Pinned", count: pinnedRows.length })
+      for (const row of pinnedRows) list.push({ kind: "flat", row, hidePin: true })
     }
     if (todayRows.length > 0) {
       list.push({ kind: "section", id: "today", label: "Today", count: todayRows.length })
@@ -1518,7 +1558,7 @@ export function ChatSidebar({
       }
     }
     return list
-  }, [searching, searchRows, todayRows, yesterdayRows, olderSummary.chats, olderExpanded, focusMode, olderFocusedRows, olderPinned, olderUnpinned, cronSessions.length, cronCollapsed, sortedCron, cronTotal])
+  }, [searching, searchRows, pinnedRows, todayRows, yesterdayRows, olderSummary.chats, olderExpanded, focusMode, olderFocusedRows, olderPinned, olderUnpinned, cronSessions.length, cronCollapsed, sortedCron, cronTotal])
 
   const VIRTUALIZE_THRESHOLD = 50
   const shouldVirtualize = virtualItems.length >= VIRTUALIZE_THRESHOLD
@@ -1582,6 +1622,7 @@ export function ChatSidebar({
             session={vi.row.session}
             avatarName={vi.row.avatarName}
             displayName={vi.row.displayName}
+            hidePin={vi.hidePin}
             {...sharedRowProps}
           />
         )
@@ -1650,10 +1691,7 @@ export function ChatSidebar({
           it's borderless. */}
       <div
         className={cn(
-          // Desktop: extra top inset so the control row's axis lines up with the
-          // floating header pill (new-chat / more) and the logo. Mobile keeps the
-          // tighter top padding (the row + compose/search share one line there).
-          "shrink-0 bg-[var(--sidebar-bg)] px-3 py-2 lg:pt-[19px] transition-shadow duration-150",
+          "shrink-0 bg-[var(--sidebar-bg)] px-3 py-2 transition-shadow duration-150",
           listScrolled && "shadow-[0_1px_0_0_var(--separator)]",
         )}
       >
@@ -1669,25 +1707,21 @@ export function ChatSidebar({
             {/* Focused (default) shows only the operator's own top-level chats;
                 All reveals delegated/automated sessions too. Persisted; search
                 spans everything regardless. */}
-            <div className="flex items-center gap-0.5 rounded-full bg-[var(--fill-tertiary)] p-0.5">
-              {([
-                { mode: "focused", Icon: Focus, aria: "Focused", tip: "Only chats you started" },
-                { mode: "all", Icon: Layers, aria: "All", tip: "Include automated & delegated sessions" },
-              ] as const).map(({ mode, Icon, aria, tip }) => (
+            <div className="flex items-center gap-0.5 rounded-full bg-[var(--fill-tertiary)] p-0.5 text-[11px] font-medium">
+              {(["focused", "all"] as const).map((mode) => (
                 <button
                   key={mode}
                   onClick={() => selectFocusMode(mode)}
                   aria-pressed={focusMode === mode}
-                  aria-label={aria}
-                  title={tip}
+                  title={mode === "focused" ? "Only chats you started" : "Include automated & delegated sessions"}
                   className={cn(
-                    "flex items-center justify-center rounded-full px-2.5 py-1.5 transition-all",
+                    "rounded-full px-2.5 py-1 capitalize transition-all",
                     focusMode === mode
                       ? "bg-[var(--bg-secondary)] text-foreground shadow-[var(--shadow-subtle)]"
                       : "text-muted-foreground hover:text-foreground"
                   )}
                 >
-                  <Icon className="size-[15px]" strokeWidth={2} />
+                  {mode}
                 </button>
               ))}
             </div>
@@ -1738,7 +1772,7 @@ export function ChatSidebar({
                   closeSearch()
                 }
               }}
-              placeholder="Search..."
+              placeholder="Search chats"
               aria-label="Search chats"
               tabIndex={searchOpen ? 0 : -1}
               className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-[var(--text-tertiary)]"
@@ -1766,7 +1800,7 @@ export function ChatSidebar({
         <div ref={scrollContainerRef} data-chat-list-scroll onScroll={handleListScroll} className="h-full overflow-y-auto pb-[calc(49px+var(--safe-bottom))] lg:pb-0">
         {loading ? (
           <div className="px-4 py-8 text-center text-xs text-[var(--text-quaternary)]">
-            Loading sessions...
+            Loading chats…
           </div>
         ) : virtualItems.length === 0 ? (
           <div className="px-4 py-8 text-center text-xs text-[var(--text-quaternary)]">
@@ -1780,7 +1814,7 @@ export function ChatSidebar({
                 </button>
               </>
             ) : (
-              "No conversations yet"
+              "No chats yet"
             )}
           </div>
         ) : shouldVirtualize ? (

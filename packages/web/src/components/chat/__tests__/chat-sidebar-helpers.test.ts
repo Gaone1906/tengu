@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { hasBackgroundActivity, isDirectSession, isRecentError, resolveRowIdentity } from '../chat-sidebar'
+import { hasBackgroundActivity, isDirectSession, isRecentError, resolveRowIdentity, shouldFloatPinned } from '../chat-sidebar'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -147,5 +147,24 @@ describe('chat sidebar search row identity', () => {
     expect(
       resolveRowIdentity({ source: 'web', sourceRef: 'web:3', employee: 'magic-switch-lead' }, opts),
     ).toEqual({ avatarName: 'magic-switch-lead', displayName: 'Magic Switch Lead' })
+  })
+})
+
+describe('chat sidebar pinned floating', () => {
+  it('floats pinned non-cron sessions to the Pinned section', () => {
+    const pinned = new Set(['s1'])
+    expect(shouldFloatPinned({ id: 's1', source: 'web', sourceRef: 'web:1' }, pinned)).toBe(true)
+  })
+
+  it('leaves unpinned sessions in their recency buckets', () => {
+    const pinned = new Set(['s1'])
+    expect(shouldFloatPinned({ id: 's2', source: 'web', sourceRef: 'web:2' }, pinned)).toBe(false)
+    expect(shouldFloatPinned({ id: 's3', source: 'web', sourceRef: 'web:3' }, new Set())).toBe(false)
+  })
+
+  it('never floats cron sessions — Scheduled paginates by loaded-count offsets', () => {
+    const pinned = new Set(['c1', 'c2'])
+    expect(shouldFloatPinned({ id: 'c1', source: 'cron', sourceRef: 'cron:daily' }, pinned)).toBe(false)
+    expect(shouldFloatPinned({ id: 'c2', source: 'web', sourceRef: 'cron:daily' }, pinned)).toBe(false)
   })
 })
