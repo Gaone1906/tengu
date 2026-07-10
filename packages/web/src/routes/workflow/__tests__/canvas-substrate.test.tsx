@@ -29,6 +29,31 @@ describe("WorkflowCanvas — React Flow substrate", () => {
     expect(container.querySelector(".react-flow__viewport")).toBeTruthy()
   })
 
+  it("opens a degenerate all-origin layout auto-laid-out — never a stacked pile (QA defect 1)", () => {
+    // Eleven "stored" positions all at the origin, one node wide enough to
+    // synthesize a dock: expanding first used to make the pile look usable.
+    const nodes = Array.from({ length: 11 }, (_, i) =>
+      node(`n${i}`, {
+        position: { x: 0, y: 0 },
+        ...(i === 4
+          ? {
+              summary: "Build it",
+              actorKind: "engine" as const,
+              subNodes: [{ role: "model" as const, kind: "MODEL", label: "Opus" }],
+            }
+          : {}),
+      }),
+    )
+    const { container } = render(<WorkflowCanvas nodes={nodes} selectedId={null} onSelect={vi.fn()} />)
+    const transforms = [...container.querySelectorAll(".react-flow__node")].map(
+      (w) => (w as HTMLElement).style.transform,
+    )
+    expect(transforms.length).toBe(12) // 11 mains + 1 synthesized dock
+    // Every card sits at its own spot; the origin pile never reaches the screen.
+    expect(new Set(transforms).size).toBe(transforms.length)
+    expect(transforms.filter((t) => t === "translate(0px,0px)").length).toBe(0)
+  })
+
   it("places node cards at the definition's stored x/y positions", () => {
     const { container } = render(
       <WorkflowCanvas

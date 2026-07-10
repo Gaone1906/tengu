@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest"
 import {
   buildCanvasNodes,
   resolveNodePositions,
+  placeCanvasNodes,
+  expandCanvas,
   NODE_W,
   NODE_H,
   GRID,
@@ -153,6 +155,85 @@ describe("resolveNodePositions — definition x/y honoured, Dagre-LR fallback ot
     ])
     expect(pos.__trigger__.y).toBe(60)
     expect(pos.__trigger__.x).toBeGreaterThanOrEqual(300 + NODE_W)
+  })
+
+  it("stacks a two-way branch top-to-bottom in AUTHORED edge order (QA defect 3)", () => {
+    const nodes = [node("sw"), node("fast"), node("thorough")]
+    // Authored fast-first → fast renders above thorough…
+    const a = resolveNodePositions(nodes, [
+      { from: "sw", to: "fast" },
+      { from: "sw", to: "thorough" },
+    ])
+    expect(a.fast.y).toBeLessThan(a.thorough.y)
+    // …and thorough-first flips it: order is meaning, not Dagre's whim.
+    const b = resolveNodePositions(nodes, [
+      { from: "sw", to: "thorough" },
+      { from: "sw", to: "fast" },
+    ])
+    expect(b.thorough.y).toBeLessThan(b.fast.y)
+  })
+
+  it("stacks a four-way fan in authored order with descendants following their lane", () => {
+    const nodes = ["sw", "low", "medium", "high", "critical", "low2", "critical2"].map((id) => node(id))
+    const pos = resolveNodePositions(nodes, [
+      { from: "sw", to: "low" },
+      { from: "sw", to: "medium" },
+      { from: "sw", to: "high" },
+      { from: "sw", to: "critical" },
+      { from: "low", to: "low2" },
+      { from: "critical", to: "critical2" },
+    ])
+    expect(pos.low.y).toBeLessThan(pos.medium.y)
+    expect(pos.medium.y).toBeLessThan(pos.high.y)
+    expect(pos.high.y).toBeLessThan(pos.critical.y)
+    // Each branch's continuation stays on its lane side (no crossed wires).
+    expect(pos.low2.y).toBeLessThan(pos.critical2.y)
+  })
+})
+
+describe("placeCanvasNodes — main nodes are placed BEFORE dock expansion (QA defect 1)", () => {
+  const wide = (id: string, position: { x: number; y: number }): CanvasNode => ({
+    ...node(id, position),
+    summary: "Do the work",
+    actorKind: "engine",
+    subNodes: [
+      { role: "model", kind: "MODEL", label: "Opus" },
+      { role: "employee", kind: "EMPLOYEE", label: "Dev" },
+    ],
+  })
+
+  it("auto-lays-out a degenerate all-origin layout instead of honouring the pile", () => {
+    const nodes = [node("a", { x: 0, y: 0 }), wide("b", { x: 0, y: 0 }), node("c", { x: 0, y: 0 })]
+    const placed = placeCanvasNodes(nodes, [
+      { from: "a", to: "b" },
+      { from: "b", to: "c" },
+    ])
+    const keys = placed.map((n) => `${n.position!.x},${n.position!.y}`)
+    expect(new Set(keys).size).toBe(3) // no two cards share a spot
+    const byId = Object.fromEntries(placed.map((n) => [n.id, n.position!]))
+    expect(byId.b.x).toBeGreaterThan(byId.a.x)
+    expect(byId.c.x).toBeGreaterThan(byId.b.x)
+  })
+
+  it("keeps the expanded graph usable: docks pin under their LAID-OUT parent", () => {
+    const nodes = [node("a", { x: 0, y: 0 }), wide("b", { x: 0, y: 0 }), node("c", { x: 0, y: 0 })]
+    const edges = [{ from: "a", to: "b" }, { from: "b", to: "c" }]
+    const placed = placeCanvasNodes(nodes, edges)
+    const { nodes: expanded } = expandCanvas(placed, [])
+    const parent = expanded.find((n) => n.id === "b")!
+    const dock = expanded.find((n) => n.id === "b__dock_model")!
+    expect(dock.position!.y).toBeGreaterThan(parent.position!.y)
+    expect(Math.abs(dock.position!.x - parent.position!.x)).toBeLessThan(300)
+    // And the mains kept their Dagre spread — the pile never reaches the flow graph.
+    const mains = expanded.filter((n) => n.visual !== "sub")
+    expect(new Set(mains.map((n) => `${n.position!.x},${n.position!.y}`)).size).toBe(mains.length)
+  })
+
+  it("passes meaningfully-spread stored positions through untouched (spatial memory wins)", () => {
+    const nodes = [node("a", { x: 240, y: 0 }), node("b", { x: 240, y: 140 })]
+    const placed = placeCanvasNodes(nodes)
+    expect(placed[0].position).toEqual({ x: 240, y: 0 })
+    expect(placed[1].position).toEqual({ x: 240, y: 140 })
   })
 })
 

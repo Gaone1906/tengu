@@ -141,11 +141,65 @@ export function nodesForDefinitionRun(run: WorkflowRunWire): CanvasNode[] {
   })
 }
 
+/** Per-edge item counts derived from the run's receipt evidence — the web-side
+ * mirror of the executor's edge-activity frame (advance.ts): a switch's frozen
+ * `route` selects its out-edges; an error lane is taken exactly when its source
+ * terminally failed under onError:'error-edge' (and that failure darkens the
+ * source's NORMAL out-edges); done/inline/checkpoint receipts pass one item per
+ * round; `fired` (output: none) passes control but declares NOTHING flows — the
+ * taken-but-empty path that renders "0 items". Unsettled (pending / running /
+ * waiting) and skipped sources have not passed control, so their lanes carry no
+ * pill. Trigger out-edges always carry the one firing payload — the trigger has
+ * fired for any run we can see. Absent from the map = lane not taken. Pure. */
+export function edgeItemsForRun(run: WorkflowRunWire): Map<string, number> {
+  const counts = new Map<string, number>()
+  const snap = run.definitionSnapshot
+  if (!snap) return counts
+  const receipts = new Map<string, RunStepReceiptWire[]>()
+  for (const r of run.steps) {
+    const list = receipts.get(r.nodeId)
+    if (list) list.push(r)
+    else receipts.set(r.nodeId, [r])
+  }
+  const errorEdgeNodes = new Set(snap.nodes.filter((n) => n.options?.onError === "error-edge").map((n) => n.id))
+  const triggerIds = new Set(snap.nodes.filter((n) => n.type === "trigger").map((n) => n.id))
+  for (const e of snap.edges) {
+    if (triggerIds.has(e.from)) {
+      counts.set(e.id, 1)
+      continue
+    }
+    let taken = false
+    let items = 0
+    for (const r of receipts.get(e.from) ?? []) {
+      const failedHere = r.status === "failed" || r.status === "error"
+      if (e.lane === "error") {
+        if (failedHere && errorEdgeNodes.has(e.from)) { taken = true; items += 1 }
+        continue
+      }
+      if (failedHere) continue // the failure killed the run or took the error lane
+      if (r.status === "routed") {
+        if (Array.isArray(r.route) && r.route.includes(e.id)) { taken = true; items += 1 }
+        continue
+      }
+      if (r.status === "done" || r.status === "inline" || r.status === "checkpoint" || r.status === "spawned") {
+        taken = true
+        items += 1
+      } else if (r.status === "fired") {
+        taken = true // declared fire-and-forget: the lane was walked, zero items flowed
+      }
+    }
+    if (taken) counts.set(e.id, items)
+  }
+  return counts
+}
+
 /** The run's REAL topology for the spatial canvas (GRS-019): the frozen
  * snapshot's edges, with the snapshot's trigger node id remapped to the
  * synthetic canvas trigger. Switch/IF out-edges carry their output-row index
  * (same lane!=='error' ordering the port rows derive from) so each branch wire
- * leaves its row's port on the card wall. Edges to nodes the run never
+ * leaves its row's port on the card wall. Taken lanes carry their receipt-
+ * derived item count (edgeItemsForRun) so the run view renders the pills —
+ * `0 items` included; untaken lanes carry none. Edges to nodes the run never
  * materialized are dropped by the canvas. Pure — unit-tests without a DOM. */
 export function edgesForDefinitionRun(run: WorkflowRunWire, nodes: CanvasNode[]): CanvasEdgeSpec[] {
   const snap = run.definitionSnapshot
@@ -158,6 +212,7 @@ export function edgesForDefinitionRun(run: WorkflowRunWire, nodes: CanvasNode[])
     if (n.type !== "switch") continue
     outsBySwitch.set(n.id, snap.edges.filter((e) => e.from === n.id && e.lane !== "error").map((e) => e.id))
   }
+  const itemCounts = edgeItemsForRun(run)
   return snap.edges.map((e) => {
     const spec: CanvasEdgeSpec = { id: e.id, from: remap(e.from), to: remap(e.to) }
     if (e.lane !== undefined) spec.lane = e.lane
@@ -166,6 +221,8 @@ export function edgesForDefinitionRun(run: WorkflowRunWire, nodes: CanvasNode[])
       const i = outs.indexOf(e.id)
       if (i >= 0) spec.outIndex = i
     }
+    const items = itemCounts.get(e.id)
+    if (items !== undefined) spec.items = items
     return spec
   })
 }

@@ -291,6 +291,71 @@ const MIN_POSITION_SPREAD = 80
 /** Minimal edge shape the layout needs — main-lane topology only. */
 export interface LayoutEdge { from: string; to: string; lane?: string }
 
+/** Vertical gap between same-rank cards — mirrors the Dagre `nodesep` above. */
+const RANK_NODESEP = 46
+
+/** Authored reading order per node: a DFS over the main-lane topology that
+ * follows out-edges in DECLARATION order, then sweeps any unvisited node in
+ * node-array order. Branch fan-out reads top-to-bottom exactly as authored —
+ * the execution-lane order — and each branch's descendants inherit its lane. */
+function authoredSequence(nodeIds: string[], edges: LayoutEdge[], ids: Set<string>): Map<string, number> {
+  const outs = new Map<string, string[]>()
+  const hasIn = new Set<string>()
+  for (const e of edges) {
+    if (e.lane === "sub" || !ids.has(e.from) || !ids.has(e.to)) continue
+    const list = outs.get(e.from) ?? []
+    list.push(e.to)
+    outs.set(e.from, list)
+    hasIn.add(e.to)
+  }
+  const seq = new Map<string, number>()
+  let next = 0
+  const visit = (id: string) => {
+    if (seq.has(id)) return
+    seq.set(id, next++)
+    for (const to of outs.get(id) ?? []) visit(to)
+  }
+  for (const id of nodeIds) if (!hasIn.has(id)) visit(id)
+  for (const id of nodeIds) visit(id)
+  return seq
+}
+
+/** Dagre's crossing-minimization is free to shuffle same-rank branch targets
+ * away from their authored order (a two-way fan rendered `thorough` above
+ * `fast`). Re-stack every multi-node rank into authored DFS order, preserving
+ * the rank's vertical center — order is meaning; the wires stay untangled
+ * because whole subtrees share their branch's sequence. Mutates `g` in place. */
+function reorderRanks(
+  g: Dagre.graphlib.Graph,
+  laidOut: CanvasNode[],
+  seq: Map<string, number>,
+): void {
+  const ranks = new Map<number, string[]>()
+  for (const n of laidOut) {
+    const d = g.node(n.id)
+    if (!d) continue
+    const rankX = Math.round(d.x)
+    const list = ranks.get(rankX) ?? []
+    list.push(n.id)
+    ranks.set(rankX, list)
+  }
+  for (const group of ranks.values()) {
+    if (group.length < 2) continue
+    const current = [...group].sort((a, b) => g.node(a).y - g.node(b).y)
+    const ordered = [...group].sort((a, b) => (seq.get(a) ?? 0) - (seq.get(b) ?? 0))
+    if (current.every((id, i) => id === ordered[i])) continue
+    const top = Math.min(...current.map((id) => g.node(id).y - g.node(id).height / 2))
+    const bottom = Math.max(...current.map((id) => g.node(id).y + g.node(id).height / 2))
+    const totalH = ordered.reduce((s, id) => s + g.node(id).height, 0) + RANK_NODESEP * (ordered.length - 1)
+    let cursor = (top + bottom) / 2 - totalH / 2
+    for (const id of ordered) {
+      const d = g.node(id)
+      d.y = cursor + d.height / 2
+      cursor += d.height + RANK_NODESEP
+    }
+  }
+}
+
 /** Dagre left→right layout → top-left positions per node id, snapped to the
  * 20px grid. Dock discs (visual "sub") and their dashed lanes are skipped —
  * expandCanvas pins them under their parent. Pure (Dagre needs no DOM), shared
@@ -301,7 +366,7 @@ export function dagreLayout(
   edges: LayoutEdge[],
 ): Record<string, WorkflowNodePosition> {
   const g = new Dagre.graphlib.Graph()
-  g.setGraph({ rankdir: "LR", nodesep: 46, ranksep: 96, marginx: 24, marginy: 24 })
+  g.setGraph({ rankdir: "LR", nodesep: RANK_NODESEP, ranksep: 96, marginx: 24, marginy: 24 })
   g.setDefaultEdgeLabel(() => ({}))
   const laidOut = nodes.filter((n) => n.visual !== "sub")
   const ids = new Set(laidOut.map((n) => n.id))
@@ -314,6 +379,7 @@ export function dagreLayout(
     if (ids.has(e.from) && ids.has(e.to)) g.setEdge(e.from, e.to)
   }
   Dagre.layout(g)
+  reorderRanks(g, laidOut, authoredSequence(laidOut.map((n) => n.id), edges, ids))
   const out: Record<string, WorkflowNodePosition> = {}
   for (const n of laidOut) {
     const d = g.node(n.id)
@@ -355,6 +421,18 @@ export function resolveNodePositions(
     out[n.id] = vertical ? { x: last.x, y: cursor } : { x: cursor, y: last.y }
   }
   return out
+}
+
+/** Resolve and ATTACH positions onto the REAL (pre-expansion) nodes. The canvas
+ * must place its main nodes BEFORE synthesizing dock discs: docks carry varied
+ * derived offsets, so expanding first makes a degenerate stored layout (every
+ * real card stacked at the origin) look "usable" to the position check and the
+ * pile ships to the screen. Placed first, a degenerate/absent layout falls back
+ * to the same Dagre geometry as Tidy up and the docks pin under laid-out
+ * parents — a freshly-opened workflow is never a stack. */
+export function placeCanvasNodes(nodes: CanvasNode[], edges?: CanvasEdgeSpec[]): CanvasNode[] {
+  const positions = resolveNodePositions(nodes, edges?.map((e) => ({ from: e.from, to: e.to, lane: e.lane })))
+  return nodes.map((n) => (positions[n.id] ? { ...n, position: positions[n.id] } : n))
 }
 
 /* ── Per-type geometry (spec §2.1/§3 — FIXED, normative) ────────────────────

@@ -23,6 +23,7 @@ import type { WorkflowRunView, WorkflowStepView, WorkflowGateResult } from "@/li
 import {
   buildCanvasNodes,
   resolveNodePositions,
+  placeCanvasNodes,
   nodeStatusColor,
   nodeGeometry,
   visualNodeType,
@@ -49,7 +50,7 @@ import {
  * property panel (GRS-011c-2 owns topology editing). */
 
 // Re-export the model so existing imports (`from "./canvas"`) keep working.
-export { nodeStatusColor, buildCanvasNodes, resolveNodePositions, nodeGeometry, visualNodeType, expandCanvas, deriveDisplayFields } from "./canvas-model"
+export { nodeStatusColor, buildCanvasNodes, resolveNodePositions, placeCanvasNodes, nodeGeometry, visualNodeType, expandCanvas, deriveDisplayFields } from "./canvas-model"
 export type { CanvasNode, CanvasNodeSeed, CanvasGraphSpec, CanvasEdgeSpec, VisualNodeType, CanvasSubNode } from "./canvas-model"
 
 /* ── The wire (spec §2.4) ─────────────────────────────────────────────────────
@@ -408,9 +409,13 @@ export function WorkflowCanvas({
   // Sub-node docks are synthesized here (decision 2) so the ONE canvas renders
   // every attachable. expandCanvas is a no-op for graphs without wide docks, so
   // the substrate/derivation tests see the exact same nodes they always did.
+  // MAIN-node positions are resolved BEFORE the expansion: dock discs carry
+  // varied derived offsets, so expanding first would make a degenerate stored
+  // layout (all real cards at the origin) pass the usability check and open as
+  // an overlapping pile that only Tidy up could rescue.
   const { expNodes, expEdges } = useMemo(() => {
     const base = tidyPos ? nodes.map((n) => (tidyPos[n.id] ? { ...n, position: tidyPos[n.id] } : n)) : nodes
-    const { nodes: en, edges: ee } = expandCanvas(base, edges)
+    const { nodes: en, edges: ee } = expandCanvas(placeCanvasNodes(base, edges), edges)
     return { expNodes: en, expEdges: ee }
   }, [nodes, edges, tidyPos])
 

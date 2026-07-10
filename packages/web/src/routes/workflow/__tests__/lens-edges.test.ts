@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest"
 import { edgesForDefinition, ghostNodeForDefinition } from "../edit"
 import { edgesForDefinitionRun } from "../run-view"
-import type { EditableWorkflowDefinitionWire, WorkflowRunWire } from "@/lib/api"
+import type { EditableWorkflowDefinitionWire, WorkflowRunWire, RunStepReceiptWire } from "@/lib/api"
 import type { CanvasNode } from "../canvas-model"
 
 /* Spec §6 — both lenses draw the SAME topology on the same geometry: the
@@ -64,5 +64,80 @@ describe("edgesForDefinitionRun — run snapshot switch edges name their row por
     expect(edges.find((e) => e.id === "e2")!.outIndex).toBe(0)
     expect(edges.find((e) => e.id === "e3")!.outIndex).toBe(1)
     expect(edges.find((e) => e.id === "err")!.outIndex).toBeUndefined()
+  })
+})
+
+/* QA defect 2 — execution edges carry their receipt-derived item counts, so the
+ * run lens renders the mid-wire pills: taken lanes count one item per settled
+ * round, `fired` lanes are taken-but-empty (`0 items`), untaken branches carry
+ * no count at all. */
+describe("edgesForDefinitionRun — taken lanes carry receipt-derived item counts", () => {
+  const receipt = (nodeId: string, over: Partial<RunStepReceiptWire> = {}): RunStepReceiptWire => ({
+    nodeId, label: nodeId, actor: null, status: "done", at: "2026-07-10T07:01:00Z", ...over,
+  })
+  const runWith = (steps: RunStepReceiptWire[], snapshot: EditableWorkflowDefinitionWire = DEF): WorkflowRunWire =>
+    ({
+      runId: "r1", workflowId: "wf", definitionVersion: 1, title: "WF",
+      trigger: { kind: "manual" }, status: "completed",
+      startedAt: "2026-07-10T07:00:00Z", endedAt: null, steps, parked: null,
+      definitionSnapshot: snapshot,
+    }) as unknown as WorkflowRunWire
+
+  it("counts the taken switch branch and leaves the untaken branch pill-less", () => {
+    const run = runWith([
+      receipt("sw", { status: "routed", route: ["e2"] }),
+      receipt("a", { status: "done" }),
+      receipt("b", { status: "skipped" }),
+    ])
+    const edges = edgesForDefinitionRun(run, [])
+    // Trigger fired for any visible run → its out-edge carried the one payload.
+    expect(edges.find((e) => e.id === "e1")!.items).toBe(1)
+    expect(edges.find((e) => e.id === "e2")!.items).toBe(1)
+    expect(edges.find((e) => e.id === "e3")!.items).toBeUndefined()
+  })
+
+  it("renders taken-but-empty: a fired (output: none) source passes 0 items", () => {
+    const snap: EditableWorkflowDefinitionWire = {
+      ...DEF,
+      nodes: [
+        { id: "trig", type: "trigger", label: "Trigger", position: { x: 0, y: 0 } },
+        { id: "f", type: "step", label: "F", position: { x: 300, y: 0 } },
+        { id: "x", type: "step", label: "X", position: { x: 600, y: 0 } },
+      ] as EditableWorkflowDefinitionWire["nodes"],
+      edges: [
+        { id: "t1", from: "trig", to: "f" },
+        { id: "fx", from: "f", to: "x" },
+      ],
+    }
+    const run = runWith([receipt("f", { status: "fired" }), receipt("x", { status: "pending" })], snap)
+    const edges = edgesForDefinitionRun(run, [])
+    expect(edges.find((e) => e.id === "fx")!.items).toBe(0)
+  })
+
+  it("sums loop rounds: two settled rounds of the source = 2 items on its lane", () => {
+    const snap: EditableWorkflowDefinitionWire = {
+      ...DEF,
+      nodes: [
+        { id: "a", type: "step", label: "A", position: { x: 0, y: 0 } },
+        { id: "b", type: "step", label: "B", position: { x: 300, y: 0 } },
+      ] as EditableWorkflowDefinitionWire["nodes"],
+      edges: [{ id: "ab", from: "a", to: "b" }],
+    }
+    const run = runWith(
+      [receipt("a", { round: 1 }), receipt("b", { round: 1 }), receipt("a", { round: 2 }), receipt("b", { round: 2 })],
+      snap,
+    )
+    expect(edgesForDefinitionRun(run, []).find((e) => e.id === "ab")!.items).toBe(2)
+  })
+
+  it("keeps unsettled lanes quiet: a running source has not passed control yet", () => {
+    const run = runWith([
+      receipt("sw", { status: "running" }),
+      receipt("a", { status: "pending" }),
+      receipt("b", { status: "pending" }),
+    ])
+    const edges = edgesForDefinitionRun(run, [])
+    expect(edges.find((e) => e.id === "e2")!.items).toBeUndefined()
+    expect(edges.find((e) => e.id === "e3")!.items).toBeUndefined()
   })
 })
