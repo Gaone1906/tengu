@@ -336,9 +336,14 @@ describe("codexChildEnv — CODEX_HOME wiring", () => {
   });
 
   it("strips inherited lifecycle takeover state from engine children", () => {
-    const env = codexChildEnv({ PATH: "/usr/bin", JINN_TAKE_PORT: "1" }, "sess-1");
+    const env = codexChildEnv({
+      PATH: "/usr/bin",
+      JINN_TAKE_PORT: "1",
+      JINN_HOME_IDENTITY: "/private/tmp/jinn-home",
+    }, "sess-1");
 
     expect(env.JINN_TAKE_PORT).toBeUndefined();
+    expect(env.JINN_HOME_IDENTITY).toBeUndefined();
   });
 
   it("omits CODEX_HOME when no per-session home is active (default ~/.codex path)", () => {

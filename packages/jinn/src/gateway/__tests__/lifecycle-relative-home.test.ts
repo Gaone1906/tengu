@@ -11,6 +11,7 @@ fs.mkdirSync(home, { recursive: true });
 
 process.chdir(root);
 process.env.JINN_HOME = "home";
+const publicHome = path.resolve("home");
 
 const { buildGatewayChildEnv } = await import("../lifecycle.js");
 
@@ -22,13 +23,14 @@ afterAll(() => {
 });
 
 describe("gateway child JINN_HOME identity", () => {
-  it("exports a canonical absolute JINN_HOME when the starter used a relative home", () => {
+  it("exports the public absolute JINN_HOME plus a canonical identity when the starter used a relative home", () => {
     const env = buildGatewayChildEnv({
       gateway: { port: 7851, host: "127.0.0.1" },
       engines: { default: "claude" },
     } as any);
 
-    expect(env.JINN_HOME).toBe(fs.realpathSync.native(home));
+    expect(env.JINN_HOME).toBe(publicHome);
     expect(env.JINN_HOME).not.toBe("home");
+    expect(env.JINN_HOME_IDENTITY).toBe(fs.realpathSync.native(home));
   });
 });

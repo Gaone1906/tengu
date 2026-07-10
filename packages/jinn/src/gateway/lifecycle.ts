@@ -3,7 +3,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONFIG_PATH, PID_FILE, JINN_HOME, canonicalizeJinnHome } from "../shared/paths.js";
+import { CONFIG_PATH, PID_FILE, JINN_HOME, JINN_HOME_IDENTITY, resolveHomeIdentity } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 import type { JinnConfig } from "../shared/types.js";
 import { startGateway } from "./server.js";
@@ -117,6 +117,7 @@ export function buildGatewayChildEnv(
   return {
     ...env,
     JINN_HOME,
+    JINN_HOME_IDENTITY,
     JINN_GATEWAY_URL: gatewayBaseUrl({ port, host }),
     JINN_GATEWAY_TOKEN: ensureGatewayAuthToken(JINN_HOME),
   };
@@ -127,6 +128,7 @@ const GATEWAY_CHILD_ENV_SCRUB_EXACT: ReadonlySet<string> = new Set([
   "CLAUDECODE",
   "JINN_SESSION_ID",
   "JINN_SESSION_CAPABILITY",
+  "JINN_HOME_IDENTITY",
   "JINN_TAKE_PORT",
   "ANTHROPIC_BASE_URL",
   "GROK_CLAUDE_MCPS_ENABLED",
@@ -161,7 +163,7 @@ export type PortOwnerLookup =
   | { status: "unknown" };
 
 export type ProcessJinnHomeLookup =
-  | { status: "found"; jinnHome: string }
+  | { status: "found"; jinnHome: string; identity: string }
   | { status: "none" }
   | { status: "unknown" };
 
@@ -213,18 +215,25 @@ export function readProcessJinnHome(pid: number): ProcessJinnHomeLookup {
       encoding: "utf-8",
       timeout: 1_000,
     });
-    const match = output.match(/(?:^|\s)JINN_HOME=([^\s]+)/);
-    return match ? { status: "found", jinnHome: match[1] } : { status: "none" };
+    return jinnHomeFromEnvEntries(output.split(/\s+/));
   } catch {
     return { status: "unknown" };
   }
 }
 
 function jinnHomeFromEnvEntries(entries: string[]): ProcessJinnHomeLookup {
+  let jinnHome: string | undefined;
+  let identity: string | undefined;
   for (const entry of entries) {
     if (entry.startsWith("JINN_HOME=")) {
-      return { status: "found", jinnHome: entry.slice("JINN_HOME=".length) };
+      jinnHome = entry.slice("JINN_HOME=".length);
+    } else if (entry.startsWith("JINN_HOME_IDENTITY=")) {
+      identity = entry.slice("JINN_HOME_IDENTITY=".length);
     }
+  }
+  if (jinnHome || identity) {
+    const publicHome = jinnHome ?? identity!;
+    return { status: "found", jinnHome: publicHome, identity: identity ?? resolveHomeIdentity(publicHome) };
   }
   return { status: "none" };
 }
@@ -237,14 +246,10 @@ function assertPidBelongsToThisInstance(
   if (options.takePort) return;
 
   const owner = readProcessJinnHome(pid);
-  if (owner.status === "found" && sameJinnHome(owner.jinnHome, JINN_HOME)) return;
+  if (owner.status === "found" && owner.identity === JINN_HOME_IDENTITY) return;
 
   if (!pidIsAlive(pid)) return;
   throw new PortOwnershipError(port, owner.status === "found" ? owner.jinnHome : "unknown");
-}
-
-function sameJinnHome(a: string, b: string): boolean {
-  return canonicalizeJinnHome(a) === canonicalizeJinnHome(b);
 }
 
 function pidIsAlive(pid: number): boolean {

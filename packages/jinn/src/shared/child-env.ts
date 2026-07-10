@@ -5,6 +5,7 @@ export interface EngineChildEnvOptions {
 }
 
 const ENGINE_CHILD_ENV_DENY_EXACT: ReadonlySet<string> = new Set([
+  "JINN_HOME_IDENTITY",
   "JINN_TAKE_PORT",
 ]);
 

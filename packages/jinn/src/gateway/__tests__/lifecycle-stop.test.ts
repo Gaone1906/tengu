@@ -12,7 +12,7 @@ process.env.JINN_HOME = tmpHome;
 
 const { buildGatewayChildEnv, lookupPidOnPort, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
 const { CONFIG_PATH, PID_FILE } = await import("../../shared/paths.js");
-const canonicalTmpHome = fs.realpathSync.native(tmpHome);
+const tmpHomeIdentity = fs.realpathSync.native(tmpHome);
 
 /** Pick a free ephemeral port (nothing will be listening on it afterwards). */
 async function freePort(): Promise<number> {
@@ -288,11 +288,13 @@ describe("buildGatewayChildEnv", () => {
     } as any, {
       ...process.env,
       JINN_HOME: "/wrong/home",
+      JINN_HOME_IDENTITY: "/wrong/home",
       JINN_GATEWAY_URL: "http://127.0.0.1:7777",
       JINN_GATEWAY_TOKEN: "wrong-token",
     });
 
-    expect(env.JINN_HOME).toBe(canonicalTmpHome);
+    expect(env.JINN_HOME).toBe(tmpHome);
+    expect(env.JINN_HOME_IDENTITY).toBe(tmpHomeIdentity);
     expect(env.JINN_GATEWAY_URL).toBe("http://127.0.0.1:7789");
     expect(env.JINN_GATEWAY_TOKEN).not.toBe("wrong-token");
     expect(env.JINN_GATEWAY_TOKEN).toBeTruthy();
@@ -310,6 +312,7 @@ describe("buildGatewayChildEnv", () => {
       JINN_SESSION_ID: "session-1",
       JINN_SESSION_CAPABILITY: "capability-secret",
       JINN_TAKE_PORT: "1",
+      JINN_HOME_IDENTITY: "/wrong/home",
       CLAUDECODE: "1",
       CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1",
       CLAUDE_CODE_RESUME_TOKEN_THRESHOLD: "999999999",
@@ -335,7 +338,8 @@ describe("buildGatewayChildEnv", () => {
     expect(env.GROK_CURSOR_MCPS_ENABLED).toBeUndefined();
     expect(env.HERMES_YOLO_MODE).toBeUndefined();
     expect(env.HERMES_ACCEPT_HOOKS).toBeUndefined();
-    expect(env.JINN_HOME).toBe(canonicalTmpHome);
+    expect(env.JINN_HOME).toBe(tmpHome);
+    expect(env.JINN_HOME_IDENTITY).toBe(tmpHomeIdentity);
     expect(env.JINN_GATEWAY_URL).toBe("http://127.0.0.1:7789");
     expect(env.JINN_GATEWAY_TOKEN).toBeTruthy();
   });

@@ -14,12 +14,12 @@ const __dirname = path.dirname(__filename);
  * call this directly instead of reading the frozen constant.
  */
 export function resolveJinnHome(): string {
-  if (process.env.JINN_HOME) return canonicalizeJinnHome(process.env.JINN_HOME);
+  if (process.env.JINN_HOME) return path.resolve(process.env.JINN_HOME);
   const instance = process.env.JINN_INSTANCE || "jinn";
-  return canonicalizeJinnHome(path.join(os.homedir(), `.${instance}`));
+  return path.resolve(path.join(os.homedir(), `.${instance}`));
 }
 
-export function canonicalizeJinnHome(home: string): string {
+export function resolveHomeIdentity(home: string): string {
   const absolute = path.resolve(home);
   try {
     return fs.realpathSync.native(absolute);
@@ -34,6 +34,7 @@ export function canonicalizeJinnHome(home: string): string {
 }
 
 export const JINN_HOME = resolveJinnHome();
+export const JINN_HOME_IDENTITY = resolveHomeIdentity(JINN_HOME);
 export const CONFIG_PATH = path.join(JINN_HOME, "config.yaml");
 export const SESSIONS_DB = path.join(JINN_HOME, "sessions", "registry.db");
 export const CRON_JOBS = path.join(JINN_HOME, "cron", "jobs.json");
