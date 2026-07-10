@@ -134,11 +134,11 @@ describe("listWorkItems SQL LIMIT", () => {
     const db = reg.initDb();
     const plan = db
       .prepare(
-        "EXPLAIN QUERY PLAN SELECT * FROM work_items ORDER BY updated_at DESC, created_at DESC LIMIT ?",
+        "EXPLAIN QUERY PLAN SELECT * FROM work_items WHERE status = ? ORDER BY (rank IS NULL) ASC, rank ASC, updated_at DESC, created_at DESC, id ASC LIMIT ? OFFSET ?",
       )
-      .all(5) as Array<{ detail: string }>;
+      .all("backlog", 5, 0) as Array<{ detail: string }>;
     const text = plan.map((r) => r.detail).join("\n");
-    expect(text).toContain("idx_work_items_recent");
+    expect(text).toContain("idx_work_items_manual_order");
     expect(text).not.toContain("TEMP B-TREE");
   });
 });

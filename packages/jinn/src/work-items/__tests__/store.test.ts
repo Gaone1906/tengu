@@ -72,6 +72,37 @@ describe("work-item store — create / get / list", () => {
   });
 });
 
+describe("work-item store — manual rank", () => {
+  it("persists rank and orders ranked rows first within a filtered group", () => {
+    const first = store.createWorkItem({ title: "rank first", status: "backlog", department: "rank-fixture" });
+    const second = store.createWorkItem({ title: "rank second", status: "backlog", department: "rank-fixture" });
+    const unranked = store.createWorkItem({ title: "rank unset", status: "backlog", department: "rank-fixture" });
+    db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2032-01-01T00:00:00.000Z", unranked.id);
+
+    expect(store.updateWorkItem(first.id, { rank: 10 }, "operator")?.rank).toBe(10);
+    expect(store.updateWorkItem(second.id, { rank: 20 }, "operator")?.rank).toBe(20);
+
+    const ordered = store.listWorkItems({ status: "backlog", department: "rank-fixture" });
+    expect(ordered.map((item) => item.id)).toEqual([first.id, second.id, unranked.id]);
+  });
+
+  it("clearing rank returns a row to deterministic newest-first fallback ordering", () => {
+    const older = store.createWorkItem({ title: "older unranked", status: "assigned", department: "rank-clear-fixture" });
+    const newer = store.createWorkItem({ title: "newer unranked", status: "assigned", department: "rank-clear-fixture" });
+    db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2030-01-01T00:00:00.000Z", older.id);
+    db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2031-01-01T00:00:00.000Z", newer.id);
+
+    store.updateWorkItem(older.id, { rank: 5 }, "operator");
+    expect(store.listWorkItems({ status: "assigned", department: "rank-clear-fixture" })[0]?.id).toBe(older.id);
+
+    store.updateWorkItem(older.id, { rank: null }, "operator");
+    db.prepare("UPDATE work_items SET updated_at = ? WHERE id = ?").run("2030-01-01T00:00:00.000Z", older.id);
+    const fallback = store.listWorkItems({ status: "assigned", department: "rank-clear-fixture" });
+    expect(fallback.map((item) => item.id)).toEqual([newer.id, older.id]);
+    expect(store.getWorkItem(older.id)?.rank).toBeNull();
+  });
+});
+
 describe("work-item store — idempotent source_ref", () => {
   it("returns the existing row for a repeated (source, source_ref)", () => {
     const ref = "cron:job-x:1751328000000";

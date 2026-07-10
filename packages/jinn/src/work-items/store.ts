@@ -90,6 +90,8 @@ export interface WorkItem {
   department: string | null;
   assignee: string | null;
   priority: number;
+  /** Nullable manual order key. Lower ranked values render first. */
+  rank: number | null;
   source: WorkItemSource;
   sourceRef: string | null;
   acceptance: string | null;
@@ -187,6 +189,7 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItem {
     department: (row.department as string) ?? null,
     assignee: (row.assignee as string) ?? null,
     priority: row.priority as number,
+    rank: (row.rank as number) ?? null,
     source: row.source as WorkItemSource,
     sourceRef: (row.source_ref as string) ?? null,
     acceptance: (row.acceptance as string) ?? null,
@@ -467,7 +470,7 @@ export function queryWorkItems(filter: ListWorkItemsFilter = {}): WorkItemPage {
     ? Math.max(0, Math.floor(filter.offset))
     : 0;
   const rows = db
-    .prepare(`SELECT * FROM work_items ${where} ORDER BY updated_at DESC, created_at DESC, id ASC LIMIT ? OFFSET ?`)
+    .prepare(`SELECT * FROM work_items ${where} ORDER BY (rank IS NULL) ASC, rank ASC, updated_at DESC, created_at DESC, id ASC LIMIT ? OFFSET ?`)
     .all(...values, limit, offset) as Record<string, unknown>[];
   const counts = db
     .prepare(`SELECT status, COUNT(*) AS total FROM work_items ${where} GROUP BY status`)
@@ -499,6 +502,46 @@ export function searchWorkItems(filter: SearchWorkItemsFilter, limit = 20): Work
     throw new Error('searchWorkItems requires at least one filter');
   }
   return queryWorkItems({ ...filter, limit }).workItems;
+}
+
+export interface UpdateWorkItemInput {
+  title?: string;
+  body?: string | null;
+  assignee?: string | null;
+  department?: string | null;
+  priority?: number;
+  rank?: number | null;
+}
+
+/** Metadata-only Todo write used by the operator edit/reorder surface. Status is
+ * deliberately absent from the input type: lifecycle changes belong to the
+ * guarded transitions module. */
+export function updateWorkItem(id: string, input: UpdateWorkItemInput, actor?: string | null): WorkItem | undefined {
+  const db = initDb();
+  const fields: Array<{ column: string; name: keyof UpdateWorkItemInput; value: unknown }> = [];
+  if (input.title !== undefined) fields.push({ column: 'title', name: 'title', value: input.title });
+  if (input.body !== undefined) fields.push({ column: 'body', name: 'body', value: input.body });
+  if (input.assignee !== undefined) fields.push({ column: 'assignee', name: 'assignee', value: input.assignee });
+  if (input.department !== undefined) fields.push({ column: 'department', name: 'department', value: input.department });
+  if (input.priority !== undefined) fields.push({ column: 'priority', name: 'priority', value: input.priority });
+  if (input.rank !== undefined) fields.push({ column: 'rank', name: 'rank', value: input.rank });
+  if (fields.length === 0) return getWorkItem(id);
+
+  const txn = db.transaction((): WorkItem | undefined => {
+    const now = new Date().toISOString();
+    const result = db
+      .prepare(`UPDATE work_items SET ${fields.map((field) => `${field.column} = ?`).join(', ')}, updated_at = ? WHERE id = ?`)
+      .run(...fields.map((field) => field.value), now, id);
+    if (result.changes === 0) return undefined;
+    appendWorkItemEvent({
+      workItemId: id,
+      kind: 'note',
+      actor: actor ?? null,
+      detail: { updatedFields: fields.map((field) => field.name) },
+    });
+    return getWorkItem(id);
+  });
+  return txn();
 }
 
 /** Live spend over an item's execution attempts: `SUM(total_cost)` across linked

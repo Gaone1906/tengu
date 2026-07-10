@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS work_items (
   department          TEXT,
   assignee            TEXT,
   priority            INTEGER NOT NULL DEFAULT 2 CHECK (priority BETWEEN 0 AND 3),
+  rank                REAL,
   source              TEXT NOT NULL DEFAULT 'human' CHECK (source IN ('human','delegation','cron','workflow','session','connector','goal')),
   source_ref          TEXT,
   acceptance          TEXT,
@@ -66,6 +67,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_work_items_source_ref
 -- Backs the default list/search ORDER BY (updated_at DESC, created_at DESC) so a
 -- LIMIT-ed read walks the index tail instead of sorting the whole table.
 CREATE INDEX IF NOT EXISTS idx_work_items_recent     ON work_items(updated_at DESC, created_at DESC);
+-- Ranked rows lead within a raw-status group; unranked rows retain the stable
+-- newest-first fallback used before manual ordering existed.
+CREATE INDEX IF NOT EXISTS idx_work_items_manual_order
+  ON work_items(status, (rank IS NULL), rank, updated_at DESC, created_at DESC, id ASC);
 `;
 
 /** Append-only audit of Todo lifecycle (design §1.2 — earned by the approvals/
@@ -101,9 +106,10 @@ function columnNames(db: Database): Set<string> {
   return new Set(cols.map((col) => col.name));
 }
 
-function ensureApprovalRoutingColumns(db: Database): void {
+function ensureAdditiveWorkItemColumns(db: Database): void {
   const cols = columnNames(db);
   const alters: string[] = [];
+  if (!cols.has('rank')) alters.push('ALTER TABLE work_items ADD COLUMN rank REAL');
   if (!cols.has('approval_target')) alters.push('ALTER TABLE work_items ADD COLUMN approval_target TEXT');
   if (!cols.has('approval_target_kind')) alters.push("ALTER TABLE work_items ADD COLUMN approval_target_kind TEXT CHECK (approval_target_kind IN ('employee','virtual','none'))");
   if (!cols.has('approval_escalated_at')) alters.push('ALTER TABLE work_items ADD COLUMN approval_escalated_at TEXT');
@@ -130,7 +136,7 @@ export function migrateWorkItemsSchema(db: Database): WorkItemsMigrationResult {
     .get() as { sql: string } | undefined;
   if (!row) return { rebuilt: false, rows: 0 }; // fresh install — initDb creates the new shape
   if (row.sql.includes("'backlog'")) {
-    ensureApprovalRoutingColumns(db);
+    ensureAdditiveWorkItemColumns(db);
     return { rebuilt: false, rows: 0 }; // already migrated
   }
 
@@ -152,7 +158,7 @@ export function migrateWorkItemsSchema(db: Database): WorkItemsMigrationResult {
     db.exec('DROP TABLE work_items');
     db.exec('ALTER TABLE work_items_new RENAME TO work_items');
     db.exec(WORK_ITEMS_INDEX_DDL);
-    ensureApprovalRoutingColumns(db);
+    ensureAdditiveWorkItemColumns(db);
     return copied.changes;
   });
   return { rebuilt: true, rows: rebuild() };

@@ -92,6 +92,7 @@ describe("migrateWorkItemsSchema — the GRS-021a vocabulary rebuild", () => {
         "idx_work_items_status",
         "idx_work_items_department",
         "idx_work_items_recent",
+        "idx_work_items_manual_order",
         "uq_work_items_source_ref",
       ]),
     );
@@ -137,6 +138,18 @@ describe("migrateWorkItemsSchema — the GRS-021a vocabulary rebuild", () => {
     const cols = db.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>;
     expect(cols.map((c) => c.name)).toEqual(expect.arrayContaining(["approval_target", "approval_escalated_at"]));
     expect(statusOf(db, "wi_new")).toMatchObject({ approval_target: null, approval_escalated_at: null });
+  });
+
+  it("adds nullable manual rank to an already-migrated table without rebuilding rows", () => {
+    const db = new Database(":memory:");
+    db.exec(WORK_ITEMS_TABLE_DDL.replace("  rank                REAL,\n", ""));
+    db.prepare("INSERT INTO work_items (id,title,status,source,created_at,updated_at) VALUES ('wi_rankless','rankless','backlog','human','x','x')").run();
+
+    expect(migrateWorkItemsSchema(db)).toEqual({ rebuilt: false, rows: 0 });
+
+    const cols = db.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>;
+    expect(cols.map((c) => c.name)).toContain("rank");
+    expect((db.prepare("SELECT rank FROM work_items WHERE id = 'wi_rankless'").get() as { rank: number | null }).rank).toBeNull();
   });
 
   it("backfills legacy non-null approval targets as virtual when adding target kind", () => {
