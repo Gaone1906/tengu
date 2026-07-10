@@ -156,9 +156,8 @@ describe('todo-status-change workflow trigger', () => {
       const secondHit = second.filter((entry) => entry.eventId === transition.event?.id);
 
       expect(firstHit).toEqual([{ eventId: transition.event?.id, outcomes: [{ workflowId: 'verify-wf', outcome: 'started' }] }]);
-      // The replay watermark advanced past this event on the first pass, so the
-      // second replay does not even re-scan it (no wasted O(runs) dedup work) —
-      // stronger than the previous "re-scan and report duplicate" behaviour.
+      // The durable per-event outcome excludes this event from the second replay,
+      // so it is not re-scanned or re-evaluated against later definitions.
       expect(secondHit).toEqual([]);
       // The workflow ran exactly once for this event: the sole run carries this
       // transition's id as its trigger fireRef.

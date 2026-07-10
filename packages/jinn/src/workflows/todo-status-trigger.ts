@@ -1,8 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { getDefinition, listDefinitions } from './definition-store.js';
 import { startWorkflowRunFromTrigger, type RunDriverDeps } from './run-reconciler.js';
 import { findRunByTriggerFireRef, getRun, listActiveRunRefs, workflowRunTriggerTodoId, type WorkflowRun } from './run-store.js';
 import type { EditableWorkflowDefinition } from './definition.js';
-import { initDb, getMetaValue, setMetaValue } from '../sessions/registry.js';
+import { initDb } from '../sessions/registry.js';
 import type { WorkflowTrigger } from './derive.js';
 import type { WorkItemSource, WorkItemStatus } from '../work-items/store.js';
 
@@ -35,15 +36,11 @@ export interface TodoStatusReplayOutcome {
 
 const NON_TERMINAL_RUN_STATUSES = new Set(['running', 'parked', 'dispatched']);
 
-/** meta key for the last-replayed todo-status event cursor (created_at + rowid).
- * Lets a boot replay only events newer than everything already processed (live or
- * by a prior replay) instead of re-scanning the last N every time. */
-const REPLAY_WATERMARK_KEY = 'todo_status_replay_watermark';
-
-interface ReplayCursor {
-  createdAt: string;
-  rowid: number;
-}
+const TODO_EVENT_CLAIMS_TABLE = 'workflow_todo_event_claims';
+const CLAIMS_MIGRATION_KEY = 'todo_status_event_claims_migrated';
+const LEGACY_WATERMARK_KEY = 'todo_status_replay_watermark';
+const CLAIM_OWNER = randomUUID();
+let claimsTableReady = false;
 
 /** An active workflow definition whose trigger is a todo-status-change, resolved
  * once so a replay batch does not re-read every definition per event. */
@@ -100,30 +97,158 @@ function loadActiveTodoStatusDefs(deps: RunDriverDeps): TodoStatusDef[] {
   return out;
 }
 
-function parseReplayCursor(raw: string | null): ReplayCursor | null {
-  if (!raw) return null;
+interface StoredClaimOutcome {
+  workflowId: string;
+  outcome: TodoStatusTriggerOutcome['outcome'];
+  runId?: string;
+  detail: string;
+}
+
+interface TodoEventClaimRow {
+  state: 'processing' | 'processed';
+  owner: string;
+  definition_ids: string;
+  outcomes: string | null;
+}
+
+type TodoEventClaim =
+  | { state: 'acquired'; definitionIds: string[] }
+  | { state: 'busy' }
+  | { state: 'processed'; outcomes: StoredClaimOutcome[] };
+
+function ensureTodoEventClaimsTable(): ReturnType<typeof initDb> {
+  const db = initDb();
+  if (claimsTableReady) return db;
+  db.exec(`CREATE TABLE IF NOT EXISTS ${TODO_EVENT_CLAIMS_TABLE} (
+    event_id TEXT PRIMARY KEY,
+    state TEXT NOT NULL CHECK (state IN ('processing', 'processed')),
+    owner TEXT NOT NULL,
+    definition_ids TEXT NOT NULL,
+    outcomes TEXT,
+    claimed_at TEXT NOT NULL,
+    processed_at TEXT
+  )`);
+  const migrated = db.prepare('SELECT value FROM meta WHERE key = ?').get(CLAIMS_MIGRATION_KEY) as { value: string } | undefined;
+  if (!migrated) {
+    db.transaction(() => {
+      const legacy = db.prepare('SELECT value FROM meta WHERE key = ?').get(LEGACY_WATERMARK_KEY) as { value: string } | undefined;
+      if (legacy) {
+        try {
+          const cursor = JSON.parse(legacy.value) as { createdAt?: unknown; rowid?: unknown };
+          if (typeof cursor.createdAt === 'string' && Number.isFinite(cursor.rowid)) {
+            // Upgrade bridge only: the old cursor is accepted as evidence that all
+            // rows at/before it were considered. New processing never advances or
+            // consults a global watermark.
+            db.prepare(
+              `INSERT OR IGNORE INTO ${TODO_EVENT_CLAIMS_TABLE}
+                (event_id, state, owner, definition_ids, outcomes, claimed_at, processed_at)
+               SELECT id, 'processed', 'legacy-watermark', '[]', '[]', created_at, ?
+               FROM work_item_events
+               WHERE created_at < ? OR (created_at = ? AND rowid <= ?)`,
+            ).run(new Date().toISOString(), cursor.createdAt, cursor.createdAt, Number(cursor.rowid));
+          }
+        } catch {
+          // A corrupt legacy cursor carries no trustworthy migration evidence.
+        }
+      }
+      db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run(CLAIMS_MIGRATION_KEY, '1');
+    })();
+  }
+  claimsTableReady = true;
+  return db;
+}
+
+function parseStringArray(raw: string): string[] {
   try {
     const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed.createdAt === 'string' && Number.isFinite(parsed.rowid)) {
-      return { createdAt: parsed.createdAt, rowid: Number(parsed.rowid) };
-    }
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : [];
   } catch {
-    /* corrupt watermark → treat as unset (rebuild-on-miss) */
+    return [];
   }
-  return null;
 }
 
-function isNewerCursor(a: ReplayCursor, b: ReplayCursor): boolean {
-  if (a.createdAt !== b.createdAt) return a.createdAt > b.createdAt;
-  return a.rowid > b.rowid;
+function parseStoredOutcomes(raw: string | null): StoredClaimOutcome[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed as StoredClaimOutcome[] : [];
+  } catch {
+    return [];
+  }
 }
 
-/** Advance the replay watermark monotonically to `next` — so the next boot only
- * replays events created after everything this boot already processed. */
-function advanceReplayWatermark(next: ReplayCursor): void {
-  const current = parseReplayCursor(getMetaValue(REPLAY_WATERMARK_KEY));
-  if (current && !isNewerCursor(next, current)) return;
-  setMetaValue(REPLAY_WATERMARK_KEY, JSON.stringify(next));
+/**
+ * Claim one event atomically. A different owner means a previous gateway process
+ * crashed mid-dispatch, so boot replay may resume its frozen definition set. The
+ * same owner means live dispatch is still in progress and replay must not race it.
+ */
+function claimTodoEvent(eventId: string, definitionIds: string[]): TodoEventClaim {
+  const db = ensureTodoEventClaimsTable();
+  return db.transaction((): TodoEventClaim => {
+    const existing = db.prepare(
+      `SELECT state, owner, definition_ids, outcomes
+       FROM ${TODO_EVENT_CLAIMS_TABLE}
+       WHERE event_id = ?`,
+    ).get(eventId) as TodoEventClaimRow | undefined;
+    if (!existing) {
+      db.prepare(
+        `INSERT INTO ${TODO_EVENT_CLAIMS_TABLE}
+          (event_id, state, owner, definition_ids, outcomes, claimed_at, processed_at)
+         VALUES (?, 'processing', ?, ?, NULL, ?, NULL)`,
+      ).run(eventId, CLAIM_OWNER, JSON.stringify(definitionIds), new Date().toISOString());
+      return { state: 'acquired', definitionIds };
+    }
+    if (existing.state === 'processed') {
+      return { state: 'processed', outcomes: parseStoredOutcomes(existing.outcomes) };
+    }
+    if (existing.owner === CLAIM_OWNER) return { state: 'busy' };
+    db.prepare(
+      `UPDATE ${TODO_EVENT_CLAIMS_TABLE}
+       SET owner = ?, claimed_at = ?
+       WHERE event_id = ? AND state = 'processing'`,
+    ).run(CLAIM_OWNER, new Date().toISOString(), eventId);
+    return { state: 'acquired', definitionIds: parseStringArray(existing.definition_ids) };
+  })();
+}
+
+function completeTodoEventClaim(eventId: string, outcomes: TodoStatusTriggerOutcome[]): void {
+  const stored: StoredClaimOutcome[] = outcomes.map((outcome) => ({
+    workflowId: outcome.workflowId,
+    outcome: outcome.outcome,
+    ...('run' in outcome ? { runId: outcome.run.runId } : {}),
+    ...('runId' in outcome ? { runId: outcome.runId } : {}),
+    detail: outcome.detail,
+  }));
+  ensureTodoEventClaimsTable().prepare(
+    `UPDATE ${TODO_EVENT_CLAIMS_TABLE}
+     SET state = 'processed', outcomes = ?, processed_at = ?
+     WHERE event_id = ? AND state = 'processing' AND owner = ?`,
+  ).run(JSON.stringify(stored), new Date().toISOString(), eventId, CLAIM_OWNER);
+}
+
+function replayProcessedClaim(
+  deps: RunDriverDeps,
+  event: TodoStatusWorkflowEvent,
+  outcomes: StoredClaimOutcome[],
+): TodoStatusTriggerOutcome[] {
+  return outcomes.flatMap((outcome): TodoStatusTriggerOutcome[] => {
+    if (outcome.outcome === 'suppressed') {
+      return [{ workflowId: outcome.workflowId, outcome: 'suppressed', detail: outcome.detail }];
+    }
+    const run = findRunByTriggerFireRef(
+      deps.root,
+      outcome.workflowId,
+      'todo-status-change',
+      'todo.status_changed',
+      event.id,
+    );
+    return run ? [{
+      workflowId: outcome.workflowId,
+      outcome: 'duplicate',
+      runId: run.runId,
+      detail: `todo event ${event.id} already ran as ${run.runId}`,
+    }] : [];
+  });
 }
 
 export async function fireTodoStatusChangeWorkflows(
@@ -133,8 +258,12 @@ export async function fireTodoStatusChangeWorkflows(
 ): Promise<TodoStatusTriggerOutcome[]> {
   const outcomes: TodoStatusTriggerOutcome[] = [];
   const defs = preloadedDefs ?? loadActiveTodoStatusDefs(deps);
-  for (const { def, trigger } of defs) {
-    if (!triggerMatches(trigger, event)) continue;
+  const matchingDefs = defs.filter(({ trigger }) => triggerMatches(trigger, event));
+  const claim = claimTodoEvent(event.id, matchingDefs.map(({ def }) => def.id));
+  if (claim.state === 'busy') return [];
+  if (claim.state === 'processed') return replayProcessedClaim(deps, event, claim.outcomes);
+  const claimedIds = new Set(claim.definitionIds);
+  for (const { def } of matchingDefs.filter(({ def }) => claimedIds.has(def.id))) {
 
     const existing = findRunByTriggerFireRef(deps.root, def.id, 'todo-status-change', 'todo.status_changed', event.id);
     if (existing) {
@@ -177,6 +306,7 @@ export async function fireTodoStatusChangeWorkflows(
       detail: `workflow run ${run.runId} started from Todo ${event.workItemId} (status: ${run.status})`,
     });
   }
+  completeTodoEventClaim(event.id, outcomes);
   return outcomes;
 }
 
@@ -203,11 +333,10 @@ export async function replayMissedTodoStatusChangeWorkflowFires(
 ): Promise<TodoStatusReplayOutcome[]> {
   const db = initDb();
   const limit = replayLimit(opts.limit);
-  const watermark = parseReplayCursor(getMetaValue(REPLAY_WATERMARK_KEY));
+  ensureTodoEventClaimsTable();
 
-  // With a watermark, replay only events created AFTER everything already handled
-  // (the boot gap) — oldest first. Without one (first boot), fall back to the last
-  // `limit` events, newest-first-then-reversed, matching the prior behaviour.
+  // Per-event claims make completion order irrelevant: replay only rows with no
+  // claim, plus abandoned `processing` claims from a prior gateway process.
   const baseSelect = `SELECT
          e.id,
          e.work_item_id,
@@ -220,23 +349,17 @@ export async function replayMissedTodoStatusChangeWorkflowFires(
          e.created_at AS created_at
        FROM work_item_events e
        JOIN work_items w ON w.id = e.work_item_id
+       LEFT JOIN ${TODO_EVENT_CLAIMS_TABLE} c
+         ON c.event_id = e.id
        WHERE e.from_status IS NOT NULL
          AND e.to_status IS NOT NULL
-         AND e.kind IN ('status_change', 'escalated')`;
+         AND e.kind IN ('status_change', 'escalated')
+         AND (c.state IS NULL OR c.state = 'processing')`;
 
-  const rows = (watermark
-    ? db
-        .prepare(
-          `${baseSelect}
-             AND (e.created_at > ? OR (e.created_at = ? AND e.rowid > ?))
-           ORDER BY e.created_at ASC, e.rowid ASC
-           LIMIT ?`,
-        )
-        .all(watermark.createdAt, watermark.createdAt, watermark.rowid, limit)
-    : db
-        .prepare(`${baseSelect} ORDER BY e.created_at DESC, e.rowid DESC LIMIT ?`)
-        .all(limit)
-        .reverse()) as TodoEventRow[];
+  const rows = db
+    .prepare(`${baseSelect} ORDER BY e.created_at DESC, e.rowid DESC LIMIT ?`)
+    .all(limit)
+    .reverse() as TodoEventRow[];
 
   // Read every active todo-status definition ONCE for the whole batch rather than
   // re-reading all definitions per event.
@@ -255,9 +378,6 @@ export async function replayMissedTodoStatusChangeWorkflowFires(
         assignee: row.assignee,
       },
     }, defs);
-    // This event has now been considered (matched or not) — advance the watermark
-    // past it so a later boot never re-scans it, whether or not a workflow fired.
-    advanceReplayWatermark({ createdAt: row.created_at, rowid: Number(row.rowid) });
     if (outcomes.length === 0) continue;
     replayed.push({
       eventId: row.id,

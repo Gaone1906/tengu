@@ -10,7 +10,8 @@ process.env.JINN_HOME = home;
 
 import { createDefinition } from '../definition-store.js';
 import { getDefinition } from '../definition-store.js';
-import { replayMissedTodoStatusChangeWorkflowFires } from '../todo-status-trigger.js';
+import { fireTodoStatusChangeWorkflows, replayMissedTodoStatusChangeWorkflowFires } from '../todo-status-trigger.js';
+import { getRun, listRuns, saveRun } from '../run-store.js';
 import { WORKFLOW_DEFINITION_SCHEMA_VERSION, type EditableWorkflowDefinition, type WorkflowNode } from '../definition.js';
 import type { RunDriverDeps } from '../run-reconciler.js';
 import { stepSessionKey, type StepSessionProbe } from '../advance.js';
@@ -57,7 +58,7 @@ function deps(): RunDriverDeps {
   };
 }
 
-describe('todo-status replay watermark', () => {
+describe('todo-status replay event claims', () => {
   it('a second replay only processes events created after the first', async () => {
     const store = await import('../../work-items/store.js');
     const transitions = await import('../../work-items/transitions.js');
@@ -71,7 +72,7 @@ describe('todo-status replay watermark', () => {
     const first = await replayMissedTodoStatusChangeWorkflowFires(deps(), { limit: 50 });
     expect(first.map((r) => r.eventId)).toContain(e1);
 
-    // A brand-new transition AFTER the first replay advanced the watermark.
+    // A brand-new transition after the first replay has no event claim yet.
     const t2 = store.createWorkItem({ title: 'second', status: 'executing', source: 'human' });
     const e2 = transitions.transition(t2.id, 'in_review', 'qa').event?.id;
 
@@ -80,5 +81,84 @@ describe('todo-status replay watermark', () => {
     // Only the new event is replayed; the already-processed one is not re-scanned.
     expect(ids).toContain(e2);
     expect(ids).not.toContain(e1);
+  });
+
+  it('does not resurrect a live-suppressed event after the blocking run settles', async () => {
+    const store = await import('../../work-items/store.js');
+    const transitions = await import('../../work-items/transitions.js');
+    transitions.setTodoStatusChangeListener(null);
+    createDefinition(root, def('suppressed-wf'), { now });
+    const todo = store.createWorkItem({ title: 'suppressed live event', status: 'executing', source: 'human' });
+
+    const firstEvent = transitions.transition(todo.id, 'in_review', 'qa').event!;
+    const first = await fireTodoStatusChangeWorkflows(deps(), {
+      id: firstEvent.id,
+      workItemId: todo.id,
+      fromStatus: 'executing',
+      toStatus: 'in_review',
+      item: { source: 'human', department: null, assignee: null },
+    });
+    expect(first.map((outcome) => outcome.outcome)).toEqual(['started']);
+
+    const resetEvent = transitions.transition(todo.id, 'executing', 'qa').event!;
+    await fireTodoStatusChangeWorkflows(deps(), {
+      id: resetEvent.id,
+      workItemId: todo.id,
+      fromStatus: 'in_review',
+      toStatus: 'executing',
+      item: { source: 'human', department: null, assignee: null },
+    });
+    const suppressedEvent = transitions.transition(todo.id, 'in_review', 'qa').event!;
+    const suppressed = await fireTodoStatusChangeWorkflows(deps(), {
+      id: suppressedEvent.id,
+      workItemId: todo.id,
+      fromStatus: 'executing',
+      toStatus: 'in_review',
+      item: { source: 'human', department: null, assignee: null },
+    });
+    expect(suppressed.map((outcome) => outcome.outcome)).toEqual(['suppressed']);
+    const registry = await import('../../sessions/registry.js');
+    const suppressedClaim = registry.initDb().prepare(
+      'SELECT state, outcomes FROM workflow_todo_event_claims WHERE event_id = ?',
+    ).get(suppressedEvent.id) as { state: string; outcomes: string };
+    expect(suppressedClaim.state).toBe('processed');
+    expect(JSON.parse(suppressedClaim.outcomes)).toEqual([
+      expect.objectContaining({ workflowId: 'suppressed-wf', outcome: 'suppressed' }),
+    ]);
+
+    const blockingRunSummary = listRuns(root, 'suppressed-wf')[0];
+    const blockingRun = getRun(root, 'suppressed-wf', blockingRunSummary.runId)!;
+    saveRun(root, { ...blockingRun, status: 'failed', endedAt: now() });
+    await replayMissedTodoStatusChangeWorkflowFires(deps(), { limit: 50 });
+
+    expect(listRuns(root, 'suppressed-wf').filter(
+      (run) => 'fireRef' in run.trigger && run.trigger.fireRef === suppressedEvent.id,
+    )).toHaveLength(0);
+  });
+
+  it('does not let a later-created definition retroactively match a live no-match event', async () => {
+    const store = await import('../../work-items/store.js');
+    const transitions = await import('../../work-items/transitions.js');
+    transitions.setTodoStatusChangeListener(null);
+    const todo = store.createWorkItem({ title: 'historical no match', status: 'executing', source: 'human' });
+    const event = transitions.transition(todo.id, 'in_review', 'qa').event!;
+
+    await expect(fireTodoStatusChangeWorkflows(deps(), {
+      id: event.id,
+      workItemId: todo.id,
+      fromStatus: 'executing',
+      toStatus: 'in_review',
+      item: { source: 'human', department: null, assignee: null },
+    })).resolves.toEqual([]);
+    const registry = await import('../../sessions/registry.js');
+    const noMatchClaim = registry.initDb().prepare(
+      'SELECT state, definition_ids, outcomes FROM workflow_todo_event_claims WHERE event_id = ?',
+    ).get(event.id) as { state: string; definition_ids: string; outcomes: string };
+    expect(noMatchClaim).toEqual({ state: 'processed', definition_ids: '[]', outcomes: '[]' });
+
+    createDefinition(root, def('created-later-wf'), { now });
+    await replayMissedTodoStatusChangeWorkflowFires(deps(), { limit: 50 });
+
+    expect(listRuns(root, 'created-later-wf')).toHaveLength(0);
   });
 });
