@@ -24,6 +24,7 @@ This is your home. Read these files when they provide context. For company opera
 | Path | Purpose |
 |------|---------|
 | `config.yaml` | Gateway configuration (port, engines, connectors, logging) |
+| `secrets/api-keys.json` | Canonical credentials store; documentation and personas reference logical keys instead of literal values |
 | `CLAUDE.md` | Instructions for Claude sessions |
 | `AGENTS.md` | Instructions for Codex sessions |
 | `skills/` | Skill directories, each containing a `SKILL.md` playbook |
@@ -35,6 +36,12 @@ This is your home. Read these files when they provide context. For company opera
 | `sessions/` | Session database (SQLite) - managed by the gateway |
 | `logs/` | Gateway runtime logs |
 | `tmp/` | Temporary scratch space |
+
+---
+
+## Credential Hygiene
+
+`~/.jinn/secrets/api-keys.json` is the single source of truth for credentials. Manuals, personas, templates, and examples must reference only the relevant logical key or environment variable; never embed literal API keys, tokens, authorization strings, or passwords.
 
 ---
 
