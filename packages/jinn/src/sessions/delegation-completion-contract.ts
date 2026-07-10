@@ -13,7 +13,7 @@ const META_KEY = "delegationCompletionContract";
 export const DELEGATION_COMPLETION_TRACKED_META_KEY = "delegationCompletionTracked";
 const OPEN_EXECUTION_STATUSES = new Set(["backlog", "assigned", "executing"]);
 
-const PROGRESS_SIGNAL = /\b(progress(?: update)?|status update|in progress|working (?:on|through)|continu(?:e|ing)|next step|remaining|not (?:done|finished|complete))\b/i;
+const EXPLICIT_UNFINISHED_SIGNAL = /\b(?:in progress|still (?:running|working|pending|incomplete)|working (?:on|through)|continuing|will continue|next step|next i will|remaining work|work remaining|not (?:done|finished|complete))\b/i;
 const TERMINAL_SIGNAL = /\b(final report|completed|complete|done|finished|shipped|implemented|resolved|all tests pass(?:ed)?|(?:tests?|checks?) (?:now )?pass(?:ed)?|ready for review|ready to merge|(?:the )?(?:pr|patch) (?:is )?ready|commit (?:sha|hash)|hand(?:-| )?off)\b/i;
 const PARENT_WAIT_SIGNAL = /\?|\b(need (?:your|the parent's) input|please confirm|which (?:option|approach)|should i|would you|let me know|blocked (?:on|by)|waiting on|awaiting (?:approval|confirmation|input)|waiting for (?:approval|confirmation|input|you|the parent)|(?:need|missing|without|awaiting) (?:the )?(?:credentials?|access|permissions?|api key|token|secret))\b/i;
 
@@ -47,12 +47,15 @@ function readGuard(session: Session): Guard | null {
 
 function isProgressOnly(text: string): boolean {
   const terminalCandidate = text.replace(/\bnot\s+(?:done|finished|complete)\b/gi, " ");
-  const hasProgress = PROGRESS_SIGNAL.test(text);
+  // A generic status/progress header is not evidence that work remains. The
+  // additive nudge requires the child to positively assert an unfinished or
+  // continuation condition; otherwise the ordinary parent callback wins.
+  const hasExplicitUnfinished = EXPLICIT_UNFINISHED_SIGNAL.test(text);
   const hasTerminal = TERMINAL_SIGNAL.test(terminalCandidate);
   // Mixed terminal + unfinished clauses are ambiguous. Under the fail-safe
   // contract, ambiguity surfaces to the parent; it never authorizes a nudge.
-  if (hasTerminal && hasProgress) return false;
-  return hasProgress && !hasTerminal && !PARENT_WAIT_SIGNAL.test(text);
+  if (hasTerminal && hasExplicitUnfinished) return false;
+  return hasExplicitUnfinished && !hasTerminal && !PARENT_WAIT_SIGNAL.test(text);
 }
 
 function isStructurallyAwaitingParent(session: Session): boolean {

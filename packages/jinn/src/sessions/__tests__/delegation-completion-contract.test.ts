@@ -144,6 +144,35 @@ describe("delegation completion contract", () => {
   });
 
   it.each([
+    "Status update: all checks are green and the deliverable is ready",
+    "Progress update: success. No further action is required",
+  ])("does not let a generic update header authorize a nudge: %s", async (message) => {
+    getWorkItem.mockReturnValue(openItem("executing"));
+    const postFollowUp = vi.fn().mockResolvedValue(undefined);
+
+    const outcome = await enforceDelegationCompletionContract(child(), { result: message }, { postFollowUp });
+
+    expect(outcome).toBe("pass");
+    expect(postFollowUp).not.toHaveBeenCalled();
+    expect(claimDelegationCompletionNudge).not.toHaveBeenCalled();
+  });
+
+  it("does not let bare remaining language authorize a nudge", async () => {
+    getWorkItem.mockReturnValue(openItem("executing"));
+    const postFollowUp = vi.fn().mockResolvedValue(undefined);
+
+    const outcome = await enforceDelegationCompletionContract(
+      child(),
+      { result: "Remaining notes are attached for context." },
+      { postFollowUp },
+    );
+
+    expect(outcome).toBe("pass");
+    expect(postFollowUp).not.toHaveBeenCalled();
+    expect(claimDelegationCompletionNudge).not.toHaveBeenCalled();
+  });
+
+  it.each([
     "Remaining checks now pass; the patch is ready for review.",
     "Progress update: tests pass and the PR is ready.",
     "Remaining checks pass; ready to merge.",
