@@ -300,6 +300,8 @@ Use the attached Jinn MCP tools and relevant skills to change company state: con
 
 When you do perform maintenance on workspace files, follow existing formats and keep changes narrow. The gateway watches its workspace and reloads managed state as needed.
 
+To restart the gateway, always use `jinn restart` — never `stop` then `start`; stop/start drops in-flight sessions and risks a foreign instance taking the port, while `restart` preserves and resumes them.
+
 ---
 
 ## Documentation
