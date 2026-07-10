@@ -10,7 +10,9 @@ import { gatewayBaseUrl } from "../gateway/gateway-info.js";
  *
  * Sections are split into three tiers that are assembled in order.
  * If the accumulated prompt exceeds the configurable budget (default 100K chars),
- * lower-tier sections are progressively replaced with compact summaries.
+ * lower-tier sections are progressively summarized and omitted. Essential
+ * sections are compacted only as a last resort, then the configured hard cap
+ * is applied deterministically.
  *
  *   ESSENTIAL  – identity, session, config                (always included)
  *   STANDARD   – org summary, cron summary, connectors,
@@ -195,7 +197,10 @@ export function buildTalkThreadsSection(threads?: TalkThreadSummary[]): string |
  * before responding to the user.
  */
 export function buildContext(opts: BuildContextOptions): string {
-  const maxChars = opts.config?.context?.maxChars ?? DEFAULT_MAX_CONTEXT_CHARS;
+  const configuredMaxChars = opts.config?.context?.maxChars ?? DEFAULT_MAX_CONTEXT_CHARS;
+  const maxChars = Number.isFinite(configuredMaxChars)
+    ? Math.max(0, Math.floor(configuredMaxChars))
+    : DEFAULT_MAX_CONTEXT_CHARS;
   const sections: Section[] = [];
   const platformContext = buildPlatformContextSnapshot(opts);
   const gatewayUrl = platformContext.gatewayBaseUrl;
@@ -238,7 +243,7 @@ export function buildContext(opts: BuildContextOptions): string {
       tier: Tier.ESSENTIAL,
       marker: "# Voice mode",
       content: opts.voicePersona,
-      summary: "", // always included, never trimmed
+      summary: "# Voice mode\nFollow the configured voice persona for this turn.",
     });
   }
 
@@ -249,7 +254,7 @@ export function buildContext(opts: BuildContextOptions): string {
       tier: Tier.ESSENTIAL,
       marker: "## Your open COO threads",
       content: rosterSection,
-      summary: "", // always included, never trimmed
+      summary: "## Your open COO threads\nContinue an existing thread for the same topic; start a new thread for a new topic.",
     });
   }
 
@@ -275,7 +280,7 @@ export function buildContext(opts: BuildContextOptions): string {
     tier: Tier.ESSENTIAL,
     marker: "## Current session",
     content: renderPlatformSessionContext(platformContext),
-    summary: "", // always included, no trimming
+    summary: renderPlatformSessionContext(platformContext),
   });
 
   // ── ESSENTIAL: Configuration awareness ──────────────────────
@@ -284,7 +289,7 @@ export function buildContext(opts: BuildContextOptions): string {
       tier: Tier.ESSENTIAL,
       marker: "## Current configuration",
       content: renderPlatformConfigContext(platformContext),
-      summary: "", // always included
+      summary: renderPlatformConfigContext(platformContext),
     });
   }
 
@@ -294,9 +299,11 @@ export function buildContext(opts: BuildContextOptions): string {
       tier: Tier.ESSENTIAL,
       marker: opts.employee ? "## Company Identity" : "## COO Company Anchor",
       content: opts.employee
-        ? buildCompanyIdentityBlock(opts.employee, opts.hierarchy, engine, opts.jinnMcpAttached)
+        ? buildCompanyIdentityBlock(engine, opts.jinnMcpAttached)
         : buildCooCompanyAnchor(engine, opts.jinnMcpAttached),
-      summary: "",
+      summary: opts.employee
+        ? buildCompanyIdentitySummary(engine)
+        : buildCooCompanyAnchorSummary(engine),
     });
   }
 
@@ -469,19 +476,9 @@ ${systemContext}`;
 }
 
 function buildCompanyIdentityBlock(
-  employee: Employee,
-  hierarchy: OrgHierarchy | undefined,
   engine: string | undefined,
   jinnMcpAttached: boolean,
 ): string {
-  const node = hierarchy?.nodes[employee.name];
-  const manager = node?.parentName
-    ? hierarchy?.nodes[node.parentName]?.employee.displayName ?? node.parentName
-    : "COO";
-  const directReports = node?.directReports
-    .map((name) => hierarchy?.nodes[name]?.employee.displayName ?? name)
-    .join(", ") || "none";
-  const level = node?.depth ?? 0;
   const engineName = engine ? `\`${engine}\`` : "current";
   const mcpLine = jinnMcpAttached
     ? `Your hands are the attached Jinn MCP on the ${engineName} engine - default to it to read/update the company (org, sessions, Todos, Workflows, cron, reference). Local shell/filesystem access remains available for implementation work or when MCP has no hand.`
@@ -489,8 +486,6 @@ function buildCompanyIdentityBlock(
 
   return [
     "## Company Identity",
-    `You are ${employee.displayName} (\`${employee.name}\`), a ${employee.rank} in ${employee.department}, level ${level} of the company.`,
-    `You report to ${manager}; direct reports: ${directReports}.`,
     mcpLine,
     "Pick colleagues by role/persona fit. One employee may run multiple child sessions in parallel; reuse the fit instead of spreading to unrelated employees. If none fits, propose a hire.",
     "Todos are your live work ledger - find and update your Todo; create one only for durable work you own.",
@@ -498,6 +493,16 @@ function buildCompanyIdentityBlock(
     "You have autonomy in your lane; end your turn when waiting on another employee.",
     "Do NOT bombard the operator. Questions and approvals route to your manager/COO by default; the aCEO/operator is the exception (money, irreversible, public, legal/security, or explicit COO escalation).",
   ].filter(Boolean).join("\n");
+}
+
+function buildCompanyIdentitySummary(engine: string | undefined): string {
+  const engineName = engine ? ` on the \`${engine}\` engine` : "";
+  return [
+    "## Company Identity",
+    `Use the attached Jinn MCP${engineName} for company state and delegation.`,
+    "Track durable work in Todos; use Workflows for reusable multi-step work.",
+    "Route ordinary questions and approvals through your manager/COO.",
+  ].join("\n");
 }
 
 function buildChainOfCommand(
@@ -591,6 +596,15 @@ function buildCooCompanyAnchor(engine?: string, jinnMcpAttached = false): string
     "- Use company-reference reads before asking the operator: sessions/search, knowledge, cost, and cron.",
     "- Keep the operator out of the firehose: route questions and approvals through managers/COO by default, escalating to the operator only for money, irreversible, public, legal/security, or explicit escalation cases.",
   ].filter(Boolean).join("\n");
+}
+
+function buildCooCompanyAnchorSummary(engine?: string): string {
+  const engineName = engine ? ` on the \`${engine}\` engine` : "";
+  return [
+    "## COO Company Anchor",
+    `Use the attached Jinn MCP${engineName} for company state, delegation, Todos, Workflows, and reference reads.`,
+    "Match work to employee roles and keep routine coordination away from the operator.",
+  ].join("\n");
 }
 
 const WORKING_ROSTER_HEADING = "## Working roster (scoped orientation; not exhaustive)";
@@ -942,7 +956,6 @@ function buildConnectorContext(connectors: string[], gatewayUrl: string, jinnMcp
     return [
       `## Available connectors: ${connectors.join(", ")}`,
       `Use the attached Jinn MCP tools and company routing for company operations; connector configuration lives in \`config.yaml\`.`,
-      `Local shell/filesystem access remains available for implementation work.`,
     ].join("\n");
   }
   return [
@@ -953,51 +966,10 @@ function buildConnectorContext(connectors: string[], gatewayUrl: string, jinnMcp
 }
 
 function buildEnvironmentContext(): string | null {
-  const home = process.env.HOME || process.env.USERPROFILE || "";
-  const lines: string[] = [`## Local environment`];
-  let hasContent = false;
-
-  const toolDirs: { dir: string; label: string; description: string }[] = [
-    { dir: ".openclaw", label: "OpenClaw", description: "AI agent platform (agents, cron, memory, hooks, credentials)" },
-    { dir: ".claude", label: "Claude Code", description: "Claude Code CLI config and projects" },
-    { dir: ".codex", label: "Codex", description: "OpenAI Codex CLI config" },
-  ];
-
-  for (const tool of toolDirs) {
-    const toolPath = path.join(home, tool.dir);
-    try {
-      const stat = fs.statSync(toolPath);
-      if (stat.isDirectory()) {
-        const contents = fs.readdirSync(toolPath).filter(f => !f.startsWith("."));
-        lines.push(`- **${tool.label}** (\`~/${tool.dir}/\`): ${tool.description}`);
-        if (contents.length > 0) {
-          lines.push(`  Contents: ${contents.slice(0, 15).join(", ")}${contents.length > 15 ? `, ... (${contents.length} total)` : ""}`);
-        }
-        hasContent = true;
-      }
-    } catch {
-      // doesn't exist
-    }
-  }
-
-  // Scan ~/Projects for user's codebases
-  const projectsDir = path.join(home, "Projects");
-  try {
-    const projects = fs.readdirSync(projectsDir).filter(f => {
-      try { return fs.statSync(path.join(projectsDir, f)).isDirectory(); } catch { return false; }
-    });
-    if (projects.length > 0) {
-      lines.push(`- **Projects** (\`~/Projects/\`): ${projects.join(", ")}`);
-      hasContent = true;
-    }
-  } catch {
-    // no Projects dir
-  }
-
-  if (!hasContent) return null;
-
-  lines.push(`\nWhen the user asks about tools or systems on their machine, check these directories first before saying you don't know. Be resourceful — explore the filesystem.`);
-  return lines.join("\n");
+  return [
+    "## Local environment",
+    "When a task depends on local tools or projects, inspect them on demand in `~/.jinn/`, `~/.claude/`, `~/.codex/`, `~/.openclaw/`, and `~/Projects/` before concluding they are unavailable.",
+  ].join("\n");
 }
 
 /**
@@ -1043,7 +1015,6 @@ function buildApiReference(
     return [
       header,
       `Use the attached Jinn MCP tools for company operations (sessions, delegation, Todos, Workflows, org, reference reads, and managed files).`,
-      `Local shell/filesystem access remains available for implementation work.`,
       `The full HTTP endpoint reference remains in CLAUDE.md / AGENTS.md for gateway maintenance and non-MCP fallback.`,
     ].join("\n");
   }
@@ -1072,24 +1043,52 @@ function buildApiReference(
 }
 
 /**
- * Progressive trimming by tier: OPTIONAL sections are replaced with summaries first,
- * then STANDARD, then (as a last resort) ESSENTIAL sections.
+ * Progressive trimming by tier. Summaries preserve orientation first, then
+ * lower tiers are omitted. Essential summaries are the last semantic fallback;
+ * an exact final bound handles pathological configurations.
  */
 function trimContext(sections: Section[], maxChars: number): string {
-  let parts = sections.map(s => s.content);
-  let result = parts.join("\n\n");
+  if (maxChars === 0) return "";
+
+  const parts: Array<string | null> = sections.map(s => s.content);
+  const assemble = (): string => parts.filter((part): part is string => Boolean(part)).join("\n\n");
+  let result = assemble();
   if (result.length <= maxChars) return result;
 
-  // Trim OPTIONAL sections first, then STANDARD
+  // Preserve orientation with compact summaries before omitting whole tiers.
   for (const tier of [Tier.OPTIONAL, Tier.STANDARD]) {
     for (let i = sections.length - 1; i >= 0; i--) {
       if (result.length <= maxChars) break;
       if (sections[i].tier === tier && sections[i].summary) {
         parts[i] = sections[i].summary;
-        result = parts.join("\n\n");
+        result = assemble();
       }
     }
   }
 
-  return result;
+  for (const tier of [Tier.OPTIONAL, Tier.STANDARD]) {
+    for (let i = sections.length - 1; i >= 0; i--) {
+      if (result.length <= maxChars) break;
+      if (sections[i].tier === tier) {
+        parts[i] = null;
+        result = assemble();
+      }
+    }
+  }
+
+  // Oversized personas and voice instructions can dominate the essential tier.
+  // Compact every essential section before resorting to a character-level bound.
+  for (let i = sections.length - 1; i >= 0; i--) {
+    if (result.length <= maxChars) break;
+    if (sections[i].tier === Tier.ESSENTIAL && sections[i].summary) {
+      parts[i] = sections[i].summary;
+      result = assemble();
+    }
+  }
+
+  if (result.length <= maxChars) return result;
+
+  const marker = "\n\n[Context truncated to context.maxChars]";
+  if (maxChars <= marker.length) return result.slice(0, maxChars);
+  return `${result.slice(0, maxChars - marker.length).trimEnd()}${marker}`.slice(0, maxChars);
 }

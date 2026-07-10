@@ -273,12 +273,13 @@ describe("buildContext — Jinn MCP usage directive", () => {
     expect(out).not.toContain("built-in `jinn` MCP attached");
   });
 
-  it("emits a lean company identity block only for employee sessions with Jinn MCP attached", () => {
+  it("emits company operating doctrine without repeating employee identity", () => {
     const out = buildContext({ ...baseOpts, employee: qa, hierarchy, jinnMcpAttached: true });
+    const companyBlock = out.slice(out.indexOf("## Company Identity"), out.indexOf("\n## ", out.indexOf("## Company Identity") + 3));
 
     expect(out).toContain("## Company Identity");
-    expect(out).toContain("You are QA Engineer (`qa-engineer`), a senior in quality, level 1 of the company.");
-    expect(out).toContain("You report to Ops Director; direct reports: Junior QA.");
+    expect(companyBlock).not.toContain("You are QA Engineer");
+    expect(companyBlock).not.toContain("You report to Ops Director");
     expect(out).toContain("Your hands are the attached Jinn MCP");
     expect(out).toContain("Todos are your live work ledger");
     expect(out).toContain("Workflows are reusable automations (the HOW)");
@@ -641,24 +642,30 @@ describe("buildContext — scoped working roster", () => {
 });
 
 describe("buildContext — maxChars trimming", () => {
-  it("stays within a configured maxChars cap by trimming optional/standard sections", () => {
+  it("strictly bounds an oversized employee context to configured maxChars", () => {
     const cap = 1200;
     const config = {
       gateway: { host: "127.0.0.1", port: 7777 },
       engines: { default: "claude", claude: { model: "opus" } },
       context: { maxChars: cap },
     } as unknown as JinnConfig;
+    const oversizedEmployee: Employee = {
+      ...minimalEmployee,
+      name: "oversized-employee",
+      displayName: "Oversized Employee",
+      persona: "Critical role instruction. ".repeat(1000),
+    };
     const out = buildContext({
       ...baseOpts,
       config,
+      employee: oversizedEmployee,
       connectors: ["slack"],
+      jinnMcpAttached: true,
     });
-    // Trimming is best-effort by tier; the essential identity + session must survive.
-    expect(out).toContain("# You are Jinn");
+    expect(out.length).toBeLessThanOrEqual(cap);
+    expect(out).toContain("# You are Oversized Employee");
     expect(out).toContain("## Current session");
-    // It should be dramatically smaller than the untrimmed (no-cap) output.
-    const uncapped = buildContext({ ...baseOpts, connectors: ["slack"] });
-    expect(out.length).toBeLessThan(uncapped.length);
+    expect(out).toContain("## Company Identity");
   });
 
   it("does not trim when output is under the default cap", () => {
@@ -667,6 +674,30 @@ describe("buildContext — maxChars trimming", () => {
     // Essential sections present and intact.
     expect(out).toContain("# You are Jinn");
     expect(out).toContain("## Current session");
+  });
+});
+
+describe("buildContext — local discovery diet", () => {
+  it("does not dump tool-directory contents or project names into every prompt", () => {
+    const originalHome = process.env.HOME;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-context-home-"));
+    fs.mkdirSync(path.join(home, ".codex"));
+    fs.writeFileSync(path.join(home, ".codex", "private-state.json"), "{}");
+    fs.mkdirSync(path.join(home, "Projects", "private-project"), { recursive: true });
+    process.env.HOME = home;
+
+    try {
+      const out = buildContext({ ...baseOpts });
+      expect(out).toContain("## Local environment");
+      expect(out).toContain("inspect them on demand");
+      expect(out).not.toContain("Contents:");
+      expect(out).not.toContain("private-state.json");
+      expect(out).not.toContain("private-project");
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
