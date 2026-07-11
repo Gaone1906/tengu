@@ -6,9 +6,9 @@ import os from "node:os";
 /**
  * Tests for forkCodexSession() in ../fork.ts.
  *
- * forkCodexSession reads/writes ~/.codex/sessions, deriving the root from
- * os.homedir(). We mock node:os so homedir() points at a throwaway temp dir,
- * keeping the real filesystem untouched. The dest layout mirrors the source:
+ * forkCodexSession defaults to ~/.codex/sessions, deriving the root from
+ * os.homedir(), but accepts explicit roots for Jinn's per-session Codex homes.
+ * We keep every path under a throwaway temp dir. The dest layout is:
  *   <home>/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<uuid>.jsonl
  * (year/month/day are UTC-derived in fork.ts).
  */
@@ -49,8 +49,9 @@ function seedSource(
   firstLine: string,
   rest: string[],
   date: { y: string; m: string; d: string } = { y: "2025", m: "01", d: "02" },
+  root: string = sessionsRoot(),
 ): string {
-  const dir = path.join(sessionsRoot(), date.y, date.m, date.d);
+  const dir = path.join(root, date.y, date.m, date.d);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `rollout-2025-01-02T00-00-00-${sessionId}.jsonl`);
   fs.writeFileSync(file, [firstLine, ...rest].join("\n"));
@@ -58,8 +59,7 @@ function seedSource(
 }
 
 /** Find the single forked file (dated dir != the source's 2025/01/02). */
-function findForkedFile(excludeSourceFile: string): string | null {
-  const root = sessionsRoot();
+function findForkedFile(excludeSourceFile: string, root: string = sessionsRoot()): string | null {
   const found: string[] = [];
   const walk = (dir: string) => {
     for (const name of fs.readdirSync(dir)) {
@@ -124,6 +124,25 @@ describe("forkCodexSession", () => {
     // Remaining lines copied verbatim.
     expect(forkedLines[1]).toBe(line2);
     expect(forkedLines[2]).toBe(line3);
+  });
+
+  it("copies a fork from the source session root into the destination session root", () => {
+    const srcId = "44444444-4444-4444-4444-444444444444";
+    const sourceRoot = path.join(fakeHome, "codex-homes", "source", "sessions");
+    const destinationRoot = path.join(fakeHome, "codex-homes", "destination", "sessions");
+    const sourceFile = seedSource(srcId, JSON.stringify({
+      type: "session_meta",
+      timestamp: "2025-01-02T00:00:00.000Z",
+      payload: { id: srcId, cwd: "/tmp/project" },
+    }), [], undefined, sourceRoot);
+
+    const result = forkCodexSession(srcId, {
+      sourceSessionsRoot: sourceRoot,
+      destinationSessionsRoot: destinationRoot,
+    });
+
+    expect(path.basename(findForkedFile(sourceFile, destinationRoot)!)).toContain(result.engineSessionId);
+    expect(findForkedFile(sourceFile, sourceRoot)).toBeNull();
   });
 
   it("throws 'Codex session file not found' when the source does not exist", () => {

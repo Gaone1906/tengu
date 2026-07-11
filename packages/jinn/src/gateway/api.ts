@@ -159,7 +159,7 @@ import { saveConfigAtomic } from "../shared/config.js";
 import { logger } from "../shared/logger.js";
 import { redactText } from "../shared/redact.js";
 import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLanguages, WHISPER_LANGUAGES } from "../stt/stt.js";
-import { JINN_HOME } from "../shared/paths.js";
+import { CODEX_HOMES_DIR, JINN_HOME } from "../shared/paths.js";
 import { resolveEffort } from "../shared/effort.js";
 import { selectClaudeModelFallback } from "../shared/model-fallback.js";
 import { detectRateLimit } from "../shared/rateLimit.js";
@@ -2936,7 +2936,13 @@ export async function handleApiRequest(
               bin: context.getConfig().engines.claude.bin,
             }
           : undefined;
-        const forkResult = await forkEngineSession(source.engine, source.engineSessionId, JINN_HOME, interactive);
+        const codex = source.engine === "codex"
+          ? {
+              sourceSessionsRoot: path.join(CODEX_HOMES_DIR, params.id, "sessions"),
+              destinationSessionsRoot: path.join(CODEX_HOMES_DIR, newSession.id, "sessions"),
+            }
+          : undefined;
+        const forkResult = await forkEngineSession(source.engine, source.engineSessionId, JINN_HOME, { interactive, codex });
 
         // 3. Store the new engine session ID
         recordEngineSessionId(newSession.id, newSession.engine, forkResult.engineSessionId, {

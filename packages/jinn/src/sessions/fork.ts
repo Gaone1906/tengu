@@ -20,6 +20,11 @@ export interface ForkResult {
   engineSessionId: string;
 }
 
+export interface ForkCodexOpts {
+  sourceSessionsRoot?: string;
+  destinationSessionsRoot?: string;
+}
+
 /**
  * Optional interactive context for forking. When provided, the source session's
  * warm PTY is released first, and the fork itself is spawned in a PTY (no `-p`)
@@ -209,13 +214,20 @@ async function findNewJsonlSince(projectDir: string, sinceMs: number, timeoutMs:
 
 /**
  * Fork a Codex CLI session by copying its JSONL file with a new UUID.
+ * Explicit roots support Jinn's per-session CODEX_HOME overlays; the legacy
+ * global Codex home remains the default and source fallback.
  * Returns the new engine session ID.
  */
-export function forkCodexSession(engineSessionId: string): ForkResult {
+export function forkCodexSession(engineSessionId: string, opts: ForkCodexOpts = {}): ForkResult {
   logger.info(`Forking Codex session ${engineSessionId}`);
 
-  const sessionsRoot = path.join(os.homedir(), ".codex", "sessions");
-  const sourceFile = findCodexSessionFile(sessionsRoot, engineSessionId);
+  const defaultSessionsRoot = path.join(os.homedir(), ".codex", "sessions");
+  const sourceSessionsRoot = opts.sourceSessionsRoot ?? defaultSessionsRoot;
+  const destinationSessionsRoot = opts.destinationSessionsRoot ?? defaultSessionsRoot;
+  const sourceFile = findCodexSessionFile(sourceSessionsRoot, engineSessionId)
+    ?? (sourceSessionsRoot !== defaultSessionsRoot
+      ? findCodexSessionFile(defaultSessionsRoot, engineSessionId)
+      : null);
   if (!sourceFile) {
     throw new Error(`Codex session file not found for ${engineSessionId}`);
   }
@@ -227,7 +239,7 @@ export function forkCodexSession(engineSessionId: string): ForkResult {
   const day = String(now.getUTCDate()).padStart(2, "0");
   const ts = now.toISOString().replace(/[:.]/g, "-").slice(0, 19);
 
-  const destDir = path.join(sessionsRoot, year, month, day);
+  const destDir = path.join(destinationSessionsRoot, year, month, day);
   fs.mkdirSync(destDir, { recursive: true });
   const destFile = path.join(destDir, `rollout-${ts}-${newUuid}.jsonl`);
 
@@ -325,20 +337,20 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 /**
  * Fork an engine session based on engine type.
  *
- * For Claude, the optional `interactive` ctx routes the fork through a PTY
+ * For Claude, `opts.interactive` routes the fork through a PTY
  * (no `-p`) so it bills as `cc_entrypoint=cli`. Codex and Hermes ignore it.
  */
 export async function forkEngineSession(
   engine: string,
   engineSessionId: string,
   cwd: string,
-  interactive?: InteractiveForkCtx,
+  opts: { interactive?: InteractiveForkCtx; codex?: ForkCodexOpts } = {},
 ): Promise<ForkResult> {
   switch (engine) {
     case "claude":
-      return forkClaudeSession({ engineSessionId, cwd, interactive });
+      return forkClaudeSession({ engineSessionId, cwd, interactive: opts.interactive });
     case "codex":
-      return forkCodexSession(engineSessionId);
+      return forkCodexSession(engineSessionId, opts.codex);
     case "hermes":
       return forkHermesSession(engineSessionId, cwd);
     default:
@@ -371,4 +383,3 @@ function findCodexSessionFile(root: string, sessionId: string): string | null {
   }
   return null;
 }
-
