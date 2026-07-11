@@ -7,6 +7,17 @@ HELPER="${JINN_SANDBOX_HELPER:-$ORIGINAL_HOME/.jinn/skills/jinn-sandbox/scripts/
 PORT="${JINN_VERIFY_PORT:-7800}"
 RUN_AUTHORS=0
 
+# Keep the helper, gateway, seed scripts, and Playwright on one Node ABI. On
+# developer machines a global `node` can be newer than the Node beside pnpm,
+# while the repo's native better-sqlite3 binding was built by that pnpm
+# toolchain. An explicit override remains available for CI.
+PNPM_BIN="$(command -v pnpm || true)"
+if [[ -z "$PNPM_BIN" ]]; then echo "pnpm is required" >&2; exit 2; fi
+NODE_BIN="${JINN_VERIFY_NODE_BIN:-$(dirname "$PNPM_BIN")/node}"
+if [[ ! -x "$NODE_BIN" ]]; then echo "Node beside pnpm not found: $NODE_BIN" >&2; exit 2; fi
+NODE_DIR="$(dirname "$NODE_BIN")"
+export PATH="$NODE_DIR:$PATH"
+
 if [[ "${1:-}" == "--with-authors" ]]; then RUN_AUTHORS=1; shift; fi
 if [[ $# -ne 0 ]]; then echo "Usage: $0 [--with-authors]" >&2; exit 2; fi
 if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 7800 )); then echo "JINN_VERIFY_PORT must be an integer at or above 7800" >&2; exit 2; fi
