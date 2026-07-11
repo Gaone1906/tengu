@@ -11,6 +11,12 @@ type Registry = typeof import("../registry.js");
 
 let registry: Registry;
 
+const UNICODE_WHITE_SPACE = [
+  0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x0020, 0x0085, 0x00a0,
+  0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006,
+  0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+] as const;
+
 function callbackInput(overrides: Record<string, unknown> = {}) {
   return {
     parentSessionId: "parent-1",
@@ -179,6 +185,53 @@ describe("callback delivery schema migration", () => {
     });
   });
 
+  it("canonicalizes every Unicode White_Space edge during migration and after reopen", () => {
+    const dbPath = path.join(home, `unicode-migration-${Date.now()}.db`);
+    let database = new Database(dbPath);
+    database.exec(`
+      CREATE TABLE callback_deliveries (
+        id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL,
+        child_session_id TEXT NOT NULL,
+        attempt_token TEXT NOT NULL,
+        terminal_outcome TEXT NOT NULL,
+        terminal_version INTEGER NOT NULL,
+        callback_kind TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted')),
+        message_id TEXT,
+        queue_item_id TEXT,
+        created_at TEXT NOT NULL,
+        accepted_at TEXT
+      )
+    `);
+    const insert = database.prepare(`
+      INSERT INTO callback_deliveries VALUES (?, ?, ?, ?, 'succeeded', 1,
+        'parent-completion', '{"message":"ok","displayMessage":"ok"}',
+        'pending', NULL, NULL, ?, NULL)
+    `);
+    for (const codePoint of UNICODE_WHITE_SPACE) {
+      const edge = String.fromCodePoint(codePoint);
+      const hex = codePoint.toString(16);
+      insert.run(`ws-${hex}`, `${edge}parent-${hex}${edge}`, `child-${hex}`, `attempt-${hex}`, new Date().toISOString());
+    }
+
+    registry.migrateCallbackDeliveriesSchema(database);
+    database.close();
+    database = new Database(dbPath);
+    registry.migrateCallbackDeliveriesSchema(database);
+
+    const rows = database.prepare(`
+      SELECT id, parent_session_id AS parentSessionId FROM callback_deliveries ORDER BY id
+    `).all() as Array<{ id: string; parentSessionId: string }>;
+    expect(rows).toHaveLength(UNICODE_WHITE_SPACE.length);
+    for (const row of rows) {
+      expect(row.parentSessionId).toBe(`parent-${row.id.slice(3)}`);
+      expect(row.parentSessionId).not.toMatch(/^\p{White_Space}|\p{White_Space}$/u);
+    }
+    database.close();
+  });
+
   it("rebuilds an all-column table whose canonical and payload-shape constraints are incomplete", () => {
     const database = new Database(":memory:");
     database.exec(`
@@ -308,6 +361,57 @@ describe("callback delivery identity", () => {
       terminalOutcome: "succeeded",
       callbackKind: "parent-completion",
     });
+  });
+
+  it("uses the complete Unicode White_Space set for claims and SQLite constraints", () => {
+    const database = registry.initDb();
+    for (const codePoint of UNICODE_WHITE_SPACE) {
+      const edge = String.fromCodePoint(codePoint);
+      const hex = codePoint.toString(16);
+      const padded = registry.claimCallbackDelivery(callbackInput({
+        parentSessionId: `${edge}parent-${hex}${edge}`,
+        childSessionId: `child-${hex}`,
+        attemptToken: `attempt-${hex}`,
+      }));
+      const canonical = registry.claimCallbackDelivery(callbackInput({
+        parentSessionId: `parent-${hex}`,
+        childSessionId: `child-${hex}`,
+        attemptToken: `attempt-${hex}`,
+      }));
+
+      expect(canonical).toMatchObject({ claimed: false, delivery: { id: padded.delivery.id } });
+      expect(padded.delivery.parentSessionId).toBe(`parent-${hex}`);
+      expect(() => registry.claimCallbackDelivery(callbackInput({
+        parentSessionId: edge,
+        childSessionId: `blank-child-${hex}`,
+        attemptToken: `blank-attempt-${hex}`,
+      }))).toThrow(/parentSessionId is required/i);
+      expect(() => database.prepare(`
+        INSERT INTO callback_deliveries (
+          id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
+          terminal_version, callback_kind, payload, status, created_at
+        ) VALUES (?, ?, ?, ?, 'succeeded', 1, 'parent-completion', ?, 'pending', ?)
+      `).run(
+        `direct-${hex}`,
+        `${edge}direct-parent-${hex}${edge}`,
+        `direct-child-${hex}`,
+        `direct-attempt-${hex}`,
+        JSON.stringify({ message: "ok", displayMessage: "ok" }),
+        new Date().toISOString(),
+      )).toThrow();
+    }
+
+    const sensitive = registry.claimCallbackDelivery(callbackInput({
+      parentSessionId: "Case-Sensitive",
+      childSessionId: "case-child",
+      attemptToken: "case-attempt",
+    }));
+    const distinctCase = registry.claimCallbackDelivery(callbackInput({
+      parentSessionId: "case-sensitive",
+      childSessionId: "case-child",
+      attemptToken: "case-attempt",
+    }));
+    expect(sensitive.delivery.id).not.toBe(distinctCase.delivery.id);
   });
 
   it.each([
@@ -484,6 +588,62 @@ describe("callback delivery retry lifecycle", () => {
       lastError: expect.stringMatching(/invalid payload json/i),
       deadLetteredAt: expect.any(Number),
     });
+  });
+
+  it("quarantines mixed identity and lifecycle poison per row and continues after reopen", () => {
+    const database = registry.initDb();
+    const baseValues = {
+      payload: JSON.stringify({ message: "poison", displayMessage: "poison" }),
+      createdAt: new Date().toISOString(),
+    };
+    const poisonRows = [
+      { id: "poison-padded", parent: " parent-poison ", child: "child", token: "attempt", outcome: "failed", version: 1, kind: "parent-completion", attempts: 0, next: null, last: null },
+      { id: "poison-nfd", parent: "parent", child: "cafe\u0301", token: "attempt", outcome: "failed", version: 1, kind: "parent-completion", attempts: 0, next: null, last: null },
+      { id: "poison-empty", parent: "", child: "child", token: "attempt", outcome: "failed", version: 1, kind: "parent-completion", attempts: 0, next: null, last: null },
+      { id: "poison-version", parent: "parent", child: "child", token: "attempt", outcome: "failed", version: 0, kind: "parent-completion", attempts: 0, next: null, last: null },
+      { id: "poison-attempts", parent: "parent", child: "child", token: "attempt", outcome: "failed", version: 1, kind: "parent-completion", attempts: -1, next: null, last: null },
+      { id: "poison-next", parent: "parent", child: "child", token: "attempt", outcome: "failed", version: 1, kind: "parent-completion", attempts: 1, next: -5, last: null },
+      { id: "poison-last", parent: "parent", child: "child", token: "attempt", outcome: "failed", version: 1, kind: "parent-completion", attempts: 1, next: null, last: -5 },
+    ];
+    database.pragma("ignore_check_constraints = ON");
+    const insert = database.prepare(`
+      INSERT INTO callback_deliveries (
+        id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
+        terminal_version, callback_kind, payload, status, attempt_count,
+        next_attempt_at, last_attempt_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+    `);
+    for (const row of poisonRows) {
+      insert.run(
+        row.id, row.parent, row.child, `${row.token}-${row.id}`, row.outcome, row.version, row.kind,
+        baseValues.payload, row.attempts, row.next, row.last, baseValues.createdAt,
+      );
+    }
+    database.pragma("ignore_check_constraints = OFF");
+    const valid = registry.claimCallbackDelivery(callbackInput({
+      parentSessionId: "valid-after-poison",
+      childSessionId: "valid-child-after-poison",
+      attemptToken: "valid-attempt-after-poison",
+    })).delivery;
+
+    expect(registry.listPendingCallbackDeliveries()).toEqual([
+      expect.objectContaining({ id: valid.id }),
+    ]);
+    expect(database.prepare(`
+      SELECT id, status, last_error AS lastError FROM callback_deliveries
+      WHERE id LIKE 'poison-%' ORDER BY id
+    `).all()).toEqual(poisonRows.map((row) => row.id).sort().map((id) => ({
+      id,
+      status: "dead_letter",
+      lastError: expect.stringMatching(/callback delivery/i),
+    })));
+
+    registry.__closeDbForTest();
+    expect(registry.listPendingCallbackDeliveries()).toEqual([
+      expect.objectContaining({ id: valid.id }),
+    ]);
+    expect(registry.listDeadLetterCallbackDeliveries().filter((row) => row.id.startsWith("poison-")))
+      .toHaveLength(poisonRows.length);
   });
 });
 

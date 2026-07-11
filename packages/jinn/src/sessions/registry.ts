@@ -16,7 +16,7 @@ import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/
 import { ptySnapshotStore } from '../engines/pty-snapshot.js';
 import { migrateActivitySchema } from '../activity/migrate.js';
 
-let db: Database.Database;
+let db: Database.Database | undefined;
 
 export const RESTART_ACK_META_KEY = "restartAcknowledgedAt";
 export const GATEWAY_RESTARTED_MESSAGE = "Gateway restarted successfully.";
@@ -461,6 +461,13 @@ export function initDb(): Database.Database {
   return db;
 }
 
+/** Test-only restart seam: close the process singleton so the next initDb()
+ * reopens the same sanitized home and reruns migrations. */
+export function __closeDbForTest(): void {
+  db?.close();
+  db = undefined;
+}
+
 /**
  * Additive, nullable migration: add the `media` column to an existing messages
  * table. Safe to run repeatedly and on legacy DBs created before media support.
@@ -609,7 +616,9 @@ export function migrateCallbackDeliveriesSchema(database: Database.Database): vo
 }
 
 function canonicalCallbackIdentityText(value: unknown): string {
-  return typeof value === 'string' ? value.normalize('NFC').trim() : '';
+  return typeof value === 'string'
+    ? value.normalize('NFC').replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '')
+    : '';
 }
 
 function rebuildCallbackDeliveriesTable(database: Database.Database, columns: Set<string>): void {
@@ -2737,6 +2746,66 @@ const CALLBACK_DELIVERY_SELECT = `
 `;
 
 function callbackDeliveryFromRow(row: CallbackDeliveryRow): CallbackDelivery {
+  const canonicalIdentity = canonicalCallbackDeliveryIdentity(row);
+  validateCallbackDeliveryIdentity(canonicalIdentity);
+  for (const field of [
+    'parentSessionId',
+    'childSessionId',
+    'attemptToken',
+    'terminalOutcome',
+    'callbackKind',
+  ] as const) {
+    if (row[field] !== canonicalIdentity[field]) {
+      throw new Error(`Callback delivery ${row.id} has noncanonical ${field}`);
+    }
+  }
+  if (!Number.isInteger(row.terminalVersion) || row.terminalVersion < 1) {
+    throw new Error(`Callback delivery ${row.id} has an invalid terminal version`);
+  }
+  if (!['pending', 'accepted', 'dead_letter'].includes(row.status)) {
+    throw new Error(`Callback delivery ${row.id} has an invalid lifecycle status`);
+  }
+  if (!Number.isInteger(row.attemptCount) || row.attemptCount < 0) {
+    throw new Error(`Callback delivery ${row.id} has an invalid attempt count`);
+  }
+  for (const [field, value] of Object.entries({
+    nextAttemptAt: row.nextAttemptAt,
+    lastAttemptAt: row.lastAttemptAt,
+    deadLetteredAt: row.deadLetteredAt,
+  })) {
+    if (value !== null && (!Number.isInteger(value) || value < 0)) {
+      throw new Error(`Callback delivery ${row.id} has an invalid ${field}`);
+    }
+  }
+  if (typeof row.createdAt !== 'string' || !row.createdAt || !Number.isFinite(Date.parse(row.createdAt))) {
+    throw new Error(`Callback delivery ${row.id} has an invalid createdAt`);
+  }
+  for (const [field, value] of Object.entries({
+    messageId: row.messageId,
+    queueItemId: row.queueItemId,
+    acceptedAt: row.acceptedAt,
+    lastError: row.lastError,
+  })) {
+    if (value !== null && (typeof value !== 'string' || value.length === 0)) {
+      throw new Error(`Callback delivery ${row.id} has an invalid ${field}`);
+    }
+  }
+  if (row.acceptedAt !== null && !Number.isFinite(Date.parse(row.acceptedAt))) {
+    throw new Error(`Callback delivery ${row.id} has an invalid acceptedAt`);
+  }
+  if (row.status === 'accepted') {
+    if (!row.messageId || !row.queueItemId || !row.acceptedAt || row.nextAttemptAt !== null || row.deadLetteredAt !== null) {
+      throw new Error(`Callback delivery ${row.id} has an invalid accepted lifecycle`);
+    }
+  } else if (row.messageId !== null || row.queueItemId !== null || row.acceptedAt !== null) {
+    throw new Error(`Callback delivery ${row.id} has callback acceptance state before acceptance`);
+  }
+  if (row.status === 'dead_letter' && row.deadLetteredAt === null) {
+    throw new Error(`Callback delivery ${row.id} has an invalid dead-letter lifecycle`);
+  }
+  if (row.status === 'pending' && row.deadLetteredAt !== null) {
+    throw new Error(`Callback delivery ${row.id} has dead-letter state while pending`);
+  }
   let payload: CallbackDeliveryPayload;
   try {
     payload = JSON.parse(row.payload) as CallbackDeliveryPayload;
@@ -2773,7 +2842,7 @@ function validateCallbackDeliveryIdentity(identity: CallbackDeliveryIdentity): v
     terminalOutcome: identity.terminalOutcome,
     callbackKind: identity.callbackKind,
   })) {
-    if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} is required for callback delivery`);
+    if (typeof value !== 'string' || !canonicalCallbackIdentityText(value)) throw new Error(`${name} is required for callback delivery`);
   }
   if (!Number.isInteger(identity.terminalVersion) || identity.terminalVersion < 1) {
     throw new Error('terminalVersion must be a positive integer for callback delivery');
@@ -2793,7 +2862,8 @@ export function getCallbackDeliveryByQueueItemId(queueItemId: string): CallbackD
 }
 
 export function listPendingCallbackDeliveries(): CallbackDelivery[] {
-  const rows = initDb()
+  const database = initDb();
+  const rows = database
     .prepare(`${CALLBACK_DELIVERY_SELECT} WHERE status = 'pending' ORDER BY created_at ASC, id ASC`)
     .all() as CallbackDeliveryRow[];
   const deliveries: CallbackDelivery[] = [];
@@ -2802,14 +2872,48 @@ export function listPendingCallbackDeliveries(): CallbackDelivery[] {
       deliveries.push(callbackDeliveryFromRow(row));
     } catch (error) {
       const diagnostic = error instanceof Error ? error.message : String(error);
-      initDb().prepare(`
-        UPDATE callback_deliveries
-        SET status = 'dead_letter', last_error = ?, dead_lettered_at = ?, next_attempt_at = NULL
-        WHERE id = ? AND status = 'pending'
-      `).run(diagnostic, Date.now(), row.id);
+      quarantineCallbackDeliveryRow(database, row, diagnostic);
     }
   }
   return deliveries;
+}
+
+function quarantineCallbackDeliveryRow(
+  database: Database.Database,
+  row: CallbackDeliveryRow,
+  diagnostic: string,
+): void {
+  const safeId = canonicalCallbackIdentityText(row.id) || randomUUID();
+  database.prepare(`
+    UPDATE callback_deliveries
+    SET parent_session_id = ?,
+        child_session_id = ?,
+        attempt_token = ?,
+        terminal_outcome = 'quarantined',
+        terminal_version = 1,
+        callback_kind = 'quarantined',
+        payload = ?,
+        status = 'dead_letter',
+        message_id = NULL,
+        queue_item_id = NULL,
+        attempt_count = 0,
+        next_attempt_at = NULL,
+        last_attempt_at = NULL,
+        last_error = ?,
+        dead_lettered_at = ?,
+        created_at = ?,
+        accepted_at = NULL
+    WHERE id = ? AND status = 'pending'
+  `).run(
+    `quarantined-parent:${safeId}`,
+    `quarantined-child:${safeId}`,
+    `quarantined-attempt:${safeId}`,
+    JSON.stringify({ message: '', displayMessage: '' }),
+    diagnostic,
+    Date.now(),
+    new Date().toISOString(),
+    row.id,
+  );
 }
 
 export function listDeadLetterCallbackDeliveries(): import("../shared/types.js").CallbackDeliveryDeadLetter[] {
