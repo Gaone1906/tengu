@@ -48,16 +48,19 @@ function prefersReducedMotion(): boolean {
 }
 
 /** Per-frame scroll compensation: keeps everything below `anchorEl` pixel-fixed
- *  while its height changes. Exported for tests. */
+ *  while its height changes. `referenceBottom` lets the caller anchor to a
+ *  position captured BEFORE a same-frame insertion (the summary row), so the
+ *  insertion itself gets compensated too. Exported for tests. */
 export function anchorScrollDuring(
   scroller: Element | null,
   anchorEl: Element,
   durationMs: number,
   raf: (cb: FrameRequestCallback) => number = (cb) => requestAnimationFrame(cb),
   now: () => number = () => performance.now(),
+  referenceBottom?: number,
 ): void {
   if (!scroller) return
-  const bottom0 = anchorEl.getBoundingClientRect().bottom
+  const bottom0 = referenceBottom ?? anchorEl.getBoundingClientRect().bottom
   const t0 = now()
   const step = () => {
     const delta = anchorEl.getBoundingClientRect().bottom - bottom0
@@ -79,6 +82,12 @@ export function FoldRegion({ answered, summary, children }: FoldRegionProps) {
   // its answer lands (answered flips false → true while mounted).
   const [folded, setFolded] = useState(answered)
   const [landed, setLanded] = useState(answered)
+  // The summary line does NOT exist until the fold begins — mounting it at
+  // answer time would push the answer down at the stream→final swap and break
+  // the structural-parity guarantee. It appears at fold start (fading in) and
+  // persists from then on.
+  const [summaryVisible, setSummaryVisible] = useState(answered)
+  const [landing, setLanding] = useState(false)
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const regionRef = useRef<HTMLDivElement | null>(null)
   const answeredRef = useRef(answered)
@@ -96,6 +105,7 @@ export function FoldRegion({ answered, summary, children }: FoldRegionProps) {
     if (!region || !wrap) {
       setFolded(true)
       setLanded(true)
+      setSummaryVisible(true)
       return
     }
     const scroller = wrap.closest('.chat-messages-scroll')
@@ -104,6 +114,7 @@ export function FoldRegion({ answered, summary, children }: FoldRegionProps) {
       const bottom0 = wrap.getBoundingClientRect().bottom
       setFolded(true)
       setLanded(true)
+      setSummaryVisible(true)
       requestAnimationFrame(() => {
         if (!scroller) return
         const delta = wrap.getBoundingClientRect().bottom - bottom0
@@ -113,18 +124,26 @@ export function FoldRegion({ answered, summary, children }: FoldRegionProps) {
     }
 
     const beat = window.setTimeout(() => {
-      region.style.height = `${region.offsetHeight}px`
-      region.style.overflow = 'hidden'
+      // Anchor reference captured BEFORE the summary mounts, so its insertion
+      // is compensated along with the region collapse.
+      const bottom0 = wrap.getBoundingClientRect().bottom
+      setLanding(true)
+      setSummaryVisible(true)
       requestAnimationFrame(() => {
-        region.style.transition = `height ${FOLD_MS}ms var(--ease-smooth), opacity 260ms var(--ease-smooth)`
-        region.style.height = '0px'
-        region.style.opacity = '0'
-        anchorScrollDuring(scroller, wrap, ANCHOR_WINDOW_MS)
-        window.setTimeout(() => {
-          setFolded(true)
-          setLanded(true)
-          region.style.transition = ''
-        }, FOLD_MS + 10)
+        region.style.height = `${region.offsetHeight}px`
+        region.style.overflow = 'hidden'
+        requestAnimationFrame(() => {
+          region.style.transition = `height ${FOLD_MS}ms var(--ease-smooth), opacity 260ms var(--ease-smooth)`
+          region.style.height = '0px'
+          region.style.opacity = '0'
+          anchorScrollDuring(scroller, wrap, ANCHOR_WINDOW_MS, undefined, undefined, bottom0)
+          window.setTimeout(() => {
+            setFolded(true)
+            setLanded(true)
+            setLanding(false)
+            region.style.transition = ''
+          }, FOLD_MS + 10)
+        })
       })
     }, FOLD_BEAT_MS)
     return () => window.clearTimeout(beat)
@@ -183,11 +202,12 @@ export function FoldRegion({ answered, summary, children }: FoldRegionProps) {
       <div ref={regionRef} data-fold-region inert={folded || undefined} aria-hidden={folded || undefined}>
         {children}
       </div>
-      {answered && (
+      {summaryVisible && (
         <div className="assistant-msg-row min-w-0">
           <button
             type="button"
             data-fold-summary
+            style={landing ? { animation: 'jinn-comm-rise 260ms var(--ease-smooth) 140ms both' } : undefined}
             aria-expanded={!folded}
             aria-label={`${words.join(', ')}. ${folded ? 'Show the work' : 'Hide the work'}.`}
             onClick={toggle}
