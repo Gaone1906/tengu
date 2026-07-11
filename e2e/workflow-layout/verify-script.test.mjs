@@ -21,3 +21,7 @@ test("five author probes settle sequentially inside the disposable gateway", () 
   assert.doesNotMatch(author, /Promise\.all/)
   assert.match(author, /for \(const author of authorRequests\(\)\)/)
 })
+
+test("daemon auth fallback stays inside the throwaway host Codex home", () => {
+  assert.match(script, /CODEX_BASE="\$HOST_HOME\/\.codex"/)
+})

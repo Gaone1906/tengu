@@ -31,7 +31,10 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then echo "Candidate 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-workflow-layout"
 VERIFY_ROOT="$(mktemp -d /tmp/jinn-workflow-layout.XXXXXX)"
 HOST_HOME="$VERIFY_ROOT/host"
-CODEX_BASE="$VERIFY_ROOT/codex-base"
+# The daemon lifecycle intentionally sanitizes inherited CODEX_HOME. Put the
+# disposable auth/config at its HOME-based fallback as well, so detached child
+# sessions never fall through to an unauthenticated throwaway path.
+CODEX_BASE="$HOST_HOME/.codex"
 SANDBOX_HOME="$HOST_HOME/.jinn-workflow-layout-verification"
 ARTIFACTS="$SANDBOX_HOME/sandbox-artifacts/$RUN_ID"
 BASE_URL="http://127.0.0.1:$PORT"
