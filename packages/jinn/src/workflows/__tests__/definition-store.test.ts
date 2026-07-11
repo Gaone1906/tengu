@@ -232,6 +232,66 @@ describe('updateDefinition', () => {
     expect(updated.nodes[1].label).toBe('Renamed only');
   });
 
+  it('byte-preserves manual positions across execution and display property mutations', () => {
+    type GraphMutation = (draft: EditableWorkflowDefinition) => void;
+    const mutations: Array<[string, GraphMutation]> = [
+      ['node label', (draft) => { draft.nodes[1].label = 'Renamed'; }],
+      ['instructions', (draft) => { draft.nodes[1].instructions = 'Perform the work and report evidence.'; }],
+      ['actor', (draft) => { draft.nodes[1].actor = { kind: 'engine', ref: 'codex' }; }],
+      ['role', (draft) => { draft.nodes[1].role = 'implement'; }],
+      ['inline gate', (draft) => { draft.nodes[1].gates = [{ kind: 'artifact', glob: 'out/*.json', description: 'Output exists' }]; }],
+      ['model option', (draft) => { draft.nodes[1].options = { model: 'gpt-5.5' }; }],
+      ['effort option', (draft) => { draft.nodes[1].options = { effort: 'high' }; }],
+      ['output option', (draft) => { draft.nodes[1].options = { output: 'full' }; }],
+      ['retry option', (draft) => { draft.nodes[1].options = { retry: { maxAttempts: 2, on: ['error'] } }; }],
+      ['onError continue', (draft) => { draft.nodes[1].options = { onError: 'continue' }; }],
+      ['timeout option', (draft) => { draft.nodes[1].options = { timeoutMinutes: 10 }; }],
+      ['session option', (draft) => { draft.nodes[1].options = { session: { mode: 'fresh' } }; }],
+      ['cadence', (draft) => { draft.nodes[1].cadence = 'once daily'; }],
+      ['optional', (draft) => { draft.nodes[1].optional = true; }],
+      ['Todo transition', (draft) => { draft.nodes[1].todoTransition = 'in_review'; }],
+      ['edge label', (draft) => { draft.edges[1].label = 'continue'; }],
+      ['edge kind', (draft) => { draft.edges[1].kind = 'handoff'; }],
+      ['error lane pairing', (draft) => {
+        draft.nodes[1].options = { onError: 'error-edge' };
+        draft.edges[1].lane = 'error';
+      }],
+      ['array order', (draft) => {
+        draft.nodes = [draft.nodes[2], draft.nodes[0], draft.nodes[1]];
+        draft.edges = [draft.edges[1], draft.edges[0]];
+      }],
+    ];
+
+    for (const [index, [name, mutate]] of mutations.entries()) {
+      const id = `manual-property-${index}`;
+      const manual = makeDef(id);
+      manual.nodes[1].position = { x: 400, y: 0 };
+      manual.nodes.push({
+        id: 's2',
+        type: 'step',
+        label: 'Second',
+        position: { x: 840, y: 0 },
+        actor: { kind: 'employee', ref: 'reviewer' },
+      });
+      manual.edges.push({ id: 'e2', from: 's1', to: 's2', kind: 'sequence' });
+      const before = createDefinition(root, manual, { now, layoutIntent: 'manual' });
+      const changed = structuredClone(before);
+      mutate(changed);
+
+      const updated = updateDefinition(root, id, { nodes: changed.nodes, edges: changed.edges }, { now });
+      const positionBytes = (definition: EditableWorkflowDefinition) => JSON.stringify(
+        definition.nodes
+          .map((node) => [node.id, node.position] as const)
+          .sort(([left], [right]) => left.localeCompare(right)),
+      );
+      const beforePositions = positionBytes(before);
+      const afterPositions = positionBytes(updated);
+
+      expect.soft(afterPositions, name).toBe(beforePositions);
+      expect.soft(updated.layout, name).toEqual({ source: 'manual', version: 1 });
+    }
+  });
+
   it('rejects an envelope-expanding property-only manual patch instead of moving nodes', () => {
     const manual = makeDef('manual-envelope');
     manual.nodes[1].position = { x: 300, y: 0 };

@@ -310,26 +310,19 @@ function hasSameLayoutGeometryAndTopology(
   candidate: EditableWorkflowDefinition,
 ): boolean {
   if (existing.nodes.length !== candidate.nodes.length || existing.edges.length !== candidate.edges.length) return false;
-  for (let index = 0; index < existing.nodes.length; index += 1) {
-    const before = existing.nodes[index];
-    const after = candidate.nodes[index];
-    if (
-      before.id !== after.id ||
-      before.type !== after.type ||
-      before.position?.x !== after.position?.x ||
-      before.position?.y !== after.position?.y
-    ) return false;
+  const existingNodes = new Map(existing.nodes.map((node) => [node.id, node]));
+  if (existingNodes.size !== existing.nodes.length) return false;
+  for (const after of candidate.nodes) {
+    const before = existingNodes.get(after.id);
+    if (!before || before.position?.x !== after.position?.x || before.position?.y !== after.position?.y) {
+      return false;
+    }
   }
-  for (let index = 0; index < existing.edges.length; index += 1) {
-    const before = existing.edges[index];
-    const after = candidate.edges[index];
-    if (
-      before.id !== after.id ||
-      before.from !== after.from ||
-      before.to !== after.to ||
-      (before.kind ?? 'sequence') !== (after.kind ?? 'sequence') ||
-      before.lane !== after.lane
-    ) return false;
+  const existingEdges = new Map(existing.edges.map((edge) => [edge.id, edge]));
+  if (existingEdges.size !== existing.edges.length) return false;
+  for (const after of candidate.edges) {
+    const before = existingEdges.get(after.id);
+    if (!before || before.from !== after.from || before.to !== after.to) return false;
   }
   return true;
 }

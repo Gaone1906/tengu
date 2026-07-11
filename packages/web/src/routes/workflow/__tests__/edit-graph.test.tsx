@@ -204,4 +204,40 @@ describe("WorkflowEditView graph layout lifecycle", () => {
     await waitFor(() => expect(screen.queryByTestId("wf-edit-dirty")).toBeNull())
     expect(screen.queryByRole("button", { name: "Apply layout" })).toBeNull()
   })
+
+  it("saves onError and lane properties without claiming a manual geometry edit", async () => {
+    const manual = definition({ layout: { source: "manual", version: 1 } })
+    getWorkflowDefinition.mockResolvedValue(manual)
+    updateWorkflowDefinition.mockResolvedValue({
+      ok: true,
+      definition: {
+        ...manual,
+        version: 4,
+        nodes: manual.nodes.map((node) => node.id === "build"
+          ? { ...node, options: { onError: "error-edge" as const } }
+          : node),
+        edges: manual.edges.map((edge) => edge.id === "build-verify"
+          ? { ...edge, lane: "error" as const }
+          : edge),
+      },
+    } satisfies SaveDefinitionResult)
+
+    render(<editModule.WorkflowEditView workflowId="sample" />)
+    await waitFor(() => expect(screen.getByTestId("wf-node-build")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("wf-node-build"))
+    fireEvent.change(screen.getAllByTestId("wf-edit-opt-onerror")[0], { target: { value: "error-edge" } })
+    fireEvent.click(screen.getAllByTestId("wf-edit-lane-build-verify")[0])
+    fireEvent.click(screen.getByTestId("wf-edit-save"))
+
+    await waitFor(() => expect(updateWorkflowDefinition).toHaveBeenCalledTimes(1))
+    const [id, patch, version, options] = updateWorkflowDefinition.mock.calls[0]
+    expect(id).toBe("sample")
+    expect(version).toBe(3)
+    expect(options).toBeUndefined()
+    expect(patch.nodes.map((node: WorkflowNodeWire) => [node.id, node.position])).toEqual(
+      manual.nodes.map((node) => [node.id, node.position]),
+    )
+    expect(patch.nodes.find((node: WorkflowNodeWire) => node.id === "build")?.options?.onError).toBe("error-edge")
+    expect(patch.edges.find((edge: WorkflowEdgeWire) => edge.id === "build-verify")?.lane).toBe("error")
+  })
 })
