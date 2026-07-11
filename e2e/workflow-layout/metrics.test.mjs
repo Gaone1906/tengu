@@ -12,6 +12,7 @@ import {
   readabilityViolations,
   isBlockedStaticAsset,
   positionsMatch,
+  visibleRunEdges,
 } from "./metrics.mjs"
 
 test("candidate URL is an exact loopback origin on port 7800 or higher", () => {
@@ -78,6 +79,15 @@ test("strict LTR excludes loop and dock edges but enforces 96 flow pixels", () =
     { id: "dock", from: "a", to: "c", lane: "sub" },
   ]
   assert.deepEqual(strictLtrViolations(edges, boxes, 96).map((x) => x.id), ["crowded"])
+})
+
+test("run metrics remap the frozen trigger and ignore unmaterialized receipts", () => {
+  const definition = {
+    nodes: [{ id: "trigger", type: "trigger" }, { id: "done", type: "step" }, { id: "future", type: "step" }],
+    edges: [{ id: "e1", from: "trigger", to: "done" }, { id: "e2", from: "done", to: "future" }],
+  }
+  const envelopes = [{ id: "__trigger__" }, { id: "done" }]
+  assert.deepEqual(visibleRunEdges(definition, envelopes), [{ id: "e1", from: "__trigger__", to: "done" }])
 })
 
 test("same-rank vertical envelopes reserve 64 flow pixels", () => {

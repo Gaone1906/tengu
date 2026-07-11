@@ -79,6 +79,19 @@ export function strictLtrViolations(edges, boxesById, clearance = HORIZONTAL_CLE
   return violations
 }
 
+/** A run lens replaces frozen trigger ids with one collision-safe synthetic
+ * trigger and omits snapshot edges whose receipts never materialized. Measure
+ * the graph the product actually rendered, matching edgesForDefinitionRun. */
+export function visibleRunEdges(definition, envelopes) {
+  const visible = new Set(envelopes.map((envelope) => envelope.id))
+  const syntheticTrigger = [...visible].find((id) => id.startsWith("__trigger__"))
+  const triggerIds = new Set((definition.nodes ?? []).filter((node) => node.type === "trigger").map((node) => node.id))
+  const remap = (id) => syntheticTrigger && triggerIds.has(id) ? syntheticTrigger : id
+  return (definition.edges ?? [])
+    .map((edge) => ({ ...edge, from: remap(edge.from), to: remap(edge.to) }))
+    .filter((edge) => visible.has(edge.from) && visible.has(edge.to))
+}
+
 export function verticalClearanceViolations(envelopes, clearance = VERTICAL_CLEARANCE) {
   const violations = []
   const ranks = new Map()

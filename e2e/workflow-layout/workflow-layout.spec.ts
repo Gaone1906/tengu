@@ -3,7 +3,7 @@ import path from 'node:path'
 import { test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test'
 import { artifactWriter, gatewayToken, pollUntil, sandboxClient, verificationEnv } from './api-client.mjs'
 import { authorRequests, canonicalFixtures, scenarioFixtures } from './fixtures.mjs'
-import { assertCandidateBaseUrl, isBlockedStaticAsset, matrixCells, positionsMatch, summarizeMetricViolations } from './metrics.mjs'
+import { assertCandidateBaseUrl, isBlockedStaticAsset, matrixCells, positionsMatch, summarizeMetricViolations, visibleRunEdges } from './metrics.mjs'
 
 type Cell = ReturnType<typeof matrixCells>[number]
 type Definition = {
@@ -386,7 +386,10 @@ test.describe.serial('isolated workflow layout verification', () => {
           }
           const definition = await readDefinition(runCase.id)
           const metrics = await captureMetrics(opened.page, cell.viewport.key)
-          const violations = summarizeMetricViolations(metrics, definition)
+          const violations = summarizeMetricViolations(metrics, {
+            ...definition,
+            edges: visibleRunEdges(definition, metrics.envelopes),
+          })
           const a11y = await basicAccessibility(opened.page)
           write(`metrics/${artifactKey(cell)}/${runCase.id}-${runCase.terminal}.json`, { metrics, violations, a11y, networkViolations: opened.violations, consoleErrors: opened.consoleErrors, pageErrors: opened.pageErrors })
           await opened.page.screenshot({ path: screenshotPath(artifactKey(cell), `${runCase.id}-${runCase.terminal}.png`) })
