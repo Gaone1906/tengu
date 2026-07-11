@@ -49,6 +49,17 @@ export function sessionPath(id: string): string {
   return `/?session=${encodeURIComponent(id)}`
 }
 
+/**
+ * The mobile pane a chat load should open on: a URL-selected session (refresh,
+ * deep link, direct open) lands in the THREAD; bare `/` lands on the LIST —
+ * the background auto-select must never yank a phone user into a chat
+ * (GRS-023). Consulted at mount only; after that, taps and history traversal
+ * drive the pane. Desktop ignores it (both panes render).
+ */
+export function initialMobileView(search: string | URLSearchParams): 'chat' | 'sidebar' {
+  return parseSelectedSession(search) ? 'chat' : 'sidebar'
+}
+
 /** Where a drill-in came from — pushed as history state by open-thread jumps. */
 export interface ThreadOrigin {
   id: string

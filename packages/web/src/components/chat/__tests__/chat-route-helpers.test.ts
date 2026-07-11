@@ -6,6 +6,7 @@ import {
   summarizeOlder,
   isFocusedSession,
   parseSelectedSession,
+  initialMobileView,
   sessionPath,
   parseThreadOrigin,
   threadOriginLabel,
@@ -77,6 +78,20 @@ describe('sessionPath', () => {
     const id = 'weird id&=?#'
     const path = sessionPath(id)
     expect(parseSelectedSession(path.slice(path.indexOf('?')))).toBe(id)
+  })
+})
+
+describe('initialMobileView', () => {
+  it('opens the THREAD pane when the URL selects a session (refresh/deep link)', () => {
+    expect(initialMobileView('?session=abc')).toBe('chat')
+    expect(initialMobileView(new URLSearchParams('session=abc'))).toBe('chat')
+  })
+
+  it('opens the LIST for bare `/` and for empty/whitespace session values', () => {
+    expect(initialMobileView('')).toBe('sidebar')
+    expect(initialMobileView('?session=')).toBe('sidebar')
+    expect(initialMobileView('?session=%20%20')).toBe('sidebar')
+    expect(initialMobileView('?employee=jinn-dev')).toBe('sidebar')
   })
 })
 

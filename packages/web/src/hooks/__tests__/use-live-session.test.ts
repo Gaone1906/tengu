@@ -21,6 +21,9 @@ import {
   __cacheLiveSessionSnapshotForTests,
   __clearLiveSessionSnapshotCacheForTests,
   __getLiveSessionSnapshotCacheSizeForTests,
+  invalidateLiveSessionSnapshot,
+  isRestingSnapshot,
+  SESSION_SNAPSHOT_REVISIT_TTL_MS,
   useLiveSession,
 } from "../use-live-session"
 
@@ -681,8 +684,11 @@ describe("useLiveSession (read-only)", () => {
 
 describe("useLiveSession (editable write path)", () => {
   it("hydrates from the in-memory session cache immediately while revalidating", async () => {
+    // The cached session is mid-run, so the snapshot is NOT "resting" and the
+    // remount must still revalidate in the background (a resting idle snapshot
+    // skips the refetch entirely — covered in the resting-snapshot suite).
     getSession.mockResolvedValueOnce({
-      status: "idle",
+      status: "running",
       messages: [{ id: "m1", role: "user", content: "cached question" }],
     })
     const { subscribe } = makeBus()
@@ -1087,5 +1093,86 @@ describe("useLiveSession (editable write path)", () => {
     act(() => { result.current.failSend("Error: nope") })
     expect(result.current.loading).toBe(false)
     expect(result.current.messages.at(-1)?.content).toBe("Error: nope")
+  })
+})
+
+describe("resting-snapshot revisits", () => {
+  const idleSnapshot = (id: string) => ({
+    messages: [{ id: "m1", role: "assistant" as const, content: "cached transcript", timestamp: 1 }],
+    streamingText: "",
+    loading: false,
+    session: { id, status: "idle", title: "Cached title", employee: "jinn-dev" },
+    liveContextTokens: null,
+    backgroundActivity: null,
+    hasOlderMessages: false,
+  })
+
+  it("renders a fresh idle snapshot WITHOUT refetching, and emits meta from it", async () => {
+    __cacheLiveSessionSnapshotForTests("s9", idleSnapshot("s9"))
+    const { subscribe } = makeBus()
+    const onMeta = vi.fn()
+    const { result } = renderHook(() => useLiveSession("s9", { subscribe, readOnly: true, onMeta }))
+    await act(async () => { await Promise.resolve() })
+
+    expect(result.current.messages.map((m) => m.content)).toEqual(["cached transcript"])
+    expect(result.current.hydrating).toBe(false)
+    expect(getSession).not.toHaveBeenCalled()
+    expect(onMeta).toHaveBeenCalledWith(expect.objectContaining({ title: "Cached title", employee: "jinn-dev" }))
+  })
+
+  it("still revalidates when the cached session was RUNNING", async () => {
+    getSession.mockResolvedValue({ status: "idle", messages: [] })
+    __cacheLiveSessionSnapshotForTests("s10", {
+      ...idleSnapshot("s10"),
+      loading: true,
+      session: { id: "s10", status: "running" },
+    })
+    const { subscribe } = makeBus()
+    renderHook(() => useLiveSession("s10", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+    expect(getSession).toHaveBeenCalledTimes(1)
+  })
+
+  it("invalidateLiveSessionSnapshot forces a cold fetch on the next visit", async () => {
+    getSession.mockResolvedValue({ status: "idle", messages: [] })
+    __cacheLiveSessionSnapshotForTests("s11", idleSnapshot("s11"))
+    invalidateLiveSessionSnapshot("s11")
+    const { subscribe } = makeBus()
+    renderHook(() => useLiveSession("s11", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+    expect(getSession).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe("isRestingSnapshot", () => {
+  const base = {
+    messages: [],
+    streamingText: "",
+    loading: false,
+    session: { status: "idle" } as Record<string, unknown>,
+    liveContextTokens: null,
+    backgroundActivity: null,
+    hasOlderMessages: false,
+    updatedAt: 1_000_000,
+  }
+
+  it("accepts a fresh, idle, non-streaming snapshot (error status too)", () => {
+    expect(isRestingSnapshot(base, base.updatedAt + 1_000)).toBe(true)
+    expect(isRestingSnapshot({ ...base, session: { status: "error" } }, base.updatedAt)).toBe(true)
+  })
+
+  it("rejects once the revisit TTL is exceeded", () => {
+    expect(isRestingSnapshot(base, base.updatedAt + SESSION_SNAPSHOT_REVISIT_TTL_MS)).toBe(true)
+    expect(isRestingSnapshot(base, base.updatedAt + SESSION_SNAPSHOT_REVISIT_TTL_MS + 1)).toBe(false)
+  })
+
+  it("rejects loading / streaming / running / unknown-status / missing-session snapshots", () => {
+    const now = base.updatedAt
+    expect(isRestingSnapshot({ ...base, loading: true }, now)).toBe(false)
+    expect(isRestingSnapshot({ ...base, streamingText: "tail" }, now)).toBe(false)
+    expect(isRestingSnapshot({ ...base, session: { status: "running" } }, now)).toBe(false)
+    expect(isRestingSnapshot({ ...base, session: { status: "waiting" } }, now)).toBe(false)
+    expect(isRestingSnapshot({ ...base, session: {} }, now)).toBe(false)
+    expect(isRestingSnapshot({ ...base, session: null }, now)).toBe(false)
   })
 })

@@ -127,8 +127,10 @@ export interface UseLiveSessionResult {
 
 const SESSION_SNAPSHOT_CACHE_MAX = 16
 const SESSION_SNAPSHOT_CACHE_TTL_MS = 10 * 60 * 1000
+/** How long a resting snapshot may stand in for a revisit without a refetch. */
+export const SESSION_SNAPSHOT_REVISIT_TTL_MS = 30_000
 
-interface LiveSessionSnapshot {
+export interface LiveSessionSnapshot {
   messages: Message[]
   streamingText: string
   loading: boolean
@@ -196,6 +198,41 @@ function writeLiveSessionSnapshot(id: string, input: SnapshotInput) {
     updatedAt: Date.now(),
   })
   pruneLiveSessionSnapshotCache()
+}
+
+/**
+ * True when a cached snapshot can stand in for a revisit WITHOUT an immediate
+ * refetch: recently current, at rest (not loading, no streaming tail), and a
+ * known terminal status. Fails closed for anything uncertain (running,
+ * unknown status, missing session) so those still revalidate. Back/forward
+ * hops across sessions must not re-issue a full transcript GET per hop.
+ */
+export function isRestingSnapshot(snapshot: LiveSessionSnapshot, now = Date.now()): boolean {
+  if (now - snapshot.updatedAt > SESSION_SNAPSHOT_REVISIT_TTL_MS) return false
+  if (snapshot.loading || snapshot.streamingText) return false
+  const status = snapshot.session?.status
+  return status === 'idle' || status === 'error'
+}
+
+/**
+ * Drop a session's cached snapshot. Called from the chat page's gateway
+ * subscription when a session changes while no pane for it is mounted
+ * (completed / stopped / errored / renamed / deleted) — the next revisit then
+ * takes the cold-fetch path instead of trusting a stale snapshot.
+ */
+export function invalidateLiveSessionSnapshot(id: string) {
+  liveSessionSnapshotCache.delete(id)
+}
+
+/** Session-record → header/tab meta (shared by the fetch and revisit paths). */
+function sessionMetaOf(session: Record<string, unknown>): SessionMetaUpdate {
+  return {
+    engine: session.engine ? String(session.engine) : undefined,
+    engineSessionId: session.engineSessionId ? String(session.engineSessionId) : undefined,
+    model: session.model ? String(session.model) : undefined,
+    title: session.title ? String(session.title) : undefined,
+    employee: session.employee ? String(session.employee) : undefined,
+  }
 }
 
 function normalizeHistoryMessages(history: unknown): { messages: Message[]; firstPartialIndex: number } {
@@ -640,14 +677,7 @@ export function useLiveSession(
       // Seed background-activity from the authoritative fetch (absent → null);
       // session:background WS events keep it live from here.
       setBackgroundActivity((session.backgroundActivity as BackgroundActivity | null) ?? null)
-      const meta = {
-        engine: session.engine ? String(session.engine) : undefined,
-        engineSessionId: session.engineSessionId ? String(session.engineSessionId) : undefined,
-        model: session.model ? String(session.model) : undefined,
-        title: session.title ? String(session.title) : undefined,
-        employee: session.employee ? String(session.employee) : undefined,
-      }
-      onMetaRef.current?.(meta)
+      onMetaRef.current?.(sessionMetaOf(session))
 
       const history = session.messages || session.history || []
       const { messages: backendMessages, firstPartialIndex } = normalizeHistoryMessages(history)
@@ -810,6 +840,23 @@ export function useLiveSession(
     // NOTE: do NOT setLoading(false) here. Loading is owned by handleSend (true) and
     // WS session:completed/stopped (false). Clearing here would clobber the lazy-init
     // loading=true set by useState() when this pane mounted with pendingUserMessage.
+    //
+    // A RESTING snapshot stands in fully: emit header/tab meta from the cached
+    // session and skip the refetch. WS lifecycle events invalidate snapshots
+    // of sessions that change while unmounted, so anything uncertain falls
+    // through to the (non-blocking) revalidate below.
+    if (cached && !pending && isRestingSnapshot(cached)) {
+      // Deferred a microtask: this effect belongs to the freshly-mounted CHILD
+      // pane, and child effects flush before the parent page's ref-sync
+      // effects — an immediate emit would be attributed to the PREVIOUS
+      // session's id and discarded. The fetch path never hits this because
+      // its await already lands after the flush.
+      const cachedSession = cached.session
+      if (cachedSession) queueMicrotask(() => {
+        if (sessionIdRef.current === sessionId) onMetaRef.current?.(sessionMetaOf(cachedSession))
+      })
+      return
+    }
     loadSession(sessionId, { suppressHydrating: Boolean(pending && !cached) })
   }, [sessionId]) // loadSession is stable (useCallback with [] deps)
 

@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useRef, useMemo, Suspense, laz
 import { useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import {
+  initialMobileView,
   parseSelectedSession,
   parseThreadOrigin,
   resolveDeepLink,
@@ -24,6 +25,7 @@ const FileView = lazy(() =>
 import { FileOpenContext } from '@/components/chat/file-open-context'
 import { ShortcutOverlay } from '@/components/chat/shortcut-overlay'
 import { useChatTabs, type ChatTab } from '@/hooks/use-chat-tabs'
+import { invalidateLiveSessionSnapshot } from '@/hooks/use-live-session'
 import { useKeyboardShortcuts, type ShortcutDef } from '@/hooks/use-keyboard-shortcuts'
 import { useDeleteSession, useDuplicateSession, useSessions } from '@/hooks/use-sessions'
 import { clearIntermediateMessages } from '@/lib/conversations'
@@ -103,7 +105,12 @@ function ChatPage() {
   // tab→URL reconciler must stand down or it re-navigates against the stale
   // URL and clobbers the entry (state included). undefined = nothing pending.
   const pendingNavRef = useRef<string | null | undefined>(undefined)
-  const [mobileView, setMobileView] = useState<'sidebar' | 'chat'>('sidebar')
+  // Mobile opens on the THREAD when the URL already selects a session
+  // (refresh / deep link / direct open) and on the LIST for bare `/` — the
+  // pane derives from the URL at mount, not only from tap events.
+  const [mobileView, setMobileView] = useState<'sidebar' | 'chat'>(
+    () => initialMobileView(location.search),
+  )
   // sessionMeta carries the sessionId it belongs to so the tab-label effect
   // can ignore stale meta from a previous session mid-switch (title flash fix).
   const [sessionMeta, setSessionMeta] = useState<{ sessionId: string; engine?: string; engineSessionId?: string; model?: string; title?: string; employee?: string } | null>(null)
@@ -248,20 +255,29 @@ function ChatPage() {
         case 'session:completed':
         case 'session:stopped':
           updateTabStatus(sid, { status: 'idle' })
+          invalidateLiveSessionSnapshot(sid)
           break
         case 'session:error':
           updateTabStatus(sid, { status: 'error' })
+          invalidateLiveSessionSnapshot(sid)
           break
         case 'session:deleted':
           closeTabBySessionId(sid)
+          invalidateLiveSessionSnapshot(sid)
           break
         case 'session:updated':
           // Gateway currently emits {sessionId} only — handle title defensively
           // in case future emitters carry it. Stale labels after rename are
           // also reconciled via the useSessions() effect below.
           if (p.title) updateTabStatus(sid, { label: p.title })
+          invalidateLiveSessionSnapshot(sid)
           break
       }
+      // The invalidations above keep the resting-snapshot revisit path honest:
+      // a session that changed while no pane for it was mounted takes a cold
+      // fetch on the next visit instead of trusting its stale snapshot. The
+      // MOUNTED pane is unaffected — it heard the same event and rewrites its
+      // snapshot on the next state change.
     })
     return unsub
   }, [subscribe, updateTabStatus, closeTabBySessionId])
