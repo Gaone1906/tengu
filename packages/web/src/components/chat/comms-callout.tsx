@@ -100,7 +100,7 @@ export function CommsLedgerRow({
         </span>
         <span
           aria-hidden="true"
-          className="shrink-0 text-[length:var(--text-caption2)] text-[var(--text-quaternary)] opacity-0 transition-opacity duration-150 ease-[var(--ease-smooth)] [font-variant-numeric:tabular-nums] group-hover:opacity-100 group-focus-visible:opacity-100"
+          className="shrink-0 text-[length:var(--text-caption2)] text-[var(--text-quaternary)] opacity-0 transition-opacity duration-150 ease-[var(--ease-smooth)] [font-variant-numeric:tabular-nums] group-hover:opacity-100 group-focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
         >
           {time}
         </span>
