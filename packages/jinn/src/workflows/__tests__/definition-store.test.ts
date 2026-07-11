@@ -205,7 +205,7 @@ describe('updateDefinition', () => {
     expect(updated.edges).toHaveLength(2);
   });
 
-  it('defaults an omitted-intent graph patch to generated normalization', () => {
+  it('normalizes an actual omitted-intent geometry change', () => {
     const manual = makeDef('graph-default');
     manual.nodes[1].position = { x: 400, y: 0 };
     createDefinition(root, manual, { now, layoutIntent: 'manual' });
@@ -216,6 +216,38 @@ describe('updateDefinition', () => {
 
     expect(updated.layout).toEqual({ source: 'normalized', version: 1 });
     expect(updated.nodes[1].position).not.toEqual(updated.nodes[0].position);
+  });
+
+  it('preserves valid manual coordinates and provenance for a property-only node patch', () => {
+    const manual = makeDef('manual-properties');
+    manual.nodes[1].position = { x: 400, y: 0 };
+    createDefinition(root, manual, { now, layoutIntent: 'manual' });
+    const propertyOnly = structuredClone(manual.nodes);
+    propertyOnly[1].label = 'Renamed only';
+
+    const updated = updateDefinition(root, 'manual-properties', { nodes: propertyOnly }, { now });
+
+    expect(updated.layout).toEqual({ source: 'manual', version: 1 });
+    expect(updated.nodes.map((node) => node.position)).toEqual(manual.nodes.map((node) => node.position));
+    expect(updated.nodes[1].label).toBe('Renamed only');
+  });
+
+  it('rejects an envelope-expanding property-only manual patch instead of moving nodes', () => {
+    const manual = makeDef('manual-envelope');
+    manual.nodes[1].position = { x: 300, y: 0 };
+    manual.nodes.push({ id: 's2', type: 'step', label: 'Second', position: { x: 620, y: 0 } });
+    manual.edges.push({ id: 'e2', from: 's1', to: 's2', kind: 'sequence' });
+    createDefinition(root, manual, { now, layoutIntent: 'manual' });
+    const expanded = structuredClone(manual.nodes);
+    expanded[1].instructions = 'This turns the employee step into a wide dock-bearing card.';
+
+    expect(() => updateDefinition(root, 'manual-envelope', { nodes: expanded }, { now }))
+      .toThrow(/s1.*s2.*Tidy/i);
+    expect(getDefinition(root, 'manual-envelope')).toMatchObject({
+      version: 1,
+      layout: { source: 'manual', version: 1 },
+      nodes: manual.nodes,
+    });
   });
 
   it('preserves server-owned provenance for an omitted-intent metadata-only patch', () => {

@@ -305,6 +305,45 @@ function applyLayoutPolicy(
   }
 }
 
+function hasSameLayoutGeometryAndTopology(
+  existing: EditableWorkflowDefinition,
+  candidate: EditableWorkflowDefinition,
+): boolean {
+  if (existing.nodes.length !== candidate.nodes.length || existing.edges.length !== candidate.edges.length) return false;
+  for (let index = 0; index < existing.nodes.length; index += 1) {
+    const before = existing.nodes[index];
+    const after = candidate.nodes[index];
+    if (
+      before.id !== after.id ||
+      before.type !== after.type ||
+      before.position?.x !== after.position?.x ||
+      before.position?.y !== after.position?.y
+    ) return false;
+  }
+  for (let index = 0; index < existing.edges.length; index += 1) {
+    const before = existing.edges[index];
+    const after = candidate.edges[index];
+    if (
+      before.id !== after.id ||
+      before.from !== after.from ||
+      before.to !== after.to ||
+      (before.kind ?? 'sequence') !== (after.kind ?? 'sequence') ||
+      before.lane !== after.lane
+    ) return false;
+  }
+  return true;
+}
+
+function inferUpdateLayoutIntent(
+  existing: EditableWorkflowDefinition,
+  candidate: EditableWorkflowDefinition,
+  patch: Partial<EditableWorkflowDefinition>,
+): WorkflowLayoutIntent | undefined {
+  if (patch.nodes === undefined && patch.edges === undefined) return undefined;
+  if (!hasSameLayoutGeometryAndTopology(existing, candidate)) return 'generated';
+  return existing.layout?.source === 'manual' ? 'manual' : 'generated';
+}
+
 /**
  * List definition summaries by scanning `<evidenceRoot>/workflows/*.definition.json`.
  * Tolerant: a single corrupt/unreadable file is skipped, not fatal, so one bad file
@@ -421,8 +460,7 @@ export function updateDefinition(
     version: existing.version + 1,
     updatedAt: now,
   };
-  const effectiveLayoutIntent = opts.layoutIntent ??
-    (patch.nodes !== undefined || patch.edges !== undefined ? 'generated' : undefined);
+  const effectiveLayoutIntent = opts.layoutIntent ?? inferUpdateLayoutIntent(existing, candidate, patch);
   const merged = effectiveLayoutIntent ? applyLayoutPolicy(candidate, effectiveLayoutIntent) : candidate;
   assertValid(merged, 'definition');
   writeOverwrite(definitionFile(root, id), serializeDefinition(merged));
