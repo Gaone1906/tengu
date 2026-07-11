@@ -302,12 +302,19 @@ describe("the identity seam", () => {
       },
     };
     const out = attachSessionIdentity(resolved, "sess-42");
-    const jinn = out.mcpServers.jinn as { env?: Record<string, string> };
+    const jinn = out.mcpServers.jinn as { args?: string[]; env?: Record<string, string> };
     expect(jinn.env).toEqual({
       JINN_GATEWAY_URL: "http://127.0.0.1:7788",
       [JINN_SESSION_ID_ENV]: "sess-42",
       [JINN_SESSION_CAPABILITY_ENV]: expect.any(String),
     });
+    expect(jinn.args).toEqual([
+      "server-entry.js",
+      "--jinn-session-id", "sess-42",
+      "--jinn-home", expect.any(String),
+      "--jinn-gateway-url", "http://127.0.0.1:7788",
+    ]);
+    expect(jinn.args?.join(" ")).not.toContain(jinn.env?.[JINN_SESSION_CAPABILITY_ENV]);
     // purity: the input object was not mutated
     expect((resolved.mcpServers.jinn as { env?: Record<string, string> }).env).toEqual({ JINN_GATEWAY_URL: "http://127.0.0.1:7788" });
     // other servers pass through by reference-equality (no gratuitous copies)

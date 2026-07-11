@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { McpServerStdioConfig, ResolvedMcpConfig } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
+import { stripMcpBootstrapArgs } from "../mcp/identity.js";
 
 const JINN_BUILTIN_SERVER = "jinn";
 const MANAGED_ENV_KEY = "JINN_MCP_MANAGED_BY";
@@ -60,7 +61,7 @@ function renderJinnServer(spec: McpServerStdioConfig): McpServerStdioConfig {
   }
   return {
     command: spec.command,
-    args: spec.args ?? [],
+    args: stripMcpBootstrapArgs(spec.args),
     env,
   };
 }

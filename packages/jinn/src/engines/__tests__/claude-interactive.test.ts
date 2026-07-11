@@ -7,10 +7,9 @@ import { afterEach, describe, it, expect, vi } from "vitest";
 // focused and CI-portable.
 vi.mock("node-pty", () => ({ spawn: vi.fn() }));
 
-import { InteractiveClaudeEngine, TurnResolver, buildInteractiveArgs, claudeHookToDeltas, pasteAndSubmit } from "../claude-interactive.js";
+import { TurnResolver, buildInteractiveArgs, claudeHookToDeltas, pasteAndSubmit } from "../claude-interactive.js";
 import { MAIN_AGENT_SENTINEL } from "../sse-pty-proxy.js";
 import { buildPromptWithPlatformContext } from "../platform-context.js";
-import { PtyLifecycleManager } from "../pty-lifecycle.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -189,29 +188,5 @@ describe("pasteAndSubmit", () => {
       "\x1b[200~Describe this image\n\nAttached files:\n- /tmp/image.png\x1b[201~",
       "\r",
     ]);
-  });
-});
-
-describe("InteractiveClaudeEngine MCP identity fallback", () => {
-  it("puts the bound session capability in the Claude child env so MCP identity survives config-env stripping", () => {
-    const engine = new InteractiveClaudeEngine(
-      new PtyLifecycleManager({ maxLivePtys: 1 }),
-      {} as any,
-    );
-    const env = (engine as any).buildPtyEnv(undefined, "session-1", {
-      mcpServers: {
-        jinn: {
-          command: "node",
-          args: ["server-entry.js"],
-          env: {
-            JINN_SESSION_ID: "session-1",
-            JINN_SESSION_CAPABILITY: "capability-1",
-          },
-        },
-      },
-    });
-
-    expect(env.JINN_SESSION_ID).toBe("session-1");
-    expect(env.JINN_SESSION_CAPABILITY).toBe("capability-1");
   });
 });

@@ -7,5 +7,8 @@
  * inherited environment (see {@link runJinnMcpServer}); no argv secret.
  */
 import { runJinnMcpServer } from "./server.js";
+import { resolveMcpServerBootstrap } from "./server-bootstrap.js";
 
-runJinnMcpServer();
+const bootstrap = resolveMcpServerBootstrap(process.argv.slice(2));
+if (bootstrap.jinnHome) process.env.JINN_HOME = bootstrap.jinnHome;
+runJinnMcpServer(bootstrap);

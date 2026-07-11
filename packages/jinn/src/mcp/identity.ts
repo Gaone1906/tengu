@@ -2,7 +2,25 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { ResolvedMcpConfig, McpServerStdioConfig } from "../shared/types.js";
-import { resolveMcpSessionCapabilityKeyFile } from "../shared/home.js";
+import { resolveJinnHome, resolveMcpSessionCapabilityKeyFile } from "../shared/home.js";
+
+export const MCP_SESSION_ID_ARG = "--jinn-session-id";
+export const MCP_HOME_ARG = "--jinn-home";
+export const MCP_GATEWAY_URL_ARG = "--jinn-gateway-url";
+const MCP_BOOTSTRAP_ARGS = new Set([MCP_SESSION_ID_ARG, MCP_HOME_ARG, MCP_GATEWAY_URL_ARG]);
+
+/** Remove per-session bootstrap flags before writing a process-global MCP config. */
+export function stripMcpBootstrapArgs(args: readonly string[] = []): string[] {
+  const out: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (MCP_BOOTSTRAP_ARGS.has(args[index])) {
+      index += 1;
+      continue;
+    }
+    out.push(args[index]);
+  }
+  return out;
+}
 
 /**
  * GRS-017a — the caller-identity seam.
@@ -159,11 +177,21 @@ export function attachSessionIdentity(resolved: ResolvedMcpConfig, sessionId: st
   if (!jinn || !("command" in jinn)) return resolved;
   const stdio = jinn as McpServerStdioConfig;
   const capability = ensureSessionCapability(sessionId);
+  const gatewayUrl = stdio.env?.JINN_GATEWAY_URL;
   return {
     ...resolved,
     mcpServers: {
       ...resolved.mcpServers,
-      jinn: { ...stdio, env: { ...(stdio.env ?? {}), [JINN_SESSION_ID_ENV]: sessionId, [JINN_SESSION_CAPABILITY_ENV]: capability } },
+      jinn: {
+        ...stdio,
+        args: [
+          ...(stdio.args ?? []),
+          MCP_SESSION_ID_ARG, sessionId,
+          MCP_HOME_ARG, resolveJinnHome(),
+          ...(gatewayUrl ? [MCP_GATEWAY_URL_ARG, gatewayUrl] : []),
+        ],
+        env: { ...(stdio.env ?? {}), [JINN_SESSION_ID_ENV]: sessionId, [JINN_SESSION_CAPABILITY_ENV]: capability },
+      },
     },
   };
 }

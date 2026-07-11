@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ResolvedMcpConfig, McpServerStdioConfig } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
+import { stripMcpBootstrapArgs } from "../mcp/identity.js";
 
 /**
  * GRS-012c — attach the built-in `jinn` MCP server to a spawned Grok
@@ -121,7 +122,7 @@ function jinnServer(resolvedMcp: ResolvedMcpConfig | undefined): McpServerStdioC
  */
 export function buildGrokMcpToml(name: string, spec: McpServerStdioConfig): string {
   const lines = [`[mcp_servers.${name}]`, `command = ${JSON.stringify(spec.command)}`];
-  const args = spec.args ?? [];
+  const args = stripMcpBootstrapArgs(spec.args);
   lines.push(`args = [${args.map((a) => JSON.stringify(a)).join(", ")}]`);
   lines.push("enabled = true");
   if (spec.env) {
