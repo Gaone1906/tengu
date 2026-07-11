@@ -1,11 +1,20 @@
 import { validateDefinition, type EditableWorkflowDefinition } from "./definition.js";
 import { resolveExecutionPlan } from "./execution-plan.js";
 import { compileWorkflowSop, type WorkflowSopCompileResult } from "./sop.js";
+import {
+  prepareWorkflowLayoutForWrite,
+  type WorkflowLayoutDiagnostics,
+  type WorkflowLayoutIntent,
+} from "./layout.js";
 
 export interface WorkflowAuthoringPlan {
   ok: boolean;
   definition: EditableWorkflowDefinition;
   triggerBindingPlan?: WorkflowSopCompileResult["triggerBindingPlan"];
+  layout: {
+    diagnostics: WorkflowLayoutDiagnostics;
+    normalizedPreview: EditableWorkflowDefinition;
+  };
   validation: ReturnType<typeof validateDefinition>;
   execution: ReturnType<typeof resolveExecutionPlan>;
 }
@@ -34,8 +43,13 @@ function requireObject(args: Record<string, unknown>, name: string): Record<stri
 export function compileWorkflowAuthoringInput(args: Record<string, unknown>): WorkflowSopCompileResult {
   if (args.sop !== undefined) return compileWorkflowSop(args.sop);
   if (args.definition !== undefined) {
+    const placed = autoPlaceWorkflowNodes(requireObject(args, "definition"));
     return {
-      definition: autoPlaceWorkflowNodes(requireObject(args, "definition")) as unknown as EditableWorkflowDefinition,
+      definition: {
+        ...placed,
+        // Raw MCP/AI input is generated regardless of any caller-supplied metadata.
+        layout: { source: "generated", version: 1 },
+      } as unknown as EditableWorkflowDefinition,
     };
   }
   throw new Error("sop or definition is required");
@@ -45,9 +59,13 @@ export function planWorkflowAuthoringInput(args: Record<string, unknown>): Workf
   const compiled = compileWorkflowAuthoringInput(args);
   const validation = validateDefinition(compiled.definition);
   const execution = resolveExecutionPlan(compiled.definition);
+  const requestedIntent = args.layoutIntent;
+  const intent: Exclude<WorkflowLayoutIntent, "manual"> = requestedIntent === "normalize" ? "normalize" : "generated";
+  const layout = prepareWorkflowLayoutForWrite(compiled.definition, intent);
   return {
     ok: validation.ok && execution.ok,
     definition: compiled.definition,
+    layout: { diagnostics: layout.diagnostics, normalizedPreview: layout.definition },
     ...(compiled.triggerBindingPlan ? { triggerBindingPlan: compiled.triggerBindingPlan } : {}),
     validation,
     execution,

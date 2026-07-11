@@ -205,6 +205,30 @@ describe('updateDefinition', () => {
     expect(updated.edges).toHaveLength(2);
   });
 
+  it('defaults an omitted-intent graph patch to generated normalization', () => {
+    const manual = makeDef('graph-default');
+    manual.nodes[1].position = { x: 400, y: 0 };
+    createDefinition(root, manual, { now, layoutIntent: 'manual' });
+    const overlapping = structuredClone(manual.nodes);
+    overlapping[1].position = { x: 0, y: 0 };
+
+    const updated = updateDefinition(root, 'graph-default', { nodes: overlapping }, { now });
+
+    expect(updated.layout).toEqual({ source: 'normalized', version: 1 });
+    expect(updated.nodes[1].position).not.toEqual(updated.nodes[0].position);
+  });
+
+  it('preserves server-owned provenance for an omitted-intent metadata-only patch', () => {
+    const manual = makeDef('metadata-default');
+    manual.nodes[1].position = { x: 400, y: 0 };
+    createDefinition(root, manual, { now, layoutIntent: 'manual' });
+
+    const updated = updateDefinition(root, 'metadata-default', { title: 'Metadata only' }, { now });
+
+    expect(updated.layout).toEqual({ source: 'manual', version: 1 });
+    expect(updated.nodes).toEqual(manual.nodes);
+  });
+
   it('rejects a stale expectedVersion with a conflict', () => {
     createDefinition(root, makeDef('u3'), { now }); // version 1
     try {

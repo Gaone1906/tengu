@@ -285,6 +285,7 @@ export function compileWorkflowSop(input: unknown): WorkflowSopCompileResult {
     status: 'active',
     nodes,
     edges,
+    layout: { source: 'generated', version: 1 },
   };
   const description = stringValue(sop.description, 'sop.description', false);
   if (description) definition.description = description;

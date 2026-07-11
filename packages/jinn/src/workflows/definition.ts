@@ -287,6 +287,15 @@ export interface WorkflowEdge {
   lane?: 'error';
 }
 
+/** Server-owned provenance for persisted canvas coordinates. Incoming metadata is
+ * never used to choose write policy; callers pass an explicit layout intent. */
+export type WorkflowLayoutSource = 'generated' | 'normalized' | 'manual';
+
+export interface WorkflowLayoutMetadata {
+  source: WorkflowLayoutSource;
+  version: 1;
+}
+
 export interface EditableWorkflowDefinition {
   /** Schema version of THIS document shape (not the workflow's edit version). */
   schemaVersion: number;
@@ -301,6 +310,8 @@ export interface EditableWorkflowDefinition {
   orchestrator?: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
+  /** Provenance stamped by the server after applying the layout write policy. */
+  layout?: WorkflowLayoutMetadata;
   /** Workflow-level gates every run must satisfy (mirrors linear runGates). */
   runGates?: WorkflowGate[];
   /** Bounded-loop metadata (until / maxRoundsPerRun / stopWhen), carried from the linear def. */
@@ -335,6 +346,7 @@ export type ValidationCode =
   | 'gates-not-array'
   | 'invalid-node'
   | 'invalid-edge'
+  | 'unsupported-edge-field'
   | 'invalid-gate'
   | 'empty-node-id'
   | 'duplicate-node-id'
@@ -387,6 +399,7 @@ export type ValidationCode =
   | 'misplaced-edge-gate'
   | 'bad-loop-gate-kind'
   | 'bad-concurrency'
+  | 'bad-layout'
   | 'unsafe-node-id'
   | 'unsafe-edge-id'
   | 'dangling-edge'
@@ -408,6 +421,7 @@ export interface ValidationResult {
 const GATE_KINDS = new Set<WorkflowGate['kind']>(['artifact', 'flag', 'approval']);
 const TRIGGER_KINDS = new Set<WorkflowTrigger['kind']>(['schedule', 'manual', 'todo-status-change']);
 const EDGE_KIND_SET = new Set<EdgeKind>(EDGE_KINDS);
+const EDGE_KEYS = new Set<string>(['id', 'from', 'to', 'kind', 'label', 'gate', 'when', 'lane']);
 const EFFORT_SET = new Set<string>(STEP_EFFORT_LEVELS);
 const RETRY_CAUSE_SET = new Set<string>(STEP_RETRY_CAUSES);
 const STEP_OPTION_KEYS = new Set<string>(['model', 'effort', 'output', 'retry', 'onError', 'timeoutMinutes', 'session']);
@@ -861,6 +875,15 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
     if (!e || typeof e !== 'object') {
       err('invalid-edge', 'edge must be an object');
       continue; // never dereference a non-object entry (guards edges:[null])
+    }
+    for (const key of Object.keys(e)) {
+      if (!EDGE_KEYS.has(key)) {
+        err(
+          'unsupported-edge-field',
+          `edge "${e.id}" has unsupported field "${key}"; use options.onError:'error-edge' on the source and lane:'error' on its failure edge`,
+          e.id,
+        );
+      }
     }
     if (isBlank(e.id)) {
       err('empty-edge-id', 'edge id must be a non-empty string');

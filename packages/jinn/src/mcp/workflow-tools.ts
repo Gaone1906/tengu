@@ -136,19 +136,50 @@ const wfPath = (id: string): string => `/api/workflow-definitions/${encodeURICom
 
 /* ── The definition shape recipe (the one schema that must teach) ───────────── */
 
+const closed = (properties: Record<string, unknown>) => ({ type: "object", additionalProperties: false, properties });
+const schemaRef = (name: string) => ({ $ref: `#/$defs/${name}` });
+const scalar = {};
+const POSITION_SCHEMA = closed({ x: { type: "number" }, y: { type: "number" } });
+const ACTOR_SCHEMA = closed({ kind: { type: "string", pattern: "^(employee|engine)$" }, ref: { type: "string" } });
+const RETRY_SCHEMA = closed({ maxAttempts: { type: "integer" }, on: { type: "array", items: { type: "string" } } });
+const SESSION_SCHEMA = closed({ mode: { type: "string", pattern: "^(fresh|workflow|existing)$" }, sessionId: { type: "string" } });
+const OPTIONS_SCHEMA = closed({
+  model: scalar, effort: scalar, output: scalar, retry: schemaRef("retry"),
+  onError: { type: "string", pattern: "^(fail-run|continue|error-edge)$" }, timeoutMinutes: scalar, session: schemaRef("session"),
+});
+const FILTER_SCHEMA = closed({ source: scalar, department: scalar, assignee: scalar });
+const TRIGGER_SCHEMA = closed({
+  kind: { type: "string", pattern: "^(manual|schedule|todo-status-change)$" }, cron: scalar, timezone: scalar,
+  until: scalar, cronJobId: scalar, toStatus: scalar, status: scalar, fromStatus: scalar, filter: schemaRef("filter"),
+});
+const GATE_SCHEMA = closed({ id: scalar, kind: { type: "string", pattern: "^(artifact|flag|approval)$" }, glob: scalar, flag: scalar, approvalRef: scalar, description: scalar });
+const CONDITION_SCHEMA = closed({ path: scalar, op: { type: "string", pattern: "^(eq|ne|gt|gte|lt|lte|contains|startsWith|exists|absent)$" }, value: scalar });
+const NODE_SCHEMA = closed({
+  id: scalar, type: { type: "string", pattern: "^(trigger|step|gate|switch|fail|wait)$" }, label: scalar,
+  position: schemaRef("position"), actor: schemaRef("actor"), role: scalar, trigger: schemaRef("trigger"), gate: schemaRef("gate"),
+  gates: { type: "array", items: schemaRef("gate") }, optional: scalar, cadence: scalar, instructions: scalar, options: schemaRef("options"),
+  todoTransition: scalar, switchMode: scalar, failMessage: scalar, waitMinutes: scalar, waitUntil: scalar,
+});
+const EDGE_SCHEMA = closed({
+  id: scalar, from: scalar, to: scalar, kind: scalar, label: scalar, gate: schemaRef("gate"),
+  when: { type: "array", items: schemaRef("condition") }, lane: { type: "string", pattern: "^error$" },
+});
+const RAW_DEFINITION_SCHEMA = closed({
+  schemaVersion: scalar, id: scalar, name: scalar, title: scalar, description: scalar, version: scalar, status: scalar,
+  orchestrator: scalar, nodes: { type: "array", items: NODE_SCHEMA }, edges: { type: "array", items: EDGE_SCHEMA },
+  runGates: { type: "array", items: schemaRef("gate") }, loop: closed({ maxRuns: scalar, until: scalar, maxRoundsPerRun: scalar, stopWhen: scalar }),
+  concurrency: scalar, evidenceRoot: scalar, updatedAt: scalar,
+});
+const WORKFLOW_SCHEMA_DEFS = {
+  position: POSITION_SCHEMA, actor: ACTOR_SCHEMA, retry: RETRY_SCHEMA, session: SESSION_SCHEMA,
+  options: OPTIONS_SCHEMA, filter: FILTER_SCHEMA, trigger: TRIGGER_SCHEMA, gate: GATE_SCHEMA, condition: CONDITION_SCHEMA,
+};
+
 const DEFINITION_SHAPE =
-  "Default authoring shape is SOP: { id, name?, title, wakeUp: { kind: 'manual'|'schedule'|'todo-status'|'event'|'poll', ... }, steps: [{ employee? | engine?, role?, instruction }] }. " +
-  "The SOP compiles to the raw graph below. Power users may pass raw definition: { id, name?, title, nodes: [...], edges: [...], loop?, runGates? }. " +
-  "Node: { id, type: 'trigger'|'step'|'gate', label, ... }. Exactly one trigger node " +
-  "({ trigger: { kind: 'manual' } } or { kind: 'schedule', cron: '0 */2 * * *' }). " +
-  "A step runs one AI session: actor { kind: 'engine'|'employee', ref: e.g. 'codex' }, " +
-  "instructions = the step's task prompt; each step's output is handed off to its edge " +
-  "successors automatically. A gate node { gate: { kind: 'approval', approvalRef, description } } " +
-  "PARKS the run for a human decision; deterministic gates ({ kind: 'artifact', glob } / " +
-  "{ kind: 'flag', flag }) auto-evaluate. Edge: { id, from, to, kind: 'sequence'|'handoff' }. " +
-  "A { kind: 'loop' } back-edge repeats its segment up to loop.maxRoundsPerRun rounds " +
-  "(required alongside a loop edge), with an optional deterministic exit gate on the edge itself. " +
-  "Node position {x,y} is optional (auto-placed).";
+  "Prefer SOP {id,name?,title,wakeUp,steps:[{employee?|engine?,instruction}]}. Raw graphs use node types trigger|step|gate|switch|fail|wait and sequence|handoff|loop edges. " +
+  "For failure routing use options.onError:'error-edge' on the source step and lane:'error' on its failure edge; edge.on is unsupported. " +
+  "Assistant text such as \"ERROR\" is ordinary successful output. Error lanes activate only when the session/transport settles failed after retry policy. " +
+  "Switch uses edge.when, fail uses failMessage, wait uses waitMinutes|waitUntil, and positions are server-generated when absent.";
 
 function compileInput(args: Record<string, unknown>): WorkflowSopCompileResult {
   try {
@@ -254,9 +285,10 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     description: "Plan workflow without saving.",
     inputSchema: {
       type: "object",
+      $defs: WORKFLOW_SCHEMA_DEFS,
       properties: {
-        sop: { type: "object" },
-        definition: { type: "object" },
+        sop: { type: "object", description: DEFINITION_SHAPE },
+        definition: RAW_DEFINITION_SCHEMA,
       },
       required: [],
     },

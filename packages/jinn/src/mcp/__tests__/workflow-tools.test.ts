@@ -149,7 +149,7 @@ describe("workflow tools — registry + schemas", () => {
   });
 
   it("closes the nested raw-definition edge schema and exposes only the supported error lane", () => {
-    const schema = tool("plan_workflow").inputSchema as {
+    const schema = tool("plan_workflow").inputSchema as unknown as {
       properties: {
         definition: {
           additionalProperties?: boolean;
@@ -170,6 +170,25 @@ describe("workflow tools — registry + schemas", () => {
     expect(rawEdgeSchema?.additionalProperties).toBe(false);
     expect(rawEdgeSchema?.properties).toHaveProperty("lane");
     expect(rawEdgeSchema?.properties).not.toHaveProperty("on");
+  });
+
+  it("keeps repeated raw-definition object shapes closed through local schema refs", () => {
+    const schema = tool("plan_workflow").inputSchema as unknown as {
+      $defs?: Record<string, { additionalProperties?: boolean }>;
+      properties: {
+        definition: {
+          properties?: {
+            nodes?: { items?: { additionalProperties?: boolean } };
+            edges?: { items?: { additionalProperties?: boolean } };
+          };
+        };
+      };
+    };
+    for (const name of ["position", "actor", "retry", "session", "options", "filter", "trigger", "gate", "condition"]) {
+      expect(schema.$defs?.[name]?.additionalProperties, name).toBe(false);
+    }
+    expect(schema.properties.definition.properties?.nodes?.items?.additionalProperties).toBe(false);
+    expect(schema.properties.definition.properties?.edges?.items?.additionalProperties).toBe(false);
   });
 
   it("describes workflow starts as live operations on the current gateway", () => {

@@ -3710,6 +3710,12 @@ export async function handleApiRequest(
         return badRequest(res, "operation must be create or update");
       }
       const reconcileSopTriggers = body.reconcileSopTriggers === true;
+      if (body.layoutIntent !== undefined && !["generated", "manual", "normalize"].includes(String(body.layoutIntent))) {
+        return badRequest(res, "layoutIntent must be generated, manual, or normalize");
+      }
+      const requestedLayoutIntent = body.layoutIntent === "generated" || body.layoutIntent === "manual" || body.layoutIntent === "normalize"
+        ? body.layoutIntent
+        : undefined;
       const rawTriggerPlan = body.triggerBindingPlan;
       if (rawTriggerPlan !== undefined && (!rawTriggerPlan || typeof rawTriggerPlan !== "object" || Array.isArray(rawTriggerPlan))) {
         return badRequest(res, "triggerBindingPlan must be a JSON object");
@@ -3737,6 +3743,9 @@ export async function handleApiRequest(
           workflowId = rawDefinition.id;
           const authority = authorizeWorkflowOperation(req.headers, null, "create", context);
           if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+          if (requestedLayoutIntent === "manual" && authority.actor !== "operator") {
+            return json(res, { error: "manual layout intent is operator-only" }, 403);
+          }
           actor = authority.actor;
           const safeBody = actor === "operator"
             ? rawDefinition
@@ -3761,6 +3770,9 @@ export async function handleApiRequest(
           if (!existing) return notFound(res);
           const authority = authorizeWorkflowOperation(req.headers, existing, "update", context);
           if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+          if (requestedLayoutIntent === "manual" && authority.actor !== "operator") {
+            return json(res, { error: "manual layout intent is operator-only" }, 403);
+          }
           actor = authority.actor;
           patch = authority.canSetWorkflowAuthority
             ? body.patch as Partial<EditableWorkflowDefinition>
@@ -3796,8 +3808,11 @@ export async function handleApiRequest(
         };
         try {
           const definition = operation === "create"
-            ? createDefinition(root, definitionInput!)
-            : updateDefinition(root, workflowId, patch!, { expectedVersion });
+            ? createDefinition(root, definitionInput!, { layoutIntent: requestedLayoutIntent ?? "generated" })
+            : updateDefinition(root, workflowId, patch!, {
+                expectedVersion,
+                ...(requestedLayoutIntent ? { layoutIntent: requestedLayoutIntent } : {}),
+              });
           const trigger = reconcileSopTriggers
             ? await reconcileOwnedSopTriggers(
                 root,
@@ -3859,12 +3874,24 @@ export async function handleApiRequest(
         }
         try {
           const body = parsed.body as Record<string, unknown>;
+          const requestedLayoutIntent = body.layoutIntent;
+          if (requestedLayoutIntent !== undefined && !["generated", "manual", "normalize"].includes(String(requestedLayoutIntent))) {
+            return badRequest(res, "layoutIntent must be generated, manual, or normalize");
+          }
+          const { layoutIntent: _layoutIntent, ...definitionBody } = body;
           const authority = authorizeWorkflowOperation(req.headers, null, "create", context);
           if (!authority.ok) {
             return json(res, { error: authority.error }, authority.status);
           }
-          const safeBody = authority.actor === "operator" ? body : stripWorkflowAuthorityFields(body as Partial<EditableWorkflowDefinition>);
-          const created = createDefinition(root, { ...safeBody, ...workflowDefinitionAuthorPatch(authority) } as unknown as EditableWorkflowDefinition);
+          if (requestedLayoutIntent === "manual" && authority.actor !== "operator") {
+            return json(res, { error: "manual layout intent is operator-only" }, 403);
+          }
+          const safeBody = authority.actor === "operator" ? definitionBody : stripWorkflowAuthorityFields(definitionBody as Partial<EditableWorkflowDefinition>);
+          const created = createDefinition(
+            root,
+            { ...safeBody, ...workflowDefinitionAuthorPatch(authority) } as unknown as EditableWorkflowDefinition,
+            { layoutIntent: requestedLayoutIntent === "manual" || requestedLayoutIntent === "normalize" ? requestedLayoutIntent : "generated" },
+          );
           syncWorkflowCronJobsForRoot(root); // GRS-014d: schedule triggers become managed cron jobs
           return json(res, created, 201);
         } catch (err) {
@@ -4158,8 +4185,12 @@ export async function handleApiRequest(
       }
       const body = (parsed.body ?? {}) as Partial<EditableWorkflowDefinition> & {
         expectedVersion?: number;
+        layoutIntent?: "generated" | "manual" | "normalize";
       };
-      const { expectedVersion, ...patch } = body;
+      const { expectedVersion, layoutIntent, ...patch } = body;
+      if (layoutIntent !== undefined && !["generated", "manual", "normalize"].includes(layoutIntent)) {
+        return badRequest(res, "layoutIntent must be generated, manual, or normalize");
+      }
       try {
         const existing = getDefinition(root, params.id);
         if (!existing) return notFound(res);
@@ -4167,8 +4198,11 @@ export async function handleApiRequest(
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
+        if (layoutIntent === "manual" && authority.actor !== "operator") {
+          return json(res, { error: "manual layout intent is operator-only" }, 403);
+        }
         const safePatch = authority.canSetWorkflowAuthority ? patch : stripWorkflowAuthorityFields(patch);
-        const updated = updateDefinition(root, params.id, safePatch, { expectedVersion });
+        const updated = updateDefinition(root, params.id, safePatch, { expectedVersion, ...(layoutIntent ? { layoutIntent } : {}) });
         syncWorkflowCronJobsForRoot(root); // GRS-014d: schedule/status edits re-derive the managed cron job
         return json(res, updated);
       } catch (err) {

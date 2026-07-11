@@ -52,6 +52,7 @@ export interface JinnMcpTool {
     type: "object";
     properties: Record<string, unknown>;
     required?: string[];
+    $defs?: Record<string, unknown>;
   };
   handler: (args: Record<string, unknown>, ctx: JinnMcpContext) => Promise<unknown>;
 }

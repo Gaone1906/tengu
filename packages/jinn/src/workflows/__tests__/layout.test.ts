@@ -369,6 +369,41 @@ function fourWayBranchWithDocks(): EditableWorkflowDefinition {
   );
 }
 
+function fourRouteSwitchDefinition(): EditableWorkflowDefinition {
+  const destinations = ['north', 'east', 'south', 'west'];
+  return definition(
+    'layout-four-route-switch',
+    [
+      trigger(),
+      { id: 'route', type: 'switch', label: 'Route', position: { x: 200, y: 0 } },
+      ...destinations.map((id, index) => step(id, { x: 500, y: index * 240 })),
+    ],
+    [
+      edge('wake-route', 'wake', 'route'),
+      ...destinations.map((id) => edge(`route-${id}`, 'route', id)),
+    ],
+  );
+}
+
+function clearCrossingDefinition(): EditableWorkflowDefinition {
+  return definition(
+    'layout-clear-crossing',
+    [
+      trigger({ x: 0, y: 200 }),
+      step('upper-source', { x: 400, y: 0 }),
+      step('lower-source', { x: 400, y: 400 }),
+      step('upper-target', { x: 800, y: 0 }),
+      step('lower-target', { x: 800, y: 400 }),
+    ],
+    [
+      edge('wake-upper', 'wake', 'upper-source'),
+      edge('wake-lower', 'wake', 'lower-source'),
+      edge('upper-lower', 'upper-source', 'lower-target'),
+      edge('lower-upper', 'lower-source', 'upper-target'),
+    ],
+  );
+}
+
 describe('workflow layout normalization invariants', () => {
   for (const [name, input] of Object.entries(shapes)) {
     it(`${name}: is deterministic, idempotent, snapped, clear, and strict-LTR`, () => {
@@ -400,6 +435,7 @@ describe('workflow layout normalization invariants', () => {
       expect(expandedEnvelopeOverlaps(once), `overlaps seed ${seed}`).toEqual([]);
       expect(nonLoopClearanceViolations(once, 96), `LTR seed ${seed}`).toEqual([]);
       expect(verticalClearanceViolations(once, 64), `vertical seed ${seed}`).toEqual([]);
+      expect(once.diagnostics.reasons.filter((reason) => reason.code === 'edge-crossing'), `crossings seed ${seed}`).toEqual([]);
     }
   });
 });
@@ -452,5 +488,23 @@ describe('expanded envelopes and bounded-loop routing', () => {
     const result = normalizeWorkflowLayout(boundedLoopDefinition());
     expect(nonLoopClearanceViolations(result, 96)).toEqual([]);
     expect(result.diagnostics.loopRoutes).toEqual({ retry: { side: 'below', lane: 0 } });
+  });
+
+  it('derives a switch envelope from all non-error outgoing route rows', () => {
+    const { normalizeWorkflowLayout } = requireLayout();
+    const result = normalizeWorkflowLayout(fourRouteSwitchDefinition());
+    expect(result.diagnostics.envelopes.find((item) => item.nodeId === 'route')?.height).toBe(200);
+  });
+
+  it('diagnoses an avoidable clear edge crossing and normalizes it away', () => {
+    const { evaluateWorkflowLayout, normalizeWorkflowLayout } = requireLayout();
+    const crossing = clearCrossingDefinition();
+    expect(evaluateWorkflowLayout(crossing).reasons).toContainEqual(expect.objectContaining({
+      code: 'edge-crossing',
+      refs: expect.arrayContaining(['upper-lower', 'lower-upper']),
+    }));
+
+    const normalized = normalizeWorkflowLayout(crossing);
+    expect(normalized.diagnostics.reasons.filter((reason) => reason.code === 'edge-crossing')).toEqual([]);
   });
 });
