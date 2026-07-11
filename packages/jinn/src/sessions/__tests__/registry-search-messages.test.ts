@@ -197,6 +197,48 @@ describe("FTS backfill of pre-existing rows", () => {
     db.close();
   });
 
+  it("backfills asynchronously while legacy rows remain safe to update or delete", async () => {
+    const db = legacyDb();
+    const ins = db.prepare("INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)");
+    ins.run("async-update", "leg", "assistant", "old async hedgehog note", 1);
+    ins.run("async-delete", "leg", "assistant", "deleted async hedgehog note", 2);
+
+    reg.migrateFtsSchema(db);
+
+    // The gateway may serve writes before a yielded backfill reaches these legacy
+    // rowids. Trigger maintenance must therefore tolerate both mutations without
+    // trying to delete an FTS row that has not been seeded yet.
+    expect(() => {
+      db.prepare("UPDATE messages SET content = 'current async hedgehog note' WHERE id = 'async-update'").run();
+      db.prepare("DELETE FROM messages WHERE id = 'async-delete'").run();
+    }).not.toThrow();
+    // SQLite may reuse the deleted high rowid. A post-migration insert inside the
+    // pending legacy watermark must remain owned by the backfill rather than get
+    // indexed once by the AI trigger and a second time by the backfill.
+    ins.run("async-reuse", "leg", "assistant", "reused async hedgehog note", 3);
+
+    type AsyncBackfill = (
+      database: Database.Database,
+      chunkSize?: number,
+    ) => Promise<void>;
+    const scheduleFtsBackfill = (reg as Reg & { scheduleFtsBackfill?: AsyncBackfill }).scheduleFtsBackfill;
+    expect(scheduleFtsBackfill).toBeTypeOf("function");
+
+    const completion = scheduleFtsBackfill!(db, 1);
+    // The first chunk is scheduled with setImmediate rather than drained inline.
+    expect(matchRows(db, "hedgehog")).toEqual([]);
+    await completion;
+
+    const hits = matchRows(db, "hedgehog");
+    expect(hits).toHaveLength(2);
+    expect(hits.every((hit) => hit.sessionId === "leg")).toBe(true);
+    expect(hits.map((hit) => hit.snippet)).toEqual(expect.arrayContaining([
+      "current async «hedgehog» note",
+      "reused async «hedgehog» note",
+    ]));
+    db.close();
+  });
+
   it("does not double-index rows inserted AFTER migration (triggers own them)", () => {
     const db = legacyDb();
     db.prepare("INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)")

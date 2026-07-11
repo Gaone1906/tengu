@@ -158,20 +158,44 @@ CREATE INDEX IF NOT EXISTS idx_sessions_work_item ON sessions (work_item_id) WHE
 // lives here; `content` is read back from `messages` via rowid for snippets), so
 // it stays in lockstep with `messages` through the AI/AD/AU triggers below. Only
 // user/assistant rows are indexed — notification/tool rows are deliberately
-// excluded (they're machine chatter, not conversation). Pre-existing rows (rows
-// that predate this table) are seeded once by the chunked backfill; the triggers
-// own every write from here on.
+// excluded (they're machine chatter, not conversation). Pre-existing rows are
+// seeded by a yielded backfill after listen(). While that backfill is in flight,
+// the AD/AU triggers only issue an FTS delete for rowids known to be indexed:
+// already-drained legacy rows or post-watermark rows owned by the AI trigger.
+// This keeps legacy updates/deletes safe without blocking gateway boot.
 const CREATE_FTS = `
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, content='messages', content_rowid='rowid', tokenize='unicode61');
-CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages WHEN new.role IN ('user','assistant') BEGIN
+CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages
+WHEN new.role IN ('user','assistant') AND (
+  COALESCE((SELECT value = '1' FROM meta WHERE key = 'fts_backfill_done'), 0)
+  OR new.rowid <= COALESCE(CAST((SELECT value FROM meta WHERE key = 'fts_backfill_rowid') AS INTEGER), 0)
+  OR new.rowid > COALESCE(CAST((SELECT value FROM meta WHERE key = 'fts_backfill_max') AS INTEGER), 0)
+) BEGIN
   INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
-CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages WHEN old.role IN ('user','assistant') BEGIN
+CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages
+WHEN old.role IN ('user','assistant') AND (
+  COALESCE((SELECT value = '1' FROM meta WHERE key = 'fts_backfill_done'), 0)
+  OR old.rowid <= COALESCE(CAST((SELECT value FROM meta WHERE key = 'fts_backfill_rowid') AS INTEGER), 0)
+  OR old.rowid > COALESCE(CAST((SELECT value FROM meta WHERE key = 'fts_backfill_max') AS INTEGER), 0)
+) BEGIN
   INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
 END;
-CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE ON messages WHEN new.role IN ('user','assistant') BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
-  INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, content)
+  SELECT 'delete', old.rowid, old.content
+  WHERE old.role IN ('user','assistant') AND (
+    COALESCE((SELECT value = '1' FROM meta WHERE key = 'fts_backfill_done'), 0)
+    OR old.rowid <= COALESCE(CAST((SELECT value FROM meta WHERE key = 'fts_backfill_rowid') AS INTEGER), 0)
+    OR old.rowid > COALESCE(CAST((SELECT value FROM meta WHERE key = 'fts_backfill_max') AS INTEGER), 0)
+  );
+  INSERT INTO messages_fts(rowid, content)
+  SELECT new.rowid, new.content
+  WHERE new.role IN ('user','assistant') AND (
+    COALESCE((SELECT value = '1' FROM meta WHERE key = 'fts_backfill_done'), 0)
+    OR new.rowid <= COALESCE(CAST((SELECT value FROM meta WHERE key = 'fts_backfill_rowid') AS INTEGER), 0)
+    OR new.rowid > COALESCE(CAST((SELECT value FROM meta WHERE key = 'fts_backfill_max') AS INTEGER), 0)
+  );
 END;
 `;
 
@@ -326,21 +350,10 @@ export function initDb(): Database.Database {
   // Partial-message index needs the `partial` column, added by migrateMessagesSchema above.
   db.exec(CREATE_MESSAGES_PARTIAL_INDEX);
   migrateFtsSchema(db);
-  // Seed the FTS index for pre-existing rows synchronously at boot — BEFORE the
-  // gateway serves any request. The AD/AU sync triggers issue an FTS `'delete'`
-  // for every user/assistant row they touch, and on an external-content table a
-  // delete of a not-yet-indexed rowid raises "database disk image is malformed"
-  // (it rolls back cleanly — no real corruption — but the delete/update fails).
-  // So any delete/update of an un-backfilled row would throw until the backfill
-  // caught up. Draining here closes that window; it is chunked + idempotent and
-  // measured at ~350ms for 120k rows, then a no-op on every later boot.
-  // On any exception: degrade gracefully — drop FTS infrastructure, reset progress
-  // flags (so the next boot retries), and disable search for this process.
-  try {
-    backfillFtsSync(db);
-  } catch (err) {
-    disableFtsForProcess(db, err);
-  }
+  // Pre-existing rows are intentionally NOT drained here. startGateway schedules
+  // the chunked backfill after server.listen(), and searchMessages also schedules
+  // it as a lazy fallback for non-gateway callers. The guarded AD/AU triggers above
+  // keep writes safe while that one-time backfill is incomplete.
   migrateSessionsSchema(db);
   db.exec(CREATE_SESSION_KEY_INDEX);
   db.exec(CREATE_DELEGATION_IDEMPOTENCY_INDEX);
@@ -463,6 +476,14 @@ export function setMetaValue(key: string, value: string): void {
  */
 export function migrateFtsSchema(database: Database.Database): void {
   database.exec(CREATE_META_TABLE);
+  // Trigger definitions changed when the boot drain became asynchronous. Rebuild
+  // them idempotently so upgraded databases get the guarded AD/AU behavior too;
+  // CREATE TRIGGER IF NOT EXISTS alone would preserve the unsafe legacy bodies.
+  database.exec(`
+    DROP TRIGGER IF EXISTS messages_fts_ai;
+    DROP TRIGGER IF EXISTS messages_fts_ad;
+    DROP TRIGGER IF EXISTS messages_fts_au;
+  `);
   database.exec(CREATE_FTS);
   // First time we see this DB and the backfill hasn't run: pin the watermark.
   if (getMeta(database, 'fts_backfill_done') !== '1' && getMeta(database, 'fts_backfill_max') === null) {
@@ -560,37 +581,44 @@ export function disableFtsForProcess(database: Database.Database, reason?: unkno
   ftsAvailable = false;
 }
 
-let ftsBackfillScheduled = false;
+const ftsBackfillPromises = new WeakMap<Database.Database, Promise<void>>();
 
 /**
- * Kick the one-time FTS backfill off the hot path. Normally a no-op because
- * `initDb` already drained it synchronously at boot; this is the resumable
- * fallback for the case where a boot drain was interrupted (process killed
- * mid-migration → `fts_backfill_done` never stamped). Guarded by the persistent
- * `fts_backfill_done` flag (runs at most once across the DB's lifetime) and an
- * in-process latch (concurrent searches don't double-schedule). Each chunk is its
- * own transaction with a `setImmediate` yield in between, so a months-old 100k-row
- * table is seeded without blocking the event loop.
+ * Kick the one-time FTS backfill off the hot path. startGateway calls this only
+ * after listen(); searchMessages calls it as a lazy fallback for library/test
+ * consumers. Guarded by the persistent `fts_backfill_done` flag and a per-DB
+ * in-process promise so concurrent callers share one drain. Each chunk is its own
+ * transaction with a `setImmediate` yield in between, so a large historical table
+ * is seeded without blocking the event loop.
  */
-function scheduleFtsBackfill(): void {
-  if (!ftsAvailable) return;
-  const database = initDb();
-  if (getMeta(database, 'fts_backfill_done') === '1') return;
-  if (ftsBackfillScheduled) return;
-  ftsBackfillScheduled = true;
-  const pump = (): void => {
-    try {
-      if (ftsBackfillStep(database)) {
-        ftsBackfillScheduled = false;
-        return;
+export function scheduleFtsBackfill(
+  database: Database.Database = initDb(),
+  chunkSize = FTS_BACKFILL_CHUNK,
+): Promise<void> {
+  if (!ftsAvailable || getMeta(database, 'fts_backfill_done') === '1') return Promise.resolve();
+  const existing = ftsBackfillPromises.get(database);
+  if (existing) return existing;
+
+  const completion = new Promise<void>((resolve) => {
+    const pump = (): void => {
+      try {
+        if (ftsBackfillStep(database, chunkSize)) {
+          ftsBackfillPromises.delete(database);
+          resolve();
+          return;
+        }
+        setImmediate(pump);
+      } catch (err) {
+        logger.warn(`FTS backfill failed: ${err instanceof Error ? err.message : err}`);
+        disableFtsForProcess(database, err);
+        ftsBackfillPromises.delete(database);
+        resolve();
       }
-      setImmediate(pump);
-    } catch (err) {
-      logger.warn(`FTS backfill failed: ${err instanceof Error ? err.message : err}`);
-      ftsBackfillScheduled = false;
-    }
-  };
-  setImmediate(pump);
+    };
+    setImmediate(pump);
+  });
+  ftsBackfillPromises.set(database, completion);
+  return completion;
 }
 
 export interface MessageSearchResult {
@@ -676,7 +704,7 @@ function sanitizeFtsQuery(query: string): string {
 export function searchMessages(query: string, limit = 50, filter?: MessageSearchFilter): MessageSearchResult[] {
   const db = initDb();
   if (!ftsAvailable) return [];
-  scheduleFtsBackfill();
+  void scheduleFtsBackfill(db);
   const match = sanitizeFtsQuery(query);
   if (!match) return [];
   const cap = Math.max(1, Math.min(Math.floor(limit) || 50, 200));

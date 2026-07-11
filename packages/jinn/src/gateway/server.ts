@@ -18,7 +18,7 @@ import {
   refreshPiModels,
 } from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
-import { initDb, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, getInterruptedSessions, listSessions, updateSession, getSession } from "../sessions/registry.js";
+import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, getInterruptedSessions, listSessions, updateSession, getSession } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
 import { recoverOrphanedDelegationCompletionClaims } from "../sessions/callbacks.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
@@ -315,13 +315,6 @@ export async function startGateway(
   if (recoveredQueue > 0) {
     logger.info(`Recovered ${recoveredQueue} in-flight queue item(s) from previous run — reset to pending`);
   }
-  // Drop any mid-turn streaming blocks stranded by a restart — their turn's final
-  // message was never written, so the partials have nothing to consolidate into.
-  const sweptPartials = clearAllPartialMessages();
-  if (sweptPartials > 0) {
-    logger.info(`Swept ${sweptPartials} stranded mid-turn partial message(s) from previous run`);
-  }
-
   // Resolve gateway port/host early so boot artifacts (gateway.json) can record it.
   const port = config.gateway.port || 7777;
   const host = config.gateway.host || "127.0.0.1";
@@ -1309,15 +1302,23 @@ export async function startGateway(
   //   • recoverStaleSessions / getInterruptedSessions — must stamp dead sessions
   //     `interrupted` BEFORE we serve /api/status|/api/sessions, or we'd report
   //     previous-process sessions as still "running".
-  //   • clearAllPartialMessages — a correctness sweep (now index-backed and cheap).
-  //   • FTS backfill (initDb) — synchronous by design: the AD/AU triggers raise
-  //     "malformed" on a not-yet-indexed rowid, so the index must be drained
-  //     before any delete/update can race; it no-ops on every boot after the first.
   //   • applyWorkflowCronSync + fire-handler wiring — must precede startScheduler
   //     (GRS-014d boot-ordering invariant), which itself is pre-listen.
   setImmediate(() => {
+    // Drop any mid-turn streaming blocks stranded by a restart — their turn's final
+    // message was never written, so the partials have nothing to consolidate into.
+    // This index-backed maintenance is safe to run after readiness and should never
+    // delay the first health check on a large historical message table.
+    const sweptPartials = clearAllPartialMessages();
+    if (sweptPartials > 0) {
+      logger.info(`Swept ${sweptPartials} stranded mid-turn partial message(s) from previous run`);
+    }
     reconcileWorkItemsOnStartup();
   });
+  // FTS migration installs guarded triggers synchronously, but historical row
+  // seeding is a yielded, resumable maintenance job. Start it only after the HTTP
+  // server accepts requests so first-upgrade history never delays readiness.
+  void scheduleFtsBackfill();
 
   // GRS-017e: arm the jinn-attachment authed smoke gate. Runs right after
   // listen (the probe is one loopback GET against this very server, using the

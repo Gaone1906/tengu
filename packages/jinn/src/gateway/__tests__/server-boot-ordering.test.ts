@@ -61,6 +61,22 @@ describe('gateway boot ordering — managed cron fires can never land half-wired
     expect(reconcile).toBeGreaterThan(immediate);
   });
 
+  it('starts the yielded FTS backfill only after server.listen()', () => {
+    const listen = callIndex('server.listen(port, host)');
+    const backfill = callIndex('scheduleFtsBackfill()');
+
+    expect(backfill).toBeGreaterThan(listen);
+    expect(serverSource.indexOf('scheduleFtsBackfill()', backfill + 1)).toBe(-1);
+  });
+
+  it('defers stranded-partial maintenance until after server.listen()', () => {
+    const listen = callIndex('server.listen(port, host)');
+    const sweep = callIndex('clearAllPartialMessages()');
+
+    expect(sweep).toBeGreaterThan(listen);
+    expect(serverSource.indexOf('clearAllPartialMessages()', sweep + 1)).toBe(-1);
+  });
+
   it('arms the jinn MCP attach gate before replaying pending web queue items', () => {
     const listen = callIndex('server.listen(port, host)');
     const arm = callIndex('await armJinnAttachGate(currentConfig.mcp');
