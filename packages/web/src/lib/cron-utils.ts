@@ -34,115 +34,154 @@ export function formatDuration(ms: number): string {
   return `${hrs}h ${remMins}m`
 }
 
-/**
- * Parse a 5-field cron expression into schedule slots for weekly grid display.
- * Returns { hour, minute, days } where days is 0=Sun..6=Sat.
- * Returns null for unparseable expressions.
- */
-export function parseScheduleSlots(
-  schedule: string
-): { hour: number; minute: number; days: number[] } | null {
-  if (!schedule || !schedule.trim()) return null
-  const parts = schedule.trim().split(/\s+/)
-  if (parts.length !== 5) return null
+/** Minute-aware fire-time label: "9 AM" / "9:15 AM". */
+function timeLabel(hour: number, minute: number): string {
+  return minute === 0 ? formatTime(hour, minute) : formatTimeWithMinute(hour, minute)
+}
 
-  const [min, hour, , , dow] = parts
-  const minNum = parseInt(min, 10)
-  const hourNum = parseInt(hour, 10)
-  if (isNaN(minNum) || isNaN(hourNum)) return null
+function ordinal(n: number): string {
+  const rem = n % 100
+  if (rem >= 11 && rem <= 13) return `${n}th`
+  const suffix = ({ 1: 'st', 2: 'nd', 3: 'rd' } as Record<number, string>)[n % 10] ?? 'th'
+  return `${n}${suffix}`
+}
 
-  let days: number[]
+/** "a" / "a and b" / "a, b and c". */
+function listPhrase(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? ''
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
+}
 
-  if (dow === '*') {
-    days = [0, 1, 2, 3, 4, 5, 6]
-  } else if (dow === '1-5') {
-    days = [1, 2, 3, 4, 5]
-  } else if (dow === '0-6' || dow === '0,1,2,3,4,5,6') {
-    days = [0, 1, 2, 3, 4, 5, 6]
-  } else if (dow.includes(',')) {
-    days = dow.split(',').map(Number).filter(n => !isNaN(n) && n >= 0 && n <= 6)
-    if (days.length === 0) return null
-  } else {
-    const dowNum = parseInt(dow, 10)
-    if (isNaN(dowNum) || dowNum < 0 || dowNum > 6) return null
-    days = [dowNum]
+function sortedAsc(set: Set<number>): number[] {
+  return Array.from(set).sort((a, b) => a - b)
+}
+
+/** Equal spacing between ≥2 sorted values, or null. {9,11,13,15,17} → 2. */
+function uniformStep(values: number[]): number | null {
+  if (values.length < 2) return null
+  const step = values[1] - values[0]
+  for (let i = 2; i < values.length; i++) {
+    if (values[i] - values[i - 1] !== step) return null
   }
+  return step
+}
 
-  return { hour: hourNum, minute: minNum, days }
+/** Which days a dow set names: "Daily", "Weekdays", "Weekends", plural day
+ *  names for small lists — or null when no honest short phrase exists. */
+function dowPhrase(dow: Set<number>): string | null {
+  if (dow.size === 7) return 'Daily'
+  const days = sortedAsc(dow)
+  if (days.length === 5 && days.every((d, i) => d === i + 1)) return 'Weekdays'
+  if (days.length === 2 && days[0] === 0 && days[1] === 6) return 'Weekends'
+  if (days.length <= 3) return listPhrase(days.map((d) => DAY_NAMES[d]))
+  return null
+}
+
+/** True per-day fire cap before the weekly grid aggregates a job into a
+ *  single counted pill (so `* * * * *` cannot explode the view). */
+export const MAX_WEEKLY_PILLS_PER_DAY = 8
+
+export interface WeeklySlots {
+  /** Distinct (hour, minute) fire slots within one active day, ascending. */
+  slots: { hour: number; minute: number }[]
+  /** Days of week the job fires on (0=Sun..6=Sat). */
+  days: number[]
+  /** Set when the job fires more than MAX_WEEKLY_PILLS_PER_DAY times a day:
+   *  `slots` collapses to the first fire and this carries the true per-day
+   *  count for an aggregated pill. */
+  aggregatedCount?: number
 }
 
 /**
- * Convert a 5-field cron expression to a human-readable description.
- * Falls back to the raw expression for anything unparseable.
+ * Expand a 5-field cron expression into weekly-grid slots using the same
+ * field expansion nextCronDate schedules by (lists, ranges, steps, dow 7→0).
+ * Day-of-month/month constraints don't map onto a generic week and are not
+ * applied here. Returns null for unparseable expressions.
+ */
+export function weeklyScheduleSlots(schedule: string): WeeklySlots | null {
+  const sets = parseCronFields(schedule)
+  if (!sets) return null
+  const days = sortedAsc(sets.dow)
+  const hours = sortedAsc(sets.hour)
+  const minutes = sortedAsc(sets.minute)
+  const perDay = hours.length * minutes.length
+  if (perDay > MAX_WEEKLY_PILLS_PER_DAY) {
+    return { slots: [{ hour: hours[0], minute: minutes[0] }], days, aggregatedCount: perDay }
+  }
+  return {
+    slots: hours.flatMap((hour) => minutes.map((minute) => ({ hour, minute }))),
+    days,
+  }
+}
+
+/**
+ * Convert a 5-field cron expression to a human-readable sentence built from
+ * the same field expansion nextCronDate uses. Only says what is true: when a
+ * schedule has no honest short sentence it returns "Custom schedule" (the UI
+ * always shows the mono expression alongside) — never a wrong sentence, and
+ * never the raw expression duplicated as prose.
  */
 export function describeCron(schedule: string): string {
   if (!schedule || !schedule.trim()) return ''
-
   const parts = schedule.trim().split(/\s+/)
-  if (parts.length !== 5) return schedule
+  const sets = parts.length === 5 ? parseCronFields(schedule) : null
+  if (!sets) return 'Custom schedule'
+  const [minF, , domF, monF] = parts
 
-  const [min, hour, dom, , dow] = parts
+  // Month-restricted schedules have no honest short sentence.
+  if (monF !== '*') return 'Custom schedule'
 
-  // Every minute: * * * * *
-  if (min === '*' && hour === '*' && dom === '*' && dow === '*') {
-    return 'Every minute'
+  const minutes = sortedAsc(sets.minute)
+  const hours = sortedAsc(sets.hour)
+  const allHours = hours.length === 24
+  const allDays = !sets.domRestricted && !sets.dowRestricted
+
+  // Sub-hourly grammar.
+  if (minF === '*' && allHours && allDays) return 'Every minute'
+  if (minF.startsWith('*/') && allHours && allDays) {
+    const interval = parseInt(minF.slice(2), 10)
+    if (!isNaN(interval)) return `Every ${interval} minutes`
   }
+  if (minutes.length === 1 && allHours && allDays) return 'Every hour'
+  if (minutes.length !== 1) return 'Custom schedule'
+  const minute = minutes[0]
 
-  // Every N minutes: */5 * * * *
-  if (min.startsWith('*/') && hour === '*' && dom === '*' && dow === '*') {
-    const interval = parseInt(min.slice(2), 10)
-    if (!isNaN(interval)) {
-      return `Every ${interval} minutes`
+  // dom ∪ dow union (standard cron: either matches) — say the "or".
+  if (sets.domRestricted && sets.dowRestricted) {
+    const days = dowPhrase(sets.dow)
+    if (hours.length === 1 && days && days !== 'Daily' && sets.dom.size === 1) {
+      const [dom] = sets.dom
+      return `${days} or the ${ordinal(dom)}, at ${timeLabel(hours[0], minute)}`
     }
+    return 'Custom schedule'
   }
 
-  // Every hour: 0 * * * *
-  if (min !== '*' && hour === '*' && dom === '*' && dow === '*') {
-    return 'Every hour'
-  }
-
-  const hourNum = parseInt(hour, 10)
-  const minNum = parseInt(min, 10)
-  if (isNaN(hourNum) || isNaN(minNum)) return schedule
-
-  const time = minNum === 0 ? formatTime(hourNum, minNum) : formatTimeWithMinute(hourNum, minNum)
-
-  // Every N days: 0 12 */2 * *
-  if (dom.startsWith('*/') && dow === '*') {
-    const interval = parseInt(dom.slice(2), 10)
-    if (!isNaN(interval)) {
-      return `Every ${interval} days at ${time}`
+  // Day-of-month driven (dow is *).
+  if (sets.domRestricted) {
+    if (hours.length !== 1) return 'Custom schedule'
+    const time = timeLabel(hours[0], minute)
+    if (domF.startsWith('*/')) {
+      const interval = parseInt(domF.slice(2), 10)
+      if (!isNaN(interval)) return `Every ${interval} days at ${time}`
     }
-  }
-
-  // Monthly: 0 8 1 * *
-  if (dom !== '*' && dow === '*') {
-    const dayNum = parseInt(dom, 10)
-    if (!isNaN(dayNum)) {
-      const suffix = dayNum === 1 ? 'st' : dayNum === 2 ? 'nd' : dayNum === 3 ? 'rd' : 'th'
-      return `Monthly on the ${dayNum}${suffix} at ${time}`
+    if (sets.dom.size === 1) {
+      const [dom] = sets.dom
+      return `Monthly on the ${ordinal(dom)} at ${time}`
     }
+    return 'Custom schedule'
   }
 
-  // Weekdays: 0 10 * * 1-5
-  if (dom === '*' && dow === '1-5') {
-    return `Weekdays at ${time}`
+  // Day-of-week driven.
+  const phrase = dowPhrase(sets.dow)
+  if (!phrase) return 'Custom schedule'
+  if (hours.length === 1) return `${phrase} at ${timeLabel(hours[0], minute)}`
+  if (allHours) return `${phrase} every hour`
+  if (hours.length <= 3) return `${phrase} at ${listPhrase(hours.map((h) => timeLabel(h, minute)))}`
+  const step = uniformStep(hours)
+  if (step) {
+    return `${phrase} every ${step}h, ${timeLabel(hours[0], minute)}–${timeLabel(hours[hours.length - 1], minute)}`
   }
-
-  // Specific day of week: 0 6 * * 1
-  if (dom === '*') {
-    const dowNum = parseInt(dow, 10)
-    if (!isNaN(dowNum) && dowNum >= 0 && dowNum <= 6) {
-      return `${DAY_NAMES[dowNum]} at ${time}`
-    }
-  }
-
-  // Daily: 0 8 * * *
-  if (dom === '*' && dow === '*') {
-    return `Daily at ${time}`
-  }
-
-  return schedule
+  return 'Custom schedule'
 }
 
 /* ------------------------------------------------------------------ */

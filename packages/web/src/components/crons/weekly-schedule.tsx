@@ -1,6 +1,6 @@
 
 import { useMemo, useState, useRef, useEffect, useCallback } from "react"
-import { parseScheduleSlots, describeCron } from "@/lib/cron-utils"
+import { weeklyScheduleSlots, describeCron } from "@/lib/cron-utils"
 
 interface CronJob {
   id: string
@@ -37,6 +37,9 @@ interface SlotInfo {
   hour: number
   minute: number
   col: number
+  /** True per-day fire count when the schedule is too dense for one pill per
+   *  fire — the pill renders once with this count instead. */
+  aggregatedCount?: number
 }
 
 interface TooltipData {
@@ -125,17 +128,19 @@ export function WeeklySchedule({ crons }: WeeklyScheduleProps) {
 
     for (const cron of crons) {
       if (!cron.enabled) continue
-      const parsed = parseScheduleSlots(cron.schedule)
+      const parsed = weeklyScheduleSlots(cron.schedule)
       if (!parsed) continue
 
       for (const dow of parsed.days) {
         const col = DOW_TO_COL[dow]
         if (col === undefined) continue
-        const key = `${col}-${parsed.hour}`
-        const existing = map.get(key) || []
-        existing.push({ cron, hour: parsed.hour, minute: parsed.minute, col })
-        map.set(key, existing)
-        hourSet.add(parsed.hour)
+        for (const slot of parsed.slots) {
+          const key = `${col}-${slot.hour}`
+          const existing = map.get(key) || []
+          existing.push({ cron, hour: slot.hour, minute: slot.minute, col, aggregatedCount: parsed.aggregatedCount })
+          map.set(key, existing)
+          hourSet.add(slot.hour)
+        }
       }
     }
 
@@ -343,9 +348,11 @@ export function WeeklySchedule({ crons }: WeeklyScheduleProps) {
                               background: slot.cron.enabled ? "var(--system-green)" : "var(--text-tertiary)",
                             }}
                           />
-                          {/* Time */}
+                          {/* Time — dense schedules aggregate into one counted pill */}
                           <span className="text-[length:var(--text-caption2)] font-[family-name:var(--font-mono)] text-[var(--text-tertiary)] shrink-0 leading-none">
-                            {`:${String(slot.minute).padStart(2, "0")}`}
+                            {slot.aggregatedCount
+                              ? `×${slot.aggregatedCount}/day`
+                              : `:${String(slot.minute).padStart(2, "0")}`}
                           </span>
                           {/* Name */}
                           <span

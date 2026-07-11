@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest"
-import { agoLabel, formatNextRun, formatRunTime, nextCronDate } from "../cron-utils"
+import {
+  agoLabel,
+  describeCron,
+  formatNextRun,
+  formatRunTime,
+  MAX_WEEKLY_PILLS_PER_DAY,
+  nextCronDate,
+  weeklyScheduleSlots,
+} from "../cron-utils"
 import { filterJobs, groupJobsByEmployee, runOutcome, type CronJobWire } from "@/routes/cron/shared"
 
 /* nextCronDate computes in the given IANA timezone (defaults to the runner's
@@ -99,6 +107,76 @@ describe("agoLabel", () => {
     expect(agoLabel("2026-07-08T10:00:00Z", now)).toBe("3d ago")
     expect(agoLabel(undefined, now)).toBe("")
     expect(agoLabel("garbage", now)).toBe("")
+  })
+})
+
+describe("weeklyScheduleSlots", () => {
+  it("expands range/step schedules into every fire slot (QA r2-1)", () => {
+    const w = weeklyScheduleSlots("15 9-17/2 * * 1-5")!
+    expect(w.days).toEqual([1, 2, 3, 4, 5])
+    expect(w.slots).toEqual([9, 11, 13, 15, 17].map((hour) => ({ hour, minute: 15 })))
+    expect(w.aggregatedCount).toBeUndefined()
+    // 5 hour-slots × 5 weekdays → 25 weekly pills.
+    expect(w.slots.length * w.days.length).toBe(25)
+  })
+
+  it("keeps simple dailies as one slot across all days", () => {
+    const w = weeklyScheduleSlots("0 8 * * *")!
+    expect(w.slots).toEqual([{ hour: 8, minute: 0 }])
+    expect(w.days).toEqual([0, 1, 2, 3, 4, 5, 6])
+  })
+
+  it("aggregates dense schedules instead of exploding the grid", () => {
+    const every = weeklyScheduleSlots("* * * * *")!
+    expect(every.aggregatedCount).toBe(1440)
+    expect(every.slots).toHaveLength(1)
+
+    const quarterHourly = weeklyScheduleSlots("*/15 9-17 * * *")!
+    expect(quarterHourly.aggregatedCount).toBe(36) // 4 × 9 hours
+    expect(quarterHourly.slots).toEqual([{ hour: 9, minute: 0 }])
+
+    // Exactly at the cap stays fully expanded.
+    const atCap = weeklyScheduleSlots("0,30 9-12 * * *")! // 2 × 4 = 8
+    expect(atCap.aggregatedCount).toBeUndefined()
+    expect(atCap.slots).toHaveLength(MAX_WEEKLY_PILLS_PER_DAY)
+  })
+
+  it("returns null for unparseable schedules", () => {
+    expect(weeklyScheduleSlots("not a cron")).toBeNull()
+    expect(weeklyScheduleSlots("0 8 * *")).toBeNull()
+  })
+})
+
+describe("describeCron", () => {
+  it("keeps the scalar sentences", () => {
+    expect(describeCron("0 8 * * *")).toBe("Daily at 8 AM")
+    expect(describeCron("15 9 * * 1")).toBe("Mondays at 9:15 AM")
+    expect(describeCron("0 10 * * 1-5")).toBe("Weekdays at 10 AM")
+    expect(describeCron("*/15 * * * *")).toBe("Every 15 minutes")
+    expect(describeCron("0 * * * *")).toBe("Every hour")
+    expect(describeCron("0 6 21 * *")).toBe("Monthly on the 21st at 6 AM")
+    expect(describeCron("0 12 */2 * *")).toBe("Every 2 days at 12 PM")
+  })
+
+  it("says every fire of a stepped hour range (QA r2-2)", () => {
+    expect(describeCron("15 9-17/2 * * 1-5")).toBe("Weekdays every 2h, 9:15 AM–5:15 PM")
+  })
+
+  it("enumerates small hour lists", () => {
+    expect(describeCron("15 9,13 * * *")).toBe("Daily at 9:15 AM and 1:15 PM")
+  })
+
+  it("says the dom ∪ dow union out loud (QA r2-3)", () => {
+    expect(describeCron("0 6 20 * 0")).toBe("Sundays or the 20th, at 6 AM")
+    expect(describeCron("0 8 20 * 1-5")).toBe("Weekdays or the 20th, at 8 AM")
+  })
+
+  it("falls back to 'Custom schedule' instead of a wrong or duplicated sentence", () => {
+    expect(describeCron("0 8 * 6 *")).toBe("Custom schedule") // month-restricted
+    expect(describeCron("0,30 8 * * *")).toBe("Custom schedule") // minute list
+    expect(describeCron("15 9-17 20 * 0")).toBe("Custom schedule") // multi-hour union
+    expect(describeCron("0 8 20,25 * 0")).toBe("Custom schedule") // multi-dom union
+    expect(describeCron("garbage")).toBe("Custom schedule")
   })
 })
 
