@@ -287,6 +287,37 @@ function formatTerminalAssistantError(error: unknown): string {
   return `Error: ${String(error)}`
 }
 
+export function reconcileCompletedTurnMessages(args: {
+  messages: Message[]
+  turnStart: number
+  finalMessage: Message
+  exactResult?: string
+}): Message[] {
+  const turnStart = args.turnStart >= 0
+    ? Math.min(args.turnStart, args.messages.length)
+    : args.messages.length
+  const exactResult = args.exactResult?.trim() ?? ''
+  const preserved = args.messages.slice(turnStart)
+    .filter((message) =>
+      message.role === 'user'
+      || Boolean(message.media?.length)
+      || Boolean(message.toolCall)
+      || message.role === 'notification'
+      || Boolean(message.blocks?.some((block) => block.type === 'delegation' || block.type === 'dispatch'))
+      || (message.role === 'assistant' && !message.blocks?.length
+        && Boolean(message.content.trim())
+        && (!exactResult || message.content.trim() !== exactResult)))
+    .map((message) => message.toolCall && !message.content.startsWith('Used ')
+      ? { ...message, content: `Used ${message.toolCall}` }
+      : message)
+
+  return [
+    ...args.messages.slice(0, turnStart),
+    ...preserved,
+    args.finalMessage,
+  ]
+}
+
 function isPersistedTerminalAssistantError(message: Message | undefined, error: unknown): boolean {
   if (!message || message.role !== 'assistant') return false
   const detail = String(error)
@@ -666,58 +697,32 @@ export function useLiveSession(
           const finalResponseId = crypto.randomUUID()
           setTurnPending(false)
           setLiveFinalResponseId(finalResponseId)
-          setMessages((prev) => {
-            const cleaned = [...prev]
-            const turnStart = intermediateStart >= 0 ? Math.min(intermediateStart, cleaned.length) : cleaned.length
-            const kept = cleaned.slice(0, turnStart)
-            // The turn's working evidence SURVIVES completion — tool rows,
-            // comms notifications, durable blocks (delegation/dispatch),
-            // media, and interim PROSE updates — so the post-turn fold files
-            // away the SAME rows a reload of the persisted transcript shows.
-            // The dedup is narrowed to the final answer alone: a flushed
-            // bubble that IS the result drops (the appended result is its
-            // canonical form — keeping both duplicates the answer);
-            // everything else the model said on the way is evidence, not an
-            // answer candidate. Transient progress blocks (task lists) still
-            // drop, and unfinished tool rows are marked done — the turn is
-            // over. User messages are never dropped.
-            const preserved = cleaned.slice(turnStart)
-              .filter((m) =>
-                m.role === 'user'
-                || (m.media && m.media.length > 0)
-                || m.toolCall
-                || m.role === 'notification'
-                || m.blocks?.some((block) => block.type === 'delegation' || block.type === 'dispatch')
-                || (m.role === 'assistant' && !m.blocks?.length
-                  && m.content.trim() !== '' && m.content.trim() !== resultStr.trim()))
-              .map((m) => m.toolCall && !m.content.startsWith('Used ')
-                ? { ...m, content: `Used ${m.toolCall}` }
-                : m)
-            return [
-              ...kept,
-              ...preserved,
-              {
-                id: finalResponseId,
-                role: 'assistant' as const,
-                content: resultStr,
-                timestamp: Date.now(),
-              },
-            ]
-          })
+          setMessages((prev) => reconcileCompletedTurnMessages({
+            messages: prev,
+            turnStart: intermediateStart,
+            exactResult: resultStr,
+            finalMessage: {
+              id: finalResponseId,
+              role: 'assistant' as const,
+              content: resultStr,
+              timestamp: Date.now(),
+            },
+          }))
         }
         if (p.error && !p.result) {
           const finalResponseId = crypto.randomUUID()
           setTurnPending(false)
           setLiveFinalResponseId(finalResponseId)
-          setMessages((prev) => [
-            ...prev,
-            {
+          setMessages((prev) => reconcileCompletedTurnMessages({
+            messages: prev,
+            turnStart: intermediateStart,
+            finalMessage: {
               id: finalResponseId,
               role: 'assistant' as const,
               content: formatTerminalAssistantError(p.error),
               timestamp: Date.now(),
             },
-          ])
+          }))
         }
         // Refresh the current session record so post-turn fields (notably
         // lastContextTokens for the context meter, and status) update without a

@@ -23,9 +23,11 @@ import {
   __getLiveSessionSnapshotCacheSizeForTests,
   invalidateLiveSessionSnapshot,
   isRestingSnapshot,
+  reconcileCompletedTurnMessages,
   SESSION_SNAPSHOT_REVISIT_TTL_MS,
   useLiveSession,
 } from "../use-live-session"
+import type { Message } from "@/lib/conversations"
 
 type Listener = (event: string, payload: unknown) => void
 
@@ -44,6 +46,88 @@ beforeEach(() => {
   getSession.mockReset()
   getSessionMessages.mockReset()
   __clearLiveSessionSnapshotCacheForTests()
+})
+
+describe("reconcileCompletedTurnMessages", () => {
+  it("classifies success and error evidence identically except for canonical success dedup", () => {
+    const olderUser: Message = { id: "older-user", role: "user", content: "older request", timestamp: 1 }
+    const olderFinal: Message = { id: "older-final", role: "assistant", content: "older answer", timestamp: 2 }
+    const currentEvidence: Message[] = [
+      { id: "current-user", role: "user", content: "current request", timestamp: 3 },
+      { id: "interim", role: "assistant", content: "Interim prose", timestamp: 4 },
+      { id: "tool", role: "assistant", content: "Using Read", timestamp: 5, toolCall: "Read" },
+      { id: "notification", role: "notification", content: "Callback received", timestamp: 6 },
+      {
+        id: "media",
+        role: "assistant",
+        content: "Screenshot",
+        timestamp: 7,
+        media: [{ type: "image", url: "https://example.test/evidence.png" }],
+      },
+      {
+        id: "delegation",
+        role: "assistant",
+        content: "Delegated",
+        timestamp: 8,
+        blocks: [{ id: "delegation", type: "delegation", version: 1, payload: {} }],
+      },
+      {
+        id: "dispatch",
+        role: "assistant",
+        content: "Followed up",
+        timestamp: 9,
+        blocks: [{ id: "dispatch", type: "dispatch", version: 1, payload: {} }],
+      },
+      {
+        id: "task-list",
+        role: "assistant",
+        content: "Temporary plan",
+        timestamp: 10,
+        blocks: [{ id: "plan", type: "task-list", version: 1, payload: {} }],
+      },
+      { id: "empty", role: "assistant", content: "  ", timestamp: 11 },
+      { id: "streamed-result", role: "assistant", content: "Canonical result", timestamp: 12 },
+    ]
+    const messages = [olderUser, olderFinal, ...currentEvidence]
+    const successFinal: Message = {
+      id: "success-final",
+      role: "assistant",
+      content: "Canonical result",
+      timestamp: 20,
+    }
+    const errorFinal: Message = {
+      id: "error-final",
+      role: "assistant",
+      content: "Error: engine failed",
+      timestamp: 21,
+    }
+
+    const success = reconcileCompletedTurnMessages({
+      messages,
+      turnStart: 2,
+      finalMessage: successFinal,
+      exactResult: successFinal.content,
+    })
+    const error = reconcileCompletedTurnMessages({
+      messages,
+      turnStart: 2,
+      finalMessage: errorFinal,
+    })
+
+    expect(success[0]).toBe(olderUser)
+    expect(success[1]).toBe(olderFinal)
+    expect(error[0]).toBe(olderUser)
+    expect(error[1]).toBe(olderFinal)
+    expect(success.slice(2, -1)).toEqual(error.slice(2, -1).filter((message) => message.id !== "streamed-result"))
+    expect(success.some((message) => message.id === "streamed-result")).toBe(false)
+    expect(error.some((message) => message.id === "streamed-result")).toBe(true)
+    expect(success.some((message) => message.id === "task-list" || message.id === "empty")).toBe(false)
+    expect(error.some((message) => message.id === "task-list" || message.id === "empty")).toBe(false)
+    expect(success.find((message) => message.id === "tool")?.content).toBe("Used Read")
+    expect(error.find((message) => message.id === "tool")?.content).toBe("Used Read")
+    expect(success.at(-1)).toBe(successFinal)
+    expect(error.at(-1)).toBe(errorFinal)
+  })
 })
 
 describe("useLiveSession (read-only)", () => {
@@ -321,6 +405,101 @@ describe("useLiveSession (read-only)", () => {
     expect(result.current.turnPending).toBe(false)
     expect(result.current.messages.at(-1)?.content).toBe("Error: engine failed")
     expect(result.current.liveFinalResponseId).toBe(result.current.messages.at(-1)?.id)
+  })
+
+  it("reconciles only current-turn evidence before a canonical terminal error", async () => {
+    getSession.mockResolvedValue({
+      status: "running",
+      messages: [
+        { id: "old-user", role: "user", content: "older request", timestamp: 1 },
+        { id: "old-final", role: "assistant", content: "older answer", timestamp: 2 },
+        { id: "current-user", role: "user", content: "run the failing task", timestamp: 3 },
+      ],
+    })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() => useLiveSession("s1", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+
+    const olderTurn = result.current.messages.slice(0, 2)
+
+    act(() => {
+      emit("session:delta", { sessionId: "s1", type: "text", content: "Inspecting the failure." })
+      emit("session:delta", {
+        sessionId: "s1",
+        type: "tool_use",
+        toolName: "Read",
+        toolId: "tool-read",
+      })
+      emit("session:delta", {
+        sessionId: "s1",
+        type: "block",
+        content: "Temporary progress",
+        block: {
+          op: "put",
+          block: { id: "plan", type: "task-list", version: 1, payload: {} },
+        },
+      })
+      emit("session:delta", {
+        sessionId: "s1",
+        type: "block",
+        content: "Delegated verification",
+        block: {
+          op: "put",
+          block: { id: "delegate", type: "delegation", version: 1, payload: {} },
+        },
+      })
+      emit("session:delta", {
+        sessionId: "s1",
+        type: "block",
+        content: "Followed up with verifier",
+        block: {
+          op: "put",
+          block: { id: "dispatch", type: "dispatch", version: 1, payload: {} },
+        },
+      })
+      emit("session:notification", {
+        sessionId: "s1",
+        message: "Verifier callback received",
+        meta: { commKind: "callback" },
+      })
+      emit("session:attachment", {
+        sessionId: "s1",
+        id: "evidence-image",
+        content: "Failure screenshot",
+        media: [{ type: "image", url: "https://example.test/failure.png" }],
+        timestamp: 4,
+      })
+    })
+
+    await act(async () => {
+      emit("session:completed", { sessionId: "s1", result: null, error: "engine failed" })
+      await Promise.resolve()
+    })
+
+    expect(result.current.messages.slice(0, 2)[0]).toBe(olderTurn[0])
+    expect(result.current.messages.slice(0, 2)[1]).toBe(olderTurn[1])
+    expect(result.current.messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      toolCall: message.toolCall,
+      blockTypes: message.blocks?.map((block) => block.type) ?? [],
+      mediaCount: message.media?.length ?? 0,
+    }))).toEqual([
+      { id: "old-user", role: "user", content: "older request", toolCall: undefined, blockTypes: [], mediaCount: 0 },
+      { id: "old-final", role: "assistant", content: "older answer", toolCall: undefined, blockTypes: [], mediaCount: 0 },
+      { id: "current-user", role: "user", content: "run the failing task", toolCall: undefined, blockTypes: [], mediaCount: 0 },
+      { id: expect.any(String), role: "assistant", content: "Inspecting the failure.", toolCall: undefined, blockTypes: [], mediaCount: 0 },
+      { id: expect.any(String), role: "assistant", content: "Used Read", toolCall: "Read", blockTypes: [], mediaCount: 0 },
+      { id: expect.stringContaining("block-delegate-"), role: "assistant", content: "Delegated verification", toolCall: undefined, blockTypes: ["delegation"], mediaCount: 0 },
+      { id: expect.stringContaining("block-dispatch-"), role: "assistant", content: "Followed up with verifier", toolCall: undefined, blockTypes: ["dispatch"], mediaCount: 0 },
+      { id: expect.any(String), role: "notification", content: "Verifier callback received", toolCall: undefined, blockTypes: [], mediaCount: 0 },
+      { id: "evidence-image", role: "assistant", content: "Failure screenshot", toolCall: undefined, blockTypes: [], mediaCount: 1 },
+      { id: result.current.liveFinalResponseId, role: "assistant", content: "Error: engine failed", toolCall: undefined, blockTypes: [], mediaCount: 0 },
+    ])
+    expect(result.current.messages.some((message) => message.blocks?.some((block) => block.type === "task-list"))).toBe(false)
+    expect(result.current.messages.filter((message) => message.id === result.current.liveFinalResponseId)).toHaveLength(1)
+    expect(result.current.messages.filter((message) => message.content === "Error: engine failed")).toHaveLength(1)
   })
 
   it("replaces the live view on a shorter snapshot (redaction must win, no length gate)", async () => {
