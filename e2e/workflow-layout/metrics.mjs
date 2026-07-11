@@ -12,6 +12,13 @@ export function isBlockedStaticAsset(value) {
   return url.protocol === "https:" && ["fonts.googleapis.com", "fonts.gstatic.com"].includes(url.hostname)
 }
 
+export function positionsMatch(nodes, positionsById) {
+  return nodes.every((node) => {
+    const position = positionsById[node.id]
+    return position?.x === node.position?.x && position?.y === node.position?.y
+  }) && Object.keys(positionsById).length === nodes.length
+}
+
 export function assertCandidateBaseUrl(value) {
   let url
   try { url = new URL(value) } catch { throw new Error("candidate URL must be an absolute URL") }

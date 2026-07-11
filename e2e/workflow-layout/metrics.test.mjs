@@ -11,6 +11,7 @@ import {
   zoomFromTransform,
   readabilityViolations,
   isBlockedStaticAsset,
+  positionsMatch,
 } from "./metrics.mjs"
 
 test("candidate URL is an exact loopback origin on port 7800 or higher", () => {
@@ -29,6 +30,12 @@ test("known remote font assets may be blocked without masking foreign API traffi
   assert.equal(isBlockedStaticAsset("https://fonts.googleapis.com/css2?family=Hanken+Grotesk"), true)
   assert.equal(isBlockedStaticAsset("https://fonts.gstatic.com/s/hankengrotesk/font.woff2"), true)
   assert.equal(isBlockedStaticAsset("https://example.com/api/private"), false)
+})
+
+test("Apply can distinguish a canonical no-op preview from changed geometry", () => {
+  const nodes = [{ id: "a", position: { x: 0, y: 20 } }, { id: "b", position: { x: 400, y: 20 } }]
+  assert.equal(positionsMatch(nodes, { a: { x: 0, y: 20 }, b: { x: 400, y: 20 } }), true)
+  assert.equal(positionsMatch(nodes, { a: { x: 0, y: 20 }, b: { x: 420, y: 20 } }), false)
 })
 
 test("matrix covers both viewports, themes, and motion preferences", () => {

@@ -3,7 +3,7 @@ import path from 'node:path'
 import { test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test'
 import { artifactWriter, gatewayToken, pollUntil, sandboxClient, verificationEnv } from './api-client.mjs'
 import { authorRequests, canonicalFixtures, scenarioFixtures } from './fixtures.mjs'
-import { assertCandidateBaseUrl, isBlockedStaticAsset, matrixCells, summarizeMetricViolations } from './metrics.mjs'
+import { assertCandidateBaseUrl, isBlockedStaticAsset, matrixCells, positionsMatch, summarizeMetricViolations } from './metrics.mjs'
 
 type Cell = ReturnType<typeof matrixCells>[number]
 type Definition = {
@@ -266,14 +266,21 @@ test.describe.serial('isolated workflow layout verification', () => {
           write(`metrics/${key}/${id}-tidy-preview.json`, { metrics: previewMetrics, violations: previewViolations })
           await opened.page.screenshot({ path: screenshotPath(key, `${id}-tidy-preview.png`) })
 
+          const positionChanged = !positionsMatch(definition.nodes, preview)
           await apply.click()
-          await expect(opened.page.getByTestId('wf-edit-dirty')).toBeVisible()
           await opened.page.screenshot({ path: screenshotPath(key, `${id}-applied.png`) })
-          await opened.page.getByTestId('wf-edit-save').click()
-          await expect(opened.page.getByTestId('wf-edit-saved')).toBeVisible()
-          const saved = await readDefinition(id)
-          expect(saved.layout?.source).toBe('manual')
-          expect(Object.fromEntries(saved.nodes.map((node) => [node.id, node.position]))).toEqual(preview)
+          let saved = definition
+          if (positionChanged) {
+            await expect(opened.page.getByTestId('wf-edit-dirty')).toBeVisible()
+            await opened.page.getByTestId('wf-edit-save').click()
+            await expect(opened.page.getByTestId('wf-edit-saved')).toBeVisible()
+            saved = await readDefinition(id)
+            expect(saved.layout?.source).toBe('manual')
+            expect(Object.fromEntries(saved.nodes.map((node) => [node.id, node.position]))).toEqual(preview)
+          } else {
+            await expect(opened.page.getByTestId('wf-edit-dirty')).toHaveCount(0)
+            expect(Object.fromEntries(saved.nodes.map((node) => [node.id, node.position]))).toEqual(preview)
+          }
           await opened.page.screenshot({ path: screenshotPath(key, `${id}-saved.png`) })
 
           await opened.page.reload({ waitUntil: 'networkidle' })
