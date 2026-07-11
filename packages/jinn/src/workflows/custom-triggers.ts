@@ -130,7 +130,7 @@ export const POLL_CWD_POLICY = 'jinn-home-or-process-cwd';
 // replacement, while least-privilege process isolation remains follow-up work.
 // The exact allowlist is baked into POLL_ENV_POLICY so changing it rehashes the
 // activation contract and forces re-approval.
-export const POLL_ENV_ALLOWLIST = ['PATH', 'HOME', 'JINN_HOME', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR'] as const;
+export const POLL_ENV_ALLOWLIST = ['PATH', 'HOME', 'JINN_HOME'] as const;
 export const POLL_ENV_POLICY = `scrubbed-allowlist:${POLL_ENV_ALLOWLIST.join(',')}`;
 
 export type WorkflowTriggerKind = 'webhook' | 'poll';

@@ -93,12 +93,12 @@ function killCommandProcess(child: ReturnType<typeof spawn>): void {
 
 /**
  * A poll command runs with a SCRUBBED inherited environment — only the allowlisted
- * vars (PATH/HOME/JINN_HOME/locale/tmp), never the complete `process.env`. The
+ * vars (PATH/HOME/JINN_HOME), never the complete `process.env`. The
  * approved artifact manifest prevents later executable replacement. This does not
  * isolate the child from files readable by the gateway UID or from the network;
  * those require a separate least-privilege sandbox.
  */
-function scrubbedPollEnv(): NodeJS.ProcessEnv {
+export function buildPollChildEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const key of POLL_ENV_ALLOWLIST) {
     const value = process.env[key];
@@ -121,7 +121,7 @@ function runCommand(binding: PollWorkflowTriggerBinding, signal: AbortSignal): P
       child = spawn(staged.interpreterPath, ['/dev/fd/3'], {
         shell: false,
         cwd: process.env.JINN_HOME || process.cwd(),
-        env: scrubbedPollEnv(),
+        env: buildPollChildEnv(),
         detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe', staged.executableFd],
       });

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -99,6 +100,34 @@ function staticOutputScript(name: string, output: string): string {
 }
 
 describe('workflow poll/check custom triggers', () => {
+  it('exports and applies the exact poll child environment policy', () => {
+    expect(customTriggers.POLL_ENV_ALLOWLIST).toEqual(['PATH', 'HOME', 'JINN_HOME']);
+
+    const previous = process.env.JINN_ENV_SENTINEL;
+    process.env.JINN_ENV_SENTINEL = 'must-not-cross-child-boundary';
+    try {
+      const captureKeys = (env: NodeJS.ProcessEnv): string[] => JSON.parse(
+        execFileSync(
+          process.execPath,
+          ['-e', 'process.stdout.write(JSON.stringify(Object.keys(process.env).sort()))'],
+          { env },
+        ).toString('utf8'),
+      ) as string[];
+      const childEnv = poll.buildPollChildEnv();
+      expect(Object.keys(childEnv).sort()).toEqual(['HOME', 'JINN_HOME', 'PATH']);
+
+      // macOS may synthesize process metadata even for an empty environment;
+      // subtract that baseline so this assertion covers inherited gateway vars.
+      const platformKeys = new Set(captureKeys({}));
+      const inheritedKeys = captureKeys(childEnv).filter((key) => !platformKeys.has(key));
+      expect(inheritedKeys).toEqual(['HOME', 'JINN_HOME', 'PATH']);
+      expect(inheritedKeys).not.toContain('JINN_ENV_SENTINEL');
+    } finally {
+      if (previous === undefined) delete process.env.JINN_ENV_SENTINEL;
+      else process.env.JINN_ENV_SENTINEL = previous;
+    }
+  });
+
   it('does not throw when the trigger store is corrupt at runner startup', () => {
     fs.mkdirSync(path.join(root, 'workflow-triggers'), { recursive: true });
     fs.writeFileSync(path.join(root, 'workflow-triggers', 'triggers.json'), '{ bad json', 'utf8');
