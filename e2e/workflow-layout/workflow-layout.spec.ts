@@ -92,6 +92,13 @@ function visibleTestId(page: Page, testId: string) {
   return page.locator(`[data-testid="${testId}"]:visible`)
 }
 
+async function fitAll(page: Page) {
+  await page.getByRole('button', { name: 'Fit all', exact: true }).click()
+  // CanvasControls intentionally animates fitView for 300ms. Hit-testing a
+  // node mid-transform can target the surface behind its eventual card.
+  await page.waitForTimeout(350)
+}
+
 async function rawNodePositions(page: Page, ids: string[]) {
   return page.evaluate((wanted) => Object.fromEntries([...document.querySelectorAll<HTMLElement>('.react-flow__node')]
     .map((element) => {
@@ -183,10 +190,39 @@ async function dragNodeToNode(page: Page, sourceId: string, targetId: string) {
   const target = await page.getByTestId(`wf-node-${targetId}`).boundingBox()
   expect(source).not.toBeNull()
   expect(target).not.toBeNull()
-  await page.mouse.move(source!.x + source!.width / 2, source!.y + source!.height / 2)
-  await page.mouse.down()
-  await page.mouse.move(target!.x + target!.width / 2, target!.y + target!.height / 2, { steps: 12 })
-  await page.mouse.up()
+  await dragCoordinates(
+    page,
+    source!.x + source!.width / 2,
+    source!.y + source!.height / 2,
+    target!.x + target!.width / 2,
+    target!.y + target!.height / 2,
+  )
+}
+
+async function dragCoordinates(page: Page, fromX: number, fromY: number, toX: number, toY: number) {
+  const coarse = await page.evaluate(() => matchMedia('(pointer: coarse)').matches)
+  if (!coarse) {
+    await page.mouse.move(fromX, fromY)
+    await page.mouse.down()
+    await page.mouse.move(toX, toY, { steps: 12 })
+    await page.mouse.up()
+    return
+  }
+
+  const client = await page.context().newCDPSession(page)
+  const touch = (x: number, y: number) => ({ x, y, id: 1, radiusX: 1, radiusY: 1, force: 1 })
+  await client.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touch(fromX, fromY)] })
+  await page.waitForTimeout(16)
+  for (let step = 1; step <= 12; step += 1) {
+    const ratio = step / 12
+    await client.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [touch(fromX + (toX - fromX) * ratio, fromY + (toY - fromY) * ratio)],
+    })
+    await page.waitForTimeout(8)
+  }
+  await client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  await client.detach()
 }
 
 async function dragNodeBy(page: Page, nodeId: string, dx: number, dy: number) {
@@ -194,10 +230,7 @@ async function dragNodeBy(page: Page, nodeId: string, dx: number, dy: number) {
   expect(box).not.toBeNull()
   const x = box!.x + box!.width / 2
   const y = box!.y + box!.height / 2
-  await page.mouse.move(x, y)
-  await page.mouse.down()
-  await page.mouse.move(x + dx, y + dy, { steps: 12 })
-  await page.mouse.up()
+  await dragCoordinates(page, x, y, x + dx, y + dy)
 }
 
 async function connectByGesture(page: Page, from: string, to: string) {
@@ -358,8 +391,11 @@ test.describe.serial('isolated workflow layout verification', () => {
       const opened = await openPage(browser, cell, '/workflow/verify-manual?mode=edit')
       try {
         await opened.page.getByTestId('wf-canvas').waitFor()
-        await opened.page.getByRole('button', { name: 'Fit all', exact: true }).click()
+        await fitAll(opened.page)
+        const beforeDrag = await rawNodePositions(opened.page, ['two'])
         await dragNodeToNode(opened.page, 'two', 'one')
+        const afterDrag = await rawNodePositions(opened.page, ['two'])
+        expect(afterDrag.two, 'drag gesture must move the node before save validation').not.toEqual(beforeDrag.two)
         await expect(opened.page.getByTestId('wf-edit-dirty')).toBeVisible()
         await opened.page.getByTestId('wf-edit-save').click()
         const error = opened.page.getByTestId('wf-edit-save-error')
@@ -428,9 +464,9 @@ test.describe.serial('isolated workflow layout verification', () => {
       const addedId = (await mainNodeIds(opened.page)).find((id) => !originalIds.has(id))!
       await opened.page.screenshot({ path: screenshotPath('gestures', '01-added.png') })
 
-      await opened.page.getByRole('button', { name: 'Fit all', exact: true }).click()
+      await fitAll(opened.page)
       await dragNodeBy(opened.page, addedId, 120, 80)
-      await opened.page.getByRole('button', { name: 'Fit all', exact: true }).click()
+      await fitAll(opened.page)
       await connectByGesture(opened.page, 'two', addedId)
       await expect(opened.page.getByTestId(`wf-edge-two-${addedId}`)).toBeVisible()
       await opened.page.screenshot({ path: screenshotPath('gestures', '02-dragged-connected.png') })

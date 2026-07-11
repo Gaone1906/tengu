@@ -82,4 +82,8 @@ fi
 
 cd "$REPO"
 node --test e2e/workflow-layout/*.test.mjs
-pnpm exec playwright test --config playwright.workflow-layout.config.ts
+PLAYWRIGHT_ARGS=(--config playwright.workflow-layout.config.ts)
+if [[ -n "${JINN_VERIFY_GREP:-}" ]]; then
+  PLAYWRIGHT_ARGS+=(--grep "$JINN_VERIFY_GREP")
+fi
+pnpm exec playwright test "${PLAYWRIGHT_ARGS[@]}"
