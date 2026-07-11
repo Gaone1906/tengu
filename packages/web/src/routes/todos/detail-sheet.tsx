@@ -30,8 +30,8 @@ import { useSetWorkItemStatus, useUpdateWorkItem } from "./use-todos"
  * design-todos §4.4 — the sheet is now the operator's pen: title, body,
  * assignee, department, and priority read as text at rest and edit on tap
  * (Apple Notes pattern — no input chrome until focus). Status stays
- * server-owned: only legal transitions render as actions (Mark done / Cancel /
- * the approval controls), never a free status picker. Edits go through the §7.4
+ * server-owned: only legal transitions render as actions (Start / Mark done /
+ * Cancel / the approval controls), never a free status picker. Edits go through the §7.4
  * PATCH; a gateway that predates it fails quietly and the read view stays true. */
 
 const MENU_CLASS =
@@ -426,16 +426,18 @@ function DecisionFooter({
   )
 }
 
-/** Legal-transition actions when no approval is pending (§4.4): Mark done for
- *  open work, Cancel for anything not already terminal. Never a status picker. */
+/** Legal-transition actions when no approval is pending (§4.4): Start for
+ *  backlog/assigned work, Mark done + Cancel for open work. Never a picker. */
 function TransitionFooter({
   status,
   busy,
+  onStart,
   onDone,
   onCancel,
 }: {
   status: WorkItemStatusWire
   busy: boolean
+  onStart: () => void
   onDone: () => void
   onCancel: () => void
 }) {
@@ -443,6 +445,17 @@ function TransitionFooter({
   if (!open) return null
   return (
     <div className="flex shrink-0 items-center gap-2.5 p-[14px_20px] pb-[max(14px,env(safe-area-inset-bottom))]">
+      {(status === "backlog" || status === "assigned") && (
+        <button
+          type="button"
+          data-testid="sheet-start-item"
+          disabled={busy}
+          onClick={onStart}
+          className="h-9 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
+        >
+          Start
+        </button>
+      )}
       <button
         type="button"
         data-testid="sheet-mark-done"
@@ -631,6 +644,7 @@ export function DetailSheet({
           <TransitionFooter
             status={detail.workItem.status}
             busy={setStatus.isPending}
+            onStart={() => transitionTo("executing")}
             onDone={() => transitionTo("done")}
             onCancel={() => transitionTo("cancelled")}
           />

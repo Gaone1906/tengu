@@ -326,6 +326,25 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     expect(transition.body.workItem.status).toBe("done");
   });
 
+  it.each(["backlog", "assigned"] as const)("round-trips an operator PUT that manually starts %s work", async (status) => {
+    const item = store.createWorkItem({ title: `Start ${status}`, status });
+    const cap = makeRes();
+
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${item.id}/status`, { status: "executing" }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+
+    expect(cap.status).toBe(200);
+    expect(cap.body.workItem.status).toBe("executing");
+    expect(store.listWorkItemEvents(item.id).at(-1)).toMatchObject({
+      fromStatus: status,
+      toStatus: "executing",
+      actor: "operator",
+    });
+  });
+
   it.each([
     [{}, /at least one|empty/i],
     [{ source: "cron" }, /source|unsupported|field/i],

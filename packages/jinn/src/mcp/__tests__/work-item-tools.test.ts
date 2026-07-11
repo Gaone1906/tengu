@@ -82,14 +82,14 @@ describe("work-item tools — registry + schemas", () => {
     expect(tool("search_work_items").description).toMatch(/structured filters/i);
   });
 
-  it("create schema has no approval fields and update schema excludes cancelled", () => {
+  it("create schema has no approval fields and update schema allows manual start but excludes cancelled", () => {
     const createProps = tool("create_work_item").inputSchema.properties;
     expect(Object.keys(createProps).sort()).toEqual(
       ["acceptance", "assignee", "body", "department", "title", "verifyPolicy"].sort(),
     );
     expect(JSON.stringify(createProps)).not.toMatch(/approval/i);
     const status = tool("update_work_item").inputSchema.properties.status as { enum: string[] };
-    expect(status.enum).toEqual(["in_review", "blocked", "escalated", "done"]);
+    expect(status.enum).toEqual(["executing", "in_review", "blocked", "escalated", "done"]);
     expect(status.enum).not.toContain("cancelled");
   });
 
@@ -218,6 +218,21 @@ describe("work-item tools — unit (stub gateway)", () => {
     expect(calls[0].method).toBe("POST");
     expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/wi_1/status");
     expect(calls[0].body).toEqual({ status: "done" });
+  });
+
+  it("accepts executing and sends it through the guarded status route", async () => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: { workItem: { id: "wi_1", status: "executing" } } }), "sess-1");
+
+    await expect(tool("update_work_item").handler({ id: "wi_1", status: "executing" }, ctx)).resolves.toMatchObject({
+      workItem: { status: "executing" },
+    });
+    expect(calls).toEqual([
+      expect.objectContaining({
+        method: "POST",
+        url: "http://127.0.0.1:7777/api/work-items/wi_1/status",
+        body: { status: "executing" },
+      }),
+    ]);
   });
 
   it("assign validates through the route and maps readable 400 near-match errors", async () => {
@@ -393,10 +408,18 @@ describe("work-item tools — integration against the real API + store", () => {
     };
     expect(assigned.workItem).toMatchObject({ assignee: "platform-dev", department: "platform", status: "assigned" });
 
+    const started = (await tool("update_work_item").handler({ id: created.workItem.id, status: "executing" }, ctx)) as {
+      workItem: { status: string };
+    };
+    expect(started.workItem.status).toBe("executing");
+
     const reviewed = (await tool("update_work_item").handler({ id: created.workItem.id, status: "in_review", note: "done" }, ctx)) as {
       workItem: { status: string };
     };
     expect(reviewed.workItem.status).toBe("in_review");
+    await expect(tool("update_work_item").handler({ id: created.workItem.id, status: "executing" }, ctx)).rejects.toThrow(
+      /illegal manual transition in_review → executing/i,
+    );
 
     const read = (await tool("get_work_item").handler({ id: created.workItem.id }, ctx)) as {
       workItem: { acceptance: string; verifyPolicy: { mode: string } };

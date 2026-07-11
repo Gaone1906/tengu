@@ -27,6 +27,35 @@ const mk = (status: Store["createWorkItem"] extends (i: infer I) => unknown ? (I
   store.createWorkItem({ title: `t-${Math.random().toString(36).slice(2, 8)}`, status, ...extra });
 
 describe("transition — the guarded edge map", () => {
+  it.each(["backlog", "assigned"] as const)("allows an operator to manually start %s work", (status) => {
+    const wi = mk(status);
+    const { item } = tr.transition(wi.id, "executing", "operator", { human: true, manual: true });
+
+    expect(item.status).toBe("executing");
+    expect(store.listWorkItemEvents(wi.id).at(-1)).toMatchObject({
+      kind: "status_change",
+      fromStatus: status,
+      toStatus: "executing",
+      actor: "operator",
+    });
+  });
+
+  it.each(["done", "cancelled", "in_review"] as const)("rejects a manual start from %s", (status) => {
+    const wi = mk(status);
+
+    expect(() => tr.transition(wi.id, "executing", "operator", { human: true, manual: true })).toThrowError(
+      new RegExp(`illegal manual transition ${status} → executing`),
+    );
+    expect(store.getWorkItem(wi.id)?.status).toBe(status);
+  });
+
+  it.each(["in_review", "done", "blocked"] as const)("keeps manual executing → %s legal", (status) => {
+    const wi = mk("backlog");
+    tr.transition(wi.id, "executing", "operator", { human: true, manual: true });
+
+    expect(tr.transition(wi.id, status, "operator", { human: true, manual: true }).item.status).toBe(status);
+  });
+
   it("moves along declared edges and appends a status_change event with actor + detail", () => {
     const wi = mk("backlog");
     const { item, escalated } = tr.transition(wi.id, "assigned", "coo", { detail: { assignee: "ana" } });

@@ -8,7 +8,7 @@ const FILTER_CHAR_CAP = 256;
 
 const STATUSES = ["backlog", "assigned", "executing", "in_review", "done", "blocked", "escalated", "cancelled"] as const;
 const SOURCES = ["human", "delegation", "cron", "workflow", "session", "connector", "goal"] as const;
-const AGENT_UPDATE_STATUSES = ["in_review", "blocked", "escalated", "done"] as const;
+const AGENT_UPDATE_STATUSES = ["executing", "in_review", "blocked", "escalated", "done"] as const;
 const VERIFY_MODES = ["trust", "verify", "thorough"] as const;
 
 function assertIdentity(ctx: JinnMcpContext): void {

@@ -117,6 +117,26 @@ describe("reconcileWorkItem — integration against real store + registry", () =
     expect(reconcile.reconcileWorkItem("wi_nope")).toBeUndefined();
   });
 
+  it("continues normal reconciliation after an operator manually starts an item", async () => {
+    const transitions = await import("../transitions.js");
+    const wi = store.createWorkItem({ title: "manual start", status: "backlog", source: "human" });
+    transitions.transition(wi.id, "executing", "operator", { human: true, manual: true });
+    linkedSession("s-manual-start", wi.id, "running", "2026-07-01T00:00:00.000Z");
+
+    expect(reconcile.reconcileWorkItem(wi.id)).toMatchObject({ changed: false, item: { status: "executing" } });
+
+    db.prepare("UPDATE sessions SET status = 'idle', attempt_outcome = 'succeeded' WHERE id = ?").run("s-manual-start");
+    expect(reconcile.reconcileWorkItem(wi.id)).toMatchObject({ changed: true, item: { status: "in_review" } });
+    expect(store.listWorkItemEvents(wi.id).filter((event) => event.kind === "status_change").map((event) => ({
+      from: event.fromStatus,
+      to: event.toStatus,
+      actor: event.actor,
+    }))).toEqual([
+      { from: "backlog", to: "executing", actor: "operator" },
+      { from: "executing", to: "in_review", actor: "reconciler" },
+    ]);
+  });
+
   it("moves executing → blocked when its only session was interrupted (the split-brain case)", () => {
     const wi = store.createWorkItem({ title: "delegated fix", status: "executing", source: "delegation", sourceRef: "delegate:j1:1" });
     linkedSession("s-int-1", wi.id, "interrupted", "2026-07-01T00:00:00.000Z");

@@ -60,6 +60,10 @@ export interface TransitionOptions {
   /** Caller is a human surface (operator web/API). Required to LEAVE a sticky
    *  terminal (`done`/`cancelled`/`escalated`). Agent/system callers never set it. */
   human?: boolean;
+  /** Explicit status update from a human/tool surface. A manual move INTO
+   *  `executing` is a start action and is legal only from backlog/assigned;
+   *  reconciler derivation and review bounces deliberately leave this unset. */
+  manual?: boolean;
   /**
    * The calling session's id (the GRS-017 identity seam), when the transition
    * comes from an agent. Enforces the SELF-REVIEW BAN (design §1.5): a session
@@ -139,6 +143,9 @@ export function transition(id: string, to: WorkItemStatus, actor: string, opts: 
         'human-required',
         `work item ${id} is ${from} — leaving a sticky terminal is a human decision (operator surface only)`,
       );
+    }
+    if (opts.manual && to === 'executing' && from !== 'backlog' && from !== 'assigned') {
+      throw new TransitionError('illegal-edge', `illegal manual transition ${from} → ${to} for work item ${id}`);
     }
     if (!EDGES[from].has(to)) {
       throw new TransitionError('illegal-edge', `illegal transition ${from} → ${to} for work item ${id}`);

@@ -1606,7 +1606,7 @@ function cronJobSummary(job: Record<string, unknown>, lastRun: unknown): Record<
 
 const WORK_ITEM_STATUSES: readonly WorkItemStatus[] = ['backlog', 'assigned', 'executing', 'in_review', 'done', 'blocked', 'escalated', 'cancelled'];
 const WORK_ITEM_SOURCES: readonly WorkItemSource[] = ['human', 'delegation', 'cron', 'workflow', 'session', 'connector', 'goal'];
-const AGENT_WORK_ITEM_TARGETS: readonly WorkItemStatus[] = ['in_review', 'blocked', 'escalated', 'done'];
+const AGENT_WORK_ITEM_TARGETS: readonly WorkItemStatus[] = ['executing', 'in_review', 'blocked', 'escalated', 'done'];
 const VERIFY_MODES = ['trust', 'verify', 'thorough'] as const;
 const VERIFY_POLICY_KEYS = new Set(['mode', 'verifier', 'maxRounds']);
 
@@ -3244,13 +3244,16 @@ export async function handleApiRequest(
       return json(res, { workItem: item });
     }
 
-    // POST /api/work-items/:id/status — GRS-021c guarded status update. Agents
-    // may keep their own work current; self-done and authority-only edges are
-    // refused readably.
+    // POST|PUT /api/work-items/:id/status — GRS-021c guarded status update.
+    // POST serves capability-scoped agent/MCP updates; PUT is the authenticated
+    // operator surface. Both use the same manual-transition legality checks.
     params = matchRoute("/api/work-items/:id/status", pathname);
-    if (method === "POST" && params) {
+    if ((method === "POST" || method === "PUT") && params) {
       const caller = resolveWorkItemCaller(req, res, context);
       if (!caller) return;
+      if (method === "PUT" && caller.kind !== "operator") {
+        return json(res, { error: "manual Todo status PUT requires the authenticated operator surface" }, 403);
+      }
       const parsed = await readJsonBody(req, res);
       if (!parsed.ok) return;
       if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
@@ -3278,6 +3281,7 @@ export async function handleApiRequest(
       if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
       try {
         const result = transition(params.id, target as WorkItemStatus, workItemActor(caller), {
+          manual: true,
           callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
           detail: note ? { note } : undefined,
         });

@@ -1015,7 +1015,7 @@ export const api = {
   ) => patch<{ workItem: WorkItemFullWire }>(`/api/work-items/${encodeURIComponent(id)}`, input),
   /** Guarded status transition (legal edges only — the gateway owns legality). */
   setWorkItemStatus: (id: string, status: WorkItemStatusWire, note?: string) =>
-    post<{ workItem: WorkItemFullWire; escalated: boolean }>(
+    put<{ workItem: WorkItemFullWire; escalated: boolean }>(
       `/api/work-items/${encodeURIComponent(id)}/status`,
       note ? { status, note } : { status },
     ),

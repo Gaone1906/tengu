@@ -110,7 +110,7 @@ const EXPECTED_ENUMS = {
     ["properties.status", ["backlog", "assigned", "executing", "in_review", "done", "blocked", "escalated", "cancelled"]],
     ["properties.source", ["human", "delegation", "cron", "workflow", "session", "connector", "goal"]],
   ],
-  update_work_item: [["properties.status", ["in_review", "blocked", "escalated", "done"]]],
+  update_work_item: [["properties.status", ["executing", "in_review", "blocked", "escalated", "done"]]],
 } as const;
 
 function collectEnums(value: unknown, path: string[] = []): Array<[string, string[]]> {
