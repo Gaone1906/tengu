@@ -811,11 +811,13 @@ export function ChatInput({
             </div>
           )}
 
-          {/* Ambient status sits centered in the toolbar's flexible middle.
-              flex-1 (basis-0) claims only LEFTOVER space, so the slot can never
-              push or truncate its siblings — appearing/disappearing moves
-              nothing, and an overlong status clips inside this container. */}
-          <div className="flex min-w-0 flex-1 items-center justify-center overflow-hidden">
+          {/* Ambient status sits left-anchored in the toolbar's flexible middle,
+              reading as a continuation of the model chip's cluster rather than a
+              floating center element. flex-1 (basis-0) claims only LEFTOVER
+              space, so the slot can never push or truncate its siblings —
+              appearing/disappearing moves nothing, and an overlong status clips
+              inside this container. */}
+          <div className="flex min-w-0 flex-1 items-center justify-start overflow-hidden pl-1">
             {statusSlot}
           </div>
 
