@@ -17,6 +17,9 @@ import { ptySnapshotStore } from '../engines/pty-snapshot.js';
 
 let db: Database.Database;
 
+export const RESTART_ACK_META_KEY = "restartAcknowledgedAt";
+export const GATEWAY_RESTARTED_MESSAGE = "Gateway restarted successfully.";
+
 const CREATE_TABLE = `
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
@@ -1640,6 +1643,36 @@ export function recoverStaleSessions(): number {
     "UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted', last_activity = ?, last_error = 'Interrupted: gateway restarted while session was running' WHERE status = 'running'",
   ).run(now);
   return result.changes;
+}
+
+/**
+ * Turn restart requests recorded by the old gateway into durable chat notices
+ * after the replacement gateway is listening. Message insertion and marker
+ * removal share one transaction, so a crash can neither lose nor duplicate the
+ * acknowledgement on the next boot.
+ */
+export function consumeRestartAcknowledgements(): number {
+  const database = initDb();
+  const jsonPath = `$.${RESTART_ACK_META_KEY}`;
+  const rows = database
+    .prepare("SELECT id FROM sessions WHERE json_type(transport_meta, ?) = 'text'")
+    .all(jsonPath) as Array<{ id: string }>;
+  if (rows.length === 0) return 0;
+
+  const insert = database.prepare(
+    "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, 'notification', ?, ?)",
+  );
+  const clear = database.prepare(
+    "UPDATE sessions SET transport_meta = NULLIF(json_remove(transport_meta, ?), '{}') WHERE id = ?",
+  );
+  const commit = database.transaction(() => {
+    for (const row of rows) {
+      insert.run(uuidv4(), row.id, GATEWAY_RESTARTED_MESSAGE, Date.now());
+      clear.run(jsonPath, row.id);
+    }
+  });
+  commit();
+  return rows.length;
 }
 
 /**

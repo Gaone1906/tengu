@@ -18,7 +18,7 @@ import {
   refreshPiModels,
 } from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
-import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, getInterruptedSessions, listSessions, updateSession, getSession } from "../sessions/registry.js";
+import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, RESTART_ACK_META_KEY } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
 import { recoverOrphanedDelegationCompletionClaims } from "../sessions/callbacks.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
@@ -56,15 +56,9 @@ import { syncExternalTurn } from "./external-turns.js";
 import { pickEncoding, isCompressibleExt, compressStream } from "./compress.js";
 import { attachPtyWebSocket } from "./pty-ws.js";
 
-const RESTART_ACK_META_KEY = "restartAcknowledgedAt";
-
-function consumeRestartAcknowledgement(session: Session): JsonObject | null | undefined {
-  const meta = (session.transportMeta && typeof session.transportMeta === "object" && !Array.isArray(session.transportMeta))
-    ? { ...(session.transportMeta as JsonObject) }
-    : undefined;
-  if (!meta || typeof meta[RESTART_ACK_META_KEY] !== "string") return undefined;
-  delete meta[RESTART_ACK_META_KEY];
-  return Object.keys(meta).length > 0 ? meta : null;
+function hasRestartAcknowledgement(session: Session): boolean {
+  const meta = session.transportMeta;
+  return Boolean(meta && typeof meta === "object" && !Array.isArray(meta) && typeof meta[RESTART_ACK_META_KEY] === "string");
 }
 import { startWsHeartbeat, trackHeartbeat } from "./ws-heartbeat.js";
 import { ensureFilesDir, cleanupOldUploads } from "./files.js";
@@ -1334,6 +1328,9 @@ export async function startGateway(
   // before this line runs.
   await armJinnAttachGate(currentConfig.mcp, { gatewayUrl: process.env.JINN_GATEWAY_URL!, log: logger, employees: employeeRegistry.values() });
 
+  const restartNotices = consumeRestartAcknowledgements();
+  if (restartNotices > 0) logger.info(`Persisted gateway restart notice in ${restartNotices} requesting session(s)`);
+
   // Replay any pending web queue items (e.g. gateway restart mid-run) only after
   // the jinn MCP attach gate is armed. Recovered Codex first turns need the same
   // resolved builtin-jinn server as normal web/connector turns so their rollout
@@ -1402,14 +1399,12 @@ export async function startGateway(
     // This preserves their engine_session_id so they can be resumed on next startup.
     const runningSessions = listSessions({ status: "running" });
     for (const session of runningSessions) {
-      const consumedRestartMeta = consumeRestartAcknowledgement(session);
-      if (consumedRestartMeta !== undefined) {
+      if (hasRestartAcknowledgement(session)) {
         updateSession(session.id, {
           status: "idle",
           attemptOutcome: "interrupted",
           lastActivity: new Date().toISOString(),
           lastError: null,
-          transportMeta: consumedRestartMeta,
         });
         logger.info(`Left restart-requesting session ${session.id} idle during gateway shutdown`);
         continue;

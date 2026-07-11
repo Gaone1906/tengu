@@ -78,6 +78,7 @@ import {
   getFile,
   getSessionBySessionKey,
   initDb,
+  RESTART_ACK_META_KEY,
 } from "../sessions/registry.js";
 import { blockFallbackText, validateBlockEnvelope } from "../shared/blocks.js";
 import { forkEngineSession } from "../sessions/fork.js";
@@ -261,8 +262,6 @@ const SKILL_CONTENT_BODY_MAX_BYTES = 2 * 1024 * 1024;
 const SESSION_LIST_PER_GROUP = 50;
 const BACKGROUND_ACTIVITY_STALE_MS = 5 * 60 * 1000;
 const SUPERSEDED_TURN_META_KEY = "supersededRunningTurnAt";
-const RESTART_ACK_META_KEY = "restartAcknowledgedAt";
-
 function headerValue(req: HttpRequest, name: string): string | undefined {
   const value = req.headers[name.toLowerCase()];
   return Array.isArray(value) ? value[0] : value;
