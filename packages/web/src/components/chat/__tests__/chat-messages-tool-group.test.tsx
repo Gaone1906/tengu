@@ -52,7 +52,11 @@ describe('ChatMessages tool groups', () => {
 
     render(<ChatMessages messages={messages} loading={false} />)
 
-    const groupButton = screen.getByRole('button', { name: /2 tools/i })
+    // The turn has its final answer, so the evidence rests folded behind the
+    // work summary — expand it first.
+    fireEvent.click(screen.getByRole('button', { name: /show the work/i }))
+
+    const groupButton = screen.getByRole('button', { name: /^2 tools$/i })
     expect(groupButton.textContent).not.toMatch(/patch|detail/i)
     expect(screen.queryByText('Hidden task detail')).toBeNull()
 

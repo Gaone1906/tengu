@@ -1,9 +1,7 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { ChevronRight } from 'lucide-react'
 import { api } from '@/lib/api'
 import { stripMarkdown } from '@/lib/strip-markdown'
-import { StateLine } from '@/components/ui/state-line'
-import { CalloutRail, clockTime, CommsCallout } from './comms-callout'
+import { clockTime, CommsLedgerRow } from './comms-callout'
+import type { CommsPeekData } from './thread-peek'
 import type { Message } from '@/lib/conversations'
 
 export interface TeammateReplyData {
@@ -13,7 +11,7 @@ export interface TeammateReplyData {
   childSessionId?: string
   preview: string
   /** Gateway contract (meta.fullMessage): the child's full final message,
-   *  persisted with the notification. When present the card renders it
+   *  persisted with the notification. When present the report panel renders it
    *  directly — no fetch, and it survives child-session deletion. */
   fullMessage?: string
 }
@@ -70,14 +68,14 @@ export function parseTeammateReply(message: Message): TeammateReplyData | null {
   return null
 }
 
-/* ── Full-reply fetch ───────────────────────────────────── */
+/* ── Full-reply fetch (consumed by the report panel) ────── */
 
 // The gateway clips the callback banner to a one-line 220-char preview
 // (callbacks.ts _clean). The child's actual final message is still fetchable,
-// so on first expand we look it up and swap it in — the callout then carries
-// the FULL reply with its original formatting. Keyed by message id: fetched
-// once per card, never for collapsed rows.
-const fullReplyCache = new Map<string, string | null>()
+// so when the report panel opens for a legacy callback (no meta.fullMessage)
+// we look it up and swap it in. Keyed by message id: fetched once per card,
+// never for collapsed rows.
+export const fullReplyCache = new Map<string, string | null>()
 
 /** Mirror of the gateway's `_clean` word-boundary clip — used to recognise
  *  which child message a given preview was cut from. */
@@ -89,7 +87,7 @@ export function cleanLikeGateway(text: string, max = 220): string {
   return (lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd() + '…'
 }
 
-async function fetchFullReply(childSessionId: string, preview: string): Promise<string | null> {
+export async function fetchFullReply(childSessionId: string, preview: string): Promise<string | null> {
   const session = await api.getSession(childSessionId, { last: 40 }) as Record<string, unknown>
   const messages = Array.isArray(session.messages) ? session.messages as Array<Record<string, unknown>> : []
   // Newest-first provenance match: find the assistant message this preview was
@@ -104,77 +102,56 @@ async function fetchFullReply(childSessionId: string, preview: string): Promise<
   return null
 }
 
-function useFullReply(data: TeammateReplyData, messageId: string, expanded: boolean): string | null {
-  const [full, setFull] = useState<string | null>(() => fullReplyCache.get(messageId) ?? null)
-
-  useEffect(() => {
-    // meta.fullMessage already carries the whole reply — never fetch then.
-    if (data.fullMessage) return
-    if (!expanded || data.kind !== 'reply' || !data.childSessionId || !data.preview) return
-    if (fullReplyCache.has(messageId)) {
-      setFull(fullReplyCache.get(messageId) ?? null)
-      return
-    }
-    let cancelled = false
-    fetchFullReply(data.childSessionId, data.preview)
-      .then((text) => {
-        fullReplyCache.set(messageId, text)
-        if (!cancelled) setFull(text)
-      })
-      .catch(() => { /* preview stays — the honest fallback */ })
-    return () => { cancelled = true }
-  }, [expanded, data, messageId])
-
-  return full
-}
-
 /* ── Component ──────────────────────────────────────────── */
 
 interface TeammateReplyProps {
   data: TeammateReplyData
   timestamp: number
   messageId: string
-  renderContent: (text: string) => ReactNode
+  /** Open the read-only report panel (peek). */
+  onPeek?: (peek: CommsPeekData) => void
+  /** Fallback when no peek surface is mounted: jump straight to the thread. */
   onOpenThread?: (sessionId: string) => void
+  dense?: boolean
+  arriving?: boolean
+  arrivalDelayMs?: number
 }
 
-export function TeammateReply({ data, timestamp, messageId, renderContent, onOpenThread }: TeammateReplyProps) {
-  const [expanded, setExpanded] = useState(false)
+export function TeammateReply({ data, timestamp, messageId, onPeek, onOpenThread, dense, arriving, arrivalDelayMs }: TeammateReplyProps) {
   const error = data.kind === 'error'
-  const full = useFullReply(data, messageId, expanded)
-  const bodyText = data.fullMessage ?? full ?? data.preview
   const hint = stripMarkdown(data.preview.split('\n')[0]) || (error ? "Couldn't finish" : '')
+  const time = clockTime(timestamp)
+
+  const open = () => {
+    if (onPeek) {
+      onPeek({
+        kind: data.kind,
+        employee: data.employee,
+        displayName: data.employeeDisplay,
+        sessionId: data.childSessionId,
+        messageId,
+        timestamp,
+        preview: data.preview,
+        fullMessage: data.fullMessage,
+      })
+    } else if (data.childSessionId && onOpenThread) {
+      onOpenThread(data.childSessionId)
+    }
+  }
 
   return (
-    <CommsCallout
+    <CommsLedgerRow
       employee={data.employee}
       displayName={data.employeeDisplay}
-      meta={error
-        ? [{ text: "couldn't finish", tone: 'error' }, { text: clockTime(timestamp) }]
-        : [{ text: 'replied' }, { text: clockTime(timestamp) }]}
       hint={hint}
-      expanded={expanded}
-      onToggle={() => setExpanded((value) => !value)}
+      time={time}
+      error={error}
+      dense={dense}
+      arriving={arriving}
+      arrivalDelayMs={arrivalDelayMs}
+      ariaLabel={`${data.employeeDisplay} ${error ? "couldn't finish" : 'replied'}, ${time}. Open report.`}
       stateAttr={data.kind}
-    >
-      <CalloutRail error={error}>
-        {error && <StateLine state="error" className="mb-[3px]" />}
-        {bodyText && (
-          <div className={`max-w-[62ch] text-pretty text-[length:var(--text-subheadline)] leading-[var(--leading-relaxed)] ${error ? 'text-[var(--text-secondary)]' : 'text-[var(--text-primary)]'}`}>
-            {renderContent(bodyText)}
-          </div>
-        )}
-        {data.childSessionId && onOpenThread && (
-          <button
-            type="button"
-            aria-label={`Open ${data.employeeDisplay} thread`}
-            onClick={() => onOpenThread(data.childSessionId!)}
-            className="mt-[var(--space-2)] inline-flex min-h-9 items-center gap-1 rounded-[var(--radius-sm)] border-none bg-transparent py-1 text-[length:var(--text-caption1)] font-[var(--weight-medium)] text-[var(--text-tertiary)] transition-colors duration-150 ease-[var(--ease-smooth)] hover:text-[var(--text-primary)]"
-          >
-            Open thread <ChevronRight size={11} strokeWidth={2.25} aria-hidden="true" />
-          </button>
-        )}
-      </CalloutRail>
-    </CommsCallout>
+      onOpen={open}
+    />
   )
 }

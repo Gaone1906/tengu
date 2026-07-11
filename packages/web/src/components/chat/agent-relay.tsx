@@ -1,13 +1,12 @@
-import { useState, type ReactNode } from 'react'
-import { ChevronRight } from 'lucide-react'
 import { stripMarkdown } from '@/lib/strip-markdown'
-import { CalloutRail, clockTime, CommsCallout } from './comms-callout'
+import { clockTime, CommsLedgerRow } from './comms-callout'
+import type { CommsPeekData } from './thread-peek'
 import type { Message } from '@/lib/conversations'
 
 /**
  * Agent-to-agent relay (send_to_session), rendered as the inbound sibling of
- * the child-callback callout — same anatomy, "messaged" voice, hop badge when
- * the chain runs deeper than one hop.
+ * the child-callback ledger line — same T1 anatomy, hop badge when the chain
+ * runs deeper than one hop. Clicking opens the read-only report panel.
  *
  * Preferred source is the structured gateway contract
  * (meta.kind === "agent-relay": fromSessionId/fromLabel/fromEmployee/hops/
@@ -83,39 +82,47 @@ export function parseAgentRelay(message: Message): AgentRelayData | null {
 interface AgentRelayProps {
   data: AgentRelayData
   timestamp: number
-  renderContent: (text: string) => ReactNode
+  messageId: string
+  onPeek?: (peek: CommsPeekData) => void
   onOpenThread?: (sessionId: string) => void
+  arriving?: boolean
+  arrivalDelayMs?: number
 }
 
-export function AgentRelay({ data, timestamp, renderContent, onOpenThread }: AgentRelayProps) {
-  const [expanded, setExpanded] = useState(false)
+export function AgentRelay({ data, timestamp, messageId, onPeek, onOpenThread, arriving, arrivalDelayMs }: AgentRelayProps) {
+  const time = clockTime(timestamp)
+  const open = () => {
+    if (onPeek) {
+      onPeek({
+        kind: 'relay',
+        employee: data.fromLabel,
+        displayName: data.fromDisplay,
+        sessionId: data.fromSessionId,
+        messageId,
+        timestamp,
+        preview: data.text,
+        // A relay's body is never clipped by the meta contract path; the text
+        // parse forms carry whatever the transcript persisted. Either way the
+        // panel renders it without fetching.
+        fullMessage: data.text,
+      })
+    } else if (data.fromSessionId && onOpenThread) {
+      onOpenThread(data.fromSessionId)
+    }
+  }
 
   return (
-    <CommsCallout
+    <CommsLedgerRow
       employee={data.fromLabel}
       displayName={data.fromDisplay}
-      meta={[{ text: 'messaged' }, { text: clockTime(timestamp) }]}
-      hopBadge={data.hops && data.hops > 1 ? `hop ${data.hops}` : undefined}
       hint={stripMarkdown(data.text.split('\n')[0])}
-      expanded={expanded}
-      onToggle={() => setExpanded((value) => !value)}
+      time={time}
+      hopBadge={data.hops && data.hops > 1 ? `hop ${data.hops}` : undefined}
+      arriving={arriving}
+      arrivalDelayMs={arrivalDelayMs}
+      ariaLabel={`${data.fromDisplay} messaged, ${time}. Open message.`}
       stateAttr="relay"
-    >
-      <CalloutRail>
-        <div className="max-w-[62ch] text-pretty text-[length:var(--text-subheadline)] leading-[var(--leading-relaxed)] text-[var(--text-primary)]">
-          {renderContent(data.text)}
-        </div>
-        {data.fromSessionId && onOpenThread && (
-          <button
-            type="button"
-            aria-label={`Open ${data.fromDisplay} thread`}
-            onClick={() => onOpenThread(data.fromSessionId!)}
-            className="mt-[var(--space-2)] inline-flex min-h-9 items-center gap-1 rounded-[var(--radius-sm)] border-none bg-transparent py-1 text-[length:var(--text-caption1)] font-[var(--weight-medium)] text-[var(--text-tertiary)] transition-colors duration-150 ease-[var(--ease-smooth)] hover:text-[var(--text-primary)]"
-          >
-            Open sender <ChevronRight size={11} strokeWidth={2.25} aria-hidden="true" />
-          </button>
-        )}
-      </CalloutRail>
-    </CommsCallout>
+      onOpen={open}
+    />
   )
 }

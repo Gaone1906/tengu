@@ -2,7 +2,8 @@
 import { lazy, Suspense, useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { api } from '@/lib/api'
 import { useOrg } from '@/hooks/use-employees'
-import { ChatMessages } from '@/components/chat/chat-messages'
+import { ChatMessages, formatMessage } from '@/components/chat/chat-messages'
+import { ThreadPeek, type CommsPeekData } from '@/components/chat/thread-peek'
 import { ChatInput } from '@/components/chat/chat-input'
 import { CliKeybar } from '@/components/chat/cli-keybar'
 import { ChatEmployeePicker } from '@/components/chat/chat-employee-picker'
@@ -411,6 +412,18 @@ export function ChatPane({
     resetPane()
   }, [resetPane])
 
+  // Read-only report panel (peek) — opened by comms ledger lines. "Open full
+  // chat" commits through the same onOpenThread chain the drill-in cards use,
+  // so history + the back chip stay correct.
+  const [peek, setPeek] = useState<CommsPeekData | null>(null)
+  const closePeek = useCallback(() => setPeek(null), [])
+  const commitPeek = useCallback((sid: string) => {
+    setPeek(null)
+    onOpenThread?.(sid)
+  }, [onOpenThread])
+  // A session switch under the panel (e.g. tab shortcut) closes it.
+  useEffect(() => { setPeek(null) }, [sessionId])
+
   // Drag & drop state
   const [dragOver, setDragOver] = useState(false)
   const [droppedFiles, setDroppedFiles] = useState<File[]>()
@@ -540,8 +553,19 @@ export function ChatPane({
           olderMessagesError={olderMessagesError}
           onLoadOlderMessages={loadOlderMessages}
           onOpenThread={onOpenThread}
+          onPeek={setPeek}
         />
       ) : null}
+
+      {/* Read-only report panel — desktop slide-over / mobile bottom sheet. */}
+      {peek && (
+        <ThreadPeek
+          peek={peek}
+          onClose={closePeek}
+          onOpenFullChat={onOpenThread ? commitPeek : undefined}
+          renderContent={formatMessage}
+        />
+      )}
 
       {/* Queue panel — hidden in the live xterm view (noise on top of the PTY). */}
       {!(viewMode === 'cli' && sessionId) && (

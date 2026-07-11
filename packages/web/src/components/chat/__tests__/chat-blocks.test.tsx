@@ -45,8 +45,8 @@ describe('ChatBlockInline', () => {
     expect(delegationStateForBlock(block)).toMatchObject({ state: 'working', label: 'Working' })
     render(<ChatBlockInline block={block} onOpenThread={onOpenThread} />)
 
-    const card = screen.getByRole('button', { name: 'Design Lead — working. Open thread.' })
-    expect(screen.getByText('— handed off')).toBeTruthy()
+    const card = screen.getByRole('button', { name: 'Design Lead, working. Open thread.' })
+    expect(screen.getByText('handed off')).toBeTruthy()
     expect(screen.getByText('Working · 2m')).toBeTruthy()
     fireEvent.click(card)
     expect(onOpenThread).toHaveBeenCalledWith('child-123')

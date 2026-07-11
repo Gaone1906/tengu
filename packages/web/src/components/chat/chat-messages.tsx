@@ -11,6 +11,9 @@ import { ChevronDown, Wrench } from 'lucide-react'
 import { parseTeammateReply, TeammateReply } from './teammate-reply'
 import { parseAgentRelay, AgentRelay } from './agent-relay'
 import { DispatchRow } from './dispatch-row'
+import { BURST_WINDOW_MS, CallbackBurst, type BurstEntry } from './callback-burst'
+import { FoldRegion, type FoldSummaryData } from './fold-region'
+import type { CommsPeekData } from './thread-peek'
 
 /* ── Tool grouping ──────────────────────────────────────── */
 
@@ -18,6 +21,7 @@ type MessageItem =
   | { kind: 'message'; msg: Message; index: number }
   | { kind: 'tool-group'; msgs: Message[]; startIndex: number }
   | { kind: 'dispatch-call'; msg: Message; index: number }
+  | { kind: 'callback-burst'; entries: BurstEntry[]; startIndex: number }
 
 // A finished tool call lands in the transcript as "Used <tool>". While it's
 // still running the content carries the live tool name instead.
@@ -78,11 +82,165 @@ function groupMessages(messages: Message[]): MessageItem[] {
       }
       if (toolMsgs.length > 0) items.push({ kind: 'tool-group', msgs: toolMsgs, startIndex: start })
     } else {
+      // T3 burst grouping: 2+ consecutive callbacks landing within the burst
+      // window compose into ONE grouped entry — the pile gets quieter as it
+      // grows instead of louder.
+      const callback = messages[i].role === 'notification' ? parseTeammateReply(messages[i]) : null
+      if (callback) {
+        const start = i
+        const entries: BurstEntry[] = [{ data: callback, msg: messages[i], messageId: messages[i].id || `idx-${i}` }]
+        i++
+        while (i < messages.length && messages[i].role === 'notification') {
+          if (messages[i].timestamp - messages[i - 1].timestamp > BURST_WINDOW_MS) break
+          const next = parseTeammateReply(messages[i])
+          if (!next) break
+          entries.push({ data: next, msg: messages[i], messageId: messages[i].id || `idx-${i}` })
+          i++
+        }
+        if (entries.length >= 2) {
+          items.push({ kind: 'callback-burst', entries, startIndex: start })
+        } else {
+          items.push({ kind: 'message', msg: messages[start], index: start })
+        }
+        continue
+      }
       items.push({ kind: 'message', msg: messages[i], index: i })
       i++
     }
   }
   return items
+}
+
+/* ── The post-turn fold — partitioning ──────────────────── */
+
+/** The turn's final answer: an assistant prose message. Tool calls are not
+ *  answers, and neither is any block-carrying message — blocks render as
+ *  cards/objects (handoffs, dispatches, task lists), not the turn's prose.
+ *  Conservative on purpose: when in doubt the evidence stays visible. */
+function isAnswerMessage(msg: Message): boolean {
+  if (msg.role !== 'assistant' || msg.toolCall) return false
+  if (msg.blocks?.length) return false
+  return Boolean((msg.content || '').trim())
+}
+
+/** A dispatch-only assistant message (all blocks `dispatch`, content the
+ *  fallback line by the parity rule) renders as a dispatch row — working
+ *  evidence, so it folds. */
+function isDispatchOnlyMessage(msg: Message): boolean {
+  if (msg.role !== 'assistant' || !msg.blocks?.length) return false
+  return msg.blocks.every((block) => block.type === 'dispatch')
+}
+
+// What folds: tool groups, dispatch rows, callbacks (incl. bursts), relays.
+// HandoffCards (delegation blocks) and interim assistant prose do NOT fold —
+// durable objects and voices stay in the thread.
+function isFoldableItem(item: MessageItem): boolean {
+  if (item.kind === 'tool-group' || item.kind === 'dispatch-call' || item.kind === 'callback-burst') return true
+  const msg = item.msg
+  if (msg.role === 'notification') return Boolean(parseTeammateReply(msg) || parseAgentRelay(msg))
+  return isDispatchOnlyMessage(msg)
+}
+
+function itemFirstMsg(item: MessageItem): Message {
+  if (item.kind === 'tool-group') return item.msgs[0]
+  if (item.kind === 'callback-burst') return item.entries[0].msg
+  return item.msg
+}
+
+function itemLastMsg(item: MessageItem): Message {
+  if (item.kind === 'tool-group') return item.msgs[item.msgs.length - 1]
+  if (item.kind === 'callback-burst') return item.entries[item.entries.length - 1].msg
+  return item.msg
+}
+
+function itemLastRawIndex(item: MessageItem): number {
+  if (item.kind === 'tool-group') return item.startIndex + item.msgs.length - 1
+  if (item.kind === 'callback-burst') return item.startIndex + item.entries.length - 1
+  return item.index
+}
+
+function buildFoldSummary(run: MessageItem[]): FoldSummaryData {
+  let tools = 0
+  const teammates = new Set<string>()
+  for (const item of run) {
+    if (item.kind === 'tool-group') {
+      tools += item.msgs.length
+      continue
+    }
+    if (item.kind === 'dispatch-call') {
+      tools += 1
+      continue
+    }
+    if (item.kind === 'callback-burst') {
+      for (const entry of item.entries) teammates.add(entry.data.employee)
+      continue
+    }
+    const msg = item.msg
+    if (msg.role === 'notification') {
+      const callback = parseTeammateReply(msg)
+      if (callback) {
+        teammates.add(callback.employee)
+        continue
+      }
+      const relay = parseAgentRelay(msg)
+      if (relay) teammates.add(relay.fromLabel)
+      continue
+    }
+    for (const block of msg.blocks || []) {
+      const employee = block.payload?.employee
+      if (typeof employee === 'string' && employee) teammates.add(employee)
+    }
+  }
+  const first = itemFirstMsg(run[0]).timestamp
+  const last = itemLastMsg(run[run.length - 1]).timestamp
+  return { durationMs: Math.max(0, last - first), tools, teammates: teammates.size }
+}
+
+type RenderGroup =
+  | { kind: 'plain'; item: MessageItem }
+  | { kind: 'fold'; id: string; items: MessageItem[]; answered: boolean; summary: FoldSummaryData }
+
+function partitionForFold(items: MessageItem[], messages: Message[]): RenderGroup[] {
+  const groups: RenderGroup[] = []
+  let i = 0
+  while (i < items.length) {
+    if (!isFoldableItem(items[i])) {
+      groups.push({ kind: 'plain', item: items[i] })
+      i++
+      continue
+    }
+    const run: MessageItem[] = []
+    while (i < items.length && isFoldableItem(items[i])) {
+      run.push(items[i])
+      i++
+    }
+    // The run folds once its turn produced a final answer (before the next
+    // user message). Unanswered tails stay open — live work stays visible —
+    // but still mount inside the SAME FoldRegion so the eventual fold
+    // animates in place with scroll anchoring instead of remounting.
+    let answered = false
+    for (let j = itemLastRawIndex(run[run.length - 1]) + 1; j < messages.length; j++) {
+      if (messages[j].role === 'user') break
+      if (isAnswerMessage(messages[j])) {
+        answered = true
+        break
+      }
+    }
+    // Never fold live work: a region with a still-running tool stays open no
+    // matter what follows it.
+    if (answered && run.some((item) => item.kind === 'tool-group' && item.msgs.some((msg) => !isToolDone(msg)))) {
+      answered = false
+    }
+    const firstMsg = itemFirstMsg(run[0])
+    groups.push({
+      kind: 'fold',
+      id: firstMsg.id || `fold-${itemLastRawIndex(run[0])}`,
+      items: run,
+      answered,
+      summary: buildFoldSummary(run),
+    })
+  }
+  return groups
 }
 
 function ToolGroup({
@@ -373,7 +531,7 @@ function TableBlock({ headerLine, rows, keyProp }: { headerLine: string; rows: s
   )
 }
 
-function formatMessage(content: string): React.ReactNode {
+export function formatMessage(content: string): React.ReactNode {
   if (!content) return null
   const lines = content.split('\n')
   const result: React.ReactNode[] = []
@@ -520,6 +678,20 @@ function shouldShowTimestamp(messages: Message[], index: number): boolean {
   if (index === 0) return true
   const gap = messages[index].timestamp - messages[index - 1].timestamp
   return gap > 5 * 60 * 1000
+}
+
+/* ── Role-switch spacer ─────────────────────────────────── */
+
+// One source of truth for the gap above a row, computed from the previous
+// message's role. The streaming container uses the SAME function as the final
+// row that replaces it, so the swap is a pure text-node replacement — zero
+// movement by construction.
+export function turnSpacerClass(prevRole: Message['role'], role: Message['role']): string {
+  // The switch AFTER a user message gets extra headroom (24px): the accent
+  // bubble's fill weight optically eats a plain 16px gap before the reply.
+  if (prevRole === 'user' && role !== 'user') return 'h-[var(--space-6)]'
+  if (prevRole !== role) return 'h-[var(--space-4)]'
+  return 'h-[var(--space-1)]'
 }
 
 /* ── MessageActions — subtle copy/retry row under a message ─ */
@@ -718,9 +890,12 @@ interface MessageRowProps {
   loading?: boolean
   onRetry?: (text: string) => void
   onOpenThread?: (sessionId: string) => void
+  onPeek?: (peek: CommsPeekData) => void
+  /** Live-arrival stagger index for comms rows (null = not arriving). */
+  arrival?: number | null
 }
 
-const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loading, onRetry, onOpenThread }: MessageRowProps) {
+const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loading, onRetry, onOpenThread, onPeek, arrival }: MessageRowProps) {
   const isUser = msg.role === 'user'
   const isNotification = msg.role === 'notification'
   const showTimestamp = shouldShowTimestamp(messages, i)
@@ -780,17 +955,10 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
         </div>
       )}
 
-      {/* Spacing between role switches. The switch AFTER a user message gets
-          extra headroom (24px): the accent bubble's fill weight optically eats
-          a plain 16px gap before the assistant's reply. */}
+      {/* Spacing between role switches — shared with the streaming container
+          (turnSpacerClass) so the stream→final swap cannot move the text. */}
       {!showTimestamp && i > 0 && (
-        <div className={
-          messages[i - 1].role === 'user' && msg.role !== 'user'
-            ? 'h-[var(--space-6)]'
-            : messages[i - 1].role !== msg.role
-              ? 'h-[var(--space-4)]'
-              : 'h-[var(--space-1)]'
-        } />
+        <div className={turnSpacerClass(messages[i - 1].role, msg.role)} />
       )}
 
       {/* Notification message — centered system-style banner */}
@@ -812,15 +980,25 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
             data={teammate}
             timestamp={msg.timestamp}
             messageId={msg.id || `idx-${i}`}
-            renderContent={formatMessage}
+            onPeek={onPeek}
             onOpenThread={onOpenThread}
+            arriving={arrival != null}
+            arrivalDelayMs={arrival != null ? arrival * 90 : undefined}
           />
         </div>
       )}
 
       {relay && (
         <div className="assistant-msg-row min-w-0">
-          <AgentRelay data={relay} timestamp={msg.timestamp} renderContent={formatMessage} onOpenThread={onOpenThread} />
+          <AgentRelay
+            data={relay}
+            timestamp={msg.timestamp}
+            messageId={msg.id || `idx-${i}`}
+            onPeek={onPeek}
+            onOpenThread={onOpenThread}
+            arriving={arrival != null}
+            arrivalDelayMs={arrival != null ? arrival * 90 : undefined}
+          />
         </div>
       )}
 
@@ -884,17 +1062,36 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
 
 /* ── StreamingBubble — always re-renders on every token ── */
 
-function StreamingBubble({ streamingText }: { streamingText: string }) {
+// Structural parity rule: this container renders the IDENTICAL prefix stack
+// (timestamp divider or role-switch spacer) and the same row/bubble classes
+// as the MessageRow that will replace it, so the stream→final swap is a pure
+// text-node replacement — the jump is impossible by construction.
+function StreamingBubble({ streamingText, prevMessage, startedAt }: {
+  streamingText: string
+  prevMessage?: Message
+  startedAt: number
+}) {
   const formattedContent = useMemo(
     () => formatMessage(closePartialMarkdown(streamingText)),
     [streamingText]
   )
+  const showTimestamp = !prevMessage || startedAt - prevMessage.timestamp > 5 * 60 * 1000
   return (
-    <div className="assistant-msg-row flex justify-start mb-[var(--space-1)]">
-      <div className="assistant-msg-bubble flex flex-col">
-        <div className="assistant-transcript py-[var(--space-1)] text-[var(--text-primary)] text-[length:var(--text-body)] leading-[var(--leading-relaxed)]">
-          {formattedContent}
-          <span className="stream-caret" aria-hidden="true" />
+    <div data-streaming>
+      {showTimestamp && (
+        <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
+          {formatTimestamp(startedAt)}
+        </div>
+      )}
+      {!showTimestamp && prevMessage && (
+        <div className={turnSpacerClass(prevMessage.role, 'assistant')} />
+      )}
+      <div className="assistant-msg-row flex justify-start mb-[var(--space-1)]">
+        <div className="assistant-msg-bubble flex flex-col">
+          <div className="assistant-transcript py-[var(--space-1)] text-[var(--text-primary)] text-[length:var(--text-body)] leading-[var(--leading-relaxed)]">
+            {formattedContent}
+            <span className="stream-caret" aria-hidden="true" />
+          </div>
         </div>
       </div>
     </div>
@@ -915,6 +1112,8 @@ interface ChatMessagesProps {
   onLoadOlderMessages?: () => Promise<void> | void
   /** Navigate to a child session from a handoff card or teammate reply. */
   onOpenThread?: (sessionId: string) => void
+  /** Open the read-only report panel for a comms ledger line. */
+  onPeek?: (peek: CommsPeekData) => void
 }
 
 const JUMP_EXIT_MS = 140
@@ -1039,6 +1238,7 @@ export function ChatMessages({
   olderMessagesError = null,
   onLoadOlderMessages,
   onOpenThread,
+  onPeek,
 }: ChatMessagesProps) {
   // Stick-to-bottom: one hook owns follow-intent, growth-follow, resize/keyboard,
   // tab-return, mount-snap, and the jump affordance. See use-stick-to-bottom.ts.
@@ -1100,6 +1300,39 @@ export function ChatMessages({
 
   // Memoize grouped messages to avoid re-running on streaming-only re-renders
   const groupedMessages = useMemo(() => groupMessages(messages), [messages])
+  const renderGroups = useMemo(() => partitionForFold(groupedMessages, messages), [groupedMessages, messages])
+
+  // Live-arrival tracking for the comms choreography: ids present at mount
+  // never animate; comms rows appended while mounted play the arrival once,
+  // staggered +90ms per row within a delivery batch. The refs are mutated in
+  // this memo on purpose — assignments must be visible to the SAME render.
+  const seenIdsRef = useRef<Set<string> | null>(null)
+  const arrivalsRef = useRef<Map<string, number>>(new Map())
+  useMemo(() => {
+    const seen = seenIdsRef.current
+    if (!seen) return
+    let batchIndex = 0
+    for (const message of messages) {
+      if (!message.id || seen.has(message.id)) continue
+      seen.add(message.id)
+      if (message.role === 'notification' && (parseTeammateReply(message) || parseAgentRelay(message))) {
+        arrivalsRef.current.set(message.id, batchIndex++)
+      }
+    }
+  }, [messages])
+  useEffect(() => {
+    if (!seenIdsRef.current) {
+      seenIdsRef.current = new Set(messages.map((message) => message.id).filter(Boolean) as string[])
+    }
+  }, [messages])
+  const arrivalFor = (id: string | undefined): number | null =>
+    id != null ? arrivalsRef.current.get(id) ?? null : null
+
+  // Captured when the first token lands so the streaming container can render
+  // the same timestamp-divider decision as the final row that will replace it.
+  const streamStartRef = useRef<number | null>(null)
+  if (streamingText && streamStartRef.current == null) streamStartRef.current = Date.now()
+  if (!streamingText && streamStartRef.current != null) streamStartRef.current = null
   const activeToolGroupStart = useMemo(() => {
     if (!loading) return -1
     for (let i = groupedMessages.length - 1; i >= 0; i--) {
@@ -1143,55 +1376,77 @@ export function ChatMessages({
               Older messages could not load
             </div>
           )}
-          {groupedMessages.map((item) => {
-            if (item.kind === 'tool-group' || item.kind === 'dispatch-call') {
-              const firstMsg = item.kind === 'tool-group' ? item.msgs[0] : item.msg
-              const startIndex = item.kind === 'tool-group' ? item.startIndex : item.index
-              const showTimestamp = shouldShowTimestamp(messages, startIndex)
-              const prevMsg = startIndex > 0 ? messages[startIndex - 1] : null
-              return (
-                <div key={`tg-${firstMsg.id || startIndex}`} data-message-id={firstMsg.id || `tg-${startIndex}`}>
-                  {showTimestamp && (
-                    <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
-                      {formatTimestamp(firstMsg.timestamp)}
-                    </div>
-                  )}
-                  {!showTimestamp && prevMsg && (
-                    <div className={
-                      prevMsg.role === 'user'
-                        ? 'h-[var(--space-6)]'
-                        : prevMsg.role !== 'assistant'
-                          ? 'h-[var(--space-4)]'
-                          : 'h-[var(--space-1)]'
-                    } />
-                  )}
-                  {item.kind === 'tool-group'
-                    ? <ToolGroup msgs={item.msgs} isActive={item.startIndex === activeToolGroupStart} />
-                    : (
+          {renderGroups.map((group) => {
+            const renderItem = (item: MessageItem) => {
+              if (item.kind === 'tool-group' || item.kind === 'dispatch-call' || item.kind === 'callback-burst') {
+                const firstMsg = itemFirstMsg(item)
+                const startIndex = item.kind === 'dispatch-call' ? item.index : item.startIndex
+                const showTimestamp = shouldShowTimestamp(messages, startIndex)
+                const prevMsg = startIndex > 0 ? messages[startIndex - 1] : null
+                return (
+                  <div key={`tg-${firstMsg.id || startIndex}`} data-message-id={firstMsg.id || `tg-${startIndex}`}>
+                    {showTimestamp && (
+                      <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
+                        {formatTimestamp(firstMsg.timestamp)}
+                      </div>
+                    )}
+                    {!showTimestamp && prevMsg && (
+                      <div className={turnSpacerClass(prevMsg.role, 'assistant')} />
+                    )}
+                    {item.kind === 'tool-group' && (
+                      <ToolGroup msgs={item.msgs} isActive={item.startIndex === activeToolGroupStart} />
+                    )}
+                    {item.kind === 'dispatch-call' && (
                       <div className="assistant-msg-row mb-[var(--space-1)] min-w-0">
                         <DispatchRow />
                       </div>
                     )}
-                </div>
+                    {item.kind === 'callback-burst' && (
+                      <div className="assistant-msg-row mb-[var(--space-1)] min-w-0">
+                        <CallbackBurst
+                          entries={item.entries}
+                          onPeek={onPeek}
+                          onOpenThread={onOpenThread}
+                          arrivals={arrivalsRef.current}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )
+              }
+
+              const { msg, index: i } = item
+              return (
+                <MessageRow
+                  key={msg.id || i}
+                  msg={msg}
+                  index={i}
+                  messages={messages}
+                  loading={loading}
+                  onRetry={onRetry}
+                  onOpenThread={onOpenThread}
+                  onPeek={onPeek}
+                  arrival={arrivalFor(msg.id)}
+                />
               )
             }
 
-            const { msg, index: i } = item
+            if (group.kind === 'plain') return renderItem(group.item)
             return (
-              <MessageRow
-                key={msg.id || i}
-                msg={msg}
-                index={i}
-                messages={messages}
-                loading={loading}
-                onRetry={onRetry}
-                onOpenThread={onOpenThread}
-              />
+              <FoldRegion key={`fold-${group.id}`} answered={group.answered} summary={group.summary}>
+                {group.items.map(renderItem)}
+              </FoldRegion>
             )
           })}
 
           {/* Streaming message — shows text as it arrives, always re-renders */}
-          {streamingText && <StreamingBubble streamingText={streamingText} />}
+          {streamingText && (
+            <StreamingBubble
+              streamingText={streamingText}
+              prevMessage={messages.at(-1)}
+              startedAt={streamStartRef.current ?? Date.now()}
+            />
+          )}
 
           {/* Running indicator — pre-first-token only; once streamingText arrives the
               caret carries the "live" signal, so suppress this to avoid a double cue. */}

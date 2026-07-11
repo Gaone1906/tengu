@@ -42,7 +42,7 @@ export function HandoffCard({ block, onOpenThread }: HandoffCardProps) {
   return (
     <QuietCard
       onClick={() => childSessionId && onOpenThread?.(childSessionId)}
-      aria-label={`${employeeDisplay} — ${visual.ariaState}. Open thread.`}
+      aria-label={`${employeeDisplay}, ${visual.ariaState}. Open thread.`}
       className="my-[var(--space-2)] flex min-h-16 w-fit max-w-[min(480px,100%)] cursor-pointer items-center gap-[var(--space-3)] py-[var(--space-3)] pl-[var(--space-3)] pr-[var(--space-4)] text-left"
       data-handoff-state={visual.state}
     >
@@ -50,7 +50,7 @@ export function HandoffCard({ block, onOpenThread }: HandoffCardProps) {
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-baseline gap-[var(--space-2)] text-[length:var(--text-footnote)] leading-[var(--leading-snug)]">
           <span className="truncate font-[var(--weight-semibold)] text-[var(--text-primary)]">{employeeDisplay}</span>
-          <span className="shrink-0 font-[var(--weight-regular)] text-[var(--text-tertiary)]">— handed off</span>
+          <span className="shrink-0 font-[var(--weight-regular)] text-[var(--text-tertiary)]">handed off</span>
         </span>
         <span className="mt-px line-clamp-2 text-pretty text-[length:var(--text-footnote)] leading-[var(--leading-normal)] text-[var(--text-secondary)]">
           {title}

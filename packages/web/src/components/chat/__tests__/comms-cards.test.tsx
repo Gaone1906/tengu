@@ -72,8 +72,8 @@ describe('agent relays', () => {
     })
   })
 
-  it('renders the meta full body on expand and links the sender session', () => {
-    const onOpenThread = vi.fn()
+  it('opens the peek with the full meta body and the sender session on click', () => {
+    const onPeek = vi.fn()
     const messages: Message[] = [{
       id: 'relay-meta',
       role: 'notification',
@@ -89,30 +89,37 @@ describe('agent relays', () => {
       },
     }]
 
-    render(<ChatMessages messages={messages} loading={false} onOpenThread={onOpenThread} />)
+    render(<ChatMessages messages={messages} loading={false} onPeek={onPeek} />)
 
     expect(screen.getByText('hop 2')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { expanded: false }))
-    expect(screen.getByText(/Second paragraph the banner clip dropped/)).toBeTruthy()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Open Growth Ops thread' }))
-    expect(onOpenThread).toHaveBeenCalledWith('session-a')
+    fireEvent.click(screen.getByRole('button', { name: /Growth Ops messaged.*Open message/ }))
+    expect(onPeek).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'relay',
+      employee: 'growth-ops',
+      displayName: 'Growth Ops',
+      sessionId: 'session-a',
+      fullMessage: 'Line one of the relay.\n\nSecond paragraph the banner clip dropped.',
+    }))
   })
 
-  it('renders no sender link for legacy banner-only relays', () => {
+  it('peeks without a sender session for legacy banner-only relays', () => {
+    const onPeek = vi.fn()
     const messages: Message[] = [{
       id: 'relay-legacy',
       role: 'notification',
       content: '📨 From growth-ops: A legacy relay with no meta.',
       timestamp: 100,
     }]
-    render(<ChatMessages messages={messages} loading={false} onOpenThread={vi.fn()} />)
-    fireEvent.click(screen.getByRole('button', { expanded: false }))
-    expect(screen.getByText(/A legacy relay with no meta/)).toBeTruthy()
-    expect(screen.queryByRole('button', { name: /Open Growth Ops thread/ })).toBeNull()
+    render(<ChatMessages messages={messages} loading={false} onPeek={onPeek} />)
+    fireEvent.click(screen.getByRole('button', { name: /Open message/ }))
+    expect(onPeek).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'relay',
+      sessionId: undefined,
+      fullMessage: 'A legacy relay with no meta.',
+    }))
   })
 
-  it('renders collapsed with a hop badge and expands to the message body', () => {
+  it('renders the T1 ledger line with a hop badge and no meta verb', () => {
     const messages: Message[] = [{
       id: 'relay',
       role: 'notification',
@@ -124,11 +131,9 @@ describe('agent relays', () => {
 
     expect(container.querySelector('[data-comms-state="relay"]')).toBeTruthy()
     expect(container.querySelector('.notification-msg-bubble')).toBeNull()
-    expect(screen.getByText('messaged')).toBeTruthy()
+    expect(screen.queryByText('messaged')).toBeNull()
     expect(screen.getByText('hop 2')).toBeTruthy()
     expect(screen.queryByText(/📨/)).toBeNull()
-
-    fireEvent.click(screen.getByRole('button', { expanded: false }))
     expect(screen.getByText(/Cross-reference the drop-off complaints/)).toBeTruthy()
   })
 
