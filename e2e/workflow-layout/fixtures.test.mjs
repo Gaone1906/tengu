@@ -30,7 +30,7 @@ test("scenario fixtures cover new, valid manual, invalid manual, and run states"
   ]))
   const manual = fixtures.find((x) => x.scenario === "manual")?.definition
   assert.equal(manual?.layout.source, "manual")
-  assert.deepEqual(manual?.nodes.map((node) => node.position.x), [40, 340, 740])
+  assert.deepEqual(manual?.nodes.map((node) => node.position.x), [40, 340, 760])
   const success = fixtures.find((x) => x.scenario === "run-success")?.definition
   assert.equal(success?.nodes.at(-1)?.type, "step")
   assert.equal(success?.nodes.at(-1)?.options?.output, "none")

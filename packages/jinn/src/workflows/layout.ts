@@ -11,6 +11,7 @@ export type { WorkflowLayoutMetadata, WorkflowLayoutSource } from './definition.
 export const LAYOUT_GRID = 20;
 export const LAYOUT_HORIZONTAL_CLEARANCE = 120;
 export const LAYOUT_VERTICAL_CLEARANCE = 80;
+export const LAYOUT_PORT_DIAMETER = 8;
 
 export type WorkflowLayoutIntent = 'generated' | 'manual' | 'normalize';
 
@@ -62,19 +63,21 @@ function ceilToGrid(value: number): number {
   return Object.is(snapped, -0) ? 0 : snapped;
 }
 
-/** Fixed semantic envelope matching the canvas card families. Dock-bearing AI
- * cards reserve the underside discs, dashed connector lane, and captions. */
+/** Fixed visible envelope matching the canvas card families. Its width also
+ * reserves the source and target port overhangs between adjacent nodes. Dock-
+ * bearing AI cards reserve the underside discs, dashed connector lane, and
+ * captions. */
 export function nodeLayoutEnvelope(node: WorkflowNode, nonErrorOutgoingRows = 0): LayoutEnvelope {
-  if (node.type === 'trigger') return { nodeId: node.id, width: 188, height: 56 };
-  if (node.type === 'gate') return { nodeId: node.id, width: 232, height: 72 };
+  if (node.type === 'trigger') return { nodeId: node.id, width: 188 + LAYOUT_PORT_DIAMETER, height: 56 };
+  if (node.type === 'gate') return { nodeId: node.id, width: 232 + LAYOUT_PORT_DIAMETER, height: 72 };
   if (node.type === 'switch') {
     const rows = Math.max(2, nonErrorOutgoingRows);
-    return { nodeId: node.id, width: 220, height: ceilToGrid(50 + rows * 32 + 8) };
+    return { nodeId: node.id, width: 220 + LAYOUT_PORT_DIAMETER, height: ceilToGrid(50 + rows * 32 + 8) };
   }
 
   const taskBearing = node.type === 'step' && typeof node.instructions === 'string' && node.instructions.trim().length > 0;
   const hasDocks = taskBearing && !!node.actor && (node.actor.kind === 'employee' || !!node.options?.model);
-  const width = taskBearing ? 300 : 220;
+  const width = (taskBearing ? 300 : 220) + LAYOUT_PORT_DIAMETER;
   const cardHeight = taskBearing ? 118 : 64;
   return { nodeId: node.id, width, height: cardHeight + (hasDocks ? 156 : 0) };
 }

@@ -235,7 +235,7 @@ describe('updateDefinition', () => {
   it('rejects an envelope-expanding property-only manual patch instead of moving nodes', () => {
     const manual = makeDef('manual-envelope');
     manual.nodes[1].position = { x: 300, y: 0 };
-    manual.nodes.push({ id: 's2', type: 'step', label: 'Second', position: { x: 620, y: 0 } });
+    manual.nodes.push({ id: 's2', type: 'step', label: 'Second', position: { x: 640, y: 0 } });
     manual.edges.push({ id: 'e2', from: 's1', to: 's2', kind: 'sequence' });
     createDefinition(root, manual, { now, layoutIntent: 'manual' });
     const expanded = structuredClone(manual.nodes);

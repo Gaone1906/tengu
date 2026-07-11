@@ -337,7 +337,7 @@ function badLayout(kind: string): EditableWorkflowDefinition {
 function validManualDefinition(): EditableWorkflowDefinition {
   return definition(
     'layout-manual',
-    [trigger(), step('build', { x: 400, y: 0 }), step('verify', { x: 800, y: 0 })],
+    [trigger(), step('build', { x: 400, y: 0 }), step('verify', { x: 820, y: 0 })],
     [edge('wake-build', 'wake', 'build'), edge('build-verify', 'build', 'verify')],
   );
 }
@@ -462,6 +462,15 @@ describe('workflow layout write policy and quality diagnostics', () => {
     const prepared = prepareWorkflowLayoutForWrite(manual, 'manual');
     expect(prepared.definition.nodes).toEqual(manual.nodes);
     expect(prepared.definition.layout).toEqual({ source: 'manual', version: 1 });
+  });
+
+  it('rejects manual edge clearance that ignores the visible port overhangs', () => {
+    const { prepareWorkflowLayoutForWrite } = requireLayout();
+    const manual = validManualDefinition();
+    manual.nodes.find((node) => node.id === 'verify')!.position = { x: 800, y: 0 };
+
+    expect(() => prepareWorkflowLayoutForWrite(manual, 'manual'))
+      .toThrow(/clearance.*build.*verify.*Tidy/i);
   });
 
   it('rejects overlapping manual coordinates with node ids and a Tidy instruction', () => {

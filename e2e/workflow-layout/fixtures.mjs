@@ -39,7 +39,7 @@ export function canonicalFixtures() {
 }
 
 export function scenarioFixtures() {
-  const manualNodes = [trigger("trigger", 40, 80), step("one", "One", 340, 80), step("two", "Two", 740, 80)]
+  const manualNodes = [trigger("trigger", 40, 80), step("one", "One", 340, 80), step("two", "Two", 760, 80)]
   return [
     { scenario: "new", mode: "create", definition: base("verify-new", "Verify New", [trigger()], []) },
     { scenario: "manual", mode: "create", definition: { ...base("verify-manual", "Verify Manual", manualNodes, [edge("e1", "trigger", "one"), edge("e2", "one", "two")]), layout: { source: "manual", version: 1 } } },
