@@ -11,6 +11,16 @@ import { type CanvasEdgeSpec, type CanvasNode } from "./canvas-model"
 
 const MOBILE_QUERY = "(max-width: 767px)"
 
+export type CanvasViewportClass = "mobile-portrait" | "mobile-landscape" | "desktop-portrait" | "desktop-landscape"
+
+/** Resize identity is deliberately coarse: only breakpoint/orientation changes
+ * own a reframe. Ordinary pixel resizes preserve the operator's viewport. */
+export function canvasViewportClass(width: number, height: number): CanvasViewportClass {
+  const breakpoint = width <= 767 ? "mobile" : "desktop"
+  const orientation = width > height ? "landscape" : "portrait"
+  return `${breakpoint}-${orientation}`
+}
+
 /** Track the narrow breakpoint so the canvas can open focused (not fit-tiny)
  * and size its controls for touch. */
 export function useIsCanvasMobile(): boolean {
@@ -75,9 +85,11 @@ export function viewportFrameKey(
   nodes: CanvasNode[],
   edges: CanvasEdgeSpec[] = [],
   viewKey = "",
+  viewportClass = "",
 ): string {
   return JSON.stringify({
     viewKey,
+    viewportClass,
     nodes: nodes
       .filter((node) => node.visual !== "sub")
       .map((node) => [node.id, node.kind, node.visual ?? "", node.status, Boolean(node.isCurrent)]),

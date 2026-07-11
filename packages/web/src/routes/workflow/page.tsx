@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
-import { useNavigate, useParams, useSearchParams } from "react-router-dom"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useBlocker, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { ChevronLeft } from "lucide-react"
 import { api, type EditableWorkflowDefinitionWire } from "@/lib/api"
 import { PageLayout } from "@/components/page-layout"
@@ -18,6 +18,10 @@ import { DefinitionRunView } from "./run-view"
  * canvas component with the same positions, so switching moves zero geometry. */
 
 type Mode = "runs" | "edit"
+export interface WorkflowLeaveActions {
+  save: () => Promise<boolean>
+  discard: () => void
+}
 const MODE_LABEL: Record<Mode, string> = { edit: "Editor", runs: "Executions" }
 const MODES: Mode[] = ["edit", "runs"]
 
@@ -64,6 +68,11 @@ export default function WorkflowPage() {
   const [mode, setMode] = useState<Mode>(() => modeFromParam(searchParams.get("mode")) ?? "runs")
   const [initialLive] = useState(() => searchParams.get("mode") === "live")
   const [editDirty, setEditDirty] = useState(false)
+  const [leaveActions, setLeaveActions] = useState<WorkflowLeaveActions | null>(null)
+  const [pendingMode, setPendingMode] = useState<Mode | null>(null)
+  const [resolvingLeave, setResolvingLeave] = useState(false)
+  const returnFocusRef = useRef<HTMLElement | null>(null)
+  const blocker = useBlocker(mode === "edit" && editDirty)
 
   useEffect(() => {
     if (!editDirty) return
@@ -94,20 +103,68 @@ export default function WorkflowPage() {
     return () => { cancelled = true }
   }, [workflowId])
 
-  // Guard: leaving a dirty Editor discards unsaved changes → confirm first.
+  useEffect(() => {
+    if (blocker.state === "blocked" && !returnFocusRef.current) {
+      returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    }
+  }, [blocker.state])
+
+  const rememberFocus = useCallback(() => {
+    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  }, [])
+
+  // Local lens changes do not enter router history, so they share the same
+  // explicit leave decision while router transitions are handled by useBlocker.
   const changeMode = useCallback((next: Mode) => {
-    setMode((current) => {
-      if (current === "edit" && next !== "edit" && editDirty) {
-        if (!window.confirm("Discard unsaved workflow edits?")) return current
-      }
-      return next
-    })
-  }, [editDirty])
+    if (mode === "edit" && next !== "edit" && editDirty) {
+      rememberFocus()
+      setPendingMode(next)
+      return
+    }
+    setMode(next)
+  }, [editDirty, mode, rememberFocus])
 
   const goBack = useCallback(() => {
-    if (mode === "edit" && editDirty && !window.confirm("Discard unsaved workflow edits?")) return
     navigate("/workflow")
-  }, [mode, editDirty, navigate])
+  }, [navigate])
+
+  const leaveDialogOpen = blocker.state === "blocked" || pendingMode !== null
+  const finishLeave = useCallback(() => {
+    const nextMode = pendingMode
+    setPendingMode(null)
+    if (blocker.state === "blocked") blocker.proceed()
+    else if (nextMode) setMode(nextMode)
+    returnFocusRef.current = null
+  }, [blocker, pendingMode])
+
+  const stay = useCallback(() => {
+    setPendingMode(null)
+    if (blocker.state === "blocked") blocker.reset()
+    const target = returnFocusRef.current
+    returnFocusRef.current = null
+    requestAnimationFrame(() => target?.focus())
+  }, [blocker])
+
+  const discardAndLeave = useCallback(() => {
+    leaveActions?.discard()
+    setEditDirty(false)
+    finishLeave()
+  }, [finishLeave, leaveActions])
+
+  const saveAndLeave = useCallback(async () => {
+    if (!leaveActions || resolvingLeave) return
+    setResolvingLeave(true)
+    const saved = await leaveActions.save()
+    setResolvingLeave(false)
+    if (saved) {
+      setEditDirty(false)
+      finishLeave()
+    }
+  }, [finishLeave, leaveActions, resolvingLeave])
+
+  const registerLeaveActions = useCallback((actions: WorkflowLeaveActions | null) => {
+    setLeaveActions(actions)
+  }, [])
 
   const paused = definition ? definition.status !== "active" : false
 
@@ -149,11 +206,59 @@ export default function WorkflowPage() {
 
         <div className="min-h-0 flex-1">
           {mode === "edit" ? (
-            <WorkflowEditView workflowId={workflowId} onDirtyChange={setEditDirty} />
+            <WorkflowEditView
+              workflowId={workflowId}
+              onDirtyChange={setEditDirty}
+              onLeaveActionsChange={registerLeaveActions}
+            />
           ) : (
             <DefinitionRunView workflowId={workflowId} liveAvailable={hasDerived} initialLive={initialLive} />
           )}
         </div>
+
+        {leaveDialogOpen && (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-[color-mix(in_srgb,var(--bg)_52%,transparent)] p-4 backdrop-blur-[3px]">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Unsaved workflow edits"
+              className="w-full max-w-sm rounded-[var(--radius-xl)] bg-[var(--material-thick)] p-5 shadow-[var(--shadow-overlay)]"
+            >
+              <h2 className="text-[length:var(--text-title3)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
+                Unsaved workflow edits
+              </h2>
+              <p className="mt-1.5 text-[length:var(--text-subheadline)] leading-relaxed text-[var(--text-secondary)]">
+                Save your geometry and workflow changes before leaving?
+              </p>
+              <div className="mt-5 flex items-center justify-end gap-1.5">
+                <button
+                  type="button"
+                  onClick={stay}
+                  disabled={resolvingLeave}
+                  className="min-h-10 rounded-[var(--radius-md)] px-3 text-[length:var(--text-subheadline)] font-[var(--weight-medium)] text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"
+                >
+                  Stay
+                </button>
+                <button
+                  type="button"
+                  onClick={discardAndLeave}
+                  disabled={resolvingLeave}
+                  className="min-h-10 rounded-[var(--radius-md)] px-3 text-[length:var(--text-subheadline)] font-[var(--weight-medium)] text-[var(--system-red)] hover:bg-[color-mix(in_srgb,var(--system-red)_10%,transparent)]"
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void saveAndLeave()}
+                  disabled={resolvingLeave || !leaveActions}
+                  className="min-h-10 rounded-[var(--radius-md)] bg-[var(--accent)] px-4 text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] text-[var(--accent-contrast)] disabled:opacity-50"
+                >
+                  {resolvingLeave ? "Saving…" : "Save"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </PageLayout>
   )

@@ -1593,10 +1593,13 @@ export function EditableNodeInspector({
 export function WorkflowEditView({
   workflowId,
   onDirtyChange,
+  onLeaveActionsChange,
 }: {
   workflowId: string
   /** Reports unsaved-changes state up so the parent can guard mode switches. */
   onDirtyChange?: (dirty: boolean) => void
+  /** Gives the route guard the editor's real save/discard operations. */
+  onLeaveActionsChange?: (actions: { save: () => Promise<boolean>; discard: () => void } | null) => void
 }) {
   const [def, setDef] = useState<EditableWorkflowDefinitionWire | null>(null)
   const [drafts, setDrafts] = useState<Record<string, NodeDraft>>({})
@@ -1692,7 +1695,7 @@ export function WorkflowEditView({
   )
 
   const save = useCallback(async () => {
-    if (!def || !graph || saving) return
+    if (!def || !graph || saving) return false
     setSaving(true)
     setSaveError(null)
     const graphDefinition: EditableWorkflowDefinitionWire = {
@@ -1720,14 +1723,17 @@ export function WorkflowEditView({
         setTriggerBindings(nextBindings)
         setWakeUpDraft(wakeUpDraftFromDefinition(result.definition, nextBindings))
         setSavedTick((t) => t + 1)
+        return true
       } else {
         setSaveError({ message: result.message, errors: result.errors })
+        return false
       }
     } catch (e) {
       // authFetch can reject (offline/CORS) and res.json() can throw even on the
       // ok path — never leave the editor wedged with saving stuck true (Codex
       // GRS-011c-1 Major 2). Surface it as an inline error the operator can retry.
       setSaveError({ message: e instanceof Error ? e.message : "Save failed — check your connection and retry." })
+      return false
     } finally {
       setSaving(false)
     }
@@ -1742,6 +1748,11 @@ export function WorkflowEditView({
     }
     setSaveError(null)
   }, [def, triggerBindings])
+
+  useEffect(() => {
+    onLeaveActionsChange?.({ save, discard })
+    return () => onLeaveActionsChange?.(null)
+  }, [discard, onLeaveActionsChange, save])
 
   const moveGraphNode = useCallback((nodeId: string, position: { x: number; y: number }) => {
     setGraph((current) => current ? moveNode(current, nodeId, position) : current)

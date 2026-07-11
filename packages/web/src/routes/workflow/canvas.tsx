@@ -18,7 +18,7 @@ import { CheckCircle2, Circle, Clock, Map as MapIcon, X } from "lucide-react"
 import { stateGlyph } from "./node-card"
 import { nodeStatusLine } from "./status-line"
 import { jinnNodeTypes, type JinnNodeData } from "./node-components"
-import { CanvasControls, initialViewportPlan, useIsCanvasMobile, minimapNodeColor, viewportFrameKey } from "./canvas-view"
+import { CanvasControls, canvasViewportClass, initialViewportPlan, useIsCanvasMobile, minimapNodeColor, viewportFrameKey } from "./canvas-view"
 
 import type { WorkflowRunView, WorkflowStepView, WorkflowGateResult } from "@/lib/api"
 import {
@@ -444,7 +444,10 @@ export function WorkflowCanvas({
    * are also detected, while position-only updates intentionally are not. */
   framingKey?: string
 }) {
-  const isMobile = useIsCanvasMobile()
+  const breakpointMobile = useIsCanvasMobile()
+  const [observedViewportClass, setObservedViewportClass] = useState<ReturnType<typeof canvasViewportClass> | null>(null)
+  const canvasRef = useRef<HTMLDivElement | null>(null)
+  const isMobile = observedViewportClass ? observedViewportClass.startsWith("mobile-") : breakpointMobile
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   // Mobile: the minimap collapses behind a map-icon toggle (spec §7) — the
   // phone canvas keeps its pixels; the whole-shape overview is one tap away.
@@ -472,11 +475,32 @@ export function WorkflowCanvas({
   const lastFramedKeyRef = useRef<string | null>(null)
   const frameRequestRef = useRef(0)
   const frameKey = useMemo(
-    () => viewportFrameKey(expNodes, expEdges, framingKey),
-    [expNodes, expEdges, framingKey],
+    () => viewportFrameKey(expNodes, expEdges, framingKey, observedViewportClass ?? "unmeasured"),
+    [expNodes, expEdges, framingKey, observedViewportClass],
   )
 
+  useEffect(() => {
+    const element = canvasRef.current
+    if (!element) return
+    if (typeof ResizeObserver === "undefined") {
+      const rect = element.getBoundingClientRect()
+      const width = rect.width || window.innerWidth
+      const height = rect.height || window.innerHeight
+      setObservedViewportClass(canvasViewportClass(width, height))
+      return
+    }
+    const observer = new ResizeObserver((entries) => {
+      const size = entries.find((entry) => entry.target === element)?.contentRect
+      if (!size || size.width <= 0 || size.height <= 0) return
+      const next = canvasViewportClass(size.width, size.height)
+      setObservedViewportClass((current) => current === next ? current : next)
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
   const frameGraph = useCallback((inst: Inst, key: string) => {
+    if (!observedViewportClass) return
     if (lastFramedKeyRef.current === key) return
     lastFramedKeyRef.current = key
     const request = ++frameRequestRef.current
@@ -497,7 +521,7 @@ export function WorkflowCanvas({
       if (plan.mode !== "focus" || !plan.nodeId) return
       focus(plan.nodeId, plan.zoom)
     })
-  }, [expNodes, isMobile])
+  }, [expNodes, isMobile, observedViewportClass])
 
   const onInit = useCallback((inst: Inst) => {
     instanceRef.current = inst
@@ -530,6 +554,7 @@ export function WorkflowCanvas({
 
   return (
     <div
+      ref={canvasRef}
       data-testid="wf-canvas"
       className="relative h-full min-h-[320px] w-full"
       onKeyDownCapture={selectFocusedEdge}

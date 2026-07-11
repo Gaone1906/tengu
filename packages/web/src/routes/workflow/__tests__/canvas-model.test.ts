@@ -239,6 +239,18 @@ describe("placeCanvasNodes — main nodes are placed BEFORE dock expansion (QA d
 })
 
 describe("readable initial viewport planning", () => {
+  it("classifies the observed canvas by breakpoint and orientation", () => {
+    const canvasViewportClass = (canvasView as unknown as {
+      canvasViewportClass?: (width: number, height: number) => string
+    }).canvasViewportClass
+    expect(canvasViewportClass, "canvasViewportClass is not implemented").toBeTypeOf("function")
+
+    expect(canvasViewportClass!(390, 844)).toBe("mobile-portrait")
+    expect(canvasViewportClass!(720, 390)).toBe("mobile-landscape")
+    expect(canvasViewportClass!(1024, 1366)).toBe("desktop-portrait")
+    expect(canvasViewportClass!(1440, 900)).toBe("desktop-landscape")
+  })
+
   it("focuses a failed node before ordinary running or pending work", () => {
     const nodes = [
       { ...node("pending"), status: "pending" },
@@ -286,16 +298,23 @@ describe("readable initial viewport planning", () => {
 
   it("keys framing to displayed graph/run changes but ignores local geometry churn", () => {
     const viewportFrameKey = (canvasView as unknown as {
-      viewportFrameKey?: (nodes: CanvasNode[], edges?: { id?: string; from: string; to: string }[], viewKey?: string) => string
+      viewportFrameKey?: (
+        nodes: CanvasNode[],
+        edges?: { id?: string; from: string; to: string }[],
+        viewKey?: string,
+        viewportClass?: string,
+      ) => string
     }).viewportFrameKey
     expect(viewportFrameKey, "viewportFrameKey is not implemented").toBeTypeOf("function")
     const nodes = [node("trigger"), { ...node("work"), status: "running" }]
     const edges = [{ id: "trigger-work", from: "trigger", to: "work" }]
 
-    const base = viewportFrameKey!(nodes, edges, "run-1")
-    expect(viewportFrameKey!(nodes.map((item) => ({ ...item, position: { x: 999, y: 999 } })), edges, "run-1")).toBe(base)
-    expect(viewportFrameKey!(nodes, edges, "run-2")).not.toBe(base)
-    expect(viewportFrameKey!(nodes.map((item) => item.id === "work" ? { ...item, status: "blocked" } : item), edges, "run-1")).not.toBe(base)
+    const base = viewportFrameKey!(nodes, edges, "run-1", "desktop-landscape")
+    expect(viewportFrameKey!(nodes.map((item) => ({ ...item, position: { x: 999, y: 999 } })), edges, "run-1", "desktop-landscape")).toBe(base)
+    expect(viewportFrameKey!(nodes, edges, "run-2", "desktop-landscape")).not.toBe(base)
+    expect(viewportFrameKey!(nodes.map((item) => item.id === "work" ? { ...item, status: "blocked" } : item), edges, "run-1", "desktop-landscape")).not.toBe(base)
+    expect(viewportFrameKey!(nodes, edges, "run-1", "mobile-portrait")).not.toBe(base)
+    expect(viewportFrameKey!(nodes, edges, "run-1", "desktop-portrait")).not.toBe(base)
   })
 })
 
