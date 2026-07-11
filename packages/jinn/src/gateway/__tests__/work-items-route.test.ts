@@ -345,6 +345,69 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     });
   });
 
+  it.each(["backlog", "assigned", "executing", "in_review"] as const)(
+    "lets the authenticated operator cancel %s work through PUT",
+    async (status) => {
+      const item = store.createWorkItem({ title: `Cancel ${status}`, status });
+      const cap = makeRes();
+
+      await api.handleApiRequest(
+        makeReq("PUT", `/api/work-items/${item.id}/status`, { status: "cancelled" }, operatorHeaders),
+        cap.res,
+        ctx,
+      );
+
+      expect(cap.status).toBe(200);
+      expect(cap.body.workItem.status).toBe("cancelled");
+      expect(store.listWorkItemEvents(item.id).at(-1)).toMatchObject({
+        kind: "status_change",
+        fromStatus: status,
+        toStatus: "cancelled",
+        actor: "operator",
+      });
+    },
+  );
+
+  it("keeps capability-scoped POST cancellation forbidden", async () => {
+    const caller = reg.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: "cancel-caller",
+      employee: "platform-worker",
+    });
+    const item = store.createWorkItem({
+      title: "Agent cancellation forbidden",
+      status: "assigned",
+      assignee: "platform-worker",
+    });
+    const cap = makeRes();
+
+    await api.handleApiRequest(
+      makeReq("POST", `/api/work-items/${item.id}/status`, { status: "cancelled" }, toolHeaders(caller.id)),
+      cap.res,
+      ctx,
+    );
+
+    expect(cap.status).toBe(403);
+    expect(cap.body.error).toMatch(/cancelling.*human surface/i);
+    expect(store.getWorkItem(item.id)?.status).toBe("assigned");
+  });
+
+  it("keeps illegal terminal cancellation rejected", async () => {
+    const item = store.createWorkItem({ title: "Already done", status: "done" });
+    const cap = makeRes();
+
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${item.id}/status`, { status: "cancelled" }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+
+    expect([400, 403]).toContain(cap.status);
+    expect(cap.body.error).toMatch(/illegal transition|human.*decision/i);
+    expect(store.getWorkItem(item.id)?.status).toBe("done");
+  });
+
   it.each([
     [{}, /at least one|empty/i],
     [{ source: "cron" }, /source|unsupported|field/i],

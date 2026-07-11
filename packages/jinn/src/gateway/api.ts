@@ -3259,10 +3259,11 @@ export async function handleApiRequest(
         return badRequest(res, `approval fields (${approvalKeys.join(", ")}) cannot be attached through Todo status updates — approvals are requested/decided through the approval authority surface`);
       }
       const target = typeof body.status === "string" ? body.status : "";
-      if (target === "cancelled") {
+      const isOperatorPutCancellation = method === "PUT" && caller.kind === "operator" && target === "cancelled";
+      if (target === "cancelled" && !isOperatorPutCancellation) {
         return json(res, { error: "cancelling a Todo is a human surface decision; agents do not have a cancel tool" }, 403);
       }
-      if (!(AGENT_WORK_ITEM_TARGETS as readonly string[]).includes(target)) {
+      if (!isOperatorPutCancellation && !(AGENT_WORK_ITEM_TARGETS as readonly string[]).includes(target)) {
         return badRequest(res, `status must be one of ${AGENT_WORK_ITEM_TARGETS.join(", ")} for agent updates; other lifecycle edits use the human surface`);
       }
       const note = typeof body.note === "string" ? body.note.trim() : "";
