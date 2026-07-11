@@ -46,6 +46,9 @@ const config = YAML.parse(fs.readFileSync(configPath, "utf8")) ?? {}
 config.gateway = { ...(config.gateway ?? {}), host: "127.0.0.1", port }
 config.engines = {
   default: "codex",
+  // Required by the gateway config contract even when Codex is the only
+  // engine exercised by this isolated fixture.
+  claude: {},
   codex: { bin: "codex", model: "gpt-5.5", effortLevel: "low" },
 }
 config.models = {
