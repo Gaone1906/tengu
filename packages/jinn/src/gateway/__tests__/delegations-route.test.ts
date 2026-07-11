@@ -58,6 +58,10 @@ fs.writeFileSync(
   path.join(tmpHome, "org", "stale-emp.yaml"),
   ["name: stale-emp", "department: qa", "engine: codex", "model: legacy-sonnet", "persona: employee pinned to an unregistered model", ""].join("\n"),
 );
+fs.writeFileSync(
+  path.join(tmpHome, "org", "codex-model-emp.yaml"),
+  ["name: codex-model-emp", "department: platform", "engine: codex", "model: gpt-5.6-sol", "persona: Employee pinned to a Codex-only model", ""].join("\n"),
+);
 
 type Api = typeof import("../api.js");
 type Reg = typeof import("../../sessions/registry.js");
@@ -142,7 +146,18 @@ const apiCtx = {
   // codex engine mapping must exist for runWebSession to reach engine.run.
   getConfig: () => ({
     gateway: {},
-    engines: { default: "codex", codex: { bin: "codex", model: "gpt-5.5" } },
+    engines: {
+      default: "claude",
+      claude: { bin: "claude", model: "opus" },
+      codex: { bin: "codex", model: "gpt-5.5" },
+    },
+    models: {
+      claude: { default: "opus", models: [{ id: "opus" }] },
+      codex: {
+        default: "gpt-5.5",
+        models: [{ id: "gpt-5.5" }, { id: "gpt-5.6-sol" }],
+      },
+    },
     sessions: {},
     mcp: { gateway: { enabled: true } },
   }),
@@ -676,6 +691,35 @@ describe("POST /api/delegations — mint-before-spawn ordering (the GRS-003b-2b 
 });
 
 describe("POST /api/delegations — validation BEFORE mint (400s never litter the table)", () => {
+  it.each([
+    ["session spawn", "/api/sessions", { employee: "codex-model-emp", model: "gpt-5.6-sol", prompt: "run the platform check" }],
+    ["delegation", "/api/delegations", { employee: "codex-model-emp", model: "gpt-5.6-sol", task: "run the platform check" }],
+  ])("resolves the employee engine before validating an explicit model for %s", async (_label, route, body) => {
+    const resp = await call("POST", route, body);
+    expect(resp.status).toBe(201);
+    expect(resp.body).toMatchObject({ employee: "codex-model-emp", engine: "codex", model: "gpt-5.6-sol" });
+  });
+
+  it.each([
+    ["session spawn", "/api/sessions", { employee: "codex-model-emp", model: "not-a-codex-model", prompt: "run the platform check" }],
+    ["delegation", "/api/delegations", { employee: "codex-model-emp", model: "not-a-codex-model", task: "run the platform check" }],
+  ])("names the resolved employee engine in model validation errors for %s", async (_label, route, body) => {
+    const resp = await call("POST", route, body);
+    expect(resp.status).toBe(400);
+    expect(String(resp.body.error)).toMatch(/unknown model "not-a-codex-model" for engine "codex"/i);
+    expect(String(resp.body.error)).not.toMatch(/engine "claude"/i);
+  });
+
+  it("fails closed when a requested spawn employee cannot be resolved instead of validating against the gateway default", async () => {
+    const resp = await call("POST", "/api/sessions", {
+      employee: "temporarily-missing",
+      model: "opus",
+      prompt: "do not silently become a Claude session",
+    });
+    expect(resp.status).toBe(400);
+    expect(String(resp.body.error)).toMatch(/unknown employee "temporarily-missing"/i);
+  });
+
   it("missing task mints nothing", async () => {
     const before = workItemCount();
     const resp = await call("POST", "/api/delegations", { employee: "qa-emp" });

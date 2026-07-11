@@ -4581,13 +4581,15 @@ export async function handleApiRequest(
       if (employeeName) {
         const { scanOrg } = await import("./org.js");
         const emp = scanOrg().get(employeeName);
-        if (emp) {
-          // GRS-017f: carry the employee slug so an unregistered configured
-          // model produces the same actionable, employee-named error the
-          // delegation route surfaces (not a cryptic bare-engine string).
-          employeeDefaults = { engine: emp.engine, model: emp.model, employee: employeeName };
-          if (emp.effortLevel) employeeDefaults.effortLevel = emp.effortLevel;
-        }
+        // A transient org-registry/file-watcher miss must not silently turn an
+        // employee spawn into a gateway-default session. Resolve the employee
+        // first or fail closed, matching the delegation route.
+        if (!emp) return badRequest(res, `unknown employee "${employeeName}" — GET /api/org lists valid employees`);
+        // GRS-017f: carry the employee slug so an unregistered configured
+        // model produces the same actionable, employee-named error the
+        // delegation route surfaces (not a cryptic bare-engine string).
+        employeeDefaults = { engine: emp.engine, model: emp.model, employee: employeeName };
+        if (emp.effortLevel) employeeDefaults.effortLevel = emp.effortLevel;
       }
       const selection = validateNewSessionSelection(config, {
         engine: body.engine,
