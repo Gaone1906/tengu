@@ -99,6 +99,18 @@ export function isOpen(status: WorkItemStatusWire): boolean {
   return !TERMINAL.has(status)
 }
 
+/** Backend errors remain useful to the operator without exposing transport
+ * identities in visible or accessible UI. */
+export function operatorSafeTodoError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error) || !error.message.trim()) return fallback
+  const redacted = error.message
+    .replace(/\b(?:work[ -]?item|todo)\s+wi_[a-z0-9_-]+\b/gi, "this Todo")
+    .replace(/\bwi_[a-z0-9_-]+\b/gi, "this Todo")
+    .replace(/\s+/g, " ")
+    .trim()
+  return redacted || fallback
+}
+
 // ── Board grouping ──────────────────────────────────────────────────────────
 export interface BoardGroup {
   group: DisplayGroup

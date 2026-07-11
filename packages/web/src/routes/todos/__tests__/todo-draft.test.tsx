@@ -23,6 +23,109 @@ const first = {
 describe("useTodoDraft", () => {
   beforeEach(() => sessionStorage.clear())
 
+  it("recovers only locally dirty fields over fresh server data from another tab", () => {
+    const save = vi.fn().mockResolvedValue(undefined)
+    const tabA = renderHook(() => useTodoDraft({
+      id: "wi_private_multitab",
+      initial: first,
+      serverVersion: "version-a",
+      save,
+    }))
+    act(() => tabA.result.current.change("title", "Tab A title"))
+    tabA.unmount()
+
+    const serverAfterTabB = { ...first, priority: 3 }
+    const recovered = renderHook(() => useTodoDraft({
+      id: "wi_private_multitab",
+      initial: serverAfterTabB,
+      serverVersion: "version-b",
+      save,
+    }))
+
+    expect(recovered.result.current.draft).toEqual({ ...serverAfterTabB, title: "Tab A title" })
+    expect(recovered.result.current.unsavedPatch()).toEqual({ title: "Tab A title" })
+  })
+
+  it("rebases a recovered patch when fresh detail arrives after the sheet mounts", () => {
+    const save = vi.fn().mockResolvedValue(undefined)
+    const firstMount = renderHook(() => useTodoDraft({ id: "wi_private_late_detail", initial: first, serverVersion: "a", save }))
+    act(() => firstMount.result.current.change("title", "Local title"))
+    firstMount.unmount()
+
+    const placeholder = { ...first, title: "", body: "", priority: 0 }
+    const recovered = renderHook(() => useTodoDraft({ id: "wi_private_late_detail", initial: placeholder, serverVersion: undefined, save }))
+    act(() => recovered.result.current.replaceInitial({ ...first, title: "Remote title", priority: 3 }, "b"))
+
+    expect(recovered.result.current.draft).toMatchObject({ title: "Local title", body: "Original body", priority: 3 })
+    expect(recovered.result.current.unsavedPatch()).toEqual({ title: "Local title" })
+  })
+
+  it("keeps the local edit dirty when the same field changed remotely", () => {
+    const save = vi.fn().mockResolvedValue(undefined)
+    const tabA = renderHook(() => useTodoDraft({
+      id: "wi_private_same_field",
+      initial: first,
+      serverVersion: "version-a",
+      save,
+    }))
+    act(() => tabA.result.current.change("title", "Unsaved local title"))
+    tabA.unmount()
+
+    const recovered = renderHook(() => useTodoDraft({
+      id: "wi_private_same_field",
+      initial: { ...first, title: "Remote title" },
+      serverVersion: "version-b",
+      save,
+    }))
+
+    expect(recovered.result.current.draft.title).toBe("Unsaved local title")
+    expect(recovered.result.current.hasUnsaved).toBe(true)
+    expect(recovered.result.current.recoveredConflict).toBe(true)
+  })
+
+  it("stores no opaque work-item ids in session storage keys or values", () => {
+    const save = vi.fn().mockResolvedValue(undefined)
+    const { result } = renderHook(() => useTodoDraft({ id: "wi_private_storage_42", initial: first, save }))
+    act(() => result.current.change("body", "Reference wi_private_in_body"))
+
+    const persisted = Array.from({ length: sessionStorage.length }, (_, index) => {
+      const key = sessionStorage.key(index) ?? ""
+      return `${key}\n${sessionStorage.getItem(key) ?? ""}`
+    }).join("\n")
+    expect(persisted).not.toMatch(/wi_[a-z0-9_-]+/i)
+  })
+
+  it("drops expired recovery journals", () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date("2026-07-12T08:00:00.000Z"))
+    const save = vi.fn().mockResolvedValue(undefined)
+    const firstMount = renderHook(() => useTodoDraft({ id: "wi_private_expiry", initial: first, save }))
+    act(() => firstMount.result.current.change("body", "Expired draft"))
+    firstMount.unmount()
+
+    vi.setSystemTime(new Date("2026-07-14T08:00:00.000Z"))
+    const recovered = renderHook(() => useTodoDraft({ id: "wi_private_expiry", initial: first, save }))
+    expect(recovered.result.current.draft).toEqual(first)
+    expect(recovered.result.current.hasUnsaved).toBe(false)
+    vi.useRealTimers()
+  })
+
+  it("acknowledges a revision that reverts exactly to the baseline", () => {
+    const save = vi.fn().mockResolvedValue(undefined)
+    const { result } = renderHook(() => useTodoDraft({ id: "wi_private_revert", initial: first, save }))
+
+    act(() => {
+      result.current.change("title", "Temporary")
+      result.current.change("title", first.title)
+    })
+
+    expect(result.current.unsavedPatch()).toEqual({})
+    expect(result.current.hasUnsaved).toBe(false)
+    expect(result.current.isAcknowledged).toBe(true)
+    expect(result.current.status).toBe("idle")
+    expect(Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.getItem(sessionStorage.key(i) ?? "")).join()).not.toContain("Temporary")
+  })
+
   it("does not acknowledge a close-time edit until its own save settles", async () => {
     const firstSave = deferred<void>()
     const closeTimeSave = deferred<void>()

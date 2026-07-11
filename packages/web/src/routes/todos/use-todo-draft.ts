@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { clearTodoJournal, loadTodoJournal, persistTodoJournal } from "./todo-private-state"
 
 export interface TodoEditableDraft {
   title: string
@@ -11,17 +12,10 @@ export interface TodoEditableDraft {
 export type TodoDraftPatch = Partial<TodoEditableDraft>
 export type TodoSaveStatus = "idle" | "dirty" | "saving" | "saved" | "error"
 
-interface StoredDraft {
-  revision: number
-  draft: TodoEditableDraft
-}
-
 interface PendingSave {
   revision: number
   patch: TodoDraftPatch
 }
-
-const STORAGE_KEY = "jinn:todo-drafts:v1"
 
 function sameDraft(a: TodoEditableDraft, b: TodoEditableDraft): boolean {
   return a.title === b.title
@@ -39,86 +33,46 @@ function patchBetween(from: TodoEditableDraft, to: TodoEditableDraft): TodoDraft
   return patch
 }
 
-function readDrafts(): Record<string, StoredDraft> {
-  if (typeof sessionStorage === "undefined") return {}
-  try {
-    const parsed = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? "{}") as Record<string, StoredDraft>
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}
-  } catch {
-    return {}
-  }
-}
-
-function validStoredDraft(value: StoredDraft | undefined): value is StoredDraft {
-  const draft = value?.draft
-  return !!draft
-    && Number.isInteger(value.revision)
-    && value.revision > 0
-    && typeof draft.title === "string"
-    && typeof draft.body === "string"
-    && (typeof draft.assignee === "string" || draft.assignee === null)
-    && (typeof draft.department === "string" || draft.department === null)
-    && typeof draft.priority === "number"
-}
-
-function loadStoredDraft(id: string): StoredDraft | null {
-  const value = readDrafts()[id]
-  return validStoredDraft(value) ? value : null
-}
-
-function persistStoredDraft(id: string, value: StoredDraft): void {
-  if (typeof sessionStorage === "undefined") return
-  try {
-    const drafts = readDrafts()
-    drafts[id] = value
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(drafts))
-  } catch {
-    // Storage can be unavailable in hardened/private contexts. The in-memory
-    // revision queue remains authoritative for the current mount.
-  }
-}
-
-function clearStoredDraft(id: string, throughRevision?: number): void {
-  if (typeof sessionStorage === "undefined") return
-  try {
-    const drafts = readDrafts()
-    const current = drafts[id]
-    if (!current || (throughRevision != null && current.revision > throughRevision)) return
-    delete drafts[id]
-    if (Object.keys(drafts).length === 0) sessionStorage.removeItem(STORAGE_KEY)
-    else sessionStorage.setItem(STORAGE_KEY, JSON.stringify(drafts))
-  } catch {
-    // See persistStoredDraft: storage failure must never break editing.
-  }
+function hasPatch(patch: TodoDraftPatch): boolean {
+  return Object.keys(patch).length > 0
 }
 
 /**
- * Item-scoped revision queue. Only the latest local revision may become
- * acknowledged: edits made during an active request are coalesced against the
- * last acknowledged baseline, failures retain that latest diff for retry, and
- * a per-item session-storage journal recovers navigation/reload/unmount loss.
+ * Item-scoped revision queue. Recovery journals only the locally dirty field
+ * patch, never a stale full server snapshot. A recovered patch overlays fresh
+ * server data; same-field conflicts keep the unsaved local operator value
+ * dirty while unrelated remote changes survive.
  */
 export function useTodoDraft({
   id,
   initial,
+  serverVersion,
   save: saveRemote,
 }: {
   id: string
   initial: TodoEditableDraft
+  serverVersion?: string
   save: (patch: TodoDraftPatch) => Promise<void>
 }) {
-  const recoveredAtMount = useRef<{ id: string; value: StoredDraft | null }>({ id, value: loadStoredDraft(id) })
+  const recoveredAtMount = useRef({ id, value: loadTodoJournal(id) })
   const recovered = recoveredAtMount.current.id === id ? recoveredAtMount.current.value : null
-  const startingDraft = recovered?.draft ?? initial
-  const startingRevision = recovered && !sameDraft(recovered.draft, initial) ? recovered.revision : 0
+  const startingDraft = recovered ? { ...initial, ...recovered.patch } : initial
+  const startingRevision = recovered && hasPatch(recovered.patch) ? recovered.revision : 0
+  const startingConflict = !!recovered?.baselineVersion
+    && !!serverVersion
+    && recovered.baselineVersion !== serverVersion
+    && hasPatch(recovered.patch)
 
   const [draft, setDraftState] = useState(startingDraft)
   const [status, setStatus] = useState<TodoSaveStatus>(startingRevision > 0 ? "dirty" : "idle")
   const [error, setError] = useState<string | null>(null)
+  const [recoveredConflict, setRecoveredConflict] = useState(startingConflict)
   const draftRef = useRef(startingDraft)
   const baselineRef = useRef(initial)
+  const baselineVersionRef = useRef(recovered?.baselineVersion ?? serverVersion)
   const saveRef = useRef(saveRemote)
   const pendingRef = useRef<PendingSave | null>(null)
+  const activeRef = useRef<PendingSave | null>(null)
   const runningRef = useRef(false)
   const failedRef = useRef(false)
   const localRevisionRef = useRef(startingRevision)
@@ -133,24 +87,61 @@ export function useTodoDraft({
     if (mountedRef.current) setDraftState(next)
   }, [])
 
+  const journalPatch = useCallback((): TodoDraftPatch => {
+    const patch = patchBetween(baselineRef.current, draftRef.current)
+    // While transport is unresolved, retain desired values for every field it
+    // may mutate. This makes an edit-then-revert recoverable even if the first
+    // request commits immediately before a reload.
+    for (const field of Object.keys(activeRef.current?.patch ?? {}) as (keyof TodoEditableDraft)[]) {
+      ;(patch as Record<string, unknown>)[field] = draftRef.current[field]
+    }
+    return patch
+  }, [])
+
+  const persistLatest = useCallback(() => {
+    persistTodoJournal(id, {
+      revision: localRevisionRef.current,
+      patch: journalPatch(),
+      baselineVersion: baselineVersionRef.current,
+    })
+  }, [id, journalPatch])
+
+  const acknowledgeEmpty = useCallback((): boolean => {
+    if (runningRef.current || pendingRef.current || failedRef.current) return false
+    if (hasPatch(patchBetween(baselineRef.current, draftRef.current))) return false
+    acknowledgedRevisionRef.current = localRevisionRef.current
+    clearTodoJournal(id, acknowledgedRevisionRef.current)
+    if (mountedRef.current) {
+      setStatus("idle")
+      setError(null)
+    }
+    return true
+  }, [id])
+
   useEffect(() => {
     mountedRef.current = true
     epochRef.current += 1
-    const stored = loadStoredDraft(id)
-    const hasRecovered = !!stored && !sameDraft(stored.draft, initial)
-    const nextDraft = hasRecovered ? stored.draft : initial
+    const stored = loadTodoJournal(id)
+    const hasRecovered = !!stored && hasPatch(stored.patch)
+    const nextDraft = hasRecovered ? { ...initial, ...stored.patch } : initial
     const nextRevision = hasRecovered ? stored.revision : 0
-    if (!hasRecovered) clearStoredDraft(id)
+    if (!hasRecovered) clearTodoJournal(id)
     baselineRef.current = initial
+    baselineVersionRef.current = stored?.baselineVersion ?? serverVersion
     draftRef.current = nextDraft
     localRevisionRef.current = nextRevision
     acknowledgedRevisionRef.current = 0
     pendingRef.current = null
+    activeRef.current = null
     runningRef.current = false
     failedRef.current = false
     setDraftState(nextDraft)
     setStatus(hasRecovered ? "dirty" : "idle")
     setError(null)
+    setRecoveredConflict(!!stored?.baselineVersion
+      && !!serverVersion
+      && stored.baselineVersion !== serverVersion
+      && hasRecovered)
 
     return () => {
       mountedRef.current = false
@@ -164,7 +155,7 @@ export function useTodoDraft({
 
   const queueLatest = useCallback(() => {
     const patch = patchBetween(baselineRef.current, draftRef.current)
-    if (Object.keys(patch).length === 0) {
+    if (!hasPatch(patch)) {
       pendingRef.current = null
       return
     }
@@ -183,14 +174,17 @@ export function useTodoDraft({
     while (pendingRef.current) {
       const request = pendingRef.current
       pendingRef.current = null
+      activeRef.current = request
+      persistLatest()
       try {
         await saveRef.current(request.patch)
       } catch (cause) {
         if (epoch !== epochRef.current) return
+        activeRef.current = null
         runningRef.current = false
         failedRef.current = true
         queueLatest()
-        persistStoredDraft(id, { revision: localRevisionRef.current, draft: draftRef.current })
+        persistLatest()
         if (mountedRef.current) {
           setStatus("error")
           setError(cause instanceof Error ? cause.message : "Couldn't save")
@@ -201,91 +195,110 @@ export function useTodoDraft({
 
       baselineRef.current = { ...baselineRef.current, ...request.patch }
       acknowledgedRevisionRef.current = Math.max(acknowledgedRevisionRef.current, request.revision)
-
-      // A save requested during transport may have been calculated against the
-      // older baseline. Rebase it after every acknowledgement and keep only the
-      // newest local revision.
-      if (pendingRef.current) queueLatest()
+      activeRef.current = null
+      // Always rebase after acknowledgement: a local revert can be empty
+      // against the old baseline yet require a compensating second request.
+      queueLatest()
+      if (pendingRef.current) persistLatest()
     }
 
     runningRef.current = false
-    const latestAcknowledged = acknowledgedRevisionRef.current === localRevisionRef.current
-      && Object.keys(patchBetween(baselineRef.current, draftRef.current)).length === 0
-    if (latestAcknowledged) clearStoredDraft(id, acknowledgedRevisionRef.current)
-    else persistStoredDraft(id, { revision: localRevisionRef.current, draft: draftRef.current })
-    if (mountedRef.current) setStatus(latestAcknowledged ? "saved" : "dirty")
-  }, [id, queueLatest])
+    if (!acknowledgeEmpty()) {
+      persistLatest()
+      if (mountedRef.current) setStatus("dirty")
+    } else if (mountedRef.current) {
+      setStatus("saved")
+    }
+  }, [acknowledgeEmpty, persistLatest, queueLatest])
 
   const change = useCallback(<K extends keyof TodoEditableDraft>(field: K, value: TodoEditableDraft[K]) => {
     if (draftRef.current[field] === value) return
     const next = { ...draftRef.current, [field]: value }
     localRevisionRef.current += 1
     publishDraft(next)
-    persistStoredDraft(id, { revision: localRevisionRef.current, draft: next })
-    if (mountedRef.current && !runningRef.current && !failedRef.current) setStatus("dirty")
-  }, [id, publishDraft])
+    if (runningRef.current) queueLatest()
+    if (!acknowledgeEmpty()) {
+      persistLatest()
+      if (mountedRef.current && !runningRef.current && !failedRef.current) setStatus("dirty")
+    }
+  }, [acknowledgeEmpty, persistLatest, publishDraft, queueLatest])
 
   const save = useCallback((patch: TodoDraftPatch) => {
     const next = { ...draftRef.current, ...patch }
     if (!sameDraft(next, draftRef.current)) {
       localRevisionRef.current += 1
       publishDraft(next)
-      persistStoredDraft(id, { revision: localRevisionRef.current, draft: next })
     }
     queueLatest()
+    if (acknowledgeEmpty()) return
+    persistLatest()
     void drain()
-  }, [drain, id, publishDraft, queueLatest])
+  }, [acknowledgeEmpty, drain, persistLatest, publishDraft, queueLatest])
 
   const retry = useCallback(() => {
     if (!failedRef.current) return
     failedRef.current = false
     if (mountedRef.current) setError(null)
     queueLatest()
+    if (acknowledgeEmpty()) return
+    persistLatest()
     void drain()
-  }, [drain, queueLatest])
+  }, [acknowledgeEmpty, drain, persistLatest, queueLatest])
 
   const discard = useCallback(() => {
     epochRef.current += 1
     pendingRef.current = null
+    activeRef.current = null
     runningRef.current = false
     failedRef.current = false
     localRevisionRef.current = acknowledgedRevisionRef.current
-    clearStoredDraft(id)
+    clearTodoJournal(id)
     publishDraft(baselineRef.current)
     if (mountedRef.current) {
       setStatus("idle")
       setError(null)
+      setRecoveredConflict(false)
     }
   }, [id, publishDraft])
 
-  const replaceInitial = useCallback((next: TodoEditableDraft) => {
-    const clean = !runningRef.current
-      && !failedRef.current
-      && !pendingRef.current
-      && Object.keys(patchBetween(baselineRef.current, draftRef.current)).length === 0
-    if (!clean) return
+  const replaceInitial = useCallback((next: TodoEditableDraft, nextVersion?: string) => {
+    if (runningRef.current || failedRef.current || pendingRef.current) return
+    const currentDraft = draftRef.current
+    const localPatch = patchBetween(baselineRef.current, currentDraft)
+    const merged = { ...next, ...localPatch }
+    const versionConflict = hasPatch(localPatch)
+      && !!baselineVersionRef.current
+      && !!nextVersion
+      && baselineVersionRef.current !== nextVersion
     baselineRef.current = next
-    draftRef.current = next
-    acknowledgedRevisionRef.current = localRevisionRef.current
-    clearStoredDraft(id, acknowledgedRevisionRef.current)
-    if (mountedRef.current) {
-      setDraftState(next)
-      setStatus("idle")
-      setError(null)
+    baselineVersionRef.current = nextVersion
+    draftRef.current = merged
+    const stillDirty = hasPatch(patchBetween(next, merged))
+    if (stillDirty) persistLatest()
+    else {
+      acknowledgedRevisionRef.current = localRevisionRef.current
+      clearTodoJournal(id, acknowledgedRevisionRef.current)
     }
-  }, [id])
+    if (mountedRef.current) {
+      if (!sameDraft(currentDraft, merged)) setDraftState(merged)
+      setStatus(stillDirty ? "dirty" : "idle")
+      setError(null)
+      setRecoveredConflict((current) => current || versionConflict)
+    }
+  }, [id, persistLatest])
 
-  const hasUnsaved = Object.keys(patchBetween(baselineRef.current, draftRef.current)).length > 0
+  const effectivePatch = patchBetween(baselineRef.current, draftRef.current)
+  const hasUnsaved = hasPatch(effectivePatch)
     || !!pendingRef.current
     || runningRef.current
     || failedRef.current
   const isAcknowledged = !hasUnsaved
-    && acknowledgedRevisionRef.current === localRevisionRef.current
 
   return {
     draft,
     status,
     error,
+    recoveredConflict,
     change,
     save,
     retry,

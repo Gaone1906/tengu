@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkItemDetailWire, WorkItemFullWire, WorkItemStatusWire } from "@/lib/api"
-import { DetailSheet } from "../detail-sheet"
+import { DetailSheet, selectLinkedSession, sessionLinkLabel } from "../detail-sheet"
 
 const authFetch = vi.fn()
 
@@ -154,6 +154,36 @@ describe("Todo detail session link copy", () => {
     expect(await screen.findByText(expected)).toBeTruthy()
     expect(screen.queryByText("Executing session")).toBeNull()
   })
+
+  it("prefers live work over a newer-looking terminal session", async () => {
+    authFetch.mockImplementation(async (path: unknown) => {
+      if (String(path ?? "").endsWith("/sessions")) {
+        return new Response(JSON.stringify([
+          { id: "terminal", status: "idle", lastActivity: "2026-07-12T10:05:00.000Z" },
+          { id: "live", status: "waiting", lastActivity: "2026-07-12T10:00:00.000Z" },
+        ]), { status: 200, headers: { "Content-Type": "application/json" } })
+      }
+      return new Response(JSON.stringify(detail("executing")), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+
+    renderSheet("executing")
+
+    expect(await screen.findByText("Running session")).toBeTruthy()
+    expect(screen.queryByText("Completed session")).toBeNull()
+    expect(screen.queryByText("In progress · no execution session")).toBeNull()
+  })
+
+  it("chooses a live session first, otherwise the newest defined terminal state", () => {
+    const sessions = [
+      { id: "older-terminal", status: "interrupted", lastActivity: "2026-07-12T08:00:00.000Z" },
+      { id: "newer-terminal", status: "idle", lastActivity: "2026-07-12T09:00:00.000Z" },
+      { id: "stale-unknown", status: "starting", lastActivity: "2026-07-12T11:00:00.000Z" },
+    ]
+    expect(selectLinkedSession(sessions)?.id).toBe("newer-terminal")
+    expect(sessionLinkLabel(selectLinkedSession(sessions)!)).toBe("Completed session")
+    expect(selectLinkedSession([{ id: "done", status: "idle" }, { id: "resumed", status: "running" }])?.id).toBe("resumed")
+    expect(selectLinkedSession([])).toBeUndefined()
+  })
 })
 
 describe("Todo detail editing and dialog behavior", () => {
@@ -286,6 +316,27 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(onClose).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole("button", { name: "Discard" }))
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it("redacts opaque backend ids from a real escalated 403 error surface", async () => {
+    const value = detail("escalated")
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PUT") {
+        return new Response(JSON.stringify({ error: "Operator cannot cancel work item wi_private_forbidden while approval is pending" }), {
+          status: 403,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel Todo" }))
+    const error = await screen.findByTestId("sheet-save-error")
+    expect(error.textContent).toContain("Operator cannot cancel")
+    expect(error.textContent).not.toMatch(/wi_[a-z0-9_-]+/i)
+    expect(screen.getByTestId("detail-sheet").innerHTML).not.toMatch(/wi_[a-z0-9_-]+/i)
   })
 
   it("uses Escape to cancel a field edit before Escape can close the sheet", () => {

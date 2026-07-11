@@ -12,6 +12,7 @@ import {
   provenanceLabel,
   formatCost,
   isOpen,
+  operatorSafeTodoError,
 } from "@/lib/todos"
 import {
   DropdownMenu,
@@ -105,9 +106,32 @@ function Section({ label, children }: { label?: string; children: React.ReactNod
 
 export function sessionLinkLabel(session: LinkedSessionWire): string {
   if (session.status === "running" || session.status === "waiting") return "Running session"
-  if (session.status === "idle") return "Completed session"
-  if (session.status === "interrupted") return "Interrupted session"
+  if (session.status === "idle" || session.status === "completed" || session.status === "complete") return "Completed session"
+  if (["interrupted", "error", "failed", "cancelled"].includes(session.status ?? "")) return "Interrupted session"
   return "Session"
+}
+
+const LIVE_SESSION_STATES = new Set(["running", "waiting"])
+const TERMINAL_SESSION_STATES = new Set(["idle", "completed", "complete", "interrupted", "error", "failed", "cancelled"])
+
+function sessionTime(session: LinkedSessionWire): number {
+  return Date.parse(session.lastActivity ?? "") || 0
+}
+
+/** Live linked work always wins. Without live work, show the newest session
+ * whose terminal meaning is defined rather than a stale/unknown transport row. */
+export function selectLinkedSession(sessions: LinkedSessionWire[] | undefined): LinkedSessionWire | undefined {
+  if (!sessions?.length) return undefined
+  const newest = (values: LinkedSessionWire[]) => values
+    .map((session, index) => ({ session, index }))
+    .sort((a, b) => sessionTime(b.session) - sessionTime(a.session) || a.index - b.index)[0]?.session
+  return newest(sessions.filter((session) => LIVE_SESSION_STATES.has(session.status ?? "")))
+    ?? newest(sessions.filter((session) => TERMINAL_SESSION_STATES.has(session.status ?? "")))
+}
+
+function pollLinkedSessions(query: { state: { data: unknown } }): number | false {
+  const sessions = query.state.data as LinkedSessionWire[] | undefined
+  return sessions?.some((session) => LIVE_SESSION_STATES.has(session.status ?? "")) ? 3_000 : false
 }
 
 /** The body as a quiet tap-to-edit field (text at rest, textarea on tap). */
@@ -185,9 +209,10 @@ function SheetBody({
     queryKey: ["work-item-sessions", item.id],
     queryFn: () => api.listWorkItemSessions(item.id),
     staleTime: 10_000,
+    refetchInterval: pollLinkedSessions,
   })
-  const execSession = sessions?.[0]
-  const hasRunningSession = sessions?.some((session) => session.status === "running" || session.status === "waiting") ?? false
+  const execSession = selectLinkedSession(sessions)
+  const hasRunningSession = !!execSession && LIVE_SESSION_STATES.has(execSession.status ?? "")
 
   const mode = effectiveVerifyMode(item)
   const maxRounds = effectiveMaxRounds(item)
@@ -535,6 +560,7 @@ export function DetailSheet({
     queryKey: ["work-item-sessions", id],
     queryFn: () => api.listWorkItemSessions(id),
     staleTime: 10_000,
+    refetchInterval: pollLinkedSessions,
   })
 
   const setStatus = useSetWorkItemStatus()
@@ -566,7 +592,7 @@ export function DetailSheet({
       queryClient.invalidateQueries({ queryKey: ["work-item", id] }),
     ])
   }, [id, queryClient])
-  const draftState = useTodoDraft({ id, initial: initialDraft, save: saveRemote })
+  const draftState = useTodoDraft({ id, initial: initialDraft, serverVersion: detail?.workItem.updatedAt, save: saveRemote })
   useEffect(() => {
     if (!draftState.hasUnsaved) return
     const guardReload = (event: BeforeUnloadEvent) => {
@@ -577,15 +603,15 @@ export function DetailSheet({
     return () => window.removeEventListener("beforeunload", guardReload)
   }, [draftState.hasUnsaved])
   useEffect(() => {
-    if (detail && draftState.status === "idle") draftState.replaceInitial(initialDraft)
-  }, [detail, initialDraft, draftState.status, draftState.replaceInitial])
+    if (detail) draftState.replaceInitial(initialDraft, detail.workItem.updatedAt)
+  }, [detail, initialDraft, draftState.replaceInitial])
 
   const displayDetail = useMemo<WorkItemDetailWire | undefined>(() => detail ? {
     ...detail,
     workItem: { ...detail.workItem, ...draftState.draft },
   } : undefined, [detail, draftState.draft])
   const pending = displayDetail?.workItem.approvalState === "pending"
-  const execSession = sessions?.[0]
+  const execSession = selectLinkedSession(sessions)
 
   const edit = (patch: TodoDraftPatch) => {
     for (const [field, value] of Object.entries(patch) as [keyof TodoEditableDraft, TodoEditableDraft[keyof TodoEditableDraft]][]) {
@@ -597,7 +623,7 @@ export function DetailSheet({
     setTransitionError(null)
     setStatus.mutate(
       { id, status },
-      { onError: (e) => setTransitionError(e instanceof Error ? e.message : "Couldn't update status") },
+      { onError: (e) => setTransitionError(operatorSafeTodoError(e, "Couldn't update status")) },
     )
   }
 
@@ -718,7 +744,7 @@ export function DetailSheet({
               data-testid="sheet-save-error"
               className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
             >
-              <span className="min-w-0 flex-1 break-words">{draftState.error ?? transitionError}</span>
+              <span className="min-w-0 flex-1 break-words">{draftState.error ? operatorSafeTodoError(new Error(draftState.error), "Couldn't save") : transitionError}</span>
               {draftState.status === "error" && <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">Retry</button>}
             </div>
           )}

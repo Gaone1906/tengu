@@ -89,6 +89,24 @@ describe("Todo progressive filters", () => {
     expect(screen.queryByRole("menu")).toBeNull()
   })
 
+  it("closes the mobile sheet and restores trigger focus across 390 → 844 → 390", async () => {
+    setMobile(true)
+    render(
+      <FilterBar filters={{ status: "open" }} onChange={vi.fn()} employees={[]} departments={[]} byName={new Map()} />,
+    )
+
+    fireEvent.click(screen.getByRole("button", { name: "Filter todos" }))
+    expect(screen.getByRole("dialog", { name: "Filter todos" })).toBeTruthy()
+
+    act(() => mobileListener?.({ matches: false } as MediaQueryListEvent))
+    expect(screen.queryByRole("dialog", { name: "Filter todos" })).toBeNull()
+    await act(async () => Promise.resolve())
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter todos" }))
+
+    act(() => mobileListener?.({ matches: true } as MediaQueryListEvent))
+    expect(screen.queryByRole("dialog", { name: "Filter todos" })).toBeNull()
+  })
+
   it("keeps active filters visible and individually removable", () => {
     setMobile(false)
     const onChange = vi.fn()

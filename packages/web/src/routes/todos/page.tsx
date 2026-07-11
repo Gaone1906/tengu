@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom"
 import { ArrowLeft, Plus } from "lucide-react"
@@ -13,6 +13,7 @@ import {
   headerCountsFromTotals,
   isDefaultFilters,
   needsYouCount,
+  operatorSafeTodoError,
   type TodoFilters,
 } from "@/lib/todos"
 import { ActiveView } from "./active-view"
@@ -34,6 +35,7 @@ import {
   useEscalateApproval,
   useUpdateWorkItem,
 } from "./use-todos"
+import { todoPrivateRef } from "./todo-private-state"
 
 /* One calm open-work ledger. Search and Filter are the persistent controls;
  * Needs you and People become transient focused views instead of peer lenses.
@@ -56,7 +58,7 @@ export function NewTodoDialog({ onClose, onCreated }: { onClose: () => void; onC
       onCreated()
     } catch (e) {
       setBusy(false)
-      setError(e instanceof Error ? e.message : "Failed to create")
+      setError(operatorSafeTodoError(e, "Failed to create"))
     }
   }, [title, busy, onCreated])
 
@@ -116,8 +118,15 @@ export default function TodosPage() {
   const location = useLocation()
   const navigate = useNavigate()
 
-  const historyState = location.state as { todoDetail?: unknown } | null
-  const openId = typeof historyState?.todoDetail === "string" ? historyState.todoDetail : null
+  const historyState = location.state as { todoRef?: unknown; todoScroll?: unknown } | null
+  const openRef = typeof historyState?.todoRef === "string" ? historyState.todoRef : null
+  const ledgerScrollRef = useRef<HTMLDivElement>(null)
+  const lastDetailScrollRef = useRef<number | null>(
+    typeof historyState?.todoScroll === "number" && Number.isFinite(historyState.todoScroll)
+      ? historyState.todoScroll
+      : null,
+  )
+  const previousOpenRef = useRef(openRef)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [resolving, setResolving] = useState<Set<string>>(new Set())
   const [creating, setCreating] = useState(false)
@@ -179,6 +188,17 @@ export default function TodosPage() {
   // People needs the FULL open set (true per-person counts), not a capped page.
   const peopleItems = usePeopleItems()
 
+  const openId = useMemo(() => {
+    if (!openRef) return null
+    const candidates = [
+      ...(ledger.data?.items ?? []),
+      ...(baseLedger.data?.items ?? []),
+      ...(needs.data ?? []),
+      ...(peopleItems.data ?? []),
+    ]
+    return candidates.find((item) => todoPrivateRef(item.id) === openRef)?.id ?? null
+  }, [baseLedger.data, ledger.data, needs.data, openRef, peopleItems.data])
+
   // Header counts from the gateway's true totals, never from fetched rows.
   const counts = useMemo(
     () => headerCountsFromTotals(baseLedger.data?.totalsByStatus ?? {}),
@@ -197,11 +217,26 @@ export default function TodosPage() {
   )
 
   const onOpen = useCallback((id: string) => {
+    const todoScroll = ledgerScrollRef.current?.scrollTop ?? 0
+    lastDetailScrollRef.current = todoScroll
     navigate(`${location.pathname}${location.search}`, {
-      state: { ...(location.state ?? {}), todoDetail: id },
+      state: { todoRef: todoPrivateRef(id), todoScroll },
     })
-  }, [location.pathname, location.search, location.state, navigate])
+  }, [location.pathname, location.search, navigate])
   const closeDetail = useCallback(() => navigate(-1), [navigate])
+
+  useLayoutEffect(() => {
+    const stateScroll = typeof historyState?.todoScroll === "number" && Number.isFinite(historyState.todoScroll)
+      ? historyState.todoScroll
+      : null
+    if (stateScroll != null) lastDetailScrollRef.current = stateScroll
+    const detailClosed = !!previousOpenRef.current && !openRef
+    const detailOpened = !previousOpenRef.current && !!openRef
+    previousOpenRef.current = openRef
+    if (!detailClosed && !detailOpened && stateScroll == null) return
+    const target = stateScroll ?? lastDetailScrollRef.current
+    if (target != null && ledgerScrollRef.current) ledgerScrollRef.current.scrollTop = target
+  }, [historyState?.todoScroll, ledger.data, needs.data, openRef, peopleItems.data, view])
   const onToggle = useCallback((name: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
@@ -218,7 +253,7 @@ export default function TodosPage() {
         update.mutate(
           { id, patch: { title } },
           {
-            onError: (e) => setEditError(e instanceof Error ? e.message : "Couldn't rename"),
+            onError: (e) => setEditError(operatorSafeTodoError(e, "Couldn't rename")),
             onSettled: () => resolve(),
           },
         )
@@ -233,7 +268,7 @@ export default function TodosPage() {
         { id, patch: { rank } },
         // The view keeps its local order either way; a failure just means the
         // order won't survive a reload until the gateway ships rank (§7.3).
-        { onError: (e) => setEditError(e instanceof Error ? e.message : "Couldn't save the order") },
+        { onError: (e) => setEditError(operatorSafeTodoError(e, "Couldn't save the order")) },
       )
     },
     [update],
@@ -278,7 +313,7 @@ export default function TodosPage() {
 
   return (
     <PageLayout>
-      <div className="h-full overflow-y-auto" data-scrollable>
+      <div ref={ledgerScrollRef} data-testid="todo-ledger-scroll" className="h-full overflow-y-auto" data-scrollable>
         <div className="mx-auto max-w-[840px] px-5 pb-20 pt-6 md:pt-11">
           <header className="flex items-end justify-between gap-3">
             <div>
@@ -351,7 +386,7 @@ export default function TodosPage() {
                 )}
                 {ledger.isError ? (
                   <div className="rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]">
-                    {ledger.error instanceof Error ? ledger.error.message : "Failed to load todos"}
+                    {operatorSafeTodoError(ledger.error, "Failed to load todos")}
                   </div>
                 ) : ledger.isLoading ? (
                   <>
@@ -390,7 +425,7 @@ export default function TodosPage() {
                 <GroupSkeleton />
               ) : needs.isError ? (
                 <div className="rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]">
-                  {needs.error instanceof Error ? needs.error.message : "Failed to load your inbox"}
+                  {operatorSafeTodoError(needs.error, "Failed to load your inbox")}
                 </div>
               ) : (
                 <NeedsYouView items={needsYou} byName={byName} resolvingIds={resolving} onApprove={onApprove} onSendBack={onSendBack} onEscalate={onEscalate} onOpen={onOpen} />

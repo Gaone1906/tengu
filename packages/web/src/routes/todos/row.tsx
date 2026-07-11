@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { StatusCircle, ProvenanceIcon } from "./state-glyph"
 import { displayNameOf, formatRelativeTime } from "./util"
+import { selectLinkedSession } from "./detail-sheet"
 
 /* The row replaces the card. Flat and calm inside ONE
  * grouped-inset container (the group owns the only card surface): 46px min,
@@ -52,7 +53,7 @@ export function executionContext(
       href: `/workflow/${encodeURIComponent(detail.workflowRun.workflowId)}`,
     }
   }
-  const session = sessions?.[0]
+  const session = selectLinkedSession(sessions)
   if (session) {
     const title = session.title?.trim()
     return {

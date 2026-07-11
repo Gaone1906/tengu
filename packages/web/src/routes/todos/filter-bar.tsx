@@ -74,6 +74,8 @@ export function FilterBar({
 }) {
   const mobile = useIsTodoMobile()
   const [mobileOpen, setMobileOpen] = useState(false)
+  const filterTriggerRef = useRef<HTMLButtonElement>(null)
+  const wasMobileRef = useRef(mobile)
   const [q, setQ] = useState(filters.q ?? "")
   const debounce = useRef<number | null>(null)
   const filtersRef = useRef(filters)
@@ -92,6 +94,13 @@ export function FilterBar({
   useEffect(() => () => {
     if (debounce.current != null) window.clearTimeout(debounce.current)
   }, [])
+  useEffect(() => {
+    const crossedToDesktop = wasMobileRef.current && !mobile
+    wasMobileRef.current = mobile
+    if (!crossedToDesktop || !mobileOpen) return
+    setMobileOpen(false)
+    queueMicrotask(() => filterTriggerRef.current?.focus())
+  }, [mobile, mobileOpen])
 
   const setSearch = (value: string) => {
     setQ(value)
@@ -134,6 +143,7 @@ export function FilterBar({
 
         {mobile ? (
           <button
+            ref={filterTriggerRef}
             type="button"
             aria-label="Filter todos"
             onClick={() => setMobileOpen(true)}
@@ -151,6 +161,7 @@ export function FilterBar({
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
+                ref={filterTriggerRef}
                 type="button"
                 aria-label="Filter todos"
                 className={`inline-flex min-h-11 flex-none items-center gap-2 rounded-[14px] px-3.5 text-[length:var(--text-subheadline)] font-medium transition-colors ${

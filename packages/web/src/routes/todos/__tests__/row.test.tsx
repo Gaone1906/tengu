@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest"
 import { act, render, screen, fireEvent } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router-dom"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import type {
@@ -148,11 +149,28 @@ describe("TodoRow execution context (render)", () => {
     expect(container.innerHTML).not.toMatch(/wi_[a-z0-9_-]+/i)
   })
 
-  it.each(["Enter", " "])("does not open the parent row when %j activates row actions", (key) => {
+  it.each([
+    ["Enter", "{Enter}"],
+    ["Space", " "],
+  ])("does not open the parent row when %s semantically activates row actions", async (_label, key) => {
     const onOpen = vi.fn()
     renderRow(compact({ status: "backlog" }), undefined, { onOpen, onRename: vi.fn() })
+    const user = userEvent.setup()
     const actions = screen.getByRole("button", { name: "Todo actions" })
-    fireEvent.keyDown(actions, { key })
+    actions.focus()
+    await user.keyboard(key)
+    expect(screen.getByRole("menuitem", { name: "Open" })).toBeTruthy()
+    expect(onOpen).not.toHaveBeenCalled()
+  })
+
+  it("opens only the actions surface for a pointer click", async () => {
+    const onOpen = vi.fn()
+    renderRow(compact({ status: "backlog" }), undefined, { onOpen, onRename: vi.fn() })
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole("button", { name: "Todo actions" }))
+
+    expect(screen.getByRole("menuitem", { name: "Open" })).toBeTruthy()
     expect(onOpen).not.toHaveBeenCalled()
   })
 })
@@ -204,12 +222,14 @@ describe("TodoRow inline rename", () => {
 
   it("opens Open, Rename, and Move from a touch long press instead of dragging", async () => {
     vi.useFakeTimers()
-    renderRow(compact({ status: "backlog" }), undefined, { onRename: vi.fn() })
+    const onOpen = vi.fn()
+    renderRow(compact({ status: "backlog" }), undefined, { onOpen, onRename: vi.fn() })
     fireEvent.pointerDown(screen.getByTestId("todo-row"), { pointerType: "touch", clientY: 24 })
     await act(async () => vi.advanceTimersByTimeAsync(450))
     expect(screen.getByRole("menuitem", { name: "Open" })).toBeTruthy()
     expect(screen.getByRole("menuitem", { name: "Rename" })).toBeTruthy()
     expect(screen.getByRole("menuitem", { name: /Move/ })).toBeTruthy()
+    expect(onOpen).not.toHaveBeenCalled()
   })
 })
 

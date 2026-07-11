@@ -72,18 +72,21 @@ const org: OrgData = {
 
 let navigate: ReturnType<typeof useNavigate>
 let currentSearch = ""
+let currentState: unknown = null
 const originalMatchMedia = window.matchMedia
 function RouterProbe() {
   navigate = useNavigate()
-  currentSearch = useLocation().search
+  const location = useLocation()
+  currentSearch = location.search
+  currentState = location.state
   return null
 }
 
-function renderPage() {
+function renderPage(initialEntries: Array<string | { pathname: string; state?: unknown }> = ["/todos"]) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/todos"]}>
+      <MemoryRouter initialEntries={initialEntries}>
         <RouterProbe />
         <TodosPage />
       </MemoryRouter>
@@ -117,6 +120,7 @@ describe("Todo detail navigation and draft recovery", () => {
     fireEvent.click(opener)
     expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
     expect(currentSearch).not.toContain(PRIVATE_ID)
+    expect(JSON.stringify(currentState)).not.toContain(PRIVATE_ID)
 
     fireEvent.click(screen.getByTestId("sheet-title"))
     fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Recovered after Back" } })
@@ -132,6 +136,37 @@ describe("Todo detail navigation and draft recovery", () => {
     expect(await screen.findByText("Recovered after Back")).toBeTruthy()
     expect(updateWorkItem).not.toHaveBeenCalled()
     expect(document.body.innerHTML).not.toContain(PRIVATE_ID)
+    const persisted = Array.from({ length: sessionStorage.length }, (_, index) => {
+      const key = sessionStorage.key(index) ?? ""
+      return `${key}\n${sessionStorage.getItem(key) ?? ""}`
+    }).join("\n")
+    expect(persisted).not.toMatch(/wi_[a-z0-9_-]+/i)
+  })
+
+  it("restores the nested ledger scroll after detail Back and Forward", async () => {
+    const mounted = renderPage()
+    const opener = await screen.findByRole("button", { name: "Open Recoverable todo" })
+    const ledgerScroll = screen.getByTestId("todo-ledger-scroll")
+    Object.defineProperty(ledgerScroll, "scrollTop", { configurable: true, writable: true, value: 417 })
+
+    fireEvent.click(opener)
+    expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+    expect(currentState).toMatchObject({ todoScroll: 417 })
+
+    ledgerScroll.scrollTop = 0
+    act(() => navigate(-1))
+    await waitFor(() => expect(screen.queryByTestId("detail-sheet")).toBeNull())
+    await waitFor(() => expect(ledgerScroll.scrollTop).toBe(417))
+
+    act(() => navigate(1))
+    expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+    expect(ledgerScroll.scrollTop).toBe(417)
+
+    const reloadState = currentState
+    mounted.unmount()
+    renderPage([{ pathname: "/todos", state: reloadState }])
+    expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+    await waitFor(() => expect(screen.getByTestId("todo-ledger-scroll").scrollTop).toBe(417))
   })
 
   it("pushes filter history so Back and Forward restore the exact filter state", async () => {
