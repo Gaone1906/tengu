@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const getOnboarding = vi.fn()
@@ -27,23 +28,16 @@ vi.mock("../onboarding-wizard", () => ({
 
 import { PageLayout } from "../page-layout"
 
-type IdleCallback = (deadline: { didTimeout: boolean; timeRemaining: () => number }) => void
-
-let idleCallbacks: IdleCallback[] = []
-
-function flushIdleCallbacks() {
-  const callbacks = idleCallbacks
-  idleCallbacks = []
-  for (const callback of callbacks) {
-    callback({ didTimeout: false, timeRemaining: () => 50 })
-  }
-}
-
 function renderLayout() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
   return render(
-    <PageLayout chromeless>
-      <div>Page content</div>
-    </PageLayout>,
+    <QueryClientProvider client={client}>
+      <PageLayout chromeless>
+        <div>Page content</div>
+      </PageLayout>
+    </QueryClientProvider>,
   )
 }
 
@@ -51,18 +45,6 @@ beforeEach(() => {
   localStorage.clear()
   getOnboarding.mockReset()
   getOnboarding.mockResolvedValue({ onboarded: true, needed: false })
-  idleCallbacks = []
-  Object.defineProperty(window, "requestIdleCallback", {
-    configurable: true,
-    value: vi.fn((callback: IdleCallback) => {
-      idleCallbacks.push(callback)
-      return idleCallbacks.length
-    }),
-  })
-  Object.defineProperty(window, "cancelIdleCallback", {
-    configurable: true,
-    value: vi.fn(),
-  })
 })
 
 describe("PageLayout deferred shell widgets", () => {
@@ -88,17 +70,27 @@ describe("PageLayout deferred shell widgets", () => {
     expect(search.getAttribute("data-initial-open")).toBe("true")
   })
 
-  it("mounts the live stream widget on idle", async () => {
-    localStorage.setItem("jinn-onboarded", "true")
-    renderLayout()
+  it("mounts the live stream widget after the page finishes loading", async () => {
+    vi.useFakeTimers()
+    try {
+      localStorage.setItem("jinn-onboarded", "true")
+      renderLayout()
 
-    expect(screen.queryByTestId("live-stream-widget")).toBeNull()
+      expect(screen.queryByTestId("live-stream-widget")).toBeNull()
 
-    await act(async () => {
-      flushIdleCallbacks()
-    })
+      // jsdom reports readyState "complete", so runAfterLoad schedules the
+      // deferred timer immediately; dispatching load also covers the
+      // not-yet-loaded branch. The async advance flushes the lazy Suspense
+      // import that resolves after the widget mounts.
+      await act(async () => {
+        window.dispatchEvent(new Event("load"))
+        await vi.advanceTimersByTimeAsync(2600)
+      })
 
-    expect(await screen.findByTestId("live-stream-widget")).toBeTruthy()
+      expect(screen.getByTestId("live-stream-widget")).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("imports onboarding only when the gateway says onboarding is needed", async () => {
@@ -118,6 +110,6 @@ describe("PageLayout deferred shell widgets", () => {
 
     await waitFor(() => expect(getOnboarding).toHaveBeenCalledTimes(1))
     expect(screen.queryByTestId("onboarding-wizard")).toBeNull()
-    expect(localStorage.getItem("jinn-onboarded")).toBe("true")
+    await waitFor(() => expect(localStorage.getItem("jinn-onboarded")).toBe("true"))
   })
 })

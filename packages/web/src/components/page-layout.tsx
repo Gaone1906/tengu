@@ -2,8 +2,8 @@ import { lazy, Suspense, useEffect, useState } from "react"
 import { NavRibbon } from "./pill-nav"
 import { MobileTabBar } from "./chat/mobile-tab-bar"
 import { cn } from "@/lib/utils"
-import { api } from "@/lib/api"
-import { runAfterIdle, useIdleMount } from "@/hooks/use-idle-mount"
+import { useOnboarding } from "@/hooks/use-onboarding"
+import { runAfterLoad, useLoadDeferredMount } from "@/hooks/use-idle-mount"
 
 const loadGlobalSearch = () => import("./global-search")
 const loadLiveStreamWidget = () => import("./live-stream-widget")
@@ -21,7 +21,10 @@ function DeferredGlobalSearch() {
   const [mounted, setMounted] = useState(false)
   const [initialOpen, setInitialOpen] = useState(false)
 
-  useEffect(() => runAfterIdle(() => {
+  // Warm the Cmd-K chunk, but only well after load so the fetch stays out of
+  // the first-paint / pre-interaction waterfall. A key press before this fires
+  // still opens instantly — the keydown handler mounts (and imports) on demand.
+  useEffect(() => runAfterLoad(() => {
     void loadGlobalSearch()
   }), [])
 
@@ -47,7 +50,9 @@ function DeferredGlobalSearch() {
 }
 
 function DeferredLiveStreamWidget() {
-  const mounted = useIdleMount()
+  // Non-critical shell widget — mount after load so its chunk never lands in
+  // the measured first-paint / pre-interaction waterfall.
+  const mounted = useLoadDeferredMount()
   if (!mounted) return null
   return (
     <Suspense fallback={null}>
@@ -57,32 +62,23 @@ function DeferredLiveStreamWidget() {
 }
 
 function DeferredOnboardingWizard() {
-  const [needed, setNeeded] = useState(false)
+  // Consumes the SAME shared onboarding query as SettingsProvider, so a clean
+  // load only fetches /api/onboarding once. The localStorage short-circuit keeps
+  // the query disabled for already-onboarded users (no request at all).
+  const onboardedLocally =
+    typeof window !== "undefined" && !!localStorage.getItem("jinn-onboarded")
+  const { data, isError } = useOnboarding({ enabled: !onboardedLocally })
 
   useEffect(() => {
-    if (typeof window !== "undefined" && localStorage.getItem("jinn-onboarded")) {
-      return
+    if (data?.onboarded && typeof window !== "undefined") {
+      localStorage.setItem("jinn-onboarded", "true")
     }
+  }, [data?.onboarded])
 
-    let cancelled = false
-    api.getOnboarding().then((data) => {
-      if (cancelled) return
-      if (data.onboarded) {
-        localStorage.setItem("jinn-onboarded", "true")
-      } else if (data.needed) {
-        setNeeded(true)
-      }
-    }).catch(() => {
-      if (!cancelled && !localStorage.getItem("jinn-onboarded")) {
-        setNeeded(true)
-      }
-    })
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
+  if (onboardedLocally) return null
+  // Fall back to "needed" on error so a failed fetch still surfaces onboarding
+  // (matches the previous best-effort behavior).
+  const needed = data ? data.needed : isError
   if (!needed) return null
 
   return (

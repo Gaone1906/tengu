@@ -14,7 +14,7 @@ import {
   CommandItem,
   CommandSeparator,
 } from "@/components/ui/command"
-import { Dialog, DialogContent } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { useSettings } from "@/routes/settings-provider"
 import { useOrg } from "@/hooks/use-employees"
 import { useCronJobs } from "@/hooks/use-cron"
@@ -109,7 +109,11 @@ export function GlobalSearch({ initialOpen = false }: GlobalSearchProps) {
   return (
     <>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="p-0 gap-0 max-w-[560px]">
+        <DialogContent className="p-0 gap-0 max-w-[560px]" aria-describedby={undefined}>
+          {/* Radix requires an accessible title on DialogContent; the command
+              palette is visually its own input, so keep the title screen-reader
+              only. */}
+          <DialogTitle className="sr-only">Search {portalName}</DialogTitle>
           <Command className="rounded-lg">
             <CommandInput placeholder={`Search ${portalName}...`} />
             <CommandList>

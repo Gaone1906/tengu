@@ -9,7 +9,7 @@ import {
   hexToAccentFill,
   hexToContrastText,
 } from '@/lib/settings'
-import { api } from '@/lib/api'
+import { useOnboarding } from '@/hooks/use-onboarding'
 
 interface EmployeeDisplay {
   emoji: string
@@ -56,29 +56,30 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   // Hydrate from localStorage after mount to avoid hydration mismatch.
   const [settings, setSettings] = useState<JinnSettings>({ ...DEFAULTS })
 
-  // Hydrate from localStorage first, then always sync portalName/operatorName
-  // from backend config (source of truth). This ensures the correct COO name
+  // Onboarding status/names come from the shared react-query key so the whole
+  // app fires exactly one /api/onboarding request (the wizard consumes it too).
+  const { data: onboarding } = useOnboarding()
+
+  // Hydrate from localStorage on mount.
+  useEffect(() => {
+    setSettings(loadSettings())
+  }, [])
+
+  // Then sync portalName/operatorName from backend config (source of truth) once
+  // the shared onboarding query resolves. This ensures the correct COO name
   // shows up even if localStorage has stale values from a previous onboarding.
   useEffect(() => {
-    const local = loadSettings()
-    setSettings(local)
-
-    api.getOnboarding()
-      .then((data) => {
-        if (data.portalName || data.operatorName) {
-          const merged = {
-            ...local,
-            ...(data.portalName && { portalName: data.portalName }),
-            ...(data.operatorName && { operatorName: data.operatorName }),
-          }
-          setSettings(merged)
-          saveSettings(merged)
-        }
-      })
-      .catch(() => {
-        // Best-effort — localStorage values are fine
-      })
-  }, [])
+    if (!onboarding || (!onboarding.portalName && !onboarding.operatorName)) return
+    setSettings((prev) => {
+      const merged = {
+        ...prev,
+        ...(onboarding.portalName ? { portalName: onboarding.portalName } : {}),
+        ...(onboarding.operatorName ? { operatorName: onboarding.operatorName } : {}),
+      }
+      saveSettings(merged)
+      return merged
+    })
+  }, [onboarding])
 
   // Apply accent color CSS variables when settings change
   useEffect(() => {
