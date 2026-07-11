@@ -5,6 +5,7 @@ import assert from "node:assert/strict"
 
 const script = fs.readFileSync(path.resolve("scripts/verify-workflow-layout.sh"), "utf8")
 const bootstrap = fs.readFileSync(path.resolve("e2e/workflow-layout/bootstrap-sandbox.mjs"), "utf8")
+const author = fs.readFileSync(path.resolve("e2e/workflow-layout/author-canonical.mjs"), "utf8")
 
 test("verification pins node to the pnpm toolchain before invoking the sandbox helper", () => {
   assert.match(script, /JINN_VERIFY_NODE_BIN/)
@@ -14,4 +15,9 @@ test("verification pins node to the pnpm toolchain before invoking the sandbox h
 
 test("sanitized sandbox config retains the required Claude engine mapping", () => {
   assert.match(bootstrap, /engines\s*=\s*\{[\s\S]*claude:\s*\{\}/)
+})
+
+test("five author probes settle sequentially inside the disposable gateway", () => {
+  assert.doesNotMatch(author, /Promise\.all/)
+  assert.match(author, /for \(const author of authorRequests\(\)\)/)
 })

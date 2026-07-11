@@ -19,7 +19,8 @@ function assertNoForeignGatewayContext(value, label) {
   }
 }
 
-const created = await Promise.all(authorRequests().map(async (author) => {
+const created = []
+for (const author of authorRequests()) {
   const body = {
     ...author.body,
     prompt: `${author.body.prompt} The only allowed MCP gateway is ${env.baseUrl}; the disposable JINN_HOME is ${env.home}.`,
@@ -29,23 +30,21 @@ const created = await Promise.all(authorRequests().map(async (author) => {
   write(`authoring/sessions/${author.expectedWorkflowId}-created.json`, result)
   if (!result.ok || typeof result.body?.id !== "string") throw new Error(`author session failed to start: ${author.expectedWorkflowId}`)
   assertNoForeignGatewayContext(result.body, `created session ${author.expectedWorkflowId}`)
-  return { ...author, body, sessionId: result.body.id }
-}))
-
-for (const author of created) {
+  const createdAuthor = { ...author, body, sessionId: result.body.id }
+  created.push(createdAuthor)
   const final = await pollUntil(
-    async () => request("GET", `/api/sessions/${encodeURIComponent(author.sessionId)}?last=20`),
+    async () => request("GET", `/api/sessions/${encodeURIComponent(createdAuthor.sessionId)}?last=20`),
     (result) => result.ok && ["idle", "error"].includes(result.body?.status),
-    { label: `author ${author.expectedWorkflowId}` },
+    { label: `author ${createdAuthor.expectedWorkflowId}` },
   )
-  write(`authoring/sessions/${author.expectedWorkflowId}-final.json`, final)
-  assertNoForeignGatewayContext(final.body, `final session ${author.expectedWorkflowId}`)
+  write(`authoring/sessions/${createdAuthor.expectedWorkflowId}-final.json`, final)
+  assertNoForeignGatewayContext(final.body, `final session ${createdAuthor.expectedWorkflowId}`)
   if (final.body.status !== "idle" || final.body.engine !== "codex" || final.body.model !== "gpt-5.5" || final.body.effortLevel !== "low") {
-    throw new Error(`author ${author.expectedWorkflowId} did not settle with the pinned model contract`)
+    throw new Error(`author ${createdAuthor.expectedWorkflowId} did not settle with the pinned model contract`)
   }
-  const definition = await request("GET", `/api/workflow-definitions/${encodeURIComponent(author.expectedWorkflowId)}`)
-  write(`authoring/definitions/${author.expectedWorkflowId}.json`, definition)
-  if (!definition.ok || definition.body?.id !== author.expectedWorkflowId) throw new Error(`author did not create ${author.expectedWorkflowId}`)
+  const definition = await request("GET", `/api/workflow-definitions/${encodeURIComponent(createdAuthor.expectedWorkflowId)}`)
+  write(`authoring/definitions/${createdAuthor.expectedWorkflowId}.json`, definition)
+  if (!definition.ok || definition.body?.id !== createdAuthor.expectedWorkflowId) throw new Error(`author did not create ${createdAuthor.expectedWorkflowId}`)
 }
 
 write("authoring/session-ids.json", created.map(({ expectedWorkflowId, sessionId }) => ({ expectedWorkflowId, sessionId })))
