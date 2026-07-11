@@ -65,6 +65,16 @@ export default function WorkflowPage() {
   const [initialLive] = useState(() => searchParams.get("mode") === "live")
   const [editDirty, setEditDirty] = useState(false)
 
+  useEffect(() => {
+    if (!editDirty) return
+    const guard = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ""
+    }
+    window.addEventListener("beforeunload", guard)
+    return () => window.removeEventListener("beforeunload", guard)
+  }, [editDirty])
+
   useBreadcrumbs(useMemo(
     () => [{ label: "Workflows", href: "/workflow" }, { label: definition?.title ?? workflowId }],
     [definition?.title, workflowId],

@@ -283,6 +283,20 @@ describe("readable initial viewport planning", () => {
     })
     expect(initialViewportPlan!({ mobile: false, fitZoom: 0.8, nodes: [node("first")] }).mode).toBe("fit")
   })
+
+  it("keys framing to displayed graph/run changes but ignores local geometry churn", () => {
+    const viewportFrameKey = (canvasView as unknown as {
+      viewportFrameKey?: (nodes: CanvasNode[], edges?: { id?: string; from: string; to: string }[], viewKey?: string) => string
+    }).viewportFrameKey
+    expect(viewportFrameKey, "viewportFrameKey is not implemented").toBeTypeOf("function")
+    const nodes = [node("trigger"), { ...node("work"), status: "running" }]
+    const edges = [{ id: "trigger-work", from: "trigger", to: "work" }]
+
+    const base = viewportFrameKey!(nodes, edges, "run-1")
+    expect(viewportFrameKey!(nodes.map((item) => ({ ...item, position: { x: 999, y: 999 } })), edges, "run-1")).toBe(base)
+    expect(viewportFrameKey!(nodes, edges, "run-2")).not.toBe(base)
+    expect(viewportFrameKey!(nodes.map((item) => item.id === "work" ? { ...item, status: "blocked" } : item), edges, "run-1")).not.toBe(base)
+  })
 })
 
 /* edgeAnchors (dominant-axis anchor picking) is deliberately GONE: direction is

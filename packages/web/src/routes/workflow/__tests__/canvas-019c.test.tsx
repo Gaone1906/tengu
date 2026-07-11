@@ -5,12 +5,12 @@ import {
   type CanvasNode,
 } from "../canvas-model"
 import { buildFlowGraph, WorkflowCanvas } from "../canvas"
-import { pickFocusNode, tidyLayout } from "../canvas-view"
+import { pickFocusNode } from "../canvas-view"
 import { HERO_FIXTURE, IF_FIXTURE, SWITCH_FIXTURE } from "../preview-fixtures"
 import type { WorkflowNodeWire, WorkflowEdgeWire } from "@/lib/api"
 
 /* GRS-019c — the n8n-mashup canvas: per-type sizing, sub-node docks, switch
- * outputs, decorated edges, and the mobile focused-view picker + Dagre tidy. */
+ * outputs, decorated edges, and the readable focused-view picker. */
 
 const node = (over: Partial<CanvasNode> & Pick<CanvasNode, "id">): CanvasNode => ({
   kind: "step", title: over.id, role: "step", who: "", status: "passed", isCurrent: false, gates: [], ...over,
@@ -174,25 +174,13 @@ describe("pickFocusNode — mobile focused-view (decision 1)", () => {
   })
 })
 
-describe("tidyLayout — Dagre 'tidy up' (decision 3)", () => {
-  it("lays real nodes left→right by edge order and skips dock discs", () => {
-    const pos = tidyLayout(
-      [node({ id: "a" }), node({ id: "b" }), node({ id: "dock", visual: "sub" })],
-      [{ from: "a", to: "b" }],
-    )
-    expect(pos.a).toBeTruthy()
-    expect(pos.b.x).toBeGreaterThan(pos.a.x) // LR flow
-    expect(pos.dock).toBeUndefined()
-  })
-})
-
 describe("WorkflowCanvas — chrome", () => {
-  it("mounts the frosted minimap, zoom readout and fit/zoom/tidy controls", () => {
+  it("mounts the frosted minimap and view controls without mutating a read-only run layout", () => {
     render(<WorkflowCanvas nodes={HERO_FIXTURE.nodes} edges={HERO_FIXTURE.edges} selectedId={null} onSelect={vi.fn()} />)
     expect(screen.getByTestId("wf-zoom")).toBeTruthy()
-    expect(screen.getByLabelText("Fit to view")).toBeTruthy()
+    expect(screen.getByLabelText("Fit all")).toBeTruthy()
     expect(screen.getByLabelText("Zoom in")).toBeTruthy()
-    expect(screen.getByLabelText("Tidy up")).toBeTruthy()
+    expect(screen.queryByLabelText("Tidy")).toBeNull()
   })
   it("renders the wide node's synthesized dock discs on the canvas", () => {
     const { container } = render(<WorkflowCanvas nodes={HERO_FIXTURE.nodes} edges={HERO_FIXTURE.edges} selectedId={null} onSelect={vi.fn()} />)

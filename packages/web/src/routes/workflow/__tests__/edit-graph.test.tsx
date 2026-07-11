@@ -33,6 +33,7 @@ interface WorkflowGraphDraft {
 type MoveNode = (graph: WorkflowGraphDraft, nodeId: string, position: WorkflowNodePosition) => WorkflowGraphDraft
 type ConnectNodes = (graph: WorkflowGraphDraft, from: string, to: string) => WorkflowGraphDraft
 type RemoveNode = (graph: WorkflowGraphDraft, nodeId: string) => WorkflowGraphDraft
+type RemoveEdge = (graph: WorkflowGraphDraft, edgeId: string) => WorkflowGraphDraft
 type AddNode = (graph: WorkflowGraphDraft, type: WorkflowNodeWire["type"]) => WorkflowGraphDraft
 type IsGraphDirty = (definition: EditableWorkflowDefinitionWire, graph: WorkflowGraphDraft) => boolean
 
@@ -40,6 +41,7 @@ const graphApi = editModule as unknown as {
   moveNode?: MoveNode
   connectNodes?: ConnectNodes
   removeNode?: RemoveNode
+  removeEdge?: RemoveEdge
   addNode?: AddNode
   isGraphDirty?: IsGraphDirty
 }
@@ -102,6 +104,16 @@ describe("workflow graph draft operations", () => {
     expect(graphApi.removeNode!(before, "trigger")).toEqual(before)
   })
 
+  it("removes one durable edge without mutating nodes or sibling edges", () => {
+    expect(graphApi.removeEdge, "removeEdge graph operation is not implemented").toBeTypeOf("function")
+    const before = graph()
+    const removed = graphApi.removeEdge!(before, "build-verify")
+
+    expect(removed.edges.map((edge) => edge.id)).toEqual(["trigger-build"])
+    expect(removed.nodes).toEqual(before.nodes)
+    expect(before.edges).toHaveLength(2)
+  })
+
   it("adds schema-valid node defaults with a unique id", () => {
     expect(graphApi.addNode, "addNode graph operation is not implemented").toBeTypeOf("function")
     const before = graph()
@@ -109,9 +121,10 @@ describe("workflow graph draft operations", () => {
     const newNode = added.nodes.find((node) => !before.nodes.some((old) => old.id === node.id))
 
     expect(added.nodes).toHaveLength(before.nodes.length + 1)
+    if (!newNode) throw new Error("added node is missing")
     expect(newNode).toMatchObject({ type: "wait", waitMinutes: 5 })
-    expect(newNode?.position.x % 20).toBe(0)
-    expect(newNode?.position.y % 20).toBe(0)
+    expect(newNode.position.x % 20).toBe(0)
+    expect(newNode.position.y % 20).toBe(0)
   })
 
   it("treats geometry and topology changes as dirty", () => {
@@ -153,10 +166,14 @@ describe("WorkflowEditView graph layout lifecycle", () => {
     render(<editModule.WorkflowEditView workflowId="sample" />)
     await waitFor(() => expect(screen.getByTestId("wf-edit-save")).toBeTruthy())
 
-    fireEvent.click(screen.getByRole("button", { name: /^Tidy(?: up)?$/i }))
+    fireEvent.click(screen.getByRole("button", { name: "Tidy" }))
     await waitFor(() => expect(planWorkflowDefinition).toHaveBeenCalledTimes(1))
+    expect(planWorkflowDefinition).toHaveBeenCalledWith(
+      expect.not.objectContaining({ layout: expect.anything() }),
+      { layoutIntent: "normalize" },
+    )
     expect(screen.queryByTestId("wf-edit-dirty")).toBeNull()
-    expect(screen.getByRole("button", { name: "Apply layout" })).toBeEnabled()
+    expect(screen.getByRole("button", { name: "Apply layout" }).hasAttribute("disabled")).toBe(false)
 
     fireEvent.click(screen.getByRole("button", { name: "Apply layout" }))
     expect(screen.getByTestId("wf-edit-dirty")).toBeTruthy()
@@ -171,14 +188,15 @@ describe("WorkflowEditView graph layout lifecycle", () => {
       3,
       { layoutIntent: "manual" },
     ))
+    expect(updateWorkflowDefinition.mock.calls[0][1]).not.toHaveProperty("layout")
   })
 
   it("Discard cancels an applied layout and restores the persisted graph", async () => {
     render(<editModule.WorkflowEditView workflowId="sample" />)
     await waitFor(() => expect(screen.getByTestId("wf-edit-save")).toBeTruthy())
 
-    fireEvent.click(screen.getByRole("button", { name: /^Tidy(?: up)?$/i }))
-    await waitFor(() => expect(screen.getByRole("button", { name: "Apply layout" })).toBeEnabled())
+    fireEvent.click(screen.getByRole("button", { name: "Tidy" }))
+    await waitFor(() => expect(screen.getByRole("button", { name: "Apply layout" }).hasAttribute("disabled")).toBe(false))
     fireEvent.click(screen.getByRole("button", { name: "Apply layout" }))
     expect(screen.getByTestId("wf-edit-dirty")).toBeTruthy()
 

@@ -75,6 +75,7 @@ export interface CanvasEdgeSpec {
   id?: string
   from: string
   to: string
+  kind?: WorkflowEdgeWire["kind"]
   /** 'error' = the failure lane of an onError:'error-edge' step (dashed red);
    * 'sub' = a dashed diamond dock to a wide node's attachable disc. */
   lane?: string
@@ -428,7 +429,7 @@ export function resolveNodePositions(
  * derived offsets, so expanding first makes a degenerate stored layout (every
  * real card stacked at the origin) look "usable" to the position check and the
  * pile ships to the screen. Placed first, a degenerate/absent layout falls back
- * to the same Dagre geometry as Tidy up and the docks pin under laid-out
+ * to the same Dagre geometry as Tidy and the docks pin under laid-out
  * parents — a freshly-opened workflow is never a stack. */
 export function placeCanvasNodes(nodes: CanvasNode[], edges?: CanvasEdgeSpec[]): CanvasNode[] {
   const positions = resolveNodePositions(nodes, edges?.map((e) => ({ from: e.from, to: e.to, lane: e.lane })))

@@ -266,7 +266,7 @@ describe("DefinitionRunView (container)", () => {
     }))
 
     render(<DefinitionRunView workflowId="sample-autonomy" />)
-    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
     expect(screen.queryByText(/POST \/api\/workflow-definitions/)).toBeNull()
 
     fireEvent.click(screen.getByRole("button", { name: "Run" }))
@@ -287,7 +287,7 @@ describe("DefinitionRunView (container)", () => {
       .mockResolvedValueOnce(runWire({ status: "running", parked: null, endedAt: null }))
 
     render(<DefinitionRunView workflowId="sample-autonomy" />)
-    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
     fireEvent.click(screen.getByRole("button", { name: "Run" }))
     fireEvent.change(screen.getByLabelText("Run input"), { target: { value: '{"ticket":"A-1"}' } })
     fireEvent.click(screen.getByRole("button", { name: "Start run" }))
@@ -322,7 +322,7 @@ describe("DefinitionRunView (container)", () => {
     getWorkflowRun.mockResolvedValue(failed)
 
     render(<DefinitionRunView workflowId="sample-autonomy" />)
-    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
     fireEvent.click(screen.getByRole("button", { name: "Run" }))
     fireEvent.click(screen.getByRole("button", { name: "Start run" }))
 
@@ -479,6 +479,8 @@ describe("gate resolution UI (GRS-014e)", () => {
     render(<RunNodeInspector run={runWire()} node={parkedNode()} onClose={() => {}} />)
     expect(screen.queryByTestId("wf-gate-approve")).toBeNull()
     expect(screen.queryByTestId("wf-gate-reject")).toBeNull()
+    expect(screen.queryByText(/POST .*resolve-gate/i)).toBeNull()
+    expect(screen.getByText(/open this execution.*approve or reject/i)).toBeTruthy()
   })
 })
 

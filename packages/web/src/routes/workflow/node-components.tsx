@@ -97,24 +97,26 @@ const PORT_BASE: React.CSSProperties = {
 }
 
 /** The one input port: left wall, vertical center. */
-function InPort() {
+function InPort({ nodeId, connectable = false }: { nodeId?: string; connectable?: boolean }) {
   return (
     <Handle
-      type="target" position={Position.Left} id="in" isConnectable={false}
+      type="target" position={Position.Left} id="in" isConnectable={connectable}
+      data-testid={nodeId ? `wf-handle-in-${nodeId}` : undefined}
       className="jinn-port"
-      style={{ ...PORT_BASE, background: portFill(), left: 0, top: "50%", transform: "translate(-50%, -50%)" }}
+      style={{ ...PORT_BASE, pointerEvents: connectable ? "auto" : "none", background: portFill(), left: 0, top: "50%", transform: "translate(-50%, -50%)" }}
     />
   )
 }
 
 /** An output port on the right wall. Single-output nodes anchor at 50%; a
  * condition names one per output row at that row's center-line. */
-function OutPort({ id = "out", top = "50%", tone }: { id?: string; top?: string; tone?: PortTone }) {
+function OutPort({ nodeId, id = "out", top = "50%", tone, connectable = false }: { nodeId?: string; id?: string; top?: string; tone?: PortTone; connectable?: boolean }) {
   return (
     <Handle
-      type="source" position={Position.Right} id={id} isConnectable={false}
+      type="source" position={Position.Right} id={id} isConnectable={connectable}
+      data-testid={nodeId ? `wf-handle-out-${nodeId}${id === "out" ? "" : `-${id}`}` : undefined}
       className="jinn-port"
-      style={{ ...PORT_BASE, background: portFill(tone), left: "auto", right: 0, top, transform: "translate(50%, -50%)" }}
+      style={{ ...PORT_BASE, pointerEvents: connectable ? "auto" : "none", background: portFill(tone), left: "auto", right: 0, top, transform: "translate(50%, -50%)" }}
     />
   )
 }
@@ -427,7 +429,7 @@ function GhostNode() {
 }
 
 /* ── dispatcher ───────────────────────────────────────────────────────────── */
-export function JinnNode({ data }: NP) {
+export function JinnNode({ data, isConnectable }: NP) {
   const { node, selected, onSelect } = data
   const t = visualNodeType(node)
   // Disc + decoration types own their ports (disc-wall centers).
@@ -453,12 +455,12 @@ export function JinnNode({ data }: NP) {
   return (
     <div className="relative h-full w-full">
       {inner}
-      {t !== "trigger" && <InPort />}
+      {t !== "trigger" && <InPort nodeId={node.id} connectable={isConnectable} />}
       {condOuts
         ? condOuts.map((o, i) => (
-            <OutPort key={o.id} id={`out-${i}`} top={`${condPortTop(i)}px`} tone={o.tone ?? "neutral"} />
+            <OutPort nodeId={node.id} key={o.id} id={`out-${i}`} top={`${condPortTop(i)}px`} tone={o.tone ?? "neutral"} connectable={isConnectable} />
           ))
-        : <OutPort />}
+        : <OutPort nodeId={node.id} connectable={isConnectable} />}
       {docks.map((_, i) => <DockPort key={i} i={i} total={docks.length} />)}
     </div>
   )
