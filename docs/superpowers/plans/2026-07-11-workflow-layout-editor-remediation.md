@@ -1,6 +1,6 @@
 # Workflow Layout and Editor Remediation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
 **Goal:** Make every generated workflow persist a deterministic, readable strict-left-to-right layout and make the Workflow Editor capable of repairing, applying, saving, reloading, and running the real graph on desktop and mobile.
 
@@ -55,7 +55,7 @@
 **Interfaces:**
 - Produces the wished-for API `normalizeWorkflowLayout(def)`, `evaluateWorkflowLayout(def)`, `prepareWorkflowLayoutForWrite(def, intent)`, and `WorkflowLayoutDiagnostics` consumed by Task 2.
 
-- [ ] **Step 1: Write the six-shape RED table and invariant helpers**
+- [x] **Step 1: Write the six-shape RED table and invariant helpers**
 
 ```ts
 const shapes = {
@@ -81,7 +81,7 @@ for (const [name, input] of Object.entries(shapes)) {
 }
 ```
 
-- [ ] **Step 2: Add RED quality/provenance cases**
+- [x] **Step 2: Add RED quality/provenance cases**
 
 ```ts
 it.each(['missing', 'overlap', 'backtracking', 'index-like', 'poor-clearance', 'bad-merge', 'tangled'])(
@@ -101,7 +101,7 @@ it('rejects overlapping manual coordinates with node ids and a Tidy instruction'
 })
 ```
 
-- [ ] **Step 3: Add RED dock-envelope and loop-route assertions**
+- [x] **Step 3: Add RED dock-envelope and loop-route assertions**
 
 ```ts
 it('reserves model/employee dock discs and caption lanes', () => {
@@ -117,7 +117,7 @@ it('excludes bounded loop back-edges from rank and emits a stable below-graph ro
 })
 ```
 
-- [ ] **Step 4: Add RED schema/store/MCP assertions**
+- [x] **Step 4: Add RED schema/store/MCP assertions**
 
 ```ts
 expect(validateDefinition(defWithEdgeOn()).errors).toContainEqual(
@@ -129,7 +129,7 @@ expect(plan.layout.normalizedPreview.layout).toEqual({ source: 'normalized', ver
 expect(rawDefinitionSchema.additionalProperties).toBe(false)
 ```
 
-- [ ] **Step 5: Run RED and save evidence**
+- [x] **Step 5: Run RED and save evidence**
 
 Run:
 ```bash
@@ -167,7 +167,7 @@ export function normalizeWorkflowLayout(def: EditableWorkflowDefinition): { defi
 export function prepareWorkflowLayoutForWrite(def: EditableWorkflowDefinition, intent?: 'generated' | 'manual'): { definition: EditableWorkflowDefinition; diagnostics: WorkflowLayoutDiagnostics }
 ```
 
-- [ ] **Step 1: Add persisted provenance and strict edge-field validation**
+- [x] **Step 1: Add persisted provenance and strict edge-field validation**
 
 ```ts
 export interface EditableWorkflowDefinition {
@@ -181,7 +181,7 @@ for (const key of Object.keys(e as object)) {
 }
 ```
 
-- [ ] **Step 2: Implement fixed semantic envelopes**
+- [x] **Step 2: Implement fixed semantic envelopes**
 
 ```ts
 export const LAYOUT_GRID = 20
@@ -194,7 +194,7 @@ export function nodeLayoutEnvelope(node: WorkflowNode): LayoutEnvelope {
 }
 ```
 
-- [ ] **Step 3: Implement deterministic ranks, stable lane order, merge placement, and bounded-loop routing**
+- [x] **Step 3: Implement deterministic ranks, stable lane order, merge placement, and bounded-loop routing**
 
 ```ts
 const structuralEdges = def.edges.filter((edge) => edge.kind !== 'loop')
@@ -209,7 +209,7 @@ snapAll(positioned, LAYOUT_GRID)
 const loopRoutes = routeLoopsBelow(def.edges.filter((edge) => edge.kind === 'loop'))
 ```
 
-- [ ] **Step 4: Implement write policy and diagnostics**
+- [x] **Step 4: Implement write policy and diagnostics**
 
 ```ts
 export function prepareWorkflowLayoutForWrite(def, intent = def.layout?.source === 'manual' ? 'manual' : 'generated') {
@@ -222,7 +222,7 @@ export function prepareWorkflowLayoutForWrite(def, intent = def.layout?.source =
 }
 ```
 
-- [ ] **Step 5: Apply policy inside create/update before existing atomic serialization**
+- [x] **Step 5: Apply policy inside create/update before existing atomic serialization**
 
 ```ts
 const prepared = prepareWorkflowLayoutForWrite(def, def.layout?.source === 'manual' ? 'manual' : 'generated')
@@ -230,7 +230,7 @@ assertValid(prepared.definition, 'definition')
 writeExclusive(definitionFile(root, def.id), serializeDefinition(prepared.definition), def.id)
 ```
 
-- [ ] **Step 6: Return plan diagnostics and normalized preview**
+- [x] **Step 6: Return plan diagnostics and normalized preview**
 
 ```ts
 const layout = normalizeWorkflowLayout(compiled.definition)
@@ -243,11 +243,11 @@ return {
 }
 ```
 
-- [ ] **Step 7: Close MCP schemas and teach execution semantics**
+- [x] **Step 7: Close MCP schemas and teach execution semantics**
 
 Use nested `additionalProperties:false` schemas for definition, nodes, edges, options, retry/session, conditions, actor, trigger, gate, and position. Node `type` enumerates `trigger|step|gate|switch|fail|wait`; edge `lane` enumerates only `error`; no `on` field exists. Add this exact recipe sentence: `Assistant text such as "ERROR" is ordinary successful output. Error lanes activate only when the session/transport settles failed after retry policy.`
 
-- [ ] **Step 8: Run GREEN server suite and commit phase 1**
+- [x] **Step 8: Run GREEN server suite and commit phase 1**
 
 Run:
 ```bash
@@ -272,7 +272,7 @@ Expected: focused tests and typecheck PASS; staged privacy grep returns no match
 **Interfaces:**
 - Produces the wished-for props `editable`, `onPositionChange`, `onConnectNodes`, `onRemoveNode`, `layoutPreview`, `onTidy`, `onApplyLayout`, and API methods `planWorkflowDefinition`/`startWorkflowRun`.
 
-- [ ] **Step 1: Add RED graph-draft unit tests**
+- [x] **Step 1: Add RED graph-draft unit tests**
 
 ```ts
 expect(moveNode(graph, 'build', { x: 413, y: 187 }).nodes.find(n => n.id === 'build')!.position)
@@ -283,7 +283,7 @@ expect(addNode(graph, 'step').nodes).toHaveLength(graph.nodes.length + 1)
 expect(isGraphDirty(definition, changedGraph)).toBe(true)
 ```
 
-- [ ] **Step 2: Add RED component gestures, Tidy preview, Apply, save, discard, and reload tests**
+- [x] **Step 2: Add RED component gestures, Tidy preview, Apply, save, discard, and reload tests**
 
 ```ts
 fireEvent.click(screen.getByRole('button', { name: 'Tidy' }))
@@ -296,7 +296,7 @@ fireEvent.click(screen.getByTestId('wf-edit-save'))
 expect(updateWorkflowDefinition).toHaveBeenCalledWith('sample', expect.objectContaining({ layout: { source: 'manual', version: 1 } }), 3)
 ```
 
-- [ ] **Step 3: Add RED editable React Flow and mobile framing tests**
+- [x] **Step 3: Add RED editable React Flow and mobile framing tests**
 
 ```ts
 expect(buildFlowGraph(nodes, null, vi.fn(), edges, true).flowNodes.every(n => n.draggable && n.connectable)).toBe(true)
@@ -305,7 +305,7 @@ expect(initialViewportPlan({ mobile: true, nodes: failedNodes }).zoom).toBeGreat
 expect(initialViewportPlan({ mobile: false, fitZoom: 0.42, nodes }).mode).toBe('focus')
 ```
 
-- [ ] **Step 4: Add RED Run action tests**
+- [x] **Step 4: Add RED Run action tests**
 
 ```ts
 fireEvent.click(screen.getByRole('button', { name: 'Run' }))
@@ -315,7 +315,7 @@ await waitFor(() => expect(startWorkflowRun).toHaveBeenCalledWith('sample', { ti
 expect(screen.queryByText(/POST \/api\/workflow-definitions/)).toBeNull()
 ```
 
-- [ ] **Step 5: Run RED and save evidence**
+- [x] **Step 5: Run RED and save evidence**
 
 Run:
 ```bash
@@ -339,7 +339,7 @@ Expected: FAIL on missing graph operations, editable props, layout plan/apply ac
 - Consumes Task 2 plan response and provenance.
 - Produces a mutable `WorkflowGraphDraft` and persisted manual layout/topology.
 
-- [ ] **Step 1: Add wire types and gateway calls**
+- [x] **Step 1: Add wire types and gateway calls**
 
 ```ts
 export interface WorkflowLayoutWire { source: 'generated' | 'normalized' | 'manual'; version: 1 }
@@ -348,7 +348,7 @@ planWorkflowDefinition: (definition) => post<WorkflowPlanWire>('/api/workflow-de
 startWorkflowRun: (id, input, idempotencyKey) => post<WorkflowRunWire>(`/api/workflow-definitions/${encodeURIComponent(id)}/run`, { input, idempotencyKey })
 ```
 
-- [ ] **Step 2: Introduce one mutable graph draft**
+- [x] **Step 2: Introduce one mutable graph draft**
 
 ```ts
 interface WorkflowGraphDraft { nodes: WorkflowNodeWire[]; edges: WorkflowEdgeWire[]; layout: WorkflowLayoutWire }
@@ -358,19 +358,19 @@ const dirty = isDirty(def, drafts) || isGraphDirty(def, graph) || triggerDirty
 
 All operations return new arrays, snap drag positions to 20px, mint collision-proof ids, remove incident edges, and set `layout:{source:'manual',version:1}`.
 
-- [ ] **Step 3: Enable controlled React Flow gestures**
+- [x] **Step 3: Enable controlled React Flow gestures**
 
 Set `draggable/connectable/selectable` from `editable`; wire `onNodeDragStop`, `onConnect`, selection, Delete/Backspace for non-trigger nodes, and prevent self/dangling/duplicate edges. Keep run canvases read-only.
 
-- [ ] **Step 4: Add progressively disclosed Add/Remove controls**
+- [x] **Step 4: Add progressively disclosed Add/Remove controls**
 
 The editor toolbar gets one quiet `Add` button opening a token-only menu for Step, Approval, Switch, Wait, and Fail. Defaults are schema-valid (`step` inline; approval with generated ref; wait 5 minutes; fail with editable starter message). The selected inspector gets a destructive `Remove step` action; trigger removal is unavailable.
 
-- [ ] **Step 5: Make Tidy a server preview with explicit Apply layout**
+- [x] **Step 5: Make Tidy a server preview with explicit Apply layout**
 
 `Tidy` posts the current graph with generated intent, overlays `normalizedPreview.nodes` without dirtying the draft, and reveals `Apply layout`. Apply copies preview positions into `graph.nodes`, clears preview, sets manual provenance, and marks dirty. Any topology/property edit clears a stale preview.
 
-- [ ] **Step 6: Implement readable framing and loop route data**
+- [x] **Step 6: Implement readable framing and loop route data**
 
 ```ts
 export function initialViewportPlan({ mobile, fitZoom, nodes }) {
@@ -382,15 +382,15 @@ export function initialViewportPlan({ mobile, fitZoom, nodes }) {
 
 Prioritize parked, failed/blocked, running/active, current, first non-trigger. Keep Fit all explicit. For `kind:'loop'`, compute one below-graph lane per stable edge order and pass it to the custom edge so the right-out/left-in path clears every expanded envelope.
 
-- [ ] **Step 7: Add first-class Run with input/idempotency**
+- [x] **Step 7: Add first-class Run with input/idempotency**
 
 Add a quiet Run button to the Executions strip and empty state. It reveals an inline `Run input` JSON field and stable generated idempotency key, validates JSON locally, calls `startWorkflowRun`, refreshes/selects the returned run, and preserves all existing failed banners, node evidence, and approval actions.
 
-- [ ] **Step 8: Add unload/lens/back guards for graph mutations**
+- [x] **Step 8: Add unload/lens/back guards for graph mutations**
 
 Use the existing `onDirtyChange` signal for property, geometry, topology, and Apply changes. Register `beforeunload` while dirty, retain current lens/back confirmations, and ensure Discard reconstructs graph/drafts/layout from the last persisted definition.
 
-- [ ] **Step 9: Run GREEN web suite and commit**
+- [x] **Step 9: Run GREEN web suite and commit**
 
 Run:
 ```bash
@@ -410,15 +410,15 @@ git commit -m "feat(web): make workflow graphs editable and runnable"
 - Modify: `packages/web/src/routes/workflow/__tests__/edit-graph.test.tsx`
 - Modify: `packages/web/src/routes/workflow/__tests__/run-view.test.tsx`
 
-- [ ] **Step 1: Add integration tests for normalized create/update/reload**
+- [x] **Step 1: Add integration tests for normalized create/update/reload**
 
 Create via real MCP route, read the file, update a valid manual layout, reload, and assert the exact applied coordinates and provenance survive. Submit an overlapping manual save and assert HTTP 400 includes node ids, clearance, and Tidy guidance.
 
-- [ ] **Step 2: Add execution integration tests**
+- [x] **Step 2: Add execution integration tests**
 
 Start twice with the same idempotency key and assert one run id; start with JSON input and assert frozen invocation input; assert transport/session failure still renders failed evidence and a parked approval run still renders/decides through the existing route.
 
-- [ ] **Step 3: Run all relevant suites**
+- [x] **Step 3: Run all relevant suites**
 
 Run:
 ```bash
@@ -427,7 +427,7 @@ pnpm --filter @jinn/web test -- src/routes/workflow
 ```
 Expected: PASS with no snapshots as the sole proof of geometry.
 
-- [ ] **Step 4: Commit integration gates**
+- [x] **Step 4: Commit integration gates**
 
 ```bash
 git add packages/jinn/src/mcp/__tests__/workflow-tools.test.ts packages/jinn/src/gateway/__tests__/workflow-run-fanout-route.test.ts packages/web/src/routes/workflow/__tests__
@@ -446,13 +446,13 @@ git commit -m "test(workflows): gate layout editor and run integration"
 - Create: `playwright.workflow-layout.config.ts`
 - Create: `scripts/verify-workflow-layout.sh`
 
-- [ ] **Step 1: Create a fresh isolated home and build**
+- [x] **Step 1: Create a fresh isolated home and build**
 
 ```bash
 export REPO=$(pwd)
 export VERIFY_ROOT=$(mktemp -d /tmp/jinn-workflow-layout.XXXXXX)
 export HOST_HOME="$VERIFY_ROOT/host"
-export CODEX_HOME="$VERIFY_ROOT/codex-base"
+export CODEX_HOME="$HOST_HOME/.codex"
 export JINN_HOME="$HOST_HOME/.jinn-workflow-layout-verification"
 export JINN_PORT=7800
 export ARTIFACTS="$JINN_HOME/sandbox-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-workflow-layout"
@@ -468,25 +468,25 @@ curl -fsS "http://127.0.0.1:$JINN_PORT/api/status"
 
 The wrapper redirects `HOME` before invoking the helper so the real instance registry is unreachable. It asserts `JINN_PORT >= 7800`, rejects any base URL containing `:7777`, installs an exit trap that stops only `workflow-layout-verification`, and retains the stopped sandbox home for inspection.
 
-- [ ] **Step 2: Seed canonical/new/invalid/manual/run states**
+- [x] **Step 2: Seed canonical/new/invalid/manual/run states**
 
 Seed linear, branch, merge, approval, supported error lane, and bounded loop definitions through sandbox APIs. Seed new trigger-only, invalid manual overlap (plan-only), valid manual, success, terminal failure, and parked approval records. All names/emails are generic.
 
-- [ ] **Step 3: Launch five fresh GPT-5.5-low sandbox children**
+- [x] **Step 3: Launch five fresh GPT-5.5-low sandbox children**
 
 Use the sandbox gateway session API with `engine:'codex'`, `model:'gpt-5.5'`, `effortLevel:'low'`, five generic sandbox employees, and prompts for representative linear, branch+merge, approval+wait, supported error-lane, and bounded-loop workflows. Each prompt explicitly uses the sandbox MCP endpoint/config and writes only under `$JINN_HOME`; assert every returned session id exists in the sandbox registry and no external gateway URL appears in its context. Poll only `http://127.0.0.1:7800` with an eight-minute bound; preserve failed transcripts rather than substituting hand-authored graphs.
 
-- [ ] **Step 4: Run browser matrix**
+- [x] **Step 4: Run browser matrix**
 
 For every canonical and child-authored graph capture 1440×900 and 390×844, dark/light, normal/reduced motion: initial Editor, Tidy preview, Apply, Save, reload, Executions empty/run success/failure/approval. Use one fresh context per cell and abort every HTTP(S)/WebSocket origin except exactly `http://127.0.0.1:7800`. Record screenshots, console errors, viewport zoom, focus node, scroll positions, and accessibility results under `$JINN_HOME/sandbox-artifacts/<timestamp>/`. Disable Playwright tracing because traces can retain authorization headers.
 
-- [ ] **Step 5: Enforce geometry/readability measurements**
+- [x] **Step 5: Enforce geometry/readability measurements**
 
 Fail the script on any expanded-envelope overlap, non-loop `target.x < source.right + 96`, same-rank vertical gap below 64, merge not right of every predecessor, zoom below 0.75 mobile initial focus or 0.65 desktop fit, clipped labels, missing focus, horizontal body scroll, or Apply+reload coordinate mismatch. Measure each semantic envelope as the union of the React Flow node root and visible descendants so overflowing dock captions are included.
 
 ### Task 7: Full verification, central review, and handoff
 
-- [ ] **Step 1: Run full builds/typechecks/tests**
+- [x] **Step 1: Run full builds/typechecks/tests**
 
 ```bash
 pnpm --filter jinn-cli typecheck
@@ -497,7 +497,7 @@ pnpm --filter jinn-cli build
 pnpm --filter @jinn/web build
 ```
 
-- [ ] **Step 2: Run audits**
+- [x] **Step 2: Run audits**
 
 ```bash
 git diff --check main...HEAD
@@ -508,15 +508,15 @@ rg -n 'transition: all|transition-all|rgba\(' packages/web/src/routes/workflow p
 
 Adjudicate each result: no new workflow hardcoded color/transition-all; existing unrelated matches do not block if absent from `main...HEAD`.
 
-- [ ] **Step 3: Review the whole branch centrally**
+- [x] **Step 3: Review the whole branch centrally**
 
 Review requirements against commits and RED/GREEN logs, inspect every browser screenshot in both themes/breakpoints, compare API/file/browser coordinates, and fix every Critical/Important finding with a covering test before re-review.
 
-- [ ] **Step 4: Update the Jinn design skill with learned durable rules**
+- [x] **Step 4: Update the Jinn design skill with learned durable rules**
 
 If verification confirms new durable rules, append concise generic guidance to `~/.jinn/skills/jinn-design/SKILL.md`: server-owned layout provenance, expanded-envelope normalization, Tidy preview versus Apply, and readable focus framing. Do not place private sandbox paths in the public repo.
 
-- [ ] **Step 5: Final report and Todo handoff**
+- [x] **Step 5: Final report and Todo handoff**
 
 Report commits, exact RED/GREEN log paths, sandbox home/port and whether stopped, browser artifact directory, five child session ids, full command results, and Before/After tables grouped by the applicable design principles. Move `wi_c239479ad914` to `in_review`; do not merge, deploy, or restart production.
 
@@ -526,3 +526,12 @@ Report commits, exact RED/GREEN log paths, sandbox home/port and whether stopped
 - Placeholder scan: no `TBD`, `TODO`, “implement later,” or unspecified error-handling step remains.
 - Type consistency: `WorkflowLayoutMetadata` ↔ `WorkflowLayoutWire`, `WorkflowLayoutDiagnostics` ↔ `LayoutDiagnosticsWire`, `normalizedPreview`, `planWorkflowDefinition`, and `startWorkflowRun` use one spelling throughout.
 - Execution choice: the user already selected strict plan → TDD → implementation with constrained agent-team parallelism, so execution proceeds without another approval prompt.
+
+## Completion evidence
+
+- Server and web RED logs are retained locally; the observed failures cover the six graph shapes, provenance/quality, unsupported `edge.on`, manual preservation/rejection, editor gestures, mobile touch, visible run topology, controlled edge selection, and sandbox daemon authentication.
+- Full GREEN suites: gateway `252` files / `2,856` passed / `1` skipped; web `84` files / `899` passed; root typecheck and build both green.
+- Final isolated browser run: `150/150` passed across 1440×900 and 390×844, dark/light, normal/reduced motion, canonical and five independently authored graphs, Apply/Save/reload, gestures, run success/failure/approval, and manual rejection.
+- Final sandbox artifacts are retained locally for handoff (`676` screenshots, `336` metric records, zero geometry/readability/a11y/network/console/page violations).
+- Five final authors were fresh sandbox-only Codex sessions pinned to GPT-5.5 low. Their definitions persisted with `layout.source=normalized` and `layout.version=1`.
+- The sandbox gateway was stopped; port `7800` is free. Retained artifacts were scrubbed of auth links, gateway tokens, session capability keys, and per-session Codex configs. Production `:7777` was never accessed, mutated, restarted, or tested.
