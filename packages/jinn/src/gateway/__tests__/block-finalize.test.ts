@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StreamDelta } from "../../shared/types.js";
-import { finalBlocksForAssistantMessage, foldPartialText, formatEngineErrorAssistantMessage, normalizeBlockDeltaForTurn, shouldPersistFinalAssistantMessage } from "../api.js";
+import { foldPartialText, formatEngineErrorAssistantMessage, normalizeBlockDeltaForTurn, shouldPersistFinalAssistantMessage } from "../api.js";
 
 describe("foldPartialText (mid-turn partial accumulation)", () => {
   const text = (content: string): StreamDelta => ({ type: "text", content });
@@ -31,32 +31,20 @@ describe("block finalization", () => {
   it("persists the final assistant row when the turn produced text", () => {
     expect(shouldPersistFinalAssistantMessage({
       resultText: "Done.",
-      finalBlockCount: 0,
-      resultAlreadyPersisted: false,
       quietPreempted: false,
     })).toBe(true);
   });
 
-  it("persists a blocks-only final row when the turn produced no text", () => {
+  it("does not turn a result-less blocks-only completion into a final boundary", () => {
     expect(shouldPersistFinalAssistantMessage({
       resultText: "",
-      finalBlockCount: 1,
-      resultAlreadyPersisted: false,
-      quietPreempted: false,
-    })).toBe(true);
-  });
-
-  it("does not persist preempted or already persisted turns", () => {
-    expect(shouldPersistFinalAssistantMessage({
-      resultText: "Done.",
-      finalBlockCount: 1,
-      resultAlreadyPersisted: true,
       quietPreempted: false,
     })).toBe(false);
+  });
+
+  it("does not persist preempted turns", () => {
     expect(shouldPersistFinalAssistantMessage({
       resultText: "Done.",
-      finalBlockCount: 1,
-      resultAlreadyPersisted: false,
       quietPreempted: true,
     })).toBe(false);
   });
@@ -64,13 +52,6 @@ describe("block finalization", () => {
   it("formats engine errors as an assistant-visible message", () => {
     expect(formatEngineErrorAssistantMessage("Hermes turn ended with no assistant text"))
       .toBe("⛔ Hermes turn ended with no assistant text");
-  });
-
-  it("excludes already persisted blocks from the final assistant row", () => {
-    expect(finalBlocksForAssistantMessage([
-      { id: "plan", type: "task-list", version: 1, payload: {} },
-      { id: "progress", type: "task-list", version: 1, payload: {} },
-    ], new Set(["progress"])).map((block) => block.id)).toEqual(["plan"]);
   });
 
   it("drops malformed block deltas before scoping ids", () => {

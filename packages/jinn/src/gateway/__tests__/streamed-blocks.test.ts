@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  resultAlreadyInStreamedBlocks,
+  completedStreamedBlockIds,
   shouldPreserveStreamedBlocks,
 } from "../streamed-blocks.js";
 
 describe("streamed block persistence", () => {
-  it("keeps tool-bearing turns consolidated to the final assistant message", () => {
+  it("preserves completed tool-bearing turns as fold evidence", () => {
     expect(
       shouldPreserveStreamedBlocks({
         quietPreempted: false,
@@ -15,16 +15,16 @@ describe("streamed block persistence", () => {
           { content: "PROGRESS-FINAL" },
         ],
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("keeps plain text-only turns consolidated to the final assistant message", () => {
+  it("preserves completed text-only turns as fold evidence", () => {
     expect(
       shouldPreserveStreamedBlocks({
         quietPreempted: false,
         streamedBlocks: [{ content: "just streaming text" }],
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("drops streamed blocks from interrupted or superseded turns", () => {
@@ -39,40 +39,41 @@ describe("streamed block persistence", () => {
     ).toBe(false);
   });
 
-  it("recognizes when the final result is already one streamed text block", () => {
-    expect(
-      resultAlreadyInStreamedBlocks("PROGRESS-FINAL", [
-        { content: "PROGRESS-FIRST" },
-        { content: "Used Bash", toolCall: "Bash" },
-        { content: "PROGRESS-FINAL" },
-      ]),
-    ).toBe(true);
-
-    expect(
-      resultAlreadyInStreamedBlocks("PROGRESS-FINAL", [
-        { content: "PROGRESS-FIRST" },
-        { content: "Used Bash", toolCall: "Bash" },
-      ]),
-    ).toBe(false);
+  it("drops only the exact streamed result row while preserving other evidence", () => {
+    expect([...completedStreamedBlockIds({
+      quietPreempted: false,
+      rateLimited: false,
+      result: "PROGRESS-FINAL",
+      error: null,
+      streamedBlocks: [
+        { id: "interim", content: "PROGRESS-FIRST" },
+        { id: "tool", content: "Used Bash", toolCall: "Bash" },
+        { id: "duplicate", content: "PROGRESS-FINAL" },
+      ],
+    })]).toEqual(["interim", "tool"]);
   });
 
-  it("does not treat an earlier repeated progress block as the final answer", () => {
-    expect(
-      resultAlreadyInStreamedBlocks("same", [
-        { content: "same" },
-        { content: "Used Bash", toolCall: "Bash" },
-        { content: "different final" },
-      ]),
-    ).toBe(false);
+  it("does not whitespace-normalize final dedup", () => {
+    expect([...completedStreamedBlockIds({
+      quietPreempted: false,
+      rateLimited: false,
+      result: "same spacing",
+      error: null,
+      streamedBlocks: [{ id: "distinct", content: "same   spacing" }],
+    })]).toEqual(["distinct"]);
   });
 
-  it("recognizes whole-turn results already represented by multiple streamed text blocks", () => {
-    expect(
-      resultAlreadyInStreamedBlocks("first final", [
-        { content: "first" },
-        { content: "Used Bash", toolCall: "Bash" },
-        { content: "final" },
-      ]),
-    ).toBe(true);
+  it("does not dedupe multiple fragments that merely concatenate to the final result", () => {
+    expect([...completedStreamedBlockIds({
+      quietPreempted: false,
+      rateLimited: false,
+      result: "first final",
+      error: null,
+      streamedBlocks: [
+        { id: "first", content: "first" },
+        { id: "tool", content: "Used Bash", toolCall: "Bash" },
+        { id: "final", content: "final" },
+      ],
+    })]).toEqual(["first", "tool", "final"]);
   });
 });

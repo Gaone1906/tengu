@@ -101,6 +101,39 @@ describe("messages partial (mid-turn streaming) blocks", () => {
     expect(msgs[0].toolCall).toBe("run_command");
   });
 
+  it("selectively finalizes completed evidence and deletes transient partial rows", () => {
+    newSession("p3c");
+    reg.insertMessage("p3c", "user", "question");
+    const proseId = reg.insertPartialMessage("p3c", "assistant", "interim", 0);
+    const toolId = reg.insertPartialMessage("p3c", "assistant", "Used Read", 1, "Read");
+    reg.insertPartialMessage("p3c", "assistant", "transient", 2);
+
+    expect(reg.settlePartialMessages("p3c", new Set([proseId, toolId]))).toBe(3);
+    expect(reg.getMessages("p3c")).toMatchObject([
+      { role: "user", content: "question" },
+      { id: proseId, role: "assistant", content: "interim" },
+      { id: toolId, role: "assistant", content: "Used Read", toolCall: "Read" },
+    ]);
+    expect(reg.getMessages("p3c").some((message) => message.partial)).toBe(false);
+    expect(reg.searchMessages("interim", 10, { sessionId: "p3c" })).toHaveLength(1);
+    expect(reg.searchMessages("transient", 10, { sessionId: "p3c" })).toHaveLength(0);
+  });
+
+  it("inserts a canonical final strictly after same-millisecond streamed evidence", () => {
+    newSession("p3d");
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      const toolId = reg.insertPartialMessage("p3d", "assistant", "Used Read", 1, "Read");
+      reg.settlePartialMessages("p3d", new Set([toolId]));
+      reg.insertMessageAfter("p3d", "assistant", "Final", 1_700_000_000_000);
+      expect(reg.getMessages("p3d").map((message) => message.content)).toEqual(["Used Read", "Final"]);
+      expect(reg.getMessagePage("p3d", { limit: 10 }).messages.map((message) => message.content))
+        .toEqual(["Used Read", "Final"]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("clearAllPartialMessages sweeps strays across sessions (boot recovery)", () => {
     newSession("p4");
     newSession("p5");

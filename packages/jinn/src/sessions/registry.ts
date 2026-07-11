@@ -2029,6 +2029,28 @@ export function insertMessage(
   return id;
 }
 
+/** Insert a canonical row strictly after streamed evidence, even when settlement
+ * and the last delta share a millisecond. This keeps tail pagination and reload
+ * order aligned with the live event order without rewriting evidence timestamps. */
+export function insertMessageAfter(
+  sessionId: string,
+  role: string,
+  content: string,
+  afterTimestamp: number,
+  media?: MessageMedia[],
+  blocks?: ChatBlock[],
+): string {
+  const db = initDb();
+  const id = uuidv4();
+  const mediaJson = media && media.length > 0 ? JSON.stringify(media) : null;
+  const blocksJson = blocks && blocks.length > 0 ? JSON.stringify(blocks) : null;
+  const timestamp = Math.max(Date.now(), Math.floor(afterTimestamp) + 1);
+  db.prepare('INSERT INTO messages (id, session_id, role, content, timestamp, media, blocks) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+    id, sessionId, role, content, timestamp, mediaJson, blocksJson,
+  );
+  return id;
+}
+
 export function getMessages(sessionId: string): SessionMessage[] {
   const db = initDb();
   const rows = db
@@ -2307,6 +2329,25 @@ export function deletePartialMessages(sessionId: string): number {
 export function finalizePartialMessages(sessionId: string): number {
   const db = initDb();
   return db.prepare('UPDATE messages SET partial = NULL WHERE session_id = ? AND partial = 1').run(sessionId).changes;
+}
+
+/** Settle one completed stream atomically: selected rows become durable evidence
+ * and every other partial row is discarded. Updating selected ids first lets the
+ * indexed trailing DELETE remove transient/duplicate rows without a large IN list. */
+export function settlePartialMessages(sessionId: string, preserveMessageIds: ReadonlySet<string>): number {
+  const db = initDb();
+  const settle = db.transaction(() => {
+    let finalized = 0;
+    const finalize = db.prepare(
+      'UPDATE messages SET partial = NULL WHERE session_id = ? AND id = ? AND partial = 1',
+    );
+    for (const id of preserveMessageIds) {
+      finalized += finalize.run(sessionId, id).changes;
+    }
+    const deleted = db.prepare('DELETE FROM messages WHERE session_id = ? AND partial = 1').run(sessionId).changes;
+    return finalized + deleted;
+  });
+  return settle();
 }
 
 /** Boot sweep: drop any partial blocks stranded by a mid-turn gateway restart. */

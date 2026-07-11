@@ -1,28 +1,53 @@
 export interface StreamedBlockForPersistence {
+  id?: string;
+  role?: string;
   content: string;
   toolCall?: string;
+  media?: unknown[];
+  blocks?: Array<{ type: string }>;
 }
 
-export function shouldPreserveStreamedBlocks(_args: {
+export function shouldPreserveStreamedBlocks(args: {
   quietPreempted: boolean;
   streamedBlocks: StreamedBlockForPersistence[];
 }): boolean {
-  // Partial stream rows are a refresh cache only. Durable history is the final
-  // assistant message, regardless of whether tools were used mid-turn.
-  return false;
+  return !args.quietPreempted && args.streamedBlocks.length > 0;
 }
 
-export function resultAlreadyInStreamedBlocks(
-  result: string | null | undefined,
-  streamedBlocks: StreamedBlockForPersistence[],
-): boolean {
-  const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
-  const resultKey = result ? normalize(result) : "";
-  if (!resultKey) return false;
-  const textBlocks = streamedBlocks
-    .filter((m) => !m.toolCall)
-    .map((m) => normalize(m.content))
-    .filter(Boolean);
-  if (textBlocks.at(-1) === resultKey) return true;
-  return normalize(textBlocks.join("\n\n")) === resultKey;
+export function completedStreamedBlockIds(args: {
+  quietPreempted: boolean;
+  rateLimited: boolean;
+  result: string | null | undefined;
+  error: string | null | undefined;
+  streamedBlocks: StreamedBlockForPersistence[];
+}): Set<string> {
+  const hasTerminalResponse = Boolean(args.result?.trim() || args.error?.trim());
+  if (
+    !hasTerminalResponse
+    || args.rateLimited
+    || !shouldPreserveStreamedBlocks(args)
+  ) {
+    return new Set();
+  }
+
+  const exactResult = args.result?.trim() ?? "";
+  return new Set(args.streamedBlocks.flatMap((message) => {
+    if (!message.id) return [];
+    const durableBlock = message.blocks?.some((block) =>
+      block.type === "delegation" || block.type === "dispatch",
+    );
+    const plainInterimProse =
+      (message.role === undefined || message.role === "assistant")
+      && !message.blocks?.length
+      && Boolean(message.content.trim())
+      && (!exactResult || message.content.trim() !== exactResult);
+    const preserve =
+      message.role === "user"
+      || message.role === "notification"
+      || Boolean(message.media?.length)
+      || Boolean(message.toolCall)
+      || durableBlock
+      || plainInterimProse;
+    return preserve ? [message.id] : [];
+  }));
 }

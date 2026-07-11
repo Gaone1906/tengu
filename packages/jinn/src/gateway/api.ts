@@ -61,11 +61,12 @@ import {
   deleteSessions,
   duplicateSession,
   insertMessage,
+  insertMessageAfter,
   insertPartialMessage,
   updatePartialMessage,
   applyBlockEnvelope,
   deletePartialMessages,
-  finalizePartialMessages,
+  settlePartialMessages,
   getMessages,
   getPartialMessages,
   getMessagePage,
@@ -179,7 +180,7 @@ import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir } from "./files.js";
 import { readJsonBody, readBodyRaw } from "./http-helpers.js";
 import { readJsonlTail } from "./jsonl-tail.js";
-import { resultAlreadyInStreamedBlocks, shouldPreserveStreamedBlocks } from "./streamed-blocks.js";
+import { completedStreamedBlockIds } from "./streamed-blocks.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions } from "../sessions/callbacks.js";
 import { clearDelegationCompletionContract, DELEGATION_COMPLETION_TRACKED_META_KEY } from "../sessions/delegation-completion-contract.js";
 import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
@@ -325,21 +326,14 @@ export function foldPartialText(curText: string, delta: StreamDelta): string {
 
 export function shouldPersistFinalAssistantMessage(options: {
   resultText: string;
-  finalBlockCount: number;
-  resultAlreadyPersisted: boolean;
   quietPreempted: boolean;
 }): boolean {
-  if (options.resultAlreadyPersisted || options.quietPreempted) return false;
-  return options.resultText.trim().length > 0 || options.finalBlockCount > 0;
+  if (options.quietPreempted) return false;
+  return options.resultText.trim().length > 0;
 }
 
 export function formatEngineErrorAssistantMessage(error: string): string {
   return `⛔ ${error}`;
-}
-
-export function finalBlocksForAssistantMessage(blocks: ChatBlock[], preservedBlockIds: Set<string>): ChatBlock[] {
-  if (preservedBlockIds.size === 0) return blocks;
-  return blocks.filter((block) => !preservedBlockIds.has(block.id));
 }
 
 export interface ApiContext {
@@ -6622,31 +6616,25 @@ async function runWebSession(
     const attemptStillRunning = liveAfterRun?.attemptToken === attemptToken && liveAfterRun.status === "running";
     const quietPreempted = wasInterrupted || wasSuperseded || !attemptStillRunning;
 
-    // Turn settled. Mid-turn rows are refresh-only, including tool rows: durable
-    // chat history collapses to the final assistant message. If the turn was
-    // preempted by a newer user message, drop stale partials/results so the old
-    // assistant answer cannot land after the new user bubble.
+    // Turn settled. Preserve the same completed evidence the live React path
+    // keeps: interim prose, tools, media, and delegation/dispatch blocks. Exact
+    // streamed copies of the result and transient task-list blocks are dropped;
+    // the canonical final assistant row is inserted below. Preempted, limited,
+    // and result-less turns keep the old cleanup semantics.
     const streamedBlocks = getPartialMessages(currentSession.id);
-    const finalBlocksById = new Map<string, ChatBlock>();
-    for (const message of streamedBlocks) {
-      for (const block of message.blocks ?? []) {
-        finalBlocksById.set(block.id, block);
-      }
-    }
-    const allStreamedBlocks = [...finalBlocksById.values()];
-    const preserveStreamedBlocks = shouldPreserveStreamedBlocks({ quietPreempted, streamedBlocks });
-    const preservedBlockIds = new Set<string>(
-      preserveStreamedBlocks
-        ? streamedBlocks
-          .flatMap((message) => (message.blocks ?? []).map((block) => block.id))
-        : [],
-    );
-    const finalBlocks = finalBlocksForAssistantMessage(allStreamedBlocks, preservedBlockIds);
-    const resultAlreadyPersisted = preserveStreamedBlocks && resultAlreadyInStreamedBlocks(result.result, streamedBlocks);
-    if (preserveStreamedBlocks) finalizePartialMessages(currentSession.id);
-    else deletePartialMessages(currentSession.id);
-
     const rateLimit = !quietPreempted ? detectRateLimit(result) : { limited: false as const };
+    const preservedMessageIds = completedStreamedBlockIds({
+      quietPreempted,
+      rateLimited: rateLimit.limited,
+      result: result.result,
+      error: result.error,
+      streamedBlocks,
+    });
+    // Durable structured blocks remain on their evidence row. Transient blocks
+    // are deliberately not copied onto the final answer (live completion drops
+    // task-list/progress rows), so the final boundary stays plain and canonical.
+    settlePartialMessages(currentSession.id, preservedMessageIds);
+    const streamedThrough = streamedBlocks.reduce((latest, message) => Math.max(latest, message.timestamp), 0);
 
     if (rateLimit.limited) {
       // Drop any buffered voice text — we won't speak a rate-limited turn.
@@ -6857,13 +6845,21 @@ async function runWebSession(
     // Persist the assistant response
     if (shouldPersistFinalAssistantMessage({
       resultText: result.result,
-      finalBlockCount: finalBlocks.length,
-      resultAlreadyPersisted,
       quietPreempted,
     })) {
-      insertMessage(currentSession.id, "assistant", result.result, undefined, finalBlocks.length > 0 ? finalBlocks : undefined);
+      insertMessageAfter(
+        currentSession.id,
+        "assistant",
+        result.result,
+        streamedThrough,
+      );
     } else if (!quietPreempted && result.error && !result.result.trim()) {
-      insertMessage(currentSession.id, "assistant", formatEngineErrorAssistantMessage(result.error));
+      insertMessageAfter(
+        currentSession.id,
+        "assistant",
+        formatEngineErrorAssistantMessage(result.error),
+        streamedThrough,
+      );
     }
 
     // Voice mode: flush the remainder of the turn's spoken text (final chunk,
