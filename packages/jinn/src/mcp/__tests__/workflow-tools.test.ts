@@ -191,6 +191,105 @@ describe("workflow tools — registry + schemas", () => {
     expect(schema.properties.definition.properties?.edges?.items?.additionalProperties).toBe(false);
   });
 
+  it("reuses one closed workflow graph contract across every authoring tool", () => {
+    const tools = buildWorkflowTools();
+    const authoringTool = (name: string) => {
+      const found = tools.find((candidate) => candidate.name === name);
+      if (!found) throw new Error(`no tool ${name}`);
+      return found.inputSchema as unknown as {
+        additionalProperties?: boolean;
+        $defs?: Record<string, unknown>;
+        properties: Record<string, unknown>;
+      };
+    };
+    const plan = authoringTool("plan_workflow");
+    const rawDefinition = plan.properties.definition;
+
+    for (const name of ["plan_workflow", "validate_workflow", "create_workflow"]) {
+      const schema = authoringTool(name);
+      expect.soft(schema.additionalProperties, `${name} input`).toBe(false);
+      expect.soft(schema.$defs, `${name} shared definitions`).toEqual(plan.$defs);
+      expect.soft(schema.properties.definition, `${name} raw definition`).toEqual(rawDefinition);
+    }
+
+    const update = authoringTool("update_workflow");
+    expect.soft(update.additionalProperties, "update_workflow input").toBe(false);
+    expect.soft(update.$defs, "update_workflow shared definitions").toEqual(plan.$defs);
+    expect.soft(update.properties.patch, "update_workflow patch").toMatchObject(rawDefinition as object);
+  });
+
+  it("teaches onError, error lanes, switch, wait, and fail before authors commit", () => {
+    type Schema = {
+      additionalProperties?: boolean;
+      description?: string;
+      pattern?: string;
+      $ref?: string;
+      properties?: Record<string, Schema>;
+      items?: Schema;
+    };
+    const schemas = buildWorkflowTools()
+      .filter((candidate) => ["plan_workflow", "validate_workflow", "create_workflow", "update_workflow"].includes(candidate.name))
+      .map((candidate) => [candidate.name, candidate.inputSchema as unknown as Schema] as const);
+
+    for (const [name, schema] of schemas) {
+      const graph = schema.properties?.[name === "update_workflow" ? "patch" : "definition"];
+      const node = graph?.properties?.nodes?.items;
+      const edge = graph?.properties?.edges?.items;
+      const optionsRef = node?.properties?.options?.$ref?.split("/").at(-1);
+      const options = optionsRef
+        ? (schema as Schema & { $defs?: Record<string, Schema> }).$defs?.[optionsRef]
+        : undefined;
+
+      expect.soft(node?.properties?.type?.pattern ?? "", `${name} node types`).toContain("switch");
+      expect.soft(node?.properties?.type?.pattern ?? "", `${name} node types`).toContain("wait");
+      expect.soft(node?.properties?.type?.pattern ?? "", `${name} node types`).toContain("fail");
+      expect.soft(node?.properties ?? {}, `${name} switch contract`).toHaveProperty("switchMode");
+      expect.soft(node?.properties ?? {}, `${name} wait contract`).toHaveProperty("waitMinutes");
+      expect.soft(node?.properties ?? {}, `${name} wait contract`).toHaveProperty("waitUntil");
+      expect.soft(node?.properties ?? {}, `${name} fail contract`).toHaveProperty("failMessage");
+      expect.soft(options?.properties?.onError?.pattern, `${name} onError contract`).toBe("^(fail-run|continue|error-edge)$");
+      expect.soft(edge?.properties?.lane?.pattern, `${name} error lane contract`).toBe("^error$");
+      expect.soft(edge?.properties ?? {}, `${name} unsupported edge.on`).not.toHaveProperty("on");
+      expect.soft(edge?.properties?.when?.items?.$ref, `${name} switch conditions`).toBe("#/$defs/condition");
+    }
+  });
+
+  it("closes SOP and raw graph objects consistently so opaque author fields are rejected in-schema", () => {
+    type Schema = {
+      additionalProperties?: boolean;
+      description?: string;
+      properties?: Record<string, Schema>;
+      items?: Schema;
+    };
+    const tools = buildWorkflowTools();
+    const authoring = ["plan_workflow", "validate_workflow", "create_workflow", "update_workflow"];
+    const plan = tools.find((candidate) => candidate.name === "plan_workflow")!;
+    const teaching = (plan.inputSchema.properties.sop as Schema).description;
+
+    for (const name of authoring) {
+      const schema = tools.find((candidate) => candidate.name === name)!.inputSchema as unknown as Schema;
+      const sop = schema.properties?.sop;
+      const graph = schema.properties?.[name === "update_workflow" ? "patch" : "definition"];
+      const wakeUp = sop?.properties?.wakeUp;
+      const step = sop?.properties?.steps?.items;
+      const node = graph?.properties?.nodes?.items;
+      const edge = graph?.properties?.edges?.items;
+
+      expect(schema.additionalProperties, `${name} input`).toBe(false);
+      expect(sop?.description, `${name} SOP guidance`).toBe(teaching);
+      expect(sop?.additionalProperties, `${name} SOP`).toBe(false);
+      expect(wakeUp?.additionalProperties, `${name} SOP wakeUp`).toBe(false);
+      expect(step?.additionalProperties, `${name} SOP step`).toBe(false);
+      expect(graph?.additionalProperties, `${name} graph`).toBe(false);
+      expect(node?.additionalProperties, `${name} graph node`).toBe(false);
+      expect(edge?.additionalProperties, `${name} graph edge`).toBe(false);
+
+      for (const closedObject of [schema, sop, wakeUp, step, graph, node, edge]) {
+        expect(closedObject?.properties, `${name} opaque field`).not.toHaveProperty("opaqueExtension");
+      }
+    }
+  });
+
   it("describes workflow starts as live operations on the current gateway", () => {
     for (const name of ["start_workflow_run", "run_workflow_by_name"]) {
       expect(tool(name).description).toMatch(/live workflow run/i);
