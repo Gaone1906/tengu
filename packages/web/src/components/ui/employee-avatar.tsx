@@ -7,6 +7,7 @@ interface EmployeeAvatarProps {
   size?: number
   fontSize?: number
   className?: string
+  style?: React.CSSProperties
   onClick?: () => void
 }
 
@@ -15,6 +16,7 @@ export function EmployeeAvatar({
   size = 32,
   fontSize: fontSizeOverride,
   className,
+  style,
   onClick,
 }: EmployeeAvatarProps) {
   const { settings } = useSettings()
@@ -39,6 +41,7 @@ export function EmployeeAvatar({
         flexShrink: 0,
         cursor: onClick ? "pointer" : undefined,
         userSelect: "none",
+        ...style,
       }}
     >
       {emoji}

@@ -3,7 +3,7 @@ import { EmployeeAvatar } from './employee-avatar'
 interface EmployeeChipProps {
   employee: string
   displayName: string
-  size?: 20 | 22 | 36
+  size?: 18 | 20 | 22 | 36
   showName?: boolean
   nameTone?: 'primary' | 'secondary'
   className?: string
@@ -22,7 +22,7 @@ export function EmployeeChip({
       <EmployeeAvatar
         name={employee}
         size={size}
-        fontSize={size === 36 ? 19 : 12}
+        fontSize={size === 36 ? 19 : size === 18 ? 10 : 12}
         className="bg-[var(--fill-secondary)]"
       />
       {showName && (

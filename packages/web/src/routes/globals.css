@@ -130,6 +130,7 @@
   --fill-quaternary: rgba(255,255,255,0.035);
   --separator: rgba(255,255,255,0.09);
   --separator-opaque: #38342B;
+  --scrim: rgba(0,0,0,0.32);
   --text-primary: #E8E4D8;
   --text-secondary: rgba(232,228,216,0.62);
   --text-tertiary: rgba(232,228,216,0.38);
@@ -190,6 +191,7 @@
   --fill-quaternary: rgba(33,30,22,0.028);
   --separator: rgba(33,30,22,0.14);
   --separator-opaque: #DED8C7;
+  --scrim: rgba(40,34,20,0.18);
   --text-primary: #211E16;
   --text-secondary: rgba(33,30,22,0.66);
   --text-tertiary: rgba(33,30,22,0.56);
@@ -249,6 +251,7 @@
     --fill-quaternary: rgba(33,30,22,0.028);
     --separator: rgba(33,30,22,0.14);
     --separator-opaque: #DED8C7;
+    --scrim: rgba(40,34,20,0.18);
     --text-primary: #211E16;
     --text-secondary: rgba(33,30,22,0.66);
     --text-tertiary: rgba(33,30,22,0.56);
@@ -306,6 +309,7 @@
     --fill-quaternary: rgba(255,255,255,0.035);
     --separator: rgba(255,255,255,0.09);
     --separator-opaque: #38342B;
+    --scrim: rgba(0,0,0,0.32);
     --text-primary: #E8E4D8;
     --text-secondary: rgba(232,228,216,0.62);
     --text-tertiary: rgba(232,228,216,0.38);
@@ -494,6 +498,36 @@ h1, h2, h3, h4, h5, h6 {
 @keyframes bounce-dot {
   0%, 60%, 100% { transform: translateY(0); }
   30% { transform: translateY(-4px); }
+}
+
+/* ============================================
+   Comms ledger arrival choreography
+   The thread makes room (max-height grows), the voice rises in, the chip
+   condenses from a blur, then a one-shot accent wash marks "new" and decays
+   over ~1.6s. Rows inside a burst stagger via --arrive-delay (+90ms each).
+   ============================================ */
+
+.comm-arrive { overflow: hidden; animation: jinn-comm-room 220ms var(--ease-snappy) backwards; animation-delay: var(--arrive-delay, 0ms); }
+.comm-arrive .comm-row { animation: jinn-comm-rise 240ms var(--ease-smooth) backwards; animation-delay: calc(var(--arrive-delay, 0ms) + 140ms); }
+.comm-arrive .comm-chip > span { animation: jinn-comm-chip 260ms var(--ease-snappy) backwards; animation-delay: calc(var(--arrive-delay, 0ms) + 160ms); }
+.comm-arrive .comm-row::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  background: var(--accent-fill);
+  pointer-events: none;
+  opacity: 0;
+  animation: jinn-comm-wash 1.6s var(--ease-smooth) both;
+  animation-delay: calc(var(--arrive-delay, 0ms) + 200ms);
+}
+@keyframes jinn-comm-room { from { max-height: 0; opacity: 0.001; } to { max-height: 48px; opacity: 1; } }
+@keyframes jinn-comm-rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes jinn-comm-chip { from { scale: 0.25; filter: blur(4px); opacity: 0; } to { scale: 1; filter: none; opacity: 1; } }
+@keyframes jinn-comm-wash { 0% { opacity: 0; } 12% { opacity: 0.55; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .comm-arrive, .comm-arrive .comm-row, .comm-arrive .comm-chip > span { animation: none; }
+  .comm-arrive .comm-row::after { animation: jinn-comm-wash 0.8s linear both; }
 }
 
 /* ============================================
