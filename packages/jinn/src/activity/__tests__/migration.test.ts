@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import { ACTIVITY_LEGACY_SCHEMA_DDL, ActivityMigrationError, migrateActivitySchema } from "../migrate.js";
+import { ACTIVITY_LEGACY_SCHEMA_DDL, ACTIVITY_SCHEMA_DDL, ActivityMigrationError, migrateActivitySchema } from "../migrate.js";
 import { appendActivityEvent } from "../store.js";
 import type { ActivityEventInput } from "../types.js";
 
@@ -49,12 +49,58 @@ function seedLegacy(database: Database.Database): void {
   );
 }
 
+function seedGate1(database: Database.Database): void {
+  database.exec(ACTIVITY_SCHEMA_DDL);
+  appendActivityEvent({
+    ...fixture(),
+    kind: "todo",
+    correlationId: "source:local:collision",
+    idempotencyKey: "todo:event:collision",
+  }, { database, idFactory: () => "00000000-0000-4000-8000-000000000001" });
+  appendActivityEvent({
+    ...fixture(),
+    kind: "workflow",
+    correlationId: "source:local:collision",
+    idempotencyKey: "workflow:event:collision",
+  }, { database, idFactory: () => "00000000-0000-4000-8000-000000000002" });
+  database.exec(`
+    DROP TRIGGER activity_events_immutable_update;
+    UPDATE activity_events SET story_id = 'story_000000000000000000000000';
+    CREATE TRIGGER activity_events_immutable_update
+      BEFORE UPDATE ON activity_events BEGIN SELECT RAISE(ABORT, 'activity events are immutable'); END;
+  `);
+}
+
 describe("activity schema migration", () => {
   it("rolls back every created object when an injected migration step fails", () => {
-    for (let failAfterStep = 1; failAfterStep <= 9; failAfterStep++) {
+    for (let failAfterStep = 1; failAfterStep <= 13; failAfterStep++) {
       const database = new Database(":memory:");
       expect(() => migrateActivitySchema(database, { failAfterStep })).toThrow(ActivityMigrationError);
       expect(database.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'activity_%'").all()).toEqual([]);
+    }
+  });
+
+  it("transactionally upgrades the Gate 1 ledger, rekeys source-local stories, and protects its durable cursor secret", () => {
+    const database = new Database(":memory:");
+    seedGate1(database);
+    migrateActivitySchema(database);
+
+    const stories = database.prepare("SELECT DISTINCT story_id FROM activity_events").all();
+    expect(stories).toHaveLength(2);
+    const secret = database.prepare("SELECT value FROM activity_ledger_meta WHERE key = 'cursor_hmac_v1'").get() as { value: string };
+    expect(secret.value).toMatch(/^[a-f0-9]{64}$/);
+    expect(() => database.prepare("INSERT OR REPLACE INTO activity_ledger_meta (key, value) VALUES ('cursor_hmac_v1', ?)").run("0".repeat(64))).toThrow(/immutable|already exists/i);
+    expect(database.prepare("SELECT value FROM activity_ledger_meta WHERE key = 'cursor_hmac_v1'").get()).toEqual(secret);
+  });
+
+  it("rolls every Gate 1 upgrade DDL step back without exposing a partial cursor contract", () => {
+    for (let failAfterStep = 1; failAfterStep <= 6; failAfterStep++) {
+      const database = new Database(":memory:");
+      seedGate1(database);
+      expect(() => migrateActivitySchema(database, { failAfterStep })).toThrow(ActivityMigrationError);
+      expect(database.prepare("SELECT COUNT(DISTINCT story_id) AS n FROM activity_events").get()).toEqual({ n: 1 });
+      expect(database.prepare("SELECT name FROM sqlite_master WHERE name = 'activity_ledger_meta'").get()).toBeUndefined();
+      expect(database.prepare("SELECT name FROM sqlite_master WHERE name = 'activity_events_immutable_update'").get()).toBeDefined();
     }
   });
 
@@ -81,7 +127,7 @@ describe("activity schema migration", () => {
   });
 
   it("rolls every legacy migration DDL step back to the intact legacy ledger", () => {
-    for (let failAfterStep = 1; failAfterStep <= 17; failAfterStep++) {
+    for (let failAfterStep = 1; failAfterStep <= 21; failAfterStep++) {
       const database = new Database(":memory:");
       seedLegacy(database);
       expect(() => migrateActivitySchema(database, { failAfterStep })).toThrow(ActivityMigrationError);

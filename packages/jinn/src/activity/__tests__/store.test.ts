@@ -22,7 +22,6 @@ function input(overrides: Partial<ActivityEventInput> = {}): ActivityEventInput 
     summary: "Operations Lead requested approval for Release check",
     correlationId: "todo:domain-object-123:approval:attempt-1",
     causationId: "source-event-1",
-    rootEventId: "source-root-1",
     attempt: 1,
     idempotencyKey: "todo:approval-requested:source-event-1",
     detailRef: "work-item-event:source-event-1",
@@ -99,7 +98,7 @@ describe("ActivityStore", () => {
       input({ outcome: { state: "attention", label: "Another outcome" } }),
       input({ correlationId: "todo:domain-object-123:approval:attempt-2" }),
       input({ causationId: "source-event-2" }),
-      input({ rootEventId: "source-root-2" }),
+      input({ rootEventId: "root:todo:source-root-2" }),
       input({ attempt: 2 }),
       input({ detailRef: "work-item-event:source-event-2" }),
       input({ detail: { request: "different detail" } }),
@@ -291,6 +290,8 @@ describe("ActivityStore", () => {
     const database = memoryDb();
     expect(() => appendActivityEvent(input({ occurredAt: "yesterday" }), { database })).toThrow(/occurredAt/i);
     expect(() => appendActivityEvent(input({ correlationId: " " }), { database })).toThrow(/correlationId/i);
+    expect(() => appendActivityEvent(input({ correlationId: "source-local" }), { database })).toThrow(/namespaced/i);
+    expect(() => appendActivityEvent(input({ rootEventId: "source-local" }), { database })).toThrow(/causal root|rootEventId|namespaced/i);
     expect(() => appendActivityEvent(input({ idempotencyKey: "retry" }), { database })).toThrow(/namespaced/i);
     expect(() => appendActivityEvent(input({ object: { type: "todo", id: "x", label: "x", href: "https://evil.example/x" } }), { database })).toThrow(/href/i);
   });

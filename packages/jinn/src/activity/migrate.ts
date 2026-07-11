@@ -1,4 +1,6 @@
+import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
+import { activityStoryId } from "./identity.js";
 import { activityPayloadHashFromRow } from "./payload.js";
 
 interface SchemaObject {
@@ -133,6 +135,33 @@ const CURRENT_TRIGGERS: SchemaObject[] = [
 const CURRENT_OBJECTS = [...COMMON_INDEXES, ...CURRENT_TRIGGERS];
 const LEGACY_OBJECTS = [...COMMON_INDEXES, ...LEGACY_TRIGGERS];
 
+const META_TABLE_SQL = `
+CREATE TABLE activity_ledger_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+) WITHOUT ROWID`;
+
+const META_OBJECTS: SchemaObject[] = [
+  {
+    type: "trigger",
+    name: "activity_ledger_meta_immutable_update",
+    sql: "CREATE TRIGGER activity_ledger_meta_immutable_update BEFORE UPDATE ON activity_ledger_meta BEGIN SELECT RAISE(ABORT, 'activity ledger metadata is immutable'); END",
+  },
+  {
+    type: "trigger",
+    name: "activity_ledger_meta_immutable_delete",
+    sql: "CREATE TRIGGER activity_ledger_meta_immutable_delete BEFORE DELETE ON activity_ledger_meta BEGIN SELECT RAISE(ABORT, 'activity ledger metadata is immutable'); END",
+  },
+  {
+    type: "trigger",
+    name: "activity_ledger_meta_immutable_insert",
+    sql: `CREATE TRIGGER activity_ledger_meta_immutable_insert
+      BEFORE INSERT ON activity_ledger_meta
+      WHEN EXISTS (SELECT 1 FROM activity_ledger_meta WHERE key = NEW.key)
+      BEGIN SELECT RAISE(ABORT, 'activity ledger metadata key already exists'); END`,
+  },
+];
+
 export const ACTIVITY_SCHEMA_DDL = [CURRENT_TABLE_SQL, ...CURRENT_OBJECTS.map((object) => object.sql)].join(";\n") + ";";
 export const ACTIVITY_LEGACY_SCHEMA_DDL = [LEGACY_TABLE_SQL, ...LEGACY_OBJECTS.map((object) => object.sql)].join(";\n") + ";";
 
@@ -150,7 +179,7 @@ function objectSql(database: Database.Database, type: string, name: string): str
   return row?.sql ?? undefined;
 }
 
-function verifyObjects(database: Database.Database, objects: SchemaObject[]): void {
+function verifyObjects(database: Database.Database, tableName: string, objects: SchemaObject[]): void {
   for (const object of objects) {
     const actual = objectSql(database, object.type, object.name);
     if (!actual || normalizedSql(actual) !== normalizedSql(object.sql)) {
@@ -159,17 +188,29 @@ function verifyObjects(database: Database.Database, objects: SchemaObject[]): vo
   }
   const actualNames = database.prepare(`
     SELECT name FROM sqlite_master
-    WHERE tbl_name = 'activity_events' AND type IN ('index', 'trigger') AND sql IS NOT NULL
+    WHERE tbl_name = ? AND type IN ('index', 'trigger') AND sql IS NOT NULL
     ORDER BY name
-  `).all() as Array<{ name: string }>;
+  `).all(tableName) as Array<{ name: string }>;
   const expectedNames = objects.map((object) => object.name).sort();
   if (JSON.stringify(actualNames.map((row) => row.name)) !== JSON.stringify(expectedNames)) {
-    throw new ActivityMigrationError("activity_events has unexpected schema objects");
+    throw new ActivityMigrationError(`${tableName} has unexpected schema objects`);
+  }
+}
+
+function verifyMeta(database: Database.Database): void {
+  const table = objectSql(database, "table", "activity_ledger_meta");
+  if (!table || normalizedSql(table) !== normalizedSql(META_TABLE_SQL)) {
+    throw new ActivityMigrationError("activity_ledger_meta has an unexpected shape");
+  }
+  verifyObjects(database, "activity_ledger_meta", META_OBJECTS);
+  const rows = database.prepare("SELECT key, value FROM activity_ledger_meta").all() as Array<{ key: string; value: string }>;
+  if (rows.length !== 1 || rows[0]?.key !== "cursor_hmac_v1" || !/^[a-f0-9]{64}$/.test(rows[0].value)) {
+    throw new ActivityMigrationError("activity ledger metadata is invalid");
   }
 }
 
 function verifyNoReservedObjects(database: Database.Database): void {
-  const names = ["activity_events", ...CURRENT_OBJECTS.map((object) => object.name)];
+  const names = ["activity_events", "activity_ledger_meta", ...CURRENT_OBJECTS.map((object) => object.name), ...META_OBJECTS.map((object) => object.name)];
   const placeholders = names.map(() => "?").join(",");
   const existing = database.prepare(`SELECT name FROM sqlite_master WHERE name IN (${placeholders})`).all(...names);
   if (existing.length > 0) throw new ActivityMigrationError("reserved activity schema objects already exist");
@@ -193,7 +234,37 @@ function insertLegacyRows(database: Database.Database, rows: Record<string, unkn
       @detail_ref, @detail_json, @links_json, @payload_hash
     )
   `);
-  for (const row of rows) insert.run({ ...row, payload_hash: activityPayloadHashFromRow(row) });
+  for (const row of rows) {
+    insert.run({
+      ...row,
+      story_id: activityStoryId(
+        String(row.kind) as Parameters<typeof activityStoryId>[0],
+        String(row.correlation_id),
+        row.root_event_id === null ? undefined : String(row.root_event_id),
+      ),
+      payload_hash: activityPayloadHashFromRow(row),
+    });
+  }
+}
+
+function createMeta(database: Database.Database, apply: (sql: string) => void): void {
+  apply(META_TABLE_SQL);
+  database.prepare("INSERT INTO activity_ledger_meta (key, value) VALUES ('cursor_hmac_v1', ?)").run(randomBytes(32).toString("hex"));
+  for (const object of META_OBJECTS) apply(object.sql);
+}
+
+function rekeyCurrentStories(database: Database.Database, apply: (sql: string) => void): void {
+  const updateTrigger = CURRENT_TRIGGERS.find((object) => object.name === "activity_events_immutable_update")!;
+  apply(`DROP TRIGGER ${updateTrigger.name}`);
+  const rows = database.prepare("SELECT seq, kind, correlation_id, root_event_id FROM activity_events").all() as Array<{
+    seq: number;
+    kind: Parameters<typeof activityStoryId>[0];
+    correlation_id: string;
+    root_event_id: string | null;
+  }>;
+  const update = database.prepare("UPDATE activity_events SET story_id = ? WHERE seq = ?");
+  for (const row of rows) update.run(activityStoryId(row.kind, row.correlation_id, row.root_event_id ?? undefined), row.seq);
+  apply(updateTrigger.sql);
 }
 
 export function migrateActivitySchema(database: Database.Database, options: ActivityMigrationOptions = {}): void {
@@ -206,8 +277,10 @@ export function migrateActivitySchema(database: Database.Database, options: Acti
 
   try {
     const currentTable = objectSql(database, "table", "activity_events");
-    if (currentTable && normalizedSql(currentTable) === normalizedSql(CURRENT_TABLE_SQL)) {
-      verifyObjects(database, CURRENT_OBJECTS);
+    const metaTable = objectSql(database, "table", "activity_ledger_meta");
+    if (currentTable && normalizedSql(currentTable) === normalizedSql(CURRENT_TABLE_SQL) && metaTable) {
+      verifyObjects(database, "activity_events", CURRENT_OBJECTS);
+      verifyMeta(database);
       database.pragma("recursive_triggers = ON");
       return;
     }
@@ -217,7 +290,8 @@ export function migrateActivitySchema(database: Database.Database, options: Acti
         apply(CURRENT_TABLE_SQL);
         for (const object of CURRENT_OBJECTS) apply(object.sql);
       } else if (normalizedSql(currentTable) === normalizedSql(LEGACY_TABLE_SQL)) {
-        verifyObjects(database, LEGACY_OBJECTS);
+        if (metaTable) throw new ActivityMigrationError("legacy activity ledger has unexpected metadata");
+        verifyObjects(database, "activity_events", LEGACY_OBJECTS);
         const rows = database.prepare("SELECT * FROM activity_events ORDER BY seq").all() as Record<string, unknown>[];
         for (const object of [...LEGACY_TRIGGERS, ...COMMON_INDEXES]) apply(`DROP ${object.type.toUpperCase()} ${object.name}`);
         apply("ALTER TABLE activity_events RENAME TO activity_events_legacy");
@@ -225,10 +299,16 @@ export function migrateActivitySchema(database: Database.Database, options: Acti
         for (const object of CURRENT_OBJECTS) apply(object.sql);
         insertLegacyRows(database, rows);
         apply("DROP TABLE activity_events_legacy");
+      } else if (normalizedSql(currentTable) === normalizedSql(CURRENT_TABLE_SQL)) {
+        if (metaTable) throw new ActivityMigrationError("activity ledger metadata has an unexpected shape");
+        verifyObjects(database, "activity_events", CURRENT_OBJECTS);
+        rekeyCurrentStories(database, apply);
       } else {
         throw new ActivityMigrationError("activity_events has an unexpected shape");
       }
-      verifyObjects(database, CURRENT_OBJECTS);
+      createMeta(database, apply);
+      verifyObjects(database, "activity_events", CURRENT_OBJECTS);
+      verifyMeta(database);
       const migratedTable = objectSql(database, "table", "activity_events");
       if (!migratedTable || normalizedSql(migratedTable) !== normalizedSql(CURRENT_TABLE_SQL)) {
         throw new ActivityMigrationError("activity_events verification failed");

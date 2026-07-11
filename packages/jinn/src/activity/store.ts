@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { initDb } from "../sessions/registry.js";
 import { ACTIVITY_KINDS, ACTIVITY_OUTCOMES, type ActivityAppendResult, type ActivityEvent, type ActivityEventInput, type ActivityJsonValue, type ActivityLink } from "./types.js";
 import { activityPayloadHash } from "./payload.js";
+import { activityStoryId, isExplicitActivityRoot, isNamespacedActivityIdentity } from "./identity.js";
 import {
   ACTIVITY_INPUT_LIMITS,
   ActivityValueLimitError,
@@ -110,6 +111,12 @@ function validateInput(input: ActivityEventInput): ActivityEventInput {
   const causationId = optional(input.causationId);
   const rootEventId = optional(input.rootEventId);
   const detailRef = optional(input.detailRef);
+  if (!isNamespacedActivityIdentity(correlationId)) {
+    throw new ActivityValidationError("correlationId must be globally namespaced as domain:operation:source");
+  }
+  if (rootEventId && !isExplicitActivityRoot(rootEventId)) {
+    throw new ActivityValidationError("rootEventId must be a namespaced causal root or ledger event ID");
+  }
   if (idempotencyKey && !/^[^:\s]+:[^:\s]+:.+/.test(idempotencyKey)) {
     throw new ActivityValidationError("idempotencyKey must be globally namespaced as domain:operation:source");
   }
@@ -153,9 +160,13 @@ function validateInput(input: ActivityEventInput): ActivityEventInput {
       label: redactActivityText(required(input.outcome.label, "outcome.label")),
     },
     summary: redactActivityText(required(input.summary, "summary")),
-    correlationId: redactStableIdentity(correlationId),
+    correlationId: redactStableIdentity(correlationId) === correlationId
+      ? correlationId
+      : `redacted:correlation:${createHash("sha256").update(correlationId).digest("hex").slice(0, 32)}`,
     ...(causationId ? { causationId: redactStableIdentity(causationId) } : {}),
-    ...(rootEventId ? { rootEventId: redactStableIdentity(rootEventId) } : {}),
+    ...(rootEventId ? { rootEventId: redactStableIdentity(rootEventId) === rootEventId
+      ? rootEventId
+      : `root:redacted:${createHash("sha256").update(rootEventId).digest("hex").slice(0, 32)}` } : {}),
     ...(input.attempt !== undefined ? { attempt: input.attempt } : {}),
     ...(idempotencyKey ? { idempotencyKey: redactStableIdentity(idempotencyKey) === idempotencyKey
       ? idempotencyKey
@@ -166,9 +177,7 @@ function validateInput(input: ActivityEventInput): ActivityEventInput {
   };
 }
 
-export function activityStoryId(correlationId: string): string {
-  return `story_${createHash("sha256").update(correlationId).digest("hex").slice(0, 24)}`;
-}
+export { activityStoryId } from "./identity.js";
 
 export function activityEventFromRow(row: ActivityRow): ActivityEvent {
   try {
@@ -222,7 +231,7 @@ function replayResult(row: ActivityRow | undefined, payloadHash: string): Activi
 export function appendActivityEvent(input: ActivityEventInput, options: AppendActivityOptions = {}): ActivityAppendResult {
   const database = options.database ?? initDb();
   const normalized = validateInput(input);
-  const storyId = activityStoryId(normalized.correlationId);
+  const storyId = activityStoryId(normalized.kind, normalized.correlationId, normalized.rootEventId);
   const payloadHash = activityPayloadHash(normalized);
   if (normalized.idempotencyKey) {
     const replay = replayResult(database.prepare("SELECT * FROM activity_events WHERE idempotency_key = ?").get(normalized.idempotencyKey) as ActivityRow | undefined, payloadHash);

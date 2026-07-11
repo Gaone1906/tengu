@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type Database from "better-sqlite3";
 import { initDb } from "../sessions/registry.js";
 import { activityEventFromRow, type ActivityRow } from "./store.js";
+import { ActivityCursorSecretError, activityCursorSecret } from "./cursor-secret.js";
 import {
   ACTIVITY_KINDS,
   ACTIVITY_OUTCOMES,
@@ -28,7 +29,7 @@ export interface ActivityQueryOptions {
 }
 
 interface CursorPayload {
-  v: 1;
+  v: 2;
   occurredAt: string;
   id: string;
   snapshotSeq: number;
@@ -82,11 +83,18 @@ function queryHash(query: ReturnType<typeof normalizedQuery>): string {
     .slice(0, 16);
 }
 
-function decodeCursor(raw: string, expectedHash: string): CursorPayload {
+function decodeCursor(raw: string, expectedHash: string, secret: Buffer): CursorPayload {
   try {
-    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Partial<CursorPayload>;
+    const parts = raw.split(".");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error("invalid token");
+    const payloadBytes = Buffer.from(parts[0], "base64url");
+    const supplied = Buffer.from(parts[1], "base64url");
+    const expected = createHmac("sha256", secret).update(payloadBytes).digest();
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new Error("invalid signature");
+    const parsed = JSON.parse(payloadBytes.toString("utf8")) as Partial<CursorPayload>;
+    if (Object.keys(parsed).sort().join(",") !== "asOf,id,occurredAt,queryHash,snapshotSeq,v") throw new Error("invalid fields");
     if (
-      parsed.v !== 1 || !canonicalIso(parsed.occurredAt) ||
+      parsed.v !== 2 || !canonicalIso(parsed.occurredAt) ||
       typeof parsed.id !== "string" || !/^act_[a-zA-Z0-9-]+$/.test(parsed.id) ||
       !Number.isSafeInteger(parsed.snapshotSeq) || (parsed.snapshotSeq ?? -1) < 0 ||
       !canonicalIso(parsed.asOf) || parsed.queryHash !== expectedHash
@@ -97,15 +105,17 @@ function decodeCursor(raw: string, expectedHash: string): CursorPayload {
   }
 }
 
-function encodeCursor(payload: CursorPayload): string {
-  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+function encodeCursor(payload: CursorPayload, secret: Buffer): string {
+  const bytes = Buffer.from(JSON.stringify(payload), "utf8");
+  const signature = createHmac("sha256", secret).update(bytes).digest("base64url");
+  return `${bytes.toString("base64url")}.${signature}`;
 }
 
 function filteredWhere(
   query: ReturnType<typeof normalizedQuery>,
   snapshotSeq: number,
 ): { sql: string; params: Record<string, unknown> } {
-  const clauses = ["seq <= @snapshotSeq"];
+  const clauses = ["1 = 1"];
   const params: Record<string, unknown> = { snapshotSeq };
   if (query.kinds?.length) {
     const names = query.kinds.map((kind, index) => {
@@ -113,7 +123,7 @@ function filteredWhere(
       params[name] = kind;
       return `@${name}`;
     });
-    clauses.push(`kind IN (${names.join(",")})`);
+    clauses.push(`stories.kind IN (${names.join(",")})`);
   }
   if (query.outcomes?.length) {
     const names = query.outcomes.map((outcome, index) => {
@@ -121,31 +131,38 @@ function filteredWhere(
       params[name] = outcome;
       return `@${name}`;
     });
-    clauses.push(`outcome_state IN (${names.join(",")})`);
+    clauses.push(`stories.outcome_state IN (${names.join(",")})`);
   }
   if (query.q) {
     params.q = query.q.toLocaleLowerCase();
-    clauses.push(`instr(lower(
-      summary || ' ' || action || ' ' || actor_display_name || ' ' || actor_id || ' ' ||
-      object_label || ' ' || object_id || ' ' || outcome_label
-    ), @q) > 0`);
+    clauses.push(`EXISTS (
+      SELECT 1 FROM activity_events search_events
+      WHERE search_events.story_id = stories.story_id AND search_events.seq <= @snapshotSeq
+        AND instr(lower(
+          search_events.summary || ' ' || search_events.action || ' ' ||
+          search_events.actor_display_name || ' ' || search_events.actor_id || ' ' ||
+          search_events.object_label || ' ' || search_events.object_id || ' ' || search_events.outcome_label
+        ), @q) > 0
+    )`);
   }
   return { sql: clauses.join(" AND "), params };
 }
 
 function storiesCte(where: string): string {
   return `
-    WITH filtered AS (
+    WITH ranked AS (
       SELECT *,
         ROW_NUMBER() OVER (PARTITION BY story_id ORDER BY occurred_at DESC, id DESC) AS story_rank
       FROM activity_events
-      WHERE ${where}
+      WHERE seq <= @snapshotSeq
     ), stories AS (
-      SELECT filtered.*,
+      SELECT ranked.*,
         (SELECT COUNT(*) FROM activity_events all_events
-          WHERE all_events.story_id = filtered.story_id AND all_events.seq <= @snapshotSeq) AS event_count
-      FROM filtered
+          WHERE all_events.story_id = ranked.story_id AND all_events.seq <= @snapshotSeq) AS event_count
+      FROM ranked
       WHERE story_rank = 1
+    ), filtered_stories AS (
+      SELECT * FROM stories WHERE ${where}
     )
   `;
 }
@@ -209,9 +226,9 @@ function matchingTotals(
   cte: string,
   params: Record<string, unknown>,
 ): Pick<ActivityTotals, "matching" | "byKind" | "byOutcome"> {
-  const matching = database.prepare(`${cte} SELECT COUNT(*) AS n FROM stories`).get(params) as { n: number };
-  const byKindRows = database.prepare(`${cte} SELECT kind AS key, COUNT(*) AS n FROM stories GROUP BY kind`).all(params) as Array<{ key: ActivityKind; n: number }>;
-  const byOutcomeRows = database.prepare(`${cte} SELECT outcome_state AS key, COUNT(*) AS n FROM stories GROUP BY outcome_state`).all(params) as Array<{ key: ActivityOutcomeState; n: number }>;
+  const matching = database.prepare(`${cte} SELECT COUNT(*) AS n FROM filtered_stories`).get(params) as { n: number };
+  const byKindRows = database.prepare(`${cte} SELECT kind AS key, COUNT(*) AS n FROM filtered_stories GROUP BY kind`).all(params) as Array<{ key: ActivityKind; n: number }>;
+  const byOutcomeRows = database.prepare(`${cte} SELECT outcome_state AS key, COUNT(*) AS n FROM filtered_stories GROUP BY outcome_state`).all(params) as Array<{ key: ActivityOutcomeState; n: number }>;
   return {
     matching: matching.n,
     byKind: Object.fromEntries(byKindRows.map((row) => [row.key, row.n])),
@@ -221,11 +238,18 @@ function matchingTotals(
 
 export function queryActivityPage(rawQuery: ActivityQuery = {}, options: ActivityQueryOptions = {}): ActivityPage {
   const database = options.database ?? initDb();
+  let secret: Buffer;
+  try {
+    secret = activityCursorSecret(database);
+  } catch (error) {
+    if (error instanceof ActivityCursorSecretError) throw new ActivityQueryError("activity cursor state is unavailable");
+    throw error;
+  }
   const query = normalizedQuery(rawQuery);
   const hash = queryHash(query);
   const now = options.now?.() ?? new Date();
   const max = database.prepare("SELECT COALESCE(MAX(seq), 0) AS n FROM activity_events").get() as { n: number };
-  const cursor = query.cursor ? decodeCursor(query.cursor, hash) : undefined;
+  const cursor = query.cursor ? decodeCursor(query.cursor, hash, secret) : undefined;
   const snapshotSeq = cursor?.snapshotSeq ?? max.n;
   const asOf = cursor?.asOf ?? now.toISOString();
   const filtered = filteredWhere(query, snapshotSeq);
@@ -239,7 +263,7 @@ export function queryActivityPage(rawQuery: ActivityQuery = {}, options: Activit
   }
   const rows = database.prepare(`
     ${cte}
-    SELECT * FROM stories
+    SELECT * FROM filtered_stories
     ${keyset}
     ORDER BY occurred_at DESC, id DESC
     LIMIT @pageLimit
@@ -250,7 +274,7 @@ export function queryActivityPage(rawQuery: ActivityQuery = {}, options: Activit
   const items = visible.map((row) => storyFromRepresentative(row, events.get(row.story_id) ?? []));
   const last = visible.at(-1);
   const nextCursor = hasMore && last
-    ? encodeCursor({ v: 1, occurredAt: last.occurred_at, id: last.id, snapshotSeq, asOf, queryHash: hash })
+    ? encodeCursor({ v: 2, occurredAt: last.occurred_at, id: last.id, snapshotSeq, asOf, queryHash: hash }, secret)
     : null;
 
   return {

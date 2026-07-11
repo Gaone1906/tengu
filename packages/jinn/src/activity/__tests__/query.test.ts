@@ -1,4 +1,7 @@
 import Database from "better-sqlite3";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { migrateActivitySchema } from "../migrate.js";
 import { ActivityQueryError, getActivityStory, queryActivityPage } from "../query.js";
@@ -98,6 +101,66 @@ describe("Activity query", () => {
     expect(unicode.totals.matching).toBe(1);
   });
 
+  it("establishes current story state before kind/outcome filters while retaining historical search matches", () => {
+    const database = memoryDb();
+    appendActivityEvent(fixture(1, {
+      occurredAt: "2026-07-11T12:00:00.000Z",
+      outcome: { state: "failed", label: "Failed" },
+      summary: "transient-only-marker failed",
+      correlationId: "session:recovery:one",
+      idempotencyKey: "session:failed:recovery-one",
+    }), { database, idFactory: () => idFor(1) });
+    appendActivityEvent(fixture(2, {
+      occurredAt: "2026-07-11T12:01:00.000Z",
+      outcome: { state: "succeeded", label: "Recovered" },
+      summary: "Session recovered",
+      correlationId: "session:recovery:one",
+      idempotencyKey: "session:recovered:recovery-one",
+    }), { database, idFactory: () => idFor(2) });
+
+    expect(queryActivityPage({ outcomes: ["failed"] }, { database, now: () => NOW }).items).toEqual([]);
+    expect(queryActivityPage({ outcomes: ["succeeded"] }, { database, now: () => NOW }).items).toHaveLength(1);
+    const historical = queryActivityPage({ q: "transient-only-marker" }, { database, now: () => NOW });
+    expect(historical.items).toHaveLength(1);
+    expect(historical.items[0]?.headline).toBe("Session recovered");
+    expect(historical.items[0]?.outcome.state).toBe("succeeded");
+  });
+
+  it("separates identical source-local correlations across domains and joins only an explicit namespaced causal root", () => {
+    const database = memoryDb();
+    appendActivityEvent(fixture(1, {
+      kind: "todo",
+      correlationId: "source:local:collision-one",
+      idempotencyKey: "todo:event:collision-one",
+    }), { database, idFactory: () => idFor(1) });
+    appendActivityEvent(fixture(2, {
+      kind: "workflow",
+      correlationId: "source:local:collision-one",
+      idempotencyKey: "workflow:event:collision-one",
+    }), { database, idFactory: () => idFor(2) });
+
+    const separated = queryActivityPage({}, { database, now: () => NOW });
+    expect(separated.items).toHaveLength(2);
+    expect(new Set(separated.items.map((story) => story.id)).size).toBe(2);
+
+    appendActivityEvent(fixture(3, {
+      kind: "todo",
+      correlationId: "todo:local:shared-root",
+      rootEventId: "root:operation:shared-one",
+      idempotencyKey: "todo:event:shared-root",
+    }), { database, idFactory: () => idFor(3) });
+    appendActivityEvent(fixture(4, {
+      kind: "workflow",
+      correlationId: "workflow:local:shared-root",
+      rootEventId: "root:operation:shared-one",
+      idempotencyKey: "workflow:event:shared-root",
+    }), { database, idFactory: () => idFor(4) });
+
+    const joined = queryActivityPage({}, { database, now: () => NOW });
+    expect(joined.items).toHaveLength(3);
+    expect(joined.items.find((story) => story.eventCount === 2)).toBeDefined();
+  });
+
   it("groups only explicit correlation, keeps concurrent same-object stories separate, and returns the redacted causal spine", () => {
     const database = memoryDb();
     const sharedObject = { type: "todo", id: "shared-object", label: "Shared Todo", href: "/todos?item=shared-object" };
@@ -147,5 +210,41 @@ describe("Activity query", () => {
     expect(() => queryActivityPage({ cursor: "not-a-cursor" }, { database })).toThrow(ActivityQueryError);
     expect(() => queryActivityPage({ kinds: ["invalid" as ActivityKind] }, { database })).toThrow(/kind/i);
     expect(() => queryActivityPage({ outcomes: ["unknown" as ActivityOutcomeState] }, { database })).toThrow(/outcome/i);
+  });
+
+  it("HMAC-authenticates every cursor field and byte and accepts an untampered cursor after database reopen", () => {
+    const directory = mkdtempSync(join(tmpdir(), "activity-cursor-"));
+    const path = join(directory, "ledger.db");
+    try {
+      let database = new Database(path);
+      migrateActivitySchema(database);
+      for (let index = 0; index < 4; index++) appendActivityEvent(fixture(index), { database, idFactory: () => idFor(index) });
+      const first = queryActivityPage({ limit: 2 }, { database, now: () => NOW });
+      const cursor = first.page.nextCursor!;
+      const [encodedPayload, signature, extra] = cursor.split(".");
+      expect(encodedPayload).toBeTruthy();
+      expect(signature).toMatch(/^[A-Za-z0-9_-]+$/);
+      expect(extra).toBeUndefined();
+
+      const payload = JSON.parse(Buffer.from(encodedPayload!, "base64url").toString("utf8")) as Record<string, unknown>;
+      for (const field of Object.keys(payload)) {
+        const changed = { ...payload, [field]: typeof payload[field] === "number" ? Number(payload[field]) + 1 : `${String(payload[field])}x` };
+        const tampered = `${Buffer.from(JSON.stringify(changed)).toString("base64url")}.${signature}`;
+        expect(() => queryActivityPage({ limit: 2, cursor: tampered }, { database, now: () => NOW })).toThrow(ActivityQueryError);
+      }
+      for (let index = 0; index < cursor.length; index++) {
+        const replacement = cursor[index] === "A" ? "B" : "A";
+        const tampered = cursor.slice(0, index) + replacement + cursor.slice(index + 1);
+        expect(() => queryActivityPage({ limit: 2, cursor: tampered }, { database, now: () => NOW })).toThrow(ActivityQueryError);
+      }
+
+      database.close();
+      database = new Database(path);
+      migrateActivitySchema(database);
+      expect(queryActivityPage({ limit: 2, cursor }, { database, now: () => NOW }).items).toHaveLength(2);
+      database.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });
