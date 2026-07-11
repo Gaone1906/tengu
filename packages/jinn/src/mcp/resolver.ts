@@ -114,17 +114,23 @@ function buildAvailableServers(config: McpGlobalConfig, attachJinn: boolean): Re
   const servers: Record<string, McpServerConfig> = {};
 
   // Browser automation via Playwright
+  // NOTE: these must be REAL npm packages. The previous specs pointed at
+  // @anthropic-ai/mcp-server-{playwright,puppeteer}, which do not exist on
+  // npm — the server never attached, and worse, engine adapters serialized the
+  // dead spec as a per-session override that SHADOWED a working browser MCP in
+  // the engine's own user config (found via FitBot QA browser-hands test,
+  // 2026-07-11). @playwright/mcp is the official Playwright MCP server.
   if (config.browser?.enabled !== false) {
     const provider = config.browser?.provider || "playwright";
     if (provider === "playwright") {
       servers.browser = {
         command: "npx",
-        args: ["-y", "@anthropic-ai/mcp-server-playwright"],
+        args: ["-y", "@playwright/mcp@latest"],
       };
     } else if (provider === "puppeteer") {
       servers.browser = {
         command: "npx",
-        args: ["-y", "@anthropic-ai/mcp-server-puppeteer"],
+        args: ["-y", "@modelcontextprotocol/server-puppeteer"],
       };
     }
   }
@@ -144,10 +150,14 @@ function buildAvailableServers(config: McpGlobalConfig, attachJinn: boolean): Re
   }
 
   // Web fetch (content extraction)
+  // NOTE: the official reference fetch server (mcp-server-fetch) is a Python
+  // package run via uvx; the previous @anthropic-ai/mcp-server-fetch npm spec
+  // does not exist on npm and never attached (same class of bug as browser
+  // above). Requires uv to be installed (https://docs.astral.sh/uv/).
   if (config.fetch?.enabled) {
     servers.fetch = {
-      command: "npx",
-      args: ["-y", "@anthropic-ai/mcp-server-fetch"],
+      command: "uvx",
+      args: ["mcp-server-fetch"],
     };
   }
 

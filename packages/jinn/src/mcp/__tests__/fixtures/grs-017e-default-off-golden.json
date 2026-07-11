@@ -1,12 +1,12 @@
 {
   "no-global-no-emp": "{\"mcpServers\":{}}",
   "no-global-emp": "{\"mcpServers\":{}}",
-  "empty-global": "{\"mcpServers\":{\"browser\":{\"command\":\"<NODE>\",\"args\":[\"<SCRUB>\",\"npx\",\"-y\",\"@anthropic-ai/mcp-server-playwright\"]}}}",
-  "fetch-only": "{\"mcpServers\":{\"fetch\":{\"command\":\"<NODE>\",\"args\":[\"<SCRUB>\",\"npx\",\"-y\",\"@anthropic-ai/mcp-server-fetch\"]}}}",
+  "empty-global": "{\"mcpServers\":{\"browser\":{\"command\":\"<NODE>\",\"args\":[\"<SCRUB>\",\"npx\",\"-y\",\"@playwright/mcp@latest\"]}}}",
+  "fetch-only": "{\"mcpServers\":{\"fetch\":{\"command\":\"<NODE>\",\"args\":[\"<SCRUB>\",\"uvx\",\"mcp-server-fetch\"]}}}",
   "fetch-only-emp-false": "{\"mcpServers\":{}}",
-  "fetch-only-allowlist": "{\"mcpServers\":{\"fetch\":{\"command\":\"<NODE>\",\"args\":[\"<SCRUB>\",\"npx\",\"-y\",\"@anthropic-ai/mcp-server-fetch\"]}}}",
+  "fetch-only-allowlist": "{\"mcpServers\":{\"fetch\":{\"command\":\"<NODE>\",\"args\":[\"<SCRUB>\",\"uvx\",\"mcp-server-fetch\"]}}}",
   "gateway-empty": "{\"mcpServers\":{}}",
   "gateway-false-custom": "{\"mcpServers\":{\"demo\":{\"command\":\"<NODE>\",\"args\":[\"<SCRUB>\",\"run\",\"--x\"],\"env\":{\"TOKEN\":\"expanded-secret-value\"}}}}",
   "gateway-absent-emp-requests-jinn": "{\"mcpServers\":{}}",
-  "claude-temp-file-bytes": "{\n  \"mcpServers\": {\n    \"fetch\": {\n      \"command\": \"<NODE>\",\n      \"args\": [\n        \"<SCRUB>\",\n        \"npx\",\n        \"-y\",\n        \"@anthropic-ai/mcp-server-fetch\"\n      ]\n    }\n  }\n}"
+  "claude-temp-file-bytes": "{\n  \"mcpServers\": {\n    \"fetch\": {\n      \"command\": \"<NODE>\",\n      \"args\": [\n        \"<SCRUB>\",\n        \"uvx\",\n        \"mcp-server-fetch\"\n      ]\n    }\n  }\n}"
 }
