@@ -80,9 +80,18 @@ describe('gateway boot ordering — managed cron fires can never land half-wired
   it('arms the jinn MCP attach gate before replaying pending web queue items', () => {
     const listen = callIndex('server.listen(port, host)');
     const arm = callIndex('await armJinnAttachGate(currentConfig.mcp');
-    const replay = callIndex('resumePendingWebQueueItems(apiContext)');
+    const replay = serverSource.indexOf('resumePendingWebQueueItems(apiContext)', arm);
 
     expect(arm).toBeGreaterThan(listen);
+    expect(replay).toBeGreaterThan(-1);
     expect(replay).toBeGreaterThan(arm);
+  });
+
+  it('retries persisted pending callback queues after engines/configuration reload', () => {
+    const reloadStart = callIndex('const reloadConfig = (): void =>');
+    const reloadEnd = callIndex('apiContext.reloadConfig = reloadConfig');
+    const reloadBody = serverSource.slice(reloadStart, reloadEnd);
+
+    expect(reloadBody).toContain('resumePendingWebQueueItems(apiContext)');
   });
 });

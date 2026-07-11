@@ -449,14 +449,25 @@ export function resumePendingWebQueueItems(context: ApiContext): void {
     // Ordinary non-web queue ownership remains connector-specific. Callback
     // receipts are the exception: acceptance already committed this internal
     // turn, so startup replay must finish it regardless of the parent's source.
-    if (session.source !== "web" && !getCallbackDeliveryByQueueItemId(item.id)) continue;
+    const callbackDelivery = getCallbackDeliveryByQueueItemId(item.id);
+    if (session.source !== "web" && !callbackDelivery) continue;
     session = maybeRevertEngineOverride(session);
 
     const config = context.getConfig();
     const engine = context.sessionManager.getEngine(session.engine);
     if (!engine) {
-      cancelQueueItem(item.id);
-      updateSession(session.id, { status: "error", lastActivity: new Date().toISOString(), lastError: `Engine "${session.engine}" not available` });
+      const diagnostic = `Engine "${session.engine}" not available`;
+      if (callbackDelivery) {
+        // Acceptance committed this exact queue row as part of the callback
+        // outbox. Engine availability is transient operational state, not a
+        // reason to destroy that accepted intent. Keep the row pending so a
+        // later config/engine reload can replay the same durable ID.
+        updateSession(session.id, { lastActivity: new Date().toISOString(), lastError: diagnostic });
+        logger.warn(`Deferred accepted callback queue ${item.id}: ${diagnostic}`);
+      } else {
+        cancelQueueItem(item.id);
+        updateSession(session.id, { status: "error", lastActivity: new Date().toISOString(), lastError: diagnostic });
+      }
       continue;
     }
 

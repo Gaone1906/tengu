@@ -782,6 +782,74 @@ describe("parent callback reliability", () => {
     });
   });
 
+  it.each(["web", "talk"] as const)(
+    "keeps an accepted %s callback queue intent pending while its engine is unavailable",
+    async (source) => {
+      const seenPrompts: string[] = [];
+      const events: Array<{ event: string; data: unknown }> = [];
+      const engine = makeEngine(seenPrompts);
+      const parent = createParent(`missing-engine-${source}`, source);
+      const delivery = registry.claimCallbackDelivery({
+        parentSessionId: parent.id,
+        childSessionId: `child-missing-engine-${source}`,
+        attemptToken: `attempt-missing-engine-${source}`,
+        terminalOutcome: "succeeded",
+        terminalVersion: 1,
+        callbackKind: source === "web" ? "parent-completion" : "talk-attachment",
+        payload: {
+          message: `callback survives ${source} engine outage`,
+          displayMessage: "Worker replied\nEngine outage result",
+        },
+      }).delivery;
+      const preRestartQueue = {
+        clearCancelled: () => {},
+        enqueue: async () => {},
+      };
+
+      await postCallbackDelivery(makeContext(engine, preRestartQueue, events), parent.id, delivery.id);
+      const accepted = registry.getCallbackDelivery(delivery.id)!;
+      const messageId = accepted.messageId;
+      const queueItemId = accepted.queueItemId;
+      expect(accepted).toMatchObject({ status: "accepted" });
+      expect(messageId).toBeTruthy();
+      expect(queueItemId).toBeTruthy();
+
+      const postRestartQueue = new queueModule.SessionQueue();
+      const restoredContext = makeContext(engine, postRestartQueue, events);
+      let engineAvailable = false;
+      restoredContext.sessionManager.getEngine = () => engineAvailable ? engine : undefined;
+
+      api.resumePendingWebQueueItems(restoredContext);
+
+      expect(seenPrompts).toEqual([]);
+      expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({
+        status: "accepted",
+        messageId,
+        queueItemId,
+      });
+      expect(registry.listAllPendingQueueItems()).toEqual([
+        expect.objectContaining({ id: queueItemId, status: "pending" }),
+      ]);
+
+      engineAvailable = true;
+      api.resumePendingWebQueueItems(restoredContext);
+
+      await eventually(() => {
+        expect(postRestartQueue.isRunning(parent.sessionKey)).toBe(false);
+        expect(seenPrompts).toEqual([`callback survives ${source} engine outage`]);
+        expect(registry.listAllPendingQueueItems()).toEqual([]);
+      });
+      expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({
+        status: "accepted",
+        messageId,
+        queueItemId,
+      });
+      expect(registry.getMessages(parent.id).filter((message) => message.role === "notification"))
+        .toHaveLength(1);
+      expect(events.filter(({ event }) => event === "session:notification")).toHaveLength(1);
+    },
+  );
+
   it("delivers a legitimate resumed attempt as a second callback", async () => {
     const seenPrompts: string[] = [];
     const engine = makeEngine(seenPrompts);

@@ -1003,6 +1003,10 @@ export async function startGateway(
       // its first await, so the reload window fails closed, never stale-open.
       // Employees threaded so a jinnMcp pilot arms the gate too (finding 1).
       void armJinnAttachGate(currentConfig.mcp, { gatewayUrl: process.env.JINN_GATEWAY_URL!, log: logger, employees: employeeRegistry.values() }).catch(() => {});
+      // Accepted callback queue intents survive a temporarily unavailable
+      // engine. Re-evaluate them whenever configuration/model availability is
+      // refreshed so recovery does not require another restart or callback.
+      resumePendingWebQueueItems(apiContext);
       logger.info("Config reloaded successfully");
       emit("config:reloaded", {});
     } catch (err) {
