@@ -7,7 +7,7 @@ import { ChatInput } from '@/components/chat/chat-input'
 import { CliKeybar } from '@/components/chat/cli-keybar'
 import { ChatEmployeePicker } from '@/components/chat/chat-employee-picker'
 import { QueuePanel } from '@/components/chat/queue-panel'
-import { BackgroundActivityPill } from '@/components/chat/background-activity-pill'
+import { BackgroundActivityStatus } from '@/components/chat/background-activity-status'
 import { ModelSelectorRow, type SelectorValue } from '@/components/chat/model-selector-row'
 import { useLiveSession } from '@/hooks/use-live-session'
 
@@ -552,13 +552,6 @@ export function ChatPane({
         />
       )}
 
-      {/* Background-work indicator — the session is officially idle but subagents /
-          background tasks are still running. Informational only (input stays live);
-          hidden while a foreground turn is streaming and in the CLI view. */}
-      {!(viewMode === 'cli' && sessionId) && !loading && (
-        <BackgroundActivityPill activity={backgroundActivity} />
-      )}
-
       {/* Input — chat-style composer for every view, including CLI (the PTY engine
           accepts attachments + the prompt is injected into xterm via bracketed-paste). */}
       <ChatInput
@@ -574,6 +567,15 @@ export function ChatPane({
         onDroppedFilesConsumed={() => setDroppedFiles(undefined)}
         focusTrigger={focusTrigger}
         onShortcutsClick={onShortcutsClick}
+        statusSlot={
+          // Background-work StateLine — the session is officially idle but
+          // subagents / background tasks are still running. Informational only
+          // (input stays live); hidden while a foreground turn is streaming
+          // (the "Thinking" indicator owns that) and in the CLI view.
+          !(viewMode === 'cli' && sessionId) && !loading ? (
+            <BackgroundActivityStatus activity={backgroundActivity} />
+          ) : undefined
+        }
         selectorSlot={
           <ModelSelectorRow
             mode={sessionId ? 'existing' : 'new'}

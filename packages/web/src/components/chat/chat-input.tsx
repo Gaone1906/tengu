@@ -136,6 +136,9 @@ interface ChatInputProps {
   onShortcutsClick?: () => void
   /** Optional Engine/Model/Effort selector row, rendered just above the input. */
   selectorSlot?: React.ReactNode
+  /** Optional ambient status (e.g. background-activity StateLine), rendered in
+   *  the toolbar's flexible middle so it never shifts layout. */
+  statusSlot?: React.ReactNode
   /** Optional compact terminal controls rendered with the helper hints on desktop. */
   terminalActionsSlot?: React.ReactNode
   /** Optional compact terminal controls rendered as a tucked icon on mobile. */
@@ -213,6 +216,7 @@ export function ChatInput({
   focusTrigger,
   onShortcutsClick,
   selectorSlot,
+  statusSlot,
   terminalActionsSlot,
   mobileTerminalActionsSlot,
 }: ChatInputProps) {
@@ -807,7 +811,13 @@ export function ChatInput({
             </div>
           )}
 
-          <div className="flex-1" />
+          {/* Ambient status sits centered in the toolbar's flexible middle.
+              flex-1 (basis-0) claims only LEFTOVER space, so the slot can never
+              push or truncate its siblings — appearing/disappearing moves
+              nothing, and an overlong status clips inside this container. */}
+          <div className="flex min-w-0 flex-1 items-center justify-center overflow-hidden">
+            {statusSlot}
+          </div>
 
           {/* Language picker — only shown when multiple STT languages configured */}
           {stt.languages.length > 1 && (

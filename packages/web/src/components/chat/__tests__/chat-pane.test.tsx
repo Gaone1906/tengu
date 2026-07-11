@@ -80,8 +80,8 @@ vi.mock('@/components/chat/queue-panel', () => ({
   QueuePanel: () => null,
 }))
 
-vi.mock('@/components/chat/background-activity-pill', () => ({
-  BackgroundActivityPill: () => null,
+vi.mock('@/components/chat/background-activity-status', () => ({
+  BackgroundActivityStatus: () => null,
 }))
 
 vi.mock('@/components/chat/cli-keybar', () => ({
