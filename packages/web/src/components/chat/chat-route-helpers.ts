@@ -26,6 +26,65 @@ export function resolveDeepLink(sp: URLSearchParams): DeepLink {
   return null
 }
 
+// ---------------------------------------------------------------------------
+// Selected-session URL model
+//
+// The URL is the single source of truth for the active chat session:
+// `/?session=<id>`. User-initiated selections PUSH a history entry; system-
+// initiated ones (auto-select, tab restore/close fallout, session-created)
+// REPLACE. Thread drill-ins additionally carry their origin in history state
+// (`{ from: ThreadOrigin }`), rendered as the in-app back chip — Jinn ships in
+// chrome-less Tauri shells, so every drill-in needs an in-app way back while
+// browser back keeps working on the web.
+// ---------------------------------------------------------------------------
+
+/** Read the selected session id from a location search string (null = none). */
+export function parseSelectedSession(search: string | URLSearchParams): string | null {
+  const sp = typeof search === 'string' ? new URLSearchParams(search) : search
+  return sp.get('session')?.trim() || null
+}
+
+/** Canonical path for a selected session (chat lives at `/`). */
+export function sessionPath(id: string): string {
+  return `/?session=${encodeURIComponent(id)}`
+}
+
+/** Where a drill-in came from — pushed as history state by open-thread jumps. */
+export interface ThreadOrigin {
+  id: string
+  label: string
+}
+
+/**
+ * Parse a history `location.state` into a ThreadOrigin. Defensive: state is
+ * untyped, survives refreshes, and may come from older builds — anything that
+ * isn't `{ from: { id: string, label: string } }` with non-empty values is null.
+ */
+export function parseThreadOrigin(state: unknown): ThreadOrigin | null {
+  if (!state || typeof state !== 'object') return null
+  const from = (state as { from?: unknown }).from
+  if (!from || typeof from !== 'object') return null
+  const { id, label } = from as { id?: unknown; label?: unknown }
+  if (typeof id !== 'string' || !id.trim()) return null
+  if (typeof label !== 'string' || !label.trim()) return null
+  return { id: id.trim(), label: label.trim() }
+}
+
+/**
+ * The back chip's label: the parent session's voice. Employee sessions read as
+ * the employee's display-cased name ("jinn-dev" → "Jinn Dev"); direct sessions
+ * belong to the portal persona (COO), so they read as the portal name.
+ */
+export function threadOriginLabel(employee: string | null | undefined, portalName: string): string {
+  const slug = employee?.trim()
+  if (!slug) return portalName
+  return slug
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part[0]!.toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
 /**
  * Merge the employees that already have sessions with the full org roster so
  * session-less employees are still listed (and contactable) in the sidebar.

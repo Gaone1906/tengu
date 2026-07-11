@@ -69,9 +69,14 @@ function saveTabs(state: TabState) {
 
 export function useChatTabs() {
   const [{ tabs, activeIndex }, setState] = useState<TabState>({ tabs: [], activeIndex: -1 })
+  // False until the persisted tabs have been loaded — reconcilers that compare
+  // the active tab against external state (the URL's selected session) must
+  // wait for hydration or they'd fire against the pre-load empty tab list.
+  const [hydrated, setHydrated] = useState(false)
 
   useEffect(() => {
     setState(loadTabs())
+    setHydrated(true)
   }, [])
 
   useEffect(() => {
@@ -91,9 +96,12 @@ export function useChatTabs() {
     const tab: SessionTab = { ...incoming, kind: 'session' }
     setState((current) => {
       // Already open? Just switch to it — keep existing label/status.
-      // Dedupe on session identity only among session tabs.
+      // Dedupe on session identity only among session tabs. Bail out with the
+      // SAME state object when it's already active so effect-driven callers
+      // (URL → tab sync) never trigger a render loop.
       const existing = current.tabs.findIndex((t) => t.kind === 'session' && t.sessionId === tab.sessionId)
       if (existing >= 0) {
+        if (current.activeIndex === existing) return current
         return { tabs: current.tabs, activeIndex: existing }
       }
 
@@ -316,12 +324,12 @@ export function useChatTabs() {
   )
 
   return useMemo(() => ({
-    tabs, activeTab, activeIndex,
+    tabs, activeTab, activeIndex, hydrated,
     openTab, openFileTab, closeTab, switchTab, nextTab, prevTab,
     pinTab, moveTab,
     clearActiveTab, updateTabStatus,
     closeTabBySessionId, reconcileTabs,
-  }), [tabs, activeTab, activeIndex,
+  }), [tabs, activeTab, activeIndex, hydrated,
     openTab, openFileTab, closeTab, switchTab, nextTab, prevTab,
     pinTab, moveTab,
     clearActiveTab, updateTabStatus,

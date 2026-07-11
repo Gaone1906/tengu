@@ -164,16 +164,17 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
     setEngineChoice({ engine: defaultEng, model: defaultModel, effortLevel: "medium" })
   }, [engineChoice.engine, enginesData])
 
-  // Dismiss the loading bridge once ChatPage's deep-link effect has consumed
-  // the ?session= param. ChatPage calls handleSelect(id) then clears the param
-  // in the same React batch, so when ?session= is gone from the URL, ChatPane
-  // already has sessionId set and the seed message in its initial render state.
+  // Dismiss the loading bridge once the ?session= navigation has landed.
+  // ?session= is the PERSISTENT selection
+  // (ChatPage derives the active session from the URL), so ChatPane mounts with
+  // sessionId + the seed message in the same render the param appears — there
+  // is no consume step to wait on any more.
   // One requestAnimationFrame lets the browser commit that paint before we drop
   // the overlay → no blank frame between the loading bridge and the seed message.
   useEffect(() => {
     if (!launching || !launchingSessionId) return
     const params = new URLSearchParams(location.search)
-    if (params.get('session') === launchingSessionId) return // still pending
+    if (params.get('session') !== launchingSessionId) return // not yet navigated
     const rafId = requestAnimationFrame(() => {
       setLaunching(false)
       setVisible(false)

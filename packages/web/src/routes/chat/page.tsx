@@ -1,7 +1,14 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo, Suspense, lazy } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
-import { resolveDeepLink } from '@/components/chat/chat-route-helpers'
+import {
+  parseSelectedSession,
+  parseThreadOrigin,
+  resolveDeepLink,
+  sessionPath,
+  threadOriginLabel,
+  type ThreadOrigin,
+} from '@/components/chat/chat-route-helpers'
 import { useGateway } from '@/hooks/use-gateway'
 import { PageLayout } from '@/components/page-layout'
 import { ChatSidebar, type SidebarOrder } from '@/components/chat/chat-sidebar'
@@ -16,7 +23,7 @@ const FileView = lazy(() =>
 )
 import { FileOpenContext } from '@/components/chat/file-open-context'
 import { ShortcutOverlay } from '@/components/chat/shortcut-overlay'
-import { useChatTabs } from '@/hooks/use-chat-tabs'
+import { useChatTabs, type ChatTab } from '@/hooks/use-chat-tabs'
 import { useKeyboardShortcuts, type ShortcutDef } from '@/hooks/use-keyboard-shortcuts'
 import { useDeleteSession, useDuplicateSession, useSessions } from '@/hooks/use-sessions'
 import { clearIntermediateMessages } from '@/lib/conversations'
@@ -77,7 +84,25 @@ export default function ChatPageWrapper() {
 function ChatPage() {
   const { settings } = useSettings()
   const portalName = settings.portalName ?? 'Jinn'
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  // The URL is the single source of truth for the selected session
+  // (`/?session=<id>`) — selecting is a navigation, so browser back/forward
+  // walk the session trail, refresh restores the thread, and links carry it.
+  // A thread drill-in's history entry also carries its origin (the back chip);
+  // Jinn ships in chrome-less Tauri shells, so every drill-in needs an in-app
+  // way back while browser back keeps working on the web.
+  const location = useLocation()
+  const navigate = useNavigate()
+  const navigationType = useNavigationType()
+  const selectedId = useMemo(() => parseSelectedSession(location.search), [location.search])
+  const threadOrigin = useMemo(() => parseThreadOrigin(location.state), [location.state])
+  const selectedIdRef = useRef<string | null>(selectedId)
+  useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
+  // Router location updates are React TRANSITIONS (react-router wraps them in
+  // startTransition), so our own urgent state (openTab, closeTab) can commit a
+  // frame BEFORE the URL. While one of our navigations is in flight, the
+  // tab→URL reconciler must stand down or it re-navigates against the stale
+  // URL and clobbers the entry (state included). undefined = nothing pending.
+  const pendingNavRef = useRef<string | null | undefined>(undefined)
   const [mobileView, setMobileView] = useState<'sidebar' | 'chat'>('sidebar')
   // sessionMeta carries the sessionId it belongs to so the tab-label effect
   // can ignore stale meta from a previous session mid-switch (title flash fix).
@@ -261,10 +286,14 @@ function ChatPage() {
     []
   )
 
+  // The single session-navigation helper — every selection funnels here
+  // (sidebar, open-thread jumps, keyboard nav, tab shortcuts). User-initiated
+  // selections PUSH a history entry; system-initiated callers (auto-select,
+  // tab restore) pass `replace`. `from` is a drill-in's origin, carried in
+  // history state for the back chip.
   const handleSelect = useCallback(
-    (id: string, opts?: { navigateMobile?: boolean }) => {
+    (id: string, opts?: { navigateMobile?: boolean; replace?: boolean; from?: ThreadOrigin }) => {
       newChatIntentRef.current = false
-      setSelectedId(id)
       // On mobile, opening a session pushes from the list into the thread. The
       // one exception is the background auto-select of the most-recent session
       // (see handleSessionsLoaded): it primes selectedId for the desktop thread
@@ -273,9 +302,45 @@ function ChatPage() {
       if (opts?.navigateMobile !== false) setMobileView('chat')
       // Open a tab — label will be updated once session meta loads
       chatTabs.openTab({ sessionId: id, label: 'Loading...', status: 'idle', unread: false })
+      // Skip when already selected — and dedupe re-fires while the same
+      // navigation is still in flight (double-click, repeated auto-select).
+      if (id !== selectedIdRef.current && pendingNavRef.current !== id) {
+        pendingNavRef.current = id
+        navigate(sessionPath(id), {
+          replace: opts?.replace,
+          state: opts?.from ? { from: opts.from } : undefined,
+        })
+      }
     },
-    [chatTabs]
+    [chatTabs, navigate]
   )
+
+  // URL → tab/intent sync: covers selections that did NOT come through
+  // handleSelect — back/forward (POP), deep links, manual URL edits. openTab
+  // dedupes and bails when already active, so re-running after a handleSelect
+  // push is a no-op.
+  const didMountRef = useRef(false)
+  useEffect(() => {
+    // A selectedId change means a navigation landed — any in-flight sentinel
+    // is done (ours just arrived; a competing user navigation obsoletes it).
+    pendingNavRef.current = undefined
+    if (selectedId) {
+      newChatIntentRef.current = false
+      chatTabs.openTab({ sessionId: selectedId, label: 'Loading...', status: 'idle', unread: false })
+    } else if (didMountRef.current) {
+      // Landed on bare `/` mid-session. On history traversal, arm the new-chat
+      // intent so the auto-select can't hijack the back button — and on mobile,
+      // "before any selection" means the chat LIST, so land there.
+      if (navigationType === 'POP') {
+        newChatIntentRef.current = true
+        setMobileView('sidebar')
+      }
+      chatTabs.clearActiveTab()
+    }
+    didMountRef.current = true
+    // openTab/clearActiveTab are stable; depending on the whole chatTabs memo
+    // would re-fire this on every tab mutation.
+  }, [selectedId, navigationType, chatTabs.openTab, chatTabs.clearActiveTab])
 
   // Auto-focus the input on any session change (sidebar click, tab switch,
   // keyboard nav, "+ New"). Effect runs after ChatPane (key=selectedId)
@@ -287,12 +352,16 @@ function ChatPage() {
   const handleNewChat = useCallback(() => {
     newChatIntentRef.current = true
     setPendingEmployee(null)
-    setSelectedId(null)
-    setSessionMeta(null)
     setMobileView('chat')
     setEmployeeSessions([])
     chatTabs.clearActiveTab()
-  }, [chatTabs])
+    // Leaving a session for the composer is a navigation — push, so back
+    // returns to the thread you left. (sessionMeta clears via the sync effect.)
+    if (selectedIdRef.current) {
+      pendingNavRef.current = null
+      navigate('/')
+    }
+  }, [chatTabs, navigate])
 
   // Start a new chat with a specific employee preselected — used when contacting
   // a session-less employee from the sidebar roster or via an ?employee= deep-link.
@@ -300,31 +369,33 @@ function ChatPage() {
   const contactEmployee = useCallback((name: string) => {
     newChatIntentRef.current = true
     setPendingEmployee(name)
-    setSelectedId(null)
-    setSessionMeta(null)
     setMobileView('chat')
     setEmployeeSessions([])
     chatTabs.clearActiveTab()
-  }, [chatTabs])
+    // Contacting from within a session is a navigation to the composer — push.
+    if (selectedIdRef.current) {
+      pendingNavRef.current = null
+      navigate('/')
+    }
+  }, [chatTabs, navigate])
 
-  // Deep-links: ?session=<id> focuses/opens that session's tab; ?employee=<name>
-  // opens a new chat with that employee preselected. The param is consumed once
-  // (cleared from the URL) so it doesn't re-fire on unrelated re-renders or stick
-  // across navigation. Mirrors routes/file/page.tsx's useSearchParams usage.
+  // ?employee=<name> deep-link: an INTENT (compose to that employee), not a
+  // location — consumed once so it doesn't re-fire or stick. ?session= is NOT
+  // consumed any more: it IS the selection (see the URL model above);
+  // resolveDeepLink's session-first precedence keeps a stray employee param
+  // inert next to a session link.
   const [searchParams, setSearchParams] = useSearchParams()
   useEffect(() => {
     const link = resolveDeepLink(searchParams)
-    if (!link) return
-    if (link.kind === 'session') handleSelect(link.id)
-    else contactEmployee(link.name)
+    if (link?.kind !== 'employee') return
+    contactEmployee(link.name)
     const next = new URLSearchParams(searchParams)
-    next.delete('session')
     next.delete('employee')
     setSearchParams(next, { replace: true })
-  }, [searchParams, handleSelect, contactEmployee, setSearchParams])
+  }, [searchParams, contactEmployee, setSearchParams])
 
   // Back target for the mobile file-view "back" button: the session that was
-  // active when a file link was clicked. selectedIdRef (declared below) is read
+  // active when a file link was clicked. selectedIdRef (declared above) is read
   // at call time so the callback stays stable.
   const fileBackTargetRef = useRef<string | null>(null)
 
@@ -355,8 +426,9 @@ function ChatPage() {
       if (!selectedId && !newChatIntentRef.current && sessions.length > 0) {
         // Background auto-select of the most-recent session: primes the desktop
         // thread, but stays on the chat LIST on mobile (navigateMobile: false),
-        // so tapping the Chat tab opens the list to pick/start a chat.
-        handleSelect(sessions[0].id, { navigateMobile: false })
+        // so tapping the Chat tab opens the list to pick/start a chat. REPLACE —
+        // a system pick must not create a history entry.
+        handleSelect(sessions[0].id, { navigateMobile: false, replace: true })
       }
     },
     [selectedId, handleSelect]
@@ -367,20 +439,21 @@ function ChatPage() {
       await deleteSessionMutation.mutateAsync(id)
     } catch { /* sidebar may have already deleted it */ }
     if (selectedId === id) {
-      setSelectedId(null)
-      setSessionMeta(null)
+      // The session is gone — REPLACE its URL entry with the composer; the
+      // sessions reload below then auto-selects the most recent chat.
+      pendingNavRef.current = null
+      navigate('/', { replace: true })
     }
     clearIntermediateMessages(id)
     chatTabs.closeTab(chatTabs.tabs.findIndex(t => t.kind === 'session' && t.sessionId === id))
     setShowMoreMenu(false)
     qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
-  }, [selectedId, chatTabs, deleteSessionMutation, qc])
+  }, [selectedId, chatTabs, deleteSessionMutation, qc, navigate])
 
   const handleDuplicate = useCallback(async (id: string) => {
     try {
       const result = await duplicateSessionMutation.mutateAsync(id) as { id?: string; title?: string; employee?: string }
       if (result?.id) {
-        setSelectedId(result.id)
         chatTabs.openTab({
           sessionId: result.id,
           label: result.title || 'Duplicated Chat',
@@ -389,13 +462,16 @@ function ChatPage() {
           pinned: true,
           employeeName: result.employee || undefined,
         })
+        // Opening the duplicate is a user navigation — push.
+        pendingNavRef.current = result.id
+        navigate(sessionPath(result.id))
         setShowMoreMenu(false)
         qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
       }
     } catch (err: any) {
       window.alert(`Duplicate failed: ${err.message || 'Unknown error'}`)
     }
-  }, [chatTabs, duplicateSessionMutation, qc])
+  }, [chatTabs, duplicateSessionMutation, qc, navigate])
 
   const handleDuplicateFromSidebar = useCallback((newSessionId: string) => {
     chatTabs.openTab({ sessionId: newSessionId, label: 'Duplicated Chat', status: 'idle', unread: false, pinned: true })
@@ -405,10 +481,13 @@ function ChatPage() {
   // ChatPane callbacks
   const handleSessionCreated = useCallback((newId: string, pending?: Message) => {
     if (pending) setPendingUserMessage({ sessionId: newId, message: pending })
-    setSelectedId(newId)
     chatTabs.openTab({ sessionId: newId, label: 'New Chat', status: 'running', unread: false, pinned: true })
+    // REPLACE — the composer entry BECOMES the created session (same
+    // conversation); back should skip the empty composer, not revisit it.
+    pendingNavRef.current = newId
+    navigate(sessionPath(newId), { replace: true })
     qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
-  }, [chatTabs, qc])
+  }, [chatTabs, qc, navigate])
 
   // Clear pendingUserMessage when selectedId moves away from the session it was created for
   useEffect(() => {
@@ -419,9 +498,8 @@ function ChatPage() {
 
   // Tag incoming meta with the sessionId it belongs to so consumers (e.g.
   // the tab-label effect) can ignore stale meta from a previous session.
-  // We read selectedId via a ref so this callback stays stable.
-  const selectedIdRef = useRef<string | null>(selectedId)
-  useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
+  // We read selectedId via a ref (declared with the URL model above) so this
+  // callback stays stable.
   const handleSessionMetaChange = useCallback((meta: { title?: string; employee?: string; engine?: string; engineSessionId?: string; model?: string }) => {
     const sid = selectedIdRef.current
     if (!sid) return
@@ -431,6 +509,27 @@ function ChatPage() {
   const handleRefresh = useCallback(() => {
     qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
   }, [qc])
+
+  // Open-thread jumps (callback / dispatch / handoff cards) drill DOWN from the
+  // current thread — a normal selection push, plus the origin in history state
+  // so the child renders a back chip to its parent. sessionMeta is read via a
+  // ref to keep the callback stable (it flows into every memoized message row).
+  const sessionMetaRef = useRef(sessionMeta)
+  useEffect(() => { sessionMetaRef.current = sessionMeta }, [sessionMeta])
+  const openThread = useCallback((childId: string) => {
+    const parentId = selectedIdRef.current
+    handleSelect(childId, parentId ? {
+      from: { id: parentId, label: threadOriginLabel(sessionMetaRef.current?.employee, portalName) },
+    } : undefined)
+  }, [handleSelect, portalName])
+
+  // The in-app way back for a drill-in: POP the entry the jump pushed (never
+  // push a new one) — browser back and the chip walk the same trail.
+  const goBackToOrigin = useCallback(() => navigate(-1), [navigate])
+  const backTo = useMemo(
+    () => (threadOrigin && selectedId ? { label: threadOrigin.label, onClick: goBackToOrigin } : undefined),
+    [threadOrigin, selectedId, goBackToOrigin],
+  )
 
   // Navigation helpers for keyboard shortcuts
   const navigateSession = useCallback((direction: 1 | -1) => {
@@ -475,6 +574,21 @@ function ChatPage() {
     } catch { /* silently fail */ }
   }, [selectedId])
 
+  // Tab activation = session selection (pushes a history entry) for session
+  // tabs; file tabs stay a pure tab-model switch (they live outside the URL).
+  const activateTab = useCallback((index: number) => {
+    const target = chatTabs.tabs[index]
+    if (!target) return
+    if (target.kind === 'session') handleSelect(target.sessionId)
+    else chatTabs.switchTab(index)
+  }, [chatTabs, handleSelect])
+
+  const cycleTab = useCallback((direction: 1 | -1) => {
+    const count = chatTabs.tabs.length
+    if (count === 0) return
+    activateTab((chatTabs.activeIndex + direction + count) % count)
+  }, [chatTabs, activateTab])
+
   // Centralized keyboard shortcut registry
   const shortcuts = useMemo<ShortcutDef[]>(() => [
     { key: 'n', category: 'Actions', description: 'New chat', action: handleNewChat },
@@ -496,8 +610,8 @@ function ChatPage() {
     { key: 'w', modifiers: ['meta'], category: 'Actions', description: 'Close tab', action: () => {
       if (chatTabs.activeIndex >= 0) chatTabs.closeTab(chatTabs.activeIndex)
     }},
-    { key: '[', modifiers: ['meta', 'shift'], category: 'Navigation', description: 'Previous tab', action: () => chatTabs.prevTab() },
-    { key: ']', modifiers: ['meta', 'shift'], category: 'Navigation', description: 'Next tab', action: () => chatTabs.nextTab() },
+    { key: '[', modifiers: ['meta', 'shift'], category: 'Navigation', description: 'Previous tab', action: () => cycleTab(-1) },
+    { key: ']', modifiers: ['meta', 'shift'], category: 'Navigation', description: 'Next tab', action: () => cycleTab(1) },
     // Fold/unfold the chat list. ⌥⌘S is the macOS-native sidebar toggle; ⌘\ is
     // the web-friendly alias (Linear/VS Code class).
     { key: 's', modifiers: ['meta', 'alt'], category: 'Navigation', description: 'Toggle chat list', action: toggleList },
@@ -507,28 +621,44 @@ function ChatPage() {
       modifiers: ['meta' as const, 'alt' as const],
       category: 'Navigation' as const,
       description: `Tab ${i + 1}`,
-      action: () => chatTabs.switchTab(i),
+      action: () => activateTab(i),
     })),
-  ], [handleNewChat, navigateSession, cycleEmployee, copyChat, selectedId, showShortcutOverlay, showMoreMenu, chatTabs, toggleList])
+  ], [handleNewChat, navigateSession, cycleEmployee, copyChat, selectedId, showShortcutOverlay, showMoreMenu, chatTabs, toggleList, activateTab, cycleTab])
 
   useKeyboardShortcuts(shortcuts)
 
-  // When active tab changes, sync selectedId
+  // Tab → URL reconciliation: tab restore on mount, ⌘W close fallout, and
+  // orphan-tab drops land on the tab model first — reflect them into the URL
+  // with REPLACE (system-initiated, not user navigation). Gated on hydration
+  // so the pre-load empty tab list can't clobber a deep link, and on the
+  // active tab OBJECT actually changing: when only the URL moved (back/
+  // forward, deep link), the stale active tab must not drag the URL backwards
+  // — the URL wins and the openTab sync above brings the tabs along.
+  const prevActiveTabRef = useRef<ChatTab | null | undefined>(undefined)
   useEffect(() => {
+    if (!chatTabs.hydrated) return
+    // One of our navigations is still in flight (location commits are lower-
+    // priority transitions) — the URL is stale; reconciling now would drag it
+    // backwards. The effect re-runs when the navigation lands (selectedId dep).
+    if (pendingNavRef.current !== undefined) return
     const at = chatTabs.activeTab
+    const tabChanged = prevActiveTabRef.current === undefined || prevActiveTabRef.current !== at
+    prevActiveTabRef.current = at
+    if (!tabChanged) return
+
     if (at && at.kind === 'session' && at.sessionId !== selectedId) {
-      setSelectedId(at.sessionId)
+      handleSelect(at.sessionId, { replace: true, navigateMobile: false })
       return
     }
 
     if (!at && selectedId && !newChatIntentRef.current) {
-      setSelectedId(null)
-      setSessionMeta(null)
       setEmployeeSessions([])
+      pendingNavRef.current = null
+      navigate('/', { replace: true })
     }
     // When at.kind === 'file', leave selectedId untouched — we render FileView
     // instead of ChatPane, but the underlying session selection is preserved.
-  }, [chatTabs.activeTab, selectedId])
+  }, [chatTabs.hydrated, chatTabs.activeTab, selectedId, handleSelect, navigate])
 
   const cliModeAvailable = !sessionMeta?.engine || ['claude', 'codex', 'antigravity', 'grok'].includes(sessionMeta.engine)
   const activeSessionTab = chatTabs.activeTab?.kind === 'session' ? chatTabs.activeTab : null
@@ -722,6 +852,7 @@ function ChatPage() {
           <ChatHeaderPills
             hideOnMobile={onMobileList}
             title={headerTitle}
+            backTo={backTo}
             onBack={backToList}
             onNew={handleNewChat}
             moreMenu={moreMenu}
@@ -788,7 +919,7 @@ function ChatPage() {
                     ? pendingUserMessage.message
                     : undefined
                 }
-                onOpenThread={handleSelect}
+                onOpenThread={openThread}
               />
             )}
           </div>

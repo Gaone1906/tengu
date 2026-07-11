@@ -16,6 +16,12 @@ export interface ChatHeaderPillsProps {
 
   /** Mobile-only: pop back from the thread to the chat list. */
   onBack?: () => void
+  /** In-app way back for a thread opened FROM another session (open-thread
+   *  drill-in): the parent's name + a handler that pops the history entry.
+   *  Desktop renders it as a quiet chip before the title; mobile turns the
+   *  nav-bar back control into `‹ Parent` (iOS previous-screen idiom). Absent
+   *  for sidebar-opened sessions — the sidebar IS the navigation. */
+  backTo?: { label: string; onClick: () => void }
   /** Start a new chat (compose). */
   onNew: () => void
   /** Existing "more" (…) menu element, rendered as the last pill control. */
@@ -45,6 +51,7 @@ export function ChatHeaderPills({
   title,
   hideOnMobile,
   onBack,
+  backTo,
   onNew,
   moreMenu,
 }: ChatHeaderPillsProps) {
@@ -53,8 +60,20 @@ export function ChatHeaderPills({
       {/* DESKTOP — slim inline thread title (top-left, plain text, no pill).
           Understated by design: 15px subheadline, semibold, single line, ellipsis.
           h-10 + top-4 puts its vertical center on the same y as the right actions
-          pill and the ribbon's logo/toggle slot — one clean horizontal row. */}
-      <div className="pointer-events-none absolute left-6 top-4 z-10 hidden h-10 max-w-[42vw] items-center lg:flex xl:max-w-[48vw]">
+          pill and the ribbon's logo/toggle slot — one clean horizontal row. A
+          drill-in prepends the quiet back chip (skills/cron detail idiom). */}
+      <div className="pointer-events-none absolute left-6 top-4 z-10 hidden h-10 max-w-[42vw] items-center gap-2.5 lg:flex xl:max-w-[48vw]">
+        {backTo && (
+          <button
+            type="button"
+            onClick={backTo.onClick}
+            aria-label={`Back to ${backTo.label}`}
+            className="pointer-events-auto inline-flex max-w-[160px] shrink-0 items-center gap-1 text-[length:var(--text-footnote)] font-medium text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)]"
+          >
+            <ChevronLeft size={13} strokeWidth={2.4} aria-hidden className="shrink-0" />
+            <span className="truncate">{backTo.label}</span>
+          </button>
+        )}
         {title && (() => {
           const { id, rest } = splitTitleId(title)
           return (
@@ -85,19 +104,34 @@ export function ChatHeaderPills({
           style={{ paddingTop: 'max(var(--safe-top), 0px)' }}
         >
           <div className="relative flex h-12 items-center gap-1 bg-[var(--material-thick)] px-1.5 [backdrop-filter:blur(20px)_saturate(1.3)] [-webkit-backdrop-filter:blur(20px)_saturate(1.3)]">
-            {/* Icon-only back (HIG icons-over-labels) — a bare chevron; the
-                accessible name lives in aria-label, not visible text. */}
-            <button
-              onClick={onBack}
-              aria-label="Back to chats"
-              title="Back to chats"
-              className="inline-flex size-9 shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)] active:bg-[var(--fill-secondary)]"
-            >
-              <ChevronLeft size={24} className="shrink-0" />
-            </button>
+            {/* Back control. A drill-in reads `‹ Parent` and returns to the
+                parent thread (iOS previous-screen-title idiom); otherwise the
+                bare chevron pops to the chat list (accessible name in
+                aria-label, HIG icons-over-labels). */}
+            {backTo ? (
+              <button
+                onClick={backTo.onClick}
+                aria-label={`Back to ${backTo.label}`}
+                title={`Back to ${backTo.label}`}
+                className="inline-flex h-9 max-w-[34vw] shrink-0 items-center gap-0.5 rounded-full pl-1 pr-2.5 text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)] active:bg-[var(--fill-secondary)]"
+              >
+                <ChevronLeft size={22} className="shrink-0" />
+                <span className="truncate text-[length:var(--text-subheadline)] font-medium">{backTo.label}</span>
+              </button>
+            ) : (
+              <button
+                onClick={onBack}
+                aria-label="Back to chats"
+                title="Back to chats"
+                className="inline-flex size-9 shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)] active:bg-[var(--fill-secondary)]"
+              >
+                <ChevronLeft size={24} className="shrink-0" />
+              </button>
+            )}
             <span
               className={cn(
-                "pointer-events-none absolute left-1/2 max-w-[48vw] -translate-x-1/2 truncate text-center text-[length:var(--text-body)] font-[var(--weight-semibold)] text-[var(--text-primary)]",
+                "pointer-events-none absolute left-1/2 -translate-x-1/2 truncate text-center text-[length:var(--text-body)] font-[var(--weight-semibold)] text-[var(--text-primary)]",
+                backTo ? "max-w-[30vw]" : "max-w-[48vw]",
               )}
             >
               {title}

@@ -1,5 +1,15 @@
 import { describe, it, expect } from 'vitest'
-import { resolveDeepLink, mergeSidebarEmployees, bucketByDay, summarizeOlder, isFocusedSession } from '../chat-route-helpers'
+import {
+  resolveDeepLink,
+  mergeSidebarEmployees,
+  bucketByDay,
+  summarizeOlder,
+  isFocusedSession,
+  parseSelectedSession,
+  sessionPath,
+  parseThreadOrigin,
+  threadOriginLabel,
+} from '../chat-route-helpers'
 
 describe('resolveDeepLink', () => {
   const link = (qs: string) => resolveDeepLink(new URLSearchParams(qs))
@@ -33,6 +43,76 @@ describe('resolveDeepLink', () => {
 
   it('falls back to employee when session is empty but employee is set', () => {
     expect(link('session=&employee=support-lead')).toEqual({ kind: 'employee', name: 'support-lead' })
+  })
+})
+
+describe('parseSelectedSession', () => {
+  it('reads ?session= from a search string', () => {
+    expect(parseSelectedSession('?session=abc')).toBe('abc')
+    expect(parseSelectedSession('session=abc&x=1')).toBe('abc')
+  })
+
+  it('accepts URLSearchParams too', () => {
+    expect(parseSelectedSession(new URLSearchParams('session=abc'))).toBe('abc')
+  })
+
+  it('returns null for missing / empty / whitespace values', () => {
+    expect(parseSelectedSession('')).toBeNull()
+    expect(parseSelectedSession('?session=')).toBeNull()
+    expect(parseSelectedSession('?session=%20%20')).toBeNull()
+    expect(parseSelectedSession('?employee=x')).toBeNull()
+  })
+
+  it('trims real values', () => {
+    expect(parseSelectedSession('?session=%20abc%20')).toBe('abc')
+  })
+})
+
+describe('sessionPath', () => {
+  it('builds the canonical selected-session path', () => {
+    expect(sessionPath('abc-123')).toBe('/?session=abc-123')
+  })
+
+  it('round-trips through parseSelectedSession, encoding included', () => {
+    const id = 'weird id&=?#'
+    const path = sessionPath(id)
+    expect(parseSelectedSession(path.slice(path.indexOf('?')))).toBe(id)
+  })
+})
+
+describe('parseThreadOrigin', () => {
+  it('parses a valid { from } history state', () => {
+    expect(parseThreadOrigin({ from: { id: 's1', label: 'Jimbo' } })).toEqual({ id: 's1', label: 'Jimbo' })
+  })
+
+  it('trims id and label', () => {
+    expect(parseThreadOrigin({ from: { id: ' s1 ', label: ' Jimbo ' } })).toEqual({ id: 's1', label: 'Jimbo' })
+  })
+
+  it('rejects null / non-object / missing / malformed state', () => {
+    expect(parseThreadOrigin(null)).toBeNull()
+    expect(parseThreadOrigin(undefined)).toBeNull()
+    expect(parseThreadOrigin('nope')).toBeNull()
+    expect(parseThreadOrigin({})).toBeNull()
+    expect(parseThreadOrigin({ from: null })).toBeNull()
+    expect(parseThreadOrigin({ from: 'x' })).toBeNull()
+    expect(parseThreadOrigin({ from: { id: 's1' } })).toBeNull()
+    expect(parseThreadOrigin({ from: { id: 42, label: 'Jimbo' } })).toBeNull()
+    expect(parseThreadOrigin({ from: { id: '  ', label: 'Jimbo' } })).toBeNull()
+    expect(parseThreadOrigin({ from: { id: 's1', label: '' } })).toBeNull()
+  })
+})
+
+describe('threadOriginLabel', () => {
+  it('display-cases an employee slug', () => {
+    expect(threadOriginLabel('jinn-dev', 'Jinn')).toBe('Jinn Dev')
+    expect(threadOriginLabel('content_lead', 'Jinn')).toBe('Content Lead')
+  })
+
+  it('falls back to the portal name for direct (COO) sessions', () => {
+    expect(threadOriginLabel(undefined, 'Jimbo')).toBe('Jimbo')
+    expect(threadOriginLabel(null, 'Jimbo')).toBe('Jimbo')
+    expect(threadOriginLabel('  ', 'Jimbo')).toBe('Jimbo')
   })
 })
 
