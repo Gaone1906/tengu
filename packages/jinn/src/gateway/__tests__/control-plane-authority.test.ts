@@ -77,6 +77,7 @@ let approvalAuthority: ApprovalAuthority;
 let auth: Auth;
 let worker: import("../../shared/types.js").Session;
 let peer: import("../../shared/types.js").Session;
+let manager: import("../../shared/types.js").Session;
 
 const apiCtx = {
   getConfig: () => readConfig(),
@@ -174,9 +175,75 @@ beforeAll(async () => {
   registry.initDb();
   worker = registry.createSession({ engine: "codex", source: "web", sourceRef: "worker", title: "worker", employee: "platform-worker" });
   peer = registry.createSession({ engine: "codex", source: "web", sourceRef: "peer", title: "peer", employee: "platform-peer" });
+  manager = registry.createSession({ engine: "codex", source: "web", sourceRef: "manager", title: "manager", employee: "platform-manager" });
 });
 
 describe("control-plane writes require operator authority", () => {
+  it("makes callback dead letters visible to managers while guarding atomic requeue authority", async () => {
+    const delivery = registry.claimCallbackDelivery({
+      parentSessionId: "callback-parent",
+      childSessionId: "callback-child",
+      attemptToken: "callback-attempt",
+      terminalOutcome: "failed",
+      terminalVersion: 1,
+      callbackKind: "parent-completion",
+      payload: { message: "recover callback", displayMessage: "Worker failed" },
+    }).delivery;
+    registry.claimCallbackDeliveryAttempt(delivery.id, 1_000, 100);
+    registry.recordCallbackDeliveryFailure(delivery.id, "temporary outage", {
+      now: 1_000,
+      nextAttemptAt: 2_000,
+      maxAttempts: 1,
+    });
+
+    expect((await call("GET", "/api/callback-deliveries/dead-letter")).status).toBe(403);
+    expect((await call("GET", "/api/callback-deliveries/dead-letter", undefined, toolHeaders(worker))).status).toBe(403);
+
+    const managerList = await call(
+      "GET",
+      "/api/callback-deliveries/dead-letter",
+      undefined,
+      toolHeaders(manager),
+    );
+    expect(managerList.status).toBe(200);
+    expect(managerList.body).toMatchObject({
+      deliveries: [expect.objectContaining({ id: delivery.id, status: "dead_letter", lastError: "temporary outage" })],
+    });
+
+    const requeued = await call(
+      "POST",
+      `/api/callback-deliveries/${delivery.id}/requeue`,
+      {},
+      { authorization: "Bearer test-token" },
+    );
+    expect(requeued.status).toBe(200);
+    expect(requeued.body).toMatchObject({ delivery: { id: delivery.id, status: "pending", attemptCount: 0 } });
+
+    const acceptedParent = registry.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: "accepted-parent",
+      sessionKey: "accepted-parent",
+    });
+    const accepted = registry.claimCallbackDelivery({
+      parentSessionId: acceptedParent.id,
+      childSessionId: "accepted-child",
+      attemptToken: "accepted-attempt",
+      terminalOutcome: "succeeded",
+      terminalVersion: 1,
+      callbackKind: "parent-completion",
+      payload: { message: "accepted callback", displayMessage: "Worker replied" },
+    }).delivery;
+    registry.acceptCallbackDelivery(accepted.id, acceptedParent.id, acceptedParent.sessionKey);
+    const rejected = await call(
+      "POST",
+      `/api/callback-deliveries/${accepted.id}/requeue`,
+      {},
+      { authorization: "Bearer test-token" },
+    );
+    expect(rejected.status).toBe(409);
+    expect(registry.getCallbackDelivery(accepted.id)).toMatchObject({ status: "accepted" });
+  });
   it("fails anonymous Todo writes closed while bearer, cookie, and session capabilities keep their exact authority", async () => {
     const anonymousAssign = store.createWorkItem({ title: "Anonymous assign target", status: "assigned", assignee: "platform-worker", source: "human" });
     const anonymousArchive = store.createWorkItem({ title: "Anonymous archive target", status: "assigned", assignee: "platform-worker", source: "human" });

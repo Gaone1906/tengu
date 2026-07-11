@@ -77,6 +77,8 @@ import {
   listAllPendingQueueItems,
   getCallbackDelivery,
   getCallbackDeliveryByQueueItemId,
+  listDeadLetterCallbackDeliveries,
+  requeueDeadLetterCallbackDelivery,
   acceptCallbackDelivery,
   getFile,
   getSessionBySessionKey,
@@ -185,7 +187,7 @@ import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAtta
 import { readJsonBody, readBodyRaw } from "./http-helpers.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
-import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions } from "../sessions/callbacks.js";
+import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions, recoverPendingCallbackDeliveries } from "../sessions/callbacks.js";
 import { clearDelegationCompletionContract, DELEGATION_COMPLETION_TRACKED_META_KEY } from "../sessions/delegation-completion-contract.js";
 import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
 import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
@@ -1926,6 +1928,18 @@ function requireOperatorControlPlaneAuthority(req: HttpRequest, res: ServerRespo
   return true;
 }
 
+function requireCallbackRecoveryAuthority(req: HttpRequest, res: ServerResponse, context: ApiContext): boolean {
+  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  if (identity.kind === "operator") return true;
+  if (identity.kind === "session") {
+    const session = getSession(identity.callerId);
+    const employee = session?.employee ? scanOrg().get(session.employee) : undefined;
+    if (employee?.rank === "manager" || employee?.rank === "executive") return true;
+  }
+  json(res, { error: "Callback recovery diagnostics require operator or manager authority" }, 403);
+  return false;
+}
+
 function rejectScopedIdentityGrant(req: HttpRequest, res: ServerResponse, action: string, context: ApiContext): boolean {
   const identity = resolveScopedWriteCallerIdentity(req.headers, context);
   if (identity.kind === "operator" || identity.kind === "unauthenticated") return false;
@@ -2306,6 +2320,26 @@ export async function handleApiRequest(
     const controlPlaneAction = operatorOnlyControlPlaneRoute(method, pathname);
     if (controlPlaneAction && !requireOperatorControlPlaneAuthority(req, res, controlPlaneAction, context)) {
       return;
+    }
+
+    if (method === "GET" && pathname === "/api/callback-deliveries/dead-letter") {
+      if (!requireCallbackRecoveryAuthority(req, res, context)) return;
+      return json(res, { deliveries: listDeadLetterCallbackDeliveries() });
+    }
+
+    const callbackRequeueParams = matchRoute("/api/callback-deliveries/:id/requeue", pathname);
+    if (method === "POST" && callbackRequeueParams) {
+      if (!requireCallbackRecoveryAuthority(req, res, context)) return;
+      try {
+        const delivery = requeueDeadLetterCallbackDelivery(callbackRequeueParams.id);
+        void recoverPendingCallbackDeliveries().catch((error) => {
+          logger.error(`[callbacks] Requeued delivery ${delivery.id} could not start recovery: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        return json(res, { delivery });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return json(res, { error: message }, /not found/i.test(message) ? 404 : 409);
+      }
     }
 
     // GET /api/auth/state — safe browser boot metadata. Never includes the token.

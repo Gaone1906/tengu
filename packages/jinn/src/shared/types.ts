@@ -311,6 +311,13 @@ export interface CallbackDelivery extends CallbackDeliveryIdentity {
   acceptedAt: string | null;
 }
 
+/** Operator-facing dead-letter diagnostics. Poison rows remain discoverable
+ * even when their stored payload cannot be decoded safely. */
+export interface CallbackDeliveryDeadLetter extends Omit<CallbackDelivery, "payload"> {
+  payload: CallbackDeliveryPayload | null;
+  payloadError: string | null;
+}
+
 export interface CronJob {
   id: string;
   name: string;

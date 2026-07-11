@@ -2812,6 +2812,51 @@ export function listPendingCallbackDeliveries(): CallbackDelivery[] {
   return deliveries;
 }
 
+export function listDeadLetterCallbackDeliveries(): import("../shared/types.js").CallbackDeliveryDeadLetter[] {
+  const rows = initDb()
+    .prepare(`${CALLBACK_DELIVERY_SELECT} WHERE status = 'dead_letter' ORDER BY dead_lettered_at ASC, created_at ASC, id ASC`)
+    .all() as CallbackDeliveryRow[];
+  return rows.map((row) => {
+    try {
+      return { ...callbackDeliveryFromRow(row), payloadError: null };
+    } catch (error) {
+      return {
+        ...row,
+        payload: null,
+        payloadError: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+}
+
+/** Atomically return one valid exhausted receipt to the live outbox. The
+ * durable identity and id are retained; accepted rows are immutable. */
+export function requeueDeadLetterCallbackDelivery(deliveryId: string): CallbackDelivery {
+  const database = initDb();
+  const requeue = database.transaction(() => {
+    const row = database.prepare(`${CALLBACK_DELIVERY_SELECT} WHERE id = ?`).get(deliveryId) as CallbackDeliveryRow | undefined;
+    if (!row) throw new Error(`Callback delivery ${deliveryId} not found`);
+    if (row.status !== 'dead_letter') {
+      throw new Error(`Callback delivery ${deliveryId} is not dead-lettered`);
+    }
+    // Permanent poison must stay quarantined until its stored data is repaired.
+    callbackDeliveryFromRow(row);
+    const updated = database.prepare(`
+      UPDATE callback_deliveries
+      SET status = 'pending',
+          attempt_count = 0,
+          next_attempt_at = NULL,
+          last_attempt_at = NULL,
+          last_error = NULL,
+          dead_lettered_at = NULL
+      WHERE id = ? AND status = 'dead_letter'
+    `).run(deliveryId);
+    if (updated.changes !== 1) throw new Error(`Callback delivery ${deliveryId} lost its dead-letter claim`);
+    return getCallbackDelivery(deliveryId)!;
+  });
+  return requeue.immediate();
+}
+
 /** Persist the callback intent before any HTTP enqueue/send. The composite
  * unique index is the concurrency arbiter; losers reuse the winning outbox id. */
 export function claimCallbackDelivery(

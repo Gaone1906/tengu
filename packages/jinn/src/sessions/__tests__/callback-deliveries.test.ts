@@ -397,6 +397,66 @@ describe("callback delivery retry lifecycle", () => {
     expect(registry.claimCallbackDeliveryAttempt(delivery.id, 2_000, 500)).toBeUndefined();
   });
 
+  it("lists an exhausted receipt and atomically requeues the same durable id after recovery", () => {
+    const parent = createSession("parent-1");
+    createSession("child-1", parent.id);
+    const delivery = registry.claimCallbackDelivery(callbackInput()).delivery;
+
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      expect(registry.claimCallbackDeliveryAttempt(delivery.id, attempt * 1_000, 100))
+        .toMatchObject({ id: delivery.id, attemptCount: attempt });
+      registry.recordCallbackDeliveryFailure(delivery.id, `outage ${attempt}`, {
+        now: attempt * 1_000,
+        nextAttemptAt: (attempt + 1) * 1_000,
+        maxAttempts: 4,
+      });
+    }
+
+    expect(registry.listDeadLetterCallbackDeliveries()).toEqual([
+      expect.objectContaining({
+        id: delivery.id,
+        status: "dead_letter",
+        attemptCount: 4,
+        lastError: "outage 4",
+      }),
+    ]);
+
+    const requeued = registry.requeueDeadLetterCallbackDelivery(delivery.id);
+    expect(requeued).toMatchObject({
+      id: delivery.id,
+      status: "pending",
+      attemptCount: 0,
+      nextAttemptAt: null,
+      lastAttemptAt: null,
+      lastError: null,
+      deadLetteredAt: null,
+      messageId: null,
+      queueItemId: null,
+      acceptedAt: null,
+    });
+    expect(registry.claimCallbackDeliveryAttempt(delivery.id, 5_000, 100))
+      .toMatchObject({ id: delivery.id, attemptCount: 1 });
+    const accepted = registry.acceptCallbackDelivery(delivery.id, parent.id, parent.sessionKey);
+    expect(accepted).toMatchObject({ accepted: true, delivery: { id: delivery.id, status: "accepted" } });
+    expect(registry.acceptCallbackDelivery(delivery.id, parent.id, parent.sessionKey))
+      .toMatchObject({ accepted: false, delivery: { id: delivery.id, status: "accepted" } });
+  });
+
+  it("never permits an accepted callback receipt to be requeued", () => {
+    const parent = createSession("parent-1");
+    createSession("child-1", parent.id);
+    const delivery = registry.claimCallbackDelivery(callbackInput()).delivery;
+    const accepted = registry.acceptCallbackDelivery(delivery.id, parent.id, parent.sessionKey).delivery;
+
+    expect(() => registry.requeueDeadLetterCallbackDelivery(delivery.id)).toThrow(/dead.?letter/i);
+    expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({
+      id: delivery.id,
+      status: "accepted",
+      messageId: accepted.messageId,
+      queueItemId: accepted.queueItemId,
+    });
+  });
+
   it("quarantines a poison pending row and continues returning later valid receipts", () => {
     const database = registry.initDb();
     database.pragma("ignore_check_constraints = ON");
