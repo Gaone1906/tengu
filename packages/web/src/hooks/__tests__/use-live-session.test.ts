@@ -258,7 +258,7 @@ describe("useLiveSession (read-only)", () => {
     expect(result.current.messages.some((m) => m.toolCall === "read" && m.content === "Used read")).toBe(true)
   })
 
-  it("collapses partial rows loaded from a running session when completion arrives", async () => {
+  it("keeps partial interim prose loaded from a running session when completion arrives", async () => {
     getSession.mockResolvedValue({
       status: "running",
       messages: [
@@ -280,13 +280,14 @@ describe("useLiveSession (read-only)", () => {
       await Promise.resolve()
     })
 
-    // Interim prose collapses into the canonical result; the tool row is kept
-    // as evidence (marked done) for the post-turn fold.
-    expect(result.current.messages.map((m) => m.content)).toEqual(["do it", "Used Bash", "PROGRESS-FINAL"])
+    // Interim prose is EVIDENCE and survives (it folds with the tools and
+    // matches what a reload shows); the tool row is kept marked done. Only a
+    // bubble duplicating the final answer drops.
+    expect(result.current.messages.map((m) => m.content)).toEqual(["do it", "PROGRESS-FIRST", "Used Bash", "PROGRESS-FINAL"])
     expect(result.current.messages.filter((m) => m.toolCall)).toHaveLength(1)
   })
 
-  it("collapses interim prose to the final answer on completion while tool evidence survives", async () => {
+  it("keeps interim prose as evidence and dedupes only the final answer on completion", async () => {
     getSession.mockResolvedValue({ status: "running", messages: [] })
     const { subscribe, emit } = makeBus()
     const { result } = renderHook(() =>
@@ -306,8 +307,34 @@ describe("useLiveSession (read-only)", () => {
       await Promise.resolve()
     })
 
-    expect(result.current.messages.map((m) => m.content)).toEqual(["Used Bash", "PROGRESS-FINAL"])
-    expect(result.current.messages.filter((m) => m.content === "PROGRESS-FIRST")).toHaveLength(0)
+    // PROGRESS-FIRST survives as an interim update; PROGRESS-FINAL appears
+    // exactly once (the streamed copy never became a message; a flushed
+    // duplicate of the result would drop).
+    expect(result.current.messages.map((m) => m.content)).toEqual(["PROGRESS-FIRST", "Used Bash", "PROGRESS-FINAL"])
+    expect(result.current.messages.filter((m) => m.content === "PROGRESS-FINAL")).toHaveLength(1)
+  })
+
+  it("dedupes a flushed bubble that IS the final answer (exactly one answer live)", async () => {
+    getSession.mockResolvedValue({ status: "running", messages: [] })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() =>
+      useLiveSession("s1", { subscribe, readOnly: true }),
+    )
+    await act(async () => { await Promise.resolve() })
+
+    act(() => {
+      // grok-style: the engine streams the FINAL answer, then a tool_use
+      // flushes it into a message before completion repeats it as result.
+      emit("session:delta", { sessionId: "s1", type: "text", content: "FINAL-ANSWER" })
+      emit("session:delta", { sessionId: "s1", type: "tool_use", content: "Using Bash", toolName: "Bash" })
+      emit("session:delta", { sessionId: "s1", type: "tool_result", content: "ok", toolName: "Bash" })
+    })
+
+    await act(async () => {
+      emit("session:completed", { sessionId: "s1", result: "FINAL-ANSWER" })
+      await Promise.resolve()
+    })
+    expect(result.current.messages.map((m) => m.content)).toEqual(["Used Bash", "FINAL-ANSWER"])
   })
 
   it("shows transient status deltas and clears them when real output arrives", async () => {

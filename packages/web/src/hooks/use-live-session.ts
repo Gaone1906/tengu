@@ -624,19 +624,24 @@ export function useLiveSession(
             const kept = cleaned.slice(0, turnStart)
             // The turn's working evidence SURVIVES completion — tool rows,
             // comms notifications, durable blocks (delegation/dispatch),
-            // media — so the post-turn fold can file it away with the
-            // scroll-anchored choreography instead of it vanishing in a jump
-            // (and so it matches what a reload shows). Interim PROSE bubbles
-            // (flushed streamed text) are still dropped: the result is their
-            // canonical form and keeping both duplicates the answer.
-            // Transient progress blocks (task lists) drop with the prose.
-            // Unfinished tool rows are marked done — the turn is over.
+            // media, and interim PROSE updates — so the post-turn fold files
+            // away the SAME rows a reload of the persisted transcript shows.
+            // The dedup is narrowed to the final answer alone: a flushed
+            // bubble that IS the result drops (the appended result is its
+            // canonical form — keeping both duplicates the answer);
+            // everything else the model said on the way is evidence, not an
+            // answer candidate. Transient progress blocks (task lists) still
+            // drop, and unfinished tool rows are marked done — the turn is
+            // over. User messages are never dropped.
             const preserved = cleaned.slice(turnStart)
               .filter((m) =>
-                (m.media && m.media.length > 0)
+                m.role === 'user'
+                || (m.media && m.media.length > 0)
                 || m.toolCall
                 || m.role === 'notification'
-                || m.blocks?.some((block) => block.type === 'delegation' || block.type === 'dispatch'))
+                || m.blocks?.some((block) => block.type === 'delegation' || block.type === 'dispatch')
+                || (m.role === 'assistant' && !m.blocks?.length
+                  && m.content.trim() !== '' && m.content.trim() !== resultStr.trim()))
               .map((m) => m.toolCall && !m.content.startsWith('Used ')
                 ? { ...m, content: `Used ${m.toolCall}` }
                 : m)
