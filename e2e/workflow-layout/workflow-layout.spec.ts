@@ -52,8 +52,12 @@ async function isolatedContext(browser: Browser, cell: Cell) {
   await context.addInitScript(({ theme }) => localStorage.setItem('jinn-theme', theme), { theme: cell.theme })
   await context.route('**/*', async (route) => {
     const raw = route.request().url()
+    if (isBlockedStaticAsset(raw)) {
+      await route.fulfill({ status: 204, body: '' })
+      return
+    }
     if (!safeNetworkUrl(raw)) {
-      if (!isBlockedStaticAsset(raw)) violations.push(raw)
+      violations.push(raw)
       await route.abort('blockedbyclient')
       return
     }
