@@ -1,5 +1,5 @@
 import "@xyflow/react/dist/style.css"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react"
 import {
   ReactFlow,
   Background,
@@ -302,6 +302,7 @@ export function buildFlowGraph(
   onSelect: (id: string) => void,
   edges?: CanvasEdgeSpec[],
   editable = false,
+  selectedEdgeId: string | null = null,
 ): { flowNodes: FlowNode<JinnNodeData>[]; flowEdges: FlowEdge[] } {
   const positions = resolveNodePositions(nodes, edges?.map((e) => ({ from: e.from, to: e.to, lane: e.lane })))
   const byId = new Map(nodes.map((n) => [n.id, n]))
@@ -357,6 +358,7 @@ export function buildFlowGraph(
       targetHandle,
       type: "jinn", // bezier, curvature 0.35 — the visible curve in the gap
       deletable: editable && !isSub,
+      selected: editable && selectedEdgeId === id,
       data: {
         testId: `wf-edge-${id}`,
         ...(spec?.kind === "loop" ? { routeY: graphBottom + 80 + (loopLaneById.get(id) ?? 0) * 40 } : {}),
@@ -443,6 +445,7 @@ export function WorkflowCanvas({
   framingKey?: string
 }) {
   const isMobile = useIsCanvasMobile()
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   // Mobile: the minimap collapses behind a map-icon toggle (spec §7) — the
   // phone canvas keeps its pixels; the whole-shape overview is one tap away.
   const [mapOpen, setMapOpen] = useState(false)
@@ -460,8 +463,8 @@ export function WorkflowCanvas({
   }, [nodes, edges])
 
   const { flowNodes, flowEdges } = useMemo(
-    () => buildFlowGraph(expNodes, selectedId, onSelect, expEdges, editable),
-    [expNodes, selectedId, onSelect, expEdges, editable],
+    () => buildFlowGraph(expNodes, selectedId, onSelect, expEdges, editable, selectedEdgeId),
+    [expNodes, selectedId, onSelect, expEdges, editable, selectedEdgeId],
   )
 
   type Inst = ReactFlowInstance<FlowNode<JinnNodeData>, FlowEdge>
@@ -510,8 +513,27 @@ export function WorkflowCanvas({
     if (connection.source && connection.target) onConnectNodes?.(connection.source, connection.target)
   }, [onConnectNodes])
 
+  const removeEdges = useCallback((deleted: FlowEdge[]) => {
+    if (deleted.some((edge) => edge.id === selectedEdgeId)) setSelectedEdgeId(null)
+    notifyRemovedEdges(deleted, onRemoveEdge)
+  }, [onRemoveEdge, selectedEdgeId])
+
+  useEffect(() => {
+    if (selectedEdgeId && !expEdges.some((edge) => edge.id === selectedEdgeId)) setSelectedEdgeId(null)
+  }, [expEdges, selectedEdgeId])
+
+  const selectFocusedEdge = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!editable || (event.key !== "Enter" && event.key !== " ")) return
+    const edgeId = (event.target as HTMLElement).closest<HTMLElement>(".react-flow__edge")?.dataset.id
+    if (edgeId) setSelectedEdgeId(edgeId)
+  }, [editable])
+
   return (
-    <div data-testid="wf-canvas" className="relative h-full min-h-[320px] w-full">
+    <div
+      data-testid="wf-canvas"
+      className="relative h-full min-h-[320px] w-full"
+      onKeyDownCapture={selectFocusedEdge}
+    >
       <ReactFlow
         nodes={flowNodes}
         edges={flowEdges}
@@ -524,8 +546,10 @@ export function WorkflowCanvas({
         deleteKeyCode={editable ? ["Backspace", "Delete"] : null}
         onNodeDragStop={editable ? (_event, node) => onPositionChange?.(node.id, node.position) : undefined}
         onConnect={editable ? connect : undefined}
+        onEdgeClick={editable ? (_event, edge) => setSelectedEdgeId(edge.id) : undefined}
+        onPaneClick={editable ? () => setSelectedEdgeId(null) : undefined}
         onNodesDelete={editable ? (deleted) => deleted.forEach((node) => onRemoveNode?.(node.id)) : undefined}
-        onEdgesDelete={editable ? (deleted) => notifyRemovedEdges(deleted, onRemoveEdge) : undefined}
+        onEdgesDelete={editable ? removeEdges : undefined}
         onInit={onInit}
         panOnDrag
         zoomOnPinch

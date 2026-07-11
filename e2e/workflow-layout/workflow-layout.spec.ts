@@ -244,6 +244,16 @@ async function connectByGesture(page: Page, from: string, to: string) {
   await page.mouse.up()
 }
 
+async function selectEdgeByGesture(page: Page, edgeId: string) {
+  const edge = page.locator(`.react-flow__edge[data-id="${edgeId}"]`)
+  // The edge wrapper is a first-class keyboard target. Selecting with Enter
+  // and deleting with Delete proves the accessible destructive gesture path.
+  await edge.focus()
+  await expect(edge).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(edge).toHaveClass(/selected/)
+}
+
 async function mainNodeIds(page: Page) {
   return page.locator('[data-testid^="wf-node-"][data-node-id]').evaluateAll((nodes) => nodes.map((node) => (node as HTMLElement).dataset.nodeId!))
 }
@@ -478,7 +488,8 @@ test.describe.serial('isolated workflow layout verification', () => {
       await opened.page.locator('button:visible').filter({ hasText: /^Remove step$/ }).click()
       await expect(opened.page.getByTestId(`wf-node-${transientId}`)).toHaveCount(0)
 
-      await opened.page.getByTestId('wf-edge-e2').click({ force: true })
+      await fitAll(opened.page)
+      await selectEdgeByGesture(opened.page, 'e2')
       await opened.page.keyboard.press('Delete')
       await expect(opened.page.getByTestId('wf-edge-e2')).toHaveCount(0)
       await connectByGesture(opened.page, 'one', 'two')

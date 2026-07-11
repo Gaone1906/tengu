@@ -115,6 +115,21 @@ describe("WorkflowCanvas", () => {
     expect(editable.flowEdges.every((edge) => edge.deletable === true)).toBe(true)
   })
 
+  it("preserves the selected durable edge in the controlled flow graph", () => {
+    const edges: CanvasEdgeSpec[] = [{ id: "a-b", from: nodes[0].id, to: nodes[1].id }]
+    const buildSelectedFlowGraph = buildFlowGraph as unknown as (
+      nodes: CanvasNode[],
+      selectedId: string | null,
+      onSelect: (id: string) => void,
+      edges: CanvasEdgeSpec[] | undefined,
+      editable: boolean,
+      selectedEdgeId: string | null,
+    ) => ReturnType<typeof buildFlowGraph>
+
+    const graph = buildSelectedFlowGraph(nodes, null, vi.fn(), edges, true, "a-b")
+    expect(graph.flowEdges[0]).toMatchObject({ id: "a-b", selected: true, deletable: true })
+  })
+
   it("forwards every React Flow edge deletion by durable id", () => {
     const onRemoveEdge = vi.fn()
     notifyRemovedEdges([{ id: "build-verify" }, { id: "verify-ship" }], onRemoveEdge)
