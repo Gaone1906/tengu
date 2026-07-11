@@ -199,4 +199,22 @@ describe("gateway auth", () => {
     expect(verifyAuthSession(home, second.device.id, second.secret)).toBe(true);
     expect(listAuthSessions(home)).toHaveLength(2);
   });
+
+  it("removes stale automation browser sessions without merging real browsers", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-auth-automation-devices-"));
+    const automated = createAuthSession(home, req({ "user-agent": "Mozilla/5.0 HeadlessChrome/149.0.0.0" }), {
+      kind: "local",
+      now: 1_000,
+    });
+    const human = createAuthSession(home, req({ "user-agent": "Mozilla/5.0 Macintosh Chrome/149.0.0.0" }), {
+      kind: "local",
+      now: 1_000,
+    });
+
+    const listed = listAuthSessions(home, undefined, 60 * 60 * 1000 + 1_001);
+
+    expect(listed.map((device) => device.id)).toEqual([human.device.id]);
+    expect(verifyAuthSession(home, automated.device.id, automated.secret)).toBe(false);
+    expect(verifyAuthSession(home, human.device.id, human.secret)).toBe(true);
+  });
 });

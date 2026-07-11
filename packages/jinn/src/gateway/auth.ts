@@ -10,6 +10,7 @@ export const LOCAL_BOOTSTRAP_GRANT_HEADER = "x-jinn-bootstrap-grant";
 export const LOCAL_BOOTSTRAP_GRANT_TTL_MS = 60_000;
 const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export const PAIRING_CODE_TTL_MS = 5 * 60 * 1000;
+export const AUTOMATED_AUTH_SESSION_TTL_MS = 60 * 60 * 1000;
 
 export interface PairingCodeEntry {
   expiresAt: number;
@@ -327,6 +328,20 @@ function saveStoredAuthSessions(jinnHome: string, devices: StoredAuthSessionDevi
   fs.chmodSync(file, 0o600);
 }
 
+function pruneStaleAutomatedAuthSessions(
+  jinnHome: string,
+  devices: StoredAuthSessionDevice[],
+  now = Date.now(),
+): StoredAuthSessionDevice[] {
+  const next = devices.filter((device) => {
+    if (!/HeadlessChrome|Playwright/i.test(device.userAgent || "")) return true;
+    const lastSeenAt = Date.parse(device.lastSeenAt);
+    return !Number.isFinite(lastSeenAt) || now - lastSeenAt <= AUTOMATED_AUTH_SESSION_TTL_MS;
+  });
+  if (next.length !== devices.length) saveStoredAuthSessions(jinnHome, next);
+  return next;
+}
+
 function inferAuthSessionName(req: Pick<IncomingMessage, "headers" | "socket">, kind: AuthSessionKind): string {
   if (kind === "local") return "This Mac";
   const ua = headerValue(req.headers, "user-agent") || "";
@@ -347,7 +362,7 @@ export function createAuthSession(
   const kind = opts.kind ?? (isLoopbackAddress(req.socket.remoteAddress) ? "local" : "remote");
   const secret = createAuthToken();
   const userAgent = headerValue(req.headers, "user-agent");
-  const devices = loadStoredAuthSessions(jinnHome);
+  const devices = pruneStaleAutomatedAuthSessions(jinnHome, loadStoredAuthSessions(jinnHome), now);
   const device: AuthSessionDevice = {
     id: `d_${crypto.randomBytes(12).toString("base64url")}`,
     name: opts.name || inferAuthSessionName(req, kind),
@@ -400,8 +415,8 @@ export function currentAuthDeviceId(headers: Record<string, string | string[] | 
   return parseCookieHeader(cookie)[AUTH_DEVICE_COOKIE];
 }
 
-export function listAuthSessions(jinnHome: string, currentDeviceId?: string): PublicAuthSessionDevice[] {
-  return loadStoredAuthSessions(jinnHome)
+export function listAuthSessions(jinnHome: string, currentDeviceId?: string, now = Date.now()): PublicAuthSessionDevice[] {
+  return pruneStaleAutomatedAuthSessions(jinnHome, loadStoredAuthSessions(jinnHome), now)
     .map(({ tokenHash: _tokenHash, ...device }) => ({
       ...device,
       current: Boolean(currentDeviceId && device.id === currentDeviceId),
