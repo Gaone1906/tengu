@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react"
-import { GripVertical, MoreHorizontal, Pause, TriangleAlert } from "lucide-react"
+import { GripVertical, MoreHorizontal } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 import { api, type Employee, type WorkItemCompactWire, type WorkItemDetailWire, type LinkedSessionWire } from "@/lib/api"
-import { attentionOf, provenanceLabel } from "@/lib/todos"
+import { provenanceLabel } from "@/lib/todos"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { StateLine } from "@/components/ui/state-line"
 import {
@@ -74,23 +74,6 @@ export function ProvChip({ source, sourceRef }: { source: WorkItemCompactWire["s
   )
 }
 
-export function AttentionBadge({ kind }: { kind: "blocked" | "escalated" }) {
-  const orange = kind === "blocked"
-  const Icon = orange ? Pause : TriangleAlert
-  return (
-    <span
-      className="inline-flex flex-none items-center gap-1 rounded-[6px] px-[7px] py-[2px] text-[length:var(--text-caption2)] font-semibold"
-      style={{
-        background: `color-mix(in srgb, var(${orange ? "--system-orange" : "--system-red"}) ${orange ? 16 : 18}%, transparent)`,
-        color: `var(${orange ? "--system-orange" : "--system-red"})`,
-      }}
-    >
-      <Icon size={10} strokeWidth={2} aria-hidden />
-      {orange ? "Blocked" : "Escalated"}
-    </span>
-  )
-}
-
 /** The 20px emoji avatar + caption-1 name (delegation attribution unit at row
  *  density — the monogram OwnerChip is retired). Name hides ≤500px. */
 export function RowEmployee({ name, byName }: { name: string; byName: Map<string, Employee> }) {
@@ -128,7 +111,6 @@ export function TodoRow({
   now?: number
 }) {
   const navigate = useNavigate()
-  const att = attentionOf(item.status)
   const isDone = item.status === "done"
   const timeHint = formatRelativeTime(item.updatedAt, now)
   const humanKey = (((item as WorkItemCompactWire & { key?: string | null }).key) ?? "").trim() || null
@@ -236,7 +218,7 @@ export function TodoRow({
       <StatusCircle status={item.status} size={24} />
 
       <span className="flex min-w-0 flex-1 flex-col gap-[3px]">
-        <span className="flex min-w-0 items-center gap-2.5">
+        <span className="flex min-w-0 items-start gap-2.5">
           {editing ? (
             <input
               ref={inputRef}
@@ -257,7 +239,7 @@ export function TodoRow({
             />
           ) : (
             <span
-              className={`min-w-0 flex-1 truncate text-[length:var(--text-subheadline)] text-[var(--text-primary)] ${
+              className={`min-w-0 flex-1 break-words text-pretty text-[length:var(--text-subheadline)] leading-snug text-[var(--text-primary)] ${
                 isDone ? "font-normal text-[var(--text-secondary)]" : "font-medium"
               }`}
             >
@@ -265,44 +247,18 @@ export function TodoRow({
             </span>
           )}
           <span className="flex flex-none items-center gap-2.5">
-            {att && <AttentionBadge kind={att} />}
-            {humanKey && (
-              <button
-                type="button"
-                aria-label={`Copy ${humanKey}`}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  void navigator.clipboard?.writeText(humanKey)
-                }}
-                className="inline-flex min-h-11 items-center font-[family-name:var(--font-code)] text-[length:var(--text-caption1)] text-[var(--text-quaternary)] hover:text-[var(--text-secondary)]"
-              >
-                {humanKey}
-              </button>
-            )}
             {item.assignee ? (
               <RowEmployee name={item.assignee} byName={byName} />
-            ) : (
-              <span className="max-[500px]:hidden">
-                <ProvChip source={item.source} sourceRef={item.sourceRef} />
-              </span>
-            )}
+            ) : null}
             <span className="min-w-[30px] text-right text-[length:var(--text-caption1)] tabular-nums text-[var(--text-quaternary)]">
               {timeHint}
             </span>
           </span>
         </span>
 
-        {exec && (
+        {exec && item.status === "executing" && (
           <span data-testid={`todo-exec-${item.id}`} className="flex min-w-0 items-center gap-1.5">
-            {item.status === "executing" && (
-              <>
-                <StateLine state="working" dispatchedAt={Date.parse(item.updatedAt) || undefined} className="flex-none whitespace-nowrap" />
-                <span className="text-[length:var(--text-caption1)] text-[var(--text-quaternary)]">·</span>
-              </>
-            )}
-            <span className="min-w-0 truncate font-[family-name:var(--font-code)] text-[11px] text-[var(--text-tertiary)]">
-              {exec.kind === "run" ? `Run · ${exec.value}` : exec.value}
-            </span>
+            <StateLine state="working" dispatchedAt={Date.parse(item.updatedAt) || undefined} className="flex-none whitespace-nowrap" />
             <span
               data-testid={`todo-exec-open-${item.id}`}
               title={exec.kind === "run" ? "Open workflow run" : "Open session"}
@@ -334,6 +290,11 @@ export function TodoRow({
           >
             <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" onClick={() => onOpen(item.id)}>Open</DropdownMenuItem>
             <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" disabled={!onRename} onClick={beginRename}>Rename</DropdownMenuItem>
+            {humanKey && (
+              <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" onClick={() => void navigator.clipboard?.writeText(humanKey)}>
+                Copy {humanKey}
+              </DropdownMenuItem>
+            )}
             {onMoveUp || onMoveDown ? (
               <>
                 <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" disabled={!onMoveUp} onClick={onMoveUp}>Move up</DropdownMenuItem>

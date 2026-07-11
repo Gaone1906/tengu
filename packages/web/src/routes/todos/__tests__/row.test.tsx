@@ -94,24 +94,23 @@ function renderRow(
 }
 
 describe("TodoRow execution context (render)", () => {
-  it("shows the run StateLine on an executing workflow Todo", () => {
+  it("shows changing execution state without run metadata at rest", () => {
     const run = { workflowId: "wf-digest", runId: "run-2026-07-06-abcdef123" }
     renderRow(compact({ status: "executing" }), detailFor("executing", run))
 
     expect(screen.getByTestId("todo-exec-w1")).toBeTruthy()
     expect(screen.getByText(/^Working/)).toBeTruthy()
-    // The long runId is shortened to a calm `prefix…`.
-    expect(screen.getByText("Run · run-2026-07-06…")).toBeTruthy()
+    expect(screen.queryByText(/run-2026/i)).toBeNull()
     expect(screen.getByTestId("todo-exec-open-w1")).toBeTruthy()
   })
 
-  it("keeps the ref line but drops the Working segment on a blocked Todo", () => {
+  it("lets the group carry blocked state instead of repeating a row badge", () => {
     const run = { workflowId: "wf-digest", runId: "run-abc" }
     renderRow(compact({ status: "blocked" }), detailFor("blocked", run))
 
-    expect(screen.getByTestId("todo-exec-w1")).toBeTruthy()
+    expect(screen.queryByTestId("todo-exec-w1")).toBeNull()
     expect(screen.queryByText(/^Working/)).toBeNull()
-    expect(screen.getByText("Blocked")).toBeTruthy() // attention badge in place
+    expect(screen.queryByText("Blocked")).toBeNull()
   })
 
   it("shows nothing extra on a plain (non-active) Todo with no run", () => {
@@ -126,6 +125,23 @@ describe("TodoRow execution context (render)", () => {
     renderRow(compact({ status: "assigned" }), undefined, { onOpen })
     fireEvent.click(screen.getByTestId("todo-row-w1"))
     expect(onOpen).toHaveBeenCalledWith("w1")
+  })
+
+  it("wraps a dominant title and omits source metadata at rest", () => {
+    renderRow(compact({ status: "backlog", assignee: null, title: "A deliberately long title that needs another line" }))
+    const title = screen.getByText("A deliberately long title that needs another line")
+    expect(title.className).toContain("break-words")
+    expect(title.className).not.toContain("truncate")
+    expect(screen.queryByText("Cron")).toBeNull()
+  })
+
+  it("keeps the canonical key out of default row chrome but copyable in context", () => {
+    const item = compact({ status: "backlog" }) as WorkItemCompactWire & { key?: string }
+    item.key = "JIN-142"
+    renderRow(item, undefined, { onRename: vi.fn() })
+    expect(screen.queryByText("JIN-142")).toBeNull()
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Todo actions" }), { button: 0, pointerType: "mouse" })
+    expect(screen.getByRole("menuitem", { name: "Copy JIN-142" })).toBeTruthy()
   })
 })
 

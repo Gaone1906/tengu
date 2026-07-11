@@ -58,11 +58,11 @@ const org: OrgData = {
   hierarchy: { root: "coo", sorted: ["coo"], warnings: [] },
 }
 
-function renderPage() {
+function renderPage(initialEntry = "/todos") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <TodosPage />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -123,5 +123,22 @@ describe("TodosPage Needs You inbox", () => {
 
     fireEvent.click(screen.getByTestId("escalate-wi_escalate"))
     await waitFor(() => expect(escalateWorkItemApproval).toHaveBeenCalledWith("wi_escalate"))
+  })
+})
+
+describe("TodosPage filtered totals", () => {
+  beforeEach(() => {
+    listWorkItems.mockReset().mockImplementation((params?: { status?: string; department?: string; needsAttentionFor?: string }) => {
+      if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+      const total = params?.status === "backlog" ? (params.department === "platform" ? 3 : 8) : 0
+      return Promise.resolve({ workItems: [], total, nextOffset: null })
+    })
+    getOrg.mockReset().mockResolvedValue(org)
+    getWorkItem.mockReset()
+  })
+
+  it("states an honest filtered subset of the primary open ledger", async () => {
+    renderPage("/todos?department=platform")
+    expect(await screen.findByText("3 of 8 open")).toBeTruthy()
   })
 })

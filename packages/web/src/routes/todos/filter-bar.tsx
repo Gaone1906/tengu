@@ -11,38 +11,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
-import type { Employee, WorkItemSourceWire } from "@/lib/api"
-import { activeFilterCount, type DateFilter, type StatusFilter, type TodoFilters } from "@/lib/todos"
-
-const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "open", label: "Open" },
-  { value: "backlog", label: "Backlog" },
-  { value: "assigned", label: "Assigned" },
-  { value: "executing", label: "Executing" },
-  { value: "blocked", label: "Blocked" },
-  { value: "in_review", label: "In review" },
-  { value: "escalated", label: "Escalated" },
-  { value: "done", label: "Done" },
-  { value: "cancelled", label: "Cancelled" },
-]
-
-const SOURCE_OPTIONS: { value: WorkItemSourceWire; label: string }[] = [
-  { value: "human", label: "You" },
-  { value: "delegation", label: "Delegation" },
-  { value: "cron", label: "Cron" },
-  { value: "workflow", label: "Workflow" },
-  { value: "session", label: "Session" },
-  { value: "connector", label: "Connector" },
-  { value: "goal", label: "Goal" },
-]
-
-const DATE_OPTIONS: { value: DateFilter | undefined; label: string }[] = [
-  { value: undefined, label: "Any time" },
-  { value: "today", label: "Today" },
-  { value: "week", label: "This week" },
-  { value: "month", label: "This month" },
-]
+import type { Employee } from "@/lib/api"
+import { activeFilterCount, type TodoFilters } from "@/lib/todos"
+import { DATE_OPTIONS, SOURCE_OPTIONS, STATUS_OPTIONS } from "./filter-options"
+import { TodoFilterSheet } from "./todo-filter-sheet"
 
 const MENU_CLASS =
   "w-[min(320px,calc(100vw-24px))] rounded-[var(--radius-xl)] border-0 bg-[var(--material-thick)] p-2 shadow-[var(--shadow-overlay)] backdrop-blur-xl"
@@ -69,6 +41,20 @@ function ActiveChip({ label, onRemove }: { label: string; onRemove: () => void }
   )
 }
 
+const MOBILE_QUERY = "(max-width: 767px)"
+
+function useIsTodoMobile() {
+  const [mobile, setMobile] = useState(() => typeof window !== "undefined" && (window.matchMedia?.(MOBILE_QUERY).matches ?? false))
+  useEffect(() => {
+    const query = window.matchMedia?.(MOBILE_QUERY)
+    if (!query) return
+    const onChange = (event: MediaQueryListEvent) => setMobile(event.matches)
+    query.addEventListener("change", onChange)
+    return () => query.removeEventListener("change", onChange)
+  }, [])
+  return mobile
+}
+
 export function FilterBar({
   filters,
   onChange,
@@ -84,6 +70,8 @@ export function FilterBar({
   byName: Map<string, Employee>
   onPeopleView?: () => void
 }) {
+  const mobile = useIsTodoMobile()
+  const [mobileOpen, setMobileOpen] = useState(false)
   const [q, setQ] = useState(filters.q ?? "")
   const debounce = useRef<number | null>(null)
   useEffect(() => setQ(filters.q ?? ""), [filters.q])
@@ -122,23 +110,39 @@ export function FilterBar({
           />
         </label>
 
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              aria-label="Filter todos"
-              className={`inline-flex min-h-11 flex-none items-center gap-2 rounded-[14px] px-3.5 text-[length:var(--text-subheadline)] font-medium transition-colors ${
-                active > 0
-                  ? "bg-[var(--accent-fill)] text-[var(--accent)]"
-                  : "bg-[var(--fill-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"
-              }`}
-            >
-              <Filter size={16} strokeWidth={1.9} aria-hidden />
-              <span className="max-[420px]:sr-only">Filter</span>
-              {active > 0 && <span className="tabular-nums">{active}</span>}
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className={MENU_CLASS}>
+        {mobile ? (
+          <button
+            type="button"
+            aria-label="Filter todos"
+            onClick={() => setMobileOpen(true)}
+            className={`inline-flex min-h-11 flex-none items-center gap-2 rounded-[14px] px-3.5 text-[length:var(--text-subheadline)] font-medium transition-[background-color,color,transform] active:scale-[0.96] ${
+              active > 0
+                ? "bg-[var(--accent-fill)] text-[var(--accent)]"
+                : "bg-[var(--fill-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"
+            }`}
+          >
+            <Filter size={16} strokeWidth={1.9} aria-hidden />
+            <span className="max-[420px]:sr-only">Filter</span>
+            {active > 0 && <span className="tabular-nums">{active}</span>}
+          </button>
+        ) : (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label="Filter todos"
+                className={`inline-flex min-h-11 flex-none items-center gap-2 rounded-[14px] px-3.5 text-[length:var(--text-subheadline)] font-medium transition-colors ${
+                  active > 0
+                    ? "bg-[var(--accent-fill)] text-[var(--accent)]"
+                    : "bg-[var(--fill-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"
+                }`}
+              >
+                <Filter size={16} strokeWidth={1.9} aria-hidden />
+                <span className="max-[420px]:sr-only">Filter</span>
+                {active > 0 && <span className="tabular-nums">{active}</span>}
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className={MENU_CLASS}>
             <DropdownMenuLabel className="px-3 pb-1 pt-2 text-[length:var(--text-caption1)] font-semibold uppercase tracking-[0.06em] text-[var(--text-tertiary)]">
               Refine this view
             </DropdownMenuLabel>
@@ -219,8 +223,9 @@ export function FilterBar({
                 Clear all filters
               </DropdownMenuItem>
             )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </div>
 
       {active > 0 && (
@@ -236,6 +241,18 @@ export function FilterBar({
           {sourceLabel && <ActiveChip label={`Source: ${sourceLabel}`} onRemove={() => onChange({ ...filters, source: undefined })} />}
           {filters.date && dateLabel && <ActiveChip label={`Date: ${dateLabel}`} onRemove={() => onChange({ ...filters, date: undefined })} />}
         </div>
+      )}
+
+      {mobile && mobileOpen && (
+        <TodoFilterSheet
+          filters={filters}
+          onChange={onChange}
+          employees={employees}
+          departments={departments}
+          byName={byName}
+          onPeopleView={onPeopleView}
+          onClose={() => setMobileOpen(false)}
+        />
       )}
     </div>
   )

@@ -298,7 +298,9 @@ export default function TodosPage() {
                 />
                 {filtered && ledger.data && (
                   <div className="-mt-3 mb-4 text-[length:var(--text-caption1)] tabular-nums text-[var(--text-tertiary)]">
-                    {filteredTotal} matching · {counts.open} open overall
+                    {filters.status === "open"
+                      ? `${filteredTotal} of ${counts.open} open`
+                      : `${filteredTotal} matching · ${counts.open} open overall`}
                   </div>
                 )}
                 {(needsCount ?? 0) > 0 && (
