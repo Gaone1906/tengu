@@ -149,12 +149,12 @@ function callbackDeliveriesTableSql(tableName = 'callback_deliveries'): string {
   return `
 CREATE TABLE ${tableName} (
   id TEXT PRIMARY KEY,
-  parent_session_id TEXT NOT NULL CHECK (length(parent_session_id) > 0 AND parent_session_id = trim(parent_session_id)),
-  child_session_id TEXT NOT NULL CHECK (length(child_session_id) > 0 AND child_session_id = trim(child_session_id)),
-  attempt_token TEXT NOT NULL CHECK (length(attempt_token) > 0 AND attempt_token = trim(attempt_token)),
-  terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND terminal_outcome = trim(terminal_outcome)),
+  parent_session_id TEXT NOT NULL CHECK (length(parent_session_id) > 0 AND parent_session_id = jinn_callback_identity(parent_session_id)),
+  child_session_id TEXT NOT NULL CHECK (length(child_session_id) > 0 AND child_session_id = jinn_callback_identity(child_session_id)),
+  attempt_token TEXT NOT NULL CHECK (length(attempt_token) > 0 AND attempt_token = jinn_callback_identity(attempt_token)),
+  terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND terminal_outcome = jinn_callback_identity(terminal_outcome)),
   terminal_version INTEGER NOT NULL CHECK (terminal_version >= 1),
-  callback_kind TEXT NOT NULL CHECK (length(callback_kind) > 0 AND callback_kind = trim(callback_kind)),
+  callback_kind TEXT NOT NULL CHECK (length(callback_kind) > 0 AND callback_kind = jinn_callback_identity(callback_kind)),
   payload TEXT NOT NULL CHECK (
     json_valid(payload)
     AND json_type(payload) = 'object'
@@ -514,7 +514,7 @@ function hasCallbackDeliveryV2Constraints(sql: string): boolean {
     'callback_kind',
   ];
   return canonicalColumns.every((column) =>
-    normalized.includes(`length(${column}) > 0 and ${column} = trim(${column})`),
+    normalized.includes(`length(${column}) > 0 and ${column} = jinn_callback_identity(${column})`),
   )
     && normalized.includes('terminal_version >= 1')
     && normalized.includes('json_valid(payload)')
@@ -529,6 +529,7 @@ function hasCallbackDeliveryV2Constraints(sql: string): boolean {
  * never silently indexed: validation throws inside the transaction so any DDL
  * from this migration is rolled back as one unit. */
 export function migrateCallbackDeliveriesSchema(database: Database.Database): void {
+  database.function('jinn_callback_identity', { deterministic: true }, canonicalCallbackIdentityText);
   const migrate = database.transaction(() => {
     const existing = database.prepare(`
       SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'callback_deliveries'

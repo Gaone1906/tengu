@@ -312,13 +312,17 @@ describe("callback delivery identity", () => {
 
   it.each([
     ["blank parent", "parent_session_id", "   ", 1],
+    ["tab-padded parent", "parent_session_id", "\tparent-sql\t", 1],
+    ["NBSP-only parent", "parent_session_id", "\u00a0", 1],
+    ["decomposed Unicode child", "child_session_id", "cafe\u0301", 1],
     ["padded token", "attempt_token", " token ", 1],
     ["zero terminal version", "terminal_version", "attempt-2", 0],
   ])("rejects direct SQL identities that violate canonical constraints: %s", (_label, column, value, version) => {
     const database = registry.initDb();
     const row = callbackInput({
       parentSessionId: column === "parent_session_id" ? value : "parent-sql",
-      attemptToken: column === "attempt_token" ? value : String(value),
+      childSessionId: column === "child_session_id" ? value : "child-sql",
+      attemptToken: column === "attempt_token" ? value : "attempt-sql",
       terminalVersion: version,
     });
     expect(() => database.prepare(`
