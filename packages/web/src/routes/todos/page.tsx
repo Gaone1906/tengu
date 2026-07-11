@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useSearchParams } from "react-router-dom"
-import { Plus } from "lucide-react"
+import { ArrowLeft, Plus } from "lucide-react"
 import { api, type WorkItemCompactWire, type WorkItemStatusWire } from "@/lib/api"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
@@ -21,6 +21,7 @@ import { GroupSkeleton } from "./group"
 import { NeedsYouView } from "./needs-you-view"
 import { PeopleView } from "./people-view"
 import { DetailSheet } from "./detail-sheet"
+import { TodoDialog } from "./todo-dialog"
 import {
   useLedgerItems,
   usePeopleItems,
@@ -34,77 +35,17 @@ import {
   useUpdateWorkItem,
 } from "./use-todos"
 
-/* design-todos §2 — the frame. ONE column (max-w 840px) for every lens, so a
- * lens switch moves zero chrome: header block and segmented control have fixed
- * geometry, and only the content region below them swaps (120ms opacity
- * crossfade — no translate, no height animation). The kanban is retired. */
+/* One calm open-work ledger. Search and Filter are the persistent controls;
+ * Needs you and People become transient focused views instead of peer lenses.
+ * Every view keeps the same 840px reading column and short opacity transition. */
 
-type Tab = "active" | "needs" | "people"
+type TodoView = "ledger" | "needs" | "people"
 
-function Segmented({
-  tab,
-  onTab,
-  activeCount,
-  needsCount,
-  peopleCount,
-}: {
-  tab: Tab
-  onTab: (t: Tab) => void
-  activeCount: number
-  needsCount: number | null
-  peopleCount: number
-}) {
-  const items: { id: Tab; label: string; count: number | null; alert?: boolean }[] = [
-    { id: "active", label: "Active", count: activeCount },
-    { id: "needs", label: "Needs you", count: needsCount, alert: (needsCount ?? 0) > 0 },
-    { id: "people", label: "People", count: peopleCount },
-  ]
-  return (
-    <div className="mb-3.5 mt-[22px] flex max-md:justify-center">
-      <div className="inline-flex gap-0.5 rounded-[12px] bg-[var(--fill-tertiary)] p-[3px]" role="tablist">
-        {items.map((it) => {
-          const active = tab === it.id
-          return (
-            <button
-              key={it.id}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              data-testid={`todos-tab-${it.id}`}
-              onClick={() => onTab(it.id)}
-              className={`inline-flex h-[34px] items-center gap-1.5 rounded-[9px] px-[15px] text-[length:var(--text-subheadline)] transition-colors ${
-                active
-                  ? "bg-[var(--bg-secondary)] font-semibold text-[var(--text-primary)] shadow-[var(--shadow-subtle)]"
-                  : "font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-              }`}
-            >
-              {it.label}
-              {it.count != null && it.count > 0 && (
-                <span
-                  className="inline-grid h-[18px] min-w-[18px] place-items-center rounded-[9px] px-1.5 text-[length:var(--text-caption2)] font-semibold tabular-nums"
-                  style={
-                    it.alert
-                      ? { background: "var(--accent-fill)", color: "var(--accent)" }
-                      : active
-                        ? { background: "var(--fill-primary)", color: "var(--text-secondary)" }
-                        : { background: "var(--fill-secondary)", color: "var(--text-tertiary)" }
-                  }
-                >
-                  {it.count}
-                </span>
-              )}
-            </button>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-function NewTodoDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+export function NewTodoDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [title, setTitle] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
   const create = useCallback(async () => {
     const t = title.trim()
     if (!t || busy) return
@@ -120,9 +61,15 @@ function NewTodoDialog({ onClose, onCreated }: { onClose: () => void; onCreated:
   }, [title, busy, onCreated])
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center" role="dialog" aria-modal="true" aria-label="New todo">
-      <div className="absolute inset-0" style={{ background: "color-mix(in srgb, var(--bg) 55%, transparent)" }} onClick={onClose} aria-hidden />
-      <div className="relative m-4 w-full max-w-[400px] rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-6 pb-[max(24px,env(safe-area-inset-bottom))] shadow-[var(--shadow-overlay)] animate-scale-in">
+    <TodoDialog
+      label="New todo"
+      onRequestClose={() => {
+        if (busy) return
+        if (title.trim()) setConfirmDiscard(true)
+        else onClose()
+      }}
+      className="inset-x-3 bottom-3 rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-6 pb-[max(24px,env(safe-area-inset-bottom))] shadow-[var(--shadow-overlay)] motion-safe:data-[state=open]:animate-in motion-safe:data-[state=open]:slide-in-from-bottom-3 sm:left-1/2 sm:top-1/2 sm:bottom-auto sm:w-[400px] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:motion-safe:data-[state=open]:zoom-in-95"
+    >
         <h2 className="text-[length:var(--text-title3)] font-semibold text-[var(--text-primary)]">New Todo</h2>
         <p className="mt-1 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">A unit of work for the company. Assign and route it later.</p>
         <input
@@ -132,11 +79,20 @@ function NewTodoDialog({ onClose, onCreated }: { onClose: () => void; onCreated:
           onChange={(e) => setTitle(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") void create() }}
           placeholder="e.g. Draft the launch note"
-          className="apple-input mt-4 w-full"
+          className="apple-input mt-4 min-h-11 w-full"
         />
         {error && <div className="mt-2 text-[length:var(--text-caption1)] text-[var(--system-red)]">{error}</div>}
+        {confirmDiscard && (
+          <div className="mt-3 rounded-[var(--radius-md)] bg-[var(--fill-tertiary)] p-3 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
+            <p>Discard this Todo draft?</p>
+            <div className="mt-2 flex gap-2">
+              <button type="button" onClick={onClose} className="min-h-11 rounded-full px-3 font-semibold text-[var(--system-red)]">Discard</button>
+              <button type="button" onClick={() => setConfirmDiscard(false)} className="min-h-11 rounded-full px-3 text-[var(--text-secondary)]">Keep editing</button>
+            </div>
+          </div>
+        )}
         <div className="mt-5 flex items-center justify-end gap-2">
-          <button type="button" onClick={onClose} className="h-9 rounded-full px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)]">
+          <button type="button" onClick={() => { if (title.trim()) setConfirmDiscard(true); else onClose() }} className="min-h-11 rounded-full px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)]">
             Cancel
           </button>
           <button
@@ -144,13 +100,12 @@ function NewTodoDialog({ onClose, onCreated }: { onClose: () => void; onCreated:
             data-testid="todo-new-create"
             disabled={!title.trim() || busy}
             onClick={() => void create()}
-            className="h-9 rounded-full bg-[var(--accent)] px-5 text-[length:var(--text-subheadline)] font-semibold text-[var(--accent-contrast)] transition-transform hover:scale-[0.98] disabled:opacity-40"
+            className="min-h-11 rounded-full bg-[var(--accent)] px-5 text-[length:var(--text-subheadline)] font-semibold text-[var(--accent-contrast)] transition-transform hover:scale-[0.98] disabled:opacity-40"
           >
             {busy ? "Creating…" : "Create"}
           </button>
         </div>
-      </div>
-    </div>
+    </TodoDialog>
   )
 }
 
@@ -159,7 +114,6 @@ export default function TodosPage() {
   const qc = useQueryClient()
   const now = Date.now()
 
-  const [tab, setTab] = useState<Tab>("active")
   const [openId, setOpenId] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [resolving, setResolving] = useState<Set<string>>(new Set())
@@ -168,15 +122,28 @@ export default function TodosPage() {
 
   // Filters live in the URL (§4.3): shareable, refresh-proof.
   const [searchParams, setSearchParams] = useSearchParams()
+  const view = (searchParams.get("view") === "needs" || searchParams.get("view") === "people"
+    ? searchParams.get("view")
+    : "ledger") as TodoView
+  const setView = useCallback((next: TodoView) => {
+    const params = new URLSearchParams(searchParams)
+    if (next === "ledger") params.delete("view")
+    else params.set("view", next)
+    setSearchParams(params, { replace: true })
+  }, [searchParams, setSearchParams])
   const filters = useMemo(() => filtersFromSearchParams(searchParams), [searchParams])
   const setFilters = useCallback(
-    (next: TodoFilters) => setSearchParams(filtersToSearchParams(next), { replace: true }),
-    [setSearchParams],
+    (next: TodoFilters) => {
+      const params = filtersToSearchParams(next)
+      if (view !== "ledger") params.set("view", view)
+      setSearchParams(params, { replace: true })
+    },
+    [setSearchParams, view],
   )
   const filtered = !isDefaultFilters(filters)
 
   // The default ledger always loads (header counts come from its server
-  // totals); a filtered Active lens adds its own queries on top. "Show N more"
+  // totals); a filtered result adds its own queries on top. "Show N more"
   // appends the NEXT server page for the group's statuses (offset=20, 40, …).
   const baseLedger = useLedgerItems({ status: "open" }, now)
   const filteredLedger = useLedgerItems(filters, now)
@@ -189,7 +156,7 @@ export default function TodosPage() {
   const ledgerItems: WorkItemCompactWire[] = useMemo(() => ledger.data?.items ?? [], [ledger.data])
 
   const openIds = useMemo(() => openIdsOf(ledgerItems), [ledgerItems])
-  const details = useOpenDetails(openIds, tab === "active")
+  const details = useOpenDetails(openIds, view === "ledger")
   const needs = useNeedsAttentionItems()
   const org = useOrg()
   const byName = useEmployeesByName(org.data?.employees)
@@ -212,7 +179,10 @@ export default function TodosPage() {
     () => groupPeople(peopleItems.data ?? [], org.data?.employees ?? []),
     [peopleItems.data, org.data?.employees],
   )
-  const peopleWithWork = useMemo(() => people.filter((p) => p.openCount > 0).length, [people])
+  const filteredTotal = useMemo(
+    () => Object.values(ledger.data?.totalsByStatus ?? {}).reduce((sum, value) => sum + (value ?? 0), 0),
+    [ledger.data],
+  )
 
   const onOpen = useCallback((id: string) => setOpenId(id), [])
   const onToggle = useCallback((name: string) => {
@@ -307,7 +277,7 @@ export default function TodosPage() {
               data-testid="todo-new"
               onClick={() => setCreating(true)}
               aria-label="New todo"
-              className="inline-flex h-[38px] shrink-0 items-center justify-center gap-1.5 rounded-full text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] max-md:w-[38px] md:px-4"
+              className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 rounded-full text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] md:px-4"
               style={{ background: "var(--accent-fill)", color: "var(--accent)", boxShadow: "var(--inset-shine)" }}
             >
               <Plus className="size-4" aria-hidden />
@@ -315,11 +285,8 @@ export default function TodosPage() {
             </button>
           </header>
 
-          <Segmented tab={tab} onTab={setTab} activeCount={counts.open} needsCount={needsCount} peopleCount={peopleWithWork} />
-
-          {/* Content region — everything below the fixed chrome swaps per lens. */}
-          <div key={tab} className="motion-safe:animate-[lensFade_120ms_var(--ease-smooth)]">
-            {tab === "active" && (
+          <div key={view} className="mt-6 motion-safe:animate-[lensFade_120ms_var(--ease-smooth)]">
+            {view === "ledger" && (
               <>
                 <FilterBar
                   filters={filters}
@@ -327,18 +294,43 @@ export default function TodosPage() {
                   employees={org.data?.employees ?? []}
                   departments={org.data?.departments ?? []}
                   byName={byName}
+                  onPeopleView={() => setView("people")}
                 />
+                {filtered && ledger.data && (
+                  <div className="-mt-3 mb-4 text-[length:var(--text-caption1)] tabular-nums text-[var(--text-tertiary)]">
+                    {filteredTotal} matching · {counts.open} open overall
+                  </div>
+                )}
+                {(needsCount ?? 0) > 0 && (
+                  <section data-testid="needs-preview" className="mb-6 rounded-[var(--radius-xl)] bg-[var(--fill-quaternary)] p-2">
+                    <div className="flex min-h-11 items-center gap-2 px-2">
+                      <span className="text-[length:var(--text-footnote)] font-semibold text-[var(--text-primary)]">Needs you</span>
+                      <span className="tabular-nums text-[length:var(--text-caption1)] text-[var(--system-orange)]">{needsCount}</span>
+                      <button type="button" onClick={() => setView("needs")} className="ml-auto min-h-11 rounded-full px-3 text-[length:var(--text-footnote)] font-semibold text-[var(--accent)]">
+                        View all
+                      </button>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      {needsYou.slice(0, 3).map((item) => (
+                        <button key={item.id} type="button" onClick={() => onOpen(item.id)} className="flex min-h-11 min-w-0 items-center gap-3 rounded-[12px] bg-[var(--bg-secondary)] px-3 text-left hover:bg-[var(--fill-tertiary)]">
+                          <span className="min-w-0 flex-1 truncate text-[length:var(--text-subheadline)] font-medium text-[var(--text-primary)]">{item.title}</span>
+                          <span className="flex-none text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">Review</span>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
                 {editError && (
                   <div
                     data-testid="todos-edit-error"
                     className="mb-4 rounded-[var(--radius-md)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
-                    style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}
+                    style={{ background: "var(--fill-quaternary)" }}
                   >
                     {editError}
                   </div>
                 )}
                 {ledger.isError ? (
-                  <div className="rounded-[var(--radius-lg)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]" style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}>
+                  <div className="rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]">
                     {ledger.error instanceof Error ? ledger.error.message : "Failed to load todos"}
                   </div>
                 ) : ledger.isLoading ? (
@@ -365,29 +357,50 @@ export default function TodosPage() {
               </>
             )}
 
-            {tab === "needs" &&
-              (needs.isLoading ? (
+            {view === "needs" && (
+              <>
+                <button type="button" onClick={() => setView("ledger")} className="mb-4 inline-flex min-h-11 items-center gap-2 rounded-full px-2 text-[length:var(--text-footnote)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-quaternary)]">
+                  <ArrowLeft size={15} strokeWidth={1.9} aria-hidden /> All todos
+                </button>
+                <div className="mb-5">
+                  <h2 className="text-[length:var(--text-title2)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">Needs you</h2>
+                  <p className="mt-1 text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">Time-sensitive decisions and blocked work.</p>
+                </div>
+              {needs.isLoading ? (
                 <GroupSkeleton />
               ) : needs.isError ? (
-                <div className="rounded-[var(--radius-lg)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]" style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}>
+                <div className="rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]">
                   {needs.error instanceof Error ? needs.error.message : "Failed to load your inbox"}
                 </div>
               ) : (
                 <NeedsYouView items={needsYou} byName={byName} resolvingIds={resolving} onApprove={onApprove} onSendBack={onSendBack} onEscalate={onEscalate} onOpen={onOpen} />
-              ))}
+              )}
+              </>
+            )}
 
-            {tab === "people" &&
-              (peopleItems.isLoading ? (
+            {view === "people" && (
+              <>
+                <button type="button" onClick={() => setView("ledger")} className="mb-4 inline-flex min-h-11 items-center gap-2 rounded-full px-2 text-[length:var(--text-footnote)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-quaternary)]">
+                  <ArrowLeft size={15} strokeWidth={1.9} aria-hidden /> All todos
+                </button>
+                <div className="mb-5">
+                  <h2 className="text-[length:var(--text-title2)] font-semibold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">By person</h2>
+                  <p className="mt-1 text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">Open work grouped by owner.</p>
+                </div>
+              {peopleItems.isLoading ? (
                 <GroupSkeleton />
               ) : (
                 <PeopleView queues={people} expanded={expanded} onToggle={onToggle} onOpen={onOpen} />
-              ))}
+              )}
+              </>
+            )}
           </div>
         </div>
       </div>
 
       {openId && (
         <DetailSheet
+          key={openId}
           id={openId}
           initial={sheetInitial}
           byName={byName}

@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest"
-import { render, screen, fireEvent } from "@testing-library/react"
+import { describe, it, expect, vi, afterEach } from "vitest"
+import { act, render, screen, fireEvent } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import type {
@@ -130,11 +130,13 @@ describe("TodoRow execution context (render)", () => {
 })
 
 describe("TodoRow inline rename", () => {
-  it("commits on Enter with the trimmed title", async () => {
+  afterEach(() => vi.useRealTimers())
+
+  it("starts a semantic rename from F2 and commits on Enter", async () => {
     const onRename = vi.fn().mockResolvedValue(undefined)
     renderRow(compact({ status: "backlog" }), undefined, { onRename })
 
-    fireEvent.doubleClick(screen.getByText("Publish the weekly digest"))
+    fireEvent.keyDown(screen.getByTestId("todo-row-w1"), { key: "F2" })
     const input = screen.getByTestId("todo-rename-w1")
     fireEvent.change(input, { target: { value: "  Publish the monthly digest " } })
     fireEvent.keyDown(input, { key: "Enter" })
@@ -146,7 +148,7 @@ describe("TodoRow inline rename", () => {
     const onRename = vi.fn()
     renderRow(compact({ status: "backlog" }), undefined, { onRename })
 
-    fireEvent.doubleClick(screen.getByText("Publish the weekly digest"))
+    fireEvent.keyDown(screen.getByTestId("todo-row-w1"), { key: "F2" })
     const input = screen.getByTestId("todo-rename-w1")
     fireEvent.change(input, { target: { value: "Different" } })
     fireEvent.keyDown(input, { key: "Escape" })
@@ -159,10 +161,27 @@ describe("TodoRow inline rename", () => {
     const onRename = vi.fn()
     renderRow(compact({ status: "backlog" }), undefined, { onRename })
 
-    fireEvent.doubleClick(screen.getByText("Publish the weekly digest"))
+    fireEvent.keyDown(screen.getByTestId("todo-row-w1"), { key: "F2" })
     fireEvent.keyDown(screen.getByTestId("todo-rename-w1"), { key: "Enter" })
 
     expect(onRename).not.toHaveBeenCalled()
+  })
+
+  it("opens an explicit actions menu with Open and Rename", () => {
+    renderRow(compact({ status: "backlog" }), undefined, { onRename: vi.fn() })
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Todo actions" }), { button: 0, pointerType: "mouse" })
+    expect(screen.getByRole("menuitem", { name: "Open" })).toBeTruthy()
+    expect(screen.getByRole("menuitem", { name: "Rename" })).toBeTruthy()
+  })
+
+  it("opens Open, Rename, and Move from a touch long press instead of dragging", async () => {
+    vi.useFakeTimers()
+    renderRow(compact({ status: "backlog" }), undefined, { onRename: vi.fn() })
+    fireEvent.pointerDown(screen.getByTestId("todo-row-w1"), { pointerType: "touch", clientY: 24 })
+    await act(async () => vi.advanceTimersByTimeAsync(450))
+    expect(screen.getByRole("menuitem", { name: "Open" })).toBeTruthy()
+    expect(screen.getByRole("menuitem", { name: "Rename" })).toBeTruthy()
+    expect(screen.getByRole("menuitem", { name: /Move/ })).toBeTruthy()
   })
 })
 

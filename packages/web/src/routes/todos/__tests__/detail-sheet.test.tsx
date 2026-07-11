@@ -97,3 +97,119 @@ describe("Todo detail transition footer", () => {
     },
   )
 })
+
+describe("Todo detail editing and dialog behavior", () => {
+  beforeEach(() => {
+    authFetch.mockReset().mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      return new Response(JSON.stringify({ workItem: workItem("backlog") }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    })
+  })
+
+  it("uses a mobile-only scrim, contains long prose, and has no resting property hairlines", () => {
+    const extreme = detail("backlog")
+    extreme.workItem.title = "A".repeat(500)
+    extreme.workItem.body = "B".repeat(1200)
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <DetailSheet id="wi_backlog" initial={extreme} byName={new Map()} resolving={false} onApprove={() => {}} onSendBack={() => {}} onClose={() => {}} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+    expect(screen.getByTestId("detail-overlay").className).toContain("md:bg-transparent")
+    expect(screen.getByTestId("detail-sheet").className).toContain("overflow-x-hidden")
+    expect(screen.getByTestId("sheet-title").className).toContain("break-words")
+    expect(screen.getByTestId("sheet-body").className).toContain("break-words")
+    expect(screen.getByTestId("detail-sheet").innerHTML).not.toContain("border-t-[0.5px]")
+  })
+
+  it("shows the optional canonical key quietly, supports copy, and never reveals the opaque id", () => {
+    const keyed = detail("backlog")
+    ;(keyed.workItem as WorkItemFullWire & { key?: string }).key = "JIN-142"
+    renderSheetWithDetail(keyed)
+    expect(screen.getByText("JIN-142")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Copy JIN-142" })).toBeTruthy()
+    fireEvent.click(screen.getByTestId("tech-disclosure"))
+    expect(screen.queryByText(/wi_backlog/)).toBeNull()
+  })
+
+  it("keeps a pending title draft mounted until the serialized save completes", async () => {
+    let finish!: () => void
+    const pending = new Promise<void>((resolve) => { finish = resolve })
+    const value = detail("backlog")
+    const onClose = vi.fn()
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        await pending
+        return new Response(JSON.stringify({ workItem: { ...value.workItem, title: "Durable title" } }), { status: 200, headers: { "Content-Type": "application/json" } })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value, onClose)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Durable title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    await screen.findByText("Saving…")
+    fireEvent.click(screen.getByRole("button", { name: "Close" }))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByText("Durable title")).toBeTruthy()
+
+    finish()
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+  })
+
+  it("preserves a failed draft behind Retry and requires explicit discard to lose it", async () => {
+    const value = detail("backlog")
+    const onClose = vi.fn()
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") return new Response(JSON.stringify({ error: "Save failed" }), { status: 500, headers: { "Content-Type": "application/json" } })
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value, onClose)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Still here" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    await screen.findByRole("button", { name: "Retry" })
+    expect(screen.getByText("Still here")).toBeTruthy()
+
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Todo details" }), { key: "Escape" })
+    expect(await screen.findByText("Your draft is still here. Retry saving or discard it before closing.")).toBeTruthy()
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it("uses Escape to cancel a field edit before Escape can close the sheet", () => {
+    const onClose = vi.fn()
+    renderSheetWithDetail(detail("backlog"), onClose)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    const title = screen.getByTestId("sheet-title-edit")
+    fireEvent.change(title, { target: { value: "Temporary title" } })
+    fireEvent.keyDown(title, { key: "Escape" })
+
+    expect(screen.queryByTestId("sheet-title-edit")).toBeNull()
+    expect(screen.getByText("Todo backlog")).toBeTruthy()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+})
+
+function renderSheetWithDetail(value: WorkItemDetailWire, onClose = vi.fn()) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+  return render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter>
+        <DetailSheet id={value.workItem.id} initial={value} byName={new Map()} resolving={false} onApprove={() => {}} onSendBack={() => {}} onClose={onClose} />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+}

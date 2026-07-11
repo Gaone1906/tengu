@@ -147,14 +147,14 @@ function NeedsYouCard({
               data-testid={`sendback-confirm-${item.id}`}
               disabled={resolving}
               onClick={() => onSendBack(item.id, note.trim())}
-              className="h-9 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-primary)] disabled:opacity-40"
+              className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-primary)] disabled:opacity-40"
             >
               Send back
             </button>
             <button
               type="button"
               onClick={() => setComposing(false)}
-              className="h-9 rounded-full px-3 text-[length:var(--text-subheadline)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)]"
+              className="min-h-11 rounded-full px-3 text-[length:var(--text-subheadline)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)]"
             >
               Cancel
             </button>
@@ -169,7 +169,7 @@ function NeedsYouCard({
                 data-testid={`approve-${item.id}`}
                 disabled={resolving}
                 onClick={() => onApprove(item.id)}
-                className="inline-flex h-9 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
+                className="inline-flex min-h-11 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
                 style={{
                   background: "color-mix(in srgb, var(--system-green) 16%, transparent)",
                   color: "var(--system-green)",
@@ -184,7 +184,7 @@ function NeedsYouCard({
                 data-testid={`sendback-${item.id}`}
                 disabled={resolving}
                 onClick={() => setComposing(true)}
-                className="h-9 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-primary)] disabled:opacity-40"
+                className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-primary)] disabled:opacity-40"
               >
                 Send back
               </button>
@@ -193,7 +193,7 @@ function NeedsYouCard({
                 data-testid={`escalate-${item.id}`}
                 disabled={resolving}
                 onClick={() => onEscalate(item.id)}
-                className="inline-flex h-9 items-center gap-1.5 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
+                className="inline-flex min-h-11 items-center gap-1.5 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
                 style={{ color: "var(--text-secondary)" }}
               >
                 <TriangleAlert size={13} strokeWidth={2} aria-hidden />
@@ -204,7 +204,7 @@ function NeedsYouCard({
             <button
               type="button"
               onClick={() => onOpen(item.id)}
-              className="inline-flex h-[34px] items-center gap-1.5 rounded-full bg-[var(--fill-secondary)] px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-primary)]"
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-full bg-[var(--fill-secondary)] px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-primary)]"
             >
               <ExternalLink size={13} strokeWidth={1.75} aria-hidden />
               Open Todo

@@ -12,9 +12,6 @@ import { TodoRow } from "./row"
  * focused row. Cross-group drag is deliberately out (a group change is a
  * status transition owned by the gateway). */
 
-const LONG_PRESS_MS = 400
-const DRAG_SLOP_PX = 6
-
 interface DragState {
   id: string
   fromIndex: number
@@ -86,7 +83,6 @@ export function TodoGroup({
   const [announce, setAnnounce] = useState("")
   const wrapRefs = useRef<(HTMLDivElement | null)[]>([])
   const dragRef = useRef<DragState | null>(null)
-  const pressTimer = useRef<number | null>(null)
   const reducedMotion = useMemo(
     () => typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
     [],
@@ -141,30 +137,6 @@ export function TodoGroup({
     [beginDrag, onReorder],
   )
 
-  /** Touch: long-press anywhere on the row lifts (the grip is hidden ≤500px). */
-  const rowPointerDown = useCallback(
-    (id: string, index: number) => (e: React.PointerEvent) => {
-      if (!onReorder || e.pointerType !== "touch") return
-      const startY = e.clientY
-      const cancel = () => {
-        if (pressTimer.current != null) window.clearTimeout(pressTimer.current)
-        pressTimer.current = null
-        window.removeEventListener("pointermove", onEarlyMove)
-        window.removeEventListener("pointerup", cancel)
-      }
-      const onEarlyMove = (ev: PointerEvent) => {
-        if (Math.abs(ev.clientY - startY) > DRAG_SLOP_PX) cancel()
-      }
-      pressTimer.current = window.setTimeout(() => {
-        cancel()
-        beginDrag(id, index, startY)
-      }, LONG_PRESS_MS)
-      window.addEventListener("pointermove", onEarlyMove)
-      window.addEventListener("pointerup", cancel)
-    },
-    [beginDrag, onReorder],
-  )
-
   const keyMove = useCallback(
     (id: string, index: number) => (e: React.KeyboardEvent) => {
       if (!onReorder || !(e.metaKey || e.ctrlKey)) return
@@ -189,7 +161,7 @@ export function TodoGroup({
         disabled={!collapsible}
         onClick={() => collapsible && setOpen((v) => !v)}
         aria-expanded={collapsible ? open : undefined}
-        className="flex w-full items-center gap-2 px-1.5 pb-2 text-left disabled:cursor-default"
+        className="flex min-h-11 w-full items-center gap-2 px-1.5 text-left disabled:cursor-default"
         data-testid={testId ? `${testId}-header` : undefined}
       >
         <StateCircle keyOf={glyph} size={20} />
@@ -243,7 +215,6 @@ export function TodoGroup({
                 ref={(el) => {
                   wrapRefs.current[i] = el
                 }}
-                onPointerDown={rowPointerDown(item.id, i)}
                 onKeyDown={keyMove(item.id, i)}
                 className={lifted ? "relative z-10 rounded-[13px] bg-[var(--bg-tertiary)] shadow-[var(--shadow-overlay)]" : "relative"}
                 style={
@@ -262,6 +233,8 @@ export function TodoGroup({
                   onOpen={onOpen}
                   onRename={onRename}
                   onGripPointerDown={onReorder ? gripDown(item.id, i) : undefined}
+                  onMoveUp={onReorder && i > 0 ? () => onReorder(item.id, i, i - 1) : undefined}
+                  onMoveDown={onReorder && i < items.length - 1 ? () => onReorder(item.id, i, i + 1) : undefined}
                   now={now}
                 />
               </div>
@@ -273,7 +246,7 @@ export function TodoGroup({
               onClick={onShowMore}
               disabled={loadingMore}
               data-testid={testId ? `${testId}-more` : undefined}
-              className="flex h-[38px] w-full items-center gap-1.5 rounded-[13px] pl-[42px] pr-3 text-[length:var(--text-footnote)] font-medium text-[var(--text-tertiary)] transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] hover:text-[var(--text-secondary)] disabled:opacity-50 max-[500px]:pl-[46px]"
+              className="flex min-h-11 w-full items-center gap-1.5 rounded-[13px] pl-[42px] pr-3 text-[length:var(--text-footnote)] font-medium text-[var(--text-tertiary)] transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] hover:text-[var(--text-secondary)] disabled:opacity-50 max-[500px]:pl-[46px]"
             >
               <ChevronDown size={11} strokeWidth={2.4} aria-hidden />
               {loadingMore ? "Loading…" : `Show ${hiddenCount} more`}

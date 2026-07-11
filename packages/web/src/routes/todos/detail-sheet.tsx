@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
-import { X, Check, ChevronRight, MessageSquareText } from "lucide-react"
-import { api, type Employee, type WorkItemDetailWire, type WorkItemStatusWire } from "@/lib/api"
+import { X, Check, ChevronRight, Copy, MessageSquareText } from "lucide-react"
+import { api, type Employee, type WorkItemDetailWire, type WorkItemFullWire, type WorkItemStatusWire } from "@/lib/api"
 import {
   STATUS_LABEL,
   effectiveVerifyMode,
@@ -21,7 +21,9 @@ import {
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { StatusCircle } from "./state-glyph"
 import { displayNameOf, formatRelativeTime } from "./util"
-import { useSetWorkItemStatus, useUpdateWorkItem } from "./use-todos"
+import { useSetWorkItemStatus } from "./use-todos"
+import { TodoDialog } from "./todo-dialog"
+import { useTodoDraft, type TodoDraftPatch, type TodoEditableDraft } from "./use-todo-draft"
 
 /* GRS-021d — the detail sheet: a DECISION (design's middle depth). Mobile = an
  * opaque bottom sheet that scrolls FROM INSIDE (pinned header, scrollable body,
@@ -32,12 +34,12 @@ import { useSetWorkItemStatus, useUpdateWorkItem } from "./use-todos"
  * (Apple Notes pattern — no input chrome until focus). Status stays
  * server-owned: only legal transitions render as actions (Start / Mark done /
  * Cancel / the approval controls), never a free status picker. Edits go through the §7.4
- * PATCH; a gateway that predates it fails quietly and the read view stays true. */
+ * PATCH and retain the local draft with an explicit Retry/Discard path on failure. */
 
 const MENU_CLASS =
   "min-w-[200px] rounded-[var(--radius-lg)] border-0 bg-[var(--material-thick)] p-1.5 shadow-[var(--shadow-overlay)] backdrop-blur-xl"
 const ITEM_CLASS =
-  "flex cursor-pointer items-center gap-2 rounded-[9px] px-2.5 py-[7px] text-[length:var(--text-footnote)] font-medium text-[var(--text-primary)] focus:bg-[var(--fill-secondary)]"
+  "flex min-h-11 cursor-pointer items-center gap-2 rounded-[9px] px-2.5 py-[7px] text-[length:var(--text-footnote)] font-medium text-[var(--text-primary)] focus:bg-[var(--fill-secondary)]"
 
 function Row({ k, children, onClick }: { k: string; children: React.ReactNode; onClick?: () => void }) {
   const Tag = onClick ? "button" : "div"
@@ -45,10 +47,10 @@ function Row({ k, children, onClick }: { k: string; children: React.ReactNode; o
     <Tag
       type={onClick ? "button" : undefined}
       onClick={onClick}
-      className={`flex min-h-[46px] w-full items-center gap-3 p-[11px_14px] text-left [&+&]:border-t-[0.5px] [&+&]:border-[var(--separator)] ${onClick ? "transition-colors hover:bg-[var(--fill-tertiary)]" : ""}`}
+      className={`flex min-h-11 w-full min-w-0 items-center gap-3 rounded-[10px] p-[10px_12px] text-left ${onClick ? "transition-colors hover:bg-[var(--fill-tertiary)]" : ""}`}
     >
       <span className="text-[length:var(--text-subheadline)] text-[var(--text-primary)]">{k}</span>
-      <span className="ml-auto inline-flex items-center gap-1.5 text-right text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
+      <span className="ml-auto inline-flex min-w-0 max-w-[65%] items-center gap-1.5 break-words text-right text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
         {children}
       </span>
       {onClick && <ChevronRight size={14} className="ml-0.5 flex-none text-[var(--text-quaternary)]" aria-hidden />}
@@ -59,12 +61,12 @@ function Row({ k, children, onClick }: { k: string; children: React.ReactNode; o
 /** A Details row whose value edits through a Ledger dropdown menu. */
 function MenuRow({ k, value, children }: { k: string; value: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="flex min-h-[46px] w-full items-center gap-3 [&+*]:border-t-[0.5px] [&+*]:border-[var(--separator)]">
+    <div className="flex min-h-11 w-full min-w-0 items-center gap-3">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <button type="button" className="flex min-h-[46px] w-full items-center gap-3 p-[11px_14px] text-left transition-colors hover:bg-[var(--fill-tertiary)]">
+          <button type="button" className="flex min-h-11 w-full min-w-0 items-center gap-3 rounded-[10px] p-[10px_12px] text-left transition-colors hover:bg-[var(--fill-tertiary)]">
             <span className="text-[length:var(--text-subheadline)] text-[var(--text-primary)]">{k}</span>
-            <span className="ml-auto inline-flex items-center gap-1.5 text-right text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
+            <span className="ml-auto inline-flex min-w-0 max-w-[65%] items-center gap-1.5 break-words text-right text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
               {value}
             </span>
             <ChevronRight size={14} className="ml-0.5 flex-none text-[var(--text-quaternary)]" aria-hidden />
@@ -83,7 +85,7 @@ function MenuCheck({ on }: { on: boolean }) {
 }
 
 function Group({ children }: { children: React.ReactNode }) {
-  return <div className="overflow-hidden rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)]">{children}</div>
+  return <div className="flex min-w-0 flex-col gap-1 overflow-hidden rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] p-1">{children}</div>
 }
 
 function Section({ label, children }: { label?: string; children: React.ReactNode }) {
@@ -112,6 +114,7 @@ function EditableBody({ body, onCommit }: { body: string | null; onCommit: (next
     return (
       <textarea
         ref={ref}
+        data-todo-field-edit
         data-testid="sheet-body-edit"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
@@ -121,12 +124,14 @@ function EditableBody({ body, onCommit }: { body: string | null; onCommit: (next
         }}
         onKeyDown={(e) => {
           if (e.key === "Escape") {
+            e.preventDefault()
+            e.stopPropagation()
             setDraft(body ?? "")
             setEditing(false)
           }
         }}
         rows={Math.max(3, draft.split("\n").length)}
-        className="w-full resize-none rounded-[var(--radius-md)] border-0 bg-[var(--fill-quaternary)] p-2.5 -m-2.5 text-[16px] leading-relaxed text-[var(--text-secondary)] outline-none"
+        className="w-full min-w-0 resize-none break-words rounded-[var(--radius-md)] border-0 bg-[var(--fill-quaternary)] p-2.5 -m-2.5 text-[16px] leading-relaxed text-[var(--text-secondary)] outline-none"
       />
     )
   }
@@ -138,10 +143,10 @@ function EditableBody({ body, onCommit }: { body: string | null; onCommit: (next
         setDraft(body ?? "")
         setEditing(true)
       }}
-      className="w-full rounded-[var(--radius-md)] p-2.5 -m-2.5 text-left transition-colors hover:bg-[var(--fill-quaternary)]"
+      className="w-full min-w-0 break-words rounded-[var(--radius-md)] p-2.5 -m-2.5 text-left transition-colors hover:bg-[var(--fill-quaternary)]"
     >
       {body ? (
-        <p className="whitespace-pre-wrap text-[16px] leading-relaxed text-[var(--text-secondary)]">{body}</p>
+        <p className="whitespace-pre-wrap break-words text-[16px] leading-relaxed text-[var(--text-secondary)]">{body}</p>
       ) : (
         <span className="text-[16px] leading-relaxed text-[var(--text-quaternary)]">Add a description…</span>
       )}
@@ -317,7 +322,7 @@ function SheetBody({
           >
             <span className="flex-1">
               <span className="block text-[length:var(--text-subheadline)] text-[var(--text-primary)]">Technical details</span>
-              <span className="mt-px block text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">ID, source ref, events, timestamps</span>
+              <span className="mt-px block text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">Source reference, events, timestamps</span>
             </span>
             <ChevronRight
               size={14}
@@ -327,8 +332,7 @@ function SheetBody({
             />
           </button>
           {showTech && (
-            <div className="border-t-[0.5px] border-[var(--separator)] p-[11px_14px] font-[var(--font-code)] text-[length:var(--text-caption1)] leading-relaxed text-[var(--text-tertiary)]">
-              <div className="break-all">id: {item.id}</div>
+            <div className="min-w-0 rounded-[10px] bg-[var(--fill-tertiary)] p-[11px_14px] font-[var(--font-code)] text-[length:var(--text-caption1)] leading-relaxed text-[var(--text-tertiary)]">
               {item.sourceRef && <div className="break-all">sourceRef: {item.sourceRef}</div>}
               {item.approvalRef && <div className="break-all">approvalRef: {item.approvalRef}</div>}
               <div>created: {item.createdAt}</div>
@@ -378,11 +382,11 @@ function DecisionFooter({
             data-testid={`sheet-sendback-confirm-${id}`}
             disabled={resolving}
             onClick={() => onSendBack(id, note.trim())}
-            className="h-9 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-primary)] disabled:opacity-40"
+            className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-primary)] disabled:opacity-40"
           >
             Send back
           </button>
-          <button type="button" onClick={() => setComposing(false)} className="h-9 rounded-full px-3 text-[length:var(--text-subheadline)] text-[var(--text-tertiary)] hover:bg-[var(--fill-secondary)]">
+          <button type="button" onClick={() => setComposing(false)} className="min-h-11 rounded-full px-3 text-[length:var(--text-subheadline)] text-[var(--text-tertiary)] hover:bg-[var(--fill-secondary)]">
             Cancel
           </button>
         </div>
@@ -397,7 +401,7 @@ function DecisionFooter({
         data-testid={`sheet-approve-${id}`}
         disabled={resolving}
         onClick={() => onApprove(id)}
-        className="inline-flex h-9 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
+        className="inline-flex min-h-11 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
         style={{ background: "color-mix(in srgb, var(--system-green) 16%, transparent)", color: "var(--system-green)", boxShadow: "var(--inset-shine)" }}
       >
         <Check size={13} strokeWidth={2.4} aria-hidden />
@@ -408,7 +412,7 @@ function DecisionFooter({
         data-testid={`sheet-sendback-${id}`}
         disabled={resolving}
         onClick={() => setComposing(true)}
-        className="h-9 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-primary)] disabled:opacity-40"
+        className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-primary)] disabled:opacity-40"
       >
         Send back
       </button>
@@ -416,7 +420,7 @@ function DecisionFooter({
         <button
           type="button"
           onClick={onOpenSession}
-          className="ml-auto inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[length:var(--text-caption1)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"
+          className="ml-auto inline-flex min-h-11 items-center gap-1.5 rounded-full px-3 text-[length:var(--text-caption1)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"
         >
           <MessageSquareText size={13} strokeWidth={1.75} aria-hidden />
           Session
@@ -451,7 +455,7 @@ function TransitionFooter({
           data-testid="sheet-start-item"
           disabled={busy}
           onClick={onStart}
-          className="h-9 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
+          className="min-h-11 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
         >
           Start
         </button>
@@ -461,7 +465,7 @@ function TransitionFooter({
         data-testid="sheet-mark-done"
         disabled={busy}
         onClick={onDone}
-        className="inline-flex h-9 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
+        className="inline-flex min-h-11 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
         style={{ background: "color-mix(in srgb, var(--system-green) 16%, transparent)", color: "var(--system-green)", boxShadow: "var(--inset-shine)" }}
       >
         <Check size={13} strokeWidth={2.4} aria-hidden />
@@ -472,7 +476,7 @@ function TransitionFooter({
         data-testid="sheet-cancel-item"
         disabled={busy}
         onClick={onCancel}
-        className="h-9 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
+        className="min-h-11 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
       >
         Cancel Todo
       </button>
@@ -502,6 +506,7 @@ export function DetailSheet({
   onClose: () => void
 }) {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const { data } = useQuery({
     queryKey: ["work-item", id],
     queryFn: () => api.getWorkItem(id),
@@ -514,142 +519,215 @@ export function DetailSheet({
     staleTime: 10_000,
   })
 
-  const update = useUpdateWorkItem()
   const setStatus = useSetWorkItemStatus()
-  const [saveError, setSaveError] = useState<string | null>(null)
+  const [transitionError, setTransitionError] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState(false)
-  const [titleDraft, setTitleDraft] = useState("")
+  const [closeAfterSave, setCloseAfterSave] = useState(false)
+  const [showCloseGuard, setShowCloseGuard] = useState(false)
   const titleRef = useRef<HTMLInputElement>(null)
+  const titleBeforeEdit = useRef("")
   useEffect(() => {
     if (editingTitle) titleRef.current?.select()
   }, [editingTitle])
 
   const detail = data
-  const pending = detail?.workItem.approvalState === "pending"
-  const execSession = sessions?.[0]
-
-  const edit = (patch: Parameters<typeof api.updateWorkItem>[1]) => {
-    setSaveError(null)
-    update.mutate(
-      { id, patch },
-      { onError: (e) => setSaveError(e instanceof Error ? e.message : "Couldn't save") },
+  const initialDraft = useMemo<TodoEditableDraft>(() => ({
+    title: detail?.workItem.title ?? "",
+    body: detail?.workItem.body ?? "",
+    assignee: detail?.workItem.assignee ?? null,
+    department: detail?.workItem.department ?? null,
+    priority: detail?.workItem.priority ?? 0,
+  }), [detail])
+  const saveRemote = useCallback(async (patch: TodoDraftPatch) => {
+    const result = await api.updateWorkItem(id, patch)
+    queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) =>
+      current ? { ...current, workItem: { ...current.workItem, ...result.workItem } } : current,
     )
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["work-items"] }),
+      queryClient.invalidateQueries({ queryKey: ["work-item", id] }),
+    ])
+  }, [id, queryClient])
+  const draftState = useTodoDraft({ id, initial: initialDraft, save: saveRemote })
+  useEffect(() => {
+    if (detail && draftState.status === "idle") draftState.replaceInitial(initialDraft)
+  }, [detail, initialDraft, draftState.status, draftState.replaceInitial])
+
+  const displayDetail = useMemo<WorkItemDetailWire | undefined>(() => detail ? {
+    ...detail,
+    workItem: { ...detail.workItem, ...draftState.draft },
+  } : undefined, [detail, draftState.draft])
+  const pending = displayDetail?.workItem.approvalState === "pending"
+  const execSession = sessions?.[0]
+  const humanKey = ((displayDetail?.workItem as (WorkItemFullWire & { key?: string | null }) | undefined)?.key ?? "").trim() || null
+
+  const edit = (patch: TodoDraftPatch) => {
+    for (const [field, value] of Object.entries(patch) as [keyof TodoEditableDraft, TodoEditableDraft[keyof TodoEditableDraft]][]) {
+      draftState.change(field, value as never)
+    }
+    draftState.save(patch)
   }
   const transitionTo = (status: WorkItemStatusWire) => {
-    setSaveError(null)
+    setTransitionError(null)
     setStatus.mutate(
       { id, status },
-      { onError: (e) => setSaveError(e instanceof Error ? e.message : "Couldn't update status") },
+      { onError: (e) => setTransitionError(e instanceof Error ? e.message : "Couldn't update status") },
     )
   }
 
   const commitTitle = () => {
     setEditingTitle(false)
-    const next = titleDraft.trim()
-    if (detail && next && next !== detail.workItem.title) edit({ title: next })
+    const next = draftState.draft.title.trim()
+    if (!next) {
+      draftState.change("title", titleBeforeEdit.current)
+      return
+    }
+    if (next !== titleBeforeEdit.current) draftState.save({ title: next })
   }
 
+  const requestClose = useCallback(() => {
+    if (draftState.status === "error") {
+      setShowCloseGuard(true)
+      return
+    }
+    const patch = draftState.unsavedPatch()
+    if (Object.keys(patch).length > 0 && draftState.status !== "saving") draftState.save(patch)
+    if (draftState.status === "saving" || Object.keys(patch).length > 0) {
+      setCloseAfterSave(true)
+      return
+    }
+    onClose()
+  }, [draftState, onClose])
+
+  useEffect(() => {
+    if (closeAfterSave && draftState.status === "saved") onClose()
+    if (closeAfterSave && draftState.status === "error") setShowCloseGuard(true)
+  }, [closeAfterSave, draftState.status, onClose])
+
   return (
-    <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Todo details">
-      {/* Scrim — dim on mobile, transparent on desktop (the panel is inset). */}
-      <button
-        type="button"
-        aria-label="Close details"
-        onClick={onClose}
-        className="absolute inset-0 md:bg-transparent"
-        style={{ background: "color-mix(in srgb, var(--bg) 58%, transparent)" }}
-      />
-      <aside
-        className="absolute inset-x-0 bottom-0 flex max-h-[92vh] flex-col rounded-t-[var(--radius-2xl)] bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)] md:inset-x-auto md:bottom-4 md:right-4 md:top-4 md:max-h-none md:w-[420px] md:rounded-[var(--radius-xl)]"
-        data-testid="detail-sheet"
-      >
+    <TodoDialog
+      label="Todo details"
+      onRequestClose={requestClose}
+      testId="detail-sheet"
+      overlayTestId="detail-overlay"
+      className="inset-x-0 bottom-0 flex max-h-[92vh] min-w-0 flex-col overflow-x-hidden rounded-t-[var(--radius-2xl)] bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)] motion-safe:data-[state=open]:animate-in motion-safe:data-[state=open]:slide-in-from-bottom-4 md:bottom-4 md:left-auto md:right-4 md:top-4 md:max-h-none md:w-[420px] md:rounded-[var(--radius-xl)] md:motion-safe:data-[state=open]:slide-in-from-right-4"
+    >
         <div className="flex shrink-0 justify-center pb-2 pt-2.5 md:hidden">
           <span className="h-[5px] w-9 rounded-full bg-[var(--fill-primary)]" aria-hidden />
         </div>
 
         {/* Pinned header — title edits in place (tap; Enter commits, Esc reverts). */}
         <div className="flex shrink-0 items-start gap-3 p-[6px_20px_14px] md:pt-[20px]">
-          {detail && <StatusCircle status={detail.workItem.status} size={42} />}
+          {displayDetail && <StatusCircle status={displayDetail.workItem.status} size={42} />}
           <div className="min-w-0 flex-1">
-            {editingTitle && detail ? (
+            {editingTitle && displayDetail ? (
               <input
                 ref={titleRef}
+                data-todo-field-edit
                 data-testid="sheet-title-edit"
-                value={titleDraft}
-                onChange={(e) => setTitleDraft(e.target.value)}
+                value={draftState.draft.title}
+                onChange={(e) => draftState.change("title", e.target.value)}
                 onBlur={commitTitle}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") commitTitle()
-                  if (e.key === "Escape") setEditingTitle(false)
+                  if (e.key === "Escape") {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    draftState.change("title", titleBeforeEdit.current)
+                    setEditingTitle(false)
+                  }
                 }}
-                className="w-full rounded-[7px] border-0 bg-[var(--fill-quaternary)] px-1.5 -mx-1.5 text-[length:var(--text-title3)] font-semibold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] outline-none"
+                className="w-full min-w-0 break-words rounded-[7px] border-0 bg-[var(--fill-quaternary)] px-1.5 -mx-1.5 text-[length:var(--text-title3)] font-semibold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] outline-none"
               />
             ) : (
-              <h2
+              <button
+                type="button"
+                aria-label="Edit title"
                 data-testid="sheet-title"
                 onClick={() => {
-                  if (!detail) return
-                  setTitleDraft(detail.workItem.title)
+                  if (!displayDetail) return
+                  titleBeforeEdit.current = draftState.draft.title
                   setEditingTitle(true)
                 }}
-                className="cursor-text rounded-[7px] px-1.5 -mx-1.5 text-[length:var(--text-title3)] font-semibold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] transition-colors hover:bg-[var(--fill-quaternary)]"
+                className="w-full min-w-0 cursor-text break-words rounded-[7px] px-1.5 -mx-1.5 text-left text-[length:var(--text-title3)] font-semibold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] transition-colors hover:bg-[var(--fill-quaternary)]"
               >
-                {detail?.workItem.title ?? "…"}
-              </h2>
+                {displayDetail?.workItem.title ?? "…"}
+              </button>
             )}
-            {detail && (
-              <div className="mt-0.5 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
-                {STATUS_LABEL[detail.workItem.status]} · updated {formatRelativeTime(detail.workItem.updatedAt)}
+            {displayDetail && (
+              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
+                {humanKey && (
+                  <button
+                    type="button"
+                    aria-label={`Copy ${humanKey}`}
+                    onClick={() => void navigator.clipboard?.writeText(humanKey)}
+                    className="inline-flex min-h-11 items-center gap-1 rounded-[8px] font-[family-name:var(--font-code)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
+                  >
+                    {humanKey}<Copy size={11} strokeWidth={1.8} aria-hidden />
+                  </button>
+                )}
+                <span>{STATUS_LABEL[displayDetail.workItem.status]} · updated {formatRelativeTime(displayDetail.workItem.updatedAt)}</span>
+                <span aria-live="polite" className="text-[var(--text-tertiary)]">
+                  {draftState.status === "saving" ? "Saving…" : draftState.status === "saved" ? "Saved" : null}
+                </span>
               </div>
             )}
           </div>
           <button
             type="button"
             aria-label="Close"
-            onClick={onClose}
-            className="grid size-[30px] flex-none place-items-center rounded-full bg-[var(--fill-tertiary)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)]"
+            onClick={requestClose}
+            className="grid min-h-11 min-w-11 flex-none place-items-center rounded-full bg-[var(--fill-tertiary)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)]"
           >
             <X size={12} strokeWidth={2.4} aria-hidden />
           </button>
         </div>
 
         {/* Scrollable body */}
-        <div className="min-h-0 flex-1 overflow-y-auto p-[0_20px_20px]" data-scrollable>
-          {saveError && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-[0_20px_20px]" data-scrollable>
+          {(draftState.error || transitionError) && (
             <div
               data-testid="sheet-save-error"
-              className="mb-3 rounded-[var(--radius-md)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
-              style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}
+              className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
             >
-              {saveError}
+              <span className="min-w-0 flex-1 break-words">{draftState.error ?? transitionError}</span>
+              {draftState.status === "error" && <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">Retry</button>}
             </div>
           )}
-          {detail ? (
-            <SheetBody detail={detail} byName={byName} employees={employees} departments={departments} onEdit={edit} />
+          {showCloseGuard && (
+            <div className="mb-3 rounded-[var(--radius-lg)] bg-[var(--fill-tertiary)] p-3 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
+              <p>Your draft is still here. Retry saving or discard it before closing.</p>
+              <div className="mt-2 flex gap-2">
+                <button type="button" onClick={() => { setCloseAfterSave(true); setShowCloseGuard(false); draftState.retry() }} className="min-h-11 rounded-full bg-[var(--accent-fill)] px-4 font-semibold text-[var(--accent)]">Retry</button>
+                <button type="button" onClick={() => { draftState.discard(); onClose() }} className="min-h-11 rounded-full px-4 text-[var(--text-tertiary)]">Discard</button>
+              </div>
+            </div>
+          )}
+          {displayDetail ? (
+            <SheetBody detail={displayDetail} byName={byName} employees={employees} departments={departments} onEdit={edit} />
           ) : (
             <div className="flex h-32 items-center justify-center text-[var(--text-tertiary)]">Loading…</div>
           )}
         </div>
 
         {/* Pinned footer — the operator's call (approval) or legal transitions. */}
-        {detail && pending ? (
+        {displayDetail && pending ? (
           <DecisionFooter
-            detail={detail}
+            detail={displayDetail}
             resolving={resolving}
             onApprove={onApprove}
             onSendBack={onSendBack}
             onOpenSession={execSession ? () => navigate(`/?session=${encodeURIComponent(execSession.id)}`) : undefined}
           />
-        ) : detail ? (
+        ) : displayDetail ? (
           <TransitionFooter
-            status={detail.workItem.status}
+            status={displayDetail.workItem.status}
             busy={setStatus.isPending}
             onStart={() => transitionTo("executing")}
             onDone={() => transitionTo("done")}
             onCancel={() => transitionTo("cancelled")}
           />
         ) : null}
-      </aside>
-    </div>
+    </TodoDialog>
   )
 }

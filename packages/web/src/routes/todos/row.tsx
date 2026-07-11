@@ -1,20 +1,27 @@
 import { useEffect, useRef, useState } from "react"
-import { GripVertical, Pause, TriangleAlert } from "lucide-react"
+import { GripVertical, MoreHorizontal, Pause, TriangleAlert } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { useQuery } from "@tanstack/react-query"
 import { api, type Employee, type WorkItemCompactWire, type WorkItemDetailWire, type LinkedSessionWire } from "@/lib/api"
 import { attentionOf, provenanceLabel } from "@/lib/todos"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { StateLine } from "@/components/ui/state-line"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { StatusCircle, ProvenanceIcon } from "./state-glyph"
 import { displayNameOf, formatRelativeTime } from "./util"
 
-/* design-todos §4.1 — the row replaces the card. Flat and calm inside ONE
+/* The row replaces the card. Flat and calm inside ONE
  * grouped-inset container (the group owns the only card surface): 46px min,
  * 13px inner radius, hover --fill-quaternary, whole row opens the sheet.
  * Executing rows speak the delegation StateLine grammar ("Working · 12m · ref");
  * blocked rows keep the ref line so the operator can still jump to the stuck
- * work. Titles rename inline on double-click (Enter commits, Esc reverts). */
+ * work. F2 or the action menu renames inline (Enter commits, Esc reverts), and
+ * touch long-press opens the same Open/Rename/Move contract. */
 
 /** What an active item is executing — a workflow run, or (fallback) its linked
  *  session. Pure + exported so the surfacing logic stays unit-testable. */
@@ -104,6 +111,8 @@ export function TodoRow({
   onOpen,
   onRename,
   onGripPointerDown,
+  onMoveUp,
+  onMoveDown,
   now = Date.now(),
 }: {
   item: WorkItemCompactWire
@@ -114,12 +123,15 @@ export function TodoRow({
   onRename?: (id: string, title: string) => Promise<void>
   /** Present only when the group supports manual reorder (drag handle). */
   onGripPointerDown?: (e: React.PointerEvent) => void
+  onMoveUp?: () => void
+  onMoveDown?: () => void
   now?: number
 }) {
   const navigate = useNavigate()
   const att = attentionOf(item.status)
   const isDone = item.status === "done"
   const timeHint = formatRelativeTime(item.updatedAt, now)
+  const humanKey = (((item as WorkItemCompactWire & { key?: string | null }).key) ?? "").trim() || null
 
   // GRS-024b: prefer the already-fetched workflowRun (zero extra cost); only
   // fall back to the linked-sessions call for an active item that has a session
@@ -136,7 +148,10 @@ export function TodoRow({
 
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(item.title)
+  const [actionsOpen, setActionsOpen] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const longPressRef = useRef<number | null>(null)
+  const suppressClickRef = useRef(false)
   useEffect(() => {
     if (editing) inputRef.current?.select()
   }, [editing])
@@ -148,25 +163,64 @@ export function TodoRow({
     void onRename(item.id, next)
   }
 
+  const beginRename = () => {
+    if (!onRename) return
+    setDraft(item.title)
+    setEditing(true)
+  }
+
+  const startLongPress = (e: React.PointerEvent) => {
+    if (e.pointerType !== "touch") return
+    const startY = e.clientY
+    const cancel = () => {
+      if (longPressRef.current != null) window.clearTimeout(longPressRef.current)
+      longPressRef.current = null
+      window.removeEventListener("pointermove", move)
+      window.removeEventListener("pointerup", cancel)
+      window.removeEventListener("pointercancel", cancel)
+    }
+    const move = (event: PointerEvent) => {
+      if (Math.abs(event.clientY - startY) > 6) cancel()
+    }
+    longPressRef.current = window.setTimeout(() => {
+      cancel()
+      suppressClickRef.current = true
+      setActionsOpen(true)
+    }, 400)
+    window.addEventListener("pointermove", move)
+    window.addEventListener("pointerup", cancel)
+    window.addEventListener("pointercancel", cancel)
+  }
+
   return (
     <div
       role="button"
       tabIndex={0}
       data-testid={`todo-row-${item.id}`}
+      onPointerDown={startLongPress}
       onClick={() => {
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false
+          return
+        }
         if (!editing) onOpen(item.id)
       }}
       onKeyDown={(e) => {
         if (editing) return
+        if (e.key === "F2") {
+          e.preventDefault()
+          beginRename()
+          return
+        }
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault()
           onOpen(item.id)
         }
       }}
-      className="group/row relative flex min-h-[46px] cursor-default items-center gap-2.5 rounded-[13px] py-[7px] pl-2 pr-3 transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] focus-visible:bg-[var(--fill-quaternary)] focus-visible:outline-none max-[500px]:pl-3"
+      className="group/row relative flex min-h-11 cursor-default items-center gap-2.5 overflow-hidden rounded-[13px] py-[7px] pl-2 pr-1 transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] focus-visible:bg-[var(--fill-quaternary)] focus-visible:outline-none max-[500px]:pl-3"
       style={isDone ? { opacity: 0.78 } : undefined}
     >
-      {/* Grip — hover/focus-revealed, hidden at phone widths (long-press lifts). */}
+      {/* Grip — hover/focus-revealed on pointer layouts; mobile uses the action menu. */}
       <span
         data-testid={onGripPointerDown ? `todo-grip-${item.id}` : undefined}
         onPointerDown={onGripPointerDown}
@@ -203,12 +257,6 @@ export function TodoRow({
             />
           ) : (
             <span
-              onDoubleClick={(e) => {
-                if (!onRename) return
-                e.stopPropagation()
-                setDraft(item.title)
-                setEditing(true)
-              }}
               className={`min-w-0 flex-1 truncate text-[length:var(--text-subheadline)] text-[var(--text-primary)] ${
                 isDone ? "font-normal text-[var(--text-secondary)]" : "font-medium"
               }`}
@@ -218,6 +266,19 @@ export function TodoRow({
           )}
           <span className="flex flex-none items-center gap-2.5">
             {att && <AttentionBadge kind={att} />}
+            {humanKey && (
+              <button
+                type="button"
+                aria-label={`Copy ${humanKey}`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  void navigator.clipboard?.writeText(humanKey)
+                }}
+                className="inline-flex min-h-11 items-center font-[family-name:var(--font-code)] text-[length:var(--text-caption1)] text-[var(--text-quaternary)] hover:text-[var(--text-secondary)]"
+              >
+                {humanKey}
+              </button>
+            )}
             {item.assignee ? (
               <RowEmployee name={item.assignee} byName={byName} />
             ) : (
@@ -256,6 +317,33 @@ export function TodoRow({
           </span>
         )}
       </span>
+      <DropdownMenu open={actionsOpen} onOpenChange={setActionsOpen}>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label="Todo actions"
+              onClick={(e) => e.stopPropagation()}
+              className="grid min-h-11 min-w-11 flex-none place-items-center rounded-[11px] text-[var(--text-quaternary)] opacity-0 transition-[opacity,background-color,color] group-hover/row:opacity-100 group-focus-within/row:opacity-100 hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)] max-[500px]:pointer-events-none max-[500px]:absolute max-[500px]:right-0 max-[500px]:opacity-0"
+            >
+              <MoreHorizontal size={17} strokeWidth={2} aria-hidden />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="min-w-[180px] rounded-[var(--radius-lg)] border-0 bg-[var(--material-thick)] p-1.5 shadow-[var(--shadow-overlay)] backdrop-blur-xl"
+          >
+            <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" onClick={() => onOpen(item.id)}>Open</DropdownMenuItem>
+            <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" disabled={!onRename} onClick={beginRename}>Rename</DropdownMenuItem>
+            {onMoveUp || onMoveDown ? (
+              <>
+                <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" disabled={!onMoveUp} onClick={onMoveUp}>Move up</DropdownMenuItem>
+                <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" disabled={!onMoveDown} onClick={onMoveDown}>Move down</DropdownMenuItem>
+              </>
+            ) : (
+              <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" disabled>Move</DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   )
 }

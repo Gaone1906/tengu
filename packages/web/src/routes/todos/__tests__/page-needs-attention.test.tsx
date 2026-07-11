@@ -93,7 +93,8 @@ describe("TodosPage Needs You inbox", () => {
 
   it("loads Needs You from the server-derived attention endpoint without detail fanout", async () => {
     renderPage()
-    fireEvent.click(await screen.findByTestId("todos-tab-needs"))
+    expect(await screen.findByTestId("needs-preview")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "View all" }))
 
     await waitFor(() => expect(screen.getByText("Approve the plan?")).toBeTruthy())
 
@@ -109,7 +110,8 @@ describe("TodosPage Needs You inbox", () => {
 
   it("wires approve, send-back, and escalation actions to the approval routes", async () => {
     renderPage()
-    fireEvent.click(await screen.findByTestId("todos-tab-needs"))
+    expect(await screen.findByTestId("needs-preview")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "View all" }))
 
     fireEvent.click(await screen.findByTestId("approve-wi_approve"))
     await waitFor(() => expect(decideWorkItemApproval).toHaveBeenCalledWith("wi_approve", "approve", undefined))

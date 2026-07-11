@@ -135,7 +135,7 @@ export function ActiveView({
             data-testid="todos-history-more"
             disabled={loadingMore}
             onClick={() => onLoadMore(statusesFor(filters))}
-            className="mx-auto flex h-[38px] items-center gap-1.5 rounded-full px-4 text-[length:var(--text-footnote)] font-medium text-[var(--text-tertiary)] transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] hover:text-[var(--text-secondary)] disabled:opacity-50"
+            className="mx-auto flex min-h-11 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-footnote)] font-medium text-[var(--text-tertiary)] transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] hover:text-[var(--text-secondary)] disabled:opacity-50"
           >
             {loadingMore ? "Loading…" : `Show ${remaining} more`}
           </button>
