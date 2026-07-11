@@ -48,15 +48,22 @@ function makeRes() {
   };
 }
 
-async function request(context: import("../api.js").ApiContext, method: string, url: string, body?: unknown) {
+async function request(
+  context: import("../api.js").ApiContext,
+  method: string,
+  url: string,
+  body?: unknown,
+  authenticated = true,
+) {
   const req = Object.assign(
     Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]),
     {
       method,
       url,
       headers: {
-        host: "gateway.test",
-        authorization: "Bearer test-token",
+        host: authenticated ? "gateway.test" : "127.0.0.1:7777",
+        ...(authenticated ? { authorization: "Bearer test-token" } : {}),
+        ...(!authenticated ? { origin: "http://127.0.0.1:7777" } : {}),
         "content-type": "application/json",
       },
     },
@@ -110,6 +117,41 @@ beforeEach(() => {
 });
 
 describe("stop versus successful completion", () => {
+  it("lets the unauthenticated loopback dashboard create a session when gateway auth is disabled", async () => {
+    const engine: Engine = {
+      name: "codex",
+      run: async () => ({ sessionId: "loopback-browser-engine", result: "ok" }),
+    };
+    const queue = new (await import("../../sessions/queue.js")).SessionQueue();
+    const context = {
+      getConfig: () => ({
+        gateway: { host: "127.0.0.1" },
+        engines: { default: "codex", codex: { bin: "codex", model: "gpt-5.5" } },
+        models: { codex: { default: "gpt-5.5", models: [{ id: "gpt-5.5", label: "GPT-5.5" }] } },
+        sessions: {},
+        mcp: {},
+      }),
+      connectors: new Map(),
+      startTime: Date.now(),
+      gatewayAuthToken: "test-token",
+      emit: () => {},
+      sessionManager: {
+        getEngine: () => engine,
+        getEngines: () => new Map([["codex", engine]]),
+        getQueue: () => queue,
+      },
+    } as unknown as import("../api.js").ApiContext;
+
+    const created = await request(context, "POST", "/api/sessions", {
+      source: "web",
+      prompt: "hello from the local dashboard",
+      engine: "codex",
+    }, false);
+
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ engine: "codex" });
+  });
+
   it("keeps an HTTP-stopped attempt interrupted when its engine resolves successfully afterward", async () => {
     const run = deferred<EngineResult>();
     const started = deferred<void>();

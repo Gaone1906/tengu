@@ -230,6 +230,7 @@ import {
   LOCAL_BOOTSTRAP_GRANT_HEADER,
   listAuthSessions,
   revokeAuthSession,
+  shouldRequireGatewayAuth,
   touchAuthSession,
   verifyGatewayAuth,
 } from "./auth.js";
@@ -1813,8 +1814,25 @@ function resolveScopedWriteCallerIdentity(headers: HttpRequest["headers"], conte
     sessionExists: (sessionId) => !!getSession(sessionId),
     verifySessionCapability,
     requireCapability: true,
-    operatorAuthenticated: verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+    operatorAuthenticated:
+      verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME)
+      || (!shouldRequireGatewayAuth(context.getConfig()) && isSameOriginBrowserRequest(headers)),
   });
+}
+
+function isSameOriginBrowserRequest(headers: HttpRequest["headers"]): boolean {
+  const rawOrigin = headers.origin;
+  const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
+  const rawHost = headers.host;
+  const host = Array.isArray(rawHost) ? rawHost[0] : rawHost;
+  if (!origin || !host) return false;
+  try {
+    const parsed = new URL(origin);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:")
+      && parsed.host.toLowerCase() === host.toLowerCase();
+  } catch {
+    return false;
+  }
 }
 
 function isPublicIdentifiedCallerRoute(method: string, pathname: string): boolean {
