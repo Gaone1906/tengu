@@ -123,22 +123,32 @@ function isAnswerMessage(msg: Message): boolean {
   return Boolean((msg.content || '').trim())
 }
 
-/** A dispatch-only assistant message (all blocks `dispatch`, content the
- *  fallback line by the parity rule) renders as a dispatch row — working
- *  evidence, so it folds. */
-function isDispatchOnlyMessage(msg: Message): boolean {
-  if (msg.role !== 'assistant' || !msg.blocks?.length) return false
-  return msg.blocks.every((block) => block.type === 'dispatch')
+/** A centered bell banner: a notification that is neither a callback nor a
+ *  relay. Banners stay OUTSIDE the fold (they're addressed to the user, not
+ *  part of the model's work) — a mid-turn banner splits the region. */
+function isSystemBanner(msg: Message): boolean {
+  return msg.role === 'notification' && !parseTeammateReply(msg) && !parseAgentRelay(msg)
 }
 
-// What folds: tool groups, dispatch rows, callbacks (incl. bursts), relays.
-// HandoffCards (delegation blocks) and interim assistant prose do NOT fold —
-// durable objects and voices stay in the thread.
-function isFoldableItem(item: MessageItem): boolean {
-  if (item.kind === 'tool-group' || item.kind === 'dispatch-call' || item.kind === 'callback-burst') return true
-  const msg = item.msg
-  if (msg.role === 'notification') return Boolean(parseTeammateReply(msg) || parseAgentRelay(msg))
-  return isDispatchOnlyMessage(msg)
+/**
+ * For each raw message index, the index of its turn's FINAL answer — the last
+ * assistant prose message before the next user message — or -1 while the turn
+ * has not produced one. The fold boundary derives from this: everything
+ * between the user message and the final answer is working evidence.
+ * Exported for tests.
+ */
+export function finalAnswerIndices(messages: Message[]): number[] {
+  const out = new Array<number>(messages.length).fill(-1)
+  let answer = -1
+  for (let j = messages.length - 1; j >= 0; j--) {
+    if (messages[j].role === 'user') {
+      answer = -1
+      continue
+    }
+    if (answer === -1 && isAnswerMessage(messages[j])) answer = j
+    out[j] = answer
+  }
+  return out
 }
 
 function itemFirstMsg(item: MessageItem): Message {
@@ -153,15 +163,32 @@ function itemLastMsg(item: MessageItem): Message {
   return item.msg
 }
 
+function itemFirstRawIndex(item: MessageItem): number {
+  if (item.kind === 'tool-group' || item.kind === 'callback-burst') return item.startIndex
+  return item.index
+}
+
 function itemLastRawIndex(item: MessageItem): number {
   if (item.kind === 'tool-group') return item.startIndex + item.msgs.length - 1
   if (item.kind === 'callback-burst') return item.startIndex + item.entries.length - 1
   return item.index
 }
 
-function buildFoldSummary(run: MessageItem[]): FoldSummaryData {
+function buildFoldSummary(run: MessageItem[], messages: Message[]): FoldSummaryData {
   let tools = 0
+  let updates = 0
   const teammates = new Set<string>()
+  // Teammate work happens elsewhere, so the row timestamps inside the region
+  // undercount it: a lone callback spans 0s. Track the outbound dispatch and
+  // the last arrival so the delegated wait counts as worked time.
+  let dispatchTs: number | null = null
+  let lastCallbackTs: number | null = null
+  const noteDispatch = (ts: number) => {
+    if (dispatchTs === null || ts < dispatchTs) dispatchTs = ts
+  }
+  const noteCallback = (ts: number) => {
+    if (lastCallbackTs === null || ts > lastCallbackTs) lastCallbackTs = ts
+  }
   for (const item of run) {
     if (item.kind === 'tool-group') {
       tools += item.msgs.length
@@ -169,10 +196,14 @@ function buildFoldSummary(run: MessageItem[]): FoldSummaryData {
     }
     if (item.kind === 'dispatch-call') {
       tools += 1
+      noteDispatch(item.msg.timestamp)
       continue
     }
     if (item.kind === 'callback-burst') {
-      for (const entry of item.entries) teammates.add(entry.data.employee)
+      for (const entry of item.entries) {
+        teammates.add(entry.data.employee)
+        noteCallback(entry.msg.timestamp)
+      }
       continue
     }
     const msg = item.msg
@@ -180,65 +211,128 @@ function buildFoldSummary(run: MessageItem[]): FoldSummaryData {
       const callback = parseTeammateReply(msg)
       if (callback) {
         teammates.add(callback.employee)
+        noteCallback(msg.timestamp)
         continue
       }
       const relay = parseAgentRelay(msg)
-      if (relay) teammates.add(relay.fromLabel)
+      if (relay) {
+        teammates.add(relay.fromLabel)
+        noteCallback(msg.timestamp)
+      }
       continue
     }
+    // Interim prose the model wrote on the way to the answer.
+    if (isAnswerMessage(msg)) updates += 1
     for (const block of msg.blocks || []) {
       const employee = block.payload?.employee
-      if (typeof employee === 'string' && employee) teammates.add(employee)
+      if (typeof employee === 'string' && employee) {
+        teammates.add(employee)
+        noteDispatch(msg.timestamp)
+      }
     }
   }
   const first = itemFirstMsg(run[0]).timestamp
   const last = itemLastMsg(run[run.length - 1]).timestamp
-  return { durationMs: Math.max(0, last - first), tools, teammates: teammates.size }
+  const intermediatesSpan = Math.max(0, last - first)
+  // Delegated span: dispatch (or the turn's user message when the dispatch
+  // isn't in the region) → the last callback arrival.
+  let teammateSpan = 0
+  if (lastCallbackTs !== null) {
+    let turnStart: number | null = null
+    for (let j = itemFirstRawIndex(run[0]) - 1; j >= 0; j--) {
+      if (messages[j].role === 'user') {
+        turnStart = messages[j].timestamp
+        break
+      }
+    }
+    teammateSpan = Math.max(0, lastCallbackTs - (dispatchTs ?? turnStart ?? first))
+  }
+  return { durationMs: Math.max(intermediatesSpan, teammateSpan), tools, teammates: teammates.size, updates }
 }
 
 type RenderGroup =
   | { kind: 'plain'; item: MessageItem }
-  | { kind: 'fold'; id: string; items: MessageItem[]; answered: boolean; summary: FoldSummaryData }
+  | { kind: 'fold'; id: string; items: MessageItem[]; answered: boolean; summary: FoldSummaryData; answerIdx: number; animated: boolean }
 
 function partitionForFold(items: MessageItem[], messages: Message[]): RenderGroup[] {
+  const answerIdx = finalAnswerIndices(messages)
+
+  // The fold wraps the turn's ENTIRE middle: everything between the user
+  // message and the turn's final answer — tool calls, interim prose,
+  // callbacks, relays, delegation and dispatch rows. Only the final answer
+  // (and anything arriving after it) stays outside. System banners stay
+  // outside too; a mid-turn banner splits the region.
+  const folds = (item: MessageItem): boolean => {
+    const msg = itemFirstMsg(item)
+    if (msg.role === 'user') return false
+    if (item.kind === 'message' && isSystemBanner(item.msg)) return false
+    const answer = answerIdx[itemFirstRawIndex(item)]
+    // Unanswered turn: the work-in-progress still groups (open, folds later).
+    if (answer === -1) return true
+    return itemLastRawIndex(item) < answer
+  }
+
   const groups: RenderGroup[] = []
+  const turnSeq = new Map<string, number>()
   let i = 0
   while (i < items.length) {
-    if (!isFoldableItem(items[i])) {
+    if (!folds(items[i])) {
       groups.push({ kind: 'plain', item: items[i] })
       i++
       continue
     }
+    // Consecutive foldable items form one region. A run never crosses a turn
+    // boundary by construction: the user message and the final answer are
+    // both non-foldable, so they break it. Unanswered tails stay open — live
+    // work stays visible — but still mount inside the SAME FoldRegion so the
+    // eventual fold animates in place with scroll anchoring.
     const run: MessageItem[] = []
-    while (i < items.length && isFoldableItem(items[i])) {
+    while (i < items.length && folds(items[i])) {
       run.push(items[i])
       i++
     }
-    // The run folds once its turn produced a final answer (before the next
-    // user message). Unanswered tails stay open — live work stays visible —
-    // but still mount inside the SAME FoldRegion so the eventual fold
-    // animates in place with scroll anchoring instead of remounting.
-    let answered = false
-    for (let j = itemLastRawIndex(run[run.length - 1]) + 1; j < messages.length; j++) {
-      if (messages[j].role === 'user') break
-      if (isAnswerMessage(messages[j])) {
-        answered = true
-        break
-      }
-    }
+    const answer = answerIdx[itemFirstRawIndex(run[0])]
+    let answered = answer !== -1
     // Never fold live work: a region with a still-running tool stays open no
     // matter what follows it.
     if (answered && run.some((item) => item.kind === 'tool-group' && item.msgs.some((msg) => !isToolDone(msg)))) {
       answered = false
     }
-    const firstMsg = itemFirstMsg(run[0])
+    // Region identity is TURN-scoped, never first-item-scoped: when the real
+    // answer lands, an interim answer reclassifies as evidence and becomes
+    // the region's new first item — a first-item key would remount the
+    // region as a fresh instance resting folded, snap-collapsing the whole
+    // middle at the swap frame instead of playing the anchored fold.
+    let turnAnchor = -1
+    for (let j = itemFirstRawIndex(run[0]); j >= 0; j--) {
+      if (messages[j].role === 'user') {
+        turnAnchor = j
+        break
+      }
+    }
+    const anchorId = turnAnchor >= 0 ? (messages[turnAnchor].id || `t${turnAnchor}`) : 'head'
+    const seq = turnSeq.get(anchorId) ?? 0
+    turnSeq.set(anchorId, seq + 1)
     groups.push({
       kind: 'fold',
-      id: firstMsg.id || `fold-${itemLastRawIndex(run[0])}`,
+      id: `${anchorId}-${seq}`,
       items: run,
       answered,
-      summary: buildFoldSummary(run),
+      summary: buildFoldSummary(run, messages),
+      answerIdx: answer,
+      animated: true,
     })
+  }
+  // When a banner splits one turn into several regions they all answer at the
+  // same instant — per-region scroll anchoring would double-compensate the
+  // shared scroller. Only the region nearest the answer plays the anchored
+  // choreography; earlier siblings fold with the instant path.
+  const seenAnswers = new Set<number>()
+  for (let g = groups.length - 1; g >= 0; g--) {
+    const group = groups[g]
+    if (group.kind !== 'fold' || group.answerIdx === -1) continue
+    if (seenAnswers.has(group.answerIdx)) group.animated = false
+    seenAnswers.add(group.answerIdx)
   }
   return groups
 }
@@ -1442,7 +1536,7 @@ export function ChatMessages({
 
             if (group.kind === 'plain') return renderItem(group.item)
             return (
-              <FoldRegion key={`fold-${group.id}`} answered={group.answered} summary={group.summary}>
+              <FoldRegion key={`fold-${group.id}`} answered={group.answered} summary={group.summary} animated={group.animated}>
                 {group.items.map(renderItem)}
               </FoldRegion>
             )

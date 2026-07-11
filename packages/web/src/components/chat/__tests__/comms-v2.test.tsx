@@ -1,8 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
-import { ChatMessages, turnSpacerClass } from '../chat-messages'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { ChatMessages, finalAnswerIndices, turnSpacerClass } from '../chat-messages'
 import { BURST_WINDOW_MS, formatBurstRange } from '../callback-burst'
 import { anchorScrollDuring, canAnchorFold, formatWorkDuration, foldSummaryWords } from '../fold-region'
 import type { Message } from '@/lib/conversations'
@@ -12,6 +12,10 @@ vi.mock('@/lib/api', () => ({
 }))
 
 const T0 = 1_780_000_000_000
+
+afterEach(() => {
+  vi.useRealTimers()
+})
 
 function callback(id: string, employee: string, ts: number, preview = `Report from ${employee}.`): Message {
   return {
@@ -107,18 +111,42 @@ describe('the post-turn fold', () => {
     expect(screen.getByText('Done, shipped.')).toBeTruthy()
   })
 
-  it('re-expands and re-collapses from the summary line', () => {
+  it('re-expands and re-collapses from the summary line, animating BOTH directions', () => {
+    vi.useFakeTimers()
     const { container } = render(<ChatMessages messages={foldedTurn} loading={false} />)
     const summary = screen.getByRole('button', { name: /Show the work/ })
+    const region = () => container.querySelector('[data-fold-region]')
 
     fireEvent.click(summary)
     expect(summary.getAttribute('aria-expanded')).toBe('true')
-    expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBeNull()
+    expect(region()?.getAttribute('aria-hidden')).toBeNull()
+    act(() => vi.advanceTimersByTime(600))
     expect(screen.getByRole('button', { name: /^2 tools$/ })).toBeTruthy()
 
+    // Collapse: the control reads closed at once, but the folded state (and
+    // the inert/aria-hidden bookkeeping) commits only after the 420ms
+    // choreography — committing synchronously would snap the height to 0.
     fireEvent.click(summary)
     expect(summary.getAttribute('aria-expanded')).toBe('false')
-    expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBe('true')
+    expect(region()?.getAttribute('aria-hidden')).toBeNull()
+    act(() => vi.advanceTimersByTime(600))
+    expect(region()?.getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('recovers from a collapse interrupted by a re-expand click', () => {
+    vi.useFakeTimers()
+    const { container } = render(<ChatMessages messages={foldedTurn} loading={false} />)
+    const summary = screen.getByRole('button', { name: /Show the work/ })
+
+    fireEvent.click(summary) // expand
+    act(() => vi.advanceTimersByTime(600))
+    fireEvent.click(summary) // collapse begins…
+    act(() => vi.advanceTimersByTime(50))
+    fireEvent.click(summary) // …interrupted: expand again
+    expect(summary.getAttribute('aria-expanded')).toBe('true')
+    act(() => vi.advanceTimersByTime(600))
+    // The stale collapse timer must not fire and snap-fold the region.
+    expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBeNull()
   })
 
   it('keeps unanswered live work open with no summary line', () => {
@@ -143,8 +171,10 @@ describe('the post-turn fold', () => {
     expect(formatWorkDuration(5_000)).toBe('5s')
     expect(formatWorkDuration(90_000)).toBe('1m')
     expect(formatWorkDuration(3_720_000)).toBe('1h 2m')
-    expect(foldSummaryWords({ durationMs: 90_000, tools: 0, teammates: 2 })).toEqual(['Worked for 1m', '2 teammates'])
-    expect(foldSummaryWords({ durationMs: 1_000, tools: 1, teammates: 0 })).toEqual(['Worked for 1s', '1 tool'])
+    expect(foldSummaryWords({ durationMs: 90_000, tools: 0, teammates: 2, updates: 0 })).toEqual(['Worked for 1m', '2 teammates'])
+    expect(foldSummaryWords({ durationMs: 1_000, tools: 1, teammates: 0, updates: 0 })).toEqual(['Worked for 1s', '1 tool'])
+    expect(foldSummaryWords({ durationMs: 1_000, tools: 2, teammates: 1, updates: 2 }))
+      .toEqual(['Worked for 1s', '2 tools', '1 teammate', '2 updates'])
   })
 
   it('anchorScrollDuring compensates scrollTop by the anchor bottom delta each frame', () => {
@@ -166,6 +196,134 @@ describe('the post-turn fold', () => {
     expect(scroller.scrollTop).toBe(50)
     // Past the window: no further frames scheduled.
     expect(frames).toHaveLength(0)
+  })
+})
+
+describe('fold region boundary (turn structure)', () => {
+  it('derives the final answer per turn: last assistant prose before the next user message', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used grep', timestamp: T0 + 1_000, toolCall: 'grep' },
+      { id: 'p1', role: 'assistant', content: 'Interim finding.', timestamp: T0 + 2_000 },
+      { id: 'a1', role: 'assistant', content: 'Final answer one.', timestamp: T0 + 3_000 },
+      { id: 'u2', role: 'user', content: 'Next.', timestamp: T0 + 10_000 },
+      { id: 't2', role: 'assistant', content: 'Used bash', timestamp: T0 + 11_000, toolCall: 'bash' },
+    ]
+    // Turn 1: the LAST prose (a1) is the answer — interim prose p1 is not.
+    // User rows never fold, so their own entry stays -1. Turn 2 has no
+    // answer yet: -1 throughout.
+    expect(finalAnswerIndices(messages)).toEqual([-1, 3, 3, 3, -1, -1])
+  })
+
+  it('folds the ENTIRE turn middle: tools, interim prose, delegation, callbacks — only the final answer stays out', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Redesign the panel.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used file_read', timestamp: T0 + 5_000, toolCall: 'file_read' },
+      { id: 'p1', role: 'assistant', content: 'Reading the current layout first.', timestamp: T0 + 10_000 },
+      {
+        id: 'd1',
+        role: 'assistant',
+        content: 'Delegated to dev',
+        timestamp: T0 + 20_000,
+        blocks: [{ id: 'b1', version: 1, type: 'delegation', payload: { employee: 'dev', employeeDisplay: 'Dev', state: 'done' } }],
+      },
+      callback('c1', 'dev', T0 + 200_000),
+      { id: 'a1', role: 'assistant', content: 'Panel redesigned end to end.', timestamp: T0 + 210_000 },
+      callback('c2', 'analyst', T0 + 900_000),
+    ]
+    const { container } = render(<ChatMessages messages={messages} loading={false} />)
+
+    const region = container.querySelector('[data-fold-region]')!
+    // Every intermediate is inside the folded region…
+    expect(region.getAttribute('aria-hidden')).toBe('true')
+    expect(region.textContent).toContain('1 tool')
+    expect(region.textContent).toContain('Reading the current layout first.')
+    expect(region.textContent).toContain('Dev')
+    expect(region.textContent).toContain('dev')
+    // …the final answer is not…
+    expect(region.textContent).not.toContain('Panel redesigned end to end.')
+    expect(screen.getByText('Panel redesigned end to end.')).toBeTruthy()
+    // …and a callback arriving AFTER the answer stays visible in the thread.
+    const postAnswer = screen.getByRole('button', { name: /analyst replied.*Open report/ })
+    expect(region.contains(postAnswer)).toBe(false)
+    // The summary counts the full scope honestly (dev appears in both the
+    // delegation and the callback — one teammate).
+    expect(screen.getByRole('button', { name: /Worked for 3m, 1 tool, 1 teammate, 1 update\. Show the work\./ })).toBeTruthy()
+  })
+
+  it('keeps system banners outside the fold and splits the region around them', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used grep', timestamp: T0 + 1_000, toolCall: 'grep' },
+      { id: 'n1', role: 'notification', content: 'Session context was compacted.', timestamp: T0 + 2_000 },
+      { id: 't2', role: 'assistant', content: 'Used bash', timestamp: T0 + 3_000, toolCall: 'bash' },
+      { id: 'a1', role: 'assistant', content: 'All done.', timestamp: T0 + 4_000 },
+    ]
+    const { container } = render(<ChatMessages messages={messages} loading={false} />)
+    // The banner stays visible between two folded regions.
+    expect(screen.getByText('Session context was compacted.')).toBeTruthy()
+    expect(container.querySelectorAll('[data-fold-region]')).toHaveLength(2)
+    for (const region of container.querySelectorAll('[data-fold-region]')) {
+      expect(region.getAttribute('aria-hidden')).toBe('true')
+    }
+  })
+
+  it('counts delegated wait as worked time: a lone callback spans from the turn start', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Ask dev to audit.', timestamp: T0 },
+      callback('c1', 'dev', T0 + 300_000),
+      { id: 'a1', role: 'assistant', content: 'Audit relayed.', timestamp: T0 + 310_000 },
+    ]
+    render(<ChatMessages messages={messages} loading={false} />)
+    // Old behavior said "Worked for 0s" (single row, zero intermediates span).
+    expect(screen.getByRole('button', { name: /Worked for 5m, 1 teammate\. Show the work\./ })).toBeTruthy()
+  })
+
+  it('gives the summary row its own after-user inset outside the folding region', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Ship it.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used file_edit', timestamp: T0 + 1_000, toolCall: 'file_edit' },
+      { id: 'a1', role: 'assistant', content: 'Shipped.', timestamp: T0 + 2_000 },
+    ]
+    const { container } = render(<ChatMessages messages={messages} loading={false} />)
+    const wrap = container.querySelector('[data-fold]')!
+    const region = wrap.querySelector('[data-fold-region]')!
+    const inset = wrap.querySelector('[data-fold-summary-inset]')!
+    // The 24px inset survives the fold: it lives OUTSIDE the folded region,
+    // directly above the summary row (the items' own spacers fold away).
+    expect(inset.className).toContain('h-[var(--space-6)]')
+    expect(region.contains(inset)).toBe(false)
+    expect(region.compareDocumentPosition(inset) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const summaryRow = screen.getByRole('button', { name: /Show the work/ }).closest('.assistant-msg-row')!
+    expect(inset.compareDocumentPosition(summaryRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('keeps the region identity turn-scoped so an interim answer reclassifying cannot remount it', () => {
+    // Live state: the last prose IS currently the turn's answer, so only the
+    // block message after it groups (unanswered, open).
+    const live: Message[] = [
+      { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
+      { id: 'p1', role: 'assistant', content: 'On it, delegating now.', timestamp: T0 + 1_000 },
+      { id: 't1', role: 'assistant', content: 'Used read_flags', timestamp: T0 + 2_000, toolCall: 'read_flags' },
+    ]
+    vi.useFakeTimers()
+    const { container, rerender } = render(<ChatMessages messages={live} loading />)
+    const liveWrap = container.querySelector('[data-fold]')
+    expect(liveWrap).toBeTruthy()
+    expect(liveWrap!.getAttribute('data-folded')).toBeNull()
+
+    // The real answer lands: p1 reclassifies as evidence and becomes the
+    // region's first item. Same turn → same render key → same instance: the
+    // region must still be OPEN right after the swap (the anchored fold
+    // plays after its 400ms beat), never rest-folded by a remount.
+    const done: Message[] = [...live, { id: 'a1', role: 'assistant', content: 'All wired up.', timestamp: T0 + 9_000 }]
+    rerender(<ChatMessages messages={done} loading={false} />)
+    const region = container.querySelector('[data-fold-region]')!
+    expect(region.textContent).toContain('On it, delegating now.')
+    expect(region.getAttribute('aria-hidden')).toBeNull()
+    // …and it folds with the choreography after the beat.
+    act(() => vi.advanceTimersByTime(1200))
+    expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBe('true')
   })
 })
 
