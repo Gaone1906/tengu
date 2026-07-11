@@ -317,6 +317,23 @@ export function pickNeighborSessionId(visibleIds: string[], deletedId: string): 
   return null
 }
 
+/**
+ * The single post-delete fallback decision: the visible-order neighbour when
+ * the deleted session is in the flat visible order, else the most recent
+ * OTHER session (a session inside a collapsed Older group is not in the
+ * visible order — real installs hit this constantly), else null (composer —
+ * nothing left to select).
+ */
+export function pickDeleteFallbackId(
+  visibleIds: string[],
+  allIdsByRecency: string[],
+  deletedId: string,
+): string | null {
+  const neighbor = pickNeighborSessionId(visibleIds, deletedId)
+  if (neighbor) return neighbor
+  return allIdsByRecency.find((id) => id !== deletedId) ?? null
+}
+
 export function isRecentError(
   status: string | undefined,
   lastActivityISO: string,
@@ -1136,34 +1153,26 @@ export function ChatSidebar({
   }
 
   async function handleDelete(sessionId: string) {
-    // Compute next session to select before removing. Neighbour picked from
-    // the current visible order (Today → Yesterday → Older drawer →
-    // Scheduled), already de-duped in allFlatIds.
-    const nextSelectId = selectedId === sessionId
-      ? pickNeighborSessionId(allFlatIds.sessionIds, sessionId)
-      : null
-
+    setPinnedSessions((prev) => {
+      if (!prev.has(sessionId)) return prev
+      const next = new Set(prev)
+      next.delete(sessionId)
+      savePinnedSessions(next)
+      return next
+    })
+    // The page-level routine owns delete resolution end-to-end (mutation,
+    // tab close, ONE atomic history REPLACE to the fallback session) so all
+    // entry points — this row menu, the page ⋯ menu, Backspace — navigate
+    // identically. No selection writes from here.
+    if (onDelete) {
+      onDelete(sessionId)
+      return
+    }
+    // Embedders without onDelete: previous minimal behavior.
     try {
       await deleteSessionMutation.mutateAsync(sessionId)
-      setPinnedSessions((prev) => {
-        if (!prev.has(sessionId)) return prev
-        const next = new Set(prev)
-        next.delete(sessionId)
-        savePinnedSessions(next)
-        return next
-      })
       startTransition(() => {
-        if (nextSelectId) {
-          // System-initiated fallback: REPLACE the deleted session's history
-          // entry with the neighbour — never push (browser Back must land on
-          // the prior session in the trail, not on the deleted one or on a
-          // bare '/'). Stays on the list on mobile.
-          onSelect(nextSelectId, { replace: true, navigateMobile: false })
-        } else if (onDelete) {
-          onDelete(sessionId)
-        } else if (selectedId === sessionId) {
-          onNewChat()
-        }
+        if (selectedId === sessionId) onNewChat()
       })
     } catch {}
   }

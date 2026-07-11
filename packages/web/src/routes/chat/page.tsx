@@ -12,7 +12,7 @@ import {
 } from '@/components/chat/chat-route-helpers'
 import { useGateway } from '@/hooks/use-gateway'
 import { PageLayout } from '@/components/page-layout'
-import { ChatSidebar, pickNeighborSessionId, type SidebarOrder } from '@/components/chat/chat-sidebar'
+import { ChatSidebar, pickDeleteFallbackId, type SidebarOrder } from '@/components/chat/chat-sidebar'
 import { ChatHeaderPills } from '@/components/chat/chat-tabs'
 import { NavRibbon } from '@/components/pill-nav'
 import { MobileTabBar } from '@/components/chat/mobile-tab-bar'
@@ -318,9 +318,11 @@ function ChatPage() {
       if (opts?.navigateMobile !== false) setMobileView('chat')
       // Open a tab — label will be updated once session meta loads
       chatTabs.openTab({ sessionId: id, label: 'Loading...', status: 'idle', unread: false })
-      // Skip when already selected — and dedupe re-fires while the same
+      // Skip when already selected — and dedupe PUSH re-fires while the same
       // navigation is still in flight (double-click, repeated auto-select).
-      if (id !== selectedIdRef.current && pendingNavRef.current !== id) {
+      // REPLACE navigations pass through: they are idempotent, and the delete
+      // routine pre-claims the sentinel before issuing its replace.
+      if (id !== selectedIdRef.current && (opts?.replace || pendingNavRef.current !== id)) {
         pendingNavRef.current = id
         navigate(sessionPath(id), {
           replace: opts?.replace,
@@ -450,17 +452,29 @@ function ChatPage() {
     [selectedId, handleSelect]
   )
 
+  // THE post-delete routine — every delete entry point (sidebar row menu,
+  // page ⋯ menu, Backspace) resolves here and performs ONE atomic history
+  // REPLACE straight to the fallback session ('/' only when no sessions
+  // remain). Never a clear-to-'/' first: the WS deleted event and the
+  // sessions refetch race the router transition, and any intermediate write
+  // desyncs the URL from the pane (F5 would then lose the fallback).
   const handleDeleteSession = useCallback(async (id: string) => {
+    const wasActive = selectedIdRef.current === id
+    // Decide the fallback UP FRONT and pre-claim the navigation sentinel so
+    // the tab→URL reconciler stands down for the whole delete window (the WS
+    // session:deleted event can close tabs before the mutation resolves).
+    const allByRecency = (sessionsQuery.data ?? []).map((s) => String((s as { id?: unknown }).id ?? ''))
+    const fallback = wasActive
+      ? pickDeleteFallbackId(sidebarOrderRef.current.sessionIds, allByRecency, id)
+      : null
+    if (wasActive) pendingNavRef.current = fallback
     try {
       await deleteSessionMutation.mutateAsync(id)
     } catch { /* sidebar may have already deleted it */ }
-    if (selectedId === id) {
-      // The session is gone — one atomic REPLACE of its URL entry with the
-      // neighbouring session in the visible order (same semantics as the
-      // sidebar's delete fallback), so Back lands on the PRIOR session in the
-      // trail, never on bare '/' or in the deleted session. Composer only
-      // when nothing is left to select.
-      const fallback = pickNeighborSessionId(sidebarOrderRef.current.sessionIds, id)
+    clearIntermediateMessages(id)
+    chatTabs.closeTab(chatTabs.tabs.findIndex(t => t.kind === 'session' && t.sessionId === id))
+    setShowMoreMenu(false)
+    if (wasActive) {
       if (fallback) {
         handleSelect(fallback, { replace: true, navigateMobile: false })
       } else {
@@ -468,11 +482,8 @@ function ChatPage() {
         navigate('/', { replace: true })
       }
     }
-    clearIntermediateMessages(id)
-    chatTabs.closeTab(chatTabs.tabs.findIndex(t => t.kind === 'session' && t.sessionId === id))
-    setShowMoreMenu(false)
     qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
-  }, [selectedId, chatTabs, deleteSessionMutation, qc, navigate, handleSelect])
+  }, [chatTabs, deleteSessionMutation, qc, navigate, handleSelect, sessionsQuery.data])
 
   const handleDuplicate = useCallback(async (id: string) => {
     try {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { hasBackgroundActivity, isDirectSession, isRecentError, pickNeighborSessionId, resolveRowIdentity, shouldFloatPinned } from '../chat-sidebar'
+import { hasBackgroundActivity, isDirectSession, isRecentError, pickDeleteFallbackId, pickNeighborSessionId, resolveRowIdentity, shouldFloatPinned } from '../chat-sidebar'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -180,5 +180,25 @@ describe('pickNeighborSessionId (post-delete fallback)', () => {
     expect(pickNeighborSessionId(['only'], 'only')).toBeNull()
     expect(pickNeighborSessionId(['a', 'b'], 'zzz')).toBeNull()
     expect(pickNeighborSessionId([], 'a')).toBeNull()
+  })
+})
+
+describe('pickDeleteFallbackId (the ONE post-delete fallback decision)', () => {
+  it('prefers the visible-order neighbour', () => {
+    expect(pickDeleteFallbackId(['a', 'b', 'c'], ['z', 'a', 'b', 'c'], 'b')).toBe('c')
+    expect(pickDeleteFallbackId(['a', 'b', 'c'], ['z'], 'c')).toBe('b')
+  })
+
+  it('falls back to the most recent OTHER session when the deleted id is not in the visible order (collapsed Older group)', () => {
+    expect(pickDeleteFallbackId(['a', 'b'], ['hidden-1', 'hidden-2'], 'hidden-1')).toBe('hidden-2')
+    expect(pickDeleteFallbackId(['a', 'b'], ['hidden-1', 'a', 'b'], 'hidden-1')).toBe('a')
+    // deleted first in recency: skip itself
+    expect(pickDeleteFallbackId([], ['x', 'y'], 'x')).toBe('y')
+  })
+
+  it('returns null only when no other session exists (composer)', () => {
+    expect(pickDeleteFallbackId(['only'], ['only'], 'only')).toBeNull()
+    expect(pickDeleteFallbackId([], [], 'gone')).toBeNull()
+    expect(pickDeleteFallbackId([], ['gone'], 'gone')).toBeNull()
   })
 })
