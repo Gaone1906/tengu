@@ -95,6 +95,9 @@ export function anchorScrollDuring(
 interface FoldRegionProps {
   /** Whether the turn already produced its final answer (fold-eligible). */
   answered: boolean
+  /** The final answer arrived while this chat was mounted. Start open so the
+   *  existing delayed collapse choreography can run on this first mount. */
+  liveCompletion?: boolean
   summary: FoldSummaryData
   /** Whether this region plays the anchored live-fold choreography. False for
    *  the earlier siblings of a banner-split turn: they answer at the same
@@ -104,16 +107,18 @@ interface FoldRegionProps {
   children: ReactNode
 }
 
-export function FoldRegion({ answered, summary, animated = true, children }: FoldRegionProps) {
+export function FoldRegion({ answered, liveCompletion = false, summary, animated = true, children }: FoldRegionProps) {
   // Historical turns rest folded; the live turn folds with choreography when
-  // its answer lands (answered flips false → true while mounted).
-  const [folded, setFolded] = useState(answered)
-  const [landed, setLanded] = useState(answered)
+  // its answer lands. A live region is now created only at final-answer time,
+  // so `liveCompletion` supplies the same open → answered transition on mount.
+  const startsAnswered = answered && !liveCompletion
+  const [folded, setFolded] = useState(startsAnswered)
+  const [landed, setLanded] = useState(startsAnswered)
   // The summary line does NOT exist until the fold begins — mounting it at
   // answer time would push the answer down at the stream→final swap and break
   // the structural-parity guarantee. It appears at fold start (fading in) and
   // persists from then on.
-  const [summaryVisible, setSummaryVisible] = useState(answered)
+  const [summaryVisible, setSummaryVisible] = useState(startsAnswered)
   const [landing, setLanding] = useState(false)
   // True while the manual collapse animation plays: the region is still
   // visually open (folded stays false until the animation lands) but the
@@ -121,7 +126,7 @@ export function FoldRegion({ answered, summary, animated = true, children }: Fol
   const [closing, setClosing] = useState(false)
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const regionRef = useRef<HTMLDivElement | null>(null)
-  const answeredRef = useRef(answered)
+  const answeredRef = useRef(startsAnswered)
   const foldedRef = useRef(folded)
   foldedRef.current = folded
   const animatedRef = useRef(animated)

@@ -151,9 +151,26 @@ describe('the post-turn fold', () => {
 
   it('keeps unanswered live work open with no summary line', () => {
     const live = foldedTurn.slice(0, 4)
-    render(<ChatMessages messages={live} loading />)
+    const { container } = render(<ChatMessages messages={live} loading />)
+    expect(container.querySelector('[data-fold]')).toBeNull()
     expect(screen.queryByRole('button', { name: /Show the work/ })).toBeNull()
     expect(screen.getByRole('button', { name: /^2 tools$/ })).toBeTruthy()
+  })
+
+  it('renders active middle evidence normally without a Worked-for wrapper', () => {
+    const active: Message[] = [
+      { id: 'u1', role: 'user', content: 'Audit it.', timestamp: T0 },
+      { id: 'p1', role: 'assistant', content: 'I found the first issue.', timestamp: T0 + 1_000 },
+      { id: 't1', role: 'assistant', content: 'Used file_read', timestamp: T0 + 2_000, toolCall: 'file_read' },
+      callback('c1', 'dev', T0 + 3_000),
+    ]
+    const { container } = render(<ChatMessages messages={active} loading />)
+
+    expect(container.querySelector('[data-fold]')).toBeNull()
+    expect(container.querySelector('[data-fold-summary]')).toBeNull()
+    expect(screen.getByText('I found the first issue.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /^1 tool$/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /dev replied.*Open report/ })).toBeTruthy()
   })
 
   it('never folds a region with a still-running tool', () => {
@@ -298,32 +315,59 @@ describe('fold region boundary (turn structure)', () => {
     expect(inset.compareDocumentPosition(summaryRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
-  it('keeps the region identity turn-scoped so an interim answer reclassifying cannot remount it', () => {
-    // Live state: the last prose IS currently the turn's answer, so only the
-    // block message after it groups (unanswered, open).
-    const live: Message[] = [
+  it('creates and auto-collapses the region only when the final response arrives', () => {
+    const running: Message[] = [
       { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
       { id: 'p1', role: 'assistant', content: 'On it, delegating now.', timestamp: T0 + 1_000 },
-      { id: 't1', role: 'assistant', content: 'Used read_flags', timestamp: T0 + 2_000, toolCall: 'read_flags' },
+      { id: 't1', role: 'assistant', content: 'Using read_flags', timestamp: T0 + 2_000, toolCall: 'read_flags' },
     ]
     vi.useFakeTimers()
-    const { container, rerender } = render(<ChatMessages messages={live} loading />)
-    const liveWrap = container.querySelector('[data-fold]')
-    expect(liveWrap).toBeTruthy()
-    expect(liveWrap!.getAttribute('data-folded')).toBeNull()
+    const { container, rerender } = render(<ChatMessages messages={running} loading />)
+    expect(container.querySelector('[data-fold]')).toBeNull()
 
-    // The real answer lands: p1 reclassifies as evidence and becomes the
-    // region's first item. Same turn → same render key → same instance: the
-    // region must still be OPEN right after the swap (the anchored fold
-    // plays after its 400ms beat), never rest-folded by a remount.
-    const done: Message[] = [...live, { id: 'a1', role: 'assistant', content: 'All wired up.', timestamp: T0 + 9_000 }]
-    rerender(<ChatMessages messages={done} loading={false} />)
+    // Tool completion and teammate completion are middle evidence, not turn
+    // completion. They stay in the ordinary, fully visible stream.
+    const middle: Message[] = [
+      running[0],
+      running[1],
+      { ...running[2], content: 'Used read_flags' },
+      callback('c1', 'dev', T0 + 4_000),
+    ]
+    rerender(<ChatMessages messages={middle} loading />)
+    expect(container.querySelector('[data-fold]')).toBeNull()
+    expect(screen.getByText('On it, delegating now.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /dev replied.*Open report/ })).toBeTruthy()
+
+    // A waiting/idle status rerender is not a final-response event either.
+    rerender(<ChatMessages messages={middle} loading={false} turnPending />)
+    expect(container.querySelector('[data-fold]')).toBeNull()
+
+    // The true final response is a new assistant prose row. Its arrival alone
+    // derives the completed middle region; the answer remains outside it.
+    const done: Message[] = [
+      ...middle,
+      { id: 'a1', role: 'assistant', content: 'All wired up.', timestamp: T0 + 9_000 },
+    ]
+    rerender(
+      <ChatMessages
+        messages={done}
+        loading={false}
+        turnPending={false}
+        liveFinalResponseId="a1"
+      />,
+    )
     const region = container.querySelector('[data-fold-region]')!
+    expect(region).toBeTruthy()
     expect(region.textContent).toContain('On it, delegating now.')
+    expect(region.textContent).not.toContain('All wired up.')
+    expect(screen.getByText('All wired up.')).toBeTruthy()
     expect(region.getAttribute('aria-hidden')).toBeNull()
-    // …and it folds with the choreography after the beat.
+    expect(container.querySelector('[data-fold-summary]')).toBeNull()
+
+    // The existing beat + 420ms choreography performs the first collapse.
     act(() => vi.advanceTimersByTime(1200))
     expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBe('true')
+    expect(screen.getByRole('button', { name: /Worked for 4s, 1 tool, 1 teammate, 1 update\. Show the work\./ })).toBeTruthy()
   })
 })
 

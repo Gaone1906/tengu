@@ -145,7 +145,9 @@ export function finalAnswerIndices(messages: Message[]): number[] {
       answer = -1
       continue
     }
-    if (answer === -1 && isAnswerMessage(messages[j])) answer = j
+    // A restored `partial` prose row is still middle evidence. Only the
+    // non-partial row written at turn completion can bound a persisted fold.
+    if (answer === -1 && !messages[j].partial && isAnswerMessage(messages[j])) answer = j
     out[j] = answer
   }
   return out
@@ -252,10 +254,22 @@ function buildFoldSummary(run: MessageItem[], messages: Message[]): FoldSummaryD
 
 type RenderGroup =
   | { kind: 'plain'; item: MessageItem }
-  | { kind: 'fold'; id: string; items: MessageItem[]; answered: boolean; summary: FoldSummaryData; answerIdx: number; animated: boolean }
+  | { kind: 'fold'; id: string; items: MessageItem[]; answered: boolean; liveCompletion: boolean; summary: FoldSummaryData; answerIdx: number; animated: boolean }
 
-function partitionForFold(items: MessageItem[], messages: Message[]): RenderGroup[] {
+function partitionForFold(
+  items: MessageItem[],
+  messages: Message[],
+  incompleteTurnIds: ReadonlySet<string>,
+  liveFinalResponseId: string | null,
+): RenderGroup[] {
   const answerIdx = finalAnswerIndices(messages)
+
+  const turnIdFor = (rawIndex: number): string => {
+    for (let j = rawIndex; j >= 0; j--) {
+      if (messages[j].role === 'user') return messages[j].id || `t${j}`
+    }
+    return 'head'
+  }
 
   // The fold wraps the turn's ENTIRE middle: everything between the user
   // message and the turn's final answer — tool calls, interim prose,
@@ -266,9 +280,11 @@ function partitionForFold(items: MessageItem[], messages: Message[]): RenderGrou
     const msg = itemFirstMsg(item)
     if (msg.role === 'user') return false
     if (item.kind === 'message' && isSystemBanner(item.msg)) return false
+    if (incompleteTurnIds.has(turnIdFor(itemFirstRawIndex(item)))) return false
     const answer = answerIdx[itemFirstRawIndex(item)]
-    // Unanswered turn: the work-in-progress still groups (open, folds later).
-    if (answer === -1) return true
+    // No true final answer means no fold DOM at all: active evidence renders in
+    // the ordinary stream until completion creates the completed-turn region.
+    if (answer === -1) return false
     return itemLastRawIndex(item) < answer
   }
 
@@ -283,21 +299,14 @@ function partitionForFold(items: MessageItem[], messages: Message[]): RenderGrou
     }
     // Consecutive foldable items form one region. A run never crosses a turn
     // boundary by construction: the user message and the final answer are
-    // both non-foldable, so they break it. Unanswered tails stay open — live
-    // work stays visible — but still mount inside the SAME FoldRegion so the
-    // eventual fold animates in place with scroll anchoring.
+    // both non-foldable, so they break it.
     const run: MessageItem[] = []
     while (i < items.length && folds(items[i])) {
       run.push(items[i])
       i++
     }
     const answer = answerIdx[itemFirstRawIndex(run[0])]
-    let answered = answer !== -1
-    // Never fold live work: a region with a still-running tool stays open no
-    // matter what follows it.
-    if (answered && run.some((item) => item.kind === 'tool-group' && item.msgs.some((msg) => !isToolDone(msg)))) {
-      answered = false
-    }
+    const answered = answer !== -1
     // Region identity is TURN-scoped, never first-item-scoped: when the real
     // answer lands, an interim answer reclassifies as evidence and becomes
     // the region's new first item — a first-item key would remount the
@@ -318,6 +327,7 @@ function partitionForFold(items: MessageItem[], messages: Message[]): RenderGrou
       id: `${anchorId}-${seq}`,
       items: run,
       answered,
+      liveCompletion: messages[answer]?.id === liveFinalResponseId,
       summary: buildFoldSummary(run, messages),
       answerIdx: answer,
       animated: true,
@@ -1210,6 +1220,10 @@ function StreamingBubble({ streamingText, prevMessage, startedAt }: {
 interface ChatMessagesProps {
   messages: Message[]
   loading: boolean
+  /** The latest turn has started but has not produced a terminal assistant response. */
+  turnPending?: boolean
+  /** The assistant row appended by the live terminal response event. */
+  liveFinalResponseId?: string | null
   streamingText?: string
   /** Resend a prior user message (assistant action-row "retry"). */
   onRetry?: (text: string) => void
@@ -1221,6 +1235,13 @@ interface ChatMessagesProps {
   onOpenThread?: (sessionId: string) => void
   /** Open the read-only report panel for a comms ledger line. */
   onPeek?: (peek: CommsPeekData) => void
+}
+
+function latestTurnId(messages: Message[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') return messages[i].id || `t${i}`
+  }
+  return null
 }
 
 const JUMP_EXIT_MS = 140
@@ -1338,6 +1359,8 @@ function restoreVisibleAnchor(node: HTMLDivElement, anchor: ScrollAnchor) {
 export function ChatMessages({
   messages,
   loading,
+  turnPending = loading,
+  liveFinalResponseId = null,
   streamingText,
   onRetry,
   hasOlderMessages = false,
@@ -1405,9 +1428,24 @@ export function ChatMessages({
     pendingAnchorRef.current = null
   }, [messages])
 
+  // The hook owns terminal-response lifecycle independently of `loading`, which
+  // can clear for waiting/idle/stopped states. Until a real final response lands,
+  // the latest turn remains ordinary stream content with no fold DOM.
+  const currentTurnId = latestTurnId(messages)
+  const liveFinalPresent = liveFinalResponseId === null
+    || messages.some((message) => message.id === liveFinalResponseId)
+  const incompleteTurnIds = (turnPending || !liveFinalPresent) && currentTurnId
+    ? new Set([currentTurnId])
+    : new Set<string>()
+
   // Memoize grouped messages to avoid re-running on streaming-only re-renders
   const groupedMessages = useMemo(() => groupMessages(messages), [messages])
-  const renderGroups = useMemo(() => partitionForFold(groupedMessages, messages), [groupedMessages, messages])
+  const renderGroups = partitionForFold(
+    groupedMessages,
+    messages,
+    incompleteTurnIds,
+    liveFinalResponseId,
+  )
 
   // Live-arrival tracking for the comms choreography: ids present at mount
   // never animate; comms rows appended while mounted play the arrival once,
@@ -1536,7 +1574,13 @@ export function ChatMessages({
 
             if (group.kind === 'plain') return renderItem(group.item)
             return (
-              <FoldRegion key={`fold-${group.id}`} answered={group.answered} summary={group.summary} animated={group.animated}>
+              <FoldRegion
+                key={`fold-${group.id}`}
+                answered={group.answered}
+                liveCompletion={group.liveCompletion}
+                summary={group.summary}
+                animated={group.animated}
+              >
                 {group.items.map(renderItem)}
               </FoldRegion>
             )

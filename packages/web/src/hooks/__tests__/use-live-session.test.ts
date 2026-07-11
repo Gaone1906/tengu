@@ -192,6 +192,8 @@ describe("useLiveSession (read-only)", () => {
     })
     expect(result.current.streamingText).toBe("Hello")
     expect(result.current.loading).toBe(true)
+    expect(result.current.turnPending).toBe(true)
+    expect(result.current.liveFinalResponseId).toBeNull()
 
     await act(async () => {
       emit("session:completed", { sessionId: "s1", result: "Hello there." })
@@ -200,6 +202,26 @@ describe("useLiveSession (read-only)", () => {
     expect(result.current.streamingText).toBe("")
     expect(result.current.loading).toBe(false)
     expect(result.current.messages.at(-1)?.content).toBe("Hello there.")
+    expect(result.current.turnPending).toBe(false)
+    expect(result.current.liveFinalResponseId).toBe(result.current.messages.at(-1)?.id)
+  })
+
+  it("keeps a restored waiting turn pending when its prose is only partial", async () => {
+    getSession.mockResolvedValue({
+      status: "waiting",
+      messages: [
+        { id: "u1", role: "user", content: "keep going", timestamp: 1 },
+        { id: "p1", role: "assistant", content: "Interim finding", timestamp: 2, partial: true },
+      ],
+    })
+    const { subscribe } = makeBus()
+    const { result } = renderHook(() => useLiveSession("s1", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+
+    expect(result.current.loading).toBe(false)
+    expect(result.current.turnPending).toBe(true)
+    expect(result.current.liveFinalResponseId).toBeNull()
+    expect(result.current.messages.at(-1)?.partial).toBe(true)
   })
 
   it("replaces the live view on a shorter snapshot (redaction must win, no length gate)", async () => {

@@ -152,6 +152,8 @@ export function ChatPane({
     messages,
     streamingText,
     loading,
+    turnPending,
+    liveFinalResponseId,
     hydrating,
     session: currentSession,
     liveContextTokens,
@@ -546,6 +548,8 @@ export function ChatPane({
         <ChatMessages
           messages={messages}
           loading={loading}
+          turnPending={turnPending}
+          liveFinalResponseId={liveFinalResponseId}
           streamingText={streamingText}
           onRetry={(t) => void handleSend(t)}
           hasOlderMessages={hasOlderMessages}

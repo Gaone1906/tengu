@@ -93,6 +93,10 @@ export interface UseLiveSessionResult {
   messages: Message[]
   streamingText: string
   loading: boolean
+  /** True until a real terminal assistant response is available for this turn. */
+  turnPending: boolean
+  /** Row id created from the latest live terminal response; null for persistence loads. */
+  liveFinalResponseId: string | null
   /** True only for the initial cold fetch of an uncached selected session. */
   hydrating: boolean
   session: Record<string, unknown> | null
@@ -134,6 +138,7 @@ export interface LiveSessionSnapshot {
   messages: Message[]
   streamingText: string
   loading: boolean
+  turnPending?: boolean
   session: Record<string, unknown> | null
   liveContextTokens: number | null
   backgroundActivity: BackgroundActivity | null
@@ -245,6 +250,7 @@ function normalizeHistoryMessages(history: unknown): { messages: Message[]; firs
       role: (m.role as 'user' | 'assistant' | 'notification') || 'assistant',
       content: String(m.content || m.text || ''),
       timestamp: m.timestamp ? Number(m.timestamp) : Date.now(),
+      ...(m.partial === true ? { partial: true } : {}),
       ...(typeof m.toolCall === 'string' && m.toolCall ? { toolCall: m.toolCall } : {}),
       ...(typeof m.toolId === 'string' && m.toolId ? { toolId: m.toolId } : {}),
       ...(Array.isArray(m.media) && m.media.length > 0
@@ -257,6 +263,24 @@ function normalizeHistoryMessages(history: unknown): { messages: Message[]; firs
     } satisfies Message
   })
   return { messages, firstPartialIndex }
+}
+
+function hasFinalAssistantAfterLastUser(messages: Message[]): boolean {
+  let userIndex = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') {
+      userIndex = i
+      break
+    }
+  }
+  if (userIndex < 0) return false
+  return messages.slice(userIndex + 1).some((message) =>
+    message.role === 'assistant'
+    && !message.partial
+    && !message.toolCall
+    && !message.blocks?.length
+    && Boolean(message.content.trim()),
+  )
 }
 
 function readHasOlderMessages(payload: Record<string, unknown>): boolean {
@@ -344,6 +368,14 @@ export function useLiveSession(
   // where the OLD pane's setLoading(true) was lost in the remount). Otherwise the
   // thinking indicator wouldn't show until the first WS delta arrives.
   const [loading, setLoading] = useState<boolean>(() => !!opts.pendingUserMessage || initialSnapshot?.loading === true)
+  const [turnPending, setTurnPending] = useState<boolean>(() =>
+    !!opts.pendingUserMessage
+    || initialSnapshot?.turnPending === true
+    || initialSnapshot?.loading === true
+    || initialSnapshot?.session?.status === 'running'
+    || initialSnapshot?.session?.status === 'waiting',
+  )
+  const [liveFinalResponseId, setLiveFinalResponseId] = useState<string | null>(null)
   const [hydrating, setHydrating] = useState<boolean>(() => Boolean(sessionId && !opts.pendingUserMessage && !initialSnapshot))
   const loadingRef = useRef(loading)
   useEffect(() => { loadingRef.current = loading }, [loading])
@@ -425,10 +457,13 @@ export function useLiveSession(
 
       if (event === 'session:started') {
         setLoading(true)
+        setTurnPending(true)
+        setLiveFinalResponseId(null)
         setCurrentSession((prev) => prev ? { ...prev, status: 'running' } : prev)
       }
 
       if (event === 'session:delta') {
+        setTurnPending(true)
         lastDeltaAtRef.current = Date.now()
         // Read-only consumers have no send path to arm loading; a delta means
         // the session is actively running, so reflect that as the spinner.
@@ -618,6 +653,9 @@ export function useLiveSession(
 
         if (p.result) {
           const resultStr = String(p.result)
+          const finalResponseId = crypto.randomUUID()
+          setTurnPending(false)
+          setLiveFinalResponseId(finalResponseId)
           setMessages((prev) => {
             const cleaned = [...prev]
             const turnStart = intermediateStart >= 0 ? Math.min(intermediateStart, cleaned.length) : cleaned.length
@@ -649,7 +687,7 @@ export function useLiveSession(
               ...kept,
               ...preserved,
               {
-                id: crypto.randomUUID(),
+                id: finalResponseId,
                 role: 'assistant' as const,
                 content: resultStr,
                 timestamp: Date.now(),
@@ -658,10 +696,13 @@ export function useLiveSession(
           })
         }
         if (p.error && !p.result) {
+          const finalResponseId = crypto.randomUUID()
+          setTurnPending(false)
+          setLiveFinalResponseId(finalResponseId)
           setMessages((prev) => [
             ...prev,
             {
-              id: crypto.randomUUID(),
+              id: finalResponseId,
               role: 'assistant' as const,
               content: `Error: ${p.error}`,
               timestamp: Date.now(),
@@ -731,6 +772,10 @@ export function useLiveSession(
       }
 
       const isRunning = session.status === 'running'
+      const isWaiting = session.status === 'waiting'
+      const hasFinalResponse = hasFinalAssistantAfterLastUser(backendMessages)
+      setTurnPending(isRunning || isWaiting || !hasFinalResponse)
+      setLiveFinalResponseId(null)
 
       // Seed from authoritative running state for read-only views and for editable
       // views that did not initiate the turn locally (reload/tab switch/reconnect).
@@ -808,6 +853,8 @@ export function useLiveSession(
     if (!sessionId) {
       setMessages([])
       setLoading(false)
+      setTurnPending(false)
+      setLiveFinalResponseId(null)
       setHydrating(false)
       setCurrentSession(null)
       setLoadError(null)
@@ -990,18 +1037,23 @@ export function useLiveSession(
       return [...prev, userMsg]
     })
     setLoading(true)
+    setTurnPending(true)
+    setLiveFinalResponseId(null)
     // Mark fresh activity so the completion watchdog doesn't treat a just-sent
     // turn as "silent" if a reconnect lands before the first delta arrives.
     lastDeltaAtRef.current = Date.now()
   }, [])
 
   const failSend = useCallback((text: string) => {
+    const finalResponseId = crypto.randomUUID()
     pendingUserMessageRef.current = null
     setLoading(false)
+    setTurnPending(false)
+    setLiveFinalResponseId(finalResponseId)
     setMessages((prev) => [
       ...prev,
       {
-        id: crypto.randomUUID(),
+        id: finalResponseId,
         role: 'assistant' as const,
         content: text,
         timestamp: Date.now(),
@@ -1039,6 +1091,8 @@ export function useLiveSession(
     pendingUserMessageRef.current = null
     setMessages([])
     setLoading(false)
+    setTurnPending(false)
+    setLiveFinalResponseId(null)
     setHydrating(false)
     setCurrentSession(null)
     setBackgroundActivity(null)
@@ -1057,17 +1111,20 @@ export function useLiveSession(
       messages,
       streamingText,
       loading,
+      turnPending,
       session: currentSession,
       liveContextTokens,
       backgroundActivity,
       hasOlderMessages,
     })
-  }, [sessionId, messages, streamingText, loading, currentSession, liveContextTokens, backgroundActivity, hasOlderMessages])
+  }, [sessionId, messages, streamingText, loading, turnPending, currentSession, liveContextTokens, backgroundActivity, hasOlderMessages])
 
   return {
     messages,
     streamingText,
     loading,
+    turnPending,
+    liveFinalResponseId,
     hydrating,
     session: currentSession,
     error: loadError,

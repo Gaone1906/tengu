@@ -29,6 +29,8 @@ export interface Message {
   media?: MediaAttachment[]
   toolCall?: string
   toolId?: string
+  /** True for a persisted mid-turn row restored while the turn is still active. */
+  partial?: boolean
   blocks?: ChatBlock[]
   /** Safe structured UI metadata persisted with notification messages. */
   meta?: Record<string, unknown>
