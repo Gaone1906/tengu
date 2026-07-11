@@ -88,6 +88,10 @@ function screenshotPath(...segments: string[]) {
   return target
 }
 
+function visibleTestId(page: Page, testId: string) {
+  return page.locator(`[data-testid="${testId}"]:visible`)
+}
+
 async function rawNodePositions(page: Page, ids: string[]) {
   return page.evaluate((wanted) => Object.fromEntries([...document.querySelectorAll<HTMLElement>('.react-flow__node')]
     .map((element) => {
@@ -382,7 +386,7 @@ test.describe.serial('isolated workflow layout verification', () => {
           await opened.page.getByTestId('wf-canvas').waitFor()
           if (runCase.terminal === 'parked') {
             await opened.page.getByTestId('wf-node-approve').click()
-            await expect(opened.page.getByTestId('wf-gate-approve')).toBeVisible()
+            await expect(visibleTestId(opened.page, 'wf-gate-approve')).toBeVisible()
           }
           const definition = await readDefinition(runCase.id)
           const metrics = await captureMetrics(opened.page, cell.viewport.key)
@@ -469,7 +473,7 @@ test.describe.serial('isolated workflow layout verification', () => {
     const opened = await openPage(browser, matrixCells()[0], '/workflow/verify-run-approval?mode=runs')
     try {
       await opened.page.getByTestId('wf-node-approve').click()
-      await opened.page.getByTestId('wf-gate-approve').click()
+      await visibleTestId(opened.page, 'wf-gate-approve').click()
       const final = await pollUntil(
         async () => api('GET', '/api/workflow-definitions/verify-run-approval/runs'),
         (response) => response.ok && response.body?.runs?.[0]?.status === 'completed',
