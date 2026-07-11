@@ -2,7 +2,7 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo, startTransition } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { useQueryClient } from "@tanstack/react-query"
-import { ChevronDown, Clock3, Copy, EllipsisVertical, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
+import { ChevronDown, Clock3, Copy, EllipsisVertical, Focus, Layers, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
 import { api, type BackgroundActivity, type Employee, type SessionsResponse } from "@/lib/api"
 import { useOrg } from "@/hooks/use-employees"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
@@ -1707,21 +1707,25 @@ export function ChatSidebar({
             {/* Focused (default) shows only the operator's own top-level chats;
                 All reveals delegated/automated sessions too. Persisted; search
                 spans everything regardless. */}
-            <div className="flex items-center gap-0.5 rounded-full bg-[var(--fill-tertiary)] p-0.5 text-[11px] font-medium">
-              {(["focused", "all"] as const).map((mode) => (
+            <div className="flex items-center gap-0.5 rounded-full bg-[var(--fill-tertiary)] p-0.5">
+              {([
+                { mode: "focused", Icon: Focus, aria: "Focused", tip: "Only chats you started" },
+                { mode: "all", Icon: Layers, aria: "All", tip: "Include automated & delegated sessions" },
+              ] as const).map(({ mode, Icon, aria, tip }) => (
                 <button
                   key={mode}
                   onClick={() => selectFocusMode(mode)}
                   aria-pressed={focusMode === mode}
-                  title={mode === "focused" ? "Only chats you started" : "Include automated & delegated sessions"}
+                  aria-label={aria}
+                  title={tip}
                   className={cn(
-                    "rounded-full px-2.5 py-1 capitalize transition-all",
+                    "flex items-center justify-center rounded-full px-2.5 py-1.5 transition-all",
                     focusMode === mode
                       ? "bg-[var(--bg-secondary)] text-foreground shadow-[var(--shadow-subtle)]"
                       : "text-muted-foreground hover:text-foreground"
                   )}
                 >
-                  {mode}
+                  <Icon className="size-[15px]" strokeWidth={2} />
                 </button>
               ))}
             </div>
