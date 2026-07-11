@@ -182,7 +182,7 @@ import { readJsonlTail } from "./jsonl-tail.js";
 import { resultAlreadyInStreamedBlocks, shouldPreserveStreamedBlocks } from "./streamed-blocks.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions } from "../sessions/callbacks.js";
 import { clearDelegationCompletionContract, DELEGATION_COMPLETION_TRACKED_META_KEY } from "../sessions/delegation-completion-contract.js";
-import { sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
+import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
 import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
 import {
   createWorkItem,
@@ -4703,6 +4703,7 @@ export async function handleApiRequest(
       // finding 2): without a caller it would bypass every guard and land as an
       // unprefixed operator-grade user message.
       const msgCaller = resolveScopedWriteCallerIdentity(req.headers, context);
+      let parentFollowUp: { caller: Session; message: string } | undefined;
       if (msgCaller.kind === "unidentified-tool") {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
@@ -4730,6 +4731,9 @@ export async function handleApiRequest(
         body.role = "notification";
         body.message = plan.prompt;
         body.displayMessage = plan.displayMessage;
+        if (session.parentSessionId === caller.id) {
+          parentFollowUp = { caller, message: String(rawMessage) };
+        }
         // Conservative on later failure (e.g. engine unavailable): the hop tag
         // may be recorded for an undelivered message, which only ever tightens
         // the budget, never loosens it.
@@ -4846,7 +4850,7 @@ export async function handleApiRequest(
       let queueItemId = isNotification
         ? enqueueQueueItem(session.id, sessionKey, prompt, { internal: true })
         : undefined;
-      insertMessage(
+      const incomingMessageId = insertMessage(
         session.id,
         messageRole,
         isNotification ? displayMessage : prompt,
@@ -4855,6 +4859,42 @@ export async function handleApiRequest(
         undefined,
         notificationMeta,
       );
+      if (parentFollowUp) {
+        const preview = clipSessionMessage(parentFollowUp.message, 220);
+        const employee = session.employee || session.engine;
+        const storedDisplay = session.transportMeta?.delegationEmployeeDisplay;
+        const employeeDisplay = typeof storedDisplay === "string" && storedDisplay.trim()
+          ? storedDisplay.trim()
+          : employee
+              .split(/[-_\s]+/)
+              .filter(Boolean)
+              .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+              .join(" ");
+        const dispatchBlock: ChatBlockEnvelope = {
+          op: "put",
+          block: {
+            id: `dp-${incomingMessageId}`,
+            type: "dispatch",
+            version: 1,
+            status: "done",
+            payload: {
+              targetSessionId: session.id,
+              employee,
+              employeeDisplay,
+              preview,
+              sentAt: Date.now(),
+            },
+          },
+        };
+        const fallbackContent = blockFallbackText(dispatchBlock.block);
+        applyBlockEnvelope(parentFollowUp.caller.id, dispatchBlock, fallbackContent);
+        context.emit("session:delta", {
+          sessionId: parentFollowUp.caller.id,
+          type: "block",
+          content: fallbackContent,
+          block: dispatchBlock,
+        });
+      }
       if (notificationBlock) {
         applyBlockEnvelope(session.id, notificationBlock);
         context.emit("session:delta", {

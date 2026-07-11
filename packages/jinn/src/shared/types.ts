@@ -3,7 +3,7 @@ export type StreamDeltaType = "text" | "text_snapshot" | "tool_use" | "tool_resu
 /** Generous but bounded body size for durable communication-card metadata. */
 export const STRUCTURED_MESSAGE_BODY_MAX_CHARS = 16_000;
 
-export type ChatBlockType = "task-list" | "delegation";
+export type ChatBlockType = "task-list" | "delegation" | "dispatch";
 export type ChatBlockStatus = "queued" | "running" | "done" | "error";
 export type ChatBlockOp = "put" | "patch" | "remove";
 

@@ -200,7 +200,7 @@ export type LateralSendPlan =
   | { ok: false; status: 400 | 429; error: string };
 
 /** One-line word-boundary trim for the human-facing banner. */
-function clip(text: string, max = 220): string {
+export function clipSessionMessage(text: string, max = 220): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
   if (oneLine.length <= max) return oneLine;
   const cut = oneLine.slice(0, max);
@@ -243,7 +243,7 @@ export function prepareLateralSend(opts: {
     `${message}\n\n` +
     `To reply: send_to_session { sessionId: "${caller.id}" }. ` +
     `If this exchange is going in circles, stop and report to your parent session or the operator instead of forwarding.`;
-  const displayMessage = `📨 From ${senderLabel}${verdict.hops > 1 ? hopTag : ""}: ${clip(message)}`;
+  const displayMessage = `📨 From ${senderLabel}${verdict.hops > 1 ? hopTag : ""}: ${clipSessionMessage(message)}`;
   return { ok: true, prompt, displayMessage, hops: verdict.hops };
 }
 

@@ -385,6 +385,74 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
     }));
   });
 
+  it("records a parent follow-up as a dispatch block with exact fallback parity", async () => {
+    const parentId = await createOperatorSession("delegate, then follow up");
+    const delegated = await call(
+      "POST",
+      "/api/delegations",
+      { employee: "qa-emp", task: "Check the responsive layout", title: "Responsive layout" },
+      { [CALLER_SESSION_HEADER]: parentId, [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(parentId) },
+    );
+    const message = "x".repeat(230);
+    const preview = `${"x".repeat(220)}…`;
+
+    const followUp = await call(
+      "POST",
+      `/api/sessions/${delegated.body.sessionId}/message`,
+      { message },
+      { [CALLER_SESSION_HEADER]: parentId, [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(parentId) },
+    );
+
+    expect(followUp.status).toBe(200);
+    const dispatchMessage = reg.getMessages(parentId).find((candidate) =>
+      candidate.blocks?.some((block) => block.type === "dispatch"),
+    );
+    const dispatch = dispatchMessage?.blocks?.find((block) => block.type === "dispatch");
+    const targetMessage = reg.getMessages(delegated.body.sessionId).find((candidate) =>
+      candidate.role === "notification" && candidate.content.includes(preview),
+    );
+    expect(dispatchMessage?.content).toBe(`Followed up: ${preview}`);
+    expect(dispatch).toMatchObject({
+      type: "dispatch",
+      version: 1,
+      status: "done",
+      payload: {
+        targetSessionId: delegated.body.sessionId,
+        employee: "qa-emp",
+        employeeDisplay: "QA Employee",
+        preview,
+      },
+    });
+    expect(targetMessage?.id).toBeTruthy();
+    expect(dispatch?.id).toBe(`dp-${targetMessage?.id}`);
+    expect(typeof dispatch?.payload.sentAt).toBe("number");
+    expect(emittedEvents).toContainEqual({
+      event: "session:delta",
+      payload: {
+        sessionId: parentId,
+        type: "block",
+        content: `Followed up: ${preview}`,
+        block: { op: "put", block: dispatch },
+      },
+    });
+  });
+
+  it("does not record dispatch blocks for lateral sends outside a parent-child pair", async () => {
+    const callerId = createEmployeeSession("qa-manager", "lateral-caller");
+    const targetId = createEmployeeSession("qa-emp", "lateral-target");
+
+    const sent = await call(
+      "POST",
+      `/api/sessions/${targetId}/message`,
+      { message: "Review this unrelated thread." },
+      { [CALLER_SESSION_HEADER]: callerId, [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(callerId) },
+    );
+
+    expect(sent.status).toBe(200);
+    expect(reg.getMessages(callerId).flatMap((message) => message.blocks ?? []))
+      .not.toContainEqual(expect.objectContaining({ type: "dispatch" }));
+  });
+
   it("persists callback metadata and patches the durable handoff block", async () => {
     const parentId = await createOperatorSession("delegate and receive a callback");
     const delegated = await call(
