@@ -33,14 +33,14 @@ describe("hot-path indexes (perf: no full-table scans on boot/turn/tick)", () =>
   it("messages WHERE partial=1 uses the partial index, not a bare full scan", () => {
     // Boot sweep primitive (clearAllPartialMessages).
     const plan = queryPlan("DELETE FROM messages WHERE partial = 1");
-    expect(plan).toContain("idx_messages_partial");
+    expect(plan).toContain("idx_messages_partial_order");
     expect(hasBareTableScan(plan)).toBe(false);
   });
 
   it("messages WHERE session_id=? AND partial=1 uses the partial index", () => {
     // Per-turn-settle primitive (deletePartialMessages / getPartialMessages).
     const plan = queryPlan("DELETE FROM messages WHERE session_id = 's' AND partial = 1");
-    expect(plan).toContain("idx_messages_partial");
+    expect(plan).toContain("idx_messages_partial_order");
     expect(hasBareTableScan(plan)).toBe(false);
   });
 

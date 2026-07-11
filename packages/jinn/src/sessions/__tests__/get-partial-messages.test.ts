@@ -50,17 +50,12 @@ describe("getPartialMessages (bounded turn-settle read)", () => {
     const db = reg.initDb();
     const plan = db
       .prepare(
-        "EXPLAIN QUERY PLAN SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks FROM messages WHERE session_id = ? AND partial = 1 ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC",
+        "EXPLAIN QUERY PLAN SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks, meta FROM messages WHERE session_id = ? AND partial = 1 ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC",
       )
       .all("getpartial-s1") as Array<{ detail: string }>;
     const text = plan.map((r) => r.detail).join("\n");
-    // The point of the change is bounded materialization: the DB seeks by
-    // session_id (SEARCH ... USING INDEX) so it never full-SCANs the messages
-    // table, and JS then holds only the handful of partial rows — not the whole
-    // transcript. Whether SQLite picks idx_messages_partial or the session index
-    // to satisfy the seek, a bare "SCAN messages" (unindexed full scan) is the
-    // regression this guards against.
-    expect(text).toContain("USING INDEX");
+    expect(text).toContain("idx_messages_partial_order");
+    expect(text).not.toContain("TEMP B-TREE");
     const bareScan = plan.some(
       (r) => /\bSCAN\b/.test(r.detail) && !/USING\s+(COVERING\s+)?INDEX/.test(r.detail),
     );

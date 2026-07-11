@@ -115,7 +115,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions (status, last_activit
 // touch a handful of live mid-turn rows. Partial index: only the tiny set of
 // currently-partial rows is indexed, so it stays cheap regardless of history size.
 const CREATE_MESSAGES_PARTIAL_INDEX = `
-CREATE INDEX IF NOT EXISTS idx_messages_partial ON messages (session_id) WHERE partial = 1
+DROP INDEX IF EXISTS idx_messages_partial;
+CREATE INDEX IF NOT EXISTS idx_messages_partial_order
+  ON messages (session_id, timestamp, COALESCE(seq, 0)) WHERE partial = 1
 `;
 
 const CREATE_FILES_TABLE = `
@@ -2004,7 +2006,7 @@ export function getMessages(sessionId: string): SessionMessage[] {
 
 /**
  * Just the live mid-turn (`partial=1`) blocks for a session, in stream order.
- * Backed by idx_messages_partial so turn-settle reads only the handful of live
+ * Backed by idx_messages_partial_order so turn-settle reads only the handful of live
  * rows instead of loading + parsing the whole transcript to filter them out
  * (the heaviest sessions were 600+ messages loaded on EVERY turn-settle).
  */
