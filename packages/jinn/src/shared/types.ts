@@ -299,9 +299,14 @@ export interface CallbackDeliveryPayload {
 export interface CallbackDelivery extends CallbackDeliveryIdentity {
   id: string;
   payload: CallbackDeliveryPayload;
-  status: "pending" | "accepted";
+  status: "pending" | "accepted" | "dead_letter";
   messageId: string | null;
   queueItemId: string | null;
+  attemptCount: number;
+  nextAttemptAt: number | null;
+  lastAttemptAt: number | null;
+  lastError: string | null;
+  deadLetteredAt: number | null;
   createdAt: string;
   acceptedAt: string | null;
 }

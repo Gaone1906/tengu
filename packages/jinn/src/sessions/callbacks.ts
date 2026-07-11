@@ -2,6 +2,8 @@ import {
   getSession,
   getCallbackDelivery,
   claimCallbackDelivery,
+  claimCallbackDeliveryAttempt,
+  recordCallbackDeliveryFailure,
   ensureCallbackAttemptToken,
   listDelegationCompletionNudgedSessions,
   listPendingCallbackDeliveries,
@@ -17,6 +19,13 @@ import { hydrateAllAttachments, talkSessionsAttachedTo } from "../talk/attachmen
 import type { ChatBlockEnvelope, JsonObject } from "../shared/types.js";
 import { enforceDelegationCompletionContract } from "./delegation-completion-contract.js";
 import type { CallbackDeliveryPayload } from "../shared/types.js";
+
+export const CALLBACK_DELIVERY_RETRY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
+export const CALLBACK_DELIVERY_MAX_ATTEMPTS = CALLBACK_DELIVERY_RETRY_DELAYS_MS.length + 1;
+const CALLBACK_DELIVERY_ATTEMPT_LEASE_MS = 60_000;
+
+let callbackRetryTimer: ReturnType<typeof setTimeout> | undefined;
+let callbackRetrySweepRunning: Promise<number> | undefined;
 
 export interface ManagerVisibilityDetails {
   manager: string;
@@ -121,18 +130,40 @@ export async function recoverOrphanedDelegationCompletionClaims(): Promise<numbe
  * queue/message transaction. Accepted rows are absent from this scan, so boot
  * recovery can never emit or wake an already delivered callback again. */
 export async function recoverPendingCallbackDeliveries(): Promise<number> {
-  let recovered = 0;
-  for (const delivery of listPendingCallbackDeliveries()) {
-    try {
-      await _postClaimedCallback(delivery.parentSessionId, delivery.id);
-      recovered++;
-    } catch (error) {
-      logger.warn(
-        `[callbacks] Pending delivery ${delivery.id} recovery failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+  if (callbackRetrySweepRunning) return callbackRetrySweepRunning;
+  callbackRetrySweepRunning = (async () => {
+    const now = Date.now();
+    const due = listPendingCallbackDeliveries().filter((delivery) =>
+      delivery.nextAttemptAt === null || delivery.nextAttemptAt <= now,
+    );
+    const results = await Promise.allSettled(due.map((delivery) => _deliverClaimedCallback(delivery.id)));
+    armCallbackRetrySweep();
+    return results.filter((result) => result.status === "fulfilled" && result.value !== "deferred").length;
+  })().finally(() => {
+    callbackRetrySweepRunning = undefined;
+  });
+  return callbackRetrySweepRunning;
+}
+
+/** Startup owns callback recovery before orphan-guard recovery. Each phase is
+ * caught independently so poison or transport failure cannot reject boot. */
+export async function recoverCallbackStateOnStartup(): Promise<{
+  pendingRecovered: number;
+  orphanedRecovered: number;
+}> {
+  let pendingRecovered = 0;
+  let orphanedRecovered = 0;
+  try {
+    pendingRecovered = await recoverPendingCallbackDeliveries();
+  } catch (error) {
+    logger.error(`[callbacks] Startup callback recovery failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return recovered;
+  try {
+    orphanedRecovered = await recoverOrphanedDelegationCompletionClaims();
+  } catch (error) {
+    logger.error(`[callbacks] Startup orphan recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { pendingRecovered, orphanedRecovered };
 }
 
 /** Label for a talk wake: title → employee → "a thread". */
@@ -206,11 +237,10 @@ async function _notifyAttached(
   const attemptToken = completedSession.attemptToken
     ?? ensureCallbackAttemptToken(completedSession.id, terminalOutcome, terminalVersion);
   if (!attemptToken) throw new Error(`child ${completedSession.id} has no immutable callback attempt token`);
-  for (const talkId of talkIds) {
-    if (talkId === completedSession.parentSessionId) continue; // owned child — already notified
+  const deliveries = talkIds.flatMap((talkId) => {
+    if (talkId === completedSession.parentSessionId) return []; // owned child — already notified
     const talk = getSession(talkId);
-    if (!talk || talk.source !== "talk") continue;
-    if (talk.status === "error") continue;
+    if (!talk || talk.source !== "talk" || talk.status === "error") return [];
     const { delivery } = claimCallbackDelivery({
       parentSessionId: talkId,
       childSessionId: completedSession.id,
@@ -220,9 +250,9 @@ async function _notifyAttached(
       callbackKind: "talk-attachment",
       payload: { message, displayMessage },
     });
-    if (delivery.status === "accepted") continue;
-    await _sendRaw(talkId, message, displayMessage, { callbackDeliveryId: delivery.id });
-  }
+    return delivery.status === "accepted" ? [] : [delivery];
+  });
+  await Promise.allSettled(deliveries.map((delivery) => _deliverClaimedCallback(delivery.id)));
 }
 
 /**
@@ -269,7 +299,24 @@ export function notifyRateLimitResumed(
     message = `🔄 Employee "${employeeName}" (session ${childSession.id}) has resumed after rate limit cleared.`;
   }
 
-  _sendRaw(childSession.parentSessionId, message).catch((err) => {
+  const terminalVersion = Math.max(1, childSession.attemptTerminalVersion ?? 0);
+  const attemptToken = childSession.attemptToken
+    ?? ensureCallbackAttemptToken(childSession.id, "rate-limit-resumed", terminalVersion);
+  if (!attemptToken) {
+    logger.warn(`[callbacks] Failed to send resume notification: child ${childSession.id} has no immutable callback attempt token`);
+    return;
+  }
+  const { delivery } = claimCallbackDelivery({
+    parentSessionId: childSession.parentSessionId,
+    childSessionId: childSession.id,
+    attemptToken,
+    terminalOutcome: "rate-limit-resumed",
+    terminalVersion,
+    callbackKind: "rate-limit-resumed",
+    payload: { message, displayMessage: message },
+  });
+  if (delivery.status === "accepted") return;
+  _deliverClaimedCallback(delivery.id).catch((err) => {
     logger.warn(`[callbacks] Failed to send resume notification: ${err instanceof Error ? err.message : String(err)}`);
   });
 }
@@ -389,11 +436,7 @@ async function _sendNotification(
   });
   if (delivery.status === "accepted") return;
 
-  await _sendRaw(childSession.parentSessionId!, message, displayMessage, {
-    meta: notificationMeta,
-    block: notificationBlock,
-    callbackDeliveryId: delivery.id,
-  });
+  await _deliverClaimedCallback(delivery.id);
 }
 
 async function _sendCompletionContractNudge(
@@ -417,16 +460,7 @@ async function _sendCompletionContractNudge(
     payload: { message, displayMessage },
   });
   if (delivery.status === "accepted") return;
-  try {
-    await _sendRaw(targetSessionId, message, displayMessage, { callbackDeliveryId: delivery.id });
-  } catch (error) {
-    // The local route may have committed acceptance before the HTTP response
-    // was lost. In that case the nudge succeeded: retain the completion guard
-    // and suppress the original parent callback. A genuinely pending receipt
-    // still throws so startup/retry can surface it deterministically.
-    if (getCallbackDelivery(delivery.id)?.status === "accepted") return;
-    throw error;
-  }
+  await _deliverClaimedCallback(delivery.id);
 }
 
 function childNotificationMeta(
@@ -521,14 +555,64 @@ async function _sendRaw(
   if (!response.ok) throw new Error(`parent notification failed (${response.status})`);
 }
 
-async function _postClaimedCallback(parentSessionId: string, callbackDeliveryId: string): Promise<void> {
-  const gateway = internalGatewayConnection();
-  const response = await fetch(`${gateway.baseUrl}/api/sessions/${parentSessionId}/message`, {
-    method: "POST",
-    headers: internalGatewayHeaders(gateway),
-    body: JSON.stringify({ callbackDeliveryId }),
-  });
-  if (!response.ok) throw new Error(`parent notification failed (${response.status})`);
+type CallbackDeliveryAttemptResult = "accepted" | "scheduled" | "deferred";
+
+async function _deliverClaimedCallback(deliveryId: string): Promise<CallbackDeliveryAttemptResult> {
+  const attempt = claimCallbackDeliveryAttempt(deliveryId, Date.now(), CALLBACK_DELIVERY_ATTEMPT_LEASE_MS);
+  if (!attempt) {
+    armCallbackRetrySweep();
+    return getCallbackDelivery(deliveryId)?.status === "accepted" ? "accepted" : "deferred";
+  }
+  try {
+    await _sendRaw(attempt.parentSessionId, attempt.payload.message, attempt.payload.displayMessage, {
+      meta: attempt.payload.meta,
+      block: attempt.payload.block,
+      callbackDeliveryId: attempt.id,
+    });
+    if (getCallbackDelivery(attempt.id)?.status === "pending") armCallbackRetrySweep();
+    return "accepted";
+  } catch (error) {
+    if (getCallbackDelivery(attempt.id)?.status === "accepted") return "accepted";
+    const diagnostic = error instanceof Error ? error.message : String(error);
+    const delayIndex = Math.min(attempt.attemptCount - 1, CALLBACK_DELIVERY_RETRY_DELAYS_MS.length - 1);
+    const failed = recordCallbackDeliveryFailure(attempt.id, diagnostic, {
+      now: Date.now(),
+      nextAttemptAt: Date.now() + CALLBACK_DELIVERY_RETRY_DELAYS_MS[Math.max(0, delayIndex)],
+      maxAttempts: CALLBACK_DELIVERY_MAX_ATTEMPTS,
+    });
+    if (failed?.status === "pending") {
+      armCallbackRetrySweep();
+      logger.warn(`[callbacks] Delivery ${attempt.id} failed; retry ${attempt.attemptCount + 1} scheduled: ${diagnostic}`);
+      return "scheduled";
+    }
+    logger.error(`[callbacks] Delivery ${attempt.id} exhausted after ${attempt.attemptCount} attempts: ${diagnostic}`);
+    return "scheduled";
+  }
+}
+
+function armCallbackRetrySweep(): void {
+  const pending = listPendingCallbackDeliveries();
+  if (callbackRetryTimer) {
+    clearTimeout(callbackRetryTimer);
+    callbackRetryTimer = undefined;
+  }
+  if (pending.length === 0) return;
+  const now = Date.now();
+  const nextAt = Math.min(...pending.map((delivery) => delivery.nextAttemptAt ?? now));
+  callbackRetryTimer = setTimeout(() => {
+    callbackRetryTimer = undefined;
+    void recoverPendingCallbackDeliveries().catch((error) => {
+      logger.error(`[callbacks] Live retry sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+      armCallbackRetrySweep();
+    });
+  }, Math.max(0, nextAt - now));
+  callbackRetryTimer.unref?.();
+}
+
+export function __resetCallbackRetrySweepForTest(): void {
+  if (callbackRetryTimer) clearTimeout(callbackRetryTimer);
+  callbackRetryTimer = undefined;
+  callbackRetrySweepRunning = undefined;
 }
 
 function internalGatewayConnection(): { baseUrl: string; token?: string } {

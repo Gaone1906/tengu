@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Engine, EngineRunOpts } from "../../shared/types.js";
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-callback-reliability-"));
@@ -187,6 +187,31 @@ function createParent(suffix: string, source: "web" | "talk" = "web") {
   });
 }
 
+function makeRouteBackedFetch(
+  context: import("../api.js").ApiContext,
+  behavior: { failBefore?: number; throwAfterAccepted?: number } = {},
+) {
+  let calls = 0;
+  return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    calls++;
+    if (calls <= (behavior.failBefore ?? 0)) throw new Error(`pre-accept timeout ${calls}`);
+    const target = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const req = Object.assign(Readable.from([Buffer.from(String(init?.body ?? ""))]), {
+      method: init?.method ?? "GET",
+      url: `${target.pathname}${target.search}`,
+      headers: {
+        host: "gateway.test",
+        authorization: "Bearer test-token",
+        "content-type": "application/json",
+      },
+    });
+    const captured = makeResponse();
+    await api.handleApiRequest(req as never, captured.res, context);
+    if (calls <= (behavior.throwAfterAccepted ?? 0)) throw new Error(`accepted response lost ${calls}`);
+    return { ok: captured.status >= 200 && captured.status < 300, status: captured.status } as Response;
+  });
+}
+
 beforeAll(async () => {
   api = await import("../api.js");
   registry = await import("../../sessions/registry.js");
@@ -208,6 +233,104 @@ beforeEach(() => {
 });
 
 describe("parent callback reliability", () => {
+  it.each(["web", "talk"] as const)(
+    "collapses six identical rate-limit-resumed callbacks for a %s parent",
+    async (source) => {
+      const seenPrompts: string[] = [];
+      const events: Array<{ event: string; data: unknown }> = [];
+      const engine = makeEngine(seenPrompts);
+      const queue = new queueModule.SessionQueue();
+      const context = makeContext(engine, queue, events);
+      const parent = createParent(`rate-resumed-${source}`, source);
+      const child = registry.createSession({
+        engine: "stub",
+        source: "web",
+        sourceRef: `web:rate-resumed-child:${source}`,
+        sessionKey: `web:rate-resumed-child:${source}`,
+        connector: "web",
+        employee: "worker",
+        title: "Rate limited work",
+        parentSessionId: parent.id,
+        prompt: "resume after rate limit",
+      });
+      const attempt = registry.beginSessionAttempt(child.id)!;
+      const resumed = registry.updateSession(child.id, {
+        status: "running",
+        attemptOutcome: null,
+      })!;
+      expect(resumed.attemptToken).toBe(attempt.attemptToken);
+      const originalFetch = globalThis.fetch;
+      const routeFetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const target = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+        const req = Object.assign(Readable.from([Buffer.from(String(init?.body ?? ""))]), {
+          method: init?.method ?? "GET",
+          url: `${target.pathname}${target.search}`,
+          headers: {
+            host: "gateway.test",
+            authorization: "Bearer test-token",
+            "content-type": "application/json",
+          },
+        });
+        const captured = makeResponse();
+        await api.handleApiRequest(
+          req as unknown as Parameters<Api["handleApiRequest"]>[0],
+          captured.res,
+          context,
+        );
+        return { ok: captured.status >= 200 && captured.status < 300, status: captured.status } as Response;
+      });
+      globalThis.fetch = routeFetch as unknown as typeof fetch;
+
+      try {
+        for (let index = 0; index < 6; index++) callbacks.notifyRateLimitResumed(resumed);
+
+        await eventually(() => {
+          expect(queue.isRunning(parent.sessionKey)).toBe(false);
+          expect(seenPrompts).toHaveLength(1);
+        });
+        expect(registry.getMessages(parent.id).filter((message) => message.role === "notification")).toHaveLength(1);
+        expect(registry.initDb().prepare(`
+          SELECT COUNT(*) AS n FROM callback_deliveries WHERE callback_kind = 'rate-limit-resumed'
+        `).get()).toEqual({ n: 1 });
+        expect(events.filter(({ event }) => event === "session:notification")).toHaveLength(1);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    },
+  );
+
+  it("keeps rate-limit waiting and resumed receipts independently deliverable", async () => {
+    const parent = createParent("rate-kinds");
+    const child = registry.createSession({
+      engine: "stub",
+      source: "web",
+      sourceRef: "web:rate-kind-child",
+      sessionKey: "web:rate-kind-child",
+      connector: "web",
+      employee: "worker",
+      parentSessionId: parent.id,
+      prompt: "rate kind distinction",
+    });
+    const attempt = registry.beginSessionAttempt(child.id)!;
+    const active = registry.getSession(child.id)!;
+    expect(active.attemptToken).toBe(attempt.attemptToken);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("hold both receipts pending")) as unknown as typeof fetch;
+
+    try {
+      callbacks.notifyRateLimited(active);
+      callbacks.notifyRateLimitResumed(active);
+      await eventually(() => {
+        const rows = registry.initDb().prepare(`
+          SELECT callback_kind AS kind FROM callback_deliveries ORDER BY callback_kind
+        `).all();
+        expect(rows).toEqual([{ kind: "rate-limit-resumed" }, { kind: "rate-limited" }]);
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("collapses six real settlement callbacks through the sender, HTTP route, SQLite, and queue", async () => {
     const seenPrompts: string[] = [];
     const events: Array<{ event: string; data: unknown }> = [];
@@ -270,7 +393,7 @@ describe("parent callback reliability", () => {
         expect(registry.getMessages(parent.id).filter((message) => message.role === "notification")).toHaveLength(1);
         expect(registry.initDb().prepare("SELECT COUNT(*) AS n FROM callback_deliveries").get()).toEqual({ n: 1 });
       });
-      expect(routeFetch).toHaveBeenCalledTimes(6);
+      expect(routeFetch).toHaveBeenCalledOnce();
       expect(events.filter(({ event }) => event === "session:notification")).toHaveLength(1);
     } finally {
       globalThis.fetch = originalFetch;
@@ -362,6 +485,167 @@ describe("parent callback reliability", () => {
       expect(registry.getSession(child.id)?.transportMeta).toMatchObject({
         delegationCompletionContract: { workItemId: item.id, state: "nudged" },
       });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("recovers a pending completion nudge before scanning orphan guards at startup", async () => {
+    const engine = makeEngine([]);
+    const acceptedWithoutExecution = { clearCancelled: () => {}, enqueue: async () => {} };
+    const context = makeContext(engine, acceptedWithoutExecution);
+    const parent = createParent("startup-nudge-order");
+    const item = workItems.createWorkItem({
+      title: "Recover a pending continuation",
+      status: "executing",
+      source: "delegation",
+    });
+    const child = registry.createSession({
+      engine: "stub",
+      source: "web",
+      sourceRef: "web:startup-nudge-child",
+      sessionKey: "web:startup-nudge-child",
+      connector: "web",
+      employee: "worker",
+      parentSessionId: parent.id,
+      transportMeta: { delegationCompletionTracked: true },
+      prompt: "continue after startup",
+    });
+    workItems.linkSession(item.id, child.id);
+    const attempt = registry.beginSessionAttempt(child.id)!;
+    const idle = registry.completeSessionAttempt(child.id, attempt.attemptToken!, {
+      status: "idle",
+      attemptOutcome: "succeeded",
+    })!;
+    registry.claimDelegationCompletionNudge(idle.id, item.id);
+    registry.claimCallbackDelivery({
+      parentSessionId: idle.id,
+      childSessionId: idle.id,
+      attemptToken: idle.attemptToken!,
+      terminalOutcome: "succeeded",
+      terminalVersion: idle.attemptTerminalVersion!,
+      callbackKind: "delegation-completion-nudge",
+      payload: { message: "continue existing task", displayMessage: "continuing task" },
+    });
+    const orphanParent = createParent("startup-unrelated-orphan");
+    const orphanItem = workItems.createWorkItem({
+      title: "Surface an unrelated orphan",
+      status: "executing",
+      source: "delegation",
+    });
+    const orphan = registry.createSession({
+      engine: "stub",
+      source: "web",
+      sourceRef: "web:startup-unrelated-orphan",
+      sessionKey: "web:startup-unrelated-orphan",
+      connector: "web",
+      parentSessionId: orphanParent.id,
+      transportMeta: { delegationCompletionTracked: true },
+      prompt: "orphaned continuation",
+    });
+    workItems.linkSession(orphanItem.id, orphan.id);
+    const orphanAttempt = registry.beginSessionAttempt(orphan.id)!;
+    registry.completeSessionAttempt(orphan.id, orphanAttempt.attemptToken!, {
+      status: "idle",
+      attemptOutcome: "succeeded",
+    });
+    registry.claimDelegationCompletionNudge(orphan.id, orphanItem.id);
+    const requestPaths: string[] = [];
+    let releasePending!: () => void;
+    const pendingGate = new Promise<void>((resolve) => { releasePending = resolve; });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const target = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      requestPaths.push(target.pathname);
+      if (target.pathname === `/api/sessions/${child.id}/message`) await pendingGate;
+      const req = Object.assign(Readable.from([Buffer.from(String(init?.body ?? ""))]), {
+        method: init?.method ?? "GET",
+        url: `${target.pathname}${target.search}`,
+        headers: {
+          host: "gateway.test",
+          authorization: "Bearer test-token",
+          "content-type": "application/json",
+        },
+      });
+      const captured = makeResponse();
+      await api.handleApiRequest(req as never, captured.res, context);
+      return { ok: true, status: captured.status } as Response;
+    }) as unknown as typeof fetch;
+
+    try {
+      const recovery = callbacks.recoverCallbackStateOnStartup();
+      await eventually(() => expect(requestPaths).toHaveLength(1));
+      expect(requestPaths[0]).toBe(`/api/sessions/${child.id}/message`);
+      releasePending();
+      await expect(recovery).resolves.toEqual({
+        pendingRecovered: 1,
+        orphanedRecovered: 1,
+      });
+      expect(registry.getMessages(child.id).filter((message) => message.role === "notification")).toHaveLength(1);
+      expect(registry.getMessages(parent.id)).toEqual([]);
+      expect(registry.getMessages(orphanParent.id).filter((message) => message.role === "notification")).toHaveLength(1);
+      expect(registry.getSession(child.id)?.transportMeta).toMatchObject({
+        delegationCompletionContract: { workItemId: item.id, state: "nudged" },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("quarantines a poison row and still recovers the following valid receipt across restart", async () => {
+    const seenPrompts: string[] = [];
+    const events: Array<{ event: string; data: unknown }> = [];
+    const context = makeContext(makeEngine(seenPrompts), new queueModule.SessionQueue(), events);
+    const parent = createParent("poison-restart");
+    const child = registry.createSession({
+      engine: "stub",
+      source: "web",
+      sourceRef: "web:poison-restart-child",
+      sessionKey: "web:poison-restart-child",
+      connector: "web",
+      parentSessionId: parent.id,
+      prompt: "finish after poison",
+    });
+    const database = registry.initDb();
+    database.pragma("ignore_check_constraints = ON");
+    database.prepare(`
+      INSERT INTO callback_deliveries (
+        id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
+        terminal_version, callback_kind, payload, status, created_at
+      ) VALUES ('poison-before-valid', ?, ?, 'poison-attempt', 'failed', 1,
+        'parent-completion', '{bad json', 'pending', '2026-01-01T00:00:00.000Z')
+    `).run(parent.id, child.id);
+    database.pragma("ignore_check_constraints = OFF");
+    const valid = registry.claimCallbackDelivery({
+      parentSessionId: parent.id,
+      childSessionId: child.id,
+      attemptToken: "valid-attempt",
+      terminalOutcome: "succeeded",
+      terminalVersion: 1,
+      callbackKind: "parent-completion",
+      payload: { message: "valid after poison", displayMessage: "valid after poison" },
+    }).delivery;
+    const originalFetch = globalThis.fetch;
+    const routeFetch = makeRouteBackedFetch(context);
+    globalThis.fetch = routeFetch as unknown as typeof fetch;
+
+    try {
+      await expect(callbacks.recoverCallbackStateOnStartup()).resolves.toEqual({
+        pendingRecovered: 1,
+        orphanedRecovered: 0,
+      });
+      await eventually(() => expect(seenPrompts).toEqual(["valid after poison"]));
+      await expect(callbacks.recoverCallbackStateOnStartup()).resolves.toEqual({
+        pendingRecovered: 0,
+        orphanedRecovered: 0,
+      });
+      expect(registry.getCallbackDelivery(valid.id)).toMatchObject({ status: "accepted" });
+      expect(database.prepare(`
+        SELECT status, last_error AS lastError FROM callback_deliveries WHERE id = 'poison-before-valid'
+      `).get()).toMatchObject({ status: "dead_letter", lastError: expect.stringMatching(/invalid payload json/i) });
+      expect(registry.getMessages(parent.id).filter((message) => message.role === "notification")).toHaveLength(1);
+      expect(events.filter(({ event }) => event === "session:notification")).toHaveLength(1);
+      expect(routeFetch).toHaveBeenCalledOnce();
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -607,5 +891,131 @@ describe("parent callback reliability", () => {
       expect(seenPrompts).toEqual(["callback-survives-visible-clear"]);
       expect(registry.listAllPendingQueueItems()).toEqual([]);
     });
+  });
+});
+
+describe("callback live retry sweep", () => {
+  afterEach(() => {
+    callbacks.__resetCallbackRetrySweepForTest();
+    vi.useRealTimers();
+  });
+
+  function createCompletedChild(parentId: string, suffix: string) {
+    const child = registry.createSession({
+      engine: "stub",
+      source: "web",
+      sourceRef: `web:retry-child:${suffix}`,
+      sessionKey: `web:retry-child:${suffix}`,
+      connector: "web",
+      employee: "worker",
+      parentSessionId: parentId,
+      prompt: "complete retry work",
+    });
+    const attempt = registry.beginSessionAttempt(child.id)!;
+    return registry.completeSessionAttempt(child.id, attempt.attemptToken!, {
+      status: "idle",
+      attemptOutcome: "succeeded",
+    })!;
+  }
+
+  it("automatically retries one pre-accept timeout after persisted backoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(10_000));
+    const seenPrompts: string[] = [];
+    const engine = makeEngine(seenPrompts);
+    const queue = new queueModule.SessionQueue();
+    const context = makeContext(engine, queue);
+    const parent = createParent("live-retry");
+    const child = createCompletedChild(parent.id, "live-retry");
+    const routeFetch = makeRouteBackedFetch(context, { failBefore: 1 });
+    globalThis.fetch = routeFetch as unknown as typeof fetch;
+
+    callbacks.notifyParentSession(child, { result: "retry once" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(routeFetch).toHaveBeenCalledOnce();
+    const pending = registry.listPendingCallbackDeliveries()[0];
+    expect(pending).toMatchObject({ attemptCount: 1, status: "pending", lastError: expect.stringContaining("timeout") });
+
+    await vi.advanceTimersByTimeAsync(callbacks.CALLBACK_DELIVERY_RETRY_DELAYS_MS[0] - 1);
+    expect(routeFetch).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.runAllTicks();
+
+    expect(routeFetch).toHaveBeenCalledTimes(2);
+    expect(registry.getCallbackDelivery(pending.id)).toMatchObject({ status: "accepted", attemptCount: 2 });
+    expect(registry.getMessages(parent.id).filter((message) => message.role === "notification")).toHaveLength(1);
+    expect(seenPrompts).toHaveLength(1);
+  });
+
+  it("restores the persisted timer without sending early after restart during backoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(20_000));
+    const engine = makeEngine([]);
+    const context = makeContext(engine, new queueModule.SessionQueue());
+    const parent = createParent("restart-backoff");
+    const child = createCompletedChild(parent.id, "restart-backoff");
+    const failingFetch = vi.fn().mockRejectedValue(new Error("offline"));
+    globalThis.fetch = failingFetch as unknown as typeof fetch;
+
+    callbacks.notifyParentSession(child, { result: "retry after restart" });
+    await vi.advanceTimersByTimeAsync(0);
+    const delivery = registry.listPendingCallbackDeliveries()[0];
+    callbacks.__resetCallbackRetrySweepForTest();
+    const routeFetch = makeRouteBackedFetch(context);
+    globalThis.fetch = routeFetch as unknown as typeof fetch;
+
+    await expect(callbacks.recoverPendingCallbackDeliveries()).resolves.toBe(0);
+    expect(routeFetch).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(callbacks.CALLBACK_DELIVERY_RETRY_DELAYS_MS[0]);
+    await vi.runAllTicks();
+
+    expect(routeFetch).toHaveBeenCalledOnce();
+    expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({ status: "accepted", attemptCount: 2 });
+  });
+
+  it("never retries an accepted receipt when its HTTP response is lost", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(30_000));
+    const engine = makeEngine([]);
+    const context = makeContext(engine, new queueModule.SessionQueue());
+    const parent = createParent("accepted-immunity");
+    const child = createCompletedChild(parent.id, "accepted-immunity");
+    const routeFetch = makeRouteBackedFetch(context, { throwAfterAccepted: 1 });
+    globalThis.fetch = routeFetch as unknown as typeof fetch;
+
+    callbacks.notifyParentSession(child, { result: "accepted once" });
+    await vi.advanceTimersByTimeAsync(0);
+    const delivery = registry.initDb().prepare(`
+      SELECT id FROM callback_deliveries WHERE callback_kind = 'parent-completion'
+    `).get() as { id: string };
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
+
+    expect(routeFetch).toHaveBeenCalledOnce();
+    expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({ status: "accepted", attemptCount: 1 });
+  });
+
+  it("dead-letters an exhausted receipt and never retries it again", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(40_000));
+    const parent = createParent("retry-exhaustion");
+    const child = createCompletedChild(parent.id, "retry-exhaustion");
+    const failingFetch = vi.fn().mockRejectedValue(new Error("permanent outage"));
+    globalThis.fetch = failingFetch as unknown as typeof fetch;
+
+    callbacks.notifyParentSession(child, { result: "eventually dead letter" });
+    await vi.advanceTimersByTimeAsync(0);
+    for (const delay of callbacks.CALLBACK_DELIVERY_RETRY_DELAYS_MS) {
+      await vi.advanceTimersByTimeAsync(delay);
+      await vi.runAllTicks();
+    }
+    const delivery = registry.initDb().prepare(`SELECT id FROM callback_deliveries`).get() as { id: string };
+    expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({
+      status: "dead_letter",
+      attemptCount: callbacks.CALLBACK_DELIVERY_MAX_ATTEMPTS,
+      deadLetteredAt: expect.any(Number),
+    });
+    const attemptsAtExhaustion = failingFetch.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
+    expect(failingFetch).toHaveBeenCalledTimes(attemptsAtExhaustion);
   });
 });
