@@ -683,6 +683,29 @@ describe("useLiveSession (read-only)", () => {
 })
 
 describe("useLiveSession (editable write path)", () => {
+  it("keeps a just-sent user message through a stale tail snapshot, then dedupes the server echo", async () => {
+    const existing = { id: "a1", role: "assistant" as const, content: "Ready", timestamp: 1 }
+    const optimistic = { id: "client-u1", role: "user" as const, content: "Run it", timestamp: 2 }
+    const echoed = { id: "server-u1", role: "user" as const, content: "Run it", timestamp: 3 }
+    getSession.mockResolvedValueOnce({ status: "idle", messages: [existing] })
+    const { subscribe } = makeBus()
+    const { result } = renderHook(() => useLiveSession("s-race", { subscribe }))
+
+    await act(async () => { await Promise.resolve() })
+    act(() => { result.current.beginSend(optimistic) })
+    expect(result.current.messages).toEqual([existing, optimistic])
+
+    // The tail sync wins the race with persistence and does not contain the POST yet.
+    getSession.mockResolvedValueOnce({ status: "idle", messages: [existing] })
+    await act(async () => { await result.current.reload("s-race") })
+    expect(result.current.messages).toEqual([existing, optimistic])
+
+    // Once the canonical row arrives, its identity replaces the optimistic copy once.
+    getSession.mockResolvedValueOnce({ status: "idle", messages: [existing, echoed] })
+    await act(async () => { await result.current.reload("s-race") })
+    expect(result.current.messages).toEqual([existing, echoed])
+  })
+
   it("hydrates from the in-memory session cache immediately while revalidating", async () => {
     // The cached session is mid-run, so the snapshot is NOT "resting" and the
     // remount must still revalidate in the background (a resting idle snapshot

@@ -324,6 +324,18 @@ export function useLiveSession(
     initialSnapshotRef.current = sessionId ? readLiveSessionSnapshot(sessionId) : null
   }
   const initialSnapshot = initialSnapshotRef.current
+  const pendingUserMessageRef = useRef<Message | null>(opts.pendingUserMessage ?? null)
+
+  const reconcilePendingUserMessage = useCallback((snapshot: Message[]) => {
+    const pending = pendingUserMessageRef.current
+    if (!pending) return snapshot
+    const pendingKey = messageIdentityKey(pending)
+    if (snapshot.some((message) => message.id === pending.id || messageIdentityKey(message) === pendingKey)) {
+      pendingUserMessageRef.current = null
+      return snapshot
+    }
+    return [...snapshot, pending].sort((a, b) => a.timestamp - b.timestamp)
+  }, [])
 
   const [messages, setMessages] = useState<Message[]>(() =>
     opts.pendingUserMessage ? [opts.pendingUserMessage] : initialSnapshot?.messages ?? [],
@@ -680,7 +692,8 @@ export function useLiveSession(
       onMetaRef.current?.(sessionMetaOf(session))
 
       const history = session.messages || session.history || []
-      const { messages: backendMessages, firstPartialIndex } = normalizeHistoryMessages(history)
+      const { messages: normalizedMessages, firstPartialIndex } = normalizeHistoryMessages(history)
+      const backendMessages = reconcilePendingUserMessage(normalizedMessages)
       const isPagedHistory = Boolean(session.messagesPage && typeof session.messagesPage === 'object')
       if (session.status === 'error' && session.lastError) {
         const lastMessage = backendMessages[backendMessages.length - 1]
@@ -790,7 +803,7 @@ export function useLiveSession(
     const cached = readLiveSessionSnapshot(sessionId)
     const pending = opts.pendingUserMessage
     if (cached) {
-      setMessages(cached.messages)
+      setMessages(reconcilePendingUserMessage(cached.messages))
       setLoading(cached.loading)
       setCurrentSession(cached.session)
       setLoadError(null)
@@ -949,6 +962,7 @@ export function useLiveSession(
   // --- write API (editable pane) ---
   const beginSend = useCallback((userMsg: Message) => {
     loadTokenRef.current += 1
+    pendingUserMessageRef.current = userMsg
     setMessages((prev) => {
       intermediateStartRef.current = prev.length + 1
       return [...prev, userMsg]
@@ -960,6 +974,7 @@ export function useLiveSession(
   }, [])
 
   const failSend = useCallback((text: string) => {
+    pendingUserMessageRef.current = null
     setLoading(false)
     setMessages((prev) => [
       ...prev,
@@ -999,6 +1014,7 @@ export function useLiveSession(
   }, [])
 
   const reset = useCallback(() => {
+    pendingUserMessageRef.current = null
     setMessages([])
     setLoading(false)
     setHydrating(false)
