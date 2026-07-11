@@ -216,7 +216,7 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
         }
         // Create the COO session, then show the branded loading bridge while
         // the chat route mounts (so there is never a blank screen).
-        const seed = "Hi! I just finished setup — let's get started. 👋"
+        const seed = "Hi! I just finished setup, let's get started. 👋"
         let launchSessionId: string | undefined
         try {
           const params = buildNewSessionParams({
@@ -256,7 +256,7 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
           navigate("/")
         }
       } catch {
-        setSubmitError("Couldn't save your setup — check that the gateway is running, then try again.")
+        setSubmitError("Couldn't save your setup. Check that the gateway is running, then try again.")
       } finally {
         setSubmitting(false)
       }
@@ -525,7 +525,7 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
               ) : !enginesData || Object.values(enginesData.engines ?? {}).every(e => !e.models?.length) ? (
                 /* Registry fetch failed or no models available — safe fallback */
                 <div className="px-[var(--space-4)] py-[var(--space-3)] rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] border border-[var(--separator)] text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
-                  Using your default engine — you can configure models in Settings anytime.
+                  Using your default engine. You can configure models in Settings anytime.
                 </div>
               ) : (
                 <>

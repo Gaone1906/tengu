@@ -224,7 +224,7 @@ export function FileView({
       {!loading && data && !data.tooLarge && data.binary && (
         <div className="text-[length:var(--text-body)] text-[var(--text-secondary)]">
           <p>
-            Binary file ({data.mime}, {formatSize(data.size)}) — cannot
+            Binary file ({data.mime}, {formatSize(data.size)}): cannot
             preview.
           </p>
           <a

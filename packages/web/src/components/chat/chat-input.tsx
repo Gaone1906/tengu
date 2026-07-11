@@ -894,7 +894,7 @@ export function ChatInput({
             const showRing = mode === 'armable' || mode === 'armed'
             const label =
               mode === 'stop' ? 'Stop'
-              : mode === 'armed' ? 'Send queued — will fire when transcription lands. Tap to cancel.'
+              : mode === 'armed' ? 'Send queued: fires when transcription lands. Tap to cancel.'
               : mode === 'armable' ? 'Send when transcription lands'
               : 'Send message'
             return (
