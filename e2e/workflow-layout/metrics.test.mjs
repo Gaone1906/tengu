@@ -10,6 +10,7 @@ import {
   verticalClearanceViolations,
   zoomFromTransform,
   readabilityViolations,
+  isBlockedStaticAsset,
 } from "./metrics.mjs"
 
 test("candidate URL is an exact loopback origin on port 7800 or higher", () => {
@@ -22,6 +23,12 @@ test("candidate URL is an exact loopback origin on port 7800 or higher", () => {
     "http://127.0.0.1:7799",
     "http://127.0.0.2:7800",
   ]) assert.throws(() => assertCandidateBaseUrl(bad), /candidate|loopback|port|origin/i)
+})
+
+test("known remote font assets may be blocked without masking foreign API traffic", () => {
+  assert.equal(isBlockedStaticAsset("https://fonts.googleapis.com/css2?family=Hanken+Grotesk"), true)
+  assert.equal(isBlockedStaticAsset("https://fonts.gstatic.com/s/hankengrotesk/font.woff2"), true)
+  assert.equal(isBlockedStaticAsset("https://example.com/api/private"), false)
 })
 
 test("matrix covers both viewports, themes, and motion preferences", () => {

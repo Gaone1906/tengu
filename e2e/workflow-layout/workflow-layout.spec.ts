@@ -3,7 +3,7 @@ import path from 'node:path'
 import { test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test'
 import { artifactWriter, gatewayToken, pollUntil, sandboxClient, verificationEnv } from './api-client.mjs'
 import { authorRequests, canonicalFixtures, scenarioFixtures } from './fixtures.mjs'
-import { assertCandidateBaseUrl, matrixCells, summarizeMetricViolations } from './metrics.mjs'
+import { assertCandidateBaseUrl, isBlockedStaticAsset, matrixCells, summarizeMetricViolations } from './metrics.mjs'
 
 type Cell = ReturnType<typeof matrixCells>[number]
 type Definition = {
@@ -53,7 +53,7 @@ async function isolatedContext(browser: Browser, cell: Cell) {
   await context.route('**/*', async (route) => {
     const raw = route.request().url()
     if (!safeNetworkUrl(raw)) {
-      violations.push(raw)
+      if (!isBlockedStaticAsset(raw)) violations.push(raw)
       await route.abort('blockedbyclient')
       return
     }

@@ -3,6 +3,15 @@ export const VERTICAL_CLEARANCE = 64
 export const MOBILE_READABLE_ZOOM = 0.75
 export const DESKTOP_READABLE_ZOOM = 0.65
 
+/** The app currently references its display fonts remotely. Verification
+ * keeps all traffic isolated, so these known static assets are aborted without
+ * being confused with foreign API/WebSocket access. */
+export function isBlockedStaticAsset(value) {
+  let url
+  try { url = new URL(value) } catch { return false }
+  return url.protocol === "https:" && ["fonts.googleapis.com", "fonts.gstatic.com"].includes(url.hostname)
+}
+
 export function assertCandidateBaseUrl(value) {
   let url
   try { url = new URL(value) } catch { throw new Error("candidate URL must be an absolute URL") }
