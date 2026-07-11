@@ -24,6 +24,7 @@ import {
 } from "../shared/models.js";
 import { validateNewSessionSelection, validateSessionPatch } from "../sessions/session-patch.js";
 import type { SessionManager } from "../sessions/manager.js";
+import { MAX_WORKFLOW_DEFINITION_BYTES } from "../workflows/definition.js";
 import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "../sessions/context.js";
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import {
@@ -256,7 +257,7 @@ const HOOK_BODY_MAX_BYTES = 64 * 1024;
 /** Max bytes accepted by public auth helpers. Codes/tokens are tiny. */
 const AUTH_BODY_MAX_BYTES = 16 * 1024;
 /** Cap for workflow-definition CRUD bodies (GRS-011b). A large graph is still KB-scale. */
-const WORKFLOW_DEFINITION_BODY_MAX_BYTES = 512 * 1024;
+const WORKFLOW_DEFINITION_BODY_MAX_BYTES = MAX_WORKFLOW_DEFINITION_BYTES;
 /** Cap for inbound workflow events. Payloads become prompt context, so keep them small. */
 const WORKFLOW_EVENT_BODY_MAX_BYTES = 64 * 1024;
 /** Cap for editable SKILL.md bodies. */

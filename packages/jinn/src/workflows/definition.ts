@@ -48,6 +48,13 @@ export const MAX_WORKFLOW_NAME_LENGTH = 128;
  * a run keeping more than this in flight is a runaway, not a workflow. */
 export const MAX_WORKFLOW_CONCURRENCY = 8;
 
+/** Authoring-time graph budgets. Validation and layout run synchronously on the
+ * gateway event loop, so these are product safety limits, not presentation hints. */
+export const MAX_WORKFLOW_NODES = 96;
+export const MAX_WORKFLOW_EDGES = 384;
+export const MAX_WORKFLOW_EDGE_DENSITY = 4;
+export const MAX_WORKFLOW_DEFINITION_BYTES = 256 * 1024;
+
 /* ── Engine-node execution options (GRS-016b) ───────────────────────────────── */
 
 /** Effort levels the effort override accepts (engine-interpreted; the closed set the
@@ -404,6 +411,11 @@ export type ValidationCode =
   | 'unsafe-edge-id'
   | 'dangling-edge'
   | 'self-loop'
+  | 'non-loop-cycle'
+  | 'too-many-nodes'
+  | 'too-many-edges'
+  | 'workflow-too-dense'
+  | 'definition-too-large'
   | 'unreachable-node';
 
 export interface ValidationError {
@@ -429,6 +441,43 @@ const SESSION_MODE_SET = new Set<string>(STEP_SESSION_MODES);
 const SESSION_SPEC_KEYS = new Set<string>(['mode', 'sessionId']);
 
 type PushError = (code: ValidationCode, message: string, ref?: string) => void;
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+/** Return one deterministic cycle path from a directed graph, if present. */
+function findDirectedCycle(nodeOrder: string[], adjacency: Map<string, string[]>): string[] | null {
+  const state = new Map<string, 0 | 1 | 2>();
+  const stack: string[] = [];
+  const stackIndex = new Map<string, number>();
+
+  const visit = (nodeId: string): string[] | null => {
+    state.set(nodeId, 1);
+    stackIndex.set(nodeId, stack.length);
+    stack.push(nodeId);
+    for (const next of adjacency.get(nodeId) ?? []) {
+      if ((state.get(next) ?? 0) === 0) {
+        const nested = visit(next);
+        if (nested) return nested;
+      } else if (state.get(next) === 1) {
+        const start = stackIndex.get(next) ?? 0;
+        return [...stack.slice(start), next];
+      }
+    }
+    stack.pop();
+    stackIndex.delete(nodeId);
+    state.set(nodeId, 2);
+    return null;
+  };
+
+  for (const nodeId of nodeOrder) {
+    if ((state.get(nodeId) ?? 0) !== 0) continue;
+    const cycle = visit(nodeId);
+    if (cycle) return cycle;
+  }
+  return null;
+}
 
 /**
  * Node/edge id charset (GRS-016c-fix, Codex finding 2). Authored ids key engine
@@ -662,6 +711,35 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
   const nodes = Array.isArray(def.nodes) ? def.nodes : [];
   const edges = Array.isArray(def.edges) ? def.edges : [];
 
+  // Fail closed before any per-node/per-edge or pairwise layout work. The size
+  // scan is linear in the request bytes; every later bound is constant-sized.
+  let definitionBytes = Number.POSITIVE_INFINITY;
+  try {
+    definitionBytes = utf8ByteLength(JSON.stringify(def));
+  } catch {
+    // Non-JSON values cannot arrive over HTTP, but direct callers still fail closed.
+  }
+  if (definitionBytes > MAX_WORKFLOW_DEFINITION_BYTES) {
+    err('definition-too-large', `workflow definition is ${definitionBytes} bytes (max ${MAX_WORKFLOW_DEFINITION_BYTES})`);
+  }
+  if (nodes.length > MAX_WORKFLOW_NODES) {
+    err('too-many-nodes', `workflow has ${nodes.length} nodes (max ${MAX_WORKFLOW_NODES})`);
+  }
+  if (edges.length > MAX_WORKFLOW_EDGES) {
+    err('too-many-edges', `workflow has ${edges.length} edges (max ${MAX_WORKFLOW_EDGES})`);
+  }
+  const densityLimit = Math.max(1, nodes.length) * MAX_WORKFLOW_EDGE_DENSITY;
+  if (edges.length > densityLimit) {
+    err('workflow-too-dense', `workflow has ${edges.length} edges for ${nodes.length} nodes (max ${MAX_WORKFLOW_EDGE_DENSITY} edges per node)`);
+  }
+  if (errors.some((error) =>
+    error.code === 'definition-too-large' ||
+    error.code === 'too-many-nodes' ||
+    error.code === 'too-many-edges' ||
+    error.code === 'workflow-too-dense')) {
+    return { ok: false, errors };
+  }
+
   // Nodes
   const nodeIds = new Set<string>();
   let triggerCount = 0;
@@ -870,7 +948,8 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
       .map((n) => n.id),
   );
   const edgeIds = new Set<string>();
-  const adjacency = new Map<string, string[]>(); // from → [to] over VALID (both-endpoints-real) edges
+  const adjacency = new Map<string, string[]>(); // all valid edges, for reachability
+  const executionAdjacency = new Map<string, string[]>(); // declared loop edges removed
   for (const e of edges) {
     if (!e || typeof e !== 'object') {
       err('invalid-edge', 'edge must be an object');
@@ -989,7 +1068,21 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
       const list = adjacency.get(e.from) ?? [];
       list.push(e.to);
       adjacency.set(e.from, list);
+      if (e.kind !== 'loop') {
+        const executionList = executionAdjacency.get(e.from) ?? [];
+        executionList.push(e.to);
+        executionAdjacency.set(e.from, executionList);
+      }
     }
+  }
+
+  const executionCycle = findDirectedCycle([...nodeIds], executionAdjacency);
+  if (executionCycle) {
+    err(
+      'non-loop-cycle',
+      `execution dependencies contain an undeclared cycle: ${executionCycle.join(' → ')}; mark only the validated bounded back-edge as kind "loop" or remove the dependency`,
+      executionCycle[0],
+    );
   }
 
   // The pairing's other direction (GRS-016d): a step that declares
@@ -1030,7 +1123,8 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
   // Reachability: BFS from the sole trigger over valid edges. Every non-trigger node
   // must be VISITED — a mere incoming edge is not enough (a disconnected island whose
   // nodes point at each other has incoming edges yet is never reached from the trigger).
-  // Reachable cycles are allowed (a bounded loop is a legal workflow shape).
+  // Declared loop edges participate in reachability, but after removing them the
+  // reachable execution graph must be acyclic (checked above).
   const triggerNode = nodes.find((n) => n && n.id && n.type === 'trigger');
   if (triggerNode) {
     const visited = new Set<string>([triggerNode.id]);
