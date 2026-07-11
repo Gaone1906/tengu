@@ -451,6 +451,18 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
     expect(sent.status).toBe(200);
     expect(reg.getMessages(callerId).flatMap((message) => message.blocks ?? []))
       .not.toContainEqual(expect.objectContaining({ type: "dispatch" }));
+    expect(reg.getMessages(targetId).find((message) => message.role === "notification")).toMatchObject({
+      content: "📨 From qa-manager: Review this unrelated thread.",
+      meta: {
+        kind: "agent-relay",
+        fromSessionId: callerId,
+        fromLabel: "qa-manager",
+        fromEmployee: "qa-manager",
+        hops: 1,
+        maxHops: 12,
+        fullMessage: "Review this unrelated thread.",
+      },
+    });
   });
 
   it("persists callback metadata and patches the durable handoff block", async () => {

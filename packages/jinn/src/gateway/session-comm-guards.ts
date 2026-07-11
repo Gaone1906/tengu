@@ -1,4 +1,4 @@
-import type { Session } from "../shared/types.js";
+import { STRUCTURED_MESSAGE_BODY_MAX_CHARS, type Session } from "../shared/types.js";
 import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, TOOL_CALL_HEADER } from "../mcp/identity.js";
 
 /**
@@ -196,8 +196,18 @@ export function createSessionCommGuards(
 export const sessionCommGuards: SessionCommGuards = createSessionCommGuards();
 
 export type LateralSendPlan =
-  | { ok: true; prompt: string; displayMessage: string; hops: number }
+  | { ok: true; prompt: string; displayMessage: string; hops: number; meta: AgentRelayMeta }
   | { ok: false; status: 400 | 429; error: string };
+
+export interface AgentRelayMeta {
+  kind: "agent-relay";
+  fromSessionId: string;
+  fromLabel: string;
+  fromEmployee?: string;
+  hops: number;
+  maxHops: number;
+  fullMessage: string;
+}
 
 /** One-line word-boundary trim for the human-facing banner. */
 export function clipSessionMessage(text: string, max = 220): string {
@@ -244,7 +254,16 @@ export function prepareLateralSend(opts: {
     `To reply: send_to_session { sessionId: "${caller.id}" }. ` +
     `If this exchange is going in circles, stop and report to your parent session or the operator instead of forwarding.`;
   const displayMessage = `📨 From ${senderLabel}${verdict.hops > 1 ? hopTag : ""}: ${clipSessionMessage(message)}`;
-  return { ok: true, prompt, displayMessage, hops: verdict.hops };
+  const meta: AgentRelayMeta = {
+    kind: "agent-relay",
+    fromSessionId: caller.id,
+    fromLabel: senderLabel,
+    ...(caller.employee ? { fromEmployee: caller.employee } : {}),
+    hops: verdict.hops,
+    maxHops: guards.maxHops(),
+    fullMessage: message.slice(0, STRUCTURED_MESSAGE_BODY_MAX_CHARS),
+  };
+  return { ok: true, prompt, displayMessage, hops: verdict.hops, meta };
 }
 
 /**

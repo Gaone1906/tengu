@@ -208,9 +208,17 @@ describe("prepareLateralSend — the route-side transform", () => {
       expect(out.prompt).toContain(`hop 2/${LATERAL_MAX_HOPS}`);
       expect(out.prompt).toContain("please review the diff");
       expect(out.prompt).toContain("send_to_session");
-      expect(out.displayMessage).toContain("jinn-dev");
-      expect(out.displayMessage).toContain("please review the diff");
+      expect(out.displayMessage).toBe(`📨 From jinn-dev [hop 2/${LATERAL_MAX_HOPS}]: please review the diff`);
       expect(out.hops).toBe(2);
+      expect(out.meta).toEqual({
+        kind: "agent-relay",
+        fromSessionId: "s1",
+        fromLabel: "jinn-dev",
+        fromEmployee: "jinn-dev",
+        hops: 2,
+        maxHops: LATERAL_MAX_HOPS,
+        fullMessage: "please review the diff",
+      });
     }
   });
 
@@ -229,12 +237,16 @@ describe("prepareLateralSend — the route-side transform", () => {
 
   it("truncates a huge message in the displayMessage but never in the engine prompt", () => {
     const g = createSessionCommGuards(() => 0);
-    const long = "x".repeat(5_000);
+    const long = "x".repeat(17_000);
     const out = prepareLateralSend({ caller: sess("s1"), targetSessionId: "s2", message: long, guards: g });
     expect(out.ok).toBe(true);
     if (out.ok) {
       expect(out.prompt).toContain(long);
       expect(out.displayMessage.length).toBeLessThan(400);
+      expect(out.meta.fullMessage).toBe("x".repeat(16_000));
+      expect(out.meta.fullMessage).toHaveLength(16_000);
+      expect(out.meta.hops).toBe(1);
+      expect(out.meta.maxHops).toBe(LATERAL_MAX_HOPS);
     }
   });
 });

@@ -4731,6 +4731,7 @@ export async function handleApiRequest(
         body.role = "notification";
         body.message = plan.prompt;
         body.displayMessage = plan.displayMessage;
+        body.meta = plan.meta;
         if (session.parentSessionId === caller.id) {
           parentFollowUp = { caller, message: String(rawMessage) };
         }
@@ -4781,14 +4782,31 @@ export async function handleApiRequest(
         const childSessionId = typeof rawMeta.childSessionId === "string" ? stripControlChars(rawMeta.childSessionId).trim().slice(0, 160) : "";
         const fullMessage = typeof rawMeta.fullMessage === "string"
           ? rawMeta.fullMessage.slice(0, STRUCTURED_MESSAGE_BODY_MAX_CHARS)
-          : "";
-        if (kind && employee && childSessionId) {
+          : undefined;
+        if (rawMeta.kind === "agent-relay") {
+          const fromSessionId = typeof rawMeta.fromSessionId === "string" ? stripControlChars(rawMeta.fromSessionId).trim().slice(0, 160) : "";
+          const fromLabel = typeof rawMeta.fromLabel === "string" ? stripControlChars(rawMeta.fromLabel).trim().slice(0, 160) : "";
+          const fromEmployee = typeof rawMeta.fromEmployee === "string" ? stripControlChars(rawMeta.fromEmployee).trim().slice(0, 160) : "";
+          const hops = typeof rawMeta.hops === "number" && Number.isFinite(rawMeta.hops) ? Math.floor(rawMeta.hops) : 0;
+          const maxHops = typeof rawMeta.maxHops === "number" && Number.isFinite(rawMeta.maxHops) ? Math.floor(rawMeta.maxHops) : 0;
+          if (fromSessionId && fromLabel && hops > 0 && maxHops > 0 && fullMessage !== undefined) {
+            notificationMeta = {
+              kind: "agent-relay",
+              fromSessionId,
+              fromLabel,
+              ...(fromEmployee ? { fromEmployee } : {}),
+              hops,
+              maxHops,
+              fullMessage,
+            };
+          }
+        } else if (kind && employee && childSessionId) {
           notificationMeta = {
             kind,
             employee,
             ...(employeeDisplay ? { employeeDisplay } : {}),
             childSessionId,
-            ...(fullMessage ? { fullMessage } : {}),
+            ...(fullMessage !== undefined ? { fullMessage } : {}),
           };
         } else if (rawMeta.kind === "manager-visibility" && employee && childSessionId) {
           const manager = typeof rawMeta.manager === "string" ? stripControlChars(rawMeta.manager).trim().slice(0, 160) : "";
