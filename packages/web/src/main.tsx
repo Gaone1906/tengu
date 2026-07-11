@@ -7,6 +7,7 @@ import './routes/globals.css'
 
 const ChatPage = lazyRoute(() => import('./routes/chat/page'), 'chat')
 const CronPage = lazyRoute(() => import('./routes/cron/page'), 'cron')
+const CronDetailPage = lazyRoute(() => import('./routes/cron/detail'), 'cron-detail')
 const TodosPage = lazyRoute(() => import('./routes/todos/page'), 'todos')
 const LogsPage = lazyRoute(() => import('./routes/logs/page'), 'logs')
 const LimitsPage = lazyRoute(() => import('./routes/limits/page'), 'limits')
@@ -66,6 +67,7 @@ function App() {
               <Route path="/" element={<ChatPage />} />
               <Route path="/chat" element={<Navigate to="/" replace />} />
               <Route path="/cron" element={<CronPage />} />
+              <Route path="/cron/:id" element={<CronDetailPage />} />
               <Route path="/todos" element={<TodosPage />} />
               {/* GRS-021d: Kanban became Todos. Old links redirect. */}
               <Route path="/kanban" element={<Navigate to="/todos" replace />} />

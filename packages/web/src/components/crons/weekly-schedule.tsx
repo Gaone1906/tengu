@@ -7,7 +7,7 @@ interface CronJob {
   name: string
   schedule: string
   enabled: boolean
-  employee?: string
+  employee?: string | null
   [key: string]: unknown
 }
 
@@ -45,34 +45,21 @@ interface TooltipData {
 }
 
 function PillTooltip({ slot, rect, containerRect }: { slot: SlotInfo; rect: DOMRect; containerRect: DOMRect }) {
-  const color = slot.cron.enabled ? "var(--system-green)" : "var(--text-tertiary)"
   const top = rect.top - containerRect.top - 8
   const left = rect.left - containerRect.left + rect.width / 2
 
   return (
     <div
-      className="absolute pointer-events-none z-[100] min-w-[200px] max-w-[300px] bg-[var(--material-regular)] border border-[var(--separator)] rounded-[var(--radius-md)] px-[var(--space-4)] py-[var(--space-3)] text-[length:var(--text-caption1)] text-[var(--text-primary)]"
+      className="absolute pointer-events-none z-[100] min-w-[200px] max-w-[300px] rounded-[var(--radius-lg)] bg-[var(--bg-tertiary)] px-[var(--space-4)] py-[var(--space-3)] text-[length:var(--text-caption1)] text-[var(--text-primary)]"
       style={{
         top,
         left,
         transform: "translate(-50%, -100%)",
-        boxShadow: "var(--shadow-key)",
+        boxShadow: "var(--shadow-overlay)",
       }}
     >
-      {/* Arrow */}
-      <div
-        className="absolute w-2.5 h-2.5 bg-[var(--material-regular)] border-r border-b border-[var(--separator)]"
-        style={{
-          bottom: -5,
-          left: "50%",
-          transform: "translateX(-50%) rotate(45deg)",
-        }}
-      />
       {/* Name */}
-      <div
-        className="font-bold text-[length:var(--text-footnote)] mb-[var(--space-1)] pl-[var(--space-2)]"
-        style={{ borderLeft: `3px solid ${color}` }}
-      >
+      <div className="mb-[var(--space-1)] text-[length:var(--text-footnote)] font-semibold">
         {slot.cron.name}
       </div>
       {/* Schedule */}
@@ -199,24 +186,15 @@ export function WeeklySchedule({ crons }: WeeklyScheduleProps) {
 
   if (activeHours.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-[200px] text-[var(--text-secondary)] gap-[var(--space-2)]">
-        <svg
-          width="32" height="32" viewBox="0 0 24 24"
-          fill="none" stroke="currentColor" strokeWidth="1.5"
-          strokeLinecap="round" strokeLinejoin="round"
-          className="text-[var(--text-tertiary)] mb-[var(--space-2)]"
-        >
-          <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-          <line x1="16" y1="2" x2="16" y2="6" />
-          <line x1="8" y1="2" x2="8" y2="6" />
-          <line x1="3" y1="10" x2="21" y2="10" />
-        </svg>
-        <span className="text-[length:var(--text-subheadline)] font-medium">
-          No scheduled jobs to display
-        </span>
-        <span className="text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">
-          Enable some cron jobs to see the weekly schedule
-        </span>
+      <div className="rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] shadow-[var(--shadow-card)]">
+        <div className="px-6 py-12 text-center">
+          <h3 className="text-[length:var(--text-title3)] font-bold tracking-[var(--tracking-tight)] text-[var(--text-primary)]">
+            Nothing on the calendar
+          </h3>
+          <p className="mx-auto mt-2 max-w-[320px] text-[length:var(--text-subheadline)] leading-relaxed text-[var(--text-tertiary)]">
+            Enable a cron job to see when the week fires.
+          </p>
+        </div>
       </div>
     )
   }
@@ -227,17 +205,20 @@ export function WeeklySchedule({ crons }: WeeklyScheduleProps) {
       className="relative"
       onClick={() => setTooltip(null)}
     >
-      <div className="grid grid-cols-[56px_repeat(7,1fr)] bg-[var(--material-regular)] rounded-[var(--radius-md)] border border-[var(--separator)] overflow-hidden">
+      {/* The grid needs ~640px for seven readable columns; narrower viewports
+          scroll it sideways inside the inset instead of crushing the pills. */}
+      <div className="overflow-x-auto rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] shadow-[var(--shadow-card)]">
+      <div className="grid min-w-[640px] grid-cols-[48px_repeat(7,minmax(0,1fr))]">
         {/* Header row */}
-        <div className="p-[var(--space-3)_var(--space-2)] border-b border-[var(--separator)] bg-[var(--material-thick)]" />
+        <div className="border-b border-[var(--separator)] p-[var(--space-3)_var(--space-2)]" />
         {DAY_LABELS.map((label, i) => {
           const isToday = i === nowCol
           return (
             <div
               key={label}
-              className="relative p-[var(--space-3)_var(--space-2)] text-center border-b border-l border-[var(--separator)]"
+              className="relative border-b border-l border-[var(--separator)] p-[var(--space-3)_var(--space-2)] text-center"
               style={{
-                background: isToday ? "var(--accent-fill)" : "var(--material-thick)",
+                background: isToday ? "var(--accent-fill)" : undefined,
               }}
             >
               <div
@@ -351,12 +332,8 @@ export function WeeklySchedule({ crons }: WeeklyScheduleProps) {
                           style={{
                             height: pillHeight,
                             background: isActive
-                              ? `color-mix(in srgb, ${pillColor} 25%, transparent)`
+                              ? `color-mix(in srgb, ${pillColor} 26%, transparent)`
                               : `color-mix(in srgb, ${pillColor} 12%, transparent)`,
-                            borderLeft: `3px solid ${pillColor}`,
-                            boxShadow: isActive
-                              ? `0 0 0 1px color-mix(in srgb, ${pillColor} 40%, transparent)`
-                              : "none",
                           }}
                         >
                           {/* Status dot */}
@@ -388,6 +365,7 @@ export function WeeklySchedule({ crons }: WeeklyScheduleProps) {
             </div>
           )
         })}
+      </div>
       </div>
 
       {/* Tooltip overlay */}
