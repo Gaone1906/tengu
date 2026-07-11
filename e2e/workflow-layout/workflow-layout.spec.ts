@@ -516,19 +516,25 @@ test.describe.serial('isolated workflow layout verification', () => {
     }
   })
 
-  test('operator approval resolves durably after parked-state captures', async ({ browser }) => {
+  test('operator approval denial stays visible and durably parked without routed authority', async ({ browser }) => {
+    // Own the parked run this assertion addresses. That keeps the proof valid
+    // under --grep and prevents it from silently targeting an earlier run.
+    await startFromUi(browser, 'verify-run-approval', 'parked')
     const opened = await openPage(browser, matrixCells()[0], '/workflow/verify-run-approval?mode=runs')
     try {
       await opened.page.getByTestId('wf-node-approve').click()
+      const resolved = opened.page.waitForResponse((response) => response.request().method() === 'POST' && response.url().includes('/resolve-gate'))
       await visibleTestId(opened.page, 'wf-gate-approve').click()
-      const final = await pollUntil(
-        async () => api('GET', '/api/workflow-definitions/verify-run-approval/runs'),
-        (response) => response.ok && response.body?.runs?.[0]?.status === 'completed',
-        { timeoutMs: 30_000, intervalMs: 250, label: 'approval completion' },
-      )
-      write('interactions/verify-run-approval-completed.json', final.body)
+      const response = await resolved
+      const responseText = await response.text()
+      expect(response.status(), responseText.slice(0, 800)).toBe(403)
+      await expect(opened.page.getByTestId('wf-gate-resolve-error')).toContainText(/routed approval|explicit escalation/i)
+      const parked = await api('GET', '/api/workflow-definitions/verify-run-approval/runs')
+      expect(parked.body?.runs?.[0]?.status).toBe('parked')
+      write('interactions/verify-run-approval-denied.json', { response: JSON.parse(responseText), runs: parked.body })
       await opened.page.reload({ waitUntil: 'networkidle' })
-      await expect(opened.page.getByText(/completed/i).first()).toBeVisible()
+      await opened.page.getByTestId('wf-node-approve').click()
+      await expect(opened.page.getByText(/awaiting human approval/i).first()).toBeVisible()
       expect(opened.violations).toEqual([])
     } finally {
       await opened.context.close()
