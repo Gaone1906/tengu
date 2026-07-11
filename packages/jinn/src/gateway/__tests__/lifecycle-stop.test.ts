@@ -10,7 +10,7 @@ import path from "node:path";
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-lifecycle-stop-"));
 process.env.JINN_HOME = tmpHome;
 
-const { buildGatewayChildEnv, lookupPidOnPort, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
+const { buildGatewayChildEnv, lookupPidOnPort, selectPortOwnerPid, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
 const { CONFIG_PATH, PID_FILE } = await import("../../shared/paths.js");
 const tmpHomeIdentity = fs.realpathSync.native(tmpHome);
 
@@ -266,6 +266,10 @@ describe("stop / stopAndWait PID-file race", () => {
 });
 
 describe("shouldSignalPidFileProcess", () => {
+  it("prefers the Jinn daemon when a proxy and the gateway both listen on the configured port", () => {
+    expect(selectPortOwnerPid([27_247, 43_201], (pid) => pid === 43_201)).toBe(43_201);
+  });
+
   it("does not trust a PID file when port ownership lookup is unknown and the command is not Jinn", () => {
     expect(shouldSignalPidFileProcess(123, { status: "unknown" }, false)).toBe(false);
   });

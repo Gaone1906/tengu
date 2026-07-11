@@ -167,6 +167,13 @@ export type ProcessJinnHomeLookup =
   | { status: "none" }
   | { status: "unknown" };
 
+export function selectPortOwnerPid(
+  pids: number[],
+  commandLooksLikeGateway: (pid: number) => boolean = pidLooksLikeGateway,
+): number | undefined {
+  return pids.find(commandLooksLikeGateway) ?? pids[0];
+}
+
 export class PortOwnershipError extends Error {
   constructor(port: number, ownerJinnHome: string) {
     super(formatPortOwnedByAnotherInstanceError(port, ownerJinnHome));
@@ -433,8 +440,12 @@ export function lookupPidOnPort(port: number): PortOwnerLookup {
         { encoding: "utf-8" },
       ).trim();
       if (!output) return { status: "none" };
-      const pid = parseInt(output.split("\n")[0], 10);
-      return isNaN(pid) ? { status: "unknown" } : { status: "found", pid };
+      const pids = output
+        .split("\n")
+        .map((line) => parseInt(line, 10))
+        .filter((pid) => !isNaN(pid));
+      const pid = selectPortOwnerPid(pids);
+      return pid === undefined ? { status: "unknown" } : { status: "found", pid };
     }
   } catch (err: unknown) {
     const status = (err as { status?: number | null }).status;
