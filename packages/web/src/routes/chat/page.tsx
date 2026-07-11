@@ -12,7 +12,7 @@ import {
 } from '@/components/chat/chat-route-helpers'
 import { useGateway } from '@/hooks/use-gateway'
 import { PageLayout } from '@/components/page-layout'
-import { ChatSidebar, type SidebarOrder } from '@/components/chat/chat-sidebar'
+import { ChatSidebar, pickNeighborSessionId, type SidebarOrder } from '@/components/chat/chat-sidebar'
 import { ChatHeaderPills } from '@/components/chat/chat-tabs'
 import { NavRibbon } from '@/components/pill-nav'
 import { MobileTabBar } from '@/components/chat/mobile-tab-bar'
@@ -455,16 +455,24 @@ function ChatPage() {
       await deleteSessionMutation.mutateAsync(id)
     } catch { /* sidebar may have already deleted it */ }
     if (selectedId === id) {
-      // The session is gone — REPLACE its URL entry with the composer; the
-      // sessions reload below then auto-selects the most recent chat.
-      pendingNavRef.current = null
-      navigate('/', { replace: true })
+      // The session is gone — one atomic REPLACE of its URL entry with the
+      // neighbouring session in the visible order (same semantics as the
+      // sidebar's delete fallback), so Back lands on the PRIOR session in the
+      // trail, never on bare '/' or in the deleted session. Composer only
+      // when nothing is left to select.
+      const fallback = pickNeighborSessionId(sidebarOrderRef.current.sessionIds, id)
+      if (fallback) {
+        handleSelect(fallback, { replace: true, navigateMobile: false })
+      } else {
+        pendingNavRef.current = null
+        navigate('/', { replace: true })
+      }
     }
     clearIntermediateMessages(id)
     chatTabs.closeTab(chatTabs.tabs.findIndex(t => t.kind === 'session' && t.sessionId === id))
     setShowMoreMenu(false)
     qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
-  }, [selectedId, chatTabs, deleteSessionMutation, qc, navigate])
+  }, [selectedId, chatTabs, deleteSessionMutation, qc, navigate, handleSelect])
 
   const handleDuplicate = useCallback(async (id: string) => {
     try {
@@ -651,6 +659,7 @@ function ChatPage() {
   // forward, deep link), the stale active tab must not drag the URL backwards
   // — the URL wins and the openTab sync above brings the tabs along.
   const prevActiveTabRef = useRef<ChatTab | null | undefined>(undefined)
+  const prevSelectedForTabSyncRef = useRef(selectedId)
   useEffect(() => {
     if (!chatTabs.hydrated) return
     // One of our navigations is still in flight (location commits are lower-
@@ -659,8 +668,15 @@ function ChatPage() {
     if (pendingNavRef.current !== undefined) return
     const at = chatTabs.activeTab
     const tabChanged = prevActiveTabRef.current === undefined || prevActiveTabRef.current !== at
+    const urlMoved = prevSelectedForTabSyncRef.current !== selectedId
     prevActiveTabRef.current = at
-    if (!tabChanged) return
+    prevSelectedForTabSyncRef.current = selectedId
+    // On the run where the URL itself moved, tabs FOLLOW the URL (the openTab
+    // sync above lands next flush) — never the other way. Without this, a
+    // fresh selection landing while its tab is still being opened (e.g. the
+    // post-delete neighbour fallback, whose old tab was just closed) would be
+    // bounced to '/' by the no-active-tab branch below.
+    if (!tabChanged || urlMoved) return
 
     if (at && at.kind === 'session' && at.sessionId !== selectedId) {
       handleSelect(at.sessionId, { replace: true, navigateMobile: false })

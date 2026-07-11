@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { hasBackgroundActivity, isDirectSession, isRecentError, resolveRowIdentity, shouldFloatPinned } from '../chat-sidebar'
+import { hasBackgroundActivity, isDirectSession, isRecentError, pickNeighborSessionId, resolveRowIdentity, shouldFloatPinned } from '../chat-sidebar'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -166,5 +166,19 @@ describe('chat sidebar pinned floating', () => {
     const pinned = new Set(['c1', 'c2'])
     expect(shouldFloatPinned({ id: 'c1', source: 'cron', sourceRef: 'cron:daily' }, pinned)).toBe(false)
     expect(shouldFloatPinned({ id: 'c2', source: 'web', sourceRef: 'cron:daily' }, pinned)).toBe(false)
+  })
+})
+
+describe('pickNeighborSessionId (post-delete fallback)', () => {
+  it('prefers the next visible session, then the previous', () => {
+    expect(pickNeighborSessionId(['a', 'b', 'c'], 'b')).toBe('c')
+    expect(pickNeighborSessionId(['a', 'b', 'c'], 'c')).toBe('b')
+    expect(pickNeighborSessionId(['a', 'b', 'c'], 'a')).toBe('b')
+  })
+
+  it('returns null when the list is a singleton or the id is not visible', () => {
+    expect(pickNeighborSessionId(['only'], 'only')).toBeNull()
+    expect(pickNeighborSessionId(['a', 'b'], 'zzz')).toBeNull()
+    expect(pickNeighborSessionId([], 'a')).toBeNull()
   })
 })

@@ -66,7 +66,10 @@ export interface SidebarOrder {
 
 interface ChatSidebarProps {
   selectedId: string | null
-  onSelect: (id: string) => void
+  /** Select a session. System-initiated selections (e.g. the post-delete
+   *  neighbour fallback) pass `replace` so they collapse into the current
+   *  history entry instead of pushing a new one. */
+  onSelect: (id: string, opts?: { replace?: boolean; navigateMobile?: boolean }) => void
   onNewChat: () => void
   onDelete?: (id: string) => void
   onDuplicate?: (newSessionId: string) => void
@@ -300,6 +303,20 @@ interface StatusDotState {
  *  in (rather than read at module load) so the window is evaluated at call time
  *  and the helper stays pure/testable. A missing or unparseable timestamp is
  *  treated as not-recent so the row falls through to the quiet treatment. */
+/**
+ * The session to fall back to after deleting the ACTIVE session: its
+ * neighbour in the visible order — the next row, else the previous, else
+ * null (list empty / deleted row not visible). Pure so the post-delete
+ * replace semantics are unit-testable.
+ */
+export function pickNeighborSessionId(visibleIds: string[], deletedId: string): string | null {
+  const idx = visibleIds.indexOf(deletedId)
+  if (idx === -1) return null
+  if (idx + 1 < visibleIds.length) return visibleIds[idx + 1]
+  if (idx - 1 >= 0) return visibleIds[idx - 1]
+  return null
+}
+
 export function isRecentError(
   status: string | undefined,
   lastActivityISO: string,
@@ -1119,19 +1136,12 @@ export function ChatSidebar({
   }
 
   async function handleDelete(sessionId: string) {
-    // Compute next session to select before removing
-    let nextSelectId: string | null = null
-    if (selectedId === sessionId) {
-      // Pick the neighbour in the current visible order (Today → Yesterday →
-      // Older drawer → Scheduled), already de-duped in allFlatIds.
-      const allVisible = allFlatIds.sessionIds
-      const idx = allVisible.indexOf(sessionId)
-      if (idx !== -1) {
-        // Prefer next item, then previous
-        if (idx + 1 < allVisible.length) nextSelectId = allVisible[idx + 1]
-        else if (idx - 1 >= 0) nextSelectId = allVisible[idx - 1]
-      }
-    }
+    // Compute next session to select before removing. Neighbour picked from
+    // the current visible order (Today → Yesterday → Older drawer →
+    // Scheduled), already de-duped in allFlatIds.
+    const nextSelectId = selectedId === sessionId
+      ? pickNeighborSessionId(allFlatIds.sessionIds, sessionId)
+      : null
 
     try {
       await deleteSessionMutation.mutateAsync(sessionId)
@@ -1144,7 +1154,11 @@ export function ChatSidebar({
       })
       startTransition(() => {
         if (nextSelectId) {
-          onSelect(nextSelectId)
+          // System-initiated fallback: REPLACE the deleted session's history
+          // entry with the neighbour — never push (browser Back must land on
+          // the prior session in the trail, not on the deleted one or on a
+          // bare '/'). Stays on the list on mobile.
+          onSelect(nextSelectId, { replace: true, navigateMobile: false })
         } else if (onDelete) {
           onDelete(sessionId)
         } else if (selectedId === sessionId) {
