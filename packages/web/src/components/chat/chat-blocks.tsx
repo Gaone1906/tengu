@@ -1,6 +1,7 @@
 import { AlertTriangle, Check, Circle, Loader2 } from 'lucide-react'
 import type { ChatBlock, JsonObject, JsonValue } from '@/lib/blocks'
 import { HandoffCard } from './handoff-card'
+import { DispatchBlockRow } from './dispatch-row'
 
 function asRecord(value: JsonValue | undefined): JsonObject | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : null
@@ -38,6 +39,10 @@ export function ChatBlockInline({
 }) {
   if (block.type === 'delegation') {
     return <HandoffCard block={block} onOpenThread={onOpenThread} />
+  }
+
+  if (block.type === 'dispatch') {
+    return <DispatchBlockRow block={block} onOpenThread={onOpenThread} />
   }
 
   const all = asArray(block.payload.items)

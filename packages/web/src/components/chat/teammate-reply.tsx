@@ -1,7 +1,9 @@
-import type { CSSProperties, ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { ChevronRight } from 'lucide-react'
-import { EmployeeChip } from '@/components/ui/employee-chip'
+import { api } from '@/lib/api'
+import { stripMarkdown } from '@/lib/strip-markdown'
 import { StateLine } from '@/components/ui/state-line'
+import { CalloutRail, clockTime, CommsCallout } from './comms-callout'
 import type { Message } from '@/lib/conversations'
 
 export interface TeammateReplyData {
@@ -60,41 +62,96 @@ export function parseTeammateReply(message: Message): TeammateReplyData | null {
   return null
 }
 
-function clockTime(timestamp: number): string {
-  return new Date(timestamp).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
+/* ── Full-reply fetch ───────────────────────────────────── */
+
+// The gateway clips the callback banner to a one-line 220-char preview
+// (callbacks.ts _clean). The child's actual final message is still fetchable,
+// so on first expand we look it up and swap it in — the callout then carries
+// the FULL reply with its original formatting. Keyed by message id: fetched
+// once per card, never for collapsed rows.
+const fullReplyCache = new Map<string, string | null>()
+
+/** Mirror of the gateway's `_clean` word-boundary clip — used to recognise
+ *  which child message a given preview was cut from. */
+export function cleanLikeGateway(text: string, max = 220): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  if (oneLine.length <= max) return oneLine
+  const cut = oneLine.slice(0, max)
+  const lastSpace = cut.lastIndexOf(' ')
+  return (lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd() + '…'
 }
+
+async function fetchFullReply(childSessionId: string, preview: string): Promise<string | null> {
+  const session = await api.getSession(childSessionId, { last: 40 }) as Record<string, unknown>
+  const messages = Array.isArray(session.messages) ? session.messages as Array<Record<string, unknown>> : []
+  // Newest-first provenance match: find the assistant message this preview was
+  // clipped from. The exact match keeps historical callbacks honest — a child
+  // that ran again later never gets its NEWER reply attributed to an OLD card.
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role !== 'assistant') continue
+    const content = typeof message.content === 'string' ? message.content : ''
+    if (content && cleanLikeGateway(content) === preview) return content
+  }
+  return null
+}
+
+function useFullReply(data: TeammateReplyData, messageId: string, expanded: boolean): string | null {
+  const [full, setFull] = useState<string | null>(() => fullReplyCache.get(messageId) ?? null)
+
+  useEffect(() => {
+    if (!expanded || data.kind !== 'reply' || !data.childSessionId || !data.preview) return
+    if (fullReplyCache.has(messageId)) {
+      setFull(fullReplyCache.get(messageId) ?? null)
+      return
+    }
+    let cancelled = false
+    fetchFullReply(data.childSessionId, data.preview)
+      .then((text) => {
+        fullReplyCache.set(messageId, text)
+        if (!cancelled) setFull(text)
+      })
+      .catch(() => { /* preview stays — the honest fallback */ })
+    return () => { cancelled = true }
+  }, [expanded, data, messageId])
+
+  return full
+}
+
+/* ── Component ──────────────────────────────────────────── */
 
 interface TeammateReplyProps {
   data: TeammateReplyData
   timestamp: number
-  formattedPreview: ReactNode
+  messageId: string
+  renderContent: (text: string) => ReactNode
   onOpenThread?: (sessionId: string) => void
 }
 
-export function TeammateReply({ data, timestamp, formattedPreview, onOpenThread }: TeammateReplyProps) {
+export function TeammateReply({ data, timestamp, messageId, renderContent, onOpenThread }: TeammateReplyProps) {
+  const [expanded, setExpanded] = useState(false)
   const error = data.kind === 'error'
-  const railStyle = {
-    '--thread-rail': error
-      ? 'color-mix(in srgb, var(--system-red) 38%, transparent)'
-      : 'var(--fill-primary)',
-  } as CSSProperties
+  const full = useFullReply(data, messageId, expanded)
+  const bodyText = full ?? data.preview
+  const hint = stripMarkdown(data.preview.split('\n')[0]) || (error ? "Couldn't finish" : '')
 
   return (
-    <div className="my-[var(--space-2)] min-w-0" data-teammate-state={data.kind}>
-      <div className="mb-[var(--space-1)] flex min-w-0 items-center gap-[var(--space-2)]">
-        <EmployeeChip employee={data.employee} displayName={data.employeeDisplay} size={22} />
-        <span className="shrink-0 text-[length:var(--text-caption2)] text-[var(--text-quaternary)]">
-          {error ? `· ${clockTime(timestamp)}` : `· replied · ${clockTime(timestamp)}`}
-        </span>
-      </div>
-      <div
-        style={railStyle}
-        className="relative ml-[10px] min-w-0 pl-[var(--space-4)] before:absolute before:bottom-[3px] before:left-0 before:top-[3px] before:w-0.5 before:rounded-px before:bg-[var(--thread-rail)]"
-      >
+    <CommsCallout
+      employee={data.employee}
+      displayName={data.employeeDisplay}
+      meta={error
+        ? [{ text: "couldn't finish", tone: 'error' }, { text: clockTime(timestamp) }]
+        : [{ text: 'replied' }, { text: clockTime(timestamp) }]}
+      hint={hint}
+      expanded={expanded}
+      onToggle={() => setExpanded((value) => !value)}
+      stateAttr={data.kind}
+    >
+      <CalloutRail error={error}>
         {error && <StateLine state="error" className="mb-[3px]" />}
-        {data.preview && (
+        {bodyText && (
           <div className={`max-w-[62ch] text-pretty text-[length:var(--text-subheadline)] leading-[var(--leading-relaxed)] ${error ? 'text-[var(--text-secondary)]' : 'text-[var(--text-primary)]'}`}>
-            {formattedPreview}
+            {renderContent(bodyText)}
           </div>
         )}
         {data.childSessionId && onOpenThread && (
@@ -107,7 +164,7 @@ export function TeammateReply({ data, timestamp, formattedPreview, onOpenThread 
             Open thread <ChevronRight size={11} strokeWidth={2.25} aria-hidden="true" />
           </button>
         )}
-      </div>
-    </div>
+      </CalloutRail>
+    </CommsCallout>
   )
 }

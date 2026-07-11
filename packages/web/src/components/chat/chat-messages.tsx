@@ -9,12 +9,15 @@ import { ChatBlockInline, statusMark } from './chat-blocks'
 import { blockFallbackContent } from '@/lib/blocks'
 import { ChevronDown, Wrench } from 'lucide-react'
 import { parseTeammateReply, TeammateReply } from './teammate-reply'
+import { parseAgentRelay, AgentRelay } from './agent-relay'
+import { DispatchRow } from './dispatch-row'
 
 /* ── Tool grouping ──────────────────────────────────────── */
 
 type MessageItem =
   | { kind: 'message'; msg: Message; index: number }
   | { kind: 'tool-group'; msgs: Message[]; startIndex: number }
+  | { kind: 'dispatch-call'; msg: Message; index: number }
 
 // A finished tool call lands in the transcript as "Used <tool>". While it's
 // still running the content carries the live tool name instead.
@@ -34,10 +37,23 @@ function isDelegationToolCall(msg: Message): boolean {
   return name === 'delegate_task' || name.endsWith('__delegate_task')
 }
 
+// A follow-up sent into another session (usually a delegated child). Surfaced
+// as a distinct dispatch row rather than buried in the tool pile — but only in
+// its generic form: the transcript's tool call carries no target or text. Once
+// the gateway emits `dispatch` blocks (structured contract), those take over
+// and the raw tool calls are skipped like delegation ones.
+function isDispatchToolCall(msg: Message): boolean {
+  const name = msg.toolCall || ''
+  return name === 'send_to_session' || name.endsWith('__send_to_session')
+}
+
 function groupMessages(messages: Message[]): MessageItem[] {
   const items: MessageItem[] = []
   const hasDelegationBlock = messages.some((message) =>
     message.blocks?.some((block) => block.type === 'delegation'),
+  )
+  const hasDispatchBlock = messages.some((message) =>
+    message.blocks?.some((block) => block.type === 'dispatch'),
   )
   let i = 0
   while (i < messages.length) {
@@ -45,10 +61,18 @@ function groupMessages(messages: Message[]): MessageItem[] {
       i++
       continue
     }
+    if (messages[i].role === 'assistant' && messages[i].toolCall && isDispatchToolCall(messages[i])) {
+      if (!hasDispatchBlock) items.push({ kind: 'dispatch-call', msg: messages[i], index: i })
+      i++
+      continue
+    }
     if (messages[i].role === 'assistant' && messages[i].toolCall) {
       const toolMsgs: Message[] = []
       const start = i
-      while (i < messages.length && messages[i].role === 'assistant' && messages[i].toolCall) {
+      while (
+        i < messages.length && messages[i].role === 'assistant' && messages[i].toolCall
+        && !isDispatchToolCall(messages[i])
+      ) {
         if (!hasDelegationBlock || !isDelegationToolCall(messages[i])) toolMsgs.push(messages[i])
         i++
       }
@@ -704,6 +728,7 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
   const blocks = msg.blocks || []
   const hasBlocks = blocks.length > 0
   const teammate = useMemo(() => parseTeammateReply(msg), [msg])
+  const relay = useMemo(() => (teammate ? null : parseAgentRelay(msg)), [msg, teammate])
 
   // Strip media URLs from text for display
   let textContent = msg.content
@@ -732,10 +757,6 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
 
   // Memoize the expensive formatting — re-runs only when textContent changes
   const formattedContent = useMemo(() => formatMessage(textContent), [textContent])
-  const formattedTeammatePreview = useMemo(
-    () => teammate ? formatMessage(teammate.preview) : null,
-    [teammate],
-  )
 
   // Memoize timestamp formatting — avoids Date allocations on every parent re-render
   const formattedTimestamp = useMemo(() => formatTimestamp(msg.timestamp), [msg.timestamp])
@@ -759,13 +780,21 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
         </div>
       )}
 
-      {/* Spacing between role switches */}
+      {/* Spacing between role switches. The switch AFTER a user message gets
+          extra headroom (24px): the accent bubble's fill weight optically eats
+          a plain 16px gap before the assistant's reply. */}
       {!showTimestamp && i > 0 && (
-        <div className={messages[i - 1].role !== msg.role ? 'h-[var(--space-4)]' : 'h-[var(--space-1)]'} />
+        <div className={
+          messages[i - 1].role === 'user' && msg.role !== 'user'
+            ? 'h-[var(--space-6)]'
+            : messages[i - 1].role !== msg.role
+              ? 'h-[var(--space-4)]'
+              : 'h-[var(--space-1)]'
+        } />
       )}
 
       {/* Notification message — centered system-style banner */}
-      {isNotification && !teammate && (
+      {isNotification && !teammate && !relay && (
         <div className="flex justify-center px-[var(--space-4)] mb-[var(--space-1)]">
           <div className="notification-msg-bubble flex items-start gap-[var(--space-2)] py-[var(--space-3)] px-[var(--space-4)] rounded-[var(--radius-md)] bg-[var(--fill-secondary)] text-[var(--text-secondary)] text-[length:var(--text-caption1)] leading-[var(--leading-relaxed)] max-w-[85%]">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 mt-0.5 opacity-60">
@@ -778,13 +807,20 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
       )}
 
       {teammate && (
-        <div className="assistant-msg-row mb-[var(--space-1)] min-w-0">
+        <div className="assistant-msg-row min-w-0">
           <TeammateReply
             data={teammate}
             timestamp={msg.timestamp}
-            formattedPreview={formattedTeammatePreview}
+            messageId={msg.id || `idx-${i}`}
+            renderContent={formatMessage}
             onOpenThread={onOpenThread}
           />
+        </div>
+      )}
+
+      {relay && (
+        <div className="assistant-msg-row min-w-0">
+          <AgentRelay data={relay} timestamp={msg.timestamp} renderContent={formatMessage} />
         </div>
       )}
 
@@ -1108,22 +1144,34 @@ export function ChatMessages({
             </div>
           )}
           {groupedMessages.map((item) => {
-            if (item.kind === 'tool-group') {
-              const firstMsg = item.msgs[0]
-              const showTimestamp = shouldShowTimestamp(messages, item.startIndex)
-              const prevMsg = item.startIndex > 0 ? messages[item.startIndex - 1] : null
-              const isActive = item.startIndex === activeToolGroupStart
+            if (item.kind === 'tool-group' || item.kind === 'dispatch-call') {
+              const firstMsg = item.kind === 'tool-group' ? item.msgs[0] : item.msg
+              const startIndex = item.kind === 'tool-group' ? item.startIndex : item.index
+              const showTimestamp = shouldShowTimestamp(messages, startIndex)
+              const prevMsg = startIndex > 0 ? messages[startIndex - 1] : null
               return (
-                <div key={`tg-${firstMsg.id || item.startIndex}`} data-message-id={firstMsg.id || `tg-${item.startIndex}`}>
+                <div key={`tg-${firstMsg.id || startIndex}`} data-message-id={firstMsg.id || `tg-${startIndex}`}>
                   {showTimestamp && (
                     <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
                       {formatTimestamp(firstMsg.timestamp)}
                     </div>
                   )}
                   {!showTimestamp && prevMsg && (
-                    <div className={prevMsg.role !== 'assistant' ? 'h-[var(--space-4)]' : 'h-[var(--space-1)]'} />
+                    <div className={
+                      prevMsg.role === 'user'
+                        ? 'h-[var(--space-6)]'
+                        : prevMsg.role !== 'assistant'
+                          ? 'h-[var(--space-4)]'
+                          : 'h-[var(--space-1)]'
+                    } />
                   )}
-                  <ToolGroup msgs={item.msgs} isActive={isActive} />
+                  {item.kind === 'tool-group'
+                    ? <ToolGroup msgs={item.msgs} isActive={item.startIndex === activeToolGroupStart} />
+                    : (
+                      <div className="assistant-msg-row mb-[var(--space-1)] min-w-0">
+                        <DispatchRow />
+                      </div>
+                    )}
                 </div>
               )
             }

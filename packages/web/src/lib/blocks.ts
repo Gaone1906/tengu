@@ -1,6 +1,6 @@
 import type { Message } from './conversations'
 
-export type ChatBlockType = 'task-list' | 'delegation'
+export type ChatBlockType = 'task-list' | 'delegation' | 'dispatch'
 export type ChatBlockStatus = 'queued' | 'running' | 'done' | 'error'
 export type ChatBlockOp = 'put' | 'patch' | 'remove'
 export type JsonPrimitive = string | number | boolean | null
@@ -23,7 +23,7 @@ export interface ChatBlockEnvelope {
   block: ChatBlock
 }
 
-const SUPPORTED_BLOCK_TYPES = new Set<ChatBlockType>(['task-list', 'delegation'])
+const SUPPORTED_BLOCK_TYPES = new Set<ChatBlockType>(['task-list', 'delegation', 'dispatch'])
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -53,6 +53,11 @@ export function blockFallbackContent(block: ChatBlock): string {
     return typeof block.payload.title === 'string' && block.payload.title.trim()
       ? block.payload.title
       : prefix
+  }
+  if (block.type === 'dispatch') {
+    return typeof block.payload.preview === 'string' && block.payload.preview.trim()
+      ? `Followed up: ${block.payload.preview}`
+      : 'Followed up'
   }
   return prefix
 }
