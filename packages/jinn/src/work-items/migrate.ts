@@ -67,6 +67,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_work_items_source_ref
 -- Backs the default list/search ORDER BY (updated_at DESC, created_at DESC) so a
 -- LIMIT-ed read walks the index tail instead of sorting the whole table.
 CREATE INDEX IF NOT EXISTS idx_work_items_recent     ON work_items(updated_at DESC, created_at DESC);
+-- Covers the unfiltered dashboard page's complete deterministic ordering.
+CREATE INDEX IF NOT EXISTS idx_work_items_default_order
+  ON work_items((rank IS NULL), rank, updated_at DESC, created_at DESC, id ASC);
 -- Ranked rows lead within a raw-status group; unranked rows retain the stable
 -- newest-first fallback used before manual ordering existed.
 CREATE INDEX IF NOT EXISTS idx_work_items_manual_order

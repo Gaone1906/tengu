@@ -141,4 +141,17 @@ describe("listWorkItems SQL LIMIT", () => {
     expect(text).toContain("idx_work_items_manual_order");
     expect(text).not.toContain("TEMP B-TREE");
   });
+
+  it("the default no-filter page is index-backed", () => {
+    const db = reg.initDb();
+    const plan = db
+      .prepare(
+        "EXPLAIN QUERY PLAN SELECT * FROM work_items ORDER BY (rank IS NULL) ASC, rank ASC, updated_at DESC, created_at DESC, id ASC LIMIT ? OFFSET ?",
+      )
+      .all(20, 0) as Array<{ detail: string }>;
+    const text = plan.map((r) => r.detail).join("\n");
+    expect(text).toContain("idx_work_items_default_order");
+    expect(plan.some((r) => /SCAN work_items$/.test(r.detail))).toBe(false);
+    expect(text).not.toContain("TEMP B-TREE");
+  });
 });

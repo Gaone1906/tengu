@@ -92,6 +92,7 @@ describe("migrateWorkItemsSchema — the GRS-021a vocabulary rebuild", () => {
         "idx_work_items_status",
         "idx_work_items_department",
         "idx_work_items_recent",
+        "idx_work_items_default_order",
         "idx_work_items_manual_order",
         "uq_work_items_source_ref",
       ]),
