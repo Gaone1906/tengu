@@ -400,65 +400,78 @@ function rowToSession(row: Record<string, unknown>): Session {
 export function initDb(): Database.Database {
   if (db) return db;
   mkdirSync(path.dirname(SESSIONS_DB), { recursive: true });
-  db = new Database(SESSIONS_DB);
-  db.pragma('journal_mode = WAL');
-  db.exec(CREATE_TABLE);
-  db.exec(CREATE_MESSAGES_TABLE);
-  db.exec(CREATE_MESSAGES_INDEX);
-  db.exec(CREATE_META_TABLE);
-  migrateMessagesSchema(db);
-  db.exec(CREATE_MESSAGES_ORDER_INDEX);
-  // Partial-message index needs the `partial` column, added by migrateMessagesSchema above.
-  db.exec(CREATE_MESSAGES_PARTIAL_INDEX);
-  migrateFtsSchema(db);
-  // Pre-existing rows are intentionally NOT drained here. startGateway schedules
-  // the chunked backfill after server.listen(), and searchMessages also schedules
-  // it as a lazy fallback for non-gateway callers. The guarded AD/AU triggers above
-  // keep writes safe while that one-time backfill is incomplete.
-  migrateSessionsSchema(db);
-  db.exec(CREATE_SESSION_KEY_INDEX);
-  db.exec(CREATE_DELEGATION_IDEMPOTENCY_INDEX);
-  db.exec(CREATE_LAST_ACTIVITY_INDEX);
-  db.exec(CREATE_PARENT_INDEX);
-  db.exec(CREATE_WORKFLOW_RUN_INDEX);
-  db.exec(CREATE_STATUS_INDEX);
-  // Work-item primitive (GRS-002 → GRS-021a Todos model): the vocabulary rebuild
-  // runs FIRST (a GRS-002-shape table is remapped onto the 8-status/7-source
-  // enums inside one rollback-safe transaction; a migration failure aborts boot
-  // by design — a half-migrated ledger must never serve), then CREATE IF NOT
-  // EXISTS covers fresh installs with the new shape directly. The nullable
-  // sessions.work_item_id FK is added by migrateSessionsSchema above. All
-  // idempotent for already-new DBs.
-  migrateWorkItemsSchema(db);
-  db.exec(WORK_ITEMS_TABLE_DDL);
-  db.exec(WORK_ITEMS_INDEX_DDL);
-  db.exec(WORK_ITEM_EVENTS_DDL);
-  db.exec(CREATE_WORK_ITEM_SESSION_INDEX);
-  // Normalized operational Activity ledger. Additive and idempotent for both
-  // fresh and existing homes; historical domain projection is checkpointed by
-  // the Activity projector rather than faked inside schema migration.
-  migrateActivitySchema(db);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS queue_items (
-      id TEXT PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      session_key TEXT NOT NULL,
-      prompt TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      internal INTEGER NOT NULL DEFAULT 0,
-      position INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL,
-      started_at TEXT,
-      completed_at TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_queue_session
-      ON queue_items (session_key, status, position);
-  `);
-  migrateQueueItemsSchema(db);
-  migrateCallbackDeliveriesSchema(db);
-  db.exec(CREATE_FILES_TABLE);
-
-  return db;
+  const database = new Database(SESSIONS_DB);
+  db = database;
+  // Register the busy handler before WAL/DDL. Several gateway processes may
+  // discover the same fresh or upgraded home concurrently; initialization is
+  // serialized by SQLite instead of surfacing a transient SQLITE_BUSY.
+  database.pragma('busy_timeout = 10000');
+  database.pragma('journal_mode = WAL');
+  const initialize = database.transaction(() => {
+    database.exec(CREATE_TABLE);
+    database.exec(CREATE_MESSAGES_TABLE);
+    database.exec(CREATE_MESSAGES_INDEX);
+    database.exec(CREATE_META_TABLE);
+    migrateMessagesSchema(database);
+    database.exec(CREATE_MESSAGES_ORDER_INDEX);
+    // Partial-message index needs the `partial` column, added by migrateMessagesSchema above.
+    database.exec(CREATE_MESSAGES_PARTIAL_INDEX);
+    migrateFtsSchema(database);
+    // Pre-existing rows are intentionally NOT drained here. startGateway schedules
+    // the chunked backfill after server.listen(), and searchMessages also schedules
+    // it as a lazy fallback for non-gateway callers. The guarded AD/AU triggers above
+    // keep writes safe while that one-time backfill is incomplete.
+    migrateSessionsSchema(database);
+    database.exec(CREATE_SESSION_KEY_INDEX);
+    database.exec(CREATE_DELEGATION_IDEMPOTENCY_INDEX);
+    database.exec(CREATE_LAST_ACTIVITY_INDEX);
+    database.exec(CREATE_PARENT_INDEX);
+    database.exec(CREATE_WORKFLOW_RUN_INDEX);
+    database.exec(CREATE_STATUS_INDEX);
+    // Work-item primitive (GRS-002 → GRS-021a Todos model): the vocabulary rebuild
+    // runs FIRST (a GRS-002-shape table is remapped onto the 8-status/7-source
+    // enums inside one rollback-safe transaction; a migration failure aborts boot
+    // by design — a half-migrated ledger must never serve), then CREATE IF NOT
+    // EXISTS covers fresh installs with the new shape directly. The nullable
+    // sessions.work_item_id FK is added by migrateSessionsSchema above. All
+    // idempotent for already-new DBs.
+    migrateWorkItemsSchema(database);
+    database.exec(WORK_ITEMS_TABLE_DDL);
+    database.exec(WORK_ITEMS_INDEX_DDL);
+    database.exec(WORK_ITEM_EVENTS_DDL);
+    database.exec(CREATE_WORK_ITEM_SESSION_INDEX);
+    // Normalized operational Activity ledger. Additive and idempotent for both
+    // fresh and existing homes; historical domain projection is checkpointed by
+    // the Activity projector rather than faked inside schema migration.
+    migrateActivitySchema(database);
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS queue_items (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        session_key TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        internal INTEGER NOT NULL DEFAULT 0,
+        position INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_queue_session
+        ON queue_items (session_key, status, position);
+    `);
+    migrateQueueItemsSchema(database);
+    migrateCallbackDeliveriesSchema(database);
+    database.exec(CREATE_FILES_TABLE);
+  });
+  try {
+    runImmediateMigrationWithRetry(initialize);
+    return database;
+  } catch (error) {
+    database.close();
+    db = undefined;
+    throw error;
+  }
 }
 
 /** Test-only restart seam: close the process singleton so the next initDb()
@@ -536,6 +549,7 @@ function hasCallbackDeliveryV2Constraints(sql: string): boolean {
  * never silently indexed: validation throws inside the transaction so any DDL
  * from this migration is rolled back as one unit. */
 export function migrateCallbackDeliveriesSchema(database: Database.Database): void {
+  database.pragma('busy_timeout = 10000');
   database.function('jinn_callback_identity', { deterministic: true }, canonicalCallbackIdentityText);
   const migrate = database.transaction(() => {
     const existing = database.prepare(`
@@ -563,22 +577,7 @@ export function migrateCallbackDeliveriesSchema(database: Database.Database): vo
     if (missing.length > 0) {
       throw new Error(`Incompatible callback_deliveries schema: missing ${missing.join(', ')}`);
     }
-    database.exec(`
-      DROP INDEX IF EXISTS uq_callback_delivery_identity;
-      DROP INDEX IF EXISTS idx_callback_deliveries_pending;
-      CREATE UNIQUE INDEX uq_callback_delivery_identity
-        ON callback_deliveries (
-          parent_session_id,
-          child_session_id,
-          attempt_token,
-          terminal_outcome,
-          terminal_version,
-          callback_kind
-        );
-      CREATE INDEX idx_callback_deliveries_pending
-        ON callback_deliveries (status, next_attempt_at, created_at)
-        WHERE status = 'pending';
-    `);
+    ensureCallbackDeliveryIndexes(database);
     const identityColumns = database.prepare('PRAGMA index_info(uq_callback_delivery_identity)').all() as Array<{ name: string }>;
     const expectedIdentity = [
       'parent_session_id',
@@ -612,7 +611,81 @@ export function migrateCallbackDeliveriesSchema(database: Database.Database): vo
       throw new Error('Incompatible callback_deliveries constraints');
     }
   });
-  migrate();
+  runImmediateMigrationWithRetry(migrate);
+}
+
+function ensureCallbackDeliveryIndexes(database: Database.Database): void {
+  const expectedIdentity = [
+    'parent_session_id',
+    'child_session_id',
+    'attempt_token',
+    'terminal_outcome',
+    'terminal_version',
+    'callback_kind',
+  ];
+  const indexes = database.prepare('PRAGMA index_list(callback_deliveries)').all() as Array<{ name: string; unique: number }>;
+  const identity = indexes.find((index) => index.name === 'uq_callback_delivery_identity');
+  const identityColumns = identity
+    ? database.prepare('PRAGMA index_info(uq_callback_delivery_identity)').all() as Array<{ name: string }>
+    : [];
+  if (
+    identity
+    && (identity.unique !== 1 || identityColumns.map((column) => column.name).join('|') !== expectedIdentity.join('|'))
+  ) {
+    database.exec('DROP INDEX uq_callback_delivery_identity');
+  }
+  database.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_callback_delivery_identity
+      ON callback_deliveries (
+        parent_session_id,
+        child_session_id,
+        attempt_token,
+        terminal_outcome,
+        terminal_version,
+        callback_kind
+      )
+  `);
+
+  const refreshedIndexes = database.prepare('PRAGMA index_list(callback_deliveries)').all() as Array<{ name: string; unique: number }>;
+  const pending = refreshedIndexes.find((index) => index.name === 'idx_callback_deliveries_pending');
+  const pendingColumns = pending
+    ? database.prepare('PRAGMA index_info(idx_callback_deliveries_pending)').all() as Array<{ name: string }>
+    : [];
+  const pendingSql = pending
+    ? (database.prepare(`
+        SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_callback_deliveries_pending'
+      `).get() as { sql: string } | undefined)?.sql.replace(/\s+/g, ' ').toLowerCase() ?? ''
+    : '';
+  if (
+    pending
+    && (
+      pending.unique !== 0
+      || pendingColumns.map((column) => column.name).join('|') !== 'status|next_attempt_at|created_at'
+      || !pendingSql.includes("where status = 'pending'")
+    )
+  ) {
+    database.exec('DROP INDEX idx_callback_deliveries_pending');
+  }
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_callback_deliveries_pending
+      ON callback_deliveries (status, next_attempt_at, created_at)
+      WHERE status = 'pending'
+  `);
+}
+
+function runImmediateMigrationWithRetry<T>(migration: Database.Transaction<() => T>): T {
+  const retryDelaysMs = [10, 50, 200];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return migration.immediate();
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error
+        ? String((error as { code?: unknown }).code)
+        : '';
+      if (!code.startsWith('SQLITE_BUSY') || attempt >= retryDelaysMs.length) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryDelaysMs[attempt]);
+    }
+  }
 }
 
 function canonicalCallbackIdentityText(value: unknown): string {
