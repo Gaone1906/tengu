@@ -251,10 +251,11 @@ describe("useLiveSession (read-only)", () => {
       emit("session:completed", { sessionId: "s1", result: "The answer is 42." })
       await Promise.resolve()
     })
-    // Exactly ONE copy of the answer survives (no duplicate), and the transient
-    // tool row is collapsed away with the rest of the active turn.
+    // Exactly ONE copy of the answer survives (no duplicate). The tool row is
+    // EVIDENCE and survives completion (marked done) — the post-turn fold
+    // files it away visually instead of the data layer deleting it.
     expect(result.current.messages.filter((m) => m.content === "The answer is 42." && !m.toolCall)).toHaveLength(1)
-    expect(result.current.messages.some((m) => m.toolCall === "read")).toBe(false)
+    expect(result.current.messages.some((m) => m.toolCall === "read" && m.content === "Used read")).toBe(true)
   })
 
   it("collapses partial rows loaded from a running session when completion arrives", async () => {
@@ -279,11 +280,13 @@ describe("useLiveSession (read-only)", () => {
       await Promise.resolve()
     })
 
-    expect(result.current.messages.map((m) => m.content)).toEqual(["do it", "PROGRESS-FINAL"])
-    expect(result.current.messages.some((m) => m.toolCall)).toBe(false)
+    // Interim prose collapses into the canonical result; the tool row is kept
+    // as evidence (marked done) for the post-turn fold.
+    expect(result.current.messages.map((m) => m.content)).toEqual(["do it", "Used Bash", "PROGRESS-FINAL"])
+    expect(result.current.messages.filter((m) => m.toolCall)).toHaveLength(1)
   })
 
-  it("collapses visible progress around a tool call to only the final answer on completion", async () => {
+  it("collapses interim prose to the final answer on completion while tool evidence survives", async () => {
     getSession.mockResolvedValue({ status: "running", messages: [] })
     const { subscribe, emit } = makeBus()
     const { result } = renderHook(() =>
@@ -303,8 +306,8 @@ describe("useLiveSession (read-only)", () => {
       await Promise.resolve()
     })
 
-    expect(result.current.messages.map((m) => m.content)).toEqual(["PROGRESS-FINAL"])
-    expect(result.current.messages.some((m) => m.toolCall)).toBe(false)
+    expect(result.current.messages.map((m) => m.content)).toEqual(["Used Bash", "PROGRESS-FINAL"])
+    expect(result.current.messages.filter((m) => m.content === "PROGRESS-FIRST")).toHaveLength(0)
   })
 
   it("shows transient status deltas and clears them when real output arrives", async () => {

@@ -622,10 +622,27 @@ export function useLiveSession(
             const cleaned = [...prev]
             const turnStart = intermediateStart >= 0 ? Math.min(intermediateStart, cleaned.length) : cleaned.length
             const kept = cleaned.slice(0, turnStart)
-            const preservedMedia = cleaned.slice(turnStart).filter((m) => m.media && m.media.length > 0)
+            // The turn's working evidence SURVIVES completion — tool rows,
+            // comms notifications, durable blocks (delegation/dispatch),
+            // media — so the post-turn fold can file it away with the
+            // scroll-anchored choreography instead of it vanishing in a jump
+            // (and so it matches what a reload shows). Interim PROSE bubbles
+            // (flushed streamed text) are still dropped: the result is their
+            // canonical form and keeping both duplicates the answer.
+            // Transient progress blocks (task lists) drop with the prose.
+            // Unfinished tool rows are marked done — the turn is over.
+            const preserved = cleaned.slice(turnStart)
+              .filter((m) =>
+                (m.media && m.media.length > 0)
+                || m.toolCall
+                || m.role === 'notification'
+                || m.blocks?.some((block) => block.type === 'delegation' || block.type === 'dispatch'))
+              .map((m) => m.toolCall && !m.content.startsWith('Used ')
+                ? { ...m, content: `Used ${m.toolCall}` }
+                : m)
             return [
               ...kept,
-              ...preservedMedia,
+              ...preserved,
               {
                 id: crypto.randomUUID(),
                 role: 'assistant' as const,
