@@ -32,8 +32,8 @@ test("scenario fixtures cover new, valid manual, invalid manual, and run states"
   assert.equal(manual?.layout.source, "manual")
   assert.deepEqual(manual?.nodes.map((node) => node.position.x), [40, 340, 740])
   const success = fixtures.find((x) => x.scenario === "run-success")?.definition
-  assert.equal(success?.nodes.at(-1)?.type, "wait")
-  assert.ok(Date.parse(success?.nodes.at(-1)?.waitUntil ?? "") < Date.now())
+  assert.equal(success?.nodes.at(-1)?.type, "step")
+  assert.equal(success?.nodes.at(-1)?.options?.output, "none")
   assert.equal(fixtures.find((x) => x.scenario === "run-failure")?.definition.nodes.at(-1)?.type, "fail")
   assert.equal(fixtures.find((x) => x.scenario === "run-approval")?.definition.nodes.at(-1)?.type, "gate")
 })

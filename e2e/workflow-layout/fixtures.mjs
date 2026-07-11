@@ -46,8 +46,8 @@ export function scenarioFixtures() {
     { scenario: "invalid-manual-overlap", mode: "plan-reject", definition: { ...base("verify-invalid-overlap", "Invalid Manual Overlap", [trigger(), step("bad", "Bad", 20, 20)], [edge("e1", "trigger", "bad")]), layout: { source: "manual", version: 1 } } },
     { scenario: "run-success", mode: "create", definition: base("verify-run-success", "Run Success", [
       trigger(),
-      { id: "ready", type: "wait", label: "Ready", position: pos(0, 160), waitUntil: "2000-01-01T00:00:00.000Z" },
-    ], [edge("e1", "trigger", "ready")]) },
+      step("notify", "Notify", 0, 160, "run-worker-a", { options: { output: "none" } }),
+    ], [edge("e1", "trigger", "notify")]) },
     { scenario: "run-failure", mode: "create", definition: base("verify-run-failure", "Run Failure", [trigger(), { id: "stop", type: "fail", label: "Intentional failure", position: pos(0, 160), failMessage: "Intentional sandbox failure" }], [edge("e1", "trigger", "stop")]) },
     { scenario: "run-approval", mode: "create", definition: base("verify-run-approval", "Run Approval", [trigger(), { id: "approve", type: "gate", label: "Operator approval", position: pos(0, 160), gate: { kind: "approval", approvalRef: "verify-run-approval", description: "Approve the deterministic sandbox run." } }], [edge("e1", "trigger", "approve")]) },
   ]
