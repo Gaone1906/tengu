@@ -44,6 +44,18 @@ function runWire(overrides: Partial<WorkflowRunWire> = {}): WorkflowRunWire {
   }
 }
 
+function approvalRun(capability: {
+  canDecide: boolean
+  target: string | null
+  needsYou: boolean
+  escalated: boolean
+}): WorkflowRunWire {
+  return {
+    ...runWire(),
+    approvalCapability: capability,
+  } as WorkflowRunWire
+}
+
 describe("stepNodeStatus — spawn ≠ done", () => {
   it("maps spawned → running (never passed)", () => {
     expect(stepNodeStatus({ nodeId: "x", label: "x", actor: null, status: "spawned", at: "" })).toBe("running")
@@ -447,12 +459,12 @@ describe("RunNodeInspector — reserved v2 step states render honest rows", () =
 })
 
 describe("gate resolution UI (GRS-014e)", () => {
-  it("renders Approve/Reject on a parked node when onResolveGate is provided and fires the decision", async () => {
+  it("renders active Approve/Reject only when the projected principal can decide", async () => {
     const decisions: string[] = []
     const onResolveGate = async (d: "approve" | "reject") => {
       decisions.push(d)
     }
-    render(<RunNodeInspector run={runWire()} node={parkedNode()} onClose={() => {}} onResolveGate={onResolveGate} />)
+    render(<RunNodeInspector run={approvalRun({ canDecide: true, target: "coo", needsYou: true, escalated: false })} node={parkedNode()} onClose={() => {}} onResolveGate={onResolveGate} />)
 
     fireEvent.click(screen.getByTestId("wf-gate-approve"))
     await waitFor(() => expect(decisions).toEqual(["approve"]))
@@ -463,7 +475,7 @@ describe("gate resolution UI (GRS-014e)", () => {
   it("surfaces a resolve failure inline (e.g. 409 not parked) instead of swallowing it", async () => {
     render(
       <RunNodeInspector
-        run={runWire()}
+        run={approvalRun({ canDecide: true, target: "coo", needsYou: true, escalated: false })}
         node={parkedNode()}
         onClose={() => {}}
         onResolveGate={async () => {
@@ -473,6 +485,40 @@ describe("gate resolution UI (GRS-014e)", () => {
     )
     fireEvent.click(screen.getByTestId("wf-gate-approve"))
     await waitFor(() => expect(screen.getByTestId("wf-gate-resolve-error").textContent).toContain("not parked"))
+  })
+
+  it("keeps an unauthorized principal read-only and names the routed approver with escalation guidance", () => {
+    const onResolveGate = vi.fn(async () => {})
+    render(
+      <RunNodeInspector
+        run={approvalRun({ canDecide: false, target: "platform-manager", needsYou: false, escalated: false })}
+        node={parkedNode()}
+        onClose={() => {}}
+        onResolveGate={onResolveGate}
+      />,
+    )
+
+    expect(screen.queryByTestId("wf-gate-approve")).toBeNull()
+    expect(screen.queryByTestId("wf-gate-reject")).toBeNull()
+    expect(screen.getByText(/waiting on platform-manager/i)).toBeTruthy()
+    expect(screen.getByText(/escalat/i)).toBeTruthy()
+    expect(onResolveGate).not.toHaveBeenCalled()
+  })
+
+  it("shows an escalated approval as waiting for its routed target without inventing decision authority", () => {
+    render(
+      <RunNodeInspector
+        run={approvalRun({ canDecide: false, target: "coo", needsYou: false, escalated: true })}
+        node={parkedNode()}
+        onClose={() => {}}
+        onResolveGate={async () => {}}
+      />,
+    )
+
+    expect(screen.queryByRole("button", { name: /approve/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /reject/i })).toBeNull()
+    expect(screen.getByText(/waiting on coo/i)).toBeTruthy()
+    expect(screen.getByText(/escalated/i)).toBeTruthy()
   })
 
   it("stays read-only (API hint, no buttons) without onResolveGate", () => {

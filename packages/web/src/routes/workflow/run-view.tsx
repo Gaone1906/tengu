@@ -537,7 +537,7 @@ export function RunNodeInspector({
               </div>
               <div className="text-[length:var(--text-subheadline)] text-[var(--text-primary)]">{run.parked.description}</div>
             </div>
-            {onResolveGate ? (
+            {onResolveGate && run.approvalCapability?.canDecide ? (
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
                   <button
@@ -566,6 +566,17 @@ export function RunNodeInspector({
                 )}
                 <div className="text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
                   Approve resumes the run; reject fails it. This is the only way a parked run moves.
+                </div>
+              </div>
+            ) : run.approvalCapability ? (
+              <div className="space-y-1.5 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
+                <div className="font-[var(--weight-medium)] text-[var(--text-secondary)]">
+                  Waiting on {run.approvalCapability.target ?? "the routed approver"}.
+                </div>
+                <div>
+                  {run.approvalCapability.escalated
+                    ? "This approval has been escalated and remains with its routed decision owner."
+                    : "If timing becomes critical, ask the routed owner to escalate it."}
                 </div>
               </div>
             ) : (

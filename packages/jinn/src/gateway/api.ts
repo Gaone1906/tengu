@@ -999,6 +999,42 @@ interface WorkflowRunRequestBody {
   idempotencyKey?: unknown;
 }
 
+function projectWorkflowRunApprovalCapability(
+  run: WorkflowRun,
+  headers: HttpRequest["headers"],
+  context: ApiContext,
+): WorkflowRun & {
+  approvalCapability: { canDecide: boolean; target: string | null; needsYou: boolean; escalated: boolean } | null;
+} {
+  if (run.status !== "parked" || !run.parked) return { ...run, approvalCapability: null };
+  const triggerTodoId = workflowRunTriggerTodoId(run);
+  const item = getWorkItemBySourceRef("workflow", `workflow:${run.workflowId}:${run.runId}`)
+    ?? (triggerTodoId ? getWorkItem(triggerTodoId) : undefined);
+  if (!item) {
+    return {
+      ...run,
+      approvalCapability: { canDecide: false, target: null, needsYou: false, escalated: false },
+    };
+  }
+  const route = resolveApprovalRouteTarget(item);
+  const authority = resolveApprovalDecisionAuthority(headers, item, {
+    operatorAuthenticated: verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+  });
+  const needsYou = authority.ok && item.approvalState === "pending" && (
+    (authority.authority.kind === "employee" && item.approvalTarget === authority.authority.employee) ||
+    (authority.authority.kind === "operator" && route.targetIsVirtualRoot)
+  );
+  return {
+    ...run,
+    approvalCapability: {
+      canDecide: authority.ok,
+      target: route.target,
+      needsYou,
+      escalated: item.approvalEscalatedAt !== null,
+    },
+  };
+}
+
 function validateWorkflowStepPrompt(value: unknown, field: string): { ok: true; prompt: string } | { ok: false; error: string } {
   if (typeof value !== "string" || !value.trim()) {
     return { ok: false, error: `${field} must be a non-empty string` };
@@ -1114,7 +1150,7 @@ async function runWorkflowDefinitionFromHttp(
     ...(invocation ? { invocation } : {}),
     ...(validated.stepOverrides ? { stepOverrides: validated.stepOverrides } : {}),
   });
-  return json(res, run, run.status === "failed" ? 422 : 201);
+  return json(res, projectWorkflowRunApprovalCapability(run, req.headers, context), run.status === "failed" ? 422 : 201);
 }
 
 /**
@@ -4080,7 +4116,7 @@ export async function handleApiRequest(
           status: outcome.status,
         }, 409);
       }
-      return json(res, outcome.run);
+      return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
     }
 
     // POST /api/workflow-definitions/:id/runs/:runId/resolve-gate — resolve a PARKED
@@ -4124,7 +4160,7 @@ export async function handleApiRequest(
         if (result.outcome === "not-parked") {
           return json(res, { error: `run is ${result.run.status}, not parked`, status: result.run.status }, 409);
         }
-        return json(res, result.run);
+        return json(res, projectWorkflowRunApprovalCapability(result.run, req.headers, context));
       } catch (err) {
         if (err instanceof WorkflowRunStoreError) {
           return json(res, { error: err.message, code: err.code }, err.code === "not-found" ? 404 : 400);
@@ -4155,7 +4191,7 @@ export async function handleApiRequest(
       try {
         const run = getRun(root, params.id, params.runId);
         if (!run) return notFound(res);
-        return json(res, run);
+        return json(res, projectWorkflowRunApprovalCapability(run, req.headers, context));
       } catch (err) {
         if (err instanceof WorkflowRunStoreError) return json(res, { error: err.message, code: err.code }, 400);
         return workflowStoreErrorResponse(res, err);

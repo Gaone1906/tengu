@@ -509,6 +509,13 @@ export interface WorkflowRunWire {
   steps: RunStepReceiptWire[]
   /** Present iff status==='parked': the human-approval gate holding the run. */
   parked: ParkedGateWire | null
+  /** Caller-specific, read-only projection. It is never persisted in run evidence. */
+  approvalCapability?: {
+    canDecide: boolean
+    target: string | null
+    needsYou: boolean
+    escalated: boolean
+  } | null
   errors?: { code: string; message: string; ref?: string }[]
   /** The frozen execution order of the run's nodes (GRS-014b sequential runs);
    * steps[] is materialized 1:1 in this order. */
