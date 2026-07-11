@@ -345,7 +345,7 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     });
   });
 
-  it.each(["backlog", "assigned", "executing", "in_review"] as const)(
+  it.each(["backlog", "assigned", "executing", "in_review", "blocked"] as const)(
     "lets the authenticated operator cancel %s work through PUT",
     async (status) => {
       const item = store.createWorkItem({ title: `Cancel ${status}`, status });
@@ -393,8 +393,8 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     expect(store.getWorkItem(item.id)?.status).toBe("assigned");
   });
 
-  it("keeps illegal terminal cancellation rejected", async () => {
-    const item = store.createWorkItem({ title: "Already done", status: "done" });
+  it.each(["done", "escalated"] as const)("keeps %s terminal cancellation rejected", async (status) => {
+    const item = store.createWorkItem({ title: `Already ${status}`, status });
     const cap = makeRes();
 
     await api.handleApiRequest(
@@ -405,7 +405,7 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
 
     expect([400, 403]).toContain(cap.status);
     expect(cap.body.error).toMatch(/illegal transition|human.*decision/i);
-    expect(store.getWorkItem(item.id)?.status).toBe("done");
+    expect(store.getWorkItem(item.id)?.status).toBe(status);
   });
 
   it.each([

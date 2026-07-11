@@ -207,7 +207,13 @@ import {
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import { createWorkflowTodoBridge } from "../work-items/workflow-bridge.js";
-import { archiveWorkItem, decideWorkItemApproval, escalateApproval, requestApproval } from "../work-items/approvals.js";
+import {
+  archiveWorkItem,
+  decideWorkItemApproval,
+  escalateApproval,
+  requestApproval,
+  WorkflowGateCancellationConflictError,
+} from "../work-items/approvals.js";
 import { resolveApprovalDecisionAuthority, resolveApprovalRouteTarget, resolveRootApprovalTarget } from "./approval-authority.js";
 import { scanOrg } from "./org.js";
 import { resolveOrgHierarchy } from "./org-hierarchy.js";
@@ -3275,13 +3281,21 @@ export async function handleApiRequest(
       const authorized = authorizeAgentWorkItemStatus(caller, item, target as WorkItemStatus);
       if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
       try {
-        const result = transition(params.id, target as WorkItemStatus, workItemActor(caller), {
-          manual: true,
-          callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
-          detail: note ? { note } : undefined,
-        });
+        const result = isOperatorPutCancellation
+          ? {
+              item: archiveWorkItem(params.id, workItemActor(caller), note ? { note } : {}),
+              escalated: false,
+            }
+          : transition(params.id, target as WorkItemStatus, workItemActor(caller), {
+              manual: true,
+              callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
+              detail: note ? { note } : undefined,
+            });
         return json(res, { workItem: result.item, escalated: result.escalated });
       } catch (err) {
+        if (err instanceof WorkflowGateCancellationConflictError) {
+          return json(res, { error: err.message }, 409);
+        }
         if (err instanceof TransitionError) {
           if (err.code === "not-found") return notFound(res);
           const human = err.code === "self-review-banned"
@@ -3380,6 +3394,9 @@ export async function handleApiRequest(
         });
         return json(res, { workItem: archived, archived: true });
       } catch (err) {
+        if (err instanceof WorkflowGateCancellationConflictError) {
+          return json(res, { error: err.message }, 409);
+        }
         if (err instanceof TransitionError) {
           if (err.code === "not-found") return notFound(res);
           const statusCode = err.code === "illegal-edge" ? 400 : 403;
