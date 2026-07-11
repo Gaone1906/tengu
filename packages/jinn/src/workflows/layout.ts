@@ -5,6 +5,7 @@ import type {
   WorkflowLayoutSource,
   WorkflowNode,
 } from './definition.js';
+import { MAX_WORKFLOW_EDGES } from './definition.js';
 
 export type { WorkflowLayoutMetadata, WorkflowLayoutSource } from './definition.js';
 
@@ -220,37 +221,56 @@ function evaluateWithSource(definition: EditableWorkflowDefinition, source: Work
     }
   }
 
-  const center = (node: WorkflowNode): { x: number; y: number } => ({
-    x: node.position.x + envelopeById.get(node.id)!.width / 2,
+  const sourcePort = (node: WorkflowNode): { x: number; y: number } => ({
+    x: node.position.x + envelopeById.get(node.id)!.width,
+    y: node.position.y + envelopeById.get(node.id)!.height / 2,
+  });
+  const targetPort = (node: WorkflowNode): { x: number; y: number } => ({
+    x: node.position.x,
     y: node.position.y + envelopeById.get(node.id)!.height / 2,
   });
   const orientation = (a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }): number =>
     (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-  for (let leftIndex = 0; leftIndex < edges.length; leftIndex += 1) {
-    const leftEdge = edges[leftIndex];
-    for (let rightIndex = leftIndex + 1; rightIndex < edges.length; rightIndex += 1) {
-      const rightEdge = edges[rightIndex];
+  const crossingEdges = edges.length <= MAX_WORKFLOW_EDGES ? edges : [];
+  if (edges.length > MAX_WORKFLOW_EDGES) {
+    reasons.push({
+      code: 'graph-too-complex',
+      message: `Layout crossing analysis supports at most ${MAX_WORKFLOW_EDGES} non-loop edges.`,
+    });
+  }
+  const segments = crossingEdges.flatMap((edge) => {
+    const from = nodeById.get(edge.from);
+    const to = nodeById.get(edge.to);
+    if (!from || !to || !positionValid.has(from.id) || !positionValid.has(to.id)) return [];
+    const start = sourcePort(from);
+    const end = targetPort(to);
+    return [{
+      edge,
+      start,
+      end,
+      minX: Math.min(start.x, end.x),
+      maxX: Math.max(start.x, end.x),
+      minY: Math.min(start.y, end.y),
+      maxY: Math.max(start.y, end.y),
+    }];
+  });
+  for (let leftIndex = 0; leftIndex < segments.length; leftIndex += 1) {
+    const left = segments[leftIndex];
+    const leftEdge = left.edge;
+    for (let rightIndex = leftIndex + 1; rightIndex < segments.length; rightIndex += 1) {
+      const right = segments[rightIndex];
+      const rightEdge = right.edge;
       const refs = new Set([leftEdge.from, leftEdge.to, rightEdge.from, rightEdge.to]);
       if (refs.size < 4) continue;
-      const leftFrom = nodeById.get(leftEdge.from)!;
-      const leftTo = nodeById.get(leftEdge.to)!;
-      const rightFrom = nodeById.get(rightEdge.from)!;
-      const rightTo = nodeById.get(rightEdge.to)!;
-      if (![leftFrom, leftTo, rightFrom, rightTo].every((node) => positionValid.has(node.id))) continue;
-      // Only rank-to-rank inversions are avoidable by deterministic lane order.
-      // A long edge spanning intermediate ranks may intersect a chain segment but
-      // no sibling reorder can remove it; diagnosing that as a tangle is noise.
-      if (leftFrom.position.x !== rightFrom.position.x || leftTo.position.x !== rightTo.position.x) continue;
-      const a = center(leftFrom);
-      const b = center(leftTo);
-      const c = center(rightFrom);
-      const d = center(rightTo);
-      const crosses = orientation(a, b, c) * orientation(a, b, d) < 0 &&
-        orientation(c, d, a) * orientation(c, d, b) < 0;
+      // Cheap bounding-box rejection keeps the supported 384-edge ceiling
+      // responsive while still testing every non-adjacent pair that can meet.
+      if (left.maxX < right.minX || right.maxX < left.minX || left.maxY < right.minY || right.maxY < left.minY) continue;
+      const crosses = orientation(left.start, left.end, right.start) * orientation(left.start, left.end, right.end) < 0 &&
+        orientation(right.start, right.end, left.start) * orientation(right.start, right.end, left.end) < 0;
       if (crosses) {
         reasons.push({
           code: 'edge-crossing',
-          message: `Edges "${leftEdge.id}" and "${rightEdge.id}" cross avoidably.`,
+          message: `Edges "${leftEdge.id}" and "${rightEdge.id}" intersect.`,
           refs: [leftEdge.id, rightEdge.id, leftEdge.from, leftEdge.to, rightEdge.from, rightEdge.to],
         });
       }

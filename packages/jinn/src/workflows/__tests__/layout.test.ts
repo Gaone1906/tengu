@@ -404,6 +404,25 @@ function clearCrossingDefinition(): EditableWorkflowDefinition {
   );
 }
 
+function unequalRankCrossingDefinition(): EditableWorkflowDefinition {
+  return definition(
+    'layout-unequal-rank-crossing',
+    [
+      trigger({ x: 0, y: 200 }),
+      step('early-upper', { x: 400, y: 0 }),
+      step('late-lower', { x: 800, y: 400 }),
+      step('middle-lower', { x: 1200, y: 400 }),
+      step('far-upper', { x: 1600, y: 0 }),
+    ],
+    [
+      edge('wake-early', 'wake', 'early-upper'),
+      edge('wake-late', 'wake', 'late-lower'),
+      edge('long-down', 'early-upper', 'middle-lower'),
+      edge('long-up', 'late-lower', 'far-upper'),
+    ],
+  );
+}
+
 describe('workflow layout normalization invariants', () => {
   for (const [name, input] of Object.entries(shapes)) {
     it(`${name}: is deterministic, idempotent, snapped, clear, and strict-LTR`, () => {
@@ -435,7 +454,9 @@ describe('workflow layout normalization invariants', () => {
       expect(expandedEnvelopeOverlaps(once), `overlaps seed ${seed}`).toEqual([]);
       expect(nonLoopClearanceViolations(once, 96), `LTR seed ${seed}`).toEqual([]);
       expect(verticalClearanceViolations(once, 64), `vertical seed ${seed}`).toEqual([]);
-      expect(once.diagnostics.reasons.filter((reason) => reason.code === 'edge-crossing'), `crossings seed ${seed}`).toEqual([]);
+      const crossings = (result: LayoutResult) => result.diagnostics.reasons.filter((reason) => reason.code === 'edge-crossing');
+      expect(crossings(replay), `crossing determinism seed ${seed}`).toEqual(crossings(once));
+      expect(crossings(twice), `crossing idempotency seed ${seed}`).toEqual(crossings(once));
     }
   });
 });
@@ -515,5 +536,25 @@ describe('expanded envelopes and bounded-loop routing', () => {
 
     const normalized = normalizeWorkflowLayout(crossing);
     expect(normalized.diagnostics.reasons.filter((reason) => reason.code === 'edge-crossing')).toEqual([]);
+  });
+
+  it('diagnoses actual non-adjacent segment intersections across unequal ranks', () => {
+    const { evaluateWorkflowLayout } = requireLayout();
+    const diagnostics = evaluateWorkflowLayout(unequalRankCrossingDefinition());
+    expect(diagnostics.reasons).toContainEqual(expect.objectContaining({
+      code: 'edge-crossing',
+      refs: expect.arrayContaining(['long-down', 'long-up']),
+    }));
+  });
+
+  it('excludes shared endpoints and routed loop segments from crossing diagnostics', () => {
+    const { evaluateWorkflowLayout } = requireLayout();
+    const graph = unequalRankCrossingDefinition();
+    graph.edges = [
+      edge('shared-a', 'early-upper', 'middle-lower'),
+      edge('shared-b', 'early-upper', 'far-upper'),
+      edge('routed-loop', 'late-lower', 'early-upper', { kind: 'loop' }),
+    ];
+    expect(evaluateWorkflowLayout(graph).reasons.filter((reason) => reason.code === 'edge-crossing')).toEqual([]);
   });
 });
