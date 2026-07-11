@@ -74,10 +74,10 @@ describe("Todo detail transition footer", () => {
     })
   })
 
-  it.each(["backlog", "assigned"] as const)("renders Start for %s and round-trips executing via PUT", async (status) => {
+  it.each(["backlog", "assigned"] as const)("renders Mark in progress for %s and round-trips executing via PUT", async (status) => {
     renderSheet(status)
 
-    fireEvent.click(screen.getByRole("button", { name: "Start" }))
+    fireEvent.click(screen.getByRole("button", { name: "Mark in progress" }))
 
     await waitFor(() => expect(authFetch).toHaveBeenCalledWith(
       `/api/work-items/wi_${status}/status`,
@@ -90,12 +90,59 @@ describe("Todo detail transition footer", () => {
   })
 
   it.each(["executing", "blocked", "in_review", "escalated", "done", "cancelled"] as const)(
-    "does not render Start for %s",
+    "does not render Mark in progress for %s",
     (status) => {
       renderSheet(status)
-      expect(screen.queryByRole("button", { name: "Start" })).toBeNull()
+      expect(screen.queryByRole("button", { name: "Mark in progress" })).toBeNull()
     },
   )
+
+  it("persists manual progress without implying that a session was dispatched", async () => {
+    let persisted: WorkItemStatusWire = "backlog"
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PUT") {
+        persisted = JSON.parse(String(init.body)).status as WorkItemStatusWire
+        return new Response(JSON.stringify({ workItem: workItem(persisted), escalated: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify(detail(persisted)), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheet("backlog")
+
+    fireEvent.click(screen.getByRole("button", { name: "Mark in progress" }))
+
+    expect(await screen.findByText("In progress · no execution session")).toBeTruthy()
+    expect(persisted).toBe("executing")
+    expect(screen.queryByText(/working/i)).toBeNull()
+  })
+})
+
+describe("Todo detail session link copy", () => {
+  beforeEach(() => authFetch.mockReset())
+
+  it.each([
+    ["done", "idle", "Completed session"],
+    ["cancelled", "interrupted", "Interrupted session"],
+    ["executing", "running", "Running session"],
+  ] as const)("labels a %s Todo's %s link as %s", async (todoStatus, sessionStatus, expected) => {
+    authFetch.mockImplementation(async (path: unknown) => {
+      if (String(path ?? "").endsWith("/sessions")) {
+        return new Response(JSON.stringify([{ id: `session-${sessionStatus}`, status: sessionStatus }]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify(detail(todoStatus)), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+
+    renderSheet(todoStatus)
+
+    expect(await screen.findByText(expected)).toBeTruthy()
+    expect(screen.queryByText("Executing session")).toBeNull()
+  })
 })
 
 describe("Todo detail editing and dialog behavior", () => {

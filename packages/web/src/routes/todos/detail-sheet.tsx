@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
 import { X, Check, ChevronRight, Copy, MessageSquareText } from "lucide-react"
-import { api, type Employee, type WorkItemDetailWire, type WorkItemFullWire, type WorkItemStatusWire } from "@/lib/api"
+import { api, type Employee, type LinkedSessionWire, type WorkItemDetailWire, type WorkItemFullWire, type WorkItemStatusWire } from "@/lib/api"
 import {
   STATUS_LABEL,
   effectiveVerifyMode,
@@ -19,6 +19,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
+import { StateLine } from "@/components/ui/state-line"
 import { StatusCircle } from "./state-glyph"
 import { displayNameOf, formatRelativeTime } from "./util"
 import { useSetWorkItemStatus } from "./use-todos"
@@ -32,7 +33,7 @@ import { useTodoDraft, type TodoDraftPatch, type TodoEditableDraft } from "./use
  * design-todos §4.4 — the sheet is now the operator's pen: title, body,
  * assignee, department, and priority read as text at rest and edit on tap
  * (Apple Notes pattern — no input chrome until focus). Status stays
- * server-owned: only legal transitions render as actions (Start / Mark done /
+ * server-owned: only legal transitions render as actions (Mark in progress / Mark done /
  * Cancel / the approval controls), never a free status picker. Edits go through the §7.4
  * PATCH and retain the local draft with an explicit Retry/Discard path on failure. */
 
@@ -99,6 +100,13 @@ function Section({ label, children }: { label?: string; children: React.ReactNod
       {children}
     </div>
   )
+}
+
+export function sessionLinkLabel(session: LinkedSessionWire): string {
+  if (session.status === "running" || session.status === "waiting") return "Running session"
+  if (session.status === "idle") return "Completed session"
+  if (session.status === "interrupted") return "Interrupted session"
+  return "Session"
 }
 
 /** The body as a quiet tap-to-edit field (text at rest, textarea on tap). */
@@ -172,12 +180,13 @@ function SheetBody({
   const [showTech, setShowTech] = useState(false)
   const pending = item.approvalState === "pending"
 
-  const { data: sessions } = useQuery({
+  const { data: sessions, isSuccess: sessionsReady } = useQuery({
     queryKey: ["work-item-sessions", item.id],
     queryFn: () => api.listWorkItemSessions(item.id),
     staleTime: 10_000,
   })
   const execSession = sessions?.[0]
+  const hasRunningSession = sessions?.some((session) => session.status === "running" || session.status === "waiting") ?? false
 
   const mode = effectiveVerifyMode(item)
   const maxRounds = effectiveMaxRounds(item)
@@ -201,6 +210,14 @@ function SheetBody({
         >
           {item.approvalRequest}
         </div>
+      )}
+
+      {item.status === "executing" && sessionsReady && !hasRunningSession && (
+        <StateLine
+          state="dispatched"
+          label="In progress · no execution session"
+          className="mb-1 text-[var(--text-tertiary)]"
+        />
       )}
 
       <Section label="What it does">
@@ -299,7 +316,7 @@ function SheetBody({
         <Section label="Links">
           <Group>
             {execSession && (
-              <Row k="Executing session" onClick={() => navigate(`/?session=${encodeURIComponent(execSession.id)}`)}>
+              <Row k={sessionLinkLabel(execSession)} onClick={() => navigate(`/?session=${encodeURIComponent(execSession.id)}`)}>
                 <span className="text-[length:var(--text-caption1)] font-semibold text-[var(--accent)]">Open</span>
               </Row>
             )}
@@ -430,18 +447,18 @@ function DecisionFooter({
   )
 }
 
-/** Legal-transition actions when no approval is pending (§4.4): Start for
+/** Legal-transition actions when no approval is pending (§4.4): manual progress for
  *  backlog/assigned work, Mark done + Cancel for open work. Never a picker. */
 function TransitionFooter({
   status,
   busy,
-  onStart,
+  onProgress,
   onDone,
   onCancel,
 }: {
   status: WorkItemStatusWire
   busy: boolean
-  onStart: () => void
+  onProgress: () => void
   onDone: () => void
   onCancel: () => void
 }) {
@@ -452,12 +469,12 @@ function TransitionFooter({
       {(status === "backlog" || status === "assigned") && (
         <button
           type="button"
-          data-testid="sheet-start-item"
+          data-testid="sheet-mark-in-progress"
           disabled={busy}
-          onClick={onStart}
+          onClick={onProgress}
           className="min-h-11 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
         >
-          Start
+          Mark in progress
         </button>
       )}
       <button
@@ -723,7 +740,7 @@ export function DetailSheet({
           <TransitionFooter
             status={displayDetail.workItem.status}
             busy={setStatus.isPending}
-            onStart={() => transitionTo("executing")}
+            onProgress={() => transitionTo("executing")}
             onDone={() => transitionTo("done")}
             onCancel={() => transitionTo("cancelled")}
           />
