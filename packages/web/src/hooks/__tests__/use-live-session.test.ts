@@ -224,6 +224,55 @@ describe("useLiveSession (read-only)", () => {
     expect(result.current.messages.at(-1)?.partial).toBe(true)
   })
 
+  it("keeps the turn pending through interrupted, stopped, and result-less completion events", async () => {
+    getSession.mockResolvedValue({
+      status: "running",
+      messages: [
+        { id: "u1", role: "user", content: "keep going", timestamp: 1 },
+        { id: "p1", role: "assistant", content: "Interim finding", timestamp: 2, partial: true },
+      ],
+    })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() => useLiveSession("s1", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+
+    act(() => { emit("session:interrupted", { sessionId: "s1" }) })
+    expect(result.current.turnPending).toBe(true)
+    expect(result.current.liveFinalResponseId).toBeNull()
+
+    act(() => { emit("session:stopped", { sessionId: "s1" }) })
+    expect(result.current.loading).toBe(false)
+    expect(result.current.turnPending).toBe(true)
+    expect(result.current.liveFinalResponseId).toBeNull()
+
+    await act(async () => {
+      emit("session:completed", { sessionId: "s1", result: null, error: null })
+      await Promise.resolve()
+    })
+    expect(result.current.turnPending).toBe(true)
+    expect(result.current.liveFinalResponseId).toBeNull()
+    expect(result.current.messages.map((message) => message.content)).toEqual(["keep going", "Interim finding"])
+  })
+
+  it("batches a terminal completion error with its live final response identity", async () => {
+    getSession.mockResolvedValue({
+      status: "running",
+      messages: [{ id: "u1", role: "user", content: "run it", timestamp: 1 }],
+    })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() => useLiveSession("s1", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+
+    await act(async () => {
+      emit("session:completed", { sessionId: "s1", result: null, error: "engine failed" })
+      await Promise.resolve()
+    })
+
+    expect(result.current.turnPending).toBe(false)
+    expect(result.current.messages.at(-1)?.content).toBe("Error: engine failed")
+    expect(result.current.liveFinalResponseId).toBe(result.current.messages.at(-1)?.id)
+  })
+
   it("replaces the live view on a shorter snapshot (redaction must win, no length gate)", async () => {
     getSession.mockResolvedValue({ status: "running", messages: [] })
     const { subscribe, emit } = makeBus()
@@ -1180,6 +1229,118 @@ describe("resting-snapshot revisits", () => {
     liveContextTokens: null,
     backgroundActivity: null,
     hasOlderMessages: false,
+  })
+
+  it("restores turnPending when the same hook switches between cached sessions", async () => {
+    __cacheLiveSessionSnapshotForTests("s-waiting", {
+      messages: [
+        { id: "u-waiting", role: "user", content: "keep going", timestamp: 1 },
+        { id: "p-waiting", role: "assistant", content: "Interim finding", timestamp: 2, partial: true },
+      ],
+      streamingText: "",
+      loading: false,
+      turnPending: true,
+      session: { id: "s-waiting", status: "waiting" },
+      liveContextTokens: null,
+      backgroundActivity: null,
+      hasOlderMessages: false,
+    })
+    __cacheLiveSessionSnapshotForTests("s-done", {
+      messages: [
+        { id: "u-done", role: "user", content: "finished task", timestamp: 3 },
+        { id: "a-done", role: "assistant", content: "Final answer", timestamp: 4 },
+      ],
+      streamingText: "",
+      loading: false,
+      turnPending: false,
+      session: { id: "s-done", status: "idle" },
+      liveContextTokens: null,
+      backgroundActivity: null,
+      hasOlderMessages: false,
+    })
+    getSession.mockReturnValue(new Promise(() => {}))
+    const { subscribe } = makeBus()
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useLiveSession(id, { subscribe, readOnly: true }),
+      { initialProps: { id: "s-waiting" } },
+    )
+
+    expect(result.current.turnPending).toBe(true)
+
+    rerender({ id: "s-done" })
+    await act(async () => { await Promise.resolve() })
+
+    expect(result.current.messages.map((message) => message.content)).toEqual(["finished task", "Final answer"])
+    expect(result.current.turnPending).toBe(false)
+    expect(result.current.liveFinalResponseId).toBeNull()
+    expect(getSession).toHaveBeenCalledTimes(1)
+  })
+
+  it("isolates live final identity and in-flight loads when a cached resting session takes over", async () => {
+    getSession
+      .mockResolvedValueOnce({
+        status: "running",
+        messages: [{ id: "u-live", role: "user", content: "live task", timestamp: 1 }],
+      })
+      .mockResolvedValueOnce({ status: "idle" })
+    const { subscribe, emit } = makeBus()
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useLiveSession(id, { subscribe, readOnly: true }),
+      { initialProps: { id: "s-live" } },
+    )
+    await act(async () => { await Promise.resolve() })
+    await act(async () => {
+      emit("session:completed", { sessionId: "s-live", result: "Live final" })
+      await Promise.resolve()
+    })
+    expect(result.current.liveFinalResponseId).toBe(result.current.messages.at(-1)?.id)
+
+    __cacheLiveSessionSnapshotForTests("s-revalidating", {
+      messages: [{ id: "u-old", role: "user", content: "old pending task", timestamp: 3 }],
+      streamingText: "",
+      loading: false,
+      turnPending: true,
+      session: { id: "s-revalidating", status: "waiting" },
+      liveContextTokens: null,
+      backgroundActivity: null,
+      hasOlderMessages: false,
+    })
+    __cacheLiveSessionSnapshotForTests("s-resting", {
+      messages: [
+        { id: "u-resting", role: "user", content: "resting task", timestamp: 5 },
+        { id: "a-resting", role: "assistant", content: "Resting final", timestamp: 6 },
+      ],
+      streamingText: "",
+      loading: false,
+      turnPending: false,
+      session: { id: "s-resting", status: "idle" },
+      liveContextTokens: null,
+      backgroundActivity: null,
+      hasOlderMessages: false,
+    })
+    let resolveOldLoad!: (value: unknown) => void
+    getSession.mockReturnValueOnce(new Promise((resolve) => { resolveOldLoad = resolve }))
+
+    rerender({ id: "s-revalidating" })
+    await act(async () => { await Promise.resolve() })
+    expect(result.current.turnPending).toBe(true)
+    expect(result.current.liveFinalResponseId).toBeNull()
+
+    rerender({ id: "s-resting" })
+    await act(async () => { await Promise.resolve() })
+    expect(result.current.messages.map((message) => message.content)).toEqual(["resting task", "Resting final"])
+    expect(result.current.turnPending).toBe(false)
+    expect(result.current.liveFinalResponseId).toBeNull()
+
+    await act(async () => {
+      resolveOldLoad({
+        status: "waiting",
+        messages: [{ id: "u-old", role: "user", content: "stale server response", timestamp: 7 }],
+      })
+      await Promise.resolve()
+    })
+    expect(result.current.messages.map((message) => message.content)).toEqual(["resting task", "Resting final"])
+    expect(result.current.turnPending).toBe(false)
   })
 
   it("renders a fresh idle snapshot WITHOUT refetching, and emits meta from it", async () => {

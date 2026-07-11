@@ -850,6 +850,9 @@ export function useLiveSession(
 
   // Load on session change
   useEffect(() => {
+    // A cached resting target can skip loadSession entirely, so changing ids
+    // must still invalidate any request started for the previous session.
+    loadTokenRef.current += 1
     if (!sessionId) {
       setMessages([])
       setLoading(false)
@@ -871,9 +874,19 @@ export function useLiveSession(
     }
     const cached = readLiveSessionSnapshot(sessionId)
     const pending = opts.pendingUserMessage
+    // Live completion identity belongs only to the session where its terminal
+    // event arrived. A restored snapshot is historical from this hook's point
+    // of view and must never inherit another session's animation sentinel.
+    setLiveFinalResponseId(null)
     if (cached) {
       setMessages(reconcilePendingUserMessage(cached.messages))
       setLoading(cached.loading)
+      setTurnPending(
+        cached.turnPending === true
+        || cached.loading
+        || cached.session?.status === 'running'
+        || cached.session?.status === 'waiting',
+      )
       setCurrentSession(cached.session)
       setLoadError(null)
       setLiveContextTokens(cached.liveContextTokens)
@@ -888,6 +901,7 @@ export function useLiveSession(
     } else if (pending) {
       setMessages([pending])
       setLoading(true)
+      setTurnPending(true)
       setCurrentSession(null)
       setLoadError(null)
       setLiveContextTokens(null)
@@ -902,6 +916,7 @@ export function useLiveSession(
     } else {
       setMessages([])
       setLoading(false)
+      setTurnPending(false)
       setCurrentSession(null)
       setLoadError(null)
       setLiveContextTokens(null)

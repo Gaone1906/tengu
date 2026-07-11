@@ -232,6 +232,38 @@ describe('fold region boundary (turn structure)', () => {
     expect(finalAnswerIndices(messages)).toEqual([-1, 3, 3, 3, -1, -1])
   })
 
+  it('treats persisted partial prose as evidence, never as the final answer', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
+      { id: 'p1', role: 'assistant', content: 'Interim finding.', timestamp: T0 + 1_000, partial: true },
+      { id: 't1', role: 'assistant', content: 'Used grep', timestamp: T0 + 2_000, partial: true, toolCall: 'grep' },
+      { id: 'a1', role: 'assistant', content: 'Final answer.', timestamp: T0 + 3_000 },
+    ]
+
+    expect(finalAnswerIndices(messages)).toEqual([-1, 3, 3, 3])
+  })
+
+  it('keeps historical turns folded while the latest turn remains an ordinary pending stream', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'First task.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used grep', timestamp: T0 + 1_000, toolCall: 'grep' },
+      { id: 'a1', role: 'assistant', content: 'First final.', timestamp: T0 + 2_000 },
+      { id: 'u2', role: 'user', content: 'Second task.', timestamp: T0 + 3_000 },
+      { id: 'p2', role: 'assistant', content: 'Second interim.', timestamp: T0 + 4_000, partial: true },
+      { id: 't2', role: 'assistant', content: 'Using bash', timestamp: T0 + 5_000, partial: true, toolCall: 'bash' },
+    ]
+    const { container } = render(
+      <ChatMessages messages={messages} loading={false} turnPending />,
+    )
+
+    expect(container.querySelectorAll('[data-fold]')).toHaveLength(1)
+    expect(container.querySelector('[data-fold-region]')?.textContent).toContain('1 tool')
+    expect(container.querySelector('[data-fold-region]')?.textContent).not.toContain('Second interim.')
+    expect(screen.getByText('First final.')).toBeTruthy()
+    expect(screen.getByText('Second interim.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /^1 tool$/ })).toBeTruthy()
+  })
+
   it('folds the ENTIRE turn middle: tools, interim prose, delegation, callbacks — only the final answer stays out', () => {
     const messages: Message[] = [
       { id: 'u1', role: 'user', content: 'Redesign the panel.', timestamp: T0 },
