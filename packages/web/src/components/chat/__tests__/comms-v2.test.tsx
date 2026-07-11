@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { ChatMessages, turnSpacerClass } from '../chat-messages'
 import { BURST_WINDOW_MS, formatBurstRange } from '../callback-burst'
-import { anchorScrollDuring, formatWorkDuration, foldSummaryWords } from '../fold-region'
+import { anchorScrollDuring, canAnchorFold, formatWorkDuration, foldSummaryWords } from '../fold-region'
 import type { Message } from '@/lib/conversations'
 
 vi.mock('@/lib/api', () => ({
@@ -200,6 +200,46 @@ describe('streaming → final structural parity', () => {
     const streaming = container.querySelector('[data-streaming]')
     expect(streaming!.textContent).toMatch(/Today/)
     expect(streaming!.querySelector('.h-\\[var\\(--space-6\\)\\]')).toBeNull()
+  })
+
+  it('renders the streaming shell and the final shell byte-identically (one component)', () => {
+    const prev: Message = { id: 'u1', role: 'user', content: 'Go.', timestamp: Date.now() - 5_000 }
+    const shellSignature = (root: Element) => {
+      const row = root.querySelector('.assistant-msg-row')!
+      const bubble = root.querySelector('.assistant-msg-bubble')!
+      const transcript = root.querySelector('.assistant-transcript')!
+      return [row.className, bubble.className, transcript.className].join('\n')
+    }
+
+    const streaming = render(
+      <ChatMessages messages={[prev]} loading streamingText="The answer." />,
+    )
+    const streamingSig = shellSignature(streaming.container.querySelector('[data-streaming]')!)
+    streaming.unmount()
+
+    const final = render(
+      <ChatMessages
+        messages={[prev, { id: 'a1', role: 'assistant', content: 'The answer.', timestamp: Date.now() }]}
+        loading={false}
+      />,
+    )
+    const finalSig = shellSignature(final.container.querySelector('[data-message-id="a1"]')!)
+
+    expect(streamingSig).toBe(finalSig)
+  })
+})
+
+describe('fold slack gate', () => {
+  it('only anchors the live fold when scrollTop can absorb the shrink', () => {
+    // QA-measured clamp case: slack 27, region ~331 (delta 299) → skip.
+    expect(canAnchorFold(27, 331)).toBe(false)
+    // Enough slack: 400 ≥ 331 - 32.
+    expect(canAnchorFold(400, 331)).toBe(true)
+    // Boundary: slack + 2 tolerance against delta.
+    expect(canAnchorFold(297, 331)).toBe(true)
+    expect(canAnchorFold(296, 331)).toBe(false)
+    // A tiny region folds even at scrollTop 0 (delta ≤ summary height).
+    expect(canAnchorFold(0, 32)).toBe(true)
   })
 })
 

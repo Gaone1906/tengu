@@ -694,6 +694,36 @@ export function turnSpacerClass(prevRole: Message['role'], role: Message['role']
   return 'h-[var(--space-1)]'
 }
 
+/* ── Shared assistant row shell ─────────────────────────── */
+
+// ONE shell, used byte-identically by the streaming container and the final
+// MessageRow that replaces it. The structural-parity guarantee (the swap can
+// never move the text) holds because both sides render THIS component — no
+// hand-copied class strings that can drift apart.
+
+export function TimestampDivider({ label }: { label: string }) {
+  return (
+    <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
+      {label}
+    </div>
+  )
+}
+
+export function AssistantRowShell({ transcript, children }: { transcript?: React.ReactNode; children?: React.ReactNode }) {
+  return (
+    <div className="assistant-msg-row flex min-w-0 justify-start mb-[var(--space-1)]">
+      <div className="assistant-msg-bubble flex min-w-0 flex-col">
+        {transcript != null && (
+          <div className="assistant-transcript py-[var(--space-1)] text-[var(--text-primary)] text-[length:var(--text-body)] leading-[var(--leading-relaxed)]">
+            {transcript}
+          </div>
+        )}
+        {children}
+      </div>
+    </div>
+  )
+}
+
 /* ── MessageActions — subtle copy/retry row under a message ─ */
 
 const ACTION_BTN =
@@ -949,11 +979,7 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
   return (
     <div key={msg.id || i} data-message-id={msg.id || `idx-${i}`}>
       {/* Timestamp divider */}
-      {showTimestamp && (
-        <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
-          {formattedTimestamp}
-        </div>
-      )}
+      {showTimestamp && <TimestampDivider label={formattedTimestamp} />}
 
       {/* Spacing between role switches — shared with the streaming container
           (turnSpacerClass) so the stream→final swap cannot move the text. */}
@@ -1018,43 +1044,34 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
         </div>
       )}
 
-      {/* Assistant message */}
+      {/* Assistant message — same shell as the streaming container. */}
       {!isUser && !isNotification && (
-        <div className="assistant-msg-row flex min-w-0 justify-start mb-[var(--space-1)]">
-          <div className="assistant-msg-bubble flex min-w-0 flex-col">
-            {/* Text bubble */}
-            {textContent && (
-              <div className="assistant-transcript py-[var(--space-1)] text-[var(--text-primary)] text-[length:var(--text-body)] leading-[var(--leading-relaxed)]">
-                {formattedContent}
-              </div>
-            )}
+        <AssistantRowShell transcript={textContent ? formattedContent : undefined}>
+          {blocks.length > 0 && (
+            <div className="mt-1.5 flex min-w-0 max-w-full flex-col items-start gap-1.5">
+              {blocks.map((block) => (
+                <ChatBlockInline
+                  key={block.id}
+                  block={block}
+                  onOpenThread={onOpenThread}
+                />
+              ))}
+            </div>
+          )}
 
-            {blocks.length > 0 && (
-              <div className="mt-1.5 flex min-w-0 max-w-full flex-col items-start gap-1.5">
-                {blocks.map((block) => (
-                  <ChatBlockInline
-                    key={block.id}
-                    block={block}
-                    onOpenThread={onOpenThread}
-                  />
-                ))}
-              </div>
-            )}
+          {/* Media attachments */}
+          {media.length > 0 && <MessageMedia media={media} isUser={false} />}
 
-            {/* Media attachments */}
-            {media.length > 0 && <MessageMedia media={media} isUser={false} />}
-
-            {/* Subtle action row — copy + retry (no avatars, full-width preserved) */}
-            {textContent && (
-              <MessageActions
-                id={msg.id || `idx-${i}`}
-                text={textContent}
-                onRetry={onRetry && prevUserText ? () => onRetry(prevUserText) : undefined}
-                retryDisabled={loading}
-              />
-            )}
-          </div>
-        </div>
+          {/* Subtle action row — copy + retry (no avatars, full-width preserved) */}
+          {textContent && (
+            <MessageActions
+              id={msg.id || `idx-${i}`}
+              text={textContent}
+              onRetry={onRetry && prevUserText ? () => onRetry(prevUserText) : undefined}
+              retryDisabled={loading}
+            />
+          )}
+        </AssistantRowShell>
       )}
     </div>
   )
@@ -1078,22 +1095,18 @@ function StreamingBubble({ streamingText, prevMessage, startedAt }: {
   const showTimestamp = !prevMessage || startedAt - prevMessage.timestamp > 5 * 60 * 1000
   return (
     <div data-streaming>
-      {showTimestamp && (
-        <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
-          {formatTimestamp(startedAt)}
-        </div>
-      )}
+      {showTimestamp && <TimestampDivider label={formatTimestamp(startedAt)} />}
       {!showTimestamp && prevMessage && (
         <div className={turnSpacerClass(prevMessage.role, 'assistant')} />
       )}
-      <div className="assistant-msg-row flex justify-start mb-[var(--space-1)]">
-        <div className="assistant-msg-bubble flex flex-col">
-          <div className="assistant-transcript py-[var(--space-1)] text-[var(--text-primary)] text-[length:var(--text-body)] leading-[var(--leading-relaxed)]">
+      <AssistantRowShell
+        transcript={(
+          <>
             {formattedContent}
             <span className="stream-caret" aria-hidden="true" />
-          </div>
-        </div>
-      </div>
+          </>
+        )}
+      />
     </div>
   )
 }
@@ -1385,11 +1398,7 @@ export function ChatMessages({
                 const prevMsg = startIndex > 0 ? messages[startIndex - 1] : null
                 return (
                   <div key={`tg-${firstMsg.id || startIndex}`} data-message-id={firstMsg.id || `tg-${startIndex}`}>
-                    {showTimestamp && (
-                      <div className="text-center py-[var(--space-3)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
-                        {formatTimestamp(firstMsg.timestamp)}
-                      </div>
-                    )}
+                    {showTimestamp && <TimestampDivider label={formatTimestamp(firstMsg.timestamp)} />}
                     {!showTimestamp && prevMsg && (
                       <div className={turnSpacerClass(prevMsg.role, 'assistant')} />
                     )}
