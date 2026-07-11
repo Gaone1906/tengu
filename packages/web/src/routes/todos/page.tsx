@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
-import { useSearchParams } from "react-router-dom"
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom"
 import { ArrowLeft, Plus } from "lucide-react"
 import { api, type WorkItemCompactWire, type WorkItemStatusWire } from "@/lib/api"
 import { PageLayout } from "@/components/page-layout"
@@ -113,8 +113,11 @@ export default function TodosPage() {
   useBreadcrumbs([{ label: "Todos" }])
   const qc = useQueryClient()
   const now = Date.now()
+  const location = useLocation()
+  const navigate = useNavigate()
 
-  const [openId, setOpenId] = useState<string | null>(null)
+  const historyState = location.state as { todoDetail?: unknown } | null
+  const openId = typeof historyState?.todoDetail === "string" ? historyState.todoDetail : null
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [resolving, setResolving] = useState<Set<string>>(new Set())
   const [creating, setCreating] = useState(false)
@@ -129,16 +132,25 @@ export default function TodosPage() {
     const params = new URLSearchParams(searchParams)
     if (next === "ledger") params.delete("view")
     else params.set("view", next)
-    setSearchParams(params, { replace: true })
+    setSearchParams(params)
   }, [searchParams, setSearchParams])
   const filters = useMemo(() => filtersFromSearchParams(searchParams), [searchParams])
   const setFilters = useCallback(
     (next: TodoFilters) => {
       const params = filtersToSearchParams(next)
       if (view !== "ledger") params.set("view", view)
-      setSearchParams(params, { replace: true })
+      setSearchParams(params)
     },
     [setSearchParams, view],
+  )
+  const setSearch = useCallback(
+    (query: string | undefined) => {
+      const next = { ...filters, q: query }
+      const params = filtersToSearchParams(next)
+      if (view !== "ledger") params.set("view", view)
+      setSearchParams(params, { replace: true })
+    },
+    [filters, setSearchParams, view],
   )
   const filtered = !isDefaultFilters(filters)
 
@@ -179,12 +191,17 @@ export default function TodosPage() {
     () => groupPeople(peopleItems.data ?? [], org.data?.employees ?? []),
     [peopleItems.data, org.data?.employees],
   )
-  const filteredTotal = useMemo(
-    () => Object.values(ledger.data?.totalsByStatus ?? {}).reduce((sum, value) => sum + (value ?? 0), 0),
+  const filteredOpenTotal = useMemo(
+    () => headerCountsFromTotals(ledger.data?.totalsByStatus ?? {}).open,
     [ledger.data],
   )
 
-  const onOpen = useCallback((id: string) => setOpenId(id), [])
+  const onOpen = useCallback((id: string) => {
+    navigate(`${location.pathname}${location.search}`, {
+      state: { ...(location.state ?? {}), todoDetail: id },
+    })
+  }, [location.pathname, location.search, location.state, navigate])
+  const closeDetail = useCallback(() => navigate(-1), [navigate])
   const onToggle = useCallback((name: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
@@ -228,7 +245,7 @@ export default function TodosPage() {
       decide.mutate(
         { id, decision, note },
         {
-          onSuccess: () => setOpenId((cur) => (cur === id ? null : cur)),
+          onSuccess: () => { if (openId === id) closeDetail() },
           onSettled: () =>
             setResolving((prev) => {
               const next = new Set(prev)
@@ -238,7 +255,7 @@ export default function TodosPage() {
         },
       )
     },
-    [decide],
+    [closeDetail, decide, openId],
   )
   const onApprove = useCallback((id: string) => runDecision(id, "approve"), [runDecision])
   const onSendBack = useCallback((id: string, note: string) => runDecision(id, "reject", note || undefined), [runDecision])
@@ -291,6 +308,7 @@ export default function TodosPage() {
                 <FilterBar
                   filters={filters}
                   onChange={setFilters}
+                  onSearchChange={setSearch}
                   employees={org.data?.employees ?? []}
                   departments={org.data?.departments ?? []}
                   byName={byName}
@@ -299,8 +317,8 @@ export default function TodosPage() {
                 {filtered && ledger.data && (
                   <div className="-mt-3 mb-4 text-[length:var(--text-caption1)] tabular-nums text-[var(--text-tertiary)]">
                     {filters.status === "open"
-                      ? `${filteredTotal} of ${counts.open} open`
-                      : `${filteredTotal} matching · ${counts.open} open overall`}
+                      ? `${filteredOpenTotal} of ${counts.open} open`
+                      : `${Object.values(ledger.data.totalsByStatus).reduce((sum, value) => sum + (value ?? 0), 0)} matching · ${counts.open} open overall`}
                   </div>
                 )}
                 {(needsCount ?? 0) > 0 && (
@@ -350,7 +368,7 @@ export default function TodosPage() {
                     onRename={onRename}
                     onRankChange={onRankChange}
                     onLoadMore={onLoadMore}
-                    onClearFilters={() => setFilters({ status: "open" })}
+                    onClearFilters={() => setFilters({ status: "open", q: filters.q })}
                     filtered={filtered}
                     loadingMore={ledger.loadingMore}
                     now={now}
@@ -411,7 +429,7 @@ export default function TodosPage() {
           resolving={resolving.has(openId)}
           onApprove={onApprove}
           onSendBack={onSendBack}
-          onClose={() => setOpenId(null)}
+          onClose={closeDetail}
         />
       )}
 

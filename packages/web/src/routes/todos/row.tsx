@@ -113,8 +113,6 @@ export function TodoRow({
   const navigate = useNavigate()
   const isDone = item.status === "done"
   const timeHint = formatRelativeTime(item.updatedAt, now)
-  const humanKey = (((item as WorkItemCompactWire & { key?: string | null }).key) ?? "").trim() || null
-
   // GRS-024b: prefer the already-fetched workflowRun (zero extra cost); only
   // fall back to the linked-sessions call for an active item that has a session
   // but no run. The key matches the detail sheet's, so react-query dedupes it.
@@ -176,38 +174,35 @@ export function TodoRow({
 
   return (
     <div
-      role="button"
-      tabIndex={0}
-      data-testid={`todo-row-${item.id}`}
+      data-testid="todo-row"
       onPointerDown={startLongPress}
-      onClick={() => {
-        if (suppressClickRef.current) {
-          suppressClickRef.current = false
-          return
-        }
-        if (!editing) onOpen(item.id)
-      }}
-      onKeyDown={(e) => {
-        if (editing) return
-        if (e.key === "F2") {
-          e.preventDefault()
-          beginRename()
-          return
-        }
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault()
-          onOpen(item.id)
-        }
-      }}
-      className="group/row relative flex min-h-11 cursor-default items-center gap-2.5 overflow-hidden rounded-[13px] py-[7px] pl-2 pr-1 transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] focus-visible:bg-[var(--fill-quaternary)] focus-visible:outline-none max-[500px]:pl-3"
+      className="group/row relative flex min-h-11 cursor-default items-center gap-2.5 overflow-hidden rounded-[13px] py-[7px] pl-2 pr-1 transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] max-[500px]:pl-3"
       style={isDone ? { opacity: 0.78 } : undefined}
     >
+      <button
+        type="button"
+        aria-label={`Open ${item.title}`}
+        disabled={editing}
+        onClick={() => {
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false
+            return
+          }
+          onOpen(item.id)
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== "F2") return
+          e.preventDefault()
+          beginRename()
+        }}
+        className="absolute inset-0 z-0 rounded-[13px] outline-none focus-visible:bg-[var(--fill-quaternary)] disabled:pointer-events-none"
+      />
+
       {/* Grip — hover/focus-revealed on pointer layouts; mobile uses the action menu. */}
       <span
-        data-testid={onGripPointerDown ? `todo-grip-${item.id}` : undefined}
+        data-testid={onGripPointerDown ? "todo-grip" : undefined}
         onPointerDown={onGripPointerDown}
-        onClick={(e) => e.stopPropagation()}
-        className={`grid w-[14px] flex-none touch-none place-items-center self-stretch text-[var(--text-quaternary)] opacity-0 transition-opacity duration-150 group-hover/row:opacity-100 group-focus-visible/row:opacity-100 max-[500px]:hidden ${
+        className={`relative z-[2] grid w-[14px] flex-none touch-none place-items-center self-stretch text-[var(--text-quaternary)] opacity-0 transition-opacity duration-150 group-hover/row:opacity-100 group-focus-within/row:opacity-100 max-[500px]:hidden ${
           onGripPointerDown ? "cursor-grab" : "pointer-events-none"
         }`}
         aria-hidden
@@ -215,14 +210,16 @@ export function TodoRow({
         {onGripPointerDown && <GripVertical size={13} strokeWidth={2} />}
       </span>
 
-      <StatusCircle status={item.status} size={24} />
+      <span className="pointer-events-none relative z-[1] flex-none" aria-hidden>
+        <StatusCircle status={item.status} size={24} />
+      </span>
 
-      <span className="flex min-w-0 flex-1 flex-col gap-[3px]">
+      <span className="pointer-events-none relative z-[1] flex min-w-0 flex-1 flex-col gap-[3px]">
         <span className="flex min-w-0 items-start gap-2.5">
           {editing ? (
             <input
               ref={inputRef}
-              data-testid={`todo-rename-${item.id}`}
+              data-testid="todo-rename"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onClick={(e) => e.stopPropagation()}
@@ -235,7 +232,7 @@ export function TodoRow({
                   setEditing(false)
                 }
               }}
-              className="min-w-0 flex-1 rounded-[7px] border-0 bg-[var(--fill-quaternary)] px-1.5 py-0.5 -mx-1.5 -my-0.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-primary)] outline-none"
+              className="pointer-events-auto relative z-[3] min-w-0 flex-1 rounded-[7px] border-0 bg-[var(--fill-quaternary)] px-1.5 py-0.5 -mx-1.5 -my-0.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-primary)] outline-none"
             />
           ) : (
             <span
@@ -257,19 +254,16 @@ export function TodoRow({
         </span>
 
         {exec && item.status === "executing" && (
-          <span data-testid={`todo-exec-${item.id}`} className="flex min-w-0 items-center gap-1.5">
+          <span data-testid="todo-exec" className="flex min-w-0 items-center gap-1.5">
             <StateLine state="working" dispatchedAt={Date.parse(item.updatedAt) || undefined} className="flex-none whitespace-nowrap" />
-            <span
-              data-testid={`todo-exec-open-${item.id}`}
-              title={exec.kind === "run" ? "Open workflow run" : "Open session"}
-              onClick={(e) => {
-                e.stopPropagation()
-                navigate(exec.href)
-              }}
-              className="flex-none cursor-pointer text-[length:var(--text-caption1)] font-semibold text-[var(--accent)] opacity-0 transition-opacity duration-150 group-hover/row:opacity-100"
+            <button
+              type="button"
+              aria-label={exec.kind === "run" ? "Open workflow run" : "Open session"}
+              onClick={() => navigate(exec.href)}
+              className="pointer-events-auto relative z-[3] flex-none cursor-pointer text-[length:var(--text-caption1)] font-semibold text-[var(--accent)] opacity-0 transition-opacity duration-150 group-hover/row:opacity-100 focus-visible:opacity-100"
             >
               Open ›
-            </span>
+            </button>
           </span>
         )}
       </span>
@@ -278,8 +272,7 @@ export function TodoRow({
             <button
               type="button"
               aria-label="Todo actions"
-              onClick={(e) => e.stopPropagation()}
-              className="grid min-h-11 min-w-11 flex-none place-items-center rounded-[11px] text-[var(--text-quaternary)] opacity-0 transition-[opacity,background-color,color] group-hover/row:opacity-100 group-focus-within/row:opacity-100 hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)] max-[500px]:pointer-events-none max-[500px]:absolute max-[500px]:right-0 max-[500px]:opacity-0"
+              className="relative z-[3] grid min-h-11 min-w-11 flex-none place-items-center rounded-[11px] text-[var(--text-quaternary)] opacity-0 transition-[opacity,background-color,color] group-hover/row:opacity-100 group-focus-within/row:opacity-100 hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)] max-[500px]:pointer-events-none max-[500px]:absolute max-[500px]:right-0 max-[500px]:opacity-0"
             >
               <MoreHorizontal size={17} strokeWidth={2} aria-hidden />
             </button>
@@ -290,11 +283,6 @@ export function TodoRow({
           >
             <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" onClick={() => onOpen(item.id)}>Open</DropdownMenuItem>
             <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" disabled={!onRename} onClick={beginRename}>Rename</DropdownMenuItem>
-            {humanKey && (
-              <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" onClick={() => void navigator.clipboard?.writeText(humanKey)}>
-                Copy {humanKey}
-              </DropdownMenuItem>
-            )}
             {onMoveUp || onMoveDown ? (
               <>
                 <DropdownMenuItem className="min-h-11 rounded-[9px] px-3" disabled={!onMoveUp} onClick={onMoveUp}>Move up</DropdownMenuItem>

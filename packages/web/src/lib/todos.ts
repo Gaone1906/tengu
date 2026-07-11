@@ -262,13 +262,14 @@ const PROVENANCE_WORD: Record<WorkItemSourceWire, string> = {
 /** The "· <name>" suffix parsed from a machine-minted sourceRef, when present.
  *  `cron:<jobId>:<iso>` → jobId; `workflow:<defId>:<runId>` → defId. */
 export function provenanceSuffix(source: WorkItemSourceWire, sourceRef?: string | null): string | null {
-  if (!sourceRef) return null
+  const safeRef = publicWorkItemReference(sourceRef)
+  if (!safeRef) return null
   if (source === "cron") {
-    const m = /^cron:([^:]+):/.exec(sourceRef)
+    const m = /^cron:([^:]+):/.exec(safeRef)
     return m ? m[1] : null
   }
   if (source === "workflow") {
-    const m = /^workflow:([^:]+):/.exec(sourceRef)
+    const m = /^workflow:([^:]+):/.exec(safeRef)
     return m ? m[1] : null
   }
   return null
@@ -348,11 +349,18 @@ export interface TodoFilters {
 
 export const DEFAULT_FILTERS: TodoFilters = { status: "open" }
 
+/** Transport-only work-item ids must never cross into user-facing metadata. */
+export function publicWorkItemReference(value: string | null | undefined): string | null {
+  const reference = value?.trim() ?? ""
+  if (!reference || /(?:^|[^a-z0-9])wi_[a-z0-9_-]+/i.test(reference)) return null
+  return reference
+}
+
 export function isDefaultFilters(f: TodoFilters): boolean {
   return f.status === "open" && !f.assignee && !f.department && !f.source && !f.date && !f.q
 }
 
-/** How many chips are set away from their default (drives the Clear control). */
+/** How many filter chips are set away from their default. Search is separate. */
 export function activeFilterCount(f: TodoFilters): number {
   let n = 0
   if (f.status !== "open") n++
@@ -360,7 +368,6 @@ export function activeFilterCount(f: TodoFilters): number {
   if (f.department) n++
   if (f.source) n++
   if (f.date) n++
-  if (f.q) n++
   return n
 }
 
@@ -409,7 +416,8 @@ export function filtersToSearchParams(f: TodoFilters): URLSearchParams {
   if (f.department) p.set("department", f.department)
   if (f.source) p.set("source", f.source)
   if (f.date) p.set("date", f.date)
-  if (f.q) p.set("q", f.q)
+  const safeQuery = publicWorkItemReference(f.q)
+  if (safeQuery) p.set("q", safeQuery)
   return p
 }
 
@@ -431,7 +439,7 @@ export function filtersFromSearchParams(p: URLSearchParams): TodoFilters {
   if (source && SOURCE_VALUES.has(source)) f.source = source as WorkItemSourceWire
   const date = p.get("date")
   if (date && DATE_VALUES.has(date)) f.date = date as DateFilter
-  const q = p.get("q")
+  const q = publicWorkItemReference(p.get("q"))
   if (q) f.q = q
   return f
 }

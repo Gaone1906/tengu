@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
-import { X, Check, ChevronRight, Copy, MessageSquareText } from "lucide-react"
-import { api, type Employee, type LinkedSessionWire, type WorkItemDetailWire, type WorkItemFullWire, type WorkItemStatusWire } from "@/lib/api"
+import { X, Check, ChevronRight, MessageSquareText } from "lucide-react"
+import { api, type Employee, type LinkedSessionWire, type WorkItemDetailWire, type WorkItemStatusWire } from "@/lib/api"
 import {
   STATUS_LABEL,
   effectiveVerifyMode,
   effectiveMaxRounds,
+  publicWorkItemReference,
   priorityLabel,
   provenanceLabel,
   formatCost,
@@ -350,8 +351,8 @@ function SheetBody({
           </button>
           {showTech && (
             <div className="min-w-0 rounded-[10px] bg-[var(--fill-tertiary)] p-[11px_14px] font-[var(--font-code)] text-[length:var(--text-caption1)] leading-relaxed text-[var(--text-tertiary)]">
-              {item.sourceRef && <div className="break-all">sourceRef: {item.sourceRef}</div>}
-              {item.approvalRef && <div className="break-all">approvalRef: {item.approvalRef}</div>}
+              {publicWorkItemReference(item.sourceRef) && <div className="break-all">sourceRef: {publicWorkItemReference(item.sourceRef)}</div>}
+              {publicWorkItemReference(item.approvalRef) && <div className="break-all">approvalRef: {publicWorkItemReference(item.approvalRef)}</div>}
               <div>created: {item.createdAt}</div>
               <div>updated: {item.updatedAt}</div>
               {item.closedAt && <div>closed: {item.closedAt}</div>}
@@ -386,7 +387,7 @@ function DecisionFooter({
       <div className="flex shrink-0 flex-col gap-2.5 p-[14px_20px] pb-[max(14px,env(safe-area-inset-bottom))]">
         <textarea
           autoFocus
-          data-testid={`sheet-sendback-note-${id}`}
+          data-testid="sheet-sendback-note"
           value={note}
           onChange={(e) => setNote(e.target.value)}
           rows={2}
@@ -396,7 +397,7 @@ function DecisionFooter({
         <div className="flex items-center gap-2.5">
           <button
             type="button"
-            data-testid={`sheet-sendback-confirm-${id}`}
+            data-testid="sheet-sendback-confirm"
             disabled={resolving}
             onClick={() => onSendBack(id, note.trim())}
             className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-primary)] disabled:opacity-40"
@@ -415,7 +416,7 @@ function DecisionFooter({
     <div className="flex shrink-0 items-center gap-2.5 p-[14px_20px] pb-[max(14px,env(safe-area-inset-bottom))]">
       <button
         type="button"
-        data-testid={`sheet-approve-${id}`}
+        data-testid="sheet-approve"
         disabled={resolving}
         onClick={() => onApprove(id)}
         className="inline-flex min-h-11 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
@@ -426,7 +427,7 @@ function DecisionFooter({
       </button>
       <button
         type="button"
-        data-testid={`sheet-sendback-${id}`}
+        data-testid="sheet-sendback"
         disabled={resolving}
         onClick={() => setComposing(true)}
         className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-primary)] disabled:opacity-40"
@@ -567,6 +568,15 @@ export function DetailSheet({
   }, [id, queryClient])
   const draftState = useTodoDraft({ id, initial: initialDraft, save: saveRemote })
   useEffect(() => {
+    if (!draftState.hasUnsaved) return
+    const guardReload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ""
+    }
+    window.addEventListener("beforeunload", guardReload)
+    return () => window.removeEventListener("beforeunload", guardReload)
+  }, [draftState.hasUnsaved])
+  useEffect(() => {
     if (detail && draftState.status === "idle") draftState.replaceInitial(initialDraft)
   }, [detail, initialDraft, draftState.status, draftState.replaceInitial])
 
@@ -576,7 +586,6 @@ export function DetailSheet({
   } : undefined, [detail, draftState.draft])
   const pending = displayDetail?.workItem.approvalState === "pending"
   const execSession = sessions?.[0]
-  const humanKey = ((displayDetail?.workItem as (WorkItemFullWire & { key?: string | null }) | undefined)?.key ?? "").trim() || null
 
   const edit = (patch: TodoDraftPatch) => {
     for (const [field, value] of Object.entries(patch) as [keyof TodoEditableDraft, TodoEditableDraft[keyof TodoEditableDraft]][]) {
@@ -608,8 +617,8 @@ export function DetailSheet({
       return
     }
     const patch = draftState.unsavedPatch()
-    if (Object.keys(patch).length > 0 && draftState.status !== "saving") draftState.save(patch)
-    if (draftState.status === "saving" || Object.keys(patch).length > 0) {
+    if (Object.keys(patch).length > 0) draftState.save(patch)
+    if (!draftState.isAcknowledged || Object.keys(patch).length > 0) {
       setCloseAfterSave(true)
       return
     }
@@ -617,9 +626,21 @@ export function DetailSheet({
   }, [draftState, onClose])
 
   useEffect(() => {
-    if (closeAfterSave && draftState.status === "saved") onClose()
-    if (closeAfterSave && draftState.status === "error") setShowCloseGuard(true)
-  }, [closeAfterSave, draftState.status, onClose])
+    if (!closeAfterSave) return
+    if (draftState.status === "error") {
+      setShowCloseGuard(true)
+      return
+    }
+    if (draftState.isAcknowledged) {
+      setCloseAfterSave(false)
+      onClose()
+      return
+    }
+    if (draftState.status === "dirty") {
+      const patch = draftState.unsavedPatch()
+      if (Object.keys(patch).length > 0) draftState.save(patch)
+    }
+  }, [closeAfterSave, draftState.isAcknowledged, draftState.save, draftState.status, draftState.unsavedPatch, onClose])
 
   return (
     <TodoDialog
@@ -673,16 +694,6 @@ export function DetailSheet({
             )}
             {displayDetail && (
               <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
-                {humanKey && (
-                  <button
-                    type="button"
-                    aria-label={`Copy ${humanKey}`}
-                    onClick={() => void navigator.clipboard?.writeText(humanKey)}
-                    className="inline-flex min-h-11 items-center gap-1 rounded-[8px] font-[family-name:var(--font-code)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
-                  >
-                    {humanKey}<Copy size={11} strokeWidth={1.8} aria-hidden />
-                  </button>
-                )}
                 <span>{STATUS_LABEL[displayDetail.workItem.status]} · updated {formatRelativeTime(displayDetail.workItem.updatedAt)}</span>
                 <span aria-live="polite" className="text-[var(--text-tertiary)]">
                   {draftState.status === "saving" ? "Saving…" : draftState.status === "saved" ? "Saved" : null}

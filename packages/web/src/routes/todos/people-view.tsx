@@ -32,7 +32,7 @@ function QueueRow({ item, onOpen }: { item: PersonQueue["items"][number]; onOpen
   return (
     <button
       type="button"
-      data-testid={`people-queue-row-${item.id}`}
+      data-testid="people-queue-row"
       onClick={() => onOpen(item.id)}
       className="flex min-h-[46px] items-center gap-2.5 rounded-[13px] px-3 py-[7px] text-left transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)]"
     >

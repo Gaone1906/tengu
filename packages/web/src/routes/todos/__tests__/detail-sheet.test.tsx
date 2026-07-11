@@ -7,13 +7,24 @@ import { DetailSheet } from "../detail-sheet"
 
 const authFetch = vi.fn()
 
+const todoId: Record<WorkItemStatusWire, string> = {
+  backlog: "wi_backlog",
+  assigned: "wi_assigned",
+  executing: "wi_executing",
+  in_review: "wi_review",
+  done: "wi_done",
+  blocked: "wi_blocked",
+  escalated: "wi_escalated",
+  cancelled: "wi_cancelled",
+}
+
 vi.mock("@/lib/auth", () => ({
   authFetch: (...args: unknown[]) => authFetch(...args),
 }))
 
 function workItem(status: WorkItemStatusWire): WorkItemFullWire {
   return {
-    id: `wi_${status}`,
+    id: todoId[status],
     title: `Todo ${status}`,
     body: null,
     status,
@@ -49,7 +60,7 @@ function renderSheet(status: WorkItemStatusWire) {
     <QueryClientProvider client={client}>
       <MemoryRouter>
         <DetailSheet
-          id={`wi_${status}`}
+          id={todoId[status]}
           initial={detail(status)}
           byName={new Map()}
           resolving={false}
@@ -80,7 +91,7 @@ describe("Todo detail transition footer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Mark in progress" }))
 
     await waitFor(() => expect(authFetch).toHaveBeenCalledWith(
-      `/api/work-items/wi_${status}/status`,
+      `/api/work-items/${todoId[status]}/status`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -164,7 +175,7 @@ describe("Todo detail editing and dialog behavior", () => {
     render(
       <QueryClientProvider client={client}>
         <MemoryRouter>
-          <DetailSheet id="wi_backlog" initial={extreme} byName={new Map()} resolving={false} onApprove={() => {}} onSendBack={() => {}} onClose={() => {}} />
+          <DetailSheet id={extreme.workItem.id} initial={extreme} byName={new Map()} resolving={false} onApprove={() => {}} onSendBack={() => {}} onClose={() => {}} />
         </MemoryRouter>
       </QueryClientProvider>,
     )
@@ -175,14 +186,18 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(screen.getByTestId("detail-sheet").innerHTML).not.toContain("border-t-[0.5px]")
   })
 
-  it("shows the optional canonical key quietly, supports copy, and never reveals the opaque id", () => {
-    const keyed = detail("backlog")
-    ;(keyed.workItem as WorkItemFullWire & { key?: string }).key = "JIN-142"
-    renderSheetWithDetail(keyed)
-    expect(screen.getByText("JIN-142")).toBeTruthy()
-    expect(screen.getByRole("button", { name: "Copy JIN-142" })).toBeTruthy()
+  it("keeps transport ids out of identity UI, technical disclosures, and test selectors", () => {
+    const privateDetail = detail("backlog")
+    privateDetail.workItem.id = "wi_private_detail_42"
+    privateDetail.workItem.sourceRef = "workflow:wi_private_source:run"
+    privateDetail.workItem.approvalState = "pending"
+    privateDetail.workItem.approvalRequest = "Review the result"
+    privateDetail.workItem.approvalRef = "wi_private_approval"
+    renderSheetWithDetail(privateDetail)
     fireEvent.click(screen.getByTestId("tech-disclosure"))
-    expect(screen.queryByText(/wi_backlog/)).toBeNull()
+    expect(screen.getByTestId("detail-sheet").textContent).not.toMatch(/wi_[a-z0-9_-]+/i)
+    expect(screen.getByTestId("detail-sheet").innerHTML).not.toMatch(/wi_[a-z0-9_-]+/i)
+    expect(screen.queryByRole("button", { name: /Copy/ })).toBeNull()
   })
 
   it("keeps a pending title draft mounted until the serialized save completes", async () => {
@@ -209,6 +224,44 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(screen.getByText("Durable title")).toBeTruthy()
 
     finish()
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
+  })
+
+  it("saves an edit made after close was requested before the sheet can close", async () => {
+    let finishFirst!: () => void
+    let finishSecond!: () => void
+    const first = new Promise<void>((resolve) => { finishFirst = resolve })
+    const second = new Promise<void>((resolve) => { finishSecond = resolve })
+    const value = detail("backlog")
+    const onClose = vi.fn()
+    const patches: Array<Record<string, unknown>> = []
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        const patch = JSON.parse(String(init.body)) as Record<string, unknown>
+        patches.push(patch)
+        await (patches.length === 1 ? first : second)
+        return new Response(JSON.stringify({ workItem: { ...value.workItem, ...patch } }), { status: 200, headers: { "Content-Type": "application/json" } })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value, onClose)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "First title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    await waitFor(() => expect(patches).toEqual([{ title: "First title" }]))
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }))
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Latest title" } })
+    expect(onClose).not.toHaveBeenCalled()
+
+    finishFirst()
+    await waitFor(() => expect(patches).toEqual([{ title: "First title" }, { title: "Latest title" }]))
+    expect(onClose).not.toHaveBeenCalled()
+
+    finishSecond()
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1))
   })
 

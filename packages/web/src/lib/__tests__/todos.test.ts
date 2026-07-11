@@ -202,12 +202,15 @@ describe("filters (design-todos §4.3)", () => {
     expect(filtersFromSearchParams(filtersToSearchParams(f))).toEqual(f)
     // Defaults serialize to an empty string (clean URLs).
     expect(filtersToSearchParams({ status: "open" }).toString()).toBe("")
+    expect(filtersToSearchParams({ status: "open", q: "wi_private_42" }).toString()).toBe("")
+    expect(filtersFromSearchParams(new URLSearchParams("q=wi_private_42"))).toEqual({ status: "open" })
     expect(isDefaultFilters(filtersFromSearchParams(new URLSearchParams()))).toBe(true)
     // Garbage params are ignored, not thrown.
     expect(filtersFromSearchParams(new URLSearchParams("status=nope&source=bad&date=huh"))).toEqual({ status: "open" })
   })
   it("counts set chips for the Clear control", () => {
     expect(activeFilterCount({ status: "open" })).toBe(0)
+    expect(activeFilterCount({ status: "open", q: "roadmap" })).toBe(0)
     expect(activeFilterCount({ status: "done", assignee: "x", date: "today" })).toBe(3)
   })
 })

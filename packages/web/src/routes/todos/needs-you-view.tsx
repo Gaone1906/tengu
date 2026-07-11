@@ -2,6 +2,7 @@ import { useState } from "react"
 import { Check, ExternalLink, MessageSquareText, TerminalSquare, TriangleAlert } from "lucide-react"
 import type { Employee, WorkItemCompactWire } from "@/lib/api"
 import { EmployeeChip } from "@/components/ui/employee-chip"
+import { publicWorkItemReference } from "@/lib/todos"
 import { StateCircle, type StateGlyphKey } from "./state-glyph"
 import { ProvChip } from "./row"
 import { displayNameOf, formatRelativeTime } from "./util"
@@ -32,20 +33,22 @@ function shortRef(id: string): string {
 
 function WorkRef({ item }: { item: WorkItemCompactWire }) {
   if (item.workflowRun) {
+    const runRef = publicWorkItemReference(item.workflowRun.runId)
     return (
       <span className="inline-flex min-w-0 items-center gap-1.5 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
         <TerminalSquare size={12.5} strokeWidth={1.75} aria-hidden />
-        <span className="truncate">Run · {shortRef(item.workflowRun.runId)}</span>
+        <span className="truncate">{runRef ? `Run · ${shortRef(runRef)}` : "Run"}</span>
       </span>
     )
   }
   if (item.sessionRef) {
     // Gateway shape is { sessionId, ref? } — the ref suffix is the human label
     // when present, else the shortened session id.
+    const sessionRef = publicWorkItemReference(item.sessionRef.ref) ?? publicWorkItemReference(item.sessionRef.sessionId)
     return (
       <span className="inline-flex min-w-0 items-center gap-1.5 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
         <MessageSquareText size={12.5} strokeWidth={1.75} aria-hidden />
-        <span className="truncate">Session · {item.sessionRef.ref?.trim() || shortRef(item.sessionRef.sessionId)}</span>
+        <span className="truncate">{sessionRef ? `Session · ${shortRef(sessionRef)}` : "Session"}</span>
       </span>
     )
   }
@@ -85,7 +88,7 @@ function NeedsYouCard({
 
   return (
     <div
-      data-testid={`needs-item-${item.id}`}
+      data-testid="needs-item"
       className="flex flex-col gap-[13px] rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-[16px_18px] shadow-[var(--shadow-card)]"
     >
       <button type="button" className="flex items-start gap-3 text-left" onClick={() => onOpen(item.id)}>
@@ -134,7 +137,7 @@ function NeedsYouCard({
         <div className="flex flex-col gap-2.5">
           <textarea
             autoFocus
-            data-testid={`sendback-note-${item.id}`}
+            data-testid="needs-sendback-note"
             value={note}
             onChange={(e) => setNote(e.target.value)}
             placeholder="Add a note for the send-back (optional)…"
@@ -144,7 +147,7 @@ function NeedsYouCard({
           <div className="flex items-center gap-2.5">
             <button
               type="button"
-              data-testid={`sendback-confirm-${item.id}`}
+              data-testid="needs-sendback-confirm"
               disabled={resolving}
               onClick={() => onSendBack(item.id, note.trim())}
               className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-primary)] disabled:opacity-40"
@@ -166,7 +169,7 @@ function NeedsYouCard({
             <>
               <button
                 type="button"
-                data-testid={`approve-${item.id}`}
+                data-testid="needs-approve"
                 disabled={resolving}
                 onClick={() => onApprove(item.id)}
                 className="inline-flex min-h-11 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
@@ -181,7 +184,7 @@ function NeedsYouCard({
               </button>
               <button
                 type="button"
-                data-testid={`sendback-${item.id}`}
+                data-testid="needs-sendback"
                 disabled={resolving}
                 onClick={() => setComposing(true)}
                 className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-primary)] disabled:opacity-40"
@@ -190,7 +193,7 @@ function NeedsYouCard({
               </button>
               <button
                 type="button"
-                data-testid={`escalate-${item.id}`}
+                data-testid="needs-escalate"
                 disabled={resolving}
                 onClick={() => onEscalate(item.id)}
                 className="inline-flex min-h-11 items-center gap-1.5 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"

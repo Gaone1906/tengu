@@ -58,6 +58,7 @@ function useIsTodoMobile() {
 export function FilterBar({
   filters,
   onChange,
+  onSearchChange,
   employees,
   departments,
   byName,
@@ -65,6 +66,7 @@ export function FilterBar({
 }: {
   filters: TodoFilters
   onChange: (next: TodoFilters) => void
+  onSearchChange?: (query: string | undefined) => void
   employees: Employee[]
   departments: string[]
   byName: Map<string, Employee>
@@ -74,17 +76,37 @@ export function FilterBar({
   const [mobileOpen, setMobileOpen] = useState(false)
   const [q, setQ] = useState(filters.q ?? "")
   const debounce = useRef<number | null>(null)
-  useEffect(() => setQ(filters.q ?? ""), [filters.q])
+  const filtersRef = useRef(filters)
+  const searchChangeRef = useRef(onSearchChange)
+  filtersRef.current = filters
+  searchChangeRef.current = onSearchChange
+  const filterStateKey = [filters.status, filters.assignee, filters.department, filters.source, filters.date, filters.q].join("\u0000")
+  const cancelPendingSearch = () => {
+    if (debounce.current != null) window.clearTimeout(debounce.current)
+    debounce.current = null
+  }
+  useEffect(() => {
+    cancelPendingSearch()
+    setQ(filters.q ?? "")
+  }, [filterStateKey])
   useEffect(() => () => {
     if (debounce.current != null) window.clearTimeout(debounce.current)
   }, [])
 
   const setSearch = (value: string) => {
     setQ(value)
-    if (debounce.current != null) window.clearTimeout(debounce.current)
+    cancelPendingSearch()
     debounce.current = window.setTimeout(() => {
-      onChange({ ...filters, q: value.trim() || undefined })
+      debounce.current = null
+      const normalized = value.trim() || undefined
+      if (searchChangeRef.current) searchChangeRef.current(normalized)
+      else onChange({ ...filtersRef.current, q: normalized })
     }, 250)
+  }
+
+  const changeFilters = (next: TodoFilters) => {
+    cancelPendingSearch()
+    onChange({ ...next, q: q.trim() || undefined })
   }
 
   const active = activeFilterCount(filters)
@@ -104,7 +126,7 @@ export function FilterBar({
             data-testid="filter-search"
             value={q}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search title or JIN-142"
+            placeholder="Search todos"
             autoComplete="off"
             className="min-w-0 flex-1 border-0 bg-transparent text-[length:var(--text-subheadline)] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)]"
           />
@@ -151,7 +173,7 @@ export function FilterBar({
               <DropdownMenuSubTrigger className={ITEM_CLASS}>Status</DropdownMenuSubTrigger>
               <DropdownMenuSubContent className={SUBMENU_CLASS}>
                 {STATUS_OPTIONS.map((option) => (
-                  <DropdownMenuItem key={option.value} className={ITEM_CLASS} onClick={() => onChange({ ...filters, status: option.value })}>
+                  <DropdownMenuItem key={option.value} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, status: option.value })}>
                     {option.label}<MenuCheck on={filters.status === option.value} />
                   </DropdownMenuItem>
                 ))}
@@ -161,11 +183,11 @@ export function FilterBar({
             <DropdownMenuSub>
               <DropdownMenuSubTrigger className={ITEM_CLASS}>Person</DropdownMenuSubTrigger>
               <DropdownMenuSubContent className={SUBMENU_CLASS}>
-                <DropdownMenuItem className={ITEM_CLASS} onClick={() => onChange({ ...filters, assignee: undefined })}>
+                <DropdownMenuItem className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, assignee: undefined })}>
                   Anyone<MenuCheck on={!filters.assignee} />
                 </DropdownMenuItem>
                 {employees.map((employee) => (
-                  <DropdownMenuItem key={employee.name} className={ITEM_CLASS} onClick={() => onChange({ ...filters, assignee: employee.name })}>
+                  <DropdownMenuItem key={employee.name} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, assignee: employee.name })}>
                     <EmployeeAvatar name={employee.name} size={20} fontSize={10} className="bg-[var(--fill-secondary)]" />
                     {employee.displayName}<MenuCheck on={filters.assignee === employee.name} />
                   </DropdownMenuItem>
@@ -176,11 +198,11 @@ export function FilterBar({
             <DropdownMenuSub>
               <DropdownMenuSubTrigger className={ITEM_CLASS}>Department</DropdownMenuSubTrigger>
               <DropdownMenuSubContent className={SUBMENU_CLASS}>
-                <DropdownMenuItem className={ITEM_CLASS} onClick={() => onChange({ ...filters, department: undefined })}>
+                <DropdownMenuItem className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, department: undefined })}>
                   Any department<MenuCheck on={!filters.department} />
                 </DropdownMenuItem>
                 {departments.map((department) => (
-                  <DropdownMenuItem key={department} className={ITEM_CLASS} onClick={() => onChange({ ...filters, department })}>
+                  <DropdownMenuItem key={department} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, department })}>
                     {department.charAt(0).toUpperCase() + department.slice(1)}<MenuCheck on={filters.department === department} />
                   </DropdownMenuItem>
                 ))}
@@ -190,11 +212,11 @@ export function FilterBar({
             <DropdownMenuSub>
               <DropdownMenuSubTrigger className={ITEM_CLASS}>Source</DropdownMenuSubTrigger>
               <DropdownMenuSubContent className={SUBMENU_CLASS}>
-                <DropdownMenuItem className={ITEM_CLASS} onClick={() => onChange({ ...filters, source: undefined })}>
+                <DropdownMenuItem className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, source: undefined })}>
                   Any source<MenuCheck on={!filters.source} />
                 </DropdownMenuItem>
                 {SOURCE_OPTIONS.map((option) => (
-                  <DropdownMenuItem key={option.value} className={ITEM_CLASS} onClick={() => onChange({ ...filters, source: option.value })}>
+                  <DropdownMenuItem key={option.value} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, source: option.value })}>
                     {option.label}<MenuCheck on={filters.source === option.value} />
                   </DropdownMenuItem>
                 ))}
@@ -205,7 +227,7 @@ export function FilterBar({
               <DropdownMenuSubTrigger className={ITEM_CLASS}>Date</DropdownMenuSubTrigger>
               <DropdownMenuSubContent className={SUBMENU_CLASS}>
                 {DATE_OPTIONS.map((option) => (
-                  <DropdownMenuItem key={option.label} className={ITEM_CLASS} onClick={() => onChange({ ...filters, date: option.value })}>
+                  <DropdownMenuItem key={option.label} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, date: option.value })}>
                     {option.label}<MenuCheck on={filters.date === option.value} />
                   </DropdownMenuItem>
                 ))}
@@ -219,7 +241,7 @@ export function FilterBar({
               </DropdownMenuItem>
             )}
             {active > 0 && (
-              <DropdownMenuItem className={`${ITEM_CLASS} mt-1 text-[var(--text-secondary)]`} onClick={() => onChange({ status: "open" })}>
+              <DropdownMenuItem className={`${ITEM_CLASS} mt-1 text-[var(--text-secondary)]`} onClick={() => changeFilters({ status: "open" })}>
                 Clear all filters
               </DropdownMenuItem>
             )}
@@ -230,23 +252,23 @@ export function FilterBar({
 
       {active > 0 && (
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5" aria-label="Active filters">
-          {statusLabel && <ActiveChip label={`Status: ${statusLabel}`} onRemove={() => onChange({ ...filters, status: "open" })} />}
-          {personName && <ActiveChip label={`Person: ${personName}`} onRemove={() => onChange({ ...filters, assignee: undefined })} />}
+          {statusLabel && <ActiveChip label={`Status: ${statusLabel}`} onRemove={() => changeFilters({ ...filters, status: "open" })} />}
+          {personName && <ActiveChip label={`Person: ${personName}`} onRemove={() => changeFilters({ ...filters, assignee: undefined })} />}
           {filters.department && (
             <ActiveChip
               label={`Department: ${filters.department.charAt(0).toUpperCase() + filters.department.slice(1)}`}
-              onRemove={() => onChange({ ...filters, department: undefined })}
+              onRemove={() => changeFilters({ ...filters, department: undefined })}
             />
           )}
-          {sourceLabel && <ActiveChip label={`Source: ${sourceLabel}`} onRemove={() => onChange({ ...filters, source: undefined })} />}
-          {filters.date && dateLabel && <ActiveChip label={`Date: ${dateLabel}`} onRemove={() => onChange({ ...filters, date: undefined })} />}
+          {sourceLabel && <ActiveChip label={`Source: ${sourceLabel}`} onRemove={() => changeFilters({ ...filters, source: undefined })} />}
+          {filters.date && dateLabel && <ActiveChip label={`Date: ${dateLabel}`} onRemove={() => changeFilters({ ...filters, date: undefined })} />}
         </div>
       )}
 
       {mobile && mobileOpen && (
         <TodoFilterSheet
           filters={filters}
-          onChange={onChange}
+          onChange={changeFilters}
           employees={employees}
           departments={departments}
           byName={byName}

@@ -1,8 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react"
+import { act, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { FilterBar } from "../filter-bar"
 
 const originalMatchMedia = window.matchMedia
+let mobileListener: ((event: MediaQueryListEvent) => void) | undefined
 function setMobile(matches: boolean) {
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
@@ -10,7 +11,7 @@ function setMobile(matches: boolean) {
       matches: query === "(max-width: 767px)" ? matches : false,
       media: query,
       onchange: null,
-      addEventListener: vi.fn(),
+      addEventListener: vi.fn((_type: string, listener: (event: MediaQueryListEvent) => void) => { mobileListener = listener }),
       removeEventListener: vi.fn(),
       addListener: vi.fn(),
       removeListener: vi.fn(),
@@ -19,7 +20,10 @@ function setMobile(matches: boolean) {
   })
 }
 
-afterEach(() => Object.defineProperty(window, "matchMedia", { configurable: true, value: originalMatchMedia }))
+afterEach(() => {
+  mobileListener = undefined
+  Object.defineProperty(window, "matchMedia", { configurable: true, value: originalMatchMedia })
+})
 
 describe("Todo progressive filters", () => {
   it("keeps search and one Filter affordance visible, with power filters disclosed on demand", () => {
@@ -73,12 +77,24 @@ describe("Todo progressive filters", () => {
     expect(screen.queryByRole("menu")).toBeNull()
   })
 
+  it("switches to the bottom sheet when a resize crosses the mobile breakpoint", () => {
+    setMobile(false)
+    render(
+      <FilterBar filters={{ status: "open" }} onChange={vi.fn()} employees={[]} departments={[]} byName={new Map()} />,
+    )
+
+    act(() => mobileListener?.({ matches: true } as MediaQueryListEvent))
+    fireEvent.click(screen.getByRole("button", { name: "Filter todos" }))
+    expect(screen.getByRole("dialog", { name: "Filter todos" })).toBeTruthy()
+    expect(screen.queryByRole("menu")).toBeNull()
+  })
+
   it("keeps active filters visible and individually removable", () => {
     setMobile(false)
     const onChange = vi.fn()
     render(
       <FilterBar
-        filters={{ status: "blocked", department: "platform", q: "JIN-142" }}
+        filters={{ status: "blocked", department: "platform", q: "roadmap" }}
         onChange={onChange}
         employees={[]}
         departments={["platform"]}
@@ -89,6 +105,56 @@ describe("Todo progressive filters", () => {
     expect(screen.getByRole("button", { name: "Remove Status: Blocked" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Remove Department: Platform" })).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "Remove Department: Platform" }))
-    expect(onChange).toHaveBeenCalledWith({ status: "blocked", q: "JIN-142", department: undefined })
+    expect(onChange).toHaveBeenCalledWith({ status: "blocked", q: "roadmap", department: undefined })
+  })
+
+  it("treats search as search, not a filter badge", () => {
+    setMobile(false)
+    render(
+      <FilterBar
+        filters={{ status: "open", q: "roadmap" }}
+        onChange={vi.fn()}
+        onSearchChange={vi.fn()}
+        employees={[]}
+        departments={[]}
+        byName={new Map()}
+      />,
+    )
+
+    expect(screen.getByRole("button", { name: "Filter todos" }).textContent).not.toContain("1")
+    expect(screen.queryByLabelText("Active filters")).toBeNull()
+  })
+
+  it("cancels a stale search debounce when history or filters change", () => {
+    vi.useFakeTimers()
+    setMobile(false)
+    const onSearchChange = vi.fn()
+    const { rerender } = render(
+      <FilterBar
+        filters={{ status: "blocked", department: "platform" }}
+        onChange={vi.fn()}
+        onSearchChange={onSearchChange}
+        employees={[]}
+        departments={["platform"]}
+        byName={new Map()}
+      />,
+    )
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search todos" }), { target: { value: "stale" } })
+    rerender(
+      <FilterBar
+        filters={{ status: "open" }}
+        onChange={vi.fn()}
+        onSearchChange={onSearchChange}
+        employees={[]}
+        departments={["platform"]}
+        byName={new Map()}
+      />,
+    )
+    act(() => vi.advanceTimersByTime(300))
+
+    expect(onSearchChange).not.toHaveBeenCalled()
+    expect(screen.getByRole<HTMLInputElement>("searchbox", { name: "Search todos" }).value).toBe("")
+    vi.useRealTimers()
   })
 })
