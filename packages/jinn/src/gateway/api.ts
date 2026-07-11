@@ -333,7 +333,7 @@ export function shouldPersistFinalAssistantMessage(options: {
 }
 
 export function formatEngineErrorAssistantMessage(error: string): string {
-  return `⛔ ${error}`;
+  return `Error: ${error}`;
 }
 
 export interface ApiContext {

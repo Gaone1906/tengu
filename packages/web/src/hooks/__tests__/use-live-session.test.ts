@@ -68,6 +68,56 @@ describe("useLiveSession (read-only)", () => {
     expect(result.current.hasOlderMessages).toBe(true)
   })
 
+  it("does not duplicate a persisted canonical terminal error during hydration", async () => {
+    getSession.mockResolvedValue({
+      status: "error",
+      lastError: "operation failed",
+      messages: [
+        { id: "u1", role: "user", content: "perform the task", timestamp: 1 },
+        { id: "e1", role: "assistant", content: "Used Read", timestamp: 2, toolCall: "Read" },
+        { id: "a1", role: "assistant", content: "Error: operation failed", timestamp: 3 },
+      ],
+    })
+    const { subscribe } = makeBus()
+    const { result } = renderHook(() =>
+      useLiveSession("s1", { subscribe, readOnly: true }),
+    )
+
+    await act(async () => { await Promise.resolve() })
+
+    expect(result.current.messages.map((message) => message.content)).toEqual([
+      "perform the task",
+      "Used Read",
+      "Error: operation failed",
+    ])
+    expect(result.current.messages.filter((message) => message.content === "Error: operation failed")).toHaveLength(1)
+  })
+
+  it("does not append a canonical error beside a persisted legacy terminal error", async () => {
+    getSession.mockResolvedValue({
+      status: "error",
+      lastError: "operation failed",
+      messages: [
+        { id: "u1", role: "user", content: "perform the task", timestamp: 1 },
+        { id: "e1", role: "assistant", content: "Used Read", timestamp: 2, toolCall: "Read" },
+        { id: "a1", role: "assistant", content: "⛔ operation failed", timestamp: 3 },
+      ],
+    })
+    const { subscribe } = makeBus()
+    const { result } = renderHook(() =>
+      useLiveSession("s1", { subscribe, readOnly: true }),
+    )
+
+    await act(async () => { await Promise.resolve() })
+
+    expect(result.current.messages.map((message) => message.content)).toEqual([
+      "perform the task",
+      "Used Read",
+      "⛔ operation failed",
+    ])
+    expect(result.current.messages.some((message) => message.content === "Error: operation failed")).toBe(false)
+  })
+
   it("prepends older pages and dedupes the cursor message", async () => {
     getSession.mockResolvedValue({
       status: "idle",

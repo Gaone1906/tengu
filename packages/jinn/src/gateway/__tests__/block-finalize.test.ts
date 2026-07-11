@@ -51,7 +51,7 @@ describe("block finalization", () => {
 
   it("formats engine errors as an assistant-visible message", () => {
     expect(formatEngineErrorAssistantMessage("Hermes turn ended with no assistant text"))
-      .toBe("⛔ Hermes turn ended with no assistant text");
+      .toBe("Error: Hermes turn ended with no assistant text");
   });
 
   it("drops malformed block deltas before scoping ids", () => {

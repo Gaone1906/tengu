@@ -244,7 +244,7 @@ describe("completed streamed-turn settlement", () => {
       "perform the task",
       "Checking the failing operation.",
       "Used Read",
-      "⛔ operation failed",
+      "Error: operation failed",
     ]);
   });
 

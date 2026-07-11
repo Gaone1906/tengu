@@ -283,6 +283,16 @@ function hasFinalAssistantAfterLastUser(messages: Message[]): boolean {
   )
 }
 
+function formatTerminalAssistantError(error: unknown): string {
+  return `Error: ${String(error)}`
+}
+
+function isPersistedTerminalAssistantError(message: Message | undefined, error: unknown): boolean {
+  if (!message || message.role !== 'assistant') return false
+  const detail = String(error)
+  return message.content === formatTerminalAssistantError(detail) || message.content === `⛔ ${detail}`
+}
+
 function readHasOlderMessages(payload: Record<string, unknown>): boolean {
   const page = payload.messagesPage
   return Boolean(page && typeof page === 'object' && !Array.isArray(page) && (page as { hasOlder?: unknown }).hasOlder === true)
@@ -704,7 +714,7 @@ export function useLiveSession(
             {
               id: finalResponseId,
               role: 'assistant' as const,
-              content: `Error: ${p.error}`,
+              content: formatTerminalAssistantError(p.error),
               timestamp: Date.now(),
             },
           ])
@@ -760,8 +770,8 @@ export function useLiveSession(
       const isPagedHistory = Boolean(session.messagesPage && typeof session.messagesPage === 'object')
       if (session.status === 'error' && session.lastError) {
         const lastMessage = backendMessages[backendMessages.length - 1]
-        const errorText = `Error: ${String(session.lastError)}`
-        if (!lastMessage || lastMessage.role !== 'assistant' || lastMessage.content !== errorText) {
+        const errorText = formatTerminalAssistantError(session.lastError)
+        if (!isPersistedTerminalAssistantError(lastMessage, session.lastError)) {
           backendMessages.push({
             id: crypto.randomUUID(),
             role: 'assistant',
