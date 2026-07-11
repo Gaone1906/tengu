@@ -75,6 +75,9 @@ import {
   getQueueItems,
   cancelAllPendingQueueItems,
   listAllPendingQueueItems,
+  getCallbackDelivery,
+  getCallbackDeliveryByQueueItemId,
+  acceptCallbackDelivery,
   getFile,
   getSessionBySessionKey,
   initDb,
@@ -443,7 +446,10 @@ export function resumePendingWebQueueItems(context: ApiContext): void {
       ceded++;
       continue;
     }
-    if (session.source !== "web") continue;
+    // Ordinary non-web queue ownership remains connector-specific. Callback
+    // receipts are the exception: acceptance already committed this internal
+    // turn, so startup replay must finish it regardless of the parent's source.
+    if (session.source !== "web" && !getCallbackDeliveryByQueueItemId(item.id)) continue;
     session = maybeRevertEngineOverride(session);
 
     const config = context.getConfig();
@@ -4733,6 +4739,36 @@ export async function handleApiRequest(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
 
+      // Child callbacks claim a durable outbox identity before entering this
+      // route. The receipt is the source of truth; request payload fields are
+      // ignored so an HTTP retry cannot mutate an already claimed delivery.
+      const callbackDeliveryId = typeof body.callbackDeliveryId === "string"
+        ? stripControlChars(body.callbackDeliveryId).trim()
+        : "";
+      const callbackDelivery = callbackDeliveryId ? getCallbackDelivery(callbackDeliveryId) : undefined;
+      if (callbackDeliveryId && !callbackDelivery) return notFound(res);
+      if (callbackDelivery && callbackDelivery.parentSessionId !== session.id) {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "callback parent mismatch" }));
+        return;
+      }
+      if (callbackDelivery?.status === "accepted") {
+        return json(res, {
+          status: "duplicate",
+          sessionId: session.id,
+          callbackDeliveryId: callbackDelivery.id,
+          messageId: callbackDelivery.messageId,
+          queueItemId: callbackDelivery.queueItemId,
+        });
+      }
+      if (callbackDelivery) {
+        body.role = "notification";
+        body.message = callbackDelivery.payload.message;
+        body.displayMessage = callbackDelivery.payload.displayMessage;
+        body.meta = callbackDelivery.payload.meta;
+        body.block = callbackDelivery.payload.block;
+      }
+
       // GRS-017a — agent-initiated (lateral / child follow-up) sends carry the
       // caller's session identity in x-jinn-caller-session (the jinn MCP server).
       // The substrate guards live HERE, route-side, so curl is equally guarded:
@@ -4906,18 +4942,35 @@ export async function handleApiRequest(
       // the full engine-facing prompt before the display-only message below; the
       // internal flag keeps it out of operator queue controls while boot replay
       // still sees it. User messages retain their existing enqueue point below.
-      let queueItemId = isNotification
-        ? enqueueQueueItem(session.id, sessionKey, prompt, { internal: true })
-        : undefined;
-      const incomingMessageId = insertMessage(
-        session.id,
-        messageRole,
-        isNotification ? displayMessage : prompt,
-        userMedia.length > 0 ? userMedia : undefined,
-        undefined,
-        undefined,
-        notificationMeta,
-      );
+      let queueItemId: string | undefined;
+      let incomingMessageId: string;
+      if (callbackDelivery) {
+        const acceptance = acceptCallbackDelivery(callbackDelivery.id, session.id, sessionKey);
+        if (!acceptance.accepted) {
+          return json(res, {
+            status: "duplicate",
+            sessionId: session.id,
+            callbackDeliveryId: acceptance.delivery.id,
+            messageId: acceptance.delivery.messageId,
+            queueItemId: acceptance.delivery.queueItemId,
+          });
+        }
+        queueItemId = acceptance.delivery.queueItemId!;
+        incomingMessageId = acceptance.delivery.messageId!;
+      } else {
+        queueItemId = isNotification
+          ? enqueueQueueItem(session.id, sessionKey, prompt, { internal: true })
+          : undefined;
+        incomingMessageId = insertMessage(
+          session.id,
+          messageRole,
+          isNotification ? displayMessage : prompt,
+          userMedia.length > 0 ? userMedia : undefined,
+          undefined,
+          undefined,
+          notificationMeta,
+        );
+      }
       if (parentFollowUp) {
         const preview = clipSessionMessage(parentFollowUp.message, 220);
         const employee = session.employee || session.engine;
@@ -4955,7 +5008,9 @@ export async function handleApiRequest(
         });
       }
       if (notificationBlock) {
-        applyBlockEnvelope(session.id, notificationBlock);
+        // Callback acceptance persisted this block with its queue/message in one
+        // transaction. Ordinary notifications still persist it here.
+        if (!callbackDelivery) applyBlockEnvelope(session.id, notificationBlock);
         context.emit("session:delta", {
           sessionId: session.id,
           type: "block",
@@ -5025,7 +5080,15 @@ export async function handleApiRequest(
 
       dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId, attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined });
 
-      return json(res, { status: "queued", sessionId: session.id });
+      return json(res, {
+        status: "queued",
+        sessionId: session.id,
+        ...(callbackDelivery ? {
+          callbackDeliveryId: callbackDelivery.id,
+          messageId: incomingMessageId,
+          queueItemId,
+        } : {}),
+      });
     }
 
     // POST /api/sessions/:id/attachments — running agent pushes a file/image into the chat.

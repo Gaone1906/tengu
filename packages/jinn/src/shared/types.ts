@@ -261,6 +261,9 @@ export interface Session {
    * writers compare this token so a stale engine result cannot overwrite a
    * stop/reset or a newer turn. */
   attemptToken?: string | null;
+  /** Monotonic terminal-receipt version within the current attempt generation.
+   * Reset to zero on dispatch and incremented for every accepted terminal state. */
+  attemptTerminalVersion?: number;
   effortLevel: string | null;
   totalCost: number;
   totalTurns: number;
@@ -275,6 +278,32 @@ export interface Session {
   createdAt: string;
   lastActivity: string;
   lastError: string | null;
+}
+
+export interface CallbackDeliveryIdentity {
+  parentSessionId: string;
+  childSessionId: string;
+  attemptToken: string;
+  terminalOutcome: string;
+  terminalVersion: number;
+  callbackKind: string;
+}
+
+export interface CallbackDeliveryPayload {
+  message: string;
+  displayMessage: string;
+  meta?: JsonObject;
+  block?: ChatBlockEnvelope;
+}
+
+export interface CallbackDelivery extends CallbackDeliveryIdentity {
+  id: string;
+  payload: CallbackDeliveryPayload;
+  status: "pending" | "accepted";
+  messageId: string | null;
+  queueItemId: string | null;
+  createdAt: string;
+  acceptedAt: string | null;
 }
 
 export interface CronJob {

@@ -20,7 +20,7 @@ import {
 import { configureLogger, logger } from "../shared/logger.js";
 import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, RESTART_ACK_META_KEY } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
-import { recoverOrphanedDelegationCompletionClaims } from "../sessions/callbacks.js";
+import { recoverOrphanedDelegationCompletionClaims, recoverPendingCallbackDeliveries } from "../sessions/callbacks.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
 import { enforcePtyIdleCap, PtyLifecycleManager, type PtyLifecycleOpts } from "../engines/pty-lifecycle.js";
 import { CodexEngine } from "../engines/codex.js";
@@ -1336,6 +1336,13 @@ export async function startGateway(
   // resolved builtin-jinn server as normal web/connector turns so their rollout
   // is written under the per-session CODEX_HOME that later resumes will use.
   resumePendingWebQueueItems(apiContext);
+
+  // Callback outbox rows are claimed before their parent POST. Re-submit only
+  // pending claims now that the listener is live; transactional route acceptance
+  // makes response-loss and concurrent recovery retries harmless.
+  void recoverPendingCallbackDeliveries().then((count) => {
+    if (count > 0) logger.info(`Re-submitted ${count} pending callback delivery claim(s) after restart`);
+  });
 
   // Any claim with no replayable internal queue intent died in the narrow
   // claim→POST crash window. The server and MCP gate are live now, so surface

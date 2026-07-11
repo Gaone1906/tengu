@@ -1,6 +1,10 @@
 import {
   getSession,
+  getCallbackDelivery,
+  claimCallbackDelivery,
+  ensureCallbackAttemptToken,
   listDelegationCompletionNudgedSessions,
+  listPendingCallbackDeliveries,
   listSessionsBySource,
   markDelegationCompletionSurfaced,
 } from "./registry.js";
@@ -12,6 +16,7 @@ import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
 import { hydrateAllAttachments, talkSessionsAttachedTo } from "../talk/attachments.js";
 import type { ChatBlockEnvelope, JsonObject } from "../shared/types.js";
 import { enforceDelegationCompletionContract } from "./delegation-completion-contract.js";
+import type { CallbackDeliveryPayload } from "../shared/types.js";
 
 export interface ManagerVisibilityDetails {
   manager: string;
@@ -97,11 +102,33 @@ export async function recoverOrphanedDelegationCompletionClaims(): Promise<numbe
         error:
           "Delegation completion recovery: a restart occurred after the automatic continuation was claimed, " +
           "so completion could not be confirmed. The child was not nudged again; parent review is required.",
-      }, { skipCompletionContract: true });
+      }, {
+        skipCompletionContract: true,
+        callbackKind: "delegation-completion-recovery",
+        terminalOutcome: child.attemptOutcome ?? "interrupted",
+      });
       if (markDelegationCompletionSurfaced(child.id, child.workItemId)) recovered++;
     } catch (error) {
       logger.warn(
         `[delegation-contract] restart recovery could not surface child ${child.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return recovered;
+}
+
+/** Replay callback intents claimed before their parent route accepted the
+ * queue/message transaction. Accepted rows are absent from this scan, so boot
+ * recovery can never emit or wake an already delivered callback again. */
+export async function recoverPendingCallbackDeliveries(): Promise<number> {
+  let recovered = 0;
+  for (const delivery of listPendingCallbackDeliveries()) {
+    try {
+      await _postClaimedCallback(delivery.parentSessionId, delivery.id);
+      recovered++;
+    } catch (error) {
+      logger.warn(
+        `[callbacks] Pending delivery ${delivery.id} recovery failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -174,12 +201,27 @@ async function _notifyAttached(
   if (talkIds.length === 0) return;
 
   const { message, displayMessage } = buildTalkWake(talkLabel(completedSession), result);
+  const terminalOutcome = completedSession.attemptOutcome ?? (result.error ? "failed" : "succeeded");
+  const terminalVersion = Math.max(1, completedSession.attemptTerminalVersion ?? 0);
+  const attemptToken = completedSession.attemptToken
+    ?? ensureCallbackAttemptToken(completedSession.id, terminalOutcome, terminalVersion);
+  if (!attemptToken) throw new Error(`child ${completedSession.id} has no immutable callback attempt token`);
   for (const talkId of talkIds) {
     if (talkId === completedSession.parentSessionId) continue; // owned child — already notified
     const talk = getSession(talkId);
     if (!talk || talk.source !== "talk") continue;
     if (talk.status === "error") continue;
-    await _sendRaw(talkId, message, displayMessage);
+    const { delivery } = claimCallbackDelivery({
+      parentSessionId: talkId,
+      childSessionId: completedSession.id,
+      attemptToken,
+      terminalOutcome,
+      terminalVersion,
+      callbackKind: "talk-attachment",
+      payload: { message, displayMessage },
+    });
+    if (delivery.status === "accepted") continue;
+    await _sendRaw(talkId, message, displayMessage, { callbackDeliveryId: delivery.id });
   }
 }
 
@@ -196,6 +238,10 @@ export function notifyRateLimited(
   _sendNotification(childSession, {
     error: null,
     result: `⏳ Session is rate-limited and will auto-resume${estimatedResumeTime ? ` around ${estimatedResumeTime}` : ' when the limit resets'}. No action needed.`,
+  }, {
+    callbackKind: "rate-limited",
+    terminalOutcome: "rate-limited",
+    terminalVersion: Math.max(1, childSession.attemptTerminalVersion ?? 0),
   }).catch((err) => {
     logger.warn(`[callbacks] Failed to send rate-limit notification: ${err instanceof Error ? err.message : String(err)}`);
   });
@@ -231,7 +277,13 @@ export function notifyRateLimitResumed(
 async function _sendNotification(
   childSession: Session,
   result: { result?: string | null; error?: string | null; cost?: number; durationMs?: number },
-  options?: { alwaysNotify?: boolean; skipCompletionContract?: boolean },
+  options?: {
+    alwaysNotify?: boolean;
+    skipCompletionContract?: boolean;
+    callbackKind?: string;
+    terminalOutcome?: string;
+    terminalVersion?: number;
+  },
 ): Promise<void> {
   const parent = getSession(childSession.parentSessionId!);
   if (!parent) return; // Parent gone or expired
@@ -247,7 +299,8 @@ async function _sendNotification(
   const contract = options?.skipCompletionContract
     ? "pass"
     : await enforceDelegationCompletionContract(childSession, result, {
-        postFollowUp: (sessionId, message, displayMessage) => _sendRaw(sessionId, message, displayMessage),
+        postFollowUp: (sessionId, message, displayMessage) =>
+          _sendCompletionContractNudge(childSession, sessionId, message, displayMessage),
       });
   if (contract === "nudged" || contract === "suppress") return;
   if (contract === "surface") {
@@ -309,10 +362,71 @@ async function _sendNotification(
     };
   }
 
+  const terminalOutcome = options?.terminalOutcome
+    ?? childSession.attemptOutcome
+    ?? (result.error ? "failed" : "succeeded");
+  const terminalVersion = options?.terminalVersion
+    ?? Math.max(1, childSession.attemptTerminalVersion ?? 0);
+  const attemptToken = childSession.attemptToken
+    ?? ensureCallbackAttemptToken(childSession.id, terminalOutcome, terminalVersion);
+  if (!attemptToken) {
+    throw new Error(`child ${childSession.id} has no immutable callback attempt token`);
+  }
+  const payload: CallbackDeliveryPayload = {
+    message,
+    displayMessage,
+    ...(notificationMeta ? { meta: notificationMeta } : {}),
+    ...(notificationBlock ? { block: notificationBlock } : {}),
+  };
+  const { delivery } = claimCallbackDelivery({
+    parentSessionId: childSession.parentSessionId!,
+    childSessionId: childSession.id,
+    attemptToken,
+    terminalOutcome,
+    terminalVersion,
+    callbackKind: options?.callbackKind ?? "parent-completion",
+    payload,
+  });
+  if (delivery.status === "accepted") return;
+
   await _sendRaw(childSession.parentSessionId!, message, displayMessage, {
     meta: notificationMeta,
     block: notificationBlock,
+    callbackDeliveryId: delivery.id,
   });
+}
+
+async function _sendCompletionContractNudge(
+  childSession: Session,
+  targetSessionId: string,
+  message: string,
+  displayMessage: string,
+): Promise<void> {
+  const terminalOutcome = childSession.attemptOutcome ?? "idle-progress";
+  const terminalVersion = Math.max(1, childSession.attemptTerminalVersion ?? 0);
+  const attemptToken = childSession.attemptToken
+    ?? ensureCallbackAttemptToken(childSession.id, terminalOutcome, terminalVersion);
+  if (!attemptToken) throw new Error(`child ${childSession.id} has no immutable callback attempt token`);
+  const { delivery } = claimCallbackDelivery({
+    parentSessionId: targetSessionId,
+    childSessionId: childSession.id,
+    attemptToken,
+    terminalOutcome,
+    terminalVersion,
+    callbackKind: "delegation-completion-nudge",
+    payload: { message, displayMessage },
+  });
+  if (delivery.status === "accepted") return;
+  try {
+    await _sendRaw(targetSessionId, message, displayMessage, { callbackDeliveryId: delivery.id });
+  } catch (error) {
+    // The local route may have committed acceptance before the HTTP response
+    // was lost. In that case the nudge succeeded: retain the completion guard
+    // and suppress the original parent callback. A genuinely pending receipt
+    // still throws so startup/retry can surface it deterministically.
+    if (getCallbackDelivery(delivery.id)?.status === "accepted") return;
+    throw error;
+  }
 }
 
 function childNotificationMeta(
@@ -388,7 +502,7 @@ async function _sendRaw(
   parentSessionId: string,
   message: string,
   displayMessage?: string,
-  structured?: { meta?: JsonObject; block?: ChatBlockEnvelope },
+  structured?: { meta?: JsonObject; block?: ChatBlockEnvelope; callbackDeliveryId?: string },
 ): Promise<void> {
   const gateway = internalGatewayConnection();
 
@@ -401,7 +515,18 @@ async function _sendRaw(
       ...(displayMessage ? { displayMessage } : {}),
       ...(structured?.meta ? { meta: structured.meta } : {}),
       ...(structured?.block ? { block: structured.block } : {}),
+      ...(structured?.callbackDeliveryId ? { callbackDeliveryId: structured.callbackDeliveryId } : {}),
     }),
+  });
+  if (!response.ok) throw new Error(`parent notification failed (${response.status})`);
+}
+
+async function _postClaimedCallback(parentSessionId: string, callbackDeliveryId: string): Promise<void> {
+  const gateway = internalGatewayConnection();
+  const response = await fetch(`${gateway.baseUrl}/api/sessions/${parentSessionId}/message`, {
+    method: "POST",
+    headers: internalGatewayHeaders(gateway),
+    body: JSON.stringify({ callbackDeliveryId }),
   });
   if (!response.ok) throw new Error(`parent notification failed (${response.status})`);
 }

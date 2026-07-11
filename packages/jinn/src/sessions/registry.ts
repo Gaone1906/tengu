@@ -11,7 +11,7 @@ import {
   WORK_ITEMS_INDEX_DDL,
   WORK_ITEM_EVENTS_DDL,
 } from '../work-items/migrate.js';
-import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome, WorkflowSessionProvenance } from '../shared/types.js';
+import type { CallbackDelivery, CallbackDeliveryIdentity, CallbackDeliveryPayload, ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome, WorkflowSessionProvenance } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
 import { ptySnapshotStore } from '../engines/pty-snapshot.js';
 import { migrateActivitySchema } from '../activity/migrate.js';
@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   status TEXT DEFAULT 'idle',
   attempt_outcome TEXT,
   attempt_token TEXT,
+  attempt_terminal_version INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   last_activity TEXT NOT NULL,
   last_error TEXT
@@ -143,6 +144,40 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT
 )
 `;
+
+const CREATE_CALLBACK_DELIVERIES_TABLE = `
+CREATE TABLE IF NOT EXISTS callback_deliveries (
+  id TEXT PRIMARY KEY,
+  parent_session_id TEXT NOT NULL,
+  child_session_id TEXT NOT NULL,
+  attempt_token TEXT NOT NULL,
+  terminal_outcome TEXT NOT NULL,
+  terminal_version INTEGER NOT NULL,
+  callback_kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted')),
+  message_id TEXT,
+  queue_item_id TEXT,
+  created_at TEXT NOT NULL,
+  accepted_at TEXT
+)
+`;
+
+const CALLBACK_DELIVERY_REQUIRED_COLUMNS = [
+  'id',
+  'parent_session_id',
+  'child_session_id',
+  'attempt_token',
+  'terminal_outcome',
+  'terminal_version',
+  'callback_kind',
+  'payload',
+  'status',
+  'message_id',
+  'queue_item_id',
+  'created_at',
+  'accepted_at',
+] as const;
 
 // Work-item primitive (GRS-002, elevated to the Todos model by GRS-021a). The
 // durable unit of intended work; sessions are execution attempts against it
@@ -333,6 +368,7 @@ function rowToSession(row: Record<string, unknown>): Session {
     status: row.status as Session['status'],
     attemptOutcome: (row.attempt_outcome as SessionAttemptOutcome) ?? null,
     attemptToken: (row.attempt_token as string) ?? null,
+    attemptTerminalVersion: (row.attempt_terminal_version as number) ?? 0,
     totalCost: (row.total_cost as number) ?? 0,
     totalTurns: (row.total_turns as number) ?? 0,
     lastContextTokens: (row.last_context_tokens as number) ?? null,
@@ -400,6 +436,7 @@ export function initDb(): Database.Database {
       ON queue_items (session_key, status, position);
   `);
   migrateQueueItemsSchema(db);
+  migrateCallbackDeliveriesSchema(db);
   db.exec(CREATE_FILES_TABLE);
 
   return db;
@@ -446,6 +483,36 @@ export function migrateQueueItemsSchema(database: Database.Database): void {
   if (!columns.some((column) => column.name === 'internal')) {
     database.exec('ALTER TABLE queue_items ADD COLUMN internal INTEGER NOT NULL DEFAULT 0');
   }
+}
+
+/** Install the callback outbox atomically. A malformed pre-existing table is
+ * never silently indexed: validation throws inside the transaction so any DDL
+ * from this migration is rolled back as one unit. */
+export function migrateCallbackDeliveriesSchema(database: Database.Database): void {
+  const migrate = database.transaction(() => {
+    database.exec(CREATE_CALLBACK_DELIVERIES_TABLE);
+    const columns = database.prepare('PRAGMA table_info(callback_deliveries)').all() as Array<{ name: string }>;
+    const names = new Set(columns.map((column) => column.name));
+    const missing = CALLBACK_DELIVERY_REQUIRED_COLUMNS.filter((column) => !names.has(column));
+    if (missing.length > 0) {
+      throw new Error(`Incompatible callback_deliveries schema: missing ${missing.join(', ')}`);
+    }
+    database.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_callback_delivery_identity
+        ON callback_deliveries (
+          parent_session_id,
+          child_session_id,
+          attempt_token,
+          terminal_outcome,
+          terminal_version,
+          callback_kind
+        );
+      CREATE INDEX IF NOT EXISTS idx_callback_deliveries_pending
+        ON callback_deliveries (status, created_at)
+        WHERE status = 'pending';
+    `);
+  });
+  migrate();
 }
 
 function getMeta(database: Database.Database, key: string): string | null {
@@ -811,6 +878,7 @@ export function migrateSessionsSchema(database: Database.Database): void {
     ['attempt_outcome', 'TEXT'],
     // Per-dispatch generation used for compare-and-set terminal writes.
     ['attempt_token', 'TEXT'],
+    ['attempt_terminal_version', 'INTEGER NOT NULL', '0'],
   ];
 
   for (const [name, type, defaultVal] of missingColumns) {
@@ -997,6 +1065,7 @@ export interface UpdateSessionFields {
   status?: Session['status'];
   attemptOutcome?: SessionAttemptOutcome | null;
   attemptToken?: string | null;
+  attemptTerminalVersion?: number;
   model?: string | null;
   effortLevel?: string | null;
   lastContextTokens?: number | null;
@@ -1049,6 +1118,15 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
   if (updates.attemptToken !== undefined) {
     sets.push('attempt_token = ?');
     values.push(updates.attemptToken);
+  }
+  if (updates.attemptTerminalVersion !== undefined) {
+    sets.push('attempt_terminal_version = ?');
+    values.push(updates.attemptTerminalVersion);
+  } else if (
+    (updates.attemptOutcome !== undefined && updates.attemptOutcome !== null)
+    || (updates.attemptOutcome === undefined && (updates.status === 'error' || updates.status === 'interrupted'))
+  ) {
+    sets.push('attempt_terminal_version = attempt_terminal_version + 1');
   }
   if (updates.model !== undefined) {
     sets.push('model = ?');
@@ -1192,6 +1270,7 @@ export function beginSessionAttempt(id: string, updates: UpdateSessionFields = {
     status: 'running',
     attemptOutcome: null,
     attemptToken: uuidv4(),
+    attemptTerminalVersion: 0,
   });
 }
 
@@ -1226,6 +1305,48 @@ export function completeSessionAttempt(
   updates: UpdateSessionFields,
 ): Session | undefined {
   return updateSessionForAttempt(id, attemptToken, updates, ['running']);
+}
+
+/** Upgrade a legacy terminal row that predates attempt tokens. The outcome and
+ * terminal version are compare predicates, so a stale callback can never borrow
+ * the token of a newer resume generation. */
+export function ensureCallbackAttemptToken(
+  id: string,
+  expectedOutcome: string,
+  expectedTerminalVersion: number,
+): string | undefined {
+  const database = initDb();
+  const ensure = database.transaction(() => {
+    const current = database.prepare(`
+      SELECT attempt_token, attempt_outcome, attempt_terminal_version
+      FROM sessions
+      WHERE id = ?
+    `).get(id) as {
+      attempt_token: string | null;
+      attempt_outcome: string | null;
+      attempt_terminal_version: number;
+    } | undefined;
+    if (!current || current.attempt_outcome !== expectedOutcome) return undefined;
+    const upgradesLegacyVersion =
+      !current.attempt_token
+      && current.attempt_terminal_version === 0
+      && expectedTerminalVersion === 1;
+    if (current.attempt_terminal_version !== expectedTerminalVersion && !upgradesLegacyVersion) return undefined;
+    if (current.attempt_token) return current.attempt_token;
+    const token = uuidv4();
+    const result = database.prepare(`
+      UPDATE sessions
+      SET attempt_token = ?, attempt_terminal_version = ?
+      WHERE id = ?
+        AND attempt_token IS NULL
+        AND attempt_outcome = ?
+        AND attempt_terminal_version = ?
+    `).run(token, expectedTerminalVersion, id, expectedOutcome, current.attempt_terminal_version);
+    if (result.changes === 1) return token;
+    const winner = database.prepare('SELECT attempt_token FROM sessions WHERE id = ?').get(id) as { attempt_token: string | null } | undefined;
+    return winner?.attempt_token ?? undefined;
+  });
+  return ensure();
 }
 
 export function getEngineSessionRef(session: Session, engine = session.engine): EngineSessionRef {
@@ -1645,7 +1766,7 @@ export function recoverStaleSessions(): number {
   const db = initDb();
   const now = new Date().toISOString();
   const result = db.prepare(
-    "UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted', last_activity = ?, last_error = 'Interrupted: gateway restarted while session was running' WHERE status = 'running'",
+    "UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted', attempt_terminal_version = attempt_terminal_version + 1, last_activity = ?, last_error = 'Interrupted: gateway restarted while session was running' WHERE status = 'running'",
   ).run(now);
   return result.changes;
 }
@@ -1854,6 +1975,7 @@ export function deleteSession(id: string): boolean {
   const txn = db.transaction(() => {
     const session = db.prepare('SELECT work_item_id FROM sessions WHERE id = ?').get(id) as { work_item_id: string | null } | undefined;
     if (!session || session.work_item_id) return false;
+    db.prepare('DELETE FROM callback_deliveries WHERE parent_session_id = ?').run(id);
     db.prepare('DELETE FROM messages WHERE session_id = ?').run(id);
     db.prepare('DELETE FROM queue_items WHERE session_id = ?').run(id);
     return db.prepare('DELETE FROM sessions WHERE id = ? AND work_item_id IS NULL').run(id).changes > 0;
@@ -1873,6 +1995,7 @@ export function deleteSessions(ids: string[]): number {
     ).all(...ids) as Array<{ id: string }>).map((row) => row.id);
     if (deletable.length === 0) return { changes: 0, deletedIds: [] };
     const placeholders = deletable.map(() => '?').join(',');
+    db.prepare(`DELETE FROM callback_deliveries WHERE parent_session_id IN (${placeholders})`).run(...deletable);
     db.prepare(`DELETE FROM messages WHERE session_id IN (${placeholders})`).run(...deletable);
     db.prepare(`DELETE FROM queue_items WHERE session_id IN (${placeholders})`).run(...deletable);
     const result = db.prepare(`DELETE FROM sessions WHERE id IN (${placeholders}) AND work_item_id IS NULL`).run(...deletable);
@@ -2359,6 +2482,207 @@ export function settlePartialMessages(sessionId: string, preserveMessageIds: Rea
 export function clearAllPartialMessages(): number {
   const db = initDb();
   return db.prepare('DELETE FROM messages WHERE partial = 1').run().changes;
+}
+
+interface CallbackDeliveryRow {
+  id: string;
+  parentSessionId: string;
+  childSessionId: string;
+  attemptToken: string;
+  terminalOutcome: string;
+  terminalVersion: number;
+  callbackKind: string;
+  payload: string;
+  status: CallbackDelivery['status'];
+  messageId: string | null;
+  queueItemId: string | null;
+  createdAt: string;
+  acceptedAt: string | null;
+}
+
+const CALLBACK_DELIVERY_SELECT = `
+  SELECT
+    id,
+    parent_session_id AS parentSessionId,
+    child_session_id AS childSessionId,
+    attempt_token AS attemptToken,
+    terminal_outcome AS terminalOutcome,
+    terminal_version AS terminalVersion,
+    callback_kind AS callbackKind,
+    payload,
+    status,
+    message_id AS messageId,
+    queue_item_id AS queueItemId,
+    created_at AS createdAt,
+    accepted_at AS acceptedAt
+  FROM callback_deliveries
+`;
+
+function callbackDeliveryFromRow(row: CallbackDeliveryRow): CallbackDelivery {
+  let payload: CallbackDeliveryPayload;
+  try {
+    payload = JSON.parse(row.payload) as CallbackDeliveryPayload;
+  } catch {
+    throw new Error(`Callback delivery ${row.id} has invalid payload JSON`);
+  }
+  if (
+    !payload
+    || typeof payload !== 'object'
+    || typeof payload.message !== 'string'
+    || typeof payload.displayMessage !== 'string'
+  ) {
+    throw new Error(`Callback delivery ${row.id} has an invalid payload`);
+  }
+  return { ...row, payload };
+}
+
+function validateCallbackDeliveryIdentity(identity: CallbackDeliveryIdentity): void {
+  for (const [name, value] of Object.entries({
+    parentSessionId: identity.parentSessionId,
+    childSessionId: identity.childSessionId,
+    attemptToken: identity.attemptToken,
+    terminalOutcome: identity.terminalOutcome,
+    callbackKind: identity.callbackKind,
+  })) {
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} is required for callback delivery`);
+  }
+  if (!Number.isInteger(identity.terminalVersion) || identity.terminalVersion < 1) {
+    throw new Error('terminalVersion must be a positive integer for callback delivery');
+  }
+}
+
+export function getCallbackDelivery(id: string): CallbackDelivery | undefined {
+  const row = initDb().prepare(`${CALLBACK_DELIVERY_SELECT} WHERE id = ?`).get(id) as CallbackDeliveryRow | undefined;
+  return row ? callbackDeliveryFromRow(row) : undefined;
+}
+
+export function getCallbackDeliveryByQueueItemId(queueItemId: string): CallbackDelivery | undefined {
+  const row = initDb()
+    .prepare(`${CALLBACK_DELIVERY_SELECT} WHERE queue_item_id = ?`)
+    .get(queueItemId) as CallbackDeliveryRow | undefined;
+  return row ? callbackDeliveryFromRow(row) : undefined;
+}
+
+export function listPendingCallbackDeliveries(): CallbackDelivery[] {
+  const rows = initDb()
+    .prepare(`${CALLBACK_DELIVERY_SELECT} WHERE status = 'pending' ORDER BY created_at ASC, id ASC`)
+    .all() as CallbackDeliveryRow[];
+  return rows.map(callbackDeliveryFromRow);
+}
+
+/** Persist the callback intent before any HTTP enqueue/send. The composite
+ * unique index is the concurrency arbiter; losers reuse the winning outbox id. */
+export function claimCallbackDelivery(
+  input: CallbackDeliveryIdentity & { payload: CallbackDeliveryPayload },
+): { delivery: CallbackDelivery; claimed: boolean } {
+  validateCallbackDeliveryIdentity(input);
+  if (typeof input.payload.message !== 'string' || typeof input.payload.displayMessage !== 'string') {
+    throw new Error('callback delivery payload requires message and displayMessage');
+  }
+  const database = initDb();
+  const id = randomUUID();
+  const createdAt = new Date().toISOString();
+  const result = database.prepare(`
+    INSERT INTO callback_deliveries (
+      id,
+      parent_session_id,
+      child_session_id,
+      attempt_token,
+      terminal_outcome,
+      terminal_version,
+      callback_kind,
+      payload,
+      status,
+      created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+    ON CONFLICT (
+      parent_session_id,
+      child_session_id,
+      attempt_token,
+      terminal_outcome,
+      terminal_version,
+      callback_kind
+    ) DO NOTHING
+  `).run(
+    id,
+    input.parentSessionId,
+    input.childSessionId,
+    input.attemptToken,
+    input.terminalOutcome,
+    input.terminalVersion,
+    input.callbackKind,
+    JSON.stringify(input.payload),
+    createdAt,
+  );
+  const delivery = result.changes === 1
+    ? getCallbackDelivery(id)
+    : callbackDeliveryFromRow(database.prepare(`
+        ${CALLBACK_DELIVERY_SELECT}
+        WHERE parent_session_id = ?
+          AND child_session_id = ?
+          AND attempt_token = ?
+          AND terminal_outcome = ?
+          AND terminal_version = ?
+          AND callback_kind = ?
+      `).get(
+        input.parentSessionId,
+        input.childSessionId,
+        input.attemptToken,
+        input.terminalOutcome,
+        input.terminalVersion,
+        input.callbackKind,
+      ) as CallbackDeliveryRow);
+  if (!delivery) throw new Error('Callback delivery claim was not persisted');
+  return { delivery, claimed: result.changes === 1 };
+}
+
+/** Atomically turn one pending outbox row into the parent notification message
+ * and its restart-safe internal queue intent. Accepted retries return the same
+ * ids without inserting, emitting, or waking anything again. */
+export function acceptCallbackDelivery(
+  deliveryId: string,
+  parentSessionId: string,
+  sessionKey: string,
+): { delivery: CallbackDelivery; accepted: boolean } {
+  const database = initDb();
+  const accept = database.transaction(() => {
+    const row = database.prepare(`${CALLBACK_DELIVERY_SELECT} WHERE id = ?`).get(deliveryId) as CallbackDeliveryRow | undefined;
+    if (!row) throw new Error(`Callback delivery ${deliveryId} not found`);
+    if (row.parentSessionId !== parentSessionId) throw new Error('Callback parent mismatch');
+    if (row.status === 'accepted') return { delivery: callbackDeliveryFromRow(row), accepted: false };
+
+    const delivery = callbackDeliveryFromRow(row);
+    const queueItemId = randomUUID();
+    const messageId = uuidv4();
+    const now = new Date().toISOString();
+    const position = (database.prepare(
+      "SELECT COALESCE(MAX(position), 0) + 1 AS pos FROM queue_items WHERE session_key = ? AND status = 'pending'",
+    ).get(sessionKey) as { pos: number }).pos;
+    database.prepare(`
+      INSERT INTO queue_items (
+        id, session_id, session_key, prompt, status, internal, position, created_at
+      ) VALUES (?, ?, ?, ?, 'pending', 1, ?, ?)
+    `).run(queueItemId, parentSessionId, sessionKey, delivery.payload.message, position, now);
+    database.prepare(`
+      INSERT INTO messages (id, session_id, role, content, timestamp, meta)
+      VALUES (?, ?, 'notification', ?, ?, ?)
+    `).run(
+      messageId,
+      parentSessionId,
+      delivery.payload.displayMessage,
+      Date.now(),
+      delivery.payload.meta ? JSON.stringify(delivery.payload.meta) : null,
+    );
+    if (delivery.payload.block) applyBlockEnvelope(parentSessionId, delivery.payload.block);
+    const updated = database.prepare(`
+      UPDATE callback_deliveries
+      SET status = 'accepted', message_id = ?, queue_item_id = ?, accepted_at = ?
+      WHERE id = ? AND status = 'pending'
+    `).run(messageId, queueItemId, now, deliveryId);
+    if (updated.changes !== 1) throw new Error(`Callback delivery ${deliveryId} lost its pending claim`);
+    return { delivery: getCallbackDelivery(deliveryId)!, accepted: true };
+  });
+  return accept();
 }
 
 export interface QueueItem {
