@@ -5,10 +5,12 @@ import type { WorkflowRunWire, WorkflowRunSummaryWire } from "@/lib/api"
 // Mock the api module — the pure mapper/inspector don't touch it; DefinitionRunView does.
 const listWorkflowRuns = vi.fn()
 const getWorkflowRun = vi.fn()
+const startWorkflowRun = vi.fn()
 vi.mock("@/lib/api", () => ({
   api: {
     listWorkflowRuns: (...a: unknown[]) => listWorkflowRuns(...a),
     getWorkflowRun: (...a: unknown[]) => getWorkflowRun(...a),
+    startWorkflowRun: (...a: unknown[]) => startWorkflowRun(...a),
   },
 }))
 
@@ -223,6 +225,7 @@ describe("DefinitionRunView (container)", () => {
   beforeEach(() => {
     listWorkflowRuns.mockReset()
     getWorkflowRun.mockReset()
+    startWorkflowRun.mockReset()
   })
 
   it("lists runs, auto-selects the newest, and renders the parked run on the canvas", async () => {
@@ -252,6 +255,79 @@ describe("DefinitionRunView (container)", () => {
     render(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByText(/No runs yet/i)).toBeTruthy())
     expect(getWorkflowRun).not.toHaveBeenCalled()
+  })
+
+  it("starts a run from JSON input with a generated idempotency key and no raw REST instruction", async () => {
+    listWorkflowRuns.mockResolvedValue({ evidenceConfigured: true, runs: [] })
+    startWorkflowRun.mockResolvedValue(runWire({
+      status: "running",
+      parked: null,
+      endedAt: null,
+    }))
+
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled())
+    expect(screen.queryByText(/POST \/api\/workflow-definitions/)).toBeNull()
+
+    fireEvent.click(screen.getByRole("button", { name: "Run" }))
+    fireEvent.change(screen.getByLabelText("Run input"), { target: { value: '{"ticket":"A-1"}' } })
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }))
+
+    await waitFor(() => expect(startWorkflowRun).toHaveBeenCalledWith(
+      "sample-autonomy",
+      { ticket: "A-1" },
+      expect.stringMatching(/\S/),
+    ))
+  })
+
+  it("reuses the same idempotency key when the operator retries a failed transport", async () => {
+    listWorkflowRuns.mockResolvedValue({ evidenceConfigured: true, runs: [] })
+    startWorkflowRun
+      .mockRejectedValueOnce(new Error("network blink"))
+      .mockResolvedValueOnce(runWire({ status: "running", parked: null, endedAt: null }))
+
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled())
+    fireEvent.click(screen.getByRole("button", { name: "Run" }))
+    fireEvent.change(screen.getByLabelText("Run input"), { target: { value: '{"ticket":"A-1"}' } })
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }))
+    await waitFor(() => expect(screen.getByText(/network blink/i)).toBeTruthy())
+
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }))
+    await waitFor(() => expect(startWorkflowRun).toHaveBeenCalledTimes(2))
+    expect(startWorkflowRun.mock.calls[1][2]).toBe(startWorkflowRun.mock.calls[0][2])
+  })
+
+  it("selects and renders a durable failed run returned by Start instead of losing its evidence", async () => {
+    const failed = runWire({
+      status: "failed",
+      parked: null,
+      errors: [{ code: "spawn-failed", message: "worker session failed", ref: "orchestrate" }],
+      steps: runWire().steps.map((step) => step.nodeId === "orchestrate" ? { ...step, status: "failed" } : step),
+    })
+    const summary: WorkflowRunSummaryWire = {
+      runId: failed.runId,
+      workflowId: failed.workflowId,
+      status: "failed",
+      trigger: failed.trigger,
+      startedAt: failed.startedAt,
+      endedAt: failed.endedAt,
+      stepCount: failed.steps.length,
+      parked: false,
+    }
+    listWorkflowRuns
+      .mockResolvedValueOnce({ evidenceConfigured: true, runs: [] })
+      .mockResolvedValue({ evidenceConfigured: true, runs: [summary] })
+    startWorkflowRun.mockResolvedValue(failed)
+    getWorkflowRun.mockResolvedValue(failed)
+
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeEnabled())
+    fireEvent.click(screen.getByRole("button", { name: "Run" }))
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }))
+
+    await waitFor(() => expect(screen.getByText(/Run failed: worker session failed/i)).toBeTruthy())
+    expect(screen.getByTestId("wf-node-orchestrate")).toBeTruthy()
   })
 
   it("notes when workflow storage is misconfigured", async () => {

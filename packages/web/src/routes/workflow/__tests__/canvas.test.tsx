@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest"
 import { render, screen, fireEvent } from "@testing-library/react"
-import { WorkflowCanvas, NodeInspector, nodesForRun, nodeStatusColor, type CanvasNode } from "../canvas"
+import { WorkflowCanvas, NodeInspector, buildFlowGraph, nodesForRun, nodeStatusColor, type CanvasNode, type CanvasEdgeSpec } from "../canvas"
 import type { WorkflowRunView } from "@/lib/api"
 
 function run(overrides: Partial<WorkflowRunView> = {}): WorkflowRunView {
@@ -89,6 +89,42 @@ describe("nodeStatusColor", () => {
 
 describe("WorkflowCanvas", () => {
   const nodes = nodesForRun(run(), "every 2h", "Jimbo")
+
+  it("makes durable nodes draggable and connectable only when explicitly editable", () => {
+    const buildEditableFlowGraph = buildFlowGraph as unknown as (
+      nodes: CanvasNode[],
+      selectedId: string | null,
+      onSelect: (id: string) => void,
+      edges: CanvasEdgeSpec[] | undefined,
+      editable: boolean,
+    ) => ReturnType<typeof buildFlowGraph>
+
+    const readOnly = buildEditableFlowGraph(nodes, null, vi.fn(), undefined, false)
+    const editable = buildEditableFlowGraph(nodes, null, vi.fn(), undefined, true)
+
+    expect(readOnly.flowNodes.every((node) => node.draggable === false && node.connectable === false)).toBe(true)
+    expect(editable.flowNodes.every((node) => node.draggable === true && node.connectable === true)).toBe(true)
+  })
+
+  it("exposes connectable handles on the editor canvas while keeping run canvases read-only", () => {
+    const { container: readOnly } = render(
+      <WorkflowCanvas nodes={nodes} selectedId={null} onSelect={vi.fn()} />,
+    )
+    expect(readOnly.querySelectorAll(".react-flow__handle.connectable")).toHaveLength(0)
+
+    const { container: editable } = render(
+      <WorkflowCanvas
+        nodes={nodes}
+        selectedId={null}
+        onSelect={vi.fn()}
+        editable
+        onPositionChange={vi.fn()}
+        onConnectNodes={vi.fn()}
+        onRemoveNode={vi.fn()}
+      />,
+    )
+    expect(editable.querySelectorAll(".react-flow__handle.connectable").length).toBeGreaterThan(0)
+  })
 
   it("renders one node box per node including the trigger", () => {
     render(<WorkflowCanvas nodes={nodes} selectedId={null} onSelect={vi.fn()} />)

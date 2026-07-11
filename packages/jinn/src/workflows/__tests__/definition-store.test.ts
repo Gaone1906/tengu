@@ -70,6 +70,22 @@ describe('createDefinition', () => {
     expect(parsed.version).toBe(1);
   });
 
+  it('normalizes generated geometry and persists the returned coordinates atomically', () => {
+    const generated = makeDef('generated-layout');
+    generated.nodes[1].position = { x: 0, y: 0 };
+
+    const writeOptions = { now, layoutIntent: 'generated' } as Parameters<typeof createDefinition>[2];
+    const created = createDefinition(root, generated, writeOptions);
+    const onDisk = JSON.parse(
+      fs.readFileSync(path.join(root, 'workflows', 'generated-layout.definition.json'), 'utf8'),
+    ) as EditableWorkflowDefinition;
+
+    expect(created.layout).toEqual({ source: 'normalized', version: 1 });
+    expect(created.nodes[1].position).not.toEqual(created.nodes[0].position);
+    expect(onDisk.nodes).toEqual(created.nodes);
+    expect(onDisk.layout).toEqual(created.layout);
+  });
+
   it('rejects duplicate canonical names even when storage ids differ', () => {
     createDefinition(root, makeDef('record-a', { name: 'full-cycle-workflow' }), { now });
     try {

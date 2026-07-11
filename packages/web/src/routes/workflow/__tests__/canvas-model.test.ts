@@ -10,6 +10,7 @@ import {
   type CanvasNode,
   type CanvasNodeSeed,
 } from "../canvas-model"
+import * as canvasView from "../canvas-view"
 
 /* GRS-013 — tests for the ONE CanvasNode-builder contract (KISS simplify item 2)
  * and the spatial layout seam under the React Flow substrate. The view adapters
@@ -234,6 +235,53 @@ describe("placeCanvasNodes — main nodes are placed BEFORE dock expansion (QA d
     const placed = placeCanvasNodes(nodes)
     expect(placed[0].position).toEqual({ x: 240, y: 0 })
     expect(placed[1].position).toEqual({ x: 240, y: 140 })
+  })
+})
+
+describe("readable initial viewport planning", () => {
+  it("focuses a failed node before ordinary running or pending work", () => {
+    const nodes = [
+      { ...node("pending"), status: "pending" },
+      { ...node("running"), status: "running" },
+      { ...node("failed"), status: "blocked" },
+    ]
+
+    expect(canvasView.pickFocusNode(nodes)?.id).toBe("failed")
+  })
+
+  it("opens mobile at a readable focus zoom and leaves Fit all explicit", () => {
+    const initialViewportPlan = (canvasView as unknown as {
+      initialViewportPlan?: (input: { mobile: boolean; fitZoom?: number; nodes: CanvasNode[] }) => {
+        mode: "focus" | "fit"
+        nodeId?: string
+        zoom: number
+      }
+    }).initialViewportPlan
+    expect(initialViewportPlan, "initialViewportPlan is not implemented").toBeTypeOf("function")
+
+    const nodes = [node("trigger"), { ...node("failed"), status: "blocked" }]
+    expect(initialViewportPlan!({ mobile: true, fitZoom: 0.3, nodes })).toMatchObject({
+      mode: "focus",
+      nodeId: "failed",
+      zoom: 0.9,
+    })
+  })
+
+  it("focuses on desktop when fitting the whole graph would be unreadable", () => {
+    const initialViewportPlan = (canvasView as unknown as {
+      initialViewportPlan?: (input: { mobile: boolean; fitZoom?: number; nodes: CanvasNode[] }) => {
+        mode: "focus" | "fit"
+        nodeId?: string
+        zoom: number
+      }
+    }).initialViewportPlan
+    expect(initialViewportPlan, "initialViewportPlan is not implemented").toBeTypeOf("function")
+
+    expect(initialViewportPlan!({ mobile: false, fitZoom: 0.42, nodes: [node("first")] })).toMatchObject({
+      mode: "focus",
+      nodeId: "first",
+    })
+    expect(initialViewportPlan!({ mobile: false, fitZoom: 0.8, nodes: [node("first")] }).mode).toBe("fit")
   })
 })
 

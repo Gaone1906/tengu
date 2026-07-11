@@ -148,6 +148,30 @@ describe("workflow tools — registry + schemas", () => {
     expect(byNameSchema.properties.idempotencyKey).toMatchObject({ type: "string", maxLength: 256 });
   });
 
+  it("closes the nested raw-definition edge schema and exposes only the supported error lane", () => {
+    const schema = tool("plan_workflow").inputSchema as {
+      properties: {
+        definition: {
+          additionalProperties?: boolean;
+          properties?: {
+            edges?: {
+              items?: {
+                additionalProperties?: boolean;
+                properties?: Record<string, unknown>;
+              };
+            };
+          };
+        };
+      };
+    };
+    const rawDefinitionSchema = schema.properties.definition;
+    const rawEdgeSchema = rawDefinitionSchema.properties?.edges?.items;
+    expect(rawDefinitionSchema.additionalProperties).toBe(false);
+    expect(rawEdgeSchema?.additionalProperties).toBe(false);
+    expect(rawEdgeSchema?.properties).toHaveProperty("lane");
+    expect(rawEdgeSchema?.properties).not.toHaveProperty("on");
+  });
+
   it("describes workflow starts as live operations on the current gateway", () => {
     for (const name of ["start_workflow_run", "run_workflow_by_name"]) {
       expect(tool(name).description).toMatch(/live workflow run/i);
@@ -274,6 +298,10 @@ describe("workflow tools — unit (stub gateway)", () => {
     )) as {
       ok: boolean;
       definition: { id: string; nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> };
+      layout: {
+        diagnostics: { source: string; quality: { valid: boolean; score: number } };
+        normalizedPreview: { layout: { source: string; version: number } };
+      };
       validation: { ok: boolean };
       execution: { ok: boolean };
     };
@@ -284,6 +312,11 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(out.ok).toBe(true);
     expect(out.validation.ok).toBe(true);
     expect(out.execution.ok).toBe(true);
+    expect(out.layout.diagnostics).toMatchObject({
+      source: "generated",
+      quality: { valid: true, score: expect.any(Number) },
+    });
+    expect(out.layout.normalizedPreview.layout).toEqual({ source: "normalized", version: 1 });
     expect(out.definition.id).toBe("daily-brief");
     expect((out.definition as { name?: string }).name).toBe("daily-research-brief");
     expect(out.definition.nodes.map((n) => n.id)).toEqual(["wake", "research", "summarize"]);

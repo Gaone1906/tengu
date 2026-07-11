@@ -142,6 +142,17 @@ describe('validateDefinition', () => {
     expect(dangling?.ref).toBe('bad');
   });
 
+  it('rejects unsupported edge.on and points authors at the supported error-lane schema', () => {
+    const d = validDef();
+    (d.edges[1] as unknown as Record<string, unknown>).on = 'error';
+    const result = validateDefinition(d);
+    expect(result.errors).toContainEqual(expect.objectContaining({
+      code: 'unsupported-edge-field',
+      ref: 'e2',
+      message: expect.stringMatching(/onError.*error-edge.*lane.*error/i),
+    }));
+  });
+
   it('rejects a duplicate edge id', () => {
     const d = validDef();
     d.edges.push({ id: 'e1', from: 'a', to: 'b' });
