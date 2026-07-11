@@ -820,7 +820,7 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
 
       {relay && (
         <div className="assistant-msg-row min-w-0">
-          <AgentRelay data={relay} timestamp={msg.timestamp} renderContent={formatMessage} />
+          <AgentRelay data={relay} timestamp={msg.timestamp} renderContent={formatMessage} onOpenThread={onOpenThread} />
         </div>
       )}
 

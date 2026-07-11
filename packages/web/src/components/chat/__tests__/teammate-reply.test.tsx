@@ -125,6 +125,50 @@ describe('teammate replies', () => {
     expect(getSession).toHaveBeenCalledWith('child-123', { last: 40 })
   })
 
+  it('renders meta.fullMessage on expand with ZERO fetches — surviving child-session deletion', () => {
+    // The child is gone: any fetch would 404. With the structured contract the
+    // card must not fetch at all.
+    getSession.mockRejectedValue(new Error('404 session not found'))
+    const fullMessage = [
+      'Canvas **direction** is ready.',
+      '',
+      'Second paragraph the 220-char preview clipped away entirely.',
+    ].join('\n')
+
+    render(
+      <ChatMessages
+        messages={[replyMessage({
+          meta: {
+            kind: 'child-reply',
+            employee: 'design-lead',
+            employeeDisplay: 'Design Lead',
+            childSessionId: 'child-deleted',
+            fullMessage,
+          },
+        })]}
+        loading={false}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+
+    expect(screen.getByText(/Second paragraph the 220-char preview/)).toBeTruthy()
+    expect(screen.getByText('direction').tagName).toBe('STRONG')
+    expect(getSession).not.toHaveBeenCalled()
+  })
+
+  it('parses meta.fullMessage onto the callback data', () => {
+    expect(parseTeammateReply(replyMessage({
+      id: 'reply-full',
+      meta: {
+        kind: 'child-reply',
+        employee: 'design-lead',
+        employeeDisplay: 'Design Lead',
+        childSessionId: 'child-123',
+        fullMessage: 'The whole reply.',
+      },
+    }))).toMatchObject({ kind: 'reply', childSessionId: 'child-123', fullMessage: 'The whole reply.' })
+  })
+
   it('keeps the preview when no child message matches the callback provenance', async () => {
     getSession.mockResolvedValue({
       messages: [{ role: 'assistant', content: 'A completely different newer reply.' }],

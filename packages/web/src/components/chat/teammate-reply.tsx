@@ -12,6 +12,10 @@ export interface TeammateReplyData {
   employeeDisplay: string
   childSessionId?: string
   preview: string
+  /** Gateway contract (meta.fullMessage): the child's full final message,
+   *  persisted with the notification. When present the card renders it
+   *  directly — no fetch, and it survives child-session deletion. */
+  fullMessage?: string
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -39,12 +43,16 @@ export function parseTeammateReply(message: Message): TeammateReplyData | null {
       const employeeDisplay = typeof meta.employeeDisplay === 'string' && meta.employeeDisplay.trim()
         ? meta.employeeDisplay.trim()
         : titleCase(employee)
+      const fullMessage = typeof meta.fullMessage === 'string' && meta.fullMessage.trim()
+        ? meta.fullMessage
+        : undefined
       return {
         kind: meta.kind === 'child-reply' ? 'reply' : 'error',
         employee,
         employeeDisplay,
         childSessionId,
         preview: previewAfterHeader(message.content),
+        ...(fullMessage ? { fullMessage } : {}),
       }
     }
   }
@@ -100,6 +108,8 @@ function useFullReply(data: TeammateReplyData, messageId: string, expanded: bool
   const [full, setFull] = useState<string | null>(() => fullReplyCache.get(messageId) ?? null)
 
   useEffect(() => {
+    // meta.fullMessage already carries the whole reply — never fetch then.
+    if (data.fullMessage) return
     if (!expanded || data.kind !== 'reply' || !data.childSessionId || !data.preview) return
     if (fullReplyCache.has(messageId)) {
       setFull(fullReplyCache.get(messageId) ?? null)
@@ -132,7 +142,7 @@ export function TeammateReply({ data, timestamp, messageId, renderContent, onOpe
   const [expanded, setExpanded] = useState(false)
   const error = data.kind === 'error'
   const full = useFullReply(data, messageId, expanded)
-  const bodyText = full ?? data.preview
+  const bodyText = data.fullMessage ?? full ?? data.preview
   const hint = stripMarkdown(data.preview.split('\n')[0]) || (error ? "Couldn't finish" : '')
 
   return (

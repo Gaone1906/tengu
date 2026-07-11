@@ -47,6 +47,71 @@ describe('agent relays', () => {
     expect(parseAgentRelay({ id: 'u', role: 'user', content: '📨 From x: hi', timestamp: 1 })).toBeNull()
   })
 
+  it('prefers structured agent-relay meta over the banner text', () => {
+    expect(parseAgentRelay({
+      id: 'r-meta',
+      role: 'notification',
+      content: '📨 From growth-ops [hop 2/12]: Truncated banner text…',
+      timestamp: 1,
+      meta: {
+        kind: 'agent-relay',
+        fromSessionId: 'session-a',
+        fromLabel: 'growth-ops',
+        fromEmployee: 'growth-ops',
+        hops: 2,
+        maxHops: 12,
+        fullMessage: 'The complete relayed message.',
+      },
+    })).toEqual({
+      fromLabel: 'growth-ops',
+      fromDisplay: 'Growth Ops',
+      fromSessionId: 'session-a',
+      hops: 2,
+      maxHops: 12,
+      text: 'The complete relayed message.',
+    })
+  })
+
+  it('renders the meta full body on expand and links the sender session', () => {
+    const onOpenThread = vi.fn()
+    const messages: Message[] = [{
+      id: 'relay-meta',
+      role: 'notification',
+      content: '📨 From growth-ops [hop 2/12]: Line one of the relay…',
+      timestamp: 100,
+      meta: {
+        kind: 'agent-relay',
+        fromSessionId: 'session-a',
+        fromLabel: 'growth-ops',
+        hops: 2,
+        maxHops: 12,
+        fullMessage: 'Line one of the relay.\n\nSecond paragraph the banner clip dropped.',
+      },
+    }]
+
+    render(<ChatMessages messages={messages} loading={false} onOpenThread={onOpenThread} />)
+
+    expect(screen.getByText('hop 2')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(screen.getByText(/Second paragraph the banner clip dropped/)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open Growth Ops thread' }))
+    expect(onOpenThread).toHaveBeenCalledWith('session-a')
+  })
+
+  it('renders no sender link for legacy banner-only relays', () => {
+    const messages: Message[] = [{
+      id: 'relay-legacy',
+      role: 'notification',
+      content: '📨 From growth-ops: A legacy relay with no meta.',
+      timestamp: 100,
+    }]
+    render(<ChatMessages messages={messages} loading={false} onOpenThread={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(screen.getByText(/A legacy relay with no meta/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Open Growth Ops thread/ })).toBeNull()
+  })
+
   it('renders collapsed with a hop badge and expands to the message body', () => {
     const messages: Message[] = [{
       id: 'relay',
