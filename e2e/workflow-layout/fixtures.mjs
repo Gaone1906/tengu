@@ -19,7 +19,7 @@ export function canonicalFixtures() {
       trigger(), step("classify", "Classify", 0, 140),
       { id: "route", type: "switch", label: "Route", position: pos(0, 280), switchMode: "firstMatch" },
       step("path-a", "Path A", -140, 420), step("path-b", "Path B", 300, 420, "run-worker-b"), step("complete", "Complete", 80, 600),
-    ], [edge("e1", "trigger", "classify"), edge("e2", "classify", "route"), edge("e3", "route", "path-a", { when: [{ path: "input.route", op: "eq", value: "A" }] }), edge("e4", "route", "path-b"), edge("e5", "path-a", "complete"), edge("e6", "path-b", "complete")]),
+    ], [edge("e1", "trigger", "classify"), edge("e2", "classify", "route"), edge("e3", "route", "path-a", { when: [{ path: "trigger.payload.route", op: "eq", value: "A" }] }), edge("e4", "route", "path-b"), edge("e5", "path-a", "complete"), edge("e6", "path-b", "complete")]),
     base("verify-merge", "Verify Merge", [
       trigger(), step("prepare-a", "Prepare A", 0, 160), step("prepare-b", "Prepare B", 280, 160, "run-worker-b"), step("merge", "Merge", 140, 340),
     ], [edge("e1", "trigger", "prepare-a"), edge("e2", "trigger", "prepare-b"), edge("e3", "prepare-a", "merge"), edge("e4", "prepare-b", "merge")]),

@@ -13,6 +13,15 @@ test("canonical fixtures cover six deterministic graph shapes", () => {
   assert.ok(fixtures.find((x) => x.id === "verify-loop")?.edges.some((x) => x.kind === "loop"))
 })
 
+test("canonical fixture conditions use the public workflow path grammar", () => {
+  const allowed = /^(?:steps\.[^.]+\.(?:status|outcome\.(?:summary|notes|finalMessage|artifacts|fields\.[^.]+))|run\.(?:rounds|status)|trigger\.(?:kind|source|event|payload\.[^.]+))$/
+  for (const fixture of canonicalFixtures()) {
+    for (const edge of fixture.edges) {
+      for (const condition of edge.when ?? []) assert.match(condition.path, allowed)
+    }
+  }
+})
+
 test("scenario fixtures cover new, valid manual, invalid manual, and run states", () => {
   const fixtures = scenarioFixtures()
   assert.deepEqual(new Set(fixtures.map((x) => x.scenario)), new Set([
