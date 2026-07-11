@@ -17,6 +17,8 @@ import { ChatHeaderPills } from '@/components/chat/chat-tabs'
 import { NavRibbon } from '@/components/pill-nav'
 import { MobileTabBar } from '@/components/chat/mobile-tab-bar'
 import { ChatPane } from '@/components/chat/chat-pane'
+import { ThreadPeek, type CommsPeekData } from '@/components/chat/thread-peek'
+import { formatMessage } from '@/components/chat/chat-messages'
 // Lazy so the file viewer's syntax-highlighter grammars + react-markdown are
 // fetched only when a file tab is actually opened — not on the landing route.
 const FileView = lazy(() =>
@@ -25,7 +27,7 @@ const FileView = lazy(() =>
 import { FileOpenContext } from '@/components/chat/file-open-context'
 import { ShortcutOverlay } from '@/components/chat/shortcut-overlay'
 import { useChatTabs, type ChatTab } from '@/hooks/use-chat-tabs'
-import { invalidateLiveSessionSnapshot } from '@/hooks/use-live-session'
+import { invalidateLiveSessionSnapshot, prefetchLiveSessionSnapshot } from '@/hooks/use-live-session'
 import { useKeyboardShortcuts, type ShortcutDef } from '@/hooks/use-keyboard-shortcuts'
 import { useDeleteSession, useDuplicateSession, useSessions } from '@/hooks/use-sessions'
 import { clearIntermediateMessages } from '@/lib/conversations'
@@ -65,6 +67,28 @@ class ChatErrorBoundary extends React.Component<{ children: React.ReactNode }, {
     }
     return this.props.children
   }
+}
+
+function parseHistoryPreview(value: unknown): CommsPeekData | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const candidate = (value as { threadPreview?: unknown }).threadPreview
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null
+  const peek = candidate as Partial<CommsPeekData>
+  if (
+    typeof peek.kind !== 'string'
+    || typeof peek.employee !== 'string'
+    || typeof peek.displayName !== 'string'
+    || typeof peek.messageId !== 'string'
+    || typeof peek.timestamp !== 'number'
+    || typeof peek.preview !== 'string'
+  ) return null
+  return peek as CommsPeekData
+}
+
+function historyRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
 }
 
 export default function ChatPageWrapper() {
@@ -139,6 +163,13 @@ function ChatPage() {
   const [viewMode, setViewMode] = useState<ViewMode>('chat')
   // Pending user message from new-chat send — passed to the new ChatPane so the user bubble appears before loadSession resolves
   const [pendingUserMessage, setPendingUserMessage] = useState<{ sessionId: string; message: Message } | null>(null)
+  const [threadPreview, setThreadPreview] = useState<CommsPeekData | null>(() => parseHistoryPreview(location.state))
+  const previewHandoffTargetRef = useRef<string | null>(null)
+  const previewAbortRef = useRef<AbortController | null>(null)
+  const previewSourceRef = useRef<{ sessionId: string | null; messageId: string; element: HTMLElement | null } | null>(null)
+  const sessionScrollRef = useRef(new Map<string, number>())
+  const returnFocusPendingRef = useRef(false)
+  const destinationFocusPendingRef = useRef(false)
 
   // Persist view mode per session
   const setAndPersistViewMode = useCallback((mode: ViewMode) => {
@@ -309,6 +340,9 @@ function ChatPage() {
   // history state for the back chip.
   const handleSelect = useCallback(
     (id: string, opts?: { navigateMobile?: boolean; replace?: boolean; from?: ThreadOrigin }) => {
+      const currentId = selectedIdRef.current
+      const currentScroller = document.querySelector<HTMLElement>('.chat-messages-scroll')
+      if (currentId && currentScroller) sessionScrollRef.current.set(currentId, currentScroller.scrollTop)
       newChatIntentRef.current = false
       // On mobile, opening a session pushes from the list into the thread. The
       // one exception is the background auto-select of the most-recent session
@@ -364,6 +398,8 @@ function ChatPage() {
   // keyboard nav, "+ New"). Effect runs after ChatPane (key=selectedId)
   // remounts, so the bumped focusTrigger reaches the fresh ChatInput.
   useEffect(() => {
+    if (previewHandoffTargetRef.current === selectedId) return
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) return
     setFocusTrigger(prev => prev + 1)
   }, [selectedId])
 
@@ -545,18 +581,115 @@ function ChatPage() {
     qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
   }, [qc])
 
-  // Open-thread jumps (callback / dispatch / handoff cards) drill DOWN from the
-  // current thread — a normal selection push, plus the origin in history state
-  // so the child renders a back chip to its parent. sessionMeta is read via a
-  // ref to keep the callback stable (it flows into every memoized message row).
+  // Inline child affordances all request this one page-owned preview. The
+  // same-URL history entry makes browser Back an honest close gesture; direct
+  // sidebar/session selections continue through handleSelect without a preview.
   const sessionMetaRef = useRef(sessionMeta)
   useEffect(() => { sessionMetaRef.current = sessionMeta }, [sessionMeta])
-  const openThread = useCallback((childId: string) => {
-    const parentId = selectedIdRef.current
-    handleSelect(childId, parentId ? {
-      from: { id: parentId, label: threadOriginLabel(sessionMetaRef.current?.employee, portalName) },
-    } : undefined)
+  const requestThreadPreview = useCallback((peek: CommsPeekData) => {
+    const currentId = selectedIdRef.current
+    const scroller = document.querySelector<HTMLElement>('.chat-messages-scroll')
+    if (currentId && scroller) sessionScrollRef.current.set(currentId, scroller.scrollTop)
+    previewSourceRef.current = {
+      sessionId: currentId,
+      messageId: peek.messageId,
+      element: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    }
+    previewAbortRef.current?.abort()
+    previewAbortRef.current = null
+    previewHandoffTargetRef.current = null
+    setThreadPreview(peek)
+    const existing = parseHistoryPreview(location.state)
+    navigate(`${location.pathname}${location.search}`, {
+      replace: Boolean(existing),
+      state: { ...historyRecord(location.state), threadPreview: peek },
+    })
+  }, [location.pathname, location.search, location.state, navigate])
+
+  const closeThreadPreview = useCallback(() => {
+    previewAbortRef.current?.abort()
+    previewAbortRef.current = null
+    previewHandoffTargetRef.current = null
+    if (parseHistoryPreview(location.state)) navigate(-1)
+    else setThreadPreview(null)
+  }, [location.state, navigate])
+
+  const openPreviewFullChat = useCallback(async (childId: string) => {
+    previewAbortRef.current?.abort()
+    const controller = new AbortController()
+    previewAbortRef.current = controller
+    try {
+      await prefetchLiveSessionSnapshot(childId, controller.signal)
+      if (controller.signal.aborted) return
+      previewHandoffTargetRef.current = childId
+      returnFocusPendingRef.current = true
+      const parentId = selectedIdRef.current
+      handleSelect(childId, {
+        replace: true,
+        from: parentId
+          ? { id: parentId, label: threadOriginLabel(sessionMetaRef.current?.employee, portalName) }
+          : undefined,
+      })
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) return
+      throw error
+    }
   }, [handleSelect, portalName])
+
+  // Location state owns open/Back cancellation. A route committed by the
+  // handoff is the one exception: keep the shell until that exact child paints.
+  useEffect(() => {
+    const historyPreview = parseHistoryPreview(location.state)
+    if (historyPreview) {
+      setThreadPreview(historyPreview)
+      return
+    }
+    const target = previewHandoffTargetRef.current
+    if (target && selectedId === target) return
+    previewAbortRef.current?.abort()
+    previewAbortRef.current = null
+    previewHandoffTargetRef.current = null
+    setThreadPreview(null)
+  }, [location.state, selectedId])
+
+  const handlePaneContentReady = useCallback((readyId: string) => {
+    const scrollTop = sessionScrollRef.current.get(readyId)
+    if (scrollTop !== undefined) requestAnimationFrame(() => {
+      const scroller = document.querySelector<HTMLElement>('.chat-messages-scroll')
+      if (selectedIdRef.current === readyId && scroller) scroller.scrollTop = scrollTop
+    })
+
+    if (previewHandoffTargetRef.current === readyId) {
+      previewAbortRef.current = null
+      previewHandoffTargetRef.current = null
+      destinationFocusPendingRef.current = true
+      setThreadPreview(null)
+      return
+    }
+
+    const source = previewSourceRef.current
+    if (returnFocusPendingRef.current && source?.sessionId === readyId) {
+      returnFocusPendingRef.current = false
+      requestAnimationFrame(() => {
+        const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+          ? CSS.escape(source.messageId)
+          : source.messageId.replace(/["\\]/g, '\\$&')
+        const target = source.element?.isConnected
+          ? source.element
+          : document.querySelector<HTMLElement>(`[data-source-message-id="${escaped}"] button, [data-block-id="${escaped}"]`)
+        target?.focus({ preventScroll: true })
+      })
+    }
+  }, [])
+
+  const handlePreviewExited = useCallback(() => {
+    if (!destinationFocusPendingRef.current) return
+    destinationFocusPendingRef.current = false
+    requestAnimationFrame(() => {
+      if (window.innerWidth >= 1024) setFocusTrigger((value) => value + 1)
+      else document.querySelector<HTMLElement>('button[aria-label^="Back"]')?.focus({ preventScroll: true })
+    })
+  }, [])
 
   // The in-app way back for a drill-in: POP the entry the jump pushed (never
   // push a new one) — browser back and the chip walk the same trail.
@@ -962,10 +1095,21 @@ function ChatPage() {
                     ? pendingUserMessage.message
                     : undefined
                 }
-                onOpenThread={openThread}
+                onPeek={requestThreadPreview}
+                onContentReady={handlePaneContentReady}
               />
             )}
           </div>
+
+          {/* Stable above the session-keyed ChatPane: it survives route remount
+              and releases only after the destination reports meaningful paint. */}
+          <ThreadPeek
+            peek={threadPreview}
+            onClose={closeThreadPreview}
+            onOpenFullChat={threadPreview?.sessionId ? openPreviewFullChat : undefined}
+            onExited={handlePreviewExited}
+            renderContent={formatMessage}
+          />
         </div>
       </div>
 

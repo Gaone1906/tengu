@@ -1,7 +1,9 @@
 import { AlertTriangle, Check, Circle, Loader2 } from 'lucide-react'
-import type { ChatBlock, JsonObject, JsonValue } from '@/lib/blocks'
+import type { CSSProperties } from 'react'
+import type { ChatBlock, DelegationArrival, JsonObject, JsonValue } from '@/lib/blocks'
 import { HandoffCard } from './handoff-card'
 import { DispatchBlockRow } from './dispatch-row'
+import type { CommsPeekData } from './thread-peek'
 
 function asRecord(value: JsonValue | undefined): JsonObject | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : null
@@ -32,17 +34,33 @@ const INLINE_MAX_WIDTH = 'max-w-[min(620px,calc(100vw_-_var(--space-10)))]'
 
 export function ChatBlockInline({
   block,
-  onOpenThread,
+  onPeek,
+  arrival,
 }: {
   block: ChatBlock
-  onOpenThread?: (sessionId: string) => void
+  onPeek?: (peek: CommsPeekData) => void
+  arrival?: DelegationArrival
 }) {
   if (block.type === 'delegation') {
-    return <HandoffCard block={block} onOpenThread={onOpenThread} />
+    const card = (
+      <div className="w-[min(480px,calc(100vw-var(--space-6)))] max-w-full">
+        <HandoffCard block={block} onPeek={onPeek} />
+      </div>
+    )
+    if (!arrival) return card
+    return (
+      <div
+        className="delegation-arrival"
+        data-delegation-arrival={arrival.nonce}
+        style={{ '--delegation-arrival-delay': `${Math.min(120, Math.max(0, arrival.delayMs))}ms` } as CSSProperties}
+      >
+        <div className="delegation-arrival-inner">{card}</div>
+      </div>
+    )
   }
 
   if (block.type === 'dispatch') {
-    return <DispatchBlockRow block={block} onOpenThread={onOpenThread} />
+    return <DispatchBlockRow block={block} onPeek={onPeek} />
   }
 
   const all = asArray(block.payload.items)

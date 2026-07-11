@@ -12,7 +12,15 @@ const BLOCK_TYPES = new Set<ChatBlockType>([
   "delegation",
   "dispatch",
 ]);
-const STATUSES = new Set<ChatBlockStatus>(["queued", "running", "done", "error"]);
+const STATUSES = new Set<ChatBlockStatus>([
+  "queued",
+  "dispatched",
+  "running",
+  "waiting",
+  "done",
+  "completed",
+  "error",
+]);
 const OPS = new Set(["put", "patch", "remove"]);
 const FORBIDDEN_KEYS = new Set(["html", "script", "component", "dangerouslySetInnerHTML"]);
 const MAX_BLOCK_BYTES = 32_000;

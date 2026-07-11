@@ -25,8 +25,8 @@ describe('ChatBlockInline', () => {
     expect(screen.getByText('Patch UI')).toBeTruthy()
   })
 
-  it('maps and renders a working delegation as one open-thread card', () => {
-    const onOpenThread = vi.fn()
+  it('maps and renders a working delegation as one preview card', () => {
+    const onPeek = vi.fn()
     const block = {
       id: 'dg-wi_123',
       type: 'delegation',
@@ -43,13 +43,18 @@ describe('ChatBlockInline', () => {
     } as ChatBlock
 
     expect(delegationStateForBlock(block)).toMatchObject({ state: 'working', label: 'Working' })
-    render(<ChatBlockInline block={block} onOpenThread={onOpenThread} />)
+    render(<ChatBlockInline block={block} onPeek={onPeek} />)
 
-    const card = screen.getByRole('button', { name: 'Design Lead, working. Open thread.' })
+    const card = screen.getByRole('button', { name: 'Design Lead, working. Open preview.' })
     expect(screen.getByText('handed off')).toBeTruthy()
     expect(screen.getByText('Working · 2m')).toBeTruthy()
     fireEvent.click(card)
-    expect(onOpenThread).toHaveBeenCalledWith('child-123')
+    expect(onPeek).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'delegation',
+      employee: 'design-lead',
+      sessionId: 'child-123',
+      messageId: 'dg-wi_123',
+    }))
   })
 
   it('maps terminal delegation states without changing card anatomy', () => {
@@ -64,6 +69,49 @@ describe('ChatBlockInline', () => {
 
     expect(delegationStateForBlock(done)).toMatchObject({ state: 'replied', label: 'Replied' })
     expect(delegationStateForBlock(failed)).toMatchObject({ state: 'error', label: "Couldn't finish" })
+  })
+
+  it('maps waiting to a static orange Waiting state with stable elapsed copy', () => {
+    const waiting = {
+      id: 'dg-waiting',
+      type: 'delegation',
+      version: 2,
+      status: 'waiting',
+      payload: { dispatchedAt: Date.now() - 180_000 },
+    } as ChatBlock
+
+    expect(delegationStateForBlock(waiting)).toMatchObject({ state: 'waiting', label: 'Waiting' })
+    const { container } = render(<ChatBlockInline block={waiting} />)
+    expect(screen.getByText('Waiting · 3m')).toBeTruthy()
+    expect(container.querySelector('[data-state-line="waiting"]')?.innerHTML).toContain('bg-[var(--system-orange)]')
+  })
+
+  it('renders a quiet non-interactive object when no valid child target exists', () => {
+    const block = {
+      id: 'dg-no-target',
+      type: 'delegation',
+      version: 1,
+      status: 'running',
+      payload: { employee: 'design-lead', employeeDisplay: 'Design Lead', title: 'Audit the surface' },
+    } as ChatBlock
+
+    const { container } = render(<ChatBlockInline block={block} onPeek={vi.fn()} />)
+    expect(screen.queryByRole('button')).toBeNull()
+    expect(container.querySelector('[data-handoff-interactive="false"]')).toBeTruthy()
+    expect(container.querySelector('svg.lucide-chevron-right')).toBeNull()
+  })
+
+  it('applies the one-time delegation arrival wrapper with the supplied capped delay', () => {
+    const block = {
+      id: 'dg-arrival', type: 'delegation', version: 1, status: 'running',
+      payload: { employee: 'design-lead', childSessionId: 'child-arrival', title: 'Start work' },
+    } as ChatBlock
+    const { container } = render(
+      <ChatBlockInline block={block} onPeek={vi.fn()} arrival={{ nonce: 3, delayMs: 120 }} />,
+    )
+    const wrapper = container.querySelector('[data-delegation-arrival="3"]') as HTMLElement
+    expect(wrapper).toBeTruthy()
+    expect(wrapper.style.getPropertyValue('--delegation-arrival-delay')).toBe('120ms')
   })
 
   it('uses the mobile-safe two-line clamp for a long title at 390px', () => {

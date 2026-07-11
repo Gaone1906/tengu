@@ -34,12 +34,11 @@ export function formatBurstRange(first: number, last: number): string {
 interface CallbackBurstProps {
   entries: BurstEntry[]
   onPeek?: (peek: CommsPeekData) => void
-  onOpenThread?: (sessionId: string) => void
   /** Message ids that just arrived live, with their stagger index (+90ms each). */
   arrivals?: Map<string, number>
 }
 
-export function CallbackBurst({ entries, onPeek, onOpenThread, arrivals }: CallbackBurstProps) {
+export function CallbackBurst({ entries, onPeek, arrivals }: CallbackBurstProps) {
   const first = entries[0].msg.timestamp
   const last = entries[entries.length - 1].msg.timestamp
   const range = formatBurstRange(first, last)
@@ -88,7 +87,6 @@ export function CallbackBurst({ entries, onPeek, onOpenThread, arrivals }: Callb
               timestamp={entry.msg.timestamp}
               messageId={entry.messageId}
               onPeek={onPeek}
-              onOpenThread={onOpenThread}
               dense
               arriving={arrivalIndex !== undefined}
               arrivalDelayMs={arrivalIndex !== undefined ? arrivalIndex * 90 : undefined}

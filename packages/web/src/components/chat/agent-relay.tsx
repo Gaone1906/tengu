@@ -84,12 +84,11 @@ interface AgentRelayProps {
   timestamp: number
   messageId: string
   onPeek?: (peek: CommsPeekData) => void
-  onOpenThread?: (sessionId: string) => void
   arriving?: boolean
   arrivalDelayMs?: number
 }
 
-export function AgentRelay({ data, timestamp, messageId, onPeek, onOpenThread, arriving, arrivalDelayMs }: AgentRelayProps) {
+export function AgentRelay({ data, timestamp, messageId, onPeek, arriving, arrivalDelayMs }: AgentRelayProps) {
   const time = clockTime(timestamp)
   const open = () => {
     if (onPeek) {
@@ -106,8 +105,6 @@ export function AgentRelay({ data, timestamp, messageId, onPeek, onOpenThread, a
         // panel renders it without fetching.
         fullMessage: data.text,
       })
-    } else if (data.fromSessionId && onOpenThread) {
-      onOpenThread(data.fromSessionId)
     }
   }
 
@@ -122,7 +119,8 @@ export function AgentRelay({ data, timestamp, messageId, onPeek, onOpenThread, a
       arrivalDelayMs={arrivalDelayMs}
       ariaLabel={`${data.fromDisplay} messaged, ${time}. Open message.`}
       stateAttr="relay"
-      onOpen={open}
+      sourceId={messageId}
+      onOpen={data.fromSessionId && onPeek ? open : undefined}
     />
   )
 }

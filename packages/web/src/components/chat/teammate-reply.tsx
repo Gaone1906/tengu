@@ -110,14 +110,12 @@ interface TeammateReplyProps {
   messageId: string
   /** Open the read-only report panel (peek). */
   onPeek?: (peek: CommsPeekData) => void
-  /** Fallback when no peek surface is mounted: jump straight to the thread. */
-  onOpenThread?: (sessionId: string) => void
   dense?: boolean
   arriving?: boolean
   arrivalDelayMs?: number
 }
 
-export function TeammateReply({ data, timestamp, messageId, onPeek, onOpenThread, dense, arriving, arrivalDelayMs }: TeammateReplyProps) {
+export function TeammateReply({ data, timestamp, messageId, onPeek, dense, arriving, arrivalDelayMs }: TeammateReplyProps) {
   const error = data.kind === 'error'
   const hint = stripMarkdown(data.preview.split('\n')[0]) || (error ? "Couldn't finish" : '')
   const time = clockTime(timestamp)
@@ -134,8 +132,6 @@ export function TeammateReply({ data, timestamp, messageId, onPeek, onOpenThread
         preview: data.preview,
         fullMessage: data.fullMessage,
       })
-    } else if (data.childSessionId && onOpenThread) {
-      onOpenThread(data.childSessionId)
     }
   }
 
@@ -151,7 +147,8 @@ export function TeammateReply({ data, timestamp, messageId, onPeek, onOpenThread
       arrivalDelayMs={arrivalDelayMs}
       ariaLabel={`${data.employeeDisplay} ${error ? "couldn't finish" : 'replied'}, ${time}. Open report.`}
       stateAttr={data.kind}
-      onOpen={open}
+      sourceId={messageId}
+      onOpen={data.childSessionId && onPeek ? open : undefined}
     />
   )
 }

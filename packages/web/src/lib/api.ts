@@ -85,8 +85,8 @@ async function extractErrorMessage(res: Response): Promise<string> {
   return `API error: ${res.status}`;
 }
 
-async function get<T>(path: string): Promise<T> {
-  const res = await authFetch(path);
+async function get<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await authFetch(path, init);
   if (!res.ok) throw new Error(await extractErrorMessage(res));
   return res.json();
 }
@@ -840,12 +840,15 @@ export const api = {
   /** Search across ALL sessions (title / employee / id), newest first. */
   searchSessions: (query: string) =>
     get<Record<string, unknown>[]>(`/api/sessions?q=${encodeURIComponent(query)}`),
-  getSession: (id: string, options?: { last?: number; messages?: boolean }) => {
+  getSession: (id: string, options?: { last?: number; messages?: boolean; signal?: AbortSignal }) => {
     const params = new URLSearchParams()
     if (options?.last) params.set("last", String(options.last))
     if (options?.messages === false) params.set("messages", "0")
     const query = params.toString()
-    return get<Record<string, unknown>>(`/api/sessions/${id}${query ? `?${query}` : ""}`)
+    return get<Record<string, unknown>>(
+      `/api/sessions/${id}${query ? `?${query}` : ""}`,
+      options?.signal ? { signal: options.signal } : undefined,
+    )
   },
   getSessionMessages: (id: string, options: { before?: string; limit?: number }) => {
     const params = new URLSearchParams()

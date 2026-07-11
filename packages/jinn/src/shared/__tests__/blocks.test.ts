@@ -63,6 +63,19 @@ describe("chat blocks", () => {
     }).ok).toBe(true);
   });
 
+  it("accepts waiting delegation patches as an active child state", () => {
+    expect(validateBlockEnvelope({
+      op: "patch",
+      block: {
+        id: "dg-wi_123",
+        type: "delegation",
+        version: 2,
+        status: "waiting",
+        payload: {},
+      },
+    })).toMatchObject({ ok: true, envelope: { block: { status: "waiting" } } });
+  });
+
   it("rejects incomplete delegation puts", () => {
     expect(validateBlockEnvelope({
       op: "put",
