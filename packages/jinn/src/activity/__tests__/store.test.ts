@@ -144,6 +144,15 @@ describe("ActivityStore", () => {
     expect(database.prepare("SELECT COUNT(*) AS n, MAX(seq) AS max_seq FROM activity_events").get()).toEqual({ n: 1, max_seq: 1 });
   });
 
+  it("rolls the authoritative event back when its transactional projection cannot commit", () => {
+    const database = memoryDb();
+    database.exec("DROP TABLE activity_event_search");
+    expect(() => appendActivityEvent(input(), { database })).toThrow();
+    expect(database.prepare("SELECT COUNT(*) AS n FROM activity_events").get()).toEqual({ n: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS n FROM activity_stories").get()).toEqual({ n: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS n FROM activity_story_versions").get()).toEqual({ n: 0 });
+  });
+
   it("derives one stable story ID from explicit correlation and never groups by object or timestamp", () => {
     const database = memoryDb();
     const ids = [

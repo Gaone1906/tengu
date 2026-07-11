@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { initDb } from "../sessions/registry.js";
 import { activityEventFromRow, type ActivityRow } from "./store.js";
 import { ActivityCursorSecretError, activityCursorSecret } from "./cursor-secret.js";
+import { activitySearchQuery, normalizeActivitySearch } from "./projection.js";
 import {
   ACTIVITY_KINDS,
   ACTIVITY_OUTCOMES,
@@ -29,12 +30,13 @@ export interface ActivityQueryOptions {
 }
 
 interface CursorPayload {
-  v: 2;
+  v: 3;
   occurredAt: string;
   id: string;
   snapshotSeq: number;
   asOf: string;
   queryHash: string;
+  totals: ActivityTotals;
 }
 
 interface RepresentativeRow extends Record<string, unknown> {
@@ -70,7 +72,7 @@ function normalizedQuery(query: ActivityQuery): Required<Pick<ActivityQuery, "li
   return {
     limit,
     ...(query.cursor ? { cursor: query.cursor } : {}),
-    ...(q ? { q } : {}),
+    ...(q ? { q: normalizeActivitySearch(q) } : {}),
     ...(kinds.length ? { kinds } : {}),
     ...(outcomes.length ? { outcomes } : {}),
   };
@@ -92,12 +94,13 @@ function decodeCursor(raw: string, expectedHash: string, secret: Buffer): Cursor
     const expected = createHmac("sha256", secret).update(payloadBytes).digest();
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new Error("invalid signature");
     const parsed = JSON.parse(payloadBytes.toString("utf8")) as Partial<CursorPayload>;
-    if (Object.keys(parsed).sort().join(",") !== "asOf,id,occurredAt,queryHash,snapshotSeq,v") throw new Error("invalid fields");
+    if (Object.keys(parsed).sort().join(",") !== "asOf,id,occurredAt,queryHash,snapshotSeq,totals,v") throw new Error("invalid fields");
     if (
-      parsed.v !== 2 || !canonicalIso(parsed.occurredAt) ||
+      parsed.v !== 3 || !canonicalIso(parsed.occurredAt) ||
       typeof parsed.id !== "string" || !/^act_[a-zA-Z0-9-]+$/.test(parsed.id) ||
       !Number.isSafeInteger(parsed.snapshotSeq) || (parsed.snapshotSeq ?? -1) < 0 ||
-      !canonicalIso(parsed.asOf) || parsed.queryHash !== expectedHash
+      !canonicalIso(parsed.asOf) || parsed.queryHash !== expectedHash ||
+      !parsed.totals || typeof parsed.totals !== "object" || !Number.isSafeInteger(parsed.totals.matching)
     ) throw new Error("invalid payload");
     return parsed as CursorPayload;
   } catch {
@@ -123,7 +126,7 @@ function filteredWhere(
       params[name] = kind;
       return `@${name}`;
     });
-    clauses.push(`stories.kind IN (${names.join(",")})`);
+    clauses.push(`snapshot_projection.kind IN (${names.join(",")})`);
   }
   if (query.outcomes?.length) {
     const names = query.outcomes.map((outcome, index) => {
@@ -131,38 +134,45 @@ function filteredWhere(
       params[name] = outcome;
       return `@${name}`;
     });
-    clauses.push(`stories.outcome_state IN (${names.join(",")})`);
+    clauses.push(`snapshot_projection.outcome_state IN (${names.join(",")})`);
   }
   if (query.q) {
-    params.q = query.q.toLocaleLowerCase();
-    clauses.push(`EXISTS (
-      SELECT 1 FROM activity_events search_events
-      WHERE search_events.story_id = stories.story_id AND search_events.seq <= @snapshotSeq
-        AND instr(lower(
-          search_events.summary || ' ' || search_events.action || ' ' ||
-          search_events.actor_display_name || ' ' || search_events.actor_id || ' ' ||
-          search_events.object_label || ' ' || search_events.object_id || ' ' || search_events.outcome_label
-        ), @q) > 0
+    const searchQuery = activitySearchQuery(query.q);
+    if (!searchQuery) throw new ActivityQueryError("q must contain searchable letters or numbers");
+    params.searchQuery = searchQuery;
+    clauses.push(`snapshot_projection.story_id IN (
+      SELECT story_id FROM activity_event_search
+      WHERE activity_event_search MATCH @searchQuery AND CAST(seq AS INTEGER) <= @snapshotSeq
     )`);
   }
   return { sql: clauses.join(" AND "), params };
 }
 
-function storiesCte(where: string): string {
+function storiesCte(where: string, currentSnapshot: boolean): string {
+  const projection = currentSnapshot
+    ? `SELECT story_id, latest_event_id, occurred_at, event_count, kind, outcome_state FROM activity_stories`
+    : `SELECT story_id, latest_event_id, occurred_at, event_count, kind, outcome_state
+      FROM activity_stories
+      WHERE last_append_seq <= @snapshotSeq
+      UNION ALL
+      SELECT versions.story_id, versions.latest_event_id, versions.occurred_at,
+        versions.event_count, versions.kind, versions.outcome_state
+      FROM activity_stories current
+      JOIN activity_story_versions versions ON versions.story_id = current.story_id
+      WHERE current.last_append_seq > @snapshotSeq
+        AND versions.append_seq = (
+          SELECT MAX(candidate.append_seq) FROM activity_story_versions candidate
+          WHERE candidate.story_id = current.story_id AND candidate.append_seq <= @snapshotSeq
+        )`;
   return `
-    WITH ranked AS (
-      SELECT *,
-        ROW_NUMBER() OVER (PARTITION BY story_id ORDER BY occurred_at DESC, id DESC) AS story_rank
-      FROM activity_events
-      WHERE seq <= @snapshotSeq
-    ), stories AS (
-      SELECT ranked.*,
-        (SELECT COUNT(*) FROM activity_events all_events
-          WHERE all_events.story_id = ranked.story_id AND all_events.seq <= @snapshotSeq) AS event_count
-      FROM ranked
-      WHERE story_rank = 1
+    WITH snapshot_projection AS (
+      ${projection}
+    ), filtered_projection AS (
+      SELECT * FROM snapshot_projection WHERE ${where}
     ), filtered_stories AS (
-      SELECT * FROM stories WHERE ${where}
+      SELECT events.*, filtered_projection.event_count
+      FROM filtered_projection
+      JOIN activity_events events ON events.id = filtered_projection.latest_event_id
     )
   `;
 }
@@ -204,21 +214,44 @@ function storyFromRepresentative(row: RepresentativeRow, events: ActivityEvent[]
   };
 }
 
-function globalTotals(database: Database.Database, snapshotSeq: number, now: Date): Omit<ActivityTotals, "matching" | "byKind" | "byOutcome"> {
+function globalBreakdown(database: Database.Database, snapshotSeq: number, now: Date, currentSnapshot: boolean): Omit<ActivityTotals, "matching"> {
   const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
-  const row = database.prepare(`
-    WITH ranked AS (
-      SELECT occurred_at, outcome_state,
-        ROW_NUMBER() OVER (PARTITION BY story_id ORDER BY occurred_at DESC, id DESC) AS story_rank
-      FROM activity_events WHERE seq <= ?
+  const projection = currentSnapshot
+    ? "SELECT story_id, occurred_at, kind, outcome_state FROM activity_stories"
+    : `SELECT story_id, occurred_at, kind, outcome_state FROM activity_stories WHERE last_append_seq <= ?
+      UNION ALL
+      SELECT versions.story_id, versions.occurred_at, versions.kind, versions.outcome_state
+      FROM activity_stories current
+      JOIN activity_story_versions versions ON versions.story_id = current.story_id
+      WHERE current.last_append_seq > ?
+        AND versions.append_seq = (
+          SELECT MAX(candidate.append_seq) FROM activity_story_versions candidate
+          WHERE candidate.story_id = current.story_id AND candidate.append_seq <= ?
+        )`;
+  const rows = database.prepare(`
+    WITH snapshot_projection AS (
+      ${projection}
     )
-    SELECT COUNT(*) AS total,
-      COALESCE(SUM(CASE WHEN occurred_at >= ? THEN 1 ELSE 0 END), 0) AS today,
-      COALESCE(SUM(CASE WHEN outcome_state = 'attention' THEN 1 ELSE 0 END), 0) AS attention,
-      COALESCE(SUM(CASE WHEN outcome_state = 'failed' THEN 1 ELSE 0 END), 0) AS failed
-    FROM ranked WHERE story_rank = 1
-  `).get(snapshotSeq, dayStart) as { total: number; today: number; attention: number; failed: number };
-  return row;
+    SELECT kind, outcome_state, COUNT(*) AS n,
+      COALESCE(SUM(CASE WHEN occurred_at >= ? THEN 1 ELSE 0 END), 0) AS today
+    FROM snapshot_projection GROUP BY kind, outcome_state
+  `).all(...(currentSnapshot ? [dayStart] : [snapshotSeq, snapshotSeq, snapshotSeq, dayStart])) as Array<{
+    kind: ActivityKind;
+    outcome_state: ActivityOutcomeState;
+    n: number;
+    today: number;
+  }>;
+  const byKind: Partial<Record<ActivityKind, number>> = {};
+  const byOutcome: Partial<Record<ActivityOutcomeState, number>> = {};
+  let total = 0;
+  let today = 0;
+  for (const row of rows) {
+    total += row.n;
+    today += row.today;
+    byKind[row.kind] = (byKind[row.kind] ?? 0) + row.n;
+    byOutcome[row.outcome_state] = (byOutcome[row.outcome_state] ?? 0) + row.n;
+  }
+  return { total, today, attention: byOutcome.attention ?? 0, failed: byOutcome.failed ?? 0, byKind, byOutcome };
 }
 
 function matchingTotals(
@@ -226,13 +259,22 @@ function matchingTotals(
   cte: string,
   params: Record<string, unknown>,
 ): Pick<ActivityTotals, "matching" | "byKind" | "byOutcome"> {
-  const matching = database.prepare(`${cte} SELECT COUNT(*) AS n FROM filtered_stories`).get(params) as { n: number };
-  const byKindRows = database.prepare(`${cte} SELECT kind AS key, COUNT(*) AS n FROM filtered_stories GROUP BY kind`).all(params) as Array<{ key: ActivityKind; n: number }>;
-  const byOutcomeRows = database.prepare(`${cte} SELECT outcome_state AS key, COUNT(*) AS n FROM filtered_stories GROUP BY outcome_state`).all(params) as Array<{ key: ActivityOutcomeState; n: number }>;
+  const rows = database.prepare(`${cte}
+    SELECT kind, outcome_state, COUNT(*) AS n
+    FROM filtered_projection GROUP BY kind, outcome_state
+  `).all(params) as Array<{ kind: ActivityKind; outcome_state: ActivityOutcomeState; n: number }>;
+  const byKind: Partial<Record<ActivityKind, number>> = {};
+  const byOutcome: Partial<Record<ActivityOutcomeState, number>> = {};
+  let matching = 0;
+  for (const row of rows) {
+    matching += row.n;
+    byKind[row.kind] = (byKind[row.kind] ?? 0) + row.n;
+    byOutcome[row.outcome_state] = (byOutcome[row.outcome_state] ?? 0) + row.n;
+  }
   return {
-    matching: matching.n,
-    byKind: Object.fromEntries(byKindRows.map((row) => [row.key, row.n])),
-    byOutcome: Object.fromEntries(byOutcomeRows.map((row) => [row.key, row.n])),
+    matching,
+    byKind,
+    byOutcome,
   };
 }
 
@@ -251,9 +293,10 @@ export function queryActivityPage(rawQuery: ActivityQuery = {}, options: Activit
   const max = database.prepare("SELECT COALESCE(MAX(seq), 0) AS n FROM activity_events").get() as { n: number };
   const cursor = query.cursor ? decodeCursor(query.cursor, hash, secret) : undefined;
   const snapshotSeq = cursor?.snapshotSeq ?? max.n;
+  const currentSnapshot = snapshotSeq === max.n;
   const asOf = cursor?.asOf ?? now.toISOString();
   const filtered = filteredWhere(query, snapshotSeq);
-  const cte = storiesCte(filtered.sql);
+  const cte = storiesCte(filtered.sql, currentSnapshot);
   const pageParams: Record<string, unknown> = { ...filtered.params, pageLimit: query.limit + 1 };
   let keyset = "";
   if (cursor) {
@@ -272,18 +315,23 @@ export function queryActivityPage(rawQuery: ActivityQuery = {}, options: Activit
   const visible = rows.slice(0, query.limit);
   const events = eventRowsForStories(database, visible.map((row) => row.story_id), snapshotSeq);
   const items = visible.map((row) => storyFromRepresentative(row, events.get(row.story_id) ?? []));
+  let totals = cursor?.totals;
+  if (!totals) {
+    const global = globalBreakdown(database, snapshotSeq, new Date(asOf), currentSnapshot);
+    const unfiltered = !query.q && !query.kinds?.length && !query.outcomes?.length;
+    totals = unfiltered
+      ? { ...global, matching: global.total }
+      : { ...global, ...matchingTotals(database, cte, filtered.params) };
+  }
   const last = visible.at(-1);
   const nextCursor = hasMore && last
-    ? encodeCursor({ v: 2, occurredAt: last.occurred_at, id: last.id, snapshotSeq, asOf, queryHash: hash }, secret)
+    ? encodeCursor({ v: 3, occurredAt: last.occurred_at, id: last.id, snapshotSeq, asOf, queryHash: hash, totals }, secret)
     : null;
 
   return {
     items,
     page: { nextCursor, hasMore },
-    totals: {
-      ...globalTotals(database, snapshotSeq, new Date(asOf)),
-      ...matchingTotals(database, cte, filtered.params),
-    },
+    totals,
     asOf,
   };
 }

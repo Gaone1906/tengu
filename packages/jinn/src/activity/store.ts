@@ -4,6 +4,7 @@ import { initDb } from "../sessions/registry.js";
 import { ACTIVITY_KINDS, ACTIVITY_OUTCOMES, type ActivityAppendResult, type ActivityEvent, type ActivityEventInput, type ActivityJsonValue, type ActivityLink } from "./types.js";
 import { activityPayloadHash } from "./payload.js";
 import { activityStoryId, isExplicitActivityRoot, isNamespacedActivityIdentity } from "./identity.js";
+import { projectActivityEvent } from "./projection.js";
 import {
   ACTIVITY_INPUT_LIMITS,
   ActivityValueLimitError,
@@ -237,64 +238,68 @@ export function appendActivityEvent(input: ActivityEventInput, options: AppendAc
     const replay = replayResult(database.prepare("SELECT * FROM activity_events WHERE idempotency_key = ?").get(normalized.idempotencyKey) as ActivityRow | undefined, payloadHash);
     if (replay) return replay;
   }
-  const id = `act_${(options.idFactory ?? randomUUID)()}`;
-  if (!/^act_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) {
-    throw new ActivityValidationError("idFactory must return a canonical UUID");
-  }
-  let result: Database.RunResult;
-  try {
-    result = database.prepare(`
-    INSERT INTO activity_events (
-      id, story_id, occurred_at, kind, action,
-      actor_type, actor_id, actor_display_name,
-      object_type, object_id, object_label, object_href,
-      outcome_state, outcome_label, summary, correlation_id,
-      causation_id, root_event_id, attempt, idempotency_key,
-      detail_ref, detail_json, links_json, payload_hash
-    ) VALUES (
-      @id, @storyId, @occurredAt, @kind, @action,
-      @actorType, @actorId, @actorDisplayName,
-      @objectType, @objectId, @objectLabel, @objectHref,
-      @outcomeState, @outcomeLabel, @summary, @correlationId,
-      @causationId, @rootEventId, @attempt, @idempotencyKey,
-      @detailRef, @detailJson, @linksJson, @payloadHash
-    )
-  `).run({
-    id,
-    storyId,
-    occurredAt: normalized.occurredAt,
-    kind: normalized.kind,
-    action: normalized.action,
-    actorType: normalized.actor.type,
-    actorId: normalized.actor.id,
-    actorDisplayName: normalized.actor.displayName,
-    objectType: normalized.object.type,
-    objectId: normalized.object.id,
-    objectLabel: normalized.object.label,
-    objectHref: normalized.object.href ?? null,
-    outcomeState: normalized.outcome.state,
-    outcomeLabel: normalized.outcome.label,
-    summary: normalized.summary,
-    correlationId: normalized.correlationId,
-    causationId: normalized.causationId ?? null,
-    rootEventId: normalized.rootEventId ?? null,
-    attempt: normalized.attempt ?? null,
-    idempotencyKey: normalized.idempotencyKey ?? null,
-    detailRef: normalized.detailRef ?? null,
-    detailJson: normalized.detail === undefined ? null : JSON.stringify(normalized.detail),
-    linksJson: normalized.links === undefined ? null : JSON.stringify(normalized.links),
-    payloadHash,
-    });
-  } catch (error) {
-    const code = (error as { code?: string }).code;
-    if (normalized.idempotencyKey && code?.startsWith("SQLITE_CONSTRAINT")) {
-      const replay = replayResult(database.prepare("SELECT * FROM activity_events WHERE idempotency_key = ?").get(normalized.idempotencyKey) as ActivityRow | undefined, payloadHash);
-      if (replay) return replay;
+  const insertAndProject = (): ActivityAppendResult => {
+    const id = `act_${(options.idFactory ?? randomUUID)()}`;
+    if (!/^act_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) {
+      throw new ActivityValidationError("idFactory must return a canonical UUID");
     }
-    throw error;
-  }
+    let result: Database.RunResult;
+    try {
+      result = database.prepare(`
+        INSERT INTO activity_events (
+          id, story_id, occurred_at, kind, action,
+          actor_type, actor_id, actor_display_name,
+          object_type, object_id, object_label, object_href,
+          outcome_state, outcome_label, summary, correlation_id,
+          causation_id, root_event_id, attempt, idempotency_key,
+          detail_ref, detail_json, links_json, payload_hash
+        ) VALUES (
+          @id, @storyId, @occurredAt, @kind, @action,
+          @actorType, @actorId, @actorDisplayName,
+          @objectType, @objectId, @objectLabel, @objectHref,
+          @outcomeState, @outcomeLabel, @summary, @correlationId,
+          @causationId, @rootEventId, @attempt, @idempotencyKey,
+          @detailRef, @detailJson, @linksJson, @payloadHash
+        )
+      `).run({
+        id,
+        storyId,
+        occurredAt: normalized.occurredAt,
+        kind: normalized.kind,
+        action: normalized.action,
+        actorType: normalized.actor.type,
+        actorId: normalized.actor.id,
+        actorDisplayName: normalized.actor.displayName,
+        objectType: normalized.object.type,
+        objectId: normalized.object.id,
+        objectLabel: normalized.object.label,
+        objectHref: normalized.object.href ?? null,
+        outcomeState: normalized.outcome.state,
+        outcomeLabel: normalized.outcome.label,
+        summary: normalized.summary,
+        correlationId: normalized.correlationId,
+        causationId: normalized.causationId ?? null,
+        rootEventId: normalized.rootEventId ?? null,
+        attempt: normalized.attempt ?? null,
+        idempotencyKey: normalized.idempotencyKey ?? null,
+        detailRef: normalized.detailRef ?? null,
+        detailJson: normalized.detail === undefined ? null : JSON.stringify(normalized.detail),
+        linksJson: normalized.links === undefined ? null : JSON.stringify(normalized.links),
+        payloadHash,
+      });
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (normalized.idempotencyKey && code?.startsWith("SQLITE_CONSTRAINT")) {
+        const replay = replayResult(database.prepare("SELECT * FROM activity_events WHERE idempotency_key = ?").get(normalized.idempotencyKey) as ActivityRow | undefined, payloadHash);
+        if (replay) return replay;
+      }
+      throw error;
+    }
 
-  const row = database.prepare("SELECT * FROM activity_events WHERE id = ?").get(id) as ActivityRow | undefined;
-  if (!row || result.changes !== 1) throw new ActivityCorruptionError();
-  return { inserted: true, event: activityEventFromRow(row) };
+    const row = database.prepare("SELECT * FROM activity_events WHERE id = ?").get(id) as ActivityRow | undefined;
+    if (!row || result.changes !== 1) throw new ActivityCorruptionError();
+    projectActivityEvent(database, row);
+    return { inserted: true, event: activityEventFromRow(row) };
+  };
+  return database.inTransaction ? insertAndProject() : database.transaction(insertAndProject)();
 }

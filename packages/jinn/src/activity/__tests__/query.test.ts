@@ -101,6 +101,25 @@ describe("Activity query", () => {
     expect(unicode.totals.matching).toBe(1);
   });
 
+  it("uses locale-neutral NFKD casefold search for Bulgarian, accented Latin, Greek, and Turkish text", () => {
+    const database = memoryDb();
+    const cases = [
+      ["ПРЕГЛЕД НА ДОГОВОР", "преглед на договор"],
+      ["Café résumé", "CAFE RESUME"],
+      ["ΟΔΥΣΣΕΎΣ", "οδυσσευσ"],
+      ["İSTANBUL IĞDIR ıslak", "istanbul igdir islak"],
+    ] as const;
+    cases.forEach(([summary], index) => appendActivityEvent(fixture(index, { summary }), {
+      database,
+      idFactory: () => idFor(index),
+    }));
+
+    cases.forEach(([summary, query]) => {
+      const result = queryActivityPage({ q: query }, { database, now: () => NOW });
+      expect(result.items.map((story) => story.headline), query).toEqual([summary]);
+    });
+  });
+
   it("establishes current story state before kind/outcome filters while retaining historical search matches", () => {
     const database = memoryDb();
     appendActivityEvent(fixture(1, {

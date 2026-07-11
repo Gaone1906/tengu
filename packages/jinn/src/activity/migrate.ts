@@ -2,6 +2,13 @@ import { randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
 import { activityStoryId } from "./identity.js";
 import { activityPayloadHashFromRow } from "./payload.js";
+import {
+  ACTIVITY_PROJECTION_INDEXES,
+  ACTIVITY_SEARCH_TABLE_SQL,
+  ACTIVITY_STORIES_TABLE_SQL,
+  ACTIVITY_STORY_VERSIONS_TABLE_SQL,
+  rebuildActivityProjections,
+} from "./projection.js";
 
 interface SchemaObject {
   type: "index" | "trigger";
@@ -15,8 +22,8 @@ export interface ActivityMigrationOptions {
 }
 
 export class ActivityMigrationError extends Error {
-  constructor(message = "activity schema migration failed") {
-    super(message);
+  constructor(message = "activity schema migration failed", options?: ErrorOptions) {
+    super(message, options);
     this.name = "ActivityMigrationError";
   }
 }
@@ -209,8 +216,33 @@ function verifyMeta(database: Database.Database): void {
   }
 }
 
+function verifyProjection(database: Database.Database): void {
+  const tables = [
+    ["activity_stories", ACTIVITY_STORIES_TABLE_SQL],
+    ["activity_story_versions", ACTIVITY_STORY_VERSIONS_TABLE_SQL],
+    ["activity_event_search", ACTIVITY_SEARCH_TABLE_SQL],
+  ] as const;
+  for (const [name, expected] of tables) {
+    const actual = objectSql(database, "table", name);
+    if (!actual || normalizedSql(actual) !== normalizedSql(expected)) {
+      throw new ActivityMigrationError(`activity projection ${name} has an unexpected shape`);
+    }
+  }
+  verifyObjects(database, "activity_stories", ACTIVITY_PROJECTION_INDEXES.filter((object) => object.name.startsWith("idx_activity_stories_")));
+  verifyObjects(database, "activity_story_versions", ACTIVITY_PROJECTION_INDEXES.filter((object) => object.name.startsWith("idx_activity_story_versions_")));
+}
+
 function verifyNoReservedObjects(database: Database.Database): void {
-  const names = ["activity_events", "activity_ledger_meta", ...CURRENT_OBJECTS.map((object) => object.name), ...META_OBJECTS.map((object) => object.name)];
+  const names = [
+    "activity_events",
+    "activity_ledger_meta",
+    "activity_stories",
+    "activity_story_versions",
+    "activity_event_search",
+    ...CURRENT_OBJECTS.map((object) => object.name),
+    ...META_OBJECTS.map((object) => object.name),
+    ...ACTIVITY_PROJECTION_INDEXES.map((object) => object.name),
+  ];
   const placeholders = names.map(() => "?").join(",");
   const existing = database.prepare(`SELECT name FROM sqlite_master WHERE name IN (${placeholders})`).all(...names);
   if (existing.length > 0) throw new ActivityMigrationError("reserved activity schema objects already exist");
@@ -253,6 +285,14 @@ function createMeta(database: Database.Database, apply: (sql: string) => void): 
   for (const object of META_OBJECTS) apply(object.sql);
 }
 
+function createProjection(database: Database.Database, apply: (sql: string) => void): void {
+  apply(ACTIVITY_STORIES_TABLE_SQL);
+  apply(ACTIVITY_STORY_VERSIONS_TABLE_SQL);
+  apply(ACTIVITY_SEARCH_TABLE_SQL);
+  for (const object of ACTIVITY_PROJECTION_INDEXES) apply(object.sql);
+  rebuildActivityProjections(database);
+}
+
 function rekeyCurrentStories(database: Database.Database, apply: (sql: string) => void): void {
   const updateTrigger = CURRENT_TRIGGERS.find((object) => object.name === "activity_events_immutable_update")!;
   apply(`DROP TRIGGER ${updateTrigger.name}`);
@@ -278,9 +318,15 @@ export function migrateActivitySchema(database: Database.Database, options: Acti
   try {
     const currentTable = objectSql(database, "table", "activity_events");
     const metaTable = objectSql(database, "table", "activity_ledger_meta");
-    if (currentTable && normalizedSql(currentTable) === normalizedSql(CURRENT_TABLE_SQL) && metaTable) {
+    const projectionTables = ["activity_stories", "activity_story_versions", "activity_event_search"]
+      .map((name) => objectSql(database, "table", name));
+    const hasCompleteProjection = projectionTables.every(Boolean);
+    const hasPartialProjection = projectionTables.some(Boolean) && !hasCompleteProjection;
+    if (hasPartialProjection) throw new ActivityMigrationError("activity projection is only partially installed");
+    if (currentTable && normalizedSql(currentTable) === normalizedSql(CURRENT_TABLE_SQL) && metaTable && hasCompleteProjection) {
       verifyObjects(database, "activity_events", CURRENT_OBJECTS);
       verifyMeta(database);
+      verifyProjection(database);
       database.pragma("recursive_triggers = ON");
       return;
     }
@@ -299,16 +345,20 @@ export function migrateActivitySchema(database: Database.Database, options: Acti
         for (const object of CURRENT_OBJECTS) apply(object.sql);
         insertLegacyRows(database, rows);
         apply("DROP TABLE activity_events_legacy");
+      } else if (normalizedSql(currentTable) === normalizedSql(CURRENT_TABLE_SQL) && metaTable) {
+        verifyObjects(database, "activity_events", CURRENT_OBJECTS);
+        verifyMeta(database);
       } else if (normalizedSql(currentTable) === normalizedSql(CURRENT_TABLE_SQL)) {
-        if (metaTable) throw new ActivityMigrationError("activity ledger metadata has an unexpected shape");
         verifyObjects(database, "activity_events", CURRENT_OBJECTS);
         rekeyCurrentStories(database, apply);
       } else {
         throw new ActivityMigrationError("activity_events has an unexpected shape");
       }
-      createMeta(database, apply);
+      if (!metaTable) createMeta(database, apply);
+      createProjection(database, apply);
       verifyObjects(database, "activity_events", CURRENT_OBJECTS);
       verifyMeta(database);
+      verifyProjection(database);
       const migratedTable = objectSql(database, "table", "activity_events");
       if (!migratedTable || normalizedSql(migratedTable) !== normalizedSql(CURRENT_TABLE_SQL)) {
         throw new ActivityMigrationError("activity_events verification failed");
@@ -318,6 +368,6 @@ export function migrateActivitySchema(database: Database.Database, options: Acti
     database.pragma("recursive_triggers = ON");
   } catch (error) {
     if (error instanceof ActivityMigrationError) throw error;
-    throw new ActivityMigrationError();
+    throw new ActivityMigrationError("activity schema migration failed", { cause: error });
   }
 }

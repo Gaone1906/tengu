@@ -51,29 +51,28 @@ function seedLegacy(database: Database.Database): void {
 
 function seedGate1(database: Database.Database): void {
   database.exec(ACTIVITY_SCHEMA_DDL);
-  appendActivityEvent({
-    ...fixture(),
-    kind: "todo",
-    correlationId: "source:local:collision",
-    idempotencyKey: "todo:event:collision",
-  }, { database, idFactory: () => "00000000-0000-4000-8000-000000000001" });
-  appendActivityEvent({
-    ...fixture(),
-    kind: "workflow",
-    correlationId: "source:local:collision",
-    idempotencyKey: "workflow:event:collision",
-  }, { database, idFactory: () => "00000000-0000-4000-8000-000000000002" });
-  database.exec(`
-    DROP TRIGGER activity_events_immutable_update;
-    UPDATE activity_events SET story_id = 'story_000000000000000000000000';
-    CREATE TRIGGER activity_events_immutable_update
-      BEFORE UPDATE ON activity_events BEGIN SELECT RAISE(ABORT, 'activity events are immutable'); END;
+  const insert = database.prepare(`
+    INSERT INTO activity_events (
+      id, story_id, occurred_at, kind, action, actor_type, actor_id, actor_display_name,
+      object_type, object_id, object_label, outcome_state, outcome_label, summary,
+      correlation_id, idempotency_key, payload_hash
+    ) VALUES (?, 'story_000000000000000000000000', '2026-07-11T12:00:00.000Z', ?,
+      'event.completed', 'system', 'gateway', 'Gateway', 'run', ?, 'Run', 'succeeded',
+      'Completed', 'Completed', 'source:local:collision', ?, ?)
   `);
+  insert.run("act_00000000-0000-4000-8000-000000000001", "todo", "opaque-one", "todo:event:collision", "1".repeat(64));
+  insert.run("act_00000000-0000-4000-8000-000000000002", "workflow", "opaque-two", "workflow:event:collision", "2".repeat(64));
+}
+
+function seedGate2(database: Database.Database): void {
+  migrateActivitySchema(database);
+  appendActivityEvent(fixture(), { database, idFactory: () => "00000000-0000-4000-8000-000000000003" });
+  database.exec("DROP TABLE activity_event_search; DROP TABLE activity_story_versions; DROP TABLE activity_stories;");
 }
 
 describe("activity schema migration", () => {
   it("rolls back every created object when an injected migration step fails", () => {
-    for (let failAfterStep = 1; failAfterStep <= 13; failAfterStep++) {
+    for (let failAfterStep = 1; failAfterStep <= 22; failAfterStep++) {
       const database = new Database(":memory:");
       expect(() => migrateActivitySchema(database, { failAfterStep })).toThrow(ActivityMigrationError);
       expect(database.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'activity_%'").all()).toEqual([]);
@@ -94,7 +93,7 @@ describe("activity schema migration", () => {
   });
 
   it("rolls every Gate 1 upgrade DDL step back without exposing a partial cursor contract", () => {
-    for (let failAfterStep = 1; failAfterStep <= 6; failAfterStep++) {
+    for (let failAfterStep = 1; failAfterStep <= 15; failAfterStep++) {
       const database = new Database(":memory:");
       seedGate1(database);
       expect(() => migrateActivitySchema(database, { failAfterStep })).toThrow(ActivityMigrationError);
@@ -102,6 +101,34 @@ describe("activity schema migration", () => {
       expect(database.prepare("SELECT name FROM sqlite_master WHERE name = 'activity_ledger_meta'").get()).toBeUndefined();
       expect(database.prepare("SELECT name FROM sqlite_master WHERE name = 'activity_events_immutable_update'").get()).toBeDefined();
     }
+  });
+
+  it("transactionally upgrades the Gate 2 ledger and rebuilds story and search projections", () => {
+    const database = new Database(":memory:");
+    seedGate2(database);
+    migrateActivitySchema(database);
+    expect(database.prepare("SELECT story_id, event_count FROM activity_stories").get()).toMatchObject({ event_count: 1 });
+    expect(database.prepare("SELECT COUNT(*) AS n FROM activity_story_versions").get()).toEqual({ n: 1 });
+    expect(database.prepare("SELECT COUNT(*) AS n FROM activity_event_search WHERE activity_event_search MATCH 'health'").get()).toEqual({ n: 1 });
+  });
+
+  it("rolls every Gate 2 projection DDL step back to an intact authoritative ledger", () => {
+    for (let failAfterStep = 1; failAfterStep <= 9; failAfterStep++) {
+      const database = new Database(":memory:");
+      seedGate2(database);
+      expect(() => migrateActivitySchema(database, { failAfterStep })).toThrow(ActivityMigrationError);
+      expect(database.prepare("SELECT COUNT(*) AS n FROM activity_events").get()).toEqual({ n: 1 });
+      expect(database.prepare("SELECT name FROM sqlite_master WHERE name IN ('activity_stories','activity_story_versions','activity_event_search')").all()).toEqual([]);
+    }
+  });
+
+  it("rejects a same-name projection index with the wrong shape without repairing it", () => {
+    const database = new Database(":memory:");
+    migrateActivitySchema(database);
+    database.exec("DROP INDEX idx_activity_stories_order; CREATE INDEX idx_activity_stories_order ON activity_stories (story_id)");
+    expect(() => migrateActivitySchema(database)).toThrow(ActivityMigrationError);
+    const row = database.prepare("SELECT sql FROM sqlite_master WHERE name = 'idx_activity_stories_order'").get() as { sql: string };
+    expect(row.sql).toContain("story_id");
   });
 
   it("rejects a same-name trigger with the wrong body without repairing it", () => {
@@ -127,7 +154,7 @@ describe("activity schema migration", () => {
   });
 
   it("rolls every legacy migration DDL step back to the intact legacy ledger", () => {
-    for (let failAfterStep = 1; failAfterStep <= 21; failAfterStep++) {
+    for (let failAfterStep = 1; failAfterStep <= 30; failAfterStep++) {
       const database = new Database(":memory:");
       seedLegacy(database);
       expect(() => migrateActivitySchema(database, { failAfterStep })).toThrow(ActivityMigrationError);
