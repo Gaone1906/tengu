@@ -28,7 +28,6 @@ import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } 
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import {
   listSessions,
-  listRecentSessions,
   countSessions,
   listRecentPerGroup,
   listSessionsForGroup,
@@ -175,6 +174,8 @@ import { summarizeCronRun } from "../cron/run-summary.js";
 import { reloadScheduler } from "../cron/scheduler.js";
 import { validateCronSchedule } from "../cron/validation.js";
 import { runCronJob, type WorkflowCronFire } from "../cron/runner.js";
+import { ActivityQueryError, getActivityStory, queryActivityPage } from "../activity/query.js";
+import type { ActivityKind, ActivityOutcomeState } from "../activity/types.js";
 import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir } from "./files.js";
@@ -5630,40 +5631,35 @@ export async function handleApiRequest(
       return json(res, connectors);
     }
 
-    // GET /api/activity — recent activity derived from sessions
+    // GET /api/activity — normalized operational stories. Raw gateway text
+    // remains available separately at /api/logs for Diagnostics.
     if (method === "GET" && pathname === "/api/activity") {
-      // We return the 30 newest activity events, and event ts == last_activity
-      // (sessions are ordered DESC), so we only need the recent tail. But some
-      // statuses emit no event (e.g. interrupted), so a single fixed window can
-      // starve the result when the newest sessions are all non-emitting. Page the
-      // newest-first window (re-deriving the real emitting predicate per row) until
-      // we have 30 events or hit a hard row cap — still O(bounded), never a full
-      // ~2.5k-session hydrate every poll.
-      const TARGET_EVENTS = 30;
-      const PAGE = 100;
-      const HARD_ROW_CAP = 1000;
-      const events: Array<{ event: string; payload: unknown; ts: number }> = [];
-      for (let offset = 0; events.length < TARGET_EVENTS && offset < HARD_ROW_CAP; offset += PAGE) {
-        const page = listRecentSessions(PAGE, offset);
-        for (const s of page) {
-          const ts = new Date(s.lastActivity || s.createdAt).getTime();
-          const transportState = getSessionTransportState(s, context);
-          if (transportState === "running") {
-            events.push({ event: "session:started", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
-          } else if (transportState === "queued") {
-            events.push({ event: "session:queued", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
-          } else if (transportState === "idle") {
-            events.push({ event: "session:completed", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
-          } else if (transportState === "error") {
-            events.push({ event: "session:error", payload: { sessionId: s.id, employee: s.employee, error: s.lastError, connector: s.connector }, ts });
-          }
-        }
-        if (page.length < PAGE) break; // exhausted — no more rows
+      try {
+        const rawLimit = url.searchParams.get("limit");
+        const kinds = url.searchParams.get("kinds")?.split(",").map((value) => value.trim()).filter(Boolean) as ActivityKind[] | undefined;
+        const outcomes = url.searchParams.get("outcomes")?.split(",").map((value) => value.trim()).filter(Boolean) as ActivityOutcomeState[] | undefined;
+        return json(res, queryActivityPage({
+          ...(rawLimit !== null ? { limit: Number(rawLimit) } : {}),
+          ...(url.searchParams.get("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
+          ...(url.searchParams.get("q") ? { q: url.searchParams.get("q")! } : {}),
+          ...(kinds?.length ? { kinds } : {}),
+          ...(outcomes?.length ? { outcomes } : {}),
+        }));
+      } catch (err) {
+        if (err instanceof ActivityQueryError) return badRequest(res, err.message);
+        throw err;
       }
-      // Newest first. Pages are already last_activity DESC, so any collected
-      // event is newer than every un-fetched one; the top 30 are the true newest.
-      events.sort((a, b) => b.ts - a.ts);
-      return json(res, events.slice(0, TARGET_EVENTS));
+    }
+
+    const activityStoryMatch = pathname.match(/^\/api\/activity\/(story_[a-f0-9]{24})$/);
+    if (method === "GET" && activityStoryMatch) {
+      try {
+        const detail = getActivityStory(activityStoryMatch[1]);
+        return detail ? json(res, detail) : notFound(res);
+      } catch (err) {
+        if (err instanceof ActivityQueryError) return badRequest(res, err.message);
+        throw err;
+      }
     }
 
     // GET /api/onboarding — check if onboarding is needed

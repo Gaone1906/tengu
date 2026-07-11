@@ -14,6 +14,7 @@ import {
 import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome, WorkflowSessionProvenance } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
 import { ptySnapshotStore } from '../engines/pty-snapshot.js';
+import { migrateActivitySchema } from '../activity/migrate.js';
 
 let db: Database.Database;
 
@@ -378,6 +379,10 @@ export function initDb(): Database.Database {
   db.exec(WORK_ITEMS_INDEX_DDL);
   db.exec(WORK_ITEM_EVENTS_DDL);
   db.exec(CREATE_WORK_ITEM_SESSION_INDEX);
+  // Normalized operational Activity ledger. Additive and idempotent for both
+  // fresh and existing homes; historical domain projection is checkpointed by
+  // the Activity projector rather than faked inside schema migration.
+  migrateActivitySchema(db);
   db.exec(`
     CREATE TABLE IF NOT EXISTS queue_items (
       id TEXT PRIMARY KEY,

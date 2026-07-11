@@ -1,27 +1,21 @@
-import { beforeAll, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
+import { beforeAll, describe, expect, it } from "vitest";
+import type { ActivityEventInput } from "../../activity/types.js";
 
-// Fresh JINN_HOME before importing api/registry (SESSIONS_DB resolves at import).
-process.env.JINN_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-activity-home-"));
+// Fresh JINN_HOME before importing api/registry (all path constants resolve at import).
+process.env.JINN_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-activity-api-home-"));
 
 type Api = typeof import("../api.js");
 type Registry = typeof import("../../sessions/registry.js");
+type Store = typeof import("../../activity/store.js");
 let api: Api;
 let registry: Registry;
+let store: Store;
 
-function seed(id: string, status: string, lastActivity: string): void {
-  registry.initDb().prepare(
-    "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES (?, 'claude','web',?, ?, ?, ?)",
-  ).run(id, `web:${id}`, status, lastActivity, lastActivity);
-}
-
-// Mirrors the privileged-read-guard harness: operator path (no auth headers),
-// transport state passes the DB status through, and no backgroundActivity so
-// sessionHasRuntimeActivity is false.
 const apiCtx = {
   getConfig: () => ({ gateway: {}, engines: { default: "codex" }, sessions: {}, portal: { portalName: "Jinn" } }),
   connectors: new Map(),
@@ -36,62 +30,113 @@ const apiCtx = {
 
 function makeRes() {
   const chunks: Buffer[] = [];
+  let status = 200;
   const res = {
-    writeHead() { return this; },
+    writeHead(code: number) { status = code; return this; },
     setHeader() { return this; },
-    write(b?: Buffer | string) { if (b) chunks.push(Buffer.isBuffer(b) ? b : Buffer.from(b)); return true; },
-    end(b?: Buffer | string) { if (b) chunks.push(Buffer.isBuffer(b) ? b : Buffer.from(b)); },
+    write(body?: Buffer | string) { if (body) chunks.push(Buffer.isBuffer(body) ? body : Buffer.from(body)); return true; },
+    end(body?: Buffer | string) { if (body) chunks.push(Buffer.isBuffer(body) ? body : Buffer.from(body)); },
     on() { return this; },
     once() { return this; },
     emit() { return false; },
   } as unknown as ServerResponse;
-  return { res, get body() { const t = Buffer.concat(chunks).toString("utf-8"); return t ? JSON.parse(t) : null; } };
+  return {
+    res,
+    get status() { return status; },
+    get body() {
+      const text = Buffer.concat(chunks).toString("utf-8");
+      return text ? JSON.parse(text) : null;
+    },
+  };
 }
 
-async function activity() {
+async function request(url: string) {
   const req = Object.assign(Readable.from([]), {
     method: "GET",
-    url: "/api/activity",
+    url,
     headers: { host: "gateway.test" },
   }) as unknown as Parameters<Api["handleApiRequest"]>[0];
-  const cap = makeRes();
-  await api.handleApiRequest(req, cap.res, apiCtx);
-  return cap.body as Array<{ event: string; payload: { sessionId: string } }>;
+  const capture = makeRes();
+  await api.handleApiRequest(req, capture.res, apiCtx);
+  return { status: capture.status, body: capture.body };
+}
+
+function event(index: number, overrides: Partial<ActivityEventInput> = {}): ActivityEventInput {
+  return {
+    occurredAt: `2026-07-11T12:0${index}:00.000Z`,
+    kind: "todo",
+    action: "todo.updated",
+    actor: { type: "employee", id: "operations-lead", displayName: "Operations Lead" },
+    object: { type: "todo", id: `object-${index}`, label: `Todo ${index}`, href: `/todos?item=object-${index}` },
+    outcome: { state: "succeeded", label: "Updated" },
+    summary: `Updated Todo ${index}`,
+    correlationId: `todo:update:${index}`,
+    idempotencyKey: `todo:updated:event-${index}`,
+    detail: { index },
+    ...overrides,
+  };
 }
 
 beforeAll(async () => {
   registry = await import("../../sessions/registry.js");
+  store = await import("../../activity/store.js");
   api = await import("../api.js");
 });
 
-describe("GET /api/activity — bounded window must not starve on non-emitting newest rows", () => {
-  it("returns 30 events even when the 101 newest sessions are all non-emitting (interrupted)", async () => {
-    // 101 interrupted rows NEWER than 35 idle rows. interrupted emits no event;
-    // idle emits session:completed. The old single-100-window path returned 0.
-    for (let i = 0; i < 101; i++) {
-      seed(`intr-${i}`, "interrupted", `2026-07-09T10:00:${String(i % 60).padStart(2, "0")}.${String(i).padStart(3, "0")}Z`);
-    }
-    for (let i = 0; i < 35; i++) {
-      seed(`idle-${i}`, "idle", `2026-07-08T10:00:${String(i % 60).padStart(2, "0")}.${String(i).padStart(3, "0")}Z`);
-    }
+describe("normalized Activity HTTP contract", () => {
+  it("migrates on a fresh gateway home and returns cursor-paginated stories with honest totals", async () => {
+    const database = registry.initDb();
+    store.appendActivityEvent(event(0), { database });
+    store.appendActivityEvent(event(1, { kind: "workflow", outcome: { state: "failed", label: "Failed" }, summary: "Workflow failed" }), { database });
+    store.appendActivityEvent(event(2, { kind: "approval", outcome: { state: "attention", label: "Waiting" }, summary: "Approval waiting" }), { database });
 
-    const events = await activity();
-    expect(events).toHaveLength(30);
-    // Every returned event is a completed idle session (the only emitters here).
-    expect(events.every((e) => e.event === "session:completed")).toBe(true);
-    expect(events.every((e) => e.payload.sessionId.startsWith("idle-"))).toBe(true);
+    const response = await request("/api/activity?limit=2&kinds=workflow,approval");
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      items: [
+        { headline: "Approval waiting", eventCount: 1 },
+        { headline: "Workflow failed", eventCount: 1 },
+      ],
+      page: { hasMore: false, nextCursor: null },
+      totals: { matching: 2, total: 3, attention: 1, failed: 1 },
+    });
+    expect(response.body.asOf).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it("caps at 30 and returns newest-first when there are plenty of emitters", async () => {
-    // Add 50 newer idle sessions; the newest 30 of those should be returned.
-    for (let i = 0; i < 50; i++) {
-      seed(`fresh-${String(i).padStart(2, "0")}`, "idle", `2026-07-10T10:00:00.${String(i).padStart(3, "0")}Z`);
-    }
-    const events = await activity();
-    expect(events).toHaveLength(30);
-    // Newest-first: ts strictly non-increasing.
-    const ids = events.map((e) => e.payload.sessionId);
-    expect(ids.every((id) => id.startsWith("fresh-"))).toBe(true);
-    expect(ids[0]).toBe("fresh-49");
+  it("returns complete story detail and applies server-side search/outcome filters", async () => {
+    const database = registry.initDb();
+    const first = store.appendActivityEvent(event(3, {
+      occurredAt: "2026-07-11T12:03:00.000Z",
+      correlationId: "workflow:run:shared",
+      summary: "Workflow started",
+      outcome: { state: "running", label: "Running" },
+    }), { database }).event;
+    store.appendActivityEvent(event(4, {
+      occurredAt: "2026-07-11T12:04:00.000Z",
+      correlationId: "workflow:run:shared",
+      summary: "Workflow completed",
+      causationId: first.id,
+    }), { database });
+
+    const filtered = await request("/api/activity?q=Workflow%20completed&outcomes=succeeded");
+    expect(filtered.status).toBe(200);
+    expect(filtered.body.items).toHaveLength(1);
+    expect(filtered.body.items[0]).toMatchObject({ id: first.storyId, headline: "Workflow completed", eventCount: 2 });
+
+    const detail = await request(`/api/activity/${first.storyId}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body.events.map((item: { summary: string }) => item.summary)).toEqual(["Workflow started", "Workflow completed"]);
+  });
+
+  it("returns 400 for malformed cursors/filters and 404 for an unknown well-formed story", async () => {
+    expect(await request("/api/activity?cursor=broken")).toMatchObject({ status: 400, body: { error: expect.stringMatching(/cursor/i) } });
+    expect(await request("/api/activity?kinds=unknown")).toMatchObject({ status: 400, body: { error: expect.stringMatching(/kind/i) } });
+    expect(await request("/api/activity/story_000000000000000000000000")).toMatchObject({ status: 404, body: { error: "Not found" } });
+  });
+
+  it("keeps raw logs on the separate Diagnostics endpoint", async () => {
+    const response = await request("/api/logs?n=5");
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ lines: [] });
   });
 });
