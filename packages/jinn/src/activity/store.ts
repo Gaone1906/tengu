@@ -2,7 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { initDb } from "../sessions/registry.js";
 import { ACTIVITY_KINDS, ACTIVITY_OUTCOMES, type ActivityAppendResult, type ActivityEvent, type ActivityEventInput, type ActivityJsonValue, type ActivityLink } from "./types.js";
-import { redactActivityText, redactActivityValue, redactStableIdentity } from "./redact.js";
+import { activityPayloadHash } from "./payload.js";
+import {
+  ACTIVITY_INPUT_LIMITS,
+  ActivityValueLimitError,
+  assertActivityValueWithinLimits,
+  redactActivityText,
+  redactActivityValue,
+  redactStableIdentity,
+} from "./redact.js";
 
 export interface ActivityRow {
   seq: number;
@@ -29,6 +37,7 @@ export interface ActivityRow {
   detail_ref: string | null;
   detail_json: string | null;
   links_json: string | null;
+  payload_hash: string;
 }
 
 export interface AppendActivityOptions {
@@ -36,8 +45,29 @@ export interface AppendActivityOptions {
   idFactory?: () => string;
 }
 
+export class ActivityValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ActivityValidationError";
+  }
+}
+
+export class ActivityIdempotencyConflictError extends Error {
+  constructor() {
+    super("activity idempotency key conflicts with an existing event");
+    this.name = "ActivityIdempotencyConflictError";
+  }
+}
+
+export class ActivityCorruptionError extends Error {
+  constructor() {
+    super("activity ledger data is corrupted");
+    this.name = "ActivityCorruptionError";
+  }
+}
+
 function required(value: string, field: string): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${field} is required`);
+  if (typeof value !== "string" || !value.trim()) throw new ActivityValidationError(`${field} is required`);
   return value.trim();
 }
 
@@ -50,7 +80,7 @@ function safeHref(value: string | undefined, field: string): string | undefined 
   const href = optional(value);
   if (!href) return undefined;
   if (!href.startsWith("/") || href.startsWith("//") || href.includes("\\")) {
-    throw new Error(`${field} href must be a gateway-relative path`);
+    throw new ActivityValidationError(`${field} href must be a gateway-relative path`);
   }
   return redactActivityText(href);
 }
@@ -59,30 +89,48 @@ function validateIso(value: string): string {
   const occurredAt = required(value, "occurredAt");
   const parsed = Date.parse(occurredAt);
   if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== occurredAt) {
-    throw new Error("occurredAt must be a canonical ISO timestamp");
+    throw new ActivityValidationError("occurredAt must be a canonical ISO timestamp");
   }
   return occurredAt;
 }
 
 function validateInput(input: ActivityEventInput): ActivityEventInput {
+  try {
+    assertActivityValueWithinLimits(input);
+  } catch (error) {
+    if (error instanceof ActivityValueLimitError) throw new ActivityValidationError(error.message);
+    throw error;
+  }
+  if (!input || typeof input !== "object" || !input.actor || typeof input.actor !== "object" ||
+      !input.object || typeof input.object !== "object" || !input.outcome || typeof input.outcome !== "object") {
+    throw new ActivityValidationError("activity input shape is invalid");
+  }
   const correlationId = required(input.correlationId, "correlationId");
   const idempotencyKey = optional(input.idempotencyKey);
   const causationId = optional(input.causationId);
   const rootEventId = optional(input.rootEventId);
   const detailRef = optional(input.detailRef);
   if (idempotencyKey && !/^[^:\s]+:[^:\s]+:.+/.test(idempotencyKey)) {
-    throw new Error("idempotencyKey must be globally namespaced as domain:operation:source");
+    throw new ActivityValidationError("idempotencyKey must be globally namespaced as domain:operation:source");
   }
-  if (!ACTIVITY_KINDS.includes(input.kind)) throw new Error("kind is invalid");
-  if (!ACTIVITY_OUTCOMES.includes(input.outcome.state)) throw new Error("outcome.state is invalid");
-  if (!(["operator", "employee", "system"] as const).includes(input.actor.type)) throw new Error("actor.type is invalid");
-  if (input.attempt !== undefined && (!Number.isSafeInteger(input.attempt) || input.attempt < 1)) throw new Error("attempt must be a positive integer");
+  if (!ACTIVITY_KINDS.includes(input.kind)) throw new ActivityValidationError("kind is invalid");
+  if (!ACTIVITY_OUTCOMES.includes(input.outcome.state)) throw new ActivityValidationError("outcome.state is invalid");
+  if (!(["operator", "employee", "system"] as const).includes(input.actor.type)) throw new ActivityValidationError("actor.type is invalid");
+  if (input.attempt !== undefined && (!Number.isSafeInteger(input.attempt) || input.attempt < 1)) throw new ActivityValidationError("attempt must be a positive integer");
+  if (input.links && input.links.length > ACTIVITY_INPUT_LIMITS.maxLinks) throw new ActivityValidationError("links exceeds the link count limit");
 
   const links = input.links?.map((link, index): ActivityLink => ({
     rel: redactActivityText(required(link.rel, `links[${index}].rel`)),
     label: redactActivityText(required(link.label, `links[${index}].label`)),
     href: safeHref(link.href, `links[${index}]`)!,
   }));
+  let detail: ActivityJsonValue | undefined;
+  try {
+    detail = input.detail === undefined ? undefined : redactActivityValue(input.detail);
+  } catch (error) {
+    if (error instanceof ActivityValueLimitError) throw new ActivityValidationError(error.message);
+    throw error;
+  }
 
   const objectHref = safeHref(input.object.href, "object");
   return {
@@ -109,9 +157,11 @@ function validateInput(input: ActivityEventInput): ActivityEventInput {
     ...(causationId ? { causationId: redactStableIdentity(causationId) } : {}),
     ...(rootEventId ? { rootEventId: redactStableIdentity(rootEventId) } : {}),
     ...(input.attempt !== undefined ? { attempt: input.attempt } : {}),
-    ...(idempotencyKey ? { idempotencyKey: redactStableIdentity(idempotencyKey) } : {}),
+    ...(idempotencyKey ? { idempotencyKey: redactStableIdentity(idempotencyKey) === idempotencyKey
+      ? idempotencyKey
+      : `redacted:identity:${createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 32)}` } : {}),
     ...(detailRef ? { detailRef: redactActivityText(detailRef) } : {}),
-    ...(input.detail !== undefined ? { detail: redactActivityValue(input.detail) } : {}),
+    ...(detail !== undefined ? { detail } : {}),
     ...(links ? { links } : {}),
   };
 }
@@ -121,53 +171,84 @@ export function activityStoryId(correlationId: string): string {
 }
 
 export function activityEventFromRow(row: ActivityRow): ActivityEvent {
-  return {
-    id: row.id,
-    storyId: row.story_id,
-    seq: row.seq,
-    occurredAt: row.occurred_at,
-    kind: row.kind,
-    action: row.action,
-    actor: { type: row.actor_type, id: row.actor_id, displayName: row.actor_display_name },
-    object: {
-      type: row.object_type,
-      id: row.object_id,
-      label: row.object_label,
-      ...(row.object_href ? { href: row.object_href } : {}),
-    },
-    outcome: { state: row.outcome_state, label: row.outcome_label },
-    summary: row.summary,
-    correlationId: row.correlation_id,
-    ...(row.causation_id ? { causationId: row.causation_id } : {}),
-    ...(row.root_event_id ? { rootEventId: row.root_event_id } : {}),
-    ...(row.attempt !== null ? { attempt: row.attempt } : {}),
-    ...(row.idempotency_key ? { idempotencyKey: row.idempotency_key } : {}),
-    ...(row.detail_ref ? { detailRef: row.detail_ref } : {}),
-    ...(row.detail_json ? { detail: JSON.parse(row.detail_json) as ActivityJsonValue } : {}),
-    ...(row.links_json ? { links: JSON.parse(row.links_json) as ActivityLink[] } : {}),
-  };
+  try {
+    const detail = row.detail_json ? JSON.parse(row.detail_json) as ActivityJsonValue : undefined;
+    const links = row.links_json ? JSON.parse(row.links_json) as ActivityLink[] : undefined;
+    if (detail !== undefined) assertActivityValueWithinLimits(detail);
+    if (links !== undefined) {
+      assertActivityValueWithinLimits(links);
+      if (!Array.isArray(links) || links.length > ACTIVITY_INPUT_LIMITS.maxLinks || links.some((link) =>
+        !link || typeof link !== "object" || typeof link.rel !== "string" || typeof link.label !== "string" || typeof link.href !== "string")) {
+        throw new Error("invalid activity links");
+      }
+    }
+    return {
+      id: row.id,
+      storyId: row.story_id,
+      seq: row.seq,
+      occurredAt: row.occurred_at,
+      kind: row.kind,
+      action: row.action,
+      actor: { type: row.actor_type, id: row.actor_id, displayName: row.actor_display_name },
+      object: {
+        type: row.object_type,
+        id: row.object_id,
+        label: row.object_label,
+        ...(row.object_href ? { href: row.object_href } : {}),
+      },
+      outcome: { state: row.outcome_state, label: row.outcome_label },
+      summary: row.summary,
+      correlationId: row.correlation_id,
+      ...(row.causation_id ? { causationId: row.causation_id } : {}),
+      ...(row.root_event_id ? { rootEventId: row.root_event_id } : {}),
+      ...(row.attempt !== null ? { attempt: row.attempt } : {}),
+      ...(row.idempotency_key ? { idempotencyKey: row.idempotency_key } : {}),
+      ...(row.detail_ref ? { detailRef: row.detail_ref } : {}),
+      ...(detail !== undefined ? { detail } : {}),
+      ...(links !== undefined ? { links } : {}),
+    };
+  } catch (error) {
+    if (error instanceof ActivityCorruptionError) throw error;
+    throw new ActivityCorruptionError();
+  }
+}
+
+function replayResult(row: ActivityRow | undefined, payloadHash: string): ActivityAppendResult | undefined {
+  if (!row) return undefined;
+  if (row.payload_hash !== payloadHash) throw new ActivityIdempotencyConflictError();
+  return { inserted: false, event: activityEventFromRow(row) };
 }
 
 export function appendActivityEvent(input: ActivityEventInput, options: AppendActivityOptions = {}): ActivityAppendResult {
   const database = options.database ?? initDb();
   const normalized = validateInput(input);
   const storyId = activityStoryId(normalized.correlationId);
+  const payloadHash = activityPayloadHash(normalized);
+  if (normalized.idempotencyKey) {
+    const replay = replayResult(database.prepare("SELECT * FROM activity_events WHERE idempotency_key = ?").get(normalized.idempotencyKey) as ActivityRow | undefined, payloadHash);
+    if (replay) return replay;
+  }
   const id = `act_${(options.idFactory ?? randomUUID)()}`;
-  const result = database.prepare(`
-    INSERT OR IGNORE INTO activity_events (
+  if (!/^act_[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) {
+    throw new ActivityValidationError("idFactory must return a canonical UUID");
+  }
+  let result: Database.RunResult;
+  try {
+    result = database.prepare(`
+    INSERT INTO activity_events (
       id, story_id, occurred_at, kind, action,
       actor_type, actor_id, actor_display_name,
       object_type, object_id, object_label, object_href,
       outcome_state, outcome_label, summary, correlation_id,
       causation_id, root_event_id, attempt, idempotency_key,
-      detail_ref, detail_json, links_json
+      detail_ref, detail_json, links_json, payload_hash
     ) VALUES (
       @id, @storyId, @occurredAt, @kind, @action,
       @actorType, @actorId, @actorDisplayName,
       @objectType, @objectId, @objectLabel, @objectHref,
       @outcomeState, @outcomeLabel, @summary, @correlationId,
       @causationId, @rootEventId, @attempt, @idempotencyKey,
-      @detailRef, @detailJson, @linksJson
+      @detailRef, @detailJson, @linksJson, @payloadHash
     )
   `).run({
     id,
@@ -193,11 +274,18 @@ export function appendActivityEvent(input: ActivityEventInput, options: AppendAc
     detailRef: normalized.detailRef ?? null,
     detailJson: normalized.detail === undefined ? null : JSON.stringify(normalized.detail),
     linksJson: normalized.links === undefined ? null : JSON.stringify(normalized.links),
-  });
+    payloadHash,
+    });
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (normalized.idempotencyKey && code?.startsWith("SQLITE_CONSTRAINT")) {
+      const replay = replayResult(database.prepare("SELECT * FROM activity_events WHERE idempotency_key = ?").get(normalized.idempotencyKey) as ActivityRow | undefined, payloadHash);
+      if (replay) return replay;
+    }
+    throw error;
+  }
 
-  const row = (result.changes === 1
-    ? database.prepare("SELECT * FROM activity_events WHERE id = ?").get(id)
-    : database.prepare("SELECT * FROM activity_events WHERE idempotency_key = ?").get(normalized.idempotencyKey)) as ActivityRow | undefined;
-  if (!row) throw new Error("activity append conflicted without a resolvable idempotency key");
-  return { inserted: result.changes === 1, event: activityEventFromRow(row) };
+  const row = database.prepare("SELECT * FROM activity_events WHERE id = ?").get(id) as ActivityRow | undefined;
+  if (!row || result.changes !== 1) throw new ActivityCorruptionError();
+  return { inserted: true, event: activityEventFromRow(row) };
 }
