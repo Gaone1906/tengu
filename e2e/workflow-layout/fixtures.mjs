@@ -49,7 +49,11 @@ export function scenarioFixtures() {
       step("notify", "Notify", 0, 160, "run-worker-a", { options: { output: "none" } }),
     ], [edge("e1", "trigger", "notify")]) },
     { scenario: "run-failure", mode: "create", definition: base("verify-run-failure", "Run Failure", [trigger(), { id: "stop", type: "fail", label: "Intentional failure", position: pos(0, 160), failMessage: "Intentional sandbox failure" }], [edge("e1", "trigger", "stop")]) },
-    { scenario: "run-approval", mode: "create", definition: base("verify-run-approval", "Run Approval", [trigger(), { id: "approve", type: "gate", label: "Operator approval", position: pos(0, 160), gate: { kind: "approval", approvalRef: "verify-run-approval", description: "Approve the deterministic sandbox run." } }], [edge("e1", "trigger", "approve")]) },
+    { scenario: "run-approval", mode: "create", definition: base("verify-run-approval", "Run Approval", [
+      trigger(),
+      step("prepare", "Prepare", 0, 160, "run-worker-a", { options: { output: "none" } }),
+      { id: "approve", type: "gate", label: "Operator approval", position: pos(0, 320), gate: { kind: "approval", approvalRef: "verify-run-approval", description: "Approve the deterministic sandbox run." } },
+    ], [edge("e1", "trigger", "prepare"), edge("e2", "prepare", "approve")]) },
   ]
 }
 

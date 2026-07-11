@@ -35,7 +35,9 @@ test("scenario fixtures cover new, valid manual, invalid manual, and run states"
   assert.equal(success?.nodes.at(-1)?.type, "step")
   assert.equal(success?.nodes.at(-1)?.options?.output, "none")
   assert.equal(fixtures.find((x) => x.scenario === "run-failure")?.definition.nodes.at(-1)?.type, "fail")
-  assert.equal(fixtures.find((x) => x.scenario === "run-approval")?.definition.nodes.at(-1)?.type, "gate")
+  const approval = fixtures.find((x) => x.scenario === "run-approval")?.definition
+  assert.equal(approval?.nodes.at(-1)?.type, "gate")
+  assert.equal(approval?.nodes.find((node) => node.type === "step")?.options?.output, "none")
 })
 
 test("five opt-in author requests pin sandbox employees to GPT-5.5 low", () => {
