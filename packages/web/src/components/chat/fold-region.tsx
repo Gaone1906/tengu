@@ -42,6 +42,19 @@ export function foldSummaryWords(summary: FoldSummaryData): string[] {
 const FOLD_MS = 420
 const FOLD_BEAT_MS = 400
 const ANCHOR_WINDOW_MS = 480
+/** Resting height of the summary ledger line (min-h-8). */
+export const FOLD_SUMMARY_PX = 32
+
+/**
+ * The anchored live fold only plays when the scroller can absorb the shrink:
+ * compensation scrolls UP by (region height - summary height), and scrollTop
+ * cannot go below 0. Without that slack the clamp yanks the answer up by the
+ * remainder — so the region stays open for this session instead, and rests
+ * folded on the next mount. Pure; exported for tests.
+ */
+export function canAnchorFold(scrollSlack: number, regionHeight: number, summaryHeight = FOLD_SUMMARY_PX): boolean {
+  return scrollSlack + 2 >= regionHeight - summaryHeight
+}
 
 function prefersReducedMotion(): boolean {
   return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
@@ -111,6 +124,7 @@ export function FoldRegion({ answered, summary, children }: FoldRegionProps) {
     const scroller = wrap.closest('.chat-messages-scroll')
 
     if (prefersReducedMotion()) {
+      if (!canAnchorFold(scroller?.scrollTop ?? 0, region.offsetHeight)) return
       const bottom0 = wrap.getBoundingClientRect().bottom
       setFolded(true)
       setLanded(true)
@@ -124,6 +138,11 @@ export function FoldRegion({ answered, summary, children }: FoldRegionProps) {
     }
 
     const beat = window.setTimeout(() => {
+      // No auto-fold without scroll slack: on a short thread scrollTop cannot
+      // absorb the shrink (it clamps at 0) and the answer would slide up by
+      // the remainder. The evidence stays open for this session and rests
+      // folded on the next mount.
+      if (!canAnchorFold(scroller?.scrollTop ?? 0, region.offsetHeight)) return
       // Anchor reference captured BEFORE the summary mounts, so its insertion
       // is compensated along with the region collapse.
       const bottom0 = wrap.getBoundingClientRect().bottom
