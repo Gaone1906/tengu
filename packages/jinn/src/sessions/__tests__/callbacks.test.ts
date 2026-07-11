@@ -251,6 +251,7 @@ describe("notifyParentSession", () => {
       employee: "test-employee",
       employeeDisplay: "Test Employee",
       childSessionId: "child-001",
+      fullMessage: "Some result",
     });
     expect(body.block).toMatchObject({
       op: "patch",
@@ -278,6 +279,20 @@ describe("notifyParentSession", () => {
     // Display banner is a tighter, truncated version
     expect(body.displayMessage.length).toBeLessThan(body.message.length);
     expect(body.displayMessage).toContain("…");
+  });
+
+  it("caps durable full callback messages at 16k without changing the 220-char display preview", async () => {
+    const longResult = "x".repeat(17_000);
+    const child = makeSession();
+
+    notifyParentSession(child, { result: longResult });
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.meta.fullMessage).toBe("x".repeat(16_000));
+    expect(body.meta.fullMessage).toHaveLength(16_000);
+    expect(body.displayMessage).toBe(`📩 test-employee replied\n${"x".repeat(220)}…`);
   });
 
   it("includes full preview for short results", async () => {

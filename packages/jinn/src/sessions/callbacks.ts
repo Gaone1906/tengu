@@ -6,7 +6,7 @@ import {
 } from "./registry.js";
 import { loadConfig } from "../shared/config.js";
 import { logger } from "../shared/logger.js";
-import type { Session } from "../shared/types.js";
+import { STRUCTURED_MESSAGE_BODY_MAX_CHARS, type Session } from "../shared/types.js";
 import { GATEWAY_INFO_FILE } from "../shared/paths.js";
 import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
 import { hydrateAllAttachments, talkSessionsAttachedTo } from "../talk/attachments.js";
@@ -283,7 +283,7 @@ async function _sendNotification(
   } else if (result.error) {
     message = `⚠️ Employee "${employeeName}" (child session ${childId}) hit an error and could not finish: ${result.error}`;
     displayMessage = `⚠️ ${employeeName} couldn't finish\n${_clean(result.error, 220)}`;
-    notificationMeta = childNotificationMeta("child-error", childSession);
+    notificationMeta = childNotificationMeta("child-error", childSession, result.error);
   } else {
     const raw = (result.result || "").trim() || "(no output)";
     const llmPreview = raw.length > 500 ? raw.slice(0, 500) + "…" : raw;
@@ -293,7 +293,7 @@ async function _sendNotification(
       `To read the full reply: GET /api/sessions/${childId}?last=N · ` +
       `to follow up: POST /api/sessions/${childId}/message`;
     displayMessage = `📩 ${employeeName} replied\n${_clean(raw, 220)}`;
-    notificationMeta = childNotificationMeta("child-reply", childSession);
+    notificationMeta = childNotificationMeta("child-reply", childSession, raw);
   }
 
   if (!isTalkParent && childSession.workItemId) {
@@ -315,7 +315,11 @@ async function _sendNotification(
   });
 }
 
-function childNotificationMeta(kind: "child-reply" | "child-error", childSession: Session): JsonObject {
+function childNotificationMeta(
+  kind: "child-reply" | "child-error",
+  childSession: Session,
+  fullMessage: string,
+): JsonObject {
   const employee = childSession.employee || "Unknown";
   const storedDisplay = childSession.transportMeta?.delegationEmployeeDisplay;
   const employeeDisplay = typeof storedDisplay === "string" && storedDisplay.trim()
@@ -325,7 +329,13 @@ function childNotificationMeta(kind: "child-reply" | "child-error", childSession
         .filter(Boolean)
         .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
         .join(" ");
-  return { kind, employee, employeeDisplay, childSessionId: childSession.id };
+  return {
+    kind,
+    employee,
+    employeeDisplay,
+    childSessionId: childSession.id,
+    fullMessage: fullMessage.slice(0, STRUCTURED_MESSAGE_BODY_MAX_CHARS),
+  };
 }
 
 /** Trim to a word boundary for a tidy human-facing preview. */

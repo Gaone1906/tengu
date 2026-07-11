@@ -409,6 +409,7 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
       employee: "qa-emp",
       employeeDisplay: "QA Employee",
       childSessionId: delegated.body.sessionId,
+      fullMessage: "Release is ready with durable details.",
     };
 
     const callback = await call("POST", `/api/sessions/${parentId}/message`, {

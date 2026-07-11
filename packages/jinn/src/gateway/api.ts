@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
 import type { ChatBlock, ChatBlockEnvelope, CronJob, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target, WorkflowSessionProvenance } from "../shared/types.js";
-import { isInterruptibleEngine } from "../shared/types.js";
+import { isInterruptibleEngine, STRUCTURED_MESSAGE_BODY_MAX_CHARS } from "../shared/types.js";
 import { compactEmployeeRole } from "../shared/employee-role.js";
 export { compactEmployeeRole } from "../shared/employee-role.js";
 import {
@@ -4775,12 +4775,16 @@ export async function handleApiRequest(
         const employee = typeof rawMeta.employee === "string" ? stripControlChars(rawMeta.employee).trim().slice(0, 160) : "";
         const employeeDisplay = typeof rawMeta.employeeDisplay === "string" ? stripControlChars(rawMeta.employeeDisplay).trim().slice(0, 160) : "";
         const childSessionId = typeof rawMeta.childSessionId === "string" ? stripControlChars(rawMeta.childSessionId).trim().slice(0, 160) : "";
+        const fullMessage = typeof rawMeta.fullMessage === "string"
+          ? rawMeta.fullMessage.slice(0, STRUCTURED_MESSAGE_BODY_MAX_CHARS)
+          : "";
         if (kind && employee && childSessionId) {
           notificationMeta = {
             kind,
             employee,
             ...(employeeDisplay ? { employeeDisplay } : {}),
             childSessionId,
+            ...(fullMessage ? { fullMessage } : {}),
           };
         } else if (rawMeta.kind === "manager-visibility" && employee && childSessionId) {
           const manager = typeof rawMeta.manager === "string" ? stripControlChars(rawMeta.manager).trim().slice(0, 160) : "";
