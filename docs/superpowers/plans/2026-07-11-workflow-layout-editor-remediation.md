@@ -255,7 +255,7 @@ pnpm --filter jinn-cli test -- src/workflows/__tests__/layout.test.ts src/workfl
 pnpm --filter jinn-cli typecheck
 git diff --check
 git add packages/jinn/src/workflows/layout.ts packages/jinn/src/workflows/definition.ts packages/jinn/src/workflows/authoring.ts packages/jinn/src/workflows/sop.ts packages/jinn/src/workflows/definition-store.ts packages/jinn/src/mcp/workflow-tools.ts packages/jinn/src/gateway/api.ts packages/jinn/src/workflows/__tests__/layout.test.ts packages/jinn/src/workflows/__tests__/definition.test.ts packages/jinn/src/workflows/__tests__/definition-store.test.ts packages/jinn/src/mcp/__tests__/workflow-tools.test.ts
-LEAK_PATTERN=$(sed -n "s/.*git diff --cached | grep -iE '\([^']*\)'.*/\1/p" "$HOME/.jinn/CLAUDE.md" | head -1); git diff --cached | grep -iE "$LEAK_PATTERN" && exit 1 || true
+test -n "$JINN_PUBLIC_LEAK_PATTERN"; git diff --cached | grep -iE "$JINN_PUBLIC_LEAK_PATTERN" && exit 1 || true
 git commit -m "feat(workflows): normalize generated graph layouts"
 ```
 Expected: focused tests and typecheck PASS; staged privacy grep returns no matches.
@@ -398,7 +398,7 @@ pnpm --filter @jinn/web test -- src/routes/workflow/__tests__/edit-graph.test.ts
 pnpm --filter @jinn/web typecheck
 git diff --check
 git add packages/web/src/lib/api.ts packages/web/src/routes/workflow packages/web/src/routes/globals.css
-LEAK_PATTERN=$(sed -n "s/.*git diff --cached | grep -iE '\([^']*\)'.*/\1/p" "$HOME/.jinn/CLAUDE.md" | head -1); git diff --cached | grep -iE "$LEAK_PATTERN" && exit 1 || true
+test -n "$JINN_PUBLIC_LEAK_PATTERN"; git diff --cached | grep -iE "$JINN_PUBLIC_LEAK_PATTERN" && exit 1 || true
 git commit -m "feat(web): make workflow graphs editable and runnable"
 ```
 
@@ -431,31 +431,42 @@ Expected: PASS with no snapshots as the sole proof of geometry.
 
 ```bash
 git add packages/jinn/src/mcp/__tests__/workflow-tools.test.ts packages/jinn/src/gateway/__tests__/workflow-run-fanout-route.test.ts packages/web/src/routes/workflow/__tests__
-LEAK_PATTERN=$(sed -n "s/.*git diff --cached | grep -iE '\([^']*\)'.*/\1/p" "$HOME/.jinn/CLAUDE.md" | head -1); git diff --cached | grep -iE "$LEAK_PATTERN" && exit 1 || true
+test -n "$JINN_PUBLIC_LEAK_PATTERN"; git diff --cached | grep -iE "$JINN_PUBLIC_LEAK_PATTERN" && exit 1 || true
 git commit -m "test(workflows): gate layout editor and run integration"
 ```
 
 ### Task 6: Sanitized sandbox and browser matrix
 
 **Files:**
-- Create: `scripts/workflow-layout-sandbox/seed.mjs`
-- Create: `scripts/workflow-layout-sandbox/author-five.mjs`
-- Create: `scripts/workflow-layout-sandbox/browser-matrix.mjs`
-- Create: `scripts/workflow-layout-sandbox/measure.mjs`
+- Create: `e2e/workflow-layout/bootstrap-sandbox.mjs`
+- Create: `e2e/workflow-layout/author-canonical.mjs`
+- Create: `e2e/workflow-layout/seed-fixtures.mjs`
+- Create: `e2e/workflow-layout/metrics.ts`
+- Create: `e2e/workflow-layout/workflow-layout.spec.ts`
+- Create: `playwright.workflow-layout.config.ts`
+- Create: `scripts/verify-workflow-layout.sh`
 
 - [ ] **Step 1: Create a fresh isolated home and build**
 
 ```bash
-export JINN_HOME=/tmp/jinn-workflow-layout-$RANDOM/home
-export JINN_PORT=7810
-mkdir -p "$JINN_HOME"
+export REPO=$(pwd)
+export VERIFY_ROOT=$(mktemp -d /tmp/jinn-workflow-layout.XXXXXX)
+export HOST_HOME="$VERIFY_ROOT/host"
+export CODEX_HOME="$VERIFY_ROOT/codex-base"
+export JINN_HOME="$HOST_HOME/.jinn-workflow-layout-verification"
+export JINN_PORT=7800
+export ARTIFACTS="$JINN_HOME/sandbox-artifacts/$(date -u +%Y%m%dT%H%M%SZ)-workflow-layout"
+test -z "$(lsof -nP -iTCP:$JINN_PORT -sTCP:LISTEN -t)"
+mkdir -p "$HOST_HOME" "$CODEX_HOME" "$ARTIFACTS"
 pnpm build
-JINN_HOME="$JINN_HOME" node packages/jinn/dist/bin/jinn.js create jinn-workflow-layout -p "$JINN_PORT"
-JINN_HOME="$JINN_HOME" node packages/jinn/dist/bin/jinn.js -i jinn-workflow-layout start --daemon
+env HOME="$HOST_HOME" CODEX_HOME="$CODEX_HOME" JINN_REPO="$REPO" \
+  "$HOME/.jinn/skills/jinn-sandbox/scripts/jinn-sandbox.sh" create workflow-layout-verification --port "$JINN_PORT" --build --seed
+env HOME="$HOST_HOME" CODEX_HOME="$CODEX_HOME" JINN_REPO="$REPO" \
+  "$HOME/.jinn/skills/jinn-sandbox/scripts/jinn-sandbox.sh" start workflow-layout-verification
 curl -fsS "http://127.0.0.1:$JINN_PORT/api/status"
 ```
 
-The scripts assert `JINN_PORT >= 7800` and reject any base URL containing `:7777` before making a request.
+The wrapper redirects `HOME` before invoking the helper so the real instance registry is unreachable. It asserts `JINN_PORT >= 7800`, rejects any base URL containing `:7777`, installs an exit trap that stops only `workflow-layout-verification`, and retains the stopped sandbox home for inspection.
 
 - [ ] **Step 2: Seed canonical/new/invalid/manual/run states**
 
@@ -463,15 +474,15 @@ Seed linear, branch, merge, approval, supported error lane, and bounded loop def
 
 - [ ] **Step 3: Launch five fresh GPT-5.5-low sandbox children**
 
-Use the sandbox gateway session API with `engine:'codex'`, `model:'gpt-5.5-low'`, and prompts for representative linear, branch+merge, approval+wait, supported error-lane, and bounded-loop workflows. Each prompt explicitly uses the sandbox MCP endpoint/config and writes only under `$JINN_HOME`; assert every returned session id exists in the sandbox registry and no external gateway URL appears in its context.
+Use the sandbox gateway session API with `engine:'codex'`, `model:'gpt-5.5'`, `effortLevel:'low'`, five generic sandbox employees, and prompts for representative linear, branch+merge, approval+wait, supported error-lane, and bounded-loop workflows. Each prompt explicitly uses the sandbox MCP endpoint/config and writes only under `$JINN_HOME`; assert every returned session id exists in the sandbox registry and no external gateway URL appears in its context. Poll only `http://127.0.0.1:7800` with an eight-minute bound; preserve failed transcripts rather than substituting hand-authored graphs.
 
 - [ ] **Step 4: Run browser matrix**
 
-For every canonical and child-authored graph capture 1440×900 and 390×844, dark/light, normal/reduced motion: initial Editor, Tidy preview, Apply, Save, reload, Executions empty/run success/failure/approval. Record screenshots, trace JSON, console errors, viewport zoom, focus node, scroll positions, and accessibility results under `$JINN_HOME/sandbox-artifacts/<timestamp>/`.
+For every canonical and child-authored graph capture 1440×900 and 390×844, dark/light, normal/reduced motion: initial Editor, Tidy preview, Apply, Save, reload, Executions empty/run success/failure/approval. Use one fresh context per cell and abort every HTTP(S)/WebSocket origin except exactly `http://127.0.0.1:7800`. Record screenshots, console errors, viewport zoom, focus node, scroll positions, and accessibility results under `$JINN_HOME/sandbox-artifacts/<timestamp>/`. Disable Playwright tracing because traces can retain authorization headers.
 
 - [ ] **Step 5: Enforce geometry/readability measurements**
 
-Fail the script on any expanded-envelope overlap, non-loop `target.x < source.right + 96`, same-rank vertical gap below 64, merge not right of every predecessor, zoom below 0.75 mobile initial focus or 0.65 desktop fit, clipped labels, missing focus, horizontal body scroll, or Apply+reload coordinate mismatch.
+Fail the script on any expanded-envelope overlap, non-loop `target.x < source.right + 96`, same-rank vertical gap below 64, merge not right of every predecessor, zoom below 0.75 mobile initial focus or 0.65 desktop fit, clipped labels, missing focus, horizontal body scroll, or Apply+reload coordinate mismatch. Measure each semantic envelope as the union of the React Flow node root and visible descendants so overflowing dock captions are included.
 
 ### Task 7: Full verification, central review, and handoff
 
@@ -491,7 +502,7 @@ pnpm --filter @jinn/web build
 ```bash
 git diff --check main...HEAD
 git log --format=%B main..HEAD | rg -i 'Co-Authored-By' && exit 1 || true
-LEAK_PATTERN=$(sed -n "s/.*git diff --cached | grep -iE '\([^']*\)'.*/\1/p" "$HOME/.jinn/CLAUDE.md" | head -1); git diff main...HEAD | grep -iE "$LEAK_PATTERN" && exit 1 || true
+test -n "$JINN_PUBLIC_LEAK_PATTERN"; git diff main...HEAD | grep -iE "$JINN_PUBLIC_LEAK_PATTERN" && exit 1 || true
 rg -n 'transition: all|transition-all|rgba\(' packages/web/src/routes/workflow packages/web/src/routes/globals.css
 ```
 
