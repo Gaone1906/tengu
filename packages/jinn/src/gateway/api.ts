@@ -24,6 +24,11 @@ import {
 } from "../shared/models.js";
 import { validateNewSessionSelection, validateSessionPatch } from "../sessions/session-patch.js";
 import type { SessionManager } from "../sessions/manager.js";
+import { MAX_WORKFLOW_DEFINITION_BYTES } from "../workflows/definition.js";
+import {
+  WorkflowRunIdempotencyConflict,
+  WORKFLOW_RUN_IDEMPOTENCY_CONFLICT,
+} from "../workflows/run-idempotency.js";
 import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "../sessions/context.js";
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import {
@@ -229,6 +234,14 @@ import { resolveOrgHierarchy } from "./org-hierarchy.js";
 import { surfaceManagerVisibility } from "./manager-visibility.js";
 import { searchKnowledge, readKnowledgeFile } from "../knowledge/store.js";
 import { planWorkflowAuthoringInput } from "../workflows/authoring.js";
+import {
+  WORKFLOW_AUTHORITY_FIELDS,
+  parseWorkflowDirectCreateTransport,
+  parseWorkflowDirectUpdateTransport,
+  parseWorkflowMutateCreateTransport,
+  parseWorkflowMutateUpdateTransport,
+  parseWorkflowPlanTransport,
+} from "../workflows/schema.js";
 import { loadInstances } from "../cli/instances.js";
 import { handleHookPost, isLoopback } from "./hook-endpoint.js";
 import {
@@ -273,7 +286,7 @@ const AUTH_BODY_MAX_BYTES = 16 * 1024;
 /** Operator Todo PATCH cap, measured as raw UTF-8 request bytes including JSON overhead. */
 export const TODO_EDIT_BODY_MAX_BYTES = 64 * 1024;
 /** Cap for workflow-definition CRUD bodies (GRS-011b). A large graph is still KB-scale. */
-const WORKFLOW_DEFINITION_BODY_MAX_BYTES = 512 * 1024;
+const WORKFLOW_DEFINITION_BODY_MAX_BYTES = MAX_WORKFLOW_DEFINITION_BYTES;
 /** Cap for inbound workflow events. Payloads become prompt context, so keep them small. */
 const WORKFLOW_EVENT_BODY_MAX_BYTES = 64 * 1024;
 /** Cap for editable SKILL.md bodies. */
@@ -1029,6 +1042,42 @@ interface WorkflowRunRequestBody {
   idempotencyKey?: unknown;
 }
 
+function projectWorkflowRunApprovalCapability(
+  run: WorkflowRun,
+  headers: HttpRequest["headers"],
+  context: ApiContext,
+): WorkflowRun & {
+  approvalCapability: { canDecide: boolean; target: string | null; needsYou: boolean; escalated: boolean } | null;
+} {
+  if (run.status !== "parked" || !run.parked) return { ...run, approvalCapability: null };
+  const triggerTodoId = workflowRunTriggerTodoId(run);
+  const item = getWorkItemBySourceRef("workflow", `workflow:${run.workflowId}:${run.runId}`)
+    ?? (triggerTodoId ? getWorkItem(triggerTodoId) : undefined);
+  if (!item) {
+    return {
+      ...run,
+      approvalCapability: { canDecide: false, target: null, needsYou: false, escalated: false },
+    };
+  }
+  const route = resolveApprovalRouteTarget(item);
+  const authority = resolveApprovalDecisionAuthority(headers, item, {
+    operatorAuthenticated: verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+  });
+  const needsYou = authority.ok && item.approvalState === "pending" && (
+    (authority.authority.kind === "employee" && item.approvalTarget === authority.authority.employee) ||
+    (authority.authority.kind === "operator" && route.targetIsVirtualRoot)
+  );
+  return {
+    ...run,
+    approvalCapability: {
+      canDecide: authority.ok,
+      target: route.target,
+      needsYou,
+      escalated: item.approvalEscalatedAt !== null,
+    },
+  };
+}
+
 function validateWorkflowStepPrompt(value: unknown, field: string): { ok: true; prompt: string } | { ok: false; error: string } {
   if (typeof value !== "string" || !value.trim()) {
     return { ok: false, error: `${field} must be a non-empty string` };
@@ -1138,13 +1187,28 @@ async function runWorkflowDefinitionFromHttp(
         ...(validated.idempotencyKey ? { idempotencyKey: validated.idempotencyKey } : {}),
       }
     : undefined;
-  const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context), def, trigger, {
-    knownEmployees,
-    knownEngines,
-    ...(invocation ? { invocation } : {}),
-    ...(validated.stepOverrides ? { stepOverrides: validated.stepOverrides } : {}),
-  });
-  return json(res, run, run.status === "failed" ? 422 : 201);
+  let replayed = false;
+  try {
+    const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context), def, trigger, {
+      knownEmployees,
+      knownEngines,
+      principal: authority.actor === "operator" ? "operator" : `employee:${authority.actor}`,
+      onIdempotencyReplay: () => { replayed = true; },
+      ...(invocation ? { invocation } : {}),
+      ...(validated.stepOverrides ? { stepOverrides: validated.stepOverrides } : {}),
+    });
+    const status = replayed ? 200 : run.status === "failed" ? 422 : 201;
+    return json(res, projectWorkflowRunApprovalCapability(run, req.headers, context), status);
+  } catch (err) {
+    if (err instanceof WorkflowRunIdempotencyConflict) {
+      return json(res, {
+        error: err.message,
+        code: WORKFLOW_RUN_IDEMPOTENCY_CONFLICT,
+        ...(err.runId ? { runId: err.runId } : {}),
+      }, 409);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -2016,23 +2080,6 @@ type WorkflowOperation = "create" | "update" | "duplicate" | "retire" | "run" | 
 type WorkflowOperationAuthority =
   | { ok: true; actor: string; employee?: Employee; canSetWorkflowAuthority: boolean }
   | { ok: false; status: 403; error: string };
-
-const WORKFLOW_AUTHORITY_FIELDS = [
-  "owner",
-  "ownerEmployee",
-  "workflowOwner",
-  "createdBy",
-  "creator",
-  "author",
-  "department",
-  "ownerDepartment",
-  "workflowDepartment",
-  "critical",
-  "cooOwned",
-  "requiresCooApproval",
-  "classification",
-  "authority",
-] as const;
 
 function readWorkflowAuthorityString(def: EditableWorkflowDefinition, keys: string[]): string | null {
   const rec = def as unknown as Record<string, unknown>;
@@ -3873,7 +3920,7 @@ export async function handleApiRequest(
         return badRequest(res, "Request body must be a JSON object");
       }
       try {
-        return json(res, planWorkflowAuthoringInput(parsed.body as Record<string, unknown>));
+        return json(res, planWorkflowAuthoringInput(parseWorkflowPlanTransport(parsed.body)));
       } catch (err) {
         return badRequest(res, err instanceof Error ? err.message : String(err));
       }
@@ -3890,16 +3937,21 @@ export async function handleApiRequest(
       if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
         return badRequest(res, "Request body must be a JSON object");
       }
-      const body = parsed.body as Record<string, unknown>;
-      const operation = body.operation;
+      const operation = (parsed.body as Record<string, unknown>).operation;
       if (operation !== "create" && operation !== "update") {
         return badRequest(res, "operation must be create or update");
       }
-      const reconcileSopTriggers = body.reconcileSopTriggers === true;
-      const rawTriggerPlan = body.triggerBindingPlan;
-      if (rawTriggerPlan !== undefined && (!rawTriggerPlan || typeof rawTriggerPlan !== "object" || Array.isArray(rawTriggerPlan))) {
-        return badRequest(res, "triggerBindingPlan must be a JSON object");
+      let body;
+      try {
+        body = operation === "create"
+          ? parseWorkflowMutateCreateTransport(parsed.body)
+          : parseWorkflowMutateUpdateTransport(parsed.body);
+      } catch (err) {
+        return badRequest(res, err instanceof Error ? err.message : String(err));
       }
+      const reconcileSopTriggers = body.reconcileSopTriggers === true;
+      const requestedLayoutIntent = body.layoutIntent;
+      const rawTriggerPlan = body.triggerBindingPlan;
       if (rawTriggerPlan !== undefined && !reconcileSopTriggers) {
         return badRequest(res, "triggerBindingPlan requires reconcileSopTriggers");
       }
@@ -3912,17 +3964,14 @@ export async function handleApiRequest(
         let expectedVersion: number | undefined;
         let actor: string;
 
-        if (operation === "create") {
-          if (!body.definition || typeof body.definition !== "object" || Array.isArray(body.definition)) {
-            return badRequest(res, "definition must be a JSON object");
-          }
+        if (body.operation === "create") {
           const rawDefinition = body.definition as Record<string, unknown>;
-          if (typeof rawDefinition.id !== "string" || !rawDefinition.id.trim()) {
-            return badRequest(res, "definition.id is required");
-          }
-          workflowId = rawDefinition.id;
+          workflowId = body.definition.id;
           const authority = authorizeWorkflowOperation(req.headers, null, "create", context);
           if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+          if (requestedLayoutIntent === "manual" && authority.actor !== "operator") {
+            return json(res, { error: "manual layout intent is operator-only" }, 403);
+          }
           actor = authority.actor;
           const safeBody = actor === "operator"
             ? rawDefinition
@@ -3936,25 +3985,19 @@ export async function handleApiRequest(
             if (!bindingAuthority.ok) return json(res, { error: bindingAuthority.error }, bindingAuthority.status);
           }
         } else {
-          if (typeof body.workflowId !== "string" || !body.workflowId.trim()) {
-            return badRequest(res, "workflowId is required");
-          }
           workflowId = body.workflowId;
-          if (!body.patch || typeof body.patch !== "object" || Array.isArray(body.patch)) {
-            return badRequest(res, "patch must be a JSON object");
-          }
           const existing = getDefinition(root, workflowId);
           if (!existing) return notFound(res);
           const authority = authorizeWorkflowOperation(req.headers, existing, "update", context);
           if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+          if (requestedLayoutIntent === "manual" && authority.actor !== "operator") {
+            return json(res, { error: "manual layout intent is operator-only" }, 403);
+          }
           actor = authority.actor;
           patch = authority.canSetWorkflowAuthority
             ? body.patch as Partial<EditableWorkflowDefinition>
             : stripWorkflowAuthorityFields(body.patch as Partial<EditableWorkflowDefinition>);
-          if (body.expectedVersion !== undefined) {
-            if (typeof body.expectedVersion !== "number") return badRequest(res, "expectedVersion must be a number");
-            expectedVersion = body.expectedVersion;
-          }
+          expectedVersion = body.expectedVersion;
           if (reconcileSopTriggers) {
             const bindingAuthority = authorizeWorkflowOperation(req.headers, existing, "bind-trigger", context);
             if (!bindingAuthority.ok) return json(res, { error: bindingAuthority.error }, bindingAuthority.status);
@@ -3981,9 +4024,12 @@ export async function handleApiRequest(
           trigger: Record<string, unknown> | undefined;
         };
         try {
-          const definition = operation === "create"
-            ? createDefinition(root, definitionInput!)
-            : updateDefinition(root, workflowId, patch!, { expectedVersion });
+          const definition = body.operation === "create"
+            ? createDefinition(root, definitionInput!, { layoutIntent: requestedLayoutIntent ?? "generated" })
+            : updateDefinition(root, workflowId, patch!, {
+                expectedVersion,
+                ...(requestedLayoutIntent ? { layoutIntent: requestedLayoutIntent } : {}),
+              });
           const trigger = reconcileSopTriggers
             ? await reconcileOwnedSopTriggers(
                 root,
@@ -4023,7 +4069,7 @@ export async function handleApiRequest(
         } catch (cleanupErr) {
           logger.warn(`workflow mutation post-commit trigger cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
         }
-        return json(res, committed, operation === "create" ? 201 : 200);
+        return json(res, committed, body.operation === "create" ? 201 : 200);
       });
     }
 
@@ -4043,14 +4089,32 @@ export async function handleApiRequest(
         if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
           return badRequest(res, "Request body must be a JSON object");
         }
+        let body;
         try {
-          const body = parsed.body as Record<string, unknown>;
+          body = parseWorkflowDirectCreateTransport(parsed.body);
+        } catch (err) {
+          const issues = (err as { issues?: unknown[] } | null)?.issues;
+          return json(res, {
+            error: err instanceof Error ? err.message : String(err),
+            ...(Array.isArray(issues) ? { errors: issues } : {}),
+          }, 400);
+        }
+        try {
+          const requestedLayoutIntent = body.layoutIntent;
+          const { layoutIntent: _layoutIntent, ...definitionBody } = body;
           const authority = authorizeWorkflowOperation(req.headers, null, "create", context);
           if (!authority.ok) {
             return json(res, { error: authority.error }, authority.status);
           }
-          const safeBody = authority.actor === "operator" ? body : stripWorkflowAuthorityFields(body as Partial<EditableWorkflowDefinition>);
-          const created = createDefinition(root, { ...safeBody, ...workflowDefinitionAuthorPatch(authority) } as unknown as EditableWorkflowDefinition);
+          if (requestedLayoutIntent === "manual" && authority.actor !== "operator") {
+            return json(res, { error: "manual layout intent is operator-only" }, 403);
+          }
+          const safeBody = authority.actor === "operator" ? definitionBody : stripWorkflowAuthorityFields(definitionBody as Partial<EditableWorkflowDefinition>);
+          const created = createDefinition(
+            root,
+            { ...safeBody, ...workflowDefinitionAuthorPatch(authority) } as unknown as EditableWorkflowDefinition,
+            { layoutIntent: requestedLayoutIntent === "manual" || requestedLayoutIntent === "normalize" ? requestedLayoutIntent : "generated" },
+          );
           syncWorkflowCronJobsForRoot(root); // GRS-014d: schedule triggers become managed cron jobs
           return json(res, created, 201);
         } catch (err) {
@@ -4238,7 +4302,7 @@ export async function handleApiRequest(
           status: outcome.status,
         }, 409);
       }
-      return json(res, outcome.run);
+      return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
     }
 
     // POST /api/workflow-definitions/:id/runs/:runId/resolve-gate — resolve a PARKED
@@ -4282,7 +4346,7 @@ export async function handleApiRequest(
         if (result.outcome === "not-parked") {
           return json(res, { error: `run is ${result.run.status}, not parked`, status: result.run.status }, 409);
         }
-        return json(res, result.run);
+        return json(res, projectWorkflowRunApprovalCapability(result.run, req.headers, context));
       } catch (err) {
         if (err instanceof WorkflowRunStoreError) {
           return json(res, { error: err.message, code: err.code }, err.code === "not-found" ? 404 : 400);
@@ -4313,7 +4377,7 @@ export async function handleApiRequest(
       try {
         const run = getRun(root, params.id, params.runId);
         if (!run) return notFound(res);
-        return json(res, run);
+        return json(res, projectWorkflowRunApprovalCapability(run, req.headers, context));
       } catch (err) {
         if (err instanceof WorkflowRunStoreError) return json(res, { error: err.message, code: err.code }, 400);
         return workflowStoreErrorResponse(res, err);
@@ -4342,10 +4406,13 @@ export async function handleApiRequest(
       if (parsed.body !== null && (typeof parsed.body !== "object" || Array.isArray(parsed.body))) {
         return badRequest(res, "Request body must be a JSON object");
       }
-      const body = (parsed.body ?? {}) as Partial<EditableWorkflowDefinition> & {
-        expectedVersion?: number;
-      };
-      const { expectedVersion, ...patch } = body;
+      let body;
+      try {
+        body = parseWorkflowDirectUpdateTransport(parsed.body ?? {});
+      } catch (err) {
+        return badRequest(res, err instanceof Error ? err.message : String(err));
+      }
+      const { expectedVersion, layoutIntent, ...patch } = body;
       try {
         const existing = getDefinition(root, params.id);
         if (!existing) return notFound(res);
@@ -4353,8 +4420,12 @@ export async function handleApiRequest(
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
-        const safePatch = authority.canSetWorkflowAuthority ? patch : stripWorkflowAuthorityFields(patch);
-        const updated = updateDefinition(root, params.id, safePatch, { expectedVersion });
+        if (layoutIntent === "manual" && authority.actor !== "operator") {
+          return json(res, { error: "manual layout intent is operator-only" }, 403);
+        }
+        const typedPatch = patch as unknown as Partial<EditableWorkflowDefinition>;
+        const safePatch = authority.canSetWorkflowAuthority ? typedPatch : stripWorkflowAuthorityFields(typedPatch);
+        const updated = updateDefinition(root, params.id, safePatch, { expectedVersion, ...(layoutIntent ? { layoutIntent } : {}) });
         syncWorkflowCronJobsForRoot(root); // GRS-014d: schedule/status edits re-derive the managed cron job
         return json(res, updated);
       } catch (err) {

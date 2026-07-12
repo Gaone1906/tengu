@@ -142,6 +142,17 @@ describe('validateDefinition', () => {
     expect(dangling?.ref).toBe('bad');
   });
 
+  it('rejects unsupported edge.on and points authors at the supported error-lane schema', () => {
+    const d = validDef();
+    (d.edges[1] as unknown as Record<string, unknown>).on = 'error';
+    const result = validateDefinition(d);
+    expect(result.errors).toContainEqual(expect.objectContaining({
+      code: 'unsupported-edge-field',
+      ref: 'e2',
+      message: expect.stringMatching(/onError.*error-edge.*lane.*error/i),
+    }));
+  });
+
   it('rejects a duplicate edge id', () => {
     const d = validDef();
     d.edges.push({ id: 'e1', from: 'a', to: 'b' });
@@ -154,6 +165,52 @@ describe('validateDefinition', () => {
     d.edges.push({ id: 'loop', from: 'b', to: 'b' });
     const r = validateDefinition(d);
     expect(r.errors.map((e) => e.code)).toContain('self-loop');
+  });
+
+  it.each([
+    ['sequence', 'sequence'],
+    ['handoff', 'handoff'],
+  ] as const)('rejects a reachable non-loop %s dependency cycle', (_label, kind) => {
+    const d = validDef();
+    d.edges.push({ id: `back-${kind}`, from: 'b', to: 'a', kind });
+    const result = validateDefinition(d);
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContainEqual(expect.objectContaining({
+      code: 'non-loop-cycle',
+      message: expect.stringMatching(/a.*b.*a|b.*a.*b/i),
+    }));
+  });
+
+  it('rejects cycles composed from sequence, error-lane, and switch edges', () => {
+    const d = validDef();
+    d.nodes[1].options = { onError: 'error-edge' };
+    d.nodes.splice(2, 0, {
+      id: 'route',
+      type: 'switch',
+      label: 'Route',
+      position: { x: 320, y: 140 },
+    });
+    d.edges = [
+      { id: 'entry', from: 't', to: 'a', kind: 'sequence' },
+      { id: 'failure', from: 'a', to: 'route', kind: 'sequence', lane: 'error' },
+      { id: 'branch', from: 'route', to: 'b', kind: 'sequence' },
+      { id: 'cycle', from: 'b', to: 'a', kind: 'handoff' },
+    ];
+
+    const result = validateDefinition(d);
+    expect(result.ok).toBe(false);
+    expect(result.errors.map((error) => error.code)).toContain('non-loop-cycle');
+  });
+
+  it('accepts a bounded loop only when removing the declared loop edge leaves a DAG', () => {
+    const legal = validDef();
+    legal.loop = { maxRoundsPerRun: 3 };
+    legal.edges.push({ id: 'bounded-back', from: 'b', to: 'a', kind: 'loop' });
+    expect(validateDefinition(legal).errors.map((error) => error.code)).not.toContain('non-loop-cycle');
+
+    const mixed = structuredClone(legal);
+    mixed.edges.push({ id: 'undeclared-knot', from: 'b', to: 'a', kind: 'sequence' });
+    expect(validateDefinition(mixed).errors.map((error) => error.code)).toContain('non-loop-cycle');
   });
 
   it('rejects an unreachable non-trigger node', () => {
@@ -296,11 +353,11 @@ describe('validateDefinition', () => {
     expect(unreachable).toEqual(['p', 'q']);
   });
 
-  it('allows a reachable cycle (bounded loop back-edge)', () => {
+  it('rejects a reachable cycle whose back-edge is not declared as a bounded loop', () => {
     const d = validDef();
     d.edges.push({ id: 'back', from: 'b', to: 'a', kind: 'sequence' }); // b → a, both reachable
     const r = validateDefinition(d);
-    expect(r.ok).toBe(true);
+    expect(r.errors.map((error) => error.code)).toContain('non-loop-cycle');
   });
 
   it('rejects impossible gates (kind-specific missing field) on nodes and runGates', () => {

@@ -1,8 +1,16 @@
 import { useCallback, useMemo } from "react"
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query"
-import { api, type Employee, type WorkItemCompactWire, type WorkItemDetailWire, type WorkItemStatusWire } from "@/lib/api"
+import {
+  api,
+  type Employee,
+  type WorkItemCompactWire,
+  type WorkItemDetailWire,
+  type WorkItemEditPatch,
+  type WorkItemStatusWire,
+} from "@/lib/api"
 import { dateBounds, statusesFor, type TodoFilters } from "@/lib/todos"
 import { queryKeys } from "@/lib/query-keys"
+import { mergeTodoIntoCaches, newTodoEditRequest } from "./todo-edit-request"
 
 /* GRS-021d/027 + design-todos §7 — the Todos data layer. The ledger keeps one
  * INFINITE query per status: every request is one fixed-size page
@@ -301,8 +309,16 @@ export function useEscalateApproval() {
 export function useUpdateWorkItem() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: Parameters<typeof api.updateWorkItem>[1] }) =>
-      api.updateWorkItem(id, patch),
+    mutationFn: async ({ id, patch }: { id: string; patch: WorkItemEditPatch }) => {
+      // Inline rename/reorder owns one logical conditional edit. Fetch the
+      // authoritative row first so these compact-row actions obey the same
+      // numeric CAS boundary as the detail sheet.
+      const detail = await api.getWorkItem(id)
+      const request = newTodoEditRequest(patch, detail.workItem.version ?? 0)
+      const result = await api.updateWorkItem(id, request)
+      mergeTodoIntoCaches(qc, result.workItem)
+      return result
+    },
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ["work-items"] })
       void qc.invalidateQueries({ queryKey: ["work-item"] })

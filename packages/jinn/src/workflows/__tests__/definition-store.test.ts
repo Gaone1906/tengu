@@ -55,6 +55,23 @@ afterEach(() => {
 });
 
 describe('createDefinition', () => {
+  it.each([
+    ['root mysteryMode', (value: Record<string, unknown>) => { value.mysteryMode = true; }],
+    ['node onError', (value: Record<string, unknown>) => {
+      ((value.nodes as Array<Record<string, unknown>>)[1]).onError = 'continue';
+    }],
+    ['nested retry option', (value: Record<string, unknown>) => {
+      const node = (value.nodes as Array<Record<string, unknown>>)[1];
+      node.options = { retry: { maxAttempts: 2, on: ['error'], mysteryMode: true } };
+    }],
+  ])('rejects unknown %s fields and writes no file', (_label, mutate) => {
+    const input = makeDef(`strict-create-${_label.replaceAll(' ', '-')}`) as unknown as Record<string, unknown>;
+    mutate(input);
+
+    expect(() => createDefinition(root, input as unknown as EditableWorkflowDefinition, { now })).toThrowError(WorkflowStoreError);
+    expect(fs.existsSync(path.join(root, 'workflows', `${input.id}.definition.json`))).toBe(false);
+  });
+
   it('writes a validated file, stamping version 1 / schemaVersion / updatedAt', () => {
     const def = createDefinition(root, makeDef('alpha', { version: 99, updatedAt: 'stale' }), { now });
     expect(def.version).toBe(1);
@@ -68,6 +85,22 @@ describe('createDefinition', () => {
     expect(parsed.id).toBe('alpha');
     expect(parsed.name).toBe('alpha');
     expect(parsed.version).toBe(1);
+  });
+
+  it('normalizes generated geometry and persists the returned coordinates atomically', () => {
+    const generated = makeDef('generated-layout');
+    generated.nodes[1].position = { x: 0, y: 0 };
+
+    const writeOptions = { now, layoutIntent: 'generated' } as Parameters<typeof createDefinition>[2];
+    const created = createDefinition(root, generated, writeOptions);
+    const onDisk = JSON.parse(
+      fs.readFileSync(path.join(root, 'workflows', 'generated-layout.definition.json'), 'utf8'),
+    ) as EditableWorkflowDefinition;
+
+    expect(created.layout).toEqual({ source: 'normalized', version: 1 });
+    expect(created.nodes[1].position).not.toEqual(created.nodes[0].position);
+    expect(onDisk.nodes).toEqual(created.nodes);
+    expect(onDisk.layout).toEqual(created.layout);
   });
 
   it('rejects duplicate canonical names even when storage ids differ', () => {
@@ -164,6 +197,19 @@ describe('listDefinitions', () => {
 });
 
 describe('updateDefinition', () => {
+  it('rejects an unknown nested field without changing bytes or version', () => {
+    createDefinition(root, makeDef('strict-update'), { now });
+    const file = path.join(root, 'workflows', 'strict-update.definition.json');
+    const before = fs.readFileSync(file);
+    const nodes = structuredClone(makeDef('strict-update').nodes) as unknown as Array<Record<string, unknown>>;
+    nodes[1].onError = 'continue';
+
+    expect(() => updateDefinition(root, 'strict-update', { nodes } as unknown as Partial<EditableWorkflowDefinition>, { now }))
+      .toThrowError(WorkflowStoreError);
+    expect(fs.readFileSync(file).equals(before)).toBe(true);
+    expect(getDefinition(root, 'strict-update')?.version).toBe(1);
+  });
+
   it('bumps version, sets updatedAt, and shallow-merges the patch', () => {
     createDefinition(root, makeDef('u1'), { now });
     const updated = updateDefinition(root, 'u1', { title: 'Renamed', description: 'new' }, { now: () => '2026-07-03T16:00:00.000Z' });
@@ -187,6 +233,122 @@ describe('updateDefinition', () => {
     const updated = updateDefinition(root, 'u2', { nodes: newNodes, edges: newEdges }, { now });
     expect(updated.nodes).toHaveLength(3);
     expect(updated.edges).toHaveLength(2);
+  });
+
+  it('normalizes an actual omitted-intent geometry change', () => {
+    const manual = makeDef('graph-default');
+    manual.nodes[1].position = { x: 400, y: 0 };
+    createDefinition(root, manual, { now, layoutIntent: 'manual' });
+    const overlapping = structuredClone(manual.nodes);
+    overlapping[1].position = { x: 0, y: 0 };
+
+    const updated = updateDefinition(root, 'graph-default', { nodes: overlapping }, { now });
+
+    expect(updated.layout).toEqual({ source: 'normalized', version: 1 });
+    expect(updated.nodes[1].position).not.toEqual(updated.nodes[0].position);
+  });
+
+  it('preserves valid manual coordinates and provenance for a property-only node patch', () => {
+    const manual = makeDef('manual-properties');
+    manual.nodes[1].position = { x: 400, y: 0 };
+    createDefinition(root, manual, { now, layoutIntent: 'manual' });
+    const propertyOnly = structuredClone(manual.nodes);
+    propertyOnly[1].label = 'Renamed only';
+
+    const updated = updateDefinition(root, 'manual-properties', { nodes: propertyOnly }, { now });
+
+    expect(updated.layout).toEqual({ source: 'manual', version: 1 });
+    expect(updated.nodes.map((node) => node.position)).toEqual(manual.nodes.map((node) => node.position));
+    expect(updated.nodes[1].label).toBe('Renamed only');
+  });
+
+  it('byte-preserves manual positions across execution and display property mutations', () => {
+    type GraphMutation = (draft: EditableWorkflowDefinition) => void;
+    const mutations: Array<[string, GraphMutation]> = [
+      ['node label', (draft) => { draft.nodes[1].label = 'Renamed'; }],
+      ['instructions', (draft) => { draft.nodes[1].instructions = 'Perform the work and report evidence.'; }],
+      ['actor', (draft) => { draft.nodes[1].actor = { kind: 'engine', ref: 'codex' }; }],
+      ['role', (draft) => { draft.nodes[1].role = 'implement'; }],
+      ['inline gate', (draft) => { draft.nodes[1].gates = [{ kind: 'artifact', glob: 'out/*.json', description: 'Output exists' }]; }],
+      ['model option', (draft) => { draft.nodes[1].options = { model: 'gpt-5.5' }; }],
+      ['effort option', (draft) => { draft.nodes[1].options = { effort: 'high' }; }],
+      ['output option', (draft) => { draft.nodes[1].options = { output: 'full' }; }],
+      ['retry option', (draft) => { draft.nodes[1].options = { retry: { maxAttempts: 2, on: ['error'] } }; }],
+      ['onError continue', (draft) => { draft.nodes[1].options = { onError: 'continue' }; }],
+      ['timeout option', (draft) => { draft.nodes[1].options = { timeoutMinutes: 10 }; }],
+      ['session option', (draft) => { draft.nodes[1].options = { session: { mode: 'fresh' } }; }],
+      ['cadence', (draft) => { draft.nodes[1].cadence = 'once daily'; }],
+      ['optional', (draft) => { draft.nodes[1].optional = true; }],
+      ['Todo transition', (draft) => { draft.nodes[1].todoTransition = 'in_review'; }],
+      ['edge label', (draft) => { draft.edges[1].label = 'continue'; }],
+      ['edge kind', (draft) => { draft.edges[1].kind = 'handoff'; }],
+      ['error lane pairing', (draft) => {
+        draft.nodes[1].options = { onError: 'error-edge' };
+        draft.edges[1].lane = 'error';
+      }],
+      ['array order', (draft) => {
+        draft.nodes = [draft.nodes[2], draft.nodes[0], draft.nodes[1]];
+        draft.edges = [draft.edges[1], draft.edges[0]];
+      }],
+    ];
+
+    for (const [index, [name, mutate]] of mutations.entries()) {
+      const id = `manual-property-${index}`;
+      const manual = makeDef(id);
+      manual.nodes[1].position = { x: 400, y: 0 };
+      manual.nodes.push({
+        id: 's2',
+        type: 'step',
+        label: 'Second',
+        position: { x: 840, y: 0 },
+        actor: { kind: 'employee', ref: 'reviewer' },
+      });
+      manual.edges.push({ id: 'e2', from: 's1', to: 's2', kind: 'sequence' });
+      const before = createDefinition(root, manual, { now, layoutIntent: 'manual' });
+      const changed = structuredClone(before);
+      mutate(changed);
+
+      const updated = updateDefinition(root, id, { nodes: changed.nodes, edges: changed.edges }, { now });
+      const positionBytes = (definition: EditableWorkflowDefinition) => JSON.stringify(
+        definition.nodes
+          .map((node) => [node.id, node.position] as const)
+          .sort(([left], [right]) => left.localeCompare(right)),
+      );
+      const beforePositions = positionBytes(before);
+      const afterPositions = positionBytes(updated);
+
+      expect.soft(afterPositions, name).toBe(beforePositions);
+      expect.soft(updated.layout, name).toEqual({ source: 'manual', version: 1 });
+    }
+  });
+
+  it('rejects an envelope-expanding property-only manual patch instead of moving nodes', () => {
+    const manual = makeDef('manual-envelope');
+    manual.nodes[1].position = { x: 300, y: 0 };
+    manual.nodes.push({ id: 's2', type: 'step', label: 'Second', position: { x: 640, y: 0 } });
+    manual.edges.push({ id: 'e2', from: 's1', to: 's2', kind: 'sequence' });
+    createDefinition(root, manual, { now, layoutIntent: 'manual' });
+    const expanded = structuredClone(manual.nodes);
+    expanded[1].instructions = 'This turns the employee step into a wide dock-bearing card.';
+
+    expect(() => updateDefinition(root, 'manual-envelope', { nodes: expanded }, { now }))
+      .toThrow(/s1.*s2.*Tidy/i);
+    expect(getDefinition(root, 'manual-envelope')).toMatchObject({
+      version: 1,
+      layout: { source: 'manual', version: 1 },
+      nodes: manual.nodes,
+    });
+  });
+
+  it('preserves server-owned provenance for an omitted-intent metadata-only patch', () => {
+    const manual = makeDef('metadata-default');
+    manual.nodes[1].position = { x: 400, y: 0 };
+    createDefinition(root, manual, { now, layoutIntent: 'manual' });
+
+    const updated = updateDefinition(root, 'metadata-default', { title: 'Metadata only' }, { now });
+
+    expect(updated.layout).toEqual({ source: 'manual', version: 1 });
+    expect(updated.nodes).toEqual(manual.nodes);
   });
 
   it('rejects a stale expectedVersion with a conflict', () => {

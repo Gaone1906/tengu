@@ -170,6 +170,35 @@ const callers = [
 ] as const;
 
 describe('uniform workflow operation authority', () => {
+  it('uses stable employee/operator idempotency namespaces rather than session credentials', async () => {
+    seedWorkflow('stable-principal-run', { owner: 'owner', createdBy: 'owner', department: 'platform' });
+    const body = { input: { ticket: 'ABC-42' }, idempotencyKey: 'same-key' };
+
+    const first = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
+      headers: verifiedHeaders('owner'), body,
+    });
+    const anotherSession = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
+      headers: verifiedHeaders('owner'), body,
+    });
+    expect(first.status).toBe(201);
+    expect(anotherSession.status).toBe(200);
+    expect((anotherSession.body as { runId: string }).runId).toBe((first.body as { runId: string }).runId);
+
+    const operator = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
+      headers: { authorization: 'Bearer gateway-secret' }, body,
+    });
+    const manager = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
+      headers: verifiedHeaders('platform-manager'), body,
+    });
+    expect(operator.status).toBe(201);
+    expect(manager.status).toBe(201);
+    expect(new Set([
+      (first.body as { runId: string }).runId,
+      (operator.body as { runId: string }).runId,
+      (manager.body as { runId: string }).runId,
+    ]).size).toBe(3);
+  });
+
   it('enforces the operation matrix for update, duplicate, retire, run, and trigger bind/unbind', async () => {
     for (const caller of callers) {
       const updateId = `update-${caller.name}`;
@@ -264,6 +293,134 @@ describe('uniform workflow operation authority', () => {
     expect(worker.status).toBe(201);
     expect(worker.body).toMatchObject({ owner: 'owner', createdBy: 'owner', department: 'platform' });
     expect(worker.body).not.toMatchObject({ critical: true, classification: 'critical', authority: 'operator' });
+  });
+
+  it('preserves recognized legacy authority fields for privileged direct API callers', async () => {
+    const operator = { authorization: 'Bearer gateway-secret' };
+    const created = await request('POST', '/api/workflow-definitions', {
+      headers: operator,
+      body: workflowDef('legacy-authority-direct', {
+        ownerEmployee: 'owner',
+        workflowOwner: 'owner',
+        creator: 'operator',
+        author: 'operator',
+        ownerDepartment: 'platform',
+        workflowDepartment: 'platform',
+        critical: true,
+        cooOwned: false,
+        requiresCooApproval: true,
+        classification: 'critical',
+        authority: 'operator',
+      }),
+    });
+
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({
+      ownerEmployee: 'owner',
+      workflowOwner: 'owner',
+      creator: 'operator',
+      author: 'operator',
+      ownerDepartment: 'platform',
+      workflowDepartment: 'platform',
+      critical: true,
+      cooOwned: false,
+      requiresCooApproval: true,
+      classification: 'critical',
+      authority: 'operator',
+      createdBy: 'operator',
+    });
+
+    const updated = await request('PUT', '/api/workflow-definitions/legacy-authority-direct', {
+      headers: operator,
+      body: { authority: 'coo', expectedVersion: 1 },
+    });
+    expect(updated.status).toBe(200);
+    expect(updated.body).toMatchObject({ authority: 'coo', version: 2 });
+  });
+
+  it('keeps manual layout provenance operator-only across create, mutate, and PUT routes', async () => {
+    const validManual = (id: string) => workflowDef(id, {
+      nodes: [
+        { id: 'trg', type: 'trigger', label: 'Manual', position: { x: 0, y: 0 }, trigger: { kind: 'manual' } },
+        { id: 'a', type: 'step', label: 'A', position: { x: 400, y: 0 } },
+      ],
+      owner: 'owner',
+      createdBy: 'owner',
+      department: 'platform',
+    });
+    const ownerHeaders = verifiedHeaders('owner');
+
+    const directCreate = await request('POST', '/api/workflow-definitions', {
+      headers: ownerHeaders,
+      body: { ...validManual('manual-direct-create'), layoutIntent: 'manual' },
+    });
+    expect(directCreate.status).toBe(403);
+    expect(getDefinition(evidenceRoot, 'manual-direct-create')).toBeNull();
+
+    const mutateCreate = await request('POST', '/api/workflow-definitions/mutate', {
+      headers: ownerHeaders,
+      body: { operation: 'create', definition: validManual('manual-mutate-create'), layoutIntent: 'manual' },
+    });
+    expect(mutateCreate.status).toBe(403);
+    expect(getDefinition(evidenceRoot, 'manual-mutate-create')).toBeNull();
+
+    seedWorkflow('manual-direct-update', { owner: 'owner', createdBy: 'owner', department: 'platform' });
+    const directUpdate = await request('PUT', '/api/workflow-definitions/manual-direct-update', {
+      headers: ownerHeaders,
+      body: { nodes: validManual('unused').nodes, layoutIntent: 'manual' },
+    });
+    expect(directUpdate.status).toBe(403);
+
+    seedWorkflow('manual-mutate-update', { owner: 'owner', createdBy: 'owner', department: 'platform' });
+    const mutateUpdate = await request('POST', '/api/workflow-definitions/mutate', {
+      headers: ownerHeaders,
+      body: {
+        operation: 'update',
+        workflowId: 'manual-mutate-update',
+        patch: { nodes: validManual('unused').nodes },
+        layoutIntent: 'manual',
+      },
+    });
+    expect(mutateUpdate.status).toBe(403);
+
+    const operatorCreate = await request('POST', '/api/workflow-definitions', {
+      headers: { authorization: 'Bearer gateway-secret' },
+      body: { ...validManual('manual-operator-create'), layoutIntent: 'manual' },
+    });
+    expect(operatorCreate.status).toBe(201);
+    expect(getDefinition(evidenceRoot, 'manual-operator-create')?.layout).toEqual({ source: 'manual', version: 1 });
+  });
+
+  it('normalizes omitted-intent graph PUTs while preserving metadata-only provenance', async () => {
+    const original = workflowDef('manual-graph-default', {
+      nodes: [
+        { id: 'trg', type: 'trigger', label: 'Manual', position: { x: 0, y: 0 }, trigger: { kind: 'manual' } },
+        { id: 'a', type: 'step', label: 'A', position: { x: 400, y: 0 } },
+      ],
+      owner: 'owner',
+      createdBy: 'owner',
+      department: 'platform',
+    });
+    createDefinition(evidenceRoot, original as Parameters<typeof createDefinition>[1], { layoutIntent: 'manual' });
+
+    const graphUpdate = await request('PUT', '/api/workflow-definitions/manual-graph-default', {
+      headers: verifiedHeaders('owner'),
+      body: {
+        nodes: [
+          original.nodes[0],
+          { ...original.nodes[1], label: 'Moved', position: { x: 0, y: 0 } },
+        ],
+      },
+    });
+    expect(graphUpdate.status).toBe(200);
+    expect((graphUpdate.body as { layout?: unknown }).layout).toEqual({ source: 'normalized', version: 1 });
+
+    const metadataUpdate = await request('PUT', '/api/workflow-definitions/manual-graph-default', {
+      headers: verifiedHeaders('owner'),
+      body: { title: 'Metadata only' },
+    });
+    expect(metadataUpdate.status).toBe(200);
+    expect((metadataUpdate.body as { layout?: unknown }).layout).toEqual({ source: 'normalized', version: 1 });
   });
 
   it('closes the full escalation chain against a COO-owned critical workflow', async () => {

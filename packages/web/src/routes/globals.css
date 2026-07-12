@@ -710,6 +710,10 @@ h1, h2, h3, h4, h5, h6 {
    the read-only workflow canvas (selection is OURS, via the card button).
    Re-enable hit-testing on the node wrapper; the pane still pans/zooms. */
 .react-flow__node { pointer-events: all !important; }
+/* A draggable workflow card owns the active finger until drop. Without this,
+   the global mobile pan gesture can cancel React Flow's touch drag before its
+   stop event persists geometry. Empty canvas space still pans and pinches. */
+.react-flow__node.draggable { touch-action: none; }
 /* Workflow canvas ports: a 24px touch hit-area around every 8px dot (inert
    until connect-by-drag lands; the dot + halo are inline on the handle). */
 .jinn-port { position: absolute; }

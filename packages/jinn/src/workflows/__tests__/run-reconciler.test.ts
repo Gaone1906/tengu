@@ -12,13 +12,18 @@ import {
   type RunDriverDeps,
 } from '../run-reconciler.js';
 import { markDispatching, stepSessionKey, type SpawnContext, type StepSessionProbe } from '../advance.js';
-import { createDefinition, getDefinition, updateDefinition } from '../definition-store.js';
-import { getRun, saveRun, type WorkflowRun } from '../run-store.js';
+import { createDefinition, getDefinition, updateDefinition, WorkflowStoreError } from '../definition-store.js';
+import { claimWorkflowRunInvocation, getRun, publishInitialWorkflowRun, saveRun, type WorkflowRun } from '../run-store.js';
 import {
   WORKFLOW_DEFINITION_SCHEMA_VERSION,
   type EditableWorkflowDefinition,
   type WorkflowNode,
 } from '../definition.js';
+import {
+  createWorkflowRunInvocationRequest,
+  fingerprintWorkflowRunInvocationRequest,
+  type WorkflowRunInvocationClaim,
+} from '../run-idempotency.js';
 
 /**
  * Integration tests for the GRS-014b run driver + reconciler against a REAL run/definition
@@ -101,6 +106,186 @@ function harness(overrides: Partial<RunDriverDeps> = {}) {
 }
 
 describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
+  it('gives exactly one interleaved full-start caller ownership of initial side effects', async () => {
+    const def = createDefinition(root, chainDef('publication-owner', [trigger, step('a')]), { now });
+    const options = {
+      trigger: { source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'publication-key' } as const,
+      invocation: { input: { ticket: 'ABC-42' } },
+      principal: 'employee:owner',
+      makeRunId: () => 'run-preallocated-owner',
+    };
+    const winner = harness();
+    const loser = harness();
+    const sideEffects: string[] = [];
+    const winnerDeps: RunDriverDeps = {
+      ...winner.deps,
+      syncRunSession: () => { sideEffects.push('winner:session'); return 'run-session'; },
+      workItems: {
+        mintRunItem: () => { sideEffects.push('winner:todo'); },
+        linkRunSession: () => { sideEffects.push('winner:todo-session'); },
+      } as unknown as NonNullable<RunDriverDeps['workItems']>,
+    };
+    let winnerStart: Promise<WorkflowRun> | undefined;
+    const loserDeps: RunDriverDeps = {
+      ...loser.deps,
+      syncRunSession: () => { sideEffects.push('loser:session'); return 'loser-session'; },
+      workItems: {
+        mintRunItem: () => { sideEffects.push('loser:todo'); },
+        linkRunSession: () => { sideEffects.push('loser:todo-session'); },
+      } as unknown as NonNullable<RunDriverDeps['workItems']>,
+      publishInitialRun: (rootPath, candidate) => {
+        winnerStart = startWorkflowRun(winnerDeps, def, options);
+        return publishInitialWorkflowRun(rootPath, candidate);
+      },
+    };
+
+    const losingResult = await startWorkflowRun(loserDeps, def, options);
+    if (!winnerStart) throw new Error('publication interleaving was not reached');
+    const winningResult = await winnerStart;
+
+    expect(losingResult.runId).toBe(winningResult.runId);
+    expect([...winner.spawnCalls, ...loser.spawnCalls]).toHaveLength(1);
+    expect(sideEffects).not.toContain('loser:session');
+    expect(sideEffects).not.toContain('loser:todo');
+    expect(sideEffects).not.toContain('loser:todo-session');
+    expect(sideEffects.filter((effect) => effect === 'winner:todo')).toHaveLength(1);
+  });
+
+  it('returns the published failed snapshot to an interleaved loser without loser projection', async () => {
+    const def = chainDef('failed-publication-owner', [trigger, step('a')]);
+    def.edges = [{ id: 'broken', from: 'trg', to: 'missing', kind: 'sequence' }];
+    const options = {
+      trigger: { source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'failed-publication-key' } as const,
+      principal: 'employee:owner',
+      makeRunId: () => 'run-preallocated-failed',
+    };
+    const winner = harness({ syncRunSession: () => 'winner-session' });
+    const loser = harness();
+    const projections: string[] = [];
+    const winnerDeps: RunDriverDeps = {
+      ...winner.deps,
+      syncRunSession: () => { projections.push('winner'); return 'winner-session'; },
+    };
+    let winnerStart: Promise<WorkflowRun> | undefined;
+    const loserDeps: RunDriverDeps = {
+      ...loser.deps,
+      syncRunSession: () => { projections.push('loser'); return 'loser-session'; },
+      publishInitialRun: (rootPath, candidate) => {
+        winnerStart = startWorkflowRun(winnerDeps, def, options);
+        return publishInitialWorkflowRun(rootPath, candidate);
+      },
+    };
+
+    const losingResult = await startWorkflowRun(loserDeps, def, options);
+    if (!winnerStart) throw new Error('failed publication interleaving was not reached');
+    const winningResult = await winnerStart;
+
+    expect(winningResult.status).toBe('failed');
+    expect(losingResult).toEqual(winningResult);
+    expect(projections).toEqual(['winner']);
+    expect([...winner.spawnCalls, ...loser.spawnCalls]).toHaveLength(0);
+  });
+
+  it('replays only exact canonical intent and rejects changed input before a second spawn', async () => {
+    const def = createDefinition(root, chainDef('intent-bound', [trigger, step('a')]), { now });
+    const { deps, spawnCalls } = harness();
+    const runTrigger = {
+      source: 'manual', event: 'workflow.manual_started', payload: { b: 2, a: 1 }, fireRef: 'request-42',
+    } as const;
+    const first = await startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      invocation: { input: { ticket: 'ABC-42', nested: { b: 2, a: 1 } } },
+      principal: 'employee:owner',
+    });
+    let replayed = false;
+    const exact = await startWorkflowRun(deps, def, {
+      trigger: { ...runTrigger, payload: { a: 1, b: 2 } },
+      invocation: { input: { nested: { a: 1, b: 2 }, ticket: 'ABC-42' } },
+      principal: 'employee:owner',
+      onIdempotencyReplay: () => { replayed = true; },
+    });
+
+    expect(exact.runId).toBe(first.runId);
+    expect(replayed).toBe(true);
+    await expect(startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      invocation: { input: { ticket: 'CHANGED' } },
+      principal: 'employee:owner',
+    })).rejects.toMatchObject({
+      code: 'workflow-run-idempotency-conflict', runId: first.runId,
+    });
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  it('resumes a crash-window claim without a run using its preallocated run id', async () => {
+    const def = createDefinition(root, chainDef('claim-recovery', [trigger, step('a')]), { now });
+    const { deps, spawnCalls } = harness();
+    const runTrigger = {
+      source: 'manual', event: 'workflow.manual_started', payload: { workflowId: def.id }, fireRef: 'recover-key',
+    } as const;
+    const request = createWorkflowRunInvocationRequest({
+      definition: def,
+      trigger: runTrigger,
+      input: { ticket: 'ABC-42' },
+      principal: 'employee:owner',
+    });
+    const claim: WorkflowRunInvocationClaim = {
+      schemaVersion: 1,
+      workflowId: def.id,
+      principal: 'employee:owner',
+      idempotencyKey: 'recover-key',
+      runId: 'run-preallocated',
+      fingerprint: fingerprintWorkflowRunInvocationRequest(request),
+      request,
+      createdAt: FIXED,
+    };
+    expect(claimWorkflowRunInvocation(root, claim).outcome).toBe('claimed');
+    expect(getRun(root, def.id, claim.runId)).toBeNull();
+
+    const recovered = await startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      invocation: { input: { ticket: 'ABC-42' } },
+      principal: 'employee:owner',
+    });
+
+    expect(recovered.runId).toBe('run-preallocated');
+    expect(getRun(root, def.id, 'run-preallocated')?.runId).toBe('run-preallocated');
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  it('compares replay intent with immutable initial overrides after the live run is edited', async () => {
+    const def = createDefinition(root, chainDef('immutable-initial-overrides', [trigger, step('a'), step('b')]), { now });
+    const { deps, spawnCalls } = harness();
+    const runTrigger = {
+      source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'override-key',
+    } as const;
+    const initialStepOverrides = { b: { prompt: 'Original run-local prompt.' } };
+    const first = await startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      invocation: { input: { ticket: 'ABC-42' } },
+      stepOverrides: initialStepOverrides,
+      principal: 'employee:owner',
+    });
+    const edited = await editPendingWorkflowStepPrompt(
+      deps, def.id, first.runId, 'b', 'Later operator edit.', { actor: 'owner' },
+    );
+    expect(edited).toMatchObject({ outcome: 'edited', run: { stepOverrides: { b: { prompt: 'Later operator edit.' } } } });
+
+    let replayed = false;
+    const exact = await startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      invocation: { input: { ticket: 'ABC-42' } },
+      stepOverrides: initialStepOverrides,
+      principal: 'employee:owner',
+      onIdempotencyReplay: () => { replayed = true; },
+    });
+
+    expect(exact.runId).toBe(first.runId);
+    expect(exact.stepOverrides?.b?.prompt).toBe('Later operator edit.');
+    expect(replayed).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+  });
+
   it('freezes structured per-run input and makes it available to the first phase prompt', async () => {
     const def = createDefinition(root, chainDef('parameterized', [trigger, step('a')]), { now });
     const { deps, spawnCalls } = harness();
@@ -309,15 +494,18 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     expect(getRun(root, 'badactor', run.runId)?.status).toBe('failed'); // persisted
   });
 
-  it('refuses a cyclic graph at start (unsupported-cycle)', async () => {
+  it('refuses a cyclic graph before persistence or start', () => {
     const cyclic = chainDef('cycly', [trigger, step('a'), step('b')]);
     cyclic.edges.push({ id: 'back', from: 'b', to: 'a', kind: 'sequence' });
-    const def = createDefinition(root, cyclic, { now });
-    const { deps, spawnCalls } = harness();
-    const run = await startWorkflowRun(deps, def);
-    expect(run.status).toBe('failed');
-    expect(run.errors?.[0].code).toBe('unsupported-cycle');
-    expect(spawnCalls).toHaveLength(0);
+    try {
+      createDefinition(root, cyclic, { now });
+      throw new Error('expected cyclic definition rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(WorkflowStoreError);
+      expect((error as WorkflowStoreError).code).toBe('validation');
+      expect((error as WorkflowStoreError).errors?.some((item) => item.code === 'non-loop-cycle')).toBe(true);
+    }
+    expect(getDefinition(root, 'cycly')).toBeNull();
   });
 
   it('a failed spawn fails the run (required step) with the receipt preserved', async () => {

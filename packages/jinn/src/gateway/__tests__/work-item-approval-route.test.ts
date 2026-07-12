@@ -434,6 +434,49 @@ describe("POST /api/work-items/:id/approval — mirrored workflow park (integrat
     return { runId: started.runId, todoId: todo.id };
   }
 
+  it("projects real approval authority and Needs-you routing onto a parked run per current principal", async () => {
+    const workflowId = "appr-int-capability";
+    const { runId, todoId } = await seedParkedRun(workflowId);
+
+    // Prove the capability is derived from the same real Todo that powers the
+    // Needs-you queue, not guessed from run.status or accepted after a 403 click.
+    const cooQueue = await call("GET", "/api/work-items?needsAttentionFor=me&limit=100", undefined, cooHeaders());
+    expect(cooQueue.status).toBe(200);
+    expect((cooQueue.body.workItems as Array<{ id: string }>).some((item) => item.id === todoId)).toBe(true);
+
+    const workerQueue = await call("GET", "/api/work-items?needsAttentionFor=me&limit=100", undefined, workerHeaders());
+    expect(workerQueue.status).toBe(200);
+    expect((workerQueue.body.workItems as Array<{ id: string }>).some((item) => item.id === todoId)).toBe(false);
+
+    const authorized = await call("GET", `/api/workflow-definitions/${workflowId}/runs/${runId}`, undefined, cooHeaders());
+    expect(authorized.status).toBe(200);
+    expect(authorized.body.approvalCapability).toEqual({
+      canDecide: true,
+      target: "coo",
+      needsYou: true,
+      escalated: false,
+    });
+
+    const unauthorized = await call("GET", `/api/workflow-definitions/${workflowId}/runs/${runId}`, undefined, workerHeaders());
+    expect(unauthorized.status).toBe(200);
+    expect(unauthorized.body.approvalCapability).toEqual({
+      canDecide: false,
+      target: "coo",
+      needsYou: false,
+      escalated: false,
+    });
+
+    // Read projection must never weaken the mutation boundary.
+    const forbidden = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/resolve-gate`,
+      { decision: "approve" },
+      workerHeaders(),
+    );
+    expect(forbidden.status).toBe(403);
+    expect(store.getWorkItem(todoId)!.approvalState).toBe("pending");
+  });
+
   it("a real parked run → approve via the Todo route → run unparks + completes through resolve-gate", async () => {
     const { runId, todoId } = await seedParkedRun("appr-int-ok");
 

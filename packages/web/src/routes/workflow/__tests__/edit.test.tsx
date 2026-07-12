@@ -305,6 +305,31 @@ describe("WorkflowEditView", () => {
     expect(screen.getAllByText(/v4/).length).toBeGreaterThan(0)
   })
 
+  it("omits manual layout intent for a property-only save", async () => {
+    getWorkflowDefinition.mockResolvedValue(def())
+    updateWorkflowDefinition.mockResolvedValue({
+      ok: true,
+      definition: def({
+        version: 4,
+        nodes: def().nodes.map((node) => node.id === "verify" ? { ...node, label: "Verify carefully" } : node),
+      }),
+    } satisfies SaveDefinitionResult)
+    render(<WorkflowEditView workflowId="sample-autonomy" />)
+    await waitFor(() => expect(screen.getByTestId("wf-edit-save")).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId("wf-node-verify"))
+    fireEvent.change(screen.getAllByTestId("wf-edit-label")[0], { target: { value: "Verify carefully" } })
+    fireEvent.click(screen.getByTestId("wf-edit-save"))
+
+    await waitFor(() => expect(updateWorkflowDefinition).toHaveBeenCalledTimes(1))
+    expect(updateWorkflowDefinition.mock.calls[0]).toHaveLength(3)
+    expect(updateWorkflowDefinition).toHaveBeenCalledWith(
+      "sample-autonomy",
+      expect.objectContaining({ nodes: expect.any(Array), edges: expect.any(Array) }),
+      3,
+    )
+  })
+
   it("blocks save while a label is blank", async () => {
     getWorkflowDefinition.mockResolvedValue(def())
     render(<WorkflowEditView workflowId="sample-autonomy" />)

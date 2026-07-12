@@ -32,24 +32,36 @@ import {
   type StopStepSession,
 } from './advance.js';
 import {
+  claimWorkflowRunInvocation,
   findRunByTriggerFireRef,
+  findWorkflowRunInvocationClaimByRunId,
   getRun,
+  getWorkflowRunInvocationClaim,
   hasInFlightSteps,
   isWorkflowTriggerEvent,
   listActiveRunRefs,
   rebuildActiveRunIndex,
   newRunId,
   normalizeWorkflowTrigger,
+  publishInitialWorkflowRun,
   workflowTriggerSource,
   saveRun,
   workflowRunTriggerTodoId,
   type WorkflowRun,
+  type InitialWorkflowRunPublication,
   type WorkflowRunInvocation,
   type WorkflowStepPromptOverride,
   type RunStepStatus,
   type WorkflowTriggerEvent,
   type WorkflowRunTrigger,
 } from './run-store.js';
+import {
+  createWorkflowRunInvocationRequest,
+  fingerprintWorkflowRunInvocationRequest,
+  workflowRunPrincipal,
+  WorkflowRunIdempotencyConflict,
+  type WorkflowRunInvocationClaim,
+} from './run-idempotency.js';
 import type { WorkflowTodoBridge } from '../work-items/workflow-bridge.js';
 import { transition as transitionWorkItem } from '../work-items/transitions.js';
 import type { WorkItemStatus } from '../work-items/store.js';
@@ -75,9 +87,9 @@ import type { WorkItemStatus } from '../work-items/store.js';
  *   3. (GRS-014e) the resolve-gate route will unpark and call back into the driver.
  *   Parked runs are deliberately NOT swept — nothing polls a human.
  *
- * CONCURRENCY: a per-runId in-process mutex serializes route-vs-sweep advancement
- * (single gateway process is the run store's stated contract). One misbehaving run
- * never kills a sweep — every run is driven under its own try/catch.
+ * CONCURRENCY: exclusive initial publication elects one owner across processes;
+ * only that owner may project/mint/spawn. A per-runId in-process mutex then
+ * serializes route-vs-sweep advancement. One misbehaving run never kills a sweep.
  */
 
 export interface RunDriverDeps {
@@ -122,8 +134,19 @@ export interface RunDriverDeps {
   /** Gateway-owned projection of one durable workflow run into the session list.
    * Best-effort: a projection failure is logged and never changes run execution. */
   syncRunSession?: (run: WorkflowRun) => string | undefined;
+  /** Injectable publication boundary for deterministic concurrency tests. */
+  publishInitialRun?: (root: string, run: WorkflowRun) => InitialWorkflowRunPublication;
   now?: () => string;
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
+}
+
+function publishInitialRun(
+  deps: RunDriverDeps,
+  run: WorkflowRun,
+): { owned: true; run: WorkflowRun; runSessionId: string | undefined } | { owned: false; run: WorkflowRun } {
+  const publication = (deps.publishInitialRun ?? publishInitialWorkflowRun)(deps.root, run);
+  if (publication.outcome === 'existing') return { owned: false, run: publication.run };
+  return { owned: true, run: publication.run, runSessionId: syncRunSessionBestEffort(deps, publication.run) };
 }
 
 function syncRunSessionBestEffort(deps: RunDriverDeps, run: WorkflowRun): string | undefined {
@@ -236,10 +259,10 @@ export interface StartRunOptions {
   /**
    * What starts this run. New trigger emitters pass WorkflowTriggerEvent; legacy
    * callers may still pass {kind,...} for byte-compat evidence.
-   * Any trigger carrying fireRef is IDEMPOTENT per (workflowId, source, event, fireRef):
-   * if a run already claims that fire,
-   * `startWorkflowRun` refuses to mint a second one and returns the existing run
-   * (file-enforced — the run store scans the run dir; the run store is the registry).
+   * A trigger carrying fireRef is bound to the full canonical invocation intent
+   * within (workflowId, stable principal, fireRef). Exact intent replays the
+   * original run; changed definition/trigger/input/initial-overrides fails with a
+   * typed conflict before any second run record or spawn can be minted.
    */
   trigger?: WorkflowRunTrigger;
   /** Frozen structured context supplied for this invocation of the workflow. */
@@ -252,6 +275,10 @@ export interface StartRunOptions {
   makeRunId?: () => string;
   /** Legacy input seam: new todo-status starts carry this as trigger.payload.todoId. */
   triggerTodoId?: string;
+  /** Stable authorization namespace. Never use a session/capability/token value. */
+  principal?: string;
+  /** Allows transports to distinguish an exact replay (200) from a new run (201/422). */
+  onIdempotencyReplay?: () => void;
 }
 
 /* ── Per-run advancement mutex ──────────────────────────────────────────────── */
@@ -639,7 +666,7 @@ export async function startWorkflowRun(
   opts: StartRunOptions = {},
 ): Promise<WorkflowRun> {
   const now = deps.now ?? (() => new Date().toISOString());
-  const runId = (opts.makeRunId ?? (() => newRunId(now)))();
+  let runId = (opts.makeRunId ?? (() => newRunId(now)))();
   const baseTrigger: WorkflowRunTrigger = opts.trigger ?? { kind: 'manual' };
   const trigger: WorkflowRunTrigger = opts.triggerTodoId
     ? normalizeWorkflowTrigger(baseTrigger, opts.triggerTodoId)
@@ -654,22 +681,55 @@ export async function startWorkflowRun(
     ? JSON.parse(JSON.stringify(opts.stepOverrides)) as Record<string, WorkflowStepPromptOverride>
     : undefined;
 
-  // ONE RUN PER (workflowId, source, event, fireRef). A re-invocation of the same
-  // logical fire (scheduler retry, replay, double tick) finds the run that already
-  // claims the fireRef and no-ops. The scan and the first save below are synchronous
-  // (no await between them), so a same-tick duplicate call cannot interleave past the
-  // guard in this single-process store. Fail-open: a corrupt run file is invisible to
-  // the scan (listRuns skips it) — double-running is the lesser harm vs permanently
-  // skipping a fire, mirroring the cron run-log guard's stance.
   const triggerEvent = normalizeWorkflowTrigger(trigger, opts.triggerTodoId);
   if (triggerEvent.fireRef) {
-    const existing = findRunByTriggerFireRef(deps.root, def.id, triggerEvent.source, triggerEvent.event, triggerEvent.fireRef);
-    if (existing) {
-      deps.log?.('info', `[workflow-runs] fire ${triggerEvent.fireRef} of ${def.id} already ran as ${existing.runId} — refusing a duplicate run`);
-      const claimed = getRun(deps.root, def.id, existing.runId);
-      // getRun re-reads the file the scan just parsed (both synchronous); null means
-      // it vanished in between — then the fire is genuinely unclaimed, so mint.
-      if (claimed) return claimed;
+    const principal = opts.principal ?? workflowRunPrincipal(undefined, triggerEvent.source);
+    const request = createWorkflowRunInvocationRequest({
+      definition: def,
+      trigger: triggerEvent,
+      input: invocation?.input,
+      initialStepOverrides: stepOverrides,
+      principal,
+    });
+
+    // A pre-claim run is legacy evidence. Never silently bind changed intent to it:
+    // fail closed and let the caller explicitly choose a new key.
+    const legacy = findRunByTriggerFireRef(
+      deps.root,
+      def.id,
+      triggerEvent.source,
+      triggerEvent.event,
+      triggerEvent.fireRef,
+    );
+    if (legacy
+      && !getWorkflowRunInvocationClaim(deps.root, def.id, principal, triggerEvent.fireRef)
+      && !findWorkflowRunInvocationClaimByRunId(deps.root, def.id, legacy.runId)) {
+      throw new WorkflowRunIdempotencyConflict(legacy.runId);
+    }
+    const claim: WorkflowRunInvocationClaim = {
+      schemaVersion: 1,
+      workflowId: def.id,
+      principal,
+      idempotencyKey: triggerEvent.fireRef,
+      runId,
+      fingerprint: fingerprintWorkflowRunInvocationRequest(request),
+      request,
+      createdAt: now(),
+    };
+    const result = claimWorkflowRunInvocation(deps.root, claim);
+    if (result.outcome === 'conflict') {
+      throw new WorkflowRunIdempotencyConflict(result.claim?.runId ?? legacy?.runId ?? '');
+    }
+    if (result.outcome === 'replay') {
+      runId = result.claim.runId;
+      const existing = getRun(deps.root, def.id, runId);
+      if (existing) {
+        opts.onIdempotencyReplay?.();
+        deps.log?.('info', `[workflow-runs] exact invocation replayed as ${runId}`);
+        return existing;
+      }
+      // The exclusive claim landed but the process died before the run record.
+      // Resume using the preallocated run id rather than minting another identity.
     }
   }
 
@@ -689,12 +749,19 @@ export async function startWorkflowRun(
     parked: null,
     errors,
   });
+  const publishCandidate = (candidate: WorkflowRun) => {
+    const publication = publishInitialRun(deps, candidate);
+    if (!publication.owned && triggerEvent.fireRef) {
+      opts.onIdempotencyReplay?.();
+      deps.log?.('info', `[workflow-runs] concurrent invocation replayed as ${publication.run.runId}`);
+    }
+    return publication;
+  };
 
   const resolved = compilePlan(def, opts);
   if (!resolved.ok) {
     const run = failedRun(resolved.errors);
-    persistRun(deps, run);
-    return run;
+    return publishCandidate(run).run;
   }
 
   // Session modes (GRS-016e): refuse at START, honestly, what this driver cannot
@@ -710,8 +777,7 @@ export async function startWorkflowRun(
       message: `step "${followUpStep.nodeId}" uses session mode "${followUpStep.sessionMode}" but this gateway's run driver provides no follow-up session support`,
       ref: followUpStep.nodeId,
     }]);
-    persistRun(deps, run);
-    return run;
+    return publishCandidate(run).run;
   }
   if (deps.sessionExists) {
     for (const s of resolved.plan.steps) {
@@ -722,8 +788,7 @@ export async function startWorkflowRun(
           message: `step "${s.nodeId}" targets session "${s.sessionTarget}", which does not exist on this gateway`,
           ref: s.nodeId,
         }]);
-        persistRun(deps, run);
-        return run;
+        return publishCandidate(run).run;
       }
     }
   }
@@ -734,8 +799,7 @@ export async function startWorkflowRun(
   });
   if (!minted.ok) {
     const run = failedRun(minted.errors);
-    persistRun(deps, run);
-    return run;
+    return publishCandidate(run).run;
   }
 
   // Freeze the definition CONTENT into the record (GRS-014b-fix, Codex finding 2):
@@ -748,10 +812,12 @@ export async function startWorkflowRun(
     definitionSnapshot: def,
   };
 
-  // Durable intent (incl. the frozen definition) BEFORE any spawn — and saved
-  // synchronously with the fireIso dedupe scan above (GRS-014d), so a same-tick
-  // duplicate schedule fire sees this file before it can mint a second run.
-  const runSessionId = persistRun(deps, run);
+  // Publish the complete durable intent before any projection, Todo, or spawn.
+  // The exclusive hard-link elects one owner even when several gateway processes
+  // recover the same preallocated claim simultaneously.
+  const publication = publishCandidate(run);
+  if (!publication.owned) return publication.run;
+  const runSessionId = publication.runSessionId;
 
   // Todos ledger (GRS-021a, design §2 — the one missing structural mint point):
   // a workflow run is company work, so it lands in the ledger right after its

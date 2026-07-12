@@ -182,6 +182,172 @@ describe('workflow-definition CRUD routes', () => {
     expect((res.body as { errors: Array<{ code: string }> }).errors.some((e) => e.code === 'missing-trigger')).toBe(true);
   });
 
+  it.sequential('rejects unknown fields at plan/direct/mutate seams before persistence', async () => {
+    const planned = await call('POST', '/api/workflow-definitions/plan', {
+      definition: {
+        ...validDef,
+        schemaVersion: 1,
+        version: 1,
+        status: 'active',
+        mysteryMode: true,
+      },
+    });
+    expect(planned.status).toBe(400);
+
+    const directCreate = await call('POST', '/api/workflow-definitions', {
+      ...validDef,
+      id: 'strict-direct-create',
+      mysteryMode: true,
+    });
+    expect(directCreate.status).toBe(400);
+    expect(fs.existsSync(path.join(evidenceRoot, 'workflows', 'strict-direct-create.definition.json'))).toBe(false);
+
+    const mutateCreateDefinition: any = {
+      ...structuredClone(validDef),
+      id: 'strict-mutate-create',
+      schemaVersion: 1,
+      version: 1,
+      status: 'active',
+    };
+    mutateCreateDefinition.nodes[1] = {
+      ...mutateCreateDefinition.nodes[1],
+      options: { retry: { maxAttempts: 2, on: ['error'], mysteryMode: true } },
+    };
+    const mutateCreate = await call('POST', '/api/workflow-definitions/mutate', {
+      operation: 'create',
+      definition: mutateCreateDefinition,
+    });
+    expect(mutateCreate.status).toBe(400);
+    expect(fs.existsSync(path.join(evidenceRoot, 'workflows', 'strict-mutate-create.definition.json'))).toBe(false);
+  });
+
+  it.sequential('rejects unknown direct/mutate update fields without changing bytes or version', async () => {
+    await call('POST', '/api/workflow-definitions', { ...validDef, id: 'strict-direct-update' });
+    const directFile = path.join(evidenceRoot, 'workflows', 'strict-direct-update.definition.json');
+    const directBefore = fs.readFileSync(directFile);
+    const directNodes: any[] = structuredClone(validDef.nodes);
+    directNodes[1].onError = 'continue';
+
+    const directUpdate = await call('PUT', '/api/workflow-definitions/strict-direct-update', {
+      nodes: directNodes,
+      expectedVersion: 1,
+    });
+    expect(directUpdate.status).toBe(400);
+    expect(fs.readFileSync(directFile).equals(directBefore)).toBe(true);
+    expect((await call('GET', '/api/workflow-definitions/strict-direct-update')).body).toMatchObject({ version: 1 });
+
+    await call('POST', '/api/workflow-definitions', { ...validDef, id: 'strict-mutate-update' });
+    const mutateFile = path.join(evidenceRoot, 'workflows', 'strict-mutate-update.definition.json');
+    const mutateBefore = fs.readFileSync(mutateFile);
+    const mutateUpdate = await call('POST', '/api/workflow-definitions/mutate', {
+      operation: 'update',
+      workflowId: 'strict-mutate-update',
+      expectedVersion: 1,
+      patch: { mysteryMode: true },
+    });
+    expect(mutateUpdate.status).toBe(400);
+    expect(fs.readFileSync(mutateFile).equals(mutateBefore)).toBe(true);
+    expect((await call('GET', '/api/workflow-definitions/strict-mutate-update')).body).toMatchObject({ version: 1 });
+  });
+
+  it('plans a loaded persisted definition with recognized provenance and authority metadata', async () => {
+    const created = await call('POST', '/api/workflow-definitions', { ...validDef, id: 'loaded-plan', owner: 'jimbo' });
+    expect(created.status).toBe(201);
+    const planned = await call('POST', '/api/workflow-definitions/plan', { definition: created.body });
+    expect(planned.status).toBe(200);
+    expect(planned.body).toMatchObject({ ok: true, definition: { id: 'loaded-plan' } });
+  });
+
+  it('direct generated create auto-places nodes that omit positions', async () => {
+    const nodes = structuredClone(validDef.nodes) as Array<Record<string, unknown>>;
+    delete nodes[1].position;
+    const created = await call('POST', '/api/workflow-definitions', {
+      ...validDef,
+      id: 'generated-no-position',
+      nodes,
+      layoutIntent: 'generated',
+    });
+    expect(created.status).toBe(201);
+    expect((created.body as { nodes: Array<{ position?: unknown }> }).nodes[1].position).toBeDefined();
+  });
+
+  it('rejects a reachable non-loop cycle at plan, create, and update before persistence', async () => {
+    const acyclic = {
+      ...validDef,
+      id: 'cycle-guard',
+      schemaVersion: 1,
+      version: 1,
+      status: 'active',
+      nodes: [
+        validDef.nodes[0],
+        validDef.nodes[1],
+        { id: 's2', type: 'step', label: 'Review', position: { x: 640, y: 0 }, actor: { kind: 'employee', ref: 'jimbo' } },
+      ],
+      edges: [
+        validDef.edges[0],
+        { id: 'e2', from: 's1', to: 's2', kind: 'sequence' },
+      ],
+    };
+    const cyclic = {
+      ...acyclic,
+      edges: [...acyclic.edges, { id: 'back', from: 's2', to: 's1', kind: 'handoff' }],
+    };
+
+    const planned = await call('POST', '/api/workflow-definitions/plan', { definition: cyclic });
+    expect(planned.status).toBe(200);
+    expect(planned.body).toMatchObject({
+      ok: false,
+      validation: { ok: false, errors: expect.arrayContaining([expect.objectContaining({ code: 'non-loop-cycle' })]) },
+      execution: { ok: false },
+    });
+
+    const created = await call('POST', '/api/workflow-definitions', cyclic);
+    expect(created.status).toBe(400);
+    expect((created.body as { errors: Array<{ code: string }> }).errors.map((error) => error.code)).toContain('non-loop-cycle');
+    expect(fs.existsSync(path.join(evidenceRoot, 'workflows', 'cycle-guard.definition.json'))).toBe(false);
+
+    const validCreate = await call('POST', '/api/workflow-definitions', acyclic);
+    expect(validCreate.status).toBe(201);
+    const updated = await call('PUT', '/api/workflow-definitions/cycle-guard', {
+      edges: cyclic.edges,
+      expectedVersion: 1,
+    });
+    expect(updated.status).toBe(400);
+    expect((updated.body as { errors: Array<{ code: string }> }).errors.map((error) => error.code)).toContain('non-loop-cycle');
+    const persisted = JSON.parse(fs.readFileSync(path.join(evidenceRoot, 'workflows', 'cycle-guard.definition.json'), 'utf8'));
+    expect(persisted.version).toBe(1);
+    expect(persisted.edges).toHaveLength(2);
+  });
+
+  it('rejects an over-limit graph quickly without creating a definition file', async () => {
+    const nodes = Array.from({ length: 97 }, (_, index) => index === 0
+      ? { id: 'n0', type: 'trigger', label: 'Manual', position: { x: 0, y: 0 }, trigger: { kind: 'manual' } }
+      : { id: `n${index}`, type: 'step', label: `Step ${index}`, position: { x: index * 320, y: 0 } });
+    const edges = nodes.flatMap((_node, from) => nodes.slice(from + 1, from + 6).map((_target, offset) => ({
+      id: `e-${from}-${from + offset + 1}`,
+      from: `n${from}`,
+      to: `n${from + offset + 1}`,
+      kind: 'sequence',
+    })));
+    const started = performance.now();
+    const response = await call('POST', '/api/workflow-definitions', {
+      id: 'route-over-limit',
+      title: 'Route over limit',
+      nodes,
+      edges,
+    });
+    const elapsedMs = performance.now() - started;
+
+    expect(response.status).toBe(400);
+    expect((response.body as { errors: Array<{ code: string }> }).errors.map((error) => error.code)).toEqual(expect.arrayContaining([
+      'too-many-nodes',
+      'too-many-edges',
+      'workflow-too-dense',
+    ]));
+    expect(elapsedMs).toBeLessThan(800);
+    expect(fs.existsSync(path.join(evidenceRoot, 'workflows', 'route-over-limit.definition.json'))).toBe(false);
+  });
+
   it('409s a duplicate-id create and a stale update', async () => {
     await call('POST', '/api/workflow-definitions', { ...validDef, id: 'conflict-wf' });
     const dupCreate = await call('POST', '/api/workflow-definitions', { ...validDef, id: 'conflict-wf' });
@@ -301,7 +467,7 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     expect(onDisk.status).toBe('completed');
   });
 
-  it('POST :id/run accepts frozen input and returns the original run for a repeated idempotency key', async () => {
+  it('POST :id/run replays exact intent with 200 and rejects changed intent with a sanitized typed 409', async () => {
     const definition = inlineDef('run-input', [
       { id: 'e0', from: 'trg', to: 'sa' },
       { id: 'e1', from: 'sa', to: 'sb' },
@@ -324,14 +490,28 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     });
     expect(firstRun.trigger.fireRef).toBe('request-42');
 
+    const replay = await call('POST', '/api/workflow-definitions/run-input/run', {
+      input: { priority: 2, ticket: { id: 'ABC-42' } },
+      idempotencyKey: 'request-42',
+    }, runCtx);
+    expect(replay.status).toBe(200);
+    expect((replay.body as typeof firstRun).runId).toBe(firstRun.runId);
+
     const duplicate = await call('POST', '/api/workflow-definitions/run-input/run', {
       input: { ticket: { id: 'SHOULD-NOT-REPLACE' } },
       idempotencyKey: 'request-42',
     }, runCtx);
-    expect(duplicate.status).toBe(201);
-    const duplicateRun = duplicate.body as typeof firstRun;
-    expect(duplicateRun.runId).toBe(firstRun.runId);
-    expect(duplicateRun.invocation).toEqual(firstRun.invocation);
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body).toEqual({
+      error: 'This idempotency key is already bound to a different workflow run request.',
+      code: 'workflow-run-idempotency-conflict',
+      runId: firstRun.runId,
+    });
+    const conflictWire = JSON.stringify(duplicate.body);
+    expect(conflictWire).not.toContain('request-42');
+    expect(conflictWire).not.toContain('SHOULD-NOT-REPLACE');
+    expect(conflictWire).not.toContain('ABC-42');
+    expect(conflictWire).not.toContain('fingerprint');
 
     const files = fs.readdirSync(path.join(evidenceRoot, 'reports', 'runs', 'run-input'));
     expect(files.filter((name) => name.endsWith('.json'))).toEqual([`${firstRun.runId}.json`]);
@@ -409,7 +589,7 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     expect((unknown.body as { error: string }).error).toMatch(/unknown.*step/i);
   });
 
-  it('POST /api/workflow-runs/by-name resolves the canonical name, forwards input, and deduplicates', async () => {
+  it('POST /api/workflow-runs/by-name replays exact intent and conflicts on changed input', async () => {
     const definition = {
       ...inlineDef('run-by-name-record', [
         { id: 'e0', from: 'trg', to: 'sa' },
@@ -438,14 +618,24 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
       idempotencyKey: 'agent-request-42',
     });
 
+    const replay = await call('POST', '/api/workflow-runs/by-name', {
+      name: 'full-cycle-workflow',
+      input: { ticket: 'ABC-42', request: 'implement this' },
+      idempotencyKey: 'agent-request-42',
+    }, runCtx);
+    expect(replay.status).toBe(200);
+    expect((replay.body as typeof firstRun).runId).toBe(firstRun.runId);
+
     const duplicate = await call('POST', '/api/workflow-runs/by-name', {
       name: 'full-cycle-workflow',
       input: { request: 'must not replace the original input' },
       idempotencyKey: 'agent-request-42',
     }, runCtx);
-    expect(duplicate.status).toBe(201);
-    expect((duplicate.body as typeof firstRun).runId).toBe(firstRun.runId);
-    expect((duplicate.body as typeof firstRun).invocation).toEqual(firstRun.invocation);
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body).toMatchObject({
+      code: 'workflow-run-idempotency-conflict',
+      runId: firstRun.runId,
+    });
   });
 
   it('POST /api/workflow-runs/by-name returns a clear 404 for an unknown canonical name', async () => {
@@ -490,18 +680,16 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     expect(run.orderWarning).toBeUndefined();
   });
 
-  it('POST :id/run refuses a cyclic graph with 422 unsupported-cycle (loops land in GRS-014e)', async () => {
+  it('refuses a cyclic graph during authoring, before a run can be created', async () => {
     const cyclic = inlineDef('run-cycle', [
       { id: 'e0', from: 'trg', to: 'sa' },
       { id: 'e1', from: 'sa', to: 'sb' },
       { id: 'e2', from: 'sb', to: 'sa' },
     ]);
-    await call('POST', '/api/workflow-definitions', cyclic);
-    const res = await call('POST', '/api/workflow-definitions/run-cycle/run', undefined, runCtx);
-    expect(res.status).toBe(422);
-    const run = res.body as { status: string; errors?: Array<{ code: string }> };
-    expect(run.status).toBe('failed');
-    expect(run.errors?.[0].code).toBe('unsupported-cycle');
+    const created = await call('POST', '/api/workflow-definitions', cyclic);
+    expect(created.status).toBe(400);
+    expect((created.body as { errors: Array<{ code: string }> }).errors.map((error) => error.code)).toContain('non-loop-cycle');
+    expect(fs.existsSync(path.join(evidenceRoot, 'workflows', 'run-cycle.definition.json'))).toBe(false);
   });
 
   it('POST :id/run parks mid-graph on an approval gate node with downstream steps still pending', async () => {

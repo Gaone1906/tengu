@@ -12,6 +12,32 @@ import {
   validateConditionShape,
   type WorkflowCondition,
 } from './condition.js';
+import {
+  ACTOR_KINDS,
+  EDGE_KINDS,
+  NODE_TYPES,
+  STEP_EFFORT_LEVELS,
+  STEP_ON_ERROR_MODES,
+  STEP_OUTPUT_MODES,
+  STEP_RETRY_CAUSES,
+  STEP_SESSION_MODES,
+  SWITCH_MODES,
+  WORK_ITEM_STATUSES,
+  workflowDefinitionSchema,
+} from './schema.js';
+
+export {
+  ACTOR_KINDS,
+  EDGE_KINDS,
+  NODE_TYPES,
+  STEP_EFFORT_LEVELS,
+  STEP_ON_ERROR_MODES,
+  STEP_OUTPUT_MODES,
+  STEP_RETRY_CAUSES,
+  STEP_SESSION_MODES,
+  SWITCH_MODES,
+  WORK_ITEM_STATUSES,
+} from './schema.js';
 
 /**
  * Editable workflow definition primitive (GRS-011a).
@@ -48,11 +74,17 @@ export const MAX_WORKFLOW_NAME_LENGTH = 128;
  * a run keeping more than this in flight is a runaway, not a workflow. */
 export const MAX_WORKFLOW_CONCURRENCY = 8;
 
+/** Authoring-time graph budgets. Validation and layout run synchronously on the
+ * gateway event loop, so these are product safety limits, not presentation hints. */
+export const MAX_WORKFLOW_NODES = 96;
+export const MAX_WORKFLOW_EDGES = 384;
+export const MAX_WORKFLOW_EDGE_DENSITY = 4;
+export const MAX_WORKFLOW_DEFINITION_BYTES = 256 * 1024;
+
 /* ── Engine-node execution options (GRS-016b) ───────────────────────────────── */
 
 /** Effort levels the effort override accepts (engine-interpreted; the closed set the
  * inspector's picker offers — a typo like "ultra" must fail at authoring time). */
-export const STEP_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
 export type StepEffortLevel = (typeof STEP_EFFORT_LEVELS)[number];
 
 /** Failure causes a per-node retry policy may cover. `interrupted` also covers a
@@ -62,7 +94,6 @@ export type StepEffortLevel = (typeof STEP_EFFORT_LEVELS)[number];
  * respawn-once), and folding timeouts in would make every option-less node silently
  * re-burn its whole wall-clock/token budget after a timeout — against the operator
  * ruling that a timeout STOPS the spend. Retrying a timeout is an explicit opt-in. */
-export const STEP_RETRY_CAUSES = ['error', 'no-output', 'interrupted', 'timeout'] as const;
 export type StepRetryCause = (typeof STEP_RETRY_CAUSES)[number];
 
 /** Hard ceiling on retry.maxAttempts (design §2.1): attempts are engine sessions —
@@ -79,13 +110,11 @@ export const MAX_WAIT_MINUTES = 10080;
 
 /** Output modes. `none` (GRS-016d) is fire-and-forget: the receipt settles `fired`
  * at spawn, the session is never awaited, and the run never blocks on it. */
-export const STEP_OUTPUT_MODES = ['handoff', 'full', 'none'] as const;
 export type StepOutputMode = (typeof STEP_OUTPUT_MODES)[number];
 
 /** onError modes. `error-edge` (GRS-016d) routes a terminal step failure down the
  * node's error-lane out-edge(s) instead of failing the run — the lane⇔mode pairing
  * is validator-enforced in both directions. */
-export const STEP_ON_ERROR_MODES = ['fail-run', 'continue', 'error-edge'] as const;
 export type StepOnErrorMode = (typeof STEP_ON_ERROR_MODES)[number];
 
 /** Session modes (GRS-016e, design §2.1). `fresh` (the default when absent) = v2:
@@ -96,10 +125,8 @@ export type StepOnErrorMode = (typeof STEP_ON_ERROR_MODES)[number];
  * strictly serialized. `existing` = the node posts its turn into an operator-picked
  * LIVE gateway session (same marker correlation) — the riskiest brick; the inspector
  * labels it and the target is validated at run start. */
-export const STEP_SESSION_MODES = ['fresh', 'workflow', 'existing'] as const;
 export type StepSessionMode = (typeof STEP_SESSION_MODES)[number];
 
-export const WORK_ITEM_STATUSES = ['backlog', 'assigned', 'executing', 'in_review', 'done', 'blocked', 'escalated', 'cancelled'] as const;
 export type WorkflowTodoTransitionStatus = (typeof WORK_ITEM_STATUSES)[number];
 const WORK_ITEM_STATUS_SET = new Set<string>(WORK_ITEM_STATUSES);
 const WORK_ITEM_SOURCES = ['human', 'delegation', 'cron', 'workflow', 'session', 'connector', 'goal'] as const;
@@ -157,7 +184,6 @@ export interface StepNodeOptions {
  * `switch` (N-way deterministic router) and `fail` (authored stop-and-error) are
  * GRS-016c; `wait` (sweep-clocked pause) is GRS-016d. All three are ACTORLESS —
  * they spawn nothing. */
-export const NODE_TYPES = ['trigger', 'step', 'gate', 'switch', 'fail', 'wait'] as const;
 export type NodeType = (typeof NODE_TYPES)[number];
 
 /** Switch evaluation modes (GRS-016c, design §2.3). `firstMatch` (the default when
@@ -166,14 +192,12 @@ export type NodeType = (typeof NODE_TYPES)[number];
  * no conditioned edge passed, regardless of where it is declared). `allMatches`:
  * every passing conditioned edge activates; no-`when` edges activate only if nothing
  * else did. */
-export const SWITCH_MODES = ['firstMatch', 'allMatches'] as const;
 export type SwitchMode = (typeof SWITCH_MODES)[number];
 
 /** Cap on a fail node's authored message (it becomes a receipt detail + run error). */
 export const MAX_FAIL_MESSAGE_CHARS = 500;
 
 /** Who performs a step: a Jinn employee or a raw engine. */
-export const ACTOR_KINDS = ['employee', 'engine'] as const;
 export type ActorKind = (typeof ACTOR_KINDS)[number];
 
 export interface WorkflowActor {
@@ -249,7 +273,6 @@ export interface WorkflowNode {
   waitUntil?: string;
 }
 
-export const EDGE_KINDS = ['handoff', 'sequence', 'loop'] as const;
 export type EdgeKind = (typeof EDGE_KINDS)[number];
 
 export interface WorkflowEdge {
@@ -287,6 +310,15 @@ export interface WorkflowEdge {
   lane?: 'error';
 }
 
+/** Server-owned provenance for persisted canvas coordinates. Incoming metadata is
+ * never used to choose write policy; callers pass an explicit layout intent. */
+export type WorkflowLayoutSource = 'generated' | 'normalized' | 'manual';
+
+export interface WorkflowLayoutMetadata {
+  source: WorkflowLayoutSource;
+  version: 1;
+}
+
 export interface EditableWorkflowDefinition {
   /** Schema version of THIS document shape (not the workflow's edit version). */
   schemaVersion: number;
@@ -301,6 +333,8 @@ export interface EditableWorkflowDefinition {
   orchestrator?: string;
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
+  /** Provenance stamped by the server after applying the layout write policy. */
+  layout?: WorkflowLayoutMetadata;
   /** Workflow-level gates every run must satisfy (mirrors linear runGates). */
   runGates?: WorkflowGate[];
   /** Bounded-loop metadata (until / maxRoundsPerRun / stopWhen), carried from the linear def. */
@@ -316,11 +350,28 @@ export interface EditableWorkflowDefinition {
   evidenceRoot?: string;
   /** ISO string set by the CRUD layer on save (GRS-011b); optional here. */
   updatedAt?: string;
+  /** Canonical server stamps plus legacy aliases retained for readable persisted records. */
+  owner?: string;
+  ownerEmployee?: string;
+  workflowOwner?: string;
+  createdBy?: string;
+  creator?: string;
+  author?: string;
+  department?: string;
+  ownerDepartment?: string;
+  workflowDepartment?: string;
+  critical?: boolean;
+  cooOwned?: boolean;
+  requiresCooApproval?: boolean;
+  classification?: string;
+  authority?: string;
 }
 
 /* ── Validation ─────────────────────────────────────────────────────────────── */
 
 export type ValidationCode =
+  | 'invalid-schema'
+  | 'unsupported-field'
   | 'bad-schema-version'
   | 'missing-id'
   | 'bad-name'
@@ -335,6 +386,7 @@ export type ValidationCode =
   | 'gates-not-array'
   | 'invalid-node'
   | 'invalid-edge'
+  | 'unsupported-edge-field'
   | 'invalid-gate'
   | 'empty-node-id'
   | 'duplicate-node-id'
@@ -387,10 +439,16 @@ export type ValidationCode =
   | 'misplaced-edge-gate'
   | 'bad-loop-gate-kind'
   | 'bad-concurrency'
+  | 'bad-layout'
   | 'unsafe-node-id'
   | 'unsafe-edge-id'
   | 'dangling-edge'
   | 'self-loop'
+  | 'non-loop-cycle'
+  | 'too-many-nodes'
+  | 'too-many-edges'
+  | 'workflow-too-dense'
+  | 'definition-too-large'
   | 'unreachable-node';
 
 export interface ValidationError {
@@ -408,6 +466,7 @@ export interface ValidationResult {
 const GATE_KINDS = new Set<WorkflowGate['kind']>(['artifact', 'flag', 'approval']);
 const TRIGGER_KINDS = new Set<WorkflowTrigger['kind']>(['schedule', 'manual', 'todo-status-change']);
 const EDGE_KIND_SET = new Set<EdgeKind>(EDGE_KINDS);
+const EDGE_KEYS = new Set<string>(['id', 'from', 'to', 'kind', 'label', 'gate', 'when', 'lane']);
 const EFFORT_SET = new Set<string>(STEP_EFFORT_LEVELS);
 const RETRY_CAUSE_SET = new Set<string>(STEP_RETRY_CAUSES);
 const STEP_OPTION_KEYS = new Set<string>(['model', 'effort', 'output', 'retry', 'onError', 'timeoutMinutes', 'session']);
@@ -415,6 +474,43 @@ const SESSION_MODE_SET = new Set<string>(STEP_SESSION_MODES);
 const SESSION_SPEC_KEYS = new Set<string>(['mode', 'sessionId']);
 
 type PushError = (code: ValidationCode, message: string, ref?: string) => void;
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+/** Return one deterministic cycle path from a directed graph, if present. */
+function findDirectedCycle(nodeOrder: string[], adjacency: Map<string, string[]>): string[] | null {
+  const state = new Map<string, 0 | 1 | 2>();
+  const stack: string[] = [];
+  const stackIndex = new Map<string, number>();
+
+  const visit = (nodeId: string): string[] | null => {
+    state.set(nodeId, 1);
+    stackIndex.set(nodeId, stack.length);
+    stack.push(nodeId);
+    for (const next of adjacency.get(nodeId) ?? []) {
+      if ((state.get(next) ?? 0) === 0) {
+        const nested = visit(next);
+        if (nested) return nested;
+      } else if (state.get(next) === 1) {
+        const start = stackIndex.get(next) ?? 0;
+        return [...stack.slice(start), next];
+      }
+    }
+    stack.pop();
+    stackIndex.delete(nodeId);
+    state.set(nodeId, 2);
+    return null;
+  };
+
+  for (const nodeId of nodeOrder) {
+    if ((state.get(nodeId) ?? 0) !== 0) continue;
+    const cycle = visit(nodeId);
+    if (cycle) return cycle;
+  }
+  return null;
+}
 
 /**
  * Node/edge id charset (GRS-016c-fix, Codex finding 2). Authored ids key engine
@@ -610,6 +706,28 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
   const errors: ValidationError[] = [];
   const err: PushError = (code, message, ref) => errors.push({ code, message, ref });
 
+  // Zod's safeParse reports schema failures, but it deliberately does not swallow
+  // exceptions thrown by hostile property accessors. The semantic validator below
+  // already treats those condition objects as invalid plain data, so keep this
+  // strict-shape preflight best-effort and let the total condition inspector emit
+  // the actionable bad-edge-condition diagnostic.
+  let strictShape: ReturnType<typeof workflowDefinitionSchema.safeParse> | null = null;
+  try {
+    strictShape = workflowDefinitionSchema.safeParse(def);
+  } catch {
+    // In-process hostile objects cannot arrive through JSON, but validation remains
+    // total for callers that construct an object directly.
+  }
+  if (strictShape && !strictShape.success) {
+    for (const issue of strictShape.error.issues) {
+      if (issue.code !== 'unrecognized_keys') continue;
+      const where = issue.path.length > 0 ? issue.path.join('.') : 'definition';
+      for (const key of issue.keys) {
+        err('unsupported-field', `${where} has unsupported field "${key}"`, where);
+      }
+    }
+  }
+
   if (def.schemaVersion !== WORKFLOW_DEFINITION_SCHEMA_VERSION) {
     err('bad-schema-version', `schemaVersion must be ${WORKFLOW_DEFINITION_SCHEMA_VERSION}`);
   }
@@ -647,6 +765,35 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
   if (!Array.isArray(def.edges)) err('edges-not-array', 'edges must be an array');
   const nodes = Array.isArray(def.nodes) ? def.nodes : [];
   const edges = Array.isArray(def.edges) ? def.edges : [];
+
+  // Fail closed before any per-node/per-edge or pairwise layout work. The size
+  // scan is linear in the request bytes; every later bound is constant-sized.
+  let definitionBytes = Number.POSITIVE_INFINITY;
+  try {
+    definitionBytes = utf8ByteLength(JSON.stringify(def));
+  } catch {
+    // Non-JSON values cannot arrive over HTTP, but direct callers still fail closed.
+  }
+  if (definitionBytes > MAX_WORKFLOW_DEFINITION_BYTES) {
+    err('definition-too-large', `workflow definition is ${definitionBytes} bytes (max ${MAX_WORKFLOW_DEFINITION_BYTES})`);
+  }
+  if (nodes.length > MAX_WORKFLOW_NODES) {
+    err('too-many-nodes', `workflow has ${nodes.length} nodes (max ${MAX_WORKFLOW_NODES})`);
+  }
+  if (edges.length > MAX_WORKFLOW_EDGES) {
+    err('too-many-edges', `workflow has ${edges.length} edges (max ${MAX_WORKFLOW_EDGES})`);
+  }
+  const densityLimit = Math.max(1, nodes.length) * MAX_WORKFLOW_EDGE_DENSITY;
+  if (edges.length > densityLimit) {
+    err('workflow-too-dense', `workflow has ${edges.length} edges for ${nodes.length} nodes (max ${MAX_WORKFLOW_EDGE_DENSITY} edges per node)`);
+  }
+  if (errors.some((error) =>
+    error.code === 'definition-too-large' ||
+    error.code === 'too-many-nodes' ||
+    error.code === 'too-many-edges' ||
+    error.code === 'workflow-too-dense')) {
+    return { ok: false, errors };
+  }
 
   // Nodes
   const nodeIds = new Set<string>();
@@ -856,11 +1003,21 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
       .map((n) => n.id),
   );
   const edgeIds = new Set<string>();
-  const adjacency = new Map<string, string[]>(); // from → [to] over VALID (both-endpoints-real) edges
+  const adjacency = new Map<string, string[]>(); // all valid edges, for reachability
+  const executionAdjacency = new Map<string, string[]>(); // declared loop edges removed
   for (const e of edges) {
     if (!e || typeof e !== 'object') {
       err('invalid-edge', 'edge must be an object');
       continue; // never dereference a non-object entry (guards edges:[null])
+    }
+    for (const key of Object.keys(e)) {
+      if (!EDGE_KEYS.has(key)) {
+        err(
+          'unsupported-edge-field',
+          `edge "${e.id}" has unsupported field "${key}"; use options.onError:'error-edge' on the source and lane:'error' on its failure edge`,
+          e.id,
+        );
+      }
     }
     if (isBlank(e.id)) {
       err('empty-edge-id', 'edge id must be a non-empty string');
@@ -966,7 +1123,21 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
       const list = adjacency.get(e.from) ?? [];
       list.push(e.to);
       adjacency.set(e.from, list);
+      if (e.kind !== 'loop') {
+        const executionList = executionAdjacency.get(e.from) ?? [];
+        executionList.push(e.to);
+        executionAdjacency.set(e.from, executionList);
+      }
     }
+  }
+
+  const executionCycle = findDirectedCycle([...nodeIds], executionAdjacency);
+  if (executionCycle) {
+    err(
+      'non-loop-cycle',
+      `execution dependencies contain an undeclared cycle: ${executionCycle.join(' → ')}; mark only the validated bounded back-edge as kind "loop" or remove the dependency`,
+      executionCycle[0],
+    );
   }
 
   // The pairing's other direction (GRS-016d): a step that declares
@@ -1007,7 +1178,8 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
   // Reachability: BFS from the sole trigger over valid edges. Every non-trigger node
   // must be VISITED — a mere incoming edge is not enough (a disconnected island whose
   // nodes point at each other has incoming edges yet is never reached from the trigger).
-  // Reachable cycles are allowed (a bounded loop is a legal workflow shape).
+  // Declared loop edges participate in reachability, but after removing them the
+  // reachable execution graph must be acyclic (checked above).
   const triggerNode = nodes.find((n) => n && n.id && n.type === 'trigger');
   if (triggerNode) {
     const visited = new Set<string>([triggerNode.id]);
@@ -1081,7 +1253,12 @@ export function parseDefinition(json: string): EditableWorkflowDefinition {
   } catch (e) {
     throw new Error(`workflow definition is not valid JSON: ${(e as Error).message}`);
   }
-  const def = obj as EditableWorkflowDefinition;
+  const parsed = workflowDefinitionSchema.safeParse(obj);
+  if (!parsed.success) {
+    const summary = parsed.error.issues.map((issue) => `${issue.path.join('.') || 'definition'}: ${issue.message}`).join(', ');
+    throw new Error(`workflow definition failed schema validation: ${summary}`);
+  }
+  const def = parsed.data as EditableWorkflowDefinition;
   const result = validateDefinition(def);
   if (!result.ok) {
     const summary = result.errors.map((e) => e.code).join(', ');

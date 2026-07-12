@@ -1,11 +1,21 @@
 import { validateDefinition, type EditableWorkflowDefinition } from "./definition.js";
 import { resolveExecutionPlan } from "./execution-plan.js";
 import { compileWorkflowSop, type WorkflowSopCompileResult } from "./sop.js";
+import {
+  prepareWorkflowLayoutForWrite,
+  type WorkflowLayoutDiagnostics,
+  type WorkflowLayoutIntent,
+} from "./layout.js";
+import { parseWorkflowPlanInput, parseWorkflowPlanTransport, WORKFLOW_AUTHORITY_FIELDS } from "./schema.js";
 
 export interface WorkflowAuthoringPlan {
   ok: boolean;
   definition: EditableWorkflowDefinition;
   triggerBindingPlan?: WorkflowSopCompileResult["triggerBindingPlan"];
+  layout: {
+    diagnostics: WorkflowLayoutDiagnostics;
+    normalizedPreview: EditableWorkflowDefinition;
+  };
   validation: ReturnType<typeof validateDefinition>;
   execution: ReturnType<typeof resolveExecutionPlan>;
 }
@@ -32,22 +42,39 @@ function requireObject(args: Record<string, unknown>, name: string): Record<stri
 }
 
 export function compileWorkflowAuthoringInput(args: Record<string, unknown>): WorkflowSopCompileResult {
-  if (args.sop !== undefined) return compileWorkflowSop(args.sop);
-  if (args.definition !== undefined) {
+  const parsed = parseWorkflowPlanInput(args);
+  if ('sop' in parsed) return compileWorkflowSop(parsed.sop);
+  if ('definition' in parsed) {
+    const placed = autoPlaceWorkflowNodes(parsed.definition as unknown as Record<string, unknown>);
     return {
-      definition: autoPlaceWorkflowNodes(requireObject(args, "definition")) as unknown as EditableWorkflowDefinition,
+      definition: {
+        ...placed,
+        // Raw MCP/AI input is generated regardless of any caller-supplied metadata.
+        layout: { source: "generated", version: 1 },
+      } as unknown as EditableWorkflowDefinition,
     };
   }
   throw new Error("sop or definition is required");
 }
 
 export function planWorkflowAuthoringInput(args: Record<string, unknown>): WorkflowAuthoringPlan {
-  const compiled = compileWorkflowAuthoringInput(args);
+  const transport = parseWorkflowPlanTransport(args);
+  let callerSafe = transport as unknown as Record<string, unknown>;
+  if ('definition' in transport) {
+    const definition = { ...transport.definition } as Record<string, unknown>;
+    for (const key of [...WORKFLOW_AUTHORITY_FIELDS, 'updatedAt', 'layout']) delete definition[key];
+    callerSafe = { ...transport, definition };
+  }
+  const compiled = compileWorkflowAuthoringInput(callerSafe);
   const validation = validateDefinition(compiled.definition);
   const execution = resolveExecutionPlan(compiled.definition);
+  const requestedIntent = args.layoutIntent;
+  const intent: Exclude<WorkflowLayoutIntent, "manual"> = requestedIntent === "normalize" ? "normalize" : "generated";
+  const layout = prepareWorkflowLayoutForWrite(compiled.definition, intent);
   return {
     ok: validation.ok && execution.ok,
     definition: compiled.definition,
+    layout: { diagnostics: layout.diagnostics, normalizedPreview: layout.definition },
     ...(compiled.triggerBindingPlan ? { triggerBindingPlan: compiled.triggerBindingPlan } : {}),
     validation,
     execution,

@@ -164,4 +164,19 @@ describe("main-lane edges name only real ports (spec §2.2)", () => {
     expect(loop.sourceHandle).toBe("out")
     expect(loop.targetHandle).toBe("in")
   })
+
+  it("routes authored loop edges through stable lanes below every node envelope", () => {
+    const { flowEdges } = buildFlowGraph(
+      [node({ id: "a", position: { x: 0, y: 20 } }), node({ id: "b", position: { x: 400, y: 120 } })],
+      null, vi.fn(),
+      [
+        { id: "loop-a", from: "b", to: "a", kind: "loop" },
+        { id: "loop-b", from: "b", to: "a", kind: "loop" },
+      ],
+    )
+    const firstY = (flowEdges[0].data as { routeY: number }).routeY
+    const secondY = (flowEdges[1].data as { routeY: number }).routeY
+    expect(firstY).toBeGreaterThan(120 + 64)
+    expect(secondY).toBe(firstY + 40)
+  })
 })

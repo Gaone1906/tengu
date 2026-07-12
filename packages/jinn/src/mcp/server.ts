@@ -2,6 +2,7 @@ import readline from "node:readline";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { z } from "zod";
 import type { JinnMcpContext, JinnMcpTool } from "./toolkit.js";
 import { buildWorkflowTools } from "./workflow-tools.js";
 import { buildSessionTools } from "./session-tools.js";
@@ -141,6 +142,30 @@ interface JsonRpcResponse {
   error?: { code: number; message: string };
 }
 
+const toolInputValidators = new WeakMap<object, z.ZodType>();
+
+function parseToolArguments(tool: JinnMcpTool, input: unknown): Record<string, unknown> {
+  let validator = toolInputValidators.get(tool.inputSchema);
+  if (!validator) {
+    const closedTopLevel = { ...tool.inputSchema, additionalProperties: false };
+    validator = tool.runtimeSchema ?? z.fromJSONSchema(closedTopLevel as Parameters<typeof z.fromJSONSchema>[0]);
+    toolInputValidators.set(tool.inputSchema, validator);
+  }
+  const parsed = validator.safeParse(input ?? {});
+  if (!parsed.success) {
+    const detail = parsed.error.issues
+      .map((issue) => {
+        const field = issue.path.length ? issue.path.join(".") : "arguments";
+        return issue.code === "invalid_type" && issue.input === undefined
+          ? `${field} is required`
+          : `${field}: ${issue.message}`;
+      })
+      .join("; ");
+    throw new Error(`invalid arguments for ${tool.name}: ${detail}`);
+  }
+  return parsed.data as Record<string, unknown>;
+}
+
 function ok(id: string | number | null, result: unknown): JsonRpcResponse {
   return { jsonrpc: "2.0", id, result };
 }
@@ -195,7 +220,6 @@ export async function handleMcpRequest(
 
   if (method === "tools/call") {
     const name = msg.params?.name;
-    const args = (msg.params?.arguments as Record<string, unknown> | undefined) ?? {};
     const tool = tools.find((t) => t.name === name);
     if (!tool) {
       // Unknown tool name is a tool-result error (the model can read + recover),
@@ -206,6 +230,7 @@ export async function handleMcpRequest(
       });
     }
     try {
+      const args = parseToolArguments(tool, msg.params?.arguments ?? {});
       const result = await tool.handler(args, ctx);
       const text = typeof result === "string" ? result : JSON.stringify(result);
       return ok(id, { content: [{ type: "text", text }] });

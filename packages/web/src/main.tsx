@@ -1,6 +1,6 @@
 import { Component, Suspense, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { Navigate, Outlet, RouterProvider, createBrowserRouter } from 'react-router-dom'
 import { ClientProviders } from './routes/client-providers'
 import { lazyRoute } from './lib/lazy-route'
 import './routes/globals.css'
@@ -57,36 +57,51 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
   }
 }
 
+function AppShell() {
+  return (
+    <ClientProviders>
+      <Suspense fallback={<RouteLoading />}>
+        <Outlet />
+      </Suspense>
+    </ClientProviders>
+  )
+}
+
+const router = createBrowserRouter([
+  {
+    element: <AppShell />,
+    children: [
+      { path: '/', element: <ChatPage /> },
+      { path: '/chat', element: <Navigate to="/" replace /> },
+      { path: '/cron', element: <CronPage /> },
+      { path: '/cron/:id', element: <CronDetailPage /> },
+      { path: '/todos', element: <TodosPage /> },
+      // GRS-021d: Kanban became Todos. Old links redirect.
+      { path: '/kanban', element: <Navigate to="/todos" replace /> },
+      { path: '/logs', element: <LogsPage /> },
+      { path: '/limits', element: <LimitsPage /> },
+      { path: '/org', element: <OrgPage /> },
+      { path: '/settings', element: <SettingsPage /> },
+      { path: '/skills', element: <SkillsPage /> },
+      { path: '/skills/:name', element: <SkillDetailPage /> },
+      { path: '/file', element: <FilePage /> },
+      { path: '/more', element: <MorePage /> },
+      { path: '/workflow', element: <WorkflowListPage /> },
+      { path: '/workflow/:id', element: <WorkflowPage /> },
+      ...(import.meta.env.DEV
+        ? [
+            { path: '/redesign', element: <RedesignPage /> },
+            { path: '/workflow-preview', element: <WorkflowPreviewPage /> },
+          ]
+        : []),
+    ],
+  },
+])
+
 function App() {
   return (
     <AppErrorBoundary>
-      <BrowserRouter>
-        <ClientProviders>
-          <Suspense fallback={<RouteLoading />}>
-            <Routes>
-              <Route path="/" element={<ChatPage />} />
-              <Route path="/chat" element={<Navigate to="/" replace />} />
-              <Route path="/cron" element={<CronPage />} />
-              <Route path="/cron/:id" element={<CronDetailPage />} />
-              <Route path="/todos" element={<TodosPage />} />
-              {/* GRS-021d: Kanban became Todos. Old links redirect. */}
-              <Route path="/kanban" element={<Navigate to="/todos" replace />} />
-              <Route path="/logs" element={<LogsPage />} />
-              <Route path="/limits" element={<LimitsPage />} />
-              <Route path="/org" element={<OrgPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="/skills" element={<SkillsPage />} />
-              <Route path="/skills/:name" element={<SkillDetailPage />} />
-              <Route path="/file" element={<FilePage />} />
-              <Route path="/more" element={<MorePage />} />
-              <Route path="/workflow" element={<WorkflowListPage />} />
-              <Route path="/workflow/:id" element={<WorkflowPage />} />
-              {import.meta.env.DEV && <Route path="/redesign" element={<RedesignPage />} />}
-              {import.meta.env.DEV && <Route path="/workflow-preview" element={<WorkflowPreviewPage />} />}
-            </Routes>
-          </Suspense>
-        </ClientProviders>
-      </BrowserRouter>
+      <RouterProvider router={router} />
     </AppErrorBoundary>
   )
 }

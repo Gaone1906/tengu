@@ -4,10 +4,45 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
-import { buildWorkflowTools } from "../workflow-tools.js";
+import { buildWorkflowTools, workflowAdvertisedComponentSchemas } from "../workflow-tools.js";
 import { handleMcpRequest, buildTools } from "../server.js";
 import type { JinnMcpContext, JinnMcpTool } from "../toolkit.js";
 import { planWorkflowAuthoringInput } from "../../workflows/authoring.js";
+import { workflowComponentJsonSchemas } from "../../workflows/schema.js";
+
+type JsonSchema = Record<string, unknown>;
+
+function closedSurface(schema: JsonSchema): Record<string, string[]> {
+  const defs = (schema.$defs ?? {}) as Record<string, JsonSchema>;
+  const surfaces = new Map<string, string[]>();
+  const activeRefs = new Set<string>();
+  const visit = (value: unknown, path: string): void => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const node = value as JsonSchema;
+    if (typeof node.$ref === "string") {
+      const key = node.$ref.split("/").at(-1)!;
+      if (activeRefs.has(key)) return; // z.json() is intentionally scalar/runtime-only here.
+      activeRefs.add(key);
+      visit(defs[key], path);
+      activeRefs.delete(key);
+      return;
+    }
+    for (const key of ["anyOf", "oneOf"] as const) {
+      if (Array.isArray(node[key])) for (const branch of node[key] as unknown[]) visit(branch, path);
+    }
+    if (node.properties && typeof node.properties === "object") {
+      expect(node.additionalProperties, `${path} must be closed`).toBe(false);
+      const keys = Object.keys(node.properties as Record<string, unknown>).sort();
+      const existing = surfaces.get(path);
+      if (existing) expect(keys, `${path} union branches must expose the same closed surface`).toEqual(existing);
+      else surfaces.set(path, keys);
+      for (const [key, child] of Object.entries(node.properties as Record<string, unknown>)) visit(child, `${path}.${key}`);
+    }
+    if (node.items) visit(node.items, `${path}[]`);
+  };
+  visit(schema, "$root");
+  return Object.fromEntries([...surfaces.entries()].sort(([a], [b]) => a.localeCompare(b)));
+}
 
 /**
  * GRS-015 — the workflow MCP tool group.
@@ -148,6 +183,180 @@ describe("workflow tools — registry + schemas", () => {
     expect(byNameSchema.properties.idempotencyKey).toMatchObject({ type: "string", maxLength: 256 });
   });
 
+  it("closes the nested raw-definition edge schema and exposes only the supported error lane", () => {
+    const schema = tool("plan_workflow").inputSchema as unknown as {
+      properties: {
+        definition: {
+          additionalProperties?: boolean;
+          properties?: {
+            edges?: {
+              items?: {
+                additionalProperties?: boolean;
+                properties?: Record<string, unknown>;
+              };
+            };
+          };
+        };
+      };
+    };
+    const rawDefinitionSchema = schema.properties.definition;
+    const rawEdgeSchema = rawDefinitionSchema.properties?.edges?.items;
+    expect(rawDefinitionSchema.additionalProperties).toBe(false);
+    expect(rawEdgeSchema?.additionalProperties).toBe(false);
+    expect(rawEdgeSchema?.properties).toHaveProperty("lane");
+    expect(rawEdgeSchema?.properties).not.toHaveProperty("on");
+  });
+
+  it("keeps repeated raw-definition object shapes closed through local schema refs", () => {
+    const schema = tool("plan_workflow").inputSchema as unknown as {
+      $defs?: Record<string, { additionalProperties?: boolean }>;
+      properties: {
+        definition: {
+          properties?: {
+            nodes?: { items?: { additionalProperties?: boolean } };
+            edges?: { items?: { additionalProperties?: boolean } };
+          };
+        };
+      };
+    };
+    for (const name of ["p", "a", "r", "s", "o", "f", "t", "g", "c"]) {
+      expect(schema.$defs?.[name]?.additionalProperties, name).toBe(false);
+    }
+    expect(schema.properties.definition.properties?.nodes?.items?.additionalProperties).toBe(false);
+    expect(schema.properties.definition.properties?.edges?.items?.additionalProperties).toBe(false);
+  });
+
+  it("reuses one closed workflow graph contract across every authoring tool", () => {
+    const tools = buildWorkflowTools();
+    const authoringTool = (name: string) => {
+      const found = tools.find((candidate) => candidate.name === name);
+      if (!found) throw new Error(`no tool ${name}`);
+      return found.inputSchema as unknown as {
+        additionalProperties?: boolean;
+        $defs?: Record<string, unknown>;
+        properties: Record<string, unknown>;
+      };
+    };
+    const plan = authoringTool("plan_workflow");
+    const rawDefinition = plan.properties.definition;
+
+    for (const name of ["plan_workflow", "validate_workflow", "create_workflow"]) {
+      const schema = authoringTool(name);
+      expect.soft(schema.additionalProperties, `${name} input`).toBe(false);
+      expect.soft(schema.$defs, `${name} shared definitions`).toEqual(plan.$defs);
+      expect.soft(schema.properties.definition, `${name} raw definition`).toEqual(rawDefinition);
+    }
+
+    const update = authoringTool("update_workflow");
+    expect.soft(update.additionalProperties, "update_workflow input").toBe(false);
+    expect.soft(update.$defs, "update_workflow shared definitions").toEqual(plan.$defs);
+    expect.soft(update.properties.patch, "update_workflow patch").toMatchObject({
+      type: "object",
+      additionalProperties: false,
+    });
+    expect.soft((update.properties.patch as { properties?: Record<string, unknown> }).properties, "immutable update fields")
+      .not.toHaveProperty("id");
+  });
+
+  it("proves recursive closed-surface parity with every shared Zod workflow component", () => {
+    expect(Object.keys(workflowAdvertisedComponentSchemas).sort()).toEqual(Object.keys(workflowComponentJsonSchemas).sort());
+    for (const name of Object.keys(workflowComponentJsonSchemas) as Array<keyof typeof workflowComponentJsonSchemas>) {
+      expect(closedSurface(workflowAdvertisedComponentSchemas[name] as JsonSchema), `${String(name)} allowed property surface`)
+        .toEqual(closedSurface(workflowComponentJsonSchemas[name] as JsonSchema));
+    }
+  });
+
+  it("keeps all four advertised authoring envelopes on the same graph surface", () => {
+    const authoring = Object.fromEntries(buildWorkflowTools().filter((tool) => ["plan_workflow", "validate_workflow", "create_workflow", "update_workflow"].includes(tool.name)).map((tool) => [tool.name, tool.inputSchema]));
+    const graph = (name: string, key: "definition" | "patch") => (authoring[name].properties as Record<string, unknown>)[key];
+    expect(graph("validate_workflow", "definition")).toEqual(graph("plan_workflow", "definition"));
+    expect(graph("create_workflow", "definition")).toEqual(graph("plan_workflow", "definition"));
+    const planSurface = closedSurface(graph("plan_workflow", "definition") as JsonSchema);
+    const patchSurface = closedSurface(graph("update_workflow", "patch") as JsonSchema);
+    for (const component of ["nodes", "edges", "runGates", "loop"]) {
+      expect(Object.fromEntries(Object.entries(patchSurface).filter(([path]) => path.includes(`.${component}`))))
+        .toEqual(Object.fromEntries(Object.entries(planSurface).filter(([path]) => path.includes(`.${component}`))));
+    }
+    expect((graph("update_workflow", "patch") as JsonSchema).properties).not.toHaveProperty("id");
+    expect((((graph("plan_workflow", "definition") as JsonSchema).properties as Record<string, JsonSchema>).edges.items as JsonSchema).properties).not.toHaveProperty("on");
+  });
+
+  it("teaches onError, error lanes, switch, wait, and fail before authors commit", () => {
+    type Schema = {
+      additionalProperties?: boolean;
+      description?: string;
+      pattern?: string;
+      enum?: string[];
+      $ref?: string;
+      properties?: Record<string, Schema>;
+      items?: Schema;
+    };
+    const schemas = buildWorkflowTools()
+      .filter((candidate) => ["plan_workflow", "validate_workflow", "create_workflow", "update_workflow"].includes(candidate.name))
+      .map((candidate) => [candidate.name, candidate.inputSchema as unknown as Schema] as const);
+
+    for (const [name, schema] of schemas) {
+      const graph = schema.properties?.[name === "update_workflow" ? "patch" : "definition"];
+      const node = graph?.properties?.nodes?.items;
+      const edge = graph?.properties?.edges?.items;
+      const optionsRef = node?.properties?.options?.$ref?.split("/").at(-1);
+      const options = optionsRef
+        ? (schema as Schema & { $defs?: Record<string, Schema> }).$defs?.[optionsRef]
+        : undefined;
+
+      expect.soft(node?.properties?.type?.enum ?? [], `${name} node types`).toContain("switch");
+      expect.soft(node?.properties?.type?.enum ?? [], `${name} node types`).toContain("wait");
+      expect.soft(node?.properties?.type?.enum ?? [], `${name} node types`).toContain("fail");
+      expect.soft(node?.properties ?? {}, `${name} switch contract`).toHaveProperty("switchMode");
+      expect.soft(node?.properties ?? {}, `${name} wait contract`).toHaveProperty("waitMinutes");
+      expect.soft(node?.properties ?? {}, `${name} wait contract`).toHaveProperty("waitUntil");
+      expect.soft(node?.properties ?? {}, `${name} fail contract`).toHaveProperty("failMessage");
+      expect.soft(options?.properties?.onError?.enum, `${name} onError contract`).toEqual(["fail-run", "continue", "error-edge"]);
+      expect.soft(edge?.properties?.lane?.pattern, `${name} error lane contract`).toBe("^error$");
+      expect.soft(edge?.properties ?? {}, `${name} unsupported edge.on`).not.toHaveProperty("on");
+      expect.soft(edge?.properties?.when?.items?.$ref, `${name} switch conditions`).toBe("#/$defs/c");
+    }
+  });
+
+  it("closes SOP and raw graph objects consistently so opaque author fields are rejected in-schema", () => {
+    type Schema = {
+      additionalProperties?: boolean;
+      description?: string;
+      properties?: Record<string, Schema>;
+      items?: Schema;
+    };
+    const tools = buildWorkflowTools();
+    const authoring = ["plan_workflow", "validate_workflow", "create_workflow", "update_workflow"];
+    const plan = tools.find((candidate) => candidate.name === "plan_workflow")!;
+    const teaching = (plan.inputSchema.properties.sop as Schema).description;
+
+    for (const name of authoring) {
+      const schema = tools.find((candidate) => candidate.name === name)!.inputSchema as unknown as Schema;
+      const sop = schema.properties?.sop;
+      const graph = schema.properties?.[name === "update_workflow" ? "patch" : "definition"];
+      const wakeUpRef = (sop?.properties?.wakeUp as Schema & { $ref?: string } | undefined)?.$ref?.split("/").at(-1);
+      const wakeUp = wakeUpRef
+        ? (schema as Schema & { $defs?: Record<string, Schema> }).$defs?.[wakeUpRef]
+        : sop?.properties?.wakeUp;
+      const step = sop?.properties?.steps?.items;
+      const node = graph?.properties?.nodes?.items;
+      const edge = graph?.properties?.edges?.items;
+
+      expect(schema.additionalProperties, `${name} input`).toBe(false);
+      expect(sop?.description, `${name} SOP guidance`).toBe(name === "plan_workflow" ? teaching : undefined);
+      expect(sop?.additionalProperties, `${name} SOP`).toBe(false);
+      expect(wakeUp?.additionalProperties, `${name} SOP wakeUp`).toBe(false);
+      expect(step?.additionalProperties, `${name} SOP step`).toBe(false);
+      expect(graph?.additionalProperties, `${name} graph`).toBe(false);
+      expect(node?.additionalProperties, `${name} graph node`).toBe(false);
+      expect(edge?.additionalProperties, `${name} graph edge`).toBe(false);
+
+      for (const closedObject of [schema, sop, wakeUp, step, graph, node, edge]) {
+        expect(closedObject?.properties, `${name} opaque field`).not.toHaveProperty("opaqueExtension");
+      }
+    }
+  });
+
   it("describes workflow starts as live operations on the current gateway", () => {
     for (const name of ["start_workflow_run", "run_workflow_by_name"]) {
       expect(tool(name).description).toMatch(/live workflow run/i);
@@ -159,6 +368,57 @@ describe("workflow tools — registry + schemas", () => {
 });
 
 describe("workflow tools — unit (stub gateway)", () => {
+  it.each(["plan_workflow", "validate_workflow", "create_workflow"])(
+    "%s rejects unknown raw-definition fields before any gateway call",
+    async (name) => {
+      const { calls, ctx } = stub(() => ({ status: 200, body: { ok: true } }));
+      const response = await handleMcpRequest(
+        {
+          id: 70,
+          method: "tools/call",
+          params: {
+            name,
+            arguments: {
+              definition: {
+                id: "strict-mcp",
+                title: "Strict MCP",
+                nodes: [
+                  { id: "wake", type: "trigger", label: "Wake", trigger: { kind: "manual" } },
+                  { id: "work", type: "step", label: "Work", onError: "continue" },
+                ],
+                edges: [{ id: "e", from: "wake", to: "work" }],
+                mysteryMode: true,
+              },
+            },
+          },
+        },
+        buildTools(),
+        ctx,
+      );
+      const result = response!.result as { isError?: boolean; content: Array<{ text: string }> };
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/invalid arguments/i);
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    ["create_workflow", { definition: { id: "forged", title: "Forged", nodes: [], edges: [], owner: "forged" } }],
+    ["update_workflow", { workflowId: "forged", patch: { createdBy: "forged" } }],
+  ])("%s rejects caller authority injection before any gateway call", async (name, args) => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: {} }));
+    const response = await handleMcpRequest(
+      { id: 71, method: "tools/call", params: { name, arguments: args } },
+      buildTools(),
+      ctx,
+    );
+    const result = response!.result as { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
   it("list_workflows GETs the definitions route and passes summaries through", async () => {
     const { calls, ctx } = stub(() => ({
       status: 200,
@@ -274,6 +534,10 @@ describe("workflow tools — unit (stub gateway)", () => {
     )) as {
       ok: boolean;
       definition: { id: string; nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> };
+      layout: {
+        diagnostics: { source: string; quality: { valid: boolean; score: number } };
+        normalizedPreview: { layout: { source: string; version: number } };
+      };
       validation: { ok: boolean };
       execution: { ok: boolean };
     };
@@ -284,6 +548,11 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(out.ok).toBe(true);
     expect(out.validation.ok).toBe(true);
     expect(out.execution.ok).toBe(true);
+    expect(out.layout.diagnostics).toMatchObject({
+      source: "generated",
+      quality: { valid: true, score: expect.any(Number) },
+    });
+    expect(out.layout.normalizedPreview.layout).toEqual({ source: "normalized", version: 1 });
     expect(out.definition.id).toBe("daily-brief");
     expect((out.definition as { name?: string }).name).toBe("daily-research-brief");
     expect(out.definition.nodes.map((n) => n.id)).toEqual(["wake", "research", "summarize"]);
@@ -520,6 +789,26 @@ describe("workflow tools — unit (stub gateway)", () => {
       stepOverrides: { verify: { prompt: "Check migrations." } },
       idempotencyKey: "request-42",
     });
+  });
+
+  it("start_workflow_run surfaces a sanitized typed idempotency conflict with safe run guidance", async () => {
+    const { ctx } = stub(() => ({
+      status: 409,
+      body: {
+        error: "This idempotency key is already bound to a different workflow run request.",
+        code: "workflow-run-idempotency-conflict",
+        runId: "run-existing",
+      },
+    }));
+    const error = await tool("start_workflow_run").handler({
+      workflowId: "wf",
+      input: { secret: "must-not-leak" },
+      idempotencyKey: "must-not-leak-key",
+    }, ctx).catch((caught: unknown) => caught as Error) as Error;
+
+    expect(error.message).toMatch(/workflow-run-idempotency-conflict/);
+    expect(error.message).toMatch(/run-existing/);
+    expect(error.message).not.toContain("must-not-leak");
   });
 
   it("edit_workflow_run_step_prompt PATCHes the audited pending-step route", async () => {

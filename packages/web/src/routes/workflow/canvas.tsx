@@ -1,5 +1,5 @@
 import "@xyflow/react/dist/style.css"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react"
 import {
   ReactFlow,
   Background,
@@ -11,13 +11,14 @@ import {
   type Node as FlowNode,
   type Edge as FlowEdge,
   type EdgeProps,
+  type Connection,
   type ReactFlowInstance,
 } from "@xyflow/react"
 import { CheckCircle2, Circle, Clock, Map as MapIcon, X } from "lucide-react"
 import { stateGlyph } from "./node-card"
 import { nodeStatusLine } from "./status-line"
 import { jinnNodeTypes, type JinnNodeData } from "./node-components"
-import { CanvasControls, useIsCanvasMobile, tidyLayout, minimapNodeColor } from "./canvas-view"
+import { CanvasControls, canvasViewportClass, initialViewportPlan, useIsCanvasMobile, minimapNodeColor, viewportFrameKey } from "./canvas-view"
 
 import type { WorkflowRunView, WorkflowStepView, WorkflowGateResult } from "@/lib/api"
 import {
@@ -59,13 +60,19 @@ export type { CanvasNode, CanvasNodeSeed, CanvasGraphSpec, CanvasEdgeSpec, Visua
  * item-count pill as a calm frosted capsule riding the bezier midpoint. Custom
  * (rather than RF's default) so the curvature and the pill are exact — the
  * wire is the product. */
-function JinnEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, style, label, markerEnd }: EdgeProps) {
-  const [path, labelX, labelY] = getBezierPath({
-    sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, curvature: 0.35,
-  })
+function JinnEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, style, label, markerEnd, data }: EdgeProps) {
+  const edgeData = data as { routeY?: number; testId?: string } | undefined
+  const routeY = edgeData?.routeY
+  const [path, labelX, labelY] = routeY === undefined
+    ? getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, curvature: 0.35 })
+    : [
+        `M ${sourceX},${sourceY} C ${sourceX + 72},${sourceY} ${sourceX + 72},${routeY} ${sourceX + 36},${routeY} L ${targetX - 36},${routeY} C ${targetX - 72},${routeY} ${targetX - 72},${targetY} ${targetX},${targetY}`,
+        (sourceX + targetX) / 2,
+        routeY,
+      ]
   return (
     <>
-      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd as string | undefined} />
+      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd as string | undefined} data-testid={edgeData?.testId ?? `wf-edge-${id}`} />
       {label != null && label !== "" && (
         <EdgeLabelRenderer>
           <div
@@ -94,6 +101,15 @@ function JinnEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targ
 }
 
 const jinnEdgeTypes = { jinn: JinnEdge }
+
+/** React Flow deletion adapter kept pure so durable edge-id forwarding is
+ * covered without depending on jsdom's missing handle measurements. */
+export function notifyRemovedEdges(
+  deleted: Array<Pick<FlowEdge, "id">>,
+  onRemoveEdge?: (edgeId: string) => void,
+): void {
+  deleted.forEach((edge) => onRemoveEdge?.(edge.id))
+}
 
 /** Inspector header glyph — the same state visual the node card carries. */
 export function InspectorStateCircle({ node }: { node: CanvasNode }) {
@@ -285,9 +301,19 @@ export function buildFlowGraph(
   selectedId: string | null,
   onSelect: (id: string) => void,
   edges?: CanvasEdgeSpec[],
+  editable = false,
+  selectedEdgeId: string | null = null,
 ): { flowNodes: FlowNode<JinnNodeData>[]; flowEdges: FlowEdge[] } {
   const positions = resolveNodePositions(nodes, edges?.map((e) => ({ from: e.from, to: e.to, lane: e.lane })))
   const byId = new Map(nodes.map((n) => [n.id, n]))
+  const graphBottom = nodes.reduce((bottom, node) => {
+    const position = positions[node.id]
+    if (!position) return bottom
+    return Math.max(bottom, position.y + nodeGeometry(node).h)
+  }, 0)
+  const loopLaneById = new Map(
+    (edges ?? []).filter((edge) => edge.kind === "loop").map((edge, lane) => [edge.id ?? `${edge.from}->${edge.to}`, lane]),
+  )
   const flowNodes: FlowNode<JinnNodeData>[] = nodes.map((n) => {
     const { w, h } = nodeGeometry(n)
     return {
@@ -296,9 +322,10 @@ export function buildFlowGraph(
       position: positions[n.id],
       width: w,
       height: h,
-      draggable: false,
-      connectable: false,
-      selectable: false,
+      draggable: editable && n.visual !== "sub" && n.visual !== "split" && n.visual !== "merge" && n.visual !== "ghost",
+      connectable: editable && n.visual !== "sub" && n.visual !== "split" && n.visual !== "merge" && n.visual !== "ghost",
+      selectable: editable,
+      deletable: editable && n.kind !== "trigger" && n.visual !== "sub" && n.visual !== "split" && n.visual !== "merge" && n.visual !== "ghost",
       data: { node: n, selected: selectedId === n.id, onSelect },
     }
   })
@@ -330,6 +357,12 @@ export function buildFlowGraph(
       sourceHandle,
       targetHandle,
       type: "jinn", // bezier, curvature 0.35 — the visible curve in the gap
+      deletable: editable && !isSub,
+      selected: editable && selectedEdgeId === id,
+      data: {
+        testId: `wf-edge-${id}`,
+        ...(spec?.kind === "loop" ? { routeY: graphBottom + 80 + (loopLaneById.get(id) ?? 0) * 40 } : {}),
+      },
       animated: !isError && !isSub && active,
       style: isSub
         ? { stroke: "var(--separator-opaque)", strokeWidth: 1.5, strokeDasharray: "5 5", opacity: 0.75 }
@@ -384,6 +417,13 @@ export function WorkflowCanvas({
   edges,
   minimap = true,
   controls = true,
+  editable = false,
+  onPositionChange,
+  onConnectNodes,
+  onRemoveNode,
+  onRemoveEdge,
+  onTidy,
+  framingKey = "",
 }: {
   nodes: CanvasNode[]
   selectedId: string | null
@@ -392,13 +432,23 @@ export function WorkflowCanvas({
   edges?: CanvasEdgeSpec[]
   minimap?: boolean
   controls?: boolean
+  editable?: boolean
+  onPositionChange?: (nodeId: string, position: { x: number; y: number }) => void
+  onConnectNodes?: (from: string, to: string) => void
+  onRemoveNode?: (nodeId: string) => void
+  onRemoveEdge?: (edgeId: string) => void
+  /** The editor supplies server-backed Tidy. Read-only canvases expose no
+   * client-side layout mutation. */
+  onTidy?: () => void
+  /** Caller-owned view identity (for example a run id). Semantic graph changes
+   * are also detected, while position-only updates intentionally are not. */
+  framingKey?: string
 }) {
-  const isMobile = useIsCanvasMobile()
-  // View-local "tidy up" override: Dagre-computed positions applied on top of the
-  // definition's manual layout (operator decision 3). Cleared when the base graph
-  // changes so a new run/definition starts from its own honest positions.
-  const [tidyPos, setTidyPos] = useState<Record<string, { x: number; y: number }> | null>(null)
-  useEffect(() => { setTidyPos(null) }, [nodes, edges])
+  const breakpointMobile = useIsCanvasMobile()
+  const [observedViewportClass, setObservedViewportClass] = useState<ReturnType<typeof canvasViewportClass> | null>(null)
+  const canvasRef = useRef<HTMLDivElement | null>(null)
+  const isMobile = observedViewportClass ? observedViewportClass.startsWith("mobile-") : breakpointMobile
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   // Mobile: the minimap collapses behind a map-icon toggle (spec §7) — the
   // phone canvas keeps its pixels; the whole-shape overview is one tap away.
   const [mapOpen, setMapOpen] = useState(false)
@@ -409,47 +459,150 @@ export function WorkflowCanvas({
   // MAIN-node positions are resolved BEFORE the expansion: dock discs carry
   // varied derived offsets, so expanding first would make a degenerate stored
   // layout (all real cards at the origin) pass the usability check and open as
-  // an overlapping pile that only Tidy up could rescue.
+  // an overlapping pile that only Tidy could rescue.
   const { expNodes, expEdges } = useMemo(() => {
-    const base = tidyPos ? nodes.map((n) => (tidyPos[n.id] ? { ...n, position: tidyPos[n.id] } : n)) : nodes
-    const { nodes: en, edges: ee } = expandCanvas(placeCanvasNodes(base, edges), edges)
+    const { nodes: en, edges: ee } = expandCanvas(placeCanvasNodes(nodes, edges), edges)
     return { expNodes: en, expEdges: ee }
-  }, [nodes, edges, tidyPos])
+  }, [nodes, edges])
 
   const { flowNodes, flowEdges } = useMemo(
-    () => buildFlowGraph(expNodes, selectedId, onSelect, expEdges),
-    [expNodes, selectedId, onSelect, expEdges],
+    () => buildFlowGraph(expNodes, selectedId, onSelect, expEdges, editable, selectedEdgeId),
+    [expNodes, selectedId, onSelect, expEdges, editable, selectedEdgeId],
   )
 
   type Inst = ReactFlowInstance<FlowNode<JinnNodeData>, FlowEdge>
   const instanceRef = useRef<Inst | null>(null)
+  const lastFramedKeyRef = useRef<string | null>(null)
+  const lastStructureFrameKeyRef = useRef<string | null>(null)
+  const userOwnsViewportRef = useRef(false)
+  const frameRequestRef = useRef(0)
+  const frameKey = useMemo(
+    () => viewportFrameKey(expNodes, expEdges, framingKey, observedViewportClass ?? "unmeasured"),
+    [expNodes, expEdges, framingKey, observedViewportClass],
+  )
+  const structureFrameKey = useMemo(
+    () => JSON.stringify({
+      framingKey,
+      viewportClass: observedViewportClass ?? "unmeasured",
+      nodes: expNodes
+        .filter((node) => node.visual !== "sub")
+        .map((node) => [node.id, node.kind, node.visual ?? ""]),
+      edges: expEdges
+        .filter((edge) => edge.lane !== "sub")
+        .map((edge) => [edge.id ?? "", edge.from, edge.to, edge.kind ?? "", edge.lane ?? ""]),
+    }),
+    [expEdges, expNodes, framingKey, observedViewportClass],
+  )
 
-  // Open framing: EVERY breakpoint fits the whole graph. A phone that opens
-  // zoomed onto one node reads as "the graph is off-screen" (QA re-verify);
-  // focused-node framing belongs to explicit user actions, never the mount —
-  // pinch-zoom and the minimap carry the close-up from there.
-  const onInit = useCallback((inst: Inst) => {
-    instanceRef.current = inst
-    inst.fitView({ padding: 0.2 })
+  useEffect(() => {
+    const element = canvasRef.current
+    if (!element) return
+    if (typeof ResizeObserver === "undefined") {
+      const rect = element.getBoundingClientRect()
+      const width = rect.width || window.innerWidth
+      const height = rect.height || window.innerHeight
+      setObservedViewportClass(canvasViewportClass(width, height))
+      return
+    }
+    const observer = new ResizeObserver((entries) => {
+      const size = entries.find((entry) => entry.target === element)?.contentRect
+      if (!size || size.width <= 0 || size.height <= 0) return
+      const next = canvasViewportClass(size.width, size.height)
+      setObservedViewportClass((current) => current === next ? current : next)
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
   }, [])
 
-  const onTidy = useCallback(() => {
-    setTidyPos(tidyLayout(nodes, (edges ?? []).map((e) => ({ from: e.from, to: e.to, lane: e.lane }))))
-    requestAnimationFrame(() => instanceRef.current?.fitView({ padding: 0.2, duration: 400 }))
-  }, [nodes, edges])
+  const frameGraph = useCallback((inst: Inst, key: string, structureKey: string) => {
+    if (!observedViewportClass) return
+    if (lastFramedKeyRef.current === key) return
+    lastFramedKeyRef.current = key
+    const structureChanged = lastStructureFrameKeyRef.current !== structureKey
+    if (!structureChanged && userOwnsViewportRef.current) return
+    if (structureChanged) {
+      lastStructureFrameKeyRef.current = structureKey
+      userOwnsViewportRef.current = false
+    }
+    const request = ++frameRequestRef.current
+    const focus = (nodeId: string, zoom: number) => {
+      const node = expNodes.find((candidate) => candidate.id === nodeId)
+      if (!node?.position) return
+      const { w, h } = nodeGeometry(node)
+      inst.setCenter(node.position.x + w / 2, node.position.y + h / 2, { zoom })
+    }
+    const firstPlan = initialViewportPlan({ mobile: isMobile, nodes: expNodes })
+    if (isMobile) {
+      if (firstPlan.nodeId) focus(firstPlan.nodeId, firstPlan.zoom)
+      return
+    }
+    void inst.fitView({ padding: 0.2 }).then(() => {
+      if (frameRequestRef.current !== request || lastFramedKeyRef.current !== key) return
+      const plan = initialViewportPlan({ mobile: false, fitZoom: inst.getZoom(), nodes: expNodes })
+      if (plan.mode !== "focus" || !plan.nodeId) return
+      focus(plan.nodeId, plan.zoom)
+    })
+  }, [expNodes, isMobile, observedViewportClass])
+
+  const onInit = useCallback((inst: Inst) => {
+    instanceRef.current = inst
+    frameGraph(inst, frameKey, structureFrameKey)
+  }, [frameGraph, frameKey, structureFrameKey])
+
+  useEffect(() => {
+    const inst = instanceRef.current
+    if (inst) frameGraph(inst, frameKey, structureFrameKey)
+  }, [frameGraph, frameKey, structureFrameKey])
+
+  const claimViewport = useCallback(() => {
+    userOwnsViewportRef.current = true
+    frameRequestRef.current += 1
+  }, [])
+
+  const connect = useCallback((connection: Connection) => {
+    if (connection.source && connection.target) onConnectNodes?.(connection.source, connection.target)
+  }, [onConnectNodes])
+
+  const removeEdges = useCallback((deleted: FlowEdge[]) => {
+    if (deleted.some((edge) => edge.id === selectedEdgeId)) setSelectedEdgeId(null)
+    notifyRemovedEdges(deleted, onRemoveEdge)
+  }, [onRemoveEdge, selectedEdgeId])
+
+  useEffect(() => {
+    if (selectedEdgeId && !expEdges.some((edge) => edge.id === selectedEdgeId)) setSelectedEdgeId(null)
+  }, [expEdges, selectedEdgeId])
+
+  const selectFocusedEdge = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!editable || (event.key !== "Enter" && event.key !== " ")) return
+    const edgeId = (event.target as HTMLElement).closest<HTMLElement>(".react-flow__edge")?.dataset.id
+    if (edgeId) setSelectedEdgeId(edgeId)
+  }, [editable])
 
   return (
-    <div data-testid="wf-canvas" className="relative h-full min-h-[320px] w-full">
+    <div
+      ref={canvasRef}
+      data-testid="wf-canvas"
+      className="relative h-full min-h-[320px] w-full"
+      onKeyDownCapture={selectFocusedEdge}
+    >
       <ReactFlow
         nodes={flowNodes}
         edges={flowEdges}
         nodeTypes={jinnNodeTypes}
         edgeTypes={jinnEdgeTypes}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable={false}
-        edgesFocusable={false}
+        nodesDraggable={editable}
+        nodesConnectable={editable}
+        elementsSelectable={editable}
+        edgesFocusable={editable}
+        deleteKeyCode={editable ? ["Backspace", "Delete"] : null}
+        onNodeDragStop={editable ? (_event, node) => onPositionChange?.(node.id, node.position) : undefined}
+        onConnect={editable ? connect : undefined}
+        onEdgeClick={editable ? (_event, edge) => setSelectedEdgeId(edge.id) : undefined}
+        onPaneClick={editable ? () => setSelectedEdgeId(null) : undefined}
+        onNodesDelete={editable ? (deleted) => deleted.forEach((node) => onRemoveNode?.(node.id)) : undefined}
+        onEdgesDelete={editable ? removeEdges : undefined}
         onInit={onInit}
+        onMoveStart={(event) => { if (event) claimViewport() }}
         panOnDrag
         zoomOnPinch
         zoomOnScroll
@@ -497,7 +650,7 @@ export function WorkflowCanvas({
             <MapIcon className="size-[20px]" />
           </button>
         )}
-        {controls && <CanvasControls onTidy={onTidy} mobile={isMobile} />}
+        {controls && <CanvasControls onTidy={onTidy} onViewportIntent={claimViewport} mobile={isMobile} />}
       </ReactFlow>
     </div>
   )

@@ -10,6 +10,7 @@ import {
   type CanvasNode,
   type CanvasNodeSeed,
 } from "../canvas-model"
+import * as canvasView from "../canvas-view"
 
 /* GRS-013 — tests for the ONE CanvasNode-builder contract (KISS simplify item 2)
  * and the spatial layout seam under the React Flow substrate. The view adapters
@@ -234,6 +235,86 @@ describe("placeCanvasNodes — main nodes are placed BEFORE dock expansion (QA d
     const placed = placeCanvasNodes(nodes)
     expect(placed[0].position).toEqual({ x: 240, y: 0 })
     expect(placed[1].position).toEqual({ x: 240, y: 140 })
+  })
+})
+
+describe("readable initial viewport planning", () => {
+  it("classifies the observed canvas by breakpoint and orientation", () => {
+    const canvasViewportClass = (canvasView as unknown as {
+      canvasViewportClass?: (width: number, height: number) => string
+    }).canvasViewportClass
+    expect(canvasViewportClass, "canvasViewportClass is not implemented").toBeTypeOf("function")
+
+    expect(canvasViewportClass!(390, 844)).toBe("mobile-portrait")
+    expect(canvasViewportClass!(720, 390)).toBe("mobile-landscape")
+    expect(canvasViewportClass!(1024, 1366)).toBe("desktop-portrait")
+    expect(canvasViewportClass!(1440, 900)).toBe("desktop-landscape")
+  })
+
+  it("focuses a failed node before ordinary running or pending work", () => {
+    const nodes = [
+      { ...node("pending"), status: "pending" },
+      { ...node("running"), status: "running" },
+      { ...node("failed"), status: "blocked" },
+    ]
+
+    expect(canvasView.pickFocusNode(nodes)?.id).toBe("failed")
+  })
+
+  it("opens mobile at a readable focus zoom and leaves Fit all explicit", () => {
+    const initialViewportPlan = (canvasView as unknown as {
+      initialViewportPlan?: (input: { mobile: boolean; fitZoom?: number; nodes: CanvasNode[] }) => {
+        mode: "focus" | "fit"
+        nodeId?: string
+        zoom: number
+      }
+    }).initialViewportPlan
+    expect(initialViewportPlan, "initialViewportPlan is not implemented").toBeTypeOf("function")
+
+    const nodes = [node("trigger"), { ...node("failed"), status: "blocked" }]
+    expect(initialViewportPlan!({ mobile: true, fitZoom: 0.3, nodes })).toMatchObject({
+      mode: "focus",
+      nodeId: "failed",
+      zoom: 0.9,
+    })
+  })
+
+  it("focuses on desktop when fitting the whole graph would be unreadable", () => {
+    const initialViewportPlan = (canvasView as unknown as {
+      initialViewportPlan?: (input: { mobile: boolean; fitZoom?: number; nodes: CanvasNode[] }) => {
+        mode: "focus" | "fit"
+        nodeId?: string
+        zoom: number
+      }
+    }).initialViewportPlan
+    expect(initialViewportPlan, "initialViewportPlan is not implemented").toBeTypeOf("function")
+
+    expect(initialViewportPlan!({ mobile: false, fitZoom: 0.42, nodes: [node("first")] })).toMatchObject({
+      mode: "focus",
+      nodeId: "first",
+    })
+    expect(initialViewportPlan!({ mobile: false, fitZoom: 0.8, nodes: [node("first")] }).mode).toBe("fit")
+  })
+
+  it("keys framing to displayed graph/run changes but ignores local geometry churn", () => {
+    const viewportFrameKey = (canvasView as unknown as {
+      viewportFrameKey?: (
+        nodes: CanvasNode[],
+        edges?: { id?: string; from: string; to: string }[],
+        viewKey?: string,
+        viewportClass?: string,
+      ) => string
+    }).viewportFrameKey
+    expect(viewportFrameKey, "viewportFrameKey is not implemented").toBeTypeOf("function")
+    const nodes = [node("trigger"), { ...node("work"), status: "running" }]
+    const edges = [{ id: "trigger-work", from: "trigger", to: "work" }]
+
+    const base = viewportFrameKey!(nodes, edges, "run-1", "desktop-landscape")
+    expect(viewportFrameKey!(nodes.map((item) => ({ ...item, position: { x: 999, y: 999 } })), edges, "run-1", "desktop-landscape")).toBe(base)
+    expect(viewportFrameKey!(nodes, edges, "run-2", "desktop-landscape")).not.toBe(base)
+    expect(viewportFrameKey!(nodes.map((item) => item.id === "work" ? { ...item, status: "blocked" } : item), edges, "run-1", "desktop-landscape")).not.toBe(base)
+    expect(viewportFrameKey!(nodes, edges, "run-1", "mobile-portrait")).not.toBe(base)
+    expect(viewportFrameKey!(nodes, edges, "run-1", "desktop-portrait")).not.toBe(base)
   })
 })
 

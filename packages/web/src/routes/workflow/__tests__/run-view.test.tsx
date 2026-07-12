@@ -1,16 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 import type { WorkflowRunWire, WorkflowRunSummaryWire } from "@/lib/api"
+import { WorkflowApiError } from "@/lib/api"
 
 // Mock the api module — the pure mapper/inspector don't touch it; DefinitionRunView does.
 const listWorkflowRuns = vi.fn()
 const getWorkflowRun = vi.fn()
-vi.mock("@/lib/api", () => ({
-  api: {
-    listWorkflowRuns: (...a: unknown[]) => listWorkflowRuns(...a),
-    getWorkflowRun: (...a: unknown[]) => getWorkflowRun(...a),
-  },
-}))
+const startWorkflowRun = vi.fn()
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>()
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      listWorkflowRuns: (...a: unknown[]) => listWorkflowRuns(...a),
+      getWorkflowRun: (...a: unknown[]) => getWorkflowRun(...a),
+      startWorkflowRun: (...a: unknown[]) => startWorkflowRun(...a),
+    },
+  }
+})
 
 import {
   nodesForDefinitionRun,
@@ -40,6 +48,18 @@ function runWire(overrides: Partial<WorkflowRunWire> = {}): WorkflowRunWire {
     parked: { scope: "gateNode", nodeId: "merge-gate", kind: "approval", evaluator: "human-approval", ref: "merge", description: "Await human sign-off before merge" },
     ...overrides,
   }
+}
+
+function approvalRun(capability: {
+  canDecide: boolean
+  target: string | null
+  needsYou: boolean
+  escalated: boolean
+}): WorkflowRunWire {
+  return {
+    ...runWire(),
+    approvalCapability: capability,
+  } as WorkflowRunWire
 }
 
 describe("stepNodeStatus — spawn ≠ done", () => {
@@ -223,6 +243,7 @@ describe("DefinitionRunView (container)", () => {
   beforeEach(() => {
     listWorkflowRuns.mockReset()
     getWorkflowRun.mockReset()
+    startWorkflowRun.mockReset()
   })
 
   it("lists runs, auto-selects the newest, and renders the parked run on the canvas", async () => {
@@ -252,6 +273,107 @@ describe("DefinitionRunView (container)", () => {
     render(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByText(/No runs yet/i)).toBeTruthy())
     expect(getWorkflowRun).not.toHaveBeenCalled()
+  })
+
+  it("starts a run from JSON input with a generated idempotency key and no raw REST instruction", async () => {
+    listWorkflowRuns.mockResolvedValue({ evidenceConfigured: true, runs: [] })
+    startWorkflowRun.mockResolvedValue(runWire({
+      status: "running",
+      parked: null,
+      endedAt: null,
+    }))
+
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
+    expect(screen.queryByText(/POST \/api\/workflow-definitions/)).toBeNull()
+
+    fireEvent.click(screen.getByRole("button", { name: "Run" }))
+    fireEvent.change(screen.getByLabelText("Run input"), { target: { value: '{"ticket":"A-1"}' } })
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }))
+
+    await waitFor(() => expect(startWorkflowRun).toHaveBeenCalledWith(
+      "sample-autonomy",
+      { ticket: "A-1" },
+      expect.stringMatching(/\S/),
+    ))
+  })
+
+  it("reuses the same idempotency key when the operator retries a failed transport", async () => {
+    listWorkflowRuns.mockResolvedValue({ evidenceConfigured: true, runs: [] })
+    startWorkflowRun
+      .mockRejectedValueOnce(new Error("network blink"))
+      .mockResolvedValueOnce(runWire({ status: "running", parked: null, endedAt: null }))
+
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
+    fireEvent.click(screen.getByRole("button", { name: "Run" }))
+    fireEvent.change(screen.getByLabelText("Run input"), { target: { value: '{"ticket":"A-1"}' } })
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }))
+    await waitFor(() => expect(screen.getByText(/network blink/i)).toBeTruthy())
+
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }))
+    await waitFor(() => expect(startWorkflowRun).toHaveBeenCalledTimes(2))
+    expect(startWorkflowRun.mock.calls[1][2]).toBe(startWorkflowRun.mock.calls[0][2])
+  })
+
+  it("keeps changed intent intact on 409 and starts with a new key only after explicit operator intent", async () => {
+    listWorkflowRuns.mockResolvedValue({ evidenceConfigured: true, runs: [] })
+    startWorkflowRun
+      .mockRejectedValueOnce(new WorkflowApiError(
+        "This idempotency key is already bound to a different workflow run request.",
+        409,
+        "workflow-run-idempotency-conflict",
+        "run-existing",
+      ))
+      .mockResolvedValueOnce(runWire({ status: "running", parked: null, endedAt: null }))
+
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
+    fireEvent.click(screen.getByRole("button", { name: "Run" }))
+    fireEvent.change(screen.getByLabelText("Run input"), { target: { value: '{"ticket":"CHANGED"}' } })
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }))
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start as new run" })).toBeTruthy())
+    expect((screen.getByLabelText("Run input") as HTMLTextAreaElement).value).toBe('{"ticket":"CHANGED"}')
+    expect(getWorkflowRun).not.toHaveBeenCalledWith("sample-autonomy", "run-existing")
+
+    const conflictedKey = startWorkflowRun.mock.calls[0][2]
+    fireEvent.click(screen.getByRole("button", { name: "Start as new run" }))
+    await waitFor(() => expect(startWorkflowRun).toHaveBeenCalledTimes(2))
+    expect(startWorkflowRun.mock.calls[1][1]).toEqual({ ticket: "CHANGED" })
+    expect(startWorkflowRun.mock.calls[1][2]).not.toBe(conflictedKey)
+  })
+
+  it("selects and renders a durable failed run returned by Start instead of losing its evidence", async () => {
+    const failed = runWire({
+      status: "failed",
+      parked: null,
+      errors: [{ code: "spawn-failed", message: "worker session failed", ref: "orchestrate" }],
+      steps: runWire().steps.map((step) => step.nodeId === "orchestrate" ? { ...step, status: "failed" } : step),
+    })
+    const summary: WorkflowRunSummaryWire = {
+      runId: failed.runId,
+      workflowId: failed.workflowId,
+      status: "failed",
+      trigger: failed.trigger,
+      startedAt: failed.startedAt,
+      endedAt: failed.endedAt,
+      stepCount: failed.steps.length,
+      parked: false,
+    }
+    listWorkflowRuns
+      .mockResolvedValueOnce({ evidenceConfigured: true, runs: [] })
+      .mockResolvedValue({ evidenceConfigured: true, runs: [summary] })
+    startWorkflowRun.mockResolvedValue(failed)
+    getWorkflowRun.mockResolvedValue(failed)
+
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
+    fireEvent.click(screen.getByRole("button", { name: "Run" }))
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }))
+
+    await waitFor(() => expect(screen.getByText(/Run failed: worker session failed/i)).toBeTruthy())
+    expect(screen.getByTestId("wf-node-orchestrate")).toBeTruthy()
   })
 
   it("notes when workflow storage is misconfigured", async () => {
@@ -371,12 +493,12 @@ describe("RunNodeInspector — reserved v2 step states render honest rows", () =
 })
 
 describe("gate resolution UI (GRS-014e)", () => {
-  it("renders Approve/Reject on a parked node when onResolveGate is provided and fires the decision", async () => {
+  it("renders active Approve/Reject only when the projected principal can decide", async () => {
     const decisions: string[] = []
     const onResolveGate = async (d: "approve" | "reject") => {
       decisions.push(d)
     }
-    render(<RunNodeInspector run={runWire()} node={parkedNode()} onClose={() => {}} onResolveGate={onResolveGate} />)
+    render(<RunNodeInspector run={approvalRun({ canDecide: true, target: "coo", needsYou: true, escalated: false })} node={parkedNode()} onClose={() => {}} onResolveGate={onResolveGate} />)
 
     fireEvent.click(screen.getByTestId("wf-gate-approve"))
     await waitFor(() => expect(decisions).toEqual(["approve"]))
@@ -387,7 +509,7 @@ describe("gate resolution UI (GRS-014e)", () => {
   it("surfaces a resolve failure inline (e.g. 409 not parked) instead of swallowing it", async () => {
     render(
       <RunNodeInspector
-        run={runWire()}
+        run={approvalRun({ canDecide: true, target: "coo", needsYou: true, escalated: false })}
         node={parkedNode()}
         onClose={() => {}}
         onResolveGate={async () => {
@@ -399,10 +521,46 @@ describe("gate resolution UI (GRS-014e)", () => {
     await waitFor(() => expect(screen.getByTestId("wf-gate-resolve-error").textContent).toContain("not parked"))
   })
 
+  it("keeps an unauthorized principal read-only and names the routed approver with escalation guidance", () => {
+    const onResolveGate = vi.fn(async () => {})
+    render(
+      <RunNodeInspector
+        run={approvalRun({ canDecide: false, target: "platform-manager", needsYou: false, escalated: false })}
+        node={parkedNode()}
+        onClose={() => {}}
+        onResolveGate={onResolveGate}
+      />,
+    )
+
+    expect(screen.queryByTestId("wf-gate-approve")).toBeNull()
+    expect(screen.queryByTestId("wf-gate-reject")).toBeNull()
+    expect(screen.getByText(/waiting on platform-manager/i)).toBeTruthy()
+    expect(screen.getByText(/escalat/i)).toBeTruthy()
+    expect(onResolveGate).not.toHaveBeenCalled()
+  })
+
+  it("shows an escalated approval as waiting for its routed target without inventing decision authority", () => {
+    render(
+      <RunNodeInspector
+        run={approvalRun({ canDecide: false, target: "coo", needsYou: false, escalated: true })}
+        node={parkedNode()}
+        onClose={() => {}}
+        onResolveGate={async () => {}}
+      />,
+    )
+
+    expect(screen.queryByRole("button", { name: /approve/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /reject/i })).toBeNull()
+    expect(screen.getByText(/waiting on coo/i)).toBeTruthy()
+    expect(screen.getByText(/escalated/i)).toBeTruthy()
+  })
+
   it("stays read-only (API hint, no buttons) without onResolveGate", () => {
     render(<RunNodeInspector run={runWire()} node={parkedNode()} onClose={() => {}} />)
     expect(screen.queryByTestId("wf-gate-approve")).toBeNull()
     expect(screen.queryByTestId("wf-gate-reject")).toBeNull()
+    expect(screen.queryByText(/POST .*resolve-gate/i)).toBeNull()
+    expect(screen.getByText(/open this execution.*approve or reject/i)).toBeTruthy()
   })
 })
 

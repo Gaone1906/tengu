@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { RefreshCw, Clock, X, ExternalLink, Bell, Loader2, CheckCircle2, AlertCircle } from "lucide-react"
+import { RefreshCw, Clock, X, ExternalLink, Bell, Loader2, CheckCircle2, AlertCircle, Play } from "lucide-react"
 import {
-  api,
+  api, WorkflowApiError,
   type WorkflowRunWire, type WorkflowRunSummaryWire, type RunStepReceiptWire,
   type WorkflowNodeWire, type DerivedWorkflow, type WorkflowRunView,
 } from "@/lib/api"
@@ -12,6 +12,10 @@ import {
 import { WorkflowGraph } from "./graph"
 import { InspectorPanel, InspectorSheet } from "./inspector-shell"
 import { nodeStatusLine, relativeTime, triggerSummaryOf } from "./status-line"
+
+function newRunIdempotencyKey(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `run-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
 
 /* GRS-011d-2c-ui — render a real workflow RUN on the canvas.
  *
@@ -214,7 +218,7 @@ export function edgesForDefinitionRun(run: WorkflowRunWire, nodes: CanvasNode[])
   }
   const itemCounts = edgeItemsForRun(run)
   return snap.edges.map((e) => {
-    const spec: CanvasEdgeSpec = { id: e.id, from: remap(e.from), to: remap(e.to) }
+    const spec: CanvasEdgeSpec = { id: e.id, from: remap(e.from), to: remap(e.to), kind: e.kind }
     if (e.lane !== undefined) spec.lane = e.lane
     const outs = outsBySwitch.get(e.from)
     if (outs) {
@@ -404,7 +408,7 @@ export function LiveProjectionView({ workflowId }: { workflowId: string }) {
       <div className="relative flex min-h-0 flex-1">
         <div className="min-h-0 min-w-0 flex-1">
           {nodes.length > 0 ? (
-            <WorkflowGraph nodes={nodes} selectedId={selectedNodeId} onSelect={setSelectedNodeId} />
+            <WorkflowGraph nodes={nodes} selectedId={selectedNodeId} onSelect={setSelectedNodeId} framingKey={workflowId} />
           ) : (
             <div className="flex h-40 items-center justify-center text-[var(--text-tertiary)]">No run selected.</div>
           )}
@@ -537,7 +541,7 @@ export function RunNodeInspector({
               </div>
               <div className="text-[length:var(--text-subheadline)] text-[var(--text-primary)]">{run.parked.description}</div>
             </div>
-            {onResolveGate ? (
+            {onResolveGate && run.approvalCapability?.canDecide ? (
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
                   <button
@@ -568,9 +572,20 @@ export function RunNodeInspector({
                   Approve resumes the run; reject fails it. This is the only way a parked run moves.
                 </div>
               </div>
+            ) : run.approvalCapability ? (
+              <div className="space-y-1.5 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
+                <div className="font-[var(--weight-medium)] text-[var(--text-secondary)]">
+                  Waiting on {run.approvalCapability.target ?? "the routed approver"}.
+                </div>
+                <div>
+                  {run.approvalCapability.escalated
+                    ? "This approval has been escalated and remains with its routed decision owner."
+                    : "If timing becomes critical, ask the routed owner to escalate it."}
+                </div>
+              </div>
             ) : (
               <div className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
-                Resolve via the run API (POST …/runs/:runId/resolve-gate).
+                Open this execution from the active workflow to approve or reject it.
               </div>
             )}
           </div>
@@ -783,6 +798,12 @@ export function DefinitionRunView({
   const [run, setRun] = useState<WorkflowRunWire | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [runComposerOpen, setRunComposerOpen] = useState(false)
+  const [runInput, setRunInput] = useState("{}")
+  const [startingRun, setStartingRun] = useState(false)
+  const [startError, setStartError] = useState<string | null>(null)
+  const [idempotencyConflict, setIdempotencyConflict] = useState(false)
+  const [idempotencyKey, setIdempotencyKey] = useState(newRunIdempotencyKey)
   // `error` is the LIST-level failure (loadRuns) — it replaces the whole view.
   // `runError` is scoped to the SELECTED run's fetch: a transient getWorkflowRun
   // failure shows an inline banner but keeps the selector mounted so the user can
@@ -873,6 +894,56 @@ export function DefinitionRunView({
     [workflowId, selectedRunId, loadRuns],
   )
 
+  const startRun = useCallback(async (forceNew = false) => {
+    if (startingRun) return
+    let input: Record<string, unknown>
+    try {
+      const parsed = JSON.parse(runInput) as unknown
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Run input must be a JSON object.")
+      }
+      input = parsed as Record<string, unknown>
+    } catch (e) {
+      setStartError(e instanceof SyntaxError ? "Run input must be valid JSON." : e instanceof Error ? e.message : "Run input is invalid.")
+      return
+    }
+
+    setStartingRun(true)
+    setStartError(null)
+    setIdempotencyConflict(false)
+    const requestKey = forceNew ? newRunIdempotencyKey() : idempotencyKey
+    if (forceNew) setIdempotencyKey(requestKey)
+    try {
+      const started = await api.startWorkflowRun(workflowId, input, requestKey)
+      const summary: WorkflowRunSummaryWire = {
+        runId: started.runId,
+        workflowId: started.workflowId,
+        status: started.status,
+        trigger: started.trigger,
+        startedAt: started.startedAt,
+        endedAt: started.endedAt,
+        stepCount: started.steps.length,
+        parked: started.status === "parked",
+      }
+      setRuns((current) => [summary, ...(current ?? []).filter((item) => item.runId !== summary.runId)])
+      setRun(started)
+      setSelectedRunId(started.runId)
+      setSelectedNodeId(null)
+      setShowLive(false)
+      setRunComposerOpen(false)
+      setIdempotencyKey(newRunIdempotencyKey())
+    } catch (e) {
+      // Keep the key and composer intact: the next click is an idempotent retry,
+      // not a second workflow execution.
+      setStartError(e instanceof Error ? e.message : "Couldn’t start this run.")
+      if (e instanceof WorkflowApiError && e.code === "workflow-run-idempotency-conflict") {
+        setIdempotencyConflict(true)
+      }
+    } finally {
+      setStartingRun(false)
+    }
+  }, [idempotencyKey, runInput, startingRun, workflowId])
+
   // Only render the full run when it matches the current selection — belt-and-
   // suspenders against a fetch for a previous selection landing late.
   const activeRun = run && run.runId === selectedRunId ? run : null
@@ -898,9 +969,68 @@ export function DefinitionRunView({
         </div>
       )}
 
+      {!error && evidenceConfigured && runs && (
+        <div className="px-[var(--space-4)] pb-[var(--space-2)]">
+          <div className="flex items-center justify-end">
+            <button
+              type="button"
+              onClick={() => { setRunComposerOpen((open) => !open); setStartError(null); setIdempotencyConflict(false) }}
+              className="flex min-h-10 items-center gap-2 rounded-[var(--radius-md)] px-3 text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] text-[var(--text-primary)] transition-colors hover:bg-[var(--fill-secondary)]"
+            >
+              <Play className="size-4" /> Run
+            </button>
+          </div>
+          {runComposerOpen && (
+            <div className="ml-auto max-w-xl rounded-[var(--radius-xl)] bg-[var(--fill-tertiary)] p-[var(--space-3)] shadow-[var(--shadow-subtle)]">
+              <label className="block">
+                <span className="mb-1.5 block text-[length:var(--text-caption1)] font-[var(--weight-semibold)] text-[var(--text-secondary)]">Run input</span>
+                <textarea
+                  aria-label="Run input"
+                  value={runInput}
+                  onChange={(event) => { setRunInput(event.target.value); setStartError(null); setIdempotencyConflict(false) }}
+                  rows={4}
+                  spellCheck={false}
+                  style={{ fontFamily: "var(--font-code)" }}
+                  className="w-full resize-y rounded-[var(--radius-lg)] bg-[var(--bg)] px-3 py-2.5 text-[length:var(--text-footnote)] text-[var(--text-primary)] shadow-[var(--shadow-subtle)] outline-none focus:shadow-[var(--shadow-card)]"
+                />
+              </label>
+              {startError && <div role="alert" className="mt-2 text-[length:var(--text-caption1)] text-[var(--system-red)]">{startError}</div>}
+              <div className="mt-3 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setRunComposerOpen(false)}
+                  className="min-h-10 rounded-[var(--radius-md)] px-3 text-[length:var(--text-subheadline)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void startRun(false)}
+                  disabled={startingRun}
+                  className="flex min-h-10 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--accent)] px-3.5 text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] text-[var(--accent-contrast)] disabled:opacity-50"
+                >
+                  {startingRun && <Loader2 className="size-4 animate-spin" />}
+                  Start run
+                </button>
+                {idempotencyConflict && (
+                  <button
+                    type="button"
+                    onClick={() => void startRun(true)}
+                    disabled={startingRun}
+                    className="flex min-h-10 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--accent)] px-3.5 text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] text-[var(--accent-contrast)] disabled:opacity-50"
+                  >
+                    Start as new run
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {!error && evidenceConfigured && runs && runs.length === 0 && !liveAvailable && (
-        <div className="m-[var(--space-4)] rounded-[var(--radius-md)] border border-[var(--separator)] p-4 text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
-          No runs yet. Start one with <code>POST /api/workflow-definitions/{workflowId}/run</code>.
+        <div className="mx-[var(--space-4)] mt-[var(--space-2)] rounded-[var(--radius-xl)] bg-[var(--fill-tertiary)] p-5 text-center text-[length:var(--text-subheadline)] text-[var(--text-secondary)] shadow-[var(--shadow-subtle)]">
+          No runs yet. Use Run to start the first execution.
         </div>
       )}
 
@@ -970,7 +1100,7 @@ export function DefinitionRunView({
             <div className="relative flex min-h-0 flex-1">
               <div className="min-h-0 min-w-0 flex-1">
                 {nodes.length > 0 ? (
-                  <WorkflowGraph nodes={nodes} selectedId={selectedNodeId} onSelect={setSelectedNodeId} edges={graphEdges} />
+                  <WorkflowGraph nodes={nodes} selectedId={selectedNodeId} onSelect={setSelectedNodeId} edges={graphEdges} framingKey={activeRun?.runId ?? selectedRunId ?? ""} />
                 ) : (
                   <div className="flex h-40 items-center justify-center text-[var(--text-tertiary)]">No run selected.</div>
                 )}

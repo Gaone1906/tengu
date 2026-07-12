@@ -10,6 +10,12 @@ import {
   type EditableWorkflowDefinition,
   type ValidationError,
 } from './definition.js';
+import {
+  prepareWorkflowLayoutForWrite,
+  WorkflowLayoutError,
+  type WorkflowLayoutIntent,
+} from './layout.js';
+import { workflowDefinitionSchema } from './schema.js';
 
 /**
  * File-backed CRUD store for editable workflow definitions (GRS-011b).
@@ -75,6 +81,8 @@ export class WorkflowStoreError extends Error {
 export interface WriteOptions {
   /** Injectable clock for deterministic tests; defaults to real wall-clock ISO. */
   now?: () => string;
+  /** Server-controlled coordinate policy. Metadata on the definition is not consulted. */
+  layoutIntent?: WorkflowLayoutIntent;
 }
 
 export interface UpdateOptions extends WriteOptions {
@@ -267,10 +275,88 @@ function assertNameAvailable(root: string, name: string, exceptId?: string): voi
 
 /** Validate a to-be-written definition; throw a `validation` error carrying every problem. */
 function assertValid(def: EditableWorkflowDefinition, what: string): void {
+  const strict = workflowDefinitionSchema.safeParse(def);
+  if (!strict.success) {
+    const errors: ValidationError[] = strict.error.issues.map((issue) => ({
+      code: issue.code === 'unrecognized_keys'
+        ? 'unsupported-field'
+        : issue.path.at(-1) === 'position'
+          ? 'missing-node-position'
+          : issue.path[0] === 'edges' && issue.path.length === 1
+            ? 'edges-not-array'
+            : issue.path.at(-1) === 'gates'
+              ? 'gates-not-array'
+              : issue.path[0] === 'title'
+                ? 'missing-title'
+                : issue.path[0] === 'id'
+                  ? 'missing-id'
+                : 'invalid-schema',
+      message: `${issue.path.join('.') || 'definition'}: ${issue.message}`,
+      ...(issue.path.length > 0 ? { ref: issue.path.join('.') } : {}),
+    }));
+    throw new WorkflowStoreError('validation', `${what} failed schema validation`, errors);
+  }
   const result = validateDefinition(def);
   if (!result.ok) {
     throw new WorkflowStoreError('validation', `${what} failed validation`, result.errors);
   }
+}
+
+function applyLayoutPolicy(
+  def: EditableWorkflowDefinition,
+  intent: WorkflowLayoutIntent,
+): EditableWorkflowDefinition {
+  const structural = validateDefinition(def);
+  const blocking = structural.errors.filter((error) => error.code !== 'missing-node-position');
+  if (blocking.length > 0) {
+    throw new WorkflowStoreError('validation', 'definition failed validation', structural.errors);
+  }
+  try {
+    return prepareWorkflowLayoutForWrite(def, intent).definition;
+  } catch (error) {
+    if (!(error instanceof WorkflowLayoutError)) throw error;
+    throw new WorkflowStoreError(
+      'validation',
+      error.message,
+      error.reasons.map((reason) => ({
+        code: 'bad-layout',
+        message: reason.message,
+        ...(reason.refs?.length ? { ref: reason.refs.join(',') } : {}),
+      })),
+    );
+  }
+}
+
+function hasSameLayoutGeometryAndTopology(
+  existing: EditableWorkflowDefinition,
+  candidate: EditableWorkflowDefinition,
+): boolean {
+  if (existing.nodes.length !== candidate.nodes.length || existing.edges.length !== candidate.edges.length) return false;
+  const existingNodes = new Map(existing.nodes.map((node) => [node.id, node]));
+  if (existingNodes.size !== existing.nodes.length) return false;
+  for (const after of candidate.nodes) {
+    const before = existingNodes.get(after.id);
+    if (!before || before.position?.x !== after.position?.x || before.position?.y !== after.position?.y) {
+      return false;
+    }
+  }
+  const existingEdges = new Map(existing.edges.map((edge) => [edge.id, edge]));
+  if (existingEdges.size !== existing.edges.length) return false;
+  for (const after of candidate.edges) {
+    const before = existingEdges.get(after.id);
+    if (!before || before.from !== after.from || before.to !== after.to) return false;
+  }
+  return true;
+}
+
+function inferUpdateLayoutIntent(
+  existing: EditableWorkflowDefinition,
+  candidate: EditableWorkflowDefinition,
+  patch: Partial<EditableWorkflowDefinition>,
+): WorkflowLayoutIntent | undefined {
+  if (patch.nodes === undefined && patch.edges === undefined) return undefined;
+  if (!hasSameLayoutGeometryAndTopology(existing, candidate)) return 'generated';
+  return existing.layout?.source === 'manual' ? 'manual' : 'generated';
 }
 
 /**
@@ -332,14 +418,16 @@ export function createDefinition(
   // Preserve the existing duplicate-id contract: the exclusive file create below
   // remains authoritative when the matching registry row has this same id.
   assertNameAvailable(root, name, input.id);
-  const def: EditableWorkflowDefinition = {
-    ...input,
+  const { layout: _incomingLayout, ...safeInput } = input;
+  const candidate: EditableWorkflowDefinition = {
+    ...safeInput,
     name,
     schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
     version: 1,
     status: input.status ?? 'active',
     updatedAt: now,
   };
+  const def = opts.layoutIntent ? applyLayoutPolicy(candidate, opts.layoutIntent) : candidate;
   assertValid(def, 'definition');
   // Atomic exclusive create: no check-then-write gap — link fails if the id exists.
   writeExclusive(definitionFile(root, def.id), serializeDefinition(def), def.id);
@@ -375,15 +463,20 @@ export function updateDefinition(
     throw new WorkflowStoreError('bad-input', 'workflow name cannot be changed via update');
   }
   const now = (opts.now ?? defaultNow)();
-  const merged: EditableWorkflowDefinition = {
+  const candidate: EditableWorkflowDefinition = {
     ...existing,
     ...patch,
+    // A patch cannot self-assert provenance. Preserve only the server-owned value
+    // already on disk; an explicit write policy below will replace it.
+    ...(existing.layout ? { layout: existing.layout } : { layout: undefined }),
     id, // id is immutable regardless of patch
     name: existingName,
     schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
     version: existing.version + 1,
     updatedAt: now,
   };
+  const effectiveLayoutIntent = opts.layoutIntent ?? inferUpdateLayoutIntent(existing, candidate, patch);
+  const merged = effectiveLayoutIntent ? applyLayoutPolicy(candidate, effectiveLayoutIntent) : candidate;
   assertValid(merged, 'definition');
   writeOverwrite(definitionFile(root, id), serializeDefinition(merged));
   return merged;
@@ -420,9 +513,10 @@ export function duplicateDefinition(
   assertValidName(newName);
   assertNameAvailable(root, newName);
 
-  const dup: EditableWorkflowDefinition = {
+  const candidate: EditableWorkflowDefinition = {
     ...existing,
     ...(opts.definitionPatch ?? {}),
+    ...(existing.layout ? { layout: existing.layout } : { layout: undefined }),
     id: newId,
     name: newName,
     title: opts.title ?? `${existing.title} (copy)`,
@@ -431,6 +525,7 @@ export function duplicateDefinition(
     status: 'active',
     updatedAt: now,
   };
+  const dup = opts.layoutIntent ? applyLayoutPolicy(candidate, opts.layoutIntent) : candidate;
   assertValid(dup, 'duplicated definition');
   // Exclusive create closes the gap between the existsSync id-scan above and the write.
   writeExclusive(definitionFile(root, newId), serializeDefinition(dup), newId);

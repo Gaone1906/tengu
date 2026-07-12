@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest"
 import { render, screen, fireEvent } from "@testing-library/react"
-import { WorkflowCanvas, NodeInspector, nodesForRun, nodeStatusColor, type CanvasNode } from "../canvas"
+import { WorkflowCanvas, NodeInspector, buildFlowGraph, nodesForRun, nodeStatusColor, notifyRemovedEdges, type CanvasNode, type CanvasEdgeSpec } from "../canvas"
 import type { WorkflowRunView } from "@/lib/api"
 
 function run(overrides: Partial<WorkflowRunView> = {}): WorkflowRunView {
@@ -89,6 +89,84 @@ describe("nodeStatusColor", () => {
 
 describe("WorkflowCanvas", () => {
   const nodes = nodesForRun(run(), "every 2h", "Jimbo")
+
+  it("makes durable nodes draggable and connectable only when explicitly editable", () => {
+    const buildEditableFlowGraph = buildFlowGraph as unknown as (
+      nodes: CanvasNode[],
+      selectedId: string | null,
+      onSelect: (id: string) => void,
+      edges: CanvasEdgeSpec[] | undefined,
+      editable: boolean,
+    ) => ReturnType<typeof buildFlowGraph>
+
+    const readOnly = buildEditableFlowGraph(nodes, null, vi.fn(), undefined, false)
+    const editable = buildEditableFlowGraph(nodes, null, vi.fn(), undefined, true)
+
+    expect(readOnly.flowNodes.every((node) => node.draggable === false && node.connectable === false)).toBe(true)
+    expect(editable.flowNodes.every((node) => node.draggable === true && node.connectable === true)).toBe(true)
+  })
+
+  it("makes durable edges deletable only on an explicitly editable canvas", () => {
+    const edges: CanvasEdgeSpec[] = [{ id: "a-b", from: nodes[0].id, to: nodes[1].id }]
+    const readOnly = buildFlowGraph(nodes, null, vi.fn(), edges, false)
+    const editable = buildFlowGraph(nodes, null, vi.fn(), edges, true)
+
+    expect(readOnly.flowEdges.every((edge) => edge.deletable === false)).toBe(true)
+    expect(editable.flowEdges.every((edge) => edge.deletable === true)).toBe(true)
+  })
+
+  it("preserves the selected durable edge in the controlled flow graph", () => {
+    const edges: CanvasEdgeSpec[] = [{ id: "a-b", from: nodes[0].id, to: nodes[1].id }]
+    const buildSelectedFlowGraph = buildFlowGraph as unknown as (
+      nodes: CanvasNode[],
+      selectedId: string | null,
+      onSelect: (id: string) => void,
+      edges: CanvasEdgeSpec[] | undefined,
+      editable: boolean,
+      selectedEdgeId: string | null,
+    ) => ReturnType<typeof buildFlowGraph>
+
+    const graph = buildSelectedFlowGraph(nodes, null, vi.fn(), edges, true, "a-b")
+    expect(graph.flowEdges[0]).toMatchObject({ id: "a-b", selected: true, deletable: true })
+  })
+
+  it("forwards every React Flow edge deletion by durable id", () => {
+    const onRemoveEdge = vi.fn()
+    notifyRemovedEdges([{ id: "build-verify" }, { id: "verify-ship" }], onRemoveEdge)
+    expect(onRemoveEdge.mock.calls).toEqual([["build-verify"], ["verify-ship"]])
+  })
+
+  it("exposes connectable handles on the editor canvas while keeping run canvases read-only", () => {
+    const { container: readOnly } = render(
+      <WorkflowCanvas nodes={nodes} selectedId={null} onSelect={vi.fn()} />,
+    )
+    expect(readOnly.querySelectorAll(".react-flow__handle.connectable")).toHaveLength(0)
+
+    const { container: editable } = render(
+      <WorkflowCanvas
+        nodes={nodes}
+        selectedId={null}
+        onSelect={vi.fn()}
+        editable
+        onPositionChange={vi.fn()}
+        onConnectNodes={vi.fn()}
+        onRemoveNode={vi.fn()}
+      />,
+    )
+    expect(editable.querySelectorAll(".react-flow__handle.connectable").length).toBeGreaterThan(0)
+    expect(editable.querySelector('[data-testid="wf-handle-out-orchestrate"]')).toBeTruthy()
+    expect(editable.querySelector('[data-testid="wf-handle-in-implement"]')).toBeTruthy()
+  })
+
+  it("exposes a stable selector on each durable edge", () => {
+    const graph = buildFlowGraph(
+      nodes,
+      null,
+      vi.fn(),
+      [{ id: "orchestrate-implement", from: "orchestrate", to: "implement" }],
+    )
+    expect(graph.flowEdges[0].data).toMatchObject({ testId: "wf-edge-orchestrate-implement" })
+  })
 
   it("renders one node box per node including the trigger", () => {
     render(<WorkflowCanvas nodes={nodes} selectedId={null} onSelect={vi.fn()} />)

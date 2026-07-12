@@ -2,6 +2,13 @@ import { assertBoundCaller, gatewayRequest, JinnMcpToolError, type JinnMcpContex
 import type { WorkflowSopCompileResult } from "../workflows/sop.js";
 import { autoPlaceWorkflowNodes, compileWorkflowAuthoringInput } from "../workflows/authoring.js";
 import { MAX_WORKFLOW_STEP_PROMPT_CHARS } from "../workflows/run-store.js";
+import {
+  WORKFLOW_AUTHORITY_FIELDS,
+  workflowCreateInputSchema,
+  workflowPlanInputSchema,
+  workflowUpdateInputSchema,
+  workflowValidateInputSchema,
+} from "../workflows/schema.js";
 
 /**
  * GRS-015 — the WORKFLOW tool group of the `jinn` MCP server: agents create,
@@ -92,7 +99,9 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
   if (status === 409) {
     const detail = typeof rec.error === "string" ? rec.error : asText(body);
     const runStatus = typeof rec.status === "string" ? ` (current status: ${rec.status})` : "";
-    return new JinnMcpToolError(`${what} conflicted (409): ${detail}${runStatus}`);
+    const code = typeof rec.code === "string" ? ` [${rec.code}]` : "";
+    const runId = typeof rec.runId === "string" ? ` Existing run: ${rec.runId}.` : "";
+    return new JinnMcpToolError(`${what} conflicted (409)${code}: ${detail}${runStatus}${runId}`);
   }
   if (status === 404) {
     const detail = typeof rec.error === "string" ? rec.error : "not found";
@@ -136,21 +145,119 @@ const wfPath = (id: string): string => `/api/workflow-definitions/${encodeURICom
 
 /* ── The definition shape recipe (the one schema that must teach) ───────────── */
 
+const closed = (properties: Record<string, unknown>) => ({ type: "object", additionalProperties: false, properties });
+const schemaRef = (name: string) => ({ $ref: `#/$defs/${name}` });
+const scalar = {};
+// The compact advertised projection owns the closed property/enumeration surface;
+// the shared Zod runtime schemas below own scalar/range validation. Avoid repeating
+// scalar keywords four times in the manifest while preserving every authorable key.
+const POSITION_SCHEMA = closed({ x: scalar, y: scalar });
+const ACTOR_SCHEMA = closed({ kind: { enum: ["employee", "engine"] }, ref: scalar });
+const RETRY_SCHEMA = closed({ maxAttempts: scalar, on: { items: scalar } });
+const SESSION_SCHEMA = closed({ mode: { enum: ["fresh", "workflow", "existing"] }, sessionId: scalar });
+const OPTIONS_SCHEMA = closed({
+  model: scalar, effort: scalar, output: scalar, retry: schemaRef("r"),
+  onError: { enum: ["fail-run", "continue", "error-edge"] }, timeoutMinutes: scalar, session: schemaRef("s"),
+});
+const FILTER_SCHEMA = closed({ source: scalar, department: scalar, assignee: scalar });
+const TRIGGER_SCHEMA = closed({
+  kind: { enum: ["manual", "schedule", "todo-status-change"] }, cron: scalar, timezone: scalar,
+  until: scalar, cronJobId: scalar, toStatus: scalar, status: scalar, fromStatus: scalar, filter: schemaRef("f"),
+});
+const GATE_SCHEMA = closed({ id: scalar, kind: { enum: ["artifact", "flag", "approval"] }, glob: scalar, flag: scalar, approvalRef: scalar, description: scalar });
+const CONDITION_SCHEMA = closed({ path: scalar, op: { enum: ["eq", "ne", "gt", "gte", "lt", "lte", "contains", "startsWith", "exists", "absent"] }, value: scalar });
+const BINDING_FILTER_SCHEMA = closed({ path: scalar, op: scalar, value: scalar });
+const NODE_SCHEMA = closed({
+  id: scalar, type: { enum: ["trigger", "step", "gate", "switch", "fail", "wait"] }, label: scalar,
+  position: schemaRef("p"), actor: schemaRef("a"), role: scalar, trigger: schemaRef("t"), gate: schemaRef("g"),
+  gates: { items: schemaRef("g") }, optional: scalar, cadence: scalar, instructions: scalar, options: schemaRef("o"),
+  todoTransition: scalar, switchMode: scalar, failMessage: scalar, waitMinutes: scalar, waitUntil: scalar,
+});
+const EDGE_SCHEMA = closed({
+  id: scalar, from: scalar, to: scalar, kind: scalar, label: scalar, gate: schemaRef("g"),
+  when: { items: schemaRef("c") }, lane: { pattern: "^error$" },
+});
+const RAW_DEFINITION_SCHEMA = closed({
+  schemaVersion: scalar, id: scalar, name: scalar, title: scalar, description: scalar, version: scalar, status: scalar,
+  orchestrator: scalar, nodes: { items: NODE_SCHEMA }, edges: { items: EDGE_SCHEMA },
+  runGates: { items: schemaRef("g") }, loop: closed({ maxRuns: scalar, until: scalar, maxRoundsPerRun: scalar, stopWhen: scalar }),
+  concurrency: scalar, evidenceRoot: scalar,
+});
+const RAW_PATCH_SCHEMA = closed({
+  title: scalar, description: scalar, status: scalar, orchestrator: scalar,
+  nodes: { items: NODE_SCHEMA }, edges: { items: EDGE_SCHEMA },
+  runGates: { items: schemaRef("g") }, loop: closed({ maxRuns: scalar, until: scalar, maxRoundsPerRun: scalar, stopWhen: scalar }),
+  concurrency: scalar, evidenceRoot: scalar,
+});
+const BASE_WORKFLOW_SCHEMA_DEFS = {
+  p: POSITION_SCHEMA, a: ACTOR_SCHEMA, r: RETRY_SCHEMA, s: SESSION_SCHEMA,
+  o: OPTIONS_SCHEMA, f: FILTER_SCHEMA, t: TRIGGER_SCHEMA, g: GATE_SCHEMA, c: CONDITION_SCHEMA,
+};
+
 const DEFINITION_SHAPE =
-  "Default authoring shape is SOP: { id, name?, title, wakeUp: { kind: 'manual'|'schedule'|'todo-status'|'event'|'poll', ... }, steps: [{ employee? | engine?, role?, instruction }] }. " +
-  "The SOP compiles to the raw graph below. Power users may pass raw definition: { id, name?, title, nodes: [...], edges: [...], loop?, runGates? }. " +
-  "Node: { id, type: 'trigger'|'step'|'gate', label, ... }. Exactly one trigger node " +
-  "({ trigger: { kind: 'manual' } } or { kind: 'schedule', cron: '0 */2 * * *' }). " +
-  "A step runs one AI session: actor { kind: 'engine'|'employee', ref: e.g. 'codex' }, " +
-  "instructions = the step's task prompt; each step's output is handed off to its edge " +
-  "successors automatically. A gate node { gate: { kind: 'approval', approvalRef, description } } " +
-  "PARKS the run for a human decision; deterministic gates ({ kind: 'artifact', glob } / " +
-  "{ kind: 'flag', flag }) auto-evaluate. Edge: { id, from, to, kind: 'sequence'|'handoff' }. " +
-  "A { kind: 'loop' } back-edge repeats its segment up to loop.maxRoundsPerRun rounds " +
-  "(required alongside a loop edge), with an optional deterministic exit gate on the edge itself. " +
-  "Node position {x,y} is optional (auto-placed).";
+  "SOP steps use employee|engine + instruction. Raw graphs support switch/wait/fail and error-edge; positions are generated.";
+
+const SOP_WAKE_UP_SCHEMA = closed({
+  kind: { enum: ["manual", "schedule", "todo-status", "todo-status-change", "event", "poll"] },
+  cron: scalar, timezone: scalar, until: scalar, cronJobId: scalar, toStatus: scalar, status: scalar, fromStatus: scalar,
+  filter: { anyOf: [schemaRef("f"), { items: schemaRef("b") }] }, name: scalar, event: scalar, secretToken: scalar, command: scalar,
+  intervalSeconds: scalar, timeoutMs: scalar, stdoutMaxBytes: scalar, stderrMaxBytes: scalar,
+});
+const SOP_STEP_SCHEMA = closed({
+  id: scalar, title: scalar, label: scalar, employee: scalar, engine: scalar, role: scalar,
+  instruction: scalar, instructions: scalar, optional: scalar, options: schemaRef("o"), todoTransition: scalar,
+});
+const WORKFLOW_SCHEMA_DEFS = {
+  ...BASE_WORKFLOW_SCHEMA_DEFS,
+  w: SOP_WAKE_UP_SCHEMA,
+  b: BINDING_FILTER_SCHEMA,
+};
+const SOP_SCHEMA = {
+  ...closed({
+    id: scalar, name: scalar, title: scalar, description: scalar,
+    wakeUp: schemaRef("w"), wakeup: schemaRef("w"),
+    steps: { items: SOP_STEP_SCHEMA }, concurrency: scalar,
+  }),
+  description: DEFINITION_SHAPE,
+};
+
+const workflowAuthoringSchema = (definitionKey: "definition" | "patch", extra: Record<string, unknown> = {}, teach = false) => ({
+  type: "object" as const,
+  additionalProperties: false,
+  $defs: WORKFLOW_SCHEMA_DEFS,
+  properties: {
+    ...extra,
+    sop: teach ? SOP_SCHEMA : { ...SOP_SCHEMA, description: undefined },
+    [definitionKey]: definitionKey === "definition" ? RAW_DEFINITION_SCHEMA : RAW_PATCH_SCHEMA,
+  },
+});
+
+const advertised = (schema: Record<string, unknown>) => ({ ...schema, $defs: WORKFLOW_SCHEMA_DEFS });
+export const workflowAdvertisedComponentSchemas = {
+  definition: advertised(RAW_DEFINITION_SCHEMA),
+  patch: advertised(RAW_PATCH_SCHEMA),
+  sop: advertised(SOP_SCHEMA),
+  sopWakeUp: advertised(SOP_WAKE_UP_SCHEMA),
+  sopStep: advertised(SOP_STEP_SCHEMA),
+  node: advertised(NODE_SCHEMA),
+  position: advertised(POSITION_SCHEMA),
+  actor: advertised(ACTOR_SCHEMA),
+  trigger: advertised(TRIGGER_SCHEMA),
+  todoFilter: advertised(FILTER_SCHEMA),
+  bindingFilter: advertised(BINDING_FILTER_SCHEMA),
+  gate: advertised(GATE_SCHEMA),
+  options: advertised(OPTIONS_SCHEMA),
+  retry: advertised(RETRY_SCHEMA),
+  session: advertised(SESSION_SCHEMA),
+  edge: advertised(EDGE_SCHEMA),
+  condition: advertised(CONDITION_SCHEMA),
+  loop: advertised((RAW_DEFINITION_SCHEMA.properties as Record<string, Record<string, unknown>>).loop),
+} as const;
 
 function compileInput(args: Record<string, unknown>): WorkflowSopCompileResult {
+  if (args.sop === undefined && args.definition === undefined) {
+    throw new JinnMcpToolError("sop or definition is required");
+  }
   try {
     return compileWorkflowAuthoringInput(args);
   } catch (e) {
@@ -160,12 +267,19 @@ function compileInput(args: Record<string, unknown>): WorkflowSopCompileResult {
 
 function compilePatchInput(args: Record<string, unknown>): { patch: Record<string, unknown>; triggerBindingPlan?: WorkflowSopCompileResult["triggerBindingPlan"]; sopAuthored: boolean } {
   if (args.sop !== undefined) {
-    const compiled = compileInput(args);
-    const { id: _id, schemaVersion: _schemaVersion, version: _version, status: _status, updatedAt: _updatedAt, ...patch } = compiled.definition;
+    const compiled = compileInput({ sop: args.sop, ...(args.layoutIntent === undefined ? {} : { layoutIntent: args.layoutIntent }) });
+    const { id: _id, schemaVersion: _schemaVersion, version: _version, status: _status, updatedAt: _updatedAt, layout: _layout, ...patch } = compiled.definition;
     return { patch, triggerBindingPlan: compiled.triggerBindingPlan, sopAuthored: true };
   }
   if (args.patch !== undefined) return { patch: autoPlaceWorkflowNodes(requireObject(args, "patch")), sopAuthored: false };
   throw new JinnMcpToolError("sop or patch is required");
+}
+
+function callerSafeDefinition(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const safe = { ...(value as Record<string, unknown>) };
+  for (const key of [...WORKFLOW_AUTHORITY_FIELDS, "updatedAt", "layout"]) delete safe[key];
+  return safe;
 }
 
 /* ── The tool group ─────────────────────────────────────────────────────────── */
@@ -252,17 +366,12 @@ export function buildWorkflowTools(): JinnMcpTool[] {
   const planWorkflow: JinnMcpTool = {
     name: "plan_workflow",
     description: "Plan workflow without saving.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        sop: { type: "object" },
-        definition: { type: "object" },
-      },
-      required: [],
-    },
+    inputSchema: { ...workflowAuthoringSchema("definition", {}, true), required: [] },
+    runtimeSchema: workflowPlanInputSchema,
     handler: async (args, ctx) => {
       assertBoundCaller(ctx);
-      const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-definitions/plan", args);
+      const payload = args.definition === undefined ? args : { ...args, definition: callerSafeDefinition(args.definition) };
+      const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-definitions/plan", payload);
       if (status >= 400) throw gatewayFailure("planning workflow", status, body);
       return body;
     },
@@ -271,17 +380,12 @@ export function buildWorkflowTools(): JinnMcpTool[] {
   const validateWorkflow: JinnMcpTool = {
     name: "validate_workflow",
     description: "Validate workflow without saving.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        sop: { type: "object" },
-        definition: { type: "object" },
-      },
-      required: [],
-    },
+    inputSchema: { ...workflowAuthoringSchema("definition"), required: [] },
+    runtimeSchema: workflowValidateInputSchema,
     handler: async (args, ctx) => {
       assertBoundCaller(ctx);
-      const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-definitions/plan", args);
+      const payload = args.definition === undefined ? args : { ...args, definition: callerSafeDefinition(args.definition) };
+      const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-definitions/plan", payload);
       if (status >= 400) throw gatewayFailure("validating workflow", status, body);
       return body;
     },
@@ -290,14 +394,8 @@ export function buildWorkflowTools(): JinnMcpTool[] {
   const createWorkflow: JinnMcpTool = {
     name: "create_workflow",
     description: "Create workflow.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        sop: { type: "object" },
-        definition: { type: "object" },
-      },
-      required: [],
-    },
+    inputSchema: { ...workflowAuthoringSchema("definition"), required: [] },
+    runtimeSchema: workflowCreateInputSchema,
     handler: async (args, ctx) => {
       assertBoundCaller(ctx);
       const compiled = compileInput(args);
@@ -323,15 +421,13 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     name: "update_workflow",
     description: "Update workflow.",
     inputSchema: {
-      type: "object",
-      properties: {
+      ...workflowAuthoringSchema("patch", {
         workflowId: { type: "string" },
-        sop: { type: "object" },
-        patch: { type: "object" },
         expectedVersion: { type: "number" },
-      },
+      }),
       required: ["workflowId"],
     },
+    runtimeSchema: workflowUpdateInputSchema,
     handler: async (args, ctx) => {
       assertBoundCaller(ctx);
       const id = requireString(args, "workflowId");

@@ -15,11 +15,13 @@ export function WorkflowGraph({
   selectedId,
   onSelect,
   edges,
+  framingKey,
 }: {
   nodes: CanvasNode[]
   selectedId: string | null
   onSelect: (id: string) => void
   edges?: CanvasEdgeSpec[]
+  framingKey?: string
 }) {
   return (
     <WorkflowCanvas
@@ -27,6 +29,7 @@ export function WorkflowGraph({
       selectedId={selectedId}
       onSelect={onSelect}
       edges={edges}
+      framingKey={framingKey}
     />
   )
 }

@@ -1,4 +1,5 @@
 import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, TOOL_CALL_HEADER, TOOL_CALL_HEADER_VALUE, UNIDENTIFIED_TOOL_CALL_ERROR } from "./identity.js";
+import type { z } from "zod";
 
 /**
  * Shared plumbing for jinn MCP tools (GRS-015): the tool/context contracts and the
@@ -52,7 +53,11 @@ export interface JinnMcpTool {
     type: "object";
     properties: Record<string, unknown>;
     required?: string[];
+    $defs?: Record<string, unknown>;
+    additionalProperties?: boolean;
+    [key: string]: unknown;
   };
+  runtimeSchema?: z.ZodType;
   handler: (args: Record<string, unknown>, ctx: JinnMcpContext) => Promise<unknown>;
 }
 

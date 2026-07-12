@@ -101,6 +101,18 @@ export function isPositiveTodoVersion(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0
 }
 
+export class WorkflowApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly runId?: string,
+  ) {
+    super(message)
+    this.name = "WorkflowApiError"
+  }
+}
+
 async function responseError(res: Response): Promise<ApiError> {
   let message = `API error: ${res.status}`
   let code: string | undefined
@@ -404,6 +416,19 @@ export interface WorkflowEdgeWire {
    * of its onError:'error-edge' source step. */
   lane?: 'error'
 }
+export interface WorkflowLayoutWire {
+  source: 'generated' | 'normalized' | 'manual'
+  version: 1
+}
+export interface WorkflowLayoutDiagnosticsWire {
+  source: WorkflowLayoutWire['source']
+  version: 1
+  normalized: boolean
+  reasons: unknown[]
+  quality: { valid: boolean; score: number }
+  envelopes: unknown[]
+  loopRoutes: Record<string, { side: 'below'; lane: number }>
+}
 export interface EditableWorkflowDefinitionWire {
   schemaVersion: number
   id: string
@@ -414,6 +439,7 @@ export interface EditableWorkflowDefinitionWire {
   orchestrator?: string
   nodes: WorkflowNodeWire[]
   edges: WorkflowEdgeWire[]
+  layout?: WorkflowLayoutWire
   runGates?: WorkflowGateWire[]
   loop?: { until?: string; maxRoundsPerRun?: number; stopWhen?: string }
   evidenceRoot?: string
@@ -529,6 +555,13 @@ export interface WorkflowRunWire {
   steps: RunStepReceiptWire[]
   /** Present iff status==='parked': the human-approval gate holding the run. */
   parked: ParkedGateWire | null
+  /** Caller-specific, read-only projection. It is never persisted in run evidence. */
+  approvalCapability?: {
+    canDecide: boolean
+    target: string | null
+    needsYou: boolean
+    escalated: boolean
+  } | null
   errors?: { code: string; message: string; ref?: string }[]
   /** The frozen execution order of the run's nodes (GRS-014b sequential runs);
    * steps[] is materialized 1:1 in this order. */
@@ -566,6 +599,14 @@ export interface WorkflowValidationError { code: string; message: string; path?:
 export type SaveDefinitionResult =
   | { ok: true; definition: EditableWorkflowDefinitionWire }
   | { ok: false; status: number; message: string; errors?: WorkflowValidationError[] }
+
+export interface WorkflowPlanWire {
+  ok: boolean
+  layout: {
+    diagnostics: WorkflowLayoutDiagnosticsWire
+    normalizedPreview: EditableWorkflowDefinitionWire
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Work items (the Todos ledger) — GRS-021a/b/c shipped the store + routes; the
@@ -841,11 +882,16 @@ export const api = {
     id: string,
     patch: Partial<EditableWorkflowDefinitionWire>,
     expectedVersion?: number,
+    options?: { layoutIntent: 'manual' },
   ): Promise<SaveDefinitionResult> => {
     const res = await authFetch(`/api/workflow-definitions/${encodeURIComponent(id)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(expectedVersion === undefined ? patch : { ...patch, expectedVersion }),
+      body: JSON.stringify({
+        ...patch,
+        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+        ...(options ?? {}),
+      }),
     })
     if (res.ok) return { ok: true, definition: (await res.json()) as EditableWorkflowDefinitionWire }
     let message = `API error: ${res.status}`
@@ -860,6 +906,39 @@ export const api = {
     }
     return { ok: false, status: res.status, message, errors }
   },
+  /** Ask the gateway's canonical layout authority for a preview. This does not
+   * persist or mutate the supplied definition. */
+  planWorkflowDefinition: (
+    definition: EditableWorkflowDefinitionWire,
+    options: { layoutIntent: 'normalize' },
+  ) => post<WorkflowPlanWire>("/api/workflow-definitions/plan", { definition, ...options }),
+  /** Start one durable run. Reusing idempotencyKey safely retries a transport
+   * failure without minting a second execution. */
+  startWorkflowRun: (
+    id: string,
+    input: Record<string, unknown>,
+    idempotencyKey: string,
+  ): Promise<WorkflowRunWire> => authFetch(
+    `/api/workflow-definitions/${encodeURIComponent(id)}/run`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input, idempotencyKey }),
+    },
+  ).then(async (res) => {
+    // A failed execution is durable evidence, not a request failure: the
+    // gateway intentionally returns its full run snapshot with HTTP 422.
+    if (res.ok || res.status === 422) return (await res.json()) as WorkflowRunWire
+    let body: Record<string, unknown> = {}
+    try { body = await res.json() as Record<string, unknown> } catch { /* keep status fallback */ }
+    const message = typeof body.error === "string" ? body.error : `API error: ${res.status}`
+    throw new WorkflowApiError(
+      message,
+      res.status,
+      typeof body.code === "string" ? body.code : undefined,
+      typeof body.runId === "string" ? body.runId : undefined,
+    )
+  }),
   /** GRS-011d-2c-ui: list a definition's real runs (newest first). Returns
    * `evidenceConfigured:false` (not an error) when the gateway has no evidence root. */
   listWorkflowRuns: (id: string) =>

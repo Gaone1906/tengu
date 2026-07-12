@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { AlertTriangle, Clock, ListChecks, Loader2, Play, Radio, RefreshCw, RotateCcw, Save } from "lucide-react"
+import { AlertTriangle, Clock, ListChecks, Loader2, Network, Play, Plus, Radio, RefreshCw, RotateCcw, Save, Trash2 } from "lucide-react"
 import {
   api,
   type CreateWorkflowTriggerInputWire,
@@ -7,6 +7,7 @@ import {
   type StepNodeOptionsWire,
   type WorkflowConditionWire,
   type WorkflowEdgeWire,
+  type WorkflowLayoutWire,
   type WorkflowNodeWire,
   type WorkflowTriggerBindingWire,
   type WorkflowValidationError,
@@ -470,7 +471,7 @@ export function edgesForDefinition(def: EditableWorkflowDefinitionWire): CanvasE
     outsBySwitch.set(n.id, def.edges.filter((e) => e.from === n.id && e.lane !== "error").map((e) => e.id))
   }
   return def.edges.map((e) => {
-    const spec: CanvasEdgeSpec = { id: e.id, from: e.from, to: e.to }
+    const spec: CanvasEdgeSpec = { id: e.id, from: e.from, to: e.to, kind: e.kind }
     if (e.lane !== undefined) spec.lane = e.lane
     const outs = outsBySwitch.get(e.from)
     if (outs) {
@@ -622,6 +623,120 @@ function canonical(v: unknown): string {
       ? Object.fromEntries(Object.entries(val as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1)))
       : val,
   )
+}
+
+export interface WorkflowGraphDraft {
+  nodes: WorkflowNodeWire[]
+  edges: WorkflowEdgeWire[]
+  layout?: WorkflowLayoutWire
+}
+
+const MANUAL_LAYOUT: WorkflowLayoutWire = { source: "manual", version: 1 }
+const GRAPH_GRID = 20
+
+function snapToGrid(value: number): number {
+  return Math.round(value / GRAPH_GRID) * GRAPH_GRID
+}
+
+function uniqueGraphId(base: string, taken: Set<string>): string {
+  const safe = base.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "node"
+  if (!taken.has(safe)) return safe
+  let suffix = 2
+  while (taken.has(`${safe}-${suffix}`)) suffix += 1
+  return `${safe}-${suffix}`
+}
+
+export function graphFromDefinition(definition: EditableWorkflowDefinitionWire): WorkflowGraphDraft {
+  return {
+    nodes: definition.nodes.map((node) => ({ ...node, position: { ...node.position } })),
+    edges: definition.edges.map((edge) => ({ ...edge })),
+    ...(definition.layout ? { layout: { ...definition.layout } } : {}),
+  }
+}
+
+export function moveNode(
+  graph: WorkflowGraphDraft,
+  nodeId: string,
+  position: WorkflowNodeWire["position"],
+): WorkflowGraphDraft {
+  if (!graph.nodes.some((node) => node.id === nodeId)) return graph
+  return {
+    ...graph,
+    nodes: graph.nodes.map((node) => node.id === nodeId
+      ? { ...node, position: { x: snapToGrid(position.x), y: snapToGrid(position.y) } }
+      : node),
+    layout: MANUAL_LAYOUT,
+  }
+}
+
+export function connectNodes(graph: WorkflowGraphDraft, from: string, to: string): WorkflowGraphDraft {
+  if (from === to) return graph
+  const nodeIds = new Set(graph.nodes.map((node) => node.id))
+  if (!nodeIds.has(from) || !nodeIds.has(to)) return graph
+  if (graph.edges.some((edge) => edge.from === from && edge.to === to && edge.lane === undefined)) return graph
+  const taken = new Set(graph.edges.map((edge) => edge.id))
+  const id = uniqueGraphId(`${from}-${to}`, taken)
+  return {
+    ...graph,
+    edges: [...graph.edges, { id, from, to, kind: "sequence" }],
+    layout: MANUAL_LAYOUT,
+  }
+}
+
+export function removeNode(graph: WorkflowGraphDraft, nodeId: string): WorkflowGraphDraft {
+  const node = graph.nodes.find((candidate) => candidate.id === nodeId)
+  if (!node || node.type === "trigger") return graph
+  return {
+    ...graph,
+    nodes: graph.nodes.filter((candidate) => candidate.id !== nodeId),
+    edges: graph.edges.filter((edge) => edge.from !== nodeId && edge.to !== nodeId),
+    layout: MANUAL_LAYOUT,
+  }
+}
+
+export function removeEdge(graph: WorkflowGraphDraft, edgeId: string): WorkflowGraphDraft {
+  if (!graph.edges.some((edge) => edge.id === edgeId)) return graph
+  return {
+    ...graph,
+    edges: graph.edges.filter((edge) => edge.id !== edgeId),
+    layout: MANUAL_LAYOUT,
+  }
+}
+
+export function addNode(graph: WorkflowGraphDraft, type: WorkflowNodeWire["type"]): WorkflowGraphDraft {
+  if (type === "trigger") return graph
+  const taken = new Set(graph.nodes.map((node) => node.id))
+  const stem = type === "gate" ? "approval" : type
+  const id = uniqueGraphId(stem, taken)
+  const right = graph.nodes.reduce((max, node) => Math.max(max, node.position.x), 0)
+  const top = graph.nodes.length > 0
+    ? graph.nodes.reduce((sum, node) => sum + node.position.y, 0) / graph.nodes.length
+    : 100
+  const base: WorkflowNodeWire = {
+    id,
+    type,
+    label: type === "gate" ? "Approval" : type === "step" ? "New step" : type === "switch" ? "Switch" : type === "wait" ? "Wait" : "Fail",
+    position: { x: snapToGrid(right + 320), y: snapToGrid(top) },
+  }
+  const node: WorkflowNodeWire = type === "gate"
+    ? { ...base, gate: { kind: "approval", description: "Approve this step", approvalRef: id } }
+    : type === "switch"
+      ? { ...base, switchMode: "firstMatch" }
+      : type === "wait"
+        ? { ...base, waitMinutes: 5 }
+        : type === "fail"
+          ? { ...base, failMessage: "Workflow stopped." }
+          : base
+  return { ...graph, nodes: [...graph.nodes, node], layout: MANUAL_LAYOUT }
+}
+
+/** Graph dirty is deliberately geometry/topology-only. Property drafts have
+ * their existing comparator, while provenance alone never creates a phantom
+ * edit on older definitions that predate layout metadata. */
+export function isGraphDirty(definition: EditableWorkflowDefinitionWire, graph: WorkflowGraphDraft): boolean {
+  const persistedNodes = definition.nodes.map(({ id, type, position }) => ({ id, type, position }))
+  const draftedNodes = graph.nodes.map(({ id, type, position }) => ({ id, type, position }))
+  return canonical(persistedNodes) !== canonical(draftedNodes) || canonical(definition.edges) !== canonical(graph.edges)
 }
 
 /** True if any draft diverges from the definition's persisted values. */
@@ -1007,12 +1122,14 @@ export function EditableNodeInspector({
   fieldErrors,
   onChange,
   onClose,
+  onRemove,
 }: {
   node: CanvasNode
   draft: NodeDraft
   fieldErrors?: WorkflowValidationError[]
   onChange: (patch: Partial<NodeDraft>) => void
   onClose: () => void
+  onRemove?: () => void
 }) {
   const tint = ROLE_TINT[node.role] ?? "var(--text-tertiary)"
   const labelBlank = draft.label.trim() === ""
@@ -1452,6 +1569,17 @@ export function EditableNodeInspector({
           </div>
         )}
 
+        {onRemove && (
+          <button
+            type="button"
+            onClick={onRemove}
+            className="flex min-h-10 w-full items-center justify-center gap-2 rounded-[var(--radius-md)] text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] text-[var(--system-red)] transition-colors hover:bg-[color-mix(in_srgb,var(--system-red)_9%,transparent)]"
+          >
+            <Trash2 className="size-4" />
+            Remove step
+          </button>
+        )}
+
         <div className="text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
           Editing changes the workflow definition, not any past run. Save writes a new version.
         </div>
@@ -1465,13 +1593,20 @@ export function EditableNodeInspector({
 export function WorkflowEditView({
   workflowId,
   onDirtyChange,
+  onLeaveActionsChange,
 }: {
   workflowId: string
   /** Reports unsaved-changes state up so the parent can guard mode switches. */
   onDirtyChange?: (dirty: boolean) => void
+  /** Gives the route guard the editor's real save/discard operations. */
+  onLeaveActionsChange?: (actions: { save: () => Promise<boolean>; discard: () => void } | null) => void
 }) {
   const [def, setDef] = useState<EditableWorkflowDefinitionWire | null>(null)
   const [drafts, setDrafts] = useState<Record<string, NodeDraft>>({})
+  const [graph, setGraph] = useState<WorkflowGraphDraft | null>(null)
+  const [layoutPreview, setLayoutPreview] = useState<WorkflowGraphDraft | null>(null)
+  const [tidying, setTidying] = useState(false)
+  const [addOpen, setAddOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
@@ -1503,6 +1638,8 @@ export function WorkflowEditView({
         }
         setDef(d)
         setDrafts(draftsFromDefinition(d))
+        setGraph(graphFromDefinition(d))
+        setLayoutPreview(null)
         setTriggerBindings(bindings)
         setWakeUpDraft(wakeUpDraftFromDefinition(d, bindings))
         setSelectedNodeId(null)
@@ -1519,20 +1656,28 @@ export function WorkflowEditView({
     () => (def ? wakeUpDirty(def, triggerBindings, wakeUpDraft) : false),
     [def, triggerBindings, wakeUpDraft],
   )
-  const dirty = nodeDirty || triggerDirty
+  const graphDirty = useMemo(() => (def && graph ? isGraphDirty(def, graph) : false), [def, graph])
+  const dirty = nodeDirty || graphDirty || triggerDirty
   useEffect(() => { onDirtyChange?.(dirty) }, [dirty, onDirtyChange])
   const nodes = useMemo(() => {
-    if (!def) return []
-    const built = nodesForDefinition(def, drafts)
-    const ghost = ghostNodeForDefinition(def)
+    if (!def || !graph) return []
+    const visibleGraph = layoutPreview ?? graph
+    const visibleDefinition = { ...def, nodes: visibleGraph.nodes, edges: visibleGraph.edges }
+    const built = nodesForDefinition(visibleDefinition, drafts)
+    const ghost = ghostNodeForDefinition(visibleDefinition)
     return ghost ? [...built, ghost] : built
-  }, [def, drafts])
-  const canvasEdges = useMemo(() => (def ? edgesForDefinition(def) : []), [def])
+  }, [def, graph, layoutPreview, drafts])
+  const canvasEdges = useMemo(() => {
+    if (!def || !graph) return []
+    const visibleGraph = layoutPreview ?? graph
+    return edgesForDefinition({ ...def, nodes: visibleGraph.nodes, edges: visibleGraph.edges })
+  }, [def, graph, layoutPreview])
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null
 
   const onNodeDraftChange = useCallback(
     (id: string, patch: Partial<NodeDraft>) => {
       setDrafts((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }))
+      setLayoutPreview(null)
       setSaveError(null)
     },
     [],
@@ -1540,6 +1685,7 @@ export function WorkflowEditView({
 
   const onWakeUpDraftChange = useCallback((patch: Partial<WakeUpDraft>) => {
     setWakeUpDraft((prev) => ({ ...prev, ...patch }))
+    setLayoutPreview(null)
     setSaveError(null)
   }, [])
 
@@ -1549,45 +1695,145 @@ export function WorkflowEditView({
   )
 
   const save = useCallback(async () => {
-    if (!def || saving) return
+    if (!def || !graph || saving) return false
     setSaving(true)
     setSaveError(null)
-    const baseNodes = buildNodesPatch(def, drafts)
+    const graphDefinition: EditableWorkflowDefinitionWire = {
+      ...def,
+      nodes: graph.nodes,
+      edges: graph.edges,
+    }
+    const baseNodes = buildNodesPatch(graphDefinition, drafts)
     const patch = {
-      nodes: triggerDirty ? buildWakeUpNodesPatch(def, baseNodes, wakeUpDraft) : baseNodes,
-      edges: buildEdgesPatch(def, drafts),
+      nodes: triggerDirty ? buildWakeUpNodesPatch(graphDefinition, baseNodes, wakeUpDraft) : baseNodes,
+      edges: buildEdgesPatch(graphDefinition, drafts),
     }
     try {
-      const result = await api.updateWorkflowDefinition(def.id, patch, def.version)
+      const result = graphDirty
+        ? await api.updateWorkflowDefinition(def.id, patch, def.version, { layoutIntent: "manual" })
+        : await api.updateWorkflowDefinition(def.id, patch, def.version)
       if (result.ok) {
         const nextBindings = triggerDirty
           ? await saveWakeUpBindings(result.definition.id, triggerBindings, wakeUpDraft)
           : triggerBindings
         setDef(result.definition)
         setDrafts(draftsFromDefinition(result.definition))
+        setGraph(graphFromDefinition(result.definition))
+        setLayoutPreview(null)
         setTriggerBindings(nextBindings)
         setWakeUpDraft(wakeUpDraftFromDefinition(result.definition, nextBindings))
         setSavedTick((t) => t + 1)
+        return true
       } else {
         setSaveError({ message: result.message, errors: result.errors })
+        return false
       }
     } catch (e) {
       // authFetch can reject (offline/CORS) and res.json() can throw even on the
       // ok path — never leave the editor wedged with saving stuck true (Codex
       // GRS-011c-1 Major 2). Surface it as an inline error the operator can retry.
       setSaveError({ message: e instanceof Error ? e.message : "Save failed — check your connection and retry." })
+      return false
     } finally {
       setSaving(false)
     }
-  }, [def, drafts, saving, triggerBindings, triggerDirty, wakeUpDraft])
+  }, [def, graph, graphDirty, drafts, saving, triggerBindings, triggerDirty, wakeUpDraft])
 
   const discard = useCallback(() => {
     if (def) {
       setDrafts(draftsFromDefinition(def))
+      setGraph(graphFromDefinition(def))
+      setLayoutPreview(null)
       setWakeUpDraft(wakeUpDraftFromDefinition(def, triggerBindings))
     }
     setSaveError(null)
   }, [def, triggerBindings])
+
+  useEffect(() => {
+    onLeaveActionsChange?.({ save, discard })
+    return () => onLeaveActionsChange?.(null)
+  }, [discard, onLeaveActionsChange, save])
+
+  const moveGraphNode = useCallback((nodeId: string, position: { x: number; y: number }) => {
+    setGraph((current) => current ? moveNode(current, nodeId, position) : current)
+    setLayoutPreview(null)
+    setSaveError(null)
+  }, [])
+
+  const connectGraphNodes = useCallback((from: string, to: string) => {
+    setGraph((current) => current ? connectNodes(current, from, to) : current)
+    setLayoutPreview(null)
+    setSaveError(null)
+  }, [])
+
+  const removeGraphNode = useCallback((nodeId: string) => {
+    setGraph((current) => current ? removeNode(current, nodeId) : current)
+    setDrafts((current) => {
+      const next = { ...current }
+      delete next[nodeId]
+      return next
+    })
+    setSelectedNodeId((current) => current === nodeId ? null : current)
+    setLayoutPreview(null)
+    setSaveError(null)
+  }, [])
+
+  const removeGraphEdge = useCallback((edgeId: string) => {
+    setGraph((current) => current ? removeEdge(current, edgeId) : current)
+    setLayoutPreview(null)
+    setSaveError(null)
+  }, [])
+
+  const addGraphNode = useCallback((type: WorkflowNodeWire["type"]) => {
+    if (!def || !graph) return
+    const next = addNode(graph, type)
+    const added = next.nodes.find((node) => !graph.nodes.some((old) => old.id === node.id))
+    if (!added) return
+    setGraph(next)
+    const one = draftsFromDefinition({ ...def, nodes: [added], edges: [] })[added.id]
+    setDrafts((current) => ({ ...current, [added.id]: one }))
+    setSelectedNodeId(added.id)
+    setLayoutPreview(null)
+    setAddOpen(false)
+    setSaveError(null)
+  }, [def, graph])
+
+  const tidy = useCallback(async () => {
+    if (!def || !graph || tidying) return
+    setTidying(true)
+    setSaveError(null)
+    const { layout: _serverLayout, ...definitionWithoutLayout } = def
+    const graphDefinition: EditableWorkflowDefinitionWire = {
+      ...definitionWithoutLayout,
+      nodes: buildNodesPatch({ ...def, nodes: graph.nodes, edges: graph.edges }, drafts),
+      edges: buildEdgesPatch({ ...def, nodes: graph.nodes, edges: graph.edges }, drafts),
+    }
+    try {
+      const planned = await api.planWorkflowDefinition(graphDefinition, { layoutIntent: "normalize" })
+      setLayoutPreview(graphFromDefinition(planned.layout.normalizedPreview))
+    } catch (e) {
+      setSaveError({ message: e instanceof Error ? e.message : "Couldn’t plan this layout." })
+    } finally {
+      setTidying(false)
+    }
+  }, [def, graph, drafts, tidying])
+
+  const applyLayout = useCallback(() => {
+    if (!layoutPreview) return
+    setGraph((current) => {
+      if (!current) return current
+      const previewPosition = new Map(layoutPreview.nodes.map((node) => [node.id, node.position]))
+      return {
+        ...current,
+        nodes: current.nodes.map((node) => {
+          const position = previewPosition.get(node.id)
+          return position ? { ...node, position: { ...position } } : node
+        }),
+        layout: MANUAL_LAYOUT,
+      }
+    })
+    setLayoutPreview(null)
+  }, [layoutPreview])
 
   if (loading) {
     return <div className="flex h-40 items-center justify-center text-[var(--text-tertiary)]">Loading definition…</div>
@@ -1633,12 +1879,55 @@ export function WorkflowEditView({
           </span>
         )}
         <div className="ml-auto flex items-center gap-1.5">
+          <div className="relative">
+            <button
+              type="button"
+              aria-expanded={addOpen}
+              onClick={() => setAddOpen((open) => !open)}
+              className="flex min-h-10 items-center gap-1.5 rounded-[var(--radius-md)] px-2.5 text-[length:var(--text-caption1)] font-[var(--weight-semibold)] text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]"
+            >
+              <Plus className="size-3.5" /> Add
+            </button>
+            {addOpen && (
+              <div
+                role="menu"
+                className="absolute right-0 top-full z-30 mt-1 min-w-40 rounded-[var(--radius-lg)] bg-[var(--bg-tertiary)] p-1 shadow-[var(--shadow-overlay)]"
+              >
+                {([
+                  ["step", "Step"],
+                  ["gate", "Approval"],
+                  ["switch", "Switch"],
+                  ["wait", "Wait"],
+                  ["fail", "Fail"],
+                ] as const).map(([type, label]) => (
+                  <button
+                    key={type}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => addGraphNode(type)}
+                    className="flex min-h-10 w-full items-center rounded-[var(--radius-md)] px-3 text-left text-[length:var(--text-subheadline)] text-[var(--text-primary)] transition-colors hover:bg-[var(--fill-secondary)]"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          {layoutPreview && (
+            <button
+              type="button"
+              onClick={applyLayout}
+              className="flex min-h-10 items-center gap-1.5 rounded-[var(--radius-md)] bg-[var(--accent-fill)] px-2.5 text-[length:var(--text-caption1)] font-[var(--weight-semibold)] text-[var(--accent)] transition-colors hover:bg-[var(--fill-secondary)]"
+            >
+              <Network className="size-3.5" /> Apply layout
+            </button>
+          )}
           <button
             type="button"
             onClick={discard}
             disabled={!dirty || saving}
             data-testid="wf-edit-discard"
-            className="flex items-center gap-1.5 rounded-[var(--radius-sm)] px-2 py-1 text-[length:var(--text-caption1)] text-[var(--text-secondary)] hover:bg-[var(--fill-quaternary)] disabled:opacity-40"
+            className="flex min-h-10 items-center gap-1.5 rounded-[var(--radius-sm)] px-2.5 text-[length:var(--text-caption1)] text-[var(--text-secondary)] hover:bg-[var(--fill-quaternary)] disabled:opacity-40"
           >
             <RotateCcw className="size-3.5" />
             Discard
@@ -1648,7 +1937,7 @@ export function WorkflowEditView({
             onClick={save}
             disabled={saveDisabled}
             data-testid="wf-edit-save"
-            className="flex items-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--accent)] px-2.5 py-1 text-[length:var(--text-caption1)] font-[var(--weight-semibold)] text-white disabled:opacity-40"
+            className="flex min-h-10 items-center gap-1.5 rounded-[var(--radius-sm)] bg-[var(--accent)] px-3 text-[length:var(--text-caption1)] font-[var(--weight-semibold)] text-[var(--accent-contrast)] disabled:opacity-40"
           >
             {saving ? <Loader2 className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
             Save
@@ -1681,7 +1970,19 @@ export function WorkflowEditView({
       <div className="relative flex min-h-0 flex-1">
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="min-h-0 flex-1">
-            <WorkflowCanvas nodes={nodes} edges={canvasEdges} selectedId={selectedNodeId} onSelect={setSelectedNodeId} />
+            <WorkflowCanvas
+              nodes={nodes}
+              edges={canvasEdges}
+              selectedId={selectedNodeId}
+              onSelect={setSelectedNodeId}
+              editable
+              onPositionChange={moveGraphNode}
+              onConnectNodes={connectGraphNodes}
+              onRemoveNode={removeGraphNode}
+              onRemoveEdge={removeGraphEdge}
+              onTidy={tidying ? undefined : tidy}
+              framingKey={`${def.id}:${def.version}:${layoutPreview ? "preview" : "draft"}`}
+            />
           </div>
           <div className="shrink-0 border-t border-[var(--separator)] px-[var(--space-4)] py-[var(--space-2)] text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
             Edit mode · changes save to the workflow definition (v{def.version}), never to past runs · tap a node to edit
@@ -1699,6 +2000,7 @@ export function WorkflowEditView({
                 draft={drafts[selectedNode.id]}
                 onChange={(p) => onNodeDraftChange(selectedNode.id, p)}
                 onClose={() => setSelectedNodeId(null)}
+                onRemove={selectedNode.kind === "trigger" ? undefined : () => removeGraphNode(selectedNode.id)}
               />
             </InspectorPanel>
             <InspectorSheet onClose={() => setSelectedNodeId(null)}>
@@ -1707,6 +2009,7 @@ export function WorkflowEditView({
                 draft={drafts[selectedNode.id]}
                 onChange={(p) => onNodeDraftChange(selectedNode.id, p)}
                 onClose={() => setSelectedNodeId(null)}
+                onRemove={selectedNode.kind === "trigger" ? undefined : () => removeGraphNode(selectedNode.id)}
               />
             </InspectorSheet>
           </>
