@@ -12,7 +12,7 @@ import {
   type RunDriverDeps,
 } from '../run-reconciler.js';
 import { markDispatching, stepSessionKey, type SpawnContext, type StepSessionProbe } from '../advance.js';
-import { createDefinition, getDefinition, updateDefinition } from '../definition-store.js';
+import { createDefinition, getDefinition, updateDefinition, WorkflowStoreError } from '../definition-store.js';
 import { getRun, saveRun, type WorkflowRun } from '../run-store.js';
 import {
   WORKFLOW_DEFINITION_SCHEMA_VERSION,
@@ -309,15 +309,18 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     expect(getRun(root, 'badactor', run.runId)?.status).toBe('failed'); // persisted
   });
 
-  it('refuses a cyclic graph at start (unsupported-cycle)', async () => {
+  it('refuses a cyclic graph before persistence or start', () => {
     const cyclic = chainDef('cycly', [trigger, step('a'), step('b')]);
     cyclic.edges.push({ id: 'back', from: 'b', to: 'a', kind: 'sequence' });
-    const def = createDefinition(root, cyclic, { now });
-    const { deps, spawnCalls } = harness();
-    const run = await startWorkflowRun(deps, def);
-    expect(run.status).toBe('failed');
-    expect(run.errors?.[0].code).toBe('unsupported-cycle');
-    expect(spawnCalls).toHaveLength(0);
+    try {
+      createDefinition(root, cyclic, { now });
+      throw new Error('expected cyclic definition rejection');
+    } catch (error) {
+      expect(error).toBeInstanceOf(WorkflowStoreError);
+      expect((error as WorkflowStoreError).code).toBe('validation');
+      expect((error as WorkflowStoreError).errors?.some((item) => item.code === 'non-loop-cycle')).toBe(true);
+    }
+    expect(getDefinition(root, 'cycly')).toBeNull();
   });
 
   it('a failed spawn fails the run (required step) with the receipt preserved', async () => {

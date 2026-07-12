@@ -108,15 +108,10 @@ describe('mintSequentialRun', () => {
     expect(run.orderWarning).toBeUndefined(); // v2 executes edges; nothing to warn about
   });
 
-  it('refuses a cyclic graph (unsupported-cycle) until GRS-014e loops', () => {
+  it('keeps the unsupported-cycle runtime defense when no topo order is available', () => {
     const def = chain([trigger, step('a'), step('b')]);
-    def.edges = [
-      { id: 'e0', from: 'trg', to: 'a', kind: 'sequence' },
-      { id: 'e1', from: 'a', to: 'b', kind: 'sequence' },
-      { id: 'e2', from: 'b', to: 'a', kind: 'sequence' },
-    ];
     const p = plan(def);
-    const minted = mintSequentialRun(p, impliedExecutionOrder(def), 'run-x', now);
+    const minted = mintSequentialRun(p, null, 'run-x', now);
     expect(minted.ok).toBe(false);
     if (!minted.ok) expect(minted.errors[0].code).toBe('unsupported-cycle');
   });
