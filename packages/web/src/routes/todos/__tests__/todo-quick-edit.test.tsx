@@ -418,4 +418,136 @@ describe("useTodoQuickEdit", () => {
     expect(result.current.rankResetRevisions).toMatchObject({ [ID]: 1 })
     expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
   })
+
+  it.each(["prepared", "dispatched"] as const)(
+    "refuses to PATCH when the %s journal transition cannot be read back durably",
+    async (blockedState) => {
+      const nativeSetItem = Storage.prototype.setItem
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+        if (key === "jinn:todo-quick-edit:v1" && value.includes(`\"state\":\"${blockedState}\"`)) return
+        nativeSetItem.call(this, key, value)
+      })
+      const { result } = setup()
+      vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7))
+      const update = vi.spyOn(api, "updateWorkItem")
+
+      await act(() => result.current.edit(ID, { title: "Must remain local" }))
+
+      expect(update).not.toHaveBeenCalled()
+      expect(result.current.error).toBe("This edit couldn't be stored safely. Reload the Todo and try again.")
+      expect(result.current.hasOutstanding(ID)).toBe(false)
+      expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
+    },
+  )
+
+  it("refuses to PATCH a tampered dispatched journal and leaves no permanent detail gate", async () => {
+    const nativeSetItem = Storage.prototype.setItem
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (key === "jinn:todo-quick-edit:v1" && value.includes('"state":"dispatched"')) {
+        nativeSetItem.call(this, key, value.replace('"state":"dispatched"', '"state":"uncertain"'))
+        return
+      }
+      nativeSetItem.call(this, key, value)
+    })
+    const { result } = setup()
+    vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7))
+    const update = vi.spyOn(api, "updateWorkItem")
+
+    await act(() => result.current.edit(ID, { rank: 91 }))
+
+    expect(update).not.toHaveBeenCalled()
+    expect(result.current.hasOutstanding(ID)).toBe(false)
+    expect(result.current.rankResetRevisions[ID]).toBe(1)
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
+  })
+
+  it("refuses to PATCH when sessionStorage quota throws", async () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota diagnostic", "QuotaExceededError")
+    })
+    const { result } = setup()
+    vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7))
+    const update = vi.spyOn(api, "updateWorkItem")
+
+    await act(() => result.current.edit(ID, { title: "Quota-held edit" }))
+
+    expect(update).not.toHaveBeenCalled()
+    expect(result.current.error).toBe("This edit couldn't be stored safely. Reload the Todo and try again.")
+    expect(result.current.hasOutstanding(ID)).toBe(false)
+  })
+
+  it("retires a definitively failed request but sends a newer different-field intent with a fresh key", async () => {
+    vi.spyOn(api, "getWorkItem")
+      .mockResolvedValueOnce(detail(7))
+      .mockResolvedValueOnce(detail(7))
+    let rejectFirst!: (error: unknown) => void
+    const update = vi.spyOn(api, "updateWorkItem")
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject }))
+      .mockResolvedValueOnce({ workItem: detail(8, { rank: 72 }).workItem as never, replayed: false })
+    const { result } = setup()
+    act(() => { void result.current.edit(ID, { title: "Rejected title" }) })
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1))
+    const firstKey = update.mock.calls[0][1].idempotencyKey
+    let queued!: Promise<void>
+    act(() => { queued = result.current.edit(ID, { rank: 72 }) })
+
+    rejectFirst(new TodoApiError(403, "private diagnostic", "TODO_FORBIDDEN"))
+    await act(() => queued)
+
+    expect(api.getWorkItem).toHaveBeenCalledTimes(2)
+    expect(update).toHaveBeenCalledTimes(2)
+    expect(update.mock.calls[1][1]).toMatchObject({ patch: { rank: 72 }, expectedVersion: 7 })
+    expect(update.mock.calls[1][1].idempotencyKey).not.toBe(firstKey)
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
+  })
+
+  it("keeps a newer same-field intent through definitive failure and reload-interrupted replay", async () => {
+    vi.spyOn(api, "getWorkItem")
+      .mockResolvedValueOnce(detail(7))
+      .mockResolvedValueOnce(detail(7))
+    let rejectFirst!: (error: unknown) => void
+    const update = vi.spyOn(api, "updateWorkItem")
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject }))
+      .mockRejectedValueOnce(new TypeError("lost second response"))
+      .mockResolvedValueOnce({ workItem: detail(8, { title: "Latest title" }).workItem as never, replayed: true })
+    const first = setup()
+    act(() => { void first.result.current.edit(ID, { title: "Rejected title" }) })
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1))
+    act(() => { void first.result.current.edit(ID, { title: "Latest title" }) })
+
+    rejectFirst(new TodoApiError(428, "private precondition", "TODO_PRECONDITION_REQUIRED"))
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2))
+    const secondRequest = update.mock.calls[1][1]
+    expect(secondRequest.patch).toEqual({ title: "Latest title" })
+    expect(secondRequest.idempotencyKey).not.toBe(update.mock.calls[0][1].idempotencyKey)
+    await waitFor(() => expect(onlyStored().active.state).toBe("uncertain"))
+    first.unmount()
+
+    const recovered = setup()
+    await act(() => recovered.result.current.recover(ID))
+    expect(update.mock.calls[2][1]).toEqual(secondRequest)
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
+  })
+
+  it("treats a repeated same-value activation after dispatch as a newer logical edit", async () => {
+    vi.spyOn(api, "getWorkItem")
+      .mockResolvedValueOnce(detail(7))
+      .mockResolvedValueOnce(detail(7))
+    let rejectFirst!: (error: unknown) => void
+    const update = vi.spyOn(api, "updateWorkItem")
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject }))
+      .mockResolvedValueOnce({ workItem: detail(8, { title: "Repeated intent" }).workItem as never, replayed: false })
+    const { result } = setup()
+    act(() => { void result.current.edit(ID, { title: "Repeated intent" }) })
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1))
+    let repeated!: Promise<void>
+    act(() => { repeated = result.current.edit(ID, { title: "Repeated intent" }) })
+
+    rejectFirst(new TodoApiError(403, "private rejection", "TODO_FORBIDDEN"))
+    await act(() => repeated)
+
+    expect(update).toHaveBeenCalledTimes(2)
+    expect(update.mock.calls[1][1].patch).toEqual({ title: "Repeated intent" })
+    expect(update.mock.calls[1][1].idempotencyKey).not.toBe(update.mock.calls[0][1].idempotencyKey)
+  })
 })

@@ -355,7 +355,8 @@ describe("Todo detail navigation and draft recovery", () => {
     }
     renderPage([{ pathname: "/todos", search: "?status=assigned", state }])
     await waitFor(() => expect(listWorkItems).toHaveBeenCalled())
-    expect(currentState).toEqual(state)
+    expect(currentState).toMatchObject(state)
+    expect((currentState as { todoQuickRecoveryEpoch: string }).todoQuickRecoveryEpoch).toMatch(/^qe_[a-f0-9]{32}$/)
     expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toContain("Recover after filter changes")
     expect(updateWorkItem).not.toHaveBeenCalled()
   })
@@ -400,6 +401,151 @@ describe("Todo detail navigation and draft recovery", () => {
     await act(async () => resolveBacklog({ workItems: [compact], total: 1, nextOffset: null }))
     await waitFor(() => expect(updateWorkItem).toHaveBeenCalledTimes(1))
     expect(scroller.scrollTop).toBe(0)
+  })
+
+  it("preserves the latest ordered quick recoveries through pushed filters and replaced search", async () => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query === "(max-width: 767px)",
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    })
+    const refs = [todoPrivateRef("wi_hidden_order_a"), todoPrivateRef("wi_hidden_order_b")]
+    const records = refs.map((ref, index) => ({
+      ref,
+      anchorRef: ref,
+      anchorOffset: 12 + index,
+      scroll: 480 + index,
+      pageDepth: { backlog: 1 },
+    }))
+    sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify(Object.fromEntries(refs.map((ref, index) => [ref, {
+      expiresAt: Date.now() + 60_000,
+      desired: { title: `Hidden ${index}` },
+      baseline: { title: `Remote ${index}` },
+      active: {
+        request: {
+          patch: { title: `Hidden ${index}` },
+          expectedVersion: 7,
+          idempotencyKey: index === 0
+            ? "e2da2848-e8d2-49c9-bc28-b49b129d4c0f"
+            : "ce38a954-4cc4-4f00-b591-b68db3fd1f21",
+        },
+        state: "uncertain",
+      },
+    }]))))
+    listWorkItems.mockResolvedValue({ workItems: [], total: 0, nextOffset: null })
+    renderPage([{ pathname: "/todos", state: {
+      todoQuickRecoveries: records,
+      todoQuickRecoveryEpoch: "qe_0123456789abcdef0123456789abcdef",
+    } }])
+    await waitFor(() => expect(listWorkItems).toHaveBeenCalled())
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search todos" }), { target: { value: "queued" } })
+    await waitFor(() => expect(currentSearch).toBe("?q=queued"), { timeout: 1_000 })
+    expect((currentState as { todoQuickRecoveries: unknown[] }).todoQuickRecoveries).toEqual(records)
+
+    fireEvent.click(screen.getByRole("button", { name: "Filter todos" }))
+    fireEvent.click(screen.getByRole("button", { name: "Status" }))
+    fireEvent.click(screen.getByRole("button", { name: "Blocked" }))
+    await waitFor(() => expect(currentSearch).toBe("?status=blocked&q=queued"))
+    expect((currentState as { todoQuickRecoveries: unknown[] }).todoQuickRecoveries).toEqual(records)
+
+    act(() => navigate(-1))
+    await waitFor(() => expect(currentSearch).toBe("?q=queued"))
+    expect((currentState as { todoQuickRecoveries: unknown[] }).todoQuickRecoveries).toEqual(records)
+    act(() => navigate(1))
+    await waitFor(() => expect(currentSearch).toBe("?status=blocked&q=queued"))
+    expect((currentState as { todoQuickRecoveries: unknown[] }).todoQuickRecoveries).toEqual(records)
+
+    fireEvent.click(screen.getByRole("button", { name: "View by person" }))
+    await waitFor(() => expect(currentSearch).toBe("?status=blocked&q=queued&view=people"))
+    expect((currentState as { todoQuickRecoveries: unknown[] }).todoQuickRecoveries).toEqual(records)
+    act(() => navigate(-1))
+    await waitFor(() => expect(currentSearch).toBe("?status=blocked&q=queued"))
+    expect((currentState as { todoQuickRecoveries: unknown[] }).todoQuickRecoveries).toEqual(records)
+  })
+
+  it("keeps user-cancelled quick scroll recovery cancelled while the ordered collection mutates", async () => {
+    const rows = [
+      { ...compact, id: "wi_scroll_epoch_a", title: "Epoch A" },
+      { ...compact, id: "wi_scroll_epoch_b", title: "Epoch B" },
+    ]
+    const refs = rows.map((row) => todoPrivateRef(row.id))
+    sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify(Object.fromEntries(refs.map((ref, index) => [ref, {
+      expiresAt: Date.now() + 60_000,
+      desired: { title: `Epoch ${index} edited` },
+      baseline: { title: rows[index].title },
+      active: {
+        request: {
+          patch: { title: `Epoch ${index} edited` },
+          expectedVersion: 7,
+          idempotencyKey: index === 0
+            ? "17e78a37-8143-4270-8e77-5e3d02a0ac36"
+            : "2421f678-7ad7-4d7e-b3d0-aa6d32b9ea4b",
+        },
+        state: "uncertain",
+      },
+    }]))))
+    let resolveBacklog!: (value: { workItems: WorkItemCompactWire[]; total: number; nextOffset: null }) => void
+    const backlog = new Promise<{ workItems: WorkItemCompactWire[]; total: number; nextOffset: null }>((resolve) => { resolveBacklog = resolve })
+    listWorkItems.mockImplementation((params?: { status?: string; needsAttentionFor?: string }) => {
+      if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+      if (params?.status === "backlog") return backlog
+      return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+    })
+    updateWorkItem
+      .mockResolvedValueOnce({ workItem: { ...detail.workItem, ...rows[0], version: 8, title: "Epoch 0 edited" }, replayed: true })
+      .mockRejectedValueOnce(new TypeError("lost second response"))
+    renderPage([{ pathname: "/todos", state: {
+      todoQuickRecoveries: refs.map((ref) => ({ ref, anchorRef: ref, anchorOffset: 12, scroll: 500, pageDepth: { backlog: 1 } })),
+      todoQuickRecoveryEpoch: "qe_abcdef0123456789abcdef0123456789",
+    } }])
+    const scroller = screen.getByTestId("todo-ledger-scroll")
+    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 0 })
+    fireEvent.pointerDown(scroller, { pointerType: "touch" })
+    await act(async () => resolveBacklog({ workItems: rows, total: 2, nextOffset: null }))
+
+    await waitFor(() => expect((currentState as { todoQuickRecoveries: unknown[] }).todoQuickRecoveries).toHaveLength(1))
+    expect(scroller.scrollTop).toBe(0)
+  })
+
+  it("retires a completed quick recovery epoch and creates a fresh epoch for a later session", async () => {
+    const ref = todoPrivateRef(PRIVATE_ID)
+    const oldEpoch = "qe_11111111111111111111111111111111"
+    sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify({
+      [ref]: {
+        expiresAt: Date.now() + 60_000,
+        desired: { title: "Recovered once" },
+        baseline: { title: compact.title },
+        active: {
+          request: {
+            patch: { title: "Recovered once" },
+            expectedVersion: 7,
+            idempotencyKey: "07ec3351-0b99-4206-ad5f-1ed9cb6854a5",
+          },
+          state: "uncertain",
+        },
+      },
+    }))
+    updateWorkItem
+      .mockResolvedValueOnce({ workItem: { ...detail.workItem, version: 8, title: "Recovered once" }, replayed: true })
+      .mockRejectedValueOnce(new TypeError("new session offline"))
+    renderPage([{ pathname: "/todos", state: {
+      todoQuickRecoveries: [{ ref, anchorRef: ref, anchorOffset: 0, scroll: 0, pageDepth: { backlog: 1 } }],
+      todoQuickRecoveryEpoch: oldEpoch,
+    } }])
+    await waitFor(() => expect((currentState as { todoQuickRecoveries?: unknown[] } | null)?.todoQuickRecoveries).toBeUndefined())
+    expect((currentState as { todoQuickRecoveryEpoch?: string } | null)?.todoQuickRecoveryEpoch).toBeUndefined()
+
+    const opener = await screen.findByRole("button", { name: "Open Recovered once" })
+    fireEvent.keyDown(opener, { key: "F2" })
+    fireEvent.change(screen.getByTestId("todo-rename"), { target: { value: "Later offline edit" } })
+    fireEvent.keyDown(screen.getByTestId("todo-rename"), { key: "Enter" })
+    await waitFor(() => expect((currentState as { todoQuickRecoveryEpoch?: string }).todoQuickRecoveryEpoch).toMatch(/^qe_[a-f0-9]{32}$/))
+    expect((currentState as { todoQuickRecoveryEpoch?: string }).todoQuickRecoveryEpoch).not.toBe(oldEpoch)
   })
 
   it("drops malformed quick history metadata instead of retaining raw identifiers or diagnostics", async () => {
