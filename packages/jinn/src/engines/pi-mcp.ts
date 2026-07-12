@@ -5,10 +5,19 @@ import { JINN_HOME } from "../shared/paths.js";
 
 const JINN_BUILTIN_SERVER = "jinn";
 const JINN_MCP_SERVER_MODULE_URL = new URL("../mcp/server.js", import.meta.url).href;
+const JINN_PI_MCP_MODULE_URL = new URL("./pi-mcp.js", import.meta.url).href;
 
 export type PiMcpExtensionHandle =
   | { attached: false }
   | { attached: true; extensionPath: string; extensionDir: string; released?: boolean };
+
+export function projectPiTool(tool: { name: string; description: string; inputSchema: unknown }) {
+  return { name: tool.name, label: `Jinn ${tool.name}`, description: tool.description, parameters: tool.inputSchema };
+}
+
+export function projectPiToolManifest(tools: Array<{ name: string; description: string; inputSchema: unknown }>) {
+  return tools.map(projectPiTool);
+}
 
 function jinnServer(resolvedMcp: ResolvedMcpConfig | undefined): McpServerStdioConfig | null {
   const spec = resolvedMcp?.mcpServers?.[JINN_BUILTIN_SERVER] as (McpServerStdioConfig & { url?: unknown }) | undefined;
@@ -58,14 +67,12 @@ export function cleanupPiJinnMcpExtension(handle: PiMcpExtensionHandle | undefin
 function piExtensionSource(): string {
   return `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildTools } from ${JSON.stringify(JINN_MCP_SERVER_MODULE_URL)};
+import { projectPiTool } from ${JSON.stringify(JINN_PI_MCP_MODULE_URL)};
 
 export default function jinnMcpExtension(pi: ExtensionAPI): void {
   for (const tool of buildTools()) {
     pi.registerTool({
-      name: tool.name,
-      label: \`Jinn \${tool.name}\`,
-      description: tool.description,
-      parameters: tool.inputSchema as any,
+      ...projectPiTool(tool),
       async execute(_toolCallId: string, params: Record<string, unknown> | undefined) {
         const result = await tool.handler(params ?? {}, {
           gatewayUrl: process.env.JINN_GATEWAY_URL ?? "http://127.0.0.1:7777",
