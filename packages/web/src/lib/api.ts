@@ -96,6 +96,11 @@ export class TodoApiError extends ApiError {
   }
 }
 
+/** A Todo revision is authoritative only when it is a positive safe integer. */
+export function isPositiveTodoVersion(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+}
+
 async function responseError(res: Response): Promise<ApiError> {
   let message = `API error: ${res.status}`
   let code: string | undefined
@@ -668,9 +673,28 @@ export interface WorkItemEditRequest {
   idempotencyKey: string
 }
 
+export interface VersionedWorkItemFullWire extends WorkItemFullWire {
+  version: number
+}
+
 export interface WorkItemEditResultWire {
-  workItem: WorkItemFullWire
+  workItem: VersionedWorkItemFullWire
   replayed: boolean
+}
+
+function requireWorkItemEditResult(value: unknown): WorkItemEditResultWire {
+  if (
+    typeof value !== "object"
+    || value === null
+    || !("workItem" in value)
+    || typeof value.workItem !== "object"
+    || value.workItem === null
+    || !("version" in value.workItem)
+    || !isPositiveTodoVersion(value.workItem.version)
+  ) {
+    throw new Error("Todo edit response has an invalid authoritative version")
+  }
+  return value as WorkItemEditResultWire
 }
 
 export interface WorkItemEventWire {
@@ -1069,12 +1093,16 @@ export const api = {
     id: string,
     input: WorkItemEditRequest,
   ): Promise<WorkItemEditResultWire> => {
+    if (!isPositiveTodoVersion(input.expectedVersion)) {
+      throw new TypeError("Todo expectedVersion must be a positive safe integer")
+    }
     try {
-      return await patch<WorkItemEditResultWire>(`/api/work-items/${encodeURIComponent(id)}`, {
+      const result = await patch<unknown>(`/api/work-items/${encodeURIComponent(id)}`, {
         ...input.patch,
         expectedVersion: input.expectedVersion,
         idempotencyKey: input.idempotencyKey,
       })
+      return requireWorkItemEditResult(result)
     } catch (error) {
       if (error instanceof ApiError) {
         throw new TodoApiError(error.status, error.message, error.code, error.currentVersion)

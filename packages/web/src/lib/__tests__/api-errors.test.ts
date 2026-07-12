@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest"
 
 const authFetch = vi.fn()
 
@@ -49,7 +49,36 @@ describe("typed API errors", () => {
       idempotencyKey: "crypto-key",
     })
     expect(result).toMatchObject({ workItem: { version: 8 }, replayed: true })
+    expectTypeOf(result.workItem.version).toEqualTypeOf<number>()
   })
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid expected version %s before transport",
+    async (expectedVersion) => {
+      await expect(api.updateWorkItem("private-id", {
+        patch: { title: "Desired" },
+        expectedVersion,
+        idempotencyKey: "crypto-key",
+      })).rejects.toThrow("positive safe integer")
+      expect(authFetch).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([undefined, "8", 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects malformed authoritative response version %s",
+    async (version) => {
+      authFetch.mockResolvedValue(new Response(JSON.stringify({
+        workItem: { id: "private-id", title: "Desired", version },
+        replayed: false,
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+
+      await expect(api.updateWorkItem("private-id", {
+        patch: { title: "Desired" },
+        expectedVersion: 7,
+        idempotencyKey: "crypto-key",
+      })).rejects.toThrow("invalid authoritative version")
+    },
+  )
 
   it("rethrows conditional edit failures as a structured Todo API error", async () => {
     authFetch.mockResolvedValue(new Response(JSON.stringify({

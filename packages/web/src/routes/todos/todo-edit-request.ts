@@ -50,6 +50,9 @@ function mergeTodoValue(value: unknown, workItem: UnknownRecord & { id: string; 
 
 /** Mint the immutable metadata envelope once per logical Todo edit. */
 export function newTodoEditRequest(patch: WorkItemEditPatch, expectedVersion: number): WorkItemEditRequest {
+  if (!isPositiveTodoVersion(expectedVersion)) {
+    throw new TypeError("Todo expectedVersion must be a positive safe integer")
+  }
   return { patch, expectedVersion, idempotencyKey: crypto.randomUUID() }
 }
 

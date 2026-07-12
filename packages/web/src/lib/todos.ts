@@ -11,6 +11,7 @@ import type {
   WorkItemSourceWire,
 } from "./api"
 import { ApiError } from "./api"
+export { isPositiveTodoVersion } from "./api"
 
 // ── Display groups (the 5 board columns / mobile sections) ──────────────────
 // The DB carries 8 statuses; the board shows 5 groups. `blocked` and `escalated`
@@ -98,11 +99,6 @@ export function stateKeyOf(status: WorkItemStatusWire): StateKey {
 const TERMINAL: ReadonlySet<WorkItemStatusWire> = new Set<WorkItemStatusWire>(["done", "cancelled"])
 export function isOpen(status: WorkItemStatusWire): boolean {
   return !TERMINAL.has(status)
-}
-
-/** A Todo revision is authoritative only when it is a positive safe integer. */
-export function isPositiveTodoVersion(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
 }
 
 const SAFE_TODO_ERROR_BY_CODE: Readonly<Record<string, string>> = {

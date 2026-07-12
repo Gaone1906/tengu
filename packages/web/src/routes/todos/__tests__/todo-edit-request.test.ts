@@ -23,6 +23,16 @@ describe("Todo conditional edit requests", () => {
     })
     expect(randomUUID).toHaveBeenCalledTimes(1)
   })
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid expected version %s before minting a request key",
+    (expectedVersion) => {
+      const randomUUID = vi.spyOn(crypto, "randomUUID")
+
+      expect(() => newTodoEditRequest({ title: "Desired" }, expectedVersion)).toThrow("positive safe integer")
+      expect(randomUUID).not.toHaveBeenCalled()
+    },
+  )
 })
 
 describe("Todo cache version authority", () => {
