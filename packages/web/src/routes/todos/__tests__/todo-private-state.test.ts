@@ -581,6 +581,30 @@ describe("Todo private CAS journal", () => {
       expect(removeItem).toHaveBeenCalledTimes(1)
     })
 
+    it("reports a silent replacement no-op instead of acknowledging it", () => {
+      const current = currentWithNewerIntent()
+      const next = {
+        revision: 2,
+        patch: { title: "Desired A2" },
+        baseline: { title: "Sent A1" },
+        baselineVersion: 8,
+      }
+      persistTodoJournal(TODO_ID, current as never)
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => undefined)
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, next)).toBe(false)
+      expect(loadTodoJournal(TODO_ID)).toEqual(current)
+    })
+
+    it("reports a silent removal no-op instead of acknowledging it", () => {
+      const current = currentWithNewerIntent()
+      persistTodoJournal(TODO_ID, current as never)
+      vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => undefined)
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, null)).toBe(false)
+      expect(loadTodoJournal(TODO_ID)).toEqual(current)
+    })
+
     it.each([
       ["rebase", "Rebased A2"],
       ["overwrite", "Overwrite A2"],

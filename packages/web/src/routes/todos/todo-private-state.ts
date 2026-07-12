@@ -135,6 +135,27 @@ function samePatch(a: TodoDraftPatch, b: TodoDraftPatch): boolean {
     && (Object.keys(a) as TodoDraftField[]).every((field) => Object.is(a[field], b[field]))
 }
 
+function sameOptionalFields(a?: TodoDraftField[], b?: TodoDraftField[]): boolean {
+  if (!a || !b) return a === b
+  return a.length === b.length && a.every((field) => b.includes(field))
+}
+
+function sameJournalRequest(a?: TodoJournalRequest, b?: TodoJournalRequest): boolean {
+  if (!a || !b) return a === b
+  return a.state === b.state && sameRequestFingerprint(a, b)
+}
+
+function samePayload(a: TodoJournalPayload, b: TodoJournalPayload): boolean {
+  return a.revision === b.revision
+    && Object.is(a.baselineVersion, b.baselineVersion)
+    && samePatch(a.patch, b.patch)
+    && samePatch(a.baseline, b.baseline)
+    && sameOptionalFields(a.uncertainFields, b.uncertainFields)
+    && sameOptionalFields(a.conflictFields, b.conflictFields)
+    && a.cleanupPending === b.cleanupPending
+    && sameJournalRequest(a.request, b.request)
+}
+
 function patchFieldsCoveredBy(active: TodoDraftPatch, latest: TodoDraftPatch): boolean {
   return Object.keys(active).every((field) => Object.prototype.hasOwnProperty.call(latest, field))
 }
@@ -385,7 +406,8 @@ export function transitionTodoJournal(
     const capped = Object.fromEntries(orderedEntries(journals).slice(0, MAX_JOURNALS))
     if (Object.keys(capped).length === 0) store.removeItem(JOURNAL_KEY)
     else store.setItem(JOURNAL_KEY, JSON.stringify(capped))
-    return true
+    const stored = readEnvelopes(Date.now(), false)[ref]?.payload
+    return nextPayload === null ? stored === undefined : !!stored && samePayload(stored, nextPayload)
   } catch {
     return false
   }
