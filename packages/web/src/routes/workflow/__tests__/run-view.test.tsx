@@ -1,18 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 import type { WorkflowRunWire, WorkflowRunSummaryWire } from "@/lib/api"
+import { WorkflowApiError } from "@/lib/api"
 
 // Mock the api module — the pure mapper/inspector don't touch it; DefinitionRunView does.
 const listWorkflowRuns = vi.fn()
 const getWorkflowRun = vi.fn()
 const startWorkflowRun = vi.fn()
-vi.mock("@/lib/api", () => ({
-  api: {
-    listWorkflowRuns: (...a: unknown[]) => listWorkflowRuns(...a),
-    getWorkflowRun: (...a: unknown[]) => getWorkflowRun(...a),
-    startWorkflowRun: (...a: unknown[]) => startWorkflowRun(...a),
-  },
-}))
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>()
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      listWorkflowRuns: (...a: unknown[]) => listWorkflowRuns(...a),
+      getWorkflowRun: (...a: unknown[]) => getWorkflowRun(...a),
+      startWorkflowRun: (...a: unknown[]) => startWorkflowRun(...a),
+    },
+  }
+})
 
 import {
   nodesForDefinitionRun,
@@ -308,6 +314,34 @@ describe("DefinitionRunView (container)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start run" }))
     await waitFor(() => expect(startWorkflowRun).toHaveBeenCalledTimes(2))
     expect(startWorkflowRun.mock.calls[1][2]).toBe(startWorkflowRun.mock.calls[0][2])
+  })
+
+  it("keeps changed intent intact on 409 and starts with a new key only after explicit operator intent", async () => {
+    listWorkflowRuns.mockResolvedValue({ evidenceConfigured: true, runs: [] })
+    startWorkflowRun
+      .mockRejectedValueOnce(new WorkflowApiError(
+        "This idempotency key is already bound to a different workflow run request.",
+        409,
+        "workflow-run-idempotency-conflict",
+        "run-existing",
+      ))
+      .mockResolvedValueOnce(runWire({ status: "running", parked: null, endedAt: null }))
+
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
+    fireEvent.click(screen.getByRole("button", { name: "Run" }))
+    fireEvent.change(screen.getByLabelText("Run input"), { target: { value: '{"ticket":"CHANGED"}' } })
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }))
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start as new run" })).toBeTruthy())
+    expect((screen.getByLabelText("Run input") as HTMLTextAreaElement).value).toBe('{"ticket":"CHANGED"}')
+    expect(getWorkflowRun).not.toHaveBeenCalledWith("sample-autonomy", "run-existing")
+
+    const conflictedKey = startWorkflowRun.mock.calls[0][2]
+    fireEvent.click(screen.getByRole("button", { name: "Start as new run" }))
+    await waitFor(() => expect(startWorkflowRun).toHaveBeenCalledTimes(2))
+    expect(startWorkflowRun.mock.calls[1][1]).toEqual({ ticket: "CHANGED" })
+    expect(startWorkflowRun.mock.calls[1][2]).not.toBe(conflictedKey)
   })
 
   it("selects and renders a durable failed run returned by Start instead of losing its evidence", async () => {

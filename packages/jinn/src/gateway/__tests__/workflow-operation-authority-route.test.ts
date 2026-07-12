@@ -170,6 +170,35 @@ const callers = [
 ] as const;
 
 describe('uniform workflow operation authority', () => {
+  it('uses stable employee/operator idempotency namespaces rather than session credentials', async () => {
+    seedWorkflow('stable-principal-run', { owner: 'owner', createdBy: 'owner', department: 'platform' });
+    const body = { input: { ticket: 'ABC-42' }, idempotencyKey: 'same-key' };
+
+    const first = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
+      headers: verifiedHeaders('owner'), body,
+    });
+    const anotherSession = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
+      headers: verifiedHeaders('owner'), body,
+    });
+    expect(first.status).toBe(201);
+    expect(anotherSession.status).toBe(200);
+    expect((anotherSession.body as { runId: string }).runId).toBe((first.body as { runId: string }).runId);
+
+    const operator = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
+      headers: { authorization: 'Bearer gateway-secret' }, body,
+    });
+    const manager = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
+      headers: verifiedHeaders('platform-manager'), body,
+    });
+    expect(operator.status).toBe(201);
+    expect(manager.status).toBe(201);
+    expect(new Set([
+      (first.body as { runId: string }).runId,
+      (operator.body as { runId: string }).runId,
+      (manager.body as { runId: string }).runId,
+    ]).size).toBe(3);
+  });
+
   it('enforces the operation matrix for update, duplicate, retire, run, and trigger bind/unbind', async () => {
     for (const caller of callers) {
       const updateId = `update-${caller.name}`;

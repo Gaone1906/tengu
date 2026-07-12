@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 const { authFetch } = vi.hoisted(() => ({ authFetch: vi.fn() }))
 vi.mock("@/lib/auth", () => ({ authFetch }))
 
-import { api, type EditableWorkflowDefinitionWire, type WorkflowRunWire } from "../api"
+import { api, WorkflowApiError, type EditableWorkflowDefinitionWire, type WorkflowRunWire } from "../api"
 
 const definition = (): EditableWorkflowDefinitionWire => ({
   schemaVersion: 1,
@@ -48,6 +48,27 @@ describe("workflow run API", () => {
         body: JSON.stringify({ input: {}, idempotencyKey: "stable-key" }),
       }),
     )
+  })
+
+  it("preserves typed idempotency conflict status, code, and safe run id", async () => {
+    authFetch.mockResolvedValue(new Response(JSON.stringify({
+      error: "This idempotency key is already bound to a different workflow run request.",
+      code: "workflow-run-idempotency-conflict",
+      runId: "run-existing",
+    }), { status: 409, headers: { "Content-Type": "application/json" } }))
+
+    const error = await api.startWorkflowRun("sample", { secret: "must-not-leak" }, "secret-key")
+      .catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(WorkflowApiError)
+    expect(error).toMatchObject({
+      status: 409,
+      code: "workflow-run-idempotency-conflict",
+      runId: "run-existing",
+      message: "This idempotency key is already bound to a different workflow run request.",
+    })
+    expect(String(error)).not.toContain("must-not-leak")
+    expect(String(error)).not.toContain("secret-key")
   })
 })
 

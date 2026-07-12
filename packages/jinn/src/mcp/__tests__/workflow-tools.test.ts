@@ -676,6 +676,26 @@ describe("workflow tools — unit (stub gateway)", () => {
     });
   });
 
+  it("start_workflow_run surfaces a sanitized typed idempotency conflict with safe run guidance", async () => {
+    const { ctx } = stub(() => ({
+      status: 409,
+      body: {
+        error: "This idempotency key is already bound to a different workflow run request.",
+        code: "workflow-run-idempotency-conflict",
+        runId: "run-existing",
+      },
+    }));
+    const error = await tool("start_workflow_run").handler({
+      workflowId: "wf",
+      input: { secret: "must-not-leak" },
+      idempotencyKey: "must-not-leak-key",
+    }, ctx).catch((caught: unknown) => caught as Error) as Error;
+
+    expect(error.message).toMatch(/workflow-run-idempotency-conflict/);
+    expect(error.message).toMatch(/run-existing/);
+    expect(error.message).not.toContain("must-not-leak");
+  });
+
   it("edit_workflow_run_step_prompt PATCHes the audited pending-step route", async () => {
     const { calls, ctx } = stub(() => ({
       status: 200,

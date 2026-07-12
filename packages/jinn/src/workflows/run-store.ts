@@ -1,9 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { OrderWarning } from './order.js';
 import type { EditableWorkflowDefinition } from './definition.js';
 import type { StepOutcome } from './handoff.js';
+import {
+  canonicalWorkflowRunJson,
+  type WorkflowRunInvocationClaim,
+} from './run-idempotency.js';
 
 /**
  * File-backed store for workflow RUNS (GRS-011d-2c).
@@ -423,6 +427,111 @@ function runsDir(root: string, workflowId: string): string {
 function runFile(root: string, workflowId: string, runId: string): string {
   assertSafeId(runId, 'run id');
   return path.join(runsDir(root, workflowId), `${runId}.json`);
+}
+
+function invocationClaimFile(root: string, workflowId: string, principal: string, idempotencyKey: string): string {
+  const namespace = canonicalWorkflowRunJson({ workflowId, principal, idempotencyKey });
+  const digest = createHash('sha256').update(namespace).digest('hex');
+  return path.join(root, 'reports', 'run-idempotency', `${digest}.json`);
+}
+
+function isInvocationClaim(value: unknown): value is WorkflowRunInvocationClaim {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const claim = value as Partial<WorkflowRunInvocationClaim>;
+  return claim.schemaVersion === 1
+    && typeof claim.workflowId === 'string'
+    && typeof claim.principal === 'string'
+    && typeof claim.idempotencyKey === 'string'
+    && typeof claim.runId === 'string'
+    && typeof claim.fingerprint === 'string'
+    && !!claim.request && typeof claim.request === 'object'
+    && typeof claim.createdAt === 'string';
+}
+
+export function getWorkflowRunInvocationClaim(
+  root: string,
+  workflowId: string,
+  principal: string,
+  idempotencyKey: string,
+): WorkflowRunInvocationClaim | null {
+  const file = invocationClaimFile(root, workflowId, principal, idempotencyKey);
+  if (!fs.existsSync(file)) return null;
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return isInvocationClaim(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function findWorkflowRunInvocationClaimByRunId(
+  root: string,
+  workflowId: string,
+  runId: string,
+): WorkflowRunInvocationClaim | null {
+  const dir = path.join(root, 'reports', 'run-idempotency');
+  if (!fs.existsSync(dir)) return null;
+  for (const name of fs.readdirSync(dir)) {
+    if (!name.endsWith('.json')) continue;
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      if (isInvocationClaim(parsed) && parsed.workflowId === workflowId && parsed.runId === runId) return parsed;
+    } catch {
+      // Corrupt claims do not prove that a legacy run has an intent binding.
+    }
+  }
+  return null;
+}
+
+export type WorkflowRunInvocationClaimResult =
+  | { outcome: 'claimed' | 'replay'; claim: WorkflowRunInvocationClaim }
+  | { outcome: 'conflict'; claim: WorkflowRunInvocationClaim | null };
+
+/** Exclusively bind an idempotency namespace before the corresponding run is minted. */
+export function claimWorkflowRunInvocation(
+  root: string,
+  claim: WorkflowRunInvocationClaim,
+): WorkflowRunInvocationClaimResult {
+  const file = invocationClaimFile(root, claim.workflowId, claim.principal, claim.idempotencyKey);
+  const directory = path.dirname(file);
+  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
+  fs.mkdirSync(directory, { recursive: true });
+  let descriptor: number | undefined;
+  try {
+    // Publish only a complete, fsynced inode. A direct `open(wx)` on the final
+    // path exposes an empty/partial file to concurrent readers and would require
+    // a synchronous event-loop wait. `link` is the exclusive atomic claim step.
+    descriptor = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(descriptor, JSON.stringify(claim, null, 2) + '\n', 'utf8');
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    try {
+      fs.linkSync(temporary, file);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      const existing = getWorkflowRunInvocationClaim(root, claim.workflowId, claim.principal, claim.idempotencyKey);
+      if (existing
+        && existing.fingerprint === claim.fingerprint
+        && canonicalWorkflowRunJson(existing.request) === canonicalWorkflowRunJson(claim.request)) {
+        return { outcome: 'replay', claim: existing };
+      }
+      return { outcome: 'conflict', claim: existing };
+    }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    try { fs.unlinkSync(temporary); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+  // Persist the final link and temporary-name removal where supported.
+  try {
+    const directoryDescriptor = fs.openSync(directory, 'r');
+    try { fs.fsyncSync(directoryDescriptor); } finally { fs.closeSync(directoryDescriptor); }
+  } catch {
+    /* directory fsync is not portable */
+  }
+  return { outcome: 'claimed', claim };
 }
 
 /** Atomic overwrite (unique temp + rename); a reader never sees a torn file. */

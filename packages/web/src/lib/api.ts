@@ -85,6 +85,18 @@ async function extractErrorMessage(res: Response): Promise<string> {
   return `API error: ${res.status}`;
 }
 
+export class WorkflowApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly runId?: string,
+  ) {
+    super(message)
+    this.name = "WorkflowApiError"
+  }
+}
+
 async function get<T>(path: string): Promise<T> {
   const res = await authFetch(path);
   if (!res.ok) throw new Error(await extractErrorMessage(res));
@@ -837,7 +849,15 @@ export const api = {
     // A failed execution is durable evidence, not a request failure: the
     // gateway intentionally returns its full run snapshot with HTTP 422.
     if (res.ok || res.status === 422) return (await res.json()) as WorkflowRunWire
-    throw new Error(await extractErrorMessage(res))
+    let body: Record<string, unknown> = {}
+    try { body = await res.json() as Record<string, unknown> } catch { /* keep status fallback */ }
+    const message = typeof body.error === "string" ? body.error : `API error: ${res.status}`
+    throw new WorkflowApiError(
+      message,
+      res.status,
+      typeof body.code === "string" ? body.code : undefined,
+      typeof body.runId === "string" ? body.runId : undefined,
+    )
   }),
   /** GRS-011d-2c-ui: list a definition's real runs (newest first). Returns
    * `evidenceConfigured:false` (not an error) when the gateway has no evidence root. */

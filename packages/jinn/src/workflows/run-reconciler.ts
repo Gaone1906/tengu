@@ -32,8 +32,11 @@ import {
   type StopStepSession,
 } from './advance.js';
 import {
+  claimWorkflowRunInvocation,
   findRunByTriggerFireRef,
+  findWorkflowRunInvocationClaimByRunId,
   getRun,
+  getWorkflowRunInvocationClaim,
   hasInFlightSteps,
   isWorkflowTriggerEvent,
   listActiveRunRefs,
@@ -50,6 +53,13 @@ import {
   type WorkflowTriggerEvent,
   type WorkflowRunTrigger,
 } from './run-store.js';
+import {
+  createWorkflowRunInvocationRequest,
+  fingerprintWorkflowRunInvocationRequest,
+  workflowRunPrincipal,
+  WorkflowRunIdempotencyConflict,
+  type WorkflowRunInvocationClaim,
+} from './run-idempotency.js';
 import type { WorkflowTodoBridge } from '../work-items/workflow-bridge.js';
 import { transition as transitionWorkItem } from '../work-items/transitions.js';
 import type { WorkItemStatus } from '../work-items/store.js';
@@ -236,10 +246,10 @@ export interface StartRunOptions {
   /**
    * What starts this run. New trigger emitters pass WorkflowTriggerEvent; legacy
    * callers may still pass {kind,...} for byte-compat evidence.
-   * Any trigger carrying fireRef is IDEMPOTENT per (workflowId, source, event, fireRef):
-   * if a run already claims that fire,
-   * `startWorkflowRun` refuses to mint a second one and returns the existing run
-   * (file-enforced — the run store scans the run dir; the run store is the registry).
+   * A trigger carrying fireRef is bound to the full canonical invocation intent
+   * within (workflowId, stable principal, fireRef). Exact intent replays the
+   * original run; changed definition/trigger/input/initial-overrides fails with a
+   * typed conflict before any second run record or spawn can be minted.
    */
   trigger?: WorkflowRunTrigger;
   /** Frozen structured context supplied for this invocation of the workflow. */
@@ -252,6 +262,10 @@ export interface StartRunOptions {
   makeRunId?: () => string;
   /** Legacy input seam: new todo-status starts carry this as trigger.payload.todoId. */
   triggerTodoId?: string;
+  /** Stable authorization namespace. Never use a session/capability/token value. */
+  principal?: string;
+  /** Allows transports to distinguish an exact replay (200) from a new run (201/422). */
+  onIdempotencyReplay?: () => void;
 }
 
 /* ── Per-run advancement mutex ──────────────────────────────────────────────── */
@@ -639,7 +653,7 @@ export async function startWorkflowRun(
   opts: StartRunOptions = {},
 ): Promise<WorkflowRun> {
   const now = deps.now ?? (() => new Date().toISOString());
-  const runId = (opts.makeRunId ?? (() => newRunId(now)))();
+  let runId = (opts.makeRunId ?? (() => newRunId(now)))();
   const baseTrigger: WorkflowRunTrigger = opts.trigger ?? { kind: 'manual' };
   const trigger: WorkflowRunTrigger = opts.triggerTodoId
     ? normalizeWorkflowTrigger(baseTrigger, opts.triggerTodoId)
@@ -654,22 +668,55 @@ export async function startWorkflowRun(
     ? JSON.parse(JSON.stringify(opts.stepOverrides)) as Record<string, WorkflowStepPromptOverride>
     : undefined;
 
-  // ONE RUN PER (workflowId, source, event, fireRef). A re-invocation of the same
-  // logical fire (scheduler retry, replay, double tick) finds the run that already
-  // claims the fireRef and no-ops. The scan and the first save below are synchronous
-  // (no await between them), so a same-tick duplicate call cannot interleave past the
-  // guard in this single-process store. Fail-open: a corrupt run file is invisible to
-  // the scan (listRuns skips it) — double-running is the lesser harm vs permanently
-  // skipping a fire, mirroring the cron run-log guard's stance.
   const triggerEvent = normalizeWorkflowTrigger(trigger, opts.triggerTodoId);
   if (triggerEvent.fireRef) {
-    const existing = findRunByTriggerFireRef(deps.root, def.id, triggerEvent.source, triggerEvent.event, triggerEvent.fireRef);
-    if (existing) {
-      deps.log?.('info', `[workflow-runs] fire ${triggerEvent.fireRef} of ${def.id} already ran as ${existing.runId} — refusing a duplicate run`);
-      const claimed = getRun(deps.root, def.id, existing.runId);
-      // getRun re-reads the file the scan just parsed (both synchronous); null means
-      // it vanished in between — then the fire is genuinely unclaimed, so mint.
-      if (claimed) return claimed;
+    const principal = opts.principal ?? workflowRunPrincipal(undefined, triggerEvent.source);
+    const request = createWorkflowRunInvocationRequest({
+      definition: def,
+      trigger: triggerEvent,
+      input: invocation?.input,
+      initialStepOverrides: stepOverrides,
+      principal,
+    });
+
+    // A pre-claim run is legacy evidence. Never silently bind changed intent to it:
+    // fail closed and let the caller explicitly choose a new key.
+    const legacy = findRunByTriggerFireRef(
+      deps.root,
+      def.id,
+      triggerEvent.source,
+      triggerEvent.event,
+      triggerEvent.fireRef,
+    );
+    if (legacy
+      && !getWorkflowRunInvocationClaim(deps.root, def.id, principal, triggerEvent.fireRef)
+      && !findWorkflowRunInvocationClaimByRunId(deps.root, def.id, legacy.runId)) {
+      throw new WorkflowRunIdempotencyConflict(legacy.runId);
+    }
+    const claim: WorkflowRunInvocationClaim = {
+      schemaVersion: 1,
+      workflowId: def.id,
+      principal,
+      idempotencyKey: triggerEvent.fireRef,
+      runId,
+      fingerprint: fingerprintWorkflowRunInvocationRequest(request),
+      request,
+      createdAt: now(),
+    };
+    const result = claimWorkflowRunInvocation(deps.root, claim);
+    if (result.outcome === 'conflict') {
+      throw new WorkflowRunIdempotencyConflict(result.claim?.runId ?? legacy?.runId ?? '');
+    }
+    if (result.outcome === 'replay') {
+      runId = result.claim.runId;
+      const existing = getRun(deps.root, def.id, runId);
+      if (existing) {
+        opts.onIdempotencyReplay?.();
+        deps.log?.('info', `[workflow-runs] exact invocation replayed as ${runId}`);
+        return existing;
+      }
+      // The exclusive claim landed but the process died before the run record.
+      // Resume using the preallocated run id rather than minting another identity.
     }
   }
 

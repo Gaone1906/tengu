@@ -378,7 +378,7 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     expect(onDisk.status).toBe('completed');
   });
 
-  it('POST :id/run accepts frozen input and returns the original run for a repeated idempotency key', async () => {
+  it('POST :id/run replays exact intent with 200 and rejects changed intent with a sanitized typed 409', async () => {
     const definition = inlineDef('run-input', [
       { id: 'e0', from: 'trg', to: 'sa' },
       { id: 'e1', from: 'sa', to: 'sb' },
@@ -401,14 +401,28 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     });
     expect(firstRun.trigger.fireRef).toBe('request-42');
 
+    const replay = await call('POST', '/api/workflow-definitions/run-input/run', {
+      input: { priority: 2, ticket: { id: 'ABC-42' } },
+      idempotencyKey: 'request-42',
+    }, runCtx);
+    expect(replay.status).toBe(200);
+    expect((replay.body as typeof firstRun).runId).toBe(firstRun.runId);
+
     const duplicate = await call('POST', '/api/workflow-definitions/run-input/run', {
       input: { ticket: { id: 'SHOULD-NOT-REPLACE' } },
       idempotencyKey: 'request-42',
     }, runCtx);
-    expect(duplicate.status).toBe(201);
-    const duplicateRun = duplicate.body as typeof firstRun;
-    expect(duplicateRun.runId).toBe(firstRun.runId);
-    expect(duplicateRun.invocation).toEqual(firstRun.invocation);
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body).toEqual({
+      error: 'This idempotency key is already bound to a different workflow run request.',
+      code: 'workflow-run-idempotency-conflict',
+      runId: firstRun.runId,
+    });
+    const conflictWire = JSON.stringify(duplicate.body);
+    expect(conflictWire).not.toContain('request-42');
+    expect(conflictWire).not.toContain('SHOULD-NOT-REPLACE');
+    expect(conflictWire).not.toContain('ABC-42');
+    expect(conflictWire).not.toContain('fingerprint');
 
     const files = fs.readdirSync(path.join(evidenceRoot, 'reports', 'runs', 'run-input'));
     expect(files.filter((name) => name.endsWith('.json'))).toEqual([`${firstRun.runId}.json`]);
@@ -486,7 +500,7 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     expect((unknown.body as { error: string }).error).toMatch(/unknown.*step/i);
   });
 
-  it('POST /api/workflow-runs/by-name resolves the canonical name, forwards input, and deduplicates', async () => {
+  it('POST /api/workflow-runs/by-name replays exact intent and conflicts on changed input', async () => {
     const definition = {
       ...inlineDef('run-by-name-record', [
         { id: 'e0', from: 'trg', to: 'sa' },
@@ -515,14 +529,24 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
       idempotencyKey: 'agent-request-42',
     });
 
+    const replay = await call('POST', '/api/workflow-runs/by-name', {
+      name: 'full-cycle-workflow',
+      input: { ticket: 'ABC-42', request: 'implement this' },
+      idempotencyKey: 'agent-request-42',
+    }, runCtx);
+    expect(replay.status).toBe(200);
+    expect((replay.body as typeof firstRun).runId).toBe(firstRun.runId);
+
     const duplicate = await call('POST', '/api/workflow-runs/by-name', {
       name: 'full-cycle-workflow',
       input: { request: 'must not replace the original input' },
       idempotencyKey: 'agent-request-42',
     }, runCtx);
-    expect(duplicate.status).toBe(201);
-    expect((duplicate.body as typeof firstRun).runId).toBe(firstRun.runId);
-    expect((duplicate.body as typeof firstRun).invocation).toEqual(firstRun.invocation);
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body).toMatchObject({
+      code: 'workflow-run-idempotency-conflict',
+      runId: firstRun.runId,
+    });
   });
 
   it('POST /api/workflow-runs/by-name returns a clear 404 for an unknown canonical name', async () => {

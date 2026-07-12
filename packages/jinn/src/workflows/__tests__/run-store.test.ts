@@ -1,10 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn as spawnChild } from 'node:child_process';
 import {
   saveRun,
+  claimWorkflowRunInvocation,
+  getWorkflowRunInvocationClaim,
   getRun,
   listRuns,
   findRunByFire,
@@ -15,6 +18,12 @@ import {
   WorkflowRunStoreError,
   type WorkflowRun,
 } from '../run-store.js';
+import {
+  createWorkflowRunInvocationRequest,
+  fingerprintWorkflowRunInvocationRequest,
+  type WorkflowRunInvocationClaim,
+} from '../run-idempotency.js';
+import { WORKFLOW_DEFINITION_SCHEMA_VERSION, type EditableWorkflowDefinition } from '../definition.js';
 
 function makeRun(over: Partial<WorkflowRun> = {}): WorkflowRun {
   return {
@@ -99,6 +108,167 @@ describe('saveRun / getRun', () => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'bad.json'), '{not json', 'utf8');
     expect(() => getRun(root, 'wf', 'bad')).toThrow(WorkflowRunStoreError);
+  });
+});
+
+describe('workflow invocation claims', () => {
+  it('fsyncs the exclusively created claim before reporting it claimed', () => {
+    const definition: EditableWorkflowDefinition = {
+      schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
+      id: 'wf', title: 'WF', version: 1, status: 'active', nodes: [], edges: [],
+    };
+    const request = createWorkflowRunInvocationRequest({
+      definition,
+      trigger: { source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'durable-key' },
+      principal: 'operator',
+    });
+    const claim: WorkflowRunInvocationClaim = {
+      schemaVersion: 1, workflowId: 'wf', principal: 'operator', idempotencyKey: 'durable-key',
+      runId: 'run-durable', fingerprint: fingerprintWorkflowRunInvocationRequest(request), request,
+      createdAt: '2026-07-12T00:00:00.000Z',
+    };
+    const fsync = vi.spyOn(fs, 'fsyncSync');
+    try {
+      expect(claimWorkflowRunInvocation(root, claim).outcome).toBe('claimed');
+      expect(fsync).toHaveBeenCalled();
+    } finally {
+      fsync.mockRestore();
+    }
+  });
+
+  it('exclusively claims a hashed namespace, replays exact intent, and fails changed intent closed', () => {
+    const definition: EditableWorkflowDefinition = {
+      schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
+      id: 'wf', title: 'WF', version: 1, status: 'active', nodes: [], edges: [],
+    };
+    const request = createWorkflowRunInvocationRequest({
+      definition,
+      trigger: { source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'raw/key' },
+      input: { ticket: 'ABC-42' },
+      principal: 'employee:owner',
+    });
+    const claim: WorkflowRunInvocationClaim = {
+      schemaVersion: 1,
+      workflowId: 'wf',
+      principal: 'employee:owner',
+      idempotencyKey: 'raw/key',
+      runId: 'run-claim',
+      fingerprint: fingerprintWorkflowRunInvocationRequest(request),
+      request,
+      createdAt: '2026-07-12T00:00:00.000Z',
+    };
+
+    expect(claimWorkflowRunInvocation(root, claim).outcome).toBe('claimed');
+    expect(claimWorkflowRunInvocation(root, { ...claim, runId: 'ignored-on-replay' })).toMatchObject({
+      outcome: 'replay', claim: { runId: 'run-claim' },
+    });
+    const changedRequest = { ...request, input: { ticket: 'CHANGED' } };
+    expect(claimWorkflowRunInvocation(root, {
+      ...claim,
+      request: changedRequest,
+      fingerprint: fingerprintWorkflowRunInvocationRequest(changedRequest),
+    })).toMatchObject({ outcome: 'conflict', claim: { runId: 'run-claim' } });
+    expect(getWorkflowRunInvocationClaim(root, 'wf', 'employee:owner', 'raw/key')?.runId).toBe('run-claim');
+
+    const filenames = fs.readdirSync(path.join(root, 'reports', 'run-idempotency'));
+    expect(filenames).toHaveLength(1);
+    expect(filenames[0]).toMatch(/^[a-f0-9]{64}\.json$/);
+    expect(filenames[0]).not.toContain('raw');
+  });
+
+  it('allows exactly one claimant in a real cross-process wx race', async () => {
+    const definition: EditableWorkflowDefinition = {
+      schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
+      id: 'wf', title: 'WF', version: 1, status: 'active', nodes: [], edges: [],
+    };
+    const request = createWorkflowRunInvocationRequest({
+      definition,
+      trigger: { source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'race-key' },
+      principal: 'operator',
+    });
+    const claim: WorkflowRunInvocationClaim = {
+      schemaVersion: 1, workflowId: 'wf', principal: 'operator', idempotencyKey: 'race-key',
+      runId: 'run-race', fingerprint: fingerprintWorkflowRunInvocationRequest(request), request,
+      createdAt: '2026-07-12T00:00:00.000Z',
+    };
+    const digest = createHash('sha256')
+      .update(JSON.stringify({ idempotencyKey: 'race-key', principal: 'operator', workflowId: 'wf' }))
+      .digest('hex');
+    const dir = path.join(root, 'reports', 'run-idempotency');
+    const file = path.join(dir, `${digest}.json`);
+    fs.mkdirSync(dir, { recursive: true });
+    const child = spawnChild(process.execPath, ['-e', `
+      const fs = require('node:fs');
+      const file = process.argv[1];
+      const contents = process.argv[2];
+      process.on('message', ({ at }) => {
+        while (Date.now() < at) {}
+        let outcome = 'claimed';
+        let fd;
+        const temporary = file + '.tmp-child-' + process.pid;
+        try {
+          fd = fs.openSync(temporary, 'wx', 0o600);
+          fs.writeFileSync(fd, contents);
+          fs.fsyncSync(fd);
+          fs.closeSync(fd);
+          fd = undefined;
+          fs.linkSync(temporary, file);
+        } catch (error) {
+          outcome = error && error.code === 'EEXIST' ? 'existing' : 'error';
+        } finally {
+          if (fd !== undefined) fs.closeSync(fd);
+          try { fs.unlinkSync(temporary); } catch {}
+        }
+        process.send(outcome);
+        process.exit(outcome === 'error' ? 1 : 0);
+      });
+    `, file, JSON.stringify(claim, null, 2) + '\n'], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+    await new Promise<void>((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+    const childOutcome = new Promise<string>((resolve) => child.once('message', (value) => resolve(String(value))));
+    const at = Date.now() + 75;
+    child.send({ at });
+    while (Date.now() < at) { /* align the two processes on the same instant */ }
+    const parent = claimWorkflowRunInvocation(root, claim);
+    const other = await childOutcome;
+
+    expect([parent.outcome, other]).toContain('claimed');
+    expect(parent.outcome === 'claimed' ? other : parent.outcome).toMatch(/^(existing|replay)$/);
+    expect(fs.readdirSync(dir)).toEqual([`${digest}.json`]);
+    expect(getWorkflowRunInvocationClaim(root, 'wf', 'operator', 'race-key')?.runId).toBe('run-race');
+  });
+
+  it('fails closed when an existing claim is corrupt', () => {
+    const definition: EditableWorkflowDefinition = {
+      schemaVersion: WORKFLOW_DEFINITION_SCHEMA_VERSION,
+      id: 'wf', title: 'WF', version: 1, status: 'active', nodes: [], edges: [],
+    };
+    const request = createWorkflowRunInvocationRequest({
+      definition,
+      trigger: { source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'corrupt-key' },
+      principal: 'operator',
+    });
+    const claim: WorkflowRunInvocationClaim = {
+      schemaVersion: 1, workflowId: 'wf', principal: 'operator', idempotencyKey: 'corrupt-key',
+      runId: 'run-corrupt', fingerprint: fingerprintWorkflowRunInvocationRequest(request), request,
+      createdAt: '2026-07-12T00:00:00.000Z',
+    };
+    const digest = createHash('sha256')
+      .update(JSON.stringify({ idempotencyKey: 'corrupt-key', principal: 'operator', workflowId: 'wf' }))
+      .digest('hex');
+    const dir = path.join(root, 'reports', 'run-idempotency');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${digest}.json`), '{broken', 'utf8');
+
+    const wait = vi.spyOn(Atomics, 'wait');
+    try {
+      expect(claimWorkflowRunInvocation(root, claim)).toEqual({ outcome: 'conflict', claim: null });
+      expect(wait).not.toHaveBeenCalled();
+    } finally {
+      wait.mockRestore();
+    }
   });
 });
 

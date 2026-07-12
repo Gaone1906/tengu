@@ -92,7 +92,9 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
   if (status === 409) {
     const detail = typeof rec.error === "string" ? rec.error : asText(body);
     const runStatus = typeof rec.status === "string" ? ` (current status: ${rec.status})` : "";
-    return new JinnMcpToolError(`${what} conflicted (409): ${detail}${runStatus}`);
+    const code = typeof rec.code === "string" ? ` [${rec.code}]` : "";
+    const runId = typeof rec.runId === "string" ? ` Existing run: ${rec.runId}.` : "";
+    return new JinnMcpToolError(`${what} conflicted (409)${code}: ${detail}${runStatus}${runId}`);
   }
   if (status === 404) {
     const detail = typeof rec.error === "string" ? rec.error : "not found";

@@ -268,6 +268,30 @@ describe("handleMcpRequest — tools/call", () => {
     expect(result.content[0].text).toMatch(/not found/);
   });
 
+  it("a workflow idempotency 409 is an isError result with typed safe guidance", async () => {
+    const ctx = stubCtx(() => ({
+      status: 409,
+      body: {
+        error: "This idempotency key is already bound to a different workflow run request.",
+        code: "workflow-run-idempotency-conflict",
+        runId: "run-existing",
+      },
+    }));
+    const resp = await handleMcpRequest(
+      { id: 61, method: "tools/call", params: { name: "start_workflow_run", arguments: {
+        workflowId: "wf", input: { secret: "must-not-leak" }, idempotencyKey: "secret-key",
+      } } },
+      buildTools(),
+      ctx,
+    );
+    const result = resp!.result as { content: Array<{ text: string }>; isError?: boolean };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("workflow-run-idempotency-conflict");
+    expect(result.content[0].text).toContain("run-existing");
+    expect(result.content[0].text).not.toContain("must-not-leak");
+    expect(result.content[0].text).not.toContain("secret-key");
+  });
+
   it("an unknown tool name is an isError result, not a protocol error", async () => {
     const ctx = stubCtx(() => ({ status: 200, body: {} }));
     const resp = await handleMcpRequest(

@@ -25,6 +25,10 @@ import {
 import { validateNewSessionSelection, validateSessionPatch } from "../sessions/session-patch.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { MAX_WORKFLOW_DEFINITION_BYTES } from "../workflows/definition.js";
+import {
+  WorkflowRunIdempotencyConflict,
+  WORKFLOW_RUN_IDEMPOTENCY_CONFLICT,
+} from "../workflows/run-idempotency.js";
 import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "../sessions/context.js";
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import {
@@ -1144,13 +1148,28 @@ async function runWorkflowDefinitionFromHttp(
         ...(validated.idempotencyKey ? { idempotencyKey: validated.idempotencyKey } : {}),
       }
     : undefined;
-  const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context), def, trigger, {
-    knownEmployees,
-    knownEngines,
-    ...(invocation ? { invocation } : {}),
-    ...(validated.stepOverrides ? { stepOverrides: validated.stepOverrides } : {}),
-  });
-  return json(res, projectWorkflowRunApprovalCapability(run, req.headers, context), run.status === "failed" ? 422 : 201);
+  let replayed = false;
+  try {
+    const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context), def, trigger, {
+      knownEmployees,
+      knownEngines,
+      principal: authority.actor === "operator" ? "operator" : `employee:${authority.actor}`,
+      onIdempotencyReplay: () => { replayed = true; },
+      ...(invocation ? { invocation } : {}),
+      ...(validated.stepOverrides ? { stepOverrides: validated.stepOverrides } : {}),
+    });
+    const status = replayed ? 200 : run.status === "failed" ? 422 : 201;
+    return json(res, projectWorkflowRunApprovalCapability(run, req.headers, context), status);
+  } catch (err) {
+    if (err instanceof WorkflowRunIdempotencyConflict) {
+      return json(res, {
+        error: err.message,
+        code: WORKFLOW_RUN_IDEMPOTENCY_CONFLICT,
+        ...(err.runId ? { runId: err.runId } : {}),
+      }, 409);
+    }
+    throw err;
+  }
 }
 
 /**

@@ -13,12 +13,17 @@ import {
 } from '../run-reconciler.js';
 import { markDispatching, stepSessionKey, type SpawnContext, type StepSessionProbe } from '../advance.js';
 import { createDefinition, getDefinition, updateDefinition, WorkflowStoreError } from '../definition-store.js';
-import { getRun, saveRun, type WorkflowRun } from '../run-store.js';
+import { claimWorkflowRunInvocation, getRun, saveRun, type WorkflowRun } from '../run-store.js';
 import {
   WORKFLOW_DEFINITION_SCHEMA_VERSION,
   type EditableWorkflowDefinition,
   type WorkflowNode,
 } from '../definition.js';
+import {
+  createWorkflowRunInvocationRequest,
+  fingerprintWorkflowRunInvocationRequest,
+  type WorkflowRunInvocationClaim,
+} from '../run-idempotency.js';
 
 /**
  * Integration tests for the GRS-014b run driver + reconciler against a REAL run/definition
@@ -101,6 +106,106 @@ function harness(overrides: Partial<RunDriverDeps> = {}) {
 }
 
 describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
+  it('replays only exact canonical intent and rejects changed input before a second spawn', async () => {
+    const def = createDefinition(root, chainDef('intent-bound', [trigger, step('a')]), { now });
+    const { deps, spawnCalls } = harness();
+    const runTrigger = {
+      source: 'manual', event: 'workflow.manual_started', payload: { b: 2, a: 1 }, fireRef: 'request-42',
+    } as const;
+    const first = await startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      invocation: { input: { ticket: 'ABC-42', nested: { b: 2, a: 1 } } },
+      principal: 'employee:owner',
+    });
+    let replayed = false;
+    const exact = await startWorkflowRun(deps, def, {
+      trigger: { ...runTrigger, payload: { a: 1, b: 2 } },
+      invocation: { input: { nested: { a: 1, b: 2 }, ticket: 'ABC-42' } },
+      principal: 'employee:owner',
+      onIdempotencyReplay: () => { replayed = true; },
+    });
+
+    expect(exact.runId).toBe(first.runId);
+    expect(replayed).toBe(true);
+    await expect(startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      invocation: { input: { ticket: 'CHANGED' } },
+      principal: 'employee:owner',
+    })).rejects.toMatchObject({
+      code: 'workflow-run-idempotency-conflict', runId: first.runId,
+    });
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  it('resumes a crash-window claim without a run using its preallocated run id', async () => {
+    const def = createDefinition(root, chainDef('claim-recovery', [trigger, step('a')]), { now });
+    const { deps, spawnCalls } = harness();
+    const runTrigger = {
+      source: 'manual', event: 'workflow.manual_started', payload: { workflowId: def.id }, fireRef: 'recover-key',
+    } as const;
+    const request = createWorkflowRunInvocationRequest({
+      definition: def,
+      trigger: runTrigger,
+      input: { ticket: 'ABC-42' },
+      principal: 'employee:owner',
+    });
+    const claim: WorkflowRunInvocationClaim = {
+      schemaVersion: 1,
+      workflowId: def.id,
+      principal: 'employee:owner',
+      idempotencyKey: 'recover-key',
+      runId: 'run-preallocated',
+      fingerprint: fingerprintWorkflowRunInvocationRequest(request),
+      request,
+      createdAt: FIXED,
+    };
+    expect(claimWorkflowRunInvocation(root, claim).outcome).toBe('claimed');
+    expect(getRun(root, def.id, claim.runId)).toBeNull();
+
+    const recovered = await startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      invocation: { input: { ticket: 'ABC-42' } },
+      principal: 'employee:owner',
+    });
+
+    expect(recovered.runId).toBe('run-preallocated');
+    expect(getRun(root, def.id, 'run-preallocated')?.runId).toBe('run-preallocated');
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  it('compares replay intent with immutable initial overrides after the live run is edited', async () => {
+    const def = createDefinition(root, chainDef('immutable-initial-overrides', [trigger, step('a'), step('b')]), { now });
+    const { deps, spawnCalls } = harness();
+    const runTrigger = {
+      source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'override-key',
+    } as const;
+    const initialStepOverrides = { b: { prompt: 'Original run-local prompt.' } };
+    const first = await startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      invocation: { input: { ticket: 'ABC-42' } },
+      stepOverrides: initialStepOverrides,
+      principal: 'employee:owner',
+    });
+    const edited = await editPendingWorkflowStepPrompt(
+      deps, def.id, first.runId, 'b', 'Later operator edit.', { actor: 'owner' },
+    );
+    expect(edited).toMatchObject({ outcome: 'edited', run: { stepOverrides: { b: { prompt: 'Later operator edit.' } } } });
+
+    let replayed = false;
+    const exact = await startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      invocation: { input: { ticket: 'ABC-42' } },
+      stepOverrides: initialStepOverrides,
+      principal: 'employee:owner',
+      onIdempotencyReplay: () => { replayed = true; },
+    });
+
+    expect(exact.runId).toBe(first.runId);
+    expect(exact.stepOverrides?.b?.prompt).toBe('Later operator edit.');
+    expect(replayed).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+  });
+
   it('freezes structured per-run input and makes it available to the first phase prompt', async () => {
     const def = createDefinition(root, chainDef('parameterized', [trigger, step('a')]), { now });
     const { deps, spawnCalls } = harness();
