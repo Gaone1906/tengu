@@ -22,6 +22,9 @@ test("sanitized sandbox config retains the required Claude engine mapping", () =
 
 test("sandbox seeds a real manager principal for authorized approval browser coverage", () => {
   assert.match(bootstrap, /name === "layout-author-1" \? "manager" : "employee"/)
+  assert.match(bootstrap, /approval\/manager-session\.json/)
+  assert.match(browserSpec, /approval\/manager-session\.json/)
+  assert.doesNotMatch(browserSpec, /authoring\/sessions\/child-linear-final\.json/)
 })
 
 test("five author probes settle sequentially inside the disposable gateway", () => {

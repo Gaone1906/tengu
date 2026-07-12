@@ -42,10 +42,10 @@ function safeNetworkUrl(raw: string) {
 type PrincipalHeaders = Record<string, string>
 
 function managerPrincipalHeaders(): PrincipalHeaders {
-  const settled = JSON.parse(fs.readFileSync(path.join(env.artifacts, 'authoring/sessions/child-linear-final.json'), 'utf8'))
-  const sessionId = settled?.body?.id
-  if (typeof sessionId !== 'string' || settled?.body?.employee !== 'layout-author-1') {
-    throw new Error('the routed approval manager session did not settle in this sandbox')
+  const seeded = JSON.parse(fs.readFileSync(path.join(env.artifacts, 'approval/manager-session.json'), 'utf8'))
+  const sessionId = seeded?.sessionId
+  if (typeof sessionId !== 'string' || seeded?.employee !== 'layout-author-1') {
+    throw new Error('the routed approval manager session was not seeded in this sandbox')
   }
   const key = Buffer.from(fs.readFileSync(path.join(env.home, 'secrets/mcp-session-capability.key'), 'utf8').trim(), 'base64url')
   const capability = crypto.createHmac('sha256', key)

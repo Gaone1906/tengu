@@ -41,6 +41,7 @@ if (!artifacts.startsWith(`${home}${path.sep}`)) throw new Error("artifacts must
 const repo = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..")
 const requireFromJinn = createRequire(path.join(repo, "packages/jinn/package.json"))
 const YAML = requireFromJinn("yaml")
+const Database = requireFromJinn("better-sqlite3")
 const configPath = path.join(home, "config.yaml")
 const config = YAML.parse(fs.readFileSync(configPath, "utf8")) ?? {}
 config.gateway = { ...(config.gateway ?? {}), host: "127.0.0.1", port }
@@ -76,9 +77,7 @@ for (const name of employees) {
   const display = name.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ")
   write(path.join(home, "org", "verification", `${name}.yaml`), YAML.stringify({
     name, displayName: display, department: "verification",
-    // The first author doubles as the disposable approval root. Its settled
-    // session gives the browser matrix a real capability-bound principal, so
-    // authorized approval is proven through the same route as production.
+    // The first author doubles as the disposable approval root.
     rank: name === "layout-author-1" ? "manager" : "employee",
     engine: "codex", model: "gpt-5.5", effortLevel: "low",
     persona: "You are a disposable generic sandbox verifier. Use only built-in Jinn tools on the current sandbox gateway. Do not inspect files, edit code, use external systems, or contact another gateway.",
@@ -86,3 +85,25 @@ for (const name of employees) {
 }
 fs.mkdirSync(artifacts, { recursive: true })
 write(path.join(artifacts, "environment.json"), `${JSON.stringify({ port, baseUrl: `http://127.0.0.1:${port}`, homeKind: "throwaway", connectors: [] }, null, 2)}\n`)
+
+// Authorized approval must be independently testable even when the expensive
+// author probes are disabled or externally rate-limited. Seed one ordinary idle
+// manager conversation before gateway start, then derive the same capability-bound
+// principal headers the product uses. The record and its public id remain wholly
+// inside this throwaway home/artifact root.
+const managerSessionId = "workflow-layout-approval-manager"
+const managerSourceRef = `sandbox:${managerSessionId}`
+const now = new Date().toISOString()
+const db = new Database(path.join(home, "sessions", "registry.db"))
+db.prepare(`
+  INSERT OR IGNORE INTO sessions (
+    id, engine, source, source_ref, connector, session_key, employee, model,
+    title, prompt_excerpt, effort_level, status, created_at, last_activity
+  ) VALUES (?, 'codex', 'web', ?, 'web', ?, 'layout-author-1', 'gpt-5.5',
+    'Approval verifier', 'Capability-bound approval verification', 'low', 'idle', ?, ?)
+`).run(managerSessionId, managerSourceRef, managerSourceRef, now, now)
+db.close()
+write(
+  path.join(artifacts, "approval/manager-session.json"),
+  `${JSON.stringify({ sessionId: managerSessionId, employee: "layout-author-1" }, null, 2)}\n`,
+)
