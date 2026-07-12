@@ -76,6 +76,7 @@ export function FilterBar({
   const [mobileOpen, setMobileOpen] = useState(false)
   const filterTriggerRef = useRef<HTMLButtonElement>(null)
   const wasMobileRef = useRef(mobile)
+  const crossoverOwnsFocusRef = useRef(false)
   const [q, setQ] = useState(filters.q ?? "")
   const debounce = useRef<number | null>(null)
   const filtersRef = useRef(filters)
@@ -95,10 +96,22 @@ export function FilterBar({
     if (debounce.current != null) window.clearTimeout(debounce.current)
   }, [])
   useEffect(() => {
-    const crossedToDesktop = wasMobileRef.current && !mobile
+    const previousMobile = wasMobileRef.current
+    const crossed = previousMobile !== mobile
     wasMobileRef.current = mobile
-    if (!crossedToDesktop || !mobileOpen) return
-    setMobileOpen(false)
+    if (!crossed) return
+    const crossedToDesktopWithSheet = previousMobile && !mobile && mobileOpen
+    if (crossedToDesktopWithSheet) {
+      crossoverOwnsFocusRef.current = true
+      setMobileOpen(false)
+    }
+    const active = document.activeElement
+    const shouldTransfer = crossedToDesktopWithSheet
+      || (crossoverOwnsFocusRef.current && (active === document.body || active === filterTriggerRef.current))
+    if (!shouldTransfer) {
+      crossoverOwnsFocusRef.current = false
+      return
+    }
     queueMicrotask(() => filterTriggerRef.current?.focus())
   }, [mobile, mobileOpen])
 

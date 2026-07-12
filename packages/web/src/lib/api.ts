@@ -77,27 +77,33 @@ export interface OrgData {
 export class ApiError extends Error {
   readonly status: number
   readonly code?: string
+  readonly currentVersion?: number
 
-  constructor(status: number, message: string, code?: string) {
+  constructor(status: number, message: string, code?: string, currentVersion?: number) {
     super(message)
     this.name = "ApiError"
     this.status = status
     this.code = code
+    this.currentVersion = currentVersion
   }
 }
 
 async function responseError(res: Response): Promise<ApiError> {
   let message = `API error: ${res.status}`
   let code: string | undefined
+  let currentVersion: number | undefined
   try {
     const body = await res.json();
     if (body.error) message = String(body.error)
     else if (body.message) message = String(body.message)
     if (typeof body.code === "string" && body.code.trim()) code = body.code
+    if (typeof body.currentVersion === "number" && Number.isSafeInteger(body.currentVersion) && body.currentVersion >= 0) {
+      currentVersion = body.currentVersion
+    }
   } catch {
     // Response wasn't JSON; status remains the typed UI-safe discriminator.
   }
-  return new ApiError(res.status, message, code)
+  return new ApiError(res.status, message, code, currentVersion)
 }
 
 async function get<T>(path: string, init?: RequestInit): Promise<T> {

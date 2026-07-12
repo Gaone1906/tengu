@@ -823,14 +823,14 @@ export function DetailSheet({
               </div>
             </div>
           )}
-          {(draftState.error || transitionError) && (
+          {((draftState.error && !draftState.recoveredConflict) || transitionError) && (
             <div
               role="alert"
               data-testid="sheet-save-error"
               className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
             >
-              <span className="min-w-0 flex-1 break-words">{draftState.error ? operatorSafeTodoError(new Error(draftState.error), "Couldn't save") : transitionError}</span>
-              {draftState.status === "error" && <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">Retry</button>}
+              <span className="min-w-0 flex-1 break-words">{draftState.error ? operatorSafeTodoError(draftState.error, "Couldn't save") : transitionError}</span>
+              {draftState.status === "error" && !draftState.recoveredConflict && <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">Retry</button>}
             </div>
           )}
           {showCloseGuard && (

@@ -105,6 +105,18 @@ describe("Todo progressive filters", () => {
 
     act(() => mobileListener?.({ matches: true } as MediaQueryListEvent))
     expect(screen.queryByRole("dialog", { name: "Filter todos" })).toBeNull()
+    await act(async () => Promise.resolve())
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter todos" }))
+
+    act(() => mobileListener?.({ matches: false } as MediaQueryListEvent))
+    await act(async () => Promise.resolve())
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter todos" }))
+
+    act(() => mobileListener?.({ matches: true } as MediaQueryListEvent))
+    await act(async () => Promise.resolve())
+    expect(screen.queryByRole("dialog", { name: "Filter todos" })).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter todos" }))
+    expect(document.activeElement).not.toBe(document.body)
   })
 
   it("keeps active filters visible and individually removable", () => {

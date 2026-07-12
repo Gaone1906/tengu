@@ -107,12 +107,25 @@ const SAFE_TODO_ERROR_BY_CODE: Readonly<Record<string, string>> = {
   WORK_ITEM_NOT_FOUND: "This Todo no longer exists.",
 }
 
+function normalizedTodoErrorCode(error: ApiError): string | undefined {
+  return error.code?.trim().toUpperCase()
+}
+
+export function isTodoVersionConflictError(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false
+  return normalizedTodoErrorCode(error) === "TODO_VERSION_CONFLICT"
+    || normalizedTodoErrorCode(error) === "WORK_ITEM_VERSION_CONFLICT"
+    || error.status === 409
+    || error.status === 412
+}
+
 /** Closed safe-copy mapping. Raw backend diagnostics stay on ApiError for
  * protected diagnostics, never in visible or accessible operator output. */
 export function operatorSafeTodoError(error: unknown, fallback: string): string {
   if (!(error instanceof ApiError)) return fallback
-  if (error.code && SAFE_TODO_ERROR_BY_CODE[error.code]) return SAFE_TODO_ERROR_BY_CODE[error.code]
-  if (error.status === 409 || error.status === 412) return SAFE_TODO_ERROR_BY_CODE.WORK_ITEM_VERSION_CONFLICT
+  const code = normalizedTodoErrorCode(error)
+  if (code && SAFE_TODO_ERROR_BY_CODE[code]) return SAFE_TODO_ERROR_BY_CODE[code]
+  if (isTodoVersionConflictError(error)) return SAFE_TODO_ERROR_BY_CODE.WORK_ITEM_VERSION_CONFLICT
   if (error.status === 404) return SAFE_TODO_ERROR_BY_CODE.WORK_ITEM_NOT_FOUND
   if (error.status === 403 && /\b(?:escalated|approval (?:is )?pending|sticky terminal)\b/i.test(error.message)) {
     return "This transition needs explicit operator authority. Use the human operator surface if it is intentional."

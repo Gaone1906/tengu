@@ -1,5 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { ApiError } from "@/lib/api"
 import { useTodoDraft, type TodoDraftPatch, type TodoEditableDraft } from "../use-todo-draft"
 import { loadTodoJournal, persistTodoJournal } from "../todo-private-state"
 
@@ -170,6 +171,55 @@ describe("useTodoDraft", () => {
     expect(result.current.isAcknowledged).toBe(true)
     expect(result.current.status).toBe("idle")
     expect(Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.getItem(sessionStorage.key(i) ?? "")).join()).not.toContain("Temporary")
+  })
+
+  it("forgets a definitive failed patch when the user reverts to the baseline", async () => {
+    const failure = new ApiError(403, "private backend diagnostic", "WORK_ITEM_APPROVAL_PENDING")
+    const save = vi.fn().mockRejectedValue(failure)
+    const { result, unmount } = renderHook(() => useTodoDraft({ id: "definitive-revert", initial: first, save }))
+
+    act(() => {
+      result.current.change("title", "Rejected title")
+      result.current.save({ title: "Rejected title" })
+    })
+    await waitFor(() => expect(result.current.status).toBe("error"))
+    expect(result.current.error).toBe(failure)
+
+    act(() => result.current.change("title", first.title))
+
+    expect(result.current.unsavedPatch()).toEqual({})
+    expect(result.current.hasUnsaved).toBe(false)
+    expect(result.current.isAcknowledged).toBe(true)
+    expect(result.current.status).toBe("idle")
+    expect(result.current.error).toBeNull()
+    expect(loadTodoJournal("definitive-revert")).toBeNull()
+    unmount()
+
+    const recovered = renderHook(() => useTodoDraft({ id: "definitive-revert", initial: first, save }))
+    expect(recovered.result.current.draft).toEqual(first)
+    expect(recovered.result.current.hasUnsaved).toBe(false)
+    act(() => recovered.result.current.retry())
+    expect(save).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    new ApiError(403, "private approval payload", "WORK_ITEM_APPROVAL_PENDING"),
+    new ApiError(409, "private conflict payload", "todo_version_conflict"),
+    new ApiError(412, "private stale payload", "WORK_ITEM_VERSION_CONFLICT"),
+  ])("preserves structured draft errors: $status/$code", async (failure) => {
+    const save = vi.fn().mockRejectedValue(failure)
+    const { result } = renderHook(() => useTodoDraft({ id: `typed-${failure.status}`, initial: first, save }))
+
+    act(() => {
+      result.current.change("title", "Rejected title")
+      result.current.save({ title: "Rejected title" })
+    })
+
+    await waitFor(() => expect(result.current.status).toBe("error"))
+    expect(result.current.error).toBe(failure)
+    if (failure.status === 409 || failure.status === 412) {
+      expect(result.current.recoveredConflict).toBe(true)
+    }
   })
 
   it("reconciles a committed mutation whose response was lost before acknowledging a local revert", async () => {
@@ -383,7 +433,7 @@ describe("useTodoDraft", () => {
     })
     await waitFor(() => expect(result.current.status).toBe("error"))
     expect(result.current.draft.body).toBe("Unsaved but durable")
-    expect(result.current.error).toBe("Network unavailable")
+    expect(result.current.error).toEqual(new Error("Network unavailable"))
 
     act(() => result.current.retry())
     await waitFor(() => expect(result.current.status).toBe("saved"))

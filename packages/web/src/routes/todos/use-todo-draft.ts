@@ -5,6 +5,7 @@ import {
   persistTodoJournal,
   type TodoDraftField,
 } from "./todo-private-state"
+import { isTodoVersionConflictError } from "@/lib/todos"
 
 export interface TodoEditableDraft {
   title: string
@@ -95,7 +96,7 @@ export function useTodoDraft({
 
   const [draft, setDraftState] = useState(startingDraft)
   const [status, setStatus] = useState<TodoSaveStatus>(recoveredUncertainFields.size > 0 ? "error" : recoveredFields.size > 0 ? "dirty" : "idle")
-  const [error, setError] = useState<string | null>(recoveredUncertainFields.size > 0 ? "Couldn't confirm the previous save" : null)
+  const [error, setError] = useState<unknown | null>(recoveredUncertainFields.size > 0 ? new Error("Couldn't confirm the previous save") : null)
   const [recoveredConflict, setRecoveredConflict] = useState(startingConflicts.size > 0)
   const draftRef = useRef(startingDraft)
   const baselineRef = useRef(initial)
@@ -183,7 +184,7 @@ export function useTodoDraft({
     failedRef.current = storedUncertainFields.size > 0
     setDraftState(nextDraft)
     setStatus(storedUncertainFields.size > 0 ? "error" : storedFields.size > 0 ? "dirty" : "idle")
-    setError(storedUncertainFields.size > 0 ? "Couldn't confirm the previous save" : null)
+    setError(storedUncertainFields.size > 0 ? new Error("Couldn't confirm the previous save") : null)
     setRecoveredConflict(conflicts.size > 0)
 
     return () => {
@@ -247,6 +248,7 @@ export function useTodoDraft({
         await saveRef.current(request.patch)
       } catch (cause) {
         if (epoch !== epochRef.current) return
+        const versionConflict = isTodoVersionConflictError(cause)
         if (isAmbiguousTransportFailure(cause)) {
           for (const field of fieldsOf(request.patch)) {
             uncertainFieldsRef.current.add(field)
@@ -255,14 +257,18 @@ export function useTodoDraft({
         } else {
           for (const field of fieldsOf(request.patch)) uncertainFieldsRef.current.delete(field)
         }
+        if (versionConflict) {
+          for (const field of fieldsOf(request.patch)) conflictFieldsRef.current.add(field)
+        }
         activeRef.current = null
         runningRef.current = false
-        failedRef.current = true
+        failedRef.current = !versionConflict
         queueLatest()
         persistLatest()
         if (mountedRef.current) {
           setStatus("error")
-          setError(cause instanceof Error ? cause.message : "Couldn't save")
+          setError(cause)
+          setRecoveredConflict(versionConflict || conflictFieldsRef.current.size > 0)
         }
         return
       }
@@ -299,12 +305,28 @@ export function useTodoDraft({
       dirtyFieldsRef.current.add(field)
     }
     setRecoveredConflict(conflictFieldsRef.current.size > 0)
+    if (failedRef.current
+      && !runningRef.current
+      && dirtyFieldsRef.current.size === 0
+      && uncertainFieldsRef.current.size === 0
+      && conflictFieldsRef.current.size === 0) {
+      pendingRef.current = null
+      activeRef.current = null
+      failedRef.current = false
+      acknowledgedRevisionRef.current = localRevisionRef.current
+      clearTodoJournal(id, acknowledgedRevisionRef.current)
+      if (mountedRef.current) {
+        setStatus("idle")
+        setError(null)
+      }
+      return
+    }
     if (runningRef.current) queueLatest()
     if (!acknowledgeIfClear()) {
       persistLatest()
       if (mountedRef.current && !runningRef.current && !failedRef.current) setStatus("dirty")
     }
-  }, [acknowledgeIfClear, persistLatest, publishDraft, queueLatest])
+  }, [acknowledgeIfClear, id, persistLatest, publishDraft, queueLatest])
 
   const save = useCallback((patch: TodoDraftPatch) => {
     const next = { ...draftRef.current, ...patch }
@@ -399,7 +421,7 @@ export function useTodoDraft({
       persistLatest()
       if (mountedRef.current) {
         setStatus("error")
-        setError(cause instanceof Error ? cause.message : "Couldn't confirm save")
+        setError(cause)
       }
     }
   }, [acknowledgeIfClear, drain, outstandingFields, persistLatest, publishDraft, queueLatest, settleAcknowledgedFields])

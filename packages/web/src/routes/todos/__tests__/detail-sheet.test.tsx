@@ -429,6 +429,86 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(screen.getByTestId("detail-sheet").innerHTML).not.toContain(diagnostic)
   })
 
+  it.each([
+    "SQLITE_BUSY /srv/private.db token=supersecret",
+    "Error: connector failed at /opt/gateway/patch.ts:42",
+    "<pre>stack trace\nAuthorization: Bearer private-token</pre>",
+  ])("never renders arbitrary PATCH diagnostics in visible or accessible output: %s", async (diagnostic) => {
+    const value = detail("backlog")
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({ error: diagnostic }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Rejected title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+
+    const error = await screen.findByRole("alert")
+    expect(error.textContent).toContain("Couldn't save")
+    expect(error.textContent).not.toContain(diagnostic)
+    expect(error.getAttribute("aria-label") ?? "").not.toContain(diagnostic)
+    expect(screen.getByTestId("detail-sheet").innerHTML).not.toContain(diagnostic)
+  })
+
+  it("keeps a typed PATCH 403 actionable without rendering its diagnostic", async () => {
+    const value = detail("backlog")
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({
+          code: "WORK_ITEM_APPROVAL_PENDING",
+          error: "private approval payload wi_hidden_patch",
+        }), { status: 403, headers: { "Content-Type": "application/json" } })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Rejected title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+
+    const error = await screen.findByRole("alert")
+    expect(error.textContent).toContain("awaiting approval")
+    expect(error.textContent).not.toMatch(/wi_[a-z0-9_-]+/i)
+    expect(error.textContent).not.toContain("private approval payload")
+  })
+
+  it.each([409, 412])("promotes a typed PATCH %s conflict to explicit conflict actions", async (status) => {
+    const value = detail("backlog")
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({
+          code: status === 409 ? "todo_version_conflict" : "WORK_ITEM_VERSION_CONFLICT",
+          currentVersion: 9,
+          error: "private conflict payload wi_hidden_conflict",
+        }), { status, headers: { "Content-Type": "application/json" } })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Conflicting title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+
+    expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Reload remote" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Overwrite remote" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull()
+    expect(screen.getByTestId("detail-sheet").innerHTML).not.toMatch(/wi_[a-z0-9_-]+/i)
+    expect(screen.getByTestId("detail-sheet").innerHTML).not.toContain("private conflict payload")
+  })
+
   it("uses Escape to cancel a field edit before Escape can close the sheet", () => {
     const onClose = vi.fn()
     renderSheetWithDetail(detail("backlog"), onClose)

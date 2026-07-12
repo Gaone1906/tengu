@@ -14,6 +14,7 @@ describe("typed API errors", () => {
   it("retains HTTP status and an optional machine code without making diagnostics UI copy", async () => {
     authFetch.mockResolvedValue(new Response(JSON.stringify({
       code: "WORK_ITEM_VERSION_CONFLICT",
+      currentVersion: 17,
       error: "SQLITE_BUSY /srv/private.db token=secret",
     }), { status: 412, headers: { "Content-Type": "application/json" } }))
 
@@ -22,6 +23,7 @@ describe("typed API errors", () => {
     await expect(request).rejects.toMatchObject({
       status: 412,
       code: "WORK_ITEM_VERSION_CONFLICT",
+      currentVersion: 17,
       message: "SQLITE_BUSY /srv/private.db token=secret",
     })
   })

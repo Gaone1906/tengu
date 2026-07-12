@@ -166,6 +166,8 @@ export default function TodosPage() {
   const savedPageDepthKey = savedPageDepth ? JSON.stringify(savedPageDepth) : ""
   const scrollRestoreKey = `${location.key}:${openRef ?? "closed"}`
   const ledgerScrollRef = useRef<HTMLDivElement>(null)
+  const ledgerHeadingRef = useRef<HTMLHeadingElement>(null)
+  const lastDetailOpenerRef = useRef<HTMLElement | null>(null)
   const lastDetailScrollRef = useRef<number | null>(
     typeof historyState?.todoScroll === "number" && Number.isFinite(historyState.todoScroll)
       ? historyState.todoScroll
@@ -270,6 +272,10 @@ export default function TodosPage() {
     const todoScroll = scroller?.scrollTop ?? 0
     const todoAnchorRef = todoPrivateRef(id)
     const row = scroller?.querySelector<HTMLElement>(`[data-todo-anchor="${todoAnchorRef}"]`)
+    const active = document.activeElement
+    lastDetailOpenerRef.current = active instanceof HTMLElement && active !== document.body
+      ? active
+      : row?.querySelector<HTMLElement>("button") ?? null
     const todoAnchorOffset = row && scroller
       ? row.getBoundingClientRect().top - scroller.getBoundingClientRect().top
       : 0
@@ -316,7 +322,15 @@ export default function TodosPage() {
     if (!scroller || cancelledScrollRestoreRef.current === scrollRestoreKey) return
     if (openRef && anchorRef && anchorOffset != null) {
       const row = scroller.querySelector<HTMLElement>(`[data-todo-anchor="${anchorRef}"]`)
-      if (!row) return
+      if (!row) {
+        if (stateScroll != null) {
+          const hasLayout = scroller.scrollHeight > 0 || scroller.clientHeight > 0
+          const maxScroll = hasLayout ? Math.max(0, scroller.scrollHeight - scroller.clientHeight) : stateScroll
+          scroller.scrollTop = Math.min(Math.max(0, stateScroll), maxScroll)
+          restoredScrollRef.current = scrollRestoreKey
+        }
+        return
+      }
       const rowRect = row.getBoundingClientRect()
       const scrollerRect = scroller.getBoundingClientRect()
       const currentOffset = rowRect.top - scrollerRect.top
@@ -424,6 +438,11 @@ export default function TodosPage() {
       replace: true,
       state: cleanTodoHistoryState(historyState),
     })
+    window.requestAnimationFrame(() => {
+      const opener = lastDetailOpenerRef.current
+      const target = opener?.isConnected ? opener : ledgerHeadingRef.current
+      target?.focus({ preventScroll: true })
+    })
   }, [historyState, location.pathname, location.search, navigate, openRef])
 
   return (
@@ -445,7 +464,11 @@ export default function TodosPage() {
         <div className="mx-auto max-w-[840px] px-5 pb-20 pt-6 md:pt-11">
           <header className="flex items-end justify-between gap-3">
             <div>
-              <h1 className="font-[var(--font-display)] text-[length:var(--text-title1)] font-bold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] md:text-[length:var(--text-large-title)]">
+              <h1
+                ref={ledgerHeadingRef}
+                tabIndex={-1}
+                className="font-[var(--font-display)] text-[length:var(--text-title1)] font-bold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] outline-none md:text-[length:var(--text-large-title)]"
+              >
                 Todos
               </h1>
               <div className="mt-1 text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">
