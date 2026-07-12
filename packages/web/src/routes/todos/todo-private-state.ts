@@ -28,6 +28,10 @@ export interface TodoJournalPayload {
   baselineVersion?: string | number
   /** A response was lost for these fields; only a server reconciliation may clear them. */
   uncertainFields?: TodoDraftField[]
+  /** Durable reconciliation provenance, independent of transport state. */
+  conflictFields?: TodoDraftField[]
+  /** A confirmed acknowledgement/discard is waiting only on journal removal. */
+  cleanupPending?: true
   /** Present only after a logical conditional edit has been prepared. */
   request?: TodoJournalRequest
 }
@@ -90,7 +94,9 @@ function existingTodoPrivateRef(id: string): string | null {
 }
 
 const FIELDS = new Set<TodoDraftField>(["title", "body", "assignee", "department", "priority"])
-const PAYLOAD_KEYS = new Set(["revision", "patch", "baseline", "baselineVersion", "uncertainFields", "request"])
+const PAYLOAD_KEYS = new Set([
+  "revision", "patch", "baseline", "baselineVersion", "uncertainFields", "conflictFields", "cleanupPending", "request",
+])
 const REQUEST_KEYS = new Set(["revision", "patch", "expectedVersion", "idempotencyKey", "state"])
 const ENVELOPE_KEYS = new Set(["expiresAt", "sequence", "payload"])
 const REQUEST_STATES = new Set<TodoJournalRequestState>(["prepared", "dispatched", "uncertain", "failed", "conflict"])
@@ -160,10 +166,24 @@ function validUncertainFields(value: unknown, patch: TodoDraftPatch): value is T
       && Object.prototype.hasOwnProperty.call(patch, field))
 }
 
+function validConflictFields(value: unknown, patch: TodoDraftPatch): value is TodoDraftField[] | undefined {
+  if (value === undefined) return true
+  if (!Array.isArray(value)) return false
+  const fields = value as unknown[]
+  return fields.length > 0
+    && new Set(fields).size === fields.length
+    && fields.every((field) => typeof field === "string"
+      && FIELDS.has(field as TodoDraftField)
+      && Object.prototype.hasOwnProperty.call(patch, field))
+}
+
 function validPayload(value: unknown): value is TodoJournalPayload {
   if (!isRecord(value) || !hasOnlyKeys(value, PAYLOAD_KEYS)) return false
   if (!isPositiveSafeInteger(value.revision) || !validPatch(value.patch) || !validPatch(value.baseline)) return false
-  if (!samePatchFields(value.patch, value.baseline) || !validUncertainFields(value.uncertainFields, value.patch)) return false
+  if (!samePatchFields(value.patch, value.baseline)
+    || !validUncertainFields(value.uncertainFields, value.patch)
+    || !validConflictFields(value.conflictFields, value.patch)
+    || (value.cleanupPending !== undefined && value.cleanupPending !== true)) return false
 
   if (value.request === undefined) {
     // The legacy v2 string was an updatedAt-like recovery marker, never a CAS
@@ -210,6 +230,11 @@ function sameDesiredIntent(a: TodoJournalPayload, b: TodoJournalPayload): boolea
     && a.baselineVersion === b.baselineVersion
     && samePatch(a.patch, b.patch)
     && samePatch(a.baseline, b.baseline)
+}
+
+function unionFields(a?: TodoDraftField[], b?: TodoDraftField[]): TodoDraftField[] | undefined {
+  const fields = [...new Set([...(a ?? []), ...(b ?? [])])]
+  return fields.length > 0 ? fields : undefined
 }
 
 function protectedRequest(current: TodoJournalRequest, incoming: TodoJournalRequest): TodoJournalRequest {
@@ -301,10 +326,18 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
       nextPayload = {
         ...latestIntent,
         uncertainFields,
+        conflictFields: unionFields(current.conflictFields, payload.conflictFields),
+        cleanupPending: current.cleanupPending || payload.cleanupPending || undefined,
         request,
       }
     } else if (current && payload.revision < current.revision) {
       return
+    } else if (current) {
+      nextPayload = {
+        ...payload,
+        conflictFields: unionFields(current.conflictFields, payload.conflictFields),
+        cleanupPending: current.cleanupPending || payload.cleanupPending || undefined,
+      }
     }
     const sequence = Math.max(0, ...Object.values(journals).map((entry) => entry.sequence)) + 1
     journals[ref] = { expiresAt: now + JOURNAL_TTL_MS, sequence, payload: nextPayload }
@@ -358,20 +391,23 @@ export function transitionTodoJournal(
   }
 }
 
-export function clearTodoJournalByRef(ref: string, throughRevision?: number): void {
+export function clearTodoJournalByRef(ref: string, throughRevision?: number): boolean {
   const store = storage()
-  if (!store || !/^td_[a-z0-9]+$/i.test(ref)) return
+  if (!store || !/^td_[a-z0-9]+$/i.test(ref)) return false
   try {
     const journals = readEnvelopes()
     const current = journals[ref]
-    if (!current) return
-    if (throughRevision != null && current.payload.revision > throughRevision) return
+    if (!current) return true
+    if (throughRevision != null && current.payload.revision > throughRevision) return false
     delete journals[ref]
     if (Object.keys(journals).length === 0) store.removeItem(JOURNAL_KEY)
     else store.setItem(JOURNAL_KEY, JSON.stringify(journals))
-  } catch { /* storage is best-effort */ }
+    return !readEnvelopes(Date.now(), false)[ref]
+  } catch {
+    return false
+  }
 }
 
-export function clearTodoJournal(id: string, throughRevision?: number): void {
-  clearTodoJournalByRef(todoPrivateRef(id), throughRevision)
+export function clearTodoJournal(id: string, throughRevision?: number): boolean {
+  return clearTodoJournalByRef(todoPrivateRef(id), throughRevision)
 }

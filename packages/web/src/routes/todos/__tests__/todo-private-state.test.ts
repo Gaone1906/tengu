@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import {
+  clearTodoJournal,
   loadTodoJournal,
   persistTodoJournal,
   todoPrivateRef,
@@ -65,6 +66,37 @@ describe("Todo private CAS journal", () => {
 
     expect(loadTodoJournal(TODO_ID)?.request).toEqual(prepared.request)
     expect(loadTodoJournal(TODO_ID)).toEqual(prepared)
+  })
+
+  it("persists conflict provenance independently of request lifecycle", () => {
+    const conflicted = { ...payload("dispatched"), conflictFields: ["title"] as const }
+    persistTodoJournal(TODO_ID, conflicted as never)
+    persistTodoJournal(TODO_ID, payload("failed") as never)
+
+    expect(loadTodoJournal(TODO_ID)?.conflictFields).toEqual(["title"])
+    expect(loadTodoJournal(TODO_ID)?.request?.state).toBe("failed")
+  })
+
+  it.each([
+    ["duplicate", ["title", "title"]],
+    ["unsupported", ["rank"]],
+    ["not dirty", ["body"]],
+    ["empty", []],
+  ])("rejects %s conflict provenance", (_label, conflictFields) => {
+    persistTodoJournal(TODO_ID, { ...payload(), conflictFields } as never)
+    expect(loadTodoJournal(TODO_ID)).toBeNull()
+  })
+
+  it("reports journal cleanup failure and succeeds after storage recovers", () => {
+    persistTodoJournal(TODO_ID, payload() as never)
+    const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "QuotaExceededError")
+    })
+    expect(clearTodoJournal(TODO_ID)).toBe(false)
+    expect(loadTodoJournal(TODO_ID)).not.toBeNull()
+    remove.mockRestore()
+    expect(clearTodoJournal(TODO_ID)).toBe(true)
+    expect(loadTodoJournal(TODO_ID)).toBeNull()
   })
 
   it.each(["prepared", "dispatched", "uncertain", "failed", "conflict"] as const)(
