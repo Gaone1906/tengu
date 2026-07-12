@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { Employee, WorkItemCompactWire, WorkItemDetailWire, WorkItemStatusWire } from "@/lib/api"
 import {
   groupBoard,
@@ -61,7 +61,7 @@ export function ActiveView({
   onRename: (id: string, title: string) => Promise<void>
   /** Persist a manual rank (fire-and-forget; the view keeps its local order). */
   onRankChange: (id: string, rank: number) => void
-  rankReset?: { id: string; revision: number } | null
+  rankReset?: Record<string, number>
   /** Fetch the next server page for these statuses (raises their `want`). */
   onLoadMore: (statuses: readonly WorkItemStatusWire[]) => void
   onClearFilters: () => void
@@ -74,14 +74,25 @@ export function ActiveView({
   // Per-item rank optimism lets one failed edit reset without masking a
   // different row's confirmed order.
   const [rankOverride, setRankOverride] = useState<Record<string, number>>({})
+  const consumedRankResets = useRef<Record<string, number>>({})
 
   useEffect(() => {
-    if (!rankReset) return
+    if (!rankReset || Object.keys(rankReset).length === 0) return
+    const newlyReset = Object.entries(rankReset)
+      .filter(([id, revision]) => revision > (consumedRankResets.current[id] ?? 0))
+      .map(([id]) => id)
+    consumedRankResets.current = { ...rankReset }
+    if (newlyReset.length === 0) return
     setRankOverride((current) => {
-      if (!(rankReset.id in current)) return current
       const next = { ...current }
-      delete next[rankReset.id]
-      return next
+      let changed = false
+      for (const id of newlyReset) {
+        if (id in next) {
+          delete next[id]
+          changed = true
+        }
+      }
+      return changed ? next : current
     })
   }, [rankReset])
 

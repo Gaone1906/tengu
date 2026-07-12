@@ -38,8 +38,8 @@ import {
 import { clearTodoJournalByRef, todoPrivateRef } from "./todo-private-state"
 import { TodoConflictActions } from "./conflict-actions"
 import {
-  clearTodoQuickEditRecoveryByRef,
   hasTodoQuickEditRecovery,
+  hasTodoQuickEditRecoveryByRef,
   useTodoQuickEdit,
 } from "./use-todo-quick-edit"
 
@@ -55,8 +55,19 @@ interface TodoHistoryState {
   todoAnchorRef?: unknown
   todoAnchorOffset?: unknown
   todoPageDepth?: unknown
-  todoQuickRef?: unknown
+  todoQuickRecoveries?: unknown
 }
+
+interface TodoQuickHistoryRecord {
+  ref: string
+  anchorRef: string
+  anchorOffset: number
+  scroll: number
+  pageDepth: LedgerPageDepth
+}
+
+const PRIVATE_REF_PATTERN = /^td_[a-z0-9]+$/i
+const QUICK_HISTORY_KEYS = new Set(["ref", "anchorRef", "anchorOffset", "scroll", "pageDepth"])
 
 const HISTORY_STATUSES: readonly WorkItemStatusWire[] = [
   "backlog", "assigned", "executing", "blocked", "in_review", "escalated", "done", "cancelled",
@@ -74,6 +85,46 @@ function historyPageDepth(value: unknown): LedgerPageDepth | null {
   return Object.keys(depth).length > 0 ? depth : null
 }
 
+function quickHistoryRecords(value: unknown): TodoQuickHistoryRecord[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const records: TodoQuickHistoryRecord[] = []
+  for (const candidate of value.slice(0, 50)) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue
+    const raw = candidate as Record<string, unknown>
+    if (Object.keys(raw).some((key) => !QUICK_HISTORY_KEYS.has(key))) continue
+    const depthRecord = raw.pageDepth as Record<string, unknown> | null
+    const depth = historyPageDepth(raw.pageDepth) ?? {}
+    if (typeof raw.ref !== "string" || !PRIVATE_REF_PATTERN.test(raw.ref) || seen.has(raw.ref)
+      || typeof raw.anchorRef !== "string" || !PRIVATE_REF_PATTERN.test(raw.anchorRef)
+      || typeof raw.anchorOffset !== "number" || !Number.isFinite(raw.anchorOffset)
+      || typeof raw.scroll !== "number" || !Number.isFinite(raw.scroll) || raw.scroll < 0
+      || !depthRecord || typeof depthRecord !== "object" || Array.isArray(depthRecord)
+      || Object.keys(depthRecord).some((key) => !HISTORY_STATUSES.includes(key as WorkItemStatusWire))) continue
+    seen.add(raw.ref)
+    records.push({
+      ref: raw.ref,
+      anchorRef: raw.anchorRef,
+      anchorOffset: raw.anchorOffset,
+      scroll: raw.scroll,
+      pageDepth: depth,
+    })
+  }
+  return records
+}
+
+function mergePageDepth(...depths: Array<LedgerPageDepth | null | undefined>): LedgerPageDepth | null {
+  const merged: LedgerPageDepth = {}
+  for (const depth of depths) {
+    if (!depth) continue
+    for (const status of HISTORY_STATUSES) {
+      const pages = Math.max(merged[status] ?? 0, depth[status] ?? 0)
+      if (pages > 0) merged[status] = pages
+    }
+  }
+  return Object.values(merged).some(Boolean) ? merged : null
+}
+
 function cleanTodoHistoryState(state: TodoHistoryState | null): Record<string, unknown> | null {
   if (!state) return null
   const next = { ...state } as Record<string, unknown>
@@ -82,15 +133,17 @@ function cleanTodoHistoryState(state: TodoHistoryState | null): Record<string, u
   delete next.todoAnchorRef
   delete next.todoAnchorOffset
   delete next.todoPageDepth
-  delete next.todoQuickRef
   return Object.keys(next).length > 0 ? next : null
 }
 
-function cleanTodoQuickHistoryState(state: TodoHistoryState | null): Record<string, unknown> | null {
-  if (!state) return null
-  const next = { ...state } as Record<string, unknown>
-  delete next.todoQuickRef
-  if (!("todoRef" in next)) delete next.todoPageDepth
+function withTodoQuickHistoryState(
+  state: TodoHistoryState | null,
+  records: TodoQuickHistoryRecord[],
+): Record<string, unknown> | null {
+  const next = { ...(state ?? {}) } as Record<string, unknown>
+  delete next.todoQuickRecoveries
+  if (records.length > 0) next.todoQuickRecoveries = records
+  if (!("todoRef" in next) && records.length === 0) delete next.todoPageDepth
   return Object.keys(next).length > 0 ? next : null
 }
 
@@ -171,18 +224,20 @@ export default function TodosPage() {
 
   const historyState = location.state as TodoHistoryState | null
   const openRef = typeof historyState?.todoRef === "string" ? historyState.todoRef : null
-  const quickRef = typeof historyState?.todoQuickRef === "string" && /^td_[a-z0-9]+$/i.test(historyState.todoQuickRef)
-    ? historyState.todoQuickRef
-    : null
+  const quickRecords = useMemo(() => quickHistoryRecords(historyState?.todoQuickRecoveries), [historyState?.todoQuickRecoveries])
+  const quickRecordsKey = JSON.stringify(quickRecords)
   const anchorRef = typeof historyState?.todoAnchorRef === "string" && /^td_[a-z0-9]+$/i.test(historyState.todoAnchorRef)
     ? historyState.todoAnchorRef
     : null
   const anchorOffset = typeof historyState?.todoAnchorOffset === "number" && Number.isFinite(historyState.todoAnchorOffset)
     ? historyState.todoAnchorOffset
     : null
-  const savedPageDepth = historyPageDepth(historyState?.todoPageDepth)
+  const savedPageDepth = mergePageDepth(
+    historyPageDepth(historyState?.todoPageDepth),
+    ...quickRecords.map((record) => record.pageDepth),
+  )
   const savedPageDepthKey = savedPageDepth ? JSON.stringify(savedPageDepth) : ""
-  const scrollRestoreKey = `${location.key}:${openRef ?? "closed"}`
+  const scrollRestoreKey = `${location.key}:${openRef ?? "closed"}:${quickRecordsKey}`
   const ledgerScrollRef = useRef<HTMLDivElement>(null)
   const ledgerHeadingRef = useRef<HTMLHeadingElement>(null)
   const lastDetailOpenerRef = useRef<HTMLElement | null>(null)
@@ -195,13 +250,20 @@ export default function TodosPage() {
   const restoredScrollRef = useRef<string | null>(null)
   const cancelledScrollRestoreRef = useRef<string | null>(null)
   const pageRestoreRef = useRef<string | null>(null)
-  const [restoringPageDepth, setRestoringPageDepth] = useState(Boolean((openRef || quickRef) && savedPageDepth))
+  const [restoringPageDepth, setRestoringPageDepth] = useState(Boolean((openRef || quickRecords.length > 0) && savedPageDepth))
   const quickRecoveryRef = useRef<string | null>(null)
   const quickConflictRef = useRef<HTMLElement>(null)
   const locallyStartedQuickRefs = useRef(new Set<string>())
+  const quickRecordsRef = useRef<TodoQuickHistoryRecord[]>(quickRecords)
+  const historyStateRef = useRef<TodoHistoryState | null>(historyState)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [resolving, setResolving] = useState<Set<string>>(new Set())
   const [creating, setCreating] = useState(false)
+
+  useLayoutEffect(() => {
+    historyStateRef.current = historyState
+    quickRecordsRef.current = quickRecords
+  }, [historyState, location.key, quickRecordsKey])
 
   // Filters live in the URL (§4.3): shareable, refresh-proof.
   const [searchParams, setSearchParams] = useSearchParams()
@@ -269,16 +331,16 @@ export default function TodosPage() {
     ]
     return candidates.find((item) => todoPrivateRef(item.id) === openRef)?.id ?? null
   }, [baseLedger.data, ledger.data, needs.data, openRef, peopleItems.data])
-  const quickId = useMemo(() => {
-    if (!quickRef) return null
+  const quickIds = useMemo(() => {
     const candidates = [
       ...(ledger.data?.items ?? []),
       ...(baseLedger.data?.items ?? []),
       ...(needs.data ?? []),
       ...(peopleItems.data ?? []),
     ]
-    return candidates.find((item) => todoPrivateRef(item.id) === quickRef)?.id ?? null
-  }, [baseLedger.data, ledger.data, needs.data, peopleItems.data, quickRef])
+    const byRef = new Map(candidates.map((item) => [todoPrivateRef(item.id), item.id]))
+    return new Map(quickRecords.map((record) => [record.ref, byRef.get(record.ref) ?? null]))
+  }, [baseLedger.data, ledger.data, needs.data, peopleItems.data, quickRecordsKey])
 
   // Header counts from the gateway's true totals, never from fetched rows.
   const counts = useMemo(
@@ -329,12 +391,12 @@ export default function TodosPage() {
   // History keeps only safe row surrogates and the number of loaded pages.
   // Rehydrate those pages before resolving the detail or restoring its anchor.
   useEffect(() => {
-    const recoveryRef = openRef ?? quickRef
-    if (!recoveryRef || !savedPageDepth || !ledger.data) {
-      if (!recoveryRef || !savedPageDepth) setRestoringPageDepth(false)
+    const recoveryKey = openRef ?? quickRecordsKey
+    if (!recoveryKey || !savedPageDepth || !ledger.data) {
+      if (!recoveryKey || !savedPageDepth) setRestoringPageDepth(false)
       return
     }
-    const token = `${location.key}:${recoveryRef}:${savedPageDepthKey}`
+    const token = `${location.key}:${recoveryKey}:${savedPageDepthKey}`
     if (pageRestoreRef.current === token) return
     pageRestoreRef.current = token
     let alive = true
@@ -346,7 +408,7 @@ export default function TodosPage() {
     // The restore function is an observer over the same eight ledger queries;
     // the history token and initial-page readiness are the intended triggers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.key, openRef, quickRef, savedPageDepthKey, Boolean(ledger.data)])
+  }, [location.key, openRef, quickRecordsKey, savedPageDepthKey, Boolean(ledger.data)])
 
   useLayoutEffect(() => {
     const stateScroll = typeof historyState?.todoScroll === "number" && Number.isFinite(historyState.todoScroll)
@@ -388,6 +450,27 @@ export default function TodosPage() {
     }
   }, [anchorOffset, anchorRef, historyState?.todoScroll, ledger.data, needs.data, openRef, peopleItems.data, restoringPageDepth, scrollRestoreKey, view])
 
+  useLayoutEffect(() => {
+    if (openRef || quickRecords.length === 0 || restoringPageDepth
+      || restoredScrollRef.current === scrollRestoreKey
+      || cancelledScrollRestoreRef.current === scrollRestoreKey) return
+    const scroller = ledgerScrollRef.current
+    if (!scroller || !ledger.data) return
+    const saved = quickRecords[0]
+    const row = scroller.querySelector<HTMLElement>(`[data-todo-anchor="${saved.anchorRef}"]`)
+    if (row) {
+      const rowRect = row.getBoundingClientRect()
+      const scrollerRect = scroller.getBoundingClientRect()
+      if (rowRect.height === 0 && scrollerRect.height === 0) scroller.scrollTop = saved.scroll
+      else scroller.scrollTop += (rowRect.top - scrollerRect.top) - saved.anchorOffset
+    } else {
+      const hasLayout = scroller.scrollHeight > 0 || scroller.clientHeight > 0
+      const maximum = hasLayout ? Math.max(0, scroller.scrollHeight - scroller.clientHeight) : saved.scroll
+      scroller.scrollTop = Math.min(saved.scroll, maximum)
+    }
+    restoredScrollRef.current = scrollRestoreKey
+  }, [ledger.data, openRef, quickRecords, restoringPageDepth, scrollRestoreKey])
+
   const cancelPendingScrollRestore = useCallback(() => {
     if (restoredScrollRef.current !== scrollRestoreKey) {
       cancelledScrollRestoreRef.current = scrollRestoreKey
@@ -402,24 +485,43 @@ export default function TodosPage() {
     })
   }, [])
 
+  const replaceQuickRecords = useCallback((next: TodoQuickHistoryRecord[]) => {
+    quickRecordsRef.current = next
+    const state = withTodoQuickHistoryState(historyStateRef.current, next)
+    historyStateRef.current = state
+    navigate(`${location.pathname}${location.search}`, { replace: true, state })
+  }, [location.pathname, location.search, navigate])
+
+  useEffect(() => {
+    if (!historyState || !Object.prototype.hasOwnProperty.call(historyState, "todoQuickRecoveries")) return
+    if (JSON.stringify(historyState.todoQuickRecoveries) === quickRecordsKey) return
+    replaceQuickRecords(quickRecords)
+  }, [historyState, quickRecords, quickRecordsKey, replaceQuickRecords])
+
   const runQuickEdit = useCallback(async (id: string, patch: { title?: string; rank?: number }) => {
     const privateRef = todoPrivateRef(id)
     locallyStartedQuickRefs.current.add(privateRef)
-    const markedState: TodoHistoryState = {
-      ...(historyState ?? {}),
-      todoQuickRef: privateRef,
-      todoPageDepth: ledger.pageDepth,
+    const scroller = ledgerScrollRef.current
+    const row = scroller?.querySelector<HTMLElement>(`[data-todo-anchor="${privateRef}"]`)
+    const record: TodoQuickHistoryRecord = {
+      ref: privateRef,
+      anchorRef: privateRef,
+      anchorOffset: row && scroller
+        ? row.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+        : 0,
+      scroll: scroller?.scrollTop ?? 0,
+      pageDepth: ledger.pageDepth,
     }
-    navigate(`${location.pathname}${location.search}`, { replace: true, state: markedState })
+    replaceQuickRecords([
+      ...quickRecordsRef.current.filter((candidate) => candidate.ref !== privateRef),
+      record,
+    ])
     await quickEdit.edit(id, patch)
     if (!hasTodoQuickEditRecovery(id)) {
       locallyStartedQuickRefs.current.delete(privateRef)
-      navigate(`${location.pathname}${location.search}`, {
-        replace: true,
-        state: cleanTodoQuickHistoryState(markedState),
-      })
+      replaceQuickRecords(quickRecordsRef.current.filter((candidate) => candidate.ref !== privateRef))
     }
-  }, [historyState, ledger.pageDepth, location.pathname, location.search, navigate, quickEdit])
+  }, [ledger.pageDepth, quickEdit, replaceQuickRecords])
 
   const onRename = useCallback(
     (id: string, title: string) => runQuickEdit(id, { title }),
@@ -488,27 +590,41 @@ export default function TodosPage() {
   }, [historyState, location.pathname, location.search, navigate, openRef])
 
   useEffect(() => {
-    if (!quickRef || restoringPageDepth || !candidateQueriesSettled || !candidateQueriesHealthy) return
-    if (locallyStartedQuickRefs.current.has(quickRef)) return
-    const token = `${location.key}:${quickRef}:${quickId ?? "missing"}`
+    if (quickRecords.length === 0 || restoringPageDepth || !candidateQueriesSettled || !candidateQueriesHealthy) return
+    const recoverable = quickRecords.filter((record) => !locallyStartedQuickRefs.current.has(record.ref))
+    const token = `${location.key}:${recoverable.map((record) => `${record.ref}:${quickIds.get(record.ref) ?? "missing"}`).join("|")}`
     if (quickRecoveryRef.current === token) return
     quickRecoveryRef.current = token
-    if (!quickId) {
-      clearTodoQuickEditRecoveryByRef(quickRef)
-      navigate(`${location.pathname}${location.search}`, {
-        replace: true,
-        state: cleanTodoQuickHistoryState(historyState),
-      })
-      return
-    }
-    void quickEdit.recover(quickId).then(() => {
-      if (hasTodoQuickEditRecovery(quickId)) return
-      navigate(`${location.pathname}${location.search}`, {
-        replace: true,
-        state: cleanTodoQuickHistoryState(historyState),
-      })
-    })
-  }, [candidateQueriesHealthy, candidateQueriesSettled, historyState, location.key, location.pathname, location.search, navigate, quickEdit, quickId, quickRef, restoringPageDepth])
+    let alive = true
+    void (async () => {
+      for (const record of recoverable) {
+        const id = quickIds.get(record.ref)
+        // An unresolved safe ref stays durable: a later page/filter refresh may
+        // resolve it, and only TTL cleanup may discard its authored intent.
+        if (!id || !hasTodoQuickEditRecoveryByRef(record.ref)) continue
+        await quickEdit.recover(id)
+        if (!alive) return
+      }
+      const next = quickRecordsRef.current.filter((record) => hasTodoQuickEditRecoveryByRef(record.ref)
+        || locallyStartedQuickRefs.current.has(record.ref))
+      if (next.length !== quickRecordsRef.current.length) replaceQuickRecords(next)
+    })()
+    return () => { alive = false }
+  }, [candidateQueriesHealthy, candidateQueriesSettled, location.key, quickEdit, quickIds, quickRecords, replaceQuickRecords, restoringPageDepth])
+
+  useEffect(() => {
+    const next = quickRecordsRef.current.filter((record) => hasTodoQuickEditRecoveryByRef(record.ref)
+      || locallyStartedQuickRefs.current.has(record.ref))
+    if (next.length !== quickRecordsRef.current.length) replaceQuickRecords(next)
+  }, [quickEdit.error, quickEdit.recovery, replaceQuickRecords])
+
+  const reconcileQuick = useCallback(async (action: () => Promise<void>) => {
+    const ref = quickEdit.recoveryRef
+    await action()
+    if (!ref || hasTodoQuickEditRecoveryByRef(ref)) return
+    locallyStartedQuickRefs.current.delete(ref)
+    replaceQuickRecords(quickRecordsRef.current.filter((record) => record.ref !== ref))
+  }, [quickEdit.recoveryRef, replaceQuickRecords])
 
   useEffect(() => {
     if (!quickEdit.recovery) return
@@ -605,16 +721,9 @@ export default function TodosPage() {
                     error={quickEdit.recovery.error}
                     reloadOnly={quickEdit.recovery.reloadOnly}
                     focusRef={quickConflictRef}
-                    onReload={() => {
-                      void quickEdit.reload().then(() => {
-                        navigate(`${location.pathname}${location.search}`, {
-                          replace: true,
-                          state: cleanTodoQuickHistoryState(historyState),
-                        })
-                      })
-                    }}
-                    onRebase={() => void quickEdit.rebase()}
-                    onOverwrite={() => void quickEdit.overwrite()}
+                    onReload={() => void reconcileQuick(quickEdit.reload)}
+                    onRebase={() => void reconcileQuick(quickEdit.rebase)}
+                    onOverwrite={() => void reconcileQuick(quickEdit.overwrite)}
                   />
                 )}
                 {quickEdit.error && !quickEdit.recovery && (
@@ -644,7 +753,7 @@ export default function TodosPage() {
                     onOpen={onOpen}
                     onRename={onRename}
                     onRankChange={onRankChange}
-                    rankReset={quickEdit.rankResetId ? { id: quickEdit.rankResetId, revision: quickEdit.rankResetRevision } : null}
+                    rankReset={quickEdit.rankResetRevisions}
                     onLoadMore={onLoadMore}
                     onClearFilters={() => setFilters({ status: "open", q: filters.q })}
                     filtered={filtered}

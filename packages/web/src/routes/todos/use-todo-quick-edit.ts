@@ -24,12 +24,18 @@ import { todoPrivateRef } from "./todo-private-state"
 
 export type TodoQuickEditField = keyof WorkItemEditPatch
 
-interface StoredQuickEdit {
-  expiresAt: number
-  baseline: WorkItemEditPatch
+interface StoredQuickEditActive {
   request: WorkItemEditRequest
   state: "prepared" | "dispatched" | "uncertain" | "conflict"
   failureCode?: "idempotency"
+}
+
+interface StoredQuickEdit {
+  expiresAt: number
+  desired: WorkItemEditPatch
+  baseline: WorkItemEditPatch
+  active?: StoredQuickEditActive
+  blocked?: "version"
 }
 
 type StoredQuickEdits = Record<string, StoredQuickEdit>
@@ -38,7 +44,9 @@ interface RuntimeEdit {
   id: string
   desired: WorkItemEditPatch
   baseline: WorkItemEditPatch
-  request?: WorkItemEditRequest
+  active?: StoredQuickEditActive
+  remote?: WorkItemFullWire
+  blocked?: "version"
   running: boolean
   waiters: Array<() => void>
 }
@@ -55,8 +63,15 @@ const STORAGE_KEY = "jinn:todo-quick-edit:v1"
 const TTL_MS = 24 * 60 * 60 * 1_000
 const MAX_STORED = 50
 const QUICK_FIELDS = new Set<TodoQuickEditField>(["title", "body", "assignee", "department", "priority", "rank"])
-const QUICK_STATES = new Set<StoredQuickEdit["state"]>(["prepared", "dispatched", "uncertain", "conflict"])
+const QUICK_STATES = new Set<StoredQuickEditActive["state"]>(["prepared", "dispatched", "uncertain", "conflict"])
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const ENVELOPE_KEYS = new Set(["expiresAt", "desired", "baseline", "active", "blocked"])
+const ACTIVE_KEYS = new Set(["request", "state", "failureCode"])
+const REQUEST_KEYS = new Set(["patch", "expectedVersion", "idempotencyKey"])
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+  return Object.keys(value).every((key) => allowed.has(key))
+}
 
 function validQuickPatch(value: unknown): value is WorkItemEditPatch {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false
@@ -68,20 +83,42 @@ function validQuickPatch(value: unknown): value is WorkItemEditPatch {
   })
 }
 
+function validQuickBaseline(value: unknown): value is WorkItemEditPatch {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  return Object.entries(value).every(([key, field]) => {
+    if (!QUICK_FIELDS.has(key as TodoQuickEditField)) return false
+    if (key === "title") return typeof field === "string"
+    if (key === "body" || key === "assignee" || key === "department") return field === null || typeof field === "string"
+    if (key === "rank") return field === null || (typeof field === "number" && Number.isFinite(field))
+    return typeof field === "number" && Number.isFinite(field)
+  })
+}
+
 function validStoredQuickEdit(value: unknown): value is StoredQuickEdit {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (!hasOnlyKeys(record, ENVELOPE_KEYS)) return false
   const candidate = value as Partial<StoredQuickEdit>
   if (typeof candidate.expiresAt !== "number" || !Number.isFinite(candidate.expiresAt)
-    || !candidate.request || !validQuickPatch(candidate.request.patch)
-    || !validQuickPatch(candidate.baseline)
-    || !isPositiveTodoVersion(candidate.request.expectedVersion)
-    || typeof candidate.request.idempotencyKey !== "string"
-    || !UUID_PATTERN.test(candidate.request.idempotencyKey)
-    || !candidate.state || !QUICK_STATES.has(candidate.state)
-    || (candidate.failureCode !== undefined && candidate.failureCode !== "idempotency")) return false
-  const patch = patchFields(candidate.request.patch)
-  return patch.length === patchFields(candidate.baseline).length
-    && patch.every((field) => Object.prototype.hasOwnProperty.call(candidate.baseline, field))
+    || !validQuickPatch(candidate.desired)
+    || !validQuickBaseline(candidate.baseline)
+    || !Object.keys(candidate.baseline).every((field) => Object.prototype.hasOwnProperty.call(candidate.desired, field))
+    || (candidate.blocked !== undefined && candidate.blocked !== "version")) return false
+  if (!candidate.active) return Object.keys(candidate.baseline).length <= patchFields(candidate.desired).length
+  if (candidate.blocked !== undefined) return false
+  const activeRecord = candidate.active as unknown as Record<string, unknown>
+  if (!hasOnlyKeys(activeRecord, ACTIVE_KEYS)) return false
+  const requestRecord = candidate.active.request as unknown as Record<string, unknown>
+  if (!requestRecord || !hasOnlyKeys(requestRecord, REQUEST_KEYS)
+    || !validQuickPatch(candidate.active.request.patch)
+    || !isPositiveTodoVersion(candidate.active.request.expectedVersion)
+    || typeof candidate.active.request.idempotencyKey !== "string"
+    || !UUID_PATTERN.test(candidate.active.request.idempotencyKey)
+    || !QUICK_STATES.has(candidate.active.state)
+    || (candidate.active.failureCode !== undefined
+      && !(candidate.active.state === "conflict" && candidate.active.failureCode === "idempotency"))) return false
+  return patchFields(candidate.active.request.patch).every((field) => Object.prototype.hasOwnProperty.call(candidate.desired, field))
+    && patchFields(candidate.desired).every((field) => Object.prototype.hasOwnProperty.call(candidate.baseline, field))
 }
 
 function readStored(): StoredQuickEdits {
@@ -119,6 +156,10 @@ export function hasTodoQuickEditRecovery(id: string): boolean {
   return loadStored(id) !== null
 }
 
+export function hasTodoQuickEditRecoveryByRef(ref: string): boolean {
+  return /^td_[a-z0-9]+$/i.test(ref) && readStored()[ref] !== undefined
+}
+
 export function clearTodoQuickEditRecoveryByRef(ref: string): void {
   if (!/^td_[a-z0-9]+$/i.test(ref)) return
   const all = readStored()
@@ -126,7 +167,7 @@ export function clearTodoQuickEditRecoveryByRef(ref: string): void {
   writeStored(all)
 }
 
-function storeRequest(id: string, value: Omit<StoredQuickEdit, "expiresAt">): void {
+function storeEntry(id: string, value: Omit<StoredQuickEdit, "expiresAt">): void {
   const all = readStored()
   all[todoPrivateRef(id)] = { ...value, expiresAt: Date.now() + TTL_MS }
   const capped = Object.fromEntries(Object.entries(all)
@@ -155,6 +196,28 @@ function baselineFor(item: WorkItemFullWire, patch: WorkItemEditPatch): WorkItem
 
 function conflictFields(item: WorkItemFullWire, baseline: WorkItemEditPatch): TodoQuickEditField[] {
   return patchFields(baseline).filter((field) => !Object.is(fieldValue(item, field), baseline[field]))
+}
+
+function persistRuntime(entry: RuntimeEdit): void {
+  storeEntry(entry.id, {
+    desired: { ...entry.desired },
+    baseline: { ...entry.baseline },
+    active: entry.active ? {
+      ...entry.active,
+      request: { ...entry.active.request, patch: { ...entry.active.request.patch } },
+    } : undefined,
+    blocked: entry.blocked,
+  })
+}
+
+function addIntent(entry: RuntimeEdit, patch: WorkItemEditPatch): void {
+  for (const field of patchFields(patch)) {
+    if (!Object.prototype.hasOwnProperty.call(entry.baseline, field) && entry.remote) {
+      entry.baseline[field] = fieldValue(entry.remote, field) as never
+    }
+    entry.desired[field] = patch[field] as never
+  }
+  persistRuntime(entry)
 }
 
 function mergeSavedDetail(current: WorkItemDetailWire | undefined, item: WorkItemFullWire): WorkItemDetailWire | undefined {
@@ -202,8 +265,7 @@ export function useTodoQuickEdit() {
   const mounted = useRef(true)
   const [recoveryEntry, setRecoveryEntry] = useState<{ id: string; value: TodoQuickEditRecovery } | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [rankResetRevision, setRankResetRevision] = useState(0)
-  const [rankResetId, setRankResetId] = useState<string | null>(null)
+  const [rankResetRevisions, setRankResetRevisions] = useState<Record<string, number>>({})
 
   useEffect(() => {
     mounted.current = true
@@ -212,8 +274,7 @@ export function useTodoQuickEdit() {
 
   const resetRank = useCallback((id: string) => {
     if (!mounted.current) return
-    setRankResetId(id)
-    setRankResetRevision((value) => value + 1)
+    setRankResetRevisions((current) => ({ ...current, [id]: (current[id] ?? 0) + 1 }))
   }, [])
 
   const publishRecovery = useCallback((id: string, value: TodoQuickEditRecovery) => {
@@ -241,16 +302,19 @@ export function useTodoQuickEdit() {
     let same: TodoQuickEditField[] = patchFields(entry.desired)
     try {
       const fresh = await loadAuthoritativeDetail(client, entry.id)
-      same = conflictFields(fresh.workItem, entry.baseline)
+      const missingBaseline = patchFields(entry.desired)
+        .filter((field) => !Object.prototype.hasOwnProperty.call(entry.baseline, field))
+      same = [...missingBaseline, ...conflictFields(fresh.workItem, entry.baseline)]
     } catch {
       // Without a full fresh row, automatic rebase is intentionally blocked.
     }
-    if (entry.request) storeRequest(entry.id, {
-      baseline: entry.baseline,
-      request: entry.request,
+    if (entry.active) entry.active = {
+      ...entry.active,
       state: "conflict",
       failureCode: reloadOnly ? "idempotency" : undefined,
-    })
+    }
+    else entry.blocked = "version"
+    persistRuntime(entry)
     if (mounted.current) {
       publishRecovery(entry.id, {
         fields: patchFields(entry.desired),
@@ -269,17 +333,24 @@ export function useTodoQuickEdit() {
     if (mounted.current) setError(null)
     try {
       for (;;) {
-        let request = entry.request
-        if (!request || !exactReplay) {
+        let active = entry.active
+        if (!active || !exactReplay) {
           const remote = await loadAuthoritativeDetail(client, entry.id)
           const expectedVersion = remote.workItem.version
           if (!isPositiveTodoVersion(expectedVersion)) throw new TodoApiError(428, "Missing version", "TODO_PRECONDITION_REQUIRED")
-          entry.baseline = baselineFor(remote.workItem, entry.desired)
-          request = newTodoEditRequest(entry.desired, expectedVersion)
-          entry.request = request
-          storeRequest(entry.id, { baseline: entry.baseline, request, state: "prepared" })
+          entry.remote = remote.workItem
+          for (const field of patchFields(entry.desired)) {
+            if (!Object.prototype.hasOwnProperty.call(entry.baseline, field)) {
+              entry.baseline[field] = fieldValue(remote.workItem, field) as never
+            }
+          }
+          active = { request: newTodoEditRequest(entry.desired, expectedVersion), state: "prepared" }
+          entry.active = active
+          persistRuntime(entry)
         }
-        storeRequest(entry.id, { baseline: entry.baseline, request, state: "dispatched" })
+        const request = active.request
+        entry.active = { ...active, state: "dispatched" }
+        persistRuntime(entry)
         let result: Awaited<ReturnType<typeof api.updateWorkItem>>
         try {
           result = await api.updateWorkItem(entry.id, request)
@@ -288,13 +359,14 @@ export function useTodoQuickEdit() {
             await refreshBestEffort(client, entry.id)
             await enterConflict(entry, cause)
           } else if (isAmbiguousTransport(cause)) {
-            storeRequest(entry.id, { baseline: entry.baseline, request, state: "uncertain" })
+            entry.active = { ...entry.active!, state: "uncertain" }
+            persistRuntime(entry)
             if (mounted.current) setError("The connection ended before this edit was confirmed. It will be replayed exactly.")
           } else {
             clearStored(entry.id)
             if (mounted.current) {
               setError(operatorSafeTodoError(cause, "Couldn't save this Todo. Reload it and try again."))
-              if (Object.prototype.hasOwnProperty.call(request.patch, "rank")) resetRank(entry.id)
+              if (Object.prototype.hasOwnProperty.call(entry.desired, "rank")) resetRank(entry.id)
             }
             entries.current.delete(entry.id)
           }
@@ -334,13 +406,17 @@ export function useTodoQuickEdit() {
         // confirmed row even when no newer revision exists.
         mergeTodoIntoCaches(client, result.workItem)
         client.setQueryData<WorkItemDetailWire>(["work-item", entry.id], (current) => mergeSavedDetail(current, result.workItem))
-        clearStored(entry.id)
         for (const field of patchFields(request.patch)) {
-          if (Object.is(entry.desired[field], request.patch[field])) delete entry.desired[field]
+          if (Object.is(entry.desired[field], request.patch[field])) {
+            delete entry.desired[field]
+            delete entry.baseline[field]
+          }
         }
-        entry.request = undefined
+        entry.active = undefined
+        entry.remote = result.workItem
         exactReplay = false
         if (patchFields(entry.desired).length === 0) {
+          clearStored(entry.id)
           entries.current.delete(entry.id)
           if (mounted.current) removeRecovery(entry.id)
           settle(entry)
@@ -350,15 +426,19 @@ export function useTodoQuickEdit() {
         // gets a fresh logical key and the returned version without allowing
         // a stale list projection to replace that acknowledgement.
         entry.baseline = baselineFor(result.workItem, entry.desired)
-        entry.request = newTodoEditRequest(entry.desired, result.workItem.version)
-        storeRequest(entry.id, { baseline: entry.baseline, request: entry.request, state: "prepared" })
+        entry.active = { request: newTodoEditRequest(entry.desired, result.workItem.version), state: "prepared" }
+        persistRuntime(entry)
         exactReplay = true
       }
     } catch (cause) {
       if (isTodoVersionConflictError(cause)) await enterConflict(entry, cause)
-      else if (mounted.current) {
-        setError(operatorSafeTodoError(cause, "Couldn't load the current Todo before saving."))
-        if (Object.prototype.hasOwnProperty.call(entry.desired, "rank")) resetRank(entry.id)
+      else {
+        clearStored(entry.id)
+        entries.current.delete(entry.id)
+        if (mounted.current) {
+          setError(operatorSafeTodoError(cause, "Couldn't load the current Todo before saving."))
+          if (Object.prototype.hasOwnProperty.call(entry.desired, "rank")) resetRank(entry.id)
+        }
       }
       settle(entry)
     }
@@ -370,7 +450,7 @@ export function useTodoQuickEdit() {
       entry = { id, desired: {}, baseline: {}, running: false, waiters: [] }
       entries.current.set(id, entry)
     }
-    entry.desired = { ...entry.desired, ...patch }
+    addIntent(entry, patch)
     const promise = new Promise<void>((resolve) => entry!.waiters.push(resolve))
     void run(entry)
     return promise
@@ -387,24 +467,28 @@ export function useTodoQuickEdit() {
     if (!entry) {
       entry = {
         id,
-        desired: { ...stored.request.patch },
+        desired: { ...stored.desired },
         baseline: { ...stored.baseline },
-        request: { ...stored.request, patch: { ...stored.request.patch } },
+        active: stored.active ? {
+          ...stored.active,
+          request: { ...stored.active.request, patch: { ...stored.active.request.patch } },
+        } : undefined,
+        blocked: stored.blocked,
         running: false,
         waiters: [],
       }
       entries.current.set(id, entry)
     }
-    if (stored.state === "conflict") {
+    if (stored.blocked === "version" || stored.active?.state === "conflict") {
       await enterConflict(entry, new TodoApiError(
         409,
         "Recovered conflict",
-        stored.failureCode === "idempotency" ? "TODO_IDEMPOTENCY_CONFLICT" : "TODO_VERSION_CONFLICT",
-        stored.request.expectedVersion,
+        stored.active?.failureCode === "idempotency" ? "TODO_IDEMPOTENCY_CONFLICT" : "TODO_VERSION_CONFLICT",
+        stored.active?.request.expectedVersion,
       ))
       return
     }
-    await run(entry, true)
+    await run(entry, !!entry.active)
   }, [enterConflict, run])
 
   const reconcile = useCallback(async (mode: "reload" | "rebase" | "overwrite") => {
@@ -424,14 +508,18 @@ export function useTodoQuickEdit() {
         resetRank(entry.id)
         return
       }
+      const missingBaseline = patchFields(entry.desired)
+        .filter((field) => !Object.prototype.hasOwnProperty.call(entry.baseline, field))
       const same = conflictFields(fresh.workItem, entry.baseline)
-      if (mode === "rebase" && same.length > 0) {
+      if (mode === "rebase" && (missingBaseline.length > 0 || same.length > 0)) {
         publishRecovery(active.id, { ...active.value, sameFieldConflict: true, busy: false, error: null })
         return
       }
       entry.baseline = baselineFor(fresh.workItem, entry.desired)
-      entry.request = newTodoEditRequest(entry.desired, fresh.workItem.version!)
-      storeRequest(entry.id, { baseline: entry.baseline, request: entry.request, state: "prepared" })
+      entry.remote = fresh.workItem
+      entry.blocked = undefined
+      entry.active = { request: newTodoEditRequest(entry.desired, fresh.workItem.version!), state: "prepared" }
+      persistRuntime(entry)
       removeRecovery(entry.id)
       await run(entry, true)
     } catch (cause) {
@@ -444,9 +532,9 @@ export function useTodoQuickEdit() {
     hasOutstanding,
     recover,
     recovery: recoveryEntry?.value ?? null,
+    recoveryRef: recoveryEntry ? todoPrivateRef(recoveryEntry.id) : null,
     error,
-    rankResetRevision,
-    rankResetId,
+    rankResetRevisions,
     reload: () => reconcile("reload"),
     rebase: () => reconcile("rebase"),
     overwrite: () => reconcile("overwrite"),
