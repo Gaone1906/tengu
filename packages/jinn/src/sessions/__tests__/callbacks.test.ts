@@ -1,17 +1,95 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-const callbackDeliveryMockState = vi.hoisted(() => ({
-  deliveries: new Map<string, any>(),
-  nextId: 1,
-}));
+const callbackDeliveryMockState = vi.hoisted(() => {
+  const state = {
+    deliveries: new Map<string, any>(),
+    nextId: 1,
+  };
+  const get = vi.fn((id: string) =>
+    [...state.deliveries.values()].find((delivery) => delivery.id === id),
+  );
+  const claim = vi.fn((input: any) => {
+    Object.assign(input, {
+      targetSessionId: input.targetSessionId ?? input.parentSessionId,
+      sourceKind: input.sourceKind ?? "session",
+      sourceId: input.sourceId ?? input.childSessionId,
+      sourceAttempt: input.sourceAttempt ?? input.attemptToken,
+      sourceOutcome: input.sourceOutcome ?? input.terminalOutcome,
+      sourceVersion: input.sourceVersion ?? input.terminalVersion,
+      deliveryKind: input.deliveryKind ?? input.callbackKind,
+    });
+    Object.assign(input, {
+      parentSessionId: input.targetSessionId,
+      childSessionId: input.sourceId,
+      attemptToken: input.sourceAttempt,
+      terminalOutcome: input.sourceOutcome,
+      terminalVersion: input.sourceVersion,
+      callbackKind: input.deliveryKind,
+    });
+    const key = [
+      input.targetSessionId,
+      input.sourceKind,
+      input.sourceId,
+      input.sourceAttempt,
+      input.sourceOutcome,
+      input.sourceVersion,
+      input.deliveryKind,
+    ].join("|");
+    const existing = state.deliveries.get(key);
+    if (existing) return { delivery: existing, claimed: false };
+    const delivery = {
+      id: `callback-delivery-${state.nextId++}`,
+      ...input,
+      status: "pending",
+      messageId: null,
+      queueItemId: null,
+      attemptCount: 0,
+      nextAttemptAt: null,
+      lastAttemptAt: null,
+      lastError: null,
+      deadLetteredAt: null,
+      createdAt: new Date().toISOString(),
+      acceptedAt: null,
+    };
+    state.deliveries.set(key, delivery);
+    return { delivery, claimed: true };
+  });
+  const claimAttempt = vi.fn((id: string, now: number, leaseMs: number) => {
+    const delivery = [...state.deliveries.values()].find((candidate) => candidate.id === id);
+    if (!delivery || delivery.status !== "pending" || (delivery.nextAttemptAt !== null && delivery.nextAttemptAt > now)) {
+      return undefined;
+    }
+    delivery.attemptCount++;
+    delivery.lastAttemptAt = now;
+    delivery.nextAttemptAt = now + leaseMs;
+    delivery.lastError = null;
+    return delivery;
+  });
+  const recordFailure = vi.fn((id: string, error: string, options: { now: number; nextAttemptAt: number; maxAttempts: number }) => {
+    const delivery = [...state.deliveries.values()].find((candidate) => candidate.id === id);
+    if (!delivery || delivery.status !== "pending") return delivery;
+    delivery.lastError = error;
+    if (delivery.attemptCount >= options.maxAttempts) {
+      delivery.status = "dead_letter";
+      delivery.nextAttemptAt = null;
+      delivery.deadLetteredAt = options.now;
+    } else {
+      delivery.nextAttemptAt = options.nextAttemptAt;
+    }
+    return delivery;
+  });
+  const listPending = vi.fn(() =>
+    [...state.deliveries.values()].filter((delivery) => delivery.status === "pending"),
+  );
+  return Object.assign(state, { get, claim, claimAttempt, recordFailure, listPending });
+});
 
 // Mock dependencies before importing the module under test
 vi.mock("../registry.js", () => ({
   getSession: vi.fn(),
   isLegacyWorkflowRunSession: vi.fn((session: Session) => session.workflowProvenance?.kind === "run"),
-  getCallbackDelivery: vi.fn((id: string) =>
-    [...callbackDeliveryMockState.deliveries.values()].find((delivery) => delivery.id === id),
-  ),
+  getSessionDelivery: callbackDeliveryMockState.get,
+  getCallbackDelivery: callbackDeliveryMockState.get,
   listSessionsBySource: vi.fn(() => []),
   updateSession: vi.fn((id: string, updates: Partial<Session>) => ({ ...makeSession({ id }), ...updates })),
   claimDelegationCompletionNudge: vi.fn((id: string, workItemId: string) => makeSession({
@@ -27,61 +105,14 @@ vi.mock("../registry.js", () => ({
   releaseDelegationCompletionNudge: vi.fn(),
   clearDelegationCompletionGuard: vi.fn(),
   listDelegationCompletionNudgedSessions: vi.fn(() => []),
-  claimCallbackDelivery: vi.fn((input: any) => {
-    const key = [
-      input.parentSessionId,
-      input.childSessionId,
-      input.attemptToken,
-      input.terminalOutcome,
-      input.terminalVersion,
-      input.callbackKind,
-    ].join("|");
-    const existing = callbackDeliveryMockState.deliveries.get(key);
-    if (existing) return { delivery: existing, claimed: false };
-    const delivery = {
-      id: `callback-delivery-${callbackDeliveryMockState.nextId++}`,
-      ...input,
-      status: "pending",
-      messageId: null,
-      queueItemId: null,
-      attemptCount: 0,
-      nextAttemptAt: null,
-      lastAttemptAt: null,
-      lastError: null,
-      deadLetteredAt: null,
-      createdAt: new Date().toISOString(),
-      acceptedAt: null,
-    };
-    callbackDeliveryMockState.deliveries.set(key, delivery);
-    return { delivery, claimed: true };
-  }),
-  claimCallbackDeliveryAttempt: vi.fn((id: string, now: number, leaseMs: number) => {
-    const delivery = [...callbackDeliveryMockState.deliveries.values()].find((candidate) => candidate.id === id);
-    if (!delivery || delivery.status !== "pending" || (delivery.nextAttemptAt !== null && delivery.nextAttemptAt > now)) {
-      return undefined;
-    }
-    delivery.attemptCount++;
-    delivery.lastAttemptAt = now;
-    delivery.nextAttemptAt = now + leaseMs;
-    delivery.lastError = null;
-    return delivery;
-  }),
-  recordCallbackDeliveryFailure: vi.fn((id: string, error: string, options: { now: number; nextAttemptAt: number; maxAttempts: number }) => {
-    const delivery = [...callbackDeliveryMockState.deliveries.values()].find((candidate) => candidate.id === id);
-    if (!delivery || delivery.status !== "pending") return delivery;
-    delivery.lastError = error;
-    if (delivery.attemptCount >= options.maxAttempts) {
-      delivery.status = "dead_letter";
-      delivery.nextAttemptAt = null;
-      delivery.deadLetteredAt = options.now;
-    } else {
-      delivery.nextAttemptAt = options.nextAttemptAt;
-    }
-    return delivery;
-  }),
-  listPendingCallbackDeliveries: vi.fn(() =>
-    [...callbackDeliveryMockState.deliveries.values()].filter((delivery) => delivery.status === "pending"),
-  ),
+  claimSessionDelivery: callbackDeliveryMockState.claim,
+  claimCallbackDelivery: callbackDeliveryMockState.claim,
+  claimSessionDeliveryAttempt: callbackDeliveryMockState.claimAttempt,
+  claimCallbackDeliveryAttempt: callbackDeliveryMockState.claimAttempt,
+  recordSessionDeliveryFailure: callbackDeliveryMockState.recordFailure,
+  recordCallbackDeliveryFailure: callbackDeliveryMockState.recordFailure,
+  listPendingSessionDeliveries: callbackDeliveryMockState.listPending,
+  listPendingCallbackDeliveries: callbackDeliveryMockState.listPending,
   ensureCallbackAttemptToken: vi.fn(() => "legacy-attempt-token"),
 }));
 

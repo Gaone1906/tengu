@@ -56,7 +56,7 @@ describe("callback delivery concurrent process initialization", () => {
     const database = new Database(path.join(home, "sessions", "registry.db"), { readonly: true });
     expect(database.prepare(`
       SELECT COUNT(*) AS count FROM callback_deliveries
-      WHERE attempt_token IN ('attempt-fresh', 'attempt-existing')
+      WHERE source_attempt IN ('attempt-fresh', 'attempt-existing')
     `).get()).toEqual({ count: 2 });
     expect(database.prepare("SELECT COUNT(*) AS count FROM callback_deliveries").get())
       .toEqual({ count: 2 + (PROCESS_COUNT * 2) });

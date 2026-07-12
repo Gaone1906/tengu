@@ -145,7 +145,7 @@ describe('workflow run session grouping', () => {
       session: database.prepare('SELECT * FROM sessions WHERE id = ?').get(legacy.id),
       messages: database.prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY id').all(legacy.id),
       queue: database.prepare('SELECT * FROM queue_items WHERE session_id = ? ORDER BY id').all(legacy.id),
-      deliveries: database.prepare('SELECT * FROM callback_deliveries WHERE parent_session_id = ? ORDER BY id').all(legacy.id),
+      deliveries: database.prepare('SELECT * FROM callback_deliveries WHERE target_session_id = ? ORDER BY id').all(legacy.id),
     });
     const before = snapshot();
     const location = {

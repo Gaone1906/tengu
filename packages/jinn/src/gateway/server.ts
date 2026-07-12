@@ -20,7 +20,8 @@ import {
 import { configureLogger, logger } from "../shared/logger.js";
 import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, isLegacyWorkflowRunSession, listSessions, updateSession, getSession, RESTART_ACK_META_KEY } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
-import { recoverCallbackStateOnStartup } from "../sessions/callbacks.js";
+import { recoverSessionDeliveryStateOnStartup } from "../sessions/callbacks.js";
+import { recoverWorkflowRunReporting } from "../workflows/reporting.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
 import { enforcePtyIdleCap, PtyLifecycleManager, type PtyLifecycleOpts } from "../engines/pty-lifecycle.js";
 import { CodexEngine } from "../engines/codex.js";
@@ -1372,11 +1373,20 @@ export async function startGateway(
   // is written under the per-session CODEX_HOME that later resumes will use.
   resumePendingWebQueueItems(apiContext);
 
+  if (workflowEvidenceRoot && workflowRunDeps?.reporting) {
+    const workflowReportingRecovery = recoverWorkflowRunReporting(workflowEvidenceRoot, workflowRunDeps.reporting);
+    if (workflowReportingRecovery.runs > 0) {
+      logger.info(
+        `Reconstructed ${workflowReportingRecovery.runs} Workflow run report block(s) and ${workflowReportingRecovery.claims} missing delivery claim(s)`,
+      );
+    }
+  }
+
   // Pending callback receipts must recover before orphan completion guards are
   // inspected. Otherwise a durable-but-unaccepted child nudge can race a
   // contradictory parent recovery message. The combined recovery owns both
   // ordering and top-level isolation so boot cannot reject on one poison row.
-  const callbackRecovery = await recoverCallbackStateOnStartup();
+  const callbackRecovery = await recoverSessionDeliveryStateOnStartup();
   if (callbackRecovery.pendingRecovered > 0) {
     logger.info(`Re-submitted ${callbackRecovery.pendingRecovered} pending callback delivery claim(s) after restart`);
   }

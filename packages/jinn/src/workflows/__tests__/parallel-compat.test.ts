@@ -34,7 +34,8 @@ import {
  * scripted sessions then sweeps to quiescence — so the final persisted run FILE
  * (read raw off disk, definitionSnapshot included) is fully reproducible and the
  * snapshot equality IS byte-level equality after projecting away only the approved
- * schema-v3 run envelope (`schemaVersion: 3` plus `revision`): each scenario
+ * schema-v3 run envelope (`schemaVersion: 3` plus `revision`) and the Task 5
+ * append-only reporting envelope (`reportSequence` plus `reportEpisodes`): each scenario
  * snapshots BOTH the parsed object (readability) AND the raw utf8 file string
  * (`raw-bytes` — the true byte-level assertion; GRS-016a-fix, Codex finding 4).
  *
@@ -141,24 +142,21 @@ function actualDiskRun(workflowId: string, runId: string): { raw: string; record
   return { raw, record };
 }
 
-/** Parsed v2-compatible view: remove only the approved schema-v3 run envelope. */
+/** Parsed v2-compatible view: remove only approved schema-v3 persistence envelopes. */
 function legacyCompatibleDiskRecord(workflowId: string, runId: string): unknown {
   const { record } = actualDiskRun(workflowId, runId);
   const projected = { ...record } as Record<string, unknown>;
   projected.schemaVersion = 2;
   delete projected.revision;
+  delete projected.reportSequence;
+  delete projected.reportEpisodes;
   return projected;
 }
 
-/** Raw v2-compatible bytes: preserve all ordering/formatting outside the v3 envelope. */
+/** Raw v2-compatible bytes: preserve all ordering/formatting outside approved v3 envelopes. */
 function legacyCompatibleDiskRaw(workflowId: string, runId: string): string {
-  const { raw, record } = actualDiskRun(workflowId, runId);
-  const currentSchemaLine = `  "schemaVersion": ${WORKFLOW_RUN_SCHEMA_VERSION},`;
-  const legacySchemaLine = '  "schemaVersion": 2,';
-  const revisionLine = `  "revision": ${record.revision},\n`;
-  expect(raw.split(currentSchemaLine)).toHaveLength(2);
-  expect(raw.split(revisionLine)).toHaveLength(2);
-  return raw.replace(currentSchemaLine, legacySchemaLine).replace(revisionLine, '');
+  const projected = legacyCompatibleDiskRecord(workflowId, runId);
+  return JSON.stringify(projected, null, 2) + '\n';
 }
 
 const runIdOf = (n: number) => () => `run-golden-${n}`;

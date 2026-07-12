@@ -30,7 +30,7 @@ function legacyRowsChecksum(): string {
     `).all(),
     callbackDeliveries: database.prepare(`
       SELECT * FROM callback_deliveries
-      WHERE parent_session_id = 'legacy-run-session'
+      WHERE target_session_id = 'legacy-run-session'
       ORDER BY id
     `).all(),
   };
@@ -110,20 +110,20 @@ describe("legacy Workflow run Session compatibility", () => {
     `).run();
     database.prepare(`
       INSERT INTO callback_deliveries (
-        id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
-        terminal_version, callback_kind, payload, status, message_id, queue_item_id,
+        id, target_session_id, source_kind, source_id, source_attempt, source_outcome,
+        source_version, delivery_kind, payload, status, message_id, queue_item_id,
         attempt_count, next_attempt_at, last_attempt_at, last_error, dead_lettered_at,
         created_at, accepted_at
       ) VALUES
         (
-          'legacy-delivery', 'legacy-run-session', 'legacy-phase-session', 'attempt-old',
+          'legacy-delivery', 'legacy-run-session', 'session', 'legacy-phase-session', 'attempt-old',
           'succeeded', 1, 'parent-completion',
           '{"message":"Historical pending callback","displayMessage":"Historical pending callback"}',
           'pending', NULL, NULL, 0, 1767323045000, NULL, NULL, NULL,
           '2026-01-02T03:04:05.000Z', NULL
         ),
         (
-          'legacy-delivery-accepted', 'legacy-run-session', 'legacy-phase-session',
+          'legacy-delivery-accepted', 'legacy-run-session', 'session', 'legacy-phase-session',
           'attempt-accepted', 'succeeded', 1, 'parent-completion',
           '{"message":"Historical callback","displayMessage":"Historical callback"}',
           'accepted', 'legacy-message', 'legacy-queue', 1, NULL, 1767323045000,

@@ -379,15 +379,15 @@ describe("parent callback reliability", () => {
         expect(seenPrompts).toHaveLength(1);
       });
       const accepted = registry.initDb().prepare(`
-        SELECT id, status FROM callback_deliveries WHERE callback_kind = 'manager-visibility'
+        SELECT id, status FROM callback_deliveries WHERE delivery_kind = 'manager-visibility'
       `).get();
       callbacks.notifyManagerVisibility(manager.id, details);
       await new Promise((resolve) => setTimeout(resolve, 25));
       expect(registry.initDb().prepare(`
-        SELECT COUNT(*) AS n FROM callback_deliveries WHERE callback_kind = 'manager-visibility'
+        SELECT COUNT(*) AS n FROM callback_deliveries WHERE delivery_kind = 'manager-visibility'
       `).get()).toEqual({ n: 1 });
       expect(registry.initDb().prepare(`
-        SELECT id, status FROM callback_deliveries WHERE callback_kind = 'manager-visibility'
+        SELECT id, status FROM callback_deliveries WHERE delivery_kind = 'manager-visibility'
       `).get()).toEqual(accepted);
       expect(registry.getMessages(manager.id).filter((message) => message.role === "notification"))
         .toHaveLength(1);
@@ -456,7 +456,7 @@ describe("parent callback reliability", () => {
         expect(seenPrompts).toHaveLength(1);
       });
       const rateLimitedPayload = JSON.parse((registry.initDb().prepare(`
-        SELECT payload FROM callback_deliveries WHERE callback_kind = 'rate-limited'
+        SELECT payload FROM callback_deliveries WHERE delivery_kind = 'rate-limited'
       `).get() as { payload: string }).payload) as Record<string, unknown>;
       expect(rateLimitedPayload).not.toHaveProperty("meta");
       expect(rateLimitedPayload).not.toHaveProperty("block");
@@ -477,10 +477,10 @@ describe("parent callback reliability", () => {
         expect(seenPrompts).toHaveLength(3);
       });
       expect(registry.initDb().prepare(`
-        SELECT callback_kind AS kind, COUNT(*) AS n
+        SELECT delivery_kind AS kind, COUNT(*) AS n
         FROM callback_deliveries
-        GROUP BY callback_kind
-        ORDER BY callback_kind
+        GROUP BY delivery_kind
+        ORDER BY delivery_kind
       `).all()).toEqual([
         { kind: "parent-completion", n: 1 },
         { kind: "rate-limit-resumed", n: 1 },
@@ -559,7 +559,7 @@ describe("parent callback reliability", () => {
         });
         expect(registry.getMessages(parent.id).filter((message) => message.role === "notification")).toHaveLength(1);
         expect(registry.initDb().prepare(`
-          SELECT COUNT(*) AS n FROM callback_deliveries WHERE callback_kind = 'rate-limit-resumed'
+          SELECT COUNT(*) AS n FROM callback_deliveries WHERE delivery_kind = 'rate-limit-resumed'
         `).get()).toEqual({ n: 1 });
         expect(events.filter(({ event }) => event === "session:notification")).toHaveLength(1);
       } finally {
@@ -591,7 +591,7 @@ describe("parent callback reliability", () => {
       callbacks.notifyRateLimitResumed(active);
       await eventually(() => {
         const rows = registry.initDb().prepare(`
-          SELECT callback_kind AS kind FROM callback_deliveries ORDER BY callback_kind
+          SELECT delivery_kind AS kind FROM callback_deliveries ORDER BY delivery_kind
         `).all();
         expect(rows).toEqual([{ kind: "rate-limit-resumed" }, { kind: "rate-limited" }]);
       });
@@ -741,7 +741,7 @@ describe("parent callback reliability", () => {
 
       await eventually(() => {
         const receipt = registry.initDb().prepare(`
-          SELECT status FROM callback_deliveries WHERE callback_kind = 'delegation-completion-nudge'
+          SELECT status FROM callback_deliveries WHERE delivery_kind = 'delegation-completion-nudge'
         `).get();
         expect(receipt).toEqual({ status: "accepted" });
       });
@@ -749,7 +749,7 @@ describe("parent callback reliability", () => {
       expect(registry.getMessages(child.id).filter((message) => message.role === "notification")).toHaveLength(1);
       expect(registry.getMessages(parent.id)).toEqual([]);
       expect(registry.initDb().prepare(`
-        SELECT COUNT(*) AS n FROM callback_deliveries WHERE callback_kind = 'parent-completion'
+        SELECT COUNT(*) AS n FROM callback_deliveries WHERE delivery_kind = 'parent-completion'
       `).get()).toEqual({ n: 0 });
       expect(registry.getSession(child.id)?.transportMeta).toMatchObject({
         delegationCompletionContract: { workItemId: item.id, state: "nudged" },
@@ -879,9 +879,9 @@ describe("parent callback reliability", () => {
     database.pragma("ignore_check_constraints = ON");
     database.prepare(`
       INSERT INTO callback_deliveries (
-        id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
-        terminal_version, callback_kind, payload, status, created_at
-      ) VALUES ('poison-before-valid', ?, ?, 'poison-attempt', 'failed', 1,
+        id, target_session_id, source_kind, source_id, source_attempt, source_outcome,
+        source_version, delivery_kind, payload, status, created_at
+      ) VALUES ('poison-before-valid', ?, 'session', ?, 'poison-attempt', 'failed', 1,
         'parent-completion', '{bad json', 'pending', '2026-01-01T00:00:00.000Z')
     `).run(parent.id, child.id);
     database.pragma("ignore_check_constraints = OFF");
@@ -1323,7 +1323,7 @@ describe("callback live retry sweep", () => {
     callbacks.notifyParentSession(child, { result: "accepted once" });
     await vi.advanceTimersByTimeAsync(0);
     const delivery = registry.initDb().prepare(`
-      SELECT id FROM callback_deliveries WHERE callback_kind = 'parent-completion'
+      SELECT id FROM callback_deliveries WHERE delivery_kind = 'parent-completion'
     `).get() as { id: string };
     await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
 

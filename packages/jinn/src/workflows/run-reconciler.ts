@@ -65,6 +65,11 @@ import {
   type WorkflowRunInvocationClaim,
 } from './run-idempotency.js';
 import { createPendingWorkflowGateApproval, freezeWorkflowApprovalEscalation } from './approval-authority.js';
+import {
+  projectWorkflowRunActivity,
+  stampWorkflowRunReportEpisode,
+  type WorkflowReportingContext,
+} from './reporting.js';
 
 /**
  * Workflow RUN RECONCILER + driver (GRS-014b) — the impure half of the v2 engine.
@@ -132,6 +137,8 @@ export interface RunDriverDeps {
   todoEventFeed?: WorkflowTodoEventFeed;
   /** Injectable publication boundary for deterministic concurrency tests. */
   publishInitialRun?: (root: string, run: WorkflowRun) => InitialWorkflowRunPublication;
+  /** Best-effort durable chat projection + shared Session delivery claim. */
+  reporting?: WorkflowReportingContext;
   now?: () => string;
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
 }
@@ -140,9 +147,21 @@ function publishInitialRun(
   deps: RunDriverDeps,
   run: WorkflowRun,
 ): { owned: true; run: WorkflowRun } | { owned: false; run: WorkflowRun } {
-  const publication = (deps.publishInitialRun ?? publishInitialWorkflowRun)(deps.root, run);
+  const now = (deps.now ?? (() => new Date().toISOString()))();
+  const candidate = stampWorkflowRunReportEpisode(null, run, now);
+  const publication = (deps.publishInitialRun ?? publishInitialWorkflowRun)(deps.root, candidate);
+  projectPersistedRun(deps, publication.run);
   if (publication.outcome === 'existing') return { owned: false, run: publication.run };
   return { owned: true, run: publication.run };
+}
+
+function projectPersistedRun(deps: RunDriverDeps, run: WorkflowRun): void {
+  if (!deps.reporting) return;
+  try {
+    projectWorkflowRunActivity(run, deps.reporting);
+  } catch (error) {
+    deps.log?.('warn', `[workflow-reporting] projection failed for ${run.runId}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /** Persist one authoritative Workflow run revision. */
@@ -167,13 +186,19 @@ function persistRun(deps: RunDriverDeps, candidate: WorkflowRun): WorkflowRun {
       };
     }
   }
-  const stamped: WorkflowRun = {
+  const stampedBase: WorkflowRun = {
     ...nativeCandidate,
     schemaVersion: WORKFLOW_RUN_SCHEMA_VERSION,
     revision: Math.max(previous?.revision ?? 0, candidate.revision ?? 0) + 1,
   };
-  saveRun(deps.root, stamped);
-  return stamped;
+  const stamped = stampWorkflowRunReportEpisode(
+    previous,
+    stampedBase,
+    (deps.now ?? (() => new Date().toISOString()))(),
+  );
+  const persisted = saveRun(deps.root, stamped);
+  projectPersistedRun(deps, persisted);
+  return persisted;
 }
 
 export interface StartRunOptions {
@@ -721,7 +746,7 @@ export async function startWorkflowRun(
   const publication = publishCandidate(run);
   if (!publication.owned) return publication.run;
 
-  return withRunAdvanceLock(runId, () => driveRunLocked(deps, def, resolved.plan, run));
+  return withRunAdvanceLock(runId, () => driveRunLocked(deps, def, resolved.plan, publication.run));
 }
 
 export async function startWorkflowRunFromTrigger(

@@ -94,4 +94,12 @@ describe('gateway boot ordering — managed cron fires can never land half-wired
 
     expect(reloadBody).toContain('resumePendingWebQueueItems(apiContext)');
   });
+
+  it('reconstructs Workflow activity and missing claims before the single Session delivery recovery call', () => {
+    const reconstruct = callIndex('recoverWorkflowRunReporting(workflowEvidenceRoot');
+    const recover = callIndex('recoverSessionDeliveryStateOnStartup()');
+
+    expect(reconstruct).toBeLessThan(recover);
+    expect(serverSource.indexOf('recoverSessionDeliveryStateOnStartup()', recover + 1)).toBe(-1);
+  });
 });

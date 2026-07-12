@@ -340,25 +340,26 @@ export interface Session {
   lastError: string | null;
 }
 
-export interface CallbackDeliveryIdentity {
-  parentSessionId: string;
-  childSessionId: string;
-  attemptToken: string;
-  terminalOutcome: string;
-  terminalVersion: number;
-  callbackKind: string;
+export interface SessionDeliveryIdentity {
+  targetSessionId: string;
+  sourceKind: "session" | "workflow-run";
+  sourceId: string;
+  sourceAttempt: string;
+  sourceOutcome: string;
+  sourceVersion: number;
+  deliveryKind: string;
 }
 
-export interface CallbackDeliveryPayload {
+export interface SessionDeliveryPayload {
   message: string;
   displayMessage: string;
   meta?: JsonObject;
   block?: ChatBlockEnvelope;
 }
 
-export interface CallbackDelivery extends CallbackDeliveryIdentity {
+export interface SessionDelivery extends SessionDeliveryIdentity {
   id: string;
-  payload: CallbackDeliveryPayload;
+  payload: SessionDeliveryPayload;
   status: "pending" | "accepted" | "dead_letter";
   messageId: string | null;
   queueItemId: string | null;
@@ -373,8 +374,8 @@ export interface CallbackDelivery extends CallbackDeliveryIdentity {
 
 /** Operator-facing dead-letter diagnostics. Poison rows remain discoverable
  * even when their stored payload cannot be decoded safely. */
-export interface CallbackDeliveryDeadLetter extends Omit<CallbackDelivery, "payload"> {
-  payload: CallbackDeliveryPayload | null;
+export interface SessionDeliveryDeadLetter extends Omit<SessionDelivery, "payload"> {
+  payload: SessionDeliveryPayload | null;
   payloadError: string | null;
 }
 

@@ -267,6 +267,15 @@ export interface WorkflowRunInvocation {
   reportMode: WorkflowReportMode;
 }
 
+export interface WorkflowRunReportEpisode {
+  sequence: number;
+  token: string;
+  kind: 'parked' | 'terminal';
+  outcome: 'parked' | 'completed' | 'failed' | 'cancelled';
+  createdAt: string;
+  summary: string;
+}
+
 /** A run-local replacement for one step's authored task text. This is deliberately
  * separate from both immutable run parameters and the frozen definition snapshot:
  * the definition remains honest evidence while the effective pending-phase prompt
@@ -328,6 +337,10 @@ export interface WorkflowRun {
   parameters?: WorkflowRunParameters;
   /** Verified invoking Session relation. Absent for browser/CLI/system and legacy runs. */
   invocation?: WorkflowRunInvocation;
+  /** Monotonic append-only report episode identity. */
+  reportSequence?: number;
+  /** Stable parked/re-entry/terminal episodes claimed through Session delivery. */
+  reportEpisodes?: WorkflowRunReportEpisode[];
   /** Current effective per-step prompt replacements for this run. Initial values
    * are frozen at start; later changes are admitted only for pending phases and
    * every such change is recorded in `stepPromptEdits`. */

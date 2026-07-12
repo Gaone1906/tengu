@@ -80,11 +80,12 @@ import {
   getQueueItems,
   cancelAllPendingQueueItems,
   listAllPendingQueueItems,
-  getCallbackDelivery,
-  getCallbackDeliveryByQueueItemId,
-  listDeadLetterCallbackDeliveries,
-  requeueDeadLetterCallbackDelivery,
-  acceptCallbackDelivery,
+  getSessionDelivery,
+  getSessionDeliveryByQueueItemId,
+  listDeadLetterSessionDeliveries,
+  requeueDeadLetterSessionDelivery,
+  acceptSessionDelivery,
+  claimSessionDelivery,
   getFile,
   getSessionBySessionKey,
   isLegacyWorkflowRunSession,
@@ -198,7 +199,8 @@ import { readJsonBody, readBodyRaw } from "./http-helpers.js";
 import { isJsonMediaType } from "./media-type.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
-import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions, recoverPendingCallbackDeliveries } from "../sessions/callbacks.js";
+import { deliverClaimedSessionDelivery, notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions, recoverPendingSessionDeliveries } from "../sessions/callbacks.js";
+import { projectWorkflowRunActivity, type WorkflowReportingContext } from "../workflows/reporting.js";
 import { clearDelegationCompletionContract, DELEGATION_COMPLETION_TRACKED_META_KEY } from "../sessions/delegation-completion-contract.js";
 import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
 import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
@@ -474,7 +476,7 @@ export function resumePendingWebQueueItems(context: ApiContext): void {
     // Ordinary non-web queue ownership remains connector-specific. Callback
     // receipts are the exception: acceptance already committed this internal
     // turn, so startup replay must finish it regardless of the parent's source.
-    const callbackDelivery = getCallbackDeliveryByQueueItemId(item.id);
+    const callbackDelivery = getSessionDeliveryByQueueItemId(item.id);
     if (session.source !== "web" && !callbackDelivery) continue;
     session = maybeRevertEngineOverride(session);
 
@@ -863,6 +865,7 @@ export async function postWorkflowStepFollowUp(ctx: FollowUpContext, context: Ap
 export function workflowRunDriverDeps(root: string, context: ApiContext): RunDriverDeps {
   return {
     root,
+    reporting: workflowReportingContext(context),
     todoEventFeed: createWorkflowTodoEventFeed(),
     getDefinition,
     probeStepSession: (sessionKey) => {
@@ -952,6 +955,34 @@ export function workflowRunDriverDeps(root: string, context: ApiContext): RunDri
     },
     log: (level, message) => logger[level](message),
   };
+}
+
+export function workflowReportingContext(context: ApiContext): WorkflowReportingContext {
+  return {
+    sessionExists: (sessionId) => !!getSession(sessionId),
+    applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
+    emitBlock: (sessionId, envelope, fallback) => {
+      context.emit("session:delta", {
+        sessionId,
+        type: "block",
+        content: fallback,
+        block: envelope,
+      });
+    },
+    claimDelivery: claimSessionDelivery,
+    deliverClaimed: deliverClaimedSessionDelivery,
+    log: (level, message) => logger[level](message),
+  };
+}
+
+function projectWorkflowOperationActivity(
+  run: WorkflowRun,
+  headers: HttpRequest["headers"],
+  context: ApiContext,
+): void {
+  const identity = resolveScopedWriteCallerIdentity(headers, context);
+  const actingSessionId = identity.kind === "session" ? identity.callerId : undefined;
+  projectWorkflowRunActivity(run, workflowReportingContext(context), actingSessionId);
 }
 
 interface WorkflowRunRequestBody {
@@ -1163,6 +1194,7 @@ async function runWorkflowDefinitionFromHttp(
       ...(invocation ? { invocation } : {}),
       ...(validated.stepOverrides ? { stepOverrides: validated.stepOverrides } : {}),
     });
+    projectWorkflowOperationActivity(run, req.headers, context);
     const status = replayed ? 200 : run.status === "failed" ? 422 : 201;
     return json(res, projectWorkflowRunApprovalCapability(run, req.headers, context), status);
   } catch (err) {
@@ -2390,20 +2422,20 @@ export async function handleApiRequest(
 
     if (method === "GET" && pathname === "/api/callback-deliveries/dead-letter") {
       if (!requireCallbackRecoveryAuthority(req, res, context)) return;
-      return json(res, { deliveries: listDeadLetterCallbackDeliveries() });
+      return json(res, { deliveries: listDeadLetterSessionDeliveries() });
     }
 
     const callbackRequeueParams = matchRoute("/api/callback-deliveries/:id/requeue", pathname);
     if (method === "POST" && callbackRequeueParams) {
       if (!requireCallbackRecoveryAuthority(req, res, context)) return;
       try {
-        const existing = getCallbackDelivery(callbackRequeueParams.id);
-        const parent = existing ? getSession(existing.parentSessionId) : undefined;
-        if (parent && isLegacyWorkflowRunSession(parent)) {
+        const existing = getSessionDelivery(callbackRequeueParams.id);
+        const target = existing ? getSession(existing.targetSessionId) : undefined;
+        if (existing?.sourceKind === "session" && target && isLegacyWorkflowRunSession(target)) {
           return json(res, { error: "historical workflow delivery is read-only" }, 409);
         }
-        const delivery = requeueDeadLetterCallbackDelivery(callbackRequeueParams.id);
-        void recoverPendingCallbackDeliveries().catch((error) => {
+        const delivery = requeueDeadLetterSessionDelivery(callbackRequeueParams.id);
+        void recoverPendingSessionDeliveries().catch((error) => {
           logger.error(`[callbacks] Requeued delivery ${delivery.id} could not start recovery: ${error instanceof Error ? error.message : String(error)}`);
         });
         return json(res, { delivery });
@@ -4318,6 +4350,7 @@ export async function handleApiRequest(
           status: outcome.status,
         }, 409);
       }
+      projectWorkflowOperationActivity(outcome.run, req.headers, context);
       return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
     }
 
@@ -4348,6 +4381,7 @@ export async function handleApiRequest(
       if (outcome.outcome === "already-terminal") {
         return json(res, { error: `run is already ${outcome.run.status}`, status: outcome.run.status }, 409);
       }
+      projectWorkflowOperationActivity(outcome.run, req.headers, context);
       return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
     }
 
@@ -4367,6 +4401,7 @@ export async function handleApiRequest(
       if (outcome.outcome === "not-parked") {
         return json(res, { error: `run is ${outcome.run.status}, not parked`, status: outcome.run.status }, 409);
       }
+      projectWorkflowOperationActivity(outcome.run, req.headers, context);
       return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
     }
 
@@ -4402,6 +4437,7 @@ export async function handleApiRequest(
       if (outcome.outcome === "not-parked") {
         return json(res, { error: `run is ${outcome.run.status}, not parked with a pending native approval`, status: outcome.run.status }, 409);
       }
+      projectWorkflowOperationActivity(outcome.run, req.headers, context);
       return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
     }
 
@@ -4439,6 +4475,7 @@ export async function handleApiRequest(
         if (result.outcome === "not-parked") {
           return json(res, { error: `run is ${result.run.status}, not parked`, status: result.run.status }, 409);
         }
+        projectWorkflowOperationActivity(result.run, req.headers, context);
         return json(res, projectWorkflowRunApprovalCapability(result.run, req.headers, context));
       } catch (err) {
         if (err instanceof WorkflowRunStoreError) {
@@ -5079,9 +5116,9 @@ export async function handleApiRequest(
       const callbackDeliveryId = typeof body.callbackDeliveryId === "string"
         ? stripControlChars(body.callbackDeliveryId).trim()
         : "";
-      const callbackDelivery = callbackDeliveryId ? getCallbackDelivery(callbackDeliveryId) : undefined;
+      const callbackDelivery = callbackDeliveryId ? getSessionDelivery(callbackDeliveryId) : undefined;
       if (callbackDeliveryId && !callbackDelivery) return notFound(res);
-      if (callbackDelivery && callbackDelivery.parentSessionId !== session.id) {
+      if (callbackDelivery && callbackDelivery.targetSessionId !== session.id) {
         res.writeHead(409, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "callback parent mismatch" }));
         return;
@@ -5279,7 +5316,7 @@ export async function handleApiRequest(
       let queueItemId: string | undefined;
       let incomingMessageId: string;
       if (callbackDelivery) {
-        const acceptance = acceptCallbackDelivery(callbackDelivery.id, session.id, sessionKey);
+        const acceptance = acceptSessionDelivery(callbackDelivery.id, session.id, sessionKey);
         if (!acceptance.accepted) {
           return json(res, {
             status: "duplicate",

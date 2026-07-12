@@ -72,6 +72,74 @@ beforeEach(() => {
 });
 
 describe("callback delivery schema migration", () => {
+  it("reopens the current child-session schema as one generic session delivery without rewriting its receipt", () => {
+    const database = registry.initDb();
+    database.exec(`
+      DROP TABLE callback_deliveries;
+      CREATE TABLE callback_deliveries (
+        id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL CHECK (length(parent_session_id) > 0 AND parent_session_id = jinn_callback_identity(parent_session_id)),
+        child_session_id TEXT NOT NULL CHECK (length(child_session_id) > 0 AND child_session_id = jinn_callback_identity(child_session_id)),
+        attempt_token TEXT NOT NULL CHECK (length(attempt_token) > 0 AND attempt_token = jinn_callback_identity(attempt_token)),
+        terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND terminal_outcome = jinn_callback_identity(terminal_outcome)),
+        terminal_version INTEGER NOT NULL CHECK (terminal_version >= 1),
+        callback_kind TEXT NOT NULL CHECK (length(callback_kind) > 0 AND callback_kind = jinn_callback_identity(callback_kind)),
+        payload TEXT NOT NULL CHECK (
+          json_valid(payload)
+          AND json_type(payload) = 'object'
+          AND json_type(payload, '$.message') IS 'text'
+          AND json_type(payload, '$.displayMessage') IS 'text'
+        ),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'dead_letter')),
+        message_id TEXT,
+        queue_item_id TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        next_attempt_at INTEGER,
+        last_attempt_at INTEGER,
+        last_error TEXT,
+        dead_lettered_at INTEGER,
+        created_at TEXT NOT NULL,
+        accepted_at TEXT
+      );
+      CREATE UNIQUE INDEX uq_callback_delivery_identity
+        ON callback_deliveries (
+          parent_session_id,
+          child_session_id,
+          attempt_token,
+          terminal_outcome,
+          terminal_version,
+          callback_kind
+        );
+      CREATE INDEX idx_callback_deliveries_pending
+        ON callback_deliveries (status, next_attempt_at, created_at)
+        WHERE status = 'pending';
+      INSERT INTO callback_deliveries (
+        id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
+        terminal_version, callback_kind, payload, status, attempt_count, created_at
+      ) VALUES (
+        'delivery-old', 'parent-a', 'child-a', 'attempt-a', 'succeeded', 1,
+        'parent-completion', '{"message":"existing payload","displayMessage":"Existing payload"}',
+        'pending', 0, '2026-07-12T00:00:00.000Z'
+      );
+    `);
+
+    registry.__closeDbForTest();
+    registry.initDb();
+
+    expect(registry.getSessionDelivery("delivery-old")).toMatchObject({
+      targetSessionId: "parent-a",
+      sourceKind: "session",
+      sourceId: "child-a",
+      sourceAttempt: "attempt-a",
+      sourceOutcome: "succeeded",
+      sourceVersion: 1,
+      deliveryKind: "parent-completion",
+      status: "pending",
+      payload: { message: "existing payload", displayMessage: "Existing payload" },
+    });
+    expect(registry.initDb().prepare("SELECT COUNT(*) AS n FROM callback_deliveries").get()).toEqual({ n: 1 });
+  });
+
   it("is idempotent and installs the durable composite uniqueness contract", () => {
     const database = new Database(":memory:");
 
@@ -81,12 +149,13 @@ describe("callback delivery schema migration", () => {
     const columns = database.prepare("PRAGMA table_info(callback_deliveries)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
       "id",
-      "parent_session_id",
-      "child_session_id",
-      "attempt_token",
-      "terminal_outcome",
-      "terminal_version",
-      "callback_kind",
+      "target_session_id",
+      "source_kind",
+      "source_id",
+      "source_attempt",
+      "source_outcome",
+      "source_version",
+      "delivery_kind",
       "payload",
       "status",
       "message_id",
@@ -106,17 +175,18 @@ describe("callback delivery schema migration", () => {
       .prepare("PRAGMA index_info(uq_callback_delivery_identity)")
       .all() as Array<{ name: string }>;
     expect(identityColumns.map((column) => column.name)).toEqual([
-      "parent_session_id",
-      "child_session_id",
-      "attempt_token",
-      "terminal_outcome",
-      "terminal_version",
-      "callback_kind",
+      "target_session_id",
+      "source_kind",
+      "source_id",
+      "source_attempt",
+      "source_outcome",
+      "source_version",
+      "delivery_kind",
     ]);
     const tableSql = (database.prepare(`
       SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'callback_deliveries'
     `).get() as { sql: string }).sql;
-    expect(tableSql).toMatch(/terminal_version\s+INTEGER\s+NOT NULL\s+CHECK\s*\(terminal_version\s*>=\s*1\)/i);
+    expect(tableSql).toMatch(/source_version\s+INTEGER\s+NOT NULL\s+CHECK\s*\(source_version\s*>=\s*1\)/i);
     expect(tableSql).toMatch(/json_valid\s*\(payload\)/i);
     expect(tableSql).toMatch(/status\s+IN\s*\('pending',\s*'accepted',\s*'dead_letter'\)/i);
   });
@@ -163,16 +233,17 @@ describe("callback delivery schema migration", () => {
     registry.migrateCallbackDeliveriesSchema(database);
 
     expect(database.prepare(`
-      SELECT parent_session_id AS parentSessionId, child_session_id AS childSessionId,
-        attempt_token AS attemptToken, terminal_outcome AS terminalOutcome,
-        callback_kind AS callbackKind, status
+      SELECT target_session_id AS targetSessionId, source_kind AS sourceKind,
+        source_id AS sourceId, source_attempt AS sourceAttempt,
+        source_outcome AS sourceOutcome, delivery_kind AS deliveryKind, status
       FROM callback_deliveries WHERE id = 'valid'
     `).get()).toEqual({
-      parentSessionId: "parent",
-      childSessionId: "child",
-      attemptToken: "attempt",
-      terminalOutcome: "succeeded",
-      callbackKind: "parent-completion",
+      targetSessionId: "parent",
+      sourceKind: "session",
+      sourceId: "child",
+      sourceAttempt: "attempt",
+      sourceOutcome: "succeeded",
+      deliveryKind: "parent-completion",
       status: "pending",
     });
     expect(database.prepare(`
@@ -222,12 +293,12 @@ describe("callback delivery schema migration", () => {
     registry.migrateCallbackDeliveriesSchema(database);
 
     const rows = database.prepare(`
-      SELECT id, parent_session_id AS parentSessionId FROM callback_deliveries ORDER BY id
-    `).all() as Array<{ id: string; parentSessionId: string }>;
+      SELECT id, target_session_id AS targetSessionId FROM callback_deliveries ORDER BY id
+    `).all() as Array<{ id: string; targetSessionId: string }>;
     expect(rows).toHaveLength(UNICODE_WHITE_SPACE.length);
     for (const row of rows) {
-      expect(row.parentSessionId).toBe(`parent-${row.id.slice(3)}`);
-      expect(row.parentSessionId).not.toMatch(/^\p{White_Space}|\p{White_Space}$/u);
+      expect(row.targetSessionId).toBe(`parent-${row.id.slice(3)}`);
+      expect(row.targetSessionId).not.toMatch(/^\p{White_Space}|\p{White_Space}$/u);
     }
     database.close();
   });
@@ -385,12 +456,12 @@ describe("callback delivery identity", () => {
         parentSessionId: edge,
         childSessionId: `blank-child-${hex}`,
         attemptToken: `blank-attempt-${hex}`,
-      }))).toThrow(/parentSessionId is required/i);
+      }))).toThrow(/targetSessionId is required/i);
       expect(() => database.prepare(`
         INSERT INTO callback_deliveries (
-          id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
-          terminal_version, callback_kind, payload, status, created_at
-        ) VALUES (?, ?, ?, ?, 'succeeded', 1, 'parent-completion', ?, 'pending', ?)
+          id, target_session_id, source_kind, source_id, source_attempt, source_outcome,
+          source_version, delivery_kind, payload, status, created_at
+        ) VALUES (?, ?, 'session', ?, ?, 'succeeded', 1, 'parent-completion', ?, 'pending', ?)
       `).run(
         `direct-${hex}`,
         `${edge}direct-parent-${hex}${edge}`,
@@ -415,25 +486,25 @@ describe("callback delivery identity", () => {
   });
 
   it.each([
-    ["blank parent", "parent_session_id", "   ", 1],
-    ["tab-padded parent", "parent_session_id", "\tparent-sql\t", 1],
-    ["NBSP-only parent", "parent_session_id", "\u00a0", 1],
-    ["decomposed Unicode child", "child_session_id", "cafe\u0301", 1],
-    ["padded token", "attempt_token", " token ", 1],
-    ["zero terminal version", "terminal_version", "attempt-2", 0],
+    ["blank target", "target_session_id", "   ", 1],
+    ["tab-padded target", "target_session_id", "\tparent-sql\t", 1],
+    ["NBSP-only target", "target_session_id", "\u00a0", 1],
+    ["decomposed Unicode source", "source_id", "cafe\u0301", 1],
+    ["padded source attempt", "source_attempt", " token ", 1],
+    ["zero source version", "source_version", "attempt-2", 0],
   ])("rejects direct SQL identities that violate canonical constraints: %s", (_label, column, value, version) => {
     const database = registry.initDb();
     const row = callbackInput({
-      parentSessionId: column === "parent_session_id" ? value : "parent-sql",
-      childSessionId: column === "child_session_id" ? value : "child-sql",
-      attemptToken: column === "attempt_token" ? value : "attempt-sql",
+      parentSessionId: column === "target_session_id" ? value : "parent-sql",
+      childSessionId: column === "source_id" ? value : "child-sql",
+      attemptToken: column === "source_attempt" ? value : "attempt-sql",
       terminalVersion: version,
     });
     expect(() => database.prepare(`
       INSERT INTO callback_deliveries (
-        id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
-        terminal_version, callback_kind, payload, status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        id, target_session_id, source_kind, source_id, source_attempt, source_outcome,
+        source_version, delivery_kind, payload, status, created_at
+      ) VALUES (?, ?, 'session', ?, ?, ?, ?, ?, ?, 'pending', ?)
     `).run(
       `sql-${column}`,
       row.parentSessionId,
@@ -566,9 +637,9 @@ describe("callback delivery retry lifecycle", () => {
     database.pragma("ignore_check_constraints = ON");
     database.prepare(`
       INSERT INTO callback_deliveries (
-        id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
-        terminal_version, callback_kind, payload, status, created_at
-      ) VALUES ('poison', 'parent-poison', 'child-poison', 'attempt-poison', 'failed',
+        id, target_session_id, source_kind, source_id, source_attempt, source_outcome,
+        source_version, delivery_kind, payload, status, created_at
+      ) VALUES ('poison', 'parent-poison', 'session', 'child-poison', 'attempt-poison', 'failed',
         1, 'parent-completion', '{bad json', 'pending', '2026-01-01T00:00:00.000Z')
     `).run();
     database.pragma("ignore_check_constraints = OFF");
@@ -608,10 +679,10 @@ describe("callback delivery retry lifecycle", () => {
     database.pragma("ignore_check_constraints = ON");
     const insert = database.prepare(`
       INSERT INTO callback_deliveries (
-        id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
-        terminal_version, callback_kind, payload, status, attempt_count,
+        id, target_session_id, source_kind, source_id, source_attempt, source_outcome,
+        source_version, delivery_kind, payload, status, attempt_count,
         next_attempt_at, last_attempt_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+      ) VALUES (?, ?, 'session', ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
     `);
     for (const row of poisonRows) {
       insert.run(
@@ -635,7 +706,7 @@ describe("callback delivery retry lifecycle", () => {
     `).all()).toEqual(poisonRows.map((row) => row.id).sort().map((id) => ({
       id,
       status: "dead_letter",
-      lastError: expect.stringMatching(/callback delivery/i),
+      lastError: expect.stringMatching(/(?:callback|session) delivery/i),
     })));
 
     registry.__closeDbForTest();
@@ -683,7 +754,7 @@ describe("callback delivery acceptance", () => {
     const claimed = registry.claimCallbackDelivery(callbackInput());
 
     expect(() => registry.acceptCallbackDelivery(claimed.delivery.id, otherParent.id, otherParent.sessionKey))
-      .toThrow(/callback parent mismatch/i);
+      .toThrow(/session delivery target mismatch/i);
 
     expect(registry.getCallbackDelivery(claimed.delivery.id)).toMatchObject({ status: "pending" });
     expect(registry.getMessages(otherParent.id)).toHaveLength(0);
@@ -757,15 +828,19 @@ describe("callback delivery acceptance", () => {
     expect(registry.listAllPendingQueueItems()).toEqual([]);
   });
 
-  it("removes pending callback receipts when their parent session is deleted", () => {
+  it("retains pending session-delivery receipts when their target session is deleted", () => {
     const parent = createSession("parent-1");
     createSession("child-1", parent.id);
     const claimed = registry.claimCallbackDelivery(callbackInput());
 
     expect(registry.deleteSession(parent.id)).toBe(true);
 
-    expect(registry.getCallbackDelivery(claimed.delivery.id)).toBeUndefined();
-    expect(registry.listPendingCallbackDeliveries()).toHaveLength(0);
+    expect(registry.getSessionDelivery(claimed.delivery.id)).toMatchObject({
+      id: claimed.delivery.id,
+      targetSessionId: parent.id,
+      status: "pending",
+    });
+    expect(registry.listPendingSessionDeliveries()).toHaveLength(1);
   });
 });
 
