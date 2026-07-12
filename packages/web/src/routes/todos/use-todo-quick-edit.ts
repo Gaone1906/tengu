@@ -36,6 +36,7 @@ interface StoredQuickEdit {
   baseline: WorkItemEditPatch
   active?: StoredQuickEditActive
   queuedFields?: TodoQuickEditField[]
+  queuedPatch?: WorkItemEditPatch
   blocked?: "version"
 }
 
@@ -67,7 +68,7 @@ const MAX_STORED = 50
 const QUICK_FIELDS = new Set<TodoQuickEditField>(["title", "body", "assignee", "department", "priority", "rank"])
 const QUICK_STATES = new Set<StoredQuickEditActive["state"]>(["prepared", "dispatched", "uncertain", "conflict"])
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const ENVELOPE_KEYS = new Set(["expiresAt", "desired", "baseline", "active", "queuedFields", "blocked"])
+const ENVELOPE_KEYS = new Set(["expiresAt", "desired", "baseline", "active", "queuedFields", "queuedPatch", "blocked"])
 const ACTIVE_KEYS = new Set(["request", "state", "failureCode"])
 const REQUEST_KEYS = new Set(["patch", "expectedVersion", "idempotencyKey"])
 
@@ -107,7 +108,8 @@ function validStoredQuickEdit(value: unknown): value is StoredQuickEdit {
     || !Object.keys(candidate.baseline).every((field) => Object.prototype.hasOwnProperty.call(candidate.desired, field))
     || (candidate.blocked !== undefined && candidate.blocked !== "version")) return false
   if (!candidate.active) return candidate.queuedFields === undefined
-    && Object.keys(candidate.baseline).length <= patchFields(candidate.desired).length
+    && candidate.queuedPatch === undefined
+    && patchFields(candidate.baseline).length <= patchFields(candidate.desired).length
   if (candidate.blocked !== undefined) return false
   const activeRecord = candidate.active as unknown as Record<string, unknown>
   if (!hasOnlyKeys(activeRecord, ACTIVE_KEYS)) return false
@@ -120,12 +122,23 @@ function validStoredQuickEdit(value: unknown): value is StoredQuickEdit {
     || !QUICK_STATES.has(candidate.active.state)
     || (candidate.active.failureCode !== undefined
       && !(candidate.active.state === "conflict" && candidate.active.failureCode === "idempotency"))) return false
+  if ((candidate.queuedFields === undefined) !== (candidate.queuedPatch === undefined)) return false
   if (candidate.queuedFields !== undefined && (!Array.isArray(candidate.queuedFields)
     || new Set(candidate.queuedFields).size !== candidate.queuedFields.length
     || candidate.queuedFields.some((field) => !QUICK_FIELDS.has(field)
-      || !Object.prototype.hasOwnProperty.call(candidate.desired, field)))) return false
-  return patchFields(candidate.active.request.patch).every((field) => Object.prototype.hasOwnProperty.call(candidate.desired, field))
-    && patchFields(candidate.desired).every((field) => Object.prototype.hasOwnProperty.call(candidate.baseline, field))
+      || !Object.prototype.hasOwnProperty.call(candidate.desired, field))
+    || !validQuickPatch(candidate.queuedPatch)
+    || patchFields(candidate.queuedPatch).length !== candidate.queuedFields.length
+    || patchFields(candidate.queuedPatch).some((field) => !candidate.queuedFields!.includes(field)
+      || !Object.is(candidate.desired![field], candidate.queuedPatch![field])))) return false
+  const activeFields = patchFields(candidate.active.request.patch)
+  const queued = new Set(candidate.queuedFields ?? [])
+  const desiredFields = patchFields(candidate.desired)
+  return patchFields(candidate.baseline).every((field) => desiredFields.includes(field))
+    && desiredFields.every((field) => (activeFields.includes(field) || queued.has(field))
+      && (queued.has(field) || Object.is(candidate.desired![field], candidate.active!.request.patch[field])))
+    && activeFields.every((field) => Object.prototype.hasOwnProperty.call(candidate.desired, field)
+      && Object.prototype.hasOwnProperty.call(candidate.baseline, field))
 }
 
 function readStored(): StoredQuickEdits {
@@ -214,6 +227,7 @@ function conflictFields(item: WorkItemFullWire, baseline: WorkItemEditPatch): To
 }
 
 function persistRuntime(entry: RuntimeEdit): boolean {
+  const queuedFields = [...entry.queuedFields]
   return storeEntry(entry.id, {
     desired: { ...entry.desired },
     baseline: { ...entry.baseline },
@@ -221,12 +235,36 @@ function persistRuntime(entry: RuntimeEdit): boolean {
       ...entry.active,
       request: { ...entry.active.request, patch: { ...entry.active.request.patch } },
     } : undefined,
-    queuedFields: entry.queuedFields.size > 0 ? [...entry.queuedFields] : undefined,
+    queuedFields: queuedFields.length > 0 ? queuedFields : undefined,
+    queuedPatch: queuedFields.length > 0
+      ? Object.fromEntries(queuedFields.map((field) => [field, entry.desired[field]])) as WorkItemEditPatch
+      : undefined,
     blocked: entry.blocked,
   })
 }
 
-function addIntent(entry: RuntimeEdit, patch: WorkItemEditPatch): void {
+interface RuntimeIntentSnapshot {
+  desired: WorkItemEditPatch
+  baseline: WorkItemEditPatch
+  queuedFields: Set<TodoQuickEditField>
+}
+
+function snapshotIntent(entry: RuntimeEdit): RuntimeIntentSnapshot {
+  return {
+    desired: { ...entry.desired },
+    baseline: { ...entry.baseline },
+    queuedFields: new Set(entry.queuedFields),
+  }
+}
+
+function restoreIntent(entry: RuntimeEdit, snapshot: RuntimeIntentSnapshot): void {
+  entry.desired = snapshot.desired
+  entry.baseline = snapshot.baseline
+  entry.queuedFields = snapshot.queuedFields
+}
+
+function addIntent(entry: RuntimeEdit, patch: WorkItemEditPatch): boolean {
+  const previous = snapshotIntent(entry)
   for (const field of patchFields(patch)) {
     if (!Object.prototype.hasOwnProperty.call(entry.baseline, field) && entry.remote) {
       entry.baseline[field] = fieldValue(entry.remote, field) as never
@@ -234,7 +272,18 @@ function addIntent(entry: RuntimeEdit, patch: WorkItemEditPatch): void {
     if (entry.active) entry.queuedFields.add(field)
     entry.desired[field] = patch[field] as never
   }
-  persistRuntime(entry)
+  if (persistRuntime(entry)) return true
+  restoreIntent(entry, previous)
+  return false
+}
+
+function removeSatisfiedIntent(entry: RuntimeEdit, item: WorkItemFullWire): void {
+  for (const field of patchFields(entry.desired)) {
+    if (!Object.is(entry.desired[field], fieldValue(item, field))) continue
+    delete entry.desired[field]
+    delete entry.baseline[field]
+    entry.queuedFields.delete(field)
+  }
 }
 
 function mergeSavedDetail(current: WorkItemDetailWire | undefined, item: WorkItemFullWire): WorkItemDetailWire | undefined {
@@ -330,6 +379,7 @@ export function useTodoQuickEdit() {
     let same: TodoQuickEditField[] = patchFields(entry.desired)
     try {
       const fresh = await loadAuthoritativeDetail(client, entry.id)
+      entry.remote = fresh.workItem
       const missingBaseline = patchFields(entry.desired)
         .filter((field) => !Object.prototype.hasOwnProperty.call(entry.baseline, field))
       same = [...missingBaseline, ...conflictFields(fresh.workItem, entry.baseline)]
@@ -372,6 +422,14 @@ export function useTodoQuickEdit() {
               entry.baseline[field] = fieldValue(remote.workItem, field) as never
             }
           }
+          removeSatisfiedIntent(entry, remote.workItem)
+          if (patchFields(entry.desired).length === 0) {
+            clearStored(entry.id)
+            entries.current.delete(entry.id)
+            if (mounted.current) removeRecovery(entry.id)
+            settle(entry)
+            return
+          }
           active = { request: newTodoEditRequest(entry.desired, expectedVersion), state: "prepared" }
           entry.active = active
           entry.queuedFields.clear()
@@ -394,8 +452,9 @@ export function useTodoQuickEdit() {
             await refreshBestEffort(client, entry.id)
             await enterConflict(entry, cause)
           } else if (isAmbiguousTransport(cause)) {
-            entry.active = { ...entry.active!, state: "uncertain" }
-            persistRuntime(entry)
+            const dispatched = entry.active!
+            entry.active = { ...dispatched, state: "uncertain" }
+            if (!persistRuntime(entry)) entry.active = dispatched
             if (mounted.current) setError("The connection ended before this edit was confirmed. It will be replayed exactly.")
           } else {
             const failedRankNeedsReset = Object.prototype.hasOwnProperty.call(request.patch, "rank")
@@ -502,15 +561,33 @@ export function useTodoQuickEdit() {
 
   const edit = useCallback((id: string, patch: WorkItemEditPatch): Promise<void> => {
     let entry = entries.current.get(id)
+    const created = !entry
     if (!entry) {
       entry = { id, desired: {}, baseline: {}, queuedFields: new Set(), running: false, waiters: [] }
       entries.current.set(id, entry)
     }
-    addIntent(entry, patch)
+    if (!addIntent(entry, patch)) {
+      if (created) {
+        clearStored(id)
+        entries.current.delete(id)
+      }
+      if (mounted.current) {
+        setError("This edit couldn't be stored safely. Reload the Todo and try again.")
+        if (Object.prototype.hasOwnProperty.call(patch, "rank")) resetRank(id)
+      }
+      return Promise.resolve()
+    }
     const promise = new Promise<void>((resolve) => entry!.waiters.push(resolve))
-    void run(entry)
+    const blocked = entry.blocked === "version" || entry.active?.state === "conflict"
+    if (blocked) {
+      const current = recoveries.current.get(id)
+      if (current && mounted.current) publishRecovery(id, { ...current, fields: patchFields(entry.desired) })
+      return promise
+    }
+    const exactReplay = entry.active?.state === "uncertain" || entry.active?.state === "dispatched"
+    void run(entry, exactReplay)
     return promise
-  }, [run])
+  }, [publishRecovery, resetRank, run])
 
   const hasOutstanding = useCallback((id: string): boolean => {
     return entries.current.has(id) || hasTodoQuickEditRecovery(id)
@@ -554,6 +631,10 @@ export function useTodoQuickEdit() {
     const entry = entries.current.get(active.id)
     if (!entry) return
     if (active.value.reloadOnly && mode !== "reload") return
+    const previousIntent = snapshotIntent(entry)
+    const previousActive = entry.active
+    const previousBlocked = entry.blocked
+    const previousRemote = entry.remote
     publishRecovery(active.id, { ...active.value, busy: true, error: null })
     try {
       const fresh = await loadAuthoritativeDetail(client, entry.id)
@@ -563,6 +644,17 @@ export function useTodoQuickEdit() {
         removeRecovery(entry.id)
         setError(null)
         resetRank(entry.id)
+        settle(entry)
+        return
+      }
+      removeSatisfiedIntent(entry, fresh.workItem)
+      if (patchFields(entry.desired).length === 0) {
+        clearStored(entry.id)
+        entries.current.delete(entry.id)
+        removeRecovery(entry.id)
+        setError(null)
+        resetRank(entry.id)
+        settle(entry)
         return
       }
       const missingBaseline = patchFields(entry.desired)
@@ -576,13 +668,25 @@ export function useTodoQuickEdit() {
       entry.remote = fresh.workItem
       entry.blocked = undefined
       entry.active = { request: newTodoEditRequest(entry.desired, fresh.workItem.version!), state: "prepared" }
-      persistRuntime(entry)
+      entry.queuedFields.clear()
+      if (!persistRuntime(entry)) {
+        restoreIntent(entry, previousIntent)
+        entry.active = previousActive
+        entry.blocked = previousBlocked
+        entry.remote = previousRemote
+        publishRecovery(active.id, {
+          ...active.value,
+          busy: false,
+          error: "This edit couldn't be stored safely. Reload the Todo and try again.",
+        })
+        return
+      }
       removeRecovery(entry.id)
       await run(entry, true)
     } catch (cause) {
       publishRecovery(active.id, { ...active.value, busy: false, error: operatorSafeTodoError(cause, "Couldn't reconcile this Todo. Try again.") })
     }
-  }, [client, publishRecovery, recoveryEntry, removeRecovery, resetRank, run])
+  }, [client, publishRecovery, recoveryEntry, removeRecovery, resetRank, run, settle])
 
   return {
     edit,

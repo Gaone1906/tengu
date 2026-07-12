@@ -330,7 +330,110 @@ describe("useTodoQuickEdit", () => {
     expect(result.current.recovery?.fields).toEqual(["title", "rank"])
     expect(result.current.recovery?.sameFieldConflict).toBe(false)
     await act(() => result.current.rebase())
+    expect(update).toHaveBeenCalledTimes(2)
     expect(update.mock.calls[1][1]).toMatchObject({ patch: { title: "Latest", rank: 55 }, expectedVersion: 8 })
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
+  })
+
+  it("exact-replays an ambiguous request before dispatching intent added afterward", async () => {
+    vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7))
+    const update = vi.spyOn(api, "updateWorkItem")
+      .mockRejectedValueOnce(new TypeError("lost response"))
+      .mockResolvedValueOnce({ workItem: detail(8, { title: "First" }).workItem as never, replayed: true })
+      .mockResolvedValueOnce({ workItem: detail(9, { title: "First", rank: 33 }).workItem as never, replayed: false })
+    const { result } = setup()
+
+    await act(() => result.current.edit(ID, { title: "First" }))
+    const firstRequest = update.mock.calls[0][1]
+    await act(() => result.current.edit(ID, { rank: 33 }))
+
+    expect(update).toHaveBeenCalledTimes(3)
+    expect(update.mock.calls[1][1]).toEqual(firstRequest)
+    expect(update.mock.calls[2][1]).toMatchObject({ patch: { rank: 33 }, expectedVersion: 8 })
+    expect(onlyStored()).toBeUndefined()
+  })
+
+  it("durably adds conflict-time intent but never dispatches before an explicit action", async () => {
+    vi.spyOn(api, "getWorkItem")
+      .mockResolvedValueOnce(detail(7))
+      .mockResolvedValueOnce(detail(8, { priority: 2 }))
+      .mockResolvedValueOnce(detail(8, { priority: 2 }))
+    const update = vi.spyOn(api, "updateWorkItem")
+      .mockRejectedValueOnce(new TodoApiError(409, "conflict", "TODO_VERSION_CONFLICT", 8))
+      .mockResolvedValueOnce({ workItem: detail(9, { title: "Desired", rank: 48, priority: 2 }).workItem as never, replayed: false })
+    const { result } = setup()
+
+    await act(() => result.current.edit(ID, { title: "Desired" }))
+    act(() => { void result.current.edit(ID, { rank: 48 }) })
+    await Promise.resolve()
+
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(onlyStored()).toMatchObject({ desired: { title: "Desired", rank: 48 }, queuedFields: ["rank"], queuedPatch: { rank: 48 } })
+    await act(() => result.current.rebase())
+    expect(update).toHaveBeenCalledTimes(2)
+    expect(update.mock.calls[1][1].patch).toEqual({ title: "Desired", rank: 48 })
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
+  })
+
+  it("retains a new field after a recovered conflict even while remote detail is unavailable", async () => {
+    const first = setup()
+    vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7))
+    const update = vi.spyOn(api, "updateWorkItem").mockRejectedValueOnce(
+      new TodoApiError(409, "conflict", "TODO_VERSION_CONFLICT", 8),
+    )
+    await act(() => first.result.current.edit(ID, { title: "Recovered desired" }))
+    first.unmount()
+
+    vi.mocked(api.getWorkItem).mockRejectedValue(new TypeError("offline"))
+    const recovered = setup()
+    await act(() => recovered.result.current.recover(ID))
+    act(() => { void recovered.result.current.edit(ID, { rank: 64 }) })
+    await Promise.resolve()
+
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(onlyStored()).toMatchObject({
+      desired: { title: "Recovered desired", rank: 64 },
+      queuedFields: ["rank"],
+      queuedPatch: { rank: 64 },
+    })
+    expect(recovered.result.current.error).toBeNull()
+  })
+
+  it("rejects an intent that cannot be durably admitted while preserving the active request", async () => {
+    vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7))
+    let resolveFirst!: (value: Awaited<ReturnType<typeof api.updateWorkItem>>) => void
+    const update = vi.spyOn(api, "updateWorkItem").mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
+    const { result } = setup()
+    act(() => { void result.current.edit(ID, { title: "Durable first" }) })
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1))
+    const durableBefore = sessionStorage.getItem("jinn:todo-quick-edit:v1")
+    const nativeSetItem = Storage.prototype.setItem
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (key === "jinn:todo-quick-edit:v1" && value.includes('"rank":88')) return
+      nativeSetItem.call(this, key, value)
+    })
+
+    let rejectedIntent!: Promise<void>
+    act(() => { rejectedIntent = result.current.edit(ID, { rank: 88 }) })
+    expect(result.current.error).toBe("This edit couldn't be stored safely. Reload the Todo and try again.")
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBe(durableBefore)
+    expect(result.current.rankResetRevisions[ID]).toBe(1)
+    resolveFirst({ workItem: detail(8, { title: "Durable first" }).workItem as never, replayed: false })
+    await act(() => rejectedIntent)
+    await waitFor(() => expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull())
+    expect(update).toHaveBeenCalledTimes(1)
+  })
+
+  it("clears an authoritative no-op without PATCHing or leaving a gate", async () => {
+    vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7, { title: "Already current" }))
+    const update = vi.spyOn(api, "updateWorkItem")
+    const { result } = setup()
+
+    await act(() => result.current.edit(ID, { title: "Already current" }))
+
+    expect(update).not.toHaveBeenCalled()
+    expect(result.current.hasOutstanding(ID)).toBe(false)
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
   })
 
   it("queues reset revisions for every failed rank independently", async () => {
@@ -390,6 +493,17 @@ describe("useTodoQuickEdit", () => {
       { ...stored, active: { ...stored.active, request: { ...stored.active.request, todoId: ID } } },
       { ...stored, blocked: "version" },
       { ...stored, active: { ...stored.active, state: "uncertain", failureCode: "idempotency" } },
+      {
+        ...stored,
+        desired: { ...stored.desired, rank: 91 },
+        baseline: { ...stored.baseline, rank: null },
+      },
+      {
+        ...stored,
+        desired: { ...stored.desired, rank: 91 },
+        baseline: { ...stored.baseline, rank: null },
+        queuedFields: ["rank"],
+      },
     ]
     for (const variant of variants) {
       sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify({ [ref]: variant }))

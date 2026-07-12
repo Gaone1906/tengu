@@ -136,9 +136,35 @@ function mergePageDepth(...depths: Array<LedgerPageDepth | null | undefined>): L
   return Object.values(merged).some(Boolean) ? merged : null
 }
 
+function sanitizeTodoHistoryState(value: unknown): TodoHistoryState | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const next: TodoHistoryState = {}
+  if (typeof raw.todoRef === "string" && PRIVATE_REF_PATTERN.test(raw.todoRef)) next.todoRef = raw.todoRef
+  if (typeof raw.todoScroll === "number" && Number.isFinite(raw.todoScroll) && raw.todoScroll >= 0) next.todoScroll = raw.todoScroll
+  if (typeof raw.todoAnchorRef === "string" && PRIVATE_REF_PATTERN.test(raw.todoAnchorRef)) next.todoAnchorRef = raw.todoAnchorRef
+  if (typeof raw.todoAnchorOffset === "number" && Number.isFinite(raw.todoAnchorOffset)) next.todoAnchorOffset = raw.todoAnchorOffset
+  const depthRecord = raw.todoPageDepth as Record<string, unknown> | null
+  const depth = historyPageDepth(raw.todoPageDepth)
+  if (depth && depthRecord && typeof depthRecord === "object" && !Array.isArray(depthRecord)
+    && Object.keys(depthRecord).every((key) => HISTORY_STATUSES.includes(key as WorkItemStatusWire))) {
+    next.todoPageDepth = depth
+  }
+  const records = quickHistoryRecords(raw.todoQuickRecoveries)
+  if (records.length > 0) {
+    next.todoQuickRecoveries = records
+    const epoch = quickHistoryEpoch(raw.todoQuickRecoveryEpoch)
+    if (epoch) next.todoQuickRecoveryEpoch = epoch
+  }
+  return Object.keys(next).length > 0 ? next : null
+}
+
+function historyStateMatches(raw: unknown, sanitized: TodoHistoryState | null): boolean {
+  try { return JSON.stringify(raw ?? null) === JSON.stringify(sanitized) } catch { return false }
+}
+
 function cleanTodoHistoryState(state: TodoHistoryState | null): Record<string, unknown> | null {
-  if (!state) return null
-  const next = { ...state } as Record<string, unknown>
+  const next = { ...(sanitizeTodoHistoryState(state) ?? {}) } as Record<string, unknown>
   delete next.todoRef
   delete next.todoScroll
   delete next.todoAnchorRef
@@ -152,7 +178,7 @@ function withTodoQuickHistoryState(
   records: TodoQuickHistoryRecord[],
   epoch: string | null,
 ): Record<string, unknown> | null {
-  const next = { ...(state ?? {}) } as Record<string, unknown>
+  const next = { ...(sanitizeTodoHistoryState(state) ?? {}) } as Record<string, unknown>
   delete next.todoQuickRecoveries
   delete next.todoQuickRecoveryEpoch
   if (records.length > 0) {
@@ -238,8 +264,11 @@ export default function TodosPage() {
   const location = useLocation()
   const navigate = useNavigate()
 
-  const historyState = location.state as TodoHistoryState | null
-  const openRef = typeof historyState?.todoRef === "string" ? historyState.todoRef : null
+  const rawHistoryState = location.state
+  const historyState = useMemo(() => sanitizeTodoHistoryState(rawHistoryState), [rawHistoryState])
+  const openRef = typeof historyState?.todoRef === "string" && PRIVATE_REF_PATTERN.test(historyState.todoRef)
+    ? historyState.todoRef
+    : null
   const quickRecords = useMemo(() => quickHistoryRecords(historyState?.todoQuickRecoveries), [historyState?.todoQuickRecoveries])
   const quickRecordsKey = JSON.stringify(quickRecords)
   const stateQuickRecoveryEpoch = quickHistoryEpoch(historyState?.todoQuickRecoveryEpoch)
@@ -279,19 +308,44 @@ export default function TodosPage() {
   const quickRecoveryRef = useRef<string | null>(null)
   const quickConflictRef = useRef<HTMLElement>(null)
   const locallyStartedQuickRefs = useRef(new Set<string>())
+  const quickOperationTokens = useRef(new Map<string, symbol>())
   const quickRecordsRef = useRef<TodoQuickHistoryRecord[]>(quickRecords)
   const historyStateRef = useRef<TodoHistoryState | null>(historyState)
+  const liveLocationRef = useRef({ pathname: location.pathname, search: location.search })
+  const pageMountedRef = useRef(true)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [resolving, setResolving] = useState<Set<string>>(new Set())
   const [creating, setCreating] = useState(false)
 
+  // Promise continuations may run after RouterProbe has observed a new URL but
+  // before layout effects flush. Keep navigation inputs current during render
+  // so an older edit can never restore its captured path/search/state.
+  liveLocationRef.current = { pathname: location.pathname, search: location.search }
+  historyStateRef.current = historyState
+  quickRecordsRef.current = quickRecords
+
   useLayoutEffect(() => {
+    liveLocationRef.current = { pathname: location.pathname, search: location.search }
     historyStateRef.current = historyState
     quickRecordsRef.current = quickRecords
     if (stateQuickRecoveryEpoch) quickRecoveryEpochRef.current = stateQuickRecoveryEpoch
     else if (quickRecords.length === 0) quickRecoveryEpochRef.current = null
     else if (!quickRecoveryEpochRef.current) quickRecoveryEpochRef.current = newQuickHistoryEpoch()
-  }, [historyState, location.key, quickRecords.length, quickRecordsKey, stateQuickRecoveryEpoch])
+  }, [historyState, location.key, location.pathname, location.search, quickRecords.length, quickRecordsKey, stateQuickRecoveryEpoch])
+
+  useEffect(() => {
+    pageMountedRef.current = true
+    return () => {
+      pageMountedRef.current = false
+      quickOperationTokens.current.clear()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (historyStateMatches(rawHistoryState, historyState)) return
+    const current = liveLocationRef.current
+    navigate(`${current.pathname}${current.search}`, { replace: true, state: historyState })
+  }, [historyState, navigate, rawHistoryState])
 
   // Filters live in the URL (§4.3): shareable, refresh-proof.
   const [searchParams, setSearchParams] = useSearchParams()
@@ -402,10 +456,22 @@ export default function TodosPage() {
     lastDetailScrollRef.current = todoScroll
     cancelledScrollRestoreRef.current = null
     restoredScrollRef.current = null
-    navigate(`${location.pathname}${location.search}`, {
-      state: { todoRef: todoAnchorRef, todoScroll, todoAnchorRef, todoAnchorOffset, todoPageDepth: ledger.pageDepth },
+    const withRecoveries = withTodoQuickHistoryState(
+      historyStateRef.current,
+      quickRecordsRef.current,
+      quickRecoveryEpochRef.current,
+    )
+    const state = sanitizeTodoHistoryState({
+      ...(withRecoveries ?? {}),
+      todoRef: todoAnchorRef,
+      todoScroll,
+      todoAnchorRef,
+      todoAnchorOffset,
+      todoPageDepth: ledger.pageDepth,
     })
-  }, [ledger.pageDepth, location.pathname, location.search, navigate])
+    const current = liveLocationRef.current
+    navigate(`${current.pathname}${current.search}`, { state })
+  }, [ledger.pageDepth, navigate])
   const onOpen = useCallback((id: string) => {
     const requestedBy = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
       ? document.activeElement
@@ -514,6 +580,7 @@ export default function TodosPage() {
   }, [])
 
   const replaceQuickRecords = useCallback((next: TodoQuickHistoryRecord[]) => {
+    if (!pageMountedRef.current) return
     quickRecordsRef.current = next
     const epoch = next.length > 0
       ? quickRecoveryEpochRef.current ?? newQuickHistoryEpoch()
@@ -521,8 +588,9 @@ export default function TodosPage() {
     quickRecoveryEpochRef.current = epoch
     const state = withTodoQuickHistoryState(historyStateRef.current, next, epoch)
     historyStateRef.current = state
-    navigate(`${location.pathname}${location.search}`, { replace: true, state })
-  }, [location.pathname, location.search, navigate])
+    const current = liveLocationRef.current
+    navigate(`${current.pathname}${current.search}`, { replace: true, state })
+  }, [navigate])
 
   useEffect(() => {
     if (!historyState || (!Object.prototype.hasOwnProperty.call(historyState, "todoQuickRecoveries")
@@ -537,6 +605,8 @@ export default function TodosPage() {
 
   const runQuickEdit = useCallback(async (id: string, patch: { title?: string; rank?: number }) => {
     const privateRef = todoPrivateRef(id)
+    const operationToken = Symbol(privateRef)
+    quickOperationTokens.current.set(privateRef, operationToken)
     locallyStartedQuickRefs.current.add(privateRef)
     const scroller = ledgerScrollRef.current
     const row = scroller?.querySelector<HTMLElement>(`[data-todo-anchor="${privateRef}"]`)
@@ -554,7 +624,9 @@ export default function TodosPage() {
       record,
     ])
     await quickEdit.edit(id, patch)
+    if (!pageMountedRef.current || quickOperationTokens.current.get(privateRef) !== operationToken) return
     if (!hasTodoQuickEditRecovery(id)) {
+      quickOperationTokens.current.delete(privateRef)
       locallyStartedQuickRefs.current.delete(privateRef)
       replaceQuickRecords(quickRecordsRef.current.filter((candidate) => candidate.ref !== privateRef))
     }

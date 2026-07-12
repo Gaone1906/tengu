@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { useState } from "react"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -79,6 +80,7 @@ const org: OrgData = {
 }
 
 let navigate: ReturnType<typeof useNavigate>
+let hideTodoPage: (() => void) | null = null
 let currentSearch = ""
 let currentState: unknown = null
 const originalMatchMedia = window.matchMedia
@@ -102,8 +104,26 @@ function renderPage(initialEntries: Array<string | { pathname: string; search?: 
   )
 }
 
+function renderTogglePage(initialEntries: Array<string | { pathname: string; search?: string; state?: unknown }> = ["/todos"]) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+  function TogglePage() {
+    const [visible, setVisible] = useState(true)
+    hideTodoPage = () => setVisible(false)
+    return visible ? <TodosPage /> : null
+  }
+  return render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={initialEntries}>
+        <RouterProbe />
+        <TogglePage />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+}
+
 describe("Todo detail navigation and draft recovery", () => {
   beforeEach(() => {
+    hideTodoPage = null
     sessionStorage.clear()
     listWorkItems.mockReset().mockImplementation((params?: { status?: string; needsAttentionFor?: string }) => {
       if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
@@ -222,6 +242,121 @@ describe("Todo detail navigation and draft recovery", () => {
     await waitFor(() => expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull())
     fireEvent.click(screen.getByRole("button", { name: "Open Confirmed before open" }))
     expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+  })
+
+  it("keeps the live filter URL when an older quick-edit operation completes", async () => {
+    let resolveUpdate!: (value: unknown) => void
+    updateWorkItem.mockImplementationOnce(() => new Promise((resolve) => { resolveUpdate = resolve }))
+    renderPage()
+    const opener = await screen.findByRole("button", { name: "Open Recoverable todo" })
+    fireEvent.keyDown(opener, { key: "F2" })
+    fireEvent.change(screen.getByTestId("todo-rename"), { target: { value: "Saved after search" } })
+    fireEvent.keyDown(screen.getByTestId("todo-rename"), { key: "Enter" })
+    await waitFor(() => expect(updateWorkItem).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search todos" }), { target: { value: "still-current" } })
+    await waitFor(() => expect(currentSearch).toBe("?q=still-current"))
+    resolveUpdate({
+      workItem: { ...detail.workItem, version: 8, title: "Saved after search" },
+      replayed: false,
+    })
+
+    await waitFor(() => expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull())
+    expect(currentSearch).toBe("?q=still-current")
+  })
+
+  it("does not navigate or retire recovery after the Todo page unmounts", async () => {
+    let resolveUpdate!: (value: unknown) => void
+    updateWorkItem.mockImplementationOnce(() => new Promise((resolve) => { resolveUpdate = resolve }))
+    renderTogglePage()
+    const opener = await screen.findByRole("button", { name: "Open Recoverable todo" })
+    fireEvent.keyDown(opener, { key: "F2" })
+    fireEvent.change(screen.getByTestId("todo-rename"), { target: { value: "Complete after unmount" } })
+    fireEvent.keyDown(screen.getByTestId("todo-rename"), { key: "Enter" })
+    await waitFor(() => expect(currentState).toMatchObject({
+      todoQuickRecoveries: [expect.objectContaining({ ref: todoPrivateRef(PRIVATE_ID) })],
+    }))
+    const stateBeforeUnmount = currentState
+
+    act(() => hideTodoPage?.())
+    resolveUpdate({
+      workItem: { ...detail.workItem, version: 8, title: "Complete after unmount" },
+      replayed: false,
+    })
+    await act(async () => { await Promise.resolve(); await Promise.resolve() })
+
+    expect(currentState).toEqual(stateBeforeUnmount)
+  })
+
+  it("preserves sanitized quick recovery metadata when another Todo opens", async () => {
+    const other = { ...compact, id: "wi_other_history", title: "Other todo" }
+    listWorkItems.mockImplementation((params?: { status?: string; needsAttentionFor?: string }) => {
+      if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+      return Promise.resolve({
+        workItems: params?.status === "backlog" ? [compact, other] : [],
+        total: params?.status === "backlog" ? 2 : 0,
+        nextOffset: null,
+      })
+    })
+    getWorkItem.mockImplementation((id: string) => Promise.resolve({ ...detail, workItem: { ...detail.workItem, id } }))
+    let rejectUpdate!: (error: unknown) => void
+    updateWorkItem.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectUpdate = reject }))
+    renderPage()
+    const first = await screen.findByRole("button", { name: "Open Recoverable todo" })
+    fireEvent.keyDown(first, { key: "F2" })
+    fireEvent.change(screen.getByTestId("todo-rename"), { target: { value: "Recover this" } })
+    fireEvent.keyDown(screen.getByTestId("todo-rename"), { key: "Enter" })
+    await waitFor(() => expect(currentState).toMatchObject({
+      todoQuickRecoveries: [expect.objectContaining({ ref: expect.stringMatching(/^td_/) })],
+      todoQuickRecoveryEpoch: expect.stringMatching(/^qe_[a-f0-9]{32}$/),
+    }))
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Other todo" }))
+    expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+    expect(currentState).toMatchObject({
+      todoRef: todoPrivateRef(other.id),
+      todoQuickRecoveries: [expect.objectContaining({ ref: todoPrivateRef(compact.id) })],
+      todoQuickRecoveryEpoch: expect.stringMatching(/^qe_[a-f0-9]{32}$/),
+    })
+    expect(JSON.stringify(currentState)).not.toContain(compact.id)
+    expect(JSON.stringify(currentState)).not.toContain(other.id)
+    rejectUpdate(new TypeError("lost response"))
+  })
+
+  it("sanitizes the complete Todo history schema instead of spreading private top-level state", async () => {
+    const safeRef = todoPrivateRef("wi_hidden_history_state")
+    sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify({
+      [safeRef]: {
+        expiresAt: Date.now() + 60_000,
+        desired: { title: "Hidden authored recovery" },
+        baseline: { title: "Hidden remote" },
+        active: {
+          request: {
+            patch: { title: "Hidden authored recovery" },
+            expectedVersion: 7,
+            idempotencyKey: "4996e28f-30f0-4f2a-bbf9-1d6ae02dd787",
+          },
+          state: "uncertain",
+        },
+      },
+    }))
+    renderPage([{ pathname: "/todos", state: {
+      todoRef: PRIVATE_ID,
+      todoScroll: -10,
+      todoAnchorRef: "wi_raw_anchor",
+      todoAnchorOffset: Number.POSITIVE_INFINITY,
+      todoPageDepth: { backlog: 2, diagnostic: "wi_depth_secret" },
+      todoQuickRecoveries: [{ ref: safeRef, anchorRef: safeRef, anchorOffset: 2, scroll: 4, pageDepth: { backlog: 1 } }],
+      todoQuickRecoveryEpoch: "qe_0123456789abcdef0123456789abcdef",
+      arbitrary: "wi_top_level_secret",
+      diagnostic: "/private/path",
+    } }])
+
+    await waitFor(() => expect(currentState).toEqual({
+      todoQuickRecoveries: [{ ref: safeRef, anchorRef: safeRef, anchorOffset: 2, scroll: 4, pageDepth: { backlog: 1 } }],
+      todoQuickRecoveryEpoch: "qe_0123456789abcdef0123456789abcdef",
+    }))
+    expect(JSON.stringify(currentState)).not.toMatch(/wi_|private\/path/)
   })
 
   it("restores second-page quick-edit depth and exact-replays without raw ids in history", async () => {
