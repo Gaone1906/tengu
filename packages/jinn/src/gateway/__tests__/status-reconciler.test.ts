@@ -21,6 +21,16 @@ function insert(id: string, status: string, lastActivity: string, engine = "clau
   ).run(id, engine, `web:${id}`, status, lastActivity, lastActivity);
 }
 
+function insertLegacyWorkflowRun(id: string, lastActivity: string) {
+  db.prepare(
+    `INSERT INTO sessions (
+       id, engine, source, source_ref, status, created_at, last_activity,
+       workflow_kind, workflow_id, workflow_name, workflow_run_id, workflow_trigger_source
+     ) VALUES (?, 'workflow', 'web', ?, 'running', ?, ?, 'run', 'release-review',
+       'release-review', 'run-old', 'manual')`,
+  ).run(id, `workflow-run:run-old:parent`, lastActivity, lastActivity);
+}
+
 const NOW = new Date("2026-06-10T12:00:00.000Z").getTime();
 const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
 
@@ -39,6 +49,16 @@ beforeEach(() => {
 });
 
 describe("status reconciler sweepOnce", () => {
+  it("never reconciles a historical Workflow run projection", () => {
+    insertLegacyWorkflowRun("legacy-run", iso(120_000));
+    const events: any[] = [];
+    const fixed = rec.sweepOnce({ engines: new Map(), emit: (event, payload) => events.push({ event, payload }), now: () => NOW });
+
+    expect(fixed).toBe(0);
+    expect(reg.getSession("legacy-run")?.status).toBe("running");
+    expect(events).toEqual([]);
+  });
+
   it("resets a stale running session whose engine reports no turn", () => {
     insert("stuck-1", "running", iso(120_000));
     const events: any[] = [];

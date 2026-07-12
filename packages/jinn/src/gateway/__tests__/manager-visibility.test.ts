@@ -149,6 +149,26 @@ describe("surfaceManagerVisibility", () => {
     expect(d.appendFallback).not.toHaveBeenCalled();
   });
 
+  it("does not treat a historical Workflow run projection as an active manager conversation", () => {
+    const managerSession = session("legacy-run", "team-lead", {
+      status: "running",
+      engine: "workflow",
+      workflowProvenance: {
+        kind: "run",
+        workflowId: "release-review",
+        workflowName: "release-review",
+        runId: "run-old",
+        triggerSource: "manual",
+      },
+    });
+    const d = deps(managerSession);
+
+    surfaceManagerVisibility(input("org-root"), d);
+
+    expect(d.notifyManager).not.toHaveBeenCalled();
+    expect(d.appendFallback).toHaveBeenCalledOnce();
+  });
+
   it("fails open when visibility delivery throws", () => {
     const d = deps();
     d.notifyManager.mockImplementation(() => {

@@ -197,7 +197,6 @@ function harness() {
   const deps = {
     ...modules.api.workflowRunDriverDeps(root, apiContext),
     now: () => new Date(clock).toISOString(),
-    syncRunSession: undefined,
     probeStepSession: (key: string) => sessions.get(key) ?? { found: false },
     spawnStep: async (ctx: import('../advance.js').SpawnContext) => {
       const key = modules.advance.stepSessionKey(ctx.runId, ctx.nodeId, ctx.attempt, ctx.round);

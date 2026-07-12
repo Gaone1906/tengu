@@ -106,7 +106,7 @@ function harness(overrides: Partial<RunDriverDeps> = {}) {
 }
 
 describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
-  it('gives exactly one interleaved full-start caller ownership of initial side effects', async () => {
+  it('gives exactly one interleaved full-start caller ownership of the initial spawn', async () => {
     const def = createDefinition(root, chainDef('publication-owner', [trigger, step('a')]), { now });
     const options = {
       trigger: { source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'publication-key' } as const,
@@ -117,15 +117,10 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     };
     const winner = harness();
     const loser = harness();
-    const sideEffects: string[] = [];
-    const winnerDeps: RunDriverDeps = {
-      ...winner.deps,
-      syncRunSession: () => { sideEffects.push('winner:session'); return 'run-session'; },
-    };
+    const winnerDeps: RunDriverDeps = winner.deps;
     let winnerStart: Promise<WorkflowRun> | undefined;
     const loserDeps: RunDriverDeps = {
       ...loser.deps,
-      syncRunSession: () => { sideEffects.push('loser:session'); return 'loser-session'; },
       publishInitialRun: (rootPath, candidate) => {
         winnerStart = startWorkflowRun(winnerDeps, def, options);
         return publishInitialWorkflowRun(rootPath, candidate);
@@ -138,12 +133,9 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
 
     expect(losingResult.runId).toBe(winningResult.runId);
     expect([...winner.spawnCalls, ...loser.spawnCalls]).toHaveLength(1);
-    expect(sideEffects).not.toContain('loser:session');
-    expect(sideEffects.length).toBeGreaterThan(0);
-    expect(new Set(sideEffects)).toEqual(new Set(['winner:session']));
   });
 
-  it('returns the published failed snapshot to an interleaved loser without loser projection', async () => {
+  it('returns the published failed snapshot to an interleaved loser without a spawn', async () => {
     const def = chainDef('failed-publication-owner', [trigger, step('a')]);
     def.edges = [{ id: 'broken', from: 'trg', to: 'missing', kind: 'sequence' }];
     const options = {
@@ -151,17 +143,12 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
       principal: 'employee:owner',
       makeRunId: () => 'run-preallocated-failed',
     };
-    const winner = harness({ syncRunSession: () => 'winner-session' });
+    const winner = harness();
     const loser = harness();
-    const projections: string[] = [];
-    const winnerDeps: RunDriverDeps = {
-      ...winner.deps,
-      syncRunSession: () => { projections.push('winner'); return 'winner-session'; },
-    };
+    const winnerDeps: RunDriverDeps = winner.deps;
     let winnerStart: Promise<WorkflowRun> | undefined;
     const loserDeps: RunDriverDeps = {
       ...loser.deps,
-      syncRunSession: () => { projections.push('loser'); return 'loser-session'; },
       publishInitialRun: (rootPath, candidate) => {
         winnerStart = startWorkflowRun(winnerDeps, def, options);
         return publishInitialWorkflowRun(rootPath, candidate);
@@ -174,7 +161,6 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
 
     expect(winningResult.status).toBe('failed');
     expect(losingResult).toEqual(winningResult);
-    expect(projections).toEqual(['winner']);
     expect([...winner.spawnCalls, ...loser.spawnCalls]).toHaveLength(0);
   });
 
@@ -340,20 +326,13 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
 
   it('publishes revision 1 and increments exactly once for each persisted mutation', async () => {
     const def = createDefinition(root, chainDef('revisioned', [trigger, step('a')]), { now });
-    const projectedRevisions: number[] = [];
-    const { deps } = harness({
-      syncRunSession: (run) => {
-        projectedRevisions.push(run.revision!);
-        return undefined;
-      },
-    });
+    const { deps } = harness();
 
     const started = await startWorkflowRun(deps, def, {
       parameters: { input: { ticket: 'ABC-42' } },
       invocation: { sessionId: 'session-a', reportMode: 'resume' },
     });
 
-    expect(projectedRevisions).toEqual([1, 2, 3]);
     expect(started.revision).toBe(3);
     expect(getRun(root, def.id, started.runId)?.revision).toBe(3);
   });

@@ -1938,8 +1938,9 @@ export interface ResolveParkedGateOptions {
  *     gateNode's receipt records "rejected by operator". Live siblings are first
  *     cancelled/probed through `stopping`; re-running the workflow is a new run.
  *
- * Parked runs are excluded from sweeps (nothing polls a human) — this transition is
- * the ONLY way a parked run moves again.
+ * Parked runs never poll or auto-resolve. Native-approved parked runs may reconcile
+ * in-flight sibling evidence without unparking; this transition remains the ONLY
+ * way a parked run moves again.
  */
 export function resolveParkedGate(
   run: WorkflowRun,

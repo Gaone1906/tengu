@@ -187,6 +187,26 @@ function createParent(suffix: string, source: "web" | "talk" = "web") {
   });
 }
 
+function createLegacyWorkflowParent(suffix: string) {
+  const parent = registry.createSession({
+    engine: "workflow",
+    source: "web",
+    sourceRef: `workflow-run:${suffix}:parent`,
+    sessionKey: `workflow-run:${suffix}:parent`,
+    connector: "web",
+    workflowProvenance: {
+      kind: "run",
+      workflowId: "release-review",
+      workflowName: "release-review",
+      runId: suffix,
+      triggerSource: "manual",
+    },
+    prompt: "historical Workflow run projection",
+  });
+  registry.updateSession(parent.id, { status: "running", lastActivity: "2026-01-02T03:04:05.000Z" });
+  return registry.getSession(parent.id)!;
+}
+
 function makeRouteBackedFetch(
   context: import("../api.js").ApiContext,
   behavior: { failBefore?: number; throwAfterAccepted?: number } = {},
@@ -233,6 +253,103 @@ beforeEach(() => {
 });
 
 describe("parent callback reliability", () => {
+  it("leaves a historical run projection's accepted queue intent byte-identical on replay", () => {
+    const seenPrompts: string[] = [];
+    const engine = makeEngine(seenPrompts);
+    const queue = new queueModule.SessionQueue();
+    const context = makeContext(engine, queue);
+    const parent = createLegacyWorkflowParent("legacy-accepted");
+    const delivery = registry.claimCallbackDelivery({
+      parentSessionId: parent.id,
+      childSessionId: "legacy-phase",
+      attemptToken: "attempt-accepted",
+      terminalOutcome: "succeeded",
+      terminalVersion: 1,
+      callbackKind: "parent-completion",
+      payload: { message: "historical callback", displayMessage: "Historical callback" },
+    }).delivery;
+    registry.acceptCallbackDelivery(delivery.id, parent.id, parent.sessionKey);
+    const database = registry.initDb();
+    const before = {
+      session: database.prepare("SELECT * FROM sessions WHERE id = ?").get(parent.id),
+      queue: database.prepare("SELECT * FROM queue_items WHERE session_id = ?").all(parent.id),
+      delivery: database.prepare("SELECT * FROM callback_deliveries WHERE id = ?").get(delivery.id),
+    };
+
+    api.resumePendingWebQueueItems(context);
+    api.resumePendingWebQueueItems(context);
+
+    expect(seenPrompts).toEqual([]);
+    expect({
+      session: database.prepare("SELECT * FROM sessions WHERE id = ?").get(parent.id),
+      queue: database.prepare("SELECT * FROM queue_items WHERE session_id = ?").all(parent.id),
+      delivery: database.prepare("SELECT * FROM callback_deliveries WHERE id = ?").get(delivery.id),
+    }).toEqual(before);
+  });
+
+  it("skips a historical run projection's pending delivery before leasing it on startup", async () => {
+    const parent = createLegacyWorkflowParent("legacy-pending");
+    const delivery = registry.claimCallbackDelivery({
+      parentSessionId: parent.id,
+      childSessionId: "legacy-phase",
+      attemptToken: "attempt-pending",
+      terminalOutcome: "succeeded",
+      terminalVersion: 1,
+      callbackKind: "parent-completion",
+      payload: { message: "historical callback", displayMessage: "Historical callback" },
+    }).delivery;
+    const before = registry.initDb().prepare("SELECT * FROM callback_deliveries WHERE id = ?").get(delivery.id);
+    const originalFetch = globalThis.fetch;
+    const fetchSpy = vi.fn(async () => { throw new Error("legacy delivery must not post"); });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    try {
+      await expect(callbacks.recoverCallbackStateOnStartup()).resolves.toEqual({
+        pendingRecovered: 0,
+        orphanedRecovered: 0,
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(registry.initDb().prepare("SELECT * FROM callback_deliveries WHERE id = ?").get(delivery.id))
+        .toEqual(before);
+    } finally {
+      callbacks.__resetCallbackRetrySweepForTest();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("rejects dead-letter requeue for a historical run projection without changing the row", async () => {
+    const parent = createLegacyWorkflowParent("legacy-dead-letter");
+    const delivery = registry.claimCallbackDelivery({
+      parentSessionId: parent.id,
+      childSessionId: "legacy-phase",
+      attemptToken: "attempt-dead-letter",
+      terminalOutcome: "failed",
+      terminalVersion: 1,
+      callbackKind: "parent-completion",
+      payload: { message: "historical failure", displayMessage: "Historical failure" },
+    }).delivery;
+    const database = registry.initDb();
+    database.prepare(`
+      UPDATE callback_deliveries
+      SET status = 'dead_letter', attempt_count = 5, next_attempt_at = NULL,
+          last_error = 'historical failure', dead_lettered_at = 1767323045000
+      WHERE id = ?
+    `).run(delivery.id);
+    const before = database.prepare("SELECT * FROM callback_deliveries WHERE id = ?").get(delivery.id);
+    const req = Object.assign(Readable.from([]), {
+      method: "POST",
+      url: `/api/callback-deliveries/${delivery.id}/requeue`,
+      headers: { host: "gateway.test", authorization: "Bearer test-token" },
+    });
+    const captured = makeResponse();
+
+    await api.handleApiRequest(req as never, captured.res, makeContext(makeEngine([]), new queueModule.SessionQueue()));
+
+    expect(captured.status).toBe(409);
+    expect(captured.body).toEqual({ error: "historical workflow delivery is read-only" });
+    expect(database.prepare("SELECT * FROM callback_deliveries WHERE id = ?").get(delivery.id)).toEqual(before);
+  });
+
   it("accepts replayed manager visibility once at the durable parent boundary", async () => {
     const seenPrompts: string[] = [];
     const events: Array<{ event: string; data: unknown }> = [];

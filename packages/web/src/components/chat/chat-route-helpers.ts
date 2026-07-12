@@ -210,10 +210,12 @@ export interface FocusableSession {
   source?: string
   sourceRef?: string
   parentSessionId?: string | null
+  workflowProvenance?: { kind?: string } | null
 }
 
 /** True for a top-level, user-initiated, non-cron conversation (see above). */
 export function isFocusedSession(s: FocusableSession): boolean {
+  if (s.workflowProvenance?.kind === 'run') return false
   const isCron = s.source === 'cron' || String(s.sourceRef ?? '').startsWith('cron:')
   if (isCron) return false
   const parent = s.parentSessionId

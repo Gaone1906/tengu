@@ -18,7 +18,7 @@ import {
   refreshPiModels,
 } from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
-import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, RESTART_ACK_META_KEY } from "../sessions/registry.js";
+import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, isLegacyWorkflowRunSession, listSessions, updateSession, getSession, RESTART_ACK_META_KEY } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
 import { recoverCallbackStateOnStartup } from "../sessions/callbacks.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
@@ -60,6 +60,31 @@ import { attachPtyWebSocket } from "./pty-ws.js";
 function hasRestartAcknowledgement(session: Session): boolean {
   const meta = session.transportMeta;
   return Boolean(meta && typeof meta === "object" && !Array.isArray(meta) && typeof meta[RESTART_ACK_META_KEY] === "string");
+}
+
+/** Preserve running conversational Sessions for resume while leaving historical
+ * Workflow run projections byte-identical. Exported as a shutdown test seam. */
+export function interruptRunningSessionsForShutdown(): void {
+  for (const session of listSessions({ status: "running" })) {
+    if (isLegacyWorkflowRunSession(session)) continue;
+    if (hasRestartAcknowledgement(session)) {
+      updateSession(session.id, {
+        status: "idle",
+        attemptOutcome: "interrupted",
+        lastActivity: new Date().toISOString(),
+        lastError: null,
+      });
+      logger.info(`Left restart-requesting session ${session.id} idle during gateway shutdown`);
+      continue;
+    }
+    updateSession(session.id, {
+      status: "interrupted",
+      attemptOutcome: "interrupted",
+      lastActivity: new Date().toISOString(),
+      lastError: "Interrupted: gateway shutting down gracefully",
+    });
+    logger.info(`Marked session ${session.id} as interrupted for resume`);
+  }
 }
 import { startWsHeartbeat, trackHeartbeat } from "./ws-heartbeat.js";
 import { ensureFilesDir, cleanupOldUploads } from "./files.js";
@@ -1412,26 +1437,7 @@ export async function startGateway(
 
     // Mark all running sessions as "interrupted" before killing engine processes.
     // This preserves their engine_session_id so they can be resumed on next startup.
-    const runningSessions = listSessions({ status: "running" });
-    for (const session of runningSessions) {
-      if (hasRestartAcknowledgement(session)) {
-        updateSession(session.id, {
-          status: "idle",
-          attemptOutcome: "interrupted",
-          lastActivity: new Date().toISOString(),
-          lastError: null,
-        });
-        logger.info(`Left restart-requesting session ${session.id} idle during gateway shutdown`);
-        continue;
-      }
-      updateSession(session.id, {
-        status: "interrupted",
-        attemptOutcome: "interrupted",
-        lastActivity: new Date().toISOString(),
-        lastError: "Interrupted: gateway shutting down gracefully",
-      });
-      logger.info(`Marked session ${session.id} as interrupted for resume`);
-    }
+    interruptRunningSessionsForShutdown();
 
     // Terminate live engine subprocesses after marking sessions.
     interactiveClaudeEngine.killAll();

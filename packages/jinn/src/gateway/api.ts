@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
-import type { ChatBlock, ChatBlockEnvelope, CronJob, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target, WorkflowSessionProvenance } from "../shared/types.js";
+import type { ChatBlock, ChatBlockEnvelope, CronJob, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
 import { isInterruptibleEngine, STRUCTURED_MESSAGE_BODY_MAX_CHARS } from "../shared/types.js";
 import { compactEmployeeRole } from "../shared/employee-role.js";
 export { compactEmployeeRole } from "../shared/employee-role.js";
@@ -87,6 +87,8 @@ import {
   acceptCallbackDelivery,
   getFile,
   getSessionBySessionKey,
+  isLegacyWorkflowRunSession,
+  legacyWorkflowRunLocation,
   initDb,
   RESTART_ACK_META_KEY,
 } from "../sessions/registry.js";
@@ -122,7 +124,6 @@ import {
   escalateWorkflowRunGateApproval,
   editPendingWorkflowStepPrompt,
   MAX_WORKFLOW_STEP_PROMPT_CHARS,
-  workflowTriggerSource,
   artifactGatePasses,
   stateFlagPasses,
   checkWorkflowEventRateLimit,
@@ -458,6 +459,7 @@ export function resumePendingWebQueueItems(context: ApiContext): void {
       cancelQueueItem(item.id);
       continue;
     }
+    if (isLegacyWorkflowRunSession(session)) continue;
     // Workflow step sessions have exactly ONE recovery owner: the run RECONCILER
     // (GRS-014b-fix, Codex finding 1). Their durable intent lives in the run record,
     // not in this queue row — replaying the row here would resume the interrupted
@@ -622,77 +624,6 @@ function dispatchWebSessionRun(
   }
 }
 
-/** Deterministic list/grouping identity for a workflow run's synthetic parent. */
-export function workflowRunParentSessionKey(runId: string): string {
-  return `workflow-run:${runId}:parent`;
-}
-
-interface WorkflowRunParentIdentity {
-  workflowId: string;
-  workflowName: string;
-  runId: string;
-  triggerSource: string;
-}
-
-function ensureWorkflowRunParentSession(identity: WorkflowRunParentIdentity, context: ApiContext): Session {
-  const sessionKey = workflowRunParentSessionKey(identity.runId);
-  const existing = getSessionBySessionKey(sessionKey);
-  if (existing) return existing;
-  const workflowProvenance: WorkflowSessionProvenance = { kind: 'run', ...identity };
-  const created = createSession({
-    engine: 'workflow',
-    source: 'web',
-    sourceRef: sessionKey,
-    connector: 'web',
-    sessionKey,
-    replyContext: { source: 'web' },
-    title: `Workflow: ${identity.workflowName} · run ${identity.runId}`,
-    promptExcerpt: `Workflow run ${identity.runId} of ${identity.workflowName}`,
-    workflowProvenance,
-    portalName: context.getConfig().portal?.portalName,
-  });
-  context.emit?.('session:created', { sessionId: created.id });
-  return created;
-}
-
-function workflowParentSessionState(run: WorkflowRun): Pick<UpdateSessionFields, 'status' | 'attemptOutcome' | 'lastActivity' | 'lastError'> {
-  const lastStepAt = run.steps.reduce<string | null>((latest, step) => !latest || step.at > latest ? step.at : latest, null);
-  const lastActivity = run.endedAt ?? lastStepAt ?? run.startedAt;
-  switch (run.status) {
-    case 'completed':
-      return { status: 'idle', attemptOutcome: 'succeeded', lastActivity, lastError: null };
-    case 'failed':
-      return {
-        status: 'error',
-        attemptOutcome: 'failed',
-        lastActivity,
-        lastError: run.errors?.at(-1)?.message ?? 'Workflow run failed',
-      };
-    case 'cancelled':
-      return { status: 'interrupted', attemptOutcome: 'interrupted', lastActivity, lastError: 'Workflow run cancelled' };
-    case 'parked':
-      return { status: 'waiting', attemptOutcome: null, lastActivity, lastError: null };
-    case 'running':
-    case 'dispatched':
-      return { status: 'running', attemptOutcome: null, lastActivity, lastError: null };
-  }
-}
-
-/** Project one durable workflow run into the ordinary session list. The run file
- * remains authoritative; callers deliberately invoke this only after saveRun. */
-export function syncWorkflowRunSession(run: WorkflowRun, context: ApiContext): string {
-  const workflowName = run.definitionSnapshot?.name ?? run.workflowId;
-  const parent = ensureWorkflowRunParentSession({
-    workflowId: run.workflowId,
-    workflowName,
-    runId: run.runId,
-    triggerSource: workflowTriggerSource(run.trigger),
-  }, context);
-  updateSession(parent.id, workflowParentSessionState(run));
-  context.emit?.('session:updated', { sessionId: parent.id });
-  return parent.id;
-}
-
 /**
  * Spawn the real session a workflow-run step maps to (GRS-011d-2c; attempt-keyed and
  * driven by the sequential engine since GRS-014b).
@@ -767,16 +698,6 @@ export async function spawnWorkflowStepSession(ctx: SpawnContext, context: ApiCo
   const engine = context.sessionManager.getEngine(engineName);
   if (!engine) throw new Error(`engine "${engineName}" not available`);
 
-  // Defense in depth behind the run driver's post-save synchronizer: even if the
-  // session-list projection failed at mint, a workflow-owned phase can never be
-  // successfully created parentless.
-  const parent = ensureWorkflowRunParentSession({
-    workflowId: ctx.workflowId,
-    workflowName: ctx.workflowName,
-    runId: ctx.runId,
-    triggerSource: ctx.triggerSource,
-  }, context);
-
   // GRS-016e: the shared-session creation spawn overrides the key
   // (`workflow-run:<runId>:shared`); absent = the ordinary attempt key (v2).
   const sessionKey = ctx.sessionKey ?? stepSessionKey(ctx.runId, ctx.nodeId, ctx.attempt, ctx.round);
@@ -793,7 +714,6 @@ export async function spawnWorkflowStepSession(ctx: SpawnContext, context: ApiCo
     connector: "web",
     sessionKey,
     replyContext: { source: "web" },
-    parentSessionId: parent.id,
     title: `[Workflow] ${ctx.workflowName} / ${ctx.label}${ctx.round > 1 ? ` / r${ctx.round}` : ''}`,
     workflowProvenance: {
       kind: 'phase',
@@ -971,7 +891,6 @@ export function workflowRunDriverDeps(root: string, context: ApiContext): RunDri
       };
     },
     spawnStep: (ctx) => spawnWorkflowStepSession(ctx, context),
-    syncRunSession: (run) => syncWorkflowRunSession(run, context),
     // ROW-ANCHORED turn probe (GRS-016e-fix, identity-only since fix2): correlation
     // runs through the shared `correlateSessionTurn` — the anchor is the workflow's
     // own inserted USER row, matched ONLY by its persisted pre-minted row id (no
@@ -1647,6 +1566,7 @@ function sessionHasRuntimeActivity(session: Session, context: ApiContext): boole
 }
 
 function getSessionTransportState(session: Session, context: ApiContext): "idle" | "queued" | "running" | "error" | "interrupted" {
+  if (isLegacyWorkflowRunSession(session)) return "idle";
   const queue = context.sessionManager.getQueue();
   const base = queue.getTransportState(session.sessionKey || session.sourceRef, session.status);
   if (sessionHasRuntimeActivity(session, context) && base !== "error" && base !== "interrupted") return "running";
@@ -2410,11 +2330,27 @@ function isTurnSuperseded(sessionId: string, turnStartedAt: number): boolean {
 }
 
 function isSessionLiveRunning(session: Session, context: ApiContext): boolean {
+  if (isLegacyWorkflowRunSession(session)) return false;
   if (session.status !== "running") return false;
   const engine = context.sessionManager.getEngine(session.engine);
   if (!engine || !isInterruptibleEngine(engine)) return true;
   if ("isTurnRunning" in engine) return Boolean((engine as any).isTurnRunning(session.id));
   return engine.isAlive(session.id);
+}
+
+function rejectLegacyWorkflowSessionAccess(
+  res: ServerResponse,
+  session: Session,
+  access: "read" | "mutation",
+): boolean {
+  if (!isLegacyWorkflowRunSession(session)) return false;
+  json(res, {
+    error: access === "read"
+      ? "Workflow runs are no longer sessions."
+      : "Historical Workflow session is read-only.",
+    legacyWorkflowRun: legacyWorkflowRunLocation(session),
+  }, access === "read" ? 410 : 409);
+  return true;
 }
 
 function checkInstanceHealth(port: number): Promise<boolean> {
@@ -2461,6 +2397,11 @@ export async function handleApiRequest(
     if (method === "POST" && callbackRequeueParams) {
       if (!requireCallbackRecoveryAuthority(req, res, context)) return;
       try {
+        const existing = getCallbackDelivery(callbackRequeueParams.id);
+        const parent = existing ? getSession(existing.parentSessionId) : undefined;
+        if (parent && isLegacyWorkflowRunSession(parent)) {
+          return json(res, { error: "historical workflow delivery is read-only" }, 409);
+        }
         const delivery = requeueDeadLetterCallbackDelivery(callbackRequeueParams.id);
         void recoverPendingCallbackDeliveries().catch((error) => {
           logger.error(`[callbacks] Requeued delivery ${delivery.id} could not start recovery: ${error instanceof Error ? error.message : String(error)}`);
@@ -2887,6 +2828,7 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const limit = parseMessageLimit(url.searchParams.get("limit"), 100);
       const before = url.searchParams.get("before") || undefined;
       const page = getMessagePage(params.id, { before, limit });
@@ -2898,6 +2840,7 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const includeMessages = url.searchParams.get("messages") !== "0";
       const lastN = parseMessageLimit(url.searchParams.get("last"), 0);
       const page = includeMessages && lastN > 0
@@ -2934,6 +2877,7 @@ export async function handleApiRequest(
     if ((method === "PUT" || method === "PATCH") && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       const _parsed = await readJsonBody(req, res);
       if (!_parsed.ok) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3004,6 +2948,7 @@ export async function handleApiRequest(
     if (method === "DELETE" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
 
       if (session.workItemId) {
         preserveLinkedAttempt(context, session, "Interrupted: deletion refused for linked execution attempt");
@@ -3037,6 +2982,7 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       // GRS-017a — an agent-initiated stop (declared caller identity) is scoped
       // to the caller's OWN DESCENDANTS: cross-tree stops are a lateral
       // authority grab, so peers and ancestors are refused. Operator/UI calls
@@ -3071,6 +3017,7 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       killSessionEngines(context, session, "Interrupted: session reset");
       context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
       const meta = { ...(session.transportMeta || {}) } as Record<string, unknown>;
@@ -3095,6 +3042,7 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const source = getSession(params.id);
       if (!source) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, source, "mutation")) return;
       if (!source.engineSessionId) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Session has no engine session ID — cannot duplicate" }));
@@ -3153,6 +3101,7 @@ export async function handleApiRequest(
     if (method === "DELETE" && queueItemParams) {
       const session = getSession(queueItemParams.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       const cancelled = cancelQueueItem(queueItemParams.itemId);
       if (!cancelled) {
         res.writeHead(409, { "Content-Type": "application/json" });
@@ -3168,6 +3117,7 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const items = getQueueItems(session.sessionKey || session.sourceRef || session.id);
       return json(res, items);
     }
@@ -3177,6 +3127,7 @@ export async function handleApiRequest(
     if (method === "DELETE" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       const sessionKey = session.sessionKey || session.sourceRef || session.id;
       // Cancel only operator-visible rows. SessionQueue checks each durable row
       // before execution, so no coarse in-memory cancellation is needed here;
@@ -3191,6 +3142,7 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       const sessionKey = session.sessionKey || session.sourceRef || session.id;
       context.sessionManager.getQueue().pauseQueue(sessionKey);
       context.emit("queue:updated", { sessionId: params.id, sessionKey, paused: true });
@@ -3202,6 +3154,7 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       const sessionKey = session.sessionKey || session.sourceRef || session.id;
       context.sessionManager.getQueue().resumeQueue(sessionKey);
       context.emit("queue:updated", { sessionId: params.id, sessionKey, paused: false });
@@ -3221,6 +3174,8 @@ export async function handleApiRequest(
         const session = getSession(id);
         return session ? [session] : [];
       });
+      const historical = sessions.find(isLegacyWorkflowRunSession);
+      if (historical && rejectLegacyWorkflowSessionAccess(res, historical, "mutation")) return;
       const preserved = sessions.filter((session) => session.workItemId);
       const deletable = sessions.filter((session) => !session.workItemId);
 
@@ -3256,6 +3211,8 @@ export async function handleApiRequest(
     // GET /api/sessions/:id/children
     params = matchRoute("/api/sessions/:id/children", pathname);
     if (method === "GET" && params) {
+      const session = getSession(params.id);
+      if (session && rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const children = listChildSessions(params.id);
       return json(res, children.map((child) => serializeSession(child, context)));
     }
@@ -3269,6 +3226,7 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const messageId = readCleanSearchParam(url, "message");
       if (!messageId) return badRequest(res, "message (the anchor message id, from a search hit) is required");
       const radius = Math.max(
@@ -4572,6 +4530,7 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const claudeSessionId = getEngineSessionRef(session, "claude").id;
       if (!claudeSessionId) return json(res, []);
       const entries = loadRawTranscript(claudeSessionId);
@@ -5100,6 +5059,7 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       let session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       session = maybeRevertEngineOverride(session);
       const _parsed = await readJsonBody(req, res);
       if (!_parsed.ok) return;
@@ -5475,6 +5435,7 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       await handleSessionAttachment(req, res, params.id, context);
       return;
     }

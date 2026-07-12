@@ -6,10 +6,32 @@ vi.mock("@/lib/auth", () => ({
   authFetch: (...args: unknown[]) => authFetch(...args),
 }))
 
-const { api, ApiError, TodoApiError } = await import("../api")
+const { api, ApiError, LegacyWorkflowSessionError, TodoApiError } = await import("../api")
 
 describe("typed API errors", () => {
   beforeEach(() => authFetch.mockReset())
+
+  it("retains the historical Workflow run redirect target as a typed error", async () => {
+    authFetch.mockResolvedValue(new Response(JSON.stringify({
+      error: "Workflow runs are no longer sessions.",
+      legacyWorkflowRun: {
+        workflowId: "release-review",
+        runId: "run-old",
+        openPath: "/workflow/release-review?mode=runs&run=run-old",
+      },
+    }), { status: 410, headers: { "Content-Type": "application/json" } }))
+
+    const request = api.getSession("legacy-session", { messages: false })
+    await expect(request).rejects.toBeInstanceOf(LegacyWorkflowSessionError)
+    await expect(request).rejects.toMatchObject({
+      status: 410,
+      legacyWorkflowRun: {
+        workflowId: "release-review",
+        runId: "run-old",
+        openPath: "/workflow/release-review?mode=runs&run=run-old",
+      },
+    })
+  })
 
   it("retains HTTP status and an optional machine code without making diagnostics UI copy", async () => {
     authFetch.mockResolvedValue(new Response(JSON.stringify({

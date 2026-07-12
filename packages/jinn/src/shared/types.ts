@@ -280,6 +280,13 @@ export interface WorkflowSessionProvenance {
   };
 }
 
+/** Navigation target for a historical synthetic Workflow run projection. */
+export interface LegacyWorkflowRunLocation {
+  workflowId: string;
+  runId: string;
+  openPath: string;
+}
+
 export interface Session {
   id: string;
   engine: string;

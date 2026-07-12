@@ -88,7 +88,7 @@ import { createPendingWorkflowGateApproval, freezeWorkflowApprovalEscalation } f
  *   Parked runs are deliberately NOT swept — nothing polls a human.
  *
  * CONCURRENCY: exclusive initial publication elects one owner across processes;
- * only that owner may project/mint/spawn. A per-runId in-process mutex then
+ * only that owner may mint/spawn. A per-runId in-process mutex then
  * serializes route-vs-sweep advancement. One misbehaving run never kills a sweep.
  */
 
@@ -126,9 +126,6 @@ export interface RunDriverDeps {
   /** Narrow, read/claim-only Todo event boundary. Workflow runtime never receives
    * the underlying session database or Todo ledger storage. */
   todoEventFeed?: WorkflowTodoEventFeed;
-  /** Gateway-owned projection of one durable workflow run into the session list.
-   * Best-effort: a projection failure is logged and never changes run execution. */
-  syncRunSession?: (run: WorkflowRun) => string | undefined;
   /** Injectable publication boundary for deterministic concurrency tests. */
   publishInitialRun?: (root: string, run: WorkflowRun) => InitialWorkflowRunPublication;
   now?: () => string;
@@ -138,23 +135,13 @@ export interface RunDriverDeps {
 function publishInitialRun(
   deps: RunDriverDeps,
   run: WorkflowRun,
-): { owned: true; run: WorkflowRun; runSessionId: string | undefined } | { owned: false; run: WorkflowRun } {
+): { owned: true; run: WorkflowRun } | { owned: false; run: WorkflowRun } {
   const publication = (deps.publishInitialRun ?? publishInitialWorkflowRun)(deps.root, run);
   if (publication.outcome === 'existing') return { owned: false, run: publication.run };
-  return { owned: true, run: publication.run, runSessionId: syncRunSessionBestEffort(deps, publication.run) };
+  return { owned: true, run: publication.run };
 }
 
-function syncRunSessionBestEffort(deps: RunDriverDeps, run: WorkflowRun): string | undefined {
-  try {
-    return deps.syncRunSession?.(run);
-  } catch (err) {
-    deps.log?.('warn', `[workflow-runs] run ${run.runId}: session-list sync failed: ${(err as Error).message}`);
-    return undefined;
-  }
-}
-
-/** Run evidence is authoritative and lands first. The session projection follows
- * best-effort, so a list/index failure can never roll back or fail execution. */
+/** Persist one authoritative Workflow run revision. */
 function persistRun(deps: RunDriverDeps, candidate: WorkflowRun): WorkflowRun {
   const previous = getRun(deps.root, candidate.workflowId, candidate.runId);
   let nativeCandidate = candidate;
@@ -182,7 +169,6 @@ function persistRun(deps: RunDriverDeps, candidate: WorkflowRun): WorkflowRun {
     revision: Math.max(previous?.revision ?? 0, candidate.revision ?? 0) + 1,
   };
   saveRun(deps.root, stamped);
-  syncRunSessionBestEffort(deps, stamped);
   return stamped;
 }
 
@@ -748,9 +734,9 @@ export async function startWorkflowRunFromTrigger(
 
 /**
  * Advance one persisted run (sweep entry point). Loads the run + its definition,
- * recompiles, and drives under the run lock. Non-sequential records (no `order` —
- * v1 walks or 014a-era stubs) are terminally failed once with an honest error so the
- * sweep never spins on records it cannot drive.
+ * recompiles, and drives under the run lock. Drivable `running` records without an
+ * `order` (v1 walks or 014a-era stubs) are terminally failed once with an honest
+ * error so the sweep never spins on records it cannot drive.
  */
 export async function advanceWorkflowRunById(
   deps: RunDriverDeps,

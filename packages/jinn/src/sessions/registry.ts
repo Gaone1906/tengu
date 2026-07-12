@@ -12,7 +12,7 @@ import {
   WORK_ITEMS_INDEX_DDL,
   WORK_ITEM_EVENTS_DDL,
 } from '../work-items/migrate.js';
-import type { CallbackDelivery, CallbackDeliveryIdentity, CallbackDeliveryPayload, ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome, WorkflowSessionProvenance } from '../shared/types.js';
+import type { CallbackDelivery, CallbackDeliveryIdentity, CallbackDeliveryPayload, ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, LegacyWorkflowRunLocation, ReplyContext, Session, SessionAttemptOutcome, WorkflowSessionProvenance } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
 import { ptySnapshotStore } from '../engines/pty-snapshot.js';
 import { migrateActivitySchema } from '../activity/migrate.js';
@@ -395,6 +395,24 @@ function rowToSession(row: Record<string, unknown>): Session {
     createdAt: row.created_at as string,
     lastActivity: row.last_activity as string,
     lastError: (row.last_error as string) ?? null,
+  };
+}
+
+/** True only for the historical synthetic Session projection of a Workflow run. */
+export function isLegacyWorkflowRunSession(session: Session): boolean {
+  return session.workflowProvenance?.kind === 'run';
+}
+
+/** Resolve a historical run projection directly from its persisted provenance. */
+export function legacyWorkflowRunLocation(session: Session): LegacyWorkflowRunLocation {
+  const provenance = session.workflowProvenance;
+  if (provenance?.kind !== 'run') {
+    throw new Error(`Session ${session.id} is not a historical Workflow run projection`);
+  }
+  return {
+    workflowId: provenance.workflowId,
+    runId: provenance.runId,
+    openPath: `/workflow/${encodeURIComponent(provenance.workflowId)}?mode=runs&run=${encodeURIComponent(provenance.runId)}`,
   };
 }
 
@@ -2058,7 +2076,7 @@ export function recoverStaleSessions(): number {
   const db = initDb();
   const now = new Date().toISOString();
   const result = db.prepare(
-    "UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted', attempt_terminal_version = attempt_terminal_version + 1, last_activity = ?, last_error = 'Interrupted: gateway restarted while session was running' WHERE status = 'running'",
+    "UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted', attempt_terminal_version = attempt_terminal_version + 1, last_activity = ?, last_error = 'Interrupted: gateway restarted while session was running' WHERE status = 'running' AND (workflow_kind IS NULL OR workflow_kind <> 'run')",
   ).run(now);
   return result.changes;
 }
@@ -3303,7 +3321,14 @@ export function recoverStaleQueueItems(): number {
   // If the gateway restarts mid-run, move any "running" items back to "pending"
   // so they can be replayed. Do NOT cancel pending work.
   const result = db.prepare(
-    "UPDATE queue_items SET status = 'pending', started_at = NULL WHERE status = 'running'"
+    `UPDATE queue_items
+     SET status = 'pending', started_at = NULL
+     WHERE status = 'running'
+       AND NOT EXISTS (
+         SELECT 1 FROM sessions
+         WHERE sessions.id = queue_items.session_id
+           AND sessions.workflow_kind = 'run'
+       )`
   ).run();
   return result.changes;
 }

@@ -1,5 +1,6 @@
 import {
   getSession,
+  isLegacyWorkflowRunSession,
   getCallbackDelivery,
   claimCallbackDelivery,
   claimCallbackDeliveryAttempt,
@@ -18,7 +19,7 @@ import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
 import { hydrateAllAttachments, talkSessionsAttachedTo } from "../talk/attachments.js";
 import type { ChatBlockEnvelope, JsonObject } from "../shared/types.js";
 import { enforceDelegationCompletionContract } from "./delegation-completion-contract.js";
-import type { CallbackDeliveryPayload } from "../shared/types.js";
+import type { CallbackDelivery, CallbackDeliveryPayload } from "../shared/types.js";
 
 export const CALLBACK_DELIVERY_RETRY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
 export const CALLBACK_DELIVERY_MAX_ATTEMPTS = CALLBACK_DELIVERY_RETRY_DELAYS_MS.length + 1;
@@ -119,7 +120,7 @@ export async function recoverOrphanedDelegationCompletionClaims(): Promise<numbe
   for (const child of listDelegationCompletionNudgedSessions()) {
     if (!child.parentSessionId || !child.workItemId) continue;
     const parent = getSession(child.parentSessionId);
-    if (!parent || parent.status === "error" || parent.workflowProvenance?.kind === "run") continue;
+    if (!parent || parent.status === "error" || isLegacyWorkflowRunSession(parent)) continue;
     try {
       await _sendNotification(child, {
         error:
@@ -148,7 +149,8 @@ export async function recoverPendingCallbackDeliveries(): Promise<number> {
   callbackRetrySweepRunning = (async () => {
     const now = Date.now();
     const due = listPendingCallbackDeliveries().filter((delivery) =>
-      delivery.nextAttemptAt === null || delivery.nextAttemptAt <= now,
+      !isHistoricalWorkflowDelivery(delivery)
+      && (delivery.nextAttemptAt === null || delivery.nextAttemptAt <= now),
     );
     const results = await Promise.allSettled(due.map((delivery) => _deliverClaimedCallback(delivery.id)));
     armCallbackRetrySweep();
@@ -302,7 +304,7 @@ export function notifyRateLimitResumed(
   if (!childSession.parentSessionId) return;
 
   const parent = getSession(childSession.parentSessionId);
-  if (parent?.workflowProvenance?.kind === "run") return;
+  if (parent && isLegacyWorkflowRunSession(parent)) return;
   const isTalkParent = parent?.source === "talk";
 
   let message: string;
@@ -351,10 +353,9 @@ async function _sendNotification(
   const parent = getSession(childSession.parentSessionId!);
   if (!parent) return; // Parent gone or expired
   if (parent.status === "error") return; // Parent already in error — skip
-  // Workflow parents reuse parentSessionId strictly for list grouping. They are
-  // synthetic run projections, not engine conversations to wake with delegation
-  // callbacks; phase completion is consumed by the workflow reconciler instead.
-  if (parent.workflowProvenance?.kind === "run") return;
+  // Historical Workflow run projections are never callback destinations. Phase
+  // completion is consumed by the Workflow reconciler instead.
+  if (isLegacyWorkflowRunSession(parent)) return;
 
   const isTerminal = options?.semantics !== "nonterminal-lifecycle";
 
@@ -583,7 +584,14 @@ async function _sendRaw(
 
 type CallbackDeliveryAttemptResult = "accepted" | "scheduled" | "deferred";
 
+function isHistoricalWorkflowDelivery(delivery: CallbackDelivery): boolean {
+  const parent = getSession(delivery.parentSessionId);
+  return Boolean(parent && isLegacyWorkflowRunSession(parent));
+}
+
 async function _deliverClaimedCallback(deliveryId: string): Promise<CallbackDeliveryAttemptResult> {
+  const delivery = getCallbackDelivery(deliveryId);
+  if (!delivery || isHistoricalWorkflowDelivery(delivery)) return "deferred";
   const attempt = claimCallbackDeliveryAttempt(deliveryId, Date.now(), CALLBACK_DELIVERY_ATTEMPT_LEASE_MS);
   if (!attempt) {
     armCallbackRetrySweep();
@@ -617,7 +625,7 @@ async function _deliverClaimedCallback(deliveryId: string): Promise<CallbackDeli
 }
 
 function armCallbackRetrySweep(): void {
-  const pending = listPendingCallbackDeliveries();
+  const pending = listPendingCallbackDeliveries().filter((delivery) => !isHistoricalWorkflowDelivery(delivery));
   if (callbackRetryTimer) {
     clearTimeout(callbackRetryTimer);
     callbackRetryTimer = undefined;

@@ -19,7 +19,7 @@ afterAll(() => {
 });
 
 describe('workflow session provenance', () => {
-  it('persists queryable run/phase provenance and enumerates phases through the parent', () => {
+  it('keeps historical run/phase parentage queryable as read-only compatibility evidence', () => {
     const parent = registry.createSession({
       engine: 'workflow',
       source: 'web',
@@ -64,6 +64,7 @@ describe('workflow session provenance', () => {
       runId: 'run-reg-1',
       triggerSource: 'manual',
     });
+    expect(registry.isLegacyWorkflowRunSession(registry.getSession(parent.id)!)).toBe(true);
     expect(registry.getSession(phase.id)).toMatchObject({
       parentSessionId: parent.id,
       workflowProvenance: {
@@ -81,5 +82,30 @@ describe('workflow session provenance', () => {
     expect(registry.searchSessionsFiltered({ workflowId: 'wf-release', workflowPhaseName: 'VERIFY' }).map((s) => s.id))
       .toEqual([phase.id]);
     expect(registry.listChildSessions(parent.id).map((s) => s.id)).toEqual([phase.id]);
+  });
+
+  it('groups a new phase attempt by workflowRunId without a conversational parent', () => {
+    const phase = registry.createSession({
+      engine: 'codex',
+      source: 'web',
+      sourceRef: 'workflow-run:run-reg-2:verify:1',
+      sessionKey: 'workflow-run:run-reg-2:verify:1',
+      title: '[Workflow] release-check / VERIFY',
+      workflowProvenance: {
+        kind: 'phase',
+        workflowId: 'wf-release',
+        workflowName: 'release-check',
+        runId: 'run-reg-2',
+        triggerSource: 'manual',
+        phase: { nodeId: 'verify', name: 'VERIFY', index: 2, round: 1, attempt: 1 },
+      },
+    });
+
+    expect(registry.getSession(phase.id)).toMatchObject({
+      parentSessionId: null,
+      workflowProvenance: { kind: 'phase', runId: 'run-reg-2' },
+    });
+    expect(registry.searchSessionsFiltered({ workflowRunId: 'run-reg-2' }).map((session) => session.id))
+      .toEqual([phase.id]);
   });
 });

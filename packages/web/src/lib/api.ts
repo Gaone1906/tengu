@@ -96,6 +96,23 @@ export class TodoApiError extends ApiError {
   }
 }
 
+export interface LegacyWorkflowRunLocation {
+  workflowId: string
+  runId: string
+  openPath: string
+}
+
+export class LegacyWorkflowSessionError extends ApiError {
+  constructor(
+    status: number,
+    message: string,
+    readonly legacyWorkflowRun: LegacyWorkflowRunLocation,
+  ) {
+    super(status, message)
+    this.name = "LegacyWorkflowSessionError"
+  }
+}
+
 /** A Todo revision is authoritative only when it is a positive safe integer. */
 export function isPositiveTodoVersion(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0
@@ -117,6 +134,7 @@ async function responseError(res: Response): Promise<ApiError> {
   let message = `API error: ${res.status}`
   let code: string | undefined
   let currentVersion: number | undefined
+  let legacyWorkflowRun: LegacyWorkflowRunLocation | undefined
   try {
     const body = await res.json();
     if (body.error) message = String(body.error)
@@ -125,8 +143,25 @@ async function responseError(res: Response): Promise<ApiError> {
     if (typeof body.currentVersion === "number" && Number.isSafeInteger(body.currentVersion) && body.currentVersion >= 0) {
       currentVersion = body.currentVersion
     }
+    const legacy = body.legacyWorkflowRun
+    if (
+      legacy
+      && typeof legacy === "object"
+      && typeof legacy.workflowId === "string"
+      && typeof legacy.runId === "string"
+      && typeof legacy.openPath === "string"
+    ) {
+      legacyWorkflowRun = {
+        workflowId: legacy.workflowId,
+        runId: legacy.runId,
+        openPath: legacy.openPath,
+      }
+    }
   } catch {
     // Response wasn't JSON; status remains the typed UI-safe discriminator.
+  }
+  if (res.status === 410 && legacyWorkflowRun) {
+    return new LegacyWorkflowSessionError(res.status, message, legacyWorkflowRun)
   }
   return new ApiError(res.status, message, code, currentVersion)
 }
