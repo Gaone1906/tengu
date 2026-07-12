@@ -2,9 +2,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router-dom"
-import { beforeEach, describe, expect, it, vi } from "vitest"
-import type { WorkItemDetailWire, WorkItemFullWire, WorkItemStatusWire } from "@/lib/api"
-import { DetailSheet, selectLinkedSession, sessionLinkLabel } from "../detail-sheet"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { api, TodoApiError, type WorkItemDetailWire, type WorkItemFullWire, type WorkItemStatusWire } from "@/lib/api"
+import { DetailSheet, saveTodoDetailRemote, selectLinkedSession, sessionLinkLabel } from "../detail-sheet"
 import { loadTodoJournal, persistTodoJournal } from "../todo-private-state"
 
 const authFetch = vi.fn()
@@ -233,6 +233,8 @@ describe("Todo detail session link copy", () => {
 })
 
 describe("Todo detail editing and dialog behavior", () => {
+  afterEach(() => vi.restoreAllMocks())
+
   beforeEach(() => {
     sessionStorage.clear()
     authFetch.mockReset().mockImplementation(async (path: string) => {
@@ -242,6 +244,81 @@ describe("Todo detail editing and dialog behavior", () => {
         headers: { "Content-Type": "application/json" },
       })
     })
+  })
+
+  it.each([409, 412])("rethrows the exact typed %s conflict object after cache invalidation fails", async (status) => {
+    const value = detail("backlog")
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    client.setQueryData(["work-item", value.workItem.id], value)
+    const original = new TodoApiError(
+      status,
+      "private diagnostic",
+      status === 409 ? "TODO_VERSION_CONFLICT" : "WORK_ITEM_VERSION_CONFLICT",
+      12,
+    )
+    vi.spyOn(api, "updateWorkItem").mockRejectedValueOnce(original)
+    const invalidate = vi.spyOn(client, "invalidateQueries").mockRejectedValue(new TypeError("offline"))
+
+    const save = saveTodoDetailRemote(client, value.workItem.id, {
+      patch: { title: "Local title" },
+      expectedVersion: 7,
+      idempotencyKey: crypto.randomUUID(),
+    })
+
+    await expect(save).rejects.toBe(original)
+    expect(original).toMatchObject({ status, currentVersion: 12 })
+    expect(invalidate.mock.calls.map(([filters]) => filters?.queryKey)).toEqual(expect.arrayContaining([
+      ["work-items"],
+      ["work-item", value.workItem.id],
+    ]))
+  })
+
+  it("best-effort refreshes both cache families before reporting an inferred cached conflict", async () => {
+    const value = detail("backlog")
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    client.setQueryData(["work-item", value.workItem.id], {
+      ...value,
+      workItem: { ...value.workItem, version: 12, title: "Newer cached title" },
+    })
+    vi.spyOn(api, "updateWorkItem").mockResolvedValueOnce(editResult(value.workItem, { title: "Local title" }, 8))
+    const invalidate = vi.spyOn(client, "invalidateQueries").mockResolvedValue()
+
+    const save = saveTodoDetailRemote(client, value.workItem.id, {
+      patch: { title: "Local title" },
+      expectedVersion: 7,
+      idempotencyKey: crypto.randomUUID(),
+    })
+
+    await expect(save).rejects.toMatchObject({ code: "TODO_VERSION_CONFLICT", currentVersion: 12 })
+    expect(invalidate.mock.calls.map(([filters]) => filters?.queryKey)).toEqual(expect.arrayContaining([
+      ["work-items"],
+      ["work-item", value.workItem.id],
+    ]))
+    expect(client.getQueryData<WorkItemDetailWire>(["work-item", value.workItem.id])?.workItem).toMatchObject({
+      version: 12,
+      title: "Newer cached title",
+    })
+  })
+
+  it("keeps a confirmed save successful when cache invalidation is offline", async () => {
+    const value = detail("backlog")
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    client.setQueryData(["work-item", value.workItem.id], value)
+    vi.spyOn(api, "updateWorkItem").mockResolvedValueOnce(editResult(value.workItem, { title: "Confirmed title" }, 8))
+    const invalidate = vi.spyOn(client, "invalidateQueries").mockRejectedValue(new TypeError("offline"))
+
+    await expect(saveTodoDetailRemote(client, value.workItem.id, {
+      patch: { title: "Confirmed title" },
+      expectedVersion: 7,
+      idempotencyKey: crypto.randomUUID(),
+    })).resolves.toMatchObject({
+      remote: { version: 8, draft: { title: "Confirmed title" } },
+      replayed: false,
+    })
+    expect(invalidate.mock.calls.map(([filters]) => filters?.queryKey)).toEqual(expect.arrayContaining([
+      ["work-items"],
+      ["work-item", value.workItem.id],
+    ]))
   })
 
   it("uses a mobile-only scrim, contains long prose, and has no resting property hairlines", () => {
@@ -809,7 +886,113 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(loadTodoJournal(value.workItem.id)?.request?.state).toBe("conflict")
   })
 
-  it("does not refetch or overwrite a newer exact detail after a stale PATCH response", async () => {
+  it("re-fences a conflict action at the final hook handoff when exact detail advances", async () => {
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    const patch = deferred<Response>()
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") return patch.promise
+      return new Response(JSON.stringify({ ...value, workItem: { ...value.workItem, version: 8 } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    })
+    const { client } = renderSheetWithDetail(value)
+    const readExact = client.getQueryData.bind(client)
+    let advanced = false
+    vi.spyOn(client, "getQueryData").mockImplementation(((key: readonly unknown[]) => {
+      const current = readExact(key)
+      if (!advanced && key[0] === "work-item" && key[1] === value.workItem.id) {
+        advanced = true
+        queueMicrotask(() => client.setQueryData<WorkItemDetailWire>(["work-item", value.workItem.id], {
+          ...value,
+          workItem: { ...value.workItem, version: 12 },
+        }))
+      }
+      return current
+    }) as typeof client.getQueryData)
+
+    fireEvent.click(await screen.findByRole("button", { name: "Rebase edits" }))
+
+    await waitFor(() => expect(patchBodies()).toHaveLength(1))
+    expect(patchBodies()[0]).toMatchObject({ title: "Recovered local title", expectedVersion: 12 })
+  })
+
+  it("refuses a final conflict-action handoff when only a compact projection advances", async () => {
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") throw new Error("A stale action must not PATCH")
+      return new Response(JSON.stringify({ ...value, workItem: { ...value.workItem, version: 8 } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    })
+    const { client } = renderSheetWithDetail(value)
+    const readExact = client.getQueryData.bind(client)
+    let advanced = false
+    vi.spyOn(client, "getQueryData").mockImplementation(((key: readonly unknown[]) => {
+      const current = readExact(key)
+      if (!advanced && key[0] === "work-item" && key[1] === value.workItem.id) {
+        advanced = true
+        queueMicrotask(() => {
+          client.setQueryData<WorkItemDetailWire>(["work-item", value.workItem.id], {
+            ...value,
+            workItem: { ...value.workItem, version: 12 },
+          })
+          client.setQueryData(["work-items", "handoff-projection"], {
+            items: [{ ...value.workItem, version: 13 }],
+          })
+        })
+      }
+      return current
+    }) as typeof client.getQueryData)
+
+    fireEvent.click(await screen.findByRole("button", { name: "Rebase edits" }))
+
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("changed elsewhere"))
+    expect(patchBodies()).toHaveLength(0)
+    expect(loadTodoJournal(value.workItem.id)?.request?.state).toBe("conflict")
+  })
+
+  it("re-fences loadRemote immediately before a version-acquisition save", async () => {
+    const value = detail("backlog")
+    delete value.workItem.version
+    const patch = deferred<Response>()
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") return patch.promise
+      return new Response(JSON.stringify({ ...value, workItem: { ...value.workItem, version: 8 } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    })
+    const { client } = renderSheetWithDetail(value)
+    const readExact = client.getQueryData.bind(client)
+    let advanced = false
+    vi.spyOn(client, "getQueryData").mockImplementation(((key: readonly unknown[]) => {
+      const current = readExact(key)
+      if (!advanced && key[0] === "work-item" && key[1] === value.workItem.id) {
+        advanced = true
+        queueMicrotask(() => client.setQueryData<WorkItemDetailWire>(["work-item", value.workItem.id], {
+          ...value,
+          workItem: { ...value.workItem, version: 12 },
+        }))
+      }
+      return current
+    }) as typeof client.getQueryData)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Version-acquired title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+
+    await waitFor(() => expect(patchBodies()).toHaveLength(1))
+    expect(patchBodies()[0]).toMatchObject({ title: "Version-acquired title", expectedVersion: 12 })
+  })
+
+  it("refreshes but does not overwrite a newer exact detail after a stale PATCH response", async () => {
     const value = detail("backlog")
     const patchResponse = deferred<Response>()
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
@@ -838,7 +1021,7 @@ describe("Todo detail editing and dialog behavior", () => {
       spendUsd: 12,
       workItem: { version: 12, title: "Newer cached title" },
     })
-    expect(authFetch.mock.calls.filter(([path, init]) => String(path).endsWith(value.workItem.id) && !(init as RequestInit | undefined)?.method)).toHaveLength(0)
+    expect(authFetch.mock.calls.filter(([path, init]) => String(path).endsWith(value.workItem.id) && !(init as RequestInit | undefined)?.method)).toHaveLength(1)
   })
 
   it("turns a stale successful PATCH payload into a typed conflict without acknowledging the request", async () => {
@@ -870,6 +1053,81 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(stored?.patch).toEqual({ title: "Local title" })
     expect(screen.queryByText("Saved")).toBeNull()
     fireEvent.click(screen.getByRole("button", { name: "Close" }))
+    expect(patchBodies()).toHaveLength(1)
+  })
+
+  it("rechecks authoritative cache state after success invalidation before acknowledging", async () => {
+    const value = detail("backlog")
+    const invalidationRead = deferred<Response>()
+    let patched = false
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        patched = true
+        return new Response(JSON.stringify(editResult(value.workItem, { title: "Local title" }, 8)), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      expect(patched).toBe(true)
+      return invalidationRead.promise
+    })
+    renderSheetWithDetail(value)
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Local title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    await waitFor(() => expect(authFetch.mock.calls.some(([path, init]) => String(path).endsWith(value.workItem.id) && !(init as RequestInit | undefined)?.method)).toBe(true))
+
+    invalidationRead.resolve(new Response(JSON.stringify({
+      ...value,
+      workItem: { ...value.workItem, version: 12, title: "Newer invalidation title" },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }))
+
+    expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+    expect(loadTodoJournal(value.workItem.id)?.request).toMatchObject({ state: "conflict", expectedVersion: 7 })
+    expect(loadTodoJournal(value.workItem.id)?.patch).toEqual({ title: "Local title" })
+    expect(screen.queryByText("Saved")).toBeNull()
+    expect(patchBodies()).toHaveLength(1)
+  })
+
+  it.each([409, 412])("invalidates typed PATCH %s conflicts and still renders the typed conflict state", async (status) => {
+    const value = detail("backlog")
+    let conflictReturned = false
+    let reconciliationRead = false
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        conflictReturned = true
+        return new Response(JSON.stringify({
+          code: status === 409 ? "todo_version_conflict" : "WORK_ITEM_VERSION_CONFLICT",
+          currentVersion: 12,
+          error: "private diagnostic",
+        }), { status, headers: { "Content-Type": "application/json" } })
+      }
+      if (!reconciliationRead) {
+        reconciliationRead = true
+        throw new TypeError("invalidation offline")
+      }
+      return new Response(JSON.stringify({ ...value, workItem: { ...value.workItem, version: 11 } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    })
+    const { client } = renderSheetWithDetail(value)
+    const invalidate = vi.spyOn(client, "invalidateQueries")
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Conflicting title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+
+    expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+    expect(conflictReturned).toBe(true)
+    expect(reconciliationRead).toBe(true)
+    expect(invalidate.mock.calls.map(([filters]) => filters?.queryKey)).toEqual(expect.arrayContaining([
+      ["work-items"],
+      ["work-item", value.workItem.id],
+    ]))
+    expect(loadTodoJournal(value.workItem.id)?.request?.state).toBe("conflict")
+
     expect(patchBodies()).toHaveLength(1)
   })
 
@@ -1160,6 +1418,68 @@ describe("Todo detail editing and dialog behavior", () => {
     fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Second local title" } })
     fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
 
+    await waitFor(() => expect(patchBodies()).toHaveLength(2))
+    expect(patchBodies()[1].idempotencyKey).not.toBe(firstKey)
+  })
+
+  it("prioritizes an idempotency conflict over retained same-field provenance", async () => {
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    const user = userEvent.setup()
+    let patchAttempt = 0
+    let remoteVersion = 8
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        patchAttempt += 1
+        if (patchAttempt === 1) {
+          return new Response(JSON.stringify({
+            code: "todo_idempotency_conflict",
+            error: "private payload",
+          }), { status: 409, headers: { "Content-Type": "application/json" } })
+        }
+        return new Response(JSON.stringify(editResult(value.workItem, JSON.parse(String(init.body)), remoteVersion + 1)), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify({
+        ...value,
+        workItem: { ...value.workItem, version: remoteVersion },
+      }), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(await screen.findByRole("button", { name: "Overwrite remote" }))
+
+    const alert = await screen.findByRole("alert")
+    expect(alert.textContent).toContain("Reload remote to discard all local edits")
+    expect(screen.queryByRole("status", { name: "Todo changed elsewhere" })).toBeNull()
+    const reload = screen.getByRole("button", { name: "Reload remote" })
+    await waitFor(() => expect(document.activeElement).toBe(reload))
+    const firstKey = patchBodies()[0].idempotencyKey
+    const close = screen.getByRole("button", { name: "Close" })
+    close.focus()
+    fireEvent.click(close)
+    await waitFor(() => expect(document.activeElement).toBe(reload))
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull()
+    expect(patchBodies()).toHaveLength(1)
+    for (const closeAttempt of [
+      () => fireEvent.keyDown(screen.getByRole("dialog", { name: "Todo details" }), { key: "Escape" }),
+      () => fireEvent.pointerDown(screen.getByTestId("detail-overlay")),
+    ]) {
+      closeAttempt()
+      await waitFor(() => expect(document.activeElement).toBe(reload))
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull()
+      expect(patchBodies()).toHaveLength(1)
+    }
+
+    remoteVersion = 9
+    await user.click(reload)
+    await waitFor(() => expect(screen.queryByText(/Reload remote to discard all local edits/)).toBeNull())
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Fresh title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
     await waitFor(() => expect(patchBodies()).toHaveLength(2))
     expect(patchBodies()[1].idempotencyKey).not.toBe(firstKey)
   })

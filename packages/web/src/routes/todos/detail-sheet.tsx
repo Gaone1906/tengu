@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
 import { X, Check, ChevronRight, MessageSquareText } from "lucide-react"
 import {
@@ -23,6 +23,7 @@ import {
   formatCost,
   isOpen,
   isTodoIdempotencyConflictError,
+  isTodoVersionConflictError,
   operatorSafeTodoError,
 } from "@/lib/todos"
 import {
@@ -450,7 +451,7 @@ function mergeSavedDetail(
  * full exact detail can supply editable fields; a newer compact projection is
  * a version fence, never a source from which to synthesize a detail snapshot. */
 function authoritativeRemoteDetail(
-  queryClient: ReturnType<typeof useQueryClient>,
+  queryClient: QueryClient,
   id: string,
   incoming: WorkItemDetailWire,
 ): WorkItemDetailWire {
@@ -467,6 +468,76 @@ function authoritativeRemoteDetail(
     )
   }
   return authoritative
+}
+
+async function refreshTodoCachesBestEffort(queryClient: QueryClient, id: string): Promise<void> {
+  try {
+    await invalidateTodoCaches(queryClient, id)
+  } catch {
+    // A cache refresh cannot replace a confirmed response or structured error.
+  }
+}
+
+/** One conditional detail edit, including both response-time cache fences.
+ * Typed backend conflicts refresh caches opportunistically but always rethrow
+ * the original object so code/currentVersion survive intact. */
+export async function saveTodoDetailRemote(
+  queryClient: QueryClient,
+  id: string,
+  request: WorkItemEditRequest,
+) {
+  let result: Awaited<ReturnType<typeof api.updateWorkItem>>
+  try {
+    result = await api.updateWorkItem(id, request)
+  } catch (cause) {
+    if (isTodoVersionConflictError(cause)) {
+      await refreshTodoCachesBestEffort(queryClient, id)
+    }
+    throw cause
+  }
+
+  let maximumBeforeMerge = maximumTodoVersion(queryClient, id)
+  if (maximumBeforeMerge !== undefined && maximumBeforeMerge > result.workItem.version) {
+    await refreshTodoCachesBestEffort(queryClient, id)
+    maximumBeforeMerge = maximumTodoVersion(queryClient, id)
+    if (maximumBeforeMerge !== undefined && maximumBeforeMerge > result.workItem.version) {
+      throw new TodoApiError(
+        409,
+        "A newer cached Todo revision superseded this response",
+        "TODO_VERSION_CONFLICT",
+        maximumBeforeMerge,
+      )
+    }
+  }
+
+  mergeTodoIntoCaches(queryClient, result.workItem)
+  queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) => mergeSavedDetail(current, result.workItem))
+  await refreshTodoCachesBestEffort(queryClient, id)
+
+  const maximumAfterRefresh = maximumTodoVersion(queryClient, id)
+  const exact = queryClient.getQueryData<WorkItemDetailWire>(["work-item", id])
+  const exactVersion = exact?.workItem.version
+  const authoritativeVersion = Math.max(
+    result.workItem.version,
+    isPositiveTodoVersion(exactVersion) ? exactVersion : 0,
+    maximumAfterRefresh ?? 0,
+  )
+  if (authoritativeVersion > result.workItem.version) {
+    throw new TodoApiError(
+      409,
+      "A newer refreshed Todo revision superseded this response",
+      "TODO_VERSION_CONFLICT",
+      authoritativeVersion,
+    )
+  }
+
+  const remoteItem = exact && exact.workItem.version === result.workItem.version
+    ? exact.workItem
+    : result.workItem
+  return {
+    remote: todoRemoteSnapshot(remoteItem),
+    replayed: result.replayed,
+  }
 }
 
 type ConflictActionName = "reload" | "rebase" | "overwrite"
@@ -726,27 +797,13 @@ export function DetailSheet({
   }, [id, queryClient])
   const loadRemote = useCallback(async () => {
     const loaded = await fetchRemote()
-    commitRemote(loaded.fresh)
-    return loaded.remote
-  }, [commitRemote, fetchRemote])
-  const saveRemote = useCallback(async (request: WorkItemEditRequest) => {
-    const result = await api.updateWorkItem(id, request)
-    const maximum = maximumTodoVersion(queryClient, id)
-    if (maximum !== undefined && maximum > result.workItem.version) {
-      throw new TodoApiError(
-        409,
-        "A newer cached Todo revision superseded this response",
-        "TODO_VERSION_CONFLICT",
-        maximum,
-      )
-    }
-    mergeTodoIntoCaches(queryClient, result.workItem)
-    queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) => mergeSavedDetail(current, result.workItem))
-    await invalidateTodoCaches(queryClient, id)
-    return {
-      remote: todoRemoteSnapshot(result.workItem),
-      replayed: result.replayed,
-    }
+    const fresh = authoritativeRemoteDetail(queryClient, id, loaded.fresh)
+    const remote = todoRemoteSnapshot(fresh.workItem)
+    commitRemote(fresh)
+    return remote
+  }, [commitRemote, fetchRemote, id, queryClient])
+  const saveRemote = useCallback((request: WorkItemEditRequest) => {
+    return saveTodoDetailRemote(queryClient, id, request)
   }, [id, queryClient])
   const draftState = useTodoDraft({
     id,
@@ -777,10 +834,10 @@ export function DetailSheet({
   useEffect(() => {
     const currentSurface: RecoveryFocusSurface = draftState.cleanupPending
       ? "cleanup"
-      : draftState.conflictMode !== "none"
-        ? "conflict"
-        : idempotencyConflict
-          ? "idempotency"
+      : idempotencyConflict
+        ? "idempotency"
+        : draftState.conflictMode !== "none"
+          ? "conflict"
           : "none"
     const previous = recoveryFocusRef.current.id === id
       ? recoveryFocusRef.current
@@ -858,12 +915,13 @@ export function DetailSheet({
   }, [id])
 
   const requestClose = useCallback(() => {
-    if (draftState.cleanupPending || draftState.recoveredConflict) return
+    if (draftState.cleanupPending) return
     if (idempotencyConflict) {
       setShowCloseGuard(false)
       focusIdempotencyReload()
       return
     }
+    if (draftState.recoveredConflict) return
     if (draftState.status === "error") {
       setShowCloseGuard(true)
       return
@@ -887,7 +945,7 @@ export function DetailSheet({
     if (!control.mounted
       || control.id !== id
       || control.busy
-      || draftState.conflictMode === "reconciling"
+      || (draftState.conflictMode === "reconciling" && !idempotencyConflict)
       || draftState.status === "saving") return
     control.busy = true
     control.token += 1
@@ -899,11 +957,13 @@ export function DetailSheet({
     try {
       const loaded = await fetchRemote()
       if (!ownsAction(token)) return
-      commitRemote(loaded.fresh)
+      const fresh = authoritativeRemoteDetail(queryClient, id, loaded.fresh)
+      const remote = todoRemoteSnapshot(fresh.workItem)
+      commitRemote(fresh)
       if (!ownsAction(token)) return
-      if (action === "reload") draftState.reloadRemote(loaded.remote)
-      else if (action === "rebase") draftState.rebaseRemote(loaded.remote)
-      else draftState.overwriteRemote(loaded.remote)
+      if (action === "reload") draftState.reloadRemote(remote)
+      else if (action === "rebase") draftState.rebaseRemote(remote)
+      else draftState.overwriteRemote(remote)
     } catch (cause) {
       if (!ownsAction(token)) return
       const fallback = action === "reload"
@@ -924,7 +984,7 @@ export function DetailSheet({
         })
       }
     }
-  }, [commitRemote, draftState, fetchRemote, id, ownsAction])
+  }, [commitRemote, draftState, fetchRemote, id, idempotencyConflict, ownsAction, queryClient])
 
   useEffect(() => {
     if (!closeAfterSave) return
@@ -1025,6 +1085,26 @@ export function DetailSheet({
                 Retry cleanup
               </button>
             </div>
+          ) : idempotencyConflict && draftState.error ? (
+            <div
+              role="alert"
+              data-testid="sheet-save-error"
+              className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
+            >
+              <span className="min-w-0 flex-1 break-words">
+                {operatorSafeTodoError(draftState.error, "Couldn't save")}
+                {conflictError ? ` ${conflictError}` : null}
+              </span>
+              <button
+                ref={idempotencyReloadRef}
+                type="button"
+                disabled={conflictBusy}
+                onClick={() => void runConflictAction("reload")}
+                className="min-h-11 rounded-full px-3 font-semibold disabled:opacity-50"
+              >
+                Reload remote
+              </button>
+            </div>
           ) : draftState.recoveredConflict ? (
             <TodoConflictActions
               fields={draftState.conflictFields}
@@ -1037,7 +1117,7 @@ export function DetailSheet({
               onOverwrite={() => void runConflictAction("overwrite")}
             />
           ) : null}
-          {((draftState.error && !draftState.cleanupPending && !draftState.recoveredConflict) || transitionError) && (
+          {((draftState.error && !draftState.cleanupPending && !draftState.recoveredConflict && !idempotencyConflict) || transitionError) && (
             <div
               role="alert"
               data-testid="sheet-save-error"
@@ -1045,19 +1125,8 @@ export function DetailSheet({
             >
               <span className="min-w-0 flex-1 break-words">
                 {draftState.error ? operatorSafeTodoError(draftState.error, "Couldn't save") : transitionError}
-                {idempotencyConflict && conflictError ? ` ${conflictError}` : null}
               </span>
-              {idempotencyConflict ? (
-                <button
-                  ref={idempotencyReloadRef}
-                  type="button"
-                  disabled={conflictBusy}
-                  onClick={() => void runConflictAction("reload")}
-                  className="min-h-11 rounded-full px-3 font-semibold disabled:opacity-50"
-                >
-                  Reload remote
-                </button>
-              ) : draftState.status === "error" && !draftState.cleanupPending && !draftState.recoveredConflict ? (
+              {draftState.status === "error" && !draftState.cleanupPending && !draftState.recoveredConflict ? (
                 <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">Retry</button>
               ) : null}
             </div>
