@@ -1,6 +1,12 @@
 import {
   getSession,
+  getCallbackDelivery,
+  claimCallbackDelivery,
+  claimCallbackDeliveryAttempt,
+  recordCallbackDeliveryFailure,
+  ensureCallbackAttemptToken,
   listDelegationCompletionNudgedSessions,
+  listPendingCallbackDeliveries,
   listSessionsBySource,
   markDelegationCompletionSurfaced,
 } from "./registry.js";
@@ -12,6 +18,14 @@ import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
 import { hydrateAllAttachments, talkSessionsAttachedTo } from "../talk/attachments.js";
 import type { ChatBlockEnvelope, JsonObject } from "../shared/types.js";
 import { enforceDelegationCompletionContract } from "./delegation-completion-contract.js";
+import type { CallbackDeliveryPayload } from "../shared/types.js";
+
+export const CALLBACK_DELIVERY_RETRY_DELAYS_MS = [1_000, 5_000, 30_000] as const;
+export const CALLBACK_DELIVERY_MAX_ATTEMPTS = CALLBACK_DELIVERY_RETRY_DELAYS_MS.length + 1;
+const CALLBACK_DELIVERY_ATTEMPT_LEASE_MS = 60_000;
+
+let callbackRetryTimer: ReturnType<typeof setTimeout> | undefined;
+let callbackRetrySweepRunning: Promise<number> | undefined;
 
 export interface ManagerVisibilityDetails {
   manager: string;
@@ -24,6 +38,8 @@ export interface ManagerVisibilityDetails {
   workItemId: string;
   title: string;
 }
+
+type CallbackSemantics = "terminal" | "nonterminal-lifecycle";
 
 /**
  * Give a manager lightweight visibility into one skip-level delegation. The
@@ -51,7 +67,17 @@ export function notifyManagerVisibility(
     workItemId: details.workItemId,
   };
 
-  _sendRaw(managerSessionId, message, displayMessage, { meta }).catch((error) => {
+  const { delivery } = claimCallbackDelivery({
+    parentSessionId: managerSessionId,
+    childSessionId: details.childSessionId,
+    attemptToken: `manager-visibility:${details.workItemId}`,
+    terminalOutcome: "manager-visibility",
+    terminalVersion: 1,
+    callbackKind: "manager-visibility",
+    payload: { message, displayMessage, meta },
+  });
+  if (delivery.status === "accepted") return;
+  _deliverClaimedCallback(delivery.id).catch((error) => {
     logger.warn(`[callbacks] Failed to notify manager session ${managerSessionId}: ${error instanceof Error ? error.message : String(error)}`);
   });
 }
@@ -66,6 +92,8 @@ export function notifyParentSession(
   result: { result?: string | null; error?: string | null; cost?: number; durationMs?: number },
   options?: { alwaysNotify?: boolean },
 ): void {
+  if (!result.error && !hasMeaningfulReply(result.result)) return;
+
   // Attachment wakes are a SEPARATE relationship from parent ownership: a talk
   // session can soft-link any session and must be woken when it finishes, even if
   // that session has no parent (or its parent is elsewhere). So this runs before
@@ -97,7 +125,11 @@ export async function recoverOrphanedDelegationCompletionClaims(): Promise<numbe
         error:
           "Delegation completion recovery: a restart occurred after the automatic continuation was claimed, " +
           "so completion could not be confirmed. The child was not nudged again; parent review is required.",
-      }, { skipCompletionContract: true });
+      }, {
+        skipCompletionContract: true,
+        callbackKind: "delegation-completion-recovery",
+        terminalOutcome: child.attemptOutcome ?? "interrupted",
+      });
       if (markDelegationCompletionSurfaced(child.id, child.workItemId)) recovered++;
     } catch (error) {
       logger.warn(
@@ -106,6 +138,46 @@ export async function recoverOrphanedDelegationCompletionClaims(): Promise<numbe
     }
   }
   return recovered;
+}
+
+/** Replay callback intents claimed before their parent route accepted the
+ * queue/message transaction. Accepted rows are absent from this scan, so boot
+ * recovery can never emit or wake an already delivered callback again. */
+export async function recoverPendingCallbackDeliveries(): Promise<number> {
+  if (callbackRetrySweepRunning) return callbackRetrySweepRunning;
+  callbackRetrySweepRunning = (async () => {
+    const now = Date.now();
+    const due = listPendingCallbackDeliveries().filter((delivery) =>
+      delivery.nextAttemptAt === null || delivery.nextAttemptAt <= now,
+    );
+    const results = await Promise.allSettled(due.map((delivery) => _deliverClaimedCallback(delivery.id)));
+    armCallbackRetrySweep();
+    return results.filter((result) => result.status === "fulfilled" && result.value !== "deferred").length;
+  })().finally(() => {
+    callbackRetrySweepRunning = undefined;
+  });
+  return callbackRetrySweepRunning;
+}
+
+/** Startup owns callback recovery before orphan-guard recovery. Each phase is
+ * caught independently so poison or transport failure cannot reject boot. */
+export async function recoverCallbackStateOnStartup(): Promise<{
+  pendingRecovered: number;
+  orphanedRecovered: number;
+}> {
+  let pendingRecovered = 0;
+  let orphanedRecovered = 0;
+  try {
+    pendingRecovered = await recoverPendingCallbackDeliveries();
+  } catch (error) {
+    logger.error(`[callbacks] Startup callback recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    orphanedRecovered = await recoverOrphanedDelegationCompletionClaims();
+  } catch (error) {
+    logger.error(`[callbacks] Startup orphan recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { pendingRecovered, orphanedRecovered };
 }
 
 /** Label for a talk wake: title → employee → "a thread". */
@@ -174,13 +246,27 @@ async function _notifyAttached(
   if (talkIds.length === 0) return;
 
   const { message, displayMessage } = buildTalkWake(talkLabel(completedSession), result);
-  for (const talkId of talkIds) {
-    if (talkId === completedSession.parentSessionId) continue; // owned child — already notified
+  const terminalOutcome = completedSession.attemptOutcome ?? (result.error ? "failed" : "succeeded");
+  const terminalVersion = Math.max(1, completedSession.attemptTerminalVersion ?? 0);
+  const attemptToken = completedSession.attemptToken
+    ?? ensureCallbackAttemptToken(completedSession.id, terminalOutcome, terminalVersion);
+  if (!attemptToken) throw new Error(`child ${completedSession.id} has no immutable callback attempt token`);
+  const deliveries = talkIds.flatMap((talkId) => {
+    if (talkId === completedSession.parentSessionId) return []; // owned child — already notified
     const talk = getSession(talkId);
-    if (!talk || talk.source !== "talk") continue;
-    if (talk.status === "error") continue;
-    await _sendRaw(talkId, message, displayMessage);
-  }
+    if (!talk || talk.source !== "talk" || talk.status === "error") return [];
+    const { delivery } = claimCallbackDelivery({
+      parentSessionId: talkId,
+      childSessionId: completedSession.id,
+      attemptToken,
+      terminalOutcome,
+      terminalVersion,
+      callbackKind: "talk-attachment",
+      payload: { message, displayMessage },
+    });
+    return delivery.status === "accepted" ? [] : [delivery];
+  });
+  await Promise.allSettled(deliveries.map((delivery) => _deliverClaimedCallback(delivery.id)));
 }
 
 /**
@@ -196,6 +282,11 @@ export function notifyRateLimited(
   _sendNotification(childSession, {
     error: null,
     result: `⏳ Session is rate-limited and will auto-resume${estimatedResumeTime ? ` around ${estimatedResumeTime}` : ' when the limit resets'}. No action needed.`,
+  }, {
+    semantics: "nonterminal-lifecycle",
+    callbackKind: "rate-limited",
+    terminalOutcome: "rate-limited",
+    terminalVersion: Math.max(1, childSession.attemptTerminalVersion ?? 0),
   }).catch((err) => {
     logger.warn(`[callbacks] Failed to send rate-limit notification: ${err instanceof Error ? err.message : String(err)}`);
   });
@@ -223,7 +314,24 @@ export function notifyRateLimitResumed(
     message = `🔄 Employee "${employeeName}" (session ${childSession.id}) has resumed after rate limit cleared.`;
   }
 
-  _sendRaw(childSession.parentSessionId, message).catch((err) => {
+  const terminalVersion = Math.max(1, childSession.attemptTerminalVersion ?? 0);
+  const attemptToken = childSession.attemptToken
+    ?? ensureCallbackAttemptToken(childSession.id, "rate-limit-resumed", terminalVersion);
+  if (!attemptToken) {
+    logger.warn(`[callbacks] Failed to send resume notification: child ${childSession.id} has no immutable callback attempt token`);
+    return;
+  }
+  const { delivery } = claimCallbackDelivery({
+    parentSessionId: childSession.parentSessionId,
+    childSessionId: childSession.id,
+    attemptToken,
+    terminalOutcome: "rate-limit-resumed",
+    terminalVersion,
+    callbackKind: "rate-limit-resumed",
+    payload: { message, displayMessage: message },
+  });
+  if (delivery.status === "accepted") return;
+  _deliverClaimedCallback(delivery.id).catch((err) => {
     logger.warn(`[callbacks] Failed to send resume notification: ${err instanceof Error ? err.message : String(err)}`);
   });
 }
@@ -231,7 +339,14 @@ export function notifyRateLimitResumed(
 async function _sendNotification(
   childSession: Session,
   result: { result?: string | null; error?: string | null; cost?: number; durationMs?: number },
-  options?: { alwaysNotify?: boolean; skipCompletionContract?: boolean },
+  options?: {
+    alwaysNotify?: boolean;
+    skipCompletionContract?: boolean;
+    semantics?: CallbackSemantics;
+    callbackKind?: string;
+    terminalOutcome?: string;
+    terminalVersion?: number;
+  },
 ): Promise<void> {
   const parent = getSession(childSession.parentSessionId!);
   if (!parent) return; // Parent gone or expired
@@ -241,13 +356,16 @@ async function _sendNotification(
   // callbacks; phase completion is consumed by the workflow reconciler instead.
   if (parent.workflowProvenance?.kind === "run") return;
 
+  const isTerminal = options?.semantics !== "nonterminal-lifecycle";
+
   // Delegation completion contract: a narrowly-qualified progress-only idle
   // settlement gets one durable follow-up instead of prematurely waking the
   // parent. The next idle settlement is surfaced and can never nudge again.
-  const contract = options?.skipCompletionContract
+  const contract = options?.skipCompletionContract || !isTerminal
     ? "pass"
     : await enforceDelegationCompletionContract(childSession, result, {
-        postFollowUp: (sessionId, message, displayMessage) => _sendRaw(sessionId, message, displayMessage),
+        postFollowUp: (sessionId, message, displayMessage) =>
+          _sendCompletionContractNudge(childSession, sessionId, message, displayMessage),
       });
   if (contract === "nudged" || contract === "suppress") return;
   if (contract === "surface") {
@@ -283,7 +401,9 @@ async function _sendNotification(
   } else if (result.error) {
     message = `⚠️ Employee "${employeeName}" (child session ${childId}) hit an error and could not finish: ${result.error}`;
     displayMessage = `⚠️ ${employeeName} couldn't finish\n${_clean(result.error, 220)}`;
-    notificationMeta = childNotificationMeta("child-error", childSession, result.error);
+    if (isTerminal) {
+      notificationMeta = childNotificationMeta("child-error", childSession, result.error);
+    }
   } else {
     const raw = (result.result || "").trim() || "(no output)";
     const llmPreview = raw.length > 500 ? raw.slice(0, 500) + "…" : raw;
@@ -293,10 +413,12 @@ async function _sendNotification(
       `To read the full reply: GET /api/sessions/${childId}?last=N · ` +
       `to follow up: POST /api/sessions/${childId}/message`;
     displayMessage = `📩 ${employeeName} replied\n${_clean(raw, 220)}`;
-    notificationMeta = childNotificationMeta("child-reply", childSession, raw);
+    if (isTerminal) {
+      notificationMeta = childNotificationMeta("child-reply", childSession, raw);
+    }
   }
 
-  if (!isTalkParent && childSession.workItemId) {
+  if (isTerminal && !isTalkParent && childSession.workItemId) {
     notificationBlock = {
       op: "patch",
       block: {
@@ -309,10 +431,58 @@ async function _sendNotification(
     };
   }
 
-  await _sendRaw(childSession.parentSessionId!, message, displayMessage, {
-    meta: notificationMeta,
-    block: notificationBlock,
+  const terminalOutcome = options?.terminalOutcome
+    ?? childSession.attemptOutcome
+    ?? (result.error ? "failed" : "succeeded");
+  const terminalVersion = options?.terminalVersion
+    ?? Math.max(1, childSession.attemptTerminalVersion ?? 0);
+  const attemptToken = childSession.attemptToken
+    ?? ensureCallbackAttemptToken(childSession.id, terminalOutcome, terminalVersion);
+  if (!attemptToken) {
+    throw new Error(`child ${childSession.id} has no immutable callback attempt token`);
+  }
+  const payload: CallbackDeliveryPayload = {
+    message,
+    displayMessage,
+    ...(notificationMeta ? { meta: notificationMeta } : {}),
+    ...(notificationBlock ? { block: notificationBlock } : {}),
+  };
+  const { delivery } = claimCallbackDelivery({
+    parentSessionId: childSession.parentSessionId!,
+    childSessionId: childSession.id,
+    attemptToken,
+    terminalOutcome,
+    terminalVersion,
+    callbackKind: options?.callbackKind ?? "parent-completion",
+    payload,
   });
+  if (delivery.status === "accepted") return;
+
+  await _deliverClaimedCallback(delivery.id);
+}
+
+async function _sendCompletionContractNudge(
+  childSession: Session,
+  targetSessionId: string,
+  message: string,
+  displayMessage: string,
+): Promise<void> {
+  const terminalOutcome = childSession.attemptOutcome ?? "idle-progress";
+  const terminalVersion = Math.max(1, childSession.attemptTerminalVersion ?? 0);
+  const attemptToken = childSession.attemptToken
+    ?? ensureCallbackAttemptToken(childSession.id, terminalOutcome, terminalVersion);
+  if (!attemptToken) throw new Error(`child ${childSession.id} has no immutable callback attempt token`);
+  const { delivery } = claimCallbackDelivery({
+    parentSessionId: targetSessionId,
+    childSessionId: childSession.id,
+    attemptToken,
+    terminalOutcome,
+    terminalVersion,
+    callbackKind: "delegation-completion-nudge",
+    payload: { message, displayMessage },
+  });
+  if (delivery.status === "accepted") return;
+  await _deliverClaimedCallback(delivery.id);
 }
 
 function childNotificationMeta(
@@ -336,6 +506,10 @@ function childNotificationMeta(
     childSessionId: childSession.id,
     fullMessage: fullMessage.slice(0, STRUCTURED_MESSAGE_BODY_MAX_CHARS),
   };
+}
+
+function hasMeaningfulReply(result: string | null | undefined): boolean {
+  return Boolean(result?.replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").trim());
 }
 
 /** Trim to a word boundary for a tidy human-facing preview. */
@@ -388,7 +562,7 @@ async function _sendRaw(
   parentSessionId: string,
   message: string,
   displayMessage?: string,
-  structured?: { meta?: JsonObject; block?: ChatBlockEnvelope },
+  structured?: { meta?: JsonObject; block?: ChatBlockEnvelope; callbackDeliveryId?: string },
 ): Promise<void> {
   const gateway = internalGatewayConnection();
 
@@ -401,9 +575,70 @@ async function _sendRaw(
       ...(displayMessage ? { displayMessage } : {}),
       ...(structured?.meta ? { meta: structured.meta } : {}),
       ...(structured?.block ? { block: structured.block } : {}),
+      ...(structured?.callbackDeliveryId ? { callbackDeliveryId: structured.callbackDeliveryId } : {}),
     }),
   });
   if (!response.ok) throw new Error(`parent notification failed (${response.status})`);
+}
+
+type CallbackDeliveryAttemptResult = "accepted" | "scheduled" | "deferred";
+
+async function _deliverClaimedCallback(deliveryId: string): Promise<CallbackDeliveryAttemptResult> {
+  const attempt = claimCallbackDeliveryAttempt(deliveryId, Date.now(), CALLBACK_DELIVERY_ATTEMPT_LEASE_MS);
+  if (!attempt) {
+    armCallbackRetrySweep();
+    return getCallbackDelivery(deliveryId)?.status === "accepted" ? "accepted" : "deferred";
+  }
+  try {
+    await _sendRaw(attempt.parentSessionId, attempt.payload.message, attempt.payload.displayMessage, {
+      meta: attempt.payload.meta,
+      block: attempt.payload.block,
+      callbackDeliveryId: attempt.id,
+    });
+    if (getCallbackDelivery(attempt.id)?.status === "pending") armCallbackRetrySweep();
+    return "accepted";
+  } catch (error) {
+    if (getCallbackDelivery(attempt.id)?.status === "accepted") return "accepted";
+    const diagnostic = error instanceof Error ? error.message : String(error);
+    const delayIndex = Math.min(attempt.attemptCount - 1, CALLBACK_DELIVERY_RETRY_DELAYS_MS.length - 1);
+    const failed = recordCallbackDeliveryFailure(attempt.id, diagnostic, {
+      now: Date.now(),
+      nextAttemptAt: Date.now() + CALLBACK_DELIVERY_RETRY_DELAYS_MS[Math.max(0, delayIndex)],
+      maxAttempts: CALLBACK_DELIVERY_MAX_ATTEMPTS,
+    });
+    if (failed?.status === "pending") {
+      armCallbackRetrySweep();
+      logger.warn(`[callbacks] Delivery ${attempt.id} failed; retry ${attempt.attemptCount + 1} scheduled: ${diagnostic}`);
+      return "scheduled";
+    }
+    logger.error(`[callbacks] Delivery ${attempt.id} exhausted after ${attempt.attemptCount} attempts: ${diagnostic}`);
+    return "scheduled";
+  }
+}
+
+function armCallbackRetrySweep(): void {
+  const pending = listPendingCallbackDeliveries();
+  if (callbackRetryTimer) {
+    clearTimeout(callbackRetryTimer);
+    callbackRetryTimer = undefined;
+  }
+  if (pending.length === 0) return;
+  const now = Date.now();
+  const nextAt = Math.min(...pending.map((delivery) => delivery.nextAttemptAt ?? now));
+  callbackRetryTimer = setTimeout(() => {
+    callbackRetryTimer = undefined;
+    void recoverPendingCallbackDeliveries().catch((error) => {
+      logger.error(`[callbacks] Live retry sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+      armCallbackRetrySweep();
+    });
+  }, Math.max(0, nextAt - now));
+  callbackRetryTimer.unref?.();
+}
+
+export function __resetCallbackRetrySweepForTest(): void {
+  if (callbackRetryTimer) clearTimeout(callbackRetryTimer);
+  callbackRetryTimer = undefined;
+  callbackRetrySweepRunning = undefined;
 }
 
 function internalGatewayConnection(): { baseUrl: string; token?: string } {

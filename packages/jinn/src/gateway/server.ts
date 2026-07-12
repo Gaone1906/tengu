@@ -20,7 +20,7 @@ import {
 import { configureLogger, logger } from "../shared/logger.js";
 import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, RESTART_ACK_META_KEY } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
-import { recoverOrphanedDelegationCompletionClaims } from "../sessions/callbacks.js";
+import { recoverCallbackStateOnStartup } from "../sessions/callbacks.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
 import { enforcePtyIdleCap, PtyLifecycleManager, type PtyLifecycleOpts } from "../engines/pty-lifecycle.js";
 import { CodexEngine } from "../engines/codex.js";
@@ -1003,6 +1003,10 @@ export async function startGateway(
       // its first await, so the reload window fails closed, never stale-open.
       // Employees threaded so a jinnMcp pilot arms the gate too (finding 1).
       void armJinnAttachGate(currentConfig.mcp, { gatewayUrl: process.env.JINN_GATEWAY_URL!, log: logger, employees: employeeRegistry.values() }).catch(() => {});
+      // Accepted callback queue intents survive a temporarily unavailable
+      // engine. Re-evaluate them whenever configuration/model availability is
+      // refreshed so recovery does not require another restart or callback.
+      resumePendingWebQueueItems(apiContext);
       logger.info("Config reloaded successfully");
       emit("config:reloaded", {});
     } catch (err) {
@@ -1337,12 +1341,17 @@ export async function startGateway(
   // is written under the per-session CODEX_HOME that later resumes will use.
   resumePendingWebQueueItems(apiContext);
 
-  // Any claim with no replayable internal queue intent died in the narrow
-  // claim→POST crash window. The server and MCP gate are live now, so surface
-  // those claims to their parents; recovery never sends a second auto-nudge.
-  void recoverOrphanedDelegationCompletionClaims().then((count) => {
-    if (count > 0) logger.warn(`Surfaced ${count} orphaned delegation completion claim(s) after restart`);
-  });
+  // Pending callback receipts must recover before orphan completion guards are
+  // inspected. Otherwise a durable-but-unaccepted child nudge can race a
+  // contradictory parent recovery message. The combined recovery owns both
+  // ordering and top-level isolation so boot cannot reject on one poison row.
+  const callbackRecovery = await recoverCallbackStateOnStartup();
+  if (callbackRecovery.pendingRecovered > 0) {
+    logger.info(`Re-submitted ${callbackRecovery.pendingRecovered} pending callback delivery claim(s) after restart`);
+  }
+  if (callbackRecovery.orphanedRecovered > 0) {
+    logger.warn(`Surfaced ${callbackRecovery.orphanedRecovered} orphaned delegation completion claim(s) after restart`);
+  }
 
   // Notify connected WebSocket clients about interrupted sessions available for resume
   if (resumable.length > 0) {

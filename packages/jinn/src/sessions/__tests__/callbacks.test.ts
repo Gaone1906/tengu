@@ -1,8 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+const callbackDeliveryMockState = vi.hoisted(() => ({
+  deliveries: new Map<string, any>(),
+  nextId: 1,
+}));
+
 // Mock dependencies before importing the module under test
 vi.mock("../registry.js", () => ({
   getSession: vi.fn(),
+  getCallbackDelivery: vi.fn((id: string) =>
+    [...callbackDeliveryMockState.deliveries.values()].find((delivery) => delivery.id === id),
+  ),
   listSessionsBySource: vi.fn(() => []),
   updateSession: vi.fn((id: string, updates: Partial<Session>) => ({ ...makeSession({ id }), ...updates })),
   claimDelegationCompletionNudge: vi.fn((id: string, workItemId: string) => makeSession({
@@ -18,6 +26,62 @@ vi.mock("../registry.js", () => ({
   releaseDelegationCompletionNudge: vi.fn(),
   clearDelegationCompletionGuard: vi.fn(),
   listDelegationCompletionNudgedSessions: vi.fn(() => []),
+  claimCallbackDelivery: vi.fn((input: any) => {
+    const key = [
+      input.parentSessionId,
+      input.childSessionId,
+      input.attemptToken,
+      input.terminalOutcome,
+      input.terminalVersion,
+      input.callbackKind,
+    ].join("|");
+    const existing = callbackDeliveryMockState.deliveries.get(key);
+    if (existing) return { delivery: existing, claimed: false };
+    const delivery = {
+      id: `callback-delivery-${callbackDeliveryMockState.nextId++}`,
+      ...input,
+      status: "pending",
+      messageId: null,
+      queueItemId: null,
+      attemptCount: 0,
+      nextAttemptAt: null,
+      lastAttemptAt: null,
+      lastError: null,
+      deadLetteredAt: null,
+      createdAt: new Date().toISOString(),
+      acceptedAt: null,
+    };
+    callbackDeliveryMockState.deliveries.set(key, delivery);
+    return { delivery, claimed: true };
+  }),
+  claimCallbackDeliveryAttempt: vi.fn((id: string, now: number, leaseMs: number) => {
+    const delivery = [...callbackDeliveryMockState.deliveries.values()].find((candidate) => candidate.id === id);
+    if (!delivery || delivery.status !== "pending" || (delivery.nextAttemptAt !== null && delivery.nextAttemptAt > now)) {
+      return undefined;
+    }
+    delivery.attemptCount++;
+    delivery.lastAttemptAt = now;
+    delivery.nextAttemptAt = now + leaseMs;
+    delivery.lastError = null;
+    return delivery;
+  }),
+  recordCallbackDeliveryFailure: vi.fn((id: string, error: string, options: { now: number; nextAttemptAt: number; maxAttempts: number }) => {
+    const delivery = [...callbackDeliveryMockState.deliveries.values()].find((candidate) => candidate.id === id);
+    if (!delivery || delivery.status !== "pending") return delivery;
+    delivery.lastError = error;
+    if (delivery.attemptCount >= options.maxAttempts) {
+      delivery.status = "dead_letter";
+      delivery.nextAttemptAt = null;
+      delivery.deadLetteredAt = options.now;
+    } else {
+      delivery.nextAttemptAt = options.nextAttemptAt;
+    }
+    return delivery;
+  }),
+  listPendingCallbackDeliveries: vi.fn(() =>
+    [...callbackDeliveryMockState.deliveries.values()].filter((delivery) => delivery.status === "pending"),
+  ),
+  ensureCallbackAttemptToken: vi.fn(() => "legacy-attempt-token"),
 }));
 
 vi.mock("../../work-items/store.js", () => ({
@@ -37,8 +101,8 @@ vi.mock("../../shared/logger.js", () => ({
   },
 }));
 
-import { notifyManagerVisibility, notifyParentSession, notifyRateLimitResumed, recoverOrphanedDelegationCompletionClaims } from "../callbacks.js";
-import { getSession, listSessionsBySource, listDelegationCompletionNudgedSessions, markDelegationCompletionSurfaced } from "../registry.js";
+import { __resetCallbackRetrySweepForTest, notifyManagerVisibility, notifyParentSession, notifyRateLimitResumed, recoverOrphanedDelegationCompletionClaims, recoverPendingCallbackDeliveries } from "../callbacks.js";
+import { claimCallbackDelivery, getSession, listSessionsBySource, listDelegationCompletionNudgedSessions, markDelegationCompletionSurfaced } from "../registry.js";
 import { getWorkItem } from "../../work-items/store.js";
 import { attach, __resetAttachmentsForTest } from "../../talk/attachments.js";
 import type { Session } from "../../shared/types.js";
@@ -60,6 +124,9 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     title: null,
     parentSessionId: "parent-001",
     status: "idle",
+    attemptOutcome: "succeeded",
+    attemptToken: "attempt-001",
+    attemptTerminalVersion: 1,
     effortLevel: null,
     totalCost: 0,
     totalTurns: 0,
@@ -71,6 +138,16 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 const originalFetch = globalThis.fetch;
+
+beforeEach(() => {
+  callbackDeliveryMockState.deliveries.clear();
+  callbackDeliveryMockState.nextId = 1;
+  vi.mocked(claimCallbackDelivery).mockClear();
+});
+
+afterEach(() => {
+  __resetCallbackRetrySweepForTest();
+});
 
 describe("notifyManagerVisibility", () => {
   it("posts one structured notification through the durable session-message route", async () => {
@@ -106,6 +183,44 @@ describe("notifyManagerVisibility", () => {
       employee: "worker",
       childSessionId: "worker-child",
       workItemId: "wi_visibility",
+    });
+
+    globalThis.fetch = originalFetch;
+  });
+
+  it("uses one stable durable receipt when the same visibility input is replayed", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const details = {
+      manager: "team-lead",
+      managerDisplay: "Team Lead",
+      delegator: "org-root",
+      delegatorDisplay: "Org Root",
+      employee: "worker",
+      employeeDisplay: "Worker",
+      childSessionId: "worker-child",
+      workItemId: "wi_visibility_replay",
+      title: "Inspect one replayed incident",
+    };
+
+    for (let index = 0; index < 6; index++) {
+      notifyManagerVisibility("manager-session", details);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(claimCallbackDelivery).toHaveBeenCalledTimes(6);
+    expect(vi.mocked(claimCallbackDelivery).mock.calls[0][0]).toMatchObject({
+      parentSessionId: "manager-session",
+      childSessionId: "worker-child",
+      attemptToken: "manager-visibility:wi_visibility_replay",
+      terminalOutcome: "manager-visibility",
+      terminalVersion: 1,
+      callbackKind: "manager-visibility",
+    });
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body)).toMatchObject({
+      callbackDeliveryId: "callback-delivery-1",
+      meta: { kind: "manager-visibility", workItemId: "wi_visibility_replay" },
     });
 
     globalThis.fetch = originalFetch;
@@ -155,6 +270,9 @@ describe("notifyParentSession", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    callbackDeliveryMockState.deliveries.clear();
+    callbackDeliveryMockState.nextId = 1;
+    vi.mocked(claimCallbackDelivery).mockClear();
     fetchSpy = vi.fn().mockResolvedValue({ ok: true });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
@@ -191,6 +309,23 @@ describe("notifyParentSession", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["empty", ""],
+    ["whitespace", " \n\t "],
+    ["zero-width space", "\u200B"],
+    ["zero-width non-joiner", "\u200C"],
+    ["zero-width joiner", "\u200D"],
+    ["word joiner", "\u2060"],
+    ["zero-width no-break space", "\uFEFF"],
+    ["mixed invisible content", " \u200B\u200C\u200D\u2060\uFEFF\n"],
+  ])("does not create a child-reply callback for a %s assistant result", async (_label, result) => {
+    notifyParentSession(makeSession(), { result });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(claimCallbackDelivery).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("routes a qualifying progress-only child back to itself and suppresses the parent callback", async () => {
     vi.mocked(getWorkItem).mockReturnValue({ id: "wi-open", status: "executing", source: "delegation" } as never);
     const child = makeSession({ workItemId: "wi-open", transportMeta: { delegationCompletionTracked: true } });
@@ -221,6 +356,40 @@ describe("notifyParentSession", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(fetchSpy).toHaveBeenCalledOnce();
     expect(fetchSpy.mock.calls[0][0]).toBe("http://127.0.0.1:7777/api/sessions/child-001/message");
+  });
+
+  it("retries a completion-contract nudge under one durable receipt after response loss", async () => {
+    vi.mocked(getWorkItem).mockReturnValue({ id: "wi-open", status: "executing", source: "delegation" } as never);
+    const child = makeSession({ workItemId: "wi-open", transportMeta: { delegationCompletionTracked: true } });
+    fetchSpy.mockRejectedValueOnce(new Error("accepted response lost")).mockResolvedValue({ ok: true });
+
+    notifyParentSession(child, {
+      result: "Progress update: I will continue with the remaining implementation.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    notifyParentSession(child, {
+      result: "Progress update: I will continue with the remaining implementation.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 75));
+
+    const nudgeClaims = vi.mocked(claimCallbackDelivery).mock.calls
+      .map(([input]) => input)
+      .filter((input) => input.callbackKind === "delegation-completion-nudge");
+    expect(nudgeClaims).toHaveLength(2);
+    expect(nudgeClaims[0]).toMatchObject({
+      parentSessionId: "child-001",
+      childSessionId: "child-001",
+      attemptToken: "attempt-001",
+      terminalOutcome: "succeeded",
+      terminalVersion: 1,
+    });
+    const childPosts = fetchSpy.mock.calls
+      .filter(([url]) => url === "http://127.0.0.1:7777/api/sessions/child-001/message")
+      .map(([, opts]) => JSON.parse(opts.body));
+    expect(childPosts).toHaveLength(1);
+    expect(new Set(childPosts.map((body) => body.callbackDeliveryId))).toEqual(
+      new Set([expect.any(String)]),
+    );
   });
 
   it("sends a full LLM message plus a clean display banner on success", async () => {
@@ -335,6 +504,108 @@ describe("notifyParentSession", () => {
     expect(fetchSpy).toHaveBeenCalledOnce();
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.role).toBe("notification");
+  });
+
+  it("claims one durable identity for six duplicate completion callbacks before posting", async () => {
+    const child = makeSession();
+
+    for (let index = 0; index < 6; index++) {
+      notifyParentSession(child, { result: "same terminal result" });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    expect(claimCallbackDelivery).toHaveBeenCalledTimes(6);
+    expect(vi.mocked(claimCallbackDelivery).mock.calls[0][0]).toMatchObject({
+      parentSessionId: "parent-001",
+      childSessionId: "child-001",
+      attemptToken: "attempt-001",
+      terminalOutcome: "succeeded",
+      terminalVersion: 1,
+      callbackKind: "parent-completion",
+    });
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(new Set(fetchSpy.mock.calls.map((call) => JSON.parse(call[1].body).callbackDeliveryId)))
+      .toEqual(new Set(["callback-delivery-1"]));
+    expect(vi.mocked(claimCallbackDelivery).mock.invocationCallOrder[0])
+      .toBeLessThan(fetchSpy.mock.invocationCallOrder[0]);
+  });
+
+  it("does not post an already accepted callback receipt", async () => {
+    const child = makeSession();
+    const claimed = vi.mocked(claimCallbackDelivery).getMockImplementation()!({
+      parentSessionId: "parent-001",
+      childSessionId: "child-001",
+      attemptToken: "attempt-001",
+      terminalOutcome: "succeeded",
+      terminalVersion: 1,
+      callbackKind: "parent-completion",
+      payload: { message: "stored", displayMessage: "stored" },
+    } as never);
+    claimed.delivery.status = "accepted";
+
+    notifyParentSession(child, { result: "same terminal result" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("honors persisted backoff when the callback is re-emitted after response loss", async () => {
+    fetchSpy.mockRejectedValueOnce(new Error("response lost")).mockResolvedValueOnce({ ok: true });
+    const child = makeSession();
+
+    notifyParentSession(child, { result: "done" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    notifyParentSession(child, { result: "done" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect([...callbackDeliveryMockState.deliveries.values()][0]).toMatchObject({
+      status: "pending",
+      attemptCount: 1,
+      lastError: "response lost",
+    });
+  });
+
+  it("uses a new receipt for a resumed attempt generation", async () => {
+    notifyParentSession(makeSession(), { result: "first completion" });
+    notifyParentSession(makeSession({ attemptToken: "attempt-002" }), { result: "resumed completion" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(new Set(fetchSpy.mock.calls.map((call) => JSON.parse(call[1].body).callbackDeliveryId)).size).toBe(2);
+  });
+});
+
+describe("callback outbox startup recovery", () => {
+  beforeEach(() => {
+    callbackDeliveryMockState.deliveries.clear();
+    callbackDeliveryMockState.nextId = 1;
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    globalThis.fetch = originalFetch as typeof fetch;
+  });
+
+  it("reposts a claimed-but-unaccepted delivery after restart", async () => {
+    vi.mocked(claimCallbackDelivery).getMockImplementation()!({
+      parentSessionId: "parent-001",
+      childSessionId: "child-001",
+      attemptToken: "attempt-001",
+      terminalOutcome: "succeeded",
+      terminalVersion: 1,
+      callbackKind: "parent-completion",
+      payload: { message: "stored engine prompt", displayMessage: "stored display" },
+    } as never);
+
+    await expect(recoverPendingCallbackDeliveries()).resolves.toBe(1);
+
+    const fetchSpy = vi.mocked(globalThis.fetch);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(JSON.parse(fetchSpy.mock.calls[0][1]!.body as string)).toMatchObject({
+      callbackDeliveryId: "callback-delivery-1",
+    });
   });
 });
 
@@ -604,6 +875,9 @@ describe("notifyParentSession — attached talk-session wakes", () => {
 
   beforeEach(() => {
     __resetAttachmentsForTest();
+    callbackDeliveryMockState.deliveries.clear();
+    callbackDeliveryMockState.nextId = 1;
+    vi.mocked(claimCallbackDelivery).mockClear();
     fetchSpy = vi.fn().mockResolvedValue({ ok: true });
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
     vi.mocked(listSessionsBySource).mockReturnValue([]);
@@ -646,6 +920,75 @@ describe("notifyParentSession — attached talk-session wakes", () => {
     expect(body.message).toContain('📩 Thread "Audit job" reported back');
     expect(body.message).toContain("All clear");
     expect(body.message).not.toContain("child-001");
+  });
+
+  it("routes six duplicate attached-talk completions through one durable receipt", async () => {
+    attach("talk-1", "child-001", "observe", {
+      getSession: () => talkSession,
+      updateSessionMeta: () => {},
+    });
+    vi.mocked(getSession).mockImplementation((id: string) =>
+      id === "talk-1" ? talkSession : undefined,
+    );
+    const child = makeSession({ id: "child-001", parentSessionId: "elsewhere", title: "Audit job" });
+
+    for (let index = 0; index < 6; index++) notifyParentSession(child, { result: "All clear" });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const talkClaims = vi.mocked(claimCallbackDelivery).mock.calls
+      .map(([input]) => input)
+      .filter((input) => input.callbackKind === "talk-attachment");
+    expect(talkClaims).toHaveLength(6);
+    expect(talkClaims[0]).toMatchObject({
+      parentSessionId: "talk-1",
+      childSessionId: "child-001",
+      attemptToken: "attempt-001",
+      terminalOutcome: "succeeded",
+      terminalVersion: 1,
+    });
+    const bodies = fetchSpy.mock.calls.map(([, opts]) => JSON.parse(opts.body));
+    expect(bodies).toHaveLength(1);
+    expect(new Set(bodies.map((body) => body.callbackDeliveryId)).size).toBe(1);
+    expect(bodies[0].callbackDeliveryId).toEqual(expect.any(String));
+  });
+
+  it("claims every attached Talk target before isolated fan-out delivery", async () => {
+    const talks = ["talk-1", "talk-2", "talk-3"].map((id) => makeSession({
+      id,
+      parentSessionId: null,
+      status: "idle",
+      source: "talk",
+    }));
+    for (const talk of talks) {
+      attach(talk.id, "child-001", "observe", {
+        getSession: () => talk,
+        updateSessionMeta: () => {},
+      });
+    }
+    vi.mocked(getSession).mockImplementation((id: string) => talks.find((talk) => talk.id === id));
+    fetchSpy.mockImplementation(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes("/talk-1/") || url.includes("/talk-2/")) throw new Error(`isolated failure ${url}`);
+      return { ok: true };
+    });
+
+    notifyParentSession(
+      makeSession({ id: "child-001", parentSessionId: "elsewhere", title: "Fan-out work" }),
+      { result: "All targets should receive receipts" },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const claims = vi.mocked(claimCallbackDelivery).mock.calls
+      .map(([input]) => input)
+      .filter((input) => input.callbackKind === "talk-attachment");
+    expect(claims.map((claim) => claim.parentSessionId).sort()).toEqual(["talk-1", "talk-2", "talk-3"]);
+    expect(vi.mocked(claimCallbackDelivery).mock.invocationCallOrder[2])
+      .toBeLessThan(fetchSpy.mock.invocationCallOrder[0]);
+    expect(fetchSpy.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringContaining("/talk-1/message"),
+      expect.stringContaining("/talk-2/message"),
+      expect.stringContaining("/talk-3/message"),
+    ]);
   });
 
   it("does NOT double-wake an owned child (parent IS the talk session)", async () => {

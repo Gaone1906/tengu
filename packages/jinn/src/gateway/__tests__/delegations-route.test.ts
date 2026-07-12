@@ -245,6 +245,7 @@ afterAll(async () => {
 describe("POST /api/delegations — the transaction (happy paths)", () => {
   it("notifies the IC manager exactly once for a skip-level delegation and still dispatches to the IC", async () => {
     const managerSessionId = createEmployeeSession("qa-manager", "visibility");
+    reg.updateSession(managerSessionId, { status: "running" });
     const rootSessionId = createEmployeeSession("org-root", "skip-level");
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
     const originalFetch = globalThis.fetch;
@@ -279,6 +280,50 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
         sessionId: first.body.sessionId,
       }));
       expect(managerVisibilityRequests(fetchSpy, managerSessionId)).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("records a fallback note instead of reviving a completed manager conversation", async () => {
+    const managerSessionId = createEmployeeSession("qa-manager", "completed-visibility");
+    for (const managerSession of reg.searchSessionsFiltered({ employee: "qa-manager" }, 20)) {
+      reg.updateSession(managerSession.id, { status: "idle", attemptOutcome: "succeeded" });
+    }
+    const rootSessionId = createEmployeeSession("org-root", "completed-skip-level");
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    try {
+      const response = await call(
+        "POST",
+        "/api/delegations",
+        {
+          employee: "qa-emp",
+          task: "Inspect a bounded lifecycle incident.",
+          title: "Lifecycle incident inspection",
+          idempotencyKey: "completed-manager-fallback",
+        },
+        {
+          [CALLER_SESSION_HEADER]: rootSessionId,
+          [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(rootSessionId),
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(response.status).toBe(201);
+      expect(managerVisibilityRequests(fetchSpy, managerSessionId)).toHaveLength(0);
+      expect(store.listWorkItemEvents(response.body.workItemId)).toContainEqual(expect.objectContaining({
+        kind: "note",
+        detail: {
+          managerVisibility: expect.objectContaining({
+            manager: "qa-manager",
+            employee: "qa-emp",
+            childSessionId: response.body.sessionId,
+          }),
+        },
+      }));
     } finally {
       globalThis.fetch = originalFetch;
     }

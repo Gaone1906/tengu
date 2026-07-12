@@ -71,4 +71,33 @@ describe("delegation completion contract atomic guard", () => {
       delegationCompletionContract: { workItemId: newItem.id, state: "nudged" },
     });
   });
+
+  it("independently excludes a guarded child that already has a durable nudge receipt", () => {
+    const item = workItems.createWorkItem({ title: "Pending durable nudge", status: "executing", source: "delegation" });
+    const session = registry.createSession({
+      engine: "codex",
+      source: "api",
+      sourceRef: "api:pending-durable-nudge",
+      parentSessionId: "parent-pending-nudge",
+      transportMeta: { delegationCompletionTracked: true },
+    });
+    workItems.linkSession(item.id, session.id);
+    const attempt = registry.beginSessionAttempt(session.id)!;
+    const idle = registry.completeSessionAttempt(session.id, attempt.attemptToken!, {
+      status: "idle",
+      attemptOutcome: "succeeded",
+    })!;
+    registry.claimDelegationCompletionNudge(idle.id, item.id);
+    registry.claimCallbackDelivery({
+      parentSessionId: idle.id,
+      childSessionId: idle.id,
+      attemptToken: idle.attemptToken!,
+      terminalOutcome: "succeeded",
+      terminalVersion: idle.attemptTerminalVersion!,
+      callbackKind: "delegation-completion-nudge",
+      payload: { message: "continue", displayMessage: "continuing" },
+    });
+
+    expect(registry.listDelegationCompletionNudgedSessions().map(({ id }) => id)).not.toContain(idle.id);
+  });
 });
