@@ -753,99 +753,50 @@ function rebuildCallbackDeliveriesTable(
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   for (const row of rows) {
-    const id = typeof row.id === 'string' && row.id.length > 0 ? row.id : randomUUID();
-    let targetSessionId = canonicalCallbackIdentityText(
+    const id = typeof row.id === 'string' ? row.id : String(row.id ?? randomUUID());
+    const targetSessionId = canonicalCallbackIdentityText(
       shape === 'legacy-session' ? row.parent_session_id : row.target_session_id,
     );
-    let sourceKind = shape === 'legacy-session' ? 'session' : canonicalCallbackIdentityText(row.source_kind);
-    let sourceId = canonicalCallbackIdentityText(shape === 'legacy-session' ? row.child_session_id : row.source_id);
-    let sourceAttempt = canonicalCallbackIdentityText(shape === 'legacy-session' ? row.attempt_token : row.source_attempt);
-    let sourceOutcome = canonicalCallbackIdentityText(shape === 'legacy-session' ? row.terminal_outcome : row.source_outcome);
-    let deliveryKind = canonicalCallbackIdentityText(shape === 'legacy-session' ? row.callback_kind : row.delivery_kind);
-    let sourceVersion = Number(shape === 'legacy-session' ? row.terminal_version : row.source_version);
-    let payload = typeof row.payload === 'string' ? row.payload : '';
-    let status = row.status === 'accepted' || row.status === 'dead_letter' ? row.status : 'pending';
-    let attemptCount = columns.has('attempt_count') ? Number(row.attempt_count ?? 0) : 0;
-    let nextAttemptAt = columns.has('next_attempt_at') && typeof row.next_attempt_at === 'number'
-      ? row.next_attempt_at
-      : null;
-    let lastAttemptAt = columns.has('last_attempt_at') && typeof row.last_attempt_at === 'number'
-      ? row.last_attempt_at
-      : null;
-    let lastError = columns.has('last_error') && typeof row.last_error === 'string' ? row.last_error : null;
-    let deadLetteredAt = columns.has('dead_lettered_at') && typeof row.dead_lettered_at === 'number'
-      ? row.dead_lettered_at
-      : null;
-    let poison: string | null = null;
-    if (
-      !targetSessionId
-      || (sourceKind !== 'session' && sourceKind !== 'workflow-run')
-      || !sourceId
-      || !sourceAttempt
-      || !sourceOutcome
-      || !deliveryKind
-    ) {
-      poison = 'invalid session delivery identity';
-      targetSessionId ||= `quarantined-target:${id}`;
-      sourceKind = sourceKind === 'workflow-run' ? sourceKind : 'session';
-      sourceId ||= `quarantined-source:${id}`;
-      sourceAttempt ||= `quarantined-attempt:${id}`;
-      sourceOutcome ||= 'quarantined';
-      deliveryKind ||= 'quarantined';
-    }
-    if (!Number.isInteger(sourceVersion) || sourceVersion < 1) {
-      poison = poison ?? 'invalid session delivery source version';
-      sourceVersion = 1;
-    }
-    if (!Number.isInteger(attemptCount) || attemptCount < 0) {
-      poison = poison ?? 'invalid callback delivery attempt count';
-      attemptCount = 0;
-      nextAttemptAt = null;
-      lastAttemptAt = null;
-    }
-    try {
-      const parsed = JSON.parse(payload) as SessionDeliveryPayload;
-      if (!parsed || typeof parsed !== 'object' || typeof parsed.message !== 'string' || typeof parsed.displayMessage !== 'string') {
-        poison = poison ?? 'invalid callback delivery payload shape';
-      }
-    } catch {
-      poison = poison ?? 'invalid callback delivery payload JSON';
-    }
-    if (poison) {
-      payload = JSON.stringify({ message: '', displayMessage: '' });
-      status = 'dead_letter';
-      lastError = poison;
-      deadLetteredAt = Date.now();
-    }
-    const values = [
+    const sourceKind = shape === 'legacy-session' ? 'session' : canonicalCallbackIdentityText(row.source_kind);
+    const sourceId = canonicalCallbackIdentityText(shape === 'legacy-session' ? row.child_session_id : row.source_id);
+    const sourceAttempt = canonicalCallbackIdentityText(shape === 'legacy-session' ? row.attempt_token : row.source_attempt);
+    const sourceOutcome = canonicalCallbackIdentityText(shape === 'legacy-session' ? row.terminal_outcome : row.source_outcome);
+    const deliveryKind = canonicalCallbackIdentityText(shape === 'legacy-session' ? row.callback_kind : row.delivery_kind);
+    const sourceVersion = Number(shape === 'legacy-session' ? row.terminal_version : row.source_version);
+    const candidate: SessionDeliveryRow = {
       id,
       targetSessionId,
-      sourceKind,
+      sourceKind: sourceKind as SessionDeliveryIdentity['sourceKind'],
       sourceId,
       sourceAttempt,
       sourceOutcome,
       sourceVersion,
       deliveryKind,
-      payload,
-      status,
-      row.message_id ?? null,
-      row.queue_item_id ?? null,
-      attemptCount,
-      nextAttemptAt,
-      lastAttemptAt,
-      lastError,
-      deadLetteredAt,
-      typeof row.created_at === 'string' ? row.created_at : new Date().toISOString(),
-      row.accepted_at ?? null,
-    ];
+      payload: typeof row.payload === 'string' ? row.payload : '',
+      status: row.status as SessionDelivery['status'],
+      messageId: (row.message_id ?? null) as string | null,
+      queueItemId: (row.queue_item_id ?? null) as string | null,
+      attemptCount: columns.has('attempt_count') ? Number(row.attempt_count ?? 0) : 0,
+      nextAttemptAt: (columns.has('next_attempt_at') ? row.next_attempt_at ?? null : null) as number | null,
+      lastAttemptAt: (columns.has('last_attempt_at') ? row.last_attempt_at ?? null : null) as number | null,
+      lastError: (columns.has('last_error') ? row.last_error ?? null : null) as string | null,
+      deadLetteredAt: (columns.has('dead_lettered_at') ? row.dead_lettered_at ?? null : null) as number | null,
+      createdAt: row.created_at as string,
+      acceptedAt: (row.accepted_at ?? null) as string | null,
+    };
+    let persisted = candidate;
+    try {
+      sessionDeliveryFromRow(candidate);
+    } catch (error) {
+      persisted = quarantinedMigrationDelivery(candidate, error instanceof Error ? error.message : String(error));
+    }
+    let values = sessionDeliveryInsertValues(persisted);
     try {
       insert.run(...values);
     } catch (error) {
       if (!(error instanceof Error) || !/unique constraint/i.test(error.message)) throw error;
-      values[4] = `${sourceAttempt}:quarantined:${id}`;
-      values[9] = 'dead_letter';
-      values[15] = 'duplicate canonical session delivery identity during migration';
-      values[16] = Date.now();
+      persisted = quarantinedMigrationDelivery(candidate, 'duplicate canonical session delivery identity during migration');
+      values = sessionDeliveryInsertValues(persisted);
       insert.run(...values);
     }
   }
@@ -853,6 +804,57 @@ function rebuildCallbackDeliveriesTable(
     DROP TABLE callback_deliveries;
     ALTER TABLE callback_deliveries_v2 RENAME TO callback_deliveries;
   `);
+}
+
+function sessionDeliveryInsertValues(row: SessionDeliveryRow): unknown[] {
+  return [
+    row.id,
+    row.targetSessionId,
+    row.sourceKind,
+    row.sourceId,
+    row.sourceAttempt,
+    row.sourceOutcome,
+    row.sourceVersion,
+    row.deliveryKind,
+    row.payload,
+    row.status,
+    row.messageId,
+    row.queueItemId,
+    row.attemptCount,
+    row.nextAttemptAt,
+    row.lastAttemptAt,
+    row.lastError,
+    row.deadLetteredAt,
+    row.createdAt,
+    row.acceptedAt,
+  ];
+}
+
+function quarantinedMigrationDelivery(row: SessionDeliveryRow, diagnostic: string): SessionDeliveryRow {
+  const safeId = canonicalCallbackIdentityText(row.id) || randomUUID();
+  return {
+    id: row.id,
+    targetSessionId: `quarantined-target:${safeId}`,
+    sourceKind: 'session',
+    sourceId: `quarantined-source:${safeId}`,
+    sourceAttempt: `quarantined-attempt:${safeId}`,
+    sourceOutcome: 'quarantined',
+    sourceVersion: 1,
+    deliveryKind: 'quarantined',
+    payload: JSON.stringify({ message: '', displayMessage: '' }),
+    status: 'dead_letter',
+    messageId: null,
+    queueItemId: null,
+    attemptCount: 0,
+    nextAttemptAt: null,
+    lastAttemptAt: null,
+    lastError: `migration quarantine: ${diagnostic}`,
+    deadLetteredAt: Date.now(),
+    createdAt: typeof row.createdAt === 'string' && Number.isFinite(Date.parse(row.createdAt))
+      ? row.createdAt
+      : new Date().toISOString(),
+    acceptedAt: null,
+  };
 }
 
 function getMeta(database: Database.Database, key: string): string | null {
@@ -2889,6 +2891,9 @@ const CALLBACK_DELIVERY_SELECT = `
 `;
 
 function sessionDeliveryFromRow(row: SessionDeliveryRow): SessionDelivery {
+  if (row.deliveryKind === 'quarantined' || row.sourceOutcome === 'quarantined') {
+    throw new Error(`Session delivery ${row.id} is quarantined${row.lastError ? `: ${row.lastError}` : ''}`);
+  }
   const canonicalIdentity = canonicalSessionDeliveryIdentity(row);
   validateSessionDeliveryIdentity(canonicalIdentity);
   for (const field of [
@@ -2939,18 +2944,50 @@ function sessionDeliveryFromRow(row: SessionDeliveryRow): SessionDelivery {
   if (row.acceptedAt !== null && !Number.isFinite(Date.parse(row.acceptedAt))) {
     throw new Error(`Callback delivery ${row.id} has an invalid acceptedAt`);
   }
+  const createdAtMs = Date.parse(row.createdAt);
+  const acceptedAtMs = row.acceptedAt === null ? null : Date.parse(row.acceptedAt);
+  if (acceptedAtMs !== null && acceptedAtMs < createdAtMs) {
+    throw new Error(`Callback delivery ${row.id} has acceptedAt before createdAt`);
+  }
+  if (row.lastError !== null && row.lastError.trim() === '') {
+    throw new Error(`Callback delivery ${row.id} has an empty lastError`);
+  }
+  if (row.attemptCount === 0 && (row.nextAttemptAt !== null || row.lastAttemptAt !== null || row.lastError !== null)) {
+    throw new Error(`Callback delivery ${row.id} has attempt state without an attempt`);
+  }
+  if (row.nextAttemptAt !== null && row.lastAttemptAt === null) {
+    throw new Error(`Callback delivery ${row.id} has nextAttemptAt without lastAttemptAt`);
+  }
+  if (row.nextAttemptAt !== null && row.lastAttemptAt !== null && row.nextAttemptAt < row.lastAttemptAt) {
+    throw new Error(`Callback delivery ${row.id} has nextAttemptAt before lastAttemptAt`);
+  }
   if (row.status === 'accepted') {
-    if (!row.messageId || !row.queueItemId || !row.acceptedAt || row.nextAttemptAt !== null || row.deadLetteredAt !== null) {
+    if (
+      !row.messageId
+      || !row.queueItemId
+      || !row.acceptedAt
+      || row.nextAttemptAt !== null
+      || row.lastError !== null
+      || row.deadLetteredAt !== null
+    ) {
       throw new Error(`Callback delivery ${row.id} has an invalid accepted lifecycle`);
     }
   } else if (row.messageId !== null || row.queueItemId !== null || row.acceptedAt !== null) {
     throw new Error(`Callback delivery ${row.id} has callback acceptance state before acceptance`);
   }
-  if (row.status === 'dead_letter' && row.deadLetteredAt === null) {
-    throw new Error(`Callback delivery ${row.id} has an invalid dead-letter lifecycle`);
+  if (row.status === 'dead_letter') {
+    if (row.deadLetteredAt === null || row.nextAttemptAt !== null || !row.lastError) {
+      throw new Error(`Callback delivery ${row.id} has an invalid dead-letter lifecycle`);
+    }
+    if (row.lastAttemptAt !== null && row.deadLetteredAt < row.lastAttemptAt) {
+      throw new Error(`Callback delivery ${row.id} has deadLetteredAt before lastAttemptAt`);
+    }
   }
   if (row.status === 'pending' && row.deadLetteredAt !== null) {
     throw new Error(`Callback delivery ${row.id} has dead-letter state while pending`);
+  }
+  if (row.status === 'pending' && row.lastError !== null && row.nextAttemptAt === null) {
+    throw new Error(`Callback delivery ${row.id} has retry error without nextAttemptAt`);
   }
   let payload: SessionDeliveryPayload;
   try {
@@ -3275,102 +3312,6 @@ export function acceptSessionDelivery(
     return { delivery: getSessionDelivery(deliveryId)!, accepted: true };
   });
   return accept();
-}
-
-/** Backward-compatible child-Session producer facade. New producers use the
- * generic Session delivery lifecycle above; existing integrations keep their
- * callback-shaped input/output while the physical row is generic. */
-type LegacyCallbackDeliveryIdentity = {
-  parentSessionId: string;
-  childSessionId: string;
-  attemptToken: string;
-  terminalOutcome: string;
-  terminalVersion: number;
-  callbackKind: string;
-};
-
-type LegacyCallbackDelivery = SessionDelivery & LegacyCallbackDeliveryIdentity;
-
-function legacyCallbackDeliveryView(delivery: SessionDelivery): LegacyCallbackDelivery {
-  return {
-    ...delivery,
-    parentSessionId: delivery.targetSessionId,
-    childSessionId: delivery.sourceId,
-    attemptToken: delivery.sourceAttempt,
-    terminalOutcome: delivery.sourceOutcome,
-    terminalVersion: delivery.sourceVersion,
-    callbackKind: delivery.deliveryKind,
-  };
-}
-
-/** @deprecated Use getSessionDelivery. */
-export function getCallbackDelivery(id: string): LegacyCallbackDelivery | undefined {
-  const delivery = getSessionDelivery(id);
-  return delivery ? legacyCallbackDeliveryView(delivery) : undefined;
-}
-
-/** @deprecated Use getSessionDeliveryByQueueItemId. */
-export function getCallbackDeliveryByQueueItemId(queueItemId: string): LegacyCallbackDelivery | undefined {
-  const delivery = getSessionDeliveryByQueueItemId(queueItemId);
-  return delivery ? legacyCallbackDeliveryView(delivery) : undefined;
-}
-
-/** @deprecated Use listPendingSessionDeliveries. */
-export function listPendingCallbackDeliveries(): LegacyCallbackDelivery[] {
-  return listPendingSessionDeliveries().map(legacyCallbackDeliveryView);
-}
-
-/** @deprecated Use listDeadLetterSessionDeliveries. */
-export function listDeadLetterCallbackDeliveries(): Array<LegacyCallbackDelivery & { payloadError: string | null }> {
-  return listDeadLetterSessionDeliveries().map((delivery) => legacyCallbackDeliveryView(delivery as SessionDelivery) as LegacyCallbackDelivery & { payloadError: string | null });
-}
-
-/** @deprecated Use requeueDeadLetterSessionDelivery. */
-export function requeueDeadLetterCallbackDelivery(deliveryId: string): LegacyCallbackDelivery {
-  return legacyCallbackDeliveryView(requeueDeadLetterSessionDelivery(deliveryId));
-}
-
-/** @deprecated Use claimSessionDelivery. */
-export function claimCallbackDelivery(
-  input: LegacyCallbackDeliveryIdentity & { payload: SessionDeliveryPayload },
-): { delivery: LegacyCallbackDelivery; claimed: boolean } {
-  const result = claimSessionDelivery({
-    targetSessionId: input.parentSessionId,
-    sourceKind: 'session',
-    sourceId: input.childSessionId,
-    sourceAttempt: input.attemptToken,
-    sourceOutcome: input.terminalOutcome,
-    sourceVersion: input.terminalVersion,
-    deliveryKind: input.callbackKind,
-    payload: input.payload,
-  });
-  return { ...result, delivery: legacyCallbackDeliveryView(result.delivery) };
-}
-
-/** @deprecated Use claimSessionDeliveryAttempt. */
-export function claimCallbackDeliveryAttempt(deliveryId: string, now: number, leaseMs: number): LegacyCallbackDelivery | undefined {
-  const delivery = claimSessionDeliveryAttempt(deliveryId, now, leaseMs);
-  return delivery ? legacyCallbackDeliveryView(delivery) : undefined;
-}
-
-/** @deprecated Use recordSessionDeliveryFailure. */
-export function recordCallbackDeliveryFailure(
-  deliveryId: string,
-  error: string,
-  options: { now: number; nextAttemptAt: number; maxAttempts: number },
-): LegacyCallbackDelivery | undefined {
-  const delivery = recordSessionDeliveryFailure(deliveryId, error, options);
-  return delivery ? legacyCallbackDeliveryView(delivery) : undefined;
-}
-
-/** @deprecated Use acceptSessionDelivery. */
-export function acceptCallbackDelivery(
-  deliveryId: string,
-  parentSessionId: string,
-  sessionKey: string,
-): { delivery: LegacyCallbackDelivery; accepted: boolean } {
-  const result = acceptSessionDelivery(deliveryId, parentSessionId, sessionKey);
-  return { ...result, delivery: legacyCallbackDeliveryView(result.delivery) };
 }
 
 export interface QueueItem {

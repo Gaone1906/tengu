@@ -959,7 +959,10 @@ export function workflowRunDriverDeps(root: string, context: ApiContext): RunDri
 
 export function workflowReportingContext(context: ApiContext): WorkflowReportingContext {
   return {
-    sessionExists: (sessionId) => !!getSession(sessionId),
+    sessionExists: (sessionId) => {
+      const session = getSession(sessionId);
+      return Boolean(session && !isLegacyWorkflowRunSession(session));
+    },
     applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
     emitBlock: (sessionId, envelope, fallback) => {
       context.emit("session:delta", {
@@ -2431,7 +2434,7 @@ export async function handleApiRequest(
       try {
         const existing = getSessionDelivery(callbackRequeueParams.id);
         const target = existing ? getSession(existing.targetSessionId) : undefined;
-        if (existing?.sourceKind === "session" && target && isLegacyWorkflowRunSession(target)) {
+        if (existing && target && isLegacyWorkflowRunSession(target)) {
           return json(res, { error: "historical workflow delivery is read-only" }, 409);
         }
         const delivery = requeueDeadLetterSessionDelivery(callbackRequeueParams.id);

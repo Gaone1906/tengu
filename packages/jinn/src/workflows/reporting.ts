@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   WorkflowRun,
   WorkflowRunReportEpisode,
@@ -112,6 +113,20 @@ function latestOutcomePreview(run: WorkflowRun): string | undefined {
   return undefined;
 }
 
+const WORKFLOW_RUN_BLOCK_ID_MAX = 96;
+
+function workflowRunBlockId(workflowId: string, runId: string): string {
+  const full = `workflow-run:${workflowId}:${runId}`;
+  if (full.length <= WORKFLOW_RUN_BLOCK_ID_MAX) return full;
+  const digest = createHash('sha256')
+    .update(`${workflowId}\u0000${runId}`)
+    .digest('hex')
+    .slice(0, 16);
+  const readableWorkflow = workflowId.slice(0, 24);
+  const readableRun = runId.slice(0, 24);
+  return `workflow-run:${readableWorkflow}:${readableRun}:${digest}`;
+}
+
 export function workflowRunActivityEnvelope(run: WorkflowRun): ChatBlockEnvelope {
   const completedSteps = completedStepCount(run);
   const latestError = run.errors?.at(-1)?.message?.trim();
@@ -119,7 +134,7 @@ export function workflowRunActivityEnvelope(run: WorkflowRun): ChatBlockEnvelope
   return {
     op: 'put',
     block: {
-      id: `workflow-run:${run.workflowId}:${run.runId}`,
+      id: workflowRunBlockId(run.workflowId, run.runId),
       type: 'workflow-run',
       version: Math.max(1, run.revision ?? 1),
       status: blockStatus(run),

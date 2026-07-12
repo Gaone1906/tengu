@@ -591,7 +591,7 @@ type SessionDeliveryAttemptResult = "accepted" | "scheduled" | "deferred";
 
 function isHistoricalWorkflowDelivery(delivery: SessionDelivery): boolean {
   const target = getSession(delivery.targetSessionId);
-  return Boolean(delivery.sourceKind === "session" && target && isLegacyWorkflowRunSession(target));
+  return Boolean(target && isLegacyWorkflowRunSession(target));
 }
 
 export async function deliverClaimedSessionDelivery(deliveryId: string): Promise<SessionDeliveryAttemptResult> {
@@ -653,12 +653,6 @@ export function __resetCallbackRetrySweepForTest(): void {
   callbackRetryTimer = undefined;
   callbackRetrySweepRunning = undefined;
 }
-
-/** @deprecated Use recoverPendingSessionDeliveries. */
-export const recoverPendingCallbackDeliveries = recoverPendingSessionDeliveries;
-
-/** @deprecated Use recoverSessionDeliveryStateOnStartup. */
-export const recoverCallbackStateOnStartup = recoverSessionDeliveryStateOnStartup;
 
 function internalGatewayConnection(): { baseUrl: string; token?: string } {
   const info = readGatewayInfo(GATEWAY_INFO_FILE);

@@ -88,13 +88,15 @@ describe("delegation completion contract atomic guard", () => {
       attemptOutcome: "succeeded",
     })!;
     registry.claimDelegationCompletionNudge(idle.id, item.id);
-    registry.claimCallbackDelivery({
-      parentSessionId: idle.id,
-      childSessionId: idle.id,
-      attemptToken: idle.attemptToken!,
-      terminalOutcome: "succeeded",
-      terminalVersion: idle.attemptTerminalVersion!,
-      callbackKind: "delegation-completion-nudge",
+    registry.claimSessionDelivery({
+      targetSessionId: idle.id,
+
+      sourceKind: "session",
+      sourceId: idle.id,
+      sourceAttempt: idle.attemptToken!,
+      sourceOutcome: "succeeded",
+      sourceVersion: idle.attemptTerminalVersion!,
+      deliveryKind: "delegation-completion-nudge",
       payload: { message: "continue", displayMessage: "continuing" },
     });
 

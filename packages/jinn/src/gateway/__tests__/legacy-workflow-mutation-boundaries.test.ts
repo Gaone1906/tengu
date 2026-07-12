@@ -431,13 +431,15 @@ describe("legacy Workflow run mutation boundaries", () => {
       registry.insertMessage(legacy.id, "notification", "Historical restart evidence");
       const queueItemId = registry.enqueueQueueItem(legacy.id, legacy.sessionKey, "Historical restart queue");
       registry.initDb().prepare("UPDATE queue_items SET status = 'running' WHERE id = ?").run(queueItemId);
-      registry.claimCallbackDelivery({
-        parentSessionId: legacy.id,
-        childSessionId: "historical-child",
-        attemptToken: "historical-attempt",
-        terminalOutcome: "succeeded",
-        terminalVersion: 1,
-        callbackKind: "parent-completion",
+      registry.claimSessionDelivery({
+        targetSessionId: legacy.id,
+
+        sourceKind: "session",
+        sourceId: "historical-child",
+        sourceAttempt: "historical-attempt",
+        sourceOutcome: "succeeded",
+        sourceVersion: 1,
+        deliveryKind: "parent-completion",
         payload: { message: "Historical callback", displayMessage: "Historical callback" },
       });
       const before = durableSnapshot();
@@ -530,13 +532,15 @@ describe("legacy Workflow run mutation boundaries", () => {
     expect(registry.getMessages(parent.id).flatMap((message) => message.blocks ?? []))
       .toContainEqual(expect.objectContaining({ type: "delegation", status: "running" }));
 
-    const delivery = registry.claimCallbackDelivery({
-      parentSessionId: parent.id,
-      childSessionId: delegated.body.sessionId,
-      attemptToken: "ordinary-callback-attempt",
-      terminalOutcome: "succeeded",
-      terminalVersion: 1,
-      callbackKind: "parent-completion",
+    const delivery = registry.claimSessionDelivery({
+      targetSessionId: parent.id,
+
+      sourceKind: "session",
+      sourceId: delegated.body.sessionId,
+      sourceAttempt: "ordinary-callback-attempt",
+      sourceOutcome: "succeeded",
+      sourceVersion: 1,
+      deliveryKind: "parent-completion",
       payload: { message: "Ordinary callback", displayMessage: "Ordinary callback" },
     }).delivery;
     const callback = await request("POST", `/api/sessions/${parent.id}/message`, {
@@ -546,7 +550,7 @@ describe("legacy Workflow run mutation boundaries", () => {
       role: "notification",
     });
     expect(callback.status).toBe(200);
-    expect(registry.getCallbackDelivery(delivery.id)?.status).toBe("accepted");
+    expect(registry.getSessionDelivery(delivery.id)?.status).toBe("accepted");
     expect(registry.getMessages(parent.id)).toContainEqual(expect.objectContaining({
       role: "notification",
       content: "Ordinary callback",

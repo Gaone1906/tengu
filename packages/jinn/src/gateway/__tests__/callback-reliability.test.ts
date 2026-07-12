@@ -259,16 +259,18 @@ describe("parent callback reliability", () => {
     const queue = new queueModule.SessionQueue();
     const context = makeContext(engine, queue);
     const parent = createLegacyWorkflowParent("legacy-accepted");
-    const delivery = registry.claimCallbackDelivery({
-      parentSessionId: parent.id,
-      childSessionId: "legacy-phase",
-      attemptToken: "attempt-accepted",
-      terminalOutcome: "succeeded",
-      terminalVersion: 1,
-      callbackKind: "parent-completion",
+    const delivery = registry.claimSessionDelivery({
+      targetSessionId: parent.id,
+
+      sourceKind: "session",
+      sourceId: "legacy-phase",
+      sourceAttempt: "attempt-accepted",
+      sourceOutcome: "succeeded",
+      sourceVersion: 1,
+      deliveryKind: "parent-completion",
       payload: { message: "historical callback", displayMessage: "Historical callback" },
     }).delivery;
-    registry.acceptCallbackDelivery(delivery.id, parent.id, parent.sessionKey);
+    registry.acceptSessionDelivery(delivery.id, parent.id, parent.sessionKey);
     const database = registry.initDb();
     const before = {
       session: database.prepare("SELECT * FROM sessions WHERE id = ?").get(parent.id),
@@ -289,13 +291,15 @@ describe("parent callback reliability", () => {
 
   it("skips a historical run projection's pending delivery before leasing it on startup", async () => {
     const parent = createLegacyWorkflowParent("legacy-pending");
-    const delivery = registry.claimCallbackDelivery({
-      parentSessionId: parent.id,
-      childSessionId: "legacy-phase",
-      attemptToken: "attempt-pending",
-      terminalOutcome: "succeeded",
-      terminalVersion: 1,
-      callbackKind: "parent-completion",
+    const delivery = registry.claimSessionDelivery({
+      targetSessionId: parent.id,
+
+      sourceKind: "session",
+      sourceId: "legacy-phase",
+      sourceAttempt: "attempt-pending",
+      sourceOutcome: "succeeded",
+      sourceVersion: 1,
+      deliveryKind: "parent-completion",
       payload: { message: "historical callback", displayMessage: "Historical callback" },
     }).delivery;
     const before = registry.initDb().prepare("SELECT * FROM callback_deliveries WHERE id = ?").get(delivery.id);
@@ -304,7 +308,7 @@ describe("parent callback reliability", () => {
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
 
     try {
-      await expect(callbacks.recoverCallbackStateOnStartup()).resolves.toEqual({
+      await expect(callbacks.recoverSessionDeliveryStateOnStartup()).resolves.toEqual({
         pendingRecovered: 0,
         orphanedRecovered: 0,
       });
@@ -319,13 +323,15 @@ describe("parent callback reliability", () => {
 
   it("rejects dead-letter requeue for a historical run projection without changing the row", async () => {
     const parent = createLegacyWorkflowParent("legacy-dead-letter");
-    const delivery = registry.claimCallbackDelivery({
-      parentSessionId: parent.id,
-      childSessionId: "legacy-phase",
-      attemptToken: "attempt-dead-letter",
-      terminalOutcome: "failed",
-      terminalVersion: 1,
-      callbackKind: "parent-completion",
+    const delivery = registry.claimSessionDelivery({
+      targetSessionId: parent.id,
+
+      sourceKind: "session",
+      sourceId: "legacy-phase",
+      sourceAttempt: "attempt-dead-letter",
+      sourceOutcome: "failed",
+      sourceVersion: 1,
+      deliveryKind: "parent-completion",
       payload: { message: "historical failure", displayMessage: "Historical failure" },
     }).delivery;
     const database = registry.initDb();
@@ -787,13 +793,15 @@ describe("parent callback reliability", () => {
       attemptOutcome: "succeeded",
     })!;
     registry.claimDelegationCompletionNudge(idle.id, item.id);
-    registry.claimCallbackDelivery({
-      parentSessionId: idle.id,
-      childSessionId: idle.id,
-      attemptToken: idle.attemptToken!,
-      terminalOutcome: "succeeded",
-      terminalVersion: idle.attemptTerminalVersion!,
-      callbackKind: "delegation-completion-nudge",
+    registry.claimSessionDelivery({
+      targetSessionId: idle.id,
+
+      sourceKind: "session",
+      sourceId: idle.id,
+      sourceAttempt: idle.attemptToken!,
+      sourceOutcome: "succeeded",
+      sourceVersion: idle.attemptTerminalVersion!,
+      deliveryKind: "delegation-completion-nudge",
       payload: { message: "continue existing task", displayMessage: "continuing task" },
     });
     const orphanParent = createParent("startup-unrelated-orphan");
@@ -842,7 +850,7 @@ describe("parent callback reliability", () => {
     }) as unknown as typeof fetch;
 
     try {
-      const recovery = callbacks.recoverCallbackStateOnStartup();
+      const recovery = callbacks.recoverSessionDeliveryStateOnStartup();
       await eventually(() => expect(requestPaths).toHaveLength(1));
       expect(requestPaths[0]).toBe(`/api/sessions/${child.id}/message`);
       releasePending();
@@ -885,13 +893,15 @@ describe("parent callback reliability", () => {
         'parent-completion', '{bad json', 'pending', '2026-01-01T00:00:00.000Z')
     `).run(parent.id, child.id);
     database.pragma("ignore_check_constraints = OFF");
-    const valid = registry.claimCallbackDelivery({
-      parentSessionId: parent.id,
-      childSessionId: child.id,
-      attemptToken: "valid-attempt",
-      terminalOutcome: "succeeded",
-      terminalVersion: 1,
-      callbackKind: "parent-completion",
+    const valid = registry.claimSessionDelivery({
+      targetSessionId: parent.id,
+
+      sourceKind: "session",
+      sourceId: child.id,
+      sourceAttempt: "valid-attempt",
+      sourceOutcome: "succeeded",
+      sourceVersion: 1,
+      deliveryKind: "parent-completion",
       payload: { message: "valid after poison", displayMessage: "valid after poison" },
     }).delivery;
     const originalFetch = globalThis.fetch;
@@ -899,16 +909,16 @@ describe("parent callback reliability", () => {
     globalThis.fetch = routeFetch as unknown as typeof fetch;
 
     try {
-      await expect(callbacks.recoverCallbackStateOnStartup()).resolves.toEqual({
+      await expect(callbacks.recoverSessionDeliveryStateOnStartup()).resolves.toEqual({
         pendingRecovered: 1,
         orphanedRecovered: 0,
       });
       await eventually(() => expect(seenPrompts).toEqual(["valid after poison"]));
-      await expect(callbacks.recoverCallbackStateOnStartup()).resolves.toEqual({
+      await expect(callbacks.recoverSessionDeliveryStateOnStartup()).resolves.toEqual({
         pendingRecovered: 0,
         orphanedRecovered: 0,
       });
-      expect(registry.getCallbackDelivery(valid.id)).toMatchObject({ status: "accepted" });
+      expect(registry.getSessionDelivery(valid.id)).toMatchObject({ status: "accepted" });
       expect(database.prepare(`
         SELECT status, last_error AS lastError FROM callback_deliveries WHERE id = 'poison-before-valid'
       `).get()).toMatchObject({ status: "dead_letter", lastError: expect.stringMatching(/invalid payload json/i) });
@@ -928,13 +938,15 @@ describe("parent callback reliability", () => {
     const enqueueSpy = vi.spyOn(queue, "enqueue");
     const context = makeContext(engine, queue, events);
     const parent = createParent("idempotent-six");
-    const delivery = registry.claimCallbackDelivery({
-      parentSessionId: parent.id,
-      childSessionId: "child-completed",
-      attemptToken: "attempt-generation-1",
-      terminalOutcome: "succeeded",
-      terminalVersion: 1,
-      callbackKind: "parent-completion",
+    const delivery = registry.claimSessionDelivery({
+      targetSessionId: parent.id,
+
+      sourceKind: "session",
+      sourceId: "child-completed",
+      sourceAttempt: "attempt-generation-1",
+      sourceOutcome: "succeeded",
+      sourceVersion: 1,
+      deliveryKind: "parent-completion",
       payload: {
         message: "one engine callback",
         displayMessage: "Worker replied\nOne result",
@@ -966,7 +978,7 @@ describe("parent callback reliability", () => {
         meta: expect.objectContaining({ kind: "child-reply", childSessionId: "child-completed" }),
       }),
     ]);
-    const stored = registry.getCallbackDelivery(delivery.id)!;
+    const stored = registry.getSessionDelivery(delivery.id)!;
     expect(stored).toMatchObject({ status: "accepted" });
     expect(registry.initDb().prepare("SELECT COUNT(*) AS n FROM queue_items WHERE id = ?").get(stored.queueItemId))
       .toEqual({ n: 1 });
@@ -982,13 +994,15 @@ describe("parent callback reliability", () => {
     const events: Array<{ event: string; data: unknown }> = [];
     const engine = makeEngine(seenPrompts);
     const parent = createParent("callback-restart");
-    const delivery = registry.claimCallbackDelivery({
-      parentSessionId: parent.id,
-      childSessionId: "child-restart",
-      attemptToken: "attempt-restart-1",
-      terminalOutcome: "succeeded",
-      terminalVersion: 1,
-      callbackKind: "parent-completion",
+    const delivery = registry.claimSessionDelivery({
+      targetSessionId: parent.id,
+
+      sourceKind: "session",
+      sourceId: "child-restart",
+      sourceAttempt: "attempt-restart-1",
+      sourceOutcome: "succeeded",
+      sourceVersion: 1,
+      deliveryKind: "parent-completion",
       payload: {
         message: "callback after restart",
         displayMessage: "Worker replied\nRestart result",
@@ -1021,13 +1035,15 @@ describe("parent callback reliability", () => {
     const seenPrompts: string[] = [];
     const engine = makeEngine(seenPrompts);
     const parent = createParent("talk-restart", "talk");
-    const delivery = registry.claimCallbackDelivery({
-      parentSessionId: parent.id,
-      childSessionId: "child-talk-restart",
-      attemptToken: "attempt-talk-restart-1",
-      terminalOutcome: "succeeded",
-      terminalVersion: 1,
-      callbackKind: "talk-attachment",
+    const delivery = registry.claimSessionDelivery({
+      targetSessionId: parent.id,
+
+      sourceKind: "session",
+      sourceId: "child-talk-restart",
+      sourceAttempt: "attempt-talk-restart-1",
+      sourceOutcome: "succeeded",
+      sourceVersion: 1,
+      deliveryKind: "talk-attachment",
       payload: {
         message: "attached callback after restart",
         displayMessage: "Attached worker replied\nRestart result",
@@ -1058,13 +1074,15 @@ describe("parent callback reliability", () => {
       const events: Array<{ event: string; data: unknown }> = [];
       const engine = makeEngine(seenPrompts);
       const parent = createParent(`missing-engine-${source}`, source);
-      const delivery = registry.claimCallbackDelivery({
-        parentSessionId: parent.id,
-        childSessionId: `child-missing-engine-${source}`,
-        attemptToken: `attempt-missing-engine-${source}`,
-        terminalOutcome: "succeeded",
-        terminalVersion: 1,
-        callbackKind: source === "web" ? "parent-completion" : "talk-attachment",
+      const delivery = registry.claimSessionDelivery({
+        targetSessionId: parent.id,
+
+        sourceKind: "session",
+        sourceId: `child-missing-engine-${source}`,
+        sourceAttempt: `attempt-missing-engine-${source}`,
+        sourceOutcome: "succeeded",
+        sourceVersion: 1,
+        deliveryKind: source === "web" ? "parent-completion" : "talk-attachment",
         payload: {
           message: `callback survives ${source} engine outage`,
           displayMessage: "Worker replied\nEngine outage result",
@@ -1076,7 +1094,7 @@ describe("parent callback reliability", () => {
       };
 
       await postCallbackDelivery(makeContext(engine, preRestartQueue, events), parent.id, delivery.id);
-      const accepted = registry.getCallbackDelivery(delivery.id)!;
+      const accepted = registry.getSessionDelivery(delivery.id)!;
       const messageId = accepted.messageId;
       const queueItemId = accepted.queueItemId;
       expect(accepted).toMatchObject({ status: "accepted" });
@@ -1091,7 +1109,7 @@ describe("parent callback reliability", () => {
       api.resumePendingWebQueueItems(restoredContext);
 
       expect(seenPrompts).toEqual([]);
-      expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({
+      expect(registry.getSessionDelivery(delivery.id)).toMatchObject({
         status: "accepted",
         messageId,
         queueItemId,
@@ -1108,7 +1126,7 @@ describe("parent callback reliability", () => {
         expect(seenPrompts).toEqual([`callback survives ${source} engine outage`]);
         expect(registry.listAllPendingQueueItems()).toEqual([]);
       });
-      expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({
+      expect(registry.getSessionDelivery(delivery.id)).toMatchObject({
         status: "accepted",
         messageId,
         queueItemId,
@@ -1126,20 +1144,21 @@ describe("parent callback reliability", () => {
     const context = makeContext(engine, queue);
     const parent = createParent("resume-generation");
     const base = {
-      parentSessionId: parent.id,
-      childSessionId: "child-resumed",
-      terminalOutcome: "succeeded",
-      terminalVersion: 1,
-      callbackKind: "parent-completion",
+      targetSessionId: parent.id,
+      sourceKind: "session" as const,
+      sourceId: "child-resumed",
+      sourceOutcome: "succeeded",
+      sourceVersion: 1,
+      deliveryKind: "parent-completion",
     };
-    const first = registry.claimCallbackDelivery({
+    const first = registry.claimSessionDelivery({
       ...base,
-      attemptToken: "attempt-1",
+      sourceAttempt: "attempt-1",
       payload: { message: "first attempt", displayMessage: "First attempt" },
     }).delivery;
-    const resumed = registry.claimCallbackDelivery({
+    const resumed = registry.claimSessionDelivery({
       ...base,
-      attemptToken: "attempt-2",
+      sourceAttempt: "attempt-2",
       payload: { message: "resumed attempt", displayMessage: "Resumed attempt" },
     }).delivery;
 
@@ -1270,7 +1289,7 @@ describe("callback live retry sweep", () => {
     callbacks.notifyParentSession(child, { result: "retry once" });
     await vi.advanceTimersByTimeAsync(0);
     expect(routeFetch).toHaveBeenCalledOnce();
-    const pending = registry.listPendingCallbackDeliveries()[0];
+    const pending = registry.listPendingSessionDeliveries()[0];
     expect(pending).toMatchObject({ attemptCount: 1, status: "pending", lastError: expect.stringContaining("timeout") });
 
     await vi.advanceTimersByTimeAsync(callbacks.CALLBACK_DELIVERY_RETRY_DELAYS_MS[0] - 1);
@@ -1279,7 +1298,7 @@ describe("callback live retry sweep", () => {
     await vi.runAllTicks();
 
     expect(routeFetch).toHaveBeenCalledTimes(2);
-    expect(registry.getCallbackDelivery(pending.id)).toMatchObject({ status: "accepted", attemptCount: 2 });
+    expect(registry.getSessionDelivery(pending.id)).toMatchObject({ status: "accepted", attemptCount: 2 });
     expect(registry.getMessages(parent.id).filter((message) => message.role === "notification")).toHaveLength(1);
     expect(seenPrompts).toHaveLength(1);
   });
@@ -1296,18 +1315,18 @@ describe("callback live retry sweep", () => {
 
     callbacks.notifyParentSession(child, { result: "retry after restart" });
     await vi.advanceTimersByTimeAsync(0);
-    const delivery = registry.listPendingCallbackDeliveries()[0];
+    const delivery = registry.listPendingSessionDeliveries()[0];
     callbacks.__resetCallbackRetrySweepForTest();
     const routeFetch = makeRouteBackedFetch(context);
     globalThis.fetch = routeFetch as unknown as typeof fetch;
 
-    await expect(callbacks.recoverPendingCallbackDeliveries()).resolves.toBe(0);
+    await expect(callbacks.recoverPendingSessionDeliveries()).resolves.toBe(0);
     expect(routeFetch).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(callbacks.CALLBACK_DELIVERY_RETRY_DELAYS_MS[0]);
     await vi.runAllTicks();
 
     expect(routeFetch).toHaveBeenCalledOnce();
-    expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({ status: "accepted", attemptCount: 2 });
+    expect(registry.getSessionDelivery(delivery.id)).toMatchObject({ status: "accepted", attemptCount: 2 });
   });
 
   it("never retries an accepted receipt when its HTTP response is lost", async () => {
@@ -1328,7 +1347,7 @@ describe("callback live retry sweep", () => {
     await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
 
     expect(routeFetch).toHaveBeenCalledOnce();
-    expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({ status: "accepted", attemptCount: 1 });
+    expect(registry.getSessionDelivery(delivery.id)).toMatchObject({ status: "accepted", attemptCount: 1 });
   });
 
   it("dead-letters an exhausted receipt and never retries it again", async () => {
@@ -1346,7 +1365,7 @@ describe("callback live retry sweep", () => {
       await vi.runAllTicks();
     }
     const delivery = registry.initDb().prepare(`SELECT id FROM callback_deliveries`).get() as { id: string };
-    expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({
+    expect(registry.getSessionDelivery(delivery.id)).toMatchObject({
       status: "dead_letter",
       attemptCount: callbacks.CALLBACK_DELIVERY_MAX_ATTEMPTS,
       deadLetteredAt: expect.any(Number),

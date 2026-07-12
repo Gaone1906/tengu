@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-callback-deliveries-"));
 process.env.JINN_HOME = home;
@@ -19,13 +19,14 @@ const UNICODE_WHITE_SPACE = [
 
 function callbackInput(overrides: Record<string, unknown> = {}) {
   return {
-    parentSessionId: "parent-1",
-    childSessionId: "child-1",
-    attemptToken: "attempt-1",
-    terminalOutcome: "succeeded",
-    terminalVersion: 1,
-    callbackKind: "parent-completion",
-    payload: {
+    targetSessionId: "parent-1",
+    sourceKind: "session" as const,
+    sourceId: "child-1",
+    sourceAttempt: "attempt-1",
+    sourceOutcome: "succeeded",
+    sourceVersion: 1,
+    deliveryKind: "parent-completion",
+    payload: overrides.payload ?? {
       message: "engine callback payload",
       displayMessage: "Worker replied\nDone",
       meta: {
@@ -36,7 +37,7 @@ function callbackInput(overrides: Record<string, unknown> = {}) {
       },
     },
     ...overrides,
-  } as Parameters<Registry["claimCallbackDelivery"]>[0];
+  } as Parameters<Registry["claimSessionDelivery"]>[0];
 }
 
 function createSession(id: string, parentSessionId?: string) {
@@ -51,6 +52,48 @@ function createSession(id: string, parentSessionId?: string) {
   });
   registry.initDb().prepare("UPDATE sessions SET id = ? WHERE id = ?").run(id, session.id);
   return registry.getSession(id)!;
+}
+
+function installExactChildDeliverySchema(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE callback_deliveries (
+      id TEXT PRIMARY KEY,
+      parent_session_id TEXT NOT NULL CHECK (length(parent_session_id) > 0 AND parent_session_id = jinn_callback_identity(parent_session_id)),
+      child_session_id TEXT NOT NULL CHECK (length(child_session_id) > 0 AND child_session_id = jinn_callback_identity(child_session_id)),
+      attempt_token TEXT NOT NULL CHECK (length(attempt_token) > 0 AND attempt_token = jinn_callback_identity(attempt_token)),
+      terminal_outcome TEXT NOT NULL CHECK (length(terminal_outcome) > 0 AND terminal_outcome = jinn_callback_identity(terminal_outcome)),
+      terminal_version INTEGER NOT NULL CHECK (terminal_version >= 1),
+      callback_kind TEXT NOT NULL CHECK (length(callback_kind) > 0 AND callback_kind = jinn_callback_identity(callback_kind)),
+      payload TEXT NOT NULL CHECK (
+        json_valid(payload)
+        AND json_type(payload) = 'object'
+        AND json_type(payload, '$.message') IS 'text'
+        AND json_type(payload, '$.displayMessage') IS 'text'
+      ),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'dead_letter')),
+      message_id TEXT,
+      queue_item_id TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+      next_attempt_at INTEGER,
+      last_attempt_at INTEGER,
+      last_error TEXT,
+      dead_lettered_at INTEGER,
+      created_at TEXT NOT NULL,
+      accepted_at TEXT
+    );
+    CREATE UNIQUE INDEX uq_callback_delivery_identity
+      ON callback_deliveries (
+        parent_session_id,
+        child_session_id,
+        attempt_token,
+        terminal_outcome,
+        terminal_version,
+        callback_kind
+      );
+    CREATE INDEX idx_callback_deliveries_pending
+      ON callback_deliveries (status, next_attempt_at, created_at)
+      WHERE status = 'pending';
+  `);
 }
 
 beforeAll(async () => {
@@ -72,6 +115,115 @@ beforeEach(() => {
 });
 
 describe("callback delivery schema migration", () => {
+  it("preserves every valid lifecycle field byte-for-byte and quarantines the complete poison matrix", () => {
+    const database = new Database(":memory:");
+    database.function("jinn_callback_identity", { deterministic: true }, (value: unknown) => value);
+    installExactChildDeliverySchema(database);
+    const payload = JSON.stringify({ message: "exact payload", displayMessage: "Exact payload", meta: { exact: true } });
+    const insert = database.prepare(`
+      INSERT INTO callback_deliveries (
+        id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
+        terminal_version, callback_kind, payload, status, message_id, queue_item_id,
+        attempt_count, next_attempt_at, last_attempt_at, last_error, dead_lettered_at,
+        created_at, accepted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insert.run("valid-pending", "parent", "child-p", "attempt-p", "succeeded", 2, "parent-completion", payload,
+      "pending", null, null, 3, 1_700_000_000_500, 1_700_000_000_000, "retry later", null,
+      "2026-01-01T00:00:00.000Z", null);
+    insert.run("valid-accepted", "parent", "child-a", "attempt-a", "succeeded", 3, "parent-completion", payload,
+      "accepted", "message-a", "queue-a", 2, null, 1_700_000_001_000, null, null,
+      "2026-01-01T00:00:01.000Z", "2026-01-01T00:00:02.000Z");
+    insert.run("valid-dead", "parent", "child-d", "attempt-d", "failed", 4, "parent-completion", payload,
+      "dead_letter", null, null, 4, null, 1_700_000_002_000, "exhausted", 1_700_000_002_500,
+      "2026-01-01T00:00:03.000Z", null);
+
+    const poisonRows = [
+      ["poison-accepted-missing-queue", "accepted", "message", null, 1, null, 10, null, null, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:01.000Z"],
+      ["poison-pending-acceptance", "pending", "message", "queue", 0, null, null, null, null, "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:01.000Z"],
+      ["poison-dead-no-time", "dead_letter", null, null, 4, null, 10, "exhausted", null, "2026-01-01T00:00:00.000Z", null],
+      ["poison-created-at", "pending", null, null, 0, null, null, null, null, "not-a-time", null],
+      ["poison-accepted-at", "accepted", "message", "queue", 1, null, 10, null, null, "2026-01-01T00:00:00.000Z", "not-a-time"],
+      ["poison-retry-order", "pending", null, null, 1, 5, 10, "retry", null, "2026-01-01T00:00:00.000Z", null],
+      ["poison-attempt-timestamps", "pending", null, null, 0, 10, 5, null, null, "2026-01-01T00:00:00.000Z", null],
+      ["poison-dead-order", "dead_letter", null, null, 4, null, 10, "exhausted", 5, "2026-01-01T00:00:00.000Z", null],
+    ] as const;
+    for (const [id, status, messageId, queueItemId, attemptCount, nextAttemptAt, lastAttemptAt, lastError, deadLetteredAt, createdAt, acceptedAt] of poisonRows) {
+      insert.run(id, "parent", `child-${id}`, `attempt-${id}`, "failed", 1, "parent-completion", payload,
+        status, messageId, queueItemId, attemptCount, nextAttemptAt, lastAttemptAt, lastError, deadLetteredAt, createdAt, acceptedAt);
+    }
+
+    const validBefore = database.prepare("SELECT * FROM callback_deliveries WHERE id LIKE 'valid-%' ORDER BY id").all();
+    registry.migrateCallbackDeliveriesSchema(database);
+
+    const validAfter = database.prepare(`
+      SELECT id, target_session_id AS parent_session_id, source_id AS child_session_id,
+        source_attempt AS attempt_token, source_outcome AS terminal_outcome,
+        source_version AS terminal_version, delivery_kind AS callback_kind,
+        payload, status, message_id, queue_item_id, attempt_count, next_attempt_at,
+        last_attempt_at, last_error, dead_lettered_at, created_at, accepted_at
+      FROM callback_deliveries WHERE id LIKE 'valid-%' ORDER BY id
+    `).all();
+    expect(validAfter).toEqual(validBefore);
+
+    const quarantined = database.prepare(`
+      SELECT id, status, delivery_kind AS deliveryKind, last_error AS lastError,
+        dead_lettered_at AS deadLetteredAt
+      FROM callback_deliveries WHERE id LIKE 'poison-%' ORDER BY id
+    `).all() as Array<{ id: string; status: string; deliveryKind: string; lastError: string | null; deadLetteredAt: number | null }>;
+    expect(quarantined).toHaveLength(poisonRows.length);
+    expect(quarantined).toEqual(expect.arrayContaining(poisonRows.map(([id]) => expect.objectContaining({
+      id,
+      status: "dead_letter",
+      deliveryKind: "quarantined",
+      lastError: expect.stringContaining("migration quarantine:"),
+      deadLetteredAt: expect.any(Number),
+    }))));
+    for (const row of quarantined) {
+      expect(() => registry.requeueDeadLetterSessionDelivery(row.id)).toThrow(/not found|quarantined|invalid/i);
+    }
+  });
+
+  it("rolls back the child-specific schema and every original row on a forced mid-copy failure", () => {
+    const database = new Database(":memory:");
+    database.function("jinn_callback_identity", { deterministic: true }, (value: unknown) => value);
+    installExactChildDeliverySchema(database);
+    database.exec(`
+      INSERT INTO callback_deliveries (
+        id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
+        terminal_version, callback_kind, payload, status, created_at
+      ) VALUES
+        ('row-1', 'parent', 'child-1', 'attempt-1', 'succeeded', 1, 'parent-completion',
+          '{"message":"one","displayMessage":"one"}', 'pending', '2026-01-01T00:00:00.000Z'),
+        ('row-2', 'parent', 'child-2', 'attempt-2', 'succeeded', 1, 'parent-completion',
+          '{"message":"two","displayMessage":"two"}', 'pending', '2026-01-01T00:00:01.000Z');
+    `);
+    const beforeSql = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'callback_deliveries'").get();
+    const beforeRows = database.prepare("SELECT * FROM callback_deliveries ORDER BY id").all();
+    const originalPrepare = database.prepare.bind(database);
+    let copied = 0;
+    const prepareSpy = vi.spyOn(database, "prepare").mockImplementation(((sql: string) => {
+      const statement = originalPrepare(sql);
+      if (!sql.includes("INSERT INTO callback_deliveries_v2")) return statement;
+      return new Proxy(statement, {
+        get(target, property, receiver) {
+          if (property !== "run") return Reflect.get(target, property, receiver);
+          return (...args: unknown[]) => {
+            copied++;
+            if (copied === 2) throw new Error("forced mid-copy failure");
+            return target.run(...args);
+          };
+        },
+      });
+    }) as Database.Database["prepare"]);
+
+    expect(() => registry.migrateCallbackDeliveriesSchema(database)).toThrow("forced mid-copy failure");
+    prepareSpy.mockRestore();
+    expect(database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'callback_deliveries'").get()).toEqual(beforeSql);
+    expect(database.prepare("SELECT * FROM callback_deliveries ORDER BY id").all()).toEqual(beforeRows);
+    expect(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'callback_deliveries_v2'").get()).toBeUndefined();
+  });
+
   it("reopens the current child-session schema as one generic session delivery without rewriting its receipt", () => {
     const database = registry.initDb();
     database.exec(`
@@ -251,7 +403,7 @@ describe("callback delivery schema migration", () => {
       FROM callback_deliveries WHERE id = 'poison'
     `).get()).toMatchObject({
       status: "dead_letter",
-      lastError: expect.stringMatching(/invalid callback delivery payload json/i),
+      lastError: expect.stringMatching(/invalid payload json/i),
       deadLetteredAt: expect.any(Number),
     });
   });
@@ -366,71 +518,71 @@ describe("callback delivery schema migration", () => {
 describe("callback delivery identity", () => {
   it("collapses six concurrent and sequential claims for one attempt outcome", async () => {
     const claims = await Promise.all(
-      Array.from({ length: 6 }, async () => registry.claimCallbackDelivery(callbackInput())),
+      Array.from({ length: 6 }, async () => registry.claimSessionDelivery(callbackInput())),
     );
-    const retry = registry.claimCallbackDelivery(callbackInput());
+    const retry = registry.claimSessionDelivery(callbackInput());
 
     expect(claims.filter((claim) => claim.claimed)).toHaveLength(1);
     expect(new Set([...claims, retry].map((claim) => claim.delivery.id))).toHaveLength(1);
-    expect(registry.listPendingCallbackDeliveries()).toHaveLength(1);
+    expect(registry.listPendingSessionDeliveries()).toHaveLength(1);
   });
 
   it.each([
-    ["parent session", { parentSessionId: "parent-2" }],
-    ["child session", { childSessionId: "child-2" }],
-    ["attempt generation", { attemptToken: "attempt-2" }],
-    ["terminal outcome", { terminalOutcome: "failed" }],
-    ["terminal version", { terminalVersion: 2 }],
-    ["callback kind", { callbackKind: "talk-attachment" }],
+    ["target session", { targetSessionId: "parent-2" }],
+    ["source session", { sourceId: "child-2" }],
+    ["source attempt", { sourceAttempt: "attempt-2" }],
+    ["source outcome", { sourceOutcome: "failed" }],
+    ["source version", { sourceVersion: 2 }],
+    ["delivery kind", { deliveryKind: "talk-attachment" }],
   ])("keeps a distinct %s deliverable exactly once", (_label, overrides) => {
-    const first = registry.claimCallbackDelivery(callbackInput());
-    const distinct = registry.claimCallbackDelivery(callbackInput(overrides));
-    const duplicate = registry.claimCallbackDelivery(callbackInput(overrides));
+    const first = registry.claimSessionDelivery(callbackInput());
+    const distinct = registry.claimSessionDelivery(callbackInput(overrides));
+    const duplicate = registry.claimSessionDelivery(callbackInput(overrides));
 
     expect(first.claimed).toBe(true);
     expect(distinct.claimed).toBe(true);
     expect(duplicate.claimed).toBe(false);
     expect(duplicate.delivery.id).toBe(distinct.delivery.id);
-    expect(registry.listPendingCallbackDeliveries()).toHaveLength(2);
+    expect(registry.listPendingSessionDeliveries()).toHaveLength(2);
   });
 
   it("keeps a failed send pending and retryable under the original durable id", () => {
-    const claimed = registry.claimCallbackDelivery(callbackInput());
+    const claimed = registry.claimSessionDelivery(callbackInput());
 
-    const retry = registry.claimCallbackDelivery(callbackInput());
+    const retry = registry.claimSessionDelivery(callbackInput());
 
     expect(claimed.claimed).toBe(true);
     expect(retry.claimed).toBe(false);
     expect(retry.delivery).toMatchObject({ id: claimed.delivery.id, status: "pending" });
-    expect(registry.getCallbackDelivery(claimed.delivery.id)).toMatchObject({ status: "pending" });
+    expect(registry.getSessionDelivery(claimed.delivery.id)).toMatchObject({ status: "pending" });
   });
 
   it("canonicalizes whitespace and Unicode before insert and conflict lookup", () => {
     const decomposed = "cafe\u0301";
     const composed = "caf\u00e9";
-    const first = registry.claimCallbackDelivery(callbackInput({
-      parentSessionId: " parent-1 ",
-      childSessionId: ` ${decomposed} `,
-      attemptToken: " attempt-1 ",
-      terminalOutcome: " succeeded ",
-      callbackKind: " parent-completion ",
+    const first = registry.claimSessionDelivery(callbackInput({
+      targetSessionId: " parent-1 ",
+      sourceId: ` ${decomposed} `,
+      sourceAttempt: " attempt-1 ",
+      sourceOutcome: " succeeded ",
+      deliveryKind: " parent-completion ",
     }));
-    const duplicate = registry.claimCallbackDelivery(callbackInput({
-      parentSessionId: "parent-1",
-      childSessionId: composed,
-      attemptToken: "attempt-1",
-      terminalOutcome: "succeeded",
-      callbackKind: "parent-completion",
+    const duplicate = registry.claimSessionDelivery(callbackInput({
+      targetSessionId: "parent-1",
+      sourceId: composed,
+      sourceAttempt: "attempt-1",
+      sourceOutcome: "succeeded",
+      deliveryKind: "parent-completion",
     }));
 
     expect(first.claimed).toBe(true);
     expect(duplicate).toMatchObject({ claimed: false, delivery: { id: first.delivery.id } });
     expect(first.delivery).toMatchObject({
-      parentSessionId: "parent-1",
-      childSessionId: composed,
-      attemptToken: "attempt-1",
-      terminalOutcome: "succeeded",
-      callbackKind: "parent-completion",
+      targetSessionId: "parent-1",
+      sourceId: composed,
+      sourceAttempt: "attempt-1",
+      sourceOutcome: "succeeded",
+      deliveryKind: "parent-completion",
     });
   });
 
@@ -439,23 +591,23 @@ describe("callback delivery identity", () => {
     for (const codePoint of UNICODE_WHITE_SPACE) {
       const edge = String.fromCodePoint(codePoint);
       const hex = codePoint.toString(16);
-      const padded = registry.claimCallbackDelivery(callbackInput({
-        parentSessionId: `${edge}parent-${hex}${edge}`,
-        childSessionId: `child-${hex}`,
-        attemptToken: `attempt-${hex}`,
+      const padded = registry.claimSessionDelivery(callbackInput({
+        targetSessionId: `${edge}parent-${hex}${edge}`,
+        sourceId: `child-${hex}`,
+        sourceAttempt: `attempt-${hex}`,
       }));
-      const canonical = registry.claimCallbackDelivery(callbackInput({
-        parentSessionId: `parent-${hex}`,
-        childSessionId: `child-${hex}`,
-        attemptToken: `attempt-${hex}`,
+      const canonical = registry.claimSessionDelivery(callbackInput({
+        targetSessionId: `parent-${hex}`,
+        sourceId: `child-${hex}`,
+        sourceAttempt: `attempt-${hex}`,
       }));
 
       expect(canonical).toMatchObject({ claimed: false, delivery: { id: padded.delivery.id } });
-      expect(padded.delivery.parentSessionId).toBe(`parent-${hex}`);
-      expect(() => registry.claimCallbackDelivery(callbackInput({
-        parentSessionId: edge,
-        childSessionId: `blank-child-${hex}`,
-        attemptToken: `blank-attempt-${hex}`,
+      expect(padded.delivery.targetSessionId).toBe(`parent-${hex}`);
+      expect(() => registry.claimSessionDelivery(callbackInput({
+        targetSessionId: edge,
+        sourceId: `blank-child-${hex}`,
+        sourceAttempt: `blank-attempt-${hex}`,
       }))).toThrow(/targetSessionId is required/i);
       expect(() => database.prepare(`
         INSERT INTO callback_deliveries (
@@ -472,15 +624,15 @@ describe("callback delivery identity", () => {
       )).toThrow();
     }
 
-    const sensitive = registry.claimCallbackDelivery(callbackInput({
-      parentSessionId: "Case-Sensitive",
-      childSessionId: "case-child",
-      attemptToken: "case-attempt",
+    const sensitive = registry.claimSessionDelivery(callbackInput({
+      targetSessionId: "Case-Sensitive",
+      sourceId: "case-child",
+      sourceAttempt: "case-attempt",
     }));
-    const distinctCase = registry.claimCallbackDelivery(callbackInput({
-      parentSessionId: "case-sensitive",
-      childSessionId: "case-child",
-      attemptToken: "case-attempt",
+    const distinctCase = registry.claimSessionDelivery(callbackInput({
+      targetSessionId: "case-sensitive",
+      sourceId: "case-child",
+      sourceAttempt: "case-attempt",
     }));
     expect(sensitive.delivery.id).not.toBe(distinctCase.delivery.id);
   });
@@ -495,10 +647,10 @@ describe("callback delivery identity", () => {
   ])("rejects direct SQL identities that violate canonical constraints: %s", (_label, column, value, version) => {
     const database = registry.initDb();
     const row = callbackInput({
-      parentSessionId: column === "target_session_id" ? value : "parent-sql",
-      childSessionId: column === "source_id" ? value : "child-sql",
-      attemptToken: column === "source_attempt" ? value : "attempt-sql",
-      terminalVersion: version,
+      targetSessionId: column === "target_session_id" ? value : "parent-sql",
+      sourceId: column === "source_id" ? value : "child-sql",
+      sourceAttempt: column === "source_attempt" ? value : "attempt-sql",
+      sourceVersion: version,
     });
     expect(() => database.prepare(`
       INSERT INTO callback_deliveries (
@@ -507,12 +659,12 @@ describe("callback delivery identity", () => {
       ) VALUES (?, ?, 'session', ?, ?, ?, ?, ?, ?, 'pending', ?)
     `).run(
       `sql-${column}`,
-      row.parentSessionId,
-      row.childSessionId,
-      row.attemptToken,
-      row.terminalOutcome,
-      row.terminalVersion,
-      row.callbackKind,
+      row.targetSessionId,
+      row.sourceId,
+      row.sourceAttempt,
+      row.sourceOutcome,
+      row.sourceVersion,
+      row.deliveryKind,
       JSON.stringify(row.payload),
       new Date().toISOString(),
     )).toThrow();
@@ -521,28 +673,28 @@ describe("callback delivery identity", () => {
 
 describe("callback delivery retry lifecycle", () => {
   it("leases one due attempt, persists backoff, and dead-letters at bounded exhaustion", () => {
-    const delivery = registry.claimCallbackDelivery(callbackInput()).delivery;
+    const delivery = registry.claimSessionDelivery(callbackInput()).delivery;
 
-    expect(registry.claimCallbackDeliveryAttempt(delivery.id, 1_000, 500)).toMatchObject({
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, 1_000, 500)).toMatchObject({
       attemptCount: 1,
       lastAttemptAt: 1_000,
       nextAttemptAt: 1_500,
     });
-    expect(registry.claimCallbackDeliveryAttempt(delivery.id, 1_000, 500)).toBeUndefined();
-    expect(registry.recordCallbackDeliveryFailure(delivery.id, "timeout one", {
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, 1_000, 500)).toBeUndefined();
+    expect(registry.recordSessionDeliveryFailure(delivery.id, "timeout one", {
       now: 1_000,
       nextAttemptAt: 2_000,
       maxAttempts: 3,
     })).toMatchObject({ status: "pending", attemptCount: 1, nextAttemptAt: 2_000, lastError: "timeout one" });
 
-    expect(registry.claimCallbackDeliveryAttempt(delivery.id, 2_000, 500)).toMatchObject({ attemptCount: 2 });
-    registry.recordCallbackDeliveryFailure(delivery.id, "timeout two", {
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, 2_000, 500)).toMatchObject({ attemptCount: 2 });
+    registry.recordSessionDeliveryFailure(delivery.id, "timeout two", {
       now: 2_000,
       nextAttemptAt: 4_000,
       maxAttempts: 3,
     });
-    expect(registry.claimCallbackDeliveryAttempt(delivery.id, 4_000, 500)).toMatchObject({ attemptCount: 3 });
-    expect(registry.recordCallbackDeliveryFailure(delivery.id, "timeout three", {
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, 4_000, 500)).toMatchObject({ attemptCount: 3 });
+    expect(registry.recordSessionDeliveryFailure(delivery.id, "timeout three", {
       now: 4_000,
       nextAttemptAt: 8_000,
       maxAttempts: 3,
@@ -552,42 +704,42 @@ describe("callback delivery retry lifecycle", () => {
       lastError: "timeout three",
       deadLetteredAt: 4_000,
     });
-    expect(registry.claimCallbackDeliveryAttempt(delivery.id, 8_000, 500)).toBeUndefined();
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, 8_000, 500)).toBeUndefined();
   });
 
   it("never resets or releases an accepted receipt after a late failure", () => {
     const parent = createSession("parent-1");
     createSession("child-1", parent.id);
-    const delivery = registry.claimCallbackDelivery(callbackInput()).delivery;
-    registry.claimCallbackDeliveryAttempt(delivery.id, 1_000, 500);
-    registry.acceptCallbackDelivery(delivery.id, parent.id, parent.sessionKey);
+    const delivery = registry.claimSessionDelivery(callbackInput()).delivery;
+    registry.claimSessionDeliveryAttempt(delivery.id, 1_000, 500);
+    registry.acceptSessionDelivery(delivery.id, parent.id, parent.sessionKey);
 
-    const afterFailure = registry.recordCallbackDeliveryFailure(delivery.id, "response lost", {
+    const afterFailure = registry.recordSessionDeliveryFailure(delivery.id, "response lost", {
       now: 1_100,
       nextAttemptAt: 2_000,
       maxAttempts: 3,
     });
 
     expect(afterFailure).toMatchObject({ status: "accepted", attemptCount: 1 });
-    expect(registry.claimCallbackDeliveryAttempt(delivery.id, 2_000, 500)).toBeUndefined();
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, 2_000, 500)).toBeUndefined();
   });
 
   it("lists an exhausted receipt and atomically requeues the same durable id after recovery", () => {
     const parent = createSession("parent-1");
     createSession("child-1", parent.id);
-    const delivery = registry.claimCallbackDelivery(callbackInput()).delivery;
+    const delivery = registry.claimSessionDelivery(callbackInput()).delivery;
 
     for (let attempt = 1; attempt <= 4; attempt++) {
-      expect(registry.claimCallbackDeliveryAttempt(delivery.id, attempt * 1_000, 100))
+      expect(registry.claimSessionDeliveryAttempt(delivery.id, attempt * 1_000, 100))
         .toMatchObject({ id: delivery.id, attemptCount: attempt });
-      registry.recordCallbackDeliveryFailure(delivery.id, `outage ${attempt}`, {
+      registry.recordSessionDeliveryFailure(delivery.id, `outage ${attempt}`, {
         now: attempt * 1_000,
         nextAttemptAt: (attempt + 1) * 1_000,
         maxAttempts: 4,
       });
     }
 
-    expect(registry.listDeadLetterCallbackDeliveries()).toEqual([
+    expect(registry.listDeadLetterSessionDeliveries()).toEqual([
       expect.objectContaining({
         id: delivery.id,
         status: "dead_letter",
@@ -596,7 +748,7 @@ describe("callback delivery retry lifecycle", () => {
       }),
     ]);
 
-    const requeued = registry.requeueDeadLetterCallbackDelivery(delivery.id);
+    const requeued = registry.requeueDeadLetterSessionDelivery(delivery.id);
     expect(requeued).toMatchObject({
       id: delivery.id,
       status: "pending",
@@ -609,22 +761,22 @@ describe("callback delivery retry lifecycle", () => {
       queueItemId: null,
       acceptedAt: null,
     });
-    expect(registry.claimCallbackDeliveryAttempt(delivery.id, 5_000, 100))
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, 5_000, 100))
       .toMatchObject({ id: delivery.id, attemptCount: 1 });
-    const accepted = registry.acceptCallbackDelivery(delivery.id, parent.id, parent.sessionKey);
+    const accepted = registry.acceptSessionDelivery(delivery.id, parent.id, parent.sessionKey);
     expect(accepted).toMatchObject({ accepted: true, delivery: { id: delivery.id, status: "accepted" } });
-    expect(registry.acceptCallbackDelivery(delivery.id, parent.id, parent.sessionKey))
+    expect(registry.acceptSessionDelivery(delivery.id, parent.id, parent.sessionKey))
       .toMatchObject({ accepted: false, delivery: { id: delivery.id, status: "accepted" } });
   });
 
   it("never permits an accepted callback receipt to be requeued", () => {
     const parent = createSession("parent-1");
     createSession("child-1", parent.id);
-    const delivery = registry.claimCallbackDelivery(callbackInput()).delivery;
-    const accepted = registry.acceptCallbackDelivery(delivery.id, parent.id, parent.sessionKey).delivery;
+    const delivery = registry.claimSessionDelivery(callbackInput()).delivery;
+    const accepted = registry.acceptSessionDelivery(delivery.id, parent.id, parent.sessionKey).delivery;
 
-    expect(() => registry.requeueDeadLetterCallbackDelivery(delivery.id)).toThrow(/dead.?letter/i);
-    expect(registry.getCallbackDelivery(delivery.id)).toMatchObject({
+    expect(() => registry.requeueDeadLetterSessionDelivery(delivery.id)).toThrow(/dead.?letter/i);
+    expect(registry.getSessionDelivery(delivery.id)).toMatchObject({
       id: delivery.id,
       status: "accepted",
       messageId: accepted.messageId,
@@ -643,12 +795,12 @@ describe("callback delivery retry lifecycle", () => {
         1, 'parent-completion', '{bad json', 'pending', '2026-01-01T00:00:00.000Z')
     `).run();
     database.pragma("ignore_check_constraints = OFF");
-    const valid = registry.claimCallbackDelivery(callbackInput({
-      parentSessionId: "parent-valid",
-      childSessionId: "child-valid",
+    const valid = registry.claimSessionDelivery(callbackInput({
+      targetSessionId: "parent-valid",
+      sourceId: "child-valid",
     })).delivery;
 
-    expect(registry.listPendingCallbackDeliveries()).toEqual([
+    expect(registry.listPendingSessionDeliveries()).toEqual([
       expect.objectContaining({ id: valid.id, status: "pending" }),
     ]);
     expect(database.prepare(`
@@ -691,13 +843,13 @@ describe("callback delivery retry lifecycle", () => {
       );
     }
     database.pragma("ignore_check_constraints = OFF");
-    const valid = registry.claimCallbackDelivery(callbackInput({
-      parentSessionId: "valid-after-poison",
-      childSessionId: "valid-child-after-poison",
-      attemptToken: "valid-attempt-after-poison",
+    const valid = registry.claimSessionDelivery(callbackInput({
+      targetSessionId: "valid-after-poison",
+      sourceId: "valid-child-after-poison",
+      sourceAttempt: "valid-attempt-after-poison",
     })).delivery;
 
-    expect(registry.listPendingCallbackDeliveries()).toEqual([
+    expect(registry.listPendingSessionDeliveries()).toEqual([
       expect.objectContaining({ id: valid.id }),
     ]);
     expect(database.prepare(`
@@ -710,10 +862,10 @@ describe("callback delivery retry lifecycle", () => {
     })));
 
     registry.__closeDbForTest();
-    expect(registry.listPendingCallbackDeliveries()).toEqual([
+    expect(registry.listPendingSessionDeliveries()).toEqual([
       expect.objectContaining({ id: valid.id }),
     ]);
-    expect(registry.listDeadLetterCallbackDeliveries().filter((row) => row.id.startsWith("poison-")))
+    expect(registry.listDeadLetterSessionDeliveries().filter((row) => row.id.startsWith("poison-")))
       .toHaveLength(poisonRows.length);
   });
 });
@@ -722,10 +874,10 @@ describe("callback delivery acceptance", () => {
   it("atomically accepts one queue item and one durable notification message", () => {
     const parent = createSession("parent-1");
     createSession("child-1", parent.id);
-    const claimed = registry.claimCallbackDelivery(callbackInput());
+    const claimed = registry.claimSessionDelivery(callbackInput());
 
-    const accepted = registry.acceptCallbackDelivery(claimed.delivery.id, parent.id, parent.sessionKey);
-    const responseLossRetry = registry.acceptCallbackDelivery(claimed.delivery.id, parent.id, parent.sessionKey);
+    const accepted = registry.acceptSessionDelivery(claimed.delivery.id, parent.id, parent.sessionKey);
+    const responseLossRetry = registry.acceptSessionDelivery(claimed.delivery.id, parent.id, parent.sessionKey);
 
     expect(accepted.accepted).toBe(true);
     expect(responseLossRetry.accepted).toBe(false);
@@ -751,12 +903,12 @@ describe("callback delivery acceptance", () => {
     const parent = createSession("parent-1");
     const otherParent = createSession("parent-2");
     createSession("child-1", parent.id);
-    const claimed = registry.claimCallbackDelivery(callbackInput());
+    const claimed = registry.claimSessionDelivery(callbackInput());
 
-    expect(() => registry.acceptCallbackDelivery(claimed.delivery.id, otherParent.id, otherParent.sessionKey))
+    expect(() => registry.acceptSessionDelivery(claimed.delivery.id, otherParent.id, otherParent.sessionKey))
       .toThrow(/session delivery target mismatch/i);
 
-    expect(registry.getCallbackDelivery(claimed.delivery.id)).toMatchObject({ status: "pending" });
+    expect(registry.getSessionDelivery(claimed.delivery.id)).toMatchObject({ status: "pending" });
     expect(registry.getMessages(otherParent.id)).toHaveLength(0);
     expect(registry.listAllPendingQueueItems()).toHaveLength(0);
   });
@@ -781,7 +933,7 @@ describe("callback delivery acceptance", () => {
         },
       },
     });
-    const claimed = registry.claimCallbackDelivery(callbackInput({
+    const claimed = registry.claimSessionDelivery(callbackInput({
       payload: {
         message: "engine callback payload",
         displayMessage: "Worker replied\nDone",
@@ -798,7 +950,7 @@ describe("callback delivery acceptance", () => {
       },
     }));
 
-    registry.acceptCallbackDelivery(claimed.delivery.id, parent.id, parent.sessionKey);
+    registry.acceptSessionDelivery(claimed.delivery.id, parent.id, parent.sessionKey);
 
     const delegation = registry.getMessages(parent.id)
       .flatMap((message) => message.blocks ?? [])
@@ -809,7 +961,7 @@ describe("callback delivery acceptance", () => {
   it("rolls back queue, message, and receipt acceptance when callback block persistence fails", () => {
     const parent = createSession("parent-1");
     createSession("child-1", parent.id);
-    const claimed = registry.claimCallbackDelivery(callbackInput({
+    const claimed = registry.claimSessionDelivery(callbackInput({
       payload: {
         message: "engine callback payload",
         displayMessage: "Worker replied\nDone",
@@ -820,10 +972,10 @@ describe("callback delivery acceptance", () => {
       } as never,
     }));
 
-    expect(() => registry.acceptCallbackDelivery(claimed.delivery.id, parent.id, parent.sessionKey))
+    expect(() => registry.acceptSessionDelivery(claimed.delivery.id, parent.id, parent.sessionKey))
       .toThrow(/block type is invalid/i);
 
-    expect(registry.getCallbackDelivery(claimed.delivery.id)).toMatchObject({ status: "pending" });
+    expect(registry.getSessionDelivery(claimed.delivery.id)).toMatchObject({ status: "pending" });
     expect(registry.getMessages(parent.id)).toEqual([]);
     expect(registry.listAllPendingQueueItems()).toEqual([]);
   });
@@ -831,7 +983,7 @@ describe("callback delivery acceptance", () => {
   it("retains pending session-delivery receipts when their target session is deleted", () => {
     const parent = createSession("parent-1");
     createSession("child-1", parent.id);
-    const claimed = registry.claimCallbackDelivery(callbackInput());
+    const claimed = registry.claimSessionDelivery(callbackInput());
 
     expect(registry.deleteSession(parent.id)).toBe(true);
 

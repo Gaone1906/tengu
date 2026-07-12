@@ -131,13 +131,15 @@ describe('workflow run session grouping', () => {
     registry.updateSession(legacy.id, { status: 'running', lastActivity: '2026-01-02T03:04:05.000Z' });
     const messageId = registry.insertMessage(legacy.id, 'notification', 'Historical evidence');
     const queueId = registry.enqueueQueueItem(legacy.id, legacy.sessionKey, 'Historical queue');
-    const delivery = registry.claimCallbackDelivery({
-      parentSessionId: legacy.id,
-      childSessionId: 'historical-phase',
-      attemptToken: 'historical-attempt',
-      terminalOutcome: 'succeeded',
-      terminalVersion: 1,
-      callbackKind: 'parent-completion',
+    const delivery = registry.claimSessionDelivery({
+      targetSessionId: legacy.id,
+
+      sourceKind: "session",
+      sourceId: 'historical-phase',
+      sourceAttempt: 'historical-attempt',
+      sourceOutcome: 'succeeded',
+      sourceVersion: 1,
+      deliveryKind: 'parent-completion',
       payload: { message: 'Historical callback', displayMessage: 'Historical callback' },
     }).delivery;
     const database = registry.initDb();
@@ -195,7 +197,7 @@ describe('workflow run session grouping', () => {
     }
 
     expect(snapshot()).toEqual(before);
-    expect(registry.getCallbackDelivery(delivery.id)?.status).toBe('pending');
+    expect(registry.getSessionDelivery(delivery.id)?.status).toBe('pending');
     expect((await get('/api/sessions/missing-ordinary-session')).status).toBe(404);
   });
 

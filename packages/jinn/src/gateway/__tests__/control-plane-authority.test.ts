@@ -180,17 +180,19 @@ beforeAll(async () => {
 
 describe("control-plane writes require operator authority", () => {
   it("makes callback dead letters visible to managers while guarding atomic requeue authority", async () => {
-    const delivery = registry.claimCallbackDelivery({
-      parentSessionId: "callback-parent",
-      childSessionId: "callback-child",
-      attemptToken: "callback-attempt",
-      terminalOutcome: "failed",
-      terminalVersion: 1,
-      callbackKind: "parent-completion",
+    const delivery = registry.claimSessionDelivery({
+      targetSessionId: "callback-parent",
+
+      sourceKind: "session",
+      sourceId: "callback-child",
+      sourceAttempt: "callback-attempt",
+      sourceOutcome: "failed",
+      sourceVersion: 1,
+      deliveryKind: "parent-completion",
       payload: { message: "recover callback", displayMessage: "Worker failed" },
     }).delivery;
-    registry.claimCallbackDeliveryAttempt(delivery.id, 1_000, 100);
-    registry.recordCallbackDeliveryFailure(delivery.id, "temporary outage", {
+    registry.claimSessionDeliveryAttempt(delivery.id, 1_000, 100);
+    registry.recordSessionDeliveryFailure(delivery.id, "temporary outage", {
       now: 1_000,
       nextAttemptAt: 2_000,
       maxAttempts: 1,
@@ -225,16 +227,18 @@ describe("control-plane writes require operator authority", () => {
       sourceRef: "accepted-parent",
       sessionKey: "accepted-parent",
     });
-    const accepted = registry.claimCallbackDelivery({
-      parentSessionId: acceptedParent.id,
-      childSessionId: "accepted-child",
-      attemptToken: "accepted-attempt",
-      terminalOutcome: "succeeded",
-      terminalVersion: 1,
-      callbackKind: "parent-completion",
+    const accepted = registry.claimSessionDelivery({
+      targetSessionId: acceptedParent.id,
+
+      sourceKind: "session",
+      sourceId: "accepted-child",
+      sourceAttempt: "accepted-attempt",
+      sourceOutcome: "succeeded",
+      sourceVersion: 1,
+      deliveryKind: "parent-completion",
       payload: { message: "accepted callback", displayMessage: "Worker replied" },
     }).delivery;
-    registry.acceptCallbackDelivery(accepted.id, acceptedParent.id, acceptedParent.sessionKey);
+    registry.acceptSessionDelivery(accepted.id, acceptedParent.id, acceptedParent.sessionKey);
     const rejected = await call(
       "POST",
       `/api/callback-deliveries/${accepted.id}/requeue`,
@@ -242,7 +246,7 @@ describe("control-plane writes require operator authority", () => {
       { authorization: "Bearer test-token" },
     );
     expect(rejected.status).toBe(409);
-    expect(registry.getCallbackDelivery(accepted.id)).toMatchObject({ status: "accepted" });
+    expect(registry.getSessionDelivery(accepted.id)).toMatchObject({ status: "accepted" });
   });
   it("fails anonymous Todo writes closed while bearer, cookie, and session capabilities keep their exact authority", async () => {
     const anonymousAssign = store.createWorkItem({ title: "Anonymous assign target", status: "assigned", assignee: "platform-worker", source: "human" });

@@ -119,7 +119,7 @@ describe("legacy Workflow run Session compatibility", () => {
           'legacy-delivery', 'legacy-run-session', 'session', 'legacy-phase-session', 'attempt-old',
           'succeeded', 1, 'parent-completion',
           '{"message":"Historical pending callback","displayMessage":"Historical pending callback"}',
-          'pending', NULL, NULL, 0, 1767323045000, NULL, NULL, NULL,
+          'pending', NULL, NULL, 1, 1767323045000, 1767323044000, 'historical retry', NULL,
           '2026-01-02T03:04:05.000Z', NULL
         ),
         (
@@ -178,8 +178,8 @@ describe("legacy Workflow run Session compatibility", () => {
       restartAcknowledgedAt: "2026-01-02T03:04:05.000Z",
     });
     expect(registry.getQueueItems(legacyParent.sessionKey).map((item) => item.id)).toEqual(["legacy-queue"]);
-    expect(registry.getCallbackDelivery("legacy-delivery")).toBeDefined();
-    expect(registry.getCallbackDelivery("legacy-delivery-accepted")).toMatchObject({
+    expect(registry.getSessionDelivery("legacy-delivery")).toBeDefined();
+    expect(registry.getSessionDelivery("legacy-delivery-accepted")).toMatchObject({
       messageId: "legacy-message",
       queueItemId: "legacy-queue",
       status: "accepted",
