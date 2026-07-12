@@ -158,7 +158,8 @@ function syncRunSessionBestEffort(deps: RunDriverDeps, run: WorkflowRun): string
 function persistRun(deps: RunDriverDeps, candidate: WorkflowRun): WorkflowRun {
   const previous = getRun(deps.root, candidate.workflowId, candidate.runId);
   let nativeCandidate = candidate;
-  if (candidate.schemaVersion === WORKFLOW_RUN_SCHEMA_VERSION
+  if (previous && previous.status !== 'parked'
+    && candidate.schemaVersion === WORKFLOW_RUN_SCHEMA_VERSION
     && candidate.status === 'parked' && candidate.parked && !candidate.parked.approval) {
     const definition = candidate.definitionSnapshot ?? deps.getDefinition(deps.root, candidate.workflowId);
     if (definition) {
@@ -760,6 +761,7 @@ export async function advanceWorkflowRunById(
   const result = await withRunAdvanceLock(runId, async () => {
     const run = getRun(deps.root, workflowId, runId);
     if (!run) return run;
+    if (run.status === 'parked' && !run.parked?.approval) return run;
     // Drivable states (GRS-016a): `running`, plus `parked` with receipts still in
     // flight — the probe-only pass keeps a parked run's sibling evidence truthful
     // (settles clean finishes, adopts crashed spawns; never dispatches, never
@@ -1095,6 +1097,7 @@ export async function sweepWorkflowRuns(deps: RunDriverDeps): Promise<number> {
       continue;
     }
     if (!run) continue; // run file gone — stale index entry, pruned on next rebuild
+    if (run.status === 'parked' && !run.parked?.approval) continue;
     // Sweepable (GRS-016a): running runs, plus parked runs whose sibling sessions
     // are still in flight (probe-only settles — a park freezes dispatch, not
     // evidence). Parked-and-quiet runs wait on a human; terminals are done.

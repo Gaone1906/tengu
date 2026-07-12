@@ -140,6 +140,87 @@ describe('native Workflow gate approvals', () => {
     };
   }
 
+  function parkedRunWithInFlightReceipt(
+    workflowId: string,
+    runId: string,
+    schemaVersion: 1 | 2 | 3,
+    receiptStatus: 'running' | 'dispatching',
+  ): import('../run-store.js').WorkflowRun {
+    return {
+      ...quietParkedRun(workflowId, runId, schemaVersion),
+      steps: [
+        {
+          nodeId: 'prepare',
+          label: 'Prepare',
+          actor: { kind: 'engine', ref: 'codex' },
+          status: receiptStatus,
+          attempt: 1,
+          at: '2026-07-12T11:01:00.000Z',
+          dispatchedAt: '2026-07-12T11:01:00.000Z',
+          ...(receiptStatus === 'running' ? { sessionId: 'legacy-running-session' } : {}),
+        },
+        {
+          nodeId: 'approval',
+          label: 'Approval',
+          actor: null,
+          status: 'pending',
+          at: '2026-07-12T11:05:00.000Z',
+        },
+      ],
+      order: ['prepare', 'approval'],
+    };
+  }
+
+  it('mints approval only for a genuine running-to-parked transition, never an already-parked candidate', async () => {
+    const store = await import('../run-store.js');
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jinn-workflow-park-transition-'));
+    const definition = approvalDefinition('native-park-transition');
+    const modern = await reconciler.startWorkflowRun({
+      root,
+      getDefinition: () => definition,
+      probeStepSession: () => ({ found: false }),
+      spawnStep: async () => ({ sessionId: 'native-park-transition-step' }),
+      now: () => '2026-07-12T12:00:00.000Z',
+    }, definition);
+    expect(modern).toMatchObject({
+      status: 'parked',
+      parked: { approval: { state: 'pending', requestedBy: 'workflow-run' } },
+    });
+
+    const legacyRunId = 'run-already-parked-candidate';
+    const legacy: import('../run-store.js').WorkflowRun = {
+      ...quietParkedRun(definition.id, legacyRunId, 3),
+      steps: [{
+        nodeId: 'prepare',
+        label: 'Prepare',
+        actor: { kind: 'engine', ref: 'codex' },
+        status: 'pending',
+        at: '2026-07-12T11:00:00.000Z',
+      }],
+      order: ['prepare', 'approval'],
+    };
+    store.saveRun(root, legacy);
+    const edited = await reconciler.editPendingWorkflowStepPrompt(
+      {
+        root,
+        getDefinition: () => definition,
+        probeStepSession: () => ({ found: false }),
+        spawnStep: async () => ({ sessionId: 'must-not-spawn' }),
+        now: () => '2026-07-12T12:00:00.000Z',
+      },
+      definition.id,
+      legacyRunId,
+      'prepare',
+      'Updated while awaiting explicit adoption.',
+      { actor: 'operator' },
+    );
+
+    expect(edited).toMatchObject({ outcome: 'edited', run: { status: 'parked' } });
+    if (edited.outcome !== 'edited') throw new Error(`expected edit, got ${edited.outcome}`);
+    expect(edited.run.parked).not.toHaveProperty('approval');
+    expect(edited.run.approvalAdoptions).toBeUndefined();
+  });
+
   it.each([1, 2, 3] as const)('explicitly adopts a quiet parked v%s run once with fresh pending authority', async (schemaVersion) => {
     const store = await import('../run-store.js');
     const workflowId = `legacy-adoption-v${schemaVersion}`;
@@ -216,39 +297,56 @@ describe('native Workflow gate approvals', () => {
     });
   });
 
-  it.each([
-    { schemaVersion: 1 as const, sweep: 'direct' as const },
-    { schemaVersion: 2 as const, sweep: 'direct' as const },
-    { schemaVersion: 1 as const, sweep: 'startup' as const },
-    { schemaVersion: 2 as const, sweep: 'startup' as const },
-    { schemaVersion: 1 as const, sweep: 'interval' as const },
-    { schemaVersion: 2 as const, sweep: 'interval' as const },
-  ])('keeps quiet parked v$schemaVersion evidence byte-identical during a $sweep sweep', async ({ schemaVersion, sweep }) => {
+  const inertParkedCases = ([1, 2, 3] as const).flatMap((schemaVersion) =>
+    (['running', 'dispatching'] as const).flatMap((receiptStatus) =>
+      (['direct-sweep', 'startup', 'interval', 'direct-advance'] as const).map((entryPath) => ({
+        schemaVersion,
+        receiptStatus,
+        entryPath,
+      })),
+    ),
+  );
+
+  it.each(inertParkedCases)(
+    'keeps parked v$schemaVersion/$receiptStatus evidence byte-identical through $entryPath',
+    async ({ schemaVersion, receiptStatus, entryPath }) => {
     const store = await import('../run-store.js');
-    const workflowId = `legacy-inert-${sweep}-v${schemaVersion}`;
-    const runId = `run-legacy-inert-${sweep}-v${schemaVersion}`;
-    const legacy = quietParkedRun(workflowId, runId, schemaVersion);
-    store.saveRun(evidenceRoot, legacy); // seeds the active index used by every sweep path
-    const file = path.join(evidenceRoot, 'reports', 'runs', workflowId, `${runId}.json`);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jinn-workflow-inert-parked-'));
+    const workflowId = `legacy-inert-${entryPath}-${receiptStatus}-v${schemaVersion}`;
+    const runId = `run-legacy-inert-${entryPath}-${receiptStatus}-v${schemaVersion}`;
+    const legacy = parkedRunWithInFlightReceipt(workflowId, runId, schemaVersion, receiptStatus);
+    const file = path.join(root, 'reports', 'runs', workflowId, `${runId}.json`);
     const original = `${JSON.stringify(legacy, null, 2)}\n`;
-    fs.writeFileSync(file, original, 'utf8');
+    const seed = () => {
+      store.saveRun(root, legacy); // seeds the active index used by sweep paths
+      fs.writeFileSync(file, original, 'utf8'); // restore the exact historical bytes after indexing
+    };
+    if (entryPath !== 'interval') seed();
     const originalHash = createHash('sha256').update(original).digest('hex');
     let spawns = 0;
     const deps = {
-      root: evidenceRoot,
+      root,
       getDefinition: () => approvalDefinition(workflowId),
-      probeStepSession: () => ({ found: false }),
+      probeStepSession: () => receiptStatus === 'running'
+        ? ({ found: true as const, sessionId: 'legacy-running-session', status: 'idle' as const, finalAssistantText: 'must not settle' })
+        : ({ found: true as const, sessionId: 'legacy-dispatching-session', status: 'running' as const }),
       spawnStep: async () => { spawns++; return { sessionId: 'must-not-spawn' }; },
       now: () => '2026-07-12T12:00:00.000Z',
     };
 
-    if (sweep === 'direct') {
+    if (entryPath === 'direct-sweep') {
       await reconciler.sweepWorkflowRuns(deps);
+    } else if (entryPath === 'direct-advance') {
+      await reconciler.advanceWorkflowRunById(deps, workflowId, runId);
+    } else if (entryPath === 'startup') {
+      const stop = reconciler.startWorkflowRunReconciler(deps, { intervalMs: 60_000 });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      stop();
     } else {
-      const stop = reconciler.startWorkflowRunReconciler(deps, {
-        intervalMs: sweep === 'startup' ? 60_000 : 5,
-      });
-      await new Promise((resolve) => setTimeout(resolve, sweep === 'startup' ? 30 : 35));
+      const stop = reconciler.startWorkflowRunReconciler(deps, { intervalMs: 5 });
+      await new Promise<void>((resolve) => setImmediate(resolve)); // startup sweep completed with no run
+      seed();
+      await new Promise((resolve) => setTimeout(resolve, 20)); // at least one interval tick sees the indexed run
       stop();
     }
 
@@ -258,8 +356,9 @@ describe('native Workflow gate approvals', () => {
     expect(after).toBe(original);
     const persisted = JSON.parse(after) as Record<string, unknown>;
     expect(persisted.schemaVersion).toBe(schemaVersion);
-    expect(persisted).not.toHaveProperty('revision');
+    expect(persisted.revision).toBe(schemaVersion === 3 ? 1 : undefined);
     expect(persisted).not.toHaveProperty('approvalAdoptions');
     expect(persisted.parked).not.toHaveProperty('approval');
-  });
+    },
+  );
 });
