@@ -171,16 +171,15 @@ const RAW_DEFINITION_SCHEMA = closed({
   concurrency: scalar, evidenceRoot: scalar, updatedAt: scalar,
   layout: closed({ source: { type: "string", pattern: "^(generated|normalized|manual)$" }, version: { type: "integer" } }),
 });
-const WORKFLOW_SCHEMA_DEFS = {
+const BASE_WORKFLOW_SCHEMA_DEFS = {
   position: POSITION_SCHEMA, actor: ACTOR_SCHEMA, retry: RETRY_SCHEMA, session: SESSION_SCHEMA,
   options: OPTIONS_SCHEMA, filter: FILTER_SCHEMA, trigger: TRIGGER_SCHEMA, gate: GATE_SCHEMA, condition: CONDITION_SCHEMA,
 };
 
 const DEFINITION_SHAPE =
-  "Prefer SOP {id,name?,title,wakeUp,steps:[{employee?|engine?,instruction}]}. Raw graphs use node types trigger|step|gate|switch|fail|wait and sequence|handoff|loop edges. " +
-  "For failure routing use options.onError:'error-edge' on the source step and lane:'error' on its failure edge; edge.on is unsupported. " +
-  "Assistant text such as \"ERROR\" is ordinary successful output. Error lanes activate only when the session/transport settles failed after retry policy. " +
-  "Switch uses edge.when, fail uses failMessage, wait uses waitMinutes|waitUntil, and positions are server-generated when absent.";
+  "Prefer SOP {id,title,wakeUp,steps:[{employee|engine,instruction}]}. Raw nodes: trigger|step|gate|switch|wait|fail; edges: sequence|handoff|loop. " +
+  "Failure routing requires source options.onError:'error-edge' plus edge lane:'error'; edge.on is unsupported. Text \"ERROR\" is output, not transport failure. " +
+  "Switch uses edge.when; wait uses waitMinutes|waitUntil; fail uses failMessage. Missing positions are generated.";
 
 const SOP_WAKE_UP_SCHEMA = closed({
   kind: { type: "string", pattern: "^(manual|schedule|todo-status|todo-status-change|event|poll)$" },
@@ -192,10 +191,14 @@ const SOP_STEP_SCHEMA = closed({
   id: scalar, title: scalar, label: scalar, employee: scalar, engine: scalar, role: scalar,
   instruction: scalar, instructions: scalar, optional: scalar, options: schemaRef("options"), todoTransition: scalar,
 });
+const WORKFLOW_SCHEMA_DEFS = {
+  ...BASE_WORKFLOW_SCHEMA_DEFS,
+  sopWakeUp: SOP_WAKE_UP_SCHEMA,
+};
 const SOP_SCHEMA = {
   ...closed({
     id: scalar, name: scalar, title: scalar, description: scalar,
-    wakeUp: SOP_WAKE_UP_SCHEMA, wakeup: SOP_WAKE_UP_SCHEMA,
+    wakeUp: schemaRef("sopWakeUp"), wakeup: schemaRef("sopWakeUp"),
     steps: { type: "array", items: SOP_STEP_SCHEMA }, concurrency: scalar,
   }),
   description: DEFINITION_SHAPE,

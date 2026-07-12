@@ -131,9 +131,10 @@ describe("tool manifest budget", () => {
       inputSchema: t.inputSchema,
     }));
     const payload = JSON.stringify({ tools });
-    // Local $defs keep the closed workflow graph contract compact. This is tighter
-    // than the initial inline-schema allowance while retaining every nested closure.
-    expect(Math.ceil(payload.length / 4)).toBeLessThanOrEqual(4000);
+    // MCP input-schema references are document-local, so plan/validate/create/update
+    // must each carry the closed authoring contract they advertise. Keep that safety
+    // contract self-contained while bounding the intentional manifest increase.
+    expect(Math.ceil(payload.length / 4)).toBeLessThanOrEqual(7500);
   });
 
   it("keeps tool names, required arrays, and enum arrays stable", () => {

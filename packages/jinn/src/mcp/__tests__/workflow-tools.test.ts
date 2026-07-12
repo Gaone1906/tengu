@@ -270,7 +270,10 @@ describe("workflow tools — registry + schemas", () => {
       const schema = tools.find((candidate) => candidate.name === name)!.inputSchema as unknown as Schema;
       const sop = schema.properties?.sop;
       const graph = schema.properties?.[name === "update_workflow" ? "patch" : "definition"];
-      const wakeUp = sop?.properties?.wakeUp;
+      const wakeUpRef = (sop?.properties?.wakeUp as Schema & { $ref?: string } | undefined)?.$ref?.split("/").at(-1);
+      const wakeUp = wakeUpRef
+        ? (schema as Schema & { $defs?: Record<string, Schema> }).$defs?.[wakeUpRef]
+        : sop?.properties?.wakeUp;
       const step = sop?.properties?.steps?.items;
       const node = graph?.properties?.nodes?.items;
       const edge = graph?.properties?.edges?.items;
