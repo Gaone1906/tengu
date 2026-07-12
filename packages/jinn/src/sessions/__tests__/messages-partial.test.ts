@@ -188,6 +188,44 @@ describe("messages partial (mid-turn streaming) blocks", () => {
     expect(reg.getMessages("block-1")).toEqual([]);
   });
 
+  it("does not persist a stale lower-version patch over a newer block", () => {
+    newSession("block-stale-patch");
+    reg.applyBlockEnvelope("block-stale-patch", {
+      op: "put",
+      block: {
+        id: "plan",
+        type: "task-list",
+        version: 3,
+        status: "running",
+        title: "Plan",
+        summary: "Current",
+        payload: { items: [{ id: "a", text: "Read code", status: "running" }] },
+      },
+    });
+
+    reg.applyBlockEnvelope("block-stale-patch", {
+      op: "patch",
+      block: {
+        id: "plan",
+        type: "task-list",
+        version: 2,
+        status: "error",
+        summary: "Stale",
+        payload: { summary: "Stale patch" },
+      },
+    }, "Stale fallback");
+
+    const message = reg.getMessages("block-stale-patch")[0];
+    expect(message.content).toBe("Plan: 1 item");
+    expect(message.blocks?.[0]).toMatchObject({
+      version: 3,
+      status: "running",
+      summary: "Current",
+      payload: { items: [{ id: "a", text: "Read code", status: "running" }] },
+    });
+    expect(message.blocks?.[0]?.payload).not.toHaveProperty("summary");
+  });
+
   it("updates synthetic block row text created with custom fallback text", () => {
     newSession("block-custom-patch");
     reg.applyBlockEnvelope("block-custom-patch", {

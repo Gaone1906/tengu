@@ -1,0 +1,75 @@
+[
+  {
+    "expectedFallback": "Todo “Prepare release” · in review",
+    "envelope": {
+      "op": "put",
+      "block": {
+        "id": "todo:wi_release",
+        "type": "todo-activity",
+        "version": 7,
+        "status": "waiting",
+        "title": "Prepare release",
+        "summary": "In review",
+        "payload": {
+          "todoId": "wi_release",
+          "action": "status-changed",
+          "status": "in_review",
+          "assignee": "release-lead",
+          "updatedAt": "2026-07-12T00:58:00.000Z",
+          "activityReceipt": {
+            "id": "todo:wi_release",
+            "operationId": "op-release-review",
+            "toolName": "update_work_item"
+          }
+        }
+      }
+    }
+  },
+  {
+    "expectedFallback": "Workflow “Release review” · updated to v4",
+    "envelope": {
+      "op": "put",
+      "block": {
+        "id": "workflow-definition:release-review",
+        "type": "workflow-definition",
+        "version": 4,
+        "status": "completed",
+        "title": "Release review",
+        "summary": "Updated to version 4",
+        "payload": {
+          "workflowId": "release-review",
+          "action": "updated",
+          "definitionStatus": "active",
+          "updatedAt": "2026-07-12T01:00:00.000Z",
+          "openPath": "/workflow/release-review?mode=edit"
+        }
+      }
+    }
+  },
+  {
+    "expectedFallback": "Workflow “Release review” · waiting for approval",
+    "envelope": {
+      "op": "put",
+      "block": {
+        "id": "workflow-run:release-review:run-20260712010101-abcd1234",
+        "type": "workflow-run",
+        "version": 3,
+        "status": "waiting",
+        "title": "Release review",
+        "summary": "Waiting for approval",
+        "payload": {
+          "workflowId": "release-review",
+          "runId": "run-20260712010101-abcd1234",
+          "action": "started",
+          "runStatus": "parked",
+          "startedAt": "2026-07-12T01:01:01.000Z",
+          "endedAt": null,
+          "completedSteps": 1,
+          "totalSteps": 3,
+          "parkedDescription": "Approve the release candidate",
+          "openPath": "/workflow/release-review?mode=runs&run=run-20260712010101-abcd1234"
+        }
+      }
+    }
+  }
+]

@@ -3,9 +3,62 @@ export type StreamDeltaType = "text" | "text_snapshot" | "tool_use" | "tool_resu
 /** Generous but bounded body size for durable communication-card metadata. */
 export const STRUCTURED_MESSAGE_BODY_MAX_CHARS = 16_000;
 
-export type ChatBlockType = "task-list" | "delegation" | "dispatch";
+export type ChatBlockType =
+  | "task-list"
+  | "delegation"
+  | "dispatch"
+  | "todo-activity"
+  | "workflow-definition"
+  | "workflow-run";
 export type ChatBlockStatus = "queued" | "dispatched" | "running" | "waiting" | "done" | "completed" | "error";
 export type ChatBlockOp = "put" | "patch" | "remove";
+
+/** Correlation metadata authored only by verified server mutation paths. */
+export type ActivityReceipt = JsonObject & {
+  id: string;
+  operationId: string;
+  toolName: string;
+};
+
+export type TodoActivityPayload = JsonObject & {
+  todoId: string;
+  action: string;
+  status: string;
+  assignee?: string | null;
+  actor?: string | null;
+  approvalState?: string | null;
+  updatedAt?: string;
+  preview?: string;
+  latestError?: string | null;
+  activityReceipt?: ActivityReceipt;
+};
+
+export type WorkflowDefinitionActivityPayload = JsonObject & {
+  workflowId: string;
+  action: string;
+  definitionStatus: string;
+  updatedAt?: string;
+  openPath?: string;
+  preview?: string;
+  latestError?: string | null;
+  activityReceipt?: ActivityReceipt;
+};
+
+export type WorkflowRunActivityPayload = JsonObject & {
+  workflowId: string;
+  runId: string;
+  action: string;
+  runStatus: string;
+  startedAt?: string;
+  endedAt?: string | null;
+  completedSteps?: number;
+  totalSteps?: number;
+  parkedDescription?: string;
+  openPath?: string;
+  preview?: string;
+  latestError?: string | null;
+  activityReceipt?: ActivityReceipt;
+};
 
 export interface ChatBlock {
   id: string;

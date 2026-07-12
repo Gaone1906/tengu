@@ -2667,6 +2667,9 @@ export function applyBlockEnvelope(
 
   if (existing) {
     const oldBlock = existing.blocks.find((block) => block.id === envelope.block.id);
+    if (envelope.op === "patch" && oldBlock && envelope.block.version < oldBlock.version) {
+      return existing.row.id;
+    }
     const nextBlocks = existing.blocks.map((block) =>
       block.id === envelope.block.id
         ? envelope.op === "patch" ? mergeBlock(block, envelope.block) : envelope.block
