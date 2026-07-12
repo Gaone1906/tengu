@@ -15,6 +15,7 @@ import { buildApprovalTools } from "./approval-tools.js";
 import { buildCostTools } from "./cost-tools.js";
 import { buildCronTools } from "./cron-tools.js";
 import { buildFileTools } from "./file-tools.js";
+import { buildConnectorTools } from "./connector-tools.js";
 import { JINN_SESSION_CAPABILITY_ENV, JINN_SESSION_ID_ENV } from "./identity.js";
 
 /**
@@ -106,7 +107,7 @@ export { gatewayGet, gatewayRequest, JinnMcpToolError, type JinnMcpContext, type
  * Growth discipline: the belt budget lives in the GRS-017 design §7 and the
  * GRS-020 design §4 (net context diet positive — measured in
  * mcp/__tests__/context-diet.test.ts and knowledge-diet.test.ts); at this
- * size (44) the hand-rolled protocol below is still comfortably sufficient —
+ * size (46) the hand-rolled protocol below is still comfortably sufficient —
  * revisit the SDK question only if a future group needs capabilities beyond
  * tools/list + tools/call (resources, prompts, progress).
  */
@@ -122,6 +123,7 @@ export function buildTools(): JinnMcpTool[] {
     ...buildWorkItemTools(),
     ...buildApprovalTools(),
     ...buildFileTools(),
+    ...buildConnectorTools(),
     ...buildWorkflowTools(),
   ];
 }

@@ -991,7 +991,7 @@ function buildConnectorContext(connectors: string[], gatewayUrl: string, jinnMcp
   if (jinnMcpAttached) {
     return [
       `## Available connectors: ${connectors.join(", ")}`,
-      `Use the attached Jinn MCP tools and company routing for company operations; connector configuration lives in \`config.yaml\`.`,
+      `Use \`send_connector_message\` to send through a configured connector; connector configuration lives in \`config.yaml\`.`,
     ].join("\n");
   }
   return [
@@ -1051,6 +1051,7 @@ function buildApiReference(
     return [
       header,
       `Use the attached Jinn MCP tools for company operations (sessions, delegation, Todos, Workflows, org, reference reads, and managed files).`,
+      `Use \`publish_attachment\` to present a local file or image in this chat. Viewing a file yourself does not send it to the operator.`,
       `The full HTTP endpoint reference remains in CLAUDE.md / AGENTS.md for gateway maintenance and non-MCP fallback.`,
     ].join("\n");
   }

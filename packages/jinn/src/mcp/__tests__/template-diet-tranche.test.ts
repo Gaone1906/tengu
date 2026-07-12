@@ -71,13 +71,12 @@ function section(template: string, startHeading: string, nextHeading: string): s
   return template.slice(start, end);
 }
 
-/** The rows the table comment names deletable: session + org endpoints. */
+/** The rows the MCP-first company surface replaces: session + org endpoints. */
 function deletableTableRows(template: string): string[] {
   return template
     .split("\n")
     .filter(
       (l) =>
-        (l.startsWith("| `/api/sessions") || l.startsWith("| `/api/org")) &&
-        !l.includes("attachments"), // attachments has no tool equivalent and stays
+        l.startsWith("| `/api/sessions") || l.startsWith("| `/api/org"),
     );
 }

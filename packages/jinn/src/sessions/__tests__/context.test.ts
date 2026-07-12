@@ -223,7 +223,7 @@ describe("buildContext — Jinn MCP usage directive", () => {
     expect(out).not.toContain("## Company Identity");
   });
 
-  it("MCP-attached sessions are not taught gateway/connector/file side-door curl flows", () => {
+  it("MCP-attached sessions use typed tools for chat attachments and connector delivery", () => {
     const out = buildContext({
       ...baseOpts,
       employee: qa,
@@ -235,12 +235,14 @@ describe("buildContext — Jinn MCP usage directive", () => {
 
     expect(out).toContain("Your hands are the attached Jinn MCP");
     expect(out).toContain("Local shell/filesystem access remains available for implementation work");
+    expect(out).toContain("publish_attachment");
+    expect(out).toContain("Viewing a file yourself does not send it to the operator");
+    expect(out).toContain("send_connector_message");
     expect(out).not.toContain("curl -X POST");
     expect(out).not.toContain("curl POST");
     expect(out).not.toContain("JINN_GATEWAY_TOKEN");
     expect(out).not.toContain("/api/connectors");
     expect(out).not.toContain("/api/sessions");
-    expect(out).not.toContain("/attachments");
     expect(out).not.toContain("board.json");
     expect(out).not.toContain("Create new employees by writing YAML");
     expect(out).not.toContain("editing YAML");

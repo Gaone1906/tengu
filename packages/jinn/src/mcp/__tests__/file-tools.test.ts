@@ -90,6 +90,49 @@ function boundCtx(fetchFn: typeof fetch): JinnMcpContext {
 }
 
 describe("managed file MCP tools", () => {
+  it("publishes a local file only into the bound caller session", async () => {
+    const screenshot = path.join(tmpHome, "review.png");
+    const bytes = Buffer.from("test-image-bytes");
+    fs.writeFileSync(screenshot, bytes);
+    let request: { url: URL; init?: RequestInit } | undefined;
+    const fetchFn = (async (input: string | URL, init?: RequestInit) => {
+      request = { url: new URL(typeof input === "string" ? input : input.toString()), init };
+      return {
+        status: 201,
+        text: async () => JSON.stringify({
+          id: "file-1",
+          media: { type: "image", url: "/api/files/file-1", name: "review.png" },
+        }),
+      } as Response;
+    }) as typeof fetch;
+
+    const out = await tool("publish_attachment").handler(
+      { path: screenshot, caption: "Review board" },
+      boundCtx(fetchFn),
+    ) as Record<string, unknown>;
+
+    expect(request?.url.pathname).toBe(`/api/sessions/${fileSession.id}/attachments`);
+    expect(request?.init?.method).toBe("POST");
+    const body = JSON.parse(String(request?.init?.body));
+    expect(body).toEqual({
+      content: bytes.toString("base64"),
+      filename: "review.png",
+      text: "Review board",
+    });
+    expect(out).toMatchObject({ status: "published", filename: "review.png" });
+    expect(JSON.stringify(out)).not.toContain(screenshot);
+  });
+
+  it("refuses attachment publishing before reading when caller identity is absent", async () => {
+    const screenshot = path.join(tmpHome, "unbound.png");
+    fs.writeFileSync(screenshot, "must-not-be-read");
+    const calls: string[] = [];
+    const ctx = { gatewayUrl: "http://gateway.test", token: "tok", fetchFn: routeFetch(calls) };
+
+    await expect(tool("publish_attachment").handler({ path: screenshot }, ctx)).rejects.toThrow(/caller identity unavailable/i);
+    expect(calls).toHaveLength(0);
+  });
+
   it("refuses list/read locally when the MCP server has no bound caller identity", async () => {
     const calls: string[] = [];
     const ctx = { gatewayUrl: "http://gateway.test", token: "tok", fetchFn: routeFetch(calls) };

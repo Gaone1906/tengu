@@ -3,13 +3,16 @@ import crypto from "node:crypto";
 import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
-const MAX_MANIFEST_TOKENS = 7000;
+// The two output-parity actions (chat attachment + connector delivery) admitted
+// in 2026-07 add 122 Pi-wrapper tokens. Keep a narrow 25-token headroom rather
+// than deleting real capability to preserve the former round-number cap.
+const MAX_MANIFEST_TOKENS = 7100;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 6655, sha256: "342c09a9741d889b2b740b02918381f12a681ae8fd4fa92d68f1a992c88511c6" },
-  pi: { tokens: 6953, sha256: "61871df2e2542ba46960bd88efec6c045d5989b8e4c6650e0d8c214fbe998440" },
-  openai: { tokens: 6773, sha256: "2845af554dee06286b5c2548fedfee656030e59d913c0f103e53e7d37a4a726c" },
+  rpc: { tokens: 6764, sha256: "d566c2174ad7c49514e6fd9b5dd89a3e910961e04451bdd3c06e3f65975af683" },
+  pi: { tokens: 7075, sha256: "9dd60ccf0b868a14d02f28b2bfe24beac8135a8ba299d8f98589b428a18d9046" },
+  openai: { tokens: 6888, sha256: "8827ae87cadfa7df860829827248a3c9d64c51307fe0a278dbfcd783b5f532e1" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -57,6 +60,7 @@ const EXPECTED_TOOL_NAMES = [
   "list_workflow_runs",
   "list_workflows",
   "plan_workflow",
+  "publish_attachment",
   "read_file",
   "read_knowledge",
   "read_session",
@@ -68,6 +72,7 @@ const EXPECTED_TOOL_NAMES = [
   "search_sessions",
   "search_work_items",
   "send_to_session",
+  "send_connector_message",
   "spawn_session",
   "start_workflow_run",
   "stop_session",
@@ -104,6 +109,7 @@ const EXPECTED_REQUIRED = {
   list_workflow_runs: ["workflowId"],
   list_workflows: [],
   plan_workflow: [],
+  publish_attachment: ["path"],
   read_file: ["path"],
   read_knowledge: ["path"],
   read_session: ["sessionId"],
@@ -115,6 +121,7 @@ const EXPECTED_REQUIRED = {
   search_sessions: [],
   search_work_items: [],
   send_to_session: ["sessionId", "message"],
+  send_connector_message: ["connector", "channel", "text"],
   spawn_session: ["prompt"],
   start_workflow_run: ["workflowId"],
   stop_session: ["sessionId"],
@@ -152,7 +159,7 @@ function collectEnums(value: unknown, path: string[] = []): Array<[string, strin
 }
 
 describe("tool manifest budget", () => {
-  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7000 o200k_base tokens", async () => {
+  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7100 o200k_base tokens", async () => {
     const tools = buildTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
     const wrappers = {
       rpc: { jsonrpc: "2.0", id: 1, result: { tools } },
@@ -191,7 +198,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(44);
+    expect(tools).toHaveLength(46);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);

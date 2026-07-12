@@ -1,9 +1,12 @@
+import fs from "node:fs";
 import path from "node:path";
-import { assertBoundCaller, gatewayGet, JinnMcpToolError, type JinnMcpContext, type JinnMcpTool } from "./toolkit.js";
+import { assertBoundCaller, gatewayGet, gatewayRequest, JinnMcpToolError, type JinnMcpContext, type JinnMcpTool } from "./toolkit.js";
 
 const LIST_LIMIT_DEFAULT = 20;
 const LIST_LIMIT_MAX = 50;
 const MANAGED_PREFIXES = ["files/", "uploads/"] as const;
+const ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
+const ATTACHMENT_CAPTION_MAX_CHARS = 4_000;
 
 interface FileMetaWire {
   id?: unknown;
@@ -89,6 +92,34 @@ function gatewayFailure(what: string, status: number, body: unknown): JinnMcpToo
   return new JinnMcpToolError(`${what} failed (HTTP ${status}): ${detail}`);
 }
 
+function attachmentPath(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new JinnMcpToolError("path is required and must be an absolute local file path");
+  }
+  if (value !== value.trim() || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new JinnMcpToolError("path must be normalized and contain no control bytes");
+  }
+  if (!path.isAbsolute(value)) throw new JinnMcpToolError("path must be absolute");
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(value);
+  } catch {
+    throw new JinnMcpToolError(`attachment file not found: ${path.basename(value) || "file"}`);
+  }
+  if (!stat.isFile()) throw new JinnMcpToolError("path must point to a regular file");
+  if (stat.size > ATTACHMENT_MAX_BYTES) throw new JinnMcpToolError("attachment exceeds the 50 MB limit");
+  return value;
+}
+
+function attachmentCaption(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") throw new JinnMcpToolError("caption must be a string when provided");
+  if (value.length > ATTACHMENT_CAPTION_MAX_CHARS) {
+    throw new JinnMcpToolError(`caption exceeds ${ATTACHMENT_CAPTION_MAX_CHARS} characters`);
+  }
+  return value;
+}
+
 export function buildFileTools(): JinnMcpTool[] {
   const list: JinnMcpTool = {
     name: "list_files",
@@ -144,5 +175,41 @@ export function buildFileTools(): JinnMcpTool[] {
     },
   };
 
-  return [list, read];
+  const publish: JinnMcpTool = {
+    name: "publish_attachment",
+    description: "Publish a local file or image in this chat.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        caption: { type: "string" },
+      },
+      required: ["path"],
+    },
+    handler: async (args, ctx) => {
+      assertBoundCaller(ctx);
+      const localPath = attachmentPath(args.path);
+      const filename = path.basename(localPath);
+      const content = fs.readFileSync(localPath).toString("base64");
+      const { status, body } = await gatewayRequest(
+        ctx,
+        "POST",
+        `/api/sessions/${encodeURIComponent(ctx.callerSessionId)}/attachments`,
+        { content, filename, text: attachmentCaption(args.caption) },
+      );
+      if (status >= 400) throw gatewayFailure(`publishing attachment "${filename}"`, status, body);
+      const response = body && typeof body === "object" ? body as Record<string, unknown> : {};
+      const message = response.message && typeof response.message === "object"
+        ? response.message as Record<string, unknown>
+        : {};
+      return {
+        status: "published",
+        filename,
+        media: response.media ?? null,
+        messageId: message.id ?? null,
+      };
+    },
+  };
+
+  return [list, read, publish];
 }
