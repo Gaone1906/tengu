@@ -507,8 +507,22 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     ["missing content type", '{"expectedVersion":1,"title":"safe"}', "", "Todo edit request must be valid JSON."],
     ["wrong content type", '{"expectedVersion":1,"title":"safe"}', "text/plain", "Todo edit request must be valid JSON."],
     ["ambiguous content type", '{"expectedVersion":1,"title":"safe"}', "application/json, text/plain", "Todo edit request must be valid JSON."],
+    ["dangling media parameter separator", '{"expectedVersion":1,"title":"safe"}', "application/json;", "Todo edit request must be valid JSON."],
+    ["parameter without equals", '{"expectedVersion":1,"title":"safe"}', "application/json; charset", "Todo edit request must be valid JSON."],
+    ["empty token parameter", '{"expectedVersion":1,"title":"safe"}', "application/json; charset=", "Todo edit request must be valid JSON."],
+    ["empty quoted parameter", '{"expectedVersion":1,"title":"safe"}', 'application/json; charset=""', "Todo edit request must be valid JSON."],
+    ["missing parameter name", '{"expectedVersion":1,"title":"safe"}', "application/json; =utf-8", "Todo edit request must be valid JSON."],
+    ["unterminated quoted parameter", '{"expectedVersion":1,"title":"safe"}', 'application/json; charset="utf-8', "Todo edit request must be valid JSON."],
+    ["dangling quoted escape", '{"expectedVersion":1,"title":"safe"}', 'application/json; profile="safe\\', "Todo edit request must be valid JSON."],
+    ["duplicate charset", '{"expectedVersion":1,"title":"safe"}', "application/json; charset=utf-8; charset=utf-8", "Todo edit request must be valid JSON."],
+    ["conflicting charset", '{"expectedVersion":1,"title":"safe"}', "application/json; charset=utf-8; charset=utf-16", "Todo edit request must be valid JSON."],
+    ["duplicate generic parameter", '{"expectedVersion":1,"title":"safe"}', "application/json; profile=one; PROFILE=two", "Todo edit request must be valid JSON."],
+    ["header tab control", '{"expectedVersion":1,"title":"safe"}', "application/json;\tcharset=utf-8", "Todo edit request must be valid JSON."],
+    ["header NUL control", '{"expectedVersion":1,"title":"safe"}', "application/json; charset=utf-8\u0000", "Todo edit request must be valid JSON."],
+    ["empty structured suffix prefix", '{"expectedVersion":1,"title":"safe"}', "application/+json", "Todo edit request must be valid JSON."],
   ])("returns a fixed typed response for %s Todo edit bodies", async (_name, raw, contentType, error) => {
     const item = store.createWorkItem({ title: "Raw validation target" });
+    const eventsBefore = store.listWorkItemEvents(item.id).length;
     const cap = makeRes();
     const headers = { ...operatorHeaders, "content-type": contentType };
     await api.handleApiRequest(makeRawReq("PATCH", `/api/work-items/${item.id}`, raw, headers), cap.res, ctx);
@@ -518,6 +532,33 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
       code: "todo_invalid_patch",
     });
     expectNoHostileInput(cap.body);
+    expect(store.getWorkItem(item.id)).toMatchObject({ title: "Raw validation target", version: 1 });
+    expect(store.listWorkItemEvents(item.id)).toHaveLength(eventsBefore);
+  });
+
+  it.each([
+    "application/json",
+    "Application/JSON",
+    " application/json ",
+    "application/json;charset=utf-8",
+    "application/json ; charset = UTF-8 ; profile = safe",
+    'application/json; charset="utf-8"; profile="safe value"',
+    'application/json; profile="safe,comma"',
+    "application/merge-patch+json",
+    "application/vnd.example.todo+json; version=1",
+  ])("accepts the valid JSON media type %s", async (contentType) => {
+    const item = store.createWorkItem({ title: "Valid media target" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeRawReq("PATCH", `/api/work-items/${item.id}`, '{"expectedVersion":1,"title":"valid media"}', {
+        ...operatorHeaders,
+        "content-type": contentType,
+      }),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(200);
+    expect(cap.body.workItem).toMatchObject({ title: "valid media", version: 2 });
   });
 
   it("preserves authorization ordering for malformed Todo edit JSON", async () => {

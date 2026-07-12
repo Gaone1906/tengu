@@ -179,6 +179,7 @@ import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir } from "./files.js";
 import { readJsonBody, readBodyRaw } from "./http-helpers.js";
+import { isJsonMediaType } from "./media-type.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions } from "../sessions/callbacks.js";
@@ -1701,11 +1702,6 @@ function todoEditValidationError(
   code: TodoEditValidationCode = 'todo_invalid_patch',
 ): void {
   json(res, { error, code }, 400);
-}
-
-function isTodoEditJsonContentType(value: string | string[] | undefined): boolean {
-  if (typeof value !== 'string') return false;
-  return /^\s*application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)\s*(?:;[^,\r\n]*)?\s*$/i.test(value);
 }
 
 function todoEditContentLength(value: string | string[] | undefined): number | undefined | null {
@@ -3251,7 +3247,7 @@ export async function handleApiRequest(
       if (!hasSupportedTodoEditContentEncoding(req.headers["content-encoding"])) {
         return json(res, invalidJsonResponse, 400);
       }
-      if (!isTodoEditJsonContentType(req.headers["content-type"])) {
+      if (!isJsonMediaType(req.headers["content-type"])) {
         return json(res, invalidJsonResponse, 400);
       }
       const parsed = await readJsonBody(req, res, {
