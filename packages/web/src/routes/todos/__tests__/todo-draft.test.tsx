@@ -1077,6 +1077,86 @@ describe("useTodoDraft conditional state machine", () => {
     expect(mounted.result.current.status).toBe("error")
   })
 
+  it("refetches before Save when the cached baseline is below the observed version floor", async () => {
+    const loadRemote = vi.fn().mockResolvedValue(snapshot(first, 9))
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "Local" }, 10)))
+    const mounted = renderHook(
+      ({ version }: { version: number }) => useTodoDraft({
+        id: "save-observed-version-floor",
+        initial: first,
+        serverVersion: version,
+        save,
+        loadRemote,
+      }),
+      { initialProps: { version: 7 } },
+    )
+    act(() => mounted.result.current.change("title", "Local"))
+    mounted.rerender({ version: 9 })
+
+    act(() => mounted.result.current.save({ title: "Local" }))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+
+    expect(loadRemote).toHaveBeenCalledTimes(1)
+    expect(save.mock.calls[0]![0]).toMatchObject({ patch: { title: "Local" }, expectedVersion: 9 })
+  })
+
+  it("does not mint when version-floor acquisition returns a lower snapshot", async () => {
+    const loadRemote = vi.fn().mockResolvedValue(snapshot(first, 8))
+    const save = vi.fn()
+    const mounted = renderHook(
+      ({ version }: { version: number }) => useTodoDraft({
+        id: "save-floor-stale-get",
+        initial: first,
+        serverVersion: version,
+        save,
+        loadRemote,
+      }),
+      { initialProps: { version: 7 } },
+    )
+    act(() => mounted.result.current.change("title", "Local"))
+    mounted.rerender({ version: 9 })
+
+    act(() => mounted.result.current.save({ title: "Local" }))
+    await waitFor(() => expect(mounted.result.current.status).toBe("error"))
+
+    expect(loadRemote).toHaveBeenCalledTimes(1)
+    expect(save).not.toHaveBeenCalled()
+    expect(mounted.result.current.isAcknowledged).toBe(false)
+  })
+
+  it("stops safely when a stale cached baseline has no fresh loader", () => {
+    const save = vi.fn()
+    const mounted = renderHook(
+      ({ version }: { version: number }) => useTodoDraft({
+        id: "save-floor-no-loader",
+        initial: first,
+        serverVersion: version,
+        save,
+      }),
+      { initialProps: { version: 7 } },
+    )
+    act(() => mounted.result.current.change("title", "Local"))
+    mounted.rerender({ version: 9 })
+
+    act(() => mounted.result.current.save({ title: "Local" }))
+
+    expect(save).not.toHaveBeenCalled()
+    expect(mounted.result.current.status).toBe("error")
+    expect(mounted.result.current.isAcknowledged).toBe(false)
+  })
+
+  it("allows an equal cached baseline at the version floor", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "Local" }, 10)))
+    const { result } = renderHook(() => useTodoDraft({ id: "save-equal-floor", initial: first, serverVersion: 9, save }))
+    act(() => {
+      result.current.change("title", "Local")
+      result.current.save({ title: "Local" })
+    })
+
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(save.mock.calls[0]![0]).toMatchObject({ expectedVersion: 9 })
+  })
+
   it("durably narrows a two-field conflict before publishing Rebase state", async () => {
     const conflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
     const save = vi.fn().mockRejectedValue(conflict)
@@ -1092,11 +1172,14 @@ describe("useTodoDraft conditional state machine", () => {
     expect(mounted.result.current.conflictFields).toEqual(["title"])
     expect(loadTodoJournal("rebase-conflict-subset")).toMatchObject({
       patch: { title: "Local title", priority: 3 },
-      baseline: { title: "Remote title", priority: 0 },
+      baseline: { title: first.title, priority: 0 },
       baselineVersion: 8,
       conflictFields: ["title"],
     })
     expect(loadTodoJournal("rebase-conflict-subset")?.request).toBeUndefined()
+    act(() => mounted.result.current.rebaseRemote(snapshot({ ...first, title: "Remote title" }, 8)))
+    expect(mounted.result.current.conflictFields).toEqual(["title"])
+    expect(save).toHaveBeenCalledTimes(1)
     mounted.unmount()
 
     const recovered = renderHook(() => useTodoDraft({
@@ -1106,6 +1189,16 @@ describe("useTodoDraft conditional state machine", () => {
       save,
     }))
     expect(recovered.result.current.conflictFields).toEqual(["title"])
+    act(() => recovered.result.current.rebaseRemote(snapshot({ ...first, title: "Remote title" }, 8)))
+    expect(recovered.result.current.conflictFields).toEqual(["title"])
+    expect(save).toHaveBeenCalledTimes(1)
+
+    act(() => recovered.result.current.overwriteRemote(snapshot({ ...first, title: "Remote title" }, 8)))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
+    expect(save.mock.calls[1]![0]).toMatchObject({
+      patch: { title: "Local title", priority: 3 },
+      expectedVersion: 8,
+    })
   })
 
   it("does not publish a narrowed Rebase conflict when its journal replacement is silent", async () => {
@@ -1169,11 +1262,19 @@ describe("useTodoDraft conditional state machine", () => {
     expect(save).not.toHaveBeenCalled()
     expect(loadTodoJournal(id)).toMatchObject({
       patch,
-      baseline: Object.fromEntries(Object.keys(patch).map((field) => [field, remoteDraft[field as keyof typeof remoteDraft]])),
+      baseline: Object.fromEntries(Object.keys(patch).map((field) => [
+        field,
+        fields.includes(field as never)
+          ? baseline[field as keyof typeof baseline]
+          : remoteDraft[field as keyof typeof remoteDraft],
+      ])),
       baselineVersion: 9,
       conflictFields: fields,
     })
     expect(loadTodoJournal(id)?.request).toBeUndefined()
+    act(() => result.current.rebaseRemote(snapshot(remoteDraft, 9)))
+    expect(result.current.conflictFields).toEqual(fields)
+    expect(save).not.toHaveBeenCalled()
   })
 
   it("keeps active cleanup blocked when journal removal silently does nothing", async () => {
