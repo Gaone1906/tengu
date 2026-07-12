@@ -942,6 +942,38 @@ describe("Todo detail navigation and draft recovery", () => {
     await waitFor(() => expect(screen.getByTestId("todo-ledger-scroll").scrollTop).toBe(417))
   })
 
+  it("restores row focus after a detail reload and every repeated Back navigation", async () => {
+    const ref = todoPrivateRef(PRIVATE_ID)
+    renderPage([
+      { pathname: "/todos" },
+      {
+        pathname: "/todos",
+        state: {
+          todoRef: ref,
+          todoScroll: 417,
+          todoAnchorRef: ref,
+          todoAnchorOffset: 0,
+          todoPageDepth: { backlog: 1 },
+        },
+      },
+    ])
+
+    expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+    act(() => navigate(-1))
+    await waitFor(() => expect(screen.queryByTestId("detail-sheet")).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Open Recoverable todo" }),
+    ))
+
+    act(() => navigate(1))
+    expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+    act(() => navigate(-1))
+    await waitFor(() => expect(screen.queryByTestId("detail-sheet")).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Open Recoverable todo" }),
+    ))
+  })
+
   it("reloads enough pages to resolve and restore a second-page detail anchor", async () => {
     const rows = Array.from({ length: 29 }, (_, index): WorkItemCompactWire => ({
       ...compact,

@@ -296,6 +296,9 @@ export default function TodosPage() {
   const ledgerScrollRef = useRef<HTMLDivElement>(null)
   const ledgerHeadingRef = useRef<HTMLHeadingElement>(null)
   const lastDetailOpenerRef = useRef<HTMLElement | null>(null)
+  const lastDetailAnchorRef = useRef<string | null>(anchorRef)
+  const previousFocusOpenRef = useRef(openRef)
+  const pendingDetailFocusRef = useRef<string | null>(null)
   const lastDetailScrollRef = useRef<number | null>(
     typeof historyState?.todoScroll === "number" && Number.isFinite(historyState.todoScroll)
       ? historyState.todoScroll
@@ -325,6 +328,7 @@ export default function TodosPage() {
   liveLocationRef.current = { pathname: location.pathname, search: location.search }
   historyStateRef.current = historyState
   quickRecordsRef.current = quickRecords
+  if (openRef && anchorRef) lastDetailAnchorRef.current = anchorRef
 
   useLayoutEffect(() => {
     liveLocationRef.current = { pathname: location.pathname, search: location.search }
@@ -567,6 +571,30 @@ export default function TodosPage() {
     }
     restoredScrollRef.current = scrollRestoreKey
   }, [ledger.data, openRef, quickRecords, restoringPageDepth, scrollRestoreKey])
+
+  useEffect(() => {
+    const detailClosed = !!previousFocusOpenRef.current && !openRef
+    previousFocusOpenRef.current = openRef
+    if (openRef) {
+      pendingDetailFocusRef.current = null
+      return
+    }
+    if (detailClosed) pendingDetailFocusRef.current = lastDetailAnchorRef.current
+    const pendingAnchor = pendingDetailFocusRef.current
+    if (!pendingAnchor || restoringPageDepth || !ledger.data) return
+
+    // Radix restores its captured opener in a microtask. After a reload that
+    // opener is BODY, so focus the durable, private row anchor one frame later.
+    const frame = window.requestAnimationFrame(() => {
+      const row = ledgerScrollRef.current?.querySelector<HTMLElement>(`[data-todo-anchor="${pendingAnchor}"]`)
+      const rowOpener = row?.querySelector<HTMLElement>('button[aria-label^="Open "]')
+      const remembered = lastDetailOpenerRef.current
+      const target = remembered?.isConnected ? remembered : rowOpener ?? ledgerHeadingRef.current
+      target?.focus({ preventScroll: true })
+      pendingDetailFocusRef.current = null
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [ledger.data, openRef, restoringPageDepth])
 
   const cancelPendingScrollRestore = useCallback(() => {
     if (restoredScrollRef.current !== scrollRestoreKey) {
