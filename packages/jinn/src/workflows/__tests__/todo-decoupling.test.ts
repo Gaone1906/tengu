@@ -184,6 +184,7 @@ function pollScript(name: string, output: unknown): string {
 
 function harness() {
   const sessions = new Map<string, import('../advance.js').StepSessionProbe>();
+  const stopStepSession = vi.fn(async () => undefined);
   const apiContext = {
     getConfig: () => ({ gateway: {}, engines: {} }),
     connectors: new Map(),
@@ -204,7 +205,7 @@ function harness() {
       sessions.set(key, { found: true, sessionId, status: 'running' });
       return { sessionId };
     },
-    stopStepSession: async () => undefined,
+    stopStepSession,
   };
   const legacyBridge = (deps as typeof deps & {
     workItems?: {
@@ -253,7 +254,7 @@ function harness() {
       ...(outcome === 'idle' ? { finalAssistantText: `${nodeId} done` } : {}),
     });
   };
-  return { deps, sessions, settle };
+  return { deps, sessions, settle, stopStepSession };
 }
 
 function todoWriteCounts(sourceTodoId: string) {
@@ -382,6 +383,15 @@ describe('Workflow has no Todo write capability', () => {
       outcome: 'cancelled',
       run: { status: 'running', stopping: { to: 'cancelled' } },
     });
+    expect(cancellation.stopStepSession).toHaveBeenCalledTimes(1);
+    expect(cancellation.stopStepSession).toHaveBeenCalledWith(expect.objectContaining({
+      workflowId: cancellationDef.id,
+      runId: cancelling.runId,
+      nodeId: 'cancel-step',
+      sessionKey: modules.advance.stepSessionKey(cancelling.runId, 'cancel-step', 1, 1),
+      sessionId: `session:${cancelling.runId}:cancel-step:1`,
+      reason: 'run-stopping: terminal cancelled requested',
+    }));
     cancellation.settle(cancelling.runId, 'cancel-step', 1, 'interrupted');
     await modules.reconciler.sweepWorkflowRuns(cancellation.deps);
     expect(modules.runStore.getRun(root, cancellationDef.id, cancelling.runId)?.status).toBe('cancelled');

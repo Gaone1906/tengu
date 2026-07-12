@@ -421,7 +421,7 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
         deps.log?.('warn', `[workflow-runs] run ${current.runId}: stopping step session ${stop.sessionKey} failed: ${(err as Error).message}`);
       }
     }
-    // A Todo-transition failure can be discovered after the planner already
+    // A terminal drain request can be discovered after the planner already
     // collected this pass's dispatch batch. Re-plan under `stopping` before using
     // those stale intents; a failing run must never start new siblings.
     // Quiescent only when a pass neither changed state nor asked for a dispatch. A
@@ -1095,15 +1095,6 @@ export async function sweepWorkflowRuns(deps: RunDriverDeps): Promise<number> {
       continue;
     }
     if (!run) continue; // run file gone — stale index entry, pruned on next rebuild
-    if (run.status === 'parked' && run.parked && !run.parked.approval) {
-      examined++;
-      try {
-        await adoptLegacyParkedWorkflowApproval(deps, workflowId, runId);
-      } catch (err) {
-        deps.log?.('warn', `[workflow-runs] adopting parked ${runId} failed: ${(err as Error).message}`);
-      }
-      continue;
-    }
     // Sweepable (GRS-016a): running runs, plus parked runs whose sibling sessions
     // are still in flight (probe-only settles — a park freezes dispatch, not
     // evidence). Parked-and-quiet runs wait on a human; terminals are done.

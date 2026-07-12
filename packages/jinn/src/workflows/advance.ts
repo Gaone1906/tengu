@@ -1918,7 +1918,7 @@ export type ResolveGateDecision = 'approve' | 'reject';
 
 export type ResolveGateResult =
   | { ok: true; run: WorkflowRun }
-  | { ok: false; code: 'not-parked'; message: string };
+  | { ok: false; code: 'not-parked' | 'approval-required'; message: string };
 
 export interface ResolveParkedGateOptions {
   decidedBy?: string;
@@ -1951,25 +1951,13 @@ export function resolveParkedGate(
     return { ok: false, code: 'not-parked', message: `run ${run.runId} is ${run.status}, not parked` };
   }
   const parked = run.parked;
+  if (!parked.approval) {
+    return { ok: false, code: 'approval-required', message: `run ${run.runId} has no native approval evidence` };
+  }
   const next: WorkflowRun = { ...run, steps: run.steps.map((r) => ({ ...r })) };
   const at = now();
   const decidedBy = opts.decidedBy ?? 'operator';
-  const approval = parked.approval
-    ? decideWorkflowGateApproval(parked.approval, decision, decidedBy, at)
-    : {
-        requesterEmployee: null,
-        target: null,
-        targetKind: 'none' as const,
-        entitledEmployees: [],
-        operatorEntitled: false,
-        escalation: null,
-        requestedAt: parked.at ?? at,
-        requestedBy: 'legacy-native-gate',
-        escalatedAt: null,
-        state: decision === 'approve' ? 'approved' as const : 'rejected' as const,
-        decidedBy,
-        decidedAt: at,
-      };
+  const approval = decideWorkflowGateApproval(parked.approval, decision, decidedBy, at);
   next.gateDecisions = [
     ...(run.gateDecisions ?? []),
     {

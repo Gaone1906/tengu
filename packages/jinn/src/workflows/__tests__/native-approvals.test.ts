@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'jinn-workflow-native-approval-'));
@@ -215,26 +216,50 @@ describe('native Workflow gate approvals', () => {
     });
   });
 
-  it('adopts quiet legacy parked runs during a sweep without advancing or spawning them', async () => {
+  it.each([
+    { schemaVersion: 1 as const, sweep: 'direct' as const },
+    { schemaVersion: 2 as const, sweep: 'direct' as const },
+    { schemaVersion: 1 as const, sweep: 'startup' as const },
+    { schemaVersion: 2 as const, sweep: 'startup' as const },
+    { schemaVersion: 1 as const, sweep: 'interval' as const },
+    { schemaVersion: 2 as const, sweep: 'interval' as const },
+  ])('keeps quiet parked v$schemaVersion evidence byte-identical during a $sweep sweep', async ({ schemaVersion, sweep }) => {
     const store = await import('../run-store.js');
-    const workflowId = 'legacy-adoption-sweep';
-    const runId = 'run-legacy-sweep';
-    store.saveRun(evidenceRoot, quietParkedRun(workflowId, runId, 2));
+    const workflowId = `legacy-inert-${sweep}-v${schemaVersion}`;
+    const runId = `run-legacy-inert-${sweep}-v${schemaVersion}`;
+    const legacy = quietParkedRun(workflowId, runId, schemaVersion);
+    store.saveRun(evidenceRoot, legacy); // seeds the active index used by every sweep path
+    const file = path.join(evidenceRoot, 'reports', 'runs', workflowId, `${runId}.json`);
+    const original = `${JSON.stringify(legacy, null, 2)}\n`;
+    fs.writeFileSync(file, original, 'utf8');
+    const originalHash = createHash('sha256').update(original).digest('hex');
     let spawns = 0;
-    const examined = await reconciler.sweepWorkflowRuns({
+    const deps = {
       root: evidenceRoot,
       getDefinition: () => approvalDefinition(workflowId),
       probeStepSession: () => ({ found: false }),
       spawnStep: async () => { spawns++; return { sessionId: 'must-not-spawn' }; },
       now: () => '2026-07-12T12:00:00.000Z',
-    });
+    };
 
-    expect(examined).toBeGreaterThanOrEqual(1);
+    if (sweep === 'direct') {
+      await reconciler.sweepWorkflowRuns(deps);
+    } else {
+      const stop = reconciler.startWorkflowRunReconciler(deps, {
+        intervalMs: sweep === 'startup' ? 60_000 : 5,
+      });
+      await new Promise((resolve) => setTimeout(resolve, sweep === 'startup' ? 30 : 35));
+      stop();
+    }
+
     expect(spawns).toBe(0);
-    expect(store.getRun(evidenceRoot, workflowId, runId)).toMatchObject({
-      status: 'parked',
-      parked: { approval: { state: 'pending' } },
-      approvalAdoptions: [{ definitionSource: 'snapshot' }],
-    });
+    const after = fs.readFileSync(file, 'utf8');
+    expect(createHash('sha256').update(after).digest('hex')).toBe(originalHash);
+    expect(after).toBe(original);
+    const persisted = JSON.parse(after) as Record<string, unknown>;
+    expect(persisted.schemaVersion).toBe(schemaVersion);
+    expect(persisted).not.toHaveProperty('revision');
+    expect(persisted).not.toHaveProperty('approvalAdoptions');
+    expect(persisted.parked).not.toHaveProperty('approval');
   });
 });

@@ -566,6 +566,30 @@ describe('advanceRun — bounded loops (GRS-014e)', () => {
 /* ── GRS-014e: gate resolution (pure transitions) ───────────────────────────── */
 
 describe('resolveParkedGate', () => {
+  function withPendingNativeApproval(run: WorkflowRun): WorkflowRun {
+    if (!run.parked) throw new Error('expected parked run');
+    return {
+      ...run,
+      parked: {
+        ...run.parked,
+        approval: {
+          requesterEmployee: null,
+          target: 'operator',
+          targetKind: 'virtual',
+          entitledEmployees: [],
+          operatorEntitled: true,
+          escalation: null,
+          requestedAt: FIXED,
+          requestedBy: 'workflow-run',
+          escalatedAt: null,
+          state: 'pending',
+          decidedBy: null,
+          decidedAt: null,
+        },
+      },
+    };
+  }
+
   function parkedOnGateNode() {
     const def = chain([trigger, step('a', { actor: undefined }), approvalGate('g'), step('b', { actor: undefined })]);
     const { run: minted, p } = mint(def);
@@ -575,9 +599,20 @@ describe('resolveParkedGate', () => {
     return { run: r.run, p };
   }
 
+  it('refuses a parked run without native approval evidence without mutating it', () => {
+    const { run } = parkedOnGateNode();
+    const before = structuredClone(run);
+
+    const resolved = resolveParkedGate(run, 'approve', now, { decidedBy: 'platform-manager' });
+
+    expect(resolved).toMatchObject({ ok: false, code: 'approval-required' });
+    expect(run).toEqual(before);
+    expect(run.gateDecisions).toBeUndefined();
+  });
+
   it('approve on a gate NODE settles its receipt with the deciding actor and resumes; the next pass moves past it', () => {
     const { run, p } = parkedOnGateNode();
-    const resolved = resolveParkedGate(run, 'approve', now, { decidedBy: 'platform-manager' });
+    const resolved = resolveParkedGate(withPendingNativeApproval(run), 'approve', now, { decidedBy: 'platform-manager' });
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
     expect(resolved.run.status).toBe('running');
@@ -592,7 +627,7 @@ describe('resolveParkedGate', () => {
 
   it('reject fails the run with a gate-rejected error and the deciding actor in receipts', () => {
     const { run } = parkedOnGateNode();
-    const resolved = resolveParkedGate(run, 'reject', now, { decidedBy: 'platform-manager' });
+    const resolved = resolveParkedGate(withPendingNativeApproval(run), 'reject', now, { decidedBy: 'platform-manager' });
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
     expect(resolved.run.status).toBe('failed');
@@ -616,7 +651,7 @@ describe('resolveParkedGate', () => {
     expect(parked.run.status).toBe('parked');
     expect(parked.run.parked?.scope).toBe('runGate');
 
-    const resolved = resolveParkedGate(parked.run, 'approve', now);
+    const resolved = resolveParkedGate(withPendingNativeApproval(parked.run), 'approve', now);
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
     expect(resolved.run.resolvedRunGates).toEqual(['operator-ok']);
@@ -636,7 +671,7 @@ describe('resolveParkedGate', () => {
     expect(parked1.run.status).toBe('parked');
     expect(parked1.run.parked?.ref).toBe('ok-1');
 
-    const approved1 = resolveParkedGate(parked1.run, 'approve', now);
+    const approved1 = resolveParkedGate(withPendingNativeApproval(parked1.run), 'approve', now);
     expect(approved1.ok).toBe(true);
     if (!approved1.ok) return;
     // ONE approval never satisfies both gates — the run re-parks on the second.
@@ -644,7 +679,7 @@ describe('resolveParkedGate', () => {
     expect(parked2.run.status).toBe('parked');
     expect(parked2.run.parked?.ref).toBe('ok-2');
 
-    const approved2 = resolveParkedGate(parked2.run, 'approve', now);
+    const approved2 = resolveParkedGate(withPendingNativeApproval(parked2.run), 'approve', now);
     expect(approved2.ok).toBe(true);
     if (!approved2.ok) return;
     const done = advanceRun(approved2.run, p, () => ({ found: false }), now);

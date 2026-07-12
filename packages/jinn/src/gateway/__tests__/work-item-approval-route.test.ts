@@ -89,7 +89,7 @@ const apiCtx = {
   sessionManager: {
     getEngines: () => new Map([["codex", {}]]),
     getEngine: () => undefined,
-    getQueue: () => ({ isRunning: () => false, getPendingCount: () => 0 }),
+    getQueue: () => ({ isRunning: () => false, getPendingCount: () => 0, clearQueue: () => undefined }),
   },
 } as unknown as import("../api.js").ApiContext;
 
@@ -626,6 +626,19 @@ describe("native Workflow gate approval integration", () => {
       now: () => "2026-07-12T12:00:00.000Z",
     }, definition);
     expect(started.status).toBe("running");
+    const liveSessionKey = `workflow-run:${started.runId}:a:1`;
+    const liveSession = registry.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: liveSessionKey,
+      sessionKey: liveSessionKey,
+      title: "Live Workflow cancellation step",
+    });
+    registry.updateSession(liveSession.id, { status: "running" });
+    expect(registry.getSessionBySessionKey(liveSessionKey)).toMatchObject({
+      status: "running",
+      sessionKey: liveSessionKey,
+    });
 
     const cancelled = await call(
       "POST",
@@ -633,7 +646,16 @@ describe("native Workflow gate approval integration", () => {
       { reason: "operator stopped the run" },
     );
     expect(cancelled.status).toBe(200);
-    expect(cancelled.body).toMatchObject({ status: "cancelled", stopping: { to: "cancelled" } });
+    expect(cancelled.body).toMatchObject({ status: "running", stopping: { to: "cancelled" } });
+    expect(registry.getSessionBySessionKey(liveSessionKey)).toMatchObject({
+      status: "interrupted",
+      attemptOutcome: "interrupted",
+    });
+    await runRec.sweepWorkflowRuns(api.workflowRunDriverDeps(evidenceRoot, apiCtx));
+    expect(runStore.getRun(evidenceRoot, workflowId, started.runId)).toMatchObject({
+      status: "cancelled",
+      stopping: { to: "cancelled" },
+    });
     expect(store.getWorkItemBySourceRef("workflow", `workflow:${workflowId}:${started.runId}`)).toBeUndefined();
 
     const duplicate = await call(

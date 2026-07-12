@@ -268,6 +268,47 @@ describe('workflow poll/check custom triggers', () => {
     expect(fs.readdirSync(path.dirname(file)).filter((name) => name.includes('.tmp-'))).toEqual([]);
   });
 
+  it('treats cleanup failure after the migration rename as non-fatal committed housekeeping', async () => {
+    const file = path.join(root, 'workflow-triggers', 'triggers.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      schemaVersion: 1,
+      triggers: [{
+        schemaVersion: 1,
+        kind: 'poll', source: 'poll', name: 'cleanup-failure', event: 'poll.cleanup', targetWorkflowId: 'cleanup',
+        activation: 'active', command: staticOutputScript('cleanup-failure', JSON.stringify({ fire: false })), intervalSeconds: 60,
+        approvalWorkItemId: 'wi_historical_cleanup', createdAt: FIXED, updatedAt: FIXED,
+      }],
+    }, null, 2));
+    const staleDir = path.join(tmpHome, 'workflow-trigger-artifacts', 'stale-after-commit');
+    fs.mkdirSync(staleDir, { recursive: true });
+    fs.writeFileSync(path.join(staleDir, 'unused'), 'unused');
+    const canonicalStaleDir = fs.realpathSync(staleDir);
+    const rmSync = fs.rmSync;
+    let committedAtFault = false;
+    const spy = vi.spyOn(fs, 'rmSync').mockImplementation((target, options) => {
+      if (path.resolve(String(target)) === canonicalStaleDir) {
+        committedAtFault = JSON.parse(fs.readFileSync(file, 'utf8')).schemaVersion === 2;
+        throw new Error('injected post-commit cleanup failure');
+      }
+      return rmSync(target, options);
+    });
+    try {
+      await expect(customTriggers.migrateWorkflowTriggerStore(root)).resolves.toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(committedAtFault).toBe(true);
+    const committed = JSON.parse(fs.readFileSync(file, 'utf8')) as { schemaVersion: number; triggers: Array<Record<string, unknown>> };
+    expect(committed.schemaVersion).toBe(2);
+    expect(committed.triggers[0]).toMatchObject({
+      schemaVersion: 2,
+      activation: 'pending_approval',
+      approval: { state: 'pending' },
+    });
+  });
+
   it('exports and applies the exact poll child environment policy', () => {
     expect(customTriggers.POLL_ENV_ALLOWLIST).toEqual(['PATH', 'HOME', 'JINN_HOME']);
 

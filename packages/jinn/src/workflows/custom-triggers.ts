@@ -568,8 +568,9 @@ export async function migrateWorkflowTriggerStore(root: string): Promise<boolean
         || 'approvalWorkItemId' in binding
         || (binding.kind === 'poll' && !binding.approval));
     if (!needsMigration) return false;
+    let migrated: WorkflowTriggerBinding[];
     try {
-      const migrated = store.triggers.map((binding) => {
+      migrated = store.triggers.map((binding) => {
         const legacy = binding as WorkflowTriggerBinding & { approvalWorkItemId?: string };
         const { approvalWorkItemId: _legacyApprovalWorkItemId, ...withoutLegacyApproval } = legacy;
         const normalized = {
@@ -585,8 +586,6 @@ export async function migrateWorkflowTriggerStore(root: string): Promise<boolean
         );
       });
       saveStore(root, { schemaVersion: TRIGGER_STORE_SCHEMA_VERSION, triggers: migrated });
-      cleanupUnusedPollExecutableArtifacts(migrated);
-      return true;
     } catch (err) {
       try {
         cleanupUnusedPollExecutableArtifacts(store.triggers);
@@ -595,6 +594,12 @@ export async function migrateWorkflowTriggerStore(root: string): Promise<boolean
       }
       throw err;
     }
+    try {
+      cleanupUnusedPollExecutableArtifacts(migrated);
+    } catch (err) {
+      logger.warn(`[workflow-triggers] post-migration artifact cleanup failed: ${(err as Error).message}`);
+    }
+    return true;
   });
 }
 

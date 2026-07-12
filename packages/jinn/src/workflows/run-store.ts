@@ -301,7 +301,7 @@ export interface WorkflowStepPromptEdit {
  *                    step ran inline/checkpoint — no unconfirmed session in flight) and
  *                    no blocking runGate held it.
  *   - `failed`     — compile failure, a step errored, or (later) a rejected gate.
- *   - `cancelled`  — reserved for the run-lifecycle slice (nothing writes it yet).
+ *   - `cancelled`  — explicit run cancellation after live step sessions drain.
  * v1's run-level `passed` is retired — it read as "the workflow succeeded" while sessions
  * were still running (KISS-audit SIMPLIFY #3).
  */
@@ -388,7 +388,7 @@ export interface WorkflowRun {
    * with `stopping.errors` folded into `errors`) is written only when nothing is in
    * flight — a terminal record never freezes live receipts at `running`. The field
    * stays on the terminal record as frozen evidence of when draining began. `to:
-   * 'cancelled'` is reserved for the future cancel route (charter item 9).
+   * 'cancelled'` records an explicit cancellation request while sessions drain.
    */
   stopping?: { to: 'failed' | 'cancelled'; at: string; errors: { code: string; message: string; ref?: string }[] };
   /**

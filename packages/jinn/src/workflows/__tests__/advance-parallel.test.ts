@@ -78,6 +78,30 @@ function mint(d: EditableWorkflowDefinition, runId = 'run-par'): { run: Workflow
   return { run: minted.run, p };
 }
 
+function withPendingNativeApproval(run: WorkflowRun): WorkflowRun {
+  if (!run.parked) throw new Error('expected parked run');
+  return {
+    ...run,
+    parked: {
+      ...run.parked,
+      approval: {
+        requesterEmployee: null,
+        target: 'operator',
+        targetKind: 'virtual',
+        entitledEmployees: [],
+        operatorEntitled: true,
+        escalation: null,
+        requestedAt: FIXED,
+        requestedBy: 'workflow-run',
+        escalatedAt: null,
+        state: 'pending',
+        decidedBy: null,
+        decidedAt: null,
+      },
+    },
+  };
+}
+
 function probeMap(entries: Record<string, StepSessionProbe> = {}) {
   const map = new Map(Object.entries(entries));
   const probe = (key: string): StepSessionProbe => map.get(key) ?? { found: false };
@@ -364,7 +388,7 @@ describe('advanceRun — parked runs are probe-only: evidence stays truthful, no
     expect(receiptOf(r.run, 'c')?.status).toBe('running');
 
     // Resume (approve) → the deferred error resolves with the normal policy.
-    const resolved = resolveParkedGate(r.run, 'approve', now);
+    const resolved = resolveParkedGate(withPendingNativeApproval(r.run), 'approve', now);
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
     const after = advanceRun(resolved.run, p, reg.probe, now);
