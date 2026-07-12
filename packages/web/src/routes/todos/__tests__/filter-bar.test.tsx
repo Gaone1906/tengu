@@ -4,11 +4,11 @@ import { FilterBar } from "../filter-bar"
 
 const originalMatchMedia = window.matchMedia
 let mobileListener: ((event: MediaQueryListEvent) => void) | undefined
-function setMobile(matches: boolean) {
+function setMobile(matches: boolean, reducedMotion = false) {
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: vi.fn().mockImplementation((query: string) => ({
-      matches: query === "(max-width: 767px)" ? matches : false,
+      matches: query === "(max-width: 767px)" ? matches : query === "(prefers-reduced-motion: reduce)" ? reducedMotion : false,
       media: query,
       onchange: null,
       addEventListener: vi.fn((_type: string, listener: (event: MediaQueryListEvent) => void) => { mobileListener = listener }),
@@ -111,6 +111,38 @@ describe("Todo progressive filters", () => {
     act(() => mobileListener?.({ matches: false } as MediaQueryListEvent))
     await act(async () => Promise.resolve())
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter todos" }))
+
+    act(() => mobileListener?.({ matches: true } as MediaQueryListEvent))
+    await act(async () => Promise.resolve())
+    expect(screen.queryByRole("dialog", { name: "Filter todos" })).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter todos" }))
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  it.each([
+    ["normal motion", false],
+    ["reduced motion", true],
+  ])("keeps a closed sheet closed and transfers its focused trigger across breakpoints with %s", async (_label, reducedMotion) => {
+    setMobile(true, reducedMotion)
+    render(
+      <FilterBar filters={{ status: "open" }} onChange={vi.fn()} employees={[]} departments={[]} byName={new Map()} />,
+    )
+
+    const mobileTrigger = screen.getByRole("button", { name: "Filter todos" })
+    mobileTrigger.focus()
+    fireEvent.click(mobileTrigger)
+    expect(screen.getByRole("dialog", { name: "Filter todos" })).toBeTruthy()
+
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Filter todos" }), { key: "Escape" })
+    await act(async () => Promise.resolve())
+    expect(screen.queryByRole("dialog", { name: "Filter todos" })).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter todos" }))
+
+    act(() => mobileListener?.({ matches: false } as MediaQueryListEvent))
+    await act(async () => Promise.resolve())
+    expect(screen.queryByRole("dialog", { name: "Filter todos" })).toBeNull()
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Filter todos" }))
+    expect(document.activeElement).not.toBe(document.body)
 
     act(() => mobileListener?.({ matches: true } as MediaQueryListEvent))
     await act(async () => Promise.resolve())

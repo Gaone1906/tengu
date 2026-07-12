@@ -76,7 +76,7 @@ export function FilterBar({
   const [mobileOpen, setMobileOpen] = useState(false)
   const filterTriggerRef = useRef<HTMLButtonElement>(null)
   const wasMobileRef = useRef(mobile)
-  const crossoverOwnsFocusRef = useRef(false)
+  const filterTriggerOwnsFocusRef = useRef(false)
   const [q, setQ] = useState(filters.q ?? "")
   const debounce = useRef<number | null>(null)
   const filtersRef = useRef(filters)
@@ -96,24 +96,36 @@ export function FilterBar({
     if (debounce.current != null) window.clearTimeout(debounce.current)
   }, [])
   useEffect(() => {
+    const releaseFocusOwnership = (event: FocusEvent | PointerEvent) => {
+      const target = event.target
+      if (target === filterTriggerRef.current) return
+      if (event.type === "focusin" && target === document.body) return
+      filterTriggerOwnsFocusRef.current = false
+    }
+    document.addEventListener("focusin", releaseFocusOwnership)
+    document.addEventListener("pointerdown", releaseFocusOwnership, true)
+    return () => {
+      document.removeEventListener("focusin", releaseFocusOwnership)
+      document.removeEventListener("pointerdown", releaseFocusOwnership, true)
+    }
+  }, [])
+  useEffect(() => {
     const previousMobile = wasMobileRef.current
     const crossed = previousMobile !== mobile
     wasMobileRef.current = mobile
     if (!crossed) return
     const crossedToDesktopWithSheet = previousMobile && !mobile && mobileOpen
     if (crossedToDesktopWithSheet) {
-      crossoverOwnsFocusRef.current = true
       setMobileOpen(false)
     }
-    const active = document.activeElement
-    const shouldTransfer = crossedToDesktopWithSheet
-      || (crossoverOwnsFocusRef.current && (active === document.body || active === filterTriggerRef.current))
-    if (!shouldTransfer) {
-      crossoverOwnsFocusRef.current = false
-      return
-    }
+    const shouldTransfer = crossedToDesktopWithSheet || filterTriggerOwnsFocusRef.current
+    if (!shouldTransfer) return
     queueMicrotask(() => filterTriggerRef.current?.focus())
   }, [mobile, mobileOpen])
+
+  const ownFilterTriggerFocus = () => {
+    filterTriggerOwnsFocusRef.current = true
+  }
 
   const setSearch = (value: string) => {
     setQ(value)
@@ -160,6 +172,7 @@ export function FilterBar({
             type="button"
             aria-label="Filter todos"
             onClick={() => setMobileOpen(true)}
+            onFocus={ownFilterTriggerFocus}
             className={`inline-flex min-h-11 flex-none items-center gap-2 rounded-[14px] px-3.5 text-[length:var(--text-subheadline)] font-medium transition-[background-color,color,transform] active:scale-[0.96] ${
               active > 0
                 ? "bg-[var(--accent-fill)] text-[var(--accent)]"
@@ -177,6 +190,7 @@ export function FilterBar({
                 ref={filterTriggerRef}
                 type="button"
                 aria-label="Filter todos"
+                onFocus={ownFilterTriggerFocus}
                 className={`inline-flex min-h-11 flex-none items-center gap-2 rounded-[14px] px-3.5 text-[length:var(--text-subheadline)] font-medium transition-colors ${
                   active > 0
                     ? "bg-[var(--accent-fill)] text-[var(--accent)]"
