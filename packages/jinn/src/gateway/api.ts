@@ -1960,20 +1960,42 @@ function resolveScopedWriteCallerIdentity(headers: HttpRequest["headers"], conte
     requireCapability: true,
     operatorAuthenticated:
       verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME)
-      || (!shouldRequireGatewayAuth(context.getConfig()) && isSameOriginBrowserRequest(headers)),
+      || (!shouldRequireGatewayAuth(context.getConfig()) && isSameOriginBrowserRequest(headers, context.getConfig())),
   });
 }
 
-function isSameOriginBrowserRequest(headers: HttpRequest["headers"]): boolean {
+function isSameOriginBrowserRequest(
+  headers: HttpRequest["headers"],
+  config: Pick<JinnConfig, "gateway">,
+): boolean {
   const rawOrigin = headers.origin;
   const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
   const rawHost = headers.host;
   const host = Array.isArray(rawHost) ? rawHost[0] : rawHost;
-  if (!origin || !host) return false;
+  if (!host) return false;
+  if (origin) {
+    try {
+      const parsed = new URL(origin);
+      return (parsed.protocol === "http:" || parsed.protocol === "https:")
+        && parsed.host.toLowerCase() === host.toLowerCase();
+    } catch {
+      return false;
+    }
+  }
+
+  const rawFetchSite = headers["sec-fetch-site"];
+  const fetchSite = Array.isArray(rawFetchSite) ? rawFetchSite[0] : rawFetchSite;
+  const rawFetchMode = headers["sec-fetch-mode"];
+  const fetchMode = Array.isArray(rawFetchMode) ? rawFetchMode[0] : rawFetchMode;
+  if (fetchSite !== "same-origin" || fetchMode !== "cors") return false;
+
+  // Browsers omit Origin on ordinary same-origin GET fetches. Fetch Metadata is
+  // browser-controlled, while the expected Host check keeps arbitrary
+  // Origin-less traffic from inheriting operator identity.
+  const configuredHost = config.gateway.host || "127.0.0.1";
+  if (isLoopbackHost(configuredHost)) return isLoopbackHost(host);
   try {
-    const parsed = new URL(origin);
-    return (parsed.protocol === "http:" || parsed.protocol === "https:")
-      && parsed.host.toLowerCase() === host.toLowerCase();
+    return new URL(`http://${host}`).hostname.toLowerCase() === configuredHost.toLowerCase();
   } catch {
     return false;
   }
