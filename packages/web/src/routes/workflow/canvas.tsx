@@ -473,10 +473,25 @@ export function WorkflowCanvas({
   type Inst = ReactFlowInstance<FlowNode<JinnNodeData>, FlowEdge>
   const instanceRef = useRef<Inst | null>(null)
   const lastFramedKeyRef = useRef<string | null>(null)
+  const lastStructureFrameKeyRef = useRef<string | null>(null)
+  const userOwnsViewportRef = useRef(false)
   const frameRequestRef = useRef(0)
   const frameKey = useMemo(
     () => viewportFrameKey(expNodes, expEdges, framingKey, observedViewportClass ?? "unmeasured"),
     [expNodes, expEdges, framingKey, observedViewportClass],
+  )
+  const structureFrameKey = useMemo(
+    () => JSON.stringify({
+      framingKey,
+      viewportClass: observedViewportClass ?? "unmeasured",
+      nodes: expNodes
+        .filter((node) => node.visual !== "sub")
+        .map((node) => [node.id, node.kind, node.visual ?? ""]),
+      edges: expEdges
+        .filter((edge) => edge.lane !== "sub")
+        .map((edge) => [edge.id ?? "", edge.from, edge.to, edge.kind ?? "", edge.lane ?? ""]),
+    }),
+    [expEdges, expNodes, framingKey, observedViewportClass],
   )
 
   useEffect(() => {
@@ -499,10 +514,16 @@ export function WorkflowCanvas({
     return () => observer.disconnect()
   }, [])
 
-  const frameGraph = useCallback((inst: Inst, key: string) => {
+  const frameGraph = useCallback((inst: Inst, key: string, structureKey: string) => {
     if (!observedViewportClass) return
     if (lastFramedKeyRef.current === key) return
     lastFramedKeyRef.current = key
+    const structureChanged = lastStructureFrameKeyRef.current !== structureKey
+    if (!structureChanged && userOwnsViewportRef.current) return
+    if (structureChanged) {
+      lastStructureFrameKeyRef.current = structureKey
+      userOwnsViewportRef.current = false
+    }
     const request = ++frameRequestRef.current
     const focus = (nodeId: string, zoom: number) => {
       const node = expNodes.find((candidate) => candidate.id === nodeId)
@@ -525,13 +546,18 @@ export function WorkflowCanvas({
 
   const onInit = useCallback((inst: Inst) => {
     instanceRef.current = inst
-    frameGraph(inst, frameKey)
-  }, [frameGraph, frameKey])
+    frameGraph(inst, frameKey, structureFrameKey)
+  }, [frameGraph, frameKey, structureFrameKey])
 
   useEffect(() => {
     const inst = instanceRef.current
-    if (inst) frameGraph(inst, frameKey)
-  }, [frameGraph, frameKey])
+    if (inst) frameGraph(inst, frameKey, structureFrameKey)
+  }, [frameGraph, frameKey, structureFrameKey])
+
+  const claimViewport = useCallback(() => {
+    userOwnsViewportRef.current = true
+    frameRequestRef.current += 1
+  }, [])
 
   const connect = useCallback((connection: Connection) => {
     if (connection.source && connection.target) onConnectNodes?.(connection.source, connection.target)
@@ -576,6 +602,7 @@ export function WorkflowCanvas({
         onNodesDelete={editable ? (deleted) => deleted.forEach((node) => onRemoveNode?.(node.id)) : undefined}
         onEdgesDelete={editable ? removeEdges : undefined}
         onInit={onInit}
+        onMoveStart={(event) => { if (event) claimViewport() }}
         panOnDrag
         zoomOnPinch
         zoomOnScroll
@@ -623,7 +650,7 @@ export function WorkflowCanvas({
             <MapIcon className="size-[20px]" />
           </button>
         )}
-        {controls && <CanvasControls onTidy={onTidy} mobile={isMobile} />}
+        {controls && <CanvasControls onTidy={onTidy} onViewportIntent={claimViewport} mobile={isMobile} />}
       </ReactFlow>
     </div>
   )

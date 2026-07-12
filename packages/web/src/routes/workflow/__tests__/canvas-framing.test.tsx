@@ -7,6 +7,7 @@ const flow = vi.hoisted(() => ({
   setCenter: vi.fn(),
   zoomIn: vi.fn(),
   zoomOut: vi.fn(),
+  moveStart: undefined as ((event: MouseEvent | TouchEvent | null, viewport: { x: number; y: number; zoom: number }) => void) | undefined,
 }))
 
 vi.mock("@xyflow/react", async () => {
@@ -20,10 +21,13 @@ vi.mock("@xyflow/react", async () => {
     ReactFlow: ({
       children,
       onInit,
+      onMoveStart,
     }: {
       children?: React.ReactNode
       onInit?: (instance: typeof flow) => void
+      onMoveStart?: typeof flow.moveStart
     }) => {
+      flow.moveStart = onMoveStart
       React.useEffect(() => { onInit?.(flow) }, [])
       return <div data-testid="react-flow-stub">{children}</div>
     },
@@ -104,6 +108,7 @@ describe("WorkflowCanvas responsive framing ownership", () => {
   beforeEach(() => {
     ControlledResizeObserver.instances = []
     clearViewportCalls()
+    flow.moveStart = undefined
     flow.getZoom.mockReset().mockReturnValue(0.8)
     vi.stubGlobal("ResizeObserver", ControlledResizeObserver)
     vi.stubGlobal("matchMedia", vi.fn(() => ({
@@ -189,6 +194,136 @@ describe("WorkflowCanvas responsive framing ownership", () => {
     clearViewportCalls()
     await emitSize(observer, canvas, 1440, 900)
     await waitFor(() => expect(flow.fitView).toHaveBeenCalledTimes(1))
+    expect(flow.setCenter).not.toHaveBeenCalled()
+  })
+
+  it("preserves a user pan across repeated desktop status ticks", async () => {
+    const view = render(
+      <WorkflowCanvas nodes={nodes} selectedId={null} onSelect={vi.fn()} framingKey="run-1" />,
+    )
+    await waitFor(() => expect(ControlledResizeObserver.instances).toHaveLength(1))
+    const observer = ControlledResizeObserver.instances[0]
+    const canvas = screen.getByTestId("wf-canvas")
+    await emitSize(observer, canvas, 1440, 900)
+    await waitFor(() => expect(flow.fitView).toHaveBeenCalledTimes(1))
+    clearViewportCalls()
+
+    act(() => flow.moveStart?.(new MouseEvent("mousedown"), { x: 80, y: 40, zoom: 1.1 }))
+    view.rerender(
+      <WorkflowCanvas
+        nodes={nodes.map((node) => ({ ...node, status: node.id === "failed" ? "running" : "passed", isCurrent: node.id === "failed" }))}
+        selectedId={null}
+        onSelect={vi.fn()}
+        framingKey="run-1"
+      />,
+    )
+    await act(async () => { await Promise.resolve() })
+    view.rerender(
+      <WorkflowCanvas
+        nodes={nodes.map((node) => ({ ...node, status: "passed", isCurrent: false }))}
+        selectedId={null}
+        onSelect={vi.fn()}
+        framingKey="run-1"
+      />,
+    )
+    await act(async () => { await Promise.resolve() })
+
+    expect(flow.fitView).not.toHaveBeenCalled()
+    expect(flow.setCenter).not.toHaveBeenCalled()
+  })
+
+  it("preserves explicit zoom and Fit ownership across repeated status ticks", async () => {
+    const view = render(
+      <WorkflowCanvas nodes={nodes} selectedId={null} onSelect={vi.fn()} framingKey="run-1" controls />,
+    )
+    await waitFor(() => expect(ControlledResizeObserver.instances).toHaveLength(1))
+    const observer = ControlledResizeObserver.instances[0]
+    const canvas = screen.getByTestId("wf-canvas")
+    await emitSize(observer, canvas, 1440, 900)
+    await waitFor(() => expect(flow.fitView).toHaveBeenCalledTimes(1))
+    clearViewportCalls()
+
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }))
+    expect(flow.zoomIn).toHaveBeenCalledTimes(1)
+    view.rerender(
+      <WorkflowCanvas
+        nodes={nodes.map((node) => ({ ...node, status: "running", isCurrent: node.id === "failed" }))}
+        selectedId={null}
+        onSelect={vi.fn()}
+        framingKey="run-1"
+        controls
+      />,
+    )
+    await act(async () => { await Promise.resolve() })
+    expect(flow.fitView).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole("button", { name: "Fit all" }))
+    expect(flow.fitView).toHaveBeenCalledTimes(1)
+    view.rerender(
+      <WorkflowCanvas
+        nodes={nodes.map((node) => ({ ...node, status: "passed", isCurrent: false }))}
+        selectedId={null}
+        onSelect={vi.fn()}
+        framingKey="run-1"
+        controls
+      />,
+    )
+    await act(async () => { await Promise.resolve() })
+    expect(flow.fitView).toHaveBeenCalledTimes(1)
+  })
+
+  it("preserves a user pan across repeated mobile status ticks", async () => {
+    const view = render(
+      <WorkflowCanvas nodes={nodes} selectedId={null} onSelect={vi.fn()} framingKey="run-1" />,
+    )
+    await waitFor(() => expect(ControlledResizeObserver.instances).toHaveLength(1))
+    const observer = ControlledResizeObserver.instances[0]
+    const canvas = screen.getByTestId("wf-canvas")
+    await emitSize(observer, canvas, 390, 844)
+    await waitFor(() => expect(flow.setCenter).toHaveBeenCalledTimes(1))
+    clearViewportCalls()
+
+    act(() => flow.moveStart?.(new TouchEvent("touchstart"), { x: 20, y: 120, zoom: 0.9 }))
+    view.rerender(
+      <WorkflowCanvas
+        nodes={nodes.map((node) => ({ ...node, status: "running", isCurrent: node.id === "failed" }))}
+        selectedId={null}
+        onSelect={vi.fn()}
+        framingKey="run-1"
+      />,
+    )
+    await act(async () => { await Promise.resolve() })
+    view.rerender(
+      <WorkflowCanvas
+        nodes={nodes.map((node) => ({ ...node, status: "passed", isCurrent: false }))}
+        selectedId={null}
+        onSelect={vi.fn()}
+        framingKey="run-1"
+      />,
+    )
+    await act(async () => { await Promise.resolve() })
+
+    expect(flow.setCenter).not.toHaveBeenCalled()
+    expect(flow.fitView).not.toHaveBeenCalled()
+  })
+
+  it("cancels an in-flight automatic desktop focus when the user claims the viewport", async () => {
+    let resolveFit: ((value: boolean) => void) | undefined
+    flow.fitView.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveFit = resolve }))
+    flow.getZoom.mockReturnValue(0.4)
+    render(<WorkflowCanvas nodes={nodes} selectedId={null} onSelect={vi.fn()} framingKey="run-1" />)
+    await waitFor(() => expect(ControlledResizeObserver.instances).toHaveLength(1))
+    const observer = ControlledResizeObserver.instances[0]
+    const canvas = screen.getByTestId("wf-canvas")
+    await emitSize(observer, canvas, 1440, 900)
+    await waitFor(() => expect(flow.fitView).toHaveBeenCalledTimes(1))
+
+    act(() => flow.moveStart?.(new MouseEvent("wheel"), { x: 10, y: 10, zoom: 1.2 }))
+    await act(async () => {
+      resolveFit?.(true)
+      await Promise.resolve()
+    })
+
     expect(flow.setCenter).not.toHaveBeenCalled()
   })
 })

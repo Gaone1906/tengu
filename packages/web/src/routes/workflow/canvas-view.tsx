@@ -104,9 +104,11 @@ export function viewportFrameKey(
  * inside the ReactFlow provider so it can drive the live viewport. */
 export function CanvasControls({
   onTidy,
+  onViewportIntent,
   mobile = false,
 }: {
   onTidy?: () => void
+  onViewportIntent?: () => void
   mobile?: boolean
 }) {
   const { zoomIn, zoomOut, fitView } = useReactFlow()
@@ -134,9 +136,9 @@ export function CanvasControls({
         {Math.round(zoom * 100)}%
       </div>
       <div className="absolute left-4 bottom-4 z-10 flex gap-1.5">
-        <Btn label="Fit all" onClick={() => fitView({ padding: 0.2, duration: 300 })}><Maximize2 className={icon} /></Btn>
-        <Btn label="Zoom in" onClick={() => zoomIn({ duration: 200 })}><Plus className={icon} /></Btn>
-        <Btn label="Zoom out" onClick={() => zoomOut({ duration: 200 })}><Minus className={icon} /></Btn>
+        <Btn label="Fit all" onClick={() => { onViewportIntent?.(); void fitView({ padding: 0.2, duration: 300 }) }}><Maximize2 className={icon} /></Btn>
+        <Btn label="Zoom in" onClick={() => { onViewportIntent?.(); void zoomIn({ duration: 200 }) }}><Plus className={icon} /></Btn>
+        <Btn label="Zoom out" onClick={() => { onViewportIntent?.(); void zoomOut({ duration: 200 }) }}><Minus className={icon} /></Btn>
         {onTidy && <Btn label="Tidy" onClick={onTidy}><Network className={icon} /></Btn>}
       </div>
     </>
