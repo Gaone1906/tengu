@@ -1701,6 +1701,11 @@ function todoEditValidationError(
   json(res, { error, code }, 400);
 }
 
+function isTodoEditJsonContentType(value: string | string[] | undefined): boolean {
+  if (typeof value !== 'string') return false;
+  return /^\s*application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)\s*(?:;[^,\r\n]*)?\s*$/i.test(value);
+}
+
 function readWorkItemStatusParam(url: URL): WorkItemStatus | undefined | null {
   const status = readCleanSearchParam(url, 'status');
   if (!status) return undefined;
@@ -3223,7 +3228,14 @@ export async function handleApiRequest(
       if (caller.kind !== "operator") {
         return json(res, { error: "editing Todo metadata and manual rank requires the authenticated operator surface" }, 403);
       }
-      const parsed = await readJsonBody(req, res);
+      const invalidJsonResponse = { error: "Todo edit request must be valid JSON.", code: "todo_invalid_patch" } as const;
+      if (!isTodoEditJsonContentType(req.headers["content-type"])) {
+        return json(res, invalidJsonResponse, 400);
+      }
+      const parsed = await readJsonBody(req, res, {
+        invalidJsonResponse,
+        rejectDuplicateTopLevelKeys: true,
+      });
       if (!parsed.ok) return;
       if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
         return todoEditValidationError(res, "Todo edit request must be a JSON object.");

@@ -70,6 +70,14 @@ function makeReq(method: string, urlPath: string, body?: unknown, headers: Recor
   >[0];
 }
 
+function makeRawReq(method: string, urlPath: string, raw: string, headers: Record<string, string> = {}) {
+  return Object.assign(Readable.from([Buffer.from(raw)]), {
+    method,
+    url: urlPath,
+    headers: { host: "localhost", "content-type": "application/json", ...headers },
+  }) as unknown as Parameters<Api["handleApiRequest"]>[0];
+}
+
 // serializeSession only reaches sessionManager.getQueue() + (absent) backgroundActivity.
 const ctx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
@@ -445,6 +453,40 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     await api.handleApiRequest(makeReq("PATCH", `/api/work-items/${item.id}`, { expectedVersion: item.version, ...body }, operatorHeaders), cap.res, ctx);
     expect(cap.status).toBe(400);
     expect(cap.body.error).toMatch(message);
+  });
+
+  it.each([
+    ["empty", "", "application/json", "Todo edit request must be valid JSON."],
+    ["whitespace", " \n\t ", "application/json", "Todo edit request must be valid JSON."],
+    ["truncated object", '{"title":"cut off"', "application/json", "Todo edit request must be valid JSON."],
+    ["invalid token", `{"title":"${hostileInputs[0]}",oops}`, "application/json", "Todo edit request must be valid JSON."],
+    ["array", '[{"title":"no"}]', "application/json", "Todo edit request must be a JSON object."],
+    ["string primitive", `"${hostileInputs[1]}"`, "application/json", "Todo edit request must be a JSON object."],
+    ["number primitive", "42", "application/json", "Todo edit request must be a JSON object."],
+    ["null primitive", "null", "application/json", "Todo edit request must be a JSON object."],
+    ["duplicate key", '{"expectedVersion":1,"title":"first","title":"second"}', "application/json", "Todo edit request must be valid JSON."],
+    ["missing content type", '{"expectedVersion":1,"title":"safe"}', "", "Todo edit request must be valid JSON."],
+    ["wrong content type", '{"expectedVersion":1,"title":"safe"}', "text/plain", "Todo edit request must be valid JSON."],
+    ["ambiguous content type", '{"expectedVersion":1,"title":"safe"}', "application/json, text/plain", "Todo edit request must be valid JSON."],
+  ])("returns a fixed typed response for %s Todo edit bodies", async (_name, raw, contentType, error) => {
+    const item = store.createWorkItem({ title: "Raw validation target" });
+    const cap = makeRes();
+    const headers = { ...operatorHeaders, "content-type": contentType };
+    await api.handleApiRequest(makeRawReq("PATCH", `/api/work-items/${item.id}`, raw, headers), cap.res, ctx);
+    expect(cap.status).toBe(400);
+    expect(cap.body).toEqual({
+      error,
+      code: "todo_invalid_patch",
+    });
+    expectNoHostileInput(cap.body);
+  });
+
+  it("preserves authorization ordering for malformed Todo edit JSON", async () => {
+    const item = store.createWorkItem({ title: "Raw auth target" });
+    const cap = makeRes();
+    await api.handleApiRequest(makeRawReq("PATCH", `/api/work-items/${item.id}`, "{"), cap.res, ctx);
+    expect(cap.status).toBe(403);
+    expect(cap.body).not.toMatchObject({ code: "todo_invalid_patch" });
   });
 
   it("never reflects unsupported field names or values in typed validation responses", async () => {
