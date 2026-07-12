@@ -26,6 +26,8 @@ export interface ReadJsonBodyOpts extends ReadBodyOpts {
   invalidJsonResponse?: unknown;
   /** Reject ambiguous duplicate top-level object members. */
   rejectDuplicateTopLevelKeys?: boolean;
+  /** Route-specific fixed body for an exceeded maxBytes limit. */
+  tooLargeResponse?: unknown;
 }
 
 function hasDuplicateTopLevelObjectKeys(raw: string): boolean {
@@ -126,7 +128,7 @@ export async function readJsonBody(
       // drains instead of destroying — the response must actually reach the wire).
       // Connection: close tells the client not to reuse the exchange.
       res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
-      res.end(JSON.stringify({ error: "Payload too large" }));
+      res.end(JSON.stringify(opts.tooLargeResponse ?? { error: "Payload too large" }));
       return { ok: false };
     }
     throw err;

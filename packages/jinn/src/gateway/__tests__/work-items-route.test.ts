@@ -78,6 +78,45 @@ function makeRawReq(method: string, urlPath: string, raw: string, headers: Recor
   }) as unknown as Parameters<Api["handleApiRequest"]>[0];
 }
 
+function makeChunkedRawReq(
+  method: string,
+  urlPath: string,
+  chunks: string[],
+  headers: Record<string, string> = {},
+  slow = false,
+) {
+  const source = slow
+    ? Readable.from((async function* () {
+        for (const chunk of chunks) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          yield Buffer.from(chunk);
+        }
+      })())
+    : Readable.from(chunks.map((chunk) => Buffer.from(chunk)));
+  return Object.assign(source, {
+    method,
+    url: urlPath,
+    headers: { host: "localhost", "content-type": "application/json", ...headers },
+  }) as unknown as Parameters<Api["handleApiRequest"]>[0];
+}
+
+function sizedTodoPatch(expectedVersion: number, byteLength: number, multibyte: boolean): string {
+  const prefix = `{"expectedVersion":${expectedVersion},"body":"`;
+  const suffix = '"}';
+  let remaining = byteLength - Buffer.byteLength(prefix + suffix);
+  if (remaining < 0) throw new Error("requested Todo patch size is smaller than its JSON envelope");
+  let body = "";
+  if (multibyte) {
+    const unit = "ж"; // two UTF-8 bytes; JSON.stringify preserves it verbatim.
+    body = unit.repeat(Math.floor(remaining / Buffer.byteLength(unit)));
+    remaining -= Buffer.byteLength(body);
+  }
+  body += "a".repeat(remaining);
+  const raw = prefix + body + suffix;
+  if (Buffer.byteLength(raw) !== byteLength) throw new Error("Todo patch byte-size fixture drifted");
+  return raw;
+}
+
 // serializeSession only reaches sessionManager.getQueue() + (absent) backgroundActivity.
 const ctx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
@@ -487,6 +526,123 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     await api.handleApiRequest(makeRawReq("PATCH", `/api/work-items/${item.id}`, "{"), cap.res, ctx);
     expect(cap.status).toBe(403);
     expect(cap.body).not.toMatchObject({ code: "todo_invalid_patch" });
+  });
+
+  it.each([
+    ["ASCII limit - 1", -1, false],
+    ["ASCII limit", 0, false],
+    ["ASCII limit + 1", 1, false],
+    ["Unicode limit - 1", -1, true],
+    ["Unicode limit", 0, true],
+    ["Unicode limit + 1", 1, true],
+  ])("enforces the 64 KiB UTF-8 request bound at %s", async (_name, delta, multibyte) => {
+    const item = store.createWorkItem({ title: "Bounded edit target" });
+    const eventsBefore = store.listWorkItemEvents(item.id).length;
+    const raw = sizedTodoPatch(item.version, 64 * 1024 + delta, multibyte);
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeRawReq("PATCH", `/api/work-items/${item.id}`, raw, {
+        ...operatorHeaders,
+        "content-length": String(Buffer.byteLength(raw)),
+      }),
+      cap.res,
+      ctx,
+    );
+
+    if (delta <= 0) {
+      expect(cap.status).toBe(200);
+      expect(cap.body.workItem.version).toBe(2);
+      expect(Buffer.byteLength(cap.body.workItem.body, "utf8")).toBeLessThan(64 * 1024);
+    } else {
+      expect(cap.status).toBe(413);
+      expect(cap.body).toEqual({
+        error: "Todo edit request exceeds the 64 KiB limit.",
+        code: "todo_edit_too_large",
+      });
+      expect(store.getWorkItem(item.id)).toMatchObject({ version: 1, body: null });
+      expect(store.listWorkItemEvents(item.id)).toHaveLength(eventsBefore);
+    }
+  });
+
+  it("rejects an oversized declared Content-Length before reading or mutating", async () => {
+    const item = store.createWorkItem({ title: "Declared length target" });
+    const eventsBefore = store.listWorkItemEvents(item.id).length;
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeRawReq("PATCH", `/api/work-items/${item.id}`, '{"expectedVersion":1,"title":"safe"}', {
+        ...operatorHeaders,
+        "content-length": String(64 * 1024 + 1),
+      }),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(413);
+    expect(cap.body).toEqual({ error: "Todo edit request exceeds the 64 KiB limit.", code: "todo_edit_too_large" });
+    expect(store.getWorkItem(item.id)).toMatchObject({ version: 1, title: "Declared length target" });
+    expect(store.listWorkItemEvents(item.id)).toHaveLength(eventsBefore);
+  });
+
+  it.each([
+    ["a lying short Content-Length", { "content-length": "1" }, false],
+    ["a chunked body with no Content-Length", {}, false],
+    ["a slow streamed body", {}, true],
+  ])("rejects %s when streamed bytes cross the limit", async (_name, extraHeaders, slow) => {
+    const item = store.createWorkItem({ title: "Stream bound target" });
+    const eventsBefore = store.listWorkItemEvents(item.id).length;
+    const raw = sizedTodoPatch(item.version, 64 * 1024 + 1, true);
+    const chunks = Array.from({ length: Math.ceil(raw.length / 1024) }, (_, index) => raw.slice(index * 1024, (index + 1) * 1024));
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeChunkedRawReq("PATCH", `/api/work-items/${item.id}`, chunks, { ...operatorHeaders, ...extraHeaders }, slow),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(413);
+    expect(cap.body).toEqual({ error: "Todo edit request exceeds the 64 KiB limit.", code: "todo_edit_too_large" });
+    expect(store.getWorkItem(item.id)).toMatchObject({ version: 1, body: null });
+    expect(store.listWorkItemEvents(item.id)).toHaveLength(eventsBefore);
+  });
+
+  it("does not store or audit a two-megabyte Todo body", async () => {
+    const item = store.createWorkItem({ title: "Two megabyte target" });
+    const eventsBefore = store.listWorkItemEvents(item.id).length;
+    const raw = `{"expectedVersion":1,"body":"${"x".repeat(2 * 1024 * 1024)}"}`;
+    const cap = makeRes();
+    await api.handleApiRequest(makeRawReq("PATCH", `/api/work-items/${item.id}`, raw, operatorHeaders), cap.res, ctx);
+    expect(cap.status).toBe(413);
+    expect(cap.body).toEqual({ error: "Todo edit request exceeds the 64 KiB limit.", code: "todo_edit_too_large" });
+    expect(store.getWorkItem(item.id)).toMatchObject({ version: 1, body: null });
+    expect(store.listWorkItemEvents(item.id)).toHaveLength(eventsBefore);
+  });
+
+  it("keeps authorization ahead of declared and streamed body bounds", async () => {
+    const item = store.createWorkItem({ title: "Bound auth target" });
+    for (const req of [
+      makeRawReq("PATCH", `/api/work-items/${item.id}`, "{}", { "content-length": String(64 * 1024 + 1) }),
+      makeRawReq("PATCH", `/api/work-items/${item.id}`, "x".repeat(64 * 1024 + 1)),
+    ]) {
+      const cap = makeRes();
+      await api.handleApiRequest(req, cap.res, ctx);
+      expect(cap.status).toBe(403);
+      expect(cap.body).not.toMatchObject({ code: "todo_edit_too_large" });
+    }
+    expect(store.getWorkItem(item.id)).toMatchObject({ version: 1, title: "Bound auth target" });
+  });
+
+  it("rejects compressed Todo edit bodies instead of buffering or decompressing them", async () => {
+    const item = store.createWorkItem({ title: "Encoding policy target" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeRawReq("PATCH", `/api/work-items/${item.id}`, '{"expectedVersion":1,"title":"encoded"}', {
+        ...operatorHeaders,
+        "content-encoding": "gzip",
+      }),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(400);
+    expect(cap.body).toEqual({ error: "Todo edit request must be valid JSON.", code: "todo_invalid_patch" });
+    expect(store.getWorkItem(item.id)).toMatchObject({ version: 1, title: "Encoding policy target" });
   });
 
   it("never reflects unsupported field names or values in typed validation responses", async () => {

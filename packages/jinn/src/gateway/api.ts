@@ -263,6 +263,8 @@ import { updateSkillContent } from "./skills.js";
 const HOOK_BODY_MAX_BYTES = 64 * 1024;
 /** Max bytes accepted by public auth helpers. Codes/tokens are tiny. */
 const AUTH_BODY_MAX_BYTES = 16 * 1024;
+/** Operator Todo PATCH cap, measured as raw UTF-8 request bytes including JSON overhead. */
+export const TODO_EDIT_BODY_MAX_BYTES = 64 * 1024;
 /** Cap for workflow-definition CRUD bodies (GRS-011b). A large graph is still KB-scale. */
 const WORKFLOW_DEFINITION_BODY_MAX_BYTES = 512 * 1024;
 /** Cap for inbound workflow events. Payloads become prompt context, so keep them small. */
@@ -1704,6 +1706,17 @@ function todoEditValidationError(
 function isTodoEditJsonContentType(value: string | string[] | undefined): boolean {
   if (typeof value !== 'string') return false;
   return /^\s*application\/(?:json|[a-z0-9!#$&^_.+-]+\+json)\s*(?:;[^,\r\n]*)?\s*$/i.test(value);
+}
+
+function todoEditContentLength(value: string | string[] | undefined): number | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+  const length = Number(value);
+  return Number.isSafeInteger(length) ? length : null;
+}
+
+function hasSupportedTodoEditContentEncoding(value: string | string[] | undefined): boolean {
+  return value === undefined || (typeof value === 'string' && value.trim().toLowerCase() === 'identity');
 }
 
 function readWorkItemStatusParam(url: URL): WorkItemStatus | undefined | null {
@@ -3229,12 +3242,23 @@ export async function handleApiRequest(
         return json(res, { error: "editing Todo metadata and manual rank requires the authenticated operator surface" }, 403);
       }
       const invalidJsonResponse = { error: "Todo edit request must be valid JSON.", code: "todo_invalid_patch" } as const;
+      const tooLargeResponse = { error: "Todo edit request exceeds the 64 KiB limit.", code: "todo_edit_too_large" } as const;
+      const contentLength = todoEditContentLength(req.headers["content-length"]);
+      if (contentLength === null) return json(res, invalidJsonResponse, 400);
+      if (contentLength !== undefined && contentLength > TODO_EDIT_BODY_MAX_BYTES) {
+        return json(res, tooLargeResponse, 413);
+      }
+      if (!hasSupportedTodoEditContentEncoding(req.headers["content-encoding"])) {
+        return json(res, invalidJsonResponse, 400);
+      }
       if (!isTodoEditJsonContentType(req.headers["content-type"])) {
         return json(res, invalidJsonResponse, 400);
       }
       const parsed = await readJsonBody(req, res, {
         invalidJsonResponse,
+        maxBytes: TODO_EDIT_BODY_MAX_BYTES,
         rejectDuplicateTopLevelKeys: true,
+        tooLargeResponse,
       });
       if (!parsed.ok) return;
       if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
