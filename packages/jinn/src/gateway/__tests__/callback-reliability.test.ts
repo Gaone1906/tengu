@@ -280,13 +280,18 @@ describe("parent callback reliability", () => {
     }
   });
 
-  it("surfaces one child reply across repeated rate-limit wait, resume, and completion signals", async () => {
+  it("keeps repeated rate-limit lifecycle callbacks nonterminal and independent from completion", async () => {
     const seenPrompts: string[] = [];
     const events: Array<{ event: string; data: unknown }> = [];
     const engine = makeEngine(seenPrompts);
     const queue = new queueModule.SessionQueue();
     const context = makeContext(engine, queue, events);
     const parent = createParent("rate-lifecycle");
+    const item = workItems.createWorkItem({
+      title: "Complete work after the rate limit clears",
+      status: "executing",
+      source: "delegation",
+    });
     const child = registry.createSession({
       engine: "stub",
       source: "web",
@@ -295,22 +300,59 @@ describe("parent callback reliability", () => {
       connector: "web",
       employee: "worker",
       parentSessionId: parent.id,
+      transportMeta: { delegationCompletionTracked: true },
       prompt: "complete after a rate limit",
     });
+    workItems.linkSession(item.id, child.id);
+    registry.applyBlockEnvelope(parent.id, {
+      op: "put",
+      block: {
+        id: `dg-${item.id}`,
+        type: "delegation",
+        version: 1,
+        status: "running",
+        payload: {
+          employee: "worker",
+          employeeDisplay: "Worker",
+          title: item.title,
+          childSessionId: child.id,
+          workItemId: item.id,
+          dispatchedAt: Date.now(),
+        },
+      },
+    });
     const attempt = registry.beginSessionAttempt(child.id)!;
-    const active = registry.getSession(child.id)!;
+    registry.completeSessionAttempt(child.id, attempt.attemptToken!, {
+      status: "idle",
+      attemptOutcome: "succeeded",
+    });
+    expect(registry.claimDelegationCompletionNudge(child.id, item.id)).toBeTruthy();
+    const rateLimited = registry.getSession(child.id)!;
     const originalFetch = globalThis.fetch;
     globalThis.fetch = makeRouteBackedFetch(context) as unknown as typeof fetch;
 
     try {
-      for (let index = 0; index < 4; index++) callbacks.notifyRateLimited(active);
-      for (let index = 0; index < 4; index++) callbacks.notifyRateLimitResumed(active);
-      const completed = registry.completeSessionAttempt(child.id, attempt.attemptToken!, {
-        status: "idle",
-        attemptOutcome: "succeeded",
-      })!;
+      for (let index = 0; index < 4; index++) callbacks.notifyRateLimited(rateLimited);
+
+      await eventually(() => {
+        expect(queue.isRunning(parent.sessionKey)).toBe(false);
+        expect(seenPrompts).toHaveLength(1);
+      });
+      const rateLimitedPayload = JSON.parse((registry.initDb().prepare(`
+        SELECT payload FROM callback_deliveries WHERE callback_kind = 'rate-limited'
+      `).get() as { payload: string }).payload) as Record<string, unknown>;
+      expect(rateLimitedPayload).not.toHaveProperty("meta");
+      expect(rateLimitedPayload).not.toHaveProperty("block");
+      expect(registry.getSession(child.id)?.transportMeta).toMatchObject({
+        delegationCompletionContract: { workItemId: item.id, state: "nudged" },
+      });
+      expect(registry.getMessages(parent.id).flatMap((message) => message.blocks ?? []))
+        .toContainEqual(expect.objectContaining({ id: `dg-${item.id}`, status: "running" }));
+      expect(workItems.getWorkItem(item.id)).toMatchObject({ status: "executing", closedAt: null });
+
+      for (let index = 0; index < 4; index++) callbacks.notifyRateLimitResumed(rateLimited);
       for (let index = 0; index < 4; index++) {
-        callbacks.notifyParentSession(completed, { result: "one final escalation" });
+        callbacks.notifyParentSession(rateLimited, { result: "one final escalation" });
       }
 
       await eventually(() => {
@@ -329,6 +371,11 @@ describe("parent callback reliability", () => {
       ]);
       expect(registry.getMessages(parent.id).filter((message) => message.meta?.kind === "child-reply"))
         .toHaveLength(1);
+      expect(registry.getMessages(parent.id).flatMap((message) => message.blocks ?? []))
+        .toContainEqual(expect.objectContaining({ id: `dg-${item.id}`, status: "done" }));
+      expect(registry.getSession(child.id)?.transportMeta).toMatchObject({
+        delegationCompletionContract: { workItemId: item.id, state: "surfaced" },
+      });
       expect(events.filter(({ event, data }) =>
         event === "session:notification"
         && (data as { meta?: { kind?: string } }).meta?.kind === "child-reply",

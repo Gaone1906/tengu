@@ -39,6 +39,8 @@ export interface ManagerVisibilityDetails {
   title: string;
 }
 
+type CallbackSemantics = "terminal" | "nonterminal-lifecycle";
+
 /**
  * Give a manager lightweight visibility into one skip-level delegation. The
  * session-message route persists this notification in the restart-safe internal
@@ -281,6 +283,7 @@ export function notifyRateLimited(
     error: null,
     result: `⏳ Session is rate-limited and will auto-resume${estimatedResumeTime ? ` around ${estimatedResumeTime}` : ' when the limit resets'}. No action needed.`,
   }, {
+    semantics: "nonterminal-lifecycle",
     callbackKind: "rate-limited",
     terminalOutcome: "rate-limited",
     terminalVersion: Math.max(1, childSession.attemptTerminalVersion ?? 0),
@@ -339,6 +342,7 @@ async function _sendNotification(
   options?: {
     alwaysNotify?: boolean;
     skipCompletionContract?: boolean;
+    semantics?: CallbackSemantics;
     callbackKind?: string;
     terminalOutcome?: string;
     terminalVersion?: number;
@@ -352,10 +356,12 @@ async function _sendNotification(
   // callbacks; phase completion is consumed by the workflow reconciler instead.
   if (parent.workflowProvenance?.kind === "run") return;
 
+  const isTerminal = options?.semantics !== "nonterminal-lifecycle";
+
   // Delegation completion contract: a narrowly-qualified progress-only idle
   // settlement gets one durable follow-up instead of prematurely waking the
   // parent. The next idle settlement is surfaced and can never nudge again.
-  const contract = options?.skipCompletionContract
+  const contract = options?.skipCompletionContract || !isTerminal
     ? "pass"
     : await enforceDelegationCompletionContract(childSession, result, {
         postFollowUp: (sessionId, message, displayMessage) =>
@@ -395,7 +401,9 @@ async function _sendNotification(
   } else if (result.error) {
     message = `⚠️ Employee "${employeeName}" (child session ${childId}) hit an error and could not finish: ${result.error}`;
     displayMessage = `⚠️ ${employeeName} couldn't finish\n${_clean(result.error, 220)}`;
-    notificationMeta = childNotificationMeta("child-error", childSession, result.error);
+    if (isTerminal) {
+      notificationMeta = childNotificationMeta("child-error", childSession, result.error);
+    }
   } else {
     const raw = (result.result || "").trim() || "(no output)";
     const llmPreview = raw.length > 500 ? raw.slice(0, 500) + "…" : raw;
@@ -405,12 +413,12 @@ async function _sendNotification(
       `To read the full reply: GET /api/sessions/${childId}?last=N · ` +
       `to follow up: POST /api/sessions/${childId}/message`;
     displayMessage = `📩 ${employeeName} replied\n${_clean(raw, 220)}`;
-    if (options?.callbackKind !== "rate-limited") {
+    if (isTerminal) {
       notificationMeta = childNotificationMeta("child-reply", childSession, raw);
     }
   }
 
-  if (!isTalkParent && childSession.workItemId) {
+  if (isTerminal && !isTalkParent && childSession.workItemId) {
     notificationBlock = {
       op: "patch",
       block: {
