@@ -198,6 +198,19 @@ export interface WorkflowGateDecision {
   decision: 'approve' | 'reject';
   actor: string;
   at: string;
+  /** Complete frozen route and decision evidence for this approval episode. */
+  approval: WorkflowGateApprovalRecord;
+}
+
+export interface WorkflowApprovalAdoptionRecord {
+  legacySchemaVersion: number;
+  definitionSource: 'snapshot' | 'missing-fallback';
+  adoptedAt: string;
+  gateKey: string;
+  /** Frozen pre-adoption gate evidence; never includes a native approval. */
+  priorParked: ParkedGate;
+  /** The fresh pending authority created by this adoption. */
+  approval: WorkflowGateApprovalRecord;
 }
 
 export type WorkflowTriggerSource = 'manual' | 'schedule' | 'todo-status-change' | 'event-webhook' | 'check-poll' | (string & {});
@@ -223,7 +236,7 @@ export interface LegacyWorkflowRunTrigger {
   cronJobId?: string;
   /** The scheduler-captured fire identity: at most one run exists per (workflowId, fireIso). */
   fireIso?: string;
-  /** The work_item_events id that fired a todo-status-change run. */
+  /** The immutable Todo audit-event id that fired a todo-status-change run. */
   fireRef?: string;
 }
 
@@ -365,6 +378,8 @@ export interface WorkflowRun {
   resolvedRunGates?: string[];
   /** Append-only native gate decision evidence. */
   gateDecisions?: WorkflowGateDecision[];
+  /** Append-only evidence for explicit adoption of a legacy parked episode. */
+  approvalAdoptions?: WorkflowApprovalAdoptionRecord[];
   /**
    * Honest drain (GRS-016a): set when a required step fails while OTHER receipts are
    * still in flight (only possible under concurrency > 1). While present: status stays
@@ -643,12 +658,6 @@ export function normalizeWorkflowTrigger(trigger: unknown, legacyTriggerTodoId?:
   }
 
   return { source: 'manual', event: 'workflow.manual_started', payload: legacyTriggerTodoId ? { todoId: legacyTriggerTodoId } : {} };
-}
-
-export function workflowRunTriggerTodoId(run: Pick<WorkflowRun, 'trigger' | 'triggerTodoId'>): string | undefined {
-  const normalized = normalizeWorkflowTrigger(run.trigger, run.triggerTodoId);
-  const todoId = normalized.payload.todoId;
-  return typeof todoId === 'string' && todoId !== '' ? todoId : undefined;
 }
 
 /* ── Public API ─────────────────────────────────────────────────────────────── */

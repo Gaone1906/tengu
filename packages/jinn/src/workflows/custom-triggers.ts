@@ -15,6 +15,7 @@ import { abortPollExecutions } from './poll-executions.js';
 import { resolveActiveTriggerDefinition } from './trigger-dispatch.js';
 import {
   createWorkflowApprovalRouteForRequester,
+  freezeWorkflowApprovalEscalation,
   type PollActivationApprovalRecord,
 } from './approval-authority.js';
 import { withWorkflowMutationLock } from './mutation-lock.js';
@@ -495,27 +496,6 @@ function cleanupUnusedPollExecutableArtifacts(bindings: WorkflowTriggerBinding[]
   );
 }
 
-export function formatPollActivationApprovalRequest(binding: PollWorkflowTriggerBinding): string {
-  const contract = binding.activationContract ?? pollActivationContract(binding);
-  const hash = binding.activationContractHash
-    ?? crypto.createHash('sha256').update(stableJson(contract)).digest('hex');
-  return [
-    `Activate poll trigger "${binding.name}" for workflow "${binding.targetWorkflowId}".`,
-    '',
-    'Execution contract:',
-    `command: ${contract.command}`,
-    `intervalSeconds: ${contract.intervalSeconds}`,
-    `cwdPolicy: ${contract.cwdPolicy}`,
-    `envPolicy: ${contract.envPolicy}`,
-    `timeoutMs: ${contract.timeoutMs}`,
-    `stdoutMaxBytes: ${contract.stdoutMaxBytes}`,
-    `stderrMaxBytes: ${contract.stderrMaxBytes}`,
-    ...contract.executableArtifacts.map((artifact) =>
-      `artifact: ${artifact.role} ${artifact.path} sha256:${artifact.sha256}`),
-    `activationContractHash: ${hash}`,
-  ].join('\n');
-}
-
 function safeEqual(a: string, b: string): boolean {
   const aa = Buffer.from(a);
   const bb = Buffer.from(b);
@@ -529,8 +509,14 @@ function tokenPreview(secret: string): string {
 function writeAtomic(file: string, contents: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${randomUUID()}`;
-  fs.writeFileSync(tmp, contents, 'utf8');
-  fs.renameSync(tmp, file);
+  try {
+    fs.writeFileSync(tmp, contents, 'utf8');
+    fs.renameSync(tmp, file);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
 }
 
 function readStore(root: string): StoredWorkflowTriggerBindings {
@@ -544,15 +530,29 @@ function readStore(root: string): StoredWorkflowTriggerBindings {
     }
     throw err;
   }
+  let parsed: StoredWorkflowTriggerBindings;
   try {
-    const parsed = JSON.parse(raw) as StoredWorkflowTriggerBindings;
-    return {
-      schemaVersion: Number.isSafeInteger(parsed.schemaVersion) ? parsed.schemaVersion : 1,
-      triggers: Array.isArray(parsed.triggers) ? parsed.triggers : [],
-    };
+    parsed = JSON.parse(raw) as StoredWorkflowTriggerBindings;
   } catch (err) {
     throw new WorkflowTriggerStoreError('invalid-input', `workflow trigger store is not valid JSON: ${(err as Error).message}`);
   }
+  const schemaVersion = Number.isSafeInteger(parsed.schemaVersion) ? parsed.schemaVersion : 1;
+  if (schemaVersion > TRIGGER_STORE_SCHEMA_VERSION) {
+    throw new WorkflowTriggerStoreError(
+      'invalid-input',
+      `workflow trigger store schemaVersion ${schemaVersion} is newer than supported version ${TRIGGER_STORE_SCHEMA_VERSION}`,
+    );
+  }
+  const triggers = Array.isArray(parsed.triggers) ? parsed.triggers : [];
+  const futureBinding = triggers.find((binding) => Number.isSafeInteger(binding.schemaVersion)
+    && binding.schemaVersion > TRIGGER_STORE_SCHEMA_VERSION);
+  if (futureBinding) {
+    throw new WorkflowTriggerStoreError(
+      'invalid-input',
+      `workflow trigger binding "${futureBinding.name}" schemaVersion ${futureBinding.schemaVersion} is newer than supported version ${TRIGGER_STORE_SCHEMA_VERSION}`,
+    );
+  }
+  return { schemaVersion, triggers };
 }
 
 function saveStore(root: string, store: StoredWorkflowTriggerBindings): void {
@@ -568,24 +568,33 @@ export async function migrateWorkflowTriggerStore(root: string): Promise<boolean
         || 'approvalWorkItemId' in binding
         || (binding.kind === 'poll' && !binding.approval));
     if (!needsMigration) return false;
-    const migrated = store.triggers.map((binding) => {
-      const legacy = binding as WorkflowTriggerBinding & { approvalWorkItemId?: string };
-      const { approvalWorkItemId: _legacyApprovalWorkItemId, ...withoutLegacyApproval } = legacy;
-      const normalized = {
-        ...withoutLegacyApproval,
-        schemaVersion: TRIGGER_STORE_SCHEMA_VERSION,
-        bindingRevision: binding.bindingRevision ?? workflowTriggerBindingRevision(legacy),
-      } as WorkflowTriggerBinding;
-      if (normalized.kind !== 'poll') return normalized;
-      return withPendingPollActivationApproval(
-        normalized,
-        normalized.updatedAt || normalized.createdAt || defaultNow(),
-        normalized.createdBy,
-      );
-    });
-    saveStore(root, { schemaVersion: TRIGGER_STORE_SCHEMA_VERSION, triggers: migrated });
-    cleanupUnusedPollExecutableArtifacts(migrated);
-    return true;
+    try {
+      const migrated = store.triggers.map((binding) => {
+        const legacy = binding as WorkflowTriggerBinding & { approvalWorkItemId?: string };
+        const { approvalWorkItemId: _legacyApprovalWorkItemId, ...withoutLegacyApproval } = legacy;
+        const normalized = {
+          ...withoutLegacyApproval,
+          schemaVersion: TRIGGER_STORE_SCHEMA_VERSION,
+          bindingRevision: binding.bindingRevision ?? workflowTriggerBindingRevision(legacy),
+        } as WorkflowTriggerBinding;
+        if (normalized.kind !== 'poll') return normalized;
+        return withPendingPollActivationApproval(
+          normalized,
+          normalized.updatedAt || normalized.createdAt || defaultNow(),
+          normalized.createdBy,
+        );
+      });
+      saveStore(root, { schemaVersion: TRIGGER_STORE_SCHEMA_VERSION, triggers: migrated });
+      cleanupUnusedPollExecutableArtifacts(migrated);
+      return true;
+    } catch (err) {
+      try {
+        cleanupUnusedPollExecutableArtifacts(store.triggers);
+      } catch {
+        // Preserve the migration failure; the store bytes remain authoritative.
+      }
+      throw err;
+    }
   });
 }
 
@@ -824,12 +833,13 @@ export async function escalatePollActivationApproval(
   if (binding.approval.state !== 'pending') {
     throw new WorkflowTriggerStoreError('conflict', `poll trigger "${name}" has no pending activation approval`);
   }
-  if (binding.approval.escalatedAt) return binding;
+  if (binding.approval.escalation?.target === 'operator'
+    && binding.approval.operatorEntitled) return binding;
   const at = (opts.now ?? defaultNow)();
   const updated: PollWorkflowTriggerBinding = {
     ...binding,
     updatedAt: at,
-    approval: { ...binding.approval, escalatedAt: at },
+    approval: freezeWorkflowApprovalEscalation(binding.approval, at),
   };
   const store = readStore(root);
   const index = store.triggers.findIndex((candidate) => candidate.name === name);

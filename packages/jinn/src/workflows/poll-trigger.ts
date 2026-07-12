@@ -237,8 +237,8 @@ function asPollBinding(binding: WorkflowTriggerBinding): PollWorkflowTriggerBind
 
 /**
  * Trust boundary: activating a poll trigger means the gateway will execute a command
- * authored through an agent-facing surface. That is intentionally gated by a COO
- * approval work item before the command can run. The approval pins the resolved
+ * authored through an agent-facing surface. That is intentionally gated by a
+ * frozen native Workflow approval before the command can run. The approval pins the resolved
  * executable inputs by content hash, rechecked before every invocation, and every
  * invocation is bounded by a hard timeout plus stdout/stderr caps. Full filesystem,
  * identity, and network sandboxing is deliberately not claimed here.

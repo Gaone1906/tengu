@@ -14,11 +14,18 @@ const suiteHome = fs.mkdtempSync(path.join(os.tmpdir(), 'jinn-todo-trigger-home-
 process.env.JINN_HOME = suiteHome;
 
 type TodoStatusTrigger = typeof import('../todo-status-trigger.js');
+type WorkflowEventFeedModule = typeof import('../../work-items/workflow-event-feed.js');
 let fireTodoStatusChangeWorkflows: TodoStatusTrigger['fireTodoStatusChangeWorkflows'];
 let replayMissedTodoStatusChangeWorkflowFires: TodoStatusTrigger['replayMissedTodoStatusChangeWorkflowFires'];
+let createWorkflowTodoEventFeed: WorkflowEventFeedModule['createWorkflowTodoEventFeed'];
 
 beforeAll(async () => {
-  ({ fireTodoStatusChangeWorkflows, replayMissedTodoStatusChangeWorkflowFires } = await import('../todo-status-trigger.js'));
+  const [triggerModule, feedModule] = await Promise.all([
+    import('../todo-status-trigger.js'),
+    import('../../work-items/workflow-event-feed.js'),
+  ]);
+  ({ fireTodoStatusChangeWorkflows, replayMissedTodoStatusChangeWorkflowFires } = triggerModule);
+  ({ createWorkflowTodoEventFeed } = feedModule);
 });
 
 afterAll(() => {
@@ -63,6 +70,7 @@ function deps(over: Partial<RunDriverDeps> = {}): RunDriverDeps {
   const sessions = new Map<string, StepSessionProbe>();
   return {
     root,
+    todoEventFeed: createWorkflowTodoEventFeed(),
     getDefinition,
     probeStepSession: (key) => sessions.get(key) ?? { found: false },
     spawnStep: async (ctx) => {

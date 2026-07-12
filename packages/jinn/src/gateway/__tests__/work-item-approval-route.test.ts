@@ -60,6 +60,7 @@ type Approvals = typeof import("../../work-items/approvals.js");
 type DefStore = typeof import("../../workflows/definition-store.js");
 type Def = typeof import("../../workflows/definition.js");
 type RunRec = typeof import("../../workflows/run-reconciler.js");
+type RunStore = typeof import("../../workflows/run-store.js");
 type Registry = typeof import("../../sessions/registry.js");
 let api: Api;
 let store: Store;
@@ -67,6 +68,7 @@ let approvals: Approvals;
 let defStore: DefStore;
 let defMod: Def;
 let runRec: RunRec;
+let runStore: RunStore;
 let registry: Registry;
 let cooSession: import("../../shared/types.js").Session;
 let managerSession: import("../../shared/types.js").Session;
@@ -193,6 +195,7 @@ beforeAll(async () => {
   defStore = await import("../../workflows/definition-store.js");
   defMod = await import("../../workflows/definition.js");
   runRec = await import("../../workflows/run-reconciler.js");
+  runStore = await import("../../workflows/run-store.js");
   registry = await import("../../sessions/registry.js");
   registry.initDb();
   cooSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "coo", title: "coo", employee: "coo" });
@@ -460,7 +463,22 @@ describe("native Workflow gate approval integration", () => {
     expect(approved.status).toBe(200);
     expect(approved.body.status).toBe("completed");
     expect(approved.body.gateDecisions).toEqual([
-      expect.objectContaining({ gateKey: "ap", decision: "approve", actor: "platform-manager" }),
+      expect.objectContaining({
+        gateKey: "ap",
+        decision: "approve",
+        actor: "platform-manager",
+        approval: expect.objectContaining({
+          state: "approved",
+          requesterEmployee: "platform-worker",
+          target: "platform-manager",
+          targetKind: "employee",
+          entitledEmployees: ["platform-manager", "coo"],
+          operatorEntitled: false,
+          escalation: null,
+          decidedBy: "platform-manager",
+          decidedAt: expect.any(String),
+        }),
+      }),
     ]);
 
     const duplicate = await call(
@@ -508,7 +526,15 @@ describe("native Workflow gate approval integration", () => {
       managerHeaders(),
     );
     expect(escalated.status).toBe(200);
-    expect(escalated.body.parked.approval.escalatedAt).toBeTruthy();
+    expect(escalated.body.parked.approval).toMatchObject({
+      escalatedAt: expect.any(String),
+      operatorEntitled: true,
+      escalation: {
+        target: "operator",
+        targetKind: "operator",
+        at: expect.any(String),
+      },
+    });
 
     const approved = await call(
       "POST",
@@ -517,7 +543,104 @@ describe("native Workflow gate approval integration", () => {
     );
     expect(approved.status).toBe(200);
     expect(approved.body.gateDecisions).toEqual([
-      expect.objectContaining({ decision: "approve", actor: "operator" }),
+      expect.objectContaining({
+        decision: "approve",
+        actor: "operator",
+        approval: expect.objectContaining({
+          state: "approved",
+          operatorEntitled: true,
+          escalation: expect.objectContaining({ target: "operator", targetKind: "operator" }),
+          decidedBy: "operator",
+          decidedAt: expect.any(String),
+        }),
+      }),
     ]);
+  });
+
+  it("requires explicit legacy adoption before a parked approval can be decided", async () => {
+    const workflowId = "appr-legacy-adoption-route";
+    const { runId } = await seedNativeParkedRun(workflowId);
+    const native = runStore.getRun(evidenceRoot, workflowId, runId)!;
+    runStore.saveRun(evidenceRoot, {
+      ...native,
+      schemaVersion: 2,
+      revision: undefined,
+      parked: native.parked ? { ...native.parked, approval: undefined } : null,
+    });
+
+    const early = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/resolve-gate`,
+      { decision: "approve" },
+      managerHeaders(),
+    );
+    expect(early.status).toBe(409);
+    expect(early.body.error).toMatch(/adopt/i);
+    expect(runStore.getRun(evidenceRoot, workflowId, runId)?.parked?.approval).toBeUndefined();
+
+    const adopted = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/gate-approval/adopt`,
+      {},
+    );
+    expect(adopted.status).toBe(200);
+    expect(adopted.body).toMatchObject({
+      parked: { approval: { state: "pending", target: "platform-manager" } },
+      approvalAdoptions: [{ definitionSource: "snapshot" }],
+    });
+
+    const duplicate = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/gate-approval/adopt`,
+      {},
+    );
+    expect(duplicate.status).toBe(200);
+    expect(duplicate.body.approvalAdoptions).toHaveLength(1);
+
+    const decided = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/resolve-gate`,
+      { decision: "approve" },
+      managerHeaders(),
+    );
+    expect(decided.status).toBe(200);
+  });
+
+  it("cancels a live Workflow run through the real run route without a Workflow Todo", async () => {
+    const workflowId = "native-run-cancellation-route";
+    const definition = gateDef(workflowId);
+    definition.nodes = definition.nodes.filter((node) => node.id !== "g");
+    definition.edges = definition.edges.filter((edge) => edge.to !== "g");
+    const step = definition.nodes.find((node) => node.id === "a");
+    if (!step || step.type !== "step") throw new Error("expected step");
+    step.options = { output: "handoff" };
+    defStore.createDefinition(evidenceRoot, definition);
+    let spawned = false;
+    const started = await runRec.startWorkflowRun({
+      root: evidenceRoot,
+      getDefinition: defStore.getDefinition,
+      probeStepSession: () => spawned
+        ? ({ found: true as const, sessionId: "stub-cancel-route", status: "running" as const })
+        : ({ found: false as const }),
+      spawnStep: async () => { spawned = true; return { sessionId: "stub-cancel-route" }; },
+      now: () => "2026-07-12T12:00:00.000Z",
+    }, definition);
+    expect(started.status).toBe("running");
+
+    const cancelled = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${started.runId}/cancel`,
+      { reason: "operator stopped the run" },
+    );
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body).toMatchObject({ status: "cancelled", stopping: { to: "cancelled" } });
+    expect(store.getWorkItemBySourceRef("workflow", `workflow:${workflowId}:${started.runId}`)).toBeUndefined();
+
+    const duplicate = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${started.runId}/cancel`,
+      {},
+    );
+    expect(duplicate.status).toBe(409);
   });
 });

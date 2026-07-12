@@ -692,13 +692,56 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     },
   };
 
+  const decidePollActivation: JinnMcpTool = {
+    name: "decide_poll_activation",
+    description: "Approve or reject a poll activation when you are on its frozen approval route.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        decision: { type: "string", enum: ["approve", "reject"] },
+      },
+      required: ["name", "decision"],
+    },
+    handler: async (args, ctx) => {
+      assertBoundCaller(ctx);
+      const name = requireString(args, "name");
+      const decision = requireString(args, "decision");
+      if (decision !== "approve" && decision !== "reject") {
+        throw new JinnMcpToolError('decision must be exactly "approve" or "reject"');
+      }
+      const route = `/api/workflow-triggers/${encodeURIComponent(name)}/activation-approval`;
+      const { status, body } = await gatewayRequest(ctx, "POST", route, { decision });
+      if (status >= 400) throw gatewayFailure(`deciding poll activation "${name}"`, status, body);
+      return { ...(body as Record<string, unknown>), hint: `Poll activation ${decision === "approve" ? "approved" : "rejected"}.` };
+    },
+  };
+
+  const escalatePollActivation: JinnMcpTool = {
+    name: "escalate_poll_activation",
+    description: "Escalate a pending poll activation from its frozen employee route to the operator.",
+    inputSchema: {
+      type: "object",
+      properties: { name: { type: "string" } },
+      required: ["name"],
+    },
+    handler: async (args, ctx) => {
+      assertBoundCaller(ctx);
+      const name = requireString(args, "name");
+      const route = `/api/workflow-triggers/${encodeURIComponent(name)}/activation-approval/escalate`;
+      const { status, body } = await gatewayRequest(ctx, "POST", route, {});
+      if (status >= 400) throw gatewayFailure(`escalating poll activation "${name}"`, status, body);
+      return { ...(body as Record<string, unknown>), hint: "Poll activation escalated for an operator decision." };
+    },
+  };
+
   // DELIBERATELY ABSENT: a gate-resolve tool (Codex GRS-015 finding 1). A run
   // parks on an approval gate precisely so a HUMAN decides; an agent-callable
   // resolve makes the doorbell theater. The 012d-0 catalog never admitted one —
   // approvals/gates are a §4 pending-primitive domain ("primitive first, wrapper
   // later") — so resolution stays on the HTTP route (web doorbell buttons,
-  // operator curl) until the approvals-as-records primitive + 012d-3 write gates
-  // exist. Escalation is safe to expose because it cannot decide or resume a run.
+  // operator route). Poll activation decisions are distinct: the binding's frozen
+  // route is caller-verified and may be decided through the tools below.
 
   return [
     listWorkflows,
@@ -716,6 +759,8 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     escalateWorkflowGate,
     listTriggers,
     createTrigger,
+    decidePollActivation,
+    escalatePollActivation,
     deleteTrigger,
   ];
 }

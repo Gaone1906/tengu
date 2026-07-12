@@ -90,6 +90,11 @@ export interface ReconcileResult {
 export function reconcileWorkItem(id: string): ReconcileResult | undefined {
   const item = getWorkItem(id);
   if (!item) return undefined;
+  // Workflow-created Todos predate native Workflow run authority. They are
+  // frozen audit records: automatic session reconciliation must never derive,
+  // TRUST-close, or otherwise rewrite them. Explicit guarded Todo actions remain
+  // available through the normal operator surfaces.
+  if (item.source === 'workflow') return { item, changed: false };
   const attempts = listSessionsByWorkItem(id).map((s) => ({
     status: s.status as SessionStatus,
     outcome: s.attemptOutcome ?? null,

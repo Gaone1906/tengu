@@ -993,6 +993,20 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
   "gateDecisions": [
     {
       "actor": "operator",
+      "approval": {
+        "decidedAt": "2026-07-04T18:00:00.000Z",
+        "decidedBy": "operator",
+        "entitledEmployees": [],
+        "escalatedAt": null,
+        "escalation": null,
+        "operatorEntitled": true,
+        "requestedAt": "2026-07-04T18:00:00.000Z",
+        "requestedBy": "workflow-run",
+        "requesterEmployee": null,
+        "state": "approved",
+        "target": "Jinn",
+        "targetKind": "virtual",
+      },
       "at": "2026-07-04T18:00:00.000Z",
       "decision": "approve",
       "gateKey": "op-ok",
@@ -1306,7 +1320,21 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
       "gateKey": "op-ok",
       "decision": "approve",
       "actor": "operator",
-      "at": "2026-07-04T18:00:00.000Z"
+      "at": "2026-07-04T18:00:00.000Z",
+      "approval": {
+        "requesterEmployee": null,
+        "target": "Jinn",
+        "targetKind": "virtual",
+        "entitledEmployees": [],
+        "operatorEntitled": true,
+        "escalation": null,
+        "requestedAt": "2026-07-04T18:00:00.000Z",
+        "requestedBy": "workflow-run",
+        "escalatedAt": null,
+        "state": "approved",
+        "decidedBy": "operator",
+        "decidedAt": "2026-07-04T18:00:00.000Z"
+      }
     }
   ]
 }
@@ -1446,7 +1474,10 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
     "approval": {
       "decidedAt": null,
       "decidedBy": null,
+      "entitledEmployees": [],
       "escalatedAt": null,
+      "escalation": null,
+      "operatorEntitled": true,
       "requestedAt": "2026-07-04T18:00:00.000Z",
       "requestedBy": "workflow-run",
       "requesterEmployee": null,
@@ -1621,6 +1652,9 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
       "requesterEmployee": null,
       "target": "Jinn",
       "targetKind": "virtual",
+      "entitledEmployees": [],
+      "operatorEntitled": true,
+      "escalation": null,
       "requestedAt": "2026-07-04T18:00:00.000Z",
       "requestedBy": "workflow-run",
       "escalatedAt": null,

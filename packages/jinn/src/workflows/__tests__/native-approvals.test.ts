@@ -105,4 +105,136 @@ describe('native Workflow gate approvals', () => {
     });
     expect(workItems.getWorkItemBySourceRef('workflow', `workflow:${run.workflowId}:${run.runId}`)).toBeUndefined();
   });
+
+  function quietParkedRun(
+    workflowId: string,
+    runId: string,
+    schemaVersion: 1 | 2 | 3,
+    withDefinition = true,
+  ): import('../run-store.js').WorkflowRun {
+    const definition = approvalDefinition(workflowId);
+    return {
+      schemaVersion,
+      ...(schemaVersion === 3 ? { revision: 1 } : {}),
+      runId,
+      workflowId,
+      definitionVersion: 1,
+      title: workflowId,
+      trigger: { kind: 'manual' },
+      status: 'parked',
+      startedAt: '2026-07-12T11:00:00.000Z',
+      endedAt: null,
+      steps: [],
+      parked: {
+        scope: 'runGate',
+        nodeId: null,
+        kind: 'approval',
+        evaluator: 'human-approval',
+        ref: 'release',
+        description: 'Approve the release?',
+        at: '2026-07-12T11:05:00.000Z',
+      },
+      order: [],
+      ...(withDefinition ? { definitionSnapshot: definition } : {}),
+    };
+  }
+
+  it.each([1, 2, 3] as const)('explicitly adopts a quiet parked v%s run once with fresh pending authority', async (schemaVersion) => {
+    const store = await import('../run-store.js');
+    const workflowId = `legacy-adoption-v${schemaVersion}`;
+    const runId = `run-legacy-v${schemaVersion}`;
+    store.saveRun(evidenceRoot, quietParkedRun(workflowId, runId, schemaVersion));
+    const deps = {
+      root: evidenceRoot,
+      getDefinition: () => approvalDefinition(workflowId),
+      probeStepSession: () => ({ found: false as const }),
+      spawnStep: async () => ({ sessionId: 'must-not-spawn' }),
+      now: () => '2026-07-12T12:00:00.000Z',
+    };
+
+    const legacyDecision = await reconciler.resolveWorkflowRunGate(deps, workflowId, runId, 'approve', { decidedBy: 'manager' });
+    expect(legacyDecision.outcome).toBe('not-parked');
+    if (legacyDecision.outcome !== 'not-parked') throw new Error('expected legacy decision refusal');
+    expect(legacyDecision.run.parked).not.toHaveProperty('approval');
+
+    const adopted = await reconciler.adoptLegacyParkedWorkflowApproval(deps, workflowId, runId);
+    if (adopted.outcome !== 'adopted') throw new Error(`expected adoption, got ${adopted.outcome}`);
+    expect(adopted).toMatchObject({
+      outcome: 'adopted',
+      run: {
+        schemaVersion: 3,
+        status: 'parked',
+        parked: {
+          approval: {
+            state: 'pending',
+            target: 'manager',
+            targetKind: 'employee',
+            decidedBy: null,
+            decidedAt: null,
+          },
+        },
+        approvalAdoptions: [{
+          legacySchemaVersion: schemaVersion,
+          definitionSource: 'snapshot',
+          adoptedAt: '2026-07-12T12:00:00.000Z',
+          priorParked: expect.not.objectContaining({ approval: expect.anything() }),
+          approval: expect.objectContaining({ state: 'pending', target: 'manager' }),
+        }],
+      },
+    });
+    const revision = adopted.run.revision;
+
+    const duplicate = await reconciler.adoptLegacyParkedWorkflowApproval(deps, workflowId, runId);
+    if (duplicate.outcome === 'not-found') throw new Error('adopted run disappeared');
+    expect(duplicate).toMatchObject({ outcome: 'already-adopted', run: { revision } });
+    expect(duplicate.run.approvalAdoptions).toHaveLength(1);
+
+    const resolved = await reconciler.resolveWorkflowRunGate(deps, workflowId, runId, 'reject', { decidedBy: 'manager' });
+    expect(resolved).toMatchObject({ outcome: 'resolved', run: { status: 'failed' } });
+  });
+
+  it('adopts missing-definition evidence through a fresh fail-closed root route', async () => {
+    const store = await import('../run-store.js');
+    const workflowId = 'legacy-adoption-missing-definition';
+    const runId = 'run-legacy-missing-definition';
+    store.saveRun(evidenceRoot, quietParkedRun(workflowId, runId, 1, false));
+    const adopted = await reconciler.adoptLegacyParkedWorkflowApproval({
+      root: evidenceRoot,
+      getDefinition: () => null,
+      probeStepSession: () => ({ found: false }),
+      spawnStep: async () => ({ sessionId: 'must-not-spawn' }),
+      now: () => '2026-07-12T12:00:00.000Z',
+    }, workflowId, runId);
+
+    expect(adopted).toMatchObject({
+      outcome: 'adopted',
+      run: {
+        parked: { approval: { state: 'pending', target: 'root', targetKind: 'employee' } },
+        approvalAdoptions: [{ definitionSource: 'missing-fallback' }],
+      },
+    });
+  });
+
+  it('adopts quiet legacy parked runs during a sweep without advancing or spawning them', async () => {
+    const store = await import('../run-store.js');
+    const workflowId = 'legacy-adoption-sweep';
+    const runId = 'run-legacy-sweep';
+    store.saveRun(evidenceRoot, quietParkedRun(workflowId, runId, 2));
+    let spawns = 0;
+    const examined = await reconciler.sweepWorkflowRuns({
+      root: evidenceRoot,
+      getDefinition: () => approvalDefinition(workflowId),
+      probeStepSession: () => ({ found: false }),
+      spawnStep: async () => { spawns++; return { sessionId: 'must-not-spawn' }; },
+      now: () => '2026-07-12T12:00:00.000Z',
+    });
+
+    expect(examined).toBeGreaterThanOrEqual(1);
+    expect(spawns).toBe(0);
+    expect(store.getRun(evidenceRoot, workflowId, runId)).toMatchObject({
+      status: 'parked',
+      parked: { approval: { state: 'pending' } },
+      approvalAdoptions: [{ definitionSource: 'snapshot' }],
+    });
+  });
 });

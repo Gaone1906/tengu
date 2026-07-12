@@ -20,6 +20,14 @@ fs.writeFileSync(
   path.join(orgDir, 'worker.yaml'),
   'name: worker\ndisplayName: Worker\ndepartment: platform\nrank: employee\nengine: codex\nmodel: gpt-5.5\npersona: Builds assigned workflows.\nreportsTo: coo\n',
 );
+fs.writeFileSync(
+  path.join(orgDir, 'manager.yaml'),
+  'name: manager\ndisplayName: Manager\ndepartment: platform\nrank: manager\nengine: codex\nmodel: gpt-5.5\npersona: Manages nested work.\nreportsTo: coo\n',
+);
+fs.writeFileSync(
+  path.join(orgDir, 'nested-worker.yaml'),
+  'name: nested-worker\ndisplayName: Nested Worker\ndepartment: platform\nrank: employee\nengine: codex\nmodel: gpt-5.5\npersona: Builds nested workflows.\nreportsTo: manager\n',
+);
 
 type Api = typeof import('../api.js');
 type DefStore = typeof import('../../workflows/definition-store.js');
@@ -339,6 +347,80 @@ describe('workflow trigger authoring routes', () => {
       expect.objectContaining({ name: 'poll-ready', activation: 'active' }),
     );
     expect(JSON.stringify(listed.json())).not.toContain('binding-secret');
+  });
+
+  it('projects caller-specific poll approval capability and keeps duplicate decisions atomic', async () => {
+    seedWorkflow('poll-capability-wf');
+    const checkScript = path.join(home, 'check-capability.sh');
+    fs.writeFileSync(checkScript, '#!/bin/sh\nprintf \'%s\' \'{"fire":false}\'\n', 'utf8');
+    fs.chmodSync(checkScript, 0o700);
+    const requesterHeaders = verifiedSessionHeaders('nested-worker');
+    const managerHeaders = verifiedSessionHeaders('manager');
+    const rootHeaders = verifiedSessionHeaders('coo');
+
+    triggers.createWorkflowTriggerBinding(evidenceRoot, {
+      kind: 'poll',
+      name: 'poll-capability',
+      event: 'poll.capability',
+      targetWorkflowId: 'poll-capability-wf',
+      command: checkScript,
+      intervalSeconds: 60,
+      createdBy: 'nested-worker',
+    });
+
+    const capability = async (headers: Record<string, string>) => {
+      const response = await request('GET', '/api/workflow-triggers', { headers });
+      return response.json<{ triggers: Array<{ name: string; approvalCapability?: Record<string, unknown> }> }>()
+        .triggers.find((binding) => binding.name === 'poll-capability')?.approvalCapability;
+    };
+
+    expect(await capability(requesterHeaders)).toMatchObject({
+      canDecide: false,
+      canEscalate: false,
+      needsYou: false,
+      target: 'manager',
+    });
+    expect(await capability(managerHeaders)).toMatchObject({
+      canDecide: true,
+      canEscalate: true,
+      needsYou: true,
+      target: 'manager',
+    });
+    expect(await capability(rootHeaders)).toMatchObject({
+      canDecide: true,
+      canEscalate: true,
+      needsYou: true,
+      target: 'manager',
+    });
+    expect(await capability({ authorization: 'Bearer gateway-secret' })).toMatchObject({
+      canDecide: false,
+      canEscalate: false,
+      needsYou: false,
+      target: 'manager',
+    });
+
+    const escalated = await request('POST', '/api/workflow-triggers/poll-capability/activation-approval/escalate', {
+      headers: managerHeaders,
+      body: {},
+    });
+    expect(escalated.status).toBe(200);
+    expect(await capability({ authorization: 'Bearer gateway-secret' })).toMatchObject({
+      canDecide: true,
+      canEscalate: false,
+      needsYou: true,
+      escalated: true,
+    });
+
+    const decided = await request('POST', '/api/workflow-triggers/poll-capability/activation-approval', {
+      headers: { authorization: 'Bearer gateway-secret' },
+      body: { decision: 'reject' },
+    });
+    expect(decided.status).toBe(200);
+    const duplicate = await request('POST', '/api/workflow-triggers/poll-capability/activation-approval', {
+      headers: { authorization: 'Bearer gateway-secret' },
+      body: { decision: 'approve' },
+    });
+    expect(duplicate.status).toBe(409);
   });
 
   it('returns a clear client rejection when a poll command is not fully pinnable', async () => {

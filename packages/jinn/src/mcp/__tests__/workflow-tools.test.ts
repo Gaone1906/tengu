@@ -129,6 +129,8 @@ describe("workflow tools — registry + schemas", () => {
       "escalate_workflow_gate",
       "list_triggers",
       "create_trigger",
+      "decide_poll_activation",
+      "escalate_poll_activation",
       "delete_trigger",
     ]);
     for (const t of tools) {
@@ -167,6 +169,8 @@ describe("workflow tools — registry + schemas", () => {
     expect(tool("edit_workflow_run_step_prompt").inputSchema.required).toEqual(["workflowId", "runId", "nodeId", "prompt"]);
     expect(tool("escalate_workflow_gate").inputSchema.required).toEqual(["workflowId", "runId"]);
     expect(tool("create_trigger").inputSchema.required).toEqual(["kind", "name", "event", "targetWorkflowId"]);
+    expect(tool("decide_poll_activation").inputSchema.required).toEqual(["name", "decision"]);
+    expect(tool("escalate_poll_activation").inputSchema.required).toEqual(["name"]);
     expect(tool("delete_trigger").inputSchema.required).toEqual(["name"]);
   });
 
@@ -957,6 +961,31 @@ describe("workflow tools — unit (stub gateway)", () => {
 
     await tool("delete_trigger").handler({ name: "lead-hook" }, authedCtx);
     expect(calls[2]).toMatchObject({ url: "http://127.0.0.1:7777/api/workflow-triggers/lead-hook", method: "DELETE" });
+  });
+
+  it("poll approval tools use only the bound caller identity and route through native approval endpoints", async () => {
+    const { calls, ctx } = stub(() => ({
+      status: 200,
+      body: { trigger: { name: "daily-check", kind: "poll", approval: { state: "pending" } } },
+    }));
+    const unbound = { ...ctx, callerSessionId: undefined, sessionCapability: undefined };
+
+    await expect(tool("decide_poll_activation").handler({ name: "daily-check", decision: "approve" }, unbound))
+      .rejects.toThrow(/caller identity unavailable/i);
+    await tool("decide_poll_activation").handler({ name: "daily-check", decision: "reject" }, ctx);
+    await tool("escalate_poll_activation").handler({ name: "daily-check" }, ctx);
+
+    expect(calls[0]).toMatchObject({
+      url: "http://127.0.0.1:7777/api/workflow-triggers/daily-check/activation-approval",
+      method: "POST",
+      body: { decision: "reject" },
+    });
+    expect(calls[1]).toMatchObject({
+      url: "http://127.0.0.1:7777/api/workflow-triggers/daily-check/activation-approval/escalate",
+      method: "POST",
+      body: {},
+    });
+    expect(JSON.stringify(calls)).not.toContain("sessionId");
   });
 
   it("a gateway 413 maps to a structured too-large error the agent can act on", async () => {

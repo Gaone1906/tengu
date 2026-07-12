@@ -15,6 +15,7 @@ import { getRun, listRuns, saveRun } from '../run-store.js';
 import { WORKFLOW_DEFINITION_SCHEMA_VERSION, type EditableWorkflowDefinition, type WorkflowNode } from '../definition.js';
 import type { RunDriverDeps } from '../run-reconciler.js';
 import { stepSessionKey, type StepSessionProbe } from '../advance.js';
+import { createWorkflowTodoEventFeed } from '../../work-items/workflow-event-feed.js';
 
 const now = () => '2026-07-06T10:00:00.000Z';
 
@@ -47,6 +48,7 @@ function deps(): RunDriverDeps {
   const sessions = new Map<string, StepSessionProbe>();
   return {
     root,
+    todoEventFeed: createWorkflowTodoEventFeed(),
     getDefinition,
     probeStepSession: (key) => sessions.get(key) ?? { found: false },
     spawnStep: async (ctx) => {
@@ -59,6 +61,129 @@ function deps(): RunDriverDeps {
 }
 
 describe('todo-status replay event claims', () => {
+  it('keeps a live foreign claim leased and permits stale crash takeover', () => {
+    let nowMs = Date.parse('2026-07-12T12:00:00.000Z');
+    const ownerA = createWorkflowTodoEventFeed({ ownerId: 'process-a', now: () => new Date(nowMs), leaseMs: 30_000 });
+    const ownerB = createWorkflowTodoEventFeed({ ownerId: 'process-b', now: () => new Date(nowMs), leaseMs: 30_000 });
+
+    expect(ownerA.claimEvent('wie_leased', ['verify-wf'])).toMatchObject({ state: 'acquired' });
+    expect(ownerB.claimEvent('wie_leased', ['verify-wf'])).toEqual({ state: 'busy' });
+
+    nowMs += 30_001;
+    expect(ownerB.claimEvent('wie_leased', ['changed-later'])).toEqual({
+      state: 'acquired',
+      definitionIds: ['verify-wf'],
+    });
+  });
+
+  it('releases a same-process claim after an exception so the event can retry', async () => {
+    createDefinition(root, def('exception-retry-wf'), { now });
+    const feed = createWorkflowTodoEventFeed({ ownerId: 'same-process-retry' });
+    const failing = deps();
+    failing.todoEventFeed = feed;
+    failing.publishInitialRun = () => { throw new Error('injected publication failure'); };
+    const event = {
+      id: 'wie_exception_retry',
+      workItemId: 'wi_exception_retry',
+      fromStatus: 'executing' as const,
+      toStatus: 'in_review' as const,
+      item: { source: 'human' as const, department: null, assignee: null },
+    };
+
+    await expect(fireTodoStatusChangeWorkflows(failing, event)).rejects.toThrow(/injected publication failure/);
+    const retrying = deps();
+    retrying.todoEventFeed = feed;
+    await expect(fireTodoStatusChangeWorkflows(retrying, event)).resolves.toEqual([
+      expect.objectContaining({ workflowId: 'exception-retry-wf', outcome: 'started' }),
+    ]);
+  });
+
+  it('retries a partial multi-definition fire idempotently by event fireRef', async () => {
+    const store = await import('../run-store.js');
+    createDefinition(root, def('partial-a'), { now });
+    createDefinition(root, def('partial-b'), { now });
+    const feed = createWorkflowTodoEventFeed({ ownerId: 'partial-retry' });
+    const failing = deps();
+    failing.todoEventFeed = feed;
+    failing.publishInitialRun = (publishRoot, run) => {
+      if (run.workflowId === 'partial-b') throw new Error('injected second publication failure');
+      return store.publishInitialWorkflowRun(publishRoot, run);
+    };
+    const event = {
+      id: 'wie_partial_retry',
+      workItemId: 'wi_partial_retry',
+      fromStatus: 'executing' as const,
+      toStatus: 'in_review' as const,
+      item: { source: 'human' as const, department: null, assignee: null },
+    };
+
+    await expect(fireTodoStatusChangeWorkflows(failing, event)).rejects.toThrow(/second publication failure/);
+    const retrying = deps();
+    retrying.todoEventFeed = feed;
+    const retried = await fireTodoStatusChangeWorkflows(retrying, event);
+
+    expect(retried.map((outcome) => [outcome.workflowId, outcome.outcome])).toEqual([
+      ['partial-a', 'duplicate'],
+      ['partial-b', 'started'],
+    ]);
+    expect(listRuns(root, 'partial-a')).toHaveLength(1);
+    expect(listRuns(root, 'partial-b')).toHaveLength(1);
+  });
+
+  it('replays matching and payload provenance from the immutable event snapshot after Todo metadata changes', async () => {
+    const store = await import('../../work-items/store.js');
+    const transitions = await import('../../work-items/transitions.js');
+    const registry = await import('../../sessions/registry.js');
+    transitions.setTodoStatusChangeListener(null);
+    const definition = def('historical-provenance-wf');
+    const trigger = definition.nodes[0];
+    if (trigger.type !== 'trigger') throw new Error('expected trigger');
+    trigger.trigger = {
+      kind: 'todo-status-change',
+      toStatus: 'in_review',
+      filter: { source: 'human', department: 'platform', assignee: 'original-reviewer' },
+    } as never;
+    createDefinition(root, definition, { now });
+    const todo = store.createWorkItem({
+      title: 'historical metadata',
+      status: 'executing',
+      source: 'human',
+      department: 'platform',
+      assignee: 'original-reviewer',
+    });
+    const event = transitions.transition(todo.id, 'in_review', 'qa').event!;
+    registry.initDb().prepare(
+      `UPDATE work_items SET source = 'cron', department = 'operations', assignee = 'replacement' WHERE id = ?`,
+    ).run(todo.id);
+
+    const replayed = await replayMissedTodoStatusChangeWorkflowFires(deps(), { limit: 50 });
+
+    expect(replayed.map((entry) => entry.eventId)).toContain(event.id);
+    expect(listRuns(root, definition.id)).toHaveLength(1);
+    expect(listRuns(root, definition.id)[0].trigger).toMatchObject({
+      payload: {
+        source: 'human',
+        department: 'platform',
+        assignee: 'original-reviewer',
+      },
+    });
+  });
+
+  it('fails closed for a legacy status event without a complete immutable provenance snapshot', async () => {
+    const store = await import('../../work-items/store.js');
+    const transitions = await import('../../work-items/transitions.js');
+    const registry = await import('../../sessions/registry.js');
+    transitions.setTodoStatusChangeListener(null);
+    createDefinition(root, def('legacy-no-snapshot-wf'), { now });
+    const todo = store.createWorkItem({ title: 'legacy event', status: 'executing', source: 'human' });
+    const event = transitions.transition(todo.id, 'in_review', 'qa').event!;
+    registry.initDb().prepare('UPDATE work_item_events SET detail = NULL WHERE id = ?').run(event.id);
+
+    await replayMissedTodoStatusChangeWorkflowFires(deps(), { limit: 50 });
+
+    expect(listRuns(root, 'legacy-no-snapshot-wf')).toHaveLength(0);
+  });
+
   it('a second replay only processes events created after the first', async () => {
     const store = await import('../../work-items/store.js');
     const transitions = await import('../../work-items/transitions.js');

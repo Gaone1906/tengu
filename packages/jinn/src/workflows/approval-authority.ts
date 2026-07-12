@@ -1,11 +1,9 @@
 import type { IncomingHttpHeaders } from 'node:http';
-import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from '../mcp/identity.js';
-import { getSession } from '../sessions/registry.js';
-import type { Employee, Session } from '../shared/types.js';
+import type { Employee } from '../shared/types.js';
 import { resolveRootApprovalTarget } from '../gateway/approval-authority.js';
 import { resolveOrgHierarchy } from '../gateway/org-hierarchy.js';
 import { scanOrg } from '../gateway/org.js';
-import { resolveCallerIdentity } from '../gateway/session-comm-guards.js';
+import { resolveWorkflowApprovalCaller, workflowInvocationEmployee } from '../gateway/workflow-approval-caller.js';
 import type { EditableWorkflowDefinition } from './definition.js';
 import type { WorkflowRun } from './run-store.js';
 
@@ -13,6 +11,16 @@ export interface WorkflowApprovalRoute {
   requesterEmployee: string | null;
   target: string | null;
   targetKind: 'employee' | 'virtual' | 'none';
+  /** Exact employee identities authorized when this route was created. */
+  entitledEmployees: string[];
+  /** Whether the authenticated operator is authorized by the frozen route. */
+  operatorEntitled: boolean;
+  /** Frozen explicit escalation destination, if escalation occurred. */
+  escalation: {
+    target: 'operator';
+    targetKind: 'operator';
+    at: string;
+  } | null;
   requestedAt: string;
   requestedBy: string;
   escalatedAt: string | null;
@@ -47,7 +55,7 @@ function knownEmployee(value: unknown, registry: Map<string, Employee>): string 
 
 function invocationEmployee(run: Pick<WorkflowRun, 'invocation'>, registry: Map<string, Employee>): string | null {
   if (!run.invocation) return null;
-  return knownEmployee(getSession(run.invocation.sessionId)?.employee, registry);
+  return knownEmployee(workflowInvocationEmployee(run.invocation.sessionId), registry);
 }
 
 function authoredRequester(definition: EditableWorkflowDefinition, registry: Map<string, Employee>): string | null {
@@ -91,13 +99,51 @@ export function createWorkflowApprovalRouteForRequester(
     : registry.has(target)
       ? 'employee'
       : 'virtual';
+  const entitledEmployees = [
+    ...(targetKind === 'employee' && target ? [target] : []),
+    ...(root?.kind === 'employee' ? [root.name] : []),
+  ].filter((employee, index, all) => all.indexOf(employee) === index);
   return {
     requesterEmployee,
     target,
     targetKind,
+    entitledEmployees,
+    operatorEntitled: targetKind === 'virtual',
+    escalation: null,
     requestedAt,
     requestedBy,
     escalatedAt: null,
+  };
+}
+
+export function freezeWorkflowApprovalEscalation<T extends WorkflowApprovalRoute>(
+  route: T,
+  at: string,
+): T {
+  if (route.escalation?.target === 'operator' && route.operatorEntitled) return route;
+  return {
+    ...route,
+    escalatedAt: route.escalatedAt ?? at,
+    operatorEntitled: true,
+    escalation: {
+      target: 'operator',
+      targetKind: 'operator',
+      at: route.escalatedAt ?? at,
+    },
+  } as T;
+}
+
+export function decideWorkflowGateApproval(
+  approval: WorkflowGateApprovalRecord,
+  decision: 'approve' | 'reject',
+  actor: string,
+  at: string,
+): WorkflowGateApprovalRecord {
+  return {
+    ...approval,
+    state: decision === 'approve' ? 'approved' : 'rejected',
+    decidedBy: actor,
+    decidedAt: at,
   };
 }
 
@@ -114,33 +160,17 @@ export function createPendingWorkflowGateApproval(
   };
 }
 
-function callerSession(
-  headers: IncomingHttpHeaders,
-  operatorAuthenticated: boolean,
-): { ok: true; session: Session } | { ok: true; operator: true } | { ok: false; error: string } {
-  const identity = resolveCallerIdentity(headers, {
-    sessionExists: (sessionId) => !!getSession(sessionId),
-    verifySessionCapability,
-    requireCapability: true,
-    operatorAuthenticated,
-  });
-  if (identity.kind === 'unidentified-tool' || identity.kind === 'unauthenticated') {
-    return { ok: false, error: UNIDENTIFIED_TOOL_CALL_ERROR };
-  }
-  if (identity.kind === 'operator') return { ok: true, operator: true };
-  const session = getSession(identity.callerId);
-  return session ? { ok: true, session } : { ok: false, error: UNIDENTIFIED_TOOL_CALL_ERROR };
-}
-
 export function resolveWorkflowApprovalDecisionAuthority(
   headers: IncomingHttpHeaders,
   route: WorkflowApprovalRoute,
   opts: { operatorAuthenticated?: boolean; allowOperator?: boolean } = {},
 ): WorkflowApprovalAuthorityResult {
-  const caller = callerSession(headers, opts.operatorAuthenticated === true);
-  if (!caller.ok) return { ok: false, status: 403, error: caller.error };
-  if ('operator' in caller) {
-    if (opts.allowOperator !== true || (route.targetKind !== 'virtual' && !route.escalatedAt)) {
+  const caller = resolveWorkflowApprovalCaller(headers, opts.operatorAuthenticated === true);
+  if (caller.kind === 'denied') return { ok: false, status: 403, error: caller.error };
+  if (caller.kind === 'operator') {
+    const operatorEntitled = route.operatorEntitled === true
+      || (route.targetKind === 'virtual' && route.target !== null);
+    if (opts.allowOperator !== true || !operatorEntitled) {
       return {
         ok: false,
         status: 403,
@@ -150,26 +180,24 @@ export function resolveWorkflowApprovalDecisionAuthority(
     return { ok: true, authority: { actor: 'operator', kind: 'operator' } };
   }
 
-  const employee = caller.session.employee;
-  const registry = scanOrg();
-  const current = employee ? registry.get(employee) : undefined;
-  if (!employee || !current) {
+  const employee = caller.employee;
+  if (!employee) {
     return { ok: false, status: 403, error: 'Workflow approval decisions require a known employee identity' };
   }
-  const root = resolveRootApprovalTarget();
-  const employeeIsRoot = root?.kind === 'employee' && root.name === employee;
-  if (route.requesterEmployee === employee && !employeeIsRoot) {
+  const frozenEntitlements = Array.isArray(route.entitledEmployees)
+    ? route.entitledEmployees
+    : route.targetKind === 'employee' && route.target
+      ? [route.target]
+      : [];
+  if (route.requesterEmployee === employee && !frozenEntitlements.includes(employee)) {
     return { ok: false, status: 403, error: `employee "${employee}" cannot decide their own Workflow approval` };
   }
-  if ((route.targetKind === 'employee' && route.target === employee) || employeeIsRoot) {
-    return { ok: true, authority: { actor: employee, kind: 'employee', employee } };
-  }
-  if (route.escalatedAt && current.rank === 'executive') {
+  if (frozenEntitlements.includes(employee)) {
     return { ok: true, authority: { actor: employee, kind: 'employee', employee } };
   }
   return {
     ok: false,
     status: 403,
-    error: `employee "${employee}" is not the routed Workflow approval target${route.target ? ` "${route.target}"` : ''} or org root`,
+    error: `employee "${employee}" is not in the frozen Workflow approval route${route.target ? ` for "${route.target}"` : ''}`,
   };
 }

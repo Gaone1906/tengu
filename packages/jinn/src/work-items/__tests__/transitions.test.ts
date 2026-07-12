@@ -167,6 +167,25 @@ describe("transition — the guarded edge map", () => {
     }
   });
 
+  it("atomically snapshots post-assignment provenance into an assignment-caused status event", () => {
+    const wi = mk("backlog", { source: "delegation", department: "old", assignee: "old-owner" });
+
+    tr.assignWorkItem(wi.id, "platform-worker", "platform", "platform-manager");
+
+    expect(store.listWorkItemEvents(wi.id).at(-1)).toMatchObject({
+      kind: "status_change",
+      fromStatus: "backlog",
+      toStatus: "assigned",
+      detail: {
+        todoProvenance: {
+          source: "delegation",
+          department: "platform",
+          assignee: "platform-worker",
+        },
+      },
+    });
+  });
+
   it("keeps the transition and event committed when the listener throws (best-effort fire hook)", () => {
     const wi = mk("executing");
     tr.setTodoStatusChangeListener(() => {

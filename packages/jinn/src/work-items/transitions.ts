@@ -122,6 +122,16 @@ function notifyTodoStatusChange(event: WorkItemEvent | undefined, item: WorkItem
   }
 }
 
+function todoProvenanceSnapshot(
+  item: Pick<WorkItem, 'source' | 'department' | 'assignee'>,
+): Pick<WorkItem, 'source' | 'department' | 'assignee'> {
+  return {
+    source: item.source,
+    department: item.department,
+    assignee: item.assignee,
+  };
+}
+
 /**
  * Move a work item to `to` under the edge map. Throws `TransitionError` on an
  * unknown item, an undeclared edge, a sticky-terminal exit without human
@@ -197,6 +207,7 @@ export function transition(id: string, to: WorkItemStatus, actor: string, opts: 
         ...(opts.detail ?? {}),
         ...(opts.bounce ? { bounce: true, rounds } : {}),
         ...(escalatedByRounds ? { reason: 'max-rounds-exhausted', maxRounds: effectiveMaxRounds(item) } : {}),
+        todoProvenance: todoProvenanceSnapshot(item),
       },
     });
 
@@ -241,7 +252,15 @@ export function assignWorkItem(
       fromStatus: item.status === target ? null : item.status,
       toStatus: item.status === target ? null : target,
       actor: actor ?? null,
-      detail: { assignee, department },
+      detail: {
+        assignee,
+        department,
+        todoProvenance: todoProvenanceSnapshot({
+          source: item.source,
+          department,
+          assignee,
+        }),
+      },
       versionEffect: 'companion',
     });
     return { item: getWorkItem(id)!, escalated: false, event };

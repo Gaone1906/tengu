@@ -372,11 +372,17 @@ describe('Workflow has no Todo write capability', () => {
     const cancellation = harness();
     const cancellationDef = createDefinition('cancellation-path', [trigger(), step('cancel-step')]);
     const cancelling = await modules.reconciler.startWorkflowRun(cancellation.deps, cancellationDef);
-    modules.runStore.saveRun(root, {
-      ...cancelling,
-      status: 'cancelled',
-      endedAt: new Date(clock).toISOString(),
+    const cancellationRequested = await modules.reconciler.cancelWorkflowRun(
+      cancellation.deps,
+      cancellationDef.id,
+      cancelling.runId,
+      { actor: 'operator', reason: 'negative capability test' },
+    );
+    expect(cancellationRequested).toMatchObject({
+      outcome: 'cancelled',
+      run: { status: 'running', stopping: { to: 'cancelled' } },
     });
+    cancellation.settle(cancelling.runId, 'cancel-step', 1, 'interrupted');
     await modules.reconciler.sweepWorkflowRuns(cancellation.deps);
     expect(modules.runStore.getRun(root, cancellationDef.id, cancelling.runId)?.status).toBe('cancelled');
 

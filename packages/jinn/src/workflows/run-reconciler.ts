@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { resolveExecutionPlan, type ExecutionPlan } from './execution-plan.js';
 import type { EditableWorkflowDefinition } from './definition.js';
+import type { WorkflowTodoEventFeed } from '../work-items/workflow-event-feed.js';
 import {
   buildStepPrompt,
   edgeLabelBetween,
@@ -63,7 +64,7 @@ import {
   WorkflowRunIdempotencyConflict,
   type WorkflowRunInvocationClaim,
 } from './run-idempotency.js';
-import { createPendingWorkflowGateApproval } from './approval-authority.js';
+import { createPendingWorkflowGateApproval, freezeWorkflowApprovalEscalation } from './approval-authority.js';
 
 /**
  * Workflow RUN RECONCILER + driver (GRS-014b) — the impure half of the v2 engine.
@@ -122,6 +123,9 @@ export interface RunDriverDeps {
    * (the gateway wires the session registry). Mid-run deletion is handled by the
    * probe/post failing honestly through the step's retry/onError policy. */
   sessionExists?: (sessionId: string) => boolean;
+  /** Narrow, read/claim-only Todo event boundary. Workflow runtime never receives
+   * the underlying session database or Todo ledger storage. */
+  todoEventFeed?: WorkflowTodoEventFeed;
   /** Gateway-owned projection of one durable workflow run into the session list.
    * Best-effort: a projection failure is logged and never changes run execution. */
   syncRunSession?: (run: WorkflowRun) => string | undefined;
@@ -154,7 +158,8 @@ function syncRunSessionBestEffort(deps: RunDriverDeps, run: WorkflowRun): string
 function persistRun(deps: RunDriverDeps, candidate: WorkflowRun): WorkflowRun {
   const previous = getRun(deps.root, candidate.workflowId, candidate.runId);
   let nativeCandidate = candidate;
-  if (candidate.status === 'parked' && candidate.parked && !candidate.parked.approval) {
+  if (candidate.schemaVersion === WORKFLOW_RUN_SCHEMA_VERSION
+    && candidate.status === 'parked' && candidate.parked && !candidate.parked.approval) {
     const definition = candidate.definitionSnapshot ?? deps.getDefinition(deps.root, candidate.workflowId);
     if (definition) {
       nativeCandidate = {
@@ -887,10 +892,100 @@ export type ResolveGateOutcome =
   | { outcome: 'not-found' }
   | { outcome: 'not-parked'; run: WorkflowRun };
 
+export type CancelWorkflowRunOutcome =
+  | { outcome: 'cancelled'; run: WorkflowRun }
+  | { outcome: 'not-found' }
+  | { outcome: 'already-terminal'; run: WorkflowRun };
+
+/** Request a real run cancellation and drive its ordinary stop/drain path. */
+export async function cancelWorkflowRun(
+  deps: RunDriverDeps,
+  workflowId: string,
+  runId: string,
+  opts: { actor: string; reason?: string },
+): Promise<CancelWorkflowRunOutcome> {
+  return withRunAdvanceLock(runId, async () => {
+    const run = getRun(deps.root, workflowId, runId);
+    if (!run) return { outcome: 'not-found' as const };
+    if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled') {
+      return { outcome: 'already-terminal' as const, run };
+    }
+    if (run.stopping?.to === 'cancelled') return { outcome: 'cancelled' as const, run };
+
+    const at = (deps.now ?? (() => new Date().toISOString()))();
+    const requested = persistRun(deps, requestWorkflowRunTerminal(run, 'cancelled', [{
+      code: 'run-cancelled',
+      message: `${opts.actor} cancelled the Workflow run${opts.reason ? `: ${opts.reason}` : ''}`,
+    }], at));
+    if (requested.status === 'cancelled') return { outcome: 'cancelled' as const, run: requested };
+
+    const definition = requested.definitionSnapshot ?? deps.getDefinition(deps.root, workflowId);
+    if (!definition) return { outcome: 'cancelled' as const, run: requested };
+    const compiled = compilePlan(definition);
+    if (!compiled.ok) return { outcome: 'cancelled' as const, run: requested };
+    return {
+      outcome: 'cancelled' as const,
+      run: await driveRunLocked(deps, definition, compiled.plan, requested),
+    };
+  });
+}
+
 export type EscalateGateApprovalOutcome =
   | { outcome: 'escalated'; run: WorkflowRun }
   | { outcome: 'not-found' }
   | { outcome: 'not-parked'; run: WorkflowRun };
+
+export type AdoptLegacyGateApprovalOutcome =
+  | { outcome: 'adopted'; run: WorkflowRun }
+  | { outcome: 'already-adopted'; run: WorkflowRun }
+  | { outcome: 'not-found' }
+  | { outcome: 'not-parked'; run: WorkflowRun };
+
+/**
+ * Atomically adopt one legacy parked episode into the native approval model.
+ * The transition never reads a Todo or a mutable current definition: it freezes
+ * a fresh pending route from the run's own definition snapshot/invocation and
+ * retains the exact pre-adoption parked evidence in an append-only record.
+ */
+export async function adoptLegacyParkedWorkflowApproval(
+  deps: RunDriverDeps,
+  workflowId: string,
+  runId: string,
+): Promise<AdoptLegacyGateApprovalOutcome> {
+  return withRunAdvanceLock(runId, async () => {
+    const run = getRun(deps.root, workflowId, runId);
+    if (!run) return { outcome: 'not-found' as const };
+    if (run.status !== 'parked' || !run.parked) return { outcome: 'not-parked' as const, run };
+    if (run.parked.approval) return { outcome: 'already-adopted' as const, run };
+
+    const at = (deps.now ?? (() => new Date().toISOString()))();
+    const definitionSource = run.definitionSnapshot ? 'snapshot' as const : 'missing-fallback' as const;
+    const definition = run.definitionSnapshot ?? {
+      schemaVersion: 1,
+      id: run.workflowId,
+      title: run.title,
+      version: run.definitionVersion,
+      status: 'active' as const,
+      nodes: [],
+      edges: [],
+    };
+    const approval = createPendingWorkflowGateApproval(run, definition, at);
+    const adoption = {
+      legacySchemaVersion: run.schemaVersion ?? 1,
+      definitionSource,
+      adoptedAt: at,
+      gateKey: run.parked.ref ?? run.parked.description,
+      priorParked: { ...run.parked },
+      approval,
+    };
+    const adopted = persistRun(deps, {
+      ...run,
+      parked: { ...run.parked, approval },
+      approvalAdoptions: [...(run.approvalAdoptions ?? []), adoption],
+    });
+    return { outcome: 'adopted' as const, run: adopted };
+  });
+}
 
 export async function escalateWorkflowRunGateApproval(
   deps: RunDriverDeps,
@@ -903,7 +998,8 @@ export async function escalateWorkflowRunGateApproval(
     if (run.status !== 'parked' || !run.parked?.approval || run.parked.approval.state !== 'pending') {
       return { outcome: 'not-parked' as const, run };
     }
-    if (run.parked.approval.escalatedAt) return { outcome: 'escalated' as const, run };
+    if (run.parked.approval.escalation?.target === 'operator'
+      && run.parked.approval.operatorEntitled) return { outcome: 'escalated' as const, run };
     const at = (deps.now ?? (() => new Date().toISOString()))();
     return {
       outcome: 'escalated' as const,
@@ -911,7 +1007,7 @@ export async function escalateWorkflowRunGateApproval(
         ...run,
         parked: {
           ...run.parked,
-          approval: { ...run.parked.approval, escalatedAt: at },
+          approval: freezeWorkflowApprovalEscalation(run.parked.approval, at),
         },
       }),
     };
@@ -941,6 +1037,9 @@ export async function resolveWorkflowRunGate(
   const outcome = await withRunAdvanceLock(runId, async () => {
     const run = getRun(deps.root, workflowId, runId);
     if (!run) return { outcome: 'not-found' as const };
+    if (run.status === 'parked' && run.parked && !run.parked.approval) {
+      return { outcome: 'not-parked' as const, run };
+    }
     const resolved = resolveParkedGate(run, decision, now, opts);
     if (!resolved.ok) return { outcome: 'not-parked' as const, run };
 
@@ -996,6 +1095,15 @@ export async function sweepWorkflowRuns(deps: RunDriverDeps): Promise<number> {
       continue;
     }
     if (!run) continue; // run file gone — stale index entry, pruned on next rebuild
+    if (run.status === 'parked' && run.parked && !run.parked.approval) {
+      examined++;
+      try {
+        await adoptLegacyParkedWorkflowApproval(deps, workflowId, runId);
+      } catch (err) {
+        deps.log?.('warn', `[workflow-runs] adopting parked ${runId} failed: ${(err as Error).message}`);
+      }
+      continue;
+    }
     // Sweepable (GRS-016a): running runs, plus parked runs whose sibling sessions
     // are still in flight (probe-only settles — a park freezes dispatch, not
     // evidence). Parked-and-quiet runs wait on a human; terminals are done.

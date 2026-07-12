@@ -806,6 +806,9 @@ export interface WorkflowApprovalRouteWire {
   requesterEmployee: string | null
   target: string | null
   targetKind: "employee" | "virtual" | "none"
+  entitledEmployees: string[]
+  operatorEntitled: boolean
+  escalation: { target: "operator"; targetKind: "operator"; at: string } | null
   requestedAt: string
   requestedBy: string
   escalatedAt: string | null
@@ -835,6 +838,13 @@ export interface WorkflowTriggerBindingWire {
   stdoutMaxBytes?: number
   stderrMaxBytes?: number
   approval?: PollActivationApprovalWire
+  approvalCapability?: {
+    canDecide: boolean
+    canEscalate: boolean
+    needsYou: boolean
+    target: string | null
+    escalated: boolean
+  }
   lastCheckedAt?: string
   lastFiredAt?: string
   lastOutcome?: string

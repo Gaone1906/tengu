@@ -524,6 +524,9 @@ describe("WorkflowEditView", () => {
         requesterEmployee: "workflow-author",
         target: "workflow-manager",
         targetKind: "employee" as const,
+        entitledEmployees: ["workflow-manager"],
+        operatorEntitled: false,
+        escalation: null,
         requestedAt: "2026-07-06T12:00:00.000Z",
         requestedBy: "workflow-trigger" as const,
         escalatedAt: null,
@@ -531,6 +534,13 @@ describe("WorkflowEditView", () => {
         activationContractHash: "sha256:contract",
         decidedBy: null,
         decidedAt: null,
+      },
+      approvalCapability: {
+        canDecide: true,
+        canEscalate: true,
+        needsYou: true,
+        target: "workflow-manager",
+        escalated: false,
       },
     }
     listWorkflowTriggers.mockResolvedValue({ triggers: [pending], evidenceConfigured: true })
@@ -556,6 +566,100 @@ describe("WorkflowEditView", () => {
 
     await waitFor(() => expect(decideWorkflowTriggerActivationApproval).toHaveBeenCalledWith("daily-check", "approve"))
     expect(screen.getByTestId("wf-poll-approval").textContent).toContain("Approved")
+  })
+
+  it("shows truthful waiting copy without decision buttons for a caller outside the frozen poll route", async () => {
+    listWorkflowTriggers.mockResolvedValue({
+      evidenceConfigured: true,
+      triggers: [{
+        schemaVersion: 2,
+        kind: "poll",
+        name: "daily-check",
+        event: "check.ready",
+        targetWorkflowId: "sample-autonomy",
+        activation: "pending_approval",
+        source: "poll",
+        command: "node scripts/check.js",
+        intervalSeconds: 300,
+        approval: {
+          requesterEmployee: "workflow-author",
+          target: "workflow-manager",
+          targetKind: "employee",
+          entitledEmployees: ["workflow-manager"],
+          operatorEntitled: false,
+          escalation: null,
+          requestedAt: "2026-07-06T12:00:00.000Z",
+          requestedBy: "workflow-trigger",
+          escalatedAt: null,
+          state: "pending",
+          activationContractHash: "sha256:contract",
+          decidedBy: null,
+          decidedAt: null,
+        },
+        approvalCapability: {
+          canDecide: false,
+          canEscalate: false,
+          needsYou: false,
+          target: "workflow-manager",
+          escalated: false,
+        },
+      }],
+    })
+    getWorkflowDefinition.mockResolvedValue(def())
+
+    render(<WorkflowEditView workflowId="sample-autonomy" />)
+
+    await waitFor(() => expect(screen.getByTestId("wf-poll-approval")).toBeTruthy())
+    expect(screen.queryByTestId("wf-poll-approve")).toBeNull()
+    expect(screen.queryByTestId("wf-poll-reject")).toBeNull()
+    expect(screen.getByTestId("wf-poll-approval").textContent).toMatch(/waiting for workflow-manager/i)
+  })
+
+  it("keeps a rejected poll activation visible for editing and review", async () => {
+    listWorkflowTriggers.mockResolvedValue({
+      evidenceConfigured: true,
+      triggers: [{
+        schemaVersion: 2,
+        kind: "poll",
+        name: "rejected-check",
+        event: "check.rejected",
+        targetWorkflowId: "sample-autonomy",
+        activation: "disabled",
+        source: "poll",
+        command: "node scripts/rejected.js",
+        intervalSeconds: 600,
+        approval: {
+          requesterEmployee: "workflow-author",
+          target: "workflow-manager",
+          targetKind: "employee",
+          entitledEmployees: ["workflow-manager"],
+          operatorEntitled: false,
+          escalation: null,
+          requestedAt: "2026-07-06T12:00:00.000Z",
+          requestedBy: "workflow-trigger",
+          escalatedAt: null,
+          state: "rejected",
+          activationContractHash: "sha256:rejected",
+          decidedBy: "workflow-manager",
+          decidedAt: "2026-07-06T12:01:00.000Z",
+        },
+        approvalCapability: {
+          canDecide: false,
+          canEscalate: false,
+          needsYou: false,
+          target: "workflow-manager",
+          escalated: false,
+        },
+      }],
+    })
+    getWorkflowDefinition.mockResolvedValue(def())
+
+    render(<WorkflowEditView workflowId="sample-autonomy" />)
+
+    await waitFor(() => expect(screen.getByTestId("wf-poll-approval")).toBeTruthy())
+    expect(screen.getByTestId("wf-poll-approval").textContent).toContain("Rejected")
+    expect((screen.getByTestId("wf-wakeup-trigger-name") as HTMLInputElement).value).toBe("rejected-check")
+    expect((screen.getByTestId("wf-wakeup-command") as HTMLInputElement).value).toBe("node scripts/rejected.js")
   })
 
   it("does not delete the current wake-up binding when replacement creation fails", async () => {

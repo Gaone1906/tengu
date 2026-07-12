@@ -13,6 +13,7 @@ import type {
 import { MAX_STEP_RETRY_ATTEMPTS, MAX_WAIT_MINUTES, type StepRetryCause, type StepRetryPolicy } from './definition.js';
 import { evaluateConditions, type ConditionEvidence } from './condition.js';
 import { extractHandoff, fullMessageOutcome, type StepOutcome } from './handoff.js';
+import { decideWorkflowGateApproval } from './approval-authority.js';
 import {
   IN_FLIGHT_STEP_STATUSES,
   SETTLED_STEP_STATUSES,
@@ -837,7 +838,7 @@ export function advanceRun(
       };
       return { run: next, changed: true, dispatches: [], ...(stops.length > 0 ? { stops } : {}) };
     }
-    next.status = 'failed';
+    next.status = next.stopping?.to ?? 'failed';
     next.endedAt = at;
     next.errors = [...(next.errors ?? []), ...pendingErrors];
     if (next.stopping) next.stopping = { ...next.stopping, errors: [] }; // folded above; keep the field as drain evidence
@@ -1953,6 +1954,22 @@ export function resolveParkedGate(
   const next: WorkflowRun = { ...run, steps: run.steps.map((r) => ({ ...r })) };
   const at = now();
   const decidedBy = opts.decidedBy ?? 'operator';
+  const approval = parked.approval
+    ? decideWorkflowGateApproval(parked.approval, decision, decidedBy, at)
+    : {
+        requesterEmployee: null,
+        target: null,
+        targetKind: 'none' as const,
+        entitledEmployees: [],
+        operatorEntitled: false,
+        escalation: null,
+        requestedAt: parked.at ?? at,
+        requestedBy: 'legacy-native-gate',
+        escalatedAt: null,
+        state: decision === 'approve' ? 'approved' as const : 'rejected' as const,
+        decidedBy,
+        decidedAt: at,
+      };
   next.gateDecisions = [
     ...(run.gateDecisions ?? []),
     {
@@ -1960,6 +1977,7 @@ export function resolveParkedGate(
       decision,
       actor: decidedBy,
       at,
+      approval,
     },
   ];
 

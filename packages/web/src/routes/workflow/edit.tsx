@@ -106,7 +106,9 @@ function activeTriggerBindingFor(
   bindings: WorkflowTriggerBindingWire[],
 ): WorkflowTriggerBindingWire | null {
   return [...bindings]
-    .filter((b) => b.targetWorkflowId === workflowId && b.activation !== "disabled")
+    .filter((b) => b.targetWorkflowId === workflowId && (
+      b.activation !== "disabled" || (b.kind === "poll" && b.approval?.state === "rejected")
+    ))
     .sort((a, b) => (b.updatedAt ?? b.createdAt ?? "").localeCompare(a.updatedAt ?? a.createdAt ?? ""))[0] ?? null
 }
 
@@ -1997,9 +1999,11 @@ export function WorkflowEditView({
                 : "Rejected"}
           </span>
           <span className="text-[var(--text-tertiary)]">
-            Poll activation · routed to {activeTriggerBinding.approval.target ?? "an organization approver"}
+            {activeTriggerBinding.approval.state === "pending" && !activeTriggerBinding.approvalCapability?.canDecide
+              ? `Poll activation · waiting for ${activeTriggerBinding.approval.target ?? "an organization approver"}`
+              : `Poll activation · routed to ${activeTriggerBinding.approval.target ?? "an organization approver"}`}
           </span>
-          {activeTriggerBinding.approval.state === "pending" && (
+          {activeTriggerBinding.approval.state === "pending" && activeTriggerBinding.approvalCapability?.canDecide && (
             <div className="ml-auto flex gap-1.5">
               <button
                 type="button"

@@ -3,15 +3,15 @@ import crypto from "node:crypto";
 import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
-// The two run tools now advertise the sole reportMode contract. Keep a narrow
-// 53-token headroom over the pinned Pi projection rather than hiding capability.
-const MAX_MANIFEST_TOKENS = 7175;
+// Keep narrow headroom over the pinned Pi projection while advertising both
+// identity-routed native poll approval operations.
+const MAX_MANIFEST_TOKENS = 7299;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 6803, sha256: "7950c4e26ac98f4271773e386ac523821b37474304f0b6c535937bee7898e34e" },
-  pi: { tokens: 7122, sha256: "b6448b9886cb1183cc0f12cb6c6e361c6148ddeeb8fbb70f55e7b3d8940dcfe3" },
-  openai: { tokens: 6930, sha256: "8606e56a300319ace277c1b0882f890cc7febaf601c33c5199228d1ab0d0665f" },
+  rpc: { tokens: 6913, sha256: "5af3a04762c721be7c5940b50f2a779b4d40f02108681ce637af102513e8c922" },
+  pi: { tokens: 7246, sha256: "95718c63c09aec841281c096745589f1a2d061825af7834279b4568f52630ce5" },
+  openai: { tokens: 7046, sha256: "54a7e649d86691532e0ad30e8c6a27bead55578f8ddba4f4a70020698013ee4c" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -26,7 +26,7 @@ async function exactOrAttested(name: keyof typeof ATTESTED, payload: string, loa
     return new Tiktoken(ranks.default).encode(payload).length;
   } catch {
     const hash = crypto.createHash("sha256").update(payload).digest("hex");
-    if (hash !== ATTESTED[name].sha256) throw new Error(`tokenizer unavailable and ${name} manifest is not the attested golden payload`);
+    if (hash !== ATTESTED[name].sha256) throw new Error(`tokenizer unavailable and ${name} manifest is not the attested golden payload (${hash})`);
     return ATTESTED[name].tokens;
   }
 }
@@ -38,10 +38,12 @@ const EXPECTED_TOOL_NAMES = [
   "create_trigger",
   "create_work_item",
   "create_workflow",
+  "decide_poll_activation",
   "decide_work_item_approval",
   "delegate_task",
   "delete_trigger",
   "edit_workflow_run_step_prompt",
+  "escalate_poll_activation",
   "escalate_workflow_gate",
   "escalate_work_item_approval",
   "find_employees",
@@ -88,10 +90,12 @@ const EXPECTED_REQUIRED = {
   create_trigger: ["kind", "name", "event", "targetWorkflowId"],
   create_work_item: ["title"],
   create_workflow: [],
+  decide_poll_activation: ["name", "decision"],
   decide_work_item_approval: ["id", "decision"],
   delegate_task: ["task"],
   delete_trigger: ["name"],
   edit_workflow_run_step_prompt: ["workflowId", "runId", "nodeId", "prompt"],
+  escalate_poll_activation: ["name"],
   escalate_workflow_gate: ["workflowId", "runId"],
   escalate_work_item_approval: ["id"],
   find_employees: [],
@@ -134,6 +138,7 @@ const EXPECTED_REQUIRED = {
 const EXPECTED_ENUMS = {
   cost_report: [["properties.groupBy", ["employee", "day"]]],
   create_trigger: [["properties.kind", ["webhook", "poll"]]],
+  decide_poll_activation: [["properties.decision", ["approve", "reject"]]],
   decide_work_item_approval: [["properties.decision", ["approve", "reject"]]],
   list_sessions: [["properties.scope", ["children", "employee", "recent"]]],
   list_work_items: [
@@ -162,7 +167,7 @@ function collectEnums(value: unknown, path: string[] = []): Array<[string, strin
 }
 
 describe("tool manifest budget", () => {
-  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7175 o200k_base tokens", async () => {
+  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7299 o200k_base tokens", async () => {
     const tools = buildTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
     const wrappers = {
       rpc: { jsonrpc: "2.0", id: 1, result: { tools } },
@@ -201,7 +206,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(47);
+    expect(tools).toHaveLength(49);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);

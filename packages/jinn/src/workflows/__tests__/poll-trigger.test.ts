@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -184,6 +184,88 @@ describe('workflow poll/check custom triggers', () => {
         decidedAt: null,
       },
     });
+  });
+
+  it('rejects future store and binding schemas without rewriting or downgrading them', async () => {
+    const file = path.join(root, 'workflow-triggers', 'triggers.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const futureStore = JSON.stringify({ schemaVersion: 99, triggers: [] }, null, 2);
+    fs.writeFileSync(file, futureStore);
+
+    expect(() => customTriggers.listWorkflowTriggerBindings(root)).toThrow(/schemaVersion 99.*newer|newer.*99/i);
+    await expect(customTriggers.migrateWorkflowTriggerStore(root)).rejects.toThrow(/schemaVersion 99.*newer|newer.*99/i);
+    expect(fs.readFileSync(file, 'utf8')).toBe(futureStore);
+
+    const futureBinding = JSON.stringify({
+      schemaVersion: 2,
+      triggers: [{ schemaVersion: 99, kind: 'webhook', source: 'event-webhook', name: 'future', event: 'future', targetWorkflowId: 'future', activation: 'active' }],
+    }, null, 2);
+    fs.writeFileSync(file, futureBinding);
+    expect(() => customTriggers.listWorkflowTriggerBindings(root)).toThrow(/binding.*schemaVersion 99.*newer|newer.*binding/i);
+    expect(fs.readFileSync(file, 'utf8')).toBe(futureBinding);
+  });
+
+  it('rolls back newly staged artifacts when a later migration artifact fails', async () => {
+    const file = path.join(root, 'workflow-triggers', 'triggers.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const original = JSON.stringify({
+      schemaVersion: 1,
+      triggers: [
+        {
+          schemaVersion: 1,
+          kind: 'poll', source: 'poll', name: 'artifact-first', event: 'poll.first', targetWorkflowId: 'first',
+          activation: 'active', command: staticOutputScript('artifact-first', JSON.stringify({ fire: false })), intervalSeconds: 60,
+          approvalWorkItemId: 'wi_historical_first', createdAt: FIXED, updatedAt: FIXED,
+        },
+        {
+          schemaVersion: 1,
+          kind: 'poll', source: 'poll', name: 'artifact-second', event: 'poll.second', targetWorkflowId: 'second',
+          activation: 'active', command: path.join(root, 'missing-second.sh'), intervalSeconds: 60,
+          approvalWorkItemId: 'wi_historical_second', createdAt: FIXED, updatedAt: FIXED,
+        },
+      ],
+    }, null, 2);
+    fs.writeFileSync(file, original);
+    const stagingRoot = path.join(tmpHome, 'workflow-trigger-artifacts');
+    const beforeArtifacts = fs.existsSync(stagingRoot) ? fs.readdirSync(stagingRoot).sort() : [];
+
+    await expect(customTriggers.migrateWorkflowTriggerStore(root)).rejects.toThrow(/fully pinnable/i);
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
+    const afterArtifacts = fs.existsSync(stagingRoot) ? fs.readdirSync(stagingRoot).sort() : [];
+    expect(afterArtifacts.filter((entry) => !beforeArtifacts.includes(entry))).toEqual([]);
+  });
+
+  it('rolls back staged artifacts and temp files when the migration store rename fails', async () => {
+    const file = path.join(root, 'workflow-triggers', 'triggers.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const original = JSON.stringify({
+      schemaVersion: 1,
+      triggers: [{
+        schemaVersion: 1,
+        kind: 'poll', source: 'poll', name: 'write-failure', event: 'poll.write', targetWorkflowId: 'write',
+        activation: 'active', command: staticOutputScript('write-failure', JSON.stringify({ fire: false })), intervalSeconds: 60,
+        approvalWorkItemId: 'wi_historical_write', createdAt: FIXED, updatedAt: FIXED,
+      }],
+    }, null, 2);
+    fs.writeFileSync(file, original);
+    const stagingRoot = path.join(tmpHome, 'workflow-trigger-artifacts');
+    const beforeArtifacts = fs.existsSync(stagingRoot) ? fs.readdirSync(stagingRoot).sort() : [];
+    const rename = fs.renameSync;
+    const spy = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (path.resolve(String(to)) === path.resolve(file)) throw new Error('injected trigger-store rename failure');
+      return rename(from, to);
+    });
+    try {
+      await expect(customTriggers.migrateWorkflowTriggerStore(root)).rejects.toThrow(/injected trigger-store rename failure/);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
+    const afterArtifacts = fs.existsSync(stagingRoot) ? fs.readdirSync(stagingRoot).sort() : [];
+    expect(afterArtifacts.filter((entry) => !beforeArtifacts.includes(entry))).toEqual([]);
+    expect(fs.readdirSync(path.dirname(file)).filter((name) => name.includes('.tmp-'))).toEqual([]);
   });
 
   it('exports and applies the exact poll child environment policy', () => {

@@ -115,6 +115,36 @@ describe("reconcileWorkItem — integration against real store + registry", () =
     expect(reconcile.reconcileWorkItem("wi_nope")).toBeUndefined();
   });
 
+  it("treats a historical Workflow Todo as audit-only in direct reconciliation", () => {
+    const wi = store.createWorkItem({
+      title: "historical workflow audit",
+      status: "executing",
+      source: "workflow",
+      sourceRef: "workflow:legacy:run-1",
+    });
+    linkedSession("s-workflow-direct", wi.id, "idle", "2026-07-01T00:00:00.000Z");
+    const beforeEvents = store.listWorkItemEvents(wi.id);
+
+    expect(reconcile.reconcileWorkItem(wi.id)).toMatchObject({
+      changed: false,
+      item: { status: "executing", source: "workflow" },
+    });
+    expect(store.listWorkItemEvents(wi.id)).toEqual(beforeEvents);
+  });
+
+  it("never TRUST-closes a historical Workflow Todo already sitting in review", () => {
+    const wi = store.createWorkItem({
+      title: "historical workflow review",
+      status: "in_review",
+      source: "workflow",
+      sourceRef: "workflow:legacy:run-2",
+    });
+    linkedSession("s-workflow-review", wi.id, "idle", "2026-07-01T00:00:00.000Z");
+
+    expect(reconcile.reconcileWorkItem(wi.id)).toMatchObject({ changed: false, item: { status: "in_review" } });
+    expect(store.getWorkItem(wi.id)?.status).toBe("in_review");
+  });
+
   it("continues normal reconciliation after an operator manually starts an item", async () => {
     const transitions = await import("../transitions.js");
     const wi = store.createWorkItem({ title: "manual start", status: "backlog", source: "human" });
@@ -245,6 +275,21 @@ describe("reconcileWorkItem — integration against real store + registry", () =
 });
 
 describe("reconcileActiveWorkItems / startup sweep — the recoverStaleSessions moment", () => {
+  it("keeps historical Workflow Todos audit-only during startup reconciliation", () => {
+    const wi = store.createWorkItem({
+      title: "workflow startup audit",
+      status: "executing",
+      source: "workflow",
+      sourceRef: "workflow:legacy:startup",
+    });
+    linkedSession("s-workflow-startup", wi.id, "interrupted", "2026-07-01T01:59:00.000Z");
+
+    reconcile.reconcileWorkItemsOnStartup();
+
+    expect(store.getWorkItem(wi.id)?.status).toBe("executing");
+    expect(store.listWorkItemEvents(wi.id).filter((event) => event.actor === "reconciler")).toHaveLength(0);
+  });
+
   it("sweeps non-sticky items (incl. in_review) and skips done/cancelled/escalated", () => {
     const dying = store.createWorkItem({ title: "sweep-dying", status: "executing", source: "cron", sourceRef: "cron:sw1:1" });
     linkedSession("s-sw-int", dying.id, "interrupted", "2026-07-01T02:00:00.000Z");
@@ -273,5 +318,21 @@ describe("reconcileActiveWorkItems / startup sweep — the recoverStaleSessions 
     stop();
     // trust-tier cron item settled → the periodic sweep closed it without a boot.
     expect(store.getWorkItem(wi.id)?.status).toBe("done");
+  });
+
+  it("keeps historical Workflow Todos audit-only during periodic reconciliation", async () => {
+    const wi = store.createWorkItem({
+      title: "workflow periodic audit",
+      status: "executing",
+      source: "workflow",
+      sourceRef: "workflow:legacy:periodic",
+    });
+    linkedSession("s-workflow-periodic", wi.id, "idle", "2026-07-01T03:30:00.000Z");
+    const stop = reconcile.startWorkItemReconciler(20);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    stop();
+
+    expect(store.getWorkItem(wi.id)?.status).toBe("executing");
+    expect(store.listWorkItemEvents(wi.id).filter((event) => event.actor === "reconciler" || event.actor === "policy:trust")).toHaveLength(0);
   });
 });
