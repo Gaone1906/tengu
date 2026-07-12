@@ -491,13 +491,19 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
   });
 
   it.each([
-    ["title", { title: { marker: hostileInputs[0] } }, "title must be a string"],
-    ["body", { body: { marker: hostileInputs[1] } }, "body must be a string or null"],
-    ["assignee shape", { assignee: { marker: hostileInputs[2] } }, "assignee must be a non-empty string or null"],
-    ["department", { department: { marker: hostileInputs[3] } }, "department must be a non-empty string or null"],
-    ["priority", { priority: hostileInputs[4] }, "priority must be an integer from 0 through 3"],
-    ["rank", { rank: hostileInputs[5] }, "rank must be a finite number or null"],
-  ])("returns a fixed typed response for rejected %s values", async (_field, patch, error) => {
+    ["status", { status: hostileInputs[0] }, "Todo status must use the guarded status transition surface.", "todo_invalid_patch"],
+    ["title shape", { title: { marker: hostileInputs[0] } }, "title must be a string", "todo_invalid_patch"],
+    ["title length", { title: hostileInputs[0] + "x".repeat(201) }, "title must be at most 200 characters", "todo_invalid_patch"],
+    ["body", { body: { marker: hostileInputs[1] } }, "body must be a string or null", "todo_invalid_patch"],
+    ["assignee shape", { assignee: { marker: hostileInputs[2] } }, "assignee must be a non-empty string or null", "todo_invalid_patch"],
+    ["department", { department: { marker: hostileInputs[3] } }, "department must be a non-empty string or null", "todo_invalid_patch"],
+    ["priority", { priority: hostileInputs[4] }, "priority must be an integer from 0 through 3", "todo_invalid_patch"],
+    ["rank", { rank: hostileInputs[5] }, "rank must be a finite number or null", "todo_invalid_patch"],
+    ["idempotency key shape", { title: "safe", idempotencyKey: { marker: hostileInputs[0] } }, "Todo edit idempotency key must be a non-empty string.", "todo_invalid_patch"],
+    ["idempotency key length", { title: "safe", idempotencyKey: hostileInputs[4] + "x".repeat(257) }, "Todo edit idempotency key is too long.", "todo_invalid_patch"],
+    ["idempotency key control", { title: "safe", idempotencyKey: `safe-${hostileInputs[5]}` }, "Todo edit idempotency key contains invalid characters.", "todo_invalid_patch"],
+    ["expected version", { title: "safe", expectedVersion: hostileInputs[3] }, "Todo version must be a positive safe integer.", "todo_invalid_version"],
+  ])("returns a fixed typed response for rejected %s values", async (_field, patch, error, code) => {
     const item = store.createWorkItem({ title: "Rejected value privacy target" });
     const cap = makeRes();
     await api.handleApiRequest(
@@ -506,7 +512,7 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
       ctx,
     );
     expect(cap.status).toBe(400);
-    expect(cap.body).toEqual({ error, code: "todo_invalid_patch" });
+    expect(cap.body).toEqual({ error, code });
     expectNoHostileInput(cap.body);
   });
 
@@ -536,6 +542,27 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
       currentVersion: 2,
     });
     expectNoHostileInput(stale.body);
+
+    const keyed = store.createWorkItem({ title: "Idempotency privacy target" });
+    const key = "todo:privacy:key-reuse";
+    const first = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${keyed.id}`, { title: "first", expectedVersion: keyed.version, idempotencyKey: key }, operatorHeaders),
+      first.res,
+      ctx,
+    );
+    const misuse = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${keyed.id}`, { title: hostileTitle, expectedVersion: keyed.version, idempotencyKey: key }, operatorHeaders),
+      misuse.res,
+      ctx,
+    );
+    expect(misuse.body).toEqual({
+      error: "This Todo edit key was already used for a different request.",
+      code: "todo_idempotency_conflict",
+      currentVersion: 2,
+    });
+    expectNoHostileInput(misuse.body);
   });
 
   it("requires a positive expected version, accepts an equivalent If-Match, and rejects disagreement", async () => {
