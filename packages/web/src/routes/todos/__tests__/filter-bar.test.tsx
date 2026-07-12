@@ -151,6 +151,28 @@ describe("Todo progressive filters", () => {
     expect(document.activeElement).not.toBe(document.body)
   })
 
+  it.each([
+    ["normal motion", false],
+    ["reduced motion", true],
+  ])("does not steal unrelated Search focus across repeated breakpoints with %s", async (_label, reducedMotion) => {
+    setMobile(true, reducedMotion)
+    render(
+      <FilterBar filters={{ status: "open" }} onChange={vi.fn()} employees={[]} departments={[]} byName={new Map()} />,
+    )
+
+    const search = screen.getByRole("searchbox", { name: "Search todos" })
+    search.focus()
+    expect(document.activeElement).toBe(search)
+
+    for (const matches of [false, true, false, true]) {
+      act(() => mobileListener?.({ matches } as MediaQueryListEvent))
+      await act(async () => Promise.resolve())
+      expect(screen.queryByRole("dialog", { name: "Filter todos" })).toBeNull()
+      expect(document.activeElement).toBe(search)
+      expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "Filter todos" }))
+    }
+  })
+
   it("keeps active filters visible and individually removable", () => {
     setMobile(false)
     const onChange = vi.fn()

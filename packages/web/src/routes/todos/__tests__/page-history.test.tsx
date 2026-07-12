@@ -1062,6 +1062,64 @@ describe("Todo detail navigation and draft recovery", () => {
     expect(currentState).toMatchObject({ todoRef: ref, todoScroll: 702, todoPageDepth: { backlog: 2 } })
   })
 
+  it.each([
+    ["wheel", (scroller: HTMLElement) => fireEvent.wheel(scroller, { deltaY: 160 })],
+    ["touch", (scroller: HTMLElement) => fireEvent.touchStart(scroller, {
+      touches: [{ clientX: 0, clientY: 400 }],
+      changedTouches: [{ clientX: 0, clientY: 400 }],
+    })],
+    ["pointer", (scroller: HTMLElement) => fireEvent.pointerDown(scroller, { pointerType: "touch", button: 0 })],
+    ["keyboard", (scroller: HTMLElement) => {
+      const search = scroller.querySelector<HTMLElement>('[aria-label="Search todos"]')!
+      search.focus()
+      fireEvent.keyDown(search, { key: "PageDown" })
+    }],
+  ] as const)("keeps the user's scroll after %s cancels a delayed second-page restoration", async (_label, cancel) => {
+    const backlogRows = Array.from({ length: 29 }, (_, index): WorkItemCompactWire => ({
+      ...compact,
+      id: `wi_cancel_restore_${index + 1}`,
+      title: `Cancel restore todo ${index + 1}`,
+    }))
+    const moved = { ...compact, id: "wi_cancel_restore_moved", title: "Moved restore todo", status: "executing" as const }
+    let resolveSecondPage!: (value: { workItems: WorkItemCompactWire[]; total: number; nextOffset: number | null }) => void
+    const secondPage = new Promise<{ workItems: WorkItemCompactWire[]; total: number; nextOffset: number | null }>((resolve) => {
+      resolveSecondPage = resolve
+    })
+    listWorkItems.mockImplementation((params?: { status?: string; needsAttentionFor?: string; offset?: number; limit?: number }) => {
+      if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+      const source = params?.status === "backlog" ? backlogRows : params?.status === "executing" ? [moved] : []
+      const offset = params?.offset ?? 0
+      const page = source.slice(offset, offset + 20)
+      if (params?.status === "backlog" && offset === 20) return secondPage
+      return Promise.resolve({ workItems: page, total: source.length, nextOffset: offset + page.length < source.length ? offset + page.length : null })
+    })
+    getWorkItem.mockResolvedValue({ ...detail, workItem: { ...detail.workItem, ...moved } })
+    const ref = todoPrivateRef(moved.id)
+
+    renderPage([{
+      pathname: "/todos",
+      search: "?status=backlog",
+      state: {
+        todoRef: ref,
+        todoScroll: 702,
+        todoAnchorRef: ref,
+        todoAnchorOffset: 24,
+        todoPageDepth: { backlog: 2 },
+      },
+    }])
+    const scroller = screen.getByTestId("todo-ledger-scroll")
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 1800 })
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 844 })
+    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 0 })
+
+    await waitFor(() => expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ status: "backlog", offset: 20 })))
+    scroller.scrollTop = 244
+    cancel(scroller)
+    await act(async () => resolveSecondPage({ workItems: backlogRows.slice(20), total: backlogRows.length, nextOffset: null }))
+    expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+    await waitFor(() => expect(scroller.scrollTop).toBe(244))
+  })
+
   it("offers explicit cleanup when a recovered Todo no longer exists", async () => {
     const ref = todoPrivateRef(PRIVATE_ID)
     persistTodoJournal(PRIVATE_ID, {
