@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { TodoApiError, type WorkItemEditRequest } from "@/lib/api"
 import { loadTodoJournal, persistTodoJournal } from "../todo-private-state"
 import {
@@ -34,8 +34,19 @@ function successful(remote = snapshot(first, 2), replayed = false) {
   return { remote, replayed }
 }
 
+function throwJournalState(state: "prepared" | "dispatched") {
+  const original = Storage.prototype.setItem
+  return vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+    if (key === "jinn:todo-draft-journal:v2" && String(value).includes(`\"state\":\"${state}\"`)) {
+      throw new DOMException("storage unavailable", "QuotaExceededError")
+    }
+    return original.call(this, key, value)
+  })
+}
+
 describe("useTodoDraft conditional state machine", () => {
   beforeEach(() => sessionStorage.clear())
+  afterEach(() => vi.restoreAllMocks())
 
   it("exact-replays two lost responses and a remount before any GET", async () => {
     const calls: WorkItemEditRequest[] = []
@@ -77,6 +88,38 @@ describe("useTodoDraft conditional state machine", () => {
     expect(calls[2]).toEqual(calls[0])
     expect(calls[0]).toMatchObject({ patch: { title: "B" }, expectedVersion: 7 })
     expect(loadRemote).not.toHaveBeenCalled()
+  })
+
+  it("does not PATCH until a prepared request is durably readable", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "B" }, 8)))
+    const { result } = renderHook(() => useTodoDraft({ id: "prepared-durability", initial: first, serverVersion: 7, save }))
+    act(() => result.current.change("title", "B"))
+    const storage = throwJournalState("prepared")
+    act(() => result.current.save({ title: "B" }))
+    await waitFor(() => expect(result.current.status).toBe("error"))
+    expect(save).not.toHaveBeenCalled()
+    expect(loadTodoJournal("prepared-durability")?.request).toBeUndefined()
+
+    storage.mockRestore()
+    act(() => result.current.retry())
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not PATCH when the dispatched lifecycle write is not durable", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "B" }, 8)))
+    const { result } = renderHook(() => useTodoDraft({ id: "dispatch-durability", initial: first, serverVersion: 7, save }))
+    act(() => result.current.change("title", "B"))
+    const storage = throwJournalState("dispatched")
+    act(() => result.current.save({ title: "B" }))
+    await waitFor(() => expect(result.current.status).toBe("error"))
+    expect(save).not.toHaveBeenCalled()
+    expect(loadTodoJournal("dispatch-durability")?.request?.state).toBe("prepared")
+
+    storage.mockRestore()
+    act(() => result.current.retry())
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save).toHaveBeenCalledTimes(1)
   })
 
   it("keeps A1 immutable while edits arrive and mints A2 only after A1 acknowledgement", async () => {
@@ -212,6 +255,27 @@ describe("useTodoDraft conditional state machine", () => {
     expect(save.mock.calls[1]![0]).toEqual(firstRequest)
   })
 
+  it("keeps a recovered definitive failure inert until explicit Retry", async () => {
+    const failure = new TodoApiError(403, "private", "WORK_ITEM_APPROVAL_PENDING")
+    const save = vi.fn().mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "B" }, 8)))
+    const firstMount = renderHook(() => useTodoDraft({ id: "failed-inert", initial: first, serverVersion: 7, save }))
+    act(() => {
+      firstMount.result.current.change("title", "B")
+      firstMount.result.current.save({ title: "B" })
+    })
+    await waitFor(() => expect(firstMount.result.current.status).toBe("error"))
+    firstMount.unmount()
+
+    const recovered = renderHook(() => useTodoDraft({ id: "failed-inert", initial: first, serverVersion: 7, save }))
+    await act(async () => Promise.resolve())
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(recovered.result.current.status).toBe("error")
+    act(() => recovered.result.current.retry())
+    await waitFor(() => expect(recovered.result.current.isAcknowledged).toBe(true))
+    expect(save).toHaveBeenCalledTimes(2)
+  })
+
   it("retires a definitive failed request after an edit and mints a new key", async () => {
     const failure = new TodoApiError(403, "private", "WORK_ITEM_APPROVAL_PENDING")
     const save = vi.fn()
@@ -308,6 +372,25 @@ describe("useTodoDraft conditional state machine", () => {
     expect(result.current.draft.priority).toBe(3)
   })
 
+  it("keeps conflict visibility while a safe Rebase request is pending", async () => {
+    const conflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
+    const pending = deferred<ReturnType<typeof successful>>()
+    const save = vi.fn().mockRejectedValueOnce(conflict).mockReturnValueOnce(pending.promise)
+    const { result } = renderHook(() => useTodoDraft({ id: "rebase-pending", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "Local")
+      result.current.save({ title: "Local" })
+    })
+    await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+    act(() => result.current.rebaseRemote(snapshot({ ...first, priority: 3 }, 8)))
+    expect(result.current.recoveredConflict).toBe(true)
+    expect(result.current.conflictFields).toEqual(["title"])
+    expect(result.current.isAcknowledged).toBe(false)
+    await act(async () => pending.resolve(successful(snapshot({ ...first, title: "Local", priority: 3 }, 9))))
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(result.current.recoveredConflict).toBe(false)
+  })
+
   it("exposes same-field conflicts during rebase without PATCHing", async () => {
     const failure = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
     const save = vi.fn().mockRejectedValue(failure)
@@ -343,6 +426,74 @@ describe("useTodoDraft conditional state machine", () => {
     expect((save.mock.calls[1]![0] as WorkItemEditRequest).idempotencyKey).not.toBe(oldKey)
     expect(result.current.recoveredConflict).toBe(true)
     expect(result.current.isAcknowledged).toBe(false)
+  })
+
+  it("keeps conflict visibility while Overwrite is pending", async () => {
+    const conflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
+    const pending = deferred<ReturnType<typeof successful>>()
+    const save = vi.fn().mockRejectedValueOnce(conflict).mockReturnValueOnce(pending.promise)
+    const { result } = renderHook(() => useTodoDraft({ id: "overwrite-pending", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "Local")
+      result.current.save({ title: "Local" })
+    })
+    await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+    act(() => result.current.overwriteRemote(snapshot({ ...first, title: "Remote" }, 8)))
+    expect(result.current.recoveredConflict).toBe(true)
+    expect(result.current.conflictFields).toEqual(["title"])
+    expect(result.current.isAcknowledged).toBe(false)
+    await act(async () => pending.resolve(successful(snapshot({ ...first, title: "Local" }, 9))))
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(result.current.recoveredConflict).toBe(false)
+  })
+
+  it("keeps conflict visibility when the Overwrite request definitively fails", async () => {
+    const conflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
+    const rejected = new TodoApiError(403, "private", "WORK_ITEM_APPROVAL_PENDING")
+    const save = vi.fn().mockRejectedValueOnce(conflict).mockRejectedValueOnce(rejected)
+    const { result } = renderHook(() => useTodoDraft({ id: "overwrite-rejected", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "Local")
+      result.current.save({ title: "Local" })
+    })
+    await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+    act(() => result.current.overwriteRemote(snapshot({ ...first, title: "Remote" }, 8)))
+    await waitFor(() => expect(result.current.error).toBe(rejected))
+    expect(result.current.recoveredConflict).toBe(true)
+    expect(result.current.conflictFields).toEqual(["title"])
+    expect(result.current.isAcknowledged).toBe(false)
+  })
+
+  it("keeps the old conflict blocked when conflict-to-A2 persistence fails", async () => {
+    const conflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
+    const save = vi.fn().mockRejectedValueOnce(conflict)
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "Local" }, 9)))
+    const { result } = renderHook(() => useTodoDraft({ id: "conflict-storage", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "Local")
+      result.current.save({ title: "Local" })
+    })
+    await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+    const oldRequest = structuredClone(save.mock.calls[0]![0])
+    const original = Storage.prototype.setItem
+    const storage = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (key === "jinn:todo-draft-journal:v2") throw new DOMException("storage unavailable", "QuotaExceededError")
+      return original.call(this, key, value)
+    })
+    act(() => result.current.overwriteRemote(snapshot({ ...first, title: "Remote" }, 8)))
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(result.current.recoveredConflict).toBe(true)
+    expect(result.current.conflictFields).toEqual(["title"])
+    const preparationError = result.current.error
+    storage.mockRestore()
+    act(() => result.current.retry())
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(result.current.error).toBe(preparationError)
+    expect(loadTodoJournal("conflict-storage")?.request).toMatchObject(oldRequest)
+
+    act(() => result.current.overwriteRemote(snapshot({ ...first, title: "Remote" }, 8)))
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save).toHaveBeenCalledTimes(2)
   })
 
   it("keeps close blocked through an edit made while A1 is saving and A2 is pending", async () => {
@@ -427,6 +578,82 @@ describe("useTodoDraft conditional state machine", () => {
     }).join("\n")
     expect(persisted).toContain("User-authored wi_text")
     expect(persisted).not.toContain("private-multitab")
+  })
+
+  it("uses the current server version for requestless recovered intent", async () => {
+    persistTodoJournal("requestless-current", {
+      revision: 1,
+      patch: { title: "Local" },
+      baseline: { title: first.title },
+      baselineVersion: 7,
+    })
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "Local", priority: 3 }, 9)))
+    const { result } = renderHook(() => useTodoDraft({
+      id: "requestless-current",
+      initial: { ...first, priority: 3 },
+      serverVersion: 8,
+      save,
+    }))
+    act(() => result.current.save(result.current.unsavedPatch()))
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save.mock.calls[0]![0]).toMatchObject({ expectedVersion: 8, patch: { title: "Local" } })
+  })
+
+  it("persists a GET-discovered conflict across remount at the same version", async () => {
+    const loadRemote = vi.fn().mockResolvedValue(snapshot({ ...first, title: "Remote" }, 8))
+    const save = vi.fn()
+    const firstMount = renderHook(() => useTodoDraft({ id: "get-conflict", initial: first, save, loadRemote }))
+    act(() => {
+      firstMount.result.current.change("title", "Local")
+      firstMount.result.current.save({ title: "Local" })
+    })
+    await waitFor(() => expect(firstMount.result.current.recoveredConflict).toBe(true))
+    firstMount.unmount()
+
+    const recovered = renderHook(() => useTodoDraft({
+      id: "get-conflict",
+      initial: { ...first, title: "Remote" },
+      serverVersion: 8,
+      save,
+      loadRemote,
+    }))
+    expect(recovered.result.current.recoveredConflict).toBe(true)
+    expect(recovered.result.current.conflictFields).toEqual(["title"])
+    act(() => recovered.result.current.retry())
+    expect(save).not.toHaveBeenCalled()
+  })
+
+  it("retries requestless version acquisition without unconditional PATCH", async () => {
+    const loadRemote = vi.fn()
+      .mockRejectedValueOnce(new TypeError("offline"))
+      .mockResolvedValueOnce(snapshot(first, 8))
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "Local" }, 9)))
+    const { result } = renderHook(() => useTodoDraft({ id: "acquire-retry", initial: first, save, loadRemote }))
+    act(() => {
+      result.current.change("title", "Local")
+      result.current.save({ title: "Local" })
+    })
+    await waitFor(() => expect(result.current.status).toBe("error"))
+    expect(save).not.toHaveBeenCalled()
+    act(() => result.current.retry())
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(loadRemote).toHaveBeenCalledTimes(2)
+    expect(save.mock.calls[0]![0]).toMatchObject({ expectedVersion: 8 })
+  })
+
+  it("does not acknowledge a malformed remote snapshot", async () => {
+    const save = vi.fn().mockResolvedValue({
+      remote: { draft: { title: "Only a title" }, version: 8 },
+      replayed: false,
+    } as never)
+    const { result } = renderHook(() => useTodoDraft({ id: "malformed-remote", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "Local")
+      result.current.save({ title: "Local" })
+    })
+    await waitFor(() => expect(result.current.status).toBe("error"))
+    expect(result.current.isAcknowledged).toBe(false)
+    expect(loadTodoJournal("malformed-remote")?.request).toBeDefined()
   })
 
   it("acknowledges an exact clean revert without transport", () => {

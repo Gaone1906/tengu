@@ -88,6 +88,37 @@ function isAmbiguousTransportFailure(cause: unknown): boolean {
       && (cause.name === "AbortError" || cause.name === "NetworkError"))
 }
 
+function isTodoEditableDraft(value: unknown): value is TodoEditableDraft {
+  if (!value || typeof value !== "object") return false
+  const draft = value as Record<string, unknown>
+  return typeof draft.title === "string"
+    && typeof draft.body === "string"
+    && (draft.assignee === null || typeof draft.assignee === "string")
+    && (draft.department === null || typeof draft.department === "string")
+    && typeof draft.priority === "number"
+    && Number.isFinite(draft.priority)
+}
+
+function isTodoRemoteSnapshot(value: unknown): value is TodoRemoteSnapshot {
+  if (!value || typeof value !== "object") return false
+  const remote = value as Partial<TodoRemoteSnapshot>
+  return isPositiveTodoVersion(remote.version) && isTodoEditableDraft(remote.draft)
+}
+
+function samePatch(a: TodoDraftPatch, b: TodoDraftPatch): boolean {
+  const aFields = fieldsOf(a)
+  const bFields = fieldsOf(b)
+  return aFields.length === bFields.length
+    && aFields.every((field) => Object.prototype.hasOwnProperty.call(b, field) && Object.is(a[field], b[field]))
+}
+
+function sameRequest(a: TodoJournalRequest, b: TodoJournalRequest): boolean {
+  return a.revision === b.revision
+    && a.expectedVersion === b.expectedVersion
+    && a.idempotencyKey === b.idempotencyKey
+    && samePatch(a.patch, b.patch)
+}
+
 function recoveryError(state: TodoJournalRequest["state"]): unknown | null {
   if (state === "conflict") return null
   if (state === "failed") return new Error("The previous save did not complete")
@@ -129,10 +160,7 @@ export function useTodoDraft({
     if (startingConflicts.size === 0) {
       for (const field of fieldsOf(recoveredRequest.patch)) startingConflicts.add(field)
     }
-  } else if (recovered && !recoveredRequest
-    && isPositiveTodoVersion(recovered.baselineVersion)
-    && isPositiveTodoVersion(serverVersion)
-    && recovered.baselineVersion !== serverVersion) {
+  } else if (recovered && !recoveredRequest && isPositiveTodoVersion(serverVersion)) {
     for (const field of recoveredFields) {
       if (initial[field] !== recovered.baseline[field] && startingDraft[field] !== initial[field]) {
         startingConflicts.add(field)
@@ -162,9 +190,11 @@ export function useTodoDraft({
   const remoteRef = useRef(initial)
   const baselineByFieldRef = useRef<Partial<TodoEditableDraft>>({ ...(recovered?.baseline ?? {}) })
   const baselineVersionRef = useRef<number | undefined>(
-    isPositiveTodoVersion(recovered?.baselineVersion)
-      ? recovered.baselineVersion
-      : isPositiveTodoVersion(serverVersion) ? serverVersion : undefined,
+    !recoveredRequest && isPositiveTodoVersion(serverVersion)
+      ? serverVersion
+      : isPositiveTodoVersion(recovered?.baselineVersion)
+        ? recovered.baselineVersion
+        : isPositiveTodoVersion(serverVersion) ? serverVersion : undefined,
   )
   const dirtyFieldsRef = useRef(recoveredFields)
   const conflictFieldsRef = useRef(startingConflicts)
@@ -219,6 +249,29 @@ export function useTodoDraft({
     else clearTodoJournal(id, localRevisionRef.current)
   }, [id, payloadFor])
 
+  const durableRequest = useCallback((
+    request: TodoJournalRequest,
+    states: ReadonlySet<TodoJournalRequest["state"]>,
+  ): TodoJournalRequest | null => {
+    const stored = loadTodoJournal(id)
+    if (stored?.revision !== Math.max(1, localRevisionRef.current)
+      || !stored.request
+      || !states.has(stored.request.state)
+      || !sameRequest(stored.request, request)) return null
+    return stored.request
+  }, [id])
+
+  const localPersistenceError = useCallback((request: TodoJournalRequest, preserveConflict: boolean) => {
+    activeRef.current = request
+    runningRef.current = false
+    failureRef.current = preserveConflict ? "conflict" : "definitive"
+    if (mountedRef.current) {
+      setStatus("error")
+      setError(new Error("This draft could not be saved locally. Check browser storage and try again."))
+      setRecoveredConflict(preserveConflict || conflictFieldsRef.current.size > 0)
+    }
+  }, [])
+
   const markClean = useCallback((nextStatus: TodoSaveStatus = "idle") => {
     activeRef.current = null
     runningRef.current = false
@@ -256,6 +309,7 @@ export function useTodoDraft({
   const installFreshRequest = useCallback((
     version: number,
     previousActive: TodoJournalRequest | null = activeRef.current,
+    retainConflict = false,
   ): boolean => {
     if (!isPositiveTodoVersion(version)) return false
     const fields = new Set(dirtyFieldsRef.current)
@@ -287,22 +341,32 @@ export function useTodoDraft({
     const installed = previousActive
       ? transitionActive(previousActive, nextPayload)
       : (persistTodoJournal(id, nextPayload), true)
-    if (!installed) return false
+    const durable = installed
+      ? durableRequest(nextRequest, new Set<TodoJournalRequest["state"]>(["prepared"]))
+      : null
+    if (!durable) {
+      if (previousActive?.state === "conflict") {
+        localPersistenceError(previousActive, true)
+      } else {
+        localPersistenceError(nextRequest, false)
+      }
+      return false
+    }
     activeRef.current = nextRequest
     failureRef.current = null
-    publishConflict(new Set())
+    if (!retainConflict) publishConflict(new Set())
     if (mountedRef.current) {
       setError(null)
       setStatus("saving")
-      setRecoveredConflict(false)
+      if (!retainConflict) setRecoveredConflict(false)
     }
     void runActiveRef.current()
     return true
-  }, [id, markClean, payloadFor, publishConflict, transitionActive])
+  }, [durableRequest, id, localPersistenceError, markClean, payloadFor, publishConflict, transitionActive])
 
   const settleSuccessfulRequest = useCallback((request: TodoJournalRequest, result: TodoSaveResult) => {
     const { remote } = result
-    if (!isPositiveTodoVersion(remote?.version) || !remote.draft) {
+    if (!isTodoRemoteSnapshot(remote)) {
       failAtomicTransition(request)
       return
     }
@@ -371,11 +435,26 @@ export function useTodoDraft({
     if (!request || runningRef.current || request.state === "conflict") return
     runningRef.current = true
     const epoch = epochRef.current
+    if (request.state === "prepared"
+      && !durableRequest(request, new Set<TodoJournalRequest["state"]>(["prepared"]))) {
+      activeRef.current = request
+      persistCurrent()
+      if (!durableRequest(request, new Set<TodoJournalRequest["state"]>(["prepared"]))) {
+        localPersistenceError(request, false)
+        return
+      }
+    }
     const dispatched: TodoJournalRequest = request.state === "uncertain"
       ? request
       : { ...request, state: "dispatched" }
     activeRef.current = dispatched
     persistCurrent()
+    const durable = durableRequest(dispatched, new Set<TodoJournalRequest["state"]>([dispatched.state]))
+    if (!durable) {
+      const stored = loadTodoJournal(id)?.request
+      localPersistenceError(stored && sameRequest(stored, request) ? stored : request, false)
+      return
+    }
     if (mountedRef.current) {
       setStatus("saving")
       setError(null)
@@ -397,10 +476,10 @@ export function useTodoDraft({
       if (mountedRef.current) {
         setStatus("error")
         setError(cause)
-        setRecoveredConflict(conflict)
+        setRecoveredConflict(conflict || conflictFieldsRef.current.size > 0)
       }
     }
-  }, [persistCurrent, publishConflict, settleSuccessfulRequest])
+  }, [durableRequest, id, localPersistenceError, persistCurrent, publishConflict, settleSuccessfulRequest])
   runActiveRef.current = runActive
 
   const adoptFreshForIntent = useCallback((remote: TodoRemoteSnapshot): Set<TodoDraftField> | null => {
@@ -443,7 +522,7 @@ export function useTodoDraft({
       const remote = await readRemote()
       if (epoch !== epochRef.current) return
       runningRef.current = false
-      if (!isPositiveTodoVersion(remote.version)) {
+      if (!isTodoRemoteSnapshot(remote)) {
         failureRef.current = "definitive"
         persistCurrent()
         if (mountedRef.current) {
@@ -496,10 +575,7 @@ export function useTodoDraft({
           && nextDraft[field] !== initial[field]) conflicts.add(field)
       }
       if (conflicts.size === 0) for (const field of fieldsOf(storedRequest.patch)) conflicts.add(field)
-    } else if (stored && !storedRequest
-      && isPositiveTodoVersion(stored.baselineVersion)
-      && isPositiveTodoVersion(serverVersion)
-      && stored.baselineVersion !== serverVersion) {
+    } else if (stored && !storedRequest && isPositiveTodoVersion(serverVersion)) {
       for (const field of storedFields) {
         if (initial[field] !== stored.baseline[field] && nextDraft[field] !== initial[field]) conflicts.add(field)
       }
@@ -510,9 +586,11 @@ export function useTodoDraft({
     remoteRef.current = initial
     draftRef.current = nextDraft
     baselineByFieldRef.current = { ...(stored?.baseline ?? {}) }
-    baselineVersionRef.current = isPositiveTodoVersion(stored?.baselineVersion)
-      ? stored.baselineVersion
-      : isPositiveTodoVersion(serverVersion) ? serverVersion : undefined
+    baselineVersionRef.current = !storedRequest && isPositiveTodoVersion(serverVersion)
+      ? serverVersion
+      : isPositiveTodoVersion(stored?.baselineVersion)
+        ? stored.baselineVersion
+        : isPositiveTodoVersion(serverVersion) ? serverVersion : undefined
     dirtyFieldsRef.current = storedFields
     activeRef.current = storedRequest
     runningRef.current = false
@@ -524,7 +602,7 @@ export function useTodoDraft({
     setError(storedRequest ? recoveryError(storedRequest.state) : null)
     setRecoveredConflict(conflicts.size > 0 || nextFailure === "conflict")
 
-    if (storedRequest && storedRequest.state !== "conflict") queueMicrotask(() => {
+    if (storedRequest && new Set<TodoJournalRequest["state"]>(["prepared", "dispatched", "uncertain"]).has(storedRequest.state)) queueMicrotask(() => {
       if (mountedRef.current) void runActiveRef.current()
     })
 
@@ -611,9 +689,21 @@ export function useTodoDraft({
 
   const retry = useCallback(() => {
     const active = activeRef.current
-    if (!active || runningRef.current || failureRef.current === "conflict") return
-    void runActiveRef.current()
-  }, [])
+    if (runningRef.current || failureRef.current === "conflict") return
+    if (active) {
+      void runActiveRef.current()
+      return
+    }
+    if (failureRef.current === "definitive" && dirtyFieldsRef.current.size > 0) {
+      failureRef.current = null
+      if (mountedRef.current) setError(null)
+      if (isPositiveTodoVersion(baselineVersionRef.current)) {
+        installFreshRequest(baselineVersionRef.current, null)
+      } else {
+        void acquireVersionAndSave()
+      }
+    }
+  }, [acquireVersionAndSave, installFreshRequest])
 
   const discard = useCallback(() => {
     epochRef.current += 1
@@ -673,8 +763,8 @@ export function useTodoDraft({
     for (const field of dirtyFieldsRef.current) {
       (baselineByFieldRef.current as Record<string, unknown>)[field] = remote.draft[field]
     }
-    if (!installFreshRequest(remote.version, previousActive)) {
-      if (previousActive) failAtomicTransition(previousActive)
+    if (!installFreshRequest(remote.version, previousActive, !!previousActive)) {
+      if (previousActive && previousActive.state !== "conflict") failAtomicTransition(previousActive)
     }
   }, [adoptFreshForIntent, failAtomicTransition, installFreshRequest, publishConflict])
 
@@ -690,9 +780,8 @@ export function useTodoDraft({
       ;(baselineByFieldRef.current as Record<string, unknown>)[field] = remote.draft[field]
     }
     publishDraft(merged)
-    publishConflict(new Set())
-    if (!installFreshRequest(remote.version, previousActive)) {
-      if (previousActive) failAtomicTransition(previousActive)
+    if (!installFreshRequest(remote.version, previousActive, !!previousActive)) {
+      if (previousActive && previousActive.state !== "conflict") failAtomicTransition(previousActive)
     }
   }, [failAtomicTransition, installFreshRequest, publishConflict, publishDraft])
 
