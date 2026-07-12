@@ -38,6 +38,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 const PRIVATE_ID = "wi_private_history"
 const compact: WorkItemCompactWire = {
   id: PRIVATE_ID,
+  version: 7,
   title: "Recoverable todo",
   status: "backlog",
   assignee: null,
