@@ -59,6 +59,17 @@ function onlyStored(): any {
   return Object.values(quickStorage())[0]
 }
 
+function storePending(id: string, desired: Record<string, unknown>, baseline: Record<string, unknown> = {}) {
+  sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify({
+    [todoPrivateRef(id)]: {
+      expiresAt: Date.now() + 60_000,
+      desired,
+      baseline,
+      pending: "retry",
+    },
+  }))
+}
+
 describe("useTodoQuickEdit", () => {
   beforeEach(() => sessionStorage.clear())
   afterEach(() => vi.restoreAllMocks())
@@ -757,5 +768,94 @@ describe("useTodoQuickEdit", () => {
     expect(update).toHaveBeenCalledTimes(2)
     expect(update.mock.calls[1][1].patch).toEqual({ title: "Repeated intent" })
     expect(update.mock.calls[1][1].idempotencyKey).not.toBe(update.mock.calls[0][1].idempotencyKey)
+  })
+
+  it("keeps an explicit pending recovery through two offline preflights then retries with a fresh key", async () => {
+    storePending(ID, { title: "Pending title" })
+    vi.spyOn(api, "getWorkItem")
+      .mockRejectedValueOnce(new TypeError("offline recovery"))
+      .mockRejectedValueOnce(new TypeError("offline retry"))
+      .mockResolvedValueOnce(detail(7))
+    const update = vi.spyOn(api, "updateWorkItem").mockResolvedValueOnce({
+      workItem: detail(8, { title: "Pending title" }).workItem as never,
+      replayed: false,
+    })
+    const { result } = setup()
+
+    await act(() => result.current.recover(ID))
+    expect(result.current.recovery).toMatchObject({ kind: "retry", busy: false })
+    expect(result.current.hasOutstanding(ID)).toBe(true)
+    expect(onlyStored()).toMatchObject({ desired: { title: "Pending title" }, pending: "retry" })
+
+    await act(() => result.current.retry())
+    expect(result.current.recovery).toMatchObject({ kind: "retry", busy: false })
+    expect(update).not.toHaveBeenCalled()
+    expect(onlyStored()).toMatchObject({ desired: { title: "Pending title" }, pending: "retry" })
+
+    await act(() => result.current.retry())
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(update.mock.calls[0][1]).toMatchObject({ patch: { title: "Pending title" }, expectedVersion: 7 })
+    expect(update.mock.calls[0][1].idempotencyKey).toMatch(/^[0-9a-f-]{36}$/i)
+    expect(result.current.recovery).toBeNull()
+    expect(result.current.hasOutstanding(ID)).toBe(false)
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
+  })
+
+  it("discards only the pending journal and resets its optimistic rank", async () => {
+    storePending(ID, { rank: 91 })
+    vi.spyOn(api, "getWorkItem").mockRejectedValueOnce(new TypeError("offline recovery"))
+    const update = vi.spyOn(api, "updateWorkItem")
+    const { result } = setup()
+
+    await act(() => result.current.recover(ID))
+    expect(result.current.recovery).toMatchObject({ kind: "retry", fields: ["rank"] })
+    const beforeDiscard = result.current.rankResetRevisions[ID] ?? 0
+    await act(() => result.current.discard())
+
+    expect(update).not.toHaveBeenCalled()
+    expect(result.current.recovery).toBeNull()
+    expect(result.current.hasOutstanding(ID)).toBe(false)
+    expect(result.current.rankResetRevisions[ID]).toBeGreaterThan(beforeDiscard)
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
+  })
+
+  it("prioritizes conflicts over ordered pending retries and promotes each pending recovery", async () => {
+    const firstId = "wi_pending_first"
+    const secondId = "wi_pending_second"
+    storePending(firstId, { title: "First pending" })
+    const firstStored = quickStorage()
+    sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify({
+      ...firstStored,
+      [todoPrivateRef(secondId)]: {
+        expiresAt: Date.now() + 60_001,
+        desired: { rank: 41 },
+        baseline: {},
+        pending: "retry",
+      },
+    }))
+    vi.spyOn(api, "getWorkItem").mockImplementation((id: string) => {
+      if (id === firstId || id === secondId) return Promise.reject(new TypeError("offline pending"))
+      return Promise.resolve(detail(7, { id }))
+    })
+    vi.spyOn(api, "updateWorkItem").mockRejectedValueOnce(
+      new TodoApiError(409, "private conflict", "TODO_VERSION_CONFLICT", 8),
+    )
+    const { result } = setup()
+
+    await act(() => result.current.recover(firstId))
+    await act(() => result.current.recover(secondId))
+    expect(result.current.recoveryRef).toBe(todoPrivateRef(firstId))
+    expect(result.current.recovery?.kind).toBe("retry")
+
+    await act(() => result.current.edit(ID, { title: "Conflicting edit" }))
+    expect(result.current.recoveryRef).toBe(todoPrivateRef(ID))
+    expect(result.current.recovery?.kind).toBe("conflict")
+
+    await act(() => result.current.reload())
+    expect(result.current.recoveryRef).toBe(todoPrivateRef(firstId))
+    await act(() => result.current.discard())
+    expect(result.current.recoveryRef).toBe(todoPrivateRef(secondId))
+    await act(() => result.current.discard())
+    expect(result.current.recovery).toBeNull()
   })
 })

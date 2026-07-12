@@ -37,6 +37,7 @@ import {
 } from "./use-todos"
 import { clearTodoJournalByRef, todoPrivateRef } from "./todo-private-state"
 import { TodoConflictActions } from "./conflict-actions"
+import { TodoQuickEditRetryActions } from "./quick-edit-retry-actions"
 import {
   hasTodoQuickEditRecovery,
   hasTodoQuickEditRecoveryByRef,
@@ -309,6 +310,7 @@ export default function TodosPage() {
   const quickConflictRef = useRef<HTMLElement>(null)
   const locallyStartedQuickRefs = useRef(new Set<string>())
   const quickOperationTokens = useRef(new Map<string, symbol>())
+  const quickRowOpenersRef = useRef(new Map<string, HTMLElement>())
   const quickRecordsRef = useRef<TodoQuickHistoryRecord[]>(quickRecords)
   const historyStateRef = useRef<TodoHistoryState | null>(historyState)
   const liveLocationRef = useRef({ pathname: location.pathname, search: location.search })
@@ -338,6 +340,7 @@ export default function TodosPage() {
     return () => {
       pageMountedRef.current = false
       quickOperationTokens.current.clear()
+      quickRowOpenersRef.current.clear()
     }
   }, [])
 
@@ -610,6 +613,8 @@ export default function TodosPage() {
     locallyStartedQuickRefs.current.add(privateRef)
     const scroller = ledgerScrollRef.current
     const row = scroller?.querySelector<HTMLElement>(`[data-todo-anchor="${privateRef}"]`)
+    const rowOpener = row?.querySelector<HTMLElement>('button[aria-label^="Open "]')
+    if (rowOpener) quickRowOpenersRef.current.set(privateRef, rowOpener)
     const record: TodoQuickHistoryRecord = {
       ref: privateRef,
       anchorRef: privateRef,
@@ -628,6 +633,7 @@ export default function TodosPage() {
     if (!hasTodoQuickEditRecovery(id)) {
       quickOperationTokens.current.delete(privateRef)
       locallyStartedQuickRefs.current.delete(privateRef)
+      quickRowOpenersRef.current.delete(privateRef)
       replaceQuickRecords(quickRecordsRef.current.filter((candidate) => candidate.ref !== privateRef))
     }
   }, [ledger.pageDepth, quickEdit, replaceQuickRecords])
@@ -735,6 +741,26 @@ export default function TodosPage() {
     replaceQuickRecords(quickRecordsRef.current.filter((record) => record.ref !== ref))
   }, [quickEdit.recoveryRef, replaceQuickRecords])
 
+  const resolvePendingQuick = useCallback(async (action: () => Promise<void>) => {
+    const ref = quickEdit.recoveryRef
+    await action()
+    if (!ref || hasTodoQuickEditRecoveryByRef(ref)) return
+    locallyStartedQuickRefs.current.delete(ref)
+    quickOperationTokens.current.delete(ref)
+    replaceQuickRecords(quickRecordsRef.current.filter((record) => record.ref !== ref))
+    const remembered = quickRowOpenersRef.current.get(ref)
+    quickRowOpenersRef.current.delete(ref)
+    if (quickEdit.hasRecovery()) return
+    window.requestAnimationFrame(() => {
+      const row = ledgerScrollRef.current?.querySelector<HTMLElement>(`[data-todo-anchor="${ref}"]`)
+      const opener = remembered?.isConnected
+        ? remembered
+        : row?.querySelector<HTMLElement>('button[aria-label^="Open "]')
+      const target = opener ?? ledgerHeadingRef.current
+      target?.focus({ preventScroll: true })
+    })
+  }, [quickEdit, replaceQuickRecords])
+
   useEffect(() => {
     if (!quickEdit.recovery) return
     const frame = window.requestAnimationFrame(() => quickConflictRef.current?.focus({ preventScroll: true }))
@@ -822,7 +848,7 @@ export default function TodosPage() {
                     </div>
                   </section>
                 )}
-                {quickEdit.recovery && (
+                {quickEdit.recovery?.kind === "conflict" && (
                   <TodoConflictActions
                     fields={quickEdit.recovery.fields}
                     sameFieldConflict={quickEdit.recovery.sameFieldConflict}
@@ -833,6 +859,15 @@ export default function TodosPage() {
                     onReload={() => void reconcileQuick(quickEdit.reload)}
                     onRebase={() => void reconcileQuick(quickEdit.rebase)}
                     onOverwrite={() => void reconcileQuick(quickEdit.overwrite)}
+                  />
+                )}
+                {quickEdit.recovery?.kind === "retry" && (
+                  <TodoQuickEditRetryActions
+                    busy={quickEdit.recovery.busy}
+                    error={quickEdit.recovery.error}
+                    focusRef={quickConflictRef}
+                    onRetry={() => void resolvePendingQuick(quickEdit.retry)}
+                    onDiscard={() => void resolvePendingQuick(quickEdit.discard)}
                   />
                 )}
                 {quickEdit.error && !quickEdit.recovery && (

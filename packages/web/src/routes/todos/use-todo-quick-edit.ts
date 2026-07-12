@@ -57,6 +57,7 @@ interface RuntimeEdit {
 }
 
 export interface TodoQuickEditRecovery {
+  kind: "conflict" | "retry"
   fields: TodoQuickEditField[]
   sameFieldConflict: boolean
   busy: boolean
@@ -383,14 +384,19 @@ export function useTodoQuickEdit() {
 
   const publishRecovery = useCallback((id: string, value: TodoQuickEditRecovery) => {
     recoveries.current.set(id, value)
-    setRecoveryEntry((current) => !current || current.id === id ? { id, value } : current)
+    setRecoveryEntry((current) => {
+      if (!current || current.id === id) return { id, value }
+      if (value.kind === "conflict" && current.value.kind !== "conflict") return { id, value }
+      return current
+    })
   }, [])
 
   const removeRecovery = useCallback((id: string) => {
     recoveries.current.delete(id)
     setRecoveryEntry((current) => {
       if (current?.id !== id) return current
-      const next = recoveries.current.entries().next().value as [string, TodoQuickEditRecovery] | undefined
+      const ordered = [...recoveries.current.entries()]
+      const next = ordered.find(([, value]) => value.kind === "conflict") ?? ordered[0]
       return next ? { id: next[0], value: next[1] } : null
     })
   }, [])
@@ -427,6 +433,7 @@ export function useTodoQuickEdit() {
     }
     if (mounted.current) {
       publishRecovery(entry.id, {
+        kind: "conflict",
         fields: patchFields(entry.desired),
         sameFieldConflict: reloadOnly || same.length > 0,
         busy: false,
@@ -593,7 +600,15 @@ export function useTodoQuickEdit() {
       if (isTodoVersionConflictError(cause)) await enterConflict(entry, cause)
       else if (entry.pending === "retry" && hasDurableRetryIntent(entry)) {
         if (mounted.current) {
-          setError(operatorSafeTodoError(cause, "Couldn't load the current Todo. Your pending edit is saved for retry."))
+          setError(null)
+          publishRecovery(entry.id, {
+            kind: "retry",
+            fields: patchFields(entry.desired),
+            sameFieldConflict: false,
+            busy: false,
+            error: operatorSafeTodoError(cause, "Couldn't reach the current Todo. Your local edit is still saved."),
+            reloadOnly: false,
+          })
           if (Object.prototype.hasOwnProperty.call(entry.desired, "rank")) resetRank(entry.id)
         }
       }
@@ -607,7 +622,7 @@ export function useTodoQuickEdit() {
       }
       settle(entry)
     }
-  }, [abortUnsafeJournal, client, enterConflict, removeRecovery, resetRank, settle])
+  }, [abortUnsafeJournal, client, enterConflict, publishRecovery, removeRecovery, resetRank, settle])
 
   const edit = useCallback((id: string, patch: WorkItemEditPatch): Promise<void> => {
     let entry = entries.current.get(id)
@@ -680,7 +695,7 @@ export function useTodoQuickEdit() {
 
   const reconcile = useCallback(async (mode: "reload" | "rebase" | "overwrite") => {
     const active = recoveryEntry
-    if (!active) return
+    if (!active || active.value.kind !== "conflict") return
     const entry = entries.current.get(active.id)
     if (!entry) return
     if (active.value.reloadOnly && mode !== "reload") return
@@ -744,9 +759,42 @@ export function useTodoQuickEdit() {
     }
   }, [client, publishRecovery, recoveryEntry, removeRecovery, resetRank, run, settle])
 
+  const retry = useCallback(async () => {
+    const active = recoveryEntry
+    if (!active || active.value.kind !== "retry") return
+    const entry = entries.current.get(active.id)
+    if (!entry || entry.pending !== "retry" || entry.running) return
+    publishRecovery(active.id, { ...active.value, busy: true, error: null })
+    await run(entry, false)
+  }, [publishRecovery, recoveryEntry, run])
+
+  const discard = useCallback(async () => {
+    const active = recoveryEntry
+    if (!active || active.value.kind !== "retry") return
+    const entry = entries.current.get(active.id)
+    if (!entry || entry.pending !== "retry" || entry.running) return
+    publishRecovery(active.id, { ...active.value, busy: true, error: null })
+    if (!clearStored(entry.id)) {
+      publishRecovery(active.id, {
+        ...active.value,
+        busy: false,
+        error: "This local edit couldn't be discarded safely. Keep this page open and try again.",
+      })
+      return
+    }
+    entries.current.delete(entry.id)
+    removeRecovery(entry.id)
+    if (mounted.current) {
+      setError(null)
+      if (Object.prototype.hasOwnProperty.call(entry.desired, "rank")) resetRank(entry.id)
+    }
+    settle(entry)
+  }, [publishRecovery, recoveryEntry, removeRecovery, resetRank, settle])
+
   return {
     edit,
     hasOutstanding,
+    hasRecovery: () => recoveries.current.size > 0,
     recover,
     recovery: recoveryEntry?.value ?? null,
     recoveryRef: recoveryEntry ? todoPrivateRef(recoveryEntry.id) : null,
@@ -755,5 +803,7 @@ export function useTodoQuickEdit() {
     reload: () => reconcile("reload"),
     rebase: () => reconcile("rebase"),
     overwrite: () => reconcile("overwrite"),
+    retry,
+    discard,
   }
 }

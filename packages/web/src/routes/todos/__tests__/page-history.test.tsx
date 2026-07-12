@@ -244,6 +244,140 @@ describe("Todo detail navigation and draft recovery", () => {
     expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
   })
 
+  it.each([
+    ["desktop", false],
+    ["mobile", true],
+  ] as const)("discards a pending quick edit from the same-page recovery surface on %s and restores row focus", async (_label, mobile) => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: mobile && query === "(max-width: 767px)",
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    })
+    const ref = todoPrivateRef(PRIVATE_ID)
+    sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify({
+      [ref]: {
+        expiresAt: Date.now() + 60_000,
+        desired: { title: "Offline local title" },
+        baseline: {},
+        pending: "retry",
+      },
+    }))
+    getWorkItem.mockRejectedValue(new TypeError("offline private diagnostic"))
+    renderPage([{ pathname: "/todos", state: {
+      todoQuickRecoveries: [{ ref, anchorRef: ref, anchorOffset: 0, scroll: 0, pageDepth: { backlog: 1 } }],
+      todoQuickRecoveryEpoch: "qe_0123456789abcdef0123456789abcdef",
+    } }])
+
+    const opener = await screen.findByRole("button", { name: "Open Recoverable todo" })
+    const recovery = await screen.findByRole("status", { name: "Todo edit needs attention" })
+    await waitFor(() => expect(document.activeElement).toBe(recovery))
+    fireEvent.click(opener)
+    expect(screen.queryByTestId("detail-sheet")).toBeNull()
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard local edit" }))
+    await waitFor(() => expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull())
+    await waitFor(() => expect((currentState as { todoQuickRecoveries?: unknown[] } | null)?.todoQuickRecoveries).toBeUndefined())
+    expect((currentState as { todoQuickRecoveryEpoch?: string } | null)?.todoQuickRecoveryEpoch).toBeUndefined()
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+
+    getWorkItem.mockResolvedValue(detail)
+    fireEvent.click(opener)
+    expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+    expect(JSON.stringify(currentState)).not.toContain(PRIVATE_ID)
+  })
+
+  it("retries a pending quick edit in place, retains it while offline, then clears its gate with a fresh request", async () => {
+    const ref = todoPrivateRef(PRIVATE_ID)
+    sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify({
+      [ref]: {
+        expiresAt: Date.now() + 60_000,
+        desired: { title: "Retry from ledger" },
+        baseline: {},
+        pending: "retry",
+      },
+    }))
+    getWorkItem.mockRejectedValue(new TypeError("offline private diagnostic"))
+    updateWorkItem.mockResolvedValue({
+      workItem: { ...detail.workItem, version: 8, title: "Retry from ledger" },
+      replayed: false,
+    })
+    renderPage([{ pathname: "/todos", state: {
+      todoQuickRecoveries: [{ ref, anchorRef: ref, anchorOffset: 0, scroll: 0, pageDepth: { backlog: 1 } }],
+      todoQuickRecoveryEpoch: "qe_abcdef0123456789abcdef0123456789",
+    } }])
+
+    const opener = await screen.findByRole("button", { name: "Open Recoverable todo" })
+    const recovery = await screen.findByRole("status", { name: "Todo edit needs attention" })
+    expect(document.body.textContent).not.toContain("private diagnostic")
+    expect(document.body.innerHTML).not.toContain(PRIVATE_ID)
+    fireEvent.click(screen.getByRole("button", { name: "Retry save" }))
+    await waitFor(() => expect(screen.getByRole("status", { name: "Todo edit needs attention" })).toBeTruthy())
+    expect(updateWorkItem).not.toHaveBeenCalled()
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toContain("Retry from ledger")
+    await waitFor(() => expect(document.activeElement).toBe(recovery))
+
+    getWorkItem.mockResolvedValue(detail)
+    fireEvent.click(screen.getByRole("button", { name: "Retry save" }))
+    await waitFor(() => expect(updateWorkItem).toHaveBeenCalledTimes(1))
+    expect(updateWorkItem.mock.calls[0][1]).toMatchObject({
+      patch: { title: "Retry from ledger" },
+      expectedVersion: 7,
+      idempotencyKey: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+    })
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Todo edit needs attention" })).toBeNull())
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
+    expect((currentState as { todoQuickRecoveries?: unknown[] } | null)?.todoQuickRecoveries).toBeUndefined()
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+  })
+
+  it("discards only the foreground pending record, promotes the next, and falls back to the Todos heading", async () => {
+    const rows = [
+      { ...compact, id: "wi_pending_page_a", title: "Pending page A" },
+      { ...compact, id: "wi_pending_page_b", title: "Pending page B" },
+    ]
+    const refs = rows.map((row) => todoPrivateRef(row.id))
+    listWorkItems.mockImplementation((params?: { status?: string; needsAttentionFor?: string }) => {
+      if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+      return Promise.resolve({ workItems: params?.status === "backlog" ? rows : [], total: params?.status === "backlog" ? 2 : 0, nextOffset: null })
+    })
+    searchWorkItems.mockResolvedValue({ workItems: [], total: 0, nextOffset: null })
+    getWorkItem.mockRejectedValue(new TypeError("offline private diagnostic"))
+    sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify(Object.fromEntries(refs.map((ref, index) => [ref, {
+      expiresAt: Date.now() + 60_000 + index,
+      desired: { title: `Pending local ${index + 1}` },
+      baseline: {},
+      pending: "retry",
+    }]))))
+    const epoch = "qe_22222222222222222222222222222222"
+    renderPage([{ pathname: "/todos", state: {
+      todoQuickRecoveries: refs.map((ref) => ({ ref, anchorRef: ref, anchorOffset: 0, scroll: 0, pageDepth: { backlog: 1 } })),
+      todoQuickRecoveryEpoch: epoch,
+    } }])
+
+    await screen.findByRole("status", { name: "Todo edit needs attention" })
+    fireEvent.click(screen.getByRole("button", { name: "Discard local edit" }))
+    await waitFor(() => expect((currentState as { todoQuickRecoveries: Array<{ ref: string }> }).todoQuickRecoveries)
+      .toEqual([expect.objectContaining({ ref: refs[1] })]))
+    expect((currentState as { todoQuickRecoveryEpoch: string }).todoQuickRecoveryEpoch).toBe(epoch)
+    const raw = sessionStorage.getItem("jinn:todo-quick-edit:v1") ?? ""
+    expect(raw).not.toContain(refs[0])
+    expect(raw).toContain(refs[1])
+    const promoted = screen.getByRole("status", { name: "Todo edit needs attention" })
+    await waitFor(() => expect(document.activeElement).toBe(promoted))
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search todos" }), { target: { value: "hide rows" } })
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Open Pending page B" })).toBeNull())
+    fireEvent.click(screen.getByRole("button", { name: "Discard local edit" }))
+    await waitFor(() => expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Todos" })))
+    expect((currentState as { todoQuickRecoveries?: unknown[] } | null)?.todoQuickRecoveries).toBeUndefined()
+    expect((currentState as { todoQuickRecoveryEpoch?: string } | null)?.todoQuickRecoveryEpoch).toBeUndefined()
+  })
+
   it("keeps the live filter URL when an older quick-edit operation completes", async () => {
     let resolveUpdate!: (value: unknown) => void
     updateWorkItem.mockImplementationOnce(() => new Promise((resolve) => { resolveUpdate = resolve }))
