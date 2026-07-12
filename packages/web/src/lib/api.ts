@@ -74,20 +74,54 @@ export interface OrgData {
   hierarchy: OrgHierarchy;
 }
 
-async function extractErrorMessage(res: Response): Promise<string> {
-  try {
-    const body = await res.json();
-    if (body.error) return String(body.error);
-    if (body.message) return String(body.message);
-  } catch {
-    // Response wasn't JSON — fall through
+export class ApiError extends Error {
+  readonly status: number
+  readonly code?: string
+  readonly currentVersion?: number
+
+  constructor(status: number, message: string, code?: string, currentVersion?: number) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+    this.code = code
+    this.currentVersion = currentVersion
   }
-  return `API error: ${res.status}`;
 }
 
-async function get<T>(path: string): Promise<T> {
-  const res = await authFetch(path);
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
+/** Structured conditional-edit failure for the Todos surface. */
+export class TodoApiError extends ApiError {
+  constructor(status: number, message: string, code?: string, currentVersion?: number) {
+    super(status, message, code, currentVersion)
+    this.name = "TodoApiError"
+  }
+}
+
+/** A Todo revision is authoritative only when it is a positive safe integer. */
+export function isPositiveTodoVersion(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+}
+
+async function responseError(res: Response): Promise<ApiError> {
+  let message = `API error: ${res.status}`
+  let code: string | undefined
+  let currentVersion: number | undefined
+  try {
+    const body = await res.json();
+    if (body.error) message = String(body.error)
+    else if (body.message) message = String(body.message)
+    if (typeof body.code === "string" && body.code.trim()) code = body.code
+    if (typeof body.currentVersion === "number" && Number.isSafeInteger(body.currentVersion) && body.currentVersion >= 0) {
+      currentVersion = body.currentVersion
+    }
+  } catch {
+    // Response wasn't JSON; status remains the typed UI-safe discriminator.
+  }
+  return new ApiError(res.status, message, code, currentVersion)
+}
+
+async function get<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await authFetch(path, init);
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
@@ -97,13 +131,13 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
 async function del<T>(path: string): Promise<T> {
   const res = await authFetch(path, { method: "DELETE" });
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
@@ -113,7 +147,7 @@ async function put<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
@@ -123,7 +157,7 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
@@ -557,6 +591,8 @@ export interface WorkItemSessionRefWire {
 /** The compact row GET /api/work-items returns (list/board/people). */
 export interface WorkItemCompactWire {
   id: string
+  /** Positive monotonic whole-row revision on CAS-capable gateways. */
+  version?: number
   title: string
   status: WorkItemStatusWire
   assignee: string | null
@@ -596,6 +632,8 @@ export interface VerifyPolicyWire {
 /** The full row GET /api/work-items/:id returns under `workItem`. */
 export interface WorkItemFullWire {
   id: string
+  /** Positive monotonic whole-row revision on CAS-capable gateways. */
+  version?: number
   title: string
   body: string | null
   status: WorkItemStatusWire
@@ -618,6 +656,48 @@ export interface WorkItemFullWire {
   createdAt: string
   updatedAt: string
   closedAt: string | null
+}
+
+export interface WorkItemEditPatch {
+  title?: string
+  body?: string
+  assignee?: string | null
+  department?: string | null
+  priority?: number
+  rank?: number
+}
+
+export interface WorkItemEditRequest {
+  patch: WorkItemEditPatch
+  expectedVersion: number
+  idempotencyKey: string
+}
+
+export interface VersionedWorkItemFullWire extends WorkItemFullWire {
+  version: number
+}
+
+export interface WorkItemEditResultWire {
+  workItem: VersionedWorkItemFullWire
+  replayed: boolean
+}
+
+function requireWorkItemEditResult(value: unknown): WorkItemEditResultWire {
+  if (
+    typeof value !== "object"
+    || value === null
+    || !("workItem" in value)
+    || typeof value.workItem !== "object"
+    || value.workItem === null
+    || !("version" in value.workItem)
+    || !isPositiveTodoVersion(value.workItem.version)
+  ) {
+    throw new Error("Todo edit response has an invalid authoritative version")
+  }
+  if (!("replayed" in value) || typeof value.replayed !== "boolean") {
+    throw new Error("Todo edit response has invalid replay metadata")
+  }
+  return value as WorkItemEditResultWire
 }
 
 export interface WorkItemEventWire {
@@ -840,12 +920,15 @@ export const api = {
   /** Search across ALL sessions (title / employee / id), newest first. */
   searchSessions: (query: string) =>
     get<Record<string, unknown>[]>(`/api/sessions?q=${encodeURIComponent(query)}`),
-  getSession: (id: string, options?: { last?: number; messages?: boolean }) => {
+  getSession: (id: string, options?: { last?: number; messages?: boolean; signal?: AbortSignal }) => {
     const params = new URLSearchParams()
     if (options?.last) params.set("last", String(options.last))
     if (options?.messages === false) params.set("messages", "0")
     const query = params.toString()
-    return get<Record<string, unknown>>(`/api/sessions/${id}${query ? `?${query}` : ""}`)
+    return get<Record<string, unknown>>(
+      `/api/sessions/${id}${query ? `?${query}` : ""}`,
+      options?.signal ? { signal: options.signal } : undefined,
+    )
   },
   getSessionMessages: (id: string, options: { before?: string; limit?: number }) => {
     const params = new URLSearchParams()
@@ -1009,10 +1092,27 @@ export const api = {
   /** The operator's pen (design-todos §7.3–4): PATCH title/body/assignee/
    *  department/priority/rank. 404s on gateways that predate the endpoint —
    *  callers surface the failure quietly and keep the read view intact. */
-  updateWorkItem: (
+  updateWorkItem: async (
     id: string,
-    input: Partial<{ title: string; body: string; assignee: string | null; department: string | null; priority: number; rank: number }>,
-  ) => patch<{ workItem: WorkItemFullWire }>(`/api/work-items/${encodeURIComponent(id)}`, input),
+    input: WorkItemEditRequest,
+  ): Promise<WorkItemEditResultWire> => {
+    if (!isPositiveTodoVersion(input.expectedVersion)) {
+      throw new TypeError("Todo expectedVersion must be a positive safe integer")
+    }
+    try {
+      const result = await patch<unknown>(`/api/work-items/${encodeURIComponent(id)}`, {
+        ...input.patch,
+        expectedVersion: input.expectedVersion,
+        idempotencyKey: input.idempotencyKey,
+      })
+      return requireWorkItemEditResult(result)
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw new TodoApiError(error.status, error.message, error.code, error.currentVersion)
+      }
+      throw error
+    }
+  },
   /** Guarded status transition (legal edges only — the gateway owns legality). */
   setWorkItemStatus: (id: string, status: WorkItemStatusWire, note?: string) =>
     put<{ workItem: WorkItemFullWire; escalated: boolean }>(
@@ -1043,7 +1143,7 @@ export const api = {
     // When known, scope the upload to the session so it lands in the date-bucketed uploads dir.
     if (sessionId) form.append('sessionId', sessionId)
     const res = await authFetch("/api/files", { method: 'POST', body: form })
-    if (!res.ok) throw new Error(await extractErrorMessage(res))
+    if (!res.ok) throw await responseError(res)
     return res.json()
   },
 };

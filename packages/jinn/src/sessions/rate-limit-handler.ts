@@ -3,9 +3,9 @@
  *
  * Both the connector path (sessions/manager.ts → runSession) and the web path
  * (gateway/api.ts → runWebSession) need to:
- *   1. Detect a Claude usage-limit response.
- *   2. Optionally fall back to a different engine (default: Codex) while Claude resets.
- *   3. Otherwise enter a "waiting" loop: sleep until the reset window, retry on Claude,
+ *   1. Detect an engine usage-limit response.
+ *   2. For Claude only, optionally fall back to a different engine (default: Codex).
+ *   3. Otherwise enter a "waiting" loop: sleep until the reset window, retry on the same engine,
  *      keep the session's lastActivity heartbeat fresh, and loop again if still limited.
  *   4. Bail out when the deadline passes without recovery.
  *
@@ -24,7 +24,7 @@ import { JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 import { resolveEffort } from "../shared/effort.js";
 import { effortLevelsForModel, engineAvailable, type EngineName } from "../shared/models.js";
-import { computeNextRetryDelayMs, computeRateLimitDeadlineMs, detectRateLimit } from "../shared/rateLimit.js";
+import { computeNextRetryDelayMs, computeRateLimitDeadlineMs, detectRateLimit, rateLimitEngineLabel } from "../shared/rateLimit.js";
 import { recordClaudeRateLimit } from "../shared/usageAwareness.js";
 import { getSession, getMessages, updateSessionForAttempt } from "./registry.js";
 
@@ -46,10 +46,12 @@ export type RateLimitOutcome =
 export interface RateLimitHandlerHooks {
   /**
    * Called once, immediately after detection, before any state changes. Used to
-   * record that Claude is rate-limited globally (usage awareness).
+   * Record engine-specific usage awareness. The default implementation records
+   * Claude limits only; other engines currently have no global awareness store.
    *
-   * The default implementation just calls `recordClaudeRateLimit(rateLimit.resetsAt)`.
-   * Override only if you need additional bookkeeping.
+   * The default path calls `recordClaudeRateLimit(rateLimit.resetsAt)` only
+   * when the limited session actually uses Claude. Override only if you need
+   * additional engine-specific bookkeeping.
    */
   onDetected?: (rateLimit: RateLimitInfo) => void;
 
@@ -141,7 +143,7 @@ export interface RateLimitHandlerOpts {
   engines: Map<string, Engine>;
   /** Optional employee record (for fallback effort + cliFlags). */
   employee?: Employee;
-  /** The Claude engine used for retries — the engine that returned the rate-limited result. */
+  /** The engine used for retries — the engine that returned the rate-limited result. */
   engine: Engine;
   /** Result of detectRateLimit() on the original turn. */
   rateLimit: RateLimitInfo;
@@ -164,8 +166,13 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
     rateLimit, originalResult, hooks,
   } = opts;
 
-  // Always record globally — both call sites did this on every detection.
-  (hooks.onDetected ?? defaultRecord)(rateLimit);
+  const engineLabel = rateLimitEngineLabel(session.engine);
+
+  if (hooks.onDetected) {
+    hooks.onDetected(rateLimit);
+  } else if (session.engine === "claude") {
+    recordClaudeRateLimit(rateLimit.resetsAt);
+  }
 
   const strategy = config.sessions?.rateLimitStrategy ?? "wait";
 
@@ -262,7 +269,7 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
     // No fallback engine available — fall through to wait-and-retry.
   }
 
-  // ── Branch B: wait-and-retry on Claude ─────────────────────────────────────
+  // ── Branch B: wait-and-retry on the original engine ────────────────────────
   const { delayMs, resumeAt } = computeNextRetryDelayMs(rateLimit.resetsAt);
   const deadlineMs = computeRateLimitDeadlineMs(
     rateLimit.resetsAt,
@@ -270,7 +277,7 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
   );
 
   logger.info(
-    `Session ${session.id} hit Claude usage limit — will auto-retry ${resumeAt ? `at ${resumeAt.toISOString()}` : `in ${Math.round(delayMs / 1000)}s`}`,
+    `Session ${session.id} hit ${engineLabel} usage limit — will auto-retry ${resumeAt ? `at ${resumeAt.toISOString()}` : `in ${Math.round(delayMs / 1000)}s`}`,
   );
 
   const enteredWaiting = updateSessionForAttempt(session.id, attemptToken, {
@@ -278,8 +285,8 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
     status: "waiting",
     lastActivity: new Date().toISOString(),
     lastError: resumeAt
-      ? `Claude usage limit — resumes ${resumeAt.toISOString()}`
-      : "Claude usage limit — waiting for reset",
+      ? `${engineLabel} usage limit — resumes ${resumeAt.toISOString()}`
+      : `${engineLabel} usage limit — waiting for reset`,
   });
   if (!enteredWaiting) {
     await hooks.onCancelled?.();
@@ -356,7 +363,9 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
       const retryRateLimit = !retryInterrupted ? detectRateLimit(retryResult) : { limited: false as const };
 
       if (retryRateLimit.limited) {
-        recordClaudeRateLimit(retryRateLimit.resetsAt);
+        if (session.engine === "claude") {
+          recordClaudeRateLimit(retryRateLimit.resetsAt);
+        }
         logger.info(`Session ${session.id} still rate limited (attempt ${attempt})`);
 
         const next = computeNextRetryDelayMs(retryRateLimit.resetsAt);
@@ -367,8 +376,8 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
           status: "waiting",
           lastActivity: new Date().toISOString(),
           lastError: next.resumeAt
-            ? `Claude usage limit — resumes ${next.resumeAt.toISOString()}`
-            : "Claude usage limit — waiting for reset",
+            ? `${engineLabel} usage limit — resumes ${next.resumeAt.toISOString()}`
+            : `${engineLabel} usage limit — waiting for reset`,
         });
         if (!waitingAgain) {
           await hooks.onCancelled?.();
@@ -392,10 +401,6 @@ export async function handleRateLimit(opts: RateLimitHandlerOpts): Promise<RateL
   } finally {
     clearInterval(heartbeat);
   }
-}
-
-function defaultRecord(rateLimit: RateLimitInfo): void {
-  recordClaudeRateLimit(rateLimit.resetsAt);
 }
 
 async function waitWhileSessionWaiting(sessionId: string, delayMs: number): Promise<boolean> {

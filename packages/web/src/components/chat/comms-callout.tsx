@@ -39,6 +39,7 @@ interface CommsLedgerRowProps {
   arrivalDelayMs?: number
   ariaLabel: string
   stateAttr: string
+  sourceId?: string
   onOpen?: () => void
 }
 
@@ -54,63 +55,57 @@ export function CommsLedgerRow({
   arrivalDelayMs,
   ariaLabel,
   stateAttr,
+  sourceId,
   onOpen,
 }: CommsLedgerRowProps) {
   const wrapStyle = arriving && arrivalDelayMs
     ? ({ '--arrive-delay': `${arrivalDelayMs}ms` } as CSSProperties)
     : undefined
+  const interactive = Boolean(onOpen)
+  const content = (
+    <>
+      <EmployeeChip employee={employee} displayName={displayName} size={18} showName={false} className="comm-chip shrink-0" />
+      <span className={`shrink-0 text-[length:var(--text-caption1)] font-[var(--weight-medium)] ${error ? 'text-[var(--system-red)]' : 'text-[var(--text-secondary)]'}`}>
+        {displayName}
+      </span>
+      {error && <AlertTriangle size={12} strokeWidth={2} aria-hidden="true" className="shrink-0 text-[var(--system-red)]" />}
+      {hopBadge && (
+        <span className="shrink-0 rounded-[var(--radius-sm)] bg-[var(--fill-secondary)] px-1.5 py-px text-[length:var(--text-caption2)] font-[var(--weight-medium)] text-[var(--text-tertiary)]">
+          {hopBadge}
+        </span>
+      )}
+      <span className={`min-w-0 flex-1 truncate text-[length:var(--text-footnote)] ${error ? 'text-[color-mix(in_srgb,var(--system-red)_55%,var(--text-tertiary))]' : 'text-[var(--text-tertiary)]'}`}>
+        {hint}
+      </span>
+      <span aria-hidden="true" className={`shrink-0 text-[length:var(--text-caption2)] text-[var(--text-quaternary)] [font-variant-numeric:tabular-nums] ${interactive ? 'opacity-0 transition-opacity duration-150 ease-[var(--ease-smooth)] group-hover:opacity-100 group-focus-visible:opacity-100 [@media(hover:none)]:opacity-100' : 'opacity-70'}`}>
+        {time}
+      </span>
+      {interactive && (
+        <ChevronRight size={12} strokeWidth={2.25} aria-hidden="true" className="shrink-0 -translate-x-0.5 text-[var(--text-quaternary)] opacity-0 transition-[opacity,transform] duration-150 ease-[var(--ease-smooth)] group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:translate-x-0 group-focus-visible:opacity-100 [@media(hover:none)]:translate-x-0 [@media(hover:none)]:opacity-100" />
+      )}
+    </>
+  )
+  const rowClass = `comm-row group relative -ml-1.5 flex w-full items-center gap-[var(--space-2)] rounded-[8px] py-[3px] pl-1.5 pr-2 text-left font-[inherit] text-[length:inherit] text-[inherit] ${dense ? 'min-h-[30px]' : 'min-h-8'} [@media(hover:none)]:min-h-10`
   return (
     <div
       className={`min-w-0 ${arriving ? 'comm-arrive' : ''}`}
       style={wrapStyle}
       data-comms-state={stateAttr}
+      data-comms-interactive={interactive}
+      data-source-message-id={sourceId}
     >
-      <button
-        type="button"
-        aria-label={ariaLabel}
-        onClick={onOpen}
-        className={`comm-row group relative -ml-1.5 flex w-full cursor-pointer items-center gap-[var(--space-2)] rounded-[8px] border-none bg-transparent py-[3px] pl-1.5 pr-2 text-left font-[inherit] text-[length:inherit] text-[inherit] outline-offset-1 transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] focus-visible:bg-[var(--fill-quaternary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)] active:bg-[var(--fill-tertiary)] ${
-          dense ? 'min-h-[30px]' : 'min-h-8'
-        } [@media(hover:none)]:min-h-10`}
-      >
-        <EmployeeChip employee={employee} displayName={displayName} size={18} showName={false} className="comm-chip shrink-0" />
-        <span
-          className={`shrink-0 text-[length:var(--text-caption1)] font-[var(--weight-medium)] ${
-            error ? 'text-[var(--system-red)]' : 'text-[var(--text-secondary)]'
-          }`}
+      {interactive ? (
+        <button
+          type="button"
+          aria-label={ariaLabel}
+          onClick={onOpen}
+          className={`${rowClass} cursor-pointer border-none bg-transparent outline-offset-1 transition-colors duration-150 ease-[var(--ease-smooth)] hover:bg-[var(--fill-quaternary)] focus-visible:bg-[var(--fill-quaternary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)] active:bg-[var(--fill-tertiary)]`}
         >
-          {displayName}
-        </span>
-        {error && (
-          <AlertTriangle size={12} strokeWidth={2} aria-hidden="true" className="shrink-0 text-[var(--system-red)]" />
-        )}
-        {hopBadge && (
-          <span className="shrink-0 rounded-[var(--radius-sm)] bg-[var(--fill-secondary)] px-1.5 py-px text-[length:var(--text-caption2)] font-[var(--weight-medium)] text-[var(--text-tertiary)]">
-            {hopBadge}
-          </span>
-        )}
-        <span
-          className={`min-w-0 flex-1 truncate text-[length:var(--text-footnote)] ${
-            error
-              ? 'text-[color-mix(in_srgb,var(--system-red)_55%,var(--text-tertiary))]'
-              : 'text-[var(--text-tertiary)]'
-          }`}
-        >
-          {hint}
-        </span>
-        <span
-          aria-hidden="true"
-          className="shrink-0 text-[length:var(--text-caption2)] text-[var(--text-quaternary)] opacity-0 transition-opacity duration-150 ease-[var(--ease-smooth)] [font-variant-numeric:tabular-nums] group-hover:opacity-100 group-focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
-        >
-          {time}
-        </span>
-        <ChevronRight
-          size={12}
-          strokeWidth={2.25}
-          aria-hidden="true"
-          className="shrink-0 -translate-x-0.5 text-[var(--text-quaternary)] opacity-0 transition-[opacity,transform] duration-150 ease-[var(--ease-smooth)] group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:translate-x-0 group-focus-visible:opacity-100 [@media(hover:none)]:translate-x-0 [@media(hover:none)]:opacity-100"
-        />
-      </button>
+          {content}
+        </button>
+      ) : (
+        <div className={rowClass}>{content}</div>
+      )}
     </div>
   )
 }

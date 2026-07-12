@@ -1,9 +1,9 @@
 
-import { lazy, Suspense, useState, useCallback, useEffect, useRef, useMemo } from 'react'
+import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useRef, useMemo } from 'react'
 import { api } from '@/lib/api'
 import { useOrg } from '@/hooks/use-employees'
-import { ChatMessages, formatMessage } from '@/components/chat/chat-messages'
-import { ThreadPeek, type CommsPeekData } from '@/components/chat/thread-peek'
+import { ChatMessages } from '@/components/chat/chat-messages'
+import type { CommsPeekData } from '@/components/chat/thread-peek'
 import { ChatInput } from '@/components/chat/chat-input'
 import { CliKeybar } from '@/components/chat/cli-keybar'
 import { ChatEmployeePicker } from '@/components/chat/chat-employee-picker'
@@ -93,8 +93,10 @@ interface ChatPaneProps {
   onShortcutsClick?: () => void
   /** Pre-selected employee for a NEW chat (e.g. contacting a session-less employee or an ?employee= deep-link). */
   initialEmployee?: string | null
-  /** Open a child thread from inline delegation/callback affordances. */
-  onOpenThread?: (sessionId: string) => void
+  /** Ask the page-owned stable read-only preview controller to open. */
+  onPeek?: (peek: CommsPeekData) => void
+  /** First meaningful destination paint; used to release a preview handoff. */
+  onContentReady?: (sessionId: string) => void
 }
 
 export function ChatPane({
@@ -115,7 +117,8 @@ export function ChatPane({
   onShortcutsClick,
   pendingUserMessage,
   initialEmployee,
-  onOpenThread,
+  onPeek,
+  onContentReady,
 }: ChatPaneProps) {
   // If this pane was opened from the onboarding wizard, the wizard stored the
   // seed user message in sessionStorage so we can display it immediately
@@ -161,6 +164,9 @@ export function ChatPane({
     hasOlderMessages,
     loadingOlderMessages,
     olderMessagesError,
+    delegationArrivals,
+    liveTerminalDelegationIds,
+    delegationAnnouncement,
     loadOlderMessages,
     beginSend,
     failSend,
@@ -414,17 +420,17 @@ export function ChatPane({
     resetPane()
   }, [resetPane])
 
-  // Read-only report panel (peek) — opened by comms ledger lines. "Open full
-  // chat" commits through the same onOpenThread chain the drill-in cards use,
-  // so history + the back chip stay correct.
-  const [peek, setPeek] = useState<CommsPeekData | null>(null)
-  const closePeek = useCallback(() => setPeek(null), [])
-  const commitPeek = useCallback((sid: string) => {
-    setPeek(null)
-    onOpenThread?.(sid)
-  }, [onOpenThread])
-  // A session switch under the panel (e.g. tab shortcut) closes it.
-  useEffect(() => { setPeek(null) }, [sessionId])
+  const readySessionRef = useRef<string | null>(null)
+  useLayoutEffect(() => {
+    if (!sessionId || hydrating || (!currentSession && messages.length === 0 && !streamingText)) return
+    if (readySessionRef.current === sessionId) return
+    const frame = requestAnimationFrame(() => {
+      if (readySessionRef.current === sessionId) return
+      readySessionRef.current = sessionId
+      onContentReady?.(sessionId)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [sessionId, hydrating, currentSession, messages.length, streamingText, onContentReady])
 
   // Drag & drop state
   const [dragOver, setDragOver] = useState(false)
@@ -476,6 +482,7 @@ export function ChatPane({
         background: 'var(--bg)',
         position: 'relative',
       }}
+      data-chat-pane-session={sessionId ?? 'new'}
       onClick={onFocus}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
@@ -556,20 +563,12 @@ export function ChatPane({
           loadingOlderMessages={loadingOlderMessages}
           olderMessagesError={olderMessagesError}
           onLoadOlderMessages={loadOlderMessages}
-          onOpenThread={onOpenThread}
-          onPeek={setPeek}
+          onPeek={onPeek}
+          delegationArrivals={delegationArrivals}
+          liveTerminalDelegationIds={liveTerminalDelegationIds}
+          delegationAnnouncement={delegationAnnouncement}
         />
       ) : null}
-
-      {/* Read-only report panel — desktop slide-over / mobile bottom sheet. */}
-      {peek && (
-        <ThreadPeek
-          peek={peek}
-          onClose={closePeek}
-          onOpenFullChat={onOpenThread ? commitPeek : undefined}
-          renderContent={formatMessage}
-        />
-      )}
 
       {/* Queue panel — hidden in the live xterm view (noise on top of the PTY). */}
       {!(viewMode === 'cli' && sessionId) && (

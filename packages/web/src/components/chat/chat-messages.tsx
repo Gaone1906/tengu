@@ -6,7 +6,7 @@ import { useOpenFile } from '@/components/chat/file-open-context'
 import { useStickToBottom } from '@/hooks/use-stick-to-bottom'
 import { useMessageTts, stopMessageTts } from './use-message-tts'
 import { ChatBlockInline, statusMark } from './chat-blocks'
-import { blockFallbackContent } from '@/lib/blocks'
+import { blockFallbackContent, isActiveDelegationStatus, type DelegationArrival } from '@/lib/blocks'
 import { ChevronDown, Wrench } from 'lucide-react'
 import { parseTeammateReply, TeammateReply } from './teammate-reply'
 import { parseAgentRelay, AgentRelay } from './agent-relay'
@@ -176,6 +176,17 @@ function itemLastRawIndex(item: MessageItem): number {
   return item.index
 }
 
+function itemHasActiveDelegation(item: MessageItem): boolean {
+  const rows = item.kind === 'tool-group'
+    ? item.msgs
+    : item.kind === 'callback-burst'
+      ? item.entries.map((entry) => entry.msg)
+      : [item.msg]
+  return rows.some((message) => message.blocks?.some((block) =>
+    block.type === 'delegation' && isActiveDelegationStatus(block.status),
+  ))
+}
+
 function buildFoldSummary(run: MessageItem[], messages: Message[]): FoldSummaryData {
   let tools = 0
   let updates = 0
@@ -261,6 +272,7 @@ function partitionForFold(
   messages: Message[],
   incompleteTurnIds: ReadonlySet<string>,
   liveFinalResponseId: string | null,
+  liveTerminalDelegationIds: ReadonlySet<string>,
 ): RenderGroup[] {
   const answerIdx = finalAnswerIndices(messages)
 
@@ -280,6 +292,7 @@ function partitionForFold(
     const msg = itemFirstMsg(item)
     if (msg.role === 'user') return false
     if (item.kind === 'message' && isSystemBanner(item.msg)) return false
+    if (itemHasActiveDelegation(item)) return false
     if (incompleteTurnIds.has(turnIdFor(itemFirstRawIndex(item)))) return false
     const answer = answerIdx[itemFirstRawIndex(item)]
     // No true final answer means no fold DOM at all: active evidence renders in
@@ -327,7 +340,14 @@ function partitionForFold(
       id: `${anchorId}-${seq}`,
       items: run,
       answered,
-      liveCompletion: messages[answer]?.id === liveFinalResponseId,
+      liveCompletion: messages[answer]?.id === liveFinalResponseId || run.some((item) => {
+        const rows = item.kind === 'tool-group'
+          ? item.msgs
+          : item.kind === 'callback-burst'
+            ? item.entries.map((entry) => entry.msg)
+            : [item.msg]
+        return rows.some((message) => message.blocks?.some((block) => liveTerminalDelegationIds.has(block.id)))
+      }),
       summary: buildFoldSummary(run, messages),
       answerIdx: answer,
       animated: true,
@@ -1023,13 +1043,13 @@ interface MessageRowProps {
   messages: Message[]
   loading?: boolean
   onRetry?: (text: string) => void
-  onOpenThread?: (sessionId: string) => void
   onPeek?: (peek: CommsPeekData) => void
   /** Live-arrival stagger index for comms rows (null = not arriving). */
   arrival?: number | null
+  delegationArrivals?: ReadonlyMap<string, DelegationArrival>
 }
 
-const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loading, onRetry, onOpenThread, onPeek, arrival }: MessageRowProps) {
+const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loading, onRetry, onPeek, arrival, delegationArrivals }: MessageRowProps) {
   const isUser = msg.role === 'user'
   const isNotification = msg.role === 'notification'
   const showTimestamp = shouldShowTimestamp(messages, i)
@@ -1111,7 +1131,6 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
             timestamp={msg.timestamp}
             messageId={msg.id || `idx-${i}`}
             onPeek={onPeek}
-            onOpenThread={onOpenThread}
             arriving={arrival != null}
             arrivalDelayMs={arrival != null ? arrival * 90 : undefined}
           />
@@ -1125,7 +1144,6 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
             timestamp={msg.timestamp}
             messageId={msg.id || `idx-${i}`}
             onPeek={onPeek}
-            onOpenThread={onOpenThread}
             arriving={arrival != null}
             arrivalDelayMs={arrival != null ? arrival * 90 : undefined}
           />
@@ -1157,7 +1175,8 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
                 <ChatBlockInline
                   key={block.id}
                   block={block}
-                  onOpenThread={onOpenThread}
+                  onPeek={onPeek}
+                  arrival={delegationArrivals?.get(block.id)}
                 />
               ))}
             </div>
@@ -1231,10 +1250,11 @@ interface ChatMessagesProps {
   loadingOlderMessages?: boolean
   olderMessagesError?: Error | null
   onLoadOlderMessages?: () => Promise<void> | void
-  /** Navigate to a child session from a handoff card or teammate reply. */
-  onOpenThread?: (sessionId: string) => void
   /** Open the read-only report panel for a comms ledger line. */
   onPeek?: (peek: CommsPeekData) => void
+  delegationArrivals?: ReadonlyMap<string, DelegationArrival>
+  liveTerminalDelegationIds?: ReadonlySet<string>
+  delegationAnnouncement?: string
 }
 
 function latestTurnId(messages: Message[]): string | null {
@@ -1367,8 +1387,10 @@ export function ChatMessages({
   loadingOlderMessages = false,
   olderMessagesError = null,
   onLoadOlderMessages,
-  onOpenThread,
   onPeek,
+  delegationArrivals = new Map(),
+  liveTerminalDelegationIds = new Set(),
+  delegationAnnouncement = '',
 }: ChatMessagesProps) {
   // Stick-to-bottom: one hook owns follow-intent, growth-follow, resize/keyboard,
   // tab-return, mount-snap, and the jump affordance. See use-stick-to-bottom.ts.
@@ -1445,6 +1467,7 @@ export function ChatMessages({
     messages,
     incompleteTurnIds,
     liveFinalResponseId,
+    liveTerminalDelegationIds,
   )
 
   // Live-arrival tracking for the comms choreography: ids present at mount
@@ -1509,6 +1532,9 @@ export function ChatMessages({
 
   return (
     <div className="relative flex-1 min-h-0 bg-[var(--bg)]">
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {delegationAnnouncement}
+      </span>
       <div ref={setScrollContainerRef} style={{ overflowAnchor: 'auto' }} className="chat-messages-scroll h-full overflow-y-auto overflow-x-hidden bg-[var(--bg)] min-h-0">
         <div className="mx-auto w-full max-w-[var(--chat-measure)] pt-[72px] pb-[var(--space-6)] lg:pt-[88px]">
           {loadingOlderMessages && (
@@ -1547,7 +1573,6 @@ export function ChatMessages({
                         <CallbackBurst
                           entries={item.entries}
                           onPeek={onPeek}
-                          onOpenThread={onOpenThread}
                           arrivals={arrivalsRef.current}
                         />
                       </div>
@@ -1565,9 +1590,9 @@ export function ChatMessages({
                   messages={messages}
                   loading={loading}
                   onRetry={onRetry}
-                  onOpenThread={onOpenThread}
                   onPeek={onPeek}
                   arrival={arrivalFor(msg.id)}
+                  delegationArrivals={delegationArrivals}
                 />
               )
             }

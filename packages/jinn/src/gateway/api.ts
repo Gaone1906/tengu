@@ -28,7 +28,6 @@ import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } 
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import {
   listSessions,
-  listRecentSessions,
   countSessions,
   listRecentPerGroup,
   listSessionsForGroup,
@@ -163,7 +162,7 @@ import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLangua
 import { CODEX_HOMES_DIR, JINN_HOME } from "../shared/paths.js";
 import { resolveEffort } from "../shared/effort.js";
 import { selectClaudeModelFallback } from "../shared/model-fallback.js";
-import { detectRateLimit } from "../shared/rateLimit.js";
+import { detectRateLimit, rateLimitEngineLabel } from "../shared/rateLimit.js";
 import { getClaudeExpectedResetAt } from "../shared/usageAwareness.js";
 import { collectEngineLimits } from "../shared/engine-limits.js";
 import { handleRateLimit } from "../sessions/rate-limit-handler.js";
@@ -175,6 +174,8 @@ import { summarizeCronRun } from "../cron/run-summary.js";
 import { reloadScheduler } from "../cron/scheduler.js";
 import { validateCronSchedule } from "../cron/validation.js";
 import { runCronJob, type WorkflowCronFire } from "../cron/runner.js";
+import { ActivityQueryError, getActivityStory, queryActivityPage } from "../activity/query.js";
+import type { ActivityKind, ActivityOutcomeState } from "../activity/types.js";
 import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir } from "./files.js";
@@ -207,7 +208,13 @@ import {
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import { createWorkflowTodoBridge } from "../work-items/workflow-bridge.js";
-import { archiveWorkItem, decideWorkItemApproval, escalateApproval, requestApproval } from "../work-items/approvals.js";
+import {
+  archiveWorkItem,
+  decideWorkItemApproval,
+  escalateApproval,
+  requestApproval,
+  WorkflowGateCancellationConflictError,
+} from "../work-items/approvals.js";
 import { resolveApprovalDecisionAuthority, resolveApprovalRouteTarget, resolveRootApprovalTarget } from "./approval-authority.js";
 import { scanOrg } from "./org.js";
 import { resolveOrgHierarchy } from "./org-hierarchy.js";
@@ -3275,13 +3282,21 @@ export async function handleApiRequest(
       const authorized = authorizeAgentWorkItemStatus(caller, item, target as WorkItemStatus);
       if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
       try {
-        const result = transition(params.id, target as WorkItemStatus, workItemActor(caller), {
-          manual: true,
-          callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
-          detail: note ? { note } : undefined,
-        });
+        const result = isOperatorPutCancellation
+          ? {
+              item: archiveWorkItem(params.id, workItemActor(caller), note ? { note } : {}),
+              escalated: false,
+            }
+          : transition(params.id, target as WorkItemStatus, workItemActor(caller), {
+              manual: true,
+              callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
+              detail: note ? { note } : undefined,
+            });
         return json(res, { workItem: result.item, escalated: result.escalated });
       } catch (err) {
+        if (err instanceof WorkflowGateCancellationConflictError) {
+          return json(res, { error: err.message }, 409);
+        }
         if (err instanceof TransitionError) {
           if (err.code === "not-found") return notFound(res);
           const human = err.code === "self-review-banned"
@@ -3380,6 +3395,9 @@ export async function handleApiRequest(
         });
         return json(res, { workItem: archived, archived: true });
       } catch (err) {
+        if (err instanceof WorkflowGateCancellationConflictError) {
+          return json(res, { error: err.message }, 409);
+        }
         if (err instanceof TransitionError) {
           if (err.code === "not-found") return notFound(res);
           const statusCode = err.code === "illegal-edge" ? 400 : 403;
@@ -4958,12 +4976,13 @@ export async function handleApiRequest(
       // processes the notification and can respond — they do not return early.
 
       if (!isNotification && session.status === "waiting") {
-        const expectedResetAt = getClaudeExpectedResetAt();
+        const engineLabel = rateLimitEngineLabel(session.engine);
+        const expectedResetAt = session.engine === "claude" ? getClaudeExpectedResetAt() : undefined;
         const resumeText = expectedResetAt
           ? expectedResetAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
           : null;
         const queuedText =
-          `⏳ Still paused due to Claude usage limit${resumeText ? ` (resets ${resumeText})` : ""}. Your message is queued and will run automatically.`;
+          `⏳ Still paused due to ${engineLabel} usage limit${resumeText ? ` (resets ${resumeText})` : ""}. Your message is queued and will run automatically.`;
         insertMessage(session.id, "notification", queuedText);
         context.emit("session:notification", { sessionId: session.id, message: queuedText });
       }
@@ -5613,40 +5632,35 @@ export async function handleApiRequest(
       return json(res, connectors);
     }
 
-    // GET /api/activity — recent activity derived from sessions
+    // GET /api/activity — normalized operational stories. Raw gateway text
+    // remains available separately at /api/logs for Diagnostics.
     if (method === "GET" && pathname === "/api/activity") {
-      // We return the 30 newest activity events, and event ts == last_activity
-      // (sessions are ordered DESC), so we only need the recent tail. But some
-      // statuses emit no event (e.g. interrupted), so a single fixed window can
-      // starve the result when the newest sessions are all non-emitting. Page the
-      // newest-first window (re-deriving the real emitting predicate per row) until
-      // we have 30 events or hit a hard row cap — still O(bounded), never a full
-      // ~2.5k-session hydrate every poll.
-      const TARGET_EVENTS = 30;
-      const PAGE = 100;
-      const HARD_ROW_CAP = 1000;
-      const events: Array<{ event: string; payload: unknown; ts: number }> = [];
-      for (let offset = 0; events.length < TARGET_EVENTS && offset < HARD_ROW_CAP; offset += PAGE) {
-        const page = listRecentSessions(PAGE, offset);
-        for (const s of page) {
-          const ts = new Date(s.lastActivity || s.createdAt).getTime();
-          const transportState = getSessionTransportState(s, context);
-          if (transportState === "running") {
-            events.push({ event: "session:started", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
-          } else if (transportState === "queued") {
-            events.push({ event: "session:queued", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
-          } else if (transportState === "idle") {
-            events.push({ event: "session:completed", payload: { sessionId: s.id, employee: s.employee, engine: s.engine, connector: s.connector }, ts });
-          } else if (transportState === "error") {
-            events.push({ event: "session:error", payload: { sessionId: s.id, employee: s.employee, error: s.lastError, connector: s.connector }, ts });
-          }
-        }
-        if (page.length < PAGE) break; // exhausted — no more rows
+      try {
+        const rawLimit = url.searchParams.get("limit");
+        const kinds = url.searchParams.get("kinds")?.split(",").map((value) => value.trim()).filter(Boolean) as ActivityKind[] | undefined;
+        const outcomes = url.searchParams.get("outcomes")?.split(",").map((value) => value.trim()).filter(Boolean) as ActivityOutcomeState[] | undefined;
+        return json(res, queryActivityPage({
+          ...(rawLimit !== null ? { limit: Number(rawLimit) } : {}),
+          ...(url.searchParams.get("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
+          ...(url.searchParams.get("q") ? { q: url.searchParams.get("q")! } : {}),
+          ...(kinds?.length ? { kinds } : {}),
+          ...(outcomes?.length ? { outcomes } : {}),
+        }));
+      } catch (err) {
+        if (err instanceof ActivityQueryError) return badRequest(res, err.message);
+        throw err;
       }
-      // Newest first. Pages are already last_activity DESC, so any collected
-      // event is newer than every un-fetched one; the top 30 are the true newest.
-      events.sort((a, b) => b.ts - a.ts);
-      return json(res, events.slice(0, TARGET_EVENTS));
+    }
+
+    const activityStoryMatch = pathname.match(/^\/api\/activity\/(story_[a-f0-9]{24})$/);
+    if (method === "GET" && activityStoryMatch) {
+      try {
+        const detail = getActivityStory(activityStoryMatch[1]);
+        return detail ? json(res, detail) : notFound(res);
+      } catch (err) {
+        if (err instanceof ActivityQueryError) return badRequest(res, err.message);
+        throw err;
+      }
     }
 
     // GET /api/onboarding — check if onboarding is needed
@@ -6740,17 +6754,18 @@ async function runWebSession(
             }
           },
           onWaitingStart: ({ resumeAt }) => {
+            const engineLabel = rateLimitEngineLabel(currentSession.engine);
             const resumeText = resumeAt
               ? resumeAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
               : null;
 
             // Send hardcoded Discord notification — does not depend on the LLM
             notifyDiscordChannel(
-              `⚠️ Claude usage limit reached. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} paused${resumeText ? ` until ${resumeText}` : ""}.`,
+              `⚠️ ${engineLabel} usage limit reached. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} paused${resumeText ? ` until ${resumeText}` : ""}.`,
             );
 
             const notificationText =
-              `⏳ Claude usage limit reached${resumeText ? `. Resets ${resumeText}` : ""} — I'll continue automatically.`;
+              `⏳ ${engineLabel} usage limit reached${resumeText ? `. Resets ${resumeText}` : ""} — I'll continue automatically.`;
             insertMessage(currentSession.id, "notification", notificationText);
 
             // Notify parent session about rate limit (fire-and-forget)
@@ -6771,6 +6786,7 @@ async function runWebSession(
           },
           onRetryStream: emitDelta,
           onRetrySuccess: (retryResult) => {
+            const engineLabel = rateLimitEngineLabel(currentSession.engine);
             // Usage limit cleared — handle result
             if (retryResult.result) {
               insertMessage(currentSession.id, "assistant", retryResult.result);
@@ -6795,7 +6811,7 @@ async function runWebSession(
             if (completedAfterRetry) {
               notifyRateLimitResumed(completedAfterRetry);
               notifyDiscordChannel(
-                `✅ Claude usage limit cleared. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} resumed.`,
+                `✅ ${engineLabel} usage limit cleared. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} resumed.`,
               );
               notifyParentSession(completedAfterRetry, { result: retryResult.result, error: retryResult.error ?? null, cost: retryResult.cost, durationMs: retryResult.durationMs }, { alwaysNotify: employee?.alwaysNotify });
               // Relay the resumed (rate-limit-cleared) turn to the originating connector channel (#51).
@@ -6816,22 +6832,24 @@ async function runWebSession(
             }
           },
           onTimeout: () => {
+            const engineLabel = rateLimitEngineLabel(currentSession.engine);
+            const timeoutError = `${engineLabel} usage limit did not clear in time`;
             notifyDiscordChannel(
-              `❌ Claude usage limit did not clear in time. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} has been stopped.`,
+              `❌ ${timeoutError}. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} has been stopped.`,
             );
             const erroredSession = updateSessionForAttempt(currentSession.id, attemptToken, {
               status: "error",
               lastActivity: new Date().toISOString(),
-              lastError: "Claude usage limit did not clear in time",
+              lastError: timeoutError,
             }, ["waiting", "running"]);
             if (erroredSession) {
-              notifyParentSession(erroredSession, { error: "Claude usage limit did not clear in time" }, { alwaysNotify: employee?.alwaysNotify });
+              notifyParentSession(erroredSession, { error: timeoutError }, { alwaysNotify: employee?.alwaysNotify });
             }
             if (erroredSession) {
               context.emit("session:completed", {
                 sessionId: currentSession.id,
                 result: null,
-                error: "Claude usage limit did not clear in time",
+                error: timeoutError,
               });
               maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
             }

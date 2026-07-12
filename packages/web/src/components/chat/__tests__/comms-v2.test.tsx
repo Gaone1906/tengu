@@ -53,7 +53,7 @@ describe('T3 burst grouping', () => {
       callback('c1', 'dev', T0),
       callback('c2', 'analyst', T0 + BURST_WINDOW_MS + 60_000),
     ]
-    const { container } = render(<ChatMessages messages={messages} loading={false} />)
+    const { container } = render(<ChatMessages messages={messages} loading={false} onPeek={vi.fn()} />)
     expect(container.querySelector('[data-comms-burst]')).toBeNull()
     expect(screen.getAllByRole('button', { name: /Open report/ })).toHaveLength(2)
   })
@@ -157,6 +157,36 @@ describe('the post-turn fold', () => {
     expect(screen.getByRole('button', { name: /^2 tools$/ })).toBeTruthy()
   })
 
+  it('partitions answered work around active delegations and folds only terminal evidence', () => {
+    const delegation = (id: string, status: 'running' | 'waiting' | 'done'): Message => ({
+      id: `m-${id}`,
+      role: 'assistant',
+      content: `Delegation ${id}`,
+      timestamp: T0 + (id === 'active' ? 2_000 : 3_000),
+      blocks: [{
+        id,
+        type: 'delegation',
+        version: 1,
+        status,
+        payload: { employee: id, employeeDisplay: id, childSessionId: `child-${id}`, title: `${id} work` },
+      }],
+    })
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Delegate both.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used search', timestamp: T0 + 1_000, toolCall: 'search' },
+      delegation('active', 'running'),
+      delegation('terminal', 'done'),
+      { id: 'a1', role: 'assistant', content: 'Parent final.', timestamp: T0 + 4_000 },
+    ]
+    const { container } = render(<ChatMessages messages={messages} loading={false} onPeek={vi.fn()} />)
+
+    const active = container.querySelector('[data-handoff-state="working"]')!
+    expect(active.closest('[data-fold-region]')).toBeNull()
+    const terminal = container.querySelector('[data-handoff-state="replied"]')!
+    expect(terminal.closest('[data-fold-region]')?.getAttribute('aria-hidden')).toBe('true')
+    expect(screen.getByText('Parent final.')).toBeTruthy()
+  })
+
   it('renders active middle evidence normally without a Worked-for wrapper', () => {
     const active: Message[] = [
       { id: 'u1', role: 'user', content: 'Audit it.', timestamp: T0 },
@@ -164,7 +194,7 @@ describe('the post-turn fold', () => {
       { id: 't1', role: 'assistant', content: 'Used file_read', timestamp: T0 + 2_000, toolCall: 'file_read' },
       callback('c1', 'dev', T0 + 3_000),
     ]
-    const { container } = render(<ChatMessages messages={active} loading />)
+    const { container } = render(<ChatMessages messages={active} loading onPeek={vi.fn()} />)
 
     expect(container.querySelector('[data-fold]')).toBeNull()
     expect(container.querySelector('[data-fold-summary]')).toBeNull()
@@ -274,13 +304,13 @@ describe('fold region boundary (turn structure)', () => {
         role: 'assistant',
         content: 'Delegated to dev',
         timestamp: T0 + 20_000,
-        blocks: [{ id: 'b1', version: 1, type: 'delegation', payload: { employee: 'dev', employeeDisplay: 'Dev', state: 'done' } }],
+        blocks: [{ id: 'b1', version: 1, type: 'delegation', status: 'done', payload: { employee: 'dev', employeeDisplay: 'Dev' } }],
       },
       callback('c1', 'dev', T0 + 200_000),
       { id: 'a1', role: 'assistant', content: 'Panel redesigned end to end.', timestamp: T0 + 210_000 },
       callback('c2', 'analyst', T0 + 900_000),
     ]
-    const { container } = render(<ChatMessages messages={messages} loading={false} />)
+    const { container } = render(<ChatMessages messages={messages} loading={false} onPeek={vi.fn()} />)
 
     const region = container.querySelector('[data-fold-region]')!
     // Every intermediate is inside the folded region…
@@ -354,7 +384,8 @@ describe('fold region boundary (turn structure)', () => {
       { id: 't1', role: 'assistant', content: 'Using read_flags', timestamp: T0 + 2_000, toolCall: 'read_flags' },
     ]
     vi.useFakeTimers()
-    const { container, rerender } = render(<ChatMessages messages={running} loading />)
+    const onPeek = vi.fn()
+    const { container, rerender } = render(<ChatMessages messages={running} loading onPeek={onPeek} />)
     expect(container.querySelector('[data-fold]')).toBeNull()
 
     // Tool completion and teammate completion are middle evidence, not turn
@@ -365,13 +396,13 @@ describe('fold region boundary (turn structure)', () => {
       { ...running[2], content: 'Used read_flags' },
       callback('c1', 'dev', T0 + 4_000),
     ]
-    rerender(<ChatMessages messages={middle} loading />)
+    rerender(<ChatMessages messages={middle} loading onPeek={onPeek} />)
     expect(container.querySelector('[data-fold]')).toBeNull()
     expect(screen.getByText('On it, delegating now.')).toBeTruthy()
     expect(screen.getByRole('button', { name: /dev replied.*Open report/ })).toBeTruthy()
 
     // A waiting/idle status rerender is not a final-response event either.
-    rerender(<ChatMessages messages={middle} loading={false} turnPending />)
+    rerender(<ChatMessages messages={middle} loading={false} turnPending onPeek={onPeek} />)
     expect(container.querySelector('[data-fold]')).toBeNull()
 
     // The true final response is a new assistant prose row. Its arrival alone
@@ -386,6 +417,7 @@ describe('fold region boundary (turn structure)', () => {
         loading={false}
         turnPending={false}
         liveFinalResponseId="a1"
+        onPeek={onPeek}
       />,
     )
     const region = container.querySelector('[data-fold-region]')!

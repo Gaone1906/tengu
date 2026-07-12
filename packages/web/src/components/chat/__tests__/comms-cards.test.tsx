@@ -102,7 +102,7 @@ describe('agent relays', () => {
     }))
   })
 
-  it('peeks without a sender session for legacy banner-only relays', () => {
+  it('renders legacy banner-only relays as non-interactive when no sender session exists', () => {
     const onPeek = vi.fn()
     const messages: Message[] = [{
       id: 'relay-legacy',
@@ -110,13 +110,10 @@ describe('agent relays', () => {
       content: '📨 From growth-ops: A legacy relay with no meta.',
       timestamp: 100,
     }]
-    render(<ChatMessages messages={messages} loading={false} onPeek={onPeek} />)
-    fireEvent.click(screen.getByRole('button', { name: /Open message/ }))
-    expect(onPeek).toHaveBeenCalledWith(expect.objectContaining({
-      kind: 'relay',
-      sessionId: undefined,
-      fullMessage: 'A legacy relay with no meta.',
-    }))
+    const { container } = render(<ChatMessages messages={messages} loading={false} onPeek={onPeek} />)
+    expect(screen.queryByRole('button', { name: /Open message/ })).toBeNull()
+    expect(container.querySelector('[data-comms-interactive="false"]')).toBeTruthy()
+    expect(onPeek).not.toHaveBeenCalled()
   })
 
   it('renders the T1 ledger line with a hop badge and no meta verb', () => {
@@ -190,10 +187,10 @@ describe('dispatch rows', () => {
         }],
       },
     ]
-    const onOpenThread = vi.fn()
+    const onPeek = vi.fn()
 
     const { container } = render(
-      <ChatMessages messages={messages} loading={false} onOpenThread={onOpenThread} />,
+      <ChatMessages messages={messages} loading={false} onPeek={onPeek} />,
     )
 
     expect(container.querySelector('[data-dispatch="generic"]')).toBeNull()
@@ -203,16 +200,16 @@ describe('dispatch rows', () => {
     expect(linked!.textContent).toContain('Jinn Dev')
     expect(linked!.textContent).toContain('Also check the mobile breakpoint.')
     fireEvent.click(linked as HTMLElement)
-    expect(onOpenThread).toHaveBeenCalledWith('child-9')
+    expect(onPeek).toHaveBeenCalledWith(expect.objectContaining({ kind: 'dispatch', sessionId: 'child-9' }))
   })
 })
 
 describe('dispatch block inline', () => {
   it('renders a linked dispatch block row', () => {
-    const onOpenThread = vi.fn()
+    const onPeek = vi.fn()
     render(
       <ChatBlockInline
-        onOpenThread={onOpenThread}
+        onPeek={onPeek}
         block={{
           id: 'dp-2',
           type: 'dispatch',
@@ -230,6 +227,6 @@ describe('dispatch block inline', () => {
     )
     const row = screen.getByRole('button', { name: /Followed up with Analyst/ })
     fireEvent.click(row)
-    expect(onOpenThread).toHaveBeenCalledWith('child-7')
+    expect(onPeek).toHaveBeenCalledWith(expect.objectContaining({ kind: 'dispatch', sessionId: 'child-7' }))
   })
 })

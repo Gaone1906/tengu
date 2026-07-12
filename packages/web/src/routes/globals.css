@@ -30,6 +30,39 @@
   --radius-xl: var(--radius-xl);
 }
 
+/* A delegation card gets one provenance-backed entrance only when its block
+   first arrives over the live WS put path. The grid track grows the real
+   layout so following threads stay visually anchored; the card itself uses
+   compositor-friendly detail motion. */
+.delegation-arrival {
+  display: grid;
+  min-width: 0;
+  grid-template-rows: 0fr;
+  animation: jinn-delegation-grow 220ms var(--ease-snappy) var(--delegation-arrival-delay, 0ms) both;
+}
+
+.delegation-arrival-inner {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  filter: blur(3px);
+  transform: translateY(8px) scale(.985);
+  animation: jinn-delegation-card-in 180ms var(--ease-snappy) calc(var(--delegation-arrival-delay, 0ms) + 35ms) both;
+}
+
+@keyframes jinn-delegation-grow {
+  to { grid-template-rows: 1fr; }
+}
+
+@keyframes jinn-delegation-card-in {
+  to { opacity: 1; filter: blur(0); transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .delegation-arrival { grid-template-rows: 1fr; animation: none; }
+  .delegation-arrival-inner { opacity: 1; filter: none; transform: none; animation: none; }
+}
+
 /* ============================================
    Tailwind v4 Theme Tokens
    ============================================ */

@@ -1,7 +1,7 @@
 import type { Message } from './conversations'
 
 export type ChatBlockType = 'task-list' | 'delegation' | 'dispatch'
-export type ChatBlockStatus = 'queued' | 'running' | 'done' | 'error'
+export type ChatBlockStatus = 'queued' | 'dispatched' | 'running' | 'waiting' | 'done' | 'completed' | 'error'
 export type ChatBlockOp = 'put' | 'patch' | 'remove'
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[]
@@ -21,6 +21,24 @@ export interface ChatBlock {
 export interface ChatBlockEnvelope {
   op: ChatBlockOp
   block: ChatBlock
+}
+
+/** Ephemeral UI-only provenance for a genuinely new live delegation put. */
+export interface DelegationArrival {
+  nonce: number
+  delayMs: number
+}
+
+export function isActiveDelegationStatus(status: ChatBlockStatus | undefined): boolean {
+  return status === undefined
+    || status === 'queued'
+    || status === 'dispatched'
+    || status === 'running'
+    || status === 'waiting'
+}
+
+export function isTerminalDelegationStatus(status: ChatBlockStatus | undefined): boolean {
+  return status === 'done' || status === 'completed' || status === 'error'
 }
 
 const SUPPORTED_BLOCK_TYPES = new Set<ChatBlockType>(['task-list', 'delegation', 'dispatch'])

@@ -57,6 +57,13 @@ export class ApprovalNotPendingError extends Error {
   }
 }
 
+export class WorkflowGateCancellationConflictError extends Error {
+  constructor(id: string) {
+    super(`work item ${id} mirrors a pending Workflow gate; the Workflow run is the lifecycle authority — resolve the run gate before cancelling its Todo`);
+    this.name = 'WorkflowGateCancellationConflictError';
+  }
+}
+
 function classifyApprovalTarget(item: WorkItem, inputTarget: string | null | undefined): { target: string | null; kind: ApprovalTargetKind } {
   if (inputTarget === null) return { target: null, kind: 'none' };
 
@@ -157,10 +164,11 @@ function decideApproval(id: string, decision: ApprovalDecision, decidedBy: strin
 }
 
 /**
- * Cancel a Todo while closing any outstanding native/mirrored approval record in
- * the same SQLite transaction. Archive is a lifecycle decision, so leaving a
- * pending approval behind would create a ghost Needs Attention item. Callers are
- * authority-checked by the gateway before reaching this persistence primitive.
+ * Cancel a Todo while closing any outstanding native approval record in the same
+ * SQLite transaction. A pending Workflow-gate mirror is refused: the run store
+ * is its lifecycle authority, and resolving the gate is the only path allowed to
+ * settle that mirror. Callers are authority-checked by the gateway before
+ * reaching this persistence primitive.
  */
 export function archiveWorkItem(id: string, actor: string, opts: ArchiveWorkItemOptions = {}): WorkItem {
   const db = initDb();
@@ -168,6 +176,9 @@ export function archiveWorkItem(id: string, actor: string, opts: ArchiveWorkItem
     let item = getWorkItem(id);
     if (!item) throw new Error(`archiveWorkItem: work item ${id} not found`);
     if (item.approvalState === 'pending') {
+      if (item.approvalRef?.startsWith(WORKFLOW_GATE_REF_PREFIX)) {
+        throw new WorkflowGateCancellationConflictError(id);
+      }
       item = decideApproval(id, 'reject', actor, opts.note ?? 'Todo archived');
     }
     if (item.status === 'cancelled') return item;

@@ -311,6 +311,45 @@ describe("POST /api/work-items/:id/approval — COO-default authority + validati
 });
 
 describe("POST /api/work-items/:id/approval — native consequence rules", () => {
+  it("operator cancellation atomically rejects a pending native approval and removes Needs-you leakage", async () => {
+    const item = pendingItem("in_review", {}, "coo");
+
+    const cancelled = await call(
+      "PUT",
+      `/api/work-items/${item.id}/status`,
+      { status: "cancelled", note: "operator withdrew the Todo" },
+    );
+
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.workItem).toMatchObject({
+      status: "cancelled",
+      approvalState: "rejected",
+      approvalDecidedBy: "operator",
+    });
+    const events = store.listWorkItemEvents(item.id);
+    expect(events.slice(-2).map((event) => event.kind)).toEqual(["approval_decided", "status_change"]);
+    expect(events.at(-2)).toMatchObject({
+      actor: "operator",
+      detail: { decision: "reject", note: "operator withdrew the Todo" },
+    });
+    expect(events.at(-1)).toMatchObject({
+      actor: "operator",
+      fromStatus: "in_review",
+      toStatus: "cancelled",
+      detail: { action: "archive", note: "operator withdrew the Todo" },
+    });
+
+    const needsYou = await call("GET", "/api/work-items?needsAttentionFor=me&limit=100");
+    expect(needsYou.status).toBe(200);
+    expect((needsYou.body.workItems as Array<{ id: string }>).some((candidate) => candidate.id === item.id)).toBe(false);
+
+    const eventCount = events.length;
+    const repeat = await call("PUT", `/api/work-items/${item.id}/status`, { status: "cancelled" });
+    expect(repeat.status).toBe(200);
+    expect(repeat.body.workItem).toMatchObject({ status: "cancelled", approvalState: "rejected" });
+    expect(store.listWorkItemEvents(item.id)).toHaveLength(eventCount);
+  });
+
   it("approve + in_review → done, decision audited", async () => {
     const item = pendingItem("in_review");
     const resp = await decide(item.id, { decision: "approve", note: "ship it" });
@@ -430,6 +469,56 @@ describe("POST /api/work-items/:id/approval — mirrored workflow park (integrat
     expect(runResp.body.status).toBe("failed");
     // failed run → blocked Todo (terminal reflect).
     expect(store.getWorkItem(todoId)!.status).toBe("blocked");
+  });
+
+  it("rejects operator cancellation of a pending Workflow-gate mirror and leaves the run authority resolvable", async () => {
+    const workflowId = "appr-int-cancel-conflict";
+    const { runId, todoId } = await seedParkedRun(workflowId);
+    const before = store.getWorkItem(todoId)!;
+    expect(before.approvalState).toBe("pending");
+    expect(before.approvalRef).toBe(`workflow-gate:${workflowId}:${runId}:ap`);
+
+    const archive = await call(
+      "POST",
+      `/api/work-items/${todoId}/archive`,
+      { note: "operator tried to archive the mirror" },
+    );
+    expect(archive.status).toBe(409);
+    expect(archive.body.error).toMatch(/Workflow.*gate.*run.*author/i);
+
+    const cancel = await call(
+      "PUT",
+      `/api/work-items/${todoId}/status`,
+      { status: "cancelled", note: "operator tried to cancel the mirror" },
+    );
+
+    expect(cancel.status).toBe(409);
+    expect(cancel.body.error).toMatch(/Workflow.*gate.*run.*author/i);
+    expect(store.getWorkItem(todoId)).toMatchObject({
+      status: before.status,
+      approvalState: "pending",
+      approvalRef: before.approvalRef,
+    });
+
+    const bridge = bridgeMod.createWorkflowTodoBridge();
+    bridge.mirrorParkedGate(
+      { workflowId, runId, title: workflowId, status: "parked" },
+      { ref: "ap", description: "Publish the report?" },
+    );
+    expect(store.listWorkItemEvents(todoId).filter((event) => event.kind === "approval_requested")).toHaveLength(1);
+
+    const resolve = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/resolve-gate`,
+      { decision: "approve" },
+      cooHeaders(),
+    );
+    expect(resolve.status).toBe(200);
+    expect(resolve.body.status).toBe("completed");
+    expect(store.getWorkItem(todoId)).toMatchObject({ status: "done", approvalState: "approved" });
+
+    const needsYou = await call("GET", "/api/work-items?needsAttentionFor=me&limit=100");
+    expect((needsYou.body.workItems as Array<{ id: string }>).some((candidate) => candidate.id === todoId)).toBe(false);
   });
 
   // QA finding 1 (mirror/resolve desync): a gate resolved DIRECTLY through the

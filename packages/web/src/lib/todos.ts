@@ -10,6 +10,8 @@ import type {
   WorkItemStatusWire,
   WorkItemSourceWire,
 } from "./api"
+import { ApiError } from "./api"
+export { isPositiveTodoVersion } from "./api"
 
 // ── Display groups (the 5 board columns / mobile sections) ──────────────────
 // The DB carries 8 statuses; the board shows 5 groups. `blocked` and `escalated`
@@ -97,6 +99,47 @@ export function stateKeyOf(status: WorkItemStatusWire): StateKey {
 const TERMINAL: ReadonlySet<WorkItemStatusWire> = new Set<WorkItemStatusWire>(["done", "cancelled"])
 export function isOpen(status: WorkItemStatusWire): boolean {
   return !TERMINAL.has(status)
+}
+
+const SAFE_TODO_ERROR_BY_CODE: Readonly<Record<string, string>> = {
+  WORK_ITEM_ESCALATED: "This Todo is escalated. Use the human operator surface for this transition.",
+  WORK_ITEM_APPROVAL_PENDING: "This Todo is awaiting approval. Resolve the approval before changing its status.",
+  WORK_ITEM_VERSION_CONFLICT: "This Todo changed elsewhere. Reload it before saving again.",
+  TODO_VERSION_CONFLICT: "This Todo changed elsewhere. Reload it before saving again.",
+  TODO_IDEMPOTENCY_CONFLICT: "This edit request conflicts with an earlier request. Reload remote to discard all local edits before starting a new edit.",
+  TODO_PRECONDITION_REQUIRED: "This Todo requires a current version before it can be saved. Reload it and try again.",
+  TODO_INVALID_VERSION: "This Todo version is invalid. Reload it and try again.",
+  TODO_INVALID_PATCH: "This Todo edit is invalid. Review the changed fields and try again.",
+  WORK_ITEM_NOT_FOUND: "This Todo no longer exists.",
+}
+
+function normalizedTodoErrorCode(error: ApiError): string | undefined {
+  return error.code?.trim().toUpperCase()
+}
+
+export function isTodoVersionConflictError(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false
+  return normalizedTodoErrorCode(error) === "TODO_VERSION_CONFLICT"
+    || normalizedTodoErrorCode(error) === "WORK_ITEM_VERSION_CONFLICT"
+}
+
+export function isTodoIdempotencyConflictError(error: unknown): boolean {
+  return error instanceof ApiError
+    && normalizedTodoErrorCode(error) === "TODO_IDEMPOTENCY_CONFLICT"
+}
+
+/** Closed safe-copy mapping. Raw backend diagnostics stay on ApiError for
+ * protected diagnostics, never in visible or accessible operator output. */
+export function operatorSafeTodoError(error: unknown, fallback: string): string {
+  if (!(error instanceof ApiError)) return fallback
+  const code = normalizedTodoErrorCode(error)
+  if (code && SAFE_TODO_ERROR_BY_CODE[code]) return SAFE_TODO_ERROR_BY_CODE[code]
+  if (isTodoVersionConflictError(error)) return SAFE_TODO_ERROR_BY_CODE.WORK_ITEM_VERSION_CONFLICT
+  if (error.status === 404) return SAFE_TODO_ERROR_BY_CODE.WORK_ITEM_NOT_FOUND
+  if (error.status === 403 && /\b(?:escalated|approval (?:is )?pending|sticky terminal)\b/i.test(error.message)) {
+    return "This transition needs explicit operator authority. Use the human operator surface if it is intentional."
+  }
+  return fallback
 }
 
 // ── Board grouping ──────────────────────────────────────────────────────────
@@ -262,13 +305,14 @@ const PROVENANCE_WORD: Record<WorkItemSourceWire, string> = {
 /** The "· <name>" suffix parsed from a machine-minted sourceRef, when present.
  *  `cron:<jobId>:<iso>` → jobId; `workflow:<defId>:<runId>` → defId. */
 export function provenanceSuffix(source: WorkItemSourceWire, sourceRef?: string | null): string | null {
-  if (!sourceRef) return null
+  const safeRef = publicWorkItemReference(sourceRef)
+  if (!safeRef) return null
   if (source === "cron") {
-    const m = /^cron:([^:]+):/.exec(sourceRef)
+    const m = /^cron:([^:]+):/.exec(safeRef)
     return m ? m[1] : null
   }
   if (source === "workflow") {
-    const m = /^workflow:([^:]+):/.exec(sourceRef)
+    const m = /^workflow:([^:]+):/.exec(safeRef)
     return m ? m[1] : null
   }
   return null
@@ -348,11 +392,18 @@ export interface TodoFilters {
 
 export const DEFAULT_FILTERS: TodoFilters = { status: "open" }
 
+/** Transport-only work-item ids must never cross into user-facing metadata. */
+export function publicWorkItemReference(value: string | null | undefined): string | null {
+  const reference = value?.trim() ?? ""
+  if (!reference || /(?:^|[^a-z0-9])wi_[a-z0-9_-]+/i.test(reference)) return null
+  return reference
+}
+
 export function isDefaultFilters(f: TodoFilters): boolean {
   return f.status === "open" && !f.assignee && !f.department && !f.source && !f.date && !f.q
 }
 
-/** How many chips are set away from their default (drives the Clear control). */
+/** How many filter chips are set away from their default. Search is separate. */
 export function activeFilterCount(f: TodoFilters): number {
   let n = 0
   if (f.status !== "open") n++
@@ -360,7 +411,6 @@ export function activeFilterCount(f: TodoFilters): number {
   if (f.department) n++
   if (f.source) n++
   if (f.date) n++
-  if (f.q) n++
   return n
 }
 
@@ -409,7 +459,8 @@ export function filtersToSearchParams(f: TodoFilters): URLSearchParams {
   if (f.department) p.set("department", f.department)
   if (f.source) p.set("source", f.source)
   if (f.date) p.set("date", f.date)
-  if (f.q) p.set("q", f.q)
+  const safeQuery = publicWorkItemReference(f.q)
+  if (safeQuery) p.set("q", safeQuery)
   return p
 }
 
@@ -431,7 +482,7 @@ export function filtersFromSearchParams(p: URLSearchParams): TodoFilters {
   if (source && SOURCE_VALUES.has(source)) f.source = source as WorkItemSourceWire
   const date = p.get("date")
   if (date && DATE_VALUES.has(date)) f.date = date as DateFilter
-  const q = p.get("q")
+  const q = publicWorkItemReference(p.get("q"))
   if (q) f.q = q
   return f
 }

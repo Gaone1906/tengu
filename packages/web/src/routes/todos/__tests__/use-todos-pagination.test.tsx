@@ -67,7 +67,7 @@ describe("fetchStatusPage (one fixed-size page per request)", () => {
   })
 
   it("requests exactly one page at the given offset with the fixed page size", async () => {
-    listWorkItems.mockImplementation(servePages(Array.from({ length: 27 }, (_, i) => `wi_${i}`)))
+    listWorkItems.mockImplementation(servePages(Array.from({ length: 27 }, (_, i) => `item-${i + 1}`)))
     const page = await fetchStatusPage("backlog", { status: "open" }, undefined, undefined, 20)
     expect(listWorkItems).toHaveBeenCalledTimes(1)
     expect(listWorkItems).toHaveBeenCalledWith(
@@ -108,7 +108,7 @@ describe("useLedgerItems (Show-more appends the next page)", () => {
   })
 
   it("loadMore fetches offset=20 with the fixed page size — never a refetch of page one", async () => {
-    const ids = Array.from({ length: 27 }, (_, i) => `wi_${i}`)
+    const ids = Array.from({ length: 27 }, (_, i) => `item-${i + 1}`)
     const backlogPages = servePages(ids)
     listWorkItems.mockImplementation((params: { status?: string; offset?: number; limit: number }) =>
       params.status === "backlog" ? backlogPages(params) : Promise.resolve({ workItems: [], total: 0, nextOffset: null }),
@@ -158,5 +158,23 @@ describe("useLedgerItems (Show-more appends the next page)", () => {
       )
     }
     expect(searchWorkItems).toHaveBeenCalledWith(expect.objectContaining({ status: "backlog", offset: 20 }))
+  })
+
+  it("restores a persisted status page depth before an anchored row is resolved", async () => {
+    const ids = Array.from({ length: 29 }, (_, i) => `restore-${i + 1}`)
+    const backlogPages = servePages(ids)
+    listWorkItems.mockImplementation((params: { status?: string; offset?: number; limit: number }) =>
+      params.status === "backlog" ? backlogPages(params) : Promise.resolve({ workItems: [], total: 0, nextOffset: null }),
+    )
+
+    const { result } = renderHook(() => useLedgerItems({ status: "open" }, NOW), { wrapper })
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(20))
+    expect(result.current.pageDepth).toMatchObject({ backlog: 1 })
+
+    await act(async () => result.current.restorePageDepth({ backlog: 2 }))
+
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(29))
+    expect(result.current.pageDepth).toMatchObject({ backlog: 2 })
+    expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ status: "backlog", offset: 20 }))
   })
 })

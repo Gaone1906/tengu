@@ -1,16 +1,30 @@
-import { useEffect, useRef, useState } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
 import { X, Check, ChevronRight, MessageSquareText } from "lucide-react"
-import { api, type Employee, type WorkItemDetailWire, type WorkItemStatusWire } from "@/lib/api"
+import {
+  api,
+  isPositiveTodoVersion,
+  TodoApiError,
+  type Employee,
+  type LinkedSessionWire,
+  type WorkItemDetailWire,
+  type WorkItemEditRequest,
+  type WorkItemFullWire,
+  type WorkItemStatusWire,
+} from "@/lib/api"
 import {
   STATUS_LABEL,
   effectiveVerifyMode,
   effectiveMaxRounds,
+  publicWorkItemReference,
   priorityLabel,
   provenanceLabel,
   formatCost,
   isOpen,
+  isTodoIdempotencyConflictError,
+  isTodoVersionConflictError,
+  operatorSafeTodoError,
 } from "@/lib/todos"
 import {
   DropdownMenu,
@@ -19,9 +33,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
+import { StateLine } from "@/components/ui/state-line"
 import { StatusCircle } from "./state-glyph"
 import { displayNameOf, formatRelativeTime } from "./util"
-import { useSetWorkItemStatus, useUpdateWorkItem } from "./use-todos"
+import { useSetWorkItemStatus } from "./use-todos"
+import { TodoDialog } from "./todo-dialog"
+import { TodoConflictActions } from "./conflict-actions"
+import { invalidateTodoCaches, maximumTodoVersion, mergeTodoIntoCaches } from "./todo-edit-request"
+import { useTodoDraft, type TodoConflictMode, type TodoDraftPatch, type TodoEditableDraft, type TodoRemoteSnapshot } from "./use-todo-draft"
 
 /* GRS-021d — the detail sheet: a DECISION (design's middle depth). Mobile = an
  * opaque bottom sheet that scrolls FROM INSIDE (pinned header, scrollable body,
@@ -30,14 +49,14 @@ import { useSetWorkItemStatus, useUpdateWorkItem } from "./use-todos"
  * design-todos §4.4 — the sheet is now the operator's pen: title, body,
  * assignee, department, and priority read as text at rest and edit on tap
  * (Apple Notes pattern — no input chrome until focus). Status stays
- * server-owned: only legal transitions render as actions (Start / Mark done /
+ * server-owned: only legal transitions render as actions (Mark in progress / Mark done /
  * Cancel / the approval controls), never a free status picker. Edits go through the §7.4
- * PATCH; a gateway that predates it fails quietly and the read view stays true. */
+ * PATCH and retain the local draft with an explicit Retry/Discard path on failure. */
 
 const MENU_CLASS =
   "min-w-[200px] rounded-[var(--radius-lg)] border-0 bg-[var(--material-thick)] p-1.5 shadow-[var(--shadow-overlay)] backdrop-blur-xl"
 const ITEM_CLASS =
-  "flex cursor-pointer items-center gap-2 rounded-[9px] px-2.5 py-[7px] text-[length:var(--text-footnote)] font-medium text-[var(--text-primary)] focus:bg-[var(--fill-secondary)]"
+  "flex min-h-11 cursor-pointer items-center gap-2 rounded-[9px] px-2.5 py-[7px] text-[length:var(--text-footnote)] font-medium text-[var(--text-primary)] focus:bg-[var(--fill-secondary)]"
 
 function Row({ k, children, onClick }: { k: string; children: React.ReactNode; onClick?: () => void }) {
   const Tag = onClick ? "button" : "div"
@@ -45,10 +64,10 @@ function Row({ k, children, onClick }: { k: string; children: React.ReactNode; o
     <Tag
       type={onClick ? "button" : undefined}
       onClick={onClick}
-      className={`flex min-h-[46px] w-full items-center gap-3 p-[11px_14px] text-left [&+&]:border-t-[0.5px] [&+&]:border-[var(--separator)] ${onClick ? "transition-colors hover:bg-[var(--fill-tertiary)]" : ""}`}
+      className={`flex min-h-11 w-full min-w-0 items-center gap-3 rounded-[10px] p-[10px_12px] text-left ${onClick ? "transition-colors hover:bg-[var(--fill-tertiary)]" : ""}`}
     >
       <span className="text-[length:var(--text-subheadline)] text-[var(--text-primary)]">{k}</span>
-      <span className="ml-auto inline-flex items-center gap-1.5 text-right text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
+      <span className="ml-auto inline-flex min-w-0 max-w-[65%] items-center gap-1.5 break-words text-right text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
         {children}
       </span>
       {onClick && <ChevronRight size={14} className="ml-0.5 flex-none text-[var(--text-quaternary)]" aria-hidden />}
@@ -59,12 +78,12 @@ function Row({ k, children, onClick }: { k: string; children: React.ReactNode; o
 /** A Details row whose value edits through a Ledger dropdown menu. */
 function MenuRow({ k, value, children }: { k: string; value: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="flex min-h-[46px] w-full items-center gap-3 [&+*]:border-t-[0.5px] [&+*]:border-[var(--separator)]">
+    <div className="flex min-h-11 w-full min-w-0 items-center gap-3">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <button type="button" className="flex min-h-[46px] w-full items-center gap-3 p-[11px_14px] text-left transition-colors hover:bg-[var(--fill-tertiary)]">
+          <button type="button" className="flex min-h-11 w-full min-w-0 items-center gap-3 rounded-[10px] p-[10px_12px] text-left transition-colors hover:bg-[var(--fill-tertiary)]">
             <span className="text-[length:var(--text-subheadline)] text-[var(--text-primary)]">{k}</span>
-            <span className="ml-auto inline-flex items-center gap-1.5 text-right text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
+            <span className="ml-auto inline-flex min-w-0 max-w-[65%] items-center gap-1.5 break-words text-right text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">
               {value}
             </span>
             <ChevronRight size={14} className="ml-0.5 flex-none text-[var(--text-quaternary)]" aria-hidden />
@@ -83,7 +102,7 @@ function MenuCheck({ on }: { on: boolean }) {
 }
 
 function Group({ children }: { children: React.ReactNode }) {
-  return <div className="overflow-hidden rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)]">{children}</div>
+  return <div className="flex min-w-0 flex-col gap-1 overflow-hidden rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] p-1">{children}</div>
 }
 
 function Section({ label, children }: { label?: string; children: React.ReactNode }) {
@@ -99,6 +118,36 @@ function Section({ label, children }: { label?: string; children: React.ReactNod
   )
 }
 
+export function sessionLinkLabel(session: LinkedSessionWire): string {
+  if (session.status === "running" || session.status === "waiting") return "Running session"
+  if (session.status === "idle" || session.status === "completed" || session.status === "complete") return "Completed session"
+  if (["interrupted", "error", "failed", "cancelled"].includes(session.status ?? "")) return "Interrupted session"
+  return "Session"
+}
+
+const LIVE_SESSION_STATES = new Set(["running", "waiting"])
+const TERMINAL_SESSION_STATES = new Set(["idle", "completed", "complete", "interrupted", "error", "failed", "cancelled"])
+
+function sessionTime(session: LinkedSessionWire): number {
+  return Date.parse(session.lastActivity ?? "") || 0
+}
+
+/** Live linked work always wins. Without live work, show the newest session
+ * whose terminal meaning is defined rather than a stale/unknown transport row. */
+export function selectLinkedSession(sessions: LinkedSessionWire[] | undefined): LinkedSessionWire | undefined {
+  if (!sessions?.length) return undefined
+  const newest = (values: LinkedSessionWire[]) => values
+    .map((session, index) => ({ session, index }))
+    .sort((a, b) => sessionTime(b.session) - sessionTime(a.session) || a.index - b.index)[0]?.session
+  return newest(sessions.filter((session) => LIVE_SESSION_STATES.has(session.status ?? "")))
+    ?? newest(sessions.filter((session) => TERMINAL_SESSION_STATES.has(session.status ?? "")))
+}
+
+function pollLinkedSessions(query: { state: { data: unknown } }): number | false {
+  const sessions = query.state.data as LinkedSessionWire[] | undefined
+  return sessions?.some((session) => LIVE_SESSION_STATES.has(session.status ?? "")) ? 3_000 : false
+}
+
 /** The body as a quiet tap-to-edit field (text at rest, textarea on tap). */
 function EditableBody({ body, onCommit }: { body: string | null; onCommit: (next: string) => void }) {
   const [editing, setEditing] = useState(false)
@@ -112,6 +161,7 @@ function EditableBody({ body, onCommit }: { body: string | null; onCommit: (next
     return (
       <textarea
         ref={ref}
+        data-todo-field-edit
         data-testid="sheet-body-edit"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
@@ -121,12 +171,14 @@ function EditableBody({ body, onCommit }: { body: string | null; onCommit: (next
         }}
         onKeyDown={(e) => {
           if (e.key === "Escape") {
+            e.preventDefault()
+            e.stopPropagation()
             setDraft(body ?? "")
             setEditing(false)
           }
         }}
         rows={Math.max(3, draft.split("\n").length)}
-        className="w-full resize-none rounded-[var(--radius-md)] border-0 bg-[var(--fill-quaternary)] p-2.5 -m-2.5 text-[16px] leading-relaxed text-[var(--text-secondary)] outline-none"
+        className="w-full min-w-0 resize-none break-words rounded-[var(--radius-md)] border-0 bg-[var(--fill-quaternary)] p-2.5 -m-2.5 text-[16px] leading-relaxed text-[var(--text-secondary)] outline-none"
       />
     )
   }
@@ -138,10 +190,10 @@ function EditableBody({ body, onCommit }: { body: string | null; onCommit: (next
         setDraft(body ?? "")
         setEditing(true)
       }}
-      className="w-full rounded-[var(--radius-md)] p-2.5 -m-2.5 text-left transition-colors hover:bg-[var(--fill-quaternary)]"
+      className="w-full min-w-0 break-words rounded-[var(--radius-md)] p-2.5 -m-2.5 text-left transition-colors hover:bg-[var(--fill-quaternary)]"
     >
       {body ? (
-        <p className="whitespace-pre-wrap text-[16px] leading-relaxed text-[var(--text-secondary)]">{body}</p>
+        <p className="whitespace-pre-wrap break-words text-[16px] leading-relaxed text-[var(--text-secondary)]">{body}</p>
       ) : (
         <span className="text-[16px] leading-relaxed text-[var(--text-quaternary)]">Add a description…</span>
       )}
@@ -160,19 +212,21 @@ function SheetBody({
   byName: Map<string, Employee>
   employees: Employee[]
   departments: string[]
-  onEdit: (patch: Parameters<typeof api.updateWorkItem>[1]) => void
+  onEdit: (patch: TodoDraftPatch) => void
 }) {
   const navigate = useNavigate()
   const item = detail.workItem
   const [showTech, setShowTech] = useState(false)
   const pending = item.approvalState === "pending"
 
-  const { data: sessions } = useQuery({
+  const { data: sessions, isSuccess: sessionsReady } = useQuery({
     queryKey: ["work-item-sessions", item.id],
     queryFn: () => api.listWorkItemSessions(item.id),
     staleTime: 10_000,
+    refetchInterval: pollLinkedSessions,
   })
-  const execSession = sessions?.[0]
+  const execSession = selectLinkedSession(sessions)
+  const hasRunningSession = !!execSession && LIVE_SESSION_STATES.has(execSession.status ?? "")
 
   const mode = effectiveVerifyMode(item)
   const maxRounds = effectiveMaxRounds(item)
@@ -196,6 +250,14 @@ function SheetBody({
         >
           {item.approvalRequest}
         </div>
+      )}
+
+      {item.status === "executing" && sessionsReady && !hasRunningSession && (
+        <StateLine
+          state="dispatched"
+          label="In progress · no execution session"
+          className="mb-1 text-[var(--text-tertiary)]"
+        />
       )}
 
       <Section label="What it does">
@@ -294,7 +356,7 @@ function SheetBody({
         <Section label="Links">
           <Group>
             {execSession && (
-              <Row k="Executing session" onClick={() => navigate(`/?session=${encodeURIComponent(execSession.id)}`)}>
+              <Row k={sessionLinkLabel(execSession)} onClick={() => navigate(`/?session=${encodeURIComponent(execSession.id)}`)}>
                 <span className="text-[length:var(--text-caption1)] font-semibold text-[var(--accent)]">Open</span>
               </Row>
             )}
@@ -317,7 +379,7 @@ function SheetBody({
           >
             <span className="flex-1">
               <span className="block text-[length:var(--text-subheadline)] text-[var(--text-primary)]">Technical details</span>
-              <span className="mt-px block text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">ID, source ref, events, timestamps</span>
+              <span className="mt-px block text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">Source reference, events, timestamps</span>
             </span>
             <ChevronRight
               size={14}
@@ -327,10 +389,9 @@ function SheetBody({
             />
           </button>
           {showTech && (
-            <div className="border-t-[0.5px] border-[var(--separator)] p-[11px_14px] font-[var(--font-code)] text-[length:var(--text-caption1)] leading-relaxed text-[var(--text-tertiary)]">
-              <div className="break-all">id: {item.id}</div>
-              {item.sourceRef && <div className="break-all">sourceRef: {item.sourceRef}</div>}
-              {item.approvalRef && <div className="break-all">approvalRef: {item.approvalRef}</div>}
+            <div className="min-w-0 rounded-[10px] bg-[var(--fill-tertiary)] p-[11px_14px] font-[var(--font-code)] text-[length:var(--text-caption1)] leading-relaxed text-[var(--text-tertiary)]">
+              {publicWorkItemReference(item.sourceRef) && <div className="break-all">sourceRef: {publicWorkItemReference(item.sourceRef)}</div>}
+              {publicWorkItemReference(item.approvalRef) && <div className="break-all">approvalRef: {publicWorkItemReference(item.approvalRef)}</div>}
               <div>created: {item.createdAt}</div>
               <div>updated: {item.updatedAt}</div>
               {item.closedAt && <div>closed: {item.closedAt}</div>}
@@ -341,6 +402,161 @@ function SheetBody({
       </Section>
     </>
   )
+}
+
+function todoRemoteSnapshot(item: WorkItemFullWire): TodoRemoteSnapshot {
+  if (!isPositiveTodoVersion(item.version)) {
+    throw new Error("Todo response is missing an authoritative version")
+  }
+  return {
+    draft: {
+      title: item.title,
+      body: item.body ?? "",
+      assignee: item.assignee,
+      department: item.department,
+      priority: item.priority,
+    },
+    version: item.version,
+  }
+}
+
+function mergeDetailResponse(
+  current: WorkItemDetailWire | undefined,
+  incoming: WorkItemDetailWire,
+): WorkItemDetailWire {
+  if (!current) return incoming
+  const currentVersion = current.workItem.version
+  const incomingVersion = incoming.workItem.version
+  if (isPositiveTodoVersion(currentVersion)
+    && (!isPositiveTodoVersion(incomingVersion) || incomingVersion < currentVersion)) return current
+  return {
+    ...current,
+    ...incoming,
+    workItem: { ...current.workItem, ...incoming.workItem },
+  }
+}
+
+function mergeSavedDetail(
+  current: WorkItemDetailWire | undefined,
+  incoming: WorkItemFullWire,
+): WorkItemDetailWire | undefined {
+  if (!current) return current
+  const currentVersion = current.workItem.version
+  if (isPositiveTodoVersion(currentVersion)
+    && (!isPositiveTodoVersion(incoming.version) || incoming.version < currentVersion)) return current
+  return { ...current, workItem: { ...current.workItem, ...incoming } }
+}
+
+/** A transport payload may finish after a newer websocket/query update. Only a
+ * full exact detail can supply editable fields; a newer compact projection is
+ * a version fence, never a source from which to synthesize a detail snapshot. */
+function authoritativeRemoteDetail(
+  queryClient: QueryClient,
+  id: string,
+  incoming: WorkItemDetailWire,
+): WorkItemDetailWire {
+  const exact = queryClient.getQueryData<WorkItemDetailWire>(["work-item", id])
+  const authoritative = mergeDetailResponse(exact, incoming)
+  const version = authoritative.workItem.version
+  const maximum = maximumTodoVersion(queryClient, id)
+  if (!isPositiveTodoVersion(version) || (maximum !== undefined && maximum > version)) {
+    throw new TodoApiError(
+      409,
+      "A newer cached Todo revision requires a fresh exact detail",
+      "TODO_VERSION_CONFLICT",
+      maximum,
+    )
+  }
+  return authoritative
+}
+
+async function refreshTodoCachesBestEffort(queryClient: QueryClient, id: string): Promise<void> {
+  try {
+    await invalidateTodoCaches(queryClient, id)
+  } catch {
+    // A cache refresh cannot replace a confirmed response or structured error.
+  }
+}
+
+/** One conditional detail edit, including both response-time cache fences.
+ * Typed backend conflicts refresh caches opportunistically but always rethrow
+ * the original object so code/currentVersion survive intact. */
+export async function saveTodoDetailRemote(
+  queryClient: QueryClient,
+  id: string,
+  request: WorkItemEditRequest,
+) {
+  let result: Awaited<ReturnType<typeof api.updateWorkItem>>
+  try {
+    result = await api.updateWorkItem(id, request)
+  } catch (cause) {
+    if (isTodoVersionConflictError(cause)) {
+      await refreshTodoCachesBestEffort(queryClient, id)
+    }
+    throw cause
+  }
+
+  let maximumBeforeMerge = maximumTodoVersion(queryClient, id)
+  if (maximumBeforeMerge !== undefined && maximumBeforeMerge > result.workItem.version) {
+    await refreshTodoCachesBestEffort(queryClient, id)
+    maximumBeforeMerge = maximumTodoVersion(queryClient, id)
+    if (maximumBeforeMerge !== undefined && maximumBeforeMerge > result.workItem.version) {
+      throw new TodoApiError(
+        409,
+        "A newer cached Todo revision superseded this response",
+        "TODO_VERSION_CONFLICT",
+        maximumBeforeMerge,
+      )
+    }
+  }
+
+  mergeTodoIntoCaches(queryClient, result.workItem)
+  queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) => mergeSavedDetail(current, result.workItem))
+  await refreshTodoCachesBestEffort(queryClient, id)
+
+  const maximumAfterRefresh = maximumTodoVersion(queryClient, id)
+  const exact = queryClient.getQueryData<WorkItemDetailWire>(["work-item", id])
+  const exactVersion = exact?.workItem.version
+  const authoritativeVersion = Math.max(
+    result.workItem.version,
+    isPositiveTodoVersion(exactVersion) ? exactVersion : 0,
+    maximumAfterRefresh ?? 0,
+  )
+  if (authoritativeVersion > result.workItem.version) {
+    throw new TodoApiError(
+      409,
+      "A newer refreshed Todo revision superseded this response",
+      "TODO_VERSION_CONFLICT",
+      authoritativeVersion,
+    )
+  }
+
+  const remoteItem = exact && exact.workItem.version === result.workItem.version
+    ? exact.workItem
+    : result.workItem
+  return {
+    remote: todoRemoteSnapshot(remoteItem),
+    replayed: result.replayed,
+  }
+}
+
+type ConflictActionName = "reload" | "rebase" | "overwrite"
+
+interface ConflictActionControl {
+  id: string
+  mounted: boolean
+  busy: boolean
+  token: number
+  focus: HTMLElement | null
+}
+
+type RecoveryFocusSurface = "none" | "cleanup" | "conflict" | "idempotency"
+
+interface RecoveryFocusControl {
+  id: string
+  surface: RecoveryFocusSurface
+  mode: TodoConflictMode
+  token: number
 }
 
 function DecisionFooter({
@@ -365,7 +581,7 @@ function DecisionFooter({
       <div className="flex shrink-0 flex-col gap-2.5 p-[14px_20px] pb-[max(14px,env(safe-area-inset-bottom))]">
         <textarea
           autoFocus
-          data-testid={`sheet-sendback-note-${id}`}
+          data-testid="sheet-sendback-note"
           value={note}
           onChange={(e) => setNote(e.target.value)}
           rows={2}
@@ -375,14 +591,14 @@ function DecisionFooter({
         <div className="flex items-center gap-2.5">
           <button
             type="button"
-            data-testid={`sheet-sendback-confirm-${id}`}
+            data-testid="sheet-sendback-confirm"
             disabled={resolving}
             onClick={() => onSendBack(id, note.trim())}
-            className="h-9 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-primary)] disabled:opacity-40"
+            className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-primary)] disabled:opacity-40"
           >
             Send back
           </button>
-          <button type="button" onClick={() => setComposing(false)} className="h-9 rounded-full px-3 text-[length:var(--text-subheadline)] text-[var(--text-tertiary)] hover:bg-[var(--fill-secondary)]">
+          <button type="button" onClick={() => setComposing(false)} className="min-h-11 rounded-full px-3 text-[length:var(--text-subheadline)] text-[var(--text-tertiary)] hover:bg-[var(--fill-secondary)]">
             Cancel
           </button>
         </div>
@@ -394,10 +610,10 @@ function DecisionFooter({
     <div className="flex shrink-0 items-center gap-2.5 p-[14px_20px] pb-[max(14px,env(safe-area-inset-bottom))]">
       <button
         type="button"
-        data-testid={`sheet-approve-${id}`}
+        data-testid="sheet-approve"
         disabled={resolving}
         onClick={() => onApprove(id)}
-        className="inline-flex h-9 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
+        className="inline-flex min-h-11 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
         style={{ background: "color-mix(in srgb, var(--system-green) 16%, transparent)", color: "var(--system-green)", boxShadow: "var(--inset-shine)" }}
       >
         <Check size={13} strokeWidth={2.4} aria-hidden />
@@ -405,10 +621,10 @@ function DecisionFooter({
       </button>
       <button
         type="button"
-        data-testid={`sheet-sendback-${id}`}
+        data-testid="sheet-sendback"
         disabled={resolving}
         onClick={() => setComposing(true)}
-        className="h-9 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-primary)] disabled:opacity-40"
+        className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-primary)] disabled:opacity-40"
       >
         Send back
       </button>
@@ -416,7 +632,7 @@ function DecisionFooter({
         <button
           type="button"
           onClick={onOpenSession}
-          className="ml-auto inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-[length:var(--text-caption1)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"
+          className="ml-auto inline-flex min-h-11 items-center gap-1.5 rounded-full px-3 text-[length:var(--text-caption1)] font-medium text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"
         >
           <MessageSquareText size={13} strokeWidth={1.75} aria-hidden />
           Session
@@ -426,18 +642,18 @@ function DecisionFooter({
   )
 }
 
-/** Legal-transition actions when no approval is pending (§4.4): Start for
+/** Legal-transition actions when no approval is pending (§4.4): manual progress for
  *  backlog/assigned work, Mark done + Cancel for open work. Never a picker. */
 function TransitionFooter({
   status,
   busy,
-  onStart,
+  onProgress,
   onDone,
   onCancel,
 }: {
   status: WorkItemStatusWire
   busy: boolean
-  onStart: () => void
+  onProgress: () => void
   onDone: () => void
   onCancel: () => void
 }) {
@@ -448,12 +664,12 @@ function TransitionFooter({
       {(status === "backlog" || status === "assigned") && (
         <button
           type="button"
-          data-testid="sheet-start-item"
+          data-testid="sheet-mark-in-progress"
           disabled={busy}
-          onClick={onStart}
-          className="h-9 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
+          onClick={onProgress}
+          className="min-h-11 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
         >
-          Start
+          Mark in progress
         </button>
       )}
       <button
@@ -461,7 +677,7 @@ function TransitionFooter({
         data-testid="sheet-mark-done"
         disabled={busy}
         onClick={onDone}
-        className="inline-flex h-9 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
+        className="inline-flex min-h-11 items-center gap-1.5 rounded-full px-4 text-[length:var(--text-subheadline)] font-semibold transition-transform hover:scale-[0.98] disabled:opacity-40"
         style={{ background: "color-mix(in srgb, var(--system-green) 16%, transparent)", color: "var(--system-green)", boxShadow: "var(--inset-shine)" }}
       >
         <Check size={13} strokeWidth={2.4} aria-hidden />
@@ -472,7 +688,7 @@ function TransitionFooter({
         data-testid="sheet-cancel-item"
         disabled={busy}
         onClick={onCancel}
-        className="h-9 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
+        className="min-h-11 rounded-full px-3.5 text-[length:var(--text-subheadline)] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)] disabled:opacity-40"
       >
         Cancel Todo
       </button>
@@ -502,9 +718,14 @@ export function DetailSheet({
   onClose: () => void
 }) {
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const { data } = useQuery({
     queryKey: ["work-item", id],
-    queryFn: () => api.getWorkItem(id),
+    queryFn: async () => {
+      const incoming = await api.getWorkItem(id)
+      const current = queryClient.getQueryData<WorkItemDetailWire>(["work-item", id])
+      return mergeDetailResponse(current, incoming)
+    },
     initialData: initial,
     staleTime: 10_000,
   })
@@ -512,144 +733,438 @@ export function DetailSheet({
     queryKey: ["work-item-sessions", id],
     queryFn: () => api.listWorkItemSessions(id),
     staleTime: 10_000,
+    refetchInterval: pollLinkedSessions,
   })
 
-  const update = useUpdateWorkItem()
   const setStatus = useSetWorkItemStatus()
-  const [saveError, setSaveError] = useState<string | null>(null)
+  const [transitionError, setTransitionError] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState(false)
-  const [titleDraft, setTitleDraft] = useState("")
+  const [closeAfterSave, setCloseAfterSave] = useState(false)
+  const [showCloseGuard, setShowCloseGuard] = useState(false)
+  const [conflictBusy, setConflictBusy] = useState(false)
+  const [conflictError, setConflictError] = useState<string | null>(null)
   const titleRef = useRef<HTMLInputElement>(null)
+  const titleBeforeEdit = useRef("")
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const conflictSurfaceRef = useRef<HTMLElement>(null)
+  const cleanupRetryRef = useRef<HTMLButtonElement>(null)
+  const idempotencyReloadRef = useRef<HTMLButtonElement>(null)
+  const recoveryFocusRef = useRef<RecoveryFocusControl>({ id, surface: "none", mode: "none", token: 0 })
+  const actionControlRef = useRef<ConflictActionControl>({ id, mounted: false, busy: false, token: 0, focus: null })
+  if (actionControlRef.current.id !== id) {
+    actionControlRef.current.id = id
+    actionControlRef.current.mounted = false
+    actionControlRef.current.busy = false
+    actionControlRef.current.token += 1
+    actionControlRef.current.focus = null
+    recoveryFocusRef.current = { id, surface: "none", mode: "none", token: recoveryFocusRef.current.token + 1 }
+  }
+  useEffect(() => {
+    const control = actionControlRef.current
+    control.id = id
+    control.mounted = true
+    return () => {
+      if (control.id !== id) return
+      control.mounted = false
+      control.busy = false
+      control.token += 1
+      control.focus = null
+    }
+  }, [id])
   useEffect(() => {
     if (editingTitle) titleRef.current?.select()
   }, [editingTitle])
 
   const detail = data
-  const pending = detail?.workItem.approvalState === "pending"
-  const execSession = sessions?.[0]
+  const initialDraft = useMemo<TodoEditableDraft>(() => ({
+    title: detail?.workItem.title ?? "",
+    body: detail?.workItem.body ?? "",
+    assignee: detail?.workItem.assignee ?? null,
+    department: detail?.workItem.department ?? null,
+    priority: detail?.workItem.priority ?? 0,
+  }), [detail])
+  const fetchRemote = useCallback(async () => {
+    const incoming = await api.getWorkItem(id)
+    // Do not let an unversioned wire response borrow authority from cache.
+    todoRemoteSnapshot(incoming.workItem)
+    const fresh = authoritativeRemoteDetail(queryClient, id, incoming)
+    const remote = todoRemoteSnapshot(fresh.workItem)
+    return { fresh, remote }
+  }, [id, queryClient])
+  const commitRemote = useCallback((fresh: WorkItemDetailWire) => {
+    mergeTodoIntoCaches(queryClient, fresh.workItem)
+    queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) => mergeDetailResponse(current, fresh))
+  }, [id, queryClient])
+  const loadRemote = useCallback(async () => {
+    const loaded = await fetchRemote()
+    const fresh = authoritativeRemoteDetail(queryClient, id, loaded.fresh)
+    const remote = todoRemoteSnapshot(fresh.workItem)
+    commitRemote(fresh)
+    return remote
+  }, [commitRemote, fetchRemote, id, queryClient])
+  const saveRemote = useCallback((request: WorkItemEditRequest) => {
+    return saveTodoDetailRemote(queryClient, id, request)
+  }, [id, queryClient])
+  const draftState = useTodoDraft({
+    id,
+    initial: initialDraft,
+    serverVersion: detail?.workItem.version,
+    save: saveRemote,
+    loadRemote,
+  })
+  const idempotencyConflict = isTodoIdempotencyConflictError(draftState.error)
+  useEffect(() => {
+    if (!draftState.hasUnsaved) return
+    const guardReload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ""
+    }
+    window.addEventListener("beforeunload", guardReload)
+    return () => window.removeEventListener("beforeunload", guardReload)
+  }, [draftState.hasUnsaved])
+  useEffect(() => {
+    if (detail) draftState.replaceInitial(initialDraft, detail.workItem.version)
+  }, [detail, initialDraft, draftState.replaceInitial])
 
-  const edit = (patch: Parameters<typeof api.updateWorkItem>[1]) => {
-    setSaveError(null)
-    update.mutate(
-      { id, patch },
-      { onError: (e) => setSaveError(e instanceof Error ? e.message : "Couldn't save") },
-    )
+  useEffect(() => {
+    if (draftState.recoveredConflict) return
+    setConflictError(null)
+  }, [draftState.recoveredConflict])
+
+  useEffect(() => {
+    const currentSurface: RecoveryFocusSurface = draftState.cleanupPending
+      ? "cleanup"
+      : idempotencyConflict
+        ? "idempotency"
+        : draftState.conflictMode !== "none"
+          ? "conflict"
+          : "none"
+    const previous = recoveryFocusRef.current.id === id
+      ? recoveryFocusRef.current
+      : { id, surface: "none" as const, mode: "none" as const, token: recoveryFocusRef.current.token }
+    const token = previous.token + 1
+    recoveryFocusRef.current = { id, surface: currentSurface, mode: draftState.conflictMode, token }
+
+    const focusCleanup = currentSurface === "cleanup"
+    const focusConflict = currentSurface === "conflict"
+      && (previous.surface !== "conflict"
+        || (draftState.conflictMode === "same-field" && previous.mode !== "same-field"))
+    const focusIdempotency = currentSurface === "idempotency" && previous.surface !== "idempotency"
+    const focusClose = currentSurface === "none" && previous.surface !== "none"
+    if (!focusCleanup && !focusConflict && !focusIdempotency && !focusClose) return
+
+    queueMicrotask(() => {
+      const latest = recoveryFocusRef.current
+      const action = actionControlRef.current
+      if (latest.id !== id || latest.token !== token || action.id !== id || !action.mounted) return
+      if (focusCleanup) cleanupRetryRef.current?.focus()
+      else if (focusConflict) conflictSurfaceRef.current?.focus()
+      else if (focusIdempotency) idempotencyReloadRef.current?.focus()
+      else closeButtonRef.current?.focus()
+    })
+  }, [draftState.cleanupPending, draftState.conflictMode, id, idempotencyConflict])
+
+  const displayDetail = useMemo<WorkItemDetailWire | undefined>(() => detail ? {
+    ...detail,
+    workItem: { ...detail.workItem, ...draftState.draft },
+  } : undefined, [detail, draftState.draft])
+  const pending = displayDetail?.workItem.approvalState === "pending"
+  const execSession = selectLinkedSession(sessions)
+  const conflictActionsBlocked = conflictBusy
+    || draftState.conflictMode === "reconciling"
+    || draftState.status === "saving"
+
+  const edit = (patch: TodoDraftPatch) => {
+    for (const [field, value] of Object.entries(patch) as [keyof TodoEditableDraft, TodoEditableDraft[keyof TodoEditableDraft]][]) {
+      draftState.change(field, value as never)
+    }
+    draftState.save(patch)
   }
   const transitionTo = (status: WorkItemStatusWire) => {
-    setSaveError(null)
+    setTransitionError(null)
     setStatus.mutate(
       { id, status },
-      { onError: (e) => setSaveError(e instanceof Error ? e.message : "Couldn't update status") },
+      { onError: (e) => setTransitionError(operatorSafeTodoError(e, "Couldn't update status")) },
     )
   }
 
   const commitTitle = () => {
     setEditingTitle(false)
-    const next = titleDraft.trim()
-    if (detail && next && next !== detail.workItem.title) edit({ title: next })
+    const next = draftState.draft.title.trim()
+    if (!next) {
+      draftState.change("title", titleBeforeEdit.current)
+      return
+    }
+    if (next !== titleBeforeEdit.current) draftState.save({ title: next })
   }
 
+  const focusIdempotencyReload = useCallback(() => {
+    const expected = recoveryFocusRef.current
+    queueMicrotask(() => {
+      const latest = recoveryFocusRef.current
+      const action = actionControlRef.current
+      if (expected.id !== id
+        || expected.surface !== "idempotency"
+        || latest.id !== id
+        || latest.token !== expected.token
+        || latest.surface !== "idempotency"
+        || action.id !== id
+        || !action.mounted) return
+      idempotencyReloadRef.current?.focus()
+    })
+  }, [id])
+
+  const requestClose = useCallback(() => {
+    if (draftState.cleanupPending) return
+    if (idempotencyConflict) {
+      setShowCloseGuard(false)
+      focusIdempotencyReload()
+      return
+    }
+    if (draftState.recoveredConflict) return
+    if (draftState.status === "error") {
+      setShowCloseGuard(true)
+      return
+    }
+    const patch = draftState.unsavedPatch()
+    if (Object.keys(patch).length > 0) draftState.save(patch)
+    if (!draftState.isAcknowledged || Object.keys(patch).length > 0) {
+      setCloseAfterSave(true)
+      return
+    }
+    onClose()
+  }, [draftState, focusIdempotencyReload, idempotencyConflict, onClose])
+
+  const ownsAction = useCallback((token: number) => {
+    const control = actionControlRef.current
+    return control.id === id && control.mounted && control.token === token
+  }, [id])
+
+  const runConflictAction = useCallback(async (action: ConflictActionName) => {
+    const control = actionControlRef.current
+    if (!control.mounted
+      || control.id !== id
+      || control.busy
+      || (draftState.conflictMode === "reconciling" && !idempotencyConflict)
+      || draftState.status === "saving") return
+    control.busy = true
+    control.token += 1
+    control.focus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const token = control.token
+    setConflictBusy(true)
+    setConflictError(null)
+    let restoreFocus = false
+    try {
+      const loaded = await fetchRemote()
+      if (!ownsAction(token)) return
+      const fresh = authoritativeRemoteDetail(queryClient, id, loaded.fresh)
+      const remote = todoRemoteSnapshot(fresh.workItem)
+      commitRemote(fresh)
+      if (!ownsAction(token)) return
+      if (action === "reload") draftState.reloadRemote(remote)
+      else if (action === "rebase") draftState.rebaseRemote(remote)
+      else draftState.overwriteRemote(remote)
+    } catch (cause) {
+      if (!ownsAction(token)) return
+      const fallback = action === "reload"
+        ? "Couldn't reload this Todo"
+        : action === "rebase"
+          ? "Couldn't rebase these edits"
+          : "Couldn't prepare the overwrite"
+      setConflictError(operatorSafeTodoError(cause, fallback))
+      restoreFocus = true
+    } finally {
+      if (!ownsAction(token)) return
+      control.busy = false
+      setConflictBusy(false)
+      if (restoreFocus) {
+        const target = control.focus
+        queueMicrotask(() => {
+          if (ownsAction(token) && target?.isConnected) target.focus()
+        })
+      }
+    }
+  }, [commitRemote, draftState, fetchRemote, id, idempotencyConflict, ownsAction, queryClient])
+
+  useEffect(() => {
+    if (!closeAfterSave) return
+    if (draftState.status === "error") {
+      setShowCloseGuard(true)
+      return
+    }
+    if (draftState.isAcknowledged) {
+      setCloseAfterSave(false)
+      onClose()
+      return
+    }
+    if (draftState.status === "dirty") {
+      const patch = draftState.unsavedPatch()
+      if (Object.keys(patch).length > 0) draftState.save(patch)
+    }
+  }, [closeAfterSave, draftState.isAcknowledged, draftState.save, draftState.status, draftState.unsavedPatch, onClose])
+
   return (
-    <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Todo details">
-      {/* Scrim — dim on mobile, transparent on desktop (the panel is inset). */}
-      <button
-        type="button"
-        aria-label="Close details"
-        onClick={onClose}
-        className="absolute inset-0 md:bg-transparent"
-        style={{ background: "color-mix(in srgb, var(--bg) 58%, transparent)" }}
-      />
-      <aside
-        className="absolute inset-x-0 bottom-0 flex max-h-[92vh] flex-col rounded-t-[var(--radius-2xl)] bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)] md:inset-x-auto md:bottom-4 md:right-4 md:top-4 md:max-h-none md:w-[420px] md:rounded-[var(--radius-xl)]"
-        data-testid="detail-sheet"
-      >
+    <TodoDialog
+      label="Todo details"
+      onRequestClose={requestClose}
+      testId="detail-sheet"
+      overlayTestId="detail-overlay"
+      className="inset-x-0 bottom-0 flex max-h-[92vh] min-w-0 flex-col overflow-x-hidden rounded-t-[var(--radius-2xl)] bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)] motion-safe:data-[state=open]:animate-in motion-safe:data-[state=open]:slide-in-from-bottom-4 md:bottom-4 md:left-auto md:right-4 md:top-4 md:max-h-none md:w-[420px] md:rounded-[var(--radius-xl)] md:motion-safe:data-[state=open]:slide-in-from-right-4"
+    >
         <div className="flex shrink-0 justify-center pb-2 pt-2.5 md:hidden">
           <span className="h-[5px] w-9 rounded-full bg-[var(--fill-primary)]" aria-hidden />
         </div>
 
         {/* Pinned header — title edits in place (tap; Enter commits, Esc reverts). */}
         <div className="flex shrink-0 items-start gap-3 p-[6px_20px_14px] md:pt-[20px]">
-          {detail && <StatusCircle status={detail.workItem.status} size={42} />}
+          {displayDetail && <StatusCircle status={displayDetail.workItem.status} size={42} />}
           <div className="min-w-0 flex-1">
-            {editingTitle && detail ? (
+            {editingTitle && displayDetail ? (
               <input
                 ref={titleRef}
+                data-todo-field-edit
                 data-testid="sheet-title-edit"
-                value={titleDraft}
-                onChange={(e) => setTitleDraft(e.target.value)}
+                value={draftState.draft.title}
+                onChange={(e) => draftState.change("title", e.target.value)}
                 onBlur={commitTitle}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") commitTitle()
-                  if (e.key === "Escape") setEditingTitle(false)
+                  if (e.key === "Escape") {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    draftState.change("title", titleBeforeEdit.current)
+                    setEditingTitle(false)
+                  }
                 }}
-                className="w-full rounded-[7px] border-0 bg-[var(--fill-quaternary)] px-1.5 -mx-1.5 text-[length:var(--text-title3)] font-semibold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] outline-none"
+                className="w-full min-w-0 break-words rounded-[7px] border-0 bg-[var(--fill-quaternary)] px-1.5 -mx-1.5 text-[length:var(--text-title3)] font-semibold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] outline-none"
               />
             ) : (
-              <h2
+              <button
+                type="button"
+                aria-label="Edit title"
                 data-testid="sheet-title"
                 onClick={() => {
-                  if (!detail) return
-                  setTitleDraft(detail.workItem.title)
+                  if (!displayDetail) return
+                  titleBeforeEdit.current = draftState.draft.title
                   setEditingTitle(true)
                 }}
-                className="cursor-text rounded-[7px] px-1.5 -mx-1.5 text-[length:var(--text-title3)] font-semibold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] transition-colors hover:bg-[var(--fill-quaternary)]"
+                className="w-full min-w-0 cursor-text break-words rounded-[7px] px-1.5 -mx-1.5 text-left text-[length:var(--text-title3)] font-semibold leading-tight tracking-[var(--tracking-tight)] text-[var(--text-primary)] transition-colors hover:bg-[var(--fill-quaternary)]"
               >
-                {detail?.workItem.title ?? "…"}
-              </h2>
+                {displayDetail?.workItem.title ?? "…"}
+              </button>
             )}
-            {detail && (
-              <div className="mt-0.5 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
-                {STATUS_LABEL[detail.workItem.status]} · updated {formatRelativeTime(detail.workItem.updatedAt)}
+            {displayDetail && (
+              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
+                <span>{STATUS_LABEL[displayDetail.workItem.status]} · updated {formatRelativeTime(displayDetail.workItem.updatedAt)}</span>
+                <span aria-live="polite" className="text-[var(--text-tertiary)]">
+                  {draftState.status === "saving" ? "Saving…" : draftState.status === "saved" ? "Saved" : null}
+                </span>
               </div>
             )}
           </div>
           <button
+            ref={closeButtonRef}
             type="button"
             aria-label="Close"
-            onClick={onClose}
-            className="grid size-[30px] flex-none place-items-center rounded-full bg-[var(--fill-tertiary)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)]"
+            onClick={requestClose}
+            className="grid min-h-11 min-w-11 flex-none place-items-center rounded-full bg-[var(--fill-tertiary)] text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-secondary)]"
           >
             <X size={12} strokeWidth={2.4} aria-hidden />
           </button>
         </div>
 
         {/* Scrollable body */}
-        <div className="min-h-0 flex-1 overflow-y-auto p-[0_20px_20px]" data-scrollable>
-          {saveError && (
+        <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-[0_20px_20px]" data-scrollable>
+          {draftState.cleanupPending ? (
             <div
-              data-testid="sheet-save-error"
-              className="mb-3 rounded-[var(--radius-md)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
-              style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}
+              role="alert"
+              className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
             >
-              {saveError}
+              <span className="min-w-0 flex-1 break-words">Couldn't clear this recovered draft locally. Retry cleanup before closing.</span>
+              <button ref={cleanupRetryRef} type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">
+                Retry cleanup
+              </button>
+            </div>
+          ) : idempotencyConflict && draftState.error ? (
+            <div
+              role="alert"
+              data-testid="sheet-save-error"
+              className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
+            >
+              <span className="min-w-0 flex-1 break-words">
+                {operatorSafeTodoError(draftState.error, "Couldn't save")}
+                {conflictError ? ` ${conflictError}` : null}
+              </span>
+              <button
+                ref={idempotencyReloadRef}
+                type="button"
+                disabled={conflictBusy}
+                onClick={() => void runConflictAction("reload")}
+                className="min-h-11 rounded-full px-3 font-semibold disabled:opacity-50"
+              >
+                Reload remote
+              </button>
+            </div>
+          ) : draftState.recoveredConflict ? (
+            <TodoConflictActions
+              fields={draftState.conflictFields}
+              sameFieldConflict={draftState.conflictMode === "same-field"}
+              busy={conflictActionsBlocked}
+              error={conflictError}
+              focusRef={conflictSurfaceRef}
+              onReload={() => void runConflictAction("reload")}
+              onRebase={() => void runConflictAction("rebase")}
+              onOverwrite={() => void runConflictAction("overwrite")}
+            />
+          ) : null}
+          {((draftState.error && !draftState.cleanupPending && !draftState.recoveredConflict && !idempotencyConflict) || transitionError) && (
+            <div
+              role="alert"
+              data-testid="sheet-save-error"
+              className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
+            >
+              <span className="min-w-0 flex-1 break-words">
+                {draftState.error ? operatorSafeTodoError(draftState.error, "Couldn't save") : transitionError}
+              </span>
+              {draftState.status === "error" && !draftState.cleanupPending && !draftState.recoveredConflict ? (
+                <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">Retry</button>
+              ) : null}
             </div>
           )}
-          {detail ? (
-            <SheetBody detail={detail} byName={byName} employees={employees} departments={departments} onEdit={edit} />
+          {showCloseGuard && (
+            <div className="mb-3 rounded-[var(--radius-lg)] bg-[var(--fill-tertiary)] p-3 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
+              <p>Your draft is still here. Retry saving or discard it before closing.</p>
+              <div className="mt-2 flex gap-2">
+                <button type="button" onClick={() => { setCloseAfterSave(true); setShowCloseGuard(false); draftState.retry() }} className="min-h-11 rounded-full bg-[var(--accent-fill)] px-4 font-semibold text-[var(--accent)]">Retry</button>
+                <button type="button" onClick={() => { draftState.discard(); onClose() }} className="min-h-11 rounded-full px-4 text-[var(--text-tertiary)]">Discard</button>
+              </div>
+            </div>
+          )}
+          {displayDetail ? (
+            <SheetBody detail={displayDetail} byName={byName} employees={employees} departments={departments} onEdit={edit} />
           ) : (
             <div className="flex h-32 items-center justify-center text-[var(--text-tertiary)]">Loading…</div>
           )}
         </div>
 
         {/* Pinned footer — the operator's call (approval) or legal transitions. */}
-        {detail && pending ? (
+        {displayDetail && pending ? (
           <DecisionFooter
-            detail={detail}
+            detail={displayDetail}
             resolving={resolving}
             onApprove={onApprove}
             onSendBack={onSendBack}
             onOpenSession={execSession ? () => navigate(`/?session=${encodeURIComponent(execSession.id)}`) : undefined}
           />
-        ) : detail ? (
+        ) : displayDetail ? (
           <TransitionFooter
-            status={detail.workItem.status}
+            status={displayDetail.workItem.status}
             busy={setStatus.isPending}
-            onStart={() => transitionTo("executing")}
+            onProgress={() => transitionTo("executing")}
             onDone={() => transitionTo("done")}
             onCancel={() => transitionTo("cancelled")}
           />
         ) : null}
-      </aside>
-    </div>
+    </TodoDialog>
   )
 }

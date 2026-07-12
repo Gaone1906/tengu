@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import type React from 'react'
 import { ChatPane } from '../chat-pane'
 
@@ -128,5 +128,43 @@ describe('ChatPane', () => {
 
     expect(screen.getByRole('status', { name: /loading chat/i })).toBeTruthy()
     expect(screen.queryByTestId('employee-picker')).toBeNull()
+  })
+
+  it('does not lose destination readiness when a prefetched pane rerenders before paint', () => {
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrame = 0
+    const request = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      const id = ++nextFrame
+      frames.set(id, callback)
+      return id
+    })
+    const cancel = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id)
+    })
+    const onContentReady = vi.fn()
+    const props = {
+      sessionId: 's1',
+      isActive: true,
+      onFocus: () => {},
+      subscribe: () => () => {},
+      events: [] as Array<{ event: string; payload: unknown }>,
+      onContentReady,
+    }
+    const { rerender } = render(<ChatPane {...props} />)
+
+    liveSessionState = {
+      ...liveSessionState,
+      session: { ...liveSessionState.session, title: 'Metadata landed before paint' },
+    }
+    rerender(<ChatPane {...props} />)
+    expect(onContentReady).not.toHaveBeenCalled()
+
+    act(() => {
+      for (const callback of [...frames.values()]) callback(performance.now())
+    })
+    expect(onContentReady).toHaveBeenCalledOnce()
+    expect(onContentReady).toHaveBeenCalledWith('s1')
+    request.mockRestore()
+    cancel.mockRestore()
   })
 })

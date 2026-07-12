@@ -5,7 +5,7 @@
  * never had: live token streaming, live media, and a running-state spinner.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { renderHook, act } from "@testing-library/react"
+import { renderHook, act, waitFor } from "@testing-library/react"
 
 // Mock the API module the hook loads sessions through.
 const getSession = vi.fn()
@@ -23,6 +23,8 @@ import {
   __getLiveSessionSnapshotCacheSizeForTests,
   invalidateLiveSessionSnapshot,
   isRestingSnapshot,
+  prefetchLiveSessionSnapshot,
+  readPrefetchedLiveSessionSnapshot,
   reconcileCompletedTurnMessages,
   SESSION_SNAPSHOT_REVISIT_TTL_MS,
   useLiveSession,
@@ -46,6 +48,41 @@ beforeEach(() => {
   getSession.mockReset()
   getSessionMessages.mockReset()
   __clearLiveSessionSnapshotCacheForTests()
+})
+
+describe("live session prefetch handoff", () => {
+  it("seeds the destination snapshot so the mounted child has content with no duplicate transcript request", async () => {
+    getSession.mockResolvedValue({
+      id: "child-prefetched",
+      status: "idle",
+      messages: [{ id: "a1", role: "assistant", content: "Prefetched child report", timestamp: 10 }],
+    })
+    await prefetchLiveSessionSnapshot("child-prefetched")
+    expect(getSession).toHaveBeenCalledTimes(1)
+    const preview = readPrefetchedLiveSessionSnapshot("child-prefetched")
+    expect(preview?.messages.at(-1)?.content).toBe("Prefetched child report")
+    preview!.messages[0].content = "mutated clone"
+    expect(readPrefetchedLiveSessionSnapshot("child-prefetched")?.messages[0].content).toBe("Prefetched child report")
+
+    const { subscribe } = makeBus()
+    const { result } = renderHook(() => useLiveSession("child-prefetched", { subscribe }))
+    expect(result.current.hydrating).toBe(false)
+    expect(result.current.messages.at(-1)?.content).toBe("Prefetched child report")
+    await act(async () => { await Promise.resolve() })
+    expect(getSession).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not seed a cancelled handoff", async () => {
+    const controller = new AbortController()
+    getSession.mockImplementation(async () => {
+      controller.abort()
+      return { id: "child-cancelled", status: "idle", messages: [] }
+    })
+    await expect(prefetchLiveSessionSnapshot("child-cancelled", controller.signal)).rejects.toMatchObject({ name: "AbortError" })
+    const { subscribe } = makeBus()
+    const { result } = renderHook(() => useLiveSession("child-cancelled", { subscribe }))
+    expect(result.current.hydrating).toBe(true)
+  })
 })
 
 describe("reconcileCompletedTurnMessages", () => {
@@ -908,6 +945,90 @@ describe("useLiveSession (read-only)", () => {
 
     expect(result.current.messages.find((m) => m.toolCall === "file_edit")?.content).toBe("Used file_edit")
     expect(result.current.messages.some((m) => m.blocks?.some((block) => block.id === "plan"))).toBe(true)
+  })
+
+  it("marks only first-time live delegation puts with stable 0/60/120ms arrival provenance", async () => {
+    getSession.mockResolvedValue({ status: "running", messages: [] })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() => useLiveSession("s-arrivals", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+    const put = (id: string) => emit("session:delta", {
+      sessionId: "s-arrivals",
+      type: "block",
+      content: id,
+      block: {
+        op: "put",
+        block: { id, type: "delegation", version: 1, status: "running", payload: { childSessionId: `child-${id}` } },
+      },
+    })
+
+    act(() => { put("d1"); put("d2"); put("d3") })
+    expect([...result.current.delegationArrivals.entries()].map(([id, arrival]) => [id, arrival.delayMs]))
+      .toEqual([["d1", 0], ["d2", 60], ["d3", 120]])
+    const firstNonce = result.current.delegationArrivals.get("d1")?.nonce
+
+    act(() => put("d1"))
+    expect(result.current.delegationArrivals.get("d1")?.nonce).toBe(firstNonce)
+    expect(result.current.messages.filter((m) => m.blocks?.some((b) => b.id === "d1"))).toHaveLength(1)
+  })
+
+  it("does not create delegation arrival provenance for hydration or patch", async () => {
+    getSession.mockResolvedValue({
+      status: "running",
+      messages: [{
+        id: "hydrated",
+        role: "assistant",
+        content: "Hydrated",
+        blocks: [{ id: "d1", type: "delegation", version: 1, status: "running", payload: {} }],
+      }],
+    })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() => useLiveSession("s-hydrated", { subscribe, readOnly: true }))
+    await waitFor(() => expect(result.current.messages).toHaveLength(1))
+    expect(result.current.delegationArrivals.size).toBe(0)
+
+    act(() => emit("session:delta", {
+      sessionId: "s-hydrated",
+      type: "block",
+      block: { op: "patch", block: { id: "d1", type: "delegation", version: 2, status: "waiting", payload: {} } },
+    }))
+    expect(result.current.delegationArrivals.size).toBe(0)
+  })
+
+  it("marks a live active-to-terminal patch for one anchored fold cycle", async () => {
+    getSession.mockResolvedValue({ status: "running", messages: [] })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() => useLiveSession("s-settlement", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+
+    act(() => emit("session:delta", {
+      sessionId: "s-settlement",
+      type: "block",
+      block: {
+        op: "put",
+        block: {
+          id: "d-settle",
+          type: "delegation",
+          version: 1,
+          status: "running",
+          payload: { employee: "dev", employeeDisplay: "Dev", title: "Audit transitions" },
+        },
+      },
+    }))
+    expect(result.current.liveTerminalDelegationIds.has("d-settle")).toBe(false)
+
+    act(() => emit("session:delta", {
+      sessionId: "s-settlement",
+      type: "block",
+      block: {
+        op: "patch",
+        block: { id: "d-settle", type: "delegation", version: 2, status: "done", payload: {} },
+      },
+    }))
+    expect(result.current.liveTerminalDelegationIds.has("d-settle")).toBe(true)
+    const settled = result.current.messages.flatMap((message) => message.blocks ?? []).find((block) => block.id === "d-settle")
+    expect(settled?.payload).toMatchObject({ employee: "dev", employeeDisplay: "Dev", title: "Audit transitions" })
+    expect(result.current.messages.flatMap((message) => message.blocks ?? []).filter((block) => block.id === "d-settle")).toHaveLength(1)
   })
 
   it("marks an earlier unfinished tool row done by toolId without closing a later tool", async () => {

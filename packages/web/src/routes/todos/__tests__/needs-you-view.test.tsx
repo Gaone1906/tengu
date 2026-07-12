@@ -16,7 +16,7 @@ function item(
 ): WorkItemCompactWire {
   return {
     id,
-    title: `Item ${id}`,
+    title: "Review this Todo",
     status,
     department: null,
     assignee: null,
@@ -54,44 +54,44 @@ describe("NeedsYouView", () => {
 
   it("renders server-ordered approval, escalated, and blocked items", () => {
     renderView([
-      item("blk", "blocked", null),
-      item("ap", "in_review", "pending"),
-      item("esc", "escalated", null),
+      item("wi_private_blocked", "blocked", null, { title: "Blocked item" }),
+      item("wi_private_approval", "in_review", "pending", { title: "Approval item" }),
+      item("wi_private_escalated", "escalated", null, { title: "Escalated item" }),
     ])
     expect(screen.getByText("Approve posting this?")).toBeTruthy()
     expect(screen.getByText("Approval")).toBeTruthy()
     expect(screen.getByText("Escalated")).toBeTruthy()
     expect(screen.getByText("Blocked")).toBeTruthy()
-    expect(screen.getAllByTestId(/needs-item-/).map((el) => el.getAttribute("data-testid"))).toEqual([
-      "needs-item-blk",
-      "needs-item-ap",
-      "needs-item-esc",
-    ])
+    expect(screen.getAllByTestId("needs-item").map((el) => el.textContent)).toEqual(expect.arrayContaining([
+      expect.stringContaining("Blocked item"),
+      expect.stringContaining("Approval item"),
+      expect.stringContaining("Escalated item"),
+    ]))
   })
 
   it("wires Approve to onApprove with the item id", () => {
-    const { onApprove } = renderView([item("ap", "in_review", "pending")])
-    fireEvent.click(screen.getByTestId("approve-ap"))
-    expect(onApprove).toHaveBeenCalledWith("ap")
+    const { onApprove } = renderView([item("wi_private_approval", "in_review", "pending")])
+    fireEvent.click(screen.getByTestId("needs-approve"))
+    expect(onApprove).toHaveBeenCalledWith("wi_private_approval")
   })
 
   it("opens a send-back composer and posts the note", () => {
-    const { onSendBack } = renderView([item("ap", "in_review", "pending")])
-    fireEvent.click(screen.getByTestId("sendback-ap"))
-    fireEvent.change(screen.getByTestId("sendback-note-ap"), { target: { value: "needs a citation" } })
-    fireEvent.click(screen.getByTestId("sendback-confirm-ap"))
-    expect(onSendBack).toHaveBeenCalledWith("ap", "needs a citation")
+    const { onSendBack } = renderView([item("wi_private_approval", "in_review", "pending")])
+    fireEvent.click(screen.getByTestId("needs-sendback"))
+    fireEvent.change(screen.getByTestId("needs-sendback-note"), { target: { value: "needs a citation" } })
+    fireEvent.click(screen.getByTestId("needs-sendback-confirm"))
+    expect(onSendBack).toHaveBeenCalledWith("wi_private_approval", "needs a citation")
   })
 
   it("wires escalation to onEscalate with the item id", () => {
-    const { onEscalate } = renderView([item("ap", "in_review", "pending")])
-    fireEvent.click(screen.getByTestId("escalate-ap"))
-    expect(onEscalate).toHaveBeenCalledWith("ap")
+    const { onEscalate } = renderView([item("wi_private_approval", "in_review", "pending")])
+    fireEvent.click(screen.getByTestId("needs-escalate"))
+    expect(onEscalate).toHaveBeenCalledWith("wi_private_approval")
   })
 
   it("optimistically hides a card while it is resolving", () => {
-    renderView([item("ap", "in_review", "pending")], new Set(["ap"]))
-    expect(screen.queryByTestId("approve-ap")).toBeNull()
+    renderView([item("wi_private_approval", "in_review", "pending")], new Set(["wi_private_approval"]))
+    expect(screen.queryByTestId("needs-approve")).toBeNull()
     expect(screen.getByTestId("needs-you-empty")).toBeTruthy()
   })
 
@@ -111,9 +111,29 @@ describe("NeedsYouView", () => {
         sessionRef: { sessionId: "sess_zz999" },
       }),
     ])
-    expect(screen.getByTestId("needs-item-sess")).toBeTruthy()
+    expect(screen.getAllByTestId("needs-item")).toHaveLength(2)
     expect(screen.getByText("Session · launch-note")).toBeTruthy()
     // No ref suffix → the shortened session id, never a crash.
     expect(screen.getByText("Session · sess_zz999")).toBeTruthy()
+  })
+
+  it("never renders an opaque work-item id from identity or reference fields", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <NeedsYouView
+          items={[item("wi_private_card", "in_review", "pending", {
+            sourceRef: "workflow:wi_private_source:run",
+            approvalRef: "wi_private_approval",
+          })]}
+          byName={new Map()}
+          resolvingIds={new Set()}
+          onApprove={() => {}}
+          onSendBack={() => {}}
+          onEscalate={() => {}}
+          onOpen={() => {}}
+        />
+      </MemoryRouter>,
+    )
+    expect(container.innerHTML).not.toMatch(/wi_[a-z0-9_-]+/i)
   })
 })

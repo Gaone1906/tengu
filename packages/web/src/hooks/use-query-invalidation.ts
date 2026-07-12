@@ -23,9 +23,11 @@ export function useQueryInvalidation() {
       switch (event) {
         case 'session:started':
           pendingRef.current.add('sessions')
+          pendingRef.current.add('work-item-sessions')
           break
         case 'session:updated':
           pendingRef.current.add('sessions')
+          pendingRef.current.add('work-item-sessions')
           if (p?.sessionId) {
             qc.invalidateQueries({ queryKey: queryKeys.sessions.detail(p.sessionId as string) })
           }
@@ -35,6 +37,7 @@ export function useQueryInvalidation() {
           // keep it as a previously-loaded extra.
           if (p?.sessionId) removeFromSessionsCache(qc, [p.sessionId as string])
           pendingRef.current.add('sessions')
+          pendingRef.current.add('work-item-sessions')
           if (p?.sessionId) {
             qc.invalidateQueries({ queryKey: queryKeys.sessions.detail(p.sessionId as string) })
           }
@@ -54,6 +57,7 @@ export function useQueryInvalidation() {
         case 'session:completed':
         case 'session:error':
           pendingRef.current.add('sessions')
+          pendingRef.current.add('work-item-sessions')
           if (p?.sessionId) {
             qc.invalidateQueries({ queryKey: queryKeys.sessions.detail(p.sessionId as string) })
           }
@@ -90,6 +94,9 @@ export function useQueryInvalidation() {
           switch (key) {
             case 'sessions':
               qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
+              break
+            case 'work-item-sessions':
+              qc.invalidateQueries({ queryKey: ['work-item-sessions'] })
               break
             case 'cron':
               qc.invalidateQueries({ queryKey: queryKeys.cron.all })
