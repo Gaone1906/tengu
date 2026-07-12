@@ -5,12 +5,10 @@ import {
   type Employee,
   type WorkItemCompactWire,
   type WorkItemDetailWire,
-  type WorkItemEditPatch,
   type WorkItemStatusWire,
 } from "@/lib/api"
 import { dateBounds, statusesFor, type TodoFilters } from "@/lib/todos"
 import { queryKeys } from "@/lib/query-keys"
-import { mergeTodoIntoCaches, newTodoEditRequest } from "./todo-edit-request"
 
 /* GRS-021d/027 + design-todos §7 — the Todos data layer. The ledger keeps one
  * INFINITE query per status: every request is one fixed-size page
@@ -299,29 +297,6 @@ export function useEscalateApproval() {
     mutationFn: (id: string) => api.escalateWorkItemApproval(id),
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ["work-items"] })
-    },
-  })
-}
-
-/** The operator's pen (design-todos §7.4): title/body/assignee/department/
- *  priority/rank edits. 404s on gateways that predate the endpoint — callers
- *  surface the failure quietly; invalidation restores server truth either way. */
-export function useUpdateWorkItem() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: async ({ id, patch }: { id: string; patch: WorkItemEditPatch }) => {
-      // Inline rename/reorder owns one logical conditional edit. Fetch the
-      // authoritative row first so these compact-row actions obey the same
-      // numeric CAS boundary as the detail sheet.
-      const detail = await api.getWorkItem(id)
-      const request = newTodoEditRequest(patch, detail.workItem.version ?? 0)
-      const result = await api.updateWorkItem(id, request)
-      mergeTodoIntoCaches(qc, result.workItem)
-      return result
-    },
-    onSettled: () => {
-      void qc.invalidateQueries({ queryKey: ["work-items"] })
-      void qc.invalidateQueries({ queryKey: ["work-item"] })
     },
   })
 }

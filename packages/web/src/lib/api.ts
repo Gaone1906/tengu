@@ -681,6 +681,8 @@ export interface WorkItemFullWire {
   department: string | null
   assignee: string | null
   priority: number
+  /** Manual order is part of the whole-row CAS response and detail baseline. */
+  rank: number | null
   source: WorkItemSourceWire
   sourceRef: string | null
   acceptance: string | null

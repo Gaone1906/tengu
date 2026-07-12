@@ -51,6 +51,7 @@ function detailFor(
     department: "platform",
     assignee: "jinn-designer",
     priority: 2,
+    rank: null,
     source: "cron",
     sourceRef: "cron:job:2026",
     acceptance: null,

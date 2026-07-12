@@ -43,7 +43,8 @@ function workItem(status: WorkItemStatusWire): WorkItemFullWire {
     status,
     department: null,
     assignee: null,
-    priority: 0,
+  priority: 0,
+  rank: null,
     source: "human",
     sourceRef: null,
     acceptance: null,
@@ -1482,6 +1483,50 @@ describe("Todo detail editing and dialog behavior", () => {
     fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
     await waitFor(() => expect(patchBodies()).toHaveLength(2))
     expect(patchBodies()[1].idempotencyKey).not.toBe(firstKey)
+  })
+
+  it("durably restores idempotency-only recovery over retained conflict provenance", async () => {
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({
+          code: "todo_idempotency_conflict",
+          error: "private payload wi_hidden token=secret",
+        }), { status: 409, headers: { "Content-Type": "application/json" } })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    const mounted = renderSheetWithDetail(value)
+
+    fireEvent.click(await screen.findByRole("button", { name: "Overwrite remote" }))
+    const firstAlert = await screen.findByRole("alert")
+    expect(firstAlert.textContent).toContain("Reload remote to discard all local edits")
+    expect(patchBodies()).toHaveLength(1)
+    expect((loadTodoJournal(value.workItem.id)?.request as Record<string, unknown> | undefined)?.failureCode)
+      .toBe("TODO_IDEMPOTENCY_CONFLICT")
+    expect(sessionStorage.getItem("jinn:todo-draft-journal:v2")).not.toMatch(/private payload|wi_hidden|wi_backlog|token=secret/i)
+    mounted.unmount()
+
+    renderSheetWithDetail(value)
+
+    const alert = await screen.findByRole("alert")
+    expect(alert.textContent).toContain("Reload remote to discard all local edits")
+    expect(alert.textContent).not.toMatch(/private payload|wi_[a-z0-9_-]+|token=/i)
+    expect(screen.queryByRole("status", { name: "Todo changed elsewhere" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Rebase edits" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Overwrite remote" })).toBeNull()
+    const reload = screen.getByRole("button", { name: "Reload remote" })
+    await waitFor(() => expect(document.activeElement).toBe(reload))
+    const close = screen.getByRole("button", { name: "Close" })
+    close.focus()
+    fireEvent.click(close)
+    await waitFor(() => expect(document.activeElement).toBe(reload))
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Todo details" }), { key: "Escape" })
+    await waitFor(() => expect(document.activeElement).toBe(reload))
+    expect(patchBodies()).toHaveLength(1)
   })
 
   it("restores the invoking idempotency Reload control after a reload failure", async () => {

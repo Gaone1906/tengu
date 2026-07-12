@@ -10,10 +10,13 @@ const SALT_PATTERN = /^[a-z0-9-]{12,}$/i
 export type TodoDraftField = keyof TodoEditableDraft
 
 export type TodoJournalRequestState = "prepared" | "dispatched" | "uncertain" | "failed" | "conflict"
+export type TodoJournalFailureCode = "TODO_IDEMPOTENCY_CONFLICT"
 
 export interface TodoJournalRequest extends WorkItemEditRequest {
   revision: number
   state: TodoJournalRequestState
+  /** Closed, privacy-safe recovery classification; never a backend message. */
+  failureCode?: TodoJournalFailureCode
 }
 
 export type TodoJournalRequestFingerprint = WorkItemEditRequest & { revision: number }
@@ -102,9 +105,10 @@ const PAYLOAD_KEYS = new Set([
   "revision", "patch", "baseline", "baselineVersion", "uncertainFields", "conflictFields", "cleanupPending",
   "cleanupIntentFields", "cleanupSaveRequested", "request",
 ])
-const REQUEST_KEYS = new Set(["revision", "patch", "expectedVersion", "idempotencyKey", "state"])
+const REQUEST_KEYS = new Set(["revision", "patch", "expectedVersion", "idempotencyKey", "state", "failureCode"])
 const ENVELOPE_KEYS = new Set(["expiresAt", "sequence", "payload"])
 const REQUEST_STATES = new Set<TodoJournalRequestState>(["prepared", "dispatched", "uncertain", "failed", "conflict"])
+const FAILURE_CODES = new Set<TodoJournalFailureCode>(["TODO_IDEMPOTENCY_CONFLICT"])
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -147,7 +151,7 @@ function sameOptionalFields(a?: TodoDraftField[], b?: TodoDraftField[]): boolean
 
 function sameJournalRequest(a?: TodoJournalRequest, b?: TodoJournalRequest): boolean {
   if (!a || !b) return a === b
-  return a.state === b.state && sameRequestFingerprint(a, b)
+  return a.state === b.state && a.failureCode === b.failureCode && sameRequestFingerprint(a, b)
 }
 
 function samePayload(a: TodoJournalPayload, b: TodoJournalPayload): boolean {
@@ -182,6 +186,8 @@ function validRequest(
     && typeof value.idempotencyKey === "string"
     && UUID_PATTERN.test(value.idempotencyKey)
     && REQUEST_STATES.has(value.state as TodoJournalRequestState)
+    && (value.failureCode === undefined
+      || (value.state === "failed" && FAILURE_CODES.has(value.failureCode as TodoJournalFailureCode)))
 }
 
 function validUncertainFields(value: unknown, patch: TodoDraftPatch): value is TodoDraftField[] | undefined {
@@ -282,7 +288,10 @@ function protectedRequest(current: TodoJournalRequest, incoming: TodoJournalRequ
   const state = SAFE_REQUEST_TRANSITIONS[current.state].has(incoming.state)
     ? incoming.state
     : current.state
-  return { ...current, state }
+  const failureCode = state === "failed"
+    ? incoming.failureCode ?? current.failureCode
+    : undefined
+  return { ...current, state, failureCode }
 }
 
 function validEnvelope(ref: string, value: unknown, now: number): value is JournalEnvelope {

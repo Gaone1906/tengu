@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { WorkItemEditRequest } from "@/lib/api"
-import { isPositiveTodoVersion } from "@/lib/api"
-import { isTodoVersionConflictError } from "@/lib/todos"
+import { isPositiveTodoVersion, TodoApiError } from "@/lib/api"
+import { isTodoIdempotencyConflictError, isTodoVersionConflictError } from "@/lib/todos"
 import { newTodoEditRequest } from "./todo-edit-request"
 import {
   clearTodoJournal,
@@ -133,9 +133,12 @@ function sameRequest(a: TodoJournalRequest, b: TodoJournalRequest): boolean {
     && samePatch(a.patch, b.patch)
 }
 
-function recoveryError(state: TodoJournalRequest["state"]): unknown | null {
-  if (state === "conflict") return null
-  if (state === "failed") return new Error("The previous save did not complete")
+function recoveryError(request: TodoJournalRequest): unknown | null {
+  if (request.failureCode === "TODO_IDEMPOTENCY_CONFLICT") {
+    return new TodoApiError(409, "The previous edit request conflicts with an earlier request", request.failureCode)
+  }
+  if (request.state === "conflict") return null
+  if (request.state === "failed") return new Error("The previous save did not complete")
   return new TypeError("The previous save response was not confirmed")
 }
 
@@ -199,7 +202,7 @@ export function useTodoDraft({
     startingFailure ? "error" : recoveredFields.size > 0 ? "dirty" : "idle",
   )
   const [error, setError] = useState<unknown | null>(
-    recovered?.cleanupPending ? cleanupRecoveryError() : recoveredRequest ? recoveryError(recoveredRequest.state) : null,
+    recovered?.cleanupPending ? cleanupRecoveryError() : recoveredRequest ? recoveryError(recoveredRequest) : null,
   )
   const [recoveredConflict, setRecoveredConflict] = useState(startingConflicts.size > 0 || startingFailure === "conflict")
   const [conflictFields, setConflictFields] = useState<TodoDraftField[]>([...startingConflicts])
@@ -714,9 +717,10 @@ export function useTodoDraft({
     } catch (cause) {
       if (epoch !== epochRef.current || activeRef.current?.idempotencyKey !== request.idempotencyKey) return
       const conflict = isTodoVersionConflictError(cause)
+      const failureCode = isTodoIdempotencyConflictError(cause) ? "TODO_IDEMPOTENCY_CONFLICT" as const : undefined
       const ambiguous = isAmbiguousTransportFailure(cause)
       const state: TodoJournalRequest["state"] = conflict ? "conflict" : ambiguous ? "uncertain" : "failed"
-      const terminalRequest: TodoJournalRequest = { ...request, state }
+      const terminalRequest: TodoJournalRequest = { ...request, state, failureCode }
       const terminalConflicts = conflict ? new Set(fieldsOf(request.patch)) : conflictFieldsRef.current
       const terminalPayload = payloadFor(terminalRequest, terminalConflicts)
       let installed = !!terminalPayload && transitionActive(dispatched, terminalPayload)
@@ -886,7 +890,7 @@ export function useTodoDraft({
     publishDraft(nextDraft)
     publishConflict(conflicts)
     setStatus(nextFailure ? "error" : storedFields.size > 0 ? "dirty" : "idle")
-    setError(stored?.cleanupPending ? cleanupRecoveryError() : storedRequest ? recoveryError(storedRequest.state) : null)
+    setError(stored?.cleanupPending ? cleanupRecoveryError() : storedRequest ? recoveryError(storedRequest) : null)
     setRecoveredConflict(conflicts.size > 0 || nextFailure === "conflict")
     setCleanupPending(!!stored?.cleanupPending)
 
