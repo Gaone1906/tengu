@@ -256,11 +256,11 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
     ) as Record<string, JournalEnvelope>
     const ref = todoPrivateRef(id)
     const current = journals[ref]?.payload
-    if (current && payload.revision < current.revision) return
     let nextPayload = payload
     if (current?.request) {
       if (!payload.request || !sameRequestFingerprint(current.request, payload.request)) return
-      const latestIntent = payload.revision === current.revision && !sameDesiredIntent(current, payload)
+      const latestIntent = payload.revision < current.revision
+        || (payload.revision === current.revision && !sameDesiredIntent(current, payload))
         ? current
         : payload
       const request = protectedRequest(current.request, payload.request)
@@ -276,6 +276,8 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
         uncertainFields,
         request,
       }
+    } else if (current && payload.revision < current.revision) {
+      return
     }
     const sequence = Math.max(0, ...Object.values(journals).map((entry) => entry.sequence)) + 1
     journals[ref] = { expiresAt: now + JOURNAL_TTL_MS, sequence, payload: nextPayload }
