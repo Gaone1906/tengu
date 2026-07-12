@@ -148,16 +148,20 @@ function ensureAdditiveWorkItemColumns(db: Database): void {
  * must never serve requests.
  */
 export function migrateWorkItemsSchema(db: Database): WorkItemsMigrationResult {
-  const row = db
-    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='work_items'")
-    .get() as { sql: string } | undefined;
-  if (!row) return { rebuilt: false, rows: 0 }; // fresh install — initDb creates the new shape
-  if (row.sql.includes("'backlog'")) {
-    ensureAdditiveWorkItemColumns(db);
-    return { rebuilt: false, rows: 0 }; // already migrated
-  }
+  const migrate = db.transaction((): WorkItemsMigrationResult => {
+    // BEGIN IMMEDIATE serializes schema inspection with every ALTER/rebuild
+    // across gateway processes. The table and columns are intentionally read
+    // only after the write lock is held, so a waiter observes the winner's
+    // committed schema instead of replaying its stale migration decision.
+    const row = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='work_items'")
+      .get() as { sql: string } | undefined;
+    if (!row) return { rebuilt: false, rows: 0 }; // fresh install — initDb creates the new shape
+    if (row.sql.includes("'backlog'")) {
+      ensureAdditiveWorkItemColumns(db);
+      return { rebuilt: false, rows: 0 }; // already migrated
+    }
 
-  const rebuild = db.transaction((): number => {
     db.exec(WORK_ITEMS_TABLE_DDL.replace('CREATE TABLE IF NOT EXISTS work_items', 'CREATE TABLE work_items_new'));
     const copied = db
       .prepare(
@@ -176,7 +180,7 @@ export function migrateWorkItemsSchema(db: Database): WorkItemsMigrationResult {
     db.exec('ALTER TABLE work_items_new RENAME TO work_items');
     db.exec(WORK_ITEMS_INDEX_DDL);
     ensureAdditiveWorkItemColumns(db);
-    return copied.changes;
+    return { rebuilt: true, rows: copied.changes };
   });
-  return { rebuilt: true, rows: rebuild() };
+  return migrate.immediate();
 }

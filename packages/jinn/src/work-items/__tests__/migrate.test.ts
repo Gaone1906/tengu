@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeAll } from "vitest";
+import { fork, type ChildProcess } from "node:child_process";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import {
   migrateWorkItemsSchema,
@@ -36,6 +38,55 @@ function oldShapeDb(): Database.Database {
   const db = new Database(":memory:");
   db.exec(OLD_DDL);
   return db;
+}
+
+interface MigrationWorkerResult {
+  round: number;
+  ok: boolean;
+  code?: string;
+  message?: string;
+  integrity?: string;
+  version?: number;
+}
+
+function startMigrationWorker(): { child: ChildProcess; ready: Promise<void> } {
+  const worker = fileURLToPath(new URL("./fixtures/migration-worker.mjs", import.meta.url));
+  const child = fork(worker, [JSON.stringify({ worker: true })], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  const ready = new Promise<void>((resolve, reject) => {
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code !== 0) reject(new Error(`migration worker exited ${code}: ${stderr}`));
+    });
+    const onMessage = (message: unknown) => {
+      if (message === "ready") {
+        child.off("message", onMessage);
+        resolve();
+      }
+    };
+    child.on("message", onMessage);
+  });
+  return { child, ready };
+}
+
+function runMigrationWave(children: ChildProcess[], dbPath: string, round: number): Promise<MigrationWorkerResult[]> {
+  return Promise.all(children.map((child) => new Promise<MigrationWorkerResult>((resolve, reject) => {
+    const onError = (error: Error) => {
+      child.off("message", onMessage);
+      reject(error);
+    };
+    const onMessage = (message: unknown) => {
+      if (message && typeof message === "object" && "round" in message && message.round === round) {
+        child.off("message", onMessage);
+        child.off("error", onError);
+        resolve(message as MigrationWorkerResult);
+      }
+    };
+    child.on("message", onMessage);
+    child.once("error", onError);
+    child.send({ type: "migrate", path: dbPath, round });
+  })));
 }
 
 function insertOld(
@@ -166,6 +217,38 @@ describe("migrateWorkItemsSchema — the GRS-021a vocabulary rebuild", () => {
       db.prepare("INSERT INTO work_items (id,title,status,source,version,created_at,updated_at) VALUES ('wi_bad_version','bad','backlog','human',0,'x','x')").run(),
     ).toThrow(/CHECK/);
   });
+
+  it("serializes and rechecks an additive version migration across repeated 16/32-process waves", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-version-race-"));
+    const workers = Array.from({ length: 32 }, () => startMigrationWorker());
+    await Promise.all(workers.map((worker) => worker.ready));
+
+    try {
+      for (let round = 0; round < 100; round++) {
+        const dbPath = path.join(root, `round-${round}.db`);
+        const seed = new Database(dbPath);
+        seed.exec(WORK_ITEMS_TABLE_DDL.replace("  version             INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),\n", ""));
+        seed.prepare("INSERT INTO work_items (id,title,status,source,created_at,updated_at) VALUES ('wi_versionless','versionless','backlog','human','x','x')").run();
+        seed.close();
+
+        const width = round % 2 === 0 ? 16 : 32;
+        const results = await runMigrationWave(workers.slice(0, width).map((worker) => worker.child), dbPath, round);
+        expect(
+          results.every((result) => result.ok && result.integrity === "ok" && result.version === 1),
+          `migration wave ${round} (${width} processes): ${JSON.stringify(results.filter((result) => !result.ok))}`,
+        ).toBe(true);
+
+        const reopened = new Database(dbPath);
+        const versionColumn = (reopened.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>).filter((column) => column.name === "version");
+        expect(versionColumn).toHaveLength(1);
+        expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
+        expect(migrateWorkItemsSchema(reopened)).toEqual({ rebuilt: false, rows: 0 });
+        reopened.close();
+      }
+    } finally {
+      for (const worker of workers) worker.child.disconnect();
+    }
+  }, 120_000);
 
   it("backfills legacy non-null approval targets as virtual when adding target kind", () => {
     const db = new Database(":memory:");
