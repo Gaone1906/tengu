@@ -138,6 +138,37 @@ export function realCodexHome(codexHomesBaseDir: string = CODEX_HOMES_DIR): stri
   return path.join(os.homedir(), ".codex");
 }
 
+// Codex normally lets all concurrent CLI processes share these directories in
+// ~/.codex. Keeping private copies inside every Jinn session home only multiplies
+// remote plugin checkouts and caches; none of them is required to locate or
+// resume a session thread. Session rollouts and SQLite state remain private.
+const SHARED_CODEX_HOME_DIRS = ["plugins", "cache", "skills", "vendor_imports", ".tmp"] as const;
+
+function linkSharedCodexHomeDirs(sessionHome: string, realHome: string): void {
+  for (const name of SHARED_CODEX_HOME_DIRS) {
+    const shared = path.join(realHome, name);
+    const link = path.join(sessionHome, name);
+    try {
+      fs.mkdirSync(shared, { recursive: true, mode: 0o700 });
+      let alreadyLinked = false;
+      try {
+        const stat = fs.lstatSync(link);
+        alreadyLinked =
+          stat.isSymbolicLink() &&
+          path.resolve(path.dirname(link), fs.readlinkSync(link)) === path.resolve(shared);
+      } catch { /* missing link — create it below */ }
+      if (alreadyLinked) continue;
+
+      // Safe for legacy overlays: rmSync removes a symlink itself rather than
+      // following it, and this runs before the session's next Codex process starts.
+      fs.rmSync(link, { recursive: true, force: true });
+      fs.symlinkSync(shared, link, process.platform === "win32" ? "junction" : "dir");
+    } catch (err) {
+      logger.warn(`Codex per-session home: could not share ${name} (${err instanceof Error ? err.message : err})`);
+    }
+  }
+}
+
 function tomlString(value: string): string {
   return JSON.stringify(value);
 }
@@ -215,6 +246,7 @@ export function prepareCodexSessionHome(
   // Symlink auth.json back to the real codex home so login (and token refreshes)
   // propagate — the overlay never owns credentials.
   const realHome = realCodexHome(baseDir);
+  linkSharedCodexHomeDirs(home, realHome);
   const realAuth = path.join(realHome, "auth.json");
   const linkAuth = path.join(home, "auth.json");
   try {

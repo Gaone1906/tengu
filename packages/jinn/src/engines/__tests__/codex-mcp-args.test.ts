@@ -209,6 +209,30 @@ describe("prepareCodexSessionHome", () => {
     expect(fs.realpathSync(authLink)).toBe(fs.realpathSync(path.join(realHome, "auth.json")));
   });
 
+  it("shares immutable/cache-heavy Codex assets instead of duplicating them per session", () => {
+    const sharedNames = ["plugins", "cache", "skills", "vendor_imports", ".tmp"];
+    for (const name of sharedNames) {
+      const shared = path.join(realHome, name);
+      fs.mkdirSync(shared, { recursive: true });
+      fs.writeFileSync(path.join(shared, "shared-marker"), name);
+    }
+
+    // Simulate a legacy overlay that already copied a full plugin checkout.
+    const legacyPlugins = path.join(baseDir, "sess-1", "plugins");
+    fs.mkdirSync(legacyPlugins, { recursive: true });
+    fs.writeFileSync(path.join(legacyPlugins, "duplicated-marker"), "waste");
+
+    const home = prepareCodexSessionHome(jinnResolvedWithCapability(), "sess-1", { baseDir })!;
+
+    for (const name of sharedNames) {
+      const link = path.join(home.home, name);
+      expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(fs.realpathSync(link)).toBe(fs.realpathSync(path.join(realHome, name)));
+      expect(fs.readFileSync(path.join(link, "shared-marker"), "utf8")).toBe(name);
+    }
+    expect(fs.existsSync(path.join(home.home, "plugins", "duplicated-marker"))).toBe(false);
+  });
+
   it("is idempotent across turns and rewrites config.toml when the capability rotates", () => {
     const first = prepareCodexSessionHome(jinnResolvedWithCapability("cap-round-1"), "sess-1", { baseDir })!;
     const second = prepareCodexSessionHome(jinnResolvedWithCapability("cap-round-2"), "sess-1", { baseDir })!;
