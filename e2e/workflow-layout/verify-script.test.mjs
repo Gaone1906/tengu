@@ -17,6 +17,10 @@ test("sanitized sandbox config retains the required Claude engine mapping", () =
   assert.match(bootstrap, /engines\s*=\s*\{[\s\S]*claude:\s*\{\}/)
 })
 
+test("sandbox seeds a real manager principal for authorized approval browser coverage", () => {
+  assert.match(bootstrap, /name === "layout-author-1" \? "manager" : "employee"/)
+})
+
 test("five author probes settle sequentially inside the disposable gateway", () => {
   assert.doesNotMatch(author, /Promise\.all/)
   assert.match(author, /for \(const author of authorRequests\(\)\)/)

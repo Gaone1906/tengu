@@ -75,7 +75,11 @@ const employees = [
 for (const name of employees) {
   const display = name.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ")
   write(path.join(home, "org", "verification", `${name}.yaml`), YAML.stringify({
-    name, displayName: display, department: "verification", rank: "employee",
+    name, displayName: display, department: "verification",
+    // The first author doubles as the disposable approval root. Its settled
+    // session gives the browser matrix a real capability-bound principal, so
+    // authorized approval is proven through the same route as production.
+    rank: name === "layout-author-1" ? "manager" : "employee",
     engine: "codex", model: "gpt-5.5", effortLevel: "low",
     persona: "You are a disposable generic sandbox verifier. Use only built-in Jinn tools on the current sandbox gateway. Do not inspect files, edit code, use external systems, or contact another gateway.",
   }))

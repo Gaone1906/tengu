@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test'
 import { artifactWriter, gatewayToken, pollUntil, sandboxClient, verificationEnv } from './api-client.mjs'
 import { authorRequests, canonicalFixtures, scenarioFixtures } from './fixtures.mjs'
@@ -37,7 +38,26 @@ function safeNetworkUrl(raw: string) {
   return ['http:', 'ws:'].includes(url.protocol) && url.hostname === '127.0.0.1' && Number(url.port) >= 7800 && url.port === new URL(origin).port
 }
 
-async function isolatedContext(browser: Browser, cell: Cell) {
+type PrincipalHeaders = Record<string, string>
+
+function managerPrincipalHeaders(): PrincipalHeaders {
+  const settled = JSON.parse(fs.readFileSync(path.join(env.artifacts, 'authoring/sessions/child-linear-final.json'), 'utf8'))
+  const sessionId = settled?.body?.id
+  if (typeof sessionId !== 'string' || settled?.body?.employee !== 'layout-author-1') {
+    throw new Error('the routed approval manager session did not settle in this sandbox')
+  }
+  const key = Buffer.from(fs.readFileSync(path.join(env.home, 'secrets/mcp-session-capability.key'), 'utf8').trim(), 'base64url')
+  const capability = crypto.createHmac('sha256', key)
+    .update('jinn:mcp-session-capability:v1\0', 'utf8')
+    .update(sessionId, 'utf8')
+    .digest('base64url')
+  return {
+    'x-jinn-caller-session': sessionId,
+    'x-jinn-session-capability': capability,
+  }
+}
+
+async function isolatedContext(browser: Browser, cell: Cell, principalHeaders: PrincipalHeaders = {}) {
   const violations: string[] = []
   const context = await browser.newContext({
     viewport: { width: cell.viewport.width, height: cell.viewport.height },
@@ -47,7 +67,7 @@ async function isolatedContext(browser: Browser, cell: Cell) {
     hasTouch: cell.viewport.key === 'mobile',
     locale: 'en-US',
     reducedMotion: cell.motion === 'reduced' ? 'reduce' : 'no-preference',
-    extraHTTPHeaders: { authorization: `Bearer ${token()}` },
+    extraHTTPHeaders: { authorization: `Bearer ${token()}`, ...principalHeaders },
   })
   await context.addInitScript(({ theme }) => localStorage.setItem('jinn-theme', theme), { theme: cell.theme })
   await context.route('**/*', async (route) => {
@@ -66,8 +86,8 @@ async function isolatedContext(browser: Browser, cell: Cell) {
   return { context, violations }
 }
 
-async function openPage(browser: Browser, cell: Cell, route: string) {
-  const { context, violations } = await isolatedContext(browser, cell)
+async function openPage(browser: Browser, cell: Cell, route: string, principalHeaders: PrincipalHeaders = {}) {
+  const { context, violations } = await isolatedContext(browser, cell, principalHeaders)
   const page = await context.newPage()
   const consoleErrors: string[] = []
   const pageErrors: string[] = []
@@ -90,6 +110,10 @@ function screenshotPath(...segments: string[]) {
 
 function visibleTestId(page: Page, testId: string) {
   return page.locator(`[data-testid="${testId}"]:visible`)
+}
+
+function visibleText(page: Page, text: RegExp) {
+  return page.getByText(text).filter({ visible: true })
 }
 
 async function fitAll(page: Page) {
@@ -432,7 +456,10 @@ test.describe.serial('isolated workflow layout verification', () => {
           await opened.page.getByTestId('wf-canvas').waitFor()
           if (runCase.terminal === 'parked') {
             await opened.page.getByTestId('wf-node-approve').click()
-            await expect(visibleTestId(opened.page, 'wf-gate-approve')).toBeVisible()
+            await expect(visibleTestId(opened.page, 'wf-gate-approve')).toHaveCount(0)
+            await expect(visibleTestId(opened.page, 'wf-gate-reject')).toHaveCount(0)
+            await expect(visibleText(opened.page, /Waiting on layout-author-1/i)).toBeVisible()
+            await expect(visibleText(opened.page, /ask the routed owner to escalate/i)).toBeVisible()
           }
           const definition = await readDefinition(runCase.id)
           const metrics = await captureMetrics(opened.page, cell.viewport.key)
@@ -516,26 +543,59 @@ test.describe.serial('isolated workflow layout verification', () => {
     }
   })
 
-  test('operator approval denial stays visible and durably parked without routed authority', async ({ browser }) => {
+  test('unauthorized approval stays visible and durably parked without active controls', async ({ browser }) => {
     // Own the parked run this assertion addresses. That keeps the proof valid
     // under --grep and prevents it from silently targeting an earlier run.
     await startFromUi(browser, 'verify-run-approval', 'parked')
     const opened = await openPage(browser, matrixCells()[0], '/workflow/verify-run-approval?mode=runs')
     try {
       await opened.page.getByTestId('wf-node-approve').click()
-      const resolved = opened.page.waitForResponse((response) => response.request().method() === 'POST' && response.url().includes('/resolve-gate'))
-      await visibleTestId(opened.page, 'wf-gate-approve').click()
-      const response = await resolved
-      const responseText = await response.text()
-      expect(response.status(), responseText.slice(0, 800)).toBe(403)
-      await expect(opened.page.getByTestId('wf-gate-resolve-error')).toContainText(/routed approval|explicit escalation/i)
+      await expect(visibleTestId(opened.page, 'wf-gate-approve')).toHaveCount(0)
+      await expect(visibleTestId(opened.page, 'wf-gate-reject')).toHaveCount(0)
+      await expect(visibleText(opened.page, /Waiting on layout-author-1/i)).toBeVisible()
+      await expect(visibleText(opened.page, /ask the routed owner to escalate/i)).toBeVisible()
       const parked = await api('GET', '/api/workflow-definitions/verify-run-approval/runs')
       expect(parked.body?.runs?.[0]?.status).toBe('parked')
-      write('interactions/verify-run-approval-denied.json', { response: JSON.parse(responseText), runs: parked.body })
+      const forbidden = await api(
+        'POST',
+        `/api/workflow-definitions/verify-run-approval/runs/${encodeURIComponent(parked.body.runs[0].runId)}/resolve-gate`,
+        { decision: 'approve' },
+      )
+      expect(forbidden.status).toBe(403)
+      write('interactions/verify-run-approval-denied.json', { response: forbidden.body, runs: parked.body })
       await opened.page.reload({ waitUntil: 'networkidle' })
       await opened.page.getByTestId('wf-node-approve').click()
       await expect(opened.page.getByText(/awaiting human approval/i).first()).toBeVisible()
       expect(opened.violations).toEqual([])
+    } finally {
+      await opened.context.close()
+    }
+  })
+
+  test('routed manager sees approval controls and can resume the parked run', async ({ browser }) => {
+    await startFromUi(browser, 'verify-run-approval', 'parked')
+    const opened = await openPage(
+      browser,
+      matrixCells()[0],
+      '/workflow/verify-run-approval?mode=runs',
+      managerPrincipalHeaders(),
+    )
+    try {
+      await opened.page.getByTestId('wf-node-approve').click()
+      await expect(visibleTestId(opened.page, 'wf-gate-approve')).toBeVisible()
+      await expect(visibleTestId(opened.page, 'wf-gate-reject')).toBeVisible()
+      await visibleTestId(opened.page, 'wf-gate-approve').click()
+      const completed = await pollUntil(
+        async () => api('GET', '/api/workflow-definitions/verify-run-approval/runs'),
+        (response) => response.ok && response.body?.runs?.[0]?.status === 'completed',
+        { timeoutMs: 30_000, intervalMs: 250, label: 'authorized approval completion' },
+      )
+      await expect(visibleText(opened.page, /^completed$/i)).toBeVisible()
+      await expect(visibleTestId(opened.page, 'wf-gate-approve')).toHaveCount(0)
+      write('interactions/verify-run-approval-authorized.json', completed.body)
+      await opened.page.screenshot({ path: screenshotPath('approval', 'authorized-completed.png') })
+      expect(opened.violations).toEqual([])
+      expect(opened.pageErrors).toEqual([])
     } finally {
       await opened.context.close()
     }
