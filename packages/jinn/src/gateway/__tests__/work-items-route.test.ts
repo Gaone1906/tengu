@@ -235,6 +235,23 @@ describe("GET /api/work-items and /api/search/work-items — pagination, totals,
 
 describe("PATCH /api/work-items/:id — operator metadata editing", () => {
   const operatorHeaders = { authorization: "Bearer test-token" };
+  const hostileInputs = [
+    "wi_private_validation_marker",
+    "/srv/private-validation.db",
+    "SQLITE_DROP_TABLE_validation",
+    "token=validation-token",
+    "secret=validation-secret",
+    "control\u0001marker",
+  ];
+
+  function expectNoHostileInput(body: unknown): void {
+    const serialized = JSON.stringify(body);
+    for (const input of hostileInputs) {
+      const escaped = JSON.stringify(input).slice(1, -1);
+      expect(serialized).not.toContain(input);
+      expect(serialized).not.toContain(escaped);
+    }
+  }
 
   function toolHeaders(sessionId: string): Record<string, string> {
     return {
@@ -428,6 +445,97 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     await api.handleApiRequest(makeReq("PATCH", `/api/work-items/${item.id}`, { expectedVersion: item.version, ...body }, operatorHeaders), cap.res, ctx);
     expect(cap.status).toBe(400);
     expect(cap.body.error).toMatch(message);
+  });
+
+  it("never reflects unsupported field names or values in typed validation responses", async () => {
+    for (const hostile of hostileInputs) {
+      const item = store.createWorkItem({ title: "Unsupported privacy target" });
+      const cap = makeRes();
+      await api.handleApiRequest(
+        makeReq("PATCH", `/api/work-items/${item.id}`, {
+          expectedVersion: item.version,
+          title: "safe title",
+          [hostile]: hostile,
+        }, operatorHeaders),
+        cap.res,
+        ctx,
+      );
+      expect(cap.status).toBe(400);
+      expect(cap.body).toEqual({
+        error: "Todo edit request contains unsupported fields.",
+        code: "todo_invalid_patch",
+      });
+      expectNoHostileInput(cap.body);
+    }
+  });
+
+  it("never reflects an unknown assignee in its typed validation response", async () => {
+    for (const hostile of hostileInputs) {
+      const item = store.createWorkItem({ title: "Assignee privacy target" });
+      const cap = makeRes();
+      await api.handleApiRequest(
+        makeReq("PATCH", `/api/work-items/${item.id}`, {
+          expectedVersion: item.version,
+          assignee: hostile,
+        }, operatorHeaders),
+        cap.res,
+        ctx,
+      );
+      expect(cap.status).toBe(400);
+      expect(cap.body).toEqual({
+        error: "Unknown employee for Todo assignee. Check the organization directory.",
+        code: "todo_invalid_assignee",
+      });
+      expectNoHostileInput(cap.body);
+    }
+  });
+
+  it.each([
+    ["title", { title: { marker: hostileInputs[0] } }, "title must be a string"],
+    ["body", { body: { marker: hostileInputs[1] } }, "body must be a string or null"],
+    ["assignee shape", { assignee: { marker: hostileInputs[2] } }, "assignee must be a non-empty string or null"],
+    ["department", { department: { marker: hostileInputs[3] } }, "department must be a non-empty string or null"],
+    ["priority", { priority: hostileInputs[4] }, "priority must be an integer from 0 through 3"],
+    ["rank", { rank: hostileInputs[5] }, "rank must be a finite number or null"],
+  ])("returns a fixed typed response for rejected %s values", async (_field, patch, error) => {
+    const item = store.createWorkItem({ title: "Rejected value privacy target" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}`, { expectedVersion: item.version, ...patch }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(400);
+    expect(cap.body).toEqual({ error, code: "todo_invalid_patch" });
+    expectNoHostileInput(cap.body);
+  });
+
+  it("keeps hostile edit content out of precondition and conflict responses", async () => {
+    const item = store.createWorkItem({ title: "Conflict privacy target" });
+    const hostileTitle = hostileInputs.join("|");
+
+    const missing = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}`, { title: hostileTitle }, operatorHeaders),
+      missing.res,
+      ctx,
+    );
+    expect(missing.body).toEqual({ error: "A current Todo version is required.", code: "todo_precondition_required" });
+    expectNoHostileInput(missing.body);
+
+    store.updateWorkItem(item.id, { title: "remote winner" }, "other-tab");
+    const stale = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}`, { title: hostileTitle, expectedVersion: item.version }, operatorHeaders),
+      stale.res,
+      ctx,
+    );
+    expect(stale.body).toEqual({
+      error: "Todo changed since it was loaded.",
+      code: "todo_version_conflict",
+      currentVersion: 2,
+    });
+    expectNoHostileInput(stale.body);
   });
 
   it("requires a positive expected version, accepts an equivalent If-Match, and rejects disagreement", async () => {

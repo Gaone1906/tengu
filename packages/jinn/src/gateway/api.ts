@@ -1691,6 +1691,16 @@ function readTodoEditPrecondition(req: HttpRequest, body: Record<string, unknown
   return { ok: true, expectedVersion: bodyVersion ?? headerVersion! };
 }
 
+type TodoEditValidationCode = 'todo_invalid_patch' | 'todo_invalid_assignee';
+
+function todoEditValidationError(
+  res: ServerResponse,
+  error: string,
+  code: TodoEditValidationCode = 'todo_invalid_patch',
+): void {
+  json(res, { error, code }, 400);
+}
+
 function readWorkItemStatusParam(url: URL): WorkItemStatus | undefined | null {
   const status = readCleanSearchParam(url, 'status');
   if (!status) return undefined;
@@ -3216,62 +3226,64 @@ export async function handleApiRequest(
       const parsed = await readJsonBody(req, res);
       if (!parsed.ok) return;
       if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
-        return badRequest(res, "request body must be a JSON object");
+        return todoEditValidationError(res, "Todo edit request must be a JSON object.");
       }
       const body = parsed.body as Record<string, unknown>;
       const precondition = readTodoEditPrecondition(req, body);
       if (!precondition.ok) return json(res, precondition.body, precondition.status);
       if (Object.prototype.hasOwnProperty.call(body, "status")) {
-        return badRequest(res, "status cannot be edited through metadata PATCH — use the guarded Todo status transition surface");
+        return todoEditValidationError(res, "Todo status must use the guarded status transition surface.");
       }
       const metadataFields = ["title", "body", "assignee", "department", "priority", "rank"] as const;
       const allowed = new Set([...metadataFields, "expectedVersion", "idempotencyKey"]);
       const unsupported = Object.keys(body).filter((key) => !allowed.has(key));
       if (unsupported.length > 0) {
-        return badRequest(res, `unsupported Todo metadata field${unsupported.length === 1 ? "" : "s"}: ${unsupported.join(", ")}`);
+        return todoEditValidationError(res, "Todo edit request contains unsupported fields.");
       }
       if (!metadataFields.some((key) => Object.prototype.hasOwnProperty.call(body, key))) {
-        return badRequest(res, "at least one metadata field is required");
+        return todoEditValidationError(res, "Todo edit request must contain at least one editable field.");
       }
 
       let idempotencyKey: string | undefined;
       if (Object.prototype.hasOwnProperty.call(body, "idempotencyKey")) {
         if (typeof body.idempotencyKey !== "string" || !body.idempotencyKey.trim()) {
-          return badRequest(res, "idempotencyKey must be a non-empty string when provided");
+          return todoEditValidationError(res, "Todo edit idempotency key must be a non-empty string.");
         }
         idempotencyKey = body.idempotencyKey.trim();
-        if (idempotencyKey.length > 256) return badRequest(res, "idempotencyKey must be at most 256 characters");
-        if (/[\x00-\x1f\x7f]/.test(idempotencyKey)) return badRequest(res, "idempotencyKey must not contain control characters");
+        if (idempotencyKey.length > 256) return todoEditValidationError(res, "Todo edit idempotency key is too long.");
+        if (/[\x00-\x1f\x7f]/.test(idempotencyKey)) return todoEditValidationError(res, "Todo edit idempotency key contains invalid characters.");
       }
 
       const patch: UpdateWorkItemInput = {};
       if (Object.prototype.hasOwnProperty.call(body, "title")) {
-        if (typeof body.title !== "string") return badRequest(res, "title must be a string");
+        if (typeof body.title !== "string") return todoEditValidationError(res, "title must be a string");
         const title = stripControlChars(body.title).trim();
-        if (!title) return badRequest(res, "title must not be empty");
-        if (title.length > 200) return badRequest(res, "title must be at most 200 characters");
+        if (!title) return todoEditValidationError(res, "title must not be empty");
+        if (title.length > 200) return todoEditValidationError(res, "title must be at most 200 characters");
         patch.title = title;
       }
       if (Object.prototype.hasOwnProperty.call(body, "body")) {
-        if (body.body !== null && typeof body.body !== "string") return badRequest(res, "body must be a string or null");
+        if (body.body !== null && typeof body.body !== "string") return todoEditValidationError(res, "body must be a string or null");
         patch.body = body.body as string | null;
       }
       if (Object.prototype.hasOwnProperty.call(body, "assignee")) {
-        if (body.assignee !== null && typeof body.assignee !== "string") return badRequest(res, "assignee must be a non-empty string or null");
+        if (body.assignee !== null && typeof body.assignee !== "string") return todoEditValidationError(res, "assignee must be a non-empty string or null");
         if (typeof body.assignee === "string") {
           const assignee = body.assignee.trim();
-          if (!assignee) return badRequest(res, "assignee must be a non-empty string or null");
-          if (!scanOrg().has(assignee)) return badRequest(res, `unknown employee "${assignee}"; check GET /api/org for valid employees`);
+          if (!assignee) return todoEditValidationError(res, "assignee must be a non-empty string or null");
+          if (!scanOrg().has(assignee)) {
+            return todoEditValidationError(res, "Unknown employee for Todo assignee. Check the organization directory.", "todo_invalid_assignee");
+          }
           patch.assignee = assignee;
         } else {
           patch.assignee = null;
         }
       }
       if (Object.prototype.hasOwnProperty.call(body, "department")) {
-        if (body.department !== null && typeof body.department !== "string") return badRequest(res, "department must be a non-empty string or null");
+        if (body.department !== null && typeof body.department !== "string") return todoEditValidationError(res, "department must be a non-empty string or null");
         if (typeof body.department === "string") {
           const department = body.department.trim();
-          if (!department) return badRequest(res, "department must be a non-empty string or null");
+          if (!department) return todoEditValidationError(res, "department must be a non-empty string or null");
           patch.department = department;
         } else {
           patch.department = null;
@@ -3279,13 +3291,13 @@ export async function handleApiRequest(
       }
       if (Object.prototype.hasOwnProperty.call(body, "priority")) {
         if (typeof body.priority !== "number" || !Number.isInteger(body.priority) || body.priority < 0 || body.priority > 3) {
-          return badRequest(res, "priority must be an integer from 0 through 3");
+          return todoEditValidationError(res, "priority must be an integer from 0 through 3");
         }
         patch.priority = body.priority;
       }
       if (Object.prototype.hasOwnProperty.call(body, "rank")) {
         if (body.rank !== null && (typeof body.rank !== "number" || !Number.isFinite(body.rank))) {
-          return badRequest(res, "rank must be a finite number or null");
+          return todoEditValidationError(res, "rank must be a finite number or null");
         }
         patch.rank = body.rank as number | null;
       }
