@@ -335,12 +335,13 @@ describe("parent callback reliability", () => {
       payload: { message: "historical failure", displayMessage: "Historical failure" },
     }).delivery;
     const database = registry.initDb();
+    const attemptedAt = Date.parse(delivery.createdAt);
     database.prepare(`
       UPDATE callback_deliveries
       SET status = 'dead_letter', attempt_count = 5, next_attempt_at = NULL,
-          last_error = 'historical failure', dead_lettered_at = 1767323045000
+          last_attempt_at = ?, last_error = 'historical failure', dead_lettered_at = ?
       WHERE id = ?
-    `).run(delivery.id);
+    `).run(attemptedAt, attemptedAt, delivery.id);
     const before = database.prepare("SELECT * FROM callback_deliveries WHERE id = ?").get(delivery.id);
     const req = Object.assign(Readable.from([]), {
       method: "POST",

@@ -73,13 +73,26 @@ function completedRun(sessionId: string, reportMode: "resume" | "silent" = "resu
   };
 }
 
-function createSession(id: string) {
+function createSession(
+  id: string,
+  metadata: {
+    source?: string;
+    connector?: string;
+    employee?: string;
+    title?: string;
+    transportMeta?: Record<string, string | number>;
+  } = {},
+) {
+  const source = metadata.source ?? "web";
   const created = registry.createSession({
     engine: "stub",
-    source: "web",
-    sourceRef: `web:${id}`,
-    sessionKey: `web:${id}`,
-    connector: "web",
+    source,
+    sourceRef: `${source}:${id}`,
+    sessionKey: `${source}:${id}`,
+    connector: metadata.connector ?? source,
+    employee: metadata.employee,
+    title: metadata.title,
+    transportMeta: metadata.transportMeta,
     prompt: id,
   });
   registry.initDb().prepare("UPDATE sessions SET id = ? WHERE id = ?").run(id, created.id);
@@ -420,8 +433,32 @@ describe("Workflow report reliability through shared Session delivery", () => {
   });
 
   it("uses byte-equivalent default-resume reports for ordinary and root/COO invoking Sessions", async () => {
-    const ordinary = createSession("ordinary-invoker");
-    const coo = createSession("root-coo-invoker");
+    const ordinary = createSession("ordinary-invoker", {
+      source: "slack",
+      connector: "slack",
+      employee: "a-lead",
+      title: "Ordinary department lead",
+      transportMeta: { rank: "senior", channel: "department-room" },
+    });
+    const coo = createSession("root-coo-invoker", {
+      source: "web",
+      connector: "web",
+      employee: "jimbo",
+      title: "Root COO",
+      transportMeta: { rank: "executive", surface: "root" },
+    });
+    expect(ordinary).toMatchObject({
+      employee: "a-lead",
+      source: "slack",
+      connector: "slack",
+      transportMeta: { rank: "senior", channel: "department-room" },
+    });
+    expect(coo).toMatchObject({
+      employee: "jimbo",
+      source: "web",
+      connector: "web",
+      transportMeta: { rank: "executive", surface: "root" },
+    });
     const definition = inlineDefinition("role-agnostic-report");
     const seenPrompts: string[] = [];
     const queue = new queueModule.SessionQueue();
@@ -450,7 +487,44 @@ describe("Workflow report reliability through shared Session delivery", () => {
       ORDER BY target_session_id
     `).all() as Array<{ targetSessionId: string; payload: string }>;
     expect(payloads).toHaveLength(2);
-    expect(JSON.parse(payloads[0].payload)).toEqual(JSON.parse(payloads[1].payload));
+    expect(payloads.map((row) => row.targetSessionId).sort()).toEqual([ordinary.id, coo.id].sort());
+    expect(payloads[0].payload).toBe(payloads[1].payload);
+  });
+
+  it("projects one correlated block to a distinct acting Session without delivering or waking it", async () => {
+    const invocation = createSession("activity-invoker", {
+      employee: "workflow-owner",
+      transportMeta: { rank: "senior" },
+    });
+    const acting = createSession("activity-actor", {
+      source: "slack",
+      connector: "slack",
+      employee: "workflow-reviewer",
+      transportMeta: { rank: "manager" },
+    });
+    const run = completedRun(invocation.id);
+    const seenPrompts: string[] = [];
+    const queue = new queueModule.SessionQueue();
+    const apiContext = makeApiContext(makeEngine(seenPrompts), queue);
+    globalThis.fetch = routeBackedFetch(apiContext) as unknown as typeof fetch;
+
+    reporting.projectWorkflowRunActivity(run, api.workflowReportingContext(apiContext), acting.id);
+    await eventually(() => expect(seenPrompts).toHaveLength(1));
+
+    const invocationBlocks = registry.getMessages(invocation.id).flatMap((message) => message.blocks ?? []);
+    const actingBlocks = registry.getMessages(acting.id).flatMap((message) => message.blocks ?? []);
+    expect(invocationBlocks).toEqual([expect.objectContaining({
+      id: "workflow-run:release-review:run-report-reliable",
+    })]);
+    expect(actingBlocks).toEqual(invocationBlocks);
+    const delivery = registry.initDb().prepare(`
+      SELECT target_session_id AS targetSessionId, queue_item_id AS queueItemId
+      FROM callback_deliveries WHERE source_kind = 'workflow-run'
+    `).get() as { targetSessionId: string; queueItemId: string };
+    expect(delivery.targetSessionId).toBe(invocation.id);
+    expect(registry.getQueueItem(delivery.queueItemId)).toMatchObject({ sessionId: invocation.id });
+    expect(registry.getMessages(invocation.id).filter((message) => message.role === "notification")).toHaveLength(1);
+    expect(registry.getMessages(acting.id).filter((message) => message.role === "notification")).toHaveLength(0);
   });
 
   it("drives success, spawn failure, retry, timeout, failure, cancellation, parking, re-entry, and terminal reports through the real driver and worker", async () => {
@@ -633,6 +707,30 @@ describe("Workflow report reliability through shared Session delivery", () => {
     ]);
 
     await eventually(() => expect(seenPrompts).toHaveLength(10));
+    const failureEvidence = [
+      ["spawn-failure:run-spawn-failure", /spawn failed: engine unavailable/i],
+      ["retry-exhaustion:run-retry-exhaustion", /interrupted.*retry exhausted: 2 attempt/i],
+      ["timeout-exhaustion:run-timeout-exhaustion", /exceeded its 1-minute budget on attempt 2/i],
+      ["step-failure:run-step-failure", /session ended in error/i],
+    ] as const;
+    for (const [sourceId, expectedDetail] of failureEvidence) {
+      const rows = registry.initDb().prepare(`
+        SELECT payload, message_id AS messageId, queue_item_id AS queueItemId
+        FROM callback_deliveries
+        WHERE source_kind = 'workflow-run' AND source_id = ?
+      `).all(sourceId) as Array<{ payload: string; messageId: string; queueItemId: string }>;
+      expect(rows).toHaveLength(1);
+      const payload = JSON.parse(rows[0].payload) as { message: string; displayMessage: string };
+      expect(payload.message).toMatch(expectedDetail);
+      expect(payload.displayMessage).toBe(payload.message);
+      expect(registry.getMessages(session.id).filter((message) => message.id === rows[0].messageId)).toEqual([
+        expect.objectContaining({ role: "notification", content: expect.stringMatching(expectedDetail) }),
+      ]);
+      expect(registry.getQueueItem(rows[0].queueItemId)).toMatchObject({
+        sessionId: session.id,
+        prompt: expect.stringMatching(expectedDetail),
+      });
+    }
     expect(registry.listDeadLetterSessionDeliveries()).toHaveLength(0);
   });
 

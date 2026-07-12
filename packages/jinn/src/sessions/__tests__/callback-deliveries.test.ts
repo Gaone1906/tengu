@@ -96,6 +96,17 @@ function installExactChildDeliverySchema(database: Database.Database): void {
   `);
 }
 
+function openRegistryOwnedExactChildDeliverySchema(): Database.Database {
+  registry.__closeDbForTest();
+  const sessionsDir = path.join(home, "sessions");
+  fs.rmSync(sessionsDir, { recursive: true, force: true });
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const database = new Database(path.join(sessionsDir, "registry.db"));
+  database.function("jinn_callback_identity", { deterministic: true }, (value: unknown) => value);
+  installExactChildDeliverySchema(database);
+  return database;
+}
+
 beforeAll(async () => {
   registry = await import("../registry.js");
   registry.initDb();
@@ -116,11 +127,9 @@ beforeEach(() => {
 
 describe("callback delivery schema migration", () => {
   it("preserves every valid lifecycle field byte-for-byte and quarantines the complete poison matrix", () => {
-    const database = new Database(":memory:");
-    database.function("jinn_callback_identity", { deterministic: true }, (value: unknown) => value);
-    installExactChildDeliverySchema(database);
+    const seedDatabase = openRegistryOwnedExactChildDeliverySchema();
     const payload = JSON.stringify({ message: "exact payload", displayMessage: "Exact payload", meta: { exact: true } });
-    const insert = database.prepare(`
+    const insert = seedDatabase.prepare(`
       INSERT INTO callback_deliveries (
         id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
         terminal_version, callback_kind, payload, status, message_id, queue_item_id,
@@ -128,14 +137,17 @@ describe("callback delivery schema migration", () => {
         created_at, accepted_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    const createdPending = Date.parse("2026-01-01T00:00:00.000Z");
+    const createdAccepted = Date.parse("2026-01-01T00:00:01.000Z");
+    const createdDead = Date.parse("2026-01-01T00:00:03.000Z");
     insert.run("valid-pending", "parent", "child-p", "attempt-p", "succeeded", 2, "parent-completion", payload,
-      "pending", null, null, 3, 1_700_000_000_500, 1_700_000_000_000, "retry later", null,
+      "pending", null, null, 3, createdPending + 1_000, createdPending + 500, "retry later", null,
       "2026-01-01T00:00:00.000Z", null);
     insert.run("valid-accepted", "parent", "child-a", "attempt-a", "succeeded", 3, "parent-completion", payload,
-      "accepted", "message-a", "queue-a", 2, null, 1_700_000_001_000, null, null,
+      "accepted", "message-a", "queue-a", 2, null, createdAccepted + 500, null, null,
       "2026-01-01T00:00:01.000Z", "2026-01-01T00:00:02.000Z");
     insert.run("valid-dead", "parent", "child-d", "attempt-d", "failed", 4, "parent-completion", payload,
-      "dead_letter", null, null, 4, null, 1_700_000_002_000, "exhausted", 1_700_000_002_500,
+      "dead_letter", null, null, 4, null, createdDead + 500, "exhausted", createdDead + 1_000,
       "2026-01-01T00:00:03.000Z", null);
 
     const poisonRows = [
@@ -147,14 +159,23 @@ describe("callback delivery schema migration", () => {
       ["poison-retry-order", "pending", null, null, 1, 5, 10, "retry", null, "2026-01-01T00:00:00.000Z", null],
       ["poison-attempt-timestamps", "pending", null, null, 0, 10, 5, null, null, "2026-01-01T00:00:00.000Z", null],
       ["poison-dead-order", "dead_letter", null, null, 4, null, 10, "exhausted", 5, "2026-01-01T00:00:00.000Z", null],
+      ["poison-attempt-missing-last", "pending", null, null, 3, null, null, null, null, "2026-01-01T00:00:00.000Z", null],
+      ["poison-pending-attempt-missing-due", "pending", null, null, 1, null, createdPending + 1_000, null, null, "2026-01-01T00:00:00.000Z", null],
+      ["poison-attempt-before-created", "pending", null, null, 1, 2_000, 1_000, "retry", null, "2026-01-01T00:00:00.000Z", null],
+      ["poison-accepted-before-attempt", "accepted", "message", "queue", 1, null, createdAccepted + 2_000, null, null, "2026-01-01T00:00:01.000Z", "2026-01-01T00:00:02.000Z"],
+      ["poison-dead-before-created", "dead_letter", null, null, 1, null, null, "exhausted", createdDead - 1, "2026-01-01T00:00:03.000Z", null],
+      ["poison-dead-without-attempt", "dead_letter", null, null, 0, null, null, "exhausted", createdPending + 1_000, "2026-01-01T00:00:00.000Z", null],
     ] as const;
     for (const [id, status, messageId, queueItemId, attemptCount, nextAttemptAt, lastAttemptAt, lastError, deadLetteredAt, createdAt, acceptedAt] of poisonRows) {
       insert.run(id, "parent", `child-${id}`, `attempt-${id}`, "failed", 1, "parent-completion", payload,
         status, messageId, queueItemId, attemptCount, nextAttemptAt, lastAttemptAt, lastError, deadLetteredAt, createdAt, acceptedAt);
     }
 
-    const validBefore = database.prepare("SELECT * FROM callback_deliveries WHERE id LIKE 'valid-%' ORDER BY id").all();
-    registry.migrateCallbackDeliveriesSchema(database);
+    const validBefore = seedDatabase.prepare("SELECT * FROM callback_deliveries WHERE id LIKE 'valid-%' ORDER BY id").all();
+    seedDatabase.close();
+    const database = registry.initDb();
+    const databaseFile = (database.pragma("database_list") as Array<{ file: string }>)[0]?.file;
+    expect(databaseFile).toBe(path.join(fs.realpathSync(home), "sessions", "registry.db"));
 
     const validAfter = database.prepare(`
       SELECT id, target_session_id AS parent_session_id, source_id AS child_session_id,
@@ -166,11 +187,8 @@ describe("callback delivery schema migration", () => {
     `).all();
     expect(validAfter).toEqual(validBefore);
 
-    const quarantined = database.prepare(`
-      SELECT id, status, delivery_kind AS deliveryKind, last_error AS lastError,
-        dead_lettered_at AS deadLetteredAt
-      FROM callback_deliveries WHERE id LIKE 'poison-%' ORDER BY id
-    `).all() as Array<{ id: string; status: string; deliveryKind: string; lastError: string | null; deadLetteredAt: number | null }>;
+    const quarantined = registry.listDeadLetterSessionDeliveries()
+      .filter((row) => row.id.startsWith("poison-"));
     expect(quarantined).toHaveLength(poisonRows.length);
     expect(quarantined).toEqual(expect.arrayContaining(poisonRows.map(([id]) => expect.objectContaining({
       id,
@@ -178,9 +196,25 @@ describe("callback delivery schema migration", () => {
       deliveryKind: "quarantined",
       lastError: expect.stringContaining("migration quarantine:"),
       deadLetteredAt: expect.any(Number),
+      payload: null,
+      payloadError: expect.stringMatching(/quarantined.*migration quarantine:/i),
     }))));
+    const chronologyDiagnostics = new Map<string, RegExp>([
+      ["poison-attempt-missing-last", /attempt without lastAttemptAt/i],
+      ["poison-pending-attempt-missing-due", /pending attempt without nextAttemptAt/i],
+      ["poison-attempt-before-created", /lastAttemptAt before createdAt/i],
+      ["poison-accepted-before-attempt", /acceptedAt before lastAttemptAt/i],
+      ["poison-dead-before-created", /deadLetteredAt before createdAt/i],
+    ]);
+    for (const [id, diagnostic] of chronologyDiagnostics) {
+      const row = quarantined.find((candidate) => candidate.id === id)!;
+      expect(row.lastError).toMatch(diagnostic);
+      expect(row.payloadError).toMatch(diagnostic);
+    }
     for (const row of quarantined) {
-      expect(() => registry.requeueDeadLetterSessionDelivery(row.id)).toThrow(/not found|quarantined|invalid/i);
+      const before = database.prepare("SELECT * FROM callback_deliveries WHERE id = ?").get(row.id);
+      expect(() => registry.requeueDeadLetterSessionDelivery(row.id)).toThrow(/is quarantined/i);
+      expect(database.prepare("SELECT * FROM callback_deliveries WHERE id = ?").get(row.id)).toEqual(before);
     }
   });
 
@@ -197,6 +231,20 @@ describe("callback delivery schema migration", () => {
           '{"message":"one","displayMessage":"one"}', 'pending', '2026-01-01T00:00:00.000Z'),
         ('row-2', 'parent', 'child-2', 'attempt-2', 'succeeded', 1, 'parent-completion',
           '{"message":"two","displayMessage":"two"}', 'pending', '2026-01-01T00:00:01.000Z');
+      UPDATE callback_deliveries
+      SET attempt_count = 3
+      WHERE id = 'row-2';
+      INSERT INTO callback_deliveries (
+        id, parent_session_id, child_session_id, attempt_token, terminal_outcome,
+        terminal_version, callback_kind, payload, status, message_id, queue_item_id,
+        attempt_count, last_attempt_at, last_error, dead_lettered_at, created_at, accepted_at
+      ) VALUES
+        ('row-3', 'parent', 'child-3', 'attempt-3', 'failed', 1, 'parent-completion',
+          '{"message":"three","displayMessage":"three"}', 'accepted', 'message-3', 'queue-3',
+          1, 1767225603000, NULL, NULL, '2026-01-01T00:00:01.000Z', '2026-01-01T00:00:02.000Z'),
+        ('row-4', 'parent', 'child-4', 'attempt-4', 'failed', 1, 'parent-completion',
+          '{"message":"four","displayMessage":"four"}', 'dead_letter', NULL, NULL,
+          1, NULL, 'exhausted', 1767225599999, '2026-01-01T00:00:03.000Z', NULL);
     `);
     const beforeSql = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'callback_deliveries'").get();
     const beforeRows = database.prepare("SELECT * FROM callback_deliveries ORDER BY id").all();
@@ -674,67 +722,70 @@ describe("callback delivery identity", () => {
 describe("callback delivery retry lifecycle", () => {
   it("leases one due attempt, persists backoff, and dead-letters at bounded exhaustion", () => {
     const delivery = registry.claimSessionDelivery(callbackInput()).delivery;
+    const base = Date.parse(delivery.createdAt);
 
-    expect(registry.claimSessionDeliveryAttempt(delivery.id, 1_000, 500)).toMatchObject({
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, base, 500)).toMatchObject({
       attemptCount: 1,
-      lastAttemptAt: 1_000,
-      nextAttemptAt: 1_500,
+      lastAttemptAt: base,
+      nextAttemptAt: base + 500,
     });
-    expect(registry.claimSessionDeliveryAttempt(delivery.id, 1_000, 500)).toBeUndefined();
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, base, 500)).toBeUndefined();
     expect(registry.recordSessionDeliveryFailure(delivery.id, "timeout one", {
-      now: 1_000,
-      nextAttemptAt: 2_000,
+      now: base,
+      nextAttemptAt: base + 1_000,
       maxAttempts: 3,
-    })).toMatchObject({ status: "pending", attemptCount: 1, nextAttemptAt: 2_000, lastError: "timeout one" });
+    })).toMatchObject({ status: "pending", attemptCount: 1, nextAttemptAt: base + 1_000, lastError: "timeout one" });
 
-    expect(registry.claimSessionDeliveryAttempt(delivery.id, 2_000, 500)).toMatchObject({ attemptCount: 2 });
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, base + 1_000, 500)).toMatchObject({ attemptCount: 2 });
     registry.recordSessionDeliveryFailure(delivery.id, "timeout two", {
-      now: 2_000,
-      nextAttemptAt: 4_000,
+      now: base + 1_000,
+      nextAttemptAt: base + 3_000,
       maxAttempts: 3,
     });
-    expect(registry.claimSessionDeliveryAttempt(delivery.id, 4_000, 500)).toMatchObject({ attemptCount: 3 });
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, base + 3_000, 500)).toMatchObject({ attemptCount: 3 });
     expect(registry.recordSessionDeliveryFailure(delivery.id, "timeout three", {
-      now: 4_000,
-      nextAttemptAt: 8_000,
+      now: base + 3_000,
+      nextAttemptAt: base + 7_000,
       maxAttempts: 3,
     })).toMatchObject({
       status: "dead_letter",
       attemptCount: 3,
       lastError: "timeout three",
-      deadLetteredAt: 4_000,
+      deadLetteredAt: base + 3_000,
     });
-    expect(registry.claimSessionDeliveryAttempt(delivery.id, 8_000, 500)).toBeUndefined();
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, base + 7_000, 500)).toBeUndefined();
   });
 
   it("never resets or releases an accepted receipt after a late failure", () => {
     const parent = createSession("parent-1");
     createSession("child-1", parent.id);
     const delivery = registry.claimSessionDelivery(callbackInput()).delivery;
-    registry.claimSessionDeliveryAttempt(delivery.id, 1_000, 500);
+    const base = Date.parse(delivery.createdAt);
+    registry.claimSessionDeliveryAttempt(delivery.id, base, 500);
     registry.acceptSessionDelivery(delivery.id, parent.id, parent.sessionKey);
 
     const afterFailure = registry.recordSessionDeliveryFailure(delivery.id, "response lost", {
-      now: 1_100,
-      nextAttemptAt: 2_000,
+      now: base + 100,
+      nextAttemptAt: base + 1_000,
       maxAttempts: 3,
     });
 
     expect(afterFailure).toMatchObject({ status: "accepted", attemptCount: 1 });
-    expect(registry.claimSessionDeliveryAttempt(delivery.id, 2_000, 500)).toBeUndefined();
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, base + 1_000, 500)).toBeUndefined();
   });
 
   it("lists an exhausted receipt and atomically requeues the same durable id after recovery", () => {
     const parent = createSession("parent-1");
     createSession("child-1", parent.id);
     const delivery = registry.claimSessionDelivery(callbackInput()).delivery;
+    const base = Date.parse(delivery.createdAt) + 1_000;
 
     for (let attempt = 1; attempt <= 4; attempt++) {
-      expect(registry.claimSessionDeliveryAttempt(delivery.id, attempt * 1_000, 100))
+      expect(registry.claimSessionDeliveryAttempt(delivery.id, base + attempt * 1_000, 100))
         .toMatchObject({ id: delivery.id, attemptCount: attempt });
       registry.recordSessionDeliveryFailure(delivery.id, `outage ${attempt}`, {
-        now: attempt * 1_000,
-        nextAttemptAt: (attempt + 1) * 1_000,
+        now: base + attempt * 1_000,
+        nextAttemptAt: base + (attempt + 1) * 1_000,
         maxAttempts: 4,
       });
     }
@@ -761,7 +812,7 @@ describe("callback delivery retry lifecycle", () => {
       queueItemId: null,
       acceptedAt: null,
     });
-    expect(registry.claimSessionDeliveryAttempt(delivery.id, 5_000, 100))
+    expect(registry.claimSessionDeliveryAttempt(delivery.id, Date.now(), 100))
       .toMatchObject({ id: delivery.id, attemptCount: 1 });
     const accepted = registry.acceptSessionDelivery(delivery.id, parent.id, parent.sessionKey);
     expect(accepted).toMatchObject({ accepted: true, delivery: { id: delivery.id, status: "accepted" } });

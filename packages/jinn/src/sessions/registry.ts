@@ -2949,11 +2949,23 @@ function sessionDeliveryFromRow(row: SessionDeliveryRow): SessionDelivery {
   if (acceptedAtMs !== null && acceptedAtMs < createdAtMs) {
     throw new Error(`Callback delivery ${row.id} has acceptedAt before createdAt`);
   }
+  if (row.deadLetteredAt !== null && row.deadLetteredAt < createdAtMs) {
+    throw new Error(`Callback delivery ${row.id} has deadLetteredAt before createdAt`);
+  }
   if (row.lastError !== null && row.lastError.trim() === '') {
     throw new Error(`Callback delivery ${row.id} has an empty lastError`);
   }
   if (row.attemptCount === 0 && (row.nextAttemptAt !== null || row.lastAttemptAt !== null || row.lastError !== null)) {
     throw new Error(`Callback delivery ${row.id} has attempt state without an attempt`);
+  }
+  if (row.attemptCount > 0 && row.lastAttemptAt === null) {
+    throw new Error(`Callback delivery ${row.id} has an attempt without lastAttemptAt`);
+  }
+  if (row.status === 'pending' && row.attemptCount > 0 && row.nextAttemptAt === null) {
+    throw new Error(`Callback delivery ${row.id} has a pending attempt without nextAttemptAt`);
+  }
+  if (row.lastAttemptAt !== null && row.lastAttemptAt < createdAtMs) {
+    throw new Error(`Callback delivery ${row.id} has lastAttemptAt before createdAt`);
   }
   if (row.nextAttemptAt !== null && row.lastAttemptAt === null) {
     throw new Error(`Callback delivery ${row.id} has nextAttemptAt without lastAttemptAt`);
@@ -2971,6 +2983,9 @@ function sessionDeliveryFromRow(row: SessionDeliveryRow): SessionDelivery {
       || row.deadLetteredAt !== null
     ) {
       throw new Error(`Callback delivery ${row.id} has an invalid accepted lifecycle`);
+    }
+    if (acceptedAtMs !== null && row.lastAttemptAt !== null && acceptedAtMs < row.lastAttemptAt) {
+      throw new Error(`Callback delivery ${row.id} has acceptedAt before lastAttemptAt`);
     }
   } else if (row.messageId !== null || row.queueItemId !== null || row.acceptedAt !== null) {
     throw new Error(`Callback delivery ${row.id} has callback acceptance state before acceptance`);

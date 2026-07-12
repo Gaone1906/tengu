@@ -170,19 +170,26 @@ const callers = [
 ] as const;
 
 describe('uniform workflow operation authority', () => {
-  it('uses stable employee/operator idempotency namespaces rather than session credentials', async () => {
+  it('keeps principal namespaces stable while binding replay to the invoking Session', async () => {
     seedWorkflow('stable-principal-run', { owner: 'owner', createdBy: 'owner', department: 'platform' });
     const body = { input: { ticket: 'ABC-42' }, idempotencyKey: 'same-key' };
+    const ownerSession = verifiedHeaders('owner');
 
     const first = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
-      headers: verifiedHeaders('owner'), body,
+      headers: ownerSession, body,
     });
+    const sameSession = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
+      headers: ownerSession, body,
+    });
+    expect(first.status).toBe(201);
+    expect(sameSession.status).toBe(200);
+    expect((sameSession.body as { runId: string }).runId).toBe((first.body as { runId: string }).runId);
+
     const anotherSession = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
       headers: verifiedHeaders('owner'), body,
     });
-    expect(first.status).toBe(201);
-    expect(anotherSession.status).toBe(200);
-    expect((anotherSession.body as { runId: string }).runId).toBe((first.body as { runId: string }).runId);
+    expect(anotherSession.status).toBe(409);
+    expect(anotherSession.body).toMatchObject({ code: 'workflow-run-idempotency-conflict' });
 
     const operator = await request('POST', '/api/workflow-definitions/stable-principal-run/run', {
       headers: { authorization: 'Bearer gateway-secret' }, body,

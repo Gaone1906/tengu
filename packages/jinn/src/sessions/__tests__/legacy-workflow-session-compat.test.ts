@@ -119,7 +119,7 @@ describe("legacy Workflow run Session compatibility", () => {
           'legacy-delivery', 'legacy-run-session', 'session', 'legacy-phase-session', 'attempt-old',
           'succeeded', 1, 'parent-completion',
           '{"message":"Historical pending callback","displayMessage":"Historical pending callback"}',
-          'pending', NULL, NULL, 1, 1767323045000, 1767323044000, 'historical retry', NULL,
+          'pending', NULL, NULL, 1, 1767323046000, 1767323045000, 'historical retry', NULL,
           '2026-01-02T03:04:05.000Z', NULL
         ),
         (

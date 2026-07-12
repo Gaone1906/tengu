@@ -191,10 +191,11 @@ describe("control-plane writes require operator authority", () => {
       deliveryKind: "parent-completion",
       payload: { message: "recover callback", displayMessage: "Worker failed" },
     }).delivery;
-    registry.claimSessionDeliveryAttempt(delivery.id, 1_000, 100);
+    const attemptedAt = Date.parse(delivery.createdAt);
+    registry.claimSessionDeliveryAttempt(delivery.id, attemptedAt, 100);
     registry.recordSessionDeliveryFailure(delivery.id, "temporary outage", {
-      now: 1_000,
-      nextAttemptAt: 2_000,
+      now: attemptedAt,
+      nextAttemptAt: attemptedAt + 1_000,
       maxAttempts: 1,
     });
 
