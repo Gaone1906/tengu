@@ -91,6 +91,13 @@ function decodeCursor(raw: string, expectedHash: string, secret: Buffer): Cursor
     if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error("invalid token");
     const payloadBytes = Buffer.from(parts[0], "base64url");
     const supplied = Buffer.from(parts[1], "base64url");
+    // Node's decoder accepts non-canonical aliases whose unused trailing bits
+    // decode to the same bytes. Cursors are signed strings, so reject every
+    // alternate spelling instead of allowing a one-byte textual mutation to
+    // authenticate as the original token.
+    if (payloadBytes.toString("base64url") !== parts[0] || supplied.toString("base64url") !== parts[1]) {
+      throw new Error("non-canonical token");
+    }
     const expected = createHmac("sha256", secret).update(payloadBytes).digest();
     if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new Error("invalid signature");
     const parsed = JSON.parse(payloadBytes.toString("utf8")) as Partial<CursorPayload>;

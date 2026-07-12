@@ -54,6 +54,7 @@ const compact: WorkItemCompactWire = {
 const detail: WorkItemDetailWire = {
   workItem: {
     ...compact,
+    version: 1,
     body: null,
     priority: 0,
     acceptance: null,
@@ -113,7 +114,7 @@ describe("Todo detail navigation and draft recovery", () => {
     searchWorkItems.mockReset()
     getWorkItem.mockReset().mockResolvedValue(detail)
     getOrg.mockReset().mockResolvedValue(org)
-    updateWorkItem.mockReset().mockResolvedValue(detail)
+    updateWorkItem.mockReset().mockResolvedValue({ workItem: detail.workItem, replayed: false })
     listWorkItemSessions.mockReset().mockResolvedValue([])
   })
   afterEach(() => Object.defineProperty(window, "matchMedia", { configurable: true, value: originalMatchMedia }))

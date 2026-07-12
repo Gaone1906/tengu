@@ -118,7 +118,7 @@ pnpm build
 ```bash
 git diff --check main@{1}..main
 git log main@{1}..main --format=%B | grep -i 'Co-Authored-By' && exit 1 || true
-git diff main@{1}..main | grep -iE 'hristo|jimmyenglish|pravko|movekit|sqlnoir|homy|spycam|asomaniac|kiwilabs|tucker@|/Users/' && exit 1 || true
+pnpm --filter jinn-cli exec vitest run src/shared/__tests__/privacy-guard.test.ts
 ```
 
 ### Task 4: Deploy and clean
