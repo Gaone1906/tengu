@@ -7,6 +7,7 @@ import {
 } from "../todo-private-state"
 
 const JOURNAL_KEY = "jinn:todo-draft-journal:v2"
+const SALT_KEY = "jinn:todo-tab-salt:v1"
 const TODO_ID = "wi_private_journal_42"
 const UUID = "123e4567-e89b-42d3-a456-426614174000"
 const patch = { title: "Operator-authored wi_reference stays", assignee: null }
@@ -511,7 +512,7 @@ describe("Todo private CAS journal", () => {
       const setItem = vi.spyOn(Storage.prototype, "setItem")
       const removeItem = vi.spyOn(Storage.prototype, "removeItem")
 
-      expect(transitionTodoJournal(TODO_ID, activeRequest(), next)).toBe(true)
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, next)).toBe(true)
 
       expect(loadTodoJournal(TODO_ID)).toEqual(next)
       expect(setItem).toHaveBeenCalledTimes(1)
@@ -529,7 +530,7 @@ describe("Todo private CAS journal", () => {
       const setItem = vi.spyOn(Storage.prototype, "setItem")
       const removeItem = vi.spyOn(Storage.prototype, "removeItem")
 
-      expect(transitionTodoJournal(TODO_ID, activeRequest(), next)).toBe(true)
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, next)).toBe(true)
 
       expect(loadTodoJournal(TODO_ID)).toEqual(next)
       expect(setItem).toHaveBeenCalledTimes(1)
@@ -541,7 +542,7 @@ describe("Todo private CAS journal", () => {
       const setItem = vi.spyOn(Storage.prototype, "setItem")
       const removeItem = vi.spyOn(Storage.prototype, "removeItem")
 
-      expect(transitionTodoJournal(TODO_ID, activeRequest(), null)).toBe(true)
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, null)).toBe(true)
 
       expect(loadTodoJournal(TODO_ID)).toBeNull()
       expect(setItem).not.toHaveBeenCalled()
@@ -568,7 +569,7 @@ describe("Todo private CAS journal", () => {
         },
       }
 
-      expect(transitionTodoJournal(TODO_ID, activeRequest(), next)).toBe(true)
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, next)).toBe(true)
       expect(loadTodoJournal(TODO_ID)).toEqual(next)
     })
 
@@ -583,7 +584,7 @@ describe("Todo private CAS journal", () => {
       const setItem = vi.spyOn(Storage.prototype, "setItem")
       const removeItem = vi.spyOn(Storage.prototype, "removeItem")
 
-      expect(transitionTodoJournal(TODO_ID, { ...activeRequest(), ...mismatch }, null)).toBe(false)
+      expect(transitionTodoJournal(TODO_ID, { ...activeRequest(), ...mismatch }, 2, null)).toBe(false)
 
       expect(loadTodoJournal(TODO_ID)).toEqual(current)
       expect(setItem).not.toHaveBeenCalled()
@@ -596,7 +597,7 @@ describe("Todo private CAS journal", () => {
       const setItem = vi.spyOn(Storage.prototype, "setItem")
       const removeItem = vi.spyOn(Storage.prototype, "removeItem")
 
-      expect(transitionTodoJournal(TODO_ID, null as never, null)).toBe(false)
+      expect(transitionTodoJournal(TODO_ID, null as never, 2, null)).toBe(false)
 
       expect(loadTodoJournal(TODO_ID)).toEqual(current)
       expect(setItem).not.toHaveBeenCalled()
@@ -613,11 +614,110 @@ describe("Todo private CAS journal", () => {
       persistTodoJournal(TODO_ID, currentWithNewerIntent() as never)
       const setItem = vi.spyOn(Storage.prototype, "setItem")
 
-      expect(transitionTodoJournal(TODO_ID, activeRequest(), null)).toBe(true)
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, null)).toBe(true)
 
       expect(loadTodoJournal("wi_unrelated")?.patch).toEqual({ title: "Other desired" })
       expect(setItem).toHaveBeenCalledTimes(1)
       expect(sessionStorage.getItem(JOURNAL_KEY)).not.toContain(TODO_ID)
     })
+
+    it.each([
+      ["missing salt", undefined],
+      ["invalid salt", "short"],
+    ])("performs zero writes when the tab has %s", (_label, salt) => {
+      sessionStorage.clear()
+      if (salt !== undefined) sessionStorage.setItem(SALT_KEY, salt)
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, null)).toBe(false)
+
+      expect(setItem).not.toHaveBeenCalled()
+      expect(removeItem).not.toHaveBeenCalled()
+    })
+
+    it("performs zero writes when valid salted storage has no matching journal", () => {
+      todoPrivateRef(TODO_ID)
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, null)).toBe(false)
+
+      expect(setItem).not.toHaveBeenCalled()
+      expect(removeItem).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ["replacement", {
+        revision: 2,
+        patch: { title: "Stale A2" },
+        baseline: { title: "Sent A1" },
+        baselineVersion: 8,
+      }],
+      ["removal", null],
+    ] as const)("blocks stale desired revision A2 %s after A3 with zero writes", (_label, next) => {
+      const current = {
+        revision: 3,
+        patch: { title: "Desired A3" },
+        baseline: { title: "Original" },
+        baselineVersion: 7,
+        request: activeRequest(),
+      }
+      persistTodoJournal(TODO_ID, current as never)
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, next)).toBe(false)
+
+      expect(loadTodoJournal(TODO_ID)).toEqual(current)
+      expect(setItem).not.toHaveBeenCalled()
+      expect(removeItem).not.toHaveBeenCalled()
+    })
+
+    it("rejects a replacement revision lower than the matching current revision", () => {
+      const current = {
+        revision: 3,
+        patch: { title: "Desired A3" },
+        baseline: { title: "Original" },
+        baselineVersion: 7,
+        request: activeRequest(),
+      }
+      const lower = {
+        revision: 2,
+        patch: { title: "Older A2" },
+        baseline: { title: "Sent A1" },
+        baselineVersion: 8,
+      }
+      persistTodoJournal(TODO_ID, current as never)
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 3, lower)).toBe(false)
+
+      expect(loadTodoJournal(TODO_ID)).toEqual(current)
+      expect(setItem).not.toHaveBeenCalled()
+      expect(removeItem).not.toHaveBeenCalled()
+    })
+
+    it.each([undefined, "2026-07-12T08:00:00.000Z", 0, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+      "rejects post-response baseline version %s with zero writes",
+      (baselineVersion) => {
+        const current = currentWithNewerIntent()
+        persistTodoJournal(TODO_ID, current as never)
+        const setItem = vi.spyOn(Storage.prototype, "setItem")
+        const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+
+        expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, {
+          revision: 2,
+          patch: { title: "Desired A2" },
+          baseline: { title: "Sent A1" },
+          baselineVersion,
+        } as never)).toBe(false)
+
+        expect(loadTodoJournal(TODO_ID)).toEqual(current)
+        expect(setItem).not.toHaveBeenCalled()
+        expect(removeItem).not.toHaveBeenCalled()
+      },
+    )
   })
 })

@@ -5,6 +5,7 @@ const SALT_KEY = "jinn:todo-tab-salt:v1"
 const JOURNAL_KEY = "jinn:todo-draft-journal:v2"
 const JOURNAL_TTL_MS = 24 * 60 * 60 * 1_000
 const MAX_JOURNALS = 50
+const SALT_PATTERN = /^[a-z0-9-]{12,}$/i
 
 export type TodoDraftField = keyof TodoEditableDraft
 
@@ -52,7 +53,7 @@ function tabSalt(): string {
   const store = storage()
   if (!store) return "ephemeral"
   const existing = store.getItem(SALT_KEY)
-  if (existing && /^[a-z0-9-]{12,}$/i.test(existing)) return existing
+  if (existing && SALT_PATTERN.test(existing)) return existing
   const next = randomSalt()
   try { store.setItem(SALT_KEY, next) } catch { /* in-memory editing still works */ }
   return next
@@ -75,6 +76,17 @@ function digest(value: string): string {
  * user-facing or canonical JIN-N identifier. */
 export function todoPrivateRef(id: string): string {
   return digest(`${tabSalt()}\u0000${id}`)
+}
+
+function existingTodoPrivateRef(id: string): string | null {
+  const store = storage()
+  if (!store) return null
+  try {
+    const salt = store.getItem(SALT_KEY)
+    return salt && SALT_PATTERN.test(salt) ? digest(`${salt}\u0000${id}`) : null
+  } catch {
+    return null
+  }
 }
 
 const FIELDS = new Set<TodoDraftField>(["title", "body", "assignee", "department", "priority"])
@@ -163,6 +175,10 @@ function validPayload(value: unknown): value is TodoJournalPayload {
   return validRequest(value.request, value.revision, value.patch, value.baseline)
     && isPositiveSafeInteger(value.baselineVersion)
     && value.baselineVersion === value.request.expectedVersion
+}
+
+function validTransitionPayload(value: unknown): value is TodoJournalPayload {
+  return validPayload(value) && isPositiveSafeInteger(value.baselineVersion)
 }
 
 const SAFE_REQUEST_TRANSITIONS: Readonly<Record<TodoJournalRequestState, ReadonlySet<TodoJournalRequestState>>> = {
@@ -305,20 +321,28 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
 export function transitionTodoJournal(
   id: string,
   expectedActiveRequest: TodoJournalRequestFingerprint,
+  expectedCurrentRevision: number,
   nextPayload: TodoJournalPayload | null,
 ): boolean {
   const store = storage()
-  if (!store || !validRequestFingerprint(expectedActiveRequest)) return false
-  if (nextPayload !== null && !validPayload(nextPayload)) return false
+  if (!store
+    || !validRequestFingerprint(expectedActiveRequest)
+    || !isPositiveSafeInteger(expectedCurrentRevision)) return false
+  if (nextPayload !== null
+    && (!validTransitionPayload(nextPayload) || nextPayload.revision < expectedCurrentRevision)) return false
   try {
+    const ref = existingTodoPrivateRef(id)
+    if (!ref) return false
     const now = Date.now()
     const parsed = parseEnvelopes()
     const journals = Object.fromEntries(
       Object.entries(parsed).filter(([ref, entry]) => validEnvelope(ref, entry, now)),
     ) as Record<string, JournalEnvelope>
-    const ref = todoPrivateRef(id)
-    const activeRequest = journals[ref]?.payload.request
-    if (!activeRequest || !sameRequestFingerprint(activeRequest, expectedActiveRequest)) return false
+    const currentPayload = journals[ref]?.payload
+    const activeRequest = currentPayload?.request
+    if (currentPayload?.revision !== expectedCurrentRevision
+      || !activeRequest
+      || !sameRequestFingerprint(activeRequest, expectedActiveRequest)) return false
 
     delete journals[ref]
     if (nextPayload !== null) {
