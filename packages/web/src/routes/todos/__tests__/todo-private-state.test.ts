@@ -3,6 +3,7 @@ import {
   loadTodoJournal,
   persistTodoJournal,
   todoPrivateRef,
+  transitionTodoJournal,
 } from "../todo-private-state"
 
 const JOURNAL_KEY = "jinn:todo-draft-journal:v2"
@@ -51,6 +52,7 @@ function writeEnvelope(id: string, storedPayload: Record<string, unknown>): void
 
 describe("Todo private CAS journal", () => {
   beforeEach(() => {
+    vi.restoreAllMocks()
     vi.useRealTimers()
     sessionStorage.clear()
   })
@@ -468,5 +470,154 @@ describe("Todo private CAS journal", () => {
     expect(loadTodoJournal("wi_private_cap_0")).toBeNull()
     expect(sessionStorage.getItem(JOURNAL_KEY)).not.toContain("wi_private_cap_50")
     expect(sessionStorage.getItem(JOURNAL_KEY)).toContain("Draft 50")
+  })
+
+  describe("atomic active-request retirement", () => {
+    function activeRequest() {
+      return {
+        revision: 1,
+        patch: { title: "Sent A1" },
+        expectedVersion: 7,
+        idempotencyKey: UUID,
+        state: "dispatched" as const,
+      }
+    }
+
+    function currentWithNewerIntent() {
+      return {
+        revision: 2,
+        patch: { title: "Desired A2", priority: 2 },
+        baseline: { title: "Original", priority: 1 },
+        baselineVersion: 7,
+        request: activeRequest(),
+      }
+    }
+
+    it("replaces acknowledged A1 with prepared A2 in exactly one storage write", () => {
+      persistTodoJournal(TODO_ID, currentWithNewerIntent() as never)
+      const next = {
+        revision: 2,
+        patch: { title: "Desired A2", priority: 2 },
+        baseline: { title: "Sent A1", priority: 1 },
+        baselineVersion: 8,
+        request: {
+          revision: 2,
+          patch: { title: "Desired A2", priority: 2 },
+          expectedVersion: 8,
+          idempotencyKey: "987e6543-e21b-42d3-a456-426614174999",
+          state: "prepared" as const,
+        },
+      }
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), next)).toBe(true)
+
+      expect(loadTodoJournal(TODO_ID)).toEqual(next)
+      expect(setItem).toHaveBeenCalledTimes(1)
+      expect(removeItem).not.toHaveBeenCalled()
+    })
+
+    it("retires acknowledged A1 to request-less dirty intent in exactly one storage write", () => {
+      persistTodoJournal(TODO_ID, currentWithNewerIntent() as never)
+      const next = {
+        revision: 2,
+        patch: { title: "Desired A2" },
+        baseline: { title: "Sent A1" },
+        baselineVersion: 8,
+      }
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), next)).toBe(true)
+
+      expect(loadTodoJournal(TODO_ID)).toEqual(next)
+      expect(setItem).toHaveBeenCalledTimes(1)
+      expect(removeItem).not.toHaveBeenCalled()
+    })
+
+    it("retires acknowledged A1 to clean state with one removal", () => {
+      persistTodoJournal(TODO_ID, currentWithNewerIntent() as never)
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), null)).toBe(true)
+
+      expect(loadTodoJournal(TODO_ID)).toBeNull()
+      expect(setItem).not.toHaveBeenCalled()
+      expect(removeItem).toHaveBeenCalledTimes(1)
+    })
+
+    it.each([
+      ["rebase", "Rebased A2"],
+      ["overwrite", "Overwrite A2"],
+    ])("replaces conflicted A1 with explicit %s A2", (_resolution, resolvedTitle) => {
+      const conflicted = { ...currentWithNewerIntent(), request: { ...activeRequest(), state: "conflict" as const } }
+      persistTodoJournal(TODO_ID, conflicted as never)
+      const next = {
+        revision: 3,
+        patch: { title: resolvedTitle },
+        baseline: { title: "Server current" },
+        baselineVersion: 9,
+        request: {
+          revision: 3,
+          patch: { title: resolvedTitle },
+          expectedVersion: 9,
+          idempotencyKey: "987e6543-e21b-42d3-a456-426614174999",
+          state: "prepared" as const,
+        },
+      }
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), next)).toBe(true)
+      expect(loadTodoJournal(TODO_ID)).toEqual(next)
+    })
+
+    it.each([
+      ["revision", { revision: 2 }],
+      ["sent patch", { patch: { title: "Different" } }],
+      ["expected version", { expectedVersion: 8 }],
+      ["idempotency key", { idempotencyKey: "987e6543-e21b-42d3-a456-426614174999" }],
+    ] as const)("blocks a stale or mismatched active-request %s with zero writes", (_label, mismatch) => {
+      const current = currentWithNewerIntent()
+      persistTodoJournal(TODO_ID, current as never)
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+
+      expect(transitionTodoJournal(TODO_ID, { ...activeRequest(), ...mismatch }, null)).toBe(false)
+
+      expect(loadTodoJournal(TODO_ID)).toEqual(current)
+      expect(setItem).not.toHaveBeenCalled()
+      expect(removeItem).not.toHaveBeenCalled()
+    })
+
+    it("rejects a malformed expected fingerprint with zero writes", () => {
+      const current = currentWithNewerIntent()
+      persistTodoJournal(TODO_ID, current as never)
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+
+      expect(transitionTodoJournal(TODO_ID, null as never, null)).toBe(false)
+
+      expect(loadTodoJournal(TODO_ID)).toEqual(current)
+      expect(setItem).not.toHaveBeenCalled()
+      expect(removeItem).not.toHaveBeenCalled()
+    })
+
+    it("retains unrelated journals while retiring A1 in one mutation", () => {
+      persistTodoJournal("wi_unrelated", {
+        revision: 1,
+        patch: { title: "Other desired" },
+        baseline: { title: "Other original" },
+        baselineVersion: 3,
+      })
+      persistTodoJournal(TODO_ID, currentWithNewerIntent() as never)
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), null)).toBe(true)
+
+      expect(loadTodoJournal("wi_unrelated")?.patch).toEqual({ title: "Other desired" })
+      expect(setItem).toHaveBeenCalledTimes(1)
+      expect(sessionStorage.getItem(JOURNAL_KEY)).not.toContain(TODO_ID)
+    })
   })
 })

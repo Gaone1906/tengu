@@ -105,6 +105,11 @@ const SAFE_TODO_ERROR_BY_CODE: Readonly<Record<string, string>> = {
   WORK_ITEM_ESCALATED: "This Todo is escalated. Use the human operator surface for this transition.",
   WORK_ITEM_APPROVAL_PENDING: "This Todo is awaiting approval. Resolve the approval before changing its status.",
   WORK_ITEM_VERSION_CONFLICT: "This Todo changed elsewhere. Reload it before saving again.",
+  TODO_VERSION_CONFLICT: "This Todo changed elsewhere. Reload it before saving again.",
+  TODO_IDEMPOTENCY_CONFLICT: "This edit request conflicts with an earlier request. Retry it as a new edit.",
+  TODO_PRECONDITION_REQUIRED: "This Todo requires a current version before it can be saved. Reload it and try again.",
+  TODO_INVALID_VERSION: "This Todo version is invalid. Reload it and try again.",
+  TODO_INVALID_PATCH: "This Todo edit is invalid. Review the changed fields and try again.",
   WORK_ITEM_NOT_FOUND: "This Todo no longer exists.",
 }
 
@@ -116,8 +121,6 @@ export function isTodoVersionConflictError(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false
   return normalizedTodoErrorCode(error) === "TODO_VERSION_CONFLICT"
     || normalizedTodoErrorCode(error) === "WORK_ITEM_VERSION_CONFLICT"
-    || error.status === 409
-    || error.status === 412
 }
 
 /** Closed safe-copy mapping. Raw backend diagnostics stay on ApiError for

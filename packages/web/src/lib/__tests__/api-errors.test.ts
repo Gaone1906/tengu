@@ -80,6 +80,22 @@ describe("typed API errors", () => {
     },
   )
 
+  it.each([undefined, "false", 0, 1, null])(
+    "rejects malformed replay metadata %s",
+    async (replayed) => {
+      authFetch.mockResolvedValue(new Response(JSON.stringify({
+        workItem: { id: "private-id", title: "Desired", version: 8 },
+        replayed,
+      }), { status: 200, headers: { "Content-Type": "application/json" } }))
+
+      await expect(api.updateWorkItem("private-id", {
+        patch: { title: "Desired" },
+        expectedVersion: 7,
+        idempotencyKey: "crypto-key",
+      })).rejects.toThrow("invalid replay metadata")
+    },
+  )
+
   it("rethrows conditional edit failures as a structured Todo API error", async () => {
     authFetch.mockResolvedValue(new Response(JSON.stringify({
       code: "WORK_ITEM_VERSION_CONFLICT",

@@ -53,7 +53,7 @@ export function newTodoEditRequest(patch: WorkItemEditPatch, expectedVersion: nu
   if (!isPositiveTodoVersion(expectedVersion)) {
     throw new TypeError("Todo expectedVersion must be a positive safe integer")
   }
-  return { patch, expectedVersion, idempotencyKey: crypto.randomUUID() }
+  return { patch: { ...patch }, expectedVersion, idempotencyKey: crypto.randomUUID() }
 }
 
 /** Highest positive safe revision found in any list/search/detail Todo cache. */

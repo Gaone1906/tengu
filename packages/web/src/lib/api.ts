@@ -694,6 +694,9 @@ function requireWorkItemEditResult(value: unknown): WorkItemEditResultWire {
   ) {
     throw new Error("Todo edit response has an invalid authoritative version")
   }
+  if (!("replayed" in value) || typeof value.replayed !== "boolean") {
+    throw new Error("Todo edit response has invalid replay metadata")
+  }
   return value as WorkItemEditResultWire
 }
 

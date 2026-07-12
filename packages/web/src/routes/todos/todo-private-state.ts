@@ -15,6 +15,8 @@ export interface TodoJournalRequest extends WorkItemEditRequest {
   state: TodoJournalRequestState
 }
 
+export type TodoJournalRequestFingerprint = WorkItemEditRequest & { revision: number }
+
 export interface TodoJournalPayload {
   revision: number
   /** Same-origin recovery intentionally stores operator-authored dirty values. */
@@ -171,7 +173,16 @@ const SAFE_REQUEST_TRANSITIONS: Readonly<Record<TodoJournalRequestState, Readonl
   conflict: new Set(["conflict"]),
 }
 
-function sameRequestFingerprint(a: TodoJournalRequest, b: TodoJournalRequest): boolean {
+function validRequestFingerprint(value: unknown): value is TodoJournalRequestFingerprint {
+  return isRecord(value)
+    && isPositiveSafeInteger(value.revision)
+    && validPatch(value.patch)
+    && isPositiveSafeInteger(value.expectedVersion)
+    && typeof value.idempotencyKey === "string"
+    && UUID_PATTERN.test(value.idempotencyKey)
+}
+
+function sameRequestFingerprint(a: TodoJournalRequestFingerprint, b: TodoJournalRequestFingerprint): boolean {
   return a.revision === b.revision
     && a.expectedVersion === b.expectedVersion
     && a.idempotencyKey === b.idempotencyKey
@@ -286,6 +297,40 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
   } catch {
     // Storage may be unavailable in hardened/private contexts. The mounted
     // revision queue remains authoritative until navigation or reload.
+  }
+}
+
+/** Atomically retire the exact active request and install its post-response
+ * recovery state. A stale response can never clear or replace another request. */
+export function transitionTodoJournal(
+  id: string,
+  expectedActiveRequest: TodoJournalRequestFingerprint,
+  nextPayload: TodoJournalPayload | null,
+): boolean {
+  const store = storage()
+  if (!store || !validRequestFingerprint(expectedActiveRequest)) return false
+  if (nextPayload !== null && !validPayload(nextPayload)) return false
+  try {
+    const now = Date.now()
+    const parsed = parseEnvelopes()
+    const journals = Object.fromEntries(
+      Object.entries(parsed).filter(([ref, entry]) => validEnvelope(ref, entry, now)),
+    ) as Record<string, JournalEnvelope>
+    const ref = todoPrivateRef(id)
+    const activeRequest = journals[ref]?.payload.request
+    if (!activeRequest || !sameRequestFingerprint(activeRequest, expectedActiveRequest)) return false
+
+    delete journals[ref]
+    if (nextPayload !== null) {
+      const sequence = Math.max(0, ...Object.values(journals).map((entry) => entry.sequence)) + 1
+      journals[ref] = { expiresAt: now + JOURNAL_TTL_MS, sequence, payload: nextPayload }
+    }
+    const capped = Object.fromEntries(orderedEntries(journals).slice(0, MAX_JOURNALS))
+    if (Object.keys(capped).length === 0) store.removeItem(JOURNAL_KEY)
+    else store.setItem(JOURNAL_KEY, JSON.stringify(capped))
+    return true
+  } catch {
+    return false
   }
 }
 

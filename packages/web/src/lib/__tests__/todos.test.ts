@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import type { Employee, WorkItemCompactWire, WorkItemStatusWire } from "../api"
+import { ApiError, TodoApiError, type Employee, type WorkItemCompactWire, type WorkItemStatusWire } from "../api"
 import {
   displayGroupOf,
   attentionOf,
@@ -23,6 +23,8 @@ import {
   filtersFromSearchParams,
   dateBucketOf,
   groupHistory,
+  isTodoVersionConflictError,
+  operatorSafeTodoError,
   type TodoFilters,
 } from "../todos"
 
@@ -66,6 +68,42 @@ describe("displayGroupOf / attention / stateKey", () => {
     expect(attentionOf("executing")).toBeNull()
     expect(stateKeyOf("in_review")).toBe("review")
     expect(stateKeyOf("blocked")).toBe("blocked") // sits in Executing but stays blocked
+  })
+})
+
+describe("conditional edit errors", () => {
+  it.each([
+    "todo_version_conflict",
+    "WORK_ITEM_VERSION_CONFLICT",
+  ])("classifies the explicit %s code as a version conflict", (code) => {
+    expect(isTodoVersionConflictError(new TodoApiError(400, "private diagnostic", code))).toBe(true)
+  })
+
+  it.each([
+    new TodoApiError(409, "generic conflict"),
+    new TodoApiError(412, "generic precondition"),
+    new TodoApiError(409, "different conflict", "todo_idempotency_conflict"),
+    new Error("WORK_ITEM_VERSION_CONFLICT"),
+  ])("does not route a non-version error to reconciliation", (error) => {
+    expect(isTodoVersionConflictError(error)).toBe(false)
+  })
+
+  it.each([
+    ["todo_idempotency_conflict", "This edit request conflicts with an earlier request. Retry it as a new edit."],
+    ["todo_precondition_required", "This Todo requires a current version before it can be saved. Reload it and try again."],
+    ["todo_invalid_version", "This Todo version is invalid. Reload it and try again."],
+    ["todo_invalid_patch", "This Todo edit is invalid. Review the changed fields and try again."],
+  ])("uses closed safe copy for %s without exposing backend diagnostics", (code, safeCopy) => {
+    const error = new TodoApiError(400, "SQLITE_BUSY /srv/private.db token=secret", code)
+
+    expect(operatorSafeTodoError(error, "Safe fallback")).toBe(safeCopy)
+    expect(error).toMatchObject({
+      name: "TodoApiError",
+      code,
+      message: "SQLITE_BUSY /srv/private.db token=secret",
+    })
+    expect(operatorSafeTodoError(error, "Safe fallback")).not.toMatch(/SQLITE_BUSY|private\.db|secret/)
+    expect(error).toBeInstanceOf(ApiError)
   })
 })
 
