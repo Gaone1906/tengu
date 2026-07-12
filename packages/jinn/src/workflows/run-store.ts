@@ -86,6 +86,7 @@ export const SETTLED_STEP_STATUSES: ReadonlySet<RunStepStatus> = new Set([
 /** Step states with a real session (possibly) in flight — the states the drain
  * (GRS-016a `stopping`) waits on and the parked probe-only sweep keeps truthful. */
 export const IN_FLIGHT_STEP_STATUSES: ReadonlySet<RunStepStatus> = new Set([
+  'spawned',
   'dispatching',
   'running',
 ]);
@@ -272,6 +273,21 @@ export interface WorkflowRunCancellation {
   requestedAt: string;
   requestedBy: string;
   reason: string | null;
+  /** Persisted before each owned Session stop. Its full attempt identity makes
+   * cancellation stop-at-most-once across duplicate requests and later sweeps. */
+  stopAttempts?: WorkflowRunCancellationStopAttempt[];
+}
+
+export interface WorkflowRunCancellationStopAttempt {
+  key: string;
+  nodeId: string;
+  round: number;
+  attempt: number;
+  sessionId?: string;
+  sessionKey: string;
+  requestedAt: string;
+  outcome: 'requested' | 'stopped' | 'failed';
+  failure?: string;
 }
 
 export const MAX_WORKFLOW_RUN_CANCELLATION_REASON_CHARS = 2_000;
@@ -913,6 +929,7 @@ function normalizeRun(run: WorkflowRun): WorkflowRun {
       ...legacy,
       revision: 0,
       ...(isWorkflowRunParameters(legacyInvocation) ? { parameters: legacyInvocation } : {}),
+      ...(isWorkflowRunInvocation(legacyInvocation) ? { invocation: legacyInvocation } : {}),
     } as WorkflowRun;
   } else {
     if (!Number.isSafeInteger(out.revision) || (out.revision ?? 0) < 1) {

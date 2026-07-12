@@ -39,6 +39,12 @@ export interface CancelWorkflowRunOptions {
   json?: boolean;
 }
 
+export function formatWorkflowRunCancellationResult(run: WorkflowRunResult): string {
+  return run.status === 'cancelled'
+    ? `Cancelled ${run.runId} for ${run.workflowId} (${run.status}).`
+    : `Cancellation requested for ${run.runId} in ${run.workflowId} (${run.status}).`;
+}
+
 export function parseWorkflowInput(raw: string): Record<string, unknown> {
   let parsed: unknown;
   try {
@@ -171,7 +177,7 @@ export async function cancelWorkflowRunFromCli(
       ...(opts.reason ? { reason: opts.reason } : {}),
     });
     if (opts.json) console.log(JSON.stringify(run, null, 2));
-    else console.log(`Cancelled ${run.runId} for ${run.workflowId} (${run.status}).`);
+    else console.log(formatWorkflowRunCancellationResult(run));
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exitCode = 1;

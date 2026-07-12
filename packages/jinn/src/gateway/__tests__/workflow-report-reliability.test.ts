@@ -27,6 +27,7 @@ type Api = typeof import("../api.js");
 type Callbacks = typeof import("../../sessions/callbacks.js");
 type Queue = typeof import("../../sessions/queue.js");
 type Advance = typeof import("../../workflows/advance.js");
+type DefinitionStore = typeof import("../../workflows/definition-store.js");
 
 let registry: Registry;
 let reporting: Reporting;
@@ -36,6 +37,7 @@ let api: Api;
 let callbacks: Callbacks;
 let queueModule: Queue;
 let advance: Advance;
+let definitionStore: DefinitionStore;
 const processFetch = globalThis.fetch;
 
 function completedRun(sessionId: string, reportMode: "resume" | "silent" = "resume"): WorkflowRun {
@@ -311,7 +313,7 @@ async function settleDeliveryMicrotasks(): Promise<void> {
 }
 
 beforeAll(async () => {
-  [registry, reporting, runStore, reconciler, api, callbacks, queueModule, advance] = await Promise.all([
+  [registry, reporting, runStore, reconciler, api, callbacks, queueModule, advance, definitionStore] = await Promise.all([
     import("../../sessions/registry.js"),
     import("../../workflows/reporting.js"),
     import("../../workflows/run-store.js"),
@@ -320,6 +322,7 @@ beforeAll(async () => {
     import("../../sessions/callbacks.js"),
     import("../../sessions/queue.js"),
     import("../../workflows/advance.js"),
+    import("../../workflows/definition-store.js"),
   ]);
   registry.initDb();
 });
@@ -341,6 +344,329 @@ afterEach(() => {
 });
 
 describe("Workflow report reliability through shared Session delivery", () => {
+  it("cancels a normalized v1 dispatched run through HTTP, interrupts and drains its real owned Session once, then delivers one terminal report", async () => {
+    const workflowId = "legacy-cancellation-integration";
+    const runId = "run-legacy-cancellation";
+    const definition = definitionStore.createDefinition(evidenceRoot, actorDefinition(workflowId), {
+      now: () => "2026-07-12T01:00:00.000Z",
+    });
+    const invoking = createSession("legacy-cancellation-owner");
+    const runDirectory = path.join(evidenceRoot, "reports", "runs", workflowId);
+    fs.mkdirSync(runDirectory, { recursive: true });
+    fs.writeFileSync(path.join(runDirectory, `${runId}.json`), JSON.stringify({
+      runId,
+      workflowId,
+      definitionVersion: definition.version,
+      title: definition.title,
+      trigger: "manual",
+      invocation: { sessionId: invoking.id, reportMode: "resume" },
+      status: "passed",
+      startedAt: "2026-07-12T01:00:00.000Z",
+      endedAt: "2026-07-12T01:00:01.000Z",
+      steps: [{
+        nodeId: "work",
+        label: "Work",
+        actor: { kind: "engine", ref: "stub" },
+        status: "spawned",
+        attempt: 1,
+        sessionId: "legacy-phase-session",
+        at: "2026-07-12T01:00:00.500Z",
+      }],
+      parked: null,
+    }, null, 2) + "\n");
+    expect(runStore.getRun(evidenceRoot, workflowId, runId)).toMatchObject({
+      status: "dispatched",
+      invocation: { sessionId: invoking.id, reportMode: "resume" },
+      steps: [{ status: "spawned" }],
+    });
+
+    const sessionKey = advance.stepSessionKey(runId, "work", 1, 1);
+    const phase = registry.createSession({
+      engine: "stub",
+      source: "web",
+      sourceRef: sessionKey,
+      sessionKey,
+      connector: "web",
+      title: "Legacy phase",
+      prompt: "legacy work",
+    });
+    registry.updateSession(phase.id, { status: "running" });
+
+    const queue = new queueModule.SessionQueue();
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => { releaseActive = resolve; });
+    let markActive!: () => void;
+    const activeStarted = new Promise<void>((resolve) => { markActive = resolve; });
+    let queuedTurnRan = false;
+    const active = queue.enqueue(sessionKey, async () => {
+      markActive();
+      await activeGate;
+    });
+    await activeStarted;
+    const queued = queue.enqueue(sessionKey, async () => { queuedTurnRan = true; });
+
+    const seenPrompts: string[] = [];
+    const killCalls: Array<{ sessionId: string; reason: string }> = [];
+    const engine = {
+      ...makeEngine(seenPrompts),
+      kill: (sessionId: string, reason: string) => { killCalls.push({ sessionId, reason }); },
+      isAlive: () => true,
+      killAll: () => undefined,
+      killIdle: () => undefined,
+    } as Engine;
+    const apiContext = makeApiContext(engine, queue);
+    globalThis.fetch = routeBackedFetch(apiContext) as unknown as typeof fetch;
+
+    const response = await fetch(`http://gateway.test/api/workflow-definitions/${workflowId}/runs/${runId}/cancel`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+      body: JSON.stringify({ reason: "operator stopped legacy work" }),
+    });
+    const body = await response.json() as WorkflowRun;
+    const duplicate = await fetch(`http://gateway.test/api/workflow-definitions/${workflowId}/runs/${runId}/cancel`, {
+      method: "POST",
+      headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+      body: JSON.stringify({ reason: "operator stopped legacy work" }),
+    });
+    releaseActive();
+    await Promise.all([active, queued]);
+
+    expect(response.status).toBe(200);
+    expect(duplicate.status).toBe(200);
+    expect(body).toMatchObject({ status: "cancelled", stopping: { to: "cancelled" } });
+    expect(killCalls).toEqual([expect.objectContaining({ sessionId: phase.id })]);
+    expect(queuedTurnRan).toBe(false);
+    expect(queue.getPendingCount(sessionKey)).toBe(0);
+    expect(registry.getSession(phase.id)).toMatchObject({ status: "interrupted", attemptOutcome: "interrupted" });
+    expect(body.steps.some((receipt) => receipt.status === "spawned" || receipt.status === "running")).toBe(false);
+
+    await eventually(() => {
+      const persisted = runStore.getRun(evidenceRoot, workflowId, runId)!;
+      expect(persisted.reportEpisodes?.filter((episode) => episode.outcome === "cancelled")).toHaveLength(1);
+      expect(registry.initDb().prepare(`
+        SELECT status FROM callback_deliveries
+        WHERE source_kind = 'workflow-run' AND source_id = ?
+      `).all(`${workflowId}:${runId}`)).toEqual([{ status: "accepted" }]);
+      expect(seenPrompts).toHaveLength(1);
+    });
+  });
+
+  it("cancels real fresh and shared owned Sessions, drains queues once, and never stops a borrowed existing Session", async () => {
+    const seenPrompts: string[] = [];
+    const killCalls: Array<{ sessionId: string; reason?: string }> = [];
+    const engine = {
+      ...makeEngine(seenPrompts),
+      kill: (sessionId: string, reason?: string) => { killCalls.push({ sessionId, reason }); },
+      isAlive: () => true,
+      killAll: () => undefined,
+      killIdle: () => undefined,
+    } as Engine;
+    const queue = new queueModule.SessionQueue();
+    const apiContext = makeApiContext(engine, queue);
+    globalThis.fetch = routeBackedFetch(apiContext) as unknown as typeof fetch;
+
+    const callCancel = async (workflowId: string, runId: string) => {
+      const response = await fetch(`http://gateway.test/api/workflow-definitions/${workflowId}/runs/${runId}/cancel`, {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({ reason: "integration cancellation" }),
+      });
+      return { response, body: await response.json() as WorkflowRun };
+    };
+    const createPhase = (sessionKey: string, title: string) => {
+      const session = registry.createSession({
+        engine: "stub", source: "web", sourceRef: sessionKey, sessionKey, connector: "web", title, prompt: title,
+      });
+      registry.updateSession(session.id, { status: "running" });
+      return registry.getSession(session.id)!;
+    };
+    const persistRunning = (
+      definition: EditableWorkflowDefinition,
+      runId: string,
+      invokingSessionId: string,
+      phase: ReturnType<typeof createPhase>,
+      mode: "fresh" | "workflow" | "existing",
+    ) => {
+      const turnMarker = mode === "fresh" ? undefined : advance.turnMarkerFor(runId, "work", 1, 1);
+      const turnAnchor = mode === "fresh" ? undefined : `${runId}-anchor`;
+      if (turnMarker && turnAnchor) registry.insertMessage(phase.id, "user", `${turnMarker}\nperform work`, undefined, undefined, turnAnchor);
+      return runStore.saveRun(evidenceRoot, {
+        schemaVersion: 3,
+        revision: 1,
+        runId,
+        workflowId: definition.id,
+        definitionVersion: definition.version,
+        definitionSnapshot: definition,
+        title: definition.title,
+        trigger: { source: "manual", event: "workflow.manual_started", payload: {} },
+        invocation: { sessionId: invokingSessionId, reportMode: "resume" },
+        status: "running",
+        startedAt: "2026-07-12T01:00:00.000Z",
+        endedAt: null,
+        steps: [{
+          nodeId: "work",
+          label: "Work",
+          actor: { kind: "engine", ref: "stub" },
+          status: "running",
+          attempt: 1,
+          sessionId: phase.id,
+          ...(turnMarker ? { turnMarker } : {}),
+          ...(turnAnchor ? { turnAnchor } : {}),
+          at: "2026-07-12T01:00:01.000Z",
+        }],
+        parked: null,
+        order: ["work"],
+        ...(mode === "workflow" ? { sharedSessionId: phase.id } : {}),
+      });
+    };
+
+    const freshOwner = createSession("fresh-cancellation-owner");
+    const freshDefinition = definitionStore.createDefinition(evidenceRoot, actorDefinition("fresh-cancellation-real"));
+    const freshRunId = "run-fresh-cancellation-real";
+    const freshKey = advance.stepSessionKey(freshRunId, "work", 1, 1);
+    const freshPhase = createPhase(freshKey, "Fresh phase");
+    persistRunning(freshDefinition, freshRunId, freshOwner.id, freshPhase, "fresh");
+    let queuedFreshRan = false;
+    let releaseFresh!: () => void;
+    const freshGate = new Promise<void>((resolve) => { releaseFresh = resolve; });
+    let freshActive!: () => void;
+    const freshStarted = new Promise<void>((resolve) => { freshActive = resolve; });
+    const freshActiveTask = queue.enqueue(freshKey, async () => { freshActive(); await freshGate; });
+    await freshStarted;
+    const freshQueuedTask = queue.enqueue(freshKey, async () => { queuedFreshRan = true; });
+    const freshCancelled = await callCancel(freshDefinition.id, freshRunId);
+    const freshDuplicate = await callCancel(freshDefinition.id, freshRunId);
+    releaseFresh();
+    await Promise.all([freshActiveTask, freshQueuedTask]);
+    expect(freshCancelled.response.status).toBe(200);
+    expect(freshDuplicate.body).toEqual(freshCancelled.body);
+    expect(queuedFreshRan).toBe(false);
+    expect(registry.getSession(freshPhase.id)).toMatchObject({ status: "interrupted" });
+
+    const sharedOwner = createSession("shared-cancellation-owner");
+    const sharedDefinition = definitionStore.createDefinition(evidenceRoot, actorDefinition("shared-cancellation-real", [
+      actorStep("work", { session: { mode: "workflow" } }),
+    ]));
+    const sharedRunId = "run-shared-cancellation-real";
+    const sharedKey = advance.sharedSessionKey(sharedRunId);
+    const sharedPhase = createPhase(sharedKey, "Shared phase");
+    persistRunning(sharedDefinition, sharedRunId, sharedOwner.id, sharedPhase, "workflow");
+    const sharedCancelled = await callCancel(sharedDefinition.id, sharedRunId);
+    expect(sharedCancelled).toMatchObject({ response: { status: 200 }, body: { status: "cancelled" } });
+    expect(registry.getSession(sharedPhase.id)).toMatchObject({ status: "interrupted" });
+
+    const borrowedOwner = createSession("borrowed-cancellation-owner");
+    const borrowedTarget = createPhase("web:borrowed-cancellation-target", "Borrowed target");
+    const borrowedDefinition = definitionStore.createDefinition(evidenceRoot, actorDefinition("borrowed-cancellation-real", [
+      actorStep("work", { session: { mode: "existing", sessionId: borrowedTarget.id } }),
+    ]));
+    const borrowedRunId = "run-borrowed-cancellation-real";
+    persistRunning(borrowedDefinition, borrowedRunId, borrowedOwner.id, borrowedTarget, "existing");
+    const borrowedRequested = await callCancel(borrowedDefinition.id, borrowedRunId);
+    expect(borrowedRequested).toMatchObject({ response: { status: 200 }, body: { status: "running", stopping: { to: "cancelled" } } });
+    expect(registry.getSession(borrowedTarget.id)).toMatchObject({ status: "running" });
+    registry.updateSession(borrowedTarget.id, { status: "idle" });
+    registry.insertMessageAfter(borrowedTarget.id, "assistant", "borrowed turn finished", Date.now() + 1);
+    await reconciler.sweepWorkflowRuns(api.workflowRunDriverDeps(evidenceRoot, apiContext));
+    expect(runStore.getRun(evidenceRoot, borrowedDefinition.id, borrowedRunId)?.status).toBe("cancelled");
+
+    expect(killCalls.map((call) => call.sessionId)).toEqual([freshPhase.id, sharedPhase.id]);
+    await eventually(() => {
+      expect(registry.initDb().prepare(`
+        SELECT COUNT(*) AS count FROM callback_deliveries WHERE source_kind = 'workflow-run'
+      `).get()).toEqual({ count: 3 });
+      expect(seenPrompts).toHaveLength(3);
+    });
+  });
+
+  it("keeps silent cancellation activity local and rejects missing or invalid pre-snapshot definitions before stopping", async () => {
+    const seenPrompts: string[] = [];
+    const killCalls: string[] = [];
+    const engine = {
+      ...makeEngine(seenPrompts),
+      kill: (sessionId: string) => { killCalls.push(sessionId); },
+      isAlive: () => true,
+      killAll: () => undefined,
+      killIdle: () => undefined,
+    } as Engine;
+    const queue = new queueModule.SessionQueue();
+    const apiContext = makeApiContext(engine, queue);
+    globalThis.fetch = routeBackedFetch(apiContext) as unknown as typeof fetch;
+    const cancel = (workflowId: string, runId: string) => fetch(
+      `http://gateway.test/api/workflow-definitions/${workflowId}/runs/${runId}/cancel`,
+      {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: "{}",
+      },
+    );
+    const makeCurrentRun = (
+      definition: EditableWorkflowDefinition,
+      runId: string,
+      invokingSessionId: string,
+      phaseSessionId: string,
+      withSnapshot: boolean,
+      reportMode: "resume" | "silent" = "resume",
+    ) => runStore.saveRun(evidenceRoot, {
+      schemaVersion: 3,
+      revision: 1,
+      runId,
+      workflowId: definition.id,
+      definitionVersion: definition.version,
+      ...(withSnapshot ? { definitionSnapshot: definition } : {}),
+      title: definition.title,
+      trigger: { source: "manual", event: "workflow.manual_started", payload: {} },
+      invocation: { sessionId: invokingSessionId, reportMode },
+      status: "running",
+      startedAt: "2026-07-12T01:00:00.000Z",
+      endedAt: null,
+      steps: [{
+        nodeId: "work", label: "Work", actor: { kind: "engine", ref: "stub" }, status: "running",
+        attempt: 1, sessionId: phaseSessionId, at: "2026-07-12T01:00:01.000Z",
+      }],
+      parked: null,
+      order: ["work"],
+    });
+    const phase = (runId: string) => {
+      const key = advance.stepSessionKey(runId, "work", 1, 1);
+      const session = registry.createSession({
+        engine: "stub", source: "web", sourceRef: key, sessionKey: key, connector: "web", prompt: "work",
+      });
+      registry.updateSession(session.id, { status: "running" });
+      return session;
+    };
+
+    const silentOwner = createSession("silent-cancellation-owner");
+    const silentDefinition = definitionStore.createDefinition(evidenceRoot, actorDefinition("silent-cancellation-real"));
+    const silentRunId = "run-silent-cancellation-real";
+    const silentPhase = phase(silentRunId);
+    makeCurrentRun(silentDefinition, silentRunId, silentOwner.id, silentPhase.id, true, "silent");
+    const silentResponse = await cancel(silentDefinition.id, silentRunId);
+    expect(silentResponse.status).toBe(200);
+    expect((await silentResponse.json() as WorkflowRun).status).toBe("cancelled");
+    await settleDeliveryMicrotasks();
+    expect(registry.initDb().prepare("SELECT COUNT(*) AS count FROM callback_deliveries").get()).toEqual({ count: 0 });
+    expect(seenPrompts).toHaveLength(0);
+    expect(registry.getMessages(silentOwner.id).flatMap((message) => message.blocks ?? [])).toHaveLength(1);
+
+    for (const state of ["missing", "invalid"] as const) {
+      const definition = definitionStore.createDefinition(evidenceRoot, actorDefinition(`${state}-definition-cancellation-real`));
+      const owner = createSession(`${state}-definition-owner`);
+      const runId = `run-${state}-definition-cancellation`;
+      const livePhase = phase(runId);
+      makeCurrentRun(definition, runId, owner.id, livePhase.id, false);
+      const definitionFile = path.join(evidenceRoot, "workflows", `${definition.id}.definition.json`);
+      if (state === "missing") fs.rmSync(definitionFile);
+      else fs.writeFileSync(definitionFile, JSON.stringify({ ...definition, edges: [] }) + "\n");
+      const response = await cancel(definition.id, runId);
+      expect(response.status).toBe(409);
+      expect(runStore.getRun(evidenceRoot, definition.id, runId)?.cancellation).toBeUndefined();
+      expect(registry.getSession(livePhase.id)).toMatchObject({ status: "running" });
+    }
+    expect(killCalls).toEqual([silentPhase.id]);
+  });
+
+
   it.each(["resume", "silent"] as const)(
     "delivers and projects a max-length Workflow id through the real driver, block store, worker, and HTTP acceptance in %s mode",
     async (reportMode) => {

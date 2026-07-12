@@ -71,8 +71,9 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("escalate_work_item_approval");
     expect(names).toContain("archive_work_item");
     expect(names).toContain("delete_trigger");
+    expect(names).toContain("cancel_workflow_run");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(49);
+    expect(names).toHaveLength(50);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {

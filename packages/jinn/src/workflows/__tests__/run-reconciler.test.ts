@@ -1146,6 +1146,95 @@ describe('cancelWorkflowRun — native cancellation authority', () => {
     return { reporting, claims, deliveries, blocks, reportMode };
   }
 
+  function writeLegacyDispatchedRun(
+    def: EditableWorkflowDefinition,
+    runId: string,
+    invocation?: WorkflowRun['invocation'],
+  ): void {
+    const directory = path.join(root, 'reports', 'runs', def.id);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, `${runId}.json`), JSON.stringify({
+      runId,
+      workflowId: def.id,
+      definitionVersion: def.version,
+      title: def.title,
+      trigger: 'manual',
+      ...(invocation ? { invocation } : {}),
+      status: 'passed',
+      startedAt: FIXED,
+      endedAt: FIXED,
+      steps: [{
+        nodeId: 'a',
+        label: 'A',
+        actor: { kind: 'engine', ref: 'codex' },
+        status: 'spawned',
+        attempt: 1,
+        sessionId: 'legacy-session',
+        at: FIXED,
+      }],
+      parked: null,
+    }, null, 2) + '\n');
+  }
+
+  it('drains a normalized v1 dispatched/spawned owned attempt before terminal cancellation', async () => {
+    const def = createDefinition(root, chainDef('cancel-legacy-spawned', [trigger, step('a')]), { now });
+    const runId = 'run-legacy-spawned';
+    writeLegacyDispatchedRun(def, runId);
+    const key = stepSessionKey(runId, 'a', 1, 1);
+    let probe: StepSessionProbe = { found: true, sessionId: 'legacy-session', status: 'running' };
+    const stopStepSession = vi.fn<NonNullable<RunDriverDeps['stopStepSession']>>(async () => {
+      probe = { found: true, sessionId: 'legacy-session', status: 'interrupted' };
+    });
+    const deps: RunDriverDeps = {
+      root,
+      getDefinition,
+      probeStepSession: (sessionKey) => sessionKey === key ? probe : { found: false },
+      spawnStep: async () => { throw new Error('legacy cancellation must not spawn'); },
+      stopStepSession,
+      now,
+    };
+
+    expect(getRun(root, def.id, runId)).toMatchObject({ status: 'dispatched', steps: [{ status: 'spawned' }] });
+    const result = await cancelWorkflowRun(deps, def.id, runId, { actor: 'operator' });
+
+    expect(result).toMatchObject({ outcome: 'cancelled', run: { status: 'cancelled', stopping: { to: 'cancelled' } } });
+    if (result.outcome !== 'cancelled') throw new Error(`unexpected cancellation outcome ${result.outcome}`);
+    expect(stopStepSession).toHaveBeenCalledOnce();
+    expect(stopStepSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'legacy-session',
+      sessionKey: key,
+    }));
+    expect(result.run.steps.some((receipt) => receipt.status === 'spawned' || receipt.status === 'running')).toBe(false);
+    await sweepWorkflowRuns(deps);
+    expect(stopStepSession).toHaveBeenCalledOnce();
+  });
+
+  it.each(['missing', 'invalid'] as const)(
+    'rejects an active pre-snapshot run before persisting cancellation when its current definition is %s',
+    async (definitionState) => {
+      const def = createDefinition(root, chainDef(`cancel-definition-${definitionState}`, [trigger, step('a')]), { now });
+      const { deps } = harness();
+      const started = await startWorkflowRun(deps, def);
+      saveRun(root, { ...started, definitionSnapshot: undefined });
+      const definitionFile = path.join(root, 'workflows', `${def.id}.definition.json`);
+      if (definitionState === 'missing') {
+        fs.rmSync(definitionFile);
+      } else {
+        fs.writeFileSync(definitionFile, JSON.stringify({ ...def, edges: [] }) + '\n');
+      }
+
+      const result = await cancelWorkflowRun(deps, def.id, started.runId, { actor: 'operator' });
+      expect(result).toMatchObject({ outcome: 'conflict', run: { status: 'running' } });
+      if (result.outcome !== 'conflict') throw new Error(`unexpected cancellation outcome ${result.outcome}`);
+      expect(result.run.cancellation).toBeUndefined();
+
+      await sweepWorkflowRuns(deps);
+      const afterSweep = getRun(root, def.id, started.runId)!;
+      expect(afterSweep.cancellation).toBeUndefined();
+      expect(afterSweep.status).toBe('failed');
+    },
+  );
+
   it('stamps intent, stops every fresh run-owned phase, drains to cancelled, and reports once', async () => {
     const def = createDefinition(root, parallelDef('cancel-fresh'), { now });
     const stopStepSession = vi.fn<NonNullable<RunDriverDeps['stopStepSession']>>(async () => undefined);
@@ -1281,11 +1370,14 @@ describe('cancelWorkflowRun — native cancellation authority', () => {
     expect((await cancelWorkflowRun(failedHarness.deps, failedDef.id, failed.runId, { actor: 'operator' })).outcome).toBe('already-terminal');
   });
 
-  it('persists bounded stop-failure evidence without resurrecting the cancelled terminal', async () => {
+  it('persists one stop-attempt identity and bounded failure evidence without retrying the stop or resurrecting', async () => {
     const def = createDefinition(root, chainDef('cancel-stop-failure', [trigger, step('a')]), { now });
     const stopStepSession = vi.fn<NonNullable<RunDriverDeps['stopStepSession']>>(async () => { throw new Error('engine stop failed'); });
-    const { deps, settle } = harness({ stopStepSession });
-    const started = await startWorkflowRun(deps, def);
+    const report = reportingHarness('resume');
+    const { deps, settle } = harness({ stopStepSession, reporting: report.reporting });
+    const started = await startWorkflowRun(deps, def, {
+      invocation: { sessionId: 'invoking-session', reportMode: report.reportMode },
+    });
 
     const requested = await cancelWorkflowRun(deps, def.id, started.runId, { actor: 'operator' });
     expect(requested).toMatchObject({
@@ -1295,6 +1387,20 @@ describe('cancelWorkflowRun — native cancellation authority', () => {
         stopping: { errors: expect.arrayContaining([expect.objectContaining({ code: 'run-cancel-stop-failed', ref: 'a' })]) },
       },
     });
+    expect(stopStepSession).toHaveBeenCalledOnce();
+    const persistedAttempt = (getRun(root, def.id, started.runId)?.cancellation as unknown as {
+      stopAttempts?: Array<{ nodeId: string; round: number; attempt: number; sessionId?: string; sessionKey: string; outcome: string }>;
+    })?.stopAttempts;
+    expect(persistedAttempt).toEqual([expect.objectContaining({
+      nodeId: 'a', round: 1, attempt: 1, sessionId: 'sess:a:1',
+      sessionKey: stepSessionKey(started.runId, 'a', 1, 1), outcome: 'failed',
+    })]);
+    await cancelWorkflowRun(deps, def.id, started.runId, { actor: 'operator' });
+    await sweepWorkflowRuns(deps);
+    await sweepWorkflowRuns(deps);
+    expect(stopStepSession).toHaveBeenCalledOnce();
+    expect((getRun(root, def.id, started.runId)?.stopping?.errors ?? []).filter((error) => error.code === 'run-cancel-stop-failed')).toHaveLength(1);
+
     settle(started.runId, 'a', 1, 'interrupted');
     await sweepWorkflowRuns(deps);
     const terminal = getRun(root, def.id, started.runId)!;
@@ -1305,6 +1411,10 @@ describe('cancelWorkflowRun — native cancellation authority', () => {
     })]));
     await sweepWorkflowRuns(deps);
     expect(getRun(root, def.id, started.runId)?.status).toBe('cancelled');
+    expect(stopStepSession).toHaveBeenCalledOnce();
+    expect([...report.claims.values()].filter((claim) => claim.sourceOutcome === 'cancelled')).toHaveLength(1);
+    await Promise.resolve();
+    expect(report.deliveries).toHaveLength(1);
   });
 
   it('serializes cancellation with a racing settle and keeps one terminal episode', async () => {

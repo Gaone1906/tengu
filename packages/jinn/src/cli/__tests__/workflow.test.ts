@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { parseWorkflowInput, requestWorkflowRunByName, requestWorkflowRunCancellation } from '../workflow.js';
+import {
+  formatWorkflowRunCancellationResult,
+  parseWorkflowInput,
+  requestWorkflowRunByName,
+  requestWorkflowRunCancellation,
+} from '../workflow.js';
 
 describe('workflow CLI', () => {
   it('parses a JSON object for invocation input and rejects non-objects', () => {
@@ -84,5 +89,23 @@ describe('workflow CLI', () => {
       runId: 'run-1',
       fetchImpl: fetchMock as unknown as typeof fetch,
     })).rejects.toThrow(/cancellation failed.*conflicts/i);
+  });
+
+  it('reports a non-terminal drain as requested instead of claiming cancellation finished', () => {
+    expect(formatWorkflowRunCancellationResult({
+      runId: 'run-1',
+      workflowId: 'release-review',
+      status: 'running',
+      stopping: { to: 'cancelled' },
+    })).toBe('Cancellation requested for run-1 in release-review (running).');
+  });
+
+  it('reports cancellation as complete only for a terminal cancelled response', () => {
+    expect(formatWorkflowRunCancellationResult({
+      runId: 'run-1',
+      workflowId: 'release-review',
+      status: 'cancelled',
+      stopping: { to: 'cancelled' },
+    })).toBe('Cancelled run-1 for release-review (cancelled).');
   });
 });

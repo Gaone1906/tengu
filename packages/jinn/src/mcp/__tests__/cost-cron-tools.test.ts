@@ -75,8 +75,9 @@ describe("cost + cron tools — schemas and belt registration", () => {
     expect(names).toContain("cost_report");
     expect(names).toContain("list_cron_jobs");
     expect(names).toContain("get_cron_run_history");
+    expect(names).toContain("cancel_workflow_run");
     expect(names.filter((name) => name === "list_work_items")).toHaveLength(1);
-    expect(names).toHaveLength(49);
+    expect(names).toHaveLength(50);
   });
 });
 

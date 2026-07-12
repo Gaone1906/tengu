@@ -284,6 +284,25 @@ function cancellationStopFailure(
   return { ...run, errors: [...other, ...boundedFailures] };
 }
 
+function recordCancellationStopOutcome(
+  run: WorkflowRun,
+  key: string,
+  outcome: 'stopped' | 'failed',
+  error?: unknown,
+): WorkflowRun {
+  if (!run.cancellation?.stopAttempts) return run;
+  const failure = error === undefined
+    ? undefined
+    : (error instanceof Error ? error.message : String(error)).slice(0, MAX_CANCELLATION_STOP_FAILURE_MESSAGE_CHARS);
+  let changed = false;
+  const stopAttempts = run.cancellation.stopAttempts.map((attempt) => {
+    if (attempt.key !== key || attempt.outcome !== 'requested') return attempt;
+    changed = true;
+    return { ...attempt, outcome, ...(failure ? { failure } : {}) };
+  });
+  return changed ? { ...run, cancellation: { ...run.cancellation, stopAttempts } } : run;
+}
+
 /**
  * Assemble a step's prompt (GRS-014c): the node's own instructions + one handoff
  * section per ACTIVE edge predecessor that produced a persisted outcome (edge
@@ -460,11 +479,17 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
       }
       try {
         await deps.stopStepSession({ ...stop, runId: current.runId, workflowId: current.workflowId });
+        if (stop.cancellationAttemptKey) {
+          current = persistRun(deps, recordCancellationStopOutcome(current, stop.cancellationAttemptKey, 'stopped'));
+        }
         deps.log?.('info', `[workflow-runs] run ${current.runId}: stopped step session ${stop.sessionKey} (${stop.reason})`);
       } catch (err) {
         deps.log?.('warn', `[workflow-runs] run ${current.runId}: stopping step session ${stop.sessionKey} failed: ${(err as Error).message}`);
         if (current.cancellation && stop.reason === 'run-stopping: terminal cancelled requested') {
-          current = persistRun(deps, cancellationStopFailure(current, stop, err));
+          const withOutcome = stop.cancellationAttemptKey
+            ? recordCancellationStopOutcome(current, stop.cancellationAttemptKey, 'failed', err)
+            : current;
+          current = persistRun(deps, cancellationStopFailure(withOutcome, stop, err));
         }
       }
     }
@@ -816,7 +841,7 @@ export async function advanceWorkflowRunById(
     const parkedInFlight = run.status === 'parked' && hasInFlightSteps(run);
     if (run.status !== 'running' && !parkedInFlight) return run;
 
-    if (run.status === 'running' && !Array.isArray(run.order)) {
+    if (run.status === 'running' && !Array.isArray(run.order) && !run.cancellation) {
       const failed: WorkflowRun = {
         ...run,
         status: 'failed',
@@ -840,6 +865,12 @@ export async function advanceWorkflowRunById(
     // later edit/retire/delete of the definition file.
     const def = run.definitionSnapshot ?? deps.getDefinition(deps.root, workflowId);
     if (!def) {
+      if (run.cancellation) {
+        // Native cancellation preflights and freezes a definition before writing
+        // intent. A historical partial record must never be overwritten as an
+        // ordinary definition failure after cancellation became authoritative.
+        return run;
+      }
       const failed: WorkflowRun = {
         ...run,
         status: 'failed',
@@ -857,6 +888,7 @@ export async function advanceWorkflowRunById(
     // employee fails the spawn, which fails/skips the step honestly).
     const resolved = compilePlan(def);
     if (!resolved.ok) {
+      if (run.cancellation) return run;
       const failed: WorkflowRun = {
         ...run,
         status: 'failed',
@@ -971,9 +1003,29 @@ export async function cancelWorkflowRun(
     // inventing ownership or replacing the earlier terminal intent.
     if (run.status === 'cancelled' || run.stopping) return { outcome: 'conflict' as const, run };
 
+    // Cancellation may terminalize without a plan only when there is no live
+    // receipt to own. Otherwise compile BEFORE persisting intent, then freeze that
+    // exact definition on legacy/pre-snapshot records. A missing or invalid mutable
+    // definition therefore yields a deterministic 409 with zero cancellation
+    // evidence instead of successful-cancel-then-failed reconciliation.
+    let definition: EditableWorkflowDefinition | null = null;
+    let compiled: ReturnType<typeof compilePlan> | null = null;
+    if (hasInFlightSteps(run)) {
+      definition = run.definitionSnapshot ?? deps.getDefinition(deps.root, workflowId);
+      if (!definition) return { outcome: 'conflict' as const, run };
+      compiled = compilePlan(definition);
+      if (!compiled.ok) return { outcome: 'conflict' as const, run };
+    }
+
     const at = (deps.now ?? (() => new Date().toISOString()))();
     const withIntent: WorkflowRun = {
       ...run,
+      ...(definition && !run.definitionSnapshot ? {
+        definitionSnapshot: JSON.parse(JSON.stringify(definition)) as EditableWorkflowDefinition,
+      } : {}),
+      ...(!Array.isArray(run.order) && hasInFlightSteps(run)
+        ? { order: run.steps.map((receipt) => receipt.nodeId) }
+        : {}),
       cancellation: { requestedAt: at, requestedBy: opts.actor, reason },
     };
     const requested = persistRun(deps, requestWorkflowRunTerminal(withIntent, 'cancelled', [{
@@ -982,9 +1034,9 @@ export async function cancelWorkflowRun(
     }], at));
     if (requested.status === 'cancelled') return { outcome: 'cancelled' as const, run: requested };
 
-    const definition = requested.definitionSnapshot ?? deps.getDefinition(deps.root, workflowId);
+    definition ??= requested.definitionSnapshot ?? deps.getDefinition(deps.root, workflowId);
     if (!definition) return { outcome: 'cancelled' as const, run: requested };
-    const compiled = compilePlan(definition);
+    compiled ??= compilePlan(definition);
     if (!compiled.ok) return { outcome: 'cancelled' as const, run: requested };
     return {
       outcome: 'cancelled' as const,

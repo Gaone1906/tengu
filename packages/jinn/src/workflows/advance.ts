@@ -440,6 +440,9 @@ export interface StopIntent {
   /** The deterministic sessionKey of the timed-out attempt — the stop lookup key. */
   sessionKey: string;
   reason: string;
+  /** Present only for native cancellation. Persisted on the run before this stop
+   * executes so later planner passes never issue the same stop twice. */
+  cancellationAttemptKey?: string;
 }
 
 export interface AdvanceResult {
@@ -759,7 +762,18 @@ export function advanceRun(
 
   const { stepById, gateById, switchById, failById, waitById } = indexPlan(plan);
   const steps = run.steps.map((r) => ({ ...r }));
-  const next: WorkflowRun = { ...run, steps };
+  const next: WorkflowRun = {
+    ...run,
+    steps,
+    ...(run.cancellation ? {
+      cancellation: {
+        ...run.cancellation,
+        ...(run.cancellation.stopAttempts
+          ? { stopAttempts: run.cancellation.stopAttempts.map((attempt) => ({ ...attempt })) }
+          : {}),
+      },
+    } : {}),
+  };
   let changed = false;
   /** Max receipts in flight at once. `?? 1` keeps the planner total against a plan
    * shape from before GRS-016a (compat: absent = sequential). */
@@ -779,6 +793,37 @@ export function advanceRun(
   });
 
   const inFlightCount = (): number => steps.filter((s) => IN_FLIGHT_STEP_STATUSES.has(s.status)).length;
+
+  const cancellationStopKey = (stop: Omit<StopIntent, 'reason' | 'cancellationAttemptKey'>): string =>
+    [run.runId, stop.nodeId, `r${stop.round}`, `a${stop.attempt}`, stop.sessionId ?? '-', stop.sessionKey].join(':');
+
+  /** Queue a cancellation stop exactly once. The identity record is part of this
+   * planner result, so the driver persists it before executing the returned stop. */
+  const queueCancellationStop = (stop: Omit<StopIntent, 'reason' | 'cancellationAttemptKey'>): void => {
+    if (!next.cancellation) return;
+    const key = cancellationStopKey(stop);
+    if (next.cancellation.stopAttempts?.some((attempt) => attempt.key === key)) return;
+    const requestedAt = now();
+    next.cancellation.stopAttempts = [
+      ...(next.cancellation.stopAttempts ?? []),
+      {
+        key,
+        nodeId: stop.nodeId,
+        round: stop.round,
+        attempt: stop.attempt,
+        ...(stop.sessionId ? { sessionId: stop.sessionId } : {}),
+        sessionKey: stop.sessionKey,
+        requestedAt,
+        outcome: 'requested',
+      },
+    ];
+    changed = true;
+    stops.push({
+      ...stop,
+      reason: 'run-stopping: terminal cancelled requested',
+      cancellationAttemptKey: key,
+    });
+  };
 
   /** The shared activity frame (GRS-016d-fix): isResolved / position rule / edge
    * activity all come from the ONE implementation the prompt builder also uses —
@@ -1103,6 +1148,28 @@ export function advanceRun(
     // A failed receipt on a DRAINING run is legitimate residue (the failure that
     // started the drain, or a sibling that failed during it) — walk past it.
     if (receipt.status === 'failed' && next.stopping) continue;
+
+    if (receipt.status === 'spawned' && next.stopping?.to === 'cancelled') {
+      // v1 `passed` runs normalize to dispatched with run-owned `spawned`
+      // receipts. Cancellation is the one safe mutation: the durable attempt key
+      // identifies exactly the Session the old executor minted, so adopt it into
+      // the ordinary running drain instead of terminalizing over live work.
+      const attempt = receipt.attempt ?? 1;
+      const sessionKey = stepSessionKey(run.runId, receipt.nodeId, attempt, receipt.round ?? 1);
+      const p = probe(sessionKey);
+      receipt.attempt = attempt;
+      if (p.found && (p.status === 'running' || p.status === 'waiting')) {
+        receipt.status = 'running';
+        if (p.sessionId) receipt.sessionId = p.sessionId;
+        receipt.detail = 'legacy spawned session adopted for cancellation drain';
+      } else {
+        receipt.status = 'failed';
+        receipt.detail = 'legacy spawned session was no longer live when cancellation drained';
+        receipt.settledAt = now();
+      }
+      receipt.at = now();
+      changed = true;
+    }
 
     if (receipt.status === 'failed' || receipt.status === 'spawned' || receipt.status === 'error') {
       // 'failed' on a running (non-draining) run means a previous driver pass died
@@ -1496,7 +1563,7 @@ export function advanceRun(
         // cannot leak a timeout stop into the cancellation transaction.
         if (next.stopping?.to === 'cancelled') {
           if (step?.sessionMode !== 'existing') {
-            stops.push({
+            queueCancellationStop({
               nodeId: receipt.nodeId,
               attempt,
               round: receipt.round ?? 1,
@@ -1504,7 +1571,6 @@ export function advanceRun(
               sessionKey: step?.sessionMode === 'workflow'
                 ? sharedSessionKey(run.runId)
                 : sessionKey,
-              reason: 'run-stopping: terminal cancelled requested',
             });
           }
           sequentialFrontBlocked = true;

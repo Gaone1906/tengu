@@ -646,7 +646,7 @@ describe("native Workflow gate approval integration", () => {
       { reason: "operator stopped the run" },
     );
     expect(cancelled.status).toBe(200);
-    expect(cancelled.body).toMatchObject({ status: "running", stopping: { to: "cancelled" } });
+    expect(cancelled.body).toMatchObject({ status: "cancelled", stopping: { to: "cancelled" } });
     expect(registry.getSessionBySessionKey(liveSessionKey)).toMatchObject({
       status: "interrupted",
       attemptOutcome: "interrupted",
