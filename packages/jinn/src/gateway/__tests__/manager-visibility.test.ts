@@ -29,7 +29,7 @@ const roster = new Map<string, Employee>([
   ["peer", employee("peer", "senior", "team-lead")],
 ]);
 
-function session(id: string, owner: string): Session {
+function session(id: string, owner: string, overrides: Partial<Session> = {}): Session {
   return {
     id,
     engine: "codex",
@@ -41,10 +41,11 @@ function session(id: string, owner: string): Session {
     connector: "web",
     createdAt: "2026-07-10T00:00:00.000Z",
     lastActivity: "2026-07-10T00:00:00.000Z",
+    ...overrides,
   } as Session;
 }
 
-function deps(managerSession: Session | null = session("manager-session", "team-lead")) {
+function deps(managerSession: Session | null = session("manager-session", "team-lead", { status: "running" })) {
   return {
     findManagerSession: vi.fn(() => managerSession ?? undefined),
     notifyManager: vi.fn(),
@@ -119,6 +120,33 @@ describe("surfaceManagerVisibility", () => {
       employee: "worker",
       childSessionId: "worker-child",
     }));
+  });
+
+  it.each([
+    ["completed", session("completed-manager", "team-lead", { status: "idle", attemptOutcome: "succeeded" })],
+    ["stopped", session("stopped-manager", "team-lead", { status: "interrupted", attemptOutcome: "interrupted" })],
+    ["stale", session("stale-manager", "team-lead", { status: "idle", attemptOutcome: null })],
+  ])("records the Todo fallback instead of waking a %s manager session", (_label, managerSession) => {
+    const d = deps(managerSession);
+
+    surfaceManagerVisibility(input("org-root"), d);
+
+    expect(d.notifyManager).not.toHaveBeenCalled();
+    expect(d.appendFallback).toHaveBeenCalledOnce();
+    expect(d.appendFallback).toHaveBeenCalledWith(expect.objectContaining({
+      workItemId: "wi_manager_visibility",
+      manager: "team-lead",
+      childSessionId: "worker-child",
+    }));
+  });
+
+  it.each(["running", "waiting"] as const)("still notifies an active %s manager session", (status) => {
+    const d = deps(session(`${status}-manager`, "team-lead", { status }));
+
+    surfaceManagerVisibility(input("org-root"), d);
+
+    expect(d.notifyManager).toHaveBeenCalledOnce();
+    expect(d.appendFallback).not.toHaveBeenCalled();
   });
 
   it("fails open when visibility delivery throws", () => {

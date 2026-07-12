@@ -233,6 +233,111 @@ beforeEach(() => {
 });
 
 describe("parent callback reliability", () => {
+  it("accepts replayed manager visibility once at the durable parent boundary", async () => {
+    const seenPrompts: string[] = [];
+    const events: Array<{ event: string; data: unknown }> = [];
+    const engine = makeEngine(seenPrompts);
+    const queue = new queueModule.SessionQueue();
+    const context = makeContext(engine, queue, events);
+    const manager = createParent("manager-visibility");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = makeRouteBackedFetch(context) as unknown as typeof fetch;
+    const details = {
+      manager: "team-lead",
+      managerDisplay: "Team Lead",
+      delegator: "org-root",
+      delegatorDisplay: "Org Root",
+      employee: "worker",
+      employeeDisplay: "Worker",
+      childSessionId: "visibility-child",
+      workItemId: "wi_visibility_boundary",
+      title: "Inspect durable visibility",
+    };
+
+    try {
+      for (let index = 0; index < 6; index++) callbacks.notifyManagerVisibility(manager.id, details);
+
+      await eventually(() => {
+        expect(queue.isRunning(manager.sessionKey)).toBe(false);
+        expect(seenPrompts).toHaveLength(1);
+      });
+      const accepted = registry.initDb().prepare(`
+        SELECT id, status FROM callback_deliveries WHERE callback_kind = 'manager-visibility'
+      `).get();
+      callbacks.notifyManagerVisibility(manager.id, details);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(registry.initDb().prepare(`
+        SELECT COUNT(*) AS n FROM callback_deliveries WHERE callback_kind = 'manager-visibility'
+      `).get()).toEqual({ n: 1 });
+      expect(registry.initDb().prepare(`
+        SELECT id, status FROM callback_deliveries WHERE callback_kind = 'manager-visibility'
+      `).get()).toEqual(accepted);
+      expect(registry.getMessages(manager.id).filter((message) => message.role === "notification"))
+        .toHaveLength(1);
+      expect(events.filter(({ event }) => event === "session:notification")).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("surfaces one child reply across repeated rate-limit wait, resume, and completion signals", async () => {
+    const seenPrompts: string[] = [];
+    const events: Array<{ event: string; data: unknown }> = [];
+    const engine = makeEngine(seenPrompts);
+    const queue = new queueModule.SessionQueue();
+    const context = makeContext(engine, queue, events);
+    const parent = createParent("rate-lifecycle");
+    const child = registry.createSession({
+      engine: "stub",
+      source: "web",
+      sourceRef: "web:rate-lifecycle-child",
+      sessionKey: "web:rate-lifecycle-child",
+      connector: "web",
+      employee: "worker",
+      parentSessionId: parent.id,
+      prompt: "complete after a rate limit",
+    });
+    const attempt = registry.beginSessionAttempt(child.id)!;
+    const active = registry.getSession(child.id)!;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = makeRouteBackedFetch(context) as unknown as typeof fetch;
+
+    try {
+      for (let index = 0; index < 4; index++) callbacks.notifyRateLimited(active);
+      for (let index = 0; index < 4; index++) callbacks.notifyRateLimitResumed(active);
+      const completed = registry.completeSessionAttempt(child.id, attempt.attemptToken!, {
+        status: "idle",
+        attemptOutcome: "succeeded",
+      })!;
+      for (let index = 0; index < 4; index++) {
+        callbacks.notifyParentSession(completed, { result: "one final escalation" });
+      }
+
+      await eventually(() => {
+        expect(queue.isRunning(parent.sessionKey)).toBe(false);
+        expect(seenPrompts).toHaveLength(3);
+      });
+      expect(registry.initDb().prepare(`
+        SELECT callback_kind AS kind, COUNT(*) AS n
+        FROM callback_deliveries
+        GROUP BY callback_kind
+        ORDER BY callback_kind
+      `).all()).toEqual([
+        { kind: "parent-completion", n: 1 },
+        { kind: "rate-limit-resumed", n: 1 },
+        { kind: "rate-limited", n: 1 },
+      ]);
+      expect(registry.getMessages(parent.id).filter((message) => message.meta?.kind === "child-reply"))
+        .toHaveLength(1);
+      expect(events.filter(({ event, data }) =>
+        event === "session:notification"
+        && (data as { meta?: { kind?: string } }).meta?.kind === "child-reply",
+      )).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it.each(["web", "talk"] as const)(
     "collapses six identical rate-limit-resumed callbacks for a %s parent",
     async (source) => {

@@ -187,6 +187,44 @@ describe("notifyManagerVisibility", () => {
 
     globalThis.fetch = originalFetch;
   });
+
+  it("uses one stable durable receipt when the same visibility input is replayed", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const details = {
+      manager: "team-lead",
+      managerDisplay: "Team Lead",
+      delegator: "org-root",
+      delegatorDisplay: "Org Root",
+      employee: "worker",
+      employeeDisplay: "Worker",
+      childSessionId: "worker-child",
+      workItemId: "wi_visibility_replay",
+      title: "Inspect one replayed incident",
+    };
+
+    for (let index = 0; index < 6; index++) {
+      notifyManagerVisibility("manager-session", details);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(claimCallbackDelivery).toHaveBeenCalledTimes(6);
+    expect(vi.mocked(claimCallbackDelivery).mock.calls[0][0]).toMatchObject({
+      parentSessionId: "manager-session",
+      childSessionId: "worker-child",
+      attemptToken: "manager-visibility:wi_visibility_replay",
+      terminalOutcome: "manager-visibility",
+      terminalVersion: 1,
+      callbackKind: "manager-visibility",
+    });
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body)).toMatchObject({
+      callbackDeliveryId: "callback-delivery-1",
+      meta: { kind: "manager-visibility", workItemId: "wi_visibility_replay" },
+    });
+
+    globalThis.fetch = originalFetch;
+  });
 });
 
 describe("notifyParentSession — no parent", () => {
@@ -268,6 +306,23 @@ describe("notifyParentSession", () => {
     notifyParentSession(makeSession(), { result: "phase complete" });
     await new Promise((r) => setTimeout(r, 50));
 
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["empty", ""],
+    ["whitespace", " \n\t "],
+    ["zero-width space", "\u200B"],
+    ["zero-width non-joiner", "\u200C"],
+    ["zero-width joiner", "\u200D"],
+    ["word joiner", "\u2060"],
+    ["zero-width no-break space", "\uFEFF"],
+    ["mixed invisible content", " \u200B\u200C\u200D\u2060\uFEFF\n"],
+  ])("does not create a child-reply callback for a %s assistant result", async (_label, result) => {
+    notifyParentSession(makeSession(), { result });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(claimCallbackDelivery).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 

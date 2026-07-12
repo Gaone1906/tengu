@@ -65,7 +65,17 @@ export function notifyManagerVisibility(
     workItemId: details.workItemId,
   };
 
-  _sendRaw(managerSessionId, message, displayMessage, { meta }).catch((error) => {
+  const { delivery } = claimCallbackDelivery({
+    parentSessionId: managerSessionId,
+    childSessionId: details.childSessionId,
+    attemptToken: `manager-visibility:${details.workItemId}`,
+    terminalOutcome: "manager-visibility",
+    terminalVersion: 1,
+    callbackKind: "manager-visibility",
+    payload: { message, displayMessage, meta },
+  });
+  if (delivery.status === "accepted") return;
+  _deliverClaimedCallback(delivery.id).catch((error) => {
     logger.warn(`[callbacks] Failed to notify manager session ${managerSessionId}: ${error instanceof Error ? error.message : String(error)}`);
   });
 }
@@ -80,6 +90,8 @@ export function notifyParentSession(
   result: { result?: string | null; error?: string | null; cost?: number; durationMs?: number },
   options?: { alwaysNotify?: boolean },
 ): void {
+  if (!result.error && !hasMeaningfulReply(result.result)) return;
+
   // Attachment wakes are a SEPARATE relationship from parent ownership: a talk
   // session can soft-link any session and must be woken when it finishes, even if
   // that session has no parent (or its parent is elsewhere). So this runs before
@@ -393,7 +405,9 @@ async function _sendNotification(
       `To read the full reply: GET /api/sessions/${childId}?last=N · ` +
       `to follow up: POST /api/sessions/${childId}/message`;
     displayMessage = `📩 ${employeeName} replied\n${_clean(raw, 220)}`;
-    notificationMeta = childNotificationMeta("child-reply", childSession, raw);
+    if (options?.callbackKind !== "rate-limited") {
+      notificationMeta = childNotificationMeta("child-reply", childSession, raw);
+    }
   }
 
   if (!isTalkParent && childSession.workItemId) {
@@ -484,6 +498,10 @@ function childNotificationMeta(
     childSessionId: childSession.id,
     fullMessage: fullMessage.slice(0, STRUCTURED_MESSAGE_BODY_MAX_CHARS),
   };
+}
+
+function hasMeaningfulReply(result: string | null | undefined): boolean {
+  return Boolean(result?.replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").trim());
 }
 
 /** Trim to a word boundary for a tidy human-facing preview. */

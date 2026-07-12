@@ -33,9 +33,15 @@ export interface ManagerVisibilityDeps {
   warn(message: string): void;
 }
 
+/** Passive visibility may join a conversation already in flight, but must not
+ * start a new turn on a completed, stopped, or otherwise idle manager thread. */
+export function isEligibleManagerVisibilitySession(session: Session): boolean {
+  return session.status === "running" || session.status === "waiting";
+}
+
 const defaultDeps: ManagerVisibilityDeps = {
   findManagerSession: (manager) =>
-    searchSessionsFiltered({ employee: manager }, 20).find((session) => session.status !== "error"),
+    searchSessionsFiltered({ employee: manager }, 20).find(isEligibleManagerVisibilitySession),
   notifyManager: notifyManagerVisibility,
   appendFallback: (fallback) => {
     appendWorkItemEvent({
@@ -91,7 +97,7 @@ export function surfaceManagerVisibility(
     };
 
     const managerSession = deps.findManagerSession(manager);
-    if (managerSession) {
+    if (managerSession && isEligibleManagerVisibilitySession(managerSession)) {
       deps.notifyManager(managerSession.id, details);
       return;
     }
