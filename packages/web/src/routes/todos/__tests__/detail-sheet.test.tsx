@@ -788,6 +788,90 @@ describe("Todo detail editing and dialog behavior", () => {
     }))
   })
 
+  it("returns the monotonic exact detail when a save invalidation refetch resolves stale", async () => {
+    const value = detail("backlog")
+    const staleRead = deferred<Response>()
+    const authoritative = {
+      ...value.workItem,
+      title: "Saved title",
+      version: 9,
+      rounds: 2,
+    }
+    const stale = {
+      ...value,
+      spendUsd: 99,
+      workItem: {
+        ...value.workItem,
+        title: "Stale title",
+        version: 8,
+        status: "assigned" as const,
+        rounds: 99,
+      },
+    }
+    let detailReads = 0
+    let patchCompleted = false
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        patchCompleted = true
+        return new Response(JSON.stringify({ workItem: authoritative, replayed: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      expect(patchCompleted).toBe(true)
+      detailReads += 1
+      return staleRead.promise
+    })
+    const { client } = renderSheetWithDetail(value)
+    client.setQueryData(["work-items", "duplicates"], {
+      items: [
+        { ...value.workItem, version: 7 },
+        { ...value.workItem, version: 10, title: "Newest duplicate" },
+      ],
+    })
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Saved title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    await waitFor(() => expect(patchBodies()).toHaveLength(1))
+    await waitFor(() => expect(detailReads).toBe(1))
+    staleRead.resolve(new Response(JSON.stringify(stale), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }))
+    await screen.findByText("Saved")
+
+    expect(client.getQueryData<WorkItemDetailWire>(["work-item", value.workItem.id])).toMatchObject({
+      spendUsd: 0,
+      workItem: { title: "Saved title", version: 9, status: "backlog", rounds: 2 },
+    })
+    const duplicateVersions = (client.getQueryData<{ items: WorkItemFullWire[] }>(["work-items", "duplicates"])?.items ?? [])
+      .map((item) => item.version)
+    expect(duplicateVersions).toEqual([9, 10])
+  })
+
+  it("accepts a newer exact-detail invalidation refetch", async () => {
+    const value = detail("backlog")
+    const newer = {
+      ...value,
+      spendUsd: 10,
+      workItem: { ...value.workItem, version: 10, rounds: 3 },
+    }
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      return new Response(JSON.stringify(newer), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    const { client } = renderSheetWithDetail(value)
+
+    await client.invalidateQueries({ queryKey: ["work-item", value.workItem.id], exact: true })
+
+    expect(client.getQueryData<WorkItemDetailWire>(["work-item", value.workItem.id])).toMatchObject({
+      spendUsd: 10,
+      workItem: { version: 10, rounds: 3 },
+    })
+  })
+
   it("updates equal-version outer detail metadata without regressing the Todo", async () => {
     const value = detail("backlog")
     value.workItem.version = 8
@@ -941,6 +1025,7 @@ describe("Todo detail editing and dialog behavior", () => {
 
   it("suppresses exact Retry for an idempotency conflict and reloads before minting a new key", async () => {
     const value = detail("backlog")
+    const user = userEvent.setup()
     let patchAttempt = 0
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
@@ -970,14 +1055,42 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull()
     const firstKey = patchBodies()[0].idempotencyKey
 
-    fireEvent.click(screen.getByRole("button", { name: "Reload remote" }))
+    const reload = screen.getByRole("button", { name: "Reload remote" })
+    await user.pointer([{ target: reload, keys: "[MouseLeft]" }])
     await waitFor(() => expect(screen.queryByText(/Reload remote to discard all local edits/)).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" })))
     fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
     fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Second local title" } })
     fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
 
     await waitFor(() => expect(patchBodies()).toHaveLength(2))
     expect(patchBodies()[1].idempotencyKey).not.toBe(firstKey)
+  })
+
+  it("restores the invoking idempotency Reload control after a reload failure", async () => {
+    const value = detail("backlog")
+    const user = userEvent.setup()
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({
+          code: "todo_idempotency_conflict",
+          error: "private payload wi_hidden token=secret",
+        }), { status: 409, headers: { "Content-Type": "application/json" } })
+      }
+      throw new TypeError("offline")
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "First local title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    const reload = await screen.findByRole("button", { name: "Reload remote" })
+    await user.pointer([{ target: reload, keys: "[MouseLeft]" }])
+
+    const alert = await screen.findByRole("alert")
+    await waitFor(() => expect(alert.textContent).toContain("Couldn't reload this Todo"))
+    await waitFor(() => expect(document.activeElement).toBe(reload))
   })
 
   it("restores focus to the invoking conflict action after a safe async error", async () => {
@@ -1058,6 +1171,7 @@ describe("Todo detail editing and dialog behavior", () => {
 
   it("prioritizes recoverable journal cleanup over conflict actions", async () => {
     const value = detail("backlog")
+    const user = userEvent.setup()
     persistTodoJournal(value.workItem.id, {
       revision: 1,
       patch: { title: "Recovered title" },
@@ -1079,6 +1193,38 @@ describe("Todo detail editing and dialog behavior", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Retry cleanup" })))
     expect(screen.queryByRole("status", { name: "Todo changed elsewhere" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Overwrite remote" })).toBeNull()
+
+    await user.keyboard("[Enter]")
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Retry cleanup" })).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" })))
+  })
+
+  it("moves focus from recovered cleanup into a newly discovered conflict", async () => {
+    const value = detail("backlog")
+    const remote = detail("backlog")
+    remote.workItem.version = 8
+    remote.workItem.title = "Remote title"
+    const user = userEvent.setup()
+    persistTodoJournal(value.workItem.id, {
+      revision: 1,
+      patch: { title: "Recovered title" },
+      baseline: { title: value.workItem.title },
+      baselineVersion: 7,
+      conflictFields: ["title"],
+      cleanupPending: true,
+      cleanupIntentFields: ["title"],
+    })
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Retry cleanup" })))
+    await user.keyboard("[Enter]")
+
+    const conflict = await screen.findByRole("status", { name: "Todo changed elsewhere" })
+    await waitFor(() => expect(document.activeElement).toBe(conflict))
   })
 
   it("uses Escape to cancel a field edit before Escape can close the sheet", () => {

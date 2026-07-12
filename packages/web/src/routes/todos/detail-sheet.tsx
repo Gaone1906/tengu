@@ -455,6 +455,15 @@ interface ConflictActionControl {
   focus: HTMLElement | null
 }
 
+type RecoveryFocusSurface = "none" | "cleanup" | "conflict" | "idempotency"
+
+interface RecoveryFocusControl {
+  id: string
+  surface: RecoveryFocusSurface
+  mode: TodoConflictMode
+  token: number
+}
+
 function DecisionFooter({
   detail,
   resolving,
@@ -617,7 +626,11 @@ export function DetailSheet({
   const queryClient = useQueryClient()
   const { data } = useQuery({
     queryKey: ["work-item", id],
-    queryFn: () => api.getWorkItem(id),
+    queryFn: async () => {
+      const incoming = await api.getWorkItem(id)
+      const current = queryClient.getQueryData<WorkItemDetailWire>(["work-item", id])
+      return mergeDetailResponse(current, incoming)
+    },
     initialData: initial,
     staleTime: 10_000,
   })
@@ -640,7 +653,7 @@ export function DetailSheet({
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const conflictSurfaceRef = useRef<HTMLElement>(null)
   const cleanupRetryRef = useRef<HTMLButtonElement>(null)
-  const previousConflictRef = useRef<{ id: string; mode: TodoConflictMode }>({ id, mode: "none" })
+  const recoveryFocusRef = useRef<RecoveryFocusControl>({ id, surface: "none", mode: "none", token: 0 })
   const actionControlRef = useRef<ConflictActionControl>({ id, mounted: false, busy: false, token: 0, focus: null })
   if (actionControlRef.current.id !== id) {
     actionControlRef.current.id = id
@@ -648,7 +661,7 @@ export function DetailSheet({
     actionControlRef.current.busy = false
     actionControlRef.current.token += 1
     actionControlRef.current.focus = null
-    previousConflictRef.current = { id, mode: "none" }
+    recoveryFocusRef.current = { id, surface: "none", mode: "none", token: recoveryFocusRef.current.token + 1 }
   }
   useEffect(() => {
     const control = actionControlRef.current
@@ -705,6 +718,7 @@ export function DetailSheet({
     save: saveRemote,
     loadRemote,
   })
+  const idempotencyConflict = isTodoIdempotencyConflictError(draftState.error)
   useEffect(() => {
     if (!draftState.hasUnsaved) return
     const guardReload = (event: BeforeUnloadEvent) => {
@@ -724,23 +738,35 @@ export function DetailSheet({
   }, [draftState.recoveredConflict])
 
   useEffect(() => {
-    const previous = previousConflictRef.current.id === id ? previousConflictRef.current.mode : "none"
-    if (draftState.cleanupPending) {
-      previousConflictRef.current = { id, mode: "none" }
-      queueMicrotask(() => cleanupRetryRef.current?.focus())
-      return
-    }
-    const mode = draftState.conflictMode
-    if (mode === "none") {
-      previousConflictRef.current = { id, mode }
-      if (previous !== "none") queueMicrotask(() => closeButtonRef.current?.focus())
-      return
-    }
-    previousConflictRef.current = { id, mode }
-    if (previous === "none" || (mode === "same-field" && previous !== "same-field")) {
-      queueMicrotask(() => conflictSurfaceRef.current?.focus())
-    }
-  }, [draftState.cleanupPending, draftState.conflictMode, id])
+    const currentSurface: RecoveryFocusSurface = draftState.cleanupPending
+      ? "cleanup"
+      : draftState.conflictMode !== "none"
+        ? "conflict"
+        : idempotencyConflict
+          ? "idempotency"
+          : "none"
+    const previous = recoveryFocusRef.current.id === id
+      ? recoveryFocusRef.current
+      : { id, surface: "none" as const, mode: "none" as const, token: recoveryFocusRef.current.token }
+    const token = previous.token + 1
+    recoveryFocusRef.current = { id, surface: currentSurface, mode: draftState.conflictMode, token }
+
+    const focusCleanup = currentSurface === "cleanup"
+    const focusConflict = currentSurface === "conflict"
+      && (previous.surface !== "conflict"
+        || (draftState.conflictMode === "same-field" && previous.mode !== "same-field"))
+    const focusClose = currentSurface === "none" && previous.surface !== "none"
+    if (!focusCleanup && !focusConflict && !focusClose) return
+
+    queueMicrotask(() => {
+      const latest = recoveryFocusRef.current
+      const action = actionControlRef.current
+      if (latest.id !== id || latest.token !== token || action.id !== id || !action.mounted) return
+      if (focusCleanup) cleanupRetryRef.current?.focus()
+      else if (focusConflict) conflictSurfaceRef.current?.focus()
+      else closeButtonRef.current?.focus()
+    })
+  }, [draftState.cleanupPending, draftState.conflictMode, id, idempotencyConflict])
 
   const displayDetail = useMemo<WorkItemDetailWire | undefined>(() => detail ? {
     ...detail,
@@ -748,7 +774,6 @@ export function DetailSheet({
   } : undefined, [detail, draftState.draft])
   const pending = displayDetail?.workItem.approvalState === "pending"
   const execSession = selectLinkedSession(sessions)
-  const idempotencyConflict = isTodoIdempotencyConflictError(draftState.error)
   const conflictActionsBlocked = conflictBusy
     || draftState.conflictMode === "reconciling"
     || draftState.status === "saving"
