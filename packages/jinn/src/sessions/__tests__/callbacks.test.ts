@@ -407,9 +407,11 @@ describe("notifyParentSession", () => {
 
     const body = JSON.parse(opts.body);
     expect(body.role).toBe("notification");
-    // LLM-facing message: full context + API pointers for following up
+    // LLM-facing message: full context + MCP-native pointers for following up.
     expect(body.message).toContain("replied in child session child-001");
-    expect(body.message).toContain("GET /api/sessions/child-001?last=N");
+    expect(body.message).toContain('read_session { sessionId: "child-001", last: N }');
+    expect(body.message).toContain('send_to_session { sessionId: "child-001"');
+    expect(body.message).not.toContain("/api/sessions");
     expect(body.message).toContain("Some result");
     // Human-facing banner: clean, no API noise
     expect(body.displayMessage).toContain("test-employee replied");
@@ -691,7 +693,7 @@ describe("notifyParentSession — talk parent (voice-friendly message)", () => {
     expect(body.message).toBe(expected);
   });
 
-  it("non-talk parent keeps byte-identical message format (regression)", async () => {
+  it("non-talk parent receives MCP-native read and follow-up guidance", async () => {
     // Override to a non-talk parent
     vi.mocked(getSession).mockReturnValue(
       makeSession({ id: "parent-001", parentSessionId: null, status: "idle", source: "api" }),
@@ -707,9 +709,10 @@ describe("notifyParentSession — talk parent (voice-friendly message)", () => {
     const expectedMessage =
       `📩 Employee "${employeeName}" replied in child session ${childId}.\n\n` +
       `Reply preview:\n${raw}\n\n` +
-      `To read the full reply: GET /api/sessions/${childId}?last=N · ` +
-      `to follow up: POST /api/sessions/${childId}/message`;
+      `To read the full reply: read_session { sessionId: "${childId}", last: N } · ` +
+      `to follow up: send_to_session { sessionId: "${childId}", message: "<message>" }`;
     expect(body.message).toBe(expectedMessage);
+    expect(body.message).not.toContain("/api/sessions");
   });
 
   // --- error path tests for talk parents ---

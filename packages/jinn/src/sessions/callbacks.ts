@@ -410,8 +410,8 @@ async function _sendNotification(
     message =
       `📩 Employee "${employeeName}" replied in child session ${childId}.\n\n` +
       `Reply preview:\n${llmPreview}\n\n` +
-      `To read the full reply: GET /api/sessions/${childId}?last=N · ` +
-      `to follow up: POST /api/sessions/${childId}/message`;
+      `To read the full reply: read_session { sessionId: "${childId}", last: N } · ` +
+      `to follow up: send_to_session { sessionId: "${childId}", message: "<message>" }`;
     displayMessage = `📩 ${employeeName} replied\n${_clean(raw, 220)}`;
     if (isTerminal) {
       notificationMeta = childNotificationMeta("child-reply", childSession, raw);
