@@ -173,7 +173,6 @@ import { CODEX_HOMES_DIR, JINN_HOME } from "../shared/paths.js";
 import { resolveEffort } from "../shared/effort.js";
 import { selectClaudeModelFallback } from "../shared/model-fallback.js";
 import { detectRateLimit, rateLimitEngineLabel } from "../shared/rateLimit.js";
-import { getClaudeExpectedResetAt } from "../shared/usageAwareness.js";
 import { collectEngineLimits } from "../shared/engine-limits.js";
 import { handleRateLimit } from "../sessions/rate-limit-handler.js";
 import { cleanupMcpConfigFile } from "../mcp/resolver.js";
@@ -5286,15 +5285,23 @@ export async function handleApiRequest(
       // processes the notification and can respond — they do not return early.
 
       if (!isNotification && session.status === "waiting") {
-        const engineLabel = rateLimitEngineLabel(session.engine);
-        const expectedResetAt = session.engine === "claude" ? getClaudeExpectedResetAt() : undefined;
-        const resumeText = expectedResetAt
-          ? expectedResetAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
-          : null;
-        const queuedText =
-          `⏳ Still paused due to ${engineLabel} usage limit${resumeText ? ` (resets ${resumeText})` : ""}. Your message is queued and will run automatically.`;
-        insertMessage(session.id, "notification", queuedText);
-        context.emit("session:notification", { sessionId: session.id, message: queuedText });
+        // A new user message on a rate-limit-paused session is an explicit
+        // "retry now" — e.g. the user cleared the limit on the provider side.
+        // handleRateLimit's wait-and-retry loop is sleeping until the engine's
+        // OWN reported resetsAt while holding this session's serial queue slot,
+        // so simply queueing this message would park it behind a now-stale reset
+        // and the session keeps reporting "still limited" (the limit is stale
+        // inside jinn, not on the provider). Flip out of `waiting` so that loop's
+        // status guard unwinds it as cancelled and frees the queue; the message
+        // enqueued below then runs immediately against the — now available —
+        // engine. Notifications (child callbacks) never trigger this.
+        updateSession(session.id, {
+          status: "idle",
+          lastActivity: new Date().toISOString(),
+          lastError: null,
+        });
+        session = getSession(session.id) ?? session;
+        context.emit("session:resumed", { sessionId: session.id });
       }
 
       // If a turn is already running, check whether we should interrupt or queue.

@@ -214,15 +214,18 @@ export class SessionManager {
       .filter((filePath): filePath is string => !!filePath);
 
     if (session.status === "waiting") {
-      const engineLabel = rateLimitEngineLabel(session.engine);
-      const expectedResetAt = session.engine === "claude" ? getClaudeExpectedResetAt() : undefined;
-      const resumeText = expectedResetAt
-        ? expectedResetAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
-        : null;
-      await connector.replyMessage(
-        target,
-        `⏳ Still paused due to ${engineLabel} usage limit${resumeText ? ` (resets ${resumeText})` : ""}. I queued this message and will respond automatically.`,
-      ).catch(() => {});
+      // A new user message on a rate-limit-paused session is an explicit "retry
+      // now" (e.g. the user cleared the limit provider-side). handleRateLimit's
+      // wait loop is sleeping until the engine's own reported resetsAt while
+      // holding this session's serial queue slot, so queueing behind it would
+      // park the message on a now-stale reset and keep replying "still limited".
+      // Flip out of `waiting` so that loop unwinds as cancelled and frees the
+      // queue; the enqueue below then runs immediately on the now-available engine.
+      session = updateSession(session.id, {
+        status: "idle",
+        lastActivity: new Date().toISOString(),
+        lastError: null,
+      }) ?? session;
     }
 
     if (session.status === "running" && this.queue.isRunning(msg.sessionKey) && connector.getCapabilities().reactions) {
