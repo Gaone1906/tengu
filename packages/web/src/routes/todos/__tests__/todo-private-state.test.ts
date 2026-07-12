@@ -78,6 +78,59 @@ describe("Todo private CAS journal", () => {
     expect(loadTodoJournal(TODO_ID)?.request?.state).toBe("failed")
   })
 
+  it("persists the closed safe idempotency failure classification without diagnostics", () => {
+    const classified = {
+      ...payload("failed"),
+      request: { ...request("failed"), failureCode: "TODO_IDEMPOTENCY_CONFLICT" },
+    }
+
+    persistTodoJournal(TODO_ID, classified as never)
+
+    expect(loadTodoJournal(TODO_ID)?.request).toEqual(classified.request)
+    expect(sessionStorage.getItem(JOURNAL_KEY)).not.toMatch(/message|diagnostic|wi_private_journal_42/i)
+  })
+
+  it.each([
+    ["arbitrary code", { failureCode: "CONNECTOR_TOKEN_LEAK" }],
+    ["raw message", { failureMessage: "SQL /private/path token=secret" }],
+  ])("rejects %s in terminal request recovery metadata", (_label, metadata) => {
+    writeEnvelope(TODO_ID, {
+      ...payload("failed"),
+      request: { ...request("failed"), ...metadata },
+    })
+
+    expect(loadTodoJournal(TODO_ID)).toBeNull()
+    expect(sessionStorage.getItem(JOURNAL_KEY)).toBeNull()
+  })
+
+  it("omits the classification for an ordinary definitive failure", () => {
+    persistTodoJournal(TODO_ID, payload("failed") as never)
+
+    expect(loadTodoJournal(TODO_ID)?.request).toMatchObject({ state: "failed" })
+    expect(loadTodoJournal(TODO_ID)?.request?.failureCode).toBeUndefined()
+  })
+
+  it("clears the classification when the exact failed request resumes dispatch", () => {
+    persistTodoJournal(TODO_ID, {
+      ...payload("failed"),
+      request: { ...request("failed"), failureCode: "TODO_IDEMPOTENCY_CONFLICT" },
+    } as never)
+
+    persistTodoJournal(TODO_ID, payload("dispatched") as never)
+
+    expect(loadTodoJournal(TODO_ID)?.request).toMatchObject({ state: "dispatched" })
+    expect(loadTodoJournal(TODO_ID)?.request?.failureCode).toBeUndefined()
+  })
+
+  it("rejects the safe classification outside the failed state", () => {
+    writeEnvelope(TODO_ID, {
+      ...payload("dispatched"),
+      request: { ...request("dispatched"), failureCode: "TODO_IDEMPOTENCY_CONFLICT" },
+    })
+
+    expect(loadTodoJournal(TODO_ID)).toBeNull()
+  })
+
   it("persists cleanup intent fields and the queued-save bit", () => {
     persistTodoJournal(TODO_ID, {
       ...payload("dispatched"),
