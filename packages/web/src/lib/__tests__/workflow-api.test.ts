@@ -70,6 +70,45 @@ describe("workflow run API", () => {
     expect(String(error)).not.toContain("must-not-leak")
     expect(String(error)).not.toContain("secret-key")
   })
+
+  it("posts native cancellation and preserves typed conflict errors", async () => {
+    const cancelled = {
+      runId: "run-1",
+      workflowId: "sample",
+      definitionVersion: 3,
+      title: "Sample",
+      trigger: { kind: "manual" as const },
+      status: "cancelled" as const,
+      startedAt: "2026-07-11T10:00:00.000Z",
+      endedAt: "2026-07-11T10:00:01.000Z",
+      steps: [],
+      parked: null,
+      cancellation: {
+        requestedAt: "2026-07-11T10:00:01.000Z",
+        requestedBy: "operator",
+        reason: "superseded",
+      },
+    }
+    authFetch.mockResolvedValueOnce(new Response(JSON.stringify(cancelled), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }))
+
+    await expect(api.cancelWorkflowRun("sample", "run-1", "superseded")).resolves.toEqual(cancelled)
+    expect(authFetch).toHaveBeenCalledWith(
+      "/api/workflow-definitions/sample/runs/run-1/cancel",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ reason: "superseded" }) }),
+    )
+
+    authFetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      error: "run cancellation intent conflicts with the persisted request",
+      code: "workflow-run-cancellation-conflict",
+      runId: "run-1",
+    }), { status: 409, headers: { "Content-Type": "application/json" } }))
+    const error = await api.cancelWorkflowRun("sample", "run-1").catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(WorkflowApiError)
+    expect(error).toMatchObject({ status: 409, code: "workflow-run-cancellation-conflict", runId: "run-1" })
+  })
 })
 
 describe("workflow layout intent API", () => {

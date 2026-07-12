@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, fireEvent, waitFor } from "@testing-library/react"
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react"
 import type { WorkflowRunWire, WorkflowRunSummaryWire } from "@/lib/api"
 import { WorkflowApiError } from "@/lib/api"
 
@@ -7,6 +7,7 @@ import { WorkflowApiError } from "@/lib/api"
 const listWorkflowRuns = vi.fn()
 const getWorkflowRun = vi.fn()
 const startWorkflowRun = vi.fn()
+const cancelWorkflowRun = vi.fn()
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>()
   return {
@@ -16,6 +17,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
       listWorkflowRuns: (...a: unknown[]) => listWorkflowRuns(...a),
       getWorkflowRun: (...a: unknown[]) => getWorkflowRun(...a),
       startWorkflowRun: (...a: unknown[]) => startWorkflowRun(...a),
+      cancelWorkflowRun: (...a: unknown[]) => cancelWorkflowRun(...a),
     },
   }
 })
@@ -244,6 +246,7 @@ describe("DefinitionRunView (container)", () => {
     listWorkflowRuns.mockReset()
     getWorkflowRun.mockReset()
     startWorkflowRun.mockReset()
+    cancelWorkflowRun.mockReset()
   })
 
   it("lists runs, auto-selects the newest, and renders the parked run on the canvas", async () => {
@@ -432,6 +435,95 @@ describe("DefinitionRunView (container)", () => {
     await waitFor(() => expect(screen.getByTestId("wf-run-order-warning")).toBeTruthy())
     expect(screen.getByTestId("wf-run-order-warning").textContent).toMatch(/declaration order/)
     expect(screen.getByTestId("wf-run-order-warning").textContent).toMatch(/qa → orchestrate/)
+  })
+
+  it.each(["running", "dispatched", "parked"] as const)("offers accessible cancellation for a %s run", async (status) => {
+    listWorkflowRuns.mockResolvedValue({
+      evidenceConfigured: true,
+      runs: [
+        { runId: "run-20260704090000-abcd1234", workflowId: "sample-autonomy", status, trigger: { kind: "manual" }, startedAt: "2026-07-04T09:00:00Z", endedAt: null, stepCount: 2, parked: status === "parked" },
+      ],
+    })
+    getWorkflowRun.mockResolvedValue(runWire({ status, parked: status === "parked" ? runWire().parked : null }))
+
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    const opener = await screen.findByRole("button", { name: "Cancel run" })
+    opener.focus()
+    fireEvent.click(opener)
+
+    const dialog = await screen.findByRole("dialog", { name: /cancel run run-20260704090000-abcd1234/i })
+    expect(dialog.getAttribute("aria-describedby")).toBeTruthy()
+    expect(within(dialog).getByText(/run-20260704090000-abcd1234/)).toBeTruthy()
+    fireEvent.keyDown(dialog, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    expect(document.activeElement).toBe(opener)
+  })
+
+  it.each(["completed", "failed", "cancelled"] as const)("does not offer cancellation for a %s run", async (status) => {
+    listWorkflowRuns.mockResolvedValue({
+      evidenceConfigured: true,
+      runs: [
+        { runId: "run-20260704090000-abcd1234", workflowId: "sample-autonomy", status, trigger: { kind: "manual" }, startedAt: "2026-07-04T09:00:00Z", endedAt: "2026-07-04T09:01:00Z", stepCount: 2, parked: false },
+      ],
+    })
+    getWorkflowRun.mockResolvedValue(runWire({ status, parked: null }))
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    await waitFor(() => expect(screen.getByText(status)).toBeTruthy())
+    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull()
+  })
+
+  it("disables cancellation while pending, avoids double submit, and renders the cancelled result truthfully", async () => {
+    listWorkflowRuns.mockResolvedValue({
+      evidenceConfigured: true,
+      runs: [
+        { runId: "run-20260704090000-abcd1234", workflowId: "sample-autonomy", status: "running", trigger: { kind: "manual" }, startedAt: "2026-07-04T09:00:00Z", endedAt: null, stepCount: 2, parked: false },
+      ],
+    })
+    getWorkflowRun.mockResolvedValue(runWire({ status: "running", parked: null, endedAt: null }))
+    let resolveCancel!: (value: WorkflowRunWire) => void
+    cancelWorkflowRun.mockReturnValue(new Promise<WorkflowRunWire>((resolve) => { resolveCancel = resolve }))
+
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }))
+    const dialog = await screen.findByRole("dialog")
+    const confirm = within(dialog).getByRole("button", { name: "Cancel run" }) as HTMLButtonElement
+    fireEvent.click(confirm)
+    fireEvent.click(confirm)
+
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Cancelling…" }).hasAttribute("disabled")).toBe(true))
+    expect(cancelWorkflowRun).toHaveBeenCalledTimes(1)
+    expect(cancelWorkflowRun).toHaveBeenCalledWith("sample-autonomy", "run-20260704090000-abcd1234")
+
+    await act(async () => {
+      resolveCancel(runWire({
+        status: "cancelled",
+        parked: null,
+        endedAt: "2026-07-04T09:01:00Z",
+        cancellation: { requestedAt: "2026-07-04T09:01:00Z", requestedBy: "operator", reason: null },
+      }))
+    })
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    expect(screen.getByText("cancelled")).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull()
+  })
+
+  it("keeps the dialog open and announces a cancellation error", async () => {
+    listWorkflowRuns.mockResolvedValue({
+      evidenceConfigured: true,
+      runs: [
+        { runId: "run-20260704090000-abcd1234", workflowId: "sample-autonomy", status: "running", trigger: { kind: "manual" }, startedAt: "2026-07-04T09:00:00Z", endedAt: null, stepCount: 2, parked: false },
+      ],
+    })
+    getWorkflowRun.mockResolvedValue(runWire({ status: "running", parked: null }))
+    cancelWorkflowRun.mockRejectedValue(new Error("run was already completed"))
+
+    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }))
+    const dialog = await screen.findByRole("dialog")
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel run" }))
+
+    expect((await within(dialog).findByRole("alert")).textContent).toContain("run was already completed")
+    expect(screen.getByRole("dialog")).toBeTruthy()
   })
 
   it("does NOT render the order-warning banner for a clean run", async () => {

@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
   advanceWorkflowRunById,
+  cancelWorkflowRun,
   editPendingWorkflowStepPrompt,
   resolveWorkflowRunGate,
   startWorkflowRun,
@@ -11,7 +12,7 @@ import {
   sweepWorkflowRuns,
   type RunDriverDeps,
 } from '../run-reconciler.js';
-import { markDispatching, stepSessionKey, type SpawnContext, type StepSessionProbe } from '../advance.js';
+import { markDispatching, sharedSessionKey, stepSessionKey, type SpawnContext, type StepSessionProbe } from '../advance.js';
 import { createDefinition, getDefinition, updateDefinition, WorkflowStoreError } from '../definition-store.js';
 import { claimWorkflowRunInvocation, getRun, publishInitialWorkflowRun, saveRun, type WorkflowRun } from '../run-store.js';
 import {
@@ -24,6 +25,7 @@ import {
   fingerprintWorkflowRunInvocationRequest,
   type WorkflowRunInvocationClaim,
 } from '../run-idempotency.js';
+import type { WorkflowReportingContext } from '../reporting.js';
 
 /**
  * Integration tests for the GRS-014b run driver + reconciler against a REAL run/definition
@@ -1091,5 +1093,281 @@ describe('resolveWorkflowRunGate (GRS-014e) — the only unpark', () => {
     const result = await resolveWorkflowRunGate(deps, 'np-wf', started.runId, 'approve');
     expect(result.outcome).toBe('not-parked');
     expect((result as { run: { status: string } }).run.status).toBe('running');
+  });
+});
+
+describe('cancelWorkflowRun — native cancellation authority', () => {
+  function parallelDef(id: string): EditableWorkflowDefinition {
+    return {
+      ...chainDef(id, [trigger, step('a'), step('b')]),
+      concurrency: 2,
+      edges: [
+        { id: 'e-a', from: 'trg', to: 'a', kind: 'sequence' },
+        { id: 'e-b', from: 'trg', to: 'b', kind: 'sequence' },
+      ],
+    };
+  }
+
+  function reportingHarness(reportMode: 'resume' | 'silent') {
+    const claims = new Map<string, Parameters<WorkflowReportingContext['claimDelivery']>[0]>();
+    const deliveries: string[] = [];
+    const blocks: Array<{ sessionId: string; status: string }> = [];
+    const reporting: WorkflowReportingContext = {
+      sessionExists: () => true,
+      applyBlock: (sessionId, envelope) => {
+        blocks.push({ sessionId, status: envelope.block.status ?? '' });
+      },
+      claimDelivery: (input) => {
+        const existing = claims.get(input.sourceAttempt);
+        claims.set(input.sourceAttempt, existing ?? input);
+        return {
+          claimed: !existing,
+          delivery: {
+            ...(existing ?? input),
+            id: `delivery-${input.sourceAttempt}`,
+            status: existing ? 'accepted' : 'pending',
+            messageId: existing ? 'message-1' : null,
+            queueItemId: existing ? 'queue-1' : null,
+            attemptCount: existing ? 1 : 0,
+            nextAttemptAt: null,
+            lastAttemptAt: null,
+            lastError: null,
+            deadLetteredAt: null,
+            createdAt: FIXED,
+            acceptedAt: existing ? FIXED : null,
+          },
+        };
+      },
+      deliverClaimed: async (deliveryId) => {
+        deliveries.push(deliveryId);
+        return 'accepted';
+      },
+    };
+    return { reporting, claims, deliveries, blocks, reportMode };
+  }
+
+  it('stamps intent, stops every fresh run-owned phase, drains to cancelled, and reports once', async () => {
+    const def = createDefinition(root, parallelDef('cancel-fresh'), { now });
+    const stopStepSession = vi.fn<NonNullable<RunDriverDeps['stopStepSession']>>(async () => undefined);
+    const report = reportingHarness('resume');
+    const { deps, settle } = harness({ stopStepSession, reporting: report.reporting });
+    const started = await startWorkflowRun(deps, def, {
+      invocation: { sessionId: 'invoking-session', reportMode: report.reportMode },
+    });
+    expect(started.steps.filter((receipt) => receipt.status === 'running')).toHaveLength(2);
+
+    const requested = await cancelWorkflowRun(deps, def.id, started.runId, {
+      actor: 'release-manager',
+      reason: 'superseded',
+    });
+
+    expect(requested).toMatchObject({
+      outcome: 'cancelled',
+      run: {
+        status: 'running',
+        cancellation: {
+          requestedAt: FIXED,
+          requestedBy: 'release-manager',
+          reason: 'superseded',
+        },
+        stopping: { to: 'cancelled' },
+      },
+    });
+    expect(stopStepSession).toHaveBeenCalledTimes(2);
+    expect(stopStepSession.mock.calls.map(([stop]) => stop.sessionKey).sort()).toEqual([
+      stepSessionKey(started.runId, 'a', 1, 1),
+      stepSessionKey(started.runId, 'b', 1, 1),
+    ]);
+
+    settle(started.runId, 'a', 1, 'interrupted');
+    settle(started.runId, 'b', 1, 'interrupted');
+    await sweepWorkflowRuns(deps);
+    const terminal = getRun(root, def.id, started.runId)!;
+    expect(terminal.status).toBe('cancelled');
+    expect(terminal.reportEpisodes?.filter((episode) => episode.outcome === 'cancelled')).toHaveLength(1);
+    expect([...report.claims.values()].filter((claim) => claim.sourceOutcome === 'cancelled')).toHaveLength(1);
+    await Promise.resolve();
+    expect(report.deliveries).toHaveLength(1);
+
+    const duplicate = await cancelWorkflowRun(deps, def.id, started.runId, {
+      actor: 'release-manager',
+      reason: 'superseded',
+    });
+    expect(duplicate).toEqual({ outcome: 'cancelled', run: terminal });
+    expect(stopStepSession).toHaveBeenCalledTimes(2);
+    expect([...report.claims.values()].filter((claim) => claim.sourceOutcome === 'cancelled')).toHaveLength(1);
+    expect(report.deliveries).toHaveLength(1);
+  });
+
+  it('stops the shared run-owned Session but never an existing borrowed Session', async () => {
+    const shared = createDefinition(root, chainDef('cancel-shared', [
+      trigger,
+      step('shared', { options: { session: { mode: 'workflow' } } }),
+    ]), { now });
+    const stopStepSession = vi.fn<NonNullable<RunDriverDeps['stopStepSession']>>(async () => undefined);
+    let sharedSessionId = '';
+    const deps: RunDriverDeps = {
+      root,
+      getDefinition,
+      probeStepSession: (key) => key === sharedSessionKey('run-shared') && sharedSessionId
+        ? { found: true, sessionId: sharedSessionId, status: 'running' }
+        : { found: false },
+      probeSessionTurn: ({ sessionId }) => ({ found: true, status: 'running', markerPosted: sessionId === sharedSessionId }),
+      postStepFollowUp: async () => ({ outcome: 'posted', sessionId: sharedSessionId }),
+      spawnStep: async () => {
+        sharedSessionId = 'session-shared';
+        return { sessionId: sharedSessionId };
+      },
+      sessionExists: () => true,
+      stopStepSession,
+      now,
+    };
+    const started = await startWorkflowRun(deps, shared, { makeRunId: () => 'run-shared' });
+    await cancelWorkflowRun(deps, shared.id, started.runId, { actor: 'operator' });
+    expect(stopStepSession).toHaveBeenCalledOnce();
+    expect(stopStepSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: sharedSessionId,
+      sessionKey: sharedSessionKey(started.runId),
+    }));
+
+    const borrowed = createDefinition(root, chainDef('cancel-borrowed', [
+      trigger,
+      step('borrowed', { options: { session: { mode: 'existing', sessionId: 'session-external' } } }),
+    ]), { now });
+    const borrowedStop = vi.fn<NonNullable<RunDriverDeps['stopStepSession']>>(async () => undefined);
+    let borrowedTurnRunning = false;
+    const borrowedDeps: RunDriverDeps = {
+      ...deps,
+      probeSessionTurn: () => ({
+        found: true,
+        status: borrowedTurnRunning ? 'running' : 'idle',
+        markerPosted: borrowedTurnRunning,
+      }),
+      postStepFollowUp: async () => {
+        borrowedTurnRunning = true;
+        return { outcome: 'posted', sessionId: 'session-external' };
+      },
+      sessionExists: (id) => id === 'session-external',
+      stopStepSession: borrowedStop,
+    };
+    const borrowedRun = await startWorkflowRun(borrowedDeps, borrowed);
+    await cancelWorkflowRun(borrowedDeps, borrowed.id, borrowedRun.runId, { actor: 'operator' });
+    expect(borrowedStop).not.toHaveBeenCalled();
+  });
+
+  it('cancels a parked run immediately, rejects completed/failed, and conflicts on changed duplicate intent', async () => {
+    const parkedDef = createDefinition(root, chainDef('cancel-parked', [trigger, step('a'), approvalGate('g')]), { now });
+    const { deps, settle } = harness();
+    const started = await startWorkflowRun(deps, parkedDef);
+    settle(started.runId, 'a', 1);
+    await sweepWorkflowRuns(deps);
+    expect(getRun(root, parkedDef.id, started.runId)?.status).toBe('parked');
+
+    const parked = await cancelWorkflowRun(deps, parkedDef.id, started.runId, { actor: 'operator' });
+    expect(parked).toMatchObject({ outcome: 'cancelled', run: { status: 'cancelled', parked: null } });
+    const changed = await cancelWorkflowRun(deps, parkedDef.id, started.runId, {
+      actor: 'operator',
+      reason: 'different intent',
+    });
+    expect(changed).toMatchObject({ outcome: 'conflict', run: { status: 'cancelled' } });
+
+    const completedDef = createDefinition(root, chainDef('cancel-completed', [trigger]), { now });
+    const completed = await startWorkflowRun(deps, completedDef);
+    expect((await cancelWorkflowRun(deps, completedDef.id, completed.runId, { actor: 'operator' })).outcome).toBe('already-terminal');
+
+    const failedDef = createDefinition(root, chainDef('cancel-failed', [trigger, step('a')]), { now });
+    const failedHarness = harness({ spawnStep: async () => { throw new Error('failed'); } });
+    const failed = await startWorkflowRun(failedHarness.deps, failedDef);
+    expect((await cancelWorkflowRun(failedHarness.deps, failedDef.id, failed.runId, { actor: 'operator' })).outcome).toBe('already-terminal');
+  });
+
+  it('persists bounded stop-failure evidence without resurrecting the cancelled terminal', async () => {
+    const def = createDefinition(root, chainDef('cancel-stop-failure', [trigger, step('a')]), { now });
+    const stopStepSession = vi.fn<NonNullable<RunDriverDeps['stopStepSession']>>(async () => { throw new Error('engine stop failed'); });
+    const { deps, settle } = harness({ stopStepSession });
+    const started = await startWorkflowRun(deps, def);
+
+    const requested = await cancelWorkflowRun(deps, def.id, started.runId, { actor: 'operator' });
+    expect(requested).toMatchObject({
+      outcome: 'cancelled',
+      run: {
+        status: 'running',
+        stopping: { errors: expect.arrayContaining([expect.objectContaining({ code: 'run-cancel-stop-failed', ref: 'a' })]) },
+      },
+    });
+    settle(started.runId, 'a', 1, 'interrupted');
+    await sweepWorkflowRuns(deps);
+    const terminal = getRun(root, def.id, started.runId)!;
+    expect(terminal.status).toBe('cancelled');
+    expect(terminal.errors).toEqual(expect.arrayContaining([expect.objectContaining({
+      code: 'run-cancel-stop-failed',
+      message: expect.stringContaining('engine stop failed'),
+    })]));
+    await sweepWorkflowRuns(deps);
+    expect(getRun(root, def.id, started.runId)?.status).toBe('cancelled');
+  });
+
+  it('serializes cancellation with a racing settle and keeps one terminal episode', async () => {
+    const def = createDefinition(root, chainDef('cancel-race', [trigger, step('a')]), { now });
+    const report = reportingHarness('resume');
+    let releaseStop!: () => void;
+    const stopStarted = new Promise<void>((resolve) => {
+      releaseStop = resolve;
+    });
+    let markStopEntered!: () => void;
+    const stopEntered = new Promise<void>((resolve) => {
+      markStopEntered = resolve;
+    });
+    const { deps, settle } = harness({
+      reporting: report.reporting,
+      stopStepSession: async () => {
+        markStopEntered();
+        await stopStarted;
+      },
+    });
+    const started = await startWorkflowRun(deps, def, {
+      invocation: { sessionId: 'invoking-session', reportMode: report.reportMode },
+    });
+    const cancellation = cancelWorkflowRun(deps, def.id, started.runId, { actor: 'operator' });
+    await stopEntered;
+    settle(started.runId, 'a', 1, 'interrupted');
+    const duplicate = cancelWorkflowRun(deps, def.id, started.runId, { actor: 'operator' });
+    const conflicting = cancelWorkflowRun(deps, def.id, started.runId, { actor: 'operator', reason: 'changed' });
+    const racingSettle = advanceWorkflowRunById(deps, def.id, started.runId);
+    releaseStop();
+    const [, duplicateResult, conflictingResult] = await Promise.all([
+      cancellation,
+      duplicate,
+      conflicting,
+      racingSettle,
+    ]);
+
+    const terminal = getRun(root, def.id, started.runId)!;
+    expect(duplicateResult.outcome).toBe('cancelled');
+    expect(conflictingResult.outcome).toBe('conflict');
+    expect(terminal.status).toBe('cancelled');
+    expect(terminal.reportEpisodes?.filter((episode) => episode.outcome === 'cancelled')).toHaveLength(1);
+    expect([...report.claims.values()].filter((claim) => claim.sourceOutcome === 'cancelled')).toHaveLength(1);
+    await Promise.resolve();
+    expect(report.deliveries).toHaveLength(1);
+  });
+
+  it('silent mode still projects cancellation activity but never claims or delivers a report', async () => {
+    const def = createDefinition(root, chainDef('cancel-silent', [trigger, step('a')]), { now });
+    const report = reportingHarness('silent');
+    const { deps, settle } = harness({
+      reporting: report.reporting,
+      stopStepSession: async () => undefined,
+    });
+    const started = await startWorkflowRun(deps, def, {
+      invocation: { sessionId: 'invoking-session', reportMode: report.reportMode },
+    });
+    await cancelWorkflowRun(deps, def.id, started.runId, { actor: 'operator' });
+    settle(started.runId, 'a', 1, 'interrupted');
+    await sweepWorkflowRuns(deps);
+    expect(getRun(root, def.id, started.runId)?.status).toBe('cancelled');
+    expect(report.blocks.some((block) => block.status === 'error')).toBe(true);
+    expect(report.claims.size).toBe(0);
+    expect(report.deliveries).toHaveLength(0);
   });
 });

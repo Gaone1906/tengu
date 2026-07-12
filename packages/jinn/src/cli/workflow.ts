@@ -19,9 +19,23 @@ export interface WorkflowRunRequestOptions {
   fetchImpl?: typeof fetch;
 }
 
+export interface WorkflowRunCancellationRequestOptions {
+  baseUrl: string;
+  token: string;
+  workflowId: string;
+  runId: string;
+  reason?: string;
+  fetchImpl?: typeof fetch;
+}
+
 export interface RunWorkflowByNameOptions {
   input?: string;
   idempotencyKey?: string;
+  json?: boolean;
+}
+
+export interface CancelWorkflowRunOptions {
+  reason?: string;
   json?: boolean;
 }
 
@@ -71,6 +85,31 @@ export async function requestWorkflowRunByName(opts: WorkflowRunRequestOptions):
   return body as WorkflowRunResult;
 }
 
+export async function requestWorkflowRunCancellation(
+  opts: WorkflowRunCancellationRequestOptions,
+): Promise<WorkflowRunResult> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const res = await fetchImpl(
+    `${opts.baseUrl}/api/workflow-definitions/${encodeURIComponent(opts.workflowId)}/runs/${encodeURIComponent(opts.runId)}/cancel`,
+    {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${opts.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(opts.reason ? { reason: opts.reason } : {}),
+    },
+  );
+  const body = await responseJson(res);
+  if (!res.ok) {
+    const detail = body && typeof body === 'object' && typeof (body as { error?: unknown }).error === 'string'
+      ? (body as { error: string }).error
+      : `gateway returned HTTP ${res.status}`;
+    throw new Error(`workflow cancellation failed: ${detail}`);
+  }
+  return body as WorkflowRunResult;
+}
+
 function gatewayConnection(): { baseUrl: string; token: string } | null {
   if (!fs.existsSync(JINN_HOME)) return null;
   const info = readGatewayInfo(GATEWAY_INFO_FILE);
@@ -107,6 +146,32 @@ export async function runWorkflowByName(name: string, opts: RunWorkflowByNameOpt
     });
     if (opts.json) console.log(JSON.stringify(run, null, 2));
     else console.log(`Started ${run.runId} for ${run.workflowId} (${run.status}).`);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  }
+}
+
+export async function cancelWorkflowRunFromCli(
+  workflowId: string,
+  runId: string,
+  opts: CancelWorkflowRunOptions = {},
+): Promise<void> {
+  const connection = gatewayConnection();
+  if (!connection) {
+    console.error('Gateway auth token was not found. Start Jinn first, then cancel the workflow run.');
+    process.exitCode = 1;
+    return;
+  }
+  try {
+    const run = await requestWorkflowRunCancellation({
+      ...connection,
+      workflowId,
+      runId,
+      ...(opts.reason ? { reason: opts.reason } : {}),
+    });
+    if (opts.json) console.log(JSON.stringify(run, null, 2));
+    else console.log(`Cancelled ${run.runId} for ${run.workflowId} (${run.status}).`);
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exitCode = 1;

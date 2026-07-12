@@ -588,6 +588,12 @@ export interface WorkflowRunInvocationWire {
   reportMode: WorkflowReportModeWire
 }
 
+export interface WorkflowRunCancellationWire {
+  requestedAt: string
+  requestedBy: string
+  reason: string | null
+}
+
 export interface WorkflowRunWire {
   /** Absent/older on legacy evidence; 3 on current records. */
   schemaVersion?: number
@@ -600,6 +606,7 @@ export interface WorkflowRunWire {
   trigger: WorkflowRunTriggerWire
   parameters?: WorkflowRunParametersWire
   invocation?: WorkflowRunInvocationWire
+  cancellation?: WorkflowRunCancellationWire
   status: WorkflowRunStatusWire
   startedAt: string
   endedAt: string | null
@@ -614,6 +621,12 @@ export interface WorkflowRunWire {
     escalated: boolean
   } | null
   errors?: { code: string; message: string; ref?: string }[]
+  /** Drain evidence while live run-owned phase sessions are being stopped. */
+  stopping?: {
+    to: 'failed' | 'cancelled'
+    at: string
+    errors: { code: string; message: string; ref?: string }[]
+  }
   /** The frozen execution order of the run's nodes (GRS-014b sequential runs);
    * steps[] is materialized 1:1 in this order. */
   order?: string[]
@@ -1022,6 +1035,25 @@ export const api = {
     get<WorkflowRunWire>(
       `/api/workflow-definitions/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`,
     ),
+  cancelWorkflowRun: async (id: string, runId: string, reason?: string): Promise<WorkflowRunWire> => {
+    const res = await authFetch(
+      `/api/workflow-definitions/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/cancel`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reason ? { reason } : {}),
+      },
+    )
+    if (res.ok) return (await res.json()) as WorkflowRunWire
+    let body: Record<string, unknown> = {}
+    try { body = await res.json() as Record<string, unknown> } catch { /* keep status fallback */ }
+    throw new WorkflowApiError(
+      typeof body.error === "string" ? body.error : `API error: ${res.status}`,
+      res.status,
+      typeof body.code === "string" ? body.code : undefined,
+      typeof body.runId === "string" ? body.runId : undefined,
+    )
+  },
   listWorkflowTriggers: () =>
     get<{ triggers: WorkflowTriggerBindingWire[]; evidenceConfigured: boolean }>("/api/workflow-triggers"),
   createWorkflowTrigger: (input: CreateWorkflowTriggerInputWire) =>

@@ -155,6 +155,16 @@ program
       const { runWorkflowByName } = await import("../src/cli/workflow.js");
       await runWorkflowByName(name, opts);
     });
+
+  workflowCmd
+    .command("cancel <workflowId> <runId>")
+    .description("Cancel a Workflow run and stop its run-owned phase sessions")
+    .option("--reason <reason>", "Record why the run was cancelled")
+    .option("--json", "Print the full cancelled run record as JSON")
+    .action(async (workflowId: string, runId: string, opts: { reason?: string; json?: boolean }) => {
+      const { cancelWorkflowRunFromCli } = await import("../src/cli/workflow.js");
+      await cancelWorkflowRunFromCli(workflowId, runId, opts);
+    });
 }
 
 // Skills subcommands (jinn skills find|add|remove|list|update|restore)

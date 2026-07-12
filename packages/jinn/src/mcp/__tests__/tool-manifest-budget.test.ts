@@ -5,13 +5,13 @@ import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
 // Keep narrow headroom over the pinned Pi projection while advertising both
 // identity-routed native poll approval operations.
-const MAX_MANIFEST_TOKENS = 7299;
+const MAX_MANIFEST_TOKENS = 7377;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 6913, sha256: "5af3a04762c721be7c5940b50f2a779b4d40f02108681ce637af102513e8c922" },
-  pi: { tokens: 7246, sha256: "95718c63c09aec841281c096745589f1a2d061825af7834279b4568f52630ce5" },
-  openai: { tokens: 7046, sha256: "54a7e649d86691532e0ad30e8c6a27bead55578f8ddba4f4a70020698013ee4c" },
+  rpc: { tokens: 6983, sha256: "48e9a6ff94401f69852b29f7ecc4926fbada962dc07222361027f6a6385931ca" },
+  pi: { tokens: 7324, sha256: "50f18611149342517221452b1476a08acd9258913aa402dec6f806a22ae5ff8d" },
+  openai: { tokens: 7119, sha256: "014e38c0847589c7e5c913c41e98c185a73fa51b3639944be2e0697ede99d601" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -34,6 +34,7 @@ async function exactOrAttested(name: keyof typeof ATTESTED, payload: string, loa
 const EXPECTED_TOOL_NAMES = [
   "archive_work_item",
   "assign_work_item",
+  "cancel_workflow_run",
   "cost_report",
   "create_trigger",
   "create_work_item",
@@ -86,6 +87,7 @@ const EXPECTED_TOOL_NAMES = [
 const EXPECTED_REQUIRED = {
   archive_work_item: ["id"],
   assign_work_item: ["id", "assignee"],
+  cancel_workflow_run: ["workflowId", "runId"],
   cost_report: [],
   create_trigger: ["kind", "name", "event", "targetWorkflowId"],
   create_work_item: ["title"],
@@ -167,7 +169,7 @@ function collectEnums(value: unknown, path: string[] = []): Array<[string, strin
 }
 
 describe("tool manifest budget", () => {
-  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7299 o200k_base tokens", async () => {
+  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7377 o200k_base tokens", async () => {
     const tools = buildTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
     const wrappers = {
       rpc: { jsonrpc: "2.0", id: 1, result: { tools } },
@@ -206,7 +208,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(49);
+    expect(tools).toHaveLength(50);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);

@@ -1141,3 +1141,118 @@ describe('resolve-gate route (GRS-014e) — approve/reject a parked run over HTT
     expect(bad.status).toBe(400);
   });
 });
+
+describe('cancel run route — native cancellation', () => {
+  async function parkRun(id: string): Promise<string> {
+    const definition = {
+      id,
+      title: 'Cancellation route',
+      nodes: [
+        { id: 'trg', type: 'trigger', label: 'Manual', position: { x: 0, y: 0 }, trigger: { kind: 'manual' } },
+        { id: 'before', type: 'step', label: 'Before', position: { x: 0, y: 140 } },
+        { id: 'gate', type: 'gate', label: 'Approve', position: { x: 0, y: 280 }, gate: { kind: 'approval', description: 'approve', approvalRef: 'release' } },
+        { id: 'after', type: 'step', label: 'After', position: { x: 0, y: 420 } },
+      ],
+      edges: [
+        { id: 'e0', from: 'trg', to: 'before', kind: 'sequence' },
+        { id: 'e1', from: 'before', to: 'gate', kind: 'sequence' },
+        { id: 'e2', from: 'gate', to: 'after', kind: 'sequence' },
+      ],
+    };
+    expect((await call('POST', '/api/workflow-definitions', definition)).status).toBe(201);
+    const started = await call('POST', `/api/workflow-definitions/${id}/run`, {}, runCtx);
+    expect(started.status).toBe(201);
+    expect(started.body).toMatchObject({ status: 'parked' });
+    return (started.body as { runId: string }).runId;
+  }
+
+  it('authorizes, persists intent, returns an identical exact duplicate, and conflicts on changed intent', async () => {
+    const workflowId = 'cancel-route-idempotent';
+    const runId = await parkRun(workflowId);
+    const route = `/api/workflow-definitions/${workflowId}/runs/${runId}/cancel`;
+
+    const first = await call('POST', route, { reason: 'superseded' }, runCtx);
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({
+      runId,
+      status: 'cancelled',
+      cancellation: {
+        requestedBy: 'operator',
+        reason: 'superseded',
+        requestedAt: expect.any(String),
+      },
+    });
+
+    const exact = await call('POST', route, { reason: 'superseded' }, runCtx);
+    expect(exact.status).toBe(200);
+    expect(exact.body).toEqual(first.body);
+
+    const changed = await call('POST', route, { reason: 'different' }, runCtx);
+    expect(changed.status).toBe(409);
+    expect(changed.body).toMatchObject({
+      code: 'workflow-run-cancellation-conflict',
+      runId,
+      status: 'cancelled',
+    });
+    expect(registry.initDb().prepare("SELECT id FROM work_items WHERE source = 'workflow' AND source_ref = ?")
+      .get(`workflow:${workflowId}:${runId}`)).toBeUndefined();
+  });
+
+  it('rejects unauthorized callers, malformed input, and completed/failed terminals with 409', async () => {
+    const workflowId = 'cancel-route-guards';
+    const runId = await parkRun(workflowId);
+    const route = `/api/workflow-definitions/${workflowId}/runs/${runId}/cancel`;
+
+    const unauthorized = await callAsSession(workerSession, 'POST', route, { reason: 'not mine' }, runCtx);
+    expect(unauthorized.status).toBe(403);
+    const arrayBody = await call('POST', route, ['not-an-object'], runCtx);
+    expect(arrayBody.status).toBe(400);
+    const emptyReason = await call('POST', route, { reason: '   ' }, runCtx);
+    expect(emptyReason.status).toBe(400);
+    const longReason = await call('POST', route, { reason: 'x'.repeat(2_001) }, runCtx);
+    expect(longReason.status).toBe(400);
+    const unknown = await call('POST', route, { reason: 'valid', actor: 'forged' }, runCtx);
+    expect(unknown.status).toBe(400);
+
+    const completedDef = {
+      id: 'cancel-route-completed',
+      title: 'Completed cancellation route',
+      nodes: [
+        { id: 'trg', type: 'trigger', label: 'Manual', position: { x: 0, y: 0 }, trigger: { kind: 'manual' } },
+        { id: 'inline', type: 'step', label: 'Inline', position: { x: 0, y: 140 } },
+      ],
+      edges: [{ id: 'e0', from: 'trg', to: 'inline', kind: 'sequence' }],
+    };
+    await call('POST', '/api/workflow-definitions', completedDef);
+    const completed = await call('POST', '/api/workflow-definitions/cancel-route-completed/run', {}, runCtx);
+    const completedCancel = await call(
+      'POST',
+      `/api/workflow-definitions/cancel-route-completed/runs/${(completed.body as { runId: string }).runId}/cancel`,
+      {},
+      runCtx,
+    );
+    expect(completedCancel.status).toBe(409);
+    expect(completedCancel.body).toMatchObject({ status: 'completed' });
+
+    const failedDef = {
+      id: 'cancel-route-failed',
+      title: 'Failed cancellation route',
+      nodes: [
+        { id: 'trg', type: 'trigger', label: 'Manual', position: { x: 0, y: 0 }, trigger: { kind: 'manual' } },
+        { id: 'worker', type: 'step', label: 'Worker', position: { x: 0, y: 140 }, actor: { kind: 'engine', ref: 'missing-engine' } },
+      ],
+      edges: [{ id: 'e0', from: 'trg', to: 'worker', kind: 'sequence' }],
+    };
+    await call('POST', '/api/workflow-definitions', failedDef);
+    const failed = await call('POST', '/api/workflow-definitions/cancel-route-failed/run', {}, runCtx);
+    expect(failed.status).toBe(422);
+    const failedCancel = await call(
+      'POST',
+      `/api/workflow-definitions/cancel-route-failed/runs/${(failed.body as { runId: string }).runId}/cancel`,
+      {},
+      runCtx,
+    );
+    expect(failedCancel.status).toBe(409);
+    expect(failedCancel.body).toMatchObject({ status: 'failed' });
+  });
+});

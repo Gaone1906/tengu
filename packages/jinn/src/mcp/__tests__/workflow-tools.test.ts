@@ -125,6 +125,7 @@ describe("workflow tools — registry + schemas", () => {
       "retire_workflow",
       "start_workflow_run",
       "run_workflow_by_name",
+      "cancel_workflow_run",
       "edit_workflow_run_step_prompt",
       "escalate_workflow_gate",
       "list_triggers",
@@ -166,6 +167,7 @@ describe("workflow tools — registry + schemas", () => {
     expect(tool("retire_workflow").inputSchema.required).toEqual(["workflowId"]);
     expect(tool("start_workflow_run").inputSchema.required).toEqual(["workflowId"]);
     expect(tool("run_workflow_by_name").inputSchema.required).toEqual(["name"]);
+    expect(tool("cancel_workflow_run").inputSchema.required).toEqual(["workflowId", "runId"]);
     expect(tool("edit_workflow_run_step_prompt").inputSchema.required).toEqual(["workflowId", "runId", "nodeId", "prompt"]);
     expect(tool("escalate_workflow_gate").inputSchema.required).toEqual(["workflowId", "runId"]);
     expect(tool("create_trigger").inputSchema.required).toEqual(["kind", "name", "event", "targetWorkflowId"]);
@@ -815,6 +817,50 @@ describe("workflow tools — unit (stub gateway)", () => {
 
     expect(out.hint).toContain("Silent mode: this run belongs to this session and updates its durable activity, but will not resume it.");
     expect(out.hint).not.toContain("session-test");
+  });
+
+  it("cancel_workflow_run POSTs native cancellation with an optional bounded reason", async () => {
+    const { calls, ctx } = stub(() => ({
+      status: 200,
+      body: {
+        runId: "run-1",
+        workflowId: "wf",
+        status: "cancelled",
+        cancellation: { requestedAt: "2026-07-12T12:00:00.000Z", requestedBy: "worker", reason: "superseded" },
+      },
+    }));
+
+    const out = await tool("cancel_workflow_run").handler({
+      workflowId: "wf",
+      runId: "run-1",
+      reason: "superseded",
+    }, ctx) as { run: { status: string }; hint: string };
+
+    expect(calls[0]).toMatchObject({
+      url: "http://127.0.0.1:7777/api/workflow-definitions/wf/runs/run-1/cancel",
+      method: "POST",
+      body: { reason: "superseded" },
+    });
+    expect(out.run.status).toBe("cancelled");
+    expect(out.hint).toMatch(/cancelled/i);
+    const schema = tool("cancel_workflow_run").inputSchema as {
+      properties: Record<string, { type?: string; maxLength?: number }>;
+    };
+    expect(schema.properties.reason).toMatchObject({ type: "string", maxLength: 2_000 });
+  });
+
+  it("cancel_workflow_run requires bound identity and surfaces terminal/conflicting 409s", async () => {
+    const { ctx } = stub(() => ({
+      status: 409,
+      body: { error: "run cancellation intent conflicts", code: "workflow-run-cancellation-conflict", runId: "run-1" },
+    }));
+    await expect(tool("cancel_workflow_run").handler({ workflowId: "wf", runId: "run-1" }, {
+      ...ctx,
+      callerSessionId: undefined,
+      sessionCapability: undefined,
+    })).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("cancel_workflow_run").handler({ workflowId: "wf", runId: "run-1" }, ctx))
+      .rejects.toThrow(/workflow-run-cancellation-conflict/i);
   });
 
   it("start_workflow_run surfaces a sanitized typed idempotency conflict with safe run guidance", async () => {

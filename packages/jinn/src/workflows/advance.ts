@@ -1489,6 +1489,27 @@ export function advanceRun(
       const status: StepSessionStatus | 'missing' = p.found && p.status ? p.status : 'missing';
 
       if (status === 'running' || status === 'waiting') {
+        // Cancellation owns only sessions minted by this run. In particular, an
+        // `existing` session is borrowed operator context and must never be killed
+        // as a side effect of cancelling the Workflow that posted into it. Handle
+        // cancellation before timeout evaluation so an elapsed borrowed attempt
+        // cannot leak a timeout stop into the cancellation transaction.
+        if (next.stopping?.to === 'cancelled') {
+          if (step?.sessionMode !== 'existing') {
+            stops.push({
+              nodeId: receipt.nodeId,
+              attempt,
+              round: receipt.round ?? 1,
+              ...(receipt.sessionId ?? p.sessionId ? { sessionId: receipt.sessionId ?? p.sessionId } : {}),
+              sessionKey: step?.sessionMode === 'workflow'
+                ? sharedSessionKey(run.runId)
+                : sessionKey,
+              reason: 'run-stopping: terminal cancelled requested',
+            });
+          }
+          sequentialFrontBlocked = true;
+          continue;
+        }
         // Per-attempt wall-clock budget (GRS-016b `timeoutMinutes`): sweep-enforced —
         // the 15s reconciler IS the clock, no second timeout system. A breach emits a
         // STOP intent (the session is live and burning tokens — operator ruling #2)

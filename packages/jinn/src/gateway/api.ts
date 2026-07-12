@@ -125,6 +125,7 @@ import {
   escalateWorkflowRunGateApproval,
   editPendingWorkflowStepPrompt,
   MAX_WORKFLOW_STEP_PROMPT_CHARS,
+  MAX_WORKFLOW_RUN_CANCELLATION_REASON_CHARS,
   artifactGatePasses,
   stateFlagPasses,
   checkWorkflowEventRateLimit,
@@ -923,21 +924,22 @@ export function workflowRunDriverDeps(root: string, context: ApiContext): RunDri
     // sessions: there is no cross-gateway path here, the evidence-root isolation
     // argument for mode 'existing' (GRS-016e safety note c).
     sessionExists: (sessionId) => !!getSession(sessionId),
-    // The timeout stop (GRS-016b, operator ruling #2 — tokens stop burning): kill
-    // the live engine turn, drain the session's queue lane, idle the record — the
-    // same sequence POST /api/sessions/:id/stop performs, keyed by the step's
-    // deterministic sessionKey. Best-effort by contract: the driver logs a failure
-    // and moves on (the receipt's settle is already persisted).
+    // Workflow phase stop (timeouts and native cancellation): kill the live engine
+    // turn, drain the session's queue lane, interrupt the record — the same sequence
+    // POST /api/sessions/:id/stop performs, keyed by the phase's deterministic
+    // sessionKey. Best-effort by contract; durable cancellation records a bounded
+    // stop failure while the run remains in its honest stopping state.
     stopStepSession: async (stop) => {
       const session = getSessionBySessionKey(stop.sessionKey);
       if (!session) return; // already gone — the settle stands, nothing burns
-      killSessionEngines(context, session, `Interrupted: workflow step timeout (${stop.reason})`);
+      const interruption = `Interrupted: workflow phase stopped (${stop.reason})`;
+      killSessionEngines(context, session, interruption);
       context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
       updateSession(session.id, {
         status: "interrupted",
         attemptOutcome: "interrupted",
         lastActivity: new Date().toISOString(),
-        lastError: `Interrupted: workflow step timeout (${stop.reason})`,
+        lastError: interruption,
       });
       context.emit("session:stopped", { sessionId: session.id });
     },
@@ -4365,11 +4367,19 @@ export async function handleApiRequest(
       if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
       const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
       if (!parsed.ok) return;
-      const body = parsed.body && typeof parsed.body === "object" && !Array.isArray(parsed.body)
-        ? parsed.body as Record<string, unknown>
-        : {};
+      if (parsed.body !== null && (typeof parsed.body !== "object" || Array.isArray(parsed.body))) {
+        return badRequest(res, "cancellation body must be a JSON object");
+      }
+      const body = (parsed.body ?? {}) as Record<string, unknown>;
+      const extraKeys = Object.keys(body).filter((key) => key !== "reason");
+      if (extraKeys.length > 0) {
+        return badRequest(res, `cancellation has unknown field(s): ${extraKeys.join(", ")}; only reason is allowed`);
+      }
       if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.trim().length === 0)) {
         return badRequest(res, "reason must be a non-empty string when provided");
+      }
+      if (typeof body.reason === "string" && body.reason.trim().length > MAX_WORKFLOW_RUN_CANCELLATION_REASON_CHARS) {
+        return badRequest(res, `reason is too long (max ${MAX_WORKFLOW_RUN_CANCELLATION_REASON_CHARS} characters)`);
       }
       const run = getRun(root, params.id, params.runId);
       if (!run) return notFound(res);
@@ -4383,6 +4393,14 @@ export async function handleApiRequest(
       if (outcome.outcome === "not-found") return notFound(res);
       if (outcome.outcome === "already-terminal") {
         return json(res, { error: `run is already ${outcome.run.status}`, status: outcome.run.status }, 409);
+      }
+      if (outcome.outcome === "conflict") {
+        return json(res, {
+          error: "run cancellation intent conflicts with the persisted request",
+          code: "workflow-run-cancellation-conflict",
+          runId: outcome.run.runId,
+          status: outcome.run.status,
+        }, 409);
       }
       projectWorkflowOperationActivity(outcome.run, req.headers, context);
       return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));

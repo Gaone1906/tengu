@@ -267,6 +267,15 @@ export interface WorkflowRunInvocation {
   reportMode: WorkflowReportMode;
 }
 
+/** Frozen authority and operator intent for one native cancellation request. */
+export interface WorkflowRunCancellation {
+  requestedAt: string;
+  requestedBy: string;
+  reason: string | null;
+}
+
+export const MAX_WORKFLOW_RUN_CANCELLATION_REASON_CHARS = 2_000;
+
 export interface WorkflowRunReportEpisode {
   sequence: number;
   token: string;
@@ -337,6 +346,8 @@ export interface WorkflowRun {
   parameters?: WorkflowRunParameters;
   /** Verified invoking Session relation. Absent for browser/CLI/system and legacy runs. */
   invocation?: WorkflowRunInvocation;
+  /** Durable cancellation authority. Once present, changed intent is rejected. */
+  cancellation?: WorkflowRunCancellation;
   /** Monotonic append-only report episode identity. */
   reportSequence?: number;
   /** Stable parked/re-entry/terminal episodes claimed through Session delivery. */

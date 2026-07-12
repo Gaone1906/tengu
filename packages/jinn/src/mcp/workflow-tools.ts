@@ -1,7 +1,10 @@
 import { assertBoundCaller, gatewayRequest, JinnMcpToolError, type JinnMcpContext, type JinnMcpTool } from "./toolkit.js";
 import type { WorkflowSopCompileResult } from "../workflows/sop.js";
 import { autoPlaceWorkflowNodes, compileWorkflowAuthoringInput } from "../workflows/authoring.js";
-import { MAX_WORKFLOW_STEP_PROMPT_CHARS } from "../workflows/run-store.js";
+import {
+  MAX_WORKFLOW_RUN_CANCELLATION_REASON_CHARS,
+  MAX_WORKFLOW_STEP_PROMPT_CHARS,
+} from "../workflows/run-store.js";
 import {
   WORKFLOW_AUTHORITY_FIELDS,
   workflowCreateInputSchema,
@@ -145,6 +148,8 @@ function runHint(run: RunView): string {
       return "Run completed.";
     case "failed":
       return "Run failed. See errors[] and failed step.";
+    case "cancelled":
+      return "Run cancelled.";
     default:
       return "See status and steps[].";
   }
@@ -571,6 +576,31 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     },
   };
 
+  const cancelWorkflowRun: JinnMcpTool = {
+    name: "cancel_workflow_run",
+    description: "Cancel a live Workflow run and stop its run-owned phase sessions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workflowId: { type: "string" },
+        runId: { type: "string" },
+        reason: { type: "string", maxLength: MAX_WORKFLOW_RUN_CANCELLATION_REASON_CHARS },
+      },
+      required: ["workflowId", "runId"],
+    },
+    handler: async (args, ctx) => {
+      assertBoundCaller(ctx);
+      const workflowId = requireString(args, "workflowId");
+      const runId = requireString(args, "runId");
+      const reason = optionalString(args, "reason", MAX_WORKFLOW_RUN_CANCELLATION_REASON_CHARS);
+      const route = `${wfPath(workflowId)}/runs/${encodeURIComponent(runId)}/cancel`;
+      const { status, body } = await gatewayRequest(ctx, "POST", route, reason ? { reason } : {});
+      if (status >= 400) throw gatewayFailure(`cancelling Workflow run "${runId}"`, status, body);
+      const run = (body ?? {}) as RunView;
+      return { run: body, hint: `Cancellation recorded. ${runHint(run)}` };
+    },
+  };
+
   const editWorkflowRunStepPrompt: JinnMcpTool = {
     name: "edit_workflow_run_step_prompt",
     description: "Audit-edit a pending phase prompt.",
@@ -755,6 +785,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     retireWorkflow,
     startWorkflowRun,
     runWorkflowByName,
+    cancelWorkflowRun,
     editWorkflowRunStepPrompt,
     escalateWorkflowGate,
     listTriggers,

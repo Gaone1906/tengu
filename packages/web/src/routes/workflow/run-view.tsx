@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
-import { RefreshCw, Clock, X, ExternalLink, Bell, Loader2, CheckCircle2, AlertCircle, Play } from "lucide-react"
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { RefreshCw, Clock, X, ExternalLink, Bell, Loader2, CheckCircle2, AlertCircle, Play, CircleStop } from "lucide-react"
 import {
   api, WorkflowApiError,
   type WorkflowRunWire, type WorkflowRunSummaryWire, type RunStepReceiptWire,
@@ -12,6 +12,12 @@ import {
 import { WorkflowGraph } from "./graph"
 import { InspectorPanel, InspectorSheet } from "./inspector-shell"
 import { nodeStatusLine, relativeTime, triggerSummaryOf } from "./status-line"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog"
 
 function newRunIdempotencyKey(): string {
   return globalThis.crypto?.randomUUID?.() ?? `run-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -777,6 +783,77 @@ function SetupRows({ node }: { node: WorkflowNodeWire }) {
   )
 }
 
+function CancelWorkflowRunDialog({
+  open,
+  runId,
+  pending,
+  error,
+  returnFocusRef,
+  onDismiss,
+  onConfirm,
+}: {
+  open: boolean
+  runId: string
+  pending: boolean
+  error: string | null
+  returnFocusRef: RefObject<HTMLButtonElement | null>
+  onDismiss: () => void
+  onConfirm: () => void
+}) {
+  const dismissRef = useRef<HTMLButtonElement | null>(null)
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!nextOpen && !pending) onDismiss() }}>
+      <DialogContent
+        showCloseButton={false}
+        className="w-full max-w-sm gap-0 rounded-[var(--radius-xl)] border-0 bg-[var(--material-thick)] p-5 shadow-[var(--shadow-overlay)] motion-reduce:animate-none motion-reduce:duration-0"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault()
+          dismissRef.current?.focus()
+        }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus()
+        }}
+        onEscapeKeyDown={(event) => { if (pending) event.preventDefault() }}
+        onPointerDownOutside={(event) => event.preventDefault()}
+      >
+        <DialogTitle className="text-balance text-[length:var(--text-title3)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
+          Cancel run {runId}?
+        </DialogTitle>
+        <DialogDescription className="mt-1.5 text-pretty text-[length:var(--text-subheadline)] leading-relaxed text-[var(--text-secondary)]">
+          Active phases owned by this run will be stopped. Completed work remains in the run history.
+        </DialogDescription>
+        {error && (
+          <div role="alert" className="mt-3 rounded-[var(--radius-md)] bg-[color-mix(in_srgb,var(--system-red)_8%,transparent)] px-3 py-2 text-[length:var(--text-caption1)] text-[var(--system-red)]">
+            {error}
+          </div>
+        )}
+        <div className="mt-5 flex items-center justify-end gap-1.5">
+          <button
+            ref={dismissRef}
+            type="button"
+            onClick={onDismiss}
+            disabled={pending}
+            className="min-h-10 rounded-[var(--radius-md)] px-3 text-[length:var(--text-subheadline)] font-[var(--weight-medium)] text-[var(--text-secondary)] transition-[background-color,scale] duration-150 hover:bg-[var(--fill-secondary)] active:scale-[0.96] disabled:opacity-50 motion-reduce:transition-none"
+          >
+            Keep running
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={pending}
+            className="inline-flex min-h-10 items-center gap-2 rounded-[var(--radius-md)] px-3 text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] text-[var(--system-red)] transition-[background-color,scale] duration-150 hover:bg-[color-mix(in_srgb,var(--system-red)_10%,transparent)] active:scale-[0.96] disabled:opacity-50 motion-reduce:transition-none"
+          >
+            {pending && <Loader2 aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />}
+            {pending ? "Cancelling…" : "Cancel run"}
+          </button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /* Container: fetch the definition's runs, default to the newest (the parked run),
  * render it on the canvas with the run-aware inspector. The Executions lens:
  * when the gateway serves a derived projection, "Live" rides the same strip as
@@ -804,6 +881,11 @@ export function DefinitionRunView({
   const [startError, setStartError] = useState<string | null>(null)
   const [idempotencyConflict, setIdempotencyConflict] = useState(false)
   const [idempotencyKey, setIdempotencyKey] = useState(newRunIdempotencyKey)
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false)
+  const [cancellingRun, setCancellingRun] = useState(false)
+  const [cancelError, setCancelError] = useState<string | null>(null)
+  const cancelButtonRef = useRef<HTMLButtonElement | null>(null)
+  const cancelPendingRef = useRef(false)
   // `error` is the LIST-level failure (loadRuns) — it replaces the whole view.
   // `runError` is scoped to the SELECTED run's fetch: a transient getWorkflowRun
   // failure shows an inline banner but keeps the selector mounted so the user can
@@ -944,9 +1026,39 @@ export function DefinitionRunView({
     }
   }, [idempotencyKey, runInput, startingRun, workflowId])
 
+  const requestCancellation = useCallback(async () => {
+    if (!selectedRunId || cancelPendingRef.current) return
+    cancelPendingRef.current = true
+    setCancellingRun(true)
+    setCancelError(null)
+    try {
+      const updated = await api.cancelWorkflowRun(workflowId, selectedRunId)
+      setRun(updated)
+      setRuns((current) => current?.map((item) => item.runId === updated.runId
+        ? {
+            ...item,
+            status: updated.status,
+            endedAt: updated.endedAt,
+            parked: updated.status === "parked",
+          }
+        : item) ?? null)
+      setCancelDialogOpen(false)
+    } catch (e) {
+      setCancelError(e instanceof Error ? e.message : "Couldn’t cancel this run.")
+    } finally {
+      cancelPendingRef.current = false
+      setCancellingRun(false)
+    }
+  }, [selectedRunId, workflowId])
+
   // Only render the full run when it matches the current selection — belt-and-
   // suspenders against a fetch for a previous selection landing late.
   const activeRun = run && run.runId === selectedRunId ? run : null
+  const cancellationPending = activeRun?.stopping?.to === "cancelled"
+  const cancellable = !!activeRun
+    && ["running", "dispatched", "parked"].includes(activeRun.status)
+    && !activeRun.cancellation
+    && !cancellationPending
   const nodes: CanvasNode[] = useMemo(() => (activeRun ? nodesForDefinitionRun(activeRun) : []), [activeRun])
   const graphEdges = useMemo(() => (activeRun ? edgesForDefinitionRun(activeRun, nodes) : []), [activeRun, nodes])
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null
@@ -1047,7 +1159,19 @@ export function DefinitionRunView({
               liveSelected={showLive}
               onSelectLive={() => { setShowLive(true); setSelectedNodeId(null) }}
             />
-            {!showLive && activeRun && <RunStatusPill status={activeRun.status} />}
+            {!showLive && activeRun && <RunStatusPill status={cancellationPending ? "cancelling" : activeRun.status} />}
+            {!showLive && cancellable && (
+              <button
+                ref={cancelButtonRef}
+                type="button"
+                aria-label="Cancel run"
+                onClick={() => { setCancelError(null); setCancelDialogOpen(true) }}
+                className="inline-flex min-h-10 items-center gap-1.5 rounded-[var(--radius-md)] px-2.5 text-[length:var(--text-caption1)] font-[var(--weight-semibold)] text-[var(--system-red)] transition-[background-color,scale] duration-150 hover:bg-[color-mix(in_srgb,var(--system-red)_10%,transparent)] active:scale-[0.96] motion-reduce:transition-none"
+              >
+                <CircleStop aria-hidden="true" className="size-3.5" />
+                Cancel
+              </button>
+            )}
             {!showLive && (
               <button
                 onClick={refresh}
@@ -1059,6 +1183,18 @@ export function DefinitionRunView({
               </button>
             )}
           </div>
+
+          {activeRun && (
+            <CancelWorkflowRunDialog
+              open={cancelDialogOpen}
+              runId={activeRun.runId}
+              pending={cancellingRun}
+              error={cancelError}
+              returnFocusRef={cancelButtonRef}
+              onDismiss={() => { setCancelDialogOpen(false); setCancelError(null) }}
+              onConfirm={() => void requestCancellation()}
+            />
+          )}
 
           {showLive && (
             <div className="min-h-0 flex-1">

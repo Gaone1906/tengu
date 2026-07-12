@@ -30,6 +30,7 @@ import {
   type ResolveGateDecision,
   type SpawnResult,
   type SpawnStep,
+  type StopIntent,
   type StopStepSession,
 } from './advance.js';
 import {
@@ -256,6 +257,33 @@ function driveIterationCap(run: WorkflowRun): number {
   return run.steps.length * 3 + 10;
 }
 
+const MAX_CANCELLATION_STOP_FAILURES = 16;
+const MAX_CANCELLATION_STOP_FAILURE_MESSAGE_CHARS = 1_000;
+
+function cancellationStopFailure(
+  run: WorkflowRun,
+  stop: StopIntent,
+  error: unknown,
+): WorkflowRun {
+  const raw = error instanceof Error ? error.message : String(error);
+  const message = `could not stop run-owned session ${stop.sessionKey}: ${raw}`
+    .slice(0, MAX_CANCELLATION_STOP_FAILURE_MESSAGE_CHARS);
+  const evidence = { code: 'run-cancel-stop-failed', message, ref: stop.nodeId };
+  const currentErrors = run.stopping?.errors ?? run.errors ?? [];
+  if (currentErrors.some((item) => item.code === evidence.code && item.message === evidence.message && item.ref === evidence.ref)) {
+    return run;
+  }
+  const other = currentErrors.filter((item) => item.code !== evidence.code);
+  const boundedFailures = [
+    ...currentErrors.filter((item) => item.code === evidence.code),
+    evidence,
+  ].slice(-MAX_CANCELLATION_STOP_FAILURES);
+  if (run.stopping) {
+    return { ...run, stopping: { ...run.stopping, errors: [...other, ...boundedFailures] } };
+  }
+  return { ...run, errors: [...other, ...boundedFailures] };
+}
+
 /**
  * Assemble a step's prompt (GRS-014c): the node's own instructions + one handoff
  * section per ACTIVE edge predecessor that produced a persisted outcome (edge
@@ -435,6 +463,9 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
         deps.log?.('info', `[workflow-runs] run ${current.runId}: stopped step session ${stop.sessionKey} (${stop.reason})`);
       } catch (err) {
         deps.log?.('warn', `[workflow-runs] run ${current.runId}: stopping step session ${stop.sessionKey} failed: ${(err as Error).message}`);
+        if (current.cancellation && stop.reason === 'run-stopping: terminal cancelled requested') {
+          current = persistRun(deps, cancellationStopFailure(current, stop, err));
+        }
       }
     }
     // A terminal drain request can be discovered after the planner already
@@ -912,7 +943,8 @@ export type ResolveGateOutcome =
 export type CancelWorkflowRunOutcome =
   | { outcome: 'cancelled'; run: WorkflowRun }
   | { outcome: 'not-found' }
-  | { outcome: 'already-terminal'; run: WorkflowRun };
+  | { outcome: 'already-terminal'; run: WorkflowRun }
+  | { outcome: 'conflict'; run: WorkflowRun };
 
 /** Request a real run cancellation and drive its ordinary stop/drain path. */
 export async function cancelWorkflowRun(
@@ -924,15 +956,29 @@ export async function cancelWorkflowRun(
   return withRunAdvanceLock(runId, async () => {
     const run = getRun(deps.root, workflowId, runId);
     if (!run) return { outcome: 'not-found' as const };
-    if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled') {
+    const reason = opts.reason?.trim() || null;
+    if (run.cancellation) {
+      if (run.cancellation.requestedBy === opts.actor && run.cancellation.reason === reason) {
+        return { outcome: 'cancelled' as const, run };
+      }
+      return { outcome: 'conflict' as const, run };
+    }
+    if (run.status === 'completed' || run.status === 'failed') {
       return { outcome: 'already-terminal' as const, run };
     }
-    if (run.stopping?.to === 'cancelled') return { outcome: 'cancelled' as const, run };
+    // Legacy terminal cancellation and an already-selected failure drain have no
+    // canonical cancellation authority to compare against. Fail closed instead of
+    // inventing ownership or replacing the earlier terminal intent.
+    if (run.status === 'cancelled' || run.stopping) return { outcome: 'conflict' as const, run };
 
     const at = (deps.now ?? (() => new Date().toISOString()))();
-    const requested = persistRun(deps, requestWorkflowRunTerminal(run, 'cancelled', [{
+    const withIntent: WorkflowRun = {
+      ...run,
+      cancellation: { requestedAt: at, requestedBy: opts.actor, reason },
+    };
+    const requested = persistRun(deps, requestWorkflowRunTerminal(withIntent, 'cancelled', [{
       code: 'run-cancelled',
-      message: `${opts.actor} cancelled the Workflow run${opts.reason ? `: ${opts.reason}` : ''}`,
+      message: `${opts.actor} cancelled the Workflow run${reason ? `: ${reason}` : ''}`,
     }], at));
     if (requested.status === 'cancelled') return { outcome: 'cancelled' as const, run: requested };
 
