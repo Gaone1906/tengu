@@ -21,7 +21,7 @@ export interface TodoJournalPayload {
   patch: TodoDraftPatch
   /** Baselines are limited to the same dirty fields so same-field conflicts can be detected. */
   baseline: TodoDraftPatch
-  /** Timestamp strings belong only to request-less legacy v2 recovery entries. */
+  /** Numeric versions are modern; timestamp strings belong only to request-less legacy v2 recovery. */
   baselineVersion?: string | number
   /** A response was lost for these fields; only a server reconciliation may clear them. */
   uncertainFields?: TodoDraftField[]
@@ -115,10 +115,21 @@ function samePatch(a: TodoDraftPatch, b: TodoDraftPatch): boolean {
     && (Object.keys(a) as TodoDraftField[]).every((field) => Object.is(a[field], b[field]))
 }
 
-function validRequest(value: unknown, revision: number, patch: TodoDraftPatch): value is TodoJournalRequest {
+function patchFieldsCoveredBy(active: TodoDraftPatch, latest: TodoDraftPatch): boolean {
+  return Object.keys(active).every((field) => Object.prototype.hasOwnProperty.call(latest, field))
+}
+
+function validRequest(
+  value: unknown,
+  latestRevision: number,
+  latestPatch: TodoDraftPatch,
+  latestBaseline: TodoDraftPatch,
+): value is TodoJournalRequest {
   if (!isRecord(value) || !hasOnlyKeys(value, REQUEST_KEYS)) return false
-  if (!isPositiveSafeInteger(value.revision) || value.revision !== revision) return false
-  if (!validPatch(value.patch) || !samePatch(value.patch, patch)) return false
+  if (!isPositiveSafeInteger(value.revision) || value.revision > latestRevision) return false
+  if (!validPatch(value.patch)
+    || !patchFieldsCoveredBy(value.patch, latestPatch)
+    || !patchFieldsCoveredBy(value.patch, latestBaseline)) return false
   return isPositiveSafeInteger(value.expectedVersion)
     && typeof value.idempotencyKey === "string"
     && UUID_PATTERN.test(value.idempotencyKey)
@@ -143,10 +154,42 @@ function validPayload(value: unknown): value is TodoJournalPayload {
   if (value.request === undefined) {
     // The legacy v2 string was an updatedAt-like recovery marker, never a CAS
     // version. Keep it recoverable without synthesising request metadata.
-    return value.baselineVersion === undefined || typeof value.baselineVersion === "string"
+    return value.baselineVersion === undefined
+      || typeof value.baselineVersion === "string"
+      || isPositiveSafeInteger(value.baselineVersion)
   }
-  return validRequest(value.request, value.revision, value.patch)
-    && (value.baselineVersion === undefined || isPositiveSafeInteger(value.baselineVersion))
+  return validRequest(value.request, value.revision, value.patch, value.baseline)
+    && isPositiveSafeInteger(value.baselineVersion)
+    && value.baselineVersion === value.request.expectedVersion
+}
+
+const SAFE_REQUEST_TRANSITIONS: Readonly<Record<TodoJournalRequestState, ReadonlySet<TodoJournalRequestState>>> = {
+  prepared: new Set(["prepared", "dispatched", "uncertain", "failed", "conflict"]),
+  dispatched: new Set(["dispatched", "uncertain", "failed", "conflict"]),
+  uncertain: new Set(["uncertain", "conflict"]),
+  failed: new Set(["failed", "dispatched", "conflict"]),
+  conflict: new Set(["conflict"]),
+}
+
+function sameRequestFingerprint(a: TodoJournalRequest, b: TodoJournalRequest): boolean {
+  return a.revision === b.revision
+    && a.expectedVersion === b.expectedVersion
+    && a.idempotencyKey === b.idempotencyKey
+    && samePatch(a.patch, b.patch)
+}
+
+function sameDesiredIntent(a: TodoJournalPayload, b: TodoJournalPayload): boolean {
+  return a.revision === b.revision
+    && a.baselineVersion === b.baselineVersion
+    && samePatch(a.patch, b.patch)
+    && samePatch(a.baseline, b.baseline)
+}
+
+function protectedRequest(current: TodoJournalRequest, incoming: TodoJournalRequest): TodoJournalRequest {
+  const state = SAFE_REQUEST_TRANSITIONS[current.state].has(incoming.state)
+    ? incoming.state
+    : current.state
+  return { ...current, state }
 }
 
 function validEnvelope(ref: string, value: unknown, now: number): value is JournalEnvelope {
@@ -214,16 +257,28 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
     const ref = todoPrivateRef(id)
     const current = journals[ref]?.payload
     if (current && payload.revision < current.revision) return
+    let nextPayload = payload
     if (current?.request) {
-      if (!payload.request) return
-      if (payload.revision === current.revision
-        && (payload.request.revision !== current.request.revision
-          || payload.request.expectedVersion !== current.request.expectedVersion
-          || payload.request.idempotencyKey !== current.request.idempotencyKey
-          || !samePatch(payload.request.patch, current.request.patch))) return
+      if (!payload.request || !sameRequestFingerprint(current.request, payload.request)) return
+      const latestIntent = payload.revision === current.revision && !sameDesiredIntent(current, payload)
+        ? current
+        : payload
+      const request = protectedRequest(current.request, payload.request)
+      const uncertainFields = request.state === "uncertain"
+        ? [...new Set([
+          ...(current.uncertainFields ?? []),
+          ...(latestIntent.uncertainFields ?? []),
+          ...Object.keys(request.patch) as TodoDraftField[],
+        ])]
+        : latestIntent.uncertainFields
+      nextPayload = {
+        ...latestIntent,
+        uncertainFields,
+        request,
+      }
     }
     const sequence = Math.max(0, ...Object.values(journals).map((entry) => entry.sequence)) + 1
-    journals[ref] = { expiresAt: now + JOURNAL_TTL_MS, sequence, payload }
+    journals[ref] = { expiresAt: now + JOURNAL_TTL_MS, sequence, payload: nextPayload }
     const capped = Object.fromEntries(orderedEntries(journals).slice(0, MAX_JOURNALS))
     store.setItem(JOURNAL_KEY, JSON.stringify(capped))
   } catch {

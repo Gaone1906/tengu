@@ -73,15 +73,164 @@ describe("Todo private CAS journal", () => {
     },
   )
 
-  it("allows state progress without replacing a prepared request fingerprint", () => {
+  it("blocks a different logical request until the active request is explicitly cleared", () => {
     persistTodoJournal(TODO_ID, payload("prepared") as never)
     persistTodoJournal(TODO_ID, payload("dispatched") as never)
     persistTodoJournal(TODO_ID, {
-      ...payload("uncertain"),
-      request: { ...request("uncertain"), idempotencyKey: "987e6543-e21b-42d3-a456-426614174999" },
+      revision: 3,
+      patch: { ...patch, priority: 2 },
+      baseline: { ...baseline, priority: 1 },
+      baselineVersion: 8,
+      request: {
+        ...request("prepared"),
+        revision: 3,
+        patch: { ...patch, priority: 2 },
+        expectedVersion: 8,
+        idempotencyKey: "987e6543-e21b-42d3-a456-426614174999",
+      },
     } as never)
 
-    expect(loadTodoJournal(TODO_ID)?.request).toEqual(request("dispatched"))
+    expect(loadTodoJournal(TODO_ID)).toEqual(payload("dispatched"))
+  })
+
+  it("keeps the exact active request while late same-field and unrelated edits survive reload", () => {
+    const active = {
+      revision: 1,
+      patch: { title: "B" },
+      expectedVersion: 7,
+      idempotencyKey: UUID,
+      state: "dispatched" as const,
+    }
+    persistTodoJournal(TODO_ID, {
+      revision: 1,
+      patch: { title: "B" },
+      baseline: { title: "A" },
+      baselineVersion: 7,
+      request: active,
+    } as never)
+    persistTodoJournal(TODO_ID, {
+      revision: 2,
+      patch: { title: "C", priority: 2 },
+      baseline: { title: "A", priority: 1 },
+      baselineVersion: 7,
+      request: { ...active, state: "uncertain" },
+      uncertainFields: ["title"],
+    } as never)
+
+    expect(loadTodoJournal(TODO_ID)).toEqual({
+      revision: 2,
+      patch: { title: "C", priority: 2 },
+      baseline: { title: "A", priority: 1 },
+      baselineVersion: 7,
+      request: { ...active, state: "uncertain" },
+      uncertainFields: ["title"],
+    })
+  })
+
+  it("retains a same-field revert as latest intent while its active request remains uncertain", () => {
+    const active = {
+      revision: 1,
+      patch: { title: "B" },
+      expectedVersion: 7,
+      idempotencyKey: UUID,
+      state: "uncertain" as const,
+    }
+
+    persistTodoJournal(TODO_ID, {
+      revision: 2,
+      patch: { title: "A" },
+      baseline: { title: "A" },
+      baselineVersion: 7,
+      uncertainFields: ["title"],
+      request: active,
+    } as never)
+
+    expect(loadTodoJournal(TODO_ID)?.patch).toEqual({ title: "A" })
+    expect(loadTodoJournal(TODO_ID)?.request?.patch).toEqual({ title: "B" })
+    expect(loadTodoJournal(TODO_ID)?.uncertainFields).toEqual(["title"])
+  })
+
+  it("persists transport uncertainty without requiring a new local edit revision", () => {
+    const active = {
+      revision: 1,
+      patch: { title: "B" },
+      expectedVersion: 7,
+      idempotencyKey: UUID,
+    }
+    const desired = {
+      revision: 1,
+      patch: { title: "B" },
+      baseline: { title: "A" },
+      baselineVersion: 7,
+    }
+    persistTodoJournal(TODO_ID, {
+      ...desired,
+      request: { ...active, state: "dispatched" },
+    } as never)
+
+    persistTodoJournal(TODO_ID, {
+      ...desired,
+      uncertainFields: ["title"],
+      request: { ...active, state: "uncertain" },
+    } as never)
+
+    expect(loadTodoJournal(TODO_ID)?.uncertainFields).toEqual(["title"])
+    expect(loadTodoJournal(TODO_ID)?.request?.state).toBe("uncertain")
+  })
+
+  it.each([
+    ["prepared", "dispatched"],
+    ["prepared", "uncertain"],
+    ["prepared", "failed"],
+    ["prepared", "conflict"],
+    ["dispatched", "uncertain"],
+    ["dispatched", "failed"],
+    ["dispatched", "conflict"],
+    ["uncertain", "uncertain"],
+    ["uncertain", "conflict"],
+    ["conflict", "conflict"],
+    ["failed", "dispatched"],
+  ] as const)("allows the safe active-request transition %s -> %s", (current, next) => {
+    persistTodoJournal(TODO_ID, payload(current) as never)
+    persistTodoJournal(TODO_ID, payload(next) as never)
+
+    expect(loadTodoJournal(TODO_ID)?.request?.state).toBe(next)
+  })
+
+  it.each([
+    ["uncertain", "prepared"],
+    ["uncertain", "dispatched"],
+    ["uncertain", "failed"],
+    ["conflict", "prepared"],
+    ["conflict", "dispatched"],
+    ["conflict", "failed"],
+  ] as const)("keeps %s while accepting newer desired intent from a stale %s write", (current, stale) => {
+    const active = {
+      revision: 1,
+      patch: { title: "B" },
+      expectedVersion: 7,
+      idempotencyKey: UUID,
+    }
+    persistTodoJournal(TODO_ID, {
+      revision: 2,
+      patch: { title: "C" },
+      baseline: { title: "A" },
+      baselineVersion: 7,
+      request: { ...active, state: current },
+    } as never)
+    persistTodoJournal(TODO_ID, {
+      revision: 3,
+      patch: { title: "D", priority: 2 },
+      baseline: { title: "A", priority: 1 },
+      baselineVersion: 7,
+      request: { ...active, state: stale },
+    } as never)
+
+    expect(loadTodoJournal(TODO_ID)).toMatchObject({
+      revision: 3,
+      patch: { title: "D", priority: 2 },
+      request: { ...active, state: current },
+    })
   })
 
   it.each([
@@ -90,7 +239,7 @@ describe("Todo private CAS journal", () => {
     ["string CAS version", { ...request("prepared"), expectedVersion: "7" }],
     ["unsafe CAS version", { ...request("prepared"), expectedVersion: Number.MAX_SAFE_INTEGER + 1 }],
     ["zero request revision", { ...request("prepared"), revision: 0 }],
-    ["mismatched request revision", { ...request("prepared"), revision: 3 }],
+    ["future request revision", { ...request("prepared"), revision: 3 }],
     ["unsupported state", { ...request("prepared"), state: "saved" }],
   ])("rejects a request with %s", (_label, malformedRequest) => {
     persistTodoJournal(TODO_ID, { ...payload(), request: malformedRequest } as never)
@@ -118,18 +267,38 @@ describe("Todo private CAS journal", () => {
     expect(loadTodoJournal(TODO_ID)).toBeNull()
   })
 
-  it("rejects a stored request whose patch no longer matches the persisted dirty patch", () => {
+  it("rejects a stored request whose active fields are missing from latest patch and baseline", () => {
     persistTodoJournal(TODO_ID, payload() as never)
     const journals = rawJournals()
     const ref = todoPrivateRef(TODO_ID)
     journals[ref].payload.request = {
       ...request("prepared"),
-      patch: { title: "mutated after persistence", assignee: null },
+      patch: { title: patch.title, assignee: null, body: "sent" },
     }
     sessionStorage.setItem(JOURNAL_KEY, JSON.stringify(journals))
 
     expect(loadTodoJournal(TODO_ID)).toBeNull()
     expect(sessionStorage.getItem(JOURNAL_KEY)).toBeNull()
+  })
+
+  it.each([undefined, 8, "7"])("rejects active request baseline version %s that does not exactly match expectedVersion", (baselineVersion) => {
+    persistTodoJournal(TODO_ID, { ...payload(), baselineVersion } as never)
+
+    expect(loadTodoJournal(TODO_ID)).toBeNull()
+  })
+
+  it("accepts a modern request-less dirty draft with a positive numeric baseline version", () => {
+    const modern = {
+      revision: 3,
+      patch: { title: "Modern desired title" },
+      baseline: { title: "Modern baseline title" },
+      baselineVersion: 9,
+    }
+
+    persistTodoJournal(TODO_ID, modern)
+
+    expect(loadTodoJournal(TODO_ID)).toEqual(modern)
+    expect(loadTodoJournal(TODO_ID)?.request).toBeUndefined()
   })
 
   it("recovers a valid legacy v2 payload without inventing a CAS request from updatedAt", () => {
