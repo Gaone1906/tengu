@@ -5,6 +5,7 @@ import {
   persistTodoJournal,
   todoPrivateRef,
   transitionTodoJournal,
+  transitionTodoJournalPayload,
 } from "../todo-private-state"
 
 const JOURNAL_KEY = "jinn:todo-draft-journal:v2"
@@ -127,6 +128,54 @@ describe("Todo private CAS journal", () => {
 
     expect(loadTodoJournal(TODO_ID)?.cleanupIntentFields).toEqual(["title"])
     expect(loadTodoJournal(TODO_ID)?.cleanupSaveRequested).toBe(true)
+  })
+
+  describe("exact payload replacement", () => {
+    const cleanup = {
+      revision: 3,
+      patch: { title: "Newest" },
+      baseline: { title: "Original" },
+      baselineVersion: 7,
+      cleanupPending: true as const,
+      cleanupIntentFields: ["title"] as const,
+      cleanupSaveRequested: true as const,
+    }
+    const rebased = {
+      revision: 3,
+      patch: { title: "Newest" },
+      baseline: { title: "Fresh" },
+      baselineVersion: 8,
+    }
+
+    it("replaces the exact semantic payload in one verified storage mutation", () => {
+      persistTodoJournal(TODO_ID, cleanup as never)
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+      const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+
+      expect(transitionTodoJournalPayload(TODO_ID, cleanup as never, rebased)).toBe(true)
+      expect(loadTodoJournal(TODO_ID)).toEqual(rebased)
+      expect(setItem).toHaveBeenCalledTimes(1)
+      expect(removeItem).not.toHaveBeenCalled()
+    })
+
+    it("rejects a stale expected payload without writing", () => {
+      persistTodoJournal(TODO_ID, cleanup as never)
+      const stale = { ...cleanup, revision: 2 }
+      const setItem = vi.spyOn(Storage.prototype, "setItem")
+
+      expect(transitionTodoJournalPayload(TODO_ID, stale as never, rebased)).toBe(false)
+      expect(loadTodoJournal(TODO_ID)).toEqual(cleanup)
+      expect(setItem).not.toHaveBeenCalled()
+    })
+
+    it.each(["replacement", "removal"] as const)("detects a silent %s no-op", (kind) => {
+      persistTodoJournal(TODO_ID, cleanup as never)
+      vi.spyOn(Storage.prototype, kind === "replacement" ? "setItem" : "removeItem")
+        .mockImplementation(() => undefined)
+
+      expect(transitionTodoJournalPayload(TODO_ID, cleanup as never, kind === "replacement" ? rebased : null)).toBe(false)
+      expect(loadTodoJournal(TODO_ID)).toEqual(cleanup)
+    })
   })
 
   it.each([

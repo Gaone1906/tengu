@@ -8,6 +8,7 @@ import {
   loadTodoJournal,
   persistTodoJournal,
   transitionTodoJournal,
+  transitionTodoJournalPayload,
   type TodoDraftField,
   type TodoJournalPayload,
   type TodoJournalRequest,
@@ -36,6 +37,15 @@ export interface TodoSaveResult {
 }
 
 type FailureKind = "ambiguous" | "definitive" | "conflict" | null
+
+interface FreshIntentPlan {
+  desired: TodoEditableDraft
+  remaining: Set<TodoDraftField>
+  conflicts: Set<TodoDraftField>
+  baseline: TodoDraftPatch
+  patch: TodoDraftPatch
+  merged: TodoEditableDraft
+}
 
 function fieldsOf(patch: TodoDraftPatch): TodoDraftField[] {
   return Object.keys(patch) as TodoDraftField[]
@@ -101,6 +111,11 @@ function isTodoRemoteSnapshot(value: unknown): value is TodoRemoteSnapshot {
   if (!value || typeof value !== "object") return false
   const remote = value as Partial<TodoRemoteSnapshot>
   return isPositiveTodoVersion(remote.version) && isTodoEditableDraft(remote.draft)
+}
+
+function maxPositiveVersion(...values: unknown[]): number | undefined {
+  const versions = values.filter(isPositiveTodoVersion)
+  return versions.length > 0 ? Math.max(...versions) : undefined
 }
 
 function samePatch(a: TodoDraftPatch, b: TodoDraftPatch): boolean {
@@ -199,6 +214,18 @@ export function useTodoDraft({
         ? recovered.baselineVersion
         : isPositiveTodoVersion(serverVersion) ? serverVersion : undefined,
   )
+  const versionFloorRef = useRef({
+    id,
+    value: maxPositiveVersion(serverVersion, recovered?.baselineVersion, recoveredRequest?.expectedVersion),
+  })
+  if (versionFloorRef.current.id !== id) {
+    versionFloorRef.current = {
+      id,
+      value: maxPositiveVersion(serverVersion, recovered?.baselineVersion, recoveredRequest?.expectedVersion),
+    }
+  } else {
+    versionFloorRef.current.value = maxPositiveVersion(versionFloorRef.current.value, serverVersion)
+  }
   const dirtyFieldsRef = useRef(recoveredFields)
   const conflictFieldsRef = useRef(startingConflicts)
   const activeRef = useRef<TodoJournalRequest | null>(recoveredRequest)
@@ -215,11 +242,6 @@ export function useTodoDraft({
   const saveRef = useRef(saveRemote)
   const loadRemoteRef = useRef(loadRemote)
   const runActiveRef = useRef<() => Promise<void>>(async () => undefined)
-  const installFreshRequestRef = useRef<(
-    version: number,
-    previousActive?: TodoJournalRequest | null,
-    retainConflict?: boolean,
-  ) => boolean>(() => false)
 
   saveRef.current = saveRemote
   loadRemoteRef.current = loadRemote
@@ -364,13 +386,18 @@ export function useTodoDraft({
     version = baselineVersionRef.current,
   ): TodoRemoteSnapshot | null => isPositiveTodoVersion(version) ? { draft, version } : null, [])
 
-  const durableIntent = useCallback((): boolean => {
-    const stored = loadTodoJournal(id)
-    return !!stored
-      && stored.revision === Math.max(1, localRevisionRef.current)
-      && !stored.request
-      && samePatch(stored.patch, patchFor(dirtyFieldsRef.current, draftRef.current))
-  }, [id])
+  const acceptRemoteSnapshot = useCallback((remote: unknown): remote is TodoRemoteSnapshot => {
+    if (!isTodoRemoteSnapshot(remote)) return false
+    const floor = maxPositiveVersion(
+      versionFloorRef.current.value,
+      baselineVersionRef.current,
+      activeRef.current?.expectedVersion,
+      cleanupSnapshotRef.current?.version,
+    )
+    if (floor !== undefined && remote.version < floor) return false
+    versionFloorRef.current.value = maxPositiveVersion(floor, remote.version)
+    return true
+  }, [])
 
   const durableCleanupIntent = useCallback((): boolean => {
     if (!cleanupPendingRef.current) return true
@@ -392,6 +419,10 @@ export function useTodoDraft({
     }
     const epoch = epochRef.current
     let target = cleanupSnapshotRef.current
+    if (target && !acceptRemoteSnapshot(target)) {
+      cleanupSnapshotRef.current = null
+      target = null
+    }
     if (!target) {
       const readRemote = loadRemoteRef.current
       if (!readRemote) {
@@ -402,7 +433,7 @@ export function useTodoDraft({
       try {
         const remote = await readRemote()
         if (epoch !== epochRef.current) return
-        if (!isTodoRemoteSnapshot(remote)) {
+        if (!acceptRemoteSnapshot(remote)) {
           runningRef.current = false
           if (mountedRef.current) setError(cleanupRecoveryError())
           return
@@ -422,39 +453,70 @@ export function useTodoDraft({
       if (mountedRef.current) setError(cleanupRecoveryError())
       return
     }
-    const active = activeRef.current
-    if (!removeJournal(active)) {
-      blockCleanup(active && activeDurableRef.current ? active : null, target)
+    const expectedPayload = loadTodoJournal(id)
+    if (!expectedPayload?.cleanupPending) {
+      if (mountedRef.current) setError(cleanupRecoveryError())
       return
     }
     const saveRequested = cleanupSaveRequestedRef.current
     const desired = draftRef.current
     const remaining = new Set<TodoDraftField>()
+    const conflicts = new Set<TodoDraftField>()
     for (const field of cleanupIntentFieldsRef.current) {
-      if (!Object.is(desired[field], target.draft[field])) remaining.add(field)
+      if (Object.is(desired[field], target.draft[field])) continue
+      remaining.add(field)
+      if (!Object.is(expectedPayload.baseline[field], target.draft[field])) conflicts.add(field)
+    }
+    const rebased = { ...target.draft }
+    for (const field of remaining) (rebased as Record<string, unknown>)[field] = desired[field]
+    const nextBaseline = patchFor(remaining, target.draft)
+    const nextPatch = patchFor(remaining, desired)
+    const prepared = saveRequested && remaining.size > 0 && conflicts.size === 0
+      ? {
+          ...newTodoEditRequest(nextPatch, target.version),
+          revision: Math.max(1, localRevisionRef.current),
+          state: "prepared" as const,
+        }
+      : null
+    const nextPayload: TodoJournalPayload | null = remaining.size === 0
+      ? null
+      : {
+          revision: Math.max(1, localRevisionRef.current),
+          patch: nextPatch,
+          baseline: nextBaseline,
+          baselineVersion: target.version,
+          conflictFields: conflicts.size > 0 ? [...conflicts] : undefined,
+          request: prepared ?? undefined,
+        }
+
+    if (!transitionTodoJournalPayload(id, expectedPayload, nextPayload)) {
+      runningRef.current = false
+      failureRef.current = "definitive"
+      if (mountedRef.current) {
+        setStatus("error")
+        setError(cleanupRecoveryError())
+      }
+      return
     }
 
     remoteRef.current = target.draft
     baselineVersionRef.current = target.version
-    activeRef.current = null
-    activeDurableRef.current = false
+    versionFloorRef.current.value = maxPositiveVersion(versionFloorRef.current.value, target.version)
+    activeRef.current = prepared
+    activeDurableRef.current = !!prepared
     cleanupPendingRef.current = false
     cleanupSnapshotRef.current = null
     cleanupIntentFieldsRef.current.clear()
     cleanupSaveRequestedRef.current = false
     runningRef.current = false
-    failureRef.current = null
+    failureRef.current = conflicts.size > 0 ? "conflict" : null
     dirtyFieldsRef.current = remaining
-    baselineByFieldRef.current = Object.fromEntries(
-      [...remaining].map((field) => [field, target.draft[field]]),
-    ) as Partial<TodoEditableDraft>
-    const rebased = { ...target.draft }
-    for (const field of remaining) (rebased as Record<string, unknown>)[field] = desired[field]
-    publishConflict(new Set())
+    baselineByFieldRef.current = { ...nextBaseline }
+    publishConflict(conflicts)
     publishDraft(rebased)
     if (mountedRef.current) {
       setCleanupPending(false)
-      setRecoveredConflict(false)
+      setRecoveredConflict(conflicts.size > 0)
       setError(null)
     }
 
@@ -463,17 +525,17 @@ export function useTodoDraft({
       markClean("idle")
       return
     }
-    persistCurrent()
-    if (!durableIntent()) {
-      localPersistenceError(null, false, false)
+    if (conflicts.size > 0) {
+      if (mountedRef.current) setStatus("error")
       return
     }
-    if (saveRequested) {
-      installFreshRequestRef.current(target.version, null)
+    if (prepared) {
+      if (mountedRef.current) setStatus("saving")
+      void runActiveRef.current()
     } else if (mountedRef.current) {
       setStatus("dirty")
     }
-  }, [blockCleanup, durableCleanupIntent, durableIntent, localPersistenceError, markClean, persistCurrent, publishConflict, publishDraft, removeJournal])
+  }, [acceptRemoteSnapshot, durableCleanupIntent, id, markClean, persistCurrent, publishConflict, publishDraft])
 
   const installFreshRequest = useCallback((
     version: number,
@@ -536,16 +598,10 @@ export function useTodoDraft({
     void runActiveRef.current()
     return true
   }, [blockCleanup, durableRequest, id, localPersistenceError, markClean, payloadFor, publishConflict, removeJournal, transitionActive])
-  installFreshRequestRef.current = installFreshRequest
-
   const settleSuccessfulRequest = useCallback((request: TodoJournalRequest, result: TodoSaveResult) => {
     const { remote } = result
-    if (!isTodoRemoteSnapshot(remote)) {
+    if (!acceptRemoteSnapshot(remote)) {
       failAtomicTransition(request)
-      return
-    }
-    if (remote.version < request.expectedVersion) {
-      failAtomicTransition(request, new TypeError("The save returned an older Todo version"))
       return
     }
     const currentDesired = draftRef.current
@@ -609,7 +665,7 @@ export function useTodoDraft({
     if (!installFreshRequest(remote.version, request)
       && !cleanupPendingRef.current
       && conflictFieldsRef.current.size === 0) failAtomicTransition(request)
-  }, [failAtomicTransition, installFreshRequest, payloadFor, publishConflict, publishDraft, transitionActive])
+  }, [acceptRemoteSnapshot, failAtomicTransition, installFreshRequest, payloadFor, publishConflict, publishDraft, transitionActive])
 
   const runActive = useCallback(async () => {
     const request = activeRef.current
@@ -676,25 +732,39 @@ export function useTodoDraft({
   }, [durableRequest, failAtomicTransition, id, localPersistenceError, payloadFor, persistCurrent, publishConflict, settleSuccessfulRequest, transitionActive])
   runActiveRef.current = runActive
 
-  const adoptFreshForIntent = useCallback((remote: TodoRemoteSnapshot): Set<TodoDraftField> | null => {
-    if (!isTodoRemoteSnapshot(remote)) return null
+  const planFreshIntent = useCallback((remote: TodoRemoteSnapshot, detectConflicts = true): FreshIntentPlan => {
     const desired = draftRef.current
+    const remaining = new Set<TodoDraftField>()
     const conflicts = new Set<TodoDraftField>()
     for (const field of dirtyFieldsRef.current) {
+      if (Object.is(desired[field], remote.draft[field])) continue
+      remaining.add(field)
       const baseline = baselineByFieldRef.current[field]
-      if (Object.prototype.hasOwnProperty.call(baselineByFieldRef.current, field)
+      if (detectConflicts
+        && Object.prototype.hasOwnProperty.call(baselineByFieldRef.current, field)
         && remote.draft[field] !== baseline
         && desired[field] !== remote.draft[field]) conflicts.add(field)
     }
+    const merged = { ...remote.draft }
+    for (const field of remaining) (merged as Record<string, unknown>)[field] = desired[field]
+    return {
+      desired,
+      remaining,
+      conflicts,
+      baseline: patchFor(remaining, remote.draft),
+      patch: patchFor(remaining, desired),
+      merged,
+    }
+  }, [])
+
+  const adoptFreshForIntent = useCallback((remote: TodoRemoteSnapshot): Set<TodoDraftField> | null => {
+    if (!acceptRemoteSnapshot(remote)) return null
+    const plan = planFreshIntent(remote)
     remoteRef.current = remote.draft
     baselineVersionRef.current = remote.version
-    const merged = { ...remote.draft }
-    for (const field of dirtyFieldsRef.current) {
-      (merged as Record<string, unknown>)[field] = desired[field]
-    }
-    publishDraft(merged)
-    return conflicts
-  }, [publishDraft])
+    publishDraft(plan.merged)
+    return plan.conflicts
+  }, [acceptRemoteSnapshot, planFreshIntent, publishDraft])
 
   const acquireVersionAndSave = useCallback(async () => {
     const readRemote = loadRemoteRef.current
@@ -716,7 +786,7 @@ export function useTodoDraft({
       const remote = await readRemote()
       if (epoch !== epochRef.current) return
       runningRef.current = false
-      if (!isTodoRemoteSnapshot(remote)) {
+      if (!acceptRemoteSnapshot(remote)) {
         failureRef.current = "definitive"
         persistCurrent()
         if (mountedRef.current) {
@@ -751,7 +821,7 @@ export function useTodoDraft({
         setError(cause)
       }
     }
-  }, [adoptFreshForIntent, installFreshRequest, persistCurrent, publishConflict])
+  }, [acceptRemoteSnapshot, adoptFreshForIntent, installFreshRequest, persistCurrent, publishConflict])
 
   useEffect(() => {
     mountedRef.current = true
@@ -785,6 +855,10 @@ export function useTodoDraft({
       : isPositiveTodoVersion(stored?.baselineVersion)
         ? stored.baselineVersion
         : isPositiveTodoVersion(serverVersion) ? serverVersion : undefined
+    versionFloorRef.current = {
+      id,
+      value: maxPositiveVersion(serverVersion, stored?.baselineVersion, storedRequest?.expectedVersion),
+    }
     dirtyFieldsRef.current = storedFields
     activeRef.current = storedRequest
     activeDurableRef.current = !!storedRequest
@@ -839,6 +913,9 @@ export function useTodoDraft({
         dirtyFieldsRef.current.delete(field)
         delete baselineByFieldRef.current[field]
       } else {
+        if (!cleanupIntentFieldsRef.current.has(field)) {
+          (baselineByFieldRef.current as Record<string, unknown>)[field] = baselineTarget[field]
+        }
         cleanupIntentFieldsRef.current.add(field)
         dirtyFieldsRef.current.add(field)
       }
@@ -905,8 +982,9 @@ export function useTodoDraft({
         const shouldKeep = !target || !Object.is(desired, target[field])
         if (shouldKeep !== cleanupIntentFieldsRef.current.has(field)) metadataChanged = true
         if (shouldKeep) {
+          const newlyMasked = !cleanupIntentFieldsRef.current.has(field)
           cleanupIntentFieldsRef.current.add(field)
-          if (!dirtyFieldsRef.current.has(field)) {
+          if (newlyMasked || !dirtyFieldsRef.current.has(field)) {
             (baselineByFieldRef.current as Record<string, unknown>)[field] = target ? target[field] : remoteRef.current[field]
           }
           dirtyFieldsRef.current.add(field)
@@ -999,7 +1077,7 @@ export function useTodoDraft({
   }, [adoptFreshForIntent, persistCurrent, publishConflict])
 
   const reloadRemote = useCallback((remote: TodoRemoteSnapshot) => {
-    if (!isTodoRemoteSnapshot(remote) || runningRef.current) return
+    if (!acceptRemoteSnapshot(remote) || runningRef.current) return
     const active = activeRef.current
     if (!removeJournal(active)) {
       blockCleanup(active && activeDurableRef.current ? active : null, remote)
@@ -1010,16 +1088,59 @@ export function useTodoDraft({
     localRevisionRef.current = 0
     markClean("idle")
     publishDraft(remote.draft)
-  }, [blockCleanup, markClean, publishDraft, removeJournal])
+  }, [acceptRemoteSnapshot, blockCleanup, markClean, publishDraft, removeJournal])
 
-  const rebaseRemote = useCallback((remote: TodoRemoteSnapshot) => {
-    if (!isTodoRemoteSnapshot(remote) || runningRef.current) return
-    const previousActive = activeRef.current
-    const conflicts = adoptFreshForIntent(remote)
-    if (!conflicts) return
-    if (conflicts.size > 0) {
-      failureRef.current = "conflict"
-      publishConflict(conflicts)
+  const reconcileRemote = useCallback((remote: TodoRemoteSnapshot, overwrite: boolean) => {
+    if (!acceptRemoteSnapshot(remote) || runningRef.current || cleanupPendingRef.current) return
+    const expectedPayload = loadTodoJournal(id)
+    if (!expectedPayload) return
+    const plan = planFreshIntent(remote, !overwrite)
+    const prepared = plan.remaining.size > 0 && plan.conflicts.size === 0
+      ? {
+          ...newTodoEditRequest(plan.patch, remote.version),
+          revision: Math.max(1, localRevisionRef.current),
+          state: "prepared" as const,
+        }
+      : null
+    const visibleConflicts = plan.conflicts.size > 0
+      ? plan.conflicts
+      : prepared && conflictFieldsRef.current.size > 0
+        ? new Set(conflictFieldsRef.current)
+        : new Set<TodoDraftField>()
+    const nextPayload: TodoJournalPayload | null = plan.remaining.size === 0
+      ? null
+      : {
+          revision: Math.max(1, localRevisionRef.current),
+          patch: plan.patch,
+          baseline: plan.baseline,
+          baselineVersion: remote.version,
+          conflictFields: visibleConflicts.size > 0 ? [...visibleConflicts] : undefined,
+          request: prepared ?? undefined,
+        }
+    if (!transitionTodoJournalPayload(id, expectedPayload, nextPayload)) {
+      if (mountedRef.current) {
+        setStatus("error")
+        setError(new Error("This draft could not be saved locally. Check browser storage and try again."))
+      }
+      return
+    }
+
+    remoteRef.current = remote.draft
+    baselineVersionRef.current = remote.version
+    dirtyFieldsRef.current = plan.remaining
+    baselineByFieldRef.current = { ...plan.baseline }
+    activeRef.current = prepared
+    activeDurableRef.current = !!prepared
+    runningRef.current = false
+    failureRef.current = plan.conflicts.size > 0 ? "conflict" : null
+    publishDraft(plan.merged)
+    publishConflict(visibleConflicts)
+    if (plan.remaining.size === 0) {
+      localRevisionRef.current = 0
+      markClean("idle")
+      return
+    }
+    if (plan.conflicts.size > 0) {
       if (mountedRef.current) {
         setStatus("error")
         setError(null)
@@ -1027,30 +1148,21 @@ export function useTodoDraft({
       }
       return
     }
-    for (const field of dirtyFieldsRef.current) {
-      (baselineByFieldRef.current as Record<string, unknown>)[field] = remote.draft[field]
+    if (mountedRef.current) {
+      setStatus("saving")
+      setError(null)
+      setRecoveredConflict(visibleConflicts.size > 0)
     }
-    if (!installFreshRequest(remote.version, previousActive, conflictFieldsRef.current.size > 0)) {
-      if (previousActive && previousActive.state !== "conflict") failAtomicTransition(previousActive)
-    }
-  }, [adoptFreshForIntent, failAtomicTransition, installFreshRequest, publishConflict])
+    void runActiveRef.current()
+  }, [acceptRemoteSnapshot, id, markClean, planFreshIntent, publishConflict, publishDraft])
+
+  const rebaseRemote = useCallback((remote: TodoRemoteSnapshot) => {
+    reconcileRemote(remote, false)
+  }, [reconcileRemote])
 
   const overwriteRemote = useCallback((remote: TodoRemoteSnapshot) => {
-    if (!isTodoRemoteSnapshot(remote) || runningRef.current) return
-    const previousActive = activeRef.current
-    const desired = draftRef.current
-    remoteRef.current = remote.draft
-    baselineVersionRef.current = remote.version
-    const merged = { ...remote.draft }
-    for (const field of dirtyFieldsRef.current) {
-      (merged as Record<string, unknown>)[field] = desired[field]
-      ;(baselineByFieldRef.current as Record<string, unknown>)[field] = remote.draft[field]
-    }
-    publishDraft(merged)
-    if (!installFreshRequest(remote.version, previousActive, conflictFieldsRef.current.size > 0)) {
-      if (previousActive && previousActive.state !== "conflict") failAtomicTransition(previousActive)
-    }
-  }, [failAtomicTransition, installFreshRequest, publishConflict, publishDraft])
+    reconcileRemote(remote, true)
+  }, [reconcileRemote])
 
   const hasUnsaved = dirtyFieldsRef.current.size > 0
     || conflictFieldsRef.current.size > 0

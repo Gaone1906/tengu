@@ -394,6 +394,41 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
   }
 }
 
+/** Atomically replace one exact durable journal payload. Identity stays behind
+ * the existing tab-private surrogate; callers never persist or compare raw IDs. */
+export function transitionTodoJournalPayload(
+  id: string,
+  expectedPayload: TodoJournalPayload,
+  nextPayload: TodoJournalPayload | null,
+): boolean {
+  const store = storage()
+  if (!store || !validPayload(expectedPayload) || (nextPayload !== null && !validPayload(nextPayload))) return false
+  try {
+    const ref = existingTodoPrivateRef(id)
+    if (!ref) return false
+    const now = Date.now()
+    const parsed = parseEnvelopes()
+    const journals = Object.fromEntries(
+      Object.entries(parsed).filter(([candidate, entry]) => validEnvelope(candidate, entry, now)),
+    ) as Record<string, JournalEnvelope>
+    const current = journals[ref]?.payload
+    if (!current || !samePayload(current, expectedPayload)) return false
+
+    delete journals[ref]
+    if (nextPayload !== null) {
+      const sequence = Math.max(0, ...Object.values(journals).map((entry) => entry.sequence)) + 1
+      journals[ref] = { expiresAt: now + JOURNAL_TTL_MS, sequence, payload: nextPayload }
+    }
+    const capped = Object.fromEntries(orderedEntries(journals).slice(0, MAX_JOURNALS))
+    if (Object.keys(capped).length === 0) store.removeItem(JOURNAL_KEY)
+    else store.setItem(JOURNAL_KEY, JSON.stringify(capped))
+    const stored = readEnvelopes(Date.now(), false)[ref]?.payload
+    return nextPayload === null ? stored === undefined : !!stored && samePayload(stored, nextPayload)
+  } catch {
+    return false
+  }
+}
+
 /** Atomically retire the exact active request and install its post-response
  * recovery state. A stale response can never clear or replace another request. */
 export function transitionTodoJournal(
