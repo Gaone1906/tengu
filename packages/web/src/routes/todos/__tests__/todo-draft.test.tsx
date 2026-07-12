@@ -609,6 +609,149 @@ describe("useTodoDraft conditional state machine", () => {
     expect(save).toHaveBeenCalledTimes(2)
   })
 
+  it("rebases a direct Save edit made during active cleanup onto the acknowledged snapshot", async () => {
+    const conflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
+    const newest = deferred<ReturnType<typeof successful>>()
+    const save = vi.fn().mockRejectedValueOnce(conflict)
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "Local" }, 9)))
+      .mockReturnValueOnce(newest.promise)
+    const { result } = renderHook(() => useTodoDraft({ id: "cleanup-direct-save", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "Local")
+      result.current.save({ title: "Local" })
+    })
+    await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+    const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "QuotaExceededError")
+    })
+    act(() => result.current.overwriteRemote(snapshot({ ...first, title: "Remote" }, 8)))
+    await waitFor(() => expect(result.current.cleanupPending).toBe(true))
+    const obsoleteKey = (save.mock.calls[1]![0] as WorkItemEditRequest).idempotencyKey
+
+    act(() => result.current.save({ title: "Newest" }))
+    expect(result.current.draft.title).toBe("Newest")
+    expect(result.current.isAcknowledged).toBe(false)
+    expect(loadTodoJournal("cleanup-direct-save")?.patch.title).toBe("Newest")
+    expect(save).toHaveBeenCalledTimes(2)
+
+    remove.mockRestore()
+    act(() => result.current.retry())
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(3))
+    expect(save.mock.calls[2]![0]).toMatchObject({ patch: { title: "Newest" }, expectedVersion: 9 })
+    expect((save.mock.calls[2]![0] as WorkItemEditRequest).idempotencyKey).not.toBe(obsoleteKey)
+    expect(result.current.draft.title).toBe("Newest")
+    expect(result.current.isAcknowledged).toBe(false)
+    await act(async () => newest.resolve(successful(snapshot({ ...first, title: "Newest" }, 10))))
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+  })
+
+  it("rebases change then Save during active cleanup without replaying the obsolete request", async () => {
+    const conflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
+    const save = vi.fn().mockRejectedValueOnce(conflict)
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "Local" }, 9)))
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "Changed" }, 10)))
+    const { result } = renderHook(() => useTodoDraft({ id: "cleanup-change-save", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "Local")
+      result.current.save({ title: "Local" })
+    })
+    await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+    const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "QuotaExceededError")
+    })
+    act(() => result.current.overwriteRemote(snapshot({ ...first, title: "Remote" }, 8)))
+    await waitFor(() => expect(result.current.cleanupPending).toBe(true))
+
+    act(() => {
+      result.current.change("title", "Changed")
+      result.current.save(result.current.unsavedPatch())
+    })
+    expect(result.current.draft.title).toBe("Changed")
+    expect(loadTodoJournal("cleanup-change-save")?.patch.title).toBe("Changed")
+    expect(save).toHaveBeenCalledTimes(2)
+    remove.mockRestore()
+    act(() => result.current.retry())
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save).toHaveBeenCalledTimes(3)
+    expect(save.mock.calls[2]![0]).toMatchObject({ patch: { title: "Changed" }, expectedVersion: 9 })
+  })
+
+  it("preserves and saves newer intent across requestless cleanup", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "Newest" }, 8)))
+    const { result } = renderHook(() => useTodoDraft({ id: "cleanup-requestless-newer", initial: first, serverVersion: 7, save }))
+    act(() => result.current.change("title", "Temporary"))
+    const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "QuotaExceededError")
+    })
+    act(() => result.current.change("title", first.title))
+    expect(result.current.cleanupPending).toBe(true)
+
+    act(() => result.current.save({ title: "Newest" }))
+    expect(result.current.draft.title).toBe("Newest")
+    expect(loadTodoJournal("cleanup-requestless-newer")?.patch.title).toBe("Newest")
+    expect(save).not.toHaveBeenCalled()
+    remove.mockRestore()
+    act(() => result.current.retry())
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(save.mock.calls[0]![0]).toMatchObject({ patch: { title: "Newest" }, expectedVersion: 7 })
+  })
+
+  it("keeps a cleanup-time change dirty and durable when Save was not requested", async () => {
+    const save = vi.fn()
+    const { result } = renderHook(() => useTodoDraft({ id: "cleanup-change-only", initial: first, serverVersion: 7, save }))
+    act(() => result.current.change("title", "Temporary"))
+    const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "QuotaExceededError")
+    })
+    act(() => result.current.change("title", first.title))
+    act(() => result.current.change("title", "Newest"))
+    remove.mockRestore()
+
+    act(() => result.current.retry())
+    await waitFor(() => expect(result.current.cleanupPending).toBe(false))
+    expect(result.current.draft.title).toBe("Newest")
+    expect(result.current.status).toBe("dirty")
+    expect(result.current.isAcknowledged).toBe(false)
+    expect(loadTodoJournal("cleanup-change-only")?.patch).toEqual({ title: "Newest" })
+    expect(loadTodoJournal("cleanup-change-only")?.request).toBeUndefined()
+    expect(save).not.toHaveBeenCalled()
+  })
+
+  it("queues edit and Save while remounted cleanup GET is unresolved", async () => {
+    persistTodoJournal("cleanup-get-race", {
+      revision: 1,
+      patch: { title: "Recovered" },
+      baseline: { title: first.title },
+      baselineVersion: 7,
+      cleanupPending: true,
+    })
+    const remote = deferred<TodoRemoteSnapshot>()
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "Newest" }, 13)))
+    const { result } = renderHook(() => useTodoDraft({
+      id: "cleanup-get-race",
+      initial: first,
+      serverVersion: 7,
+      save,
+      loadRemote: vi.fn().mockReturnValue(remote.promise),
+    }))
+    act(() => result.current.retry())
+    act(() => {
+      result.current.change("title", "Newest")
+      result.current.save({ title: "Newest" })
+    })
+    expect(result.current.draft.title).toBe("Newest")
+    expect(result.current.cleanupPending).toBe(true)
+    expect(result.current.isAcknowledged).toBe(false)
+    expect(loadTodoJournal("cleanup-get-race")?.patch.title).toBe("Newest")
+    expect(save).not.toHaveBeenCalled()
+
+    await act(async () => remote.resolve(snapshot({ ...first, title: "Fresh" }, 12)))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(save.mock.calls[0]![0]).toMatchObject({ patch: { title: "Newest" }, expectedVersion: 12 })
+    expect(result.current.draft.title).toBe("Newest")
+  })
+
   it("keeps active cleanup blocked when journal removal silently does nothing", async () => {
     const conflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
     const save = vi.fn().mockRejectedValueOnce(conflict)
@@ -971,6 +1114,40 @@ describe("useTodoDraft conditional state machine", () => {
     await waitFor(() => expect(result.current.status).toBe("error"))
     expect(result.current.isAcknowledged).toBe(false)
     expect(loadTodoJournal("malformed-remote")?.request).toBeDefined()
+  })
+
+  it("rejects a regressive successful version and exact-replays without a CAS downgrade", async () => {
+    const save = vi.fn()
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "B", priority: 3 }, 6)))
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "B" }, 8), true))
+    const { result } = renderHook(() => useTodoDraft({ id: "regressive-version", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
+    })
+    await waitFor(() => expect(result.current.status).toBe("error"))
+    const firstRequest = structuredClone(save.mock.calls[0]![0])
+    expect(result.current.isAcknowledged).toBe(false)
+    expect(result.current.draft.priority).toBe(0)
+    expect(loadTodoJournal("regressive-version")?.request).toMatchObject({ expectedVersion: 7 })
+
+    act(() => result.current.retry())
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save.mock.calls[1]![0]).toEqual(firstRequest)
+    expect(save.mock.calls[1]![0]).toMatchObject({ expectedVersion: 7 })
+  })
+
+  it("accepts a no-op successful response at the expected version", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "B" }, 7)))
+    const { result } = renderHook(() => useTodoDraft({ id: "equal-version", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
+    })
+
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(loadTodoJournal("equal-version")).toBeNull()
   })
 
   it("drops an undurable unsent candidate on revert without later replay", async () => {
