@@ -195,7 +195,9 @@ import {
   listWorkItems,
   queryWorkItems,
   STICKY_STATUSES,
-  updateWorkItem,
+  updateWorkItemConditional,
+  WorkItemIdempotencyConflictError,
+  WorkItemVersionConflictError,
   type CreateWorkItemInput,
   type SearchWorkItemsFilter,
   type UpdateWorkItemInput,
@@ -1615,6 +1617,7 @@ function compactWorkItem(item: WorkItem): Record<string, unknown> {
     id: item.id,
     title: item.title,
     status: item.status,
+    version: item.version,
     assignee: item.assignee,
     department: item.department,
     source: item.source,
@@ -1653,6 +1656,39 @@ function fullWorkItemPayload(item: WorkItem): Record<string, unknown> {
     workflowRun: workflowRunRef(item),
     events: listWorkItemEvents(item.id),
   };
+}
+
+type TodoEditPrecondition =
+  | { ok: true; expectedVersion: number }
+  | { ok: false; status: 400 | 428; body: { error: string; code: 'todo_precondition_required' | 'todo_invalid_version' } };
+
+function positiveTodoVersion(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function ifMatchTodoVersion(value: string | string[] | undefined): number | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = /^(?:"([1-9]\d*)"|([1-9]\d*))$/.exec(value.trim());
+  if (!match) return undefined;
+  const parsed = Number(match[1] ?? match[2]);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function readTodoEditPrecondition(req: HttpRequest, body: Record<string, unknown>): TodoEditPrecondition {
+  const hasBodyVersion = Object.prototype.hasOwnProperty.call(body, 'expectedVersion');
+  const hasIfMatch = req.headers['if-match'] !== undefined;
+  if (!hasBodyVersion && !hasIfMatch) {
+    return { ok: false, status: 428, body: { error: 'A current Todo version is required.', code: 'todo_precondition_required' } };
+  }
+  const bodyVersion = hasBodyVersion ? positiveTodoVersion(body.expectedVersion) : undefined;
+  const headerVersion = hasIfMatch ? ifMatchTodoVersion(req.headers['if-match']) : undefined;
+  if ((hasBodyVersion && bodyVersion === undefined) || (hasIfMatch && headerVersion === undefined)) {
+    return { ok: false, status: 400, body: { error: 'Todo version must be a positive safe integer.', code: 'todo_invalid_version' } };
+  }
+  if (bodyVersion !== undefined && headerVersion !== undefined && bodyVersion !== headerVersion) {
+    return { ok: false, status: 400, body: { error: 'Todo version preconditions do not match.', code: 'todo_invalid_version' } };
+  }
+  return { ok: true, expectedVersion: bodyVersion ?? headerVersion! };
 }
 
 function readWorkItemStatusParam(url: URL): WorkItemStatus | undefined | null {
@@ -3183,15 +3219,30 @@ export async function handleApiRequest(
         return badRequest(res, "request body must be a JSON object");
       }
       const body = parsed.body as Record<string, unknown>;
+      const precondition = readTodoEditPrecondition(req, body);
+      if (!precondition.ok) return json(res, precondition.body, precondition.status);
       if (Object.prototype.hasOwnProperty.call(body, "status")) {
         return badRequest(res, "status cannot be edited through metadata PATCH — use the guarded Todo status transition surface");
       }
-      const allowed = new Set(["title", "body", "assignee", "department", "priority", "rank"]);
+      const metadataFields = ["title", "body", "assignee", "department", "priority", "rank"] as const;
+      const allowed = new Set([...metadataFields, "expectedVersion", "idempotencyKey"]);
       const unsupported = Object.keys(body).filter((key) => !allowed.has(key));
       if (unsupported.length > 0) {
         return badRequest(res, `unsupported Todo metadata field${unsupported.length === 1 ? "" : "s"}: ${unsupported.join(", ")}`);
       }
-      if (Object.keys(body).length === 0) return badRequest(res, "at least one metadata field is required");
+      if (!metadataFields.some((key) => Object.prototype.hasOwnProperty.call(body, key))) {
+        return badRequest(res, "at least one metadata field is required");
+      }
+
+      let idempotencyKey: string | undefined;
+      if (Object.prototype.hasOwnProperty.call(body, "idempotencyKey")) {
+        if (typeof body.idempotencyKey !== "string" || !body.idempotencyKey.trim()) {
+          return badRequest(res, "idempotencyKey must be a non-empty string when provided");
+        }
+        idempotencyKey = body.idempotencyKey.trim();
+        if (idempotencyKey.length > 256) return badRequest(res, "idempotencyKey must be at most 256 characters");
+        if (/[\x00-\x1f\x7f]/.test(idempotencyKey)) return badRequest(res, "idempotencyKey must not contain control characters");
+      }
 
       const patch: UpdateWorkItemInput = {};
       if (Object.prototype.hasOwnProperty.call(body, "title")) {
@@ -3239,9 +3290,31 @@ export async function handleApiRequest(
         patch.rank = body.rank as number | null;
       }
 
-      const item = updateWorkItem(params.id, patch, "operator");
-      if (!item) return notFound(res);
-      return json(res, { workItem: item });
+      try {
+        const result = updateWorkItemConditional(params.id, patch, {
+          expectedVersion: precondition.expectedVersion,
+          ...(idempotencyKey ? { idempotencyKey } : {}),
+          actor: "operator",
+        });
+        if (!result) return notFound(res);
+        return json(res, { workItem: result.item, replayed: result.replayed });
+      } catch (err) {
+        if (err instanceof WorkItemVersionConflictError) {
+          return json(res, {
+            error: "Todo changed since it was loaded.",
+            code: "todo_version_conflict",
+            currentVersion: err.currentVersion,
+          }, 409);
+        }
+        if (err instanceof WorkItemIdempotencyConflictError) {
+          return json(res, {
+            error: "This Todo edit key was already used for a different request.",
+            code: "todo_idempotency_conflict",
+            currentVersion: err.currentVersion,
+          }, 409);
+        }
+        throw err;
+      }
     }
 
     // POST|PUT /api/work-items/:id/status — GRS-021c guarded status update.

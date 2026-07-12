@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS work_items (
   assignee            TEXT,
   priority            INTEGER NOT NULL DEFAULT 2 CHECK (priority BETWEEN 0 AND 3),
   rank                REAL,
+  version             INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
   source              TEXT NOT NULL DEFAULT 'human' CHECK (source IN ('human','delegation','cron','workflow','session','connector','goal')),
   source_ref          TEXT,
   acceptance          TEXT,
@@ -93,6 +94,18 @@ CREATE TABLE IF NOT EXISTS work_item_events (
 CREATE INDEX IF NOT EXISTS idx_wi_events_item ON work_item_events(work_item_id, created_at);
 `;
 
+/** Durable operator-edit receipts. Only digests are retained: the caller's key
+ * is never persisted, and the request fingerprint covers Todo identity,
+ * expected version, and canonical patch without retaining editable field data. */
+export const WORK_ITEM_EDIT_RECEIPTS_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
+  key_digest         TEXT PRIMARY KEY CHECK (length(key_digest) = 64),
+  request_fingerprint TEXT NOT NULL,
+  result_version    INTEGER NOT NULL CHECK (result_version >= 1),
+  created_at        TEXT NOT NULL
+);
+`;
+
 /** Columns copied straight through by the rebuild (everything the old shape had,
  *  minus the two CASE-mapped ones). New columns take their DDL defaults. */
 const CARRIED_COLUMNS = 'id, title, body, department, assignee, priority, source_ref, created_at, updated_at, closed_at';
@@ -113,6 +126,7 @@ function ensureAdditiveWorkItemColumns(db: Database): void {
   const cols = columnNames(db);
   const alters: string[] = [];
   if (!cols.has('rank')) alters.push('ALTER TABLE work_items ADD COLUMN rank REAL');
+  if (!cols.has('version')) alters.push('ALTER TABLE work_items ADD COLUMN version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1)');
   if (!cols.has('approval_target')) alters.push('ALTER TABLE work_items ADD COLUMN approval_target TEXT');
   if (!cols.has('approval_target_kind')) alters.push("ALTER TABLE work_items ADD COLUMN approval_target_kind TEXT CHECK (approval_target_kind IN ('employee','virtual','none'))");
   if (!cols.has('approval_escalated_at')) alters.push('ALTER TABLE work_items ADD COLUMN approval_escalated_at TEXT');

@@ -104,7 +104,7 @@ describe("work-item tools — registry + schemas", () => {
 
 describe("work-item tools — unit (stub gateway)", () => {
   it("list passes status/source/assignee filters and returns compact summaries", async () => {
-    const { calls, ctx } = stub(() => ({ status: 200, body: { workItems: [{ id: "wi_1", title: "T", body: "MUST NOT LEAK", status: "blocked", source: "session" }] } }));
+    const { calls, ctx } = stub(() => ({ status: 200, body: { workItems: [{ id: "wi_1", title: "T", body: "MUST NOT LEAK", status: "blocked", source: "session", version: 7 }] } }));
     const out = (await tool("list_work_items").handler({ status: "blocked", source: "session", assignee: "qa", limit: 99 }, ctx)) as {
       workItems: Array<Record<string, unknown>>;
     };
@@ -114,7 +114,7 @@ describe("work-item tools — unit (stub gateway)", () => {
     expect(url.searchParams.get("source")).toBe("session");
     expect(url.searchParams.get("assignee")).toBe("qa");
     expect(url.searchParams.get("limit")).toBe("20");
-    expect(out.workItems[0]).toEqual({ id: "wi_1", title: "T", status: "blocked", assignee: null, department: null, source: "session", updatedAt: null });
+    expect(out.workItems[0]).toEqual({ id: "wi_1", title: "T", status: "blocked", assignee: null, department: null, source: "session", version: 7, updatedAt: null });
   });
 
   it("get returns full detail including acceptance/policy/approval/spend/workflowRun", async () => {

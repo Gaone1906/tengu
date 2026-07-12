@@ -52,7 +52,7 @@ function insertOld(
 }
 
 const statusOf = (db: Database.Database, id: string): Record<string, unknown> =>
-  db.prepare("SELECT status, source, source_ref, rounds, approval_state, approval_target, approval_target_kind, approval_escalated_at FROM work_items WHERE id = ?").get(id) as Record<string, unknown>;
+  db.prepare("SELECT status, source, source_ref, version, rounds, approval_state, approval_target, approval_target_kind, approval_escalated_at FROM work_items WHERE id = ?").get(id) as Record<string, unknown>;
 
 describe("migrateWorkItemsSchema — the GRS-021a vocabulary rebuild", () => {
   it("maps every old row onto the Todo vocabulary (open→backlog, active→executing, manual→human, delegate-shaped session→delegation)", () => {
@@ -73,7 +73,7 @@ describe("migrateWorkItemsSchema — the GRS-021a vocabulary rebuild", () => {
     expect(statusOf(db, "wi_done")).toMatchObject({ status: "done", source: "delegation", source_ref: "delegate:abc:123" });
     expect(statusOf(db, "wi_sess")).toMatchObject({ status: "cancelled", source: "session" });
     // New columns exist with their defaults.
-    expect(statusOf(db, "wi_open")).toMatchObject({ rounds: 0, approval_state: null, approval_target: null, approval_escalated_at: null });
+    expect(statusOf(db, "wi_open")).toMatchObject({ version: 1, rounds: 0, approval_state: null, approval_target: null, approval_escalated_at: null });
     // closed_at carried through.
     const done = db.prepare("SELECT closed_at FROM work_items WHERE id = 'wi_done'").get() as { closed_at: string };
     expect(done.closed_at).toBe("2026-07-02T00:00:00.000Z");
@@ -153,6 +153,20 @@ describe("migrateWorkItemsSchema — the GRS-021a vocabulary rebuild", () => {
     expect((db.prepare("SELECT rank FROM work_items WHERE id = 'wi_rankless'").get() as { rank: number | null }).rank).toBeNull();
   });
 
+  it("adds and backfills a positive monotonic version on an already-migrated table without rebuilding rows", () => {
+    const db = new Database(":memory:");
+    db.exec(WORK_ITEMS_TABLE_DDL.replace("  version             INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),\n", ""));
+    db.prepare("INSERT INTO work_items (id,title,status,source,created_at,updated_at) VALUES ('wi_versionless','versionless','backlog','human','x','x')").run();
+
+    expect(migrateWorkItemsSchema(db)).toEqual({ rebuilt: false, rows: 0 });
+    expect(statusOf(db, "wi_versionless")).toMatchObject({ version: 1 });
+    expect(migrateWorkItemsSchema(db)).toEqual({ rebuilt: false, rows: 0 });
+
+    expect(() =>
+      db.prepare("INSERT INTO work_items (id,title,status,source,version,created_at,updated_at) VALUES ('wi_bad_version','bad','backlog','human',0,'x','x')").run(),
+    ).toThrow(/CHECK/);
+  });
+
   it("backfills legacy non-null approval targets as virtual when adding target kind", () => {
     const db = new Database(":memory:");
     db.exec(WORK_ITEMS_TABLE_DDL.replace("  approval_target_kind TEXT CHECK (approval_target_kind IN ('employee','virtual','none')),\n", ""));
@@ -212,18 +226,20 @@ describe("migrateWorkItemsSchema — through the real initDb on an old-shape reg
     raw.close();
   });
 
-  it("initDb rebuilds the old table, keeps the rows, and the events table exists", async () => {
+  it("initDb rebuilds the old table, keeps versioned rows, and creates events plus edit receipts", async () => {
     const reg = await import("../../sessions/registry.js");
     const db = reg.initDb();
 
     const sql = (db.prepare("SELECT sql FROM sqlite_master WHERE name='work_items'").get() as { sql: string }).sql;
     expect(sql).toContain("'backlog'");
 
-    expect(statusOf(db, "wi_live_open")).toMatchObject({ status: "backlog", source: "cron" });
-    expect(statusOf(db, "wi_live_deleg")).toMatchObject({ status: "executing", source: "delegation" });
+    expect(statusOf(db, "wi_live_open")).toMatchObject({ status: "backlog", source: "cron", version: 1 });
+    expect(statusOf(db, "wi_live_deleg")).toMatchObject({ status: "executing", source: "delegation", version: 1 });
 
     const events = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='work_item_events'").get();
     expect(events).toBeTruthy();
+    const receipts = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='work_item_edit_receipts'").get();
+    expect(receipts).toBeTruthy();
     void WORK_ITEM_EVENTS_DDL;
   });
 });

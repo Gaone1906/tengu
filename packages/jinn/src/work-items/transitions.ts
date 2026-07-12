@@ -179,7 +179,7 @@ export function transition(id: string, to: WorkItemStatus, actor: string, opts: 
     const now = new Date().toISOString();
     const closing = target === 'done' || target === 'cancelled';
     const result = db
-      .prepare(`UPDATE work_items SET status = ?, rounds = ?, updated_at = ?${
+      .prepare(`UPDATE work_items SET status = ?, rounds = ?, updated_at = ?, version = version + 1${
         closing ? ', closed_at = COALESCE(closed_at, ?)' : ', closed_at = NULL'
       } WHERE id = ? AND status = ?`)
       .run(...(closing ? [target, rounds, now, now, id, from] : [target, rounds, now, id, from]));
@@ -225,9 +225,12 @@ export function assignWorkItem(
       throw new TransitionError('illegal-edge', `cannot assign work item ${id} while it is in terminal state ${item.status}`);
     }
     const target = item.status === 'backlog' ? 'assigned' : item.status;
+    if (item.assignee === assignee && item.department === department && item.status === target) {
+      return { item, escalated: false };
+    }
     const now = new Date().toISOString();
     const result = db
-      .prepare('UPDATE work_items SET assignee = ?, department = ?, status = ?, updated_at = ? WHERE id = ? AND status = ?')
+      .prepare('UPDATE work_items SET assignee = ?, department = ?, status = ?, updated_at = ?, version = version + 1 WHERE id = ? AND status = ?')
       .run(assignee, department, target, now, id, item.status);
     if (result.changes === 0) {
       throw new TransitionError('conflict', `work item ${id} changed concurrently (expected status ${item.status})`);
@@ -239,6 +242,7 @@ export function assignWorkItem(
       toStatus: item.status === target ? null : target,
       actor: actor ?? null,
       detail: { assignee, department },
+      versionEffect: 'companion',
     });
     return { item: getWorkItem(id)!, escalated: false, event };
   });

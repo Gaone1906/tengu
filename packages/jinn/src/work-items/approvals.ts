@@ -107,7 +107,7 @@ export function requestApproval(id: string, input: RequestApprovalInput): WorkIt
       `UPDATE work_items
          SET approval_state = 'pending', approval_request = ?, approval_ref = ?,
              approval_target = ?, approval_target_kind = ?, approval_escalated_at = NULL,
-             approval_decided_by = NULL, approval_decided_at = NULL, updated_at = ?
+             approval_decided_by = NULL, approval_decided_at = NULL, updated_at = ?, version = version + 1
        WHERE id = ?`,
     ).run(input.request, ref, routed.target, routed.kind, now, id);
     appendWorkItemEvent({
@@ -145,7 +145,7 @@ function decideApproval(id: string, decision: ApprovalDecision, decidedBy: strin
     const now = new Date().toISOString();
     db.prepare(
       `UPDATE work_items
-         SET approval_state = ?, approval_decided_by = ?, approval_decided_at = ?, updated_at = ?
+         SET approval_state = ?, approval_decided_by = ?, approval_decided_at = ?, updated_at = ?, version = version + 1
        WHERE id = ?`,
     ).run(state, decidedBy, now, now, id);
     appendWorkItemEvent({
@@ -216,10 +216,11 @@ export function escalateApproval(id: string, actor: string, reason?: string): Wo
     const item = getWorkItem(id);
     if (!item) throw new Error(`escalateApproval: work item ${id} not found`);
     if (item.approvalState !== 'pending') throw new ApprovalNotPendingError(id);
-    const now = item.approvalEscalatedAt ?? new Date().toISOString();
+    if (item.approvalEscalatedAt) return item;
+    const now = new Date().toISOString();
     db.prepare(
       `UPDATE work_items
-         SET approval_escalated_at = ?, updated_at = ?
+         SET approval_escalated_at = ?, updated_at = ?, version = version + 1
        WHERE id = ?`,
     ).run(now, now, id);
     appendWorkItemEvent({
@@ -227,6 +228,7 @@ export function escalateApproval(id: string, actor: string, reason?: string): Wo
       kind: 'note',
       actor,
       detail: { approvalEscalated: true, ...(reason !== undefined ? { reason } : {}) },
+      versionEffect: 'companion',
     });
     return getWorkItem(id)!;
   });
