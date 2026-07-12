@@ -17,6 +17,7 @@
  * so the vendor CLI's process supervision sees the true cause of death.
  */
 import { spawn } from "node:child_process";
+import { createMcpTempSandbox } from "./temp-sandbox.js";
 
 const [realCommand, ...realArgs] = process.argv.slice(2);
 
@@ -25,10 +26,16 @@ if (!realCommand) {
   process.exit(2);
 }
 
-// The single purpose: strip the gateway bearer before the untrusted child runs.
+// First security boundary: strip the gateway bearer before the untrusted child runs.
 delete process.env.JINN_GATEWAY_TOKEN;
 
-const child = spawn(realCommand, realArgs, { stdio: "inherit", env: process.env });
+// External MCPs also get a launcher-owned temp root. Browser drivers can leak
+// launch artifacts when setup fails before their cleanup hook is registered;
+// containing them here makes their lifetime no longer than the MCP process.
+const tempSandbox = createMcpTempSandbox(process.env);
+process.on("exit", tempSandbox.cleanup);
+
+const child = spawn(realCommand, realArgs, { stdio: "inherit", env: tempSandbox.env });
 
 const FORWARD_SIGNALS: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"];
 for (const sig of FORWARD_SIGNALS) {
@@ -39,10 +46,12 @@ for (const sig of FORWARD_SIGNALS) {
 
 child.on("error", (err) => {
   process.stderr.write(`scrub-entry: failed to launch ${realCommand}: ${err.message}\n`);
+  tempSandbox.cleanup();
   process.exit(127);
 });
 
 child.on("exit", (code, signal) => {
+  tempSandbox.cleanup();
   if (signal) {
     // Re-raise the child's terminating signal on ourselves so the parent sees
     // the true cause (matches `exec`-style transparency). Remove our own

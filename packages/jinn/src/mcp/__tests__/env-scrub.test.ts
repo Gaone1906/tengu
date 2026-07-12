@@ -108,6 +108,45 @@ describe("wrapServersWithScrub (pure spec transform)", () => {
 });
 
 describe("scrub-entry.js launcher (real spawn)", () => {
+  it("contains child temp files in an owned root and removes that root on exit", async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "scrub-temp-containment-"));
+    const outFile = path.join(fixtureRoot, "temp-env.json");
+    const childScript = path.join(fixtureRoot, "leak.mjs");
+    fs.writeFileSync(childScript, `import fs from "node:fs";
+import path from "node:path";
+const tmp = process.env.TMPDIR;
+fs.mkdirSync(path.join(tmp, "playwright-artifacts-leaked"));
+fs.mkdirSync(path.join(tmp, "playwright_chromiumdev_profile-leaked"));
+const hardened = path.join(tmp, "playwright_chromiumdev_profile-hardened", "nested");
+fs.mkdirSync(hardened, { recursive: true });
+fs.writeFileSync(path.join(hardened, "Preferences"), "{}");
+fs.chmodSync(path.dirname(hardened), 0o500);
+fs.writeFileSync(${JSON.stringify(outFile)}, JSON.stringify({
+  tmpdir: process.env.TMPDIR,
+  tmp: process.env.TMP,
+  temp: process.env.TEMP,
+}));`);
+
+    try {
+      const code = await new Promise<number>((resolve) => {
+        const child = spawn(process.execPath, [DIST_SCRUB, process.execPath, childScript], {
+          env: { ...process.env },
+          stdio: "ignore",
+        });
+        child.on("exit", (c) => resolve(c ?? -1));
+      });
+
+      expect(code).toBe(0);
+      const dumped = JSON.parse(fs.readFileSync(outFile, "utf-8"));
+      expect(dumped.tmpdir).toBe(dumped.tmp);
+      expect(dumped.tmpdir).toBe(dumped.temp);
+      expect(path.basename(dumped.tmpdir)).toMatch(/^jinn-mcp-\d+-/);
+      expect(fs.existsSync(dumped.tmpdir)).toBe(false);
+    } finally {
+      fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("strips JINN_GATEWAY_TOKEN from the child env, keeps everything else, propagates exit 0", async () => {
     const outFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "scrub-")), "env.json");
     const dumpScript = path.join(path.dirname(outFile), "dump.mjs");
