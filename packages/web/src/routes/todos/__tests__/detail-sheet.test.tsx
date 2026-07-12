@@ -752,14 +752,70 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(client.getQueryData<WorkItemDetailWire>(["work-item", value.workItem.id])?.workItem.version).toBe(12)
   })
 
-  it("does not let a stale PATCH response overwrite a newer exact detail cache", async () => {
+  it("hands Rebase the response-time authoritative exact snapshot instead of the stale GET payload", async () => {
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    const read = deferred<Response>()
+    const patch = deferred<Response>()
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") return patch.promise
+      return read.promise
+    })
+    const { client } = renderSheetWithDetail(value)
+
+    fireEvent.click(await screen.findByRole("button", { name: "Rebase edits" }))
+    await waitFor(() => expect(authFetch.mock.calls.some(([path]) => String(path).endsWith(value.workItem.id))).toBe(true))
+    client.setQueryData<WorkItemDetailWire>(["work-item", value.workItem.id], {
+      ...value,
+      workItem: { ...value.workItem, version: 12 },
+    })
+    read.resolve(new Response(JSON.stringify({
+      ...value,
+      workItem: { ...value.workItem, version: 8 },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }))
+
+    await waitFor(() => expect(patchBodies()).toHaveLength(1))
+    expect(patchBodies()[0]).toMatchObject({ title: "Recovered local title", expectedVersion: 12 })
+  })
+
+  it("refuses a reconciliation snapshot when only a duplicate cache has a newer version", async () => {
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    const read = deferred<Response>()
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      return read.promise
+    })
+    const { client } = renderSheetWithDetail(value)
+
+    fireEvent.click(await screen.findByRole("button", { name: "Rebase edits" }))
+    await waitFor(() => expect(authFetch.mock.calls.some(([path]) => String(path).endsWith(value.workItem.id))).toBe(true))
+    client.setQueryData<WorkItemDetailWire>(["work-item", value.workItem.id], {
+      ...value,
+      workItem: { ...value.workItem, version: 12, title: "Exact title" },
+    })
+    client.setQueryData(["work-items", "newer-duplicate"], {
+      items: [{ ...value.workItem, version: 13, title: "Projection only" }],
+    })
+    read.resolve(new Response(JSON.stringify({
+      ...value,
+      workItem: { ...value.workItem, version: 8, title: "Stale transport title" },
+    }), { status: 200, headers: { "Content-Type": "application/json" } }))
+
+    expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("changed elsewhere"))
+    expect(patchBodies()).toHaveLength(0)
+    expect(loadTodoJournal(value.workItem.id)?.request?.state).toBe("conflict")
+  })
+
+  it("does not refetch or overwrite a newer exact detail after a stale PATCH response", async () => {
     const value = detail("backlog")
     const patchResponse = deferred<Response>()
-    const refetch = deferred<Response>()
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") return patchResponse.promise
-      return refetch.promise
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
     })
     const { client } = renderSheetWithDetail(value)
     fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
@@ -776,16 +832,45 @@ describe("Todo detail editing and dialog behavior", () => {
       status: 200,
       headers: { "Content-Type": "application/json" },
     }))
-    await waitFor(() => expect(authFetch.mock.calls.some(([path, init]) => String(path).endsWith(value.workItem.id) && !(init as RequestInit | undefined)?.method)).toBe(true))
+    await screen.findByRole("status", { name: "Todo changed elsewhere" })
 
     expect(client.getQueryData<WorkItemDetailWire>(["work-item", value.workItem.id])).toMatchObject({
       spendUsd: 12,
       workItem: { version: 12, title: "Newer cached title" },
     })
-    refetch.resolve(new Response(JSON.stringify(client.getQueryData(["work-item", value.workItem.id])), {
+    expect(authFetch.mock.calls.filter(([path, init]) => String(path).endsWith(value.workItem.id) && !(init as RequestInit | undefined)?.method)).toHaveLength(0)
+  })
+
+  it("turns a stale successful PATCH payload into a typed conflict without acknowledging the request", async () => {
+    const value = detail("backlog")
+    const patchResponse = deferred<Response>()
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") return patchResponse.promise
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    const { client } = renderSheetWithDetail(value)
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Local title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    await waitFor(() => expect(patchBodies()).toHaveLength(1))
+    client.setQueryData<WorkItemDetailWire>(["work-item", value.workItem.id], {
+      ...value,
+      workItem: { ...value.workItem, version: 12, title: "Newer cached title" },
+    })
+
+    patchResponse.resolve(new Response(JSON.stringify(editResult(value.workItem, { title: "Local title" }, 8)), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     }))
+
+    expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+    const stored = loadTodoJournal(value.workItem.id)
+    expect(stored?.request).toMatchObject({ state: "conflict", expectedVersion: 7 })
+    expect(stored?.patch).toEqual({ title: "Local title" })
+    expect(screen.queryByText("Saved")).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: "Close" }))
+    expect(patchBodies()).toHaveLength(1)
   })
 
   it("returns the monotonic exact detail when a save invalidation refetch resolves stale", async () => {
@@ -827,7 +912,7 @@ describe("Todo detail editing and dialog behavior", () => {
     client.setQueryData(["work-items", "duplicates"], {
       items: [
         { ...value.workItem, version: 7 },
-        { ...value.workItem, version: 10, title: "Newest duplicate" },
+        { ...value.workItem, version: 9, title: "Same-version duplicate" },
       ],
     })
 
@@ -848,7 +933,7 @@ describe("Todo detail editing and dialog behavior", () => {
     })
     const duplicateVersions = (client.getQueryData<{ items: WorkItemFullWire[] }>(["work-items", "duplicates"])?.items ?? [])
       .map((item) => item.version)
-    expect(duplicateVersions).toEqual([9, 10])
+    expect(duplicateVersions).toEqual([9, 9])
   })
 
   it("accepts a newer exact-detail invalidation refetch", async () => {
@@ -1056,6 +1141,18 @@ describe("Todo detail editing and dialog behavior", () => {
     const firstKey = patchBodies()[0].idempotencyKey
 
     const reload = screen.getByRole("button", { name: "Reload remote" })
+    await waitFor(() => expect(document.activeElement).toBe(reload))
+    for (const closeAttempt of [
+      () => fireEvent.click(screen.getByRole("button", { name: "Close" })),
+      () => fireEvent.keyDown(screen.getByRole("dialog", { name: "Todo details" }), { key: "Escape" }),
+      () => fireEvent.pointerDown(screen.getByTestId("detail-overlay")),
+    ]) {
+      closeAttempt()
+      await waitFor(() => expect(document.activeElement).toBe(reload))
+      expect(screen.queryByText("Your draft is still here")).toBeNull()
+      expect(screen.queryByRole("button", { name: "Retry" })).toBeNull()
+      expect(patchBodies()).toHaveLength(1)
+    }
     await user.pointer([{ target: reload, keys: "[MouseLeft]" }])
     await waitFor(() => expect(screen.queryByText(/Reload remote to discard all local edits/)).toBeNull())
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" })))

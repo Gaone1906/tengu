@@ -5,6 +5,7 @@ import { X, Check, ChevronRight, MessageSquareText } from "lucide-react"
 import {
   api,
   isPositiveTodoVersion,
+  TodoApiError,
   type Employee,
   type LinkedSessionWire,
   type WorkItemDetailWire,
@@ -37,7 +38,7 @@ import { displayNameOf, formatRelativeTime } from "./util"
 import { useSetWorkItemStatus } from "./use-todos"
 import { TodoDialog } from "./todo-dialog"
 import { TodoConflictActions } from "./conflict-actions"
-import { invalidateTodoCaches, mergeTodoIntoCaches } from "./todo-edit-request"
+import { invalidateTodoCaches, maximumTodoVersion, mergeTodoIntoCaches } from "./todo-edit-request"
 import { useTodoDraft, type TodoConflictMode, type TodoDraftPatch, type TodoEditableDraft, type TodoRemoteSnapshot } from "./use-todo-draft"
 
 /* GRS-021d — the detail sheet: a DECISION (design's middle depth). Mobile = an
@@ -445,6 +446,29 @@ function mergeSavedDetail(
   return { ...current, workItem: { ...current.workItem, ...incoming } }
 }
 
+/** A transport payload may finish after a newer websocket/query update. Only a
+ * full exact detail can supply editable fields; a newer compact projection is
+ * a version fence, never a source from which to synthesize a detail snapshot. */
+function authoritativeRemoteDetail(
+  queryClient: ReturnType<typeof useQueryClient>,
+  id: string,
+  incoming: WorkItemDetailWire,
+): WorkItemDetailWire {
+  const exact = queryClient.getQueryData<WorkItemDetailWire>(["work-item", id])
+  const authoritative = mergeDetailResponse(exact, incoming)
+  const version = authoritative.workItem.version
+  const maximum = maximumTodoVersion(queryClient, id)
+  if (!isPositiveTodoVersion(version) || (maximum !== undefined && maximum > version)) {
+    throw new TodoApiError(
+      409,
+      "A newer cached Todo revision requires a fresh exact detail",
+      "TODO_VERSION_CONFLICT",
+      maximum,
+    )
+  }
+  return authoritative
+}
+
 type ConflictActionName = "reload" | "rebase" | "overwrite"
 
 interface ConflictActionControl {
@@ -653,6 +677,7 @@ export function DetailSheet({
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const conflictSurfaceRef = useRef<HTMLElement>(null)
   const cleanupRetryRef = useRef<HTMLButtonElement>(null)
+  const idempotencyReloadRef = useRef<HTMLButtonElement>(null)
   const recoveryFocusRef = useRef<RecoveryFocusControl>({ id, surface: "none", mode: "none", token: 0 })
   const actionControlRef = useRef<ConflictActionControl>({ id, mounted: false, busy: false, token: 0, focus: null })
   if (actionControlRef.current.id !== id) {
@@ -688,10 +713,13 @@ export function DetailSheet({
     priority: detail?.workItem.priority ?? 0,
   }), [detail])
   const fetchRemote = useCallback(async () => {
-    const fresh = await api.getWorkItem(id)
+    const incoming = await api.getWorkItem(id)
+    // Do not let an unversioned wire response borrow authority from cache.
+    todoRemoteSnapshot(incoming.workItem)
+    const fresh = authoritativeRemoteDetail(queryClient, id, incoming)
     const remote = todoRemoteSnapshot(fresh.workItem)
     return { fresh, remote }
-  }, [id])
+  }, [id, queryClient])
   const commitRemote = useCallback((fresh: WorkItemDetailWire) => {
     mergeTodoIntoCaches(queryClient, fresh.workItem)
     queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) => mergeDetailResponse(current, fresh))
@@ -703,6 +731,15 @@ export function DetailSheet({
   }, [commitRemote, fetchRemote])
   const saveRemote = useCallback(async (request: WorkItemEditRequest) => {
     const result = await api.updateWorkItem(id, request)
+    const maximum = maximumTodoVersion(queryClient, id)
+    if (maximum !== undefined && maximum > result.workItem.version) {
+      throw new TodoApiError(
+        409,
+        "A newer cached Todo revision superseded this response",
+        "TODO_VERSION_CONFLICT",
+        maximum,
+      )
+    }
     mergeTodoIntoCaches(queryClient, result.workItem)
     queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) => mergeSavedDetail(current, result.workItem))
     await invalidateTodoCaches(queryClient, id)
@@ -755,8 +792,9 @@ export function DetailSheet({
     const focusConflict = currentSurface === "conflict"
       && (previous.surface !== "conflict"
         || (draftState.conflictMode === "same-field" && previous.mode !== "same-field"))
+    const focusIdempotency = currentSurface === "idempotency" && previous.surface !== "idempotency"
     const focusClose = currentSurface === "none" && previous.surface !== "none"
-    if (!focusCleanup && !focusConflict && !focusClose) return
+    if (!focusCleanup && !focusConflict && !focusIdempotency && !focusClose) return
 
     queueMicrotask(() => {
       const latest = recoveryFocusRef.current
@@ -764,6 +802,7 @@ export function DetailSheet({
       if (latest.id !== id || latest.token !== token || action.id !== id || !action.mounted) return
       if (focusCleanup) cleanupRetryRef.current?.focus()
       else if (focusConflict) conflictSurfaceRef.current?.focus()
+      else if (focusIdempotency) idempotencyReloadRef.current?.focus()
       else closeButtonRef.current?.focus()
     })
   }, [draftState.cleanupPending, draftState.conflictMode, id, idempotencyConflict])
@@ -802,8 +841,29 @@ export function DetailSheet({
     if (next !== titleBeforeEdit.current) draftState.save({ title: next })
   }
 
+  const focusIdempotencyReload = useCallback(() => {
+    const expected = recoveryFocusRef.current
+    queueMicrotask(() => {
+      const latest = recoveryFocusRef.current
+      const action = actionControlRef.current
+      if (expected.id !== id
+        || expected.surface !== "idempotency"
+        || latest.id !== id
+        || latest.token !== expected.token
+        || latest.surface !== "idempotency"
+        || action.id !== id
+        || !action.mounted) return
+      idempotencyReloadRef.current?.focus()
+    })
+  }, [id])
+
   const requestClose = useCallback(() => {
     if (draftState.cleanupPending || draftState.recoveredConflict) return
+    if (idempotencyConflict) {
+      setShowCloseGuard(false)
+      focusIdempotencyReload()
+      return
+    }
     if (draftState.status === "error") {
       setShowCloseGuard(true)
       return
@@ -815,7 +875,7 @@ export function DetailSheet({
       return
     }
     onClose()
-  }, [draftState, onClose])
+  }, [draftState, focusIdempotencyReload, idempotencyConflict, onClose])
 
   const ownsAction = useCallback((token: number) => {
     const control = actionControlRef.current
@@ -989,6 +1049,7 @@ export function DetailSheet({
               </span>
               {idempotencyConflict ? (
                 <button
+                  ref={idempotencyReloadRef}
                   type="button"
                   disabled={conflictBusy}
                   onClick={() => void runConflictAction("reload")}
