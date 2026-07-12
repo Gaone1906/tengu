@@ -6,6 +6,7 @@ import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { WorkflowEditView } from "./edit"
 import { DefinitionRunView } from "./run-view"
+import { WorkflowLeaveDialog } from "./workflow-leave-dialog"
 
 /* GRS-019 / canvas-spec §6 — ONE workflow's surface, opened from the /workflow
  * list.
@@ -29,6 +30,15 @@ function modeFromParam(p: string | null): Mode | null {
   if (p === "edit") return "edit"
   if (p === "runs" || p === "live" || p === "run") return "runs"
   return null
+}
+
+function currentFocusReturnTarget(): HTMLElement | null {
+  const active = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  if (!active) return null
+  const menu = active.closest<HTMLElement>("[role=menu]")
+  const triggerId = menu?.getAttribute("aria-labelledby")
+  const menuTrigger = triggerId ? document.getElementById(triggerId) : null
+  return menuTrigger instanceof HTMLElement ? menuTrigger : active
 }
 
 /* Editor ↔ Executions as a quiet segmented control (HIG): soft fill container,
@@ -62,17 +72,35 @@ export default function WorkflowPage() {
   const workflowId = id ?? ""
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
+  const requestedModeParam = searchParams.get("mode")
+  const requestedMode = modeFromParam(requestedModeParam) ?? "runs"
+  const initialLive = requestedModeParam === "live"
 
   const [definition, setDefinition] = useState<EditableWorkflowDefinitionWire | null>(null)
   const [hasDerived, setHasDerived] = useState(false)
-  const [mode, setMode] = useState<Mode>(() => modeFromParam(searchParams.get("mode")) ?? "runs")
-  const [initialLive] = useState(() => searchParams.get("mode") === "live")
+  const [mode, setMode] = useState<Mode>(requestedMode)
   const [editDirty, setEditDirty] = useState(false)
   const [leaveActions, setLeaveActions] = useState<WorkflowLeaveActions | null>(null)
   const [pendingMode, setPendingMode] = useState<Mode | null>(null)
   const [resolvingLeave, setResolvingLeave] = useState(false)
   const returnFocusRef = useRef<HTMLElement | null>(null)
   const blocker = useBlocker(mode === "edit" && editDirty)
+  const leaveDialogOpen = blocker.state === "blocked" || pendingMode !== null
+  if (blocker.state === "blocked" && !returnFocusRef.current) {
+    // Capture before the modal's mount autofocus runs. A passive effect would
+    // observe the Stay button instead of the control that initiated navigation.
+    returnFocusRef.current = currentFocusReturnTarget()
+  }
+
+  useEffect(() => {
+    if (!editDirty || leaveDialogOpen) return
+    const rememberStableFocus = () => {
+      const target = currentFocusReturnTarget()
+      if (target && target !== document.body) returnFocusRef.current = target
+    }
+    document.addEventListener("focusin", rememberStableFocus)
+    return () => document.removeEventListener("focusin", rememberStableFocus)
+  }, [editDirty, leaveDialogOpen])
 
   useEffect(() => {
     if (!editDirty) return
@@ -104,13 +132,11 @@ export default function WorkflowPage() {
   }, [workflowId])
 
   useEffect(() => {
-    if (blocker.state === "blocked" && !returnFocusRef.current) {
-      returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    }
-  }, [blocker.state])
+    setMode(requestedMode)
+  }, [requestedMode, workflowId])
 
   const rememberFocus = useCallback(() => {
-    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    returnFocusRef.current = currentFocusReturnTarget()
   }, [])
 
   // Local lens changes do not enter router history, so they share the same
@@ -128,7 +154,6 @@ export default function WorkflowPage() {
     navigate("/workflow")
   }, [navigate])
 
-  const leaveDialogOpen = blocker.state === "blocked" || pendingMode !== null
   const finishLeave = useCallback(() => {
     const nextMode = pendingMode
     setPendingMode(null)
@@ -141,9 +166,11 @@ export default function WorkflowPage() {
     setPendingMode(null)
     if (blocker.state === "blocked") blocker.reset()
     const target = returnFocusRef.current
-    returnFocusRef.current = null
-    requestAnimationFrame(() => target?.focus())
-  }, [blocker])
+    if (!leaveDialogOpen) {
+      returnFocusRef.current = null
+      requestAnimationFrame(() => target?.focus())
+    }
+  }, [blocker, leaveDialogOpen])
 
   const discardAndLeave = useCallback(() => {
     leaveActions?.discard()
@@ -207,58 +234,30 @@ export default function WorkflowPage() {
         <div className="min-h-0 flex-1">
           {mode === "edit" ? (
             <WorkflowEditView
+              key={`edit:${workflowId}`}
               workflowId={workflowId}
               onDirtyChange={setEditDirty}
               onLeaveActionsChange={registerLeaveActions}
             />
           ) : (
-            <DefinitionRunView workflowId={workflowId} liveAvailable={hasDerived} initialLive={initialLive} />
+            <DefinitionRunView
+              key={`runs:${workflowId}:${initialLive ? "live" : "runs"}`}
+              workflowId={workflowId}
+              liveAvailable={hasDerived}
+              initialLive={initialLive}
+            />
           )}
         </div>
 
-        {leaveDialogOpen && (
-          <div className="fixed inset-0 z-50 grid place-items-center bg-[color-mix(in_srgb,var(--bg)_52%,transparent)] p-4 backdrop-blur-[3px]">
-            <div
-              role="dialog"
-              aria-modal="true"
-              aria-label="Unsaved workflow edits"
-              className="w-full max-w-sm rounded-[var(--radius-xl)] bg-[var(--material-thick)] p-5 shadow-[var(--shadow-overlay)]"
-            >
-              <h2 className="text-[length:var(--text-title3)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
-                Unsaved workflow edits
-              </h2>
-              <p className="mt-1.5 text-[length:var(--text-subheadline)] leading-relaxed text-[var(--text-secondary)]">
-                Save your geometry and workflow changes before leaving?
-              </p>
-              <div className="mt-5 flex items-center justify-end gap-1.5">
-                <button
-                  type="button"
-                  onClick={stay}
-                  disabled={resolvingLeave}
-                  className="min-h-10 rounded-[var(--radius-md)] px-3 text-[length:var(--text-subheadline)] font-[var(--weight-medium)] text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"
-                >
-                  Stay
-                </button>
-                <button
-                  type="button"
-                  onClick={discardAndLeave}
-                  disabled={resolvingLeave}
-                  className="min-h-10 rounded-[var(--radius-md)] px-3 text-[length:var(--text-subheadline)] font-[var(--weight-medium)] text-[var(--system-red)] hover:bg-[color-mix(in_srgb,var(--system-red)_10%,transparent)]"
-                >
-                  Discard
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void saveAndLeave()}
-                  disabled={resolvingLeave || !leaveActions}
-                  className="min-h-10 rounded-[var(--radius-md)] bg-[var(--accent)] px-4 text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] text-[var(--accent-contrast)] disabled:opacity-50"
-                >
-                  {resolvingLeave ? "Saving…" : "Save"}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        <WorkflowLeaveDialog
+          open={leaveDialogOpen}
+          resolving={resolvingLeave}
+          canSave={Boolean(leaveActions)}
+          returnFocusRef={returnFocusRef}
+          onStay={stay}
+          onDiscard={discardAndLeave}
+          onSave={() => void saveAndLeave()}
+        />
       </div>
     </PageLayout>
   )
