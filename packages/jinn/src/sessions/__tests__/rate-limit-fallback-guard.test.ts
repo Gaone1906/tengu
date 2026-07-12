@@ -11,14 +11,16 @@ vi.mock("../../shared/models.js", () => ({
 
 // Registry side effects — no real DB.
 const getSessionMock = vi.fn();
+const updateSessionForAttemptMock = vi.fn((_id: string, _token: string, updates: Partial<Session>) => makeSession(updates));
 vi.mock("../registry.js", () => ({
   getSession: (...a: unknown[]) => getSessionMock(...a),
   getMessages: vi.fn(() => []),
-  updateSessionForAttempt: vi.fn((_id: string, _token: string, updates: Partial<Session>) => makeSession(updates)),
+  updateSessionForAttempt: (...a: Parameters<typeof updateSessionForAttemptMock>) => updateSessionForAttemptMock(...a),
 }));
 
+const recordClaudeRateLimitMock = vi.fn();
 vi.mock("../../shared/usageAwareness.js", () => ({
-  recordClaudeRateLimit: vi.fn(),
+  recordClaudeRateLimit: (...a: unknown[]) => recordClaudeRateLimitMock(...a),
 }));
 
 vi.mock("../../shared/effort.js", () => ({
@@ -35,6 +37,7 @@ vi.mock("../../shared/rateLimit.js", () => ({
   computeNextRetryDelayMs: vi.fn(() => ({ delayMs: 0, resumeAt: undefined })),
   computeRateLimitDeadlineMs: vi.fn(() => Date.now() - 1),
   detectRateLimit: vi.fn(() => ({ limited: false })),
+  rateLimitEngineLabel: (engine: string) => engine === "codex" ? "Codex" : "Claude",
 }));
 
 import { handleRateLimit, type RateLimitHandlerOpts } from "../rate-limit-handler.js";
@@ -183,5 +186,42 @@ describe("handleRateLimit — wait cancellation", () => {
 
     expect(outcome.kind).toBe("resumed");
     expect(retryEngine.run).toHaveBeenCalledWith(expect.objectContaining({ platformContextRefresh: refresh }));
+  });
+
+  it("labels a Codex limit as Codex without contaminating Claude usage awareness", async () => {
+    vi.clearAllMocks();
+    engineAvailableMock.mockReturnValue(false);
+    vi.mocked(computeNextRetryDelayMs).mockReturnValue({ delayMs: 0, resumeAt: undefined });
+    vi.mocked(computeRateLimitDeadlineMs).mockReturnValue(Date.now() - 1);
+    const codexSession = makeSession({
+      engine: "codex",
+      engineSessionId: "codex-thread-1",
+      model: "gpt-5.6-sol",
+    });
+    getSessionMock.mockImplementation(() => codexSession);
+
+    const outcome = await handleRateLimit({
+      ...makeOpts(vi.fn()),
+      session: codexSession,
+      engineConfig: { bin: "codex", model: "gpt-5.6-sol" },
+      config: {
+        sessions: { rateLimitStrategy: "wait" },
+        engines: { codex: { bin: "codex", model: "gpt-5.6-sol" } },
+      } as unknown as RateLimitHandlerOpts["config"],
+      engine: { run: vi.fn() } as unknown as RateLimitHandlerOpts["engine"],
+      originalResult: { result: "", sessionId: "codex-thread-1" } as EngineResult,
+      hooks: {},
+    });
+
+    expect(outcome.kind).toBe("timeout");
+    expect(updateSessionForAttemptMock).toHaveBeenCalledWith(
+      codexSession.id,
+      "attempt-1",
+      expect.objectContaining({
+        status: "waiting",
+        lastError: "Codex usage limit — waiting for reset",
+      }),
+    );
+    expect(recordClaudeRateLimitMock).not.toHaveBeenCalled();
   });
 });

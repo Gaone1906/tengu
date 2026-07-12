@@ -9,6 +9,22 @@ export interface RateLimitDetection {
   resetsAt?: number;
 }
 
+const RATE_LIMIT_ENGINE_LABELS: Record<string, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  antigravity: "Antigravity",
+  grok: "Grok",
+  pi: "Pi",
+  hermes: "Hermes",
+};
+
+/** Human-facing provider/engine name for rate-limit state and notifications. */
+export function rateLimitEngineLabel(engine: string): string {
+  const normalized = engine.trim().toLowerCase();
+  return RATE_LIMIT_ENGINE_LABELS[normalized]
+    ?? (normalized ? normalized[0]!.toUpperCase() + normalized.slice(1) : "Engine");
+}
+
 /** Patterns that indicate the engine session is dead (expired, not found, etc.) */
 const DEAD_SESSION_PATTERNS = [
   /error.during.execution/i,
@@ -76,4 +92,3 @@ export function computeNextRetryDelayMs(resetsAtSeconds?: number): { delayMs: nu
   }
   return { delayMs: 60_000 };
 }
-

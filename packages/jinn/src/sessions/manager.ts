@@ -35,7 +35,7 @@ import { JINN_HOME } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 import { resolveEffort } from "../shared/effort.js";
 import { effortLevelsForModel, engineAvailable, isKnownEngine, engineUnavailableMessage } from "../shared/models.js";
-import { detectRateLimit, isDeadSessionError } from "../shared/rateLimit.js";
+import { detectRateLimit, isDeadSessionError, rateLimitEngineLabel } from "../shared/rateLimit.js";
 import { getClaudeExpectedResetAt, isLikelyNearClaudeUsageLimit } from "../shared/usageAwareness.js";
 import { loadJobs } from "../cron/jobs.js";
 import { setCronJobEnabled, triggerCronJob } from "../cron/scheduler.js";
@@ -214,13 +214,14 @@ export class SessionManager {
       .filter((filePath): filePath is string => !!filePath);
 
     if (session.status === "waiting") {
-      const expectedResetAt = getClaudeExpectedResetAt();
+      const engineLabel = rateLimitEngineLabel(session.engine);
+      const expectedResetAt = session.engine === "claude" ? getClaudeExpectedResetAt() : undefined;
       const resumeText = expectedResetAt
         ? expectedResetAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
         : null;
       await connector.replyMessage(
         target,
-        `⏳ Still paused due to Claude usage limit${resumeText ? ` (resets ${resumeText})` : ""}. I queued this message and will respond automatically.`,
+        `⏳ Still paused due to ${engineLabel} usage limit${resumeText ? ` (resets ${resumeText})` : ""}. I queued this message and will respond automatically.`,
       ).catch(() => {});
     }
 
@@ -615,13 +616,14 @@ export class SessionManager {
               }
             },
             onWaitingStart: async ({ resumeAt }) => {
+              const engineLabel = rateLimitEngineLabel(session.engine);
               const resumeText = resumeAt
                 ? resumeAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
                 : null;
 
               // Send hardcoded Discord notification — does not depend on LLM
               notifyDiscordChannel(
-                `⚠️ Claude usage limit reached. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} paused${resumeText ? ` until ${resumeText}` : ""}.`,
+                `⚠️ ${engineLabel} usage limit reached. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} paused${resumeText ? ` until ${resumeText}` : ""}.`,
               );
 
               // Clear "thinking" UI and show waiting state
@@ -643,7 +645,7 @@ export class SessionManager {
 
               await connector.replyMessage(
                 target,
-                `⏳ Claude usage limit reached${resumeText ? `. Resets ${resumeText}` : ""} — I'll continue automatically.`,
+                `⏳ ${engineLabel} usage limit reached${resumeText ? `. Resets ${resumeText}` : ""} — I'll continue automatically.`,
               ).catch(() => {});
             },
             onRetryAttempt: async () => {
@@ -667,6 +669,7 @@ export class SessionManager {
               }
             },
             onRetrySuccess: async (retryResult) => {
+              const engineLabel = rateLimitEngineLabel(session.engine);
               // Success or different error — handle normally
               const retryText = retryResult.result?.trim()
                 ? retryResult.result
@@ -709,20 +712,22 @@ export class SessionManager {
               if (retryUpdated) {
                 notifyRateLimitResumed(retryUpdated);
                 notifyDiscordChannel(
-                  `✅ Claude usage limit cleared. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} resumed.`,
+                  `✅ ${engineLabel} usage limit cleared. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} resumed.`,
                 );
                 notifyParentSession(retryUpdated, { result: retryResult.result, error: retryResult.error ?? null, cost: retryResult.cost, durationMs: retryResult.durationMs }, { alwaysNotify: employee?.alwaysNotify });
               }
             },
             onTimeout: async () => {
+              const engineLabel = rateLimitEngineLabel(session.engine);
+              const timeoutError = `${engineLabel} usage limit did not clear in time`;
               notifyDiscordChannel(
-                `❌ Claude usage limit did not clear in time. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} has been stopped.`,
+                `❌ ${timeoutError}. Session ${session.id}${session.employee ? ` (${session.employee})` : ""} has been stopped.`,
               );
               await connector.replyMessage(target, "Usage limit didn't reset in time. Please try again later.").catch(() => {});
               updateSessionForAttempt(session.id, attemptToken, {
                 status: "error",
                 lastActivity: new Date().toISOString(),
-                lastError: "Claude usage limit did not clear in time",
+                lastError: timeoutError,
               }, ["waiting", "running"]);
 
               // Clear reactions on failure

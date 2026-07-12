@@ -162,7 +162,7 @@ import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLangua
 import { CODEX_HOMES_DIR, JINN_HOME } from "../shared/paths.js";
 import { resolveEffort } from "../shared/effort.js";
 import { selectClaudeModelFallback } from "../shared/model-fallback.js";
-import { detectRateLimit } from "../shared/rateLimit.js";
+import { detectRateLimit, rateLimitEngineLabel } from "../shared/rateLimit.js";
 import { getClaudeExpectedResetAt } from "../shared/usageAwareness.js";
 import { collectEngineLimits } from "../shared/engine-limits.js";
 import { handleRateLimit } from "../sessions/rate-limit-handler.js";
@@ -4976,12 +4976,13 @@ export async function handleApiRequest(
       // processes the notification and can respond — they do not return early.
 
       if (!isNotification && session.status === "waiting") {
-        const expectedResetAt = getClaudeExpectedResetAt();
+        const engineLabel = rateLimitEngineLabel(session.engine);
+        const expectedResetAt = session.engine === "claude" ? getClaudeExpectedResetAt() : undefined;
         const resumeText = expectedResetAt
           ? expectedResetAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
           : null;
         const queuedText =
-          `⏳ Still paused due to Claude usage limit${resumeText ? ` (resets ${resumeText})` : ""}. Your message is queued and will run automatically.`;
+          `⏳ Still paused due to ${engineLabel} usage limit${resumeText ? ` (resets ${resumeText})` : ""}. Your message is queued and will run automatically.`;
         insertMessage(session.id, "notification", queuedText);
         context.emit("session:notification", { sessionId: session.id, message: queuedText });
       }
@@ -6753,17 +6754,18 @@ async function runWebSession(
             }
           },
           onWaitingStart: ({ resumeAt }) => {
+            const engineLabel = rateLimitEngineLabel(currentSession.engine);
             const resumeText = resumeAt
               ? resumeAt.toLocaleString("en-GB", { weekday: "short", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
               : null;
 
             // Send hardcoded Discord notification — does not depend on the LLM
             notifyDiscordChannel(
-              `⚠️ Claude usage limit reached. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} paused${resumeText ? ` until ${resumeText}` : ""}.`,
+              `⚠️ ${engineLabel} usage limit reached. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} paused${resumeText ? ` until ${resumeText}` : ""}.`,
             );
 
             const notificationText =
-              `⏳ Claude usage limit reached${resumeText ? `. Resets ${resumeText}` : ""} — I'll continue automatically.`;
+              `⏳ ${engineLabel} usage limit reached${resumeText ? `. Resets ${resumeText}` : ""} — I'll continue automatically.`;
             insertMessage(currentSession.id, "notification", notificationText);
 
             // Notify parent session about rate limit (fire-and-forget)
@@ -6784,6 +6786,7 @@ async function runWebSession(
           },
           onRetryStream: emitDelta,
           onRetrySuccess: (retryResult) => {
+            const engineLabel = rateLimitEngineLabel(currentSession.engine);
             // Usage limit cleared — handle result
             if (retryResult.result) {
               insertMessage(currentSession.id, "assistant", retryResult.result);
@@ -6808,7 +6811,7 @@ async function runWebSession(
             if (completedAfterRetry) {
               notifyRateLimitResumed(completedAfterRetry);
               notifyDiscordChannel(
-                `✅ Claude usage limit cleared. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} resumed.`,
+                `✅ ${engineLabel} usage limit cleared. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} resumed.`,
               );
               notifyParentSession(completedAfterRetry, { result: retryResult.result, error: retryResult.error ?? null, cost: retryResult.cost, durationMs: retryResult.durationMs }, { alwaysNotify: employee?.alwaysNotify });
               // Relay the resumed (rate-limit-cleared) turn to the originating connector channel (#51).
@@ -6829,22 +6832,24 @@ async function runWebSession(
             }
           },
           onTimeout: () => {
+            const engineLabel = rateLimitEngineLabel(currentSession.engine);
+            const timeoutError = `${engineLabel} usage limit did not clear in time`;
             notifyDiscordChannel(
-              `❌ Claude usage limit did not clear in time. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} has been stopped.`,
+              `❌ ${timeoutError}. Session ${currentSession.id}${currentSession.employee ? ` (${currentSession.employee})` : ""} has been stopped.`,
             );
             const erroredSession = updateSessionForAttempt(currentSession.id, attemptToken, {
               status: "error",
               lastActivity: new Date().toISOString(),
-              lastError: "Claude usage limit did not clear in time",
+              lastError: timeoutError,
             }, ["waiting", "running"]);
             if (erroredSession) {
-              notifyParentSession(erroredSession, { error: "Claude usage limit did not clear in time" }, { alwaysNotify: employee?.alwaysNotify });
+              notifyParentSession(erroredSession, { error: timeoutError }, { alwaysNotify: employee?.alwaysNotify });
             }
             if (erroredSession) {
               context.emit("session:completed", {
                 sessionId: currentSession.id,
                 result: null,
-                error: "Claude usage limit did not clear in time",
+                error: timeoutError,
               });
               maybeEmitTalkGraph(currentSession.id, "completed", { getSession, emit: context.emit });
             }
