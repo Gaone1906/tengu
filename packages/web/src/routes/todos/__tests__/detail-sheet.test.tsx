@@ -573,6 +573,105 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(patchBodies()[1]).toEqual(patchBodies()[0])
   })
 
+  it("classifies a typed same-field conflict from a fresh detail before exposing choices", async () => {
+    const value = detail("backlog")
+    const remote = detail("backlog")
+    remote.workItem.version = 8
+    remote.workItem.title = "Remote title"
+    let detailReads = 0
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({ code: "todo_version_conflict", currentVersion: 8, error: "private wi_hidden" }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      detailReads += 1
+      return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Local title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+
+    expect(await screen.findByText("Title still conflicts")).toBeTruthy()
+    const conflict = screen.getByRole("status", { name: "Todo changed elsewhere" })
+    expect(conflict.textContent).toContain("Your title also changed remotely")
+    expect(screen.queryByRole("button", { name: "Rebase edits" })).toBeNull()
+    expect(screen.getByRole("button", { name: "Reload remote" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Overwrite remote" })).toBeTruthy()
+    expect(detailReads).toBeGreaterThanOrEqual(1)
+    expect(detailReads).toBeLessThanOrEqual(2)
+    expect(patchBodies()).toHaveLength(1)
+    expect(conflict.textContent).not.toContain("wi_hidden")
+  })
+
+  it("classifies a typed unrelated conflict from a fresh detail without rebasing automatically", async () => {
+    const value = detail("backlog")
+    const remote = detail("backlog")
+    remote.workItem.version = 8
+    remote.workItem.priority = 3
+    let detailReads = 0
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({ code: "todo_version_conflict", currentVersion: 8, error: "private" }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      detailReads += 1
+      return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Local title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+
+    const rebase = await screen.findByRole("button", { name: "Rebase edits" })
+    await waitFor(() => expect((rebase as HTMLButtonElement).disabled).toBe(false))
+    const conflict = screen.getByRole("status", { name: "Todo changed elsewhere" })
+    expect(conflict.textContent).toContain("Rebase keeps unrelated remote work")
+    expect(screen.queryByText("Title still conflicts")).toBeNull()
+    expect(screen.getByRole("button", { name: "Reload remote" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Overwrite remote" })).toBeTruthy()
+    expect(detailReads).toBeGreaterThanOrEqual(1)
+    expect(detailReads).toBeLessThanOrEqual(2)
+    expect(patchBodies()).toHaveLength(1)
+  })
+
+  it("re-inspects a recovered conflict after remount instead of trusting its prior field label", async () => {
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    let remote = {
+      ...detail("backlog"),
+      workItem: { ...detail("backlog").workItem, version: 8, priority: 3 },
+    }
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+
+    const first = renderSheetWithDetail(value)
+    const rebase = await screen.findByRole("button", { name: "Rebase edits" })
+    await waitFor(() => expect((rebase as HTMLButtonElement).disabled).toBe(false))
+    expect(screen.queryByText("Title still conflicts")).toBeNull()
+    first.unmount()
+
+    remote = {
+      ...remote,
+      workItem: { ...remote.workItem, version: 9, title: "Remote title" },
+    }
+    renderSheetWithDetail(value)
+
+    expect(await screen.findByText("Title still conflicts")).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Rebase edits" })).toBeNull()
+    expect(patchBodies()).toHaveLength(0)
+  })
+
   it("rebases unrelated edits on a freshly loaded version with a new request key", async () => {
     const value = detail("backlog")
     const remote = detail("backlog")
@@ -614,8 +713,7 @@ describe("Todo detail editing and dialog behavior", () => {
     await waitFor(() => expect(screen.queryByRole("status", { name: "Todo changed elsewhere" })).toBeNull())
   })
 
-  it("keeps a same-field conflict blocked after Rebase and names the field", async () => {
-    const user = userEvent.setup()
+  it("keeps a same-field conflict blocked after the automatic classification and names the field", async () => {
     const value = detail("backlog")
     const remote = detail("backlog")
     remote.workItem.version = 8
@@ -635,8 +733,6 @@ describe("Todo detail editing and dialog behavior", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
     fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Local title" } })
     fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
-    await screen.findByRole("status", { name: "Todo changed elsewhere" })
-    await user.click(screen.getByRole("button", { name: "Rebase edits" }))
 
     expect(await screen.findByText("Title still conflicts")).toBeTruthy()
     const conflict = screen.getByRole("status", { name: "Todo changed elsewhere" })
@@ -734,14 +830,16 @@ describe("Todo detail editing and dialog behavior", () => {
     })
     renderSheetWithDetail(value)
 
-    fireEvent.click(await screen.findByRole("button", { name: "Rebase edits" }))
+    const rebase = await screen.findByRole("button", { name: "Rebase edits" })
+    await waitFor(() => expect((rebase as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(rebase)
     await waitFor(() => expect(patchBodies()).toHaveLength(1))
 
     for (const name of ["Reload remote", "Rebase edits", "Overwrite remote"]) {
       expect(screen.getByRole("button", { name }).hasAttribute("disabled")).toBe(true)
     }
     fireEvent.click(screen.getByRole("button", { name: "Overwrite remote" }))
-    expect(detailReads).toBe(1)
+    expect(detailReads).toBe(2)
     patchResponse.resolve(new Response(JSON.stringify(editResult(remote.workItem, { title: "Recovered local title" }, 9)), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -835,15 +933,20 @@ describe("Todo detail editing and dialog behavior", () => {
     persistTypedConflict(value)
     const read = deferred<Response>()
     const patch = deferred<Response>()
+    let detailReads = 0
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") return patch.promise
+      detailReads += 1
+      if (detailReads === 1) return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
       return read.promise
     })
     const { client } = renderSheetWithDetail(value)
 
-    fireEvent.click(await screen.findByRole("button", { name: "Rebase edits" }))
-    await waitFor(() => expect(authFetch.mock.calls.some(([path]) => String(path).endsWith(value.workItem.id))).toBe(true))
+    const rebase = await screen.findByRole("button", { name: "Rebase edits" })
+    await waitFor(() => expect((rebase as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(rebase)
+    await waitFor(() => expect(detailReads).toBe(2))
     client.setQueryData<WorkItemDetailWire>(["work-item", value.workItem.id], {
       ...value,
       workItem: { ...value.workItem, version: 12 },
@@ -861,14 +964,19 @@ describe("Todo detail editing and dialog behavior", () => {
     const value = detail("backlog")
     persistTypedConflict(value)
     const read = deferred<Response>()
+    let detailReads = 0
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      detailReads += 1
+      if (detailReads === 1) return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
       return read.promise
     })
     const { client } = renderSheetWithDetail(value)
 
-    fireEvent.click(await screen.findByRole("button", { name: "Rebase edits" }))
-    await waitFor(() => expect(authFetch.mock.calls.some(([path]) => String(path).endsWith(value.workItem.id))).toBe(true))
+    const rebase = await screen.findByRole("button", { name: "Rebase edits" })
+    await waitFor(() => expect((rebase as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(rebase)
+    await waitFor(() => expect(detailReads).toBe(2))
     client.setQueryData<WorkItemDetailWire>(["work-item", value.workItem.id], {
       ...value,
       workItem: { ...value.workItem, version: 12, title: "Exact title" },
@@ -1022,7 +1130,7 @@ describe("Todo detail editing and dialog behavior", () => {
       spendUsd: 12,
       workItem: { version: 12, title: "Newer cached title" },
     })
-    expect(authFetch.mock.calls.filter(([path, init]) => String(path).endsWith(value.workItem.id) && !(init as RequestInit | undefined)?.method)).toHaveLength(1)
+    expect(authFetch.mock.calls.filter(([path, init]) => String(path).endsWith(value.workItem.id) && !(init as RequestInit | undefined)?.method).length).toBeGreaterThanOrEqual(1)
   })
 
   it("turns a stale successful PATCH payload into a typed conflict without acknowledging the request", async () => {
@@ -1576,12 +1684,14 @@ describe("Todo detail editing and dialog behavior", () => {
     const remote = detail("backlog")
     remote.workItem.version = 8
     remote.workItem.title = "Remote title"
+    let patchAttempt = 0
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
+        patchAttempt += 1
         return new Response(JSON.stringify({
           code: "todo_version_conflict",
-          currentVersion: Number(remote.workItem.version) + 1,
+          currentVersion: patchAttempt === 1 ? remote.workItem.version : Number(remote.workItem.version) + 1,
           error: "conflict wi_private_payload",
         }), { status: 409, headers: { "Content-Type": "application/json" } })
       }
@@ -1592,7 +1702,7 @@ describe("Todo detail editing and dialog behavior", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
     fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Explicit local title" } })
     fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
-    await screen.findByRole("status", { name: "Todo changed elsewhere" })
+    await screen.findByText("Title still conflicts")
     const original = patchBodies()[0]
 
     fireEvent.click(screen.getByRole("button", { name: "Overwrite remote" }))

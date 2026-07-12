@@ -871,6 +871,7 @@ export function DetailSheet({
   const pending = displayDetail?.workItem.approvalState === "pending"
   const execSession = selectLinkedSession(sessions)
   const conflictActionsBlocked = conflictBusy
+    || draftState.classifyingConflict
     || draftState.conflictMode === "reconciling"
     || draftState.status === "saving"
 

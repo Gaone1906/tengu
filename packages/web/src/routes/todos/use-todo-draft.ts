@@ -25,7 +25,7 @@ export interface TodoEditableDraft {
 
 export type TodoDraftPatch = Partial<TodoEditableDraft>
 export type TodoSaveStatus = "idle" | "dirty" | "saving" | "saved" | "error"
-export type TodoConflictMode = "none" | "unreconciled" | "same-field" | "reconciling"
+export type TodoConflictMode = "none" | "unreconciled" | "unrelated" | "same-field" | "reconciling"
 
 export interface TodoRemoteSnapshot {
   draft: TodoEditableDraft
@@ -206,6 +206,8 @@ export function useTodoDraft({
   )
   const [recoveredConflict, setRecoveredConflict] = useState(startingConflicts.size > 0 || startingFailure === "conflict")
   const [conflictFields, setConflictFields] = useState<TodoDraftField[]>([...startingConflicts])
+  const [conflictInspected, setConflictInspected] = useState(recoveredRequest?.state !== "conflict")
+  const [classifyingConflict, setClassifyingConflict] = useState(false)
   const [cleanupPending, setCleanupPending] = useState(!!recovered?.cleanupPending)
 
   const draftRef = useRef(startingDraft)
@@ -239,6 +241,7 @@ export function useTodoDraft({
   const cleanupIntentFieldsRef = useRef(new Set<TodoDraftField>(recovered?.cleanupIntentFields ?? []))
   const cleanupSaveRequestedRef = useRef(recovered?.cleanupSaveRequested === true)
   const runningRef = useRef(false)
+  const classifyingConflictRef = useRef(false)
   const failureRef = useRef<FailureKind>(startingFailure)
   const localRevisionRef = useRef(recovered ? recovered.revision : 0)
   const epochRef = useRef(0)
@@ -246,6 +249,7 @@ export function useTodoDraft({
   const saveRef = useRef(saveRemote)
   const loadRemoteRef = useRef(loadRemote)
   const runActiveRef = useRef<() => Promise<void>>(async () => undefined)
+  const classifyConflictRef = useRef<() => Promise<void>>(async () => undefined)
 
   saveRef.current = saveRemote
   loadRemoteRef.current = loadRemote
@@ -311,6 +315,7 @@ export function useTodoDraft({
     activeRef.current = request
     activeDurableRef.current = durable
     runningRef.current = false
+    classifyingConflictRef.current = false
     failureRef.current = preserveConflict ? "conflict" : "definitive"
     if (mountedRef.current) {
       setStatus("error")
@@ -327,6 +332,7 @@ export function useTodoDraft({
     cleanupIntentFieldsRef.current.clear()
     cleanupSaveRequestedRef.current = false
     runningRef.current = false
+    classifyingConflictRef.current = false
     failureRef.current = null
     dirtyFieldsRef.current.clear()
     baselineByFieldRef.current = {}
@@ -335,6 +341,8 @@ export function useTodoDraft({
       setError(null)
       setStatus(nextStatus)
       setRecoveredConflict(false)
+      setConflictInspected(true)
+      setClassifyingConflict(false)
       setCleanupPending(false)
     }
   }, [publishConflict])
@@ -735,12 +743,17 @@ export function useTodoDraft({
       activeDurableRef.current = true
       runningRef.current = false
       failureRef.current = conflict ? "conflict" : ambiguous ? "ambiguous" : "definitive"
+      if (conflict && cause instanceof TodoApiError && isPositiveTodoVersion(cause.currentVersion)) {
+        versionFloorRef.current.value = maxPositiveVersion(versionFloorRef.current.value, cause.currentVersion)
+      }
       if (conflict) publishConflict(terminalConflicts)
       if (mountedRef.current) {
         setStatus("error")
         setError(cause)
         setRecoveredConflict(conflict || conflictFieldsRef.current.size > 0)
+        if (conflict) setConflictInspected(false)
       }
+      if (conflict) queueMicrotask(() => void classifyConflictRef.current())
     }
   }, [durableRequest, failAtomicTransition, id, localPersistenceError, payloadFor, persistCurrent, publishConflict, settleSuccessfulRequest, transitionActive])
   runActiveRef.current = runActive
@@ -774,6 +787,45 @@ export function useTodoDraft({
       merged,
     }
   }, [])
+
+  const classifyConflict = useCallback(async () => {
+    const request = activeRef.current
+    const readRemote = loadRemoteRef.current
+    if (!readRemote
+      || request?.state !== "conflict"
+      || cleanupPendingRef.current
+      || classifyingConflictRef.current) return
+    classifyingConflictRef.current = true
+    const epoch = epochRef.current
+    const requestKey = request.idempotencyKey
+    if (mountedRef.current) setClassifyingConflict(true)
+    try {
+      const remote = await readRemote()
+      if (epoch !== epochRef.current
+        || activeRef.current?.state !== "conflict"
+        || activeRef.current.idempotencyKey !== requestKey
+        || !acceptRemoteSnapshot(remote)) return
+      const expectedPayload = loadTodoJournal(id)
+      if (!expectedPayload?.request
+        || expectedPayload.request.state !== "conflict"
+        || !sameRequest(expectedPayload.request, request)) return
+      const conflicts = planFreshIntent(remote).conflicts
+      const nextPayload = payloadFor(request, conflicts)
+      if (!nextPayload || !transitionTodoJournalPayload(id, expectedPayload, nextPayload)) return
+      publishConflict(conflicts)
+      if (mountedRef.current) setConflictInspected(true)
+    } catch {
+      // The typed PATCH conflict remains the operator-safe visible state. A
+      // failed classification read must not clear intent or replace it with a
+      // transport diagnostic; explicit recovery actions can retry the read.
+    } finally {
+      if (epoch === epochRef.current && activeRef.current?.idempotencyKey === requestKey) {
+        classifyingConflictRef.current = false
+        if (mountedRef.current) setClassifyingConflict(false)
+      }
+    }
+  }, [acceptRemoteSnapshot, id, payloadFor, planFreshIntent, publishConflict])
+  classifyConflictRef.current = classifyConflict
 
   const adoptFreshForIntent = useCallback((remote: TodoRemoteSnapshot): Set<TodoDraftField> | null => {
     if (!acceptRemoteSnapshot(remote)) return null
@@ -885,6 +937,7 @@ export function useTodoDraft({
     cleanupIntentFieldsRef.current = new Set(stored?.cleanupIntentFields ?? [])
     cleanupSaveRequestedRef.current = stored?.cleanupSaveRequested === true
     runningRef.current = false
+    classifyingConflictRef.current = false
     failureRef.current = nextFailure
     localRevisionRef.current = stored ? stored.revision : 0
     publishDraft(nextDraft)
@@ -892,10 +945,15 @@ export function useTodoDraft({
     setStatus(nextFailure ? "error" : storedFields.size > 0 ? "dirty" : "idle")
     setError(stored?.cleanupPending ? cleanupRecoveryError() : storedRequest ? recoveryError(storedRequest) : null)
     setRecoveredConflict(conflicts.size > 0 || nextFailure === "conflict")
+    setConflictInspected(storedRequest?.state !== "conflict")
+    setClassifyingConflict(false)
     setCleanupPending(!!stored?.cleanupPending)
 
     if (!stored?.cleanupPending && storedRequest && new Set<TodoJournalRequest["state"]>(["prepared", "dispatched", "uncertain"]).has(storedRequest.state)) queueMicrotask(() => {
       if (mountedRef.current) void runActiveRef.current()
+    })
+    if (!stored?.cleanupPending && storedRequest?.state === "conflict") queueMicrotask(() => {
+      if (mountedRef.current) void classifyConflictRef.current()
     })
 
     return () => {
@@ -914,6 +972,7 @@ export function useTodoDraft({
     const cleanupTarget = cleanupSnapshotRef.current?.draft ?? null
     const baselineTarget = cleanupTarget ?? remoteRef.current
     let active = activeRef.current
+    const reclassifyConflict = active?.state === "conflict"
     if (!cleanupPendingRef.current && active && !activeDurableRef.current && !runningRef.current) {
       activeRef.current = null
       active = null
@@ -984,6 +1043,10 @@ export function useTodoDraft({
       return
     }
     persistCurrent()
+    if (reclassifyConflict) {
+      if (mountedRef.current) setConflictInspected(false)
+      queueMicrotask(() => void classifyConflictRef.current())
+    }
     if (mountedRef.current && !runningRef.current && !failureRef.current) setStatus("dirty")
   }, [blockCleanup, id, knownSnapshot, markClean, payloadFor, persistCurrent, publishConflict, publishDraft])
 
@@ -1157,6 +1220,7 @@ export function useTodoDraft({
     failureRef.current = plan.conflicts.size > 0 ? "conflict" : null
     publishDraft(plan.merged)
     publishConflict(visibleConflicts)
+    if (mountedRef.current) setConflictInspected(true)
     if (plan.remaining.size === 0) {
       localRevisionRef.current = 0
       markClean("idle")
@@ -1173,7 +1237,9 @@ export function useTodoDraft({
     if (mountedRef.current) {
       setStatus("saving")
       setError(null)
-      setRecoveredConflict(visibleConflicts.size > 0)
+      // Keep the recovery surface mounted (with all choices disabled) until
+      // the conditional Rebase/Overwrite request is durably acknowledged.
+      setRecoveredConflict(!!prepared || visibleConflicts.size > 0)
     }
     void runActiveRef.current()
   }, [acceptRemoteSnapshot, id, markClean, planFreshIntent, publishConflict, publishDraft])
@@ -1195,7 +1261,11 @@ export function useTodoDraft({
   const conflictMode: TodoConflictMode = !recoveredConflict
     ? "none"
     : activeRef.current?.state === "conflict"
-      ? "unreconciled"
+      ? !conflictInspected
+        ? "unreconciled"
+        : conflictFields.length > 0
+          ? "same-field"
+          : "unrelated"
       : activeRef.current
         ? "reconciling"
         : conflictFields.length > 0
@@ -1209,6 +1279,7 @@ export function useTodoDraft({
     recoveredConflict,
     conflictMode,
     conflictFields,
+    classifyingConflict,
     change,
     save,
     retry,

@@ -165,7 +165,7 @@ describe("useTodoDraft conditional state machine", () => {
       result.current.change("title", "C")
     })
     await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
-    expect(result.current.conflictMode).toBe("unreconciled")
+    expect(result.current.conflictMode).toBe("same-field")
 
     expect(save).toHaveBeenCalledTimes(1)
     expect(result.current.draft.title).toBe("C")
