@@ -7,6 +7,7 @@ import { SESSIONS_DB } from '../shared/paths.js';
 import { logger } from '../shared/logger.js';
 import {
   migrateWorkItemsSchema,
+  WORK_ITEM_EDIT_RECEIPTS_DDL,
   WORK_ITEMS_TABLE_DDL,
   WORK_ITEMS_INDEX_DDL,
   WORK_ITEM_EVENTS_DDL,
@@ -378,6 +379,7 @@ export function initDb(): Database.Database {
   db.exec(WORK_ITEMS_TABLE_DDL);
   db.exec(WORK_ITEMS_INDEX_DDL);
   db.exec(WORK_ITEM_EVENTS_DDL);
+  db.exec(WORK_ITEM_EDIT_RECEIPTS_DDL);
   db.exec(CREATE_WORK_ITEM_SESSION_INDEX);
   // Normalized operational Activity ledger. Additive and idempotent for both
   // fresh and existing homes; historical domain projection is checkpointed by

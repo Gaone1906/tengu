@@ -83,6 +83,7 @@ function summarize(item: Record<string, unknown>): Record<string, unknown> {
     assignee: item.assignee ?? null,
     department: item.department ?? null,
     source: item.source,
+    version: item.version,
     updatedAt: item.updatedAt ?? null,
   };
 }

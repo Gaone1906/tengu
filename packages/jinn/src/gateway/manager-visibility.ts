@@ -51,6 +51,7 @@ const defaultDeps: ManagerVisibilityDeps = {
           title: fallback.title,
         },
       },
+      versionEffect: "audit",
     });
   },
   warn: (message) => logger.warn(message),

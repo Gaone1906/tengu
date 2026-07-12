@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { initDb } from '../sessions/registry.js';
 
 /**
@@ -92,6 +92,8 @@ export interface WorkItem {
   priority: number;
   /** Nullable manual order key. Lower ranked values render first. */
   rank: number | null;
+  /** Monotonic row revision used for whole-Todo optimistic concurrency. */
+  version: number;
   source: WorkItemSource;
   sourceRef: string | null;
   acceptance: string | null;
@@ -190,6 +192,7 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItem {
     assignee: (row.assignee as string) ?? null,
     priority: row.priority as number,
     rank: (row.rank as number) ?? null,
+    version: row.version as number,
     source: row.source as WorkItemSource,
     sourceRef: (row.source_ref as string) ?? null,
     acceptance: (row.acceptance as string) ?? null,
@@ -252,6 +255,10 @@ export interface AppendWorkItemEventInput {
   toStatus?: WorkItemStatus | null;
   actor?: string | null;
   detail?: Record<string, unknown> | null;
+  /** `state` advances the Todo revision for a standalone operator-visible note
+   * or verification result. `companion` records the audit for a row mutation
+   * that already advanced it. `audit` is telemetry/visibility only. */
+  versionEffect?: 'state' | 'companion' | 'audit';
 }
 
 /** Append one audit event. Callers inside a transaction compose naturally
@@ -270,20 +277,29 @@ export function appendWorkItemEvent(input: AppendWorkItemEventInput): WorkItemEv
     detail: input.detail ?? null,
     createdAt: now,
   };
-  db.prepare(
-    `INSERT INTO work_item_events (id, work_item_id, kind, from_status, to_status, actor, detail, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    event.id,
-    event.workItemId,
-    event.kind,
-    event.fromStatus,
-    event.toStatus,
-    event.actor,
-    event.detail ? JSON.stringify(event.detail) : null,
-    event.createdAt,
-  );
-  return event;
+  const versionEffect = input.versionEffect
+    ?? (input.kind === 'note' || input.kind === 'verify_result' ? 'state' : 'companion');
+  const txn = db.transaction((): WorkItemEvent => {
+    if (versionEffect === 'state') {
+      const touched = db.prepare('UPDATE work_items SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, input.workItemId);
+      if (touched.changes === 0) throw new Error('cannot append state event for an unknown Todo');
+    }
+    db.prepare(
+      `INSERT INTO work_item_events (id, work_item_id, kind, from_status, to_status, actor, detail, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      event.id,
+      event.workItemId,
+      event.kind,
+      event.fromStatus,
+      event.toStatus,
+      event.actor,
+      event.detail ? JSON.stringify(event.detail) : null,
+      event.createdAt,
+    );
+    return event;
+  });
+  return txn();
 }
 
 /** List an item's audit trail, oldest-first (the story reads top-down). */
@@ -513,9 +529,133 @@ export interface UpdateWorkItemInput {
   rank?: number | null;
 }
 
-/** Metadata-only Todo write used by the operator edit/reorder surface. Status is
- * deliberately absent from the input type: lifecycle changes belong to the
- * guarded transitions module. */
+export interface ConditionalWorkItemUpdateOptions {
+  expectedVersion: number;
+  idempotencyKey?: string;
+  actor?: string | null;
+}
+
+export interface ConditionalWorkItemUpdateResult {
+  item: WorkItem;
+  replayed: boolean;
+}
+
+export class WorkItemVersionConflictError extends Error {
+  readonly currentVersion: number;
+
+  constructor(currentVersion: number) {
+    super('Todo changed since it was loaded');
+    this.name = 'WorkItemVersionConflictError';
+    this.currentVersion = currentVersion;
+  }
+}
+
+export class WorkItemIdempotencyConflictError extends Error {
+  readonly currentVersion: number;
+
+  constructor(currentVersion: number) {
+    super('Todo edit idempotency key was already used for a different request');
+    this.name = 'WorkItemIdempotencyConflictError';
+    this.currentVersion = currentVersion;
+  }
+}
+
+const UPDATE_FIELD_COLUMNS: Readonly<Record<keyof UpdateWorkItemInput, string>> = {
+  title: 'title',
+  body: 'body',
+  assignee: 'assignee',
+  department: 'department',
+  priority: 'priority',
+  rank: 'rank',
+};
+
+function canonicalUpdateFingerprint(id: string, input: UpdateWorkItemInput, expectedVersion: number): string {
+  const patch: Record<string, unknown> = {};
+  for (const key of Object.keys(UPDATE_FIELD_COLUMNS) as Array<keyof UpdateWorkItemInput>) {
+    if (input[key] !== undefined) patch[key] = input[key];
+  }
+  return createHash('sha256').update(JSON.stringify({ id, expectedVersion, patch })).digest('hex');
+}
+
+function idempotencyKeyDigest(key: string): string {
+  return createHash('sha256').update(key).digest('hex');
+}
+
+function updateChangesItem(item: WorkItem, input: UpdateWorkItemInput): boolean {
+  return (Object.keys(UPDATE_FIELD_COLUMNS) as Array<keyof UpdateWorkItemInput>)
+    .some((key) => input[key] !== undefined && item[key] !== input[key]);
+}
+
+/** Atomic row-level compare-and-update for the operator metadata surface.
+ * Partial fields are patch semantics, but `expectedVersion` protects the whole
+ * Todo row: any intervening editable or lifecycle mutation conflicts. An exact
+ * idempotency replay is resolved before that guard and never writes again. */
+export function updateWorkItemConditional(
+  id: string,
+  input: UpdateWorkItemInput,
+  opts: ConditionalWorkItemUpdateOptions,
+): ConditionalWorkItemUpdateResult | undefined {
+  const db = initDb();
+  const fingerprint = canonicalUpdateFingerprint(id, input, opts.expectedVersion);
+  const keyDigest = opts.idempotencyKey ? idempotencyKeyDigest(opts.idempotencyKey) : undefined;
+  const txn = db.transaction((): ConditionalWorkItemUpdateResult | undefined => {
+    const current = getWorkItem(id);
+    if (!current) return undefined;
+
+    if (keyDigest) {
+      const receipt = db
+        .prepare('SELECT request_fingerprint FROM work_item_edit_receipts WHERE key_digest = ?')
+        .get(keyDigest) as { request_fingerprint: string } | undefined;
+      if (receipt) {
+        if (receipt.request_fingerprint !== fingerprint) {
+          throw new WorkItemIdempotencyConflictError(current.version);
+        }
+        return { item: current, replayed: true };
+      }
+    }
+
+    if (current.version !== opts.expectedVersion) {
+      throw new WorkItemVersionConflictError(current.version);
+    }
+
+    let item = current;
+    if (updateChangesItem(current, input)) {
+      const fields = (Object.keys(UPDATE_FIELD_COLUMNS) as Array<keyof UpdateWorkItemInput>)
+        .filter((key) => input[key] !== undefined)
+        .map((key) => ({ column: UPDATE_FIELD_COLUMNS[key], name: key, value: input[key] }));
+      const now = new Date().toISOString();
+      const result = db
+        .prepare(`UPDATE work_items SET ${fields.map((field) => `${field.column} = ?`).join(', ')}, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?`)
+        .run(...fields.map((field) => field.value), now, id, opts.expectedVersion);
+      if (result.changes === 0) {
+        const latest = getWorkItem(id);
+        if (!latest) return undefined;
+        throw new WorkItemVersionConflictError(latest.version);
+      }
+      appendWorkItemEvent({
+        workItemId: id,
+        kind: 'note',
+        actor: opts.actor ?? null,
+        detail: { updatedFields: fields.map((field) => field.name) },
+        versionEffect: 'companion',
+      });
+      item = getWorkItem(id)!;
+    }
+
+    if (keyDigest) {
+      db.prepare(
+        `INSERT INTO work_item_edit_receipts (key_digest, request_fingerprint, result_version, created_at)
+         VALUES (?, ?, ?, ?)`,
+      ).run(keyDigest, fingerprint, item.version, new Date().toISOString());
+    }
+    return { item, replayed: false };
+  });
+  return txn.immediate();
+}
+
+/** Internal compatibility write for migration and trusted non-HTTP callers.
+ * Public operator edits use updateWorkItemConditional. Status is deliberately
+ * absent: lifecycle changes belong to the guarded transitions module. */
 export function updateWorkItem(id: string, input: UpdateWorkItemInput, actor?: string | null): WorkItem | undefined {
   const db = initDb();
   const fields: Array<{ column: string; name: keyof UpdateWorkItemInput; value: unknown }> = [];
@@ -528,16 +668,21 @@ export function updateWorkItem(id: string, input: UpdateWorkItemInput, actor?: s
   if (fields.length === 0) return getWorkItem(id);
 
   const txn = db.transaction((): WorkItem | undefined => {
+    const current = getWorkItem(id);
+    if (!current) return undefined;
+    const changedFields = fields.filter((field) => current[field.name] !== field.value);
+    if (changedFields.length === 0) return current;
     const now = new Date().toISOString();
     const result = db
-      .prepare(`UPDATE work_items SET ${fields.map((field) => `${field.column} = ?`).join(', ')}, updated_at = ? WHERE id = ?`)
-      .run(...fields.map((field) => field.value), now, id);
+      .prepare(`UPDATE work_items SET ${changedFields.map((field) => `${field.column} = ?`).join(', ')}, updated_at = ?, version = version + 1 WHERE id = ?`)
+      .run(...changedFields.map((field) => field.value), now, id);
     if (result.changes === 0) return undefined;
     appendWorkItemEvent({
       workItemId: id,
       kind: 'note',
       actor: actor ?? null,
-      detail: { updatedFields: fields.map((field) => field.name) },
+      detail: { updatedFields: changedFields.map((field) => field.name) },
+      versionEffect: 'companion',
     });
     return getWorkItem(id);
   });
@@ -581,7 +726,7 @@ export function linkSession(workItemId: string, sessionId: string): void {
     // Already linked to this exact item → no write, no `updated_at` bump.
     if (session.work_item_id === workItemId) return;
     db.prepare('UPDATE sessions SET work_item_id = ? WHERE id = ?').run(workItemId, sessionId);
-    db.prepare('UPDATE work_items SET updated_at = ? WHERE id = ?').run(now, workItemId);
+    db.prepare('UPDATE work_items SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, workItemId);
     appendWorkItemEvent({ workItemId, kind: 'session_linked', detail: { sessionId } });
   });
   txn();
@@ -622,7 +767,7 @@ function updateStatus(
   if (CLOSED_STATUSES.has(toStatus)) params.push(now);
   params.push(id);
   const result = db
-    .prepare(`UPDATE work_items SET status = ?, updated_at = ?${closedClause} WHERE id = ?${guardClause}`)
+    .prepare(`UPDATE work_items SET status = ?, updated_at = ?, version = version + 1${closedClause} WHERE id = ?${guardClause}`)
     .run(...params);
   if (result.changes === 0) return undefined;
   return getWorkItem(id);

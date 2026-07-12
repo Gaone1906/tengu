@@ -180,6 +180,7 @@ import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir } from "./files.js";
 import { readJsonBody, readBodyRaw } from "./http-helpers.js";
+import { isJsonMediaType } from "./media-type.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions } from "../sessions/callbacks.js";
@@ -196,7 +197,9 @@ import {
   listWorkItems,
   queryWorkItems,
   STICKY_STATUSES,
-  updateWorkItem,
+  updateWorkItemConditional,
+  WorkItemIdempotencyConflictError,
+  WorkItemVersionConflictError,
   type CreateWorkItemInput,
   type SearchWorkItemsFilter,
   type UpdateWorkItemInput,
@@ -262,6 +265,8 @@ import { updateSkillContent } from "./skills.js";
 const HOOK_BODY_MAX_BYTES = 64 * 1024;
 /** Max bytes accepted by public auth helpers. Codes/tokens are tiny. */
 const AUTH_BODY_MAX_BYTES = 16 * 1024;
+/** Operator Todo PATCH cap, measured as raw UTF-8 request bytes including JSON overhead. */
+export const TODO_EDIT_BODY_MAX_BYTES = 64 * 1024;
 /** Cap for workflow-definition CRUD bodies (GRS-011b). A large graph is still KB-scale. */
 const WORKFLOW_DEFINITION_BODY_MAX_BYTES = 512 * 1024;
 /** Cap for inbound workflow events. Payloads become prompt context, so keep them small. */
@@ -1616,6 +1621,7 @@ function compactWorkItem(item: WorkItem): Record<string, unknown> {
     id: item.id,
     title: item.title,
     status: item.status,
+    version: item.version,
     assignee: item.assignee,
     department: item.department,
     source: item.source,
@@ -1654,6 +1660,60 @@ function fullWorkItemPayload(item: WorkItem): Record<string, unknown> {
     workflowRun: workflowRunRef(item),
     events: listWorkItemEvents(item.id),
   };
+}
+
+type TodoEditPrecondition =
+  | { ok: true; expectedVersion: number }
+  | { ok: false; status: 400 | 428; body: { error: string; code: 'todo_precondition_required' | 'todo_invalid_version' } };
+
+function positiveTodoVersion(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function ifMatchTodoVersion(value: string | string[] | undefined): number | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = /^(?:"([1-9]\d*)"|([1-9]\d*))$/.exec(value.trim());
+  if (!match) return undefined;
+  const parsed = Number(match[1] ?? match[2]);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function readTodoEditPrecondition(req: HttpRequest, body: Record<string, unknown>): TodoEditPrecondition {
+  const hasBodyVersion = Object.prototype.hasOwnProperty.call(body, 'expectedVersion');
+  const hasIfMatch = req.headers['if-match'] !== undefined;
+  if (!hasBodyVersion && !hasIfMatch) {
+    return { ok: false, status: 428, body: { error: 'A current Todo version is required.', code: 'todo_precondition_required' } };
+  }
+  const bodyVersion = hasBodyVersion ? positiveTodoVersion(body.expectedVersion) : undefined;
+  const headerVersion = hasIfMatch ? ifMatchTodoVersion(req.headers['if-match']) : undefined;
+  if ((hasBodyVersion && bodyVersion === undefined) || (hasIfMatch && headerVersion === undefined)) {
+    return { ok: false, status: 400, body: { error: 'Todo version must be a positive safe integer.', code: 'todo_invalid_version' } };
+  }
+  if (bodyVersion !== undefined && headerVersion !== undefined && bodyVersion !== headerVersion) {
+    return { ok: false, status: 400, body: { error: 'Todo version preconditions do not match.', code: 'todo_invalid_version' } };
+  }
+  return { ok: true, expectedVersion: bodyVersion ?? headerVersion! };
+}
+
+type TodoEditValidationCode = 'todo_invalid_patch' | 'todo_invalid_assignee';
+
+function todoEditValidationError(
+  res: ServerResponse,
+  error: string,
+  code: TodoEditValidationCode = 'todo_invalid_patch',
+): void {
+  json(res, { error, code }, 400);
+}
+
+function todoEditContentLength(value: string | string[] | undefined): number | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+  const length = Number(value);
+  return Number.isSafeInteger(length) ? length : null;
+}
+
+function hasSupportedTodoEditContentEncoding(value: string | string[] | undefined): boolean {
+  return value === undefined || (typeof value === 'string' && value.trim().toLowerCase() === 'identity');
 }
 
 function readWorkItemStatusParam(url: URL): WorkItemStatus | undefined | null {
@@ -3178,50 +3238,85 @@ export async function handleApiRequest(
       if (caller.kind !== "operator") {
         return json(res, { error: "editing Todo metadata and manual rank requires the authenticated operator surface" }, 403);
       }
-      const parsed = await readJsonBody(req, res);
+      const invalidJsonResponse = { error: "Todo edit request must be valid JSON.", code: "todo_invalid_patch" } as const;
+      const tooLargeResponse = { error: "Todo edit request exceeds the 64 KiB limit.", code: "todo_edit_too_large" } as const;
+      const contentLength = todoEditContentLength(req.headers["content-length"]);
+      if (contentLength === null) return json(res, invalidJsonResponse, 400);
+      if (contentLength !== undefined && contentLength > TODO_EDIT_BODY_MAX_BYTES) {
+        return json(res, tooLargeResponse, 413);
+      }
+      if (!hasSupportedTodoEditContentEncoding(req.headers["content-encoding"])) {
+        return json(res, invalidJsonResponse, 400);
+      }
+      if (!isJsonMediaType(req.headers["content-type"])) {
+        return json(res, invalidJsonResponse, 400);
+      }
+      const parsed = await readJsonBody(req, res, {
+        invalidJsonResponse,
+        maxBytes: TODO_EDIT_BODY_MAX_BYTES,
+        rejectDuplicateTopLevelKeys: true,
+        tooLargeResponse,
+      });
       if (!parsed.ok) return;
       if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
-        return badRequest(res, "request body must be a JSON object");
+        return todoEditValidationError(res, "Todo edit request must be a JSON object.");
       }
       const body = parsed.body as Record<string, unknown>;
+      const precondition = readTodoEditPrecondition(req, body);
+      if (!precondition.ok) return json(res, precondition.body, precondition.status);
       if (Object.prototype.hasOwnProperty.call(body, "status")) {
-        return badRequest(res, "status cannot be edited through metadata PATCH — use the guarded Todo status transition surface");
+        return todoEditValidationError(res, "Todo status must use the guarded status transition surface.");
       }
-      const allowed = new Set(["title", "body", "assignee", "department", "priority", "rank"]);
+      const metadataFields = ["title", "body", "assignee", "department", "priority", "rank"] as const;
+      const allowed = new Set([...metadataFields, "expectedVersion", "idempotencyKey"]);
       const unsupported = Object.keys(body).filter((key) => !allowed.has(key));
       if (unsupported.length > 0) {
-        return badRequest(res, `unsupported Todo metadata field${unsupported.length === 1 ? "" : "s"}: ${unsupported.join(", ")}`);
+        return todoEditValidationError(res, "Todo edit request contains unsupported fields.");
       }
-      if (Object.keys(body).length === 0) return badRequest(res, "at least one metadata field is required");
+      if (!metadataFields.some((key) => Object.prototype.hasOwnProperty.call(body, key))) {
+        return todoEditValidationError(res, "Todo edit request must contain at least one editable field.");
+      }
+
+      let idempotencyKey: string | undefined;
+      if (Object.prototype.hasOwnProperty.call(body, "idempotencyKey")) {
+        if (typeof body.idempotencyKey !== "string" || !body.idempotencyKey.trim()) {
+          return todoEditValidationError(res, "Todo edit idempotency key must be a non-empty string.");
+        }
+        idempotencyKey = body.idempotencyKey.trim();
+        if (idempotencyKey.length > 256) return todoEditValidationError(res, "Todo edit idempotency key is too long.");
+        if (/[\x00-\x1f\x7f]/.test(idempotencyKey)) return todoEditValidationError(res, "Todo edit idempotency key contains invalid characters.");
+      }
 
       const patch: UpdateWorkItemInput = {};
       if (Object.prototype.hasOwnProperty.call(body, "title")) {
-        if (typeof body.title !== "string") return badRequest(res, "title must be a string");
+        if (typeof body.title !== "string") return todoEditValidationError(res, "title must be a string");
         const title = stripControlChars(body.title).trim();
-        if (!title) return badRequest(res, "title must not be empty");
-        if (title.length > 200) return badRequest(res, "title must be at most 200 characters");
+        if (!title) return todoEditValidationError(res, "title must not be empty");
+        if (title.length > 200) return todoEditValidationError(res, "title must be at most 200 characters");
         patch.title = title;
       }
       if (Object.prototype.hasOwnProperty.call(body, "body")) {
-        if (body.body !== null && typeof body.body !== "string") return badRequest(res, "body must be a string or null");
+        if (body.body !== null && typeof body.body !== "string") return todoEditValidationError(res, "body must be a string or null");
         patch.body = body.body as string | null;
       }
       if (Object.prototype.hasOwnProperty.call(body, "assignee")) {
-        if (body.assignee !== null && typeof body.assignee !== "string") return badRequest(res, "assignee must be a non-empty string or null");
+        if (body.assignee !== null && typeof body.assignee !== "string") return todoEditValidationError(res, "assignee must be a non-empty string or null");
         if (typeof body.assignee === "string") {
           const assignee = body.assignee.trim();
-          if (!assignee) return badRequest(res, "assignee must be a non-empty string or null");
-          if (!scanOrg().has(assignee)) return badRequest(res, `unknown employee "${assignee}"; check GET /api/org for valid employees`);
+          if (!assignee) return todoEditValidationError(res, "assignee must be a non-empty string or null");
+          if (!scanOrg().has(assignee)) {
+            return todoEditValidationError(res, "Unknown employee for Todo assignee. Check the organization directory.", "todo_invalid_assignee");
+          }
           patch.assignee = assignee;
         } else {
           patch.assignee = null;
         }
       }
       if (Object.prototype.hasOwnProperty.call(body, "department")) {
-        if (body.department !== null && typeof body.department !== "string") return badRequest(res, "department must be a non-empty string or null");
+        if (body.department !== null && typeof body.department !== "string") return todoEditValidationError(res, "department must be a non-empty string or null");
         if (typeof body.department === "string") {
           const department = body.department.trim();
-          if (!department) return badRequest(res, "department must be a non-empty string or null");
+          if (!department) return todoEditValidationError(res, "department must be a non-empty string or null");
           patch.department = department;
         } else {
           patch.department = null;
@@ -3229,20 +3324,42 @@ export async function handleApiRequest(
       }
       if (Object.prototype.hasOwnProperty.call(body, "priority")) {
         if (typeof body.priority !== "number" || !Number.isInteger(body.priority) || body.priority < 0 || body.priority > 3) {
-          return badRequest(res, "priority must be an integer from 0 through 3");
+          return todoEditValidationError(res, "priority must be an integer from 0 through 3");
         }
         patch.priority = body.priority;
       }
       if (Object.prototype.hasOwnProperty.call(body, "rank")) {
         if (body.rank !== null && (typeof body.rank !== "number" || !Number.isFinite(body.rank))) {
-          return badRequest(res, "rank must be a finite number or null");
+          return todoEditValidationError(res, "rank must be a finite number or null");
         }
         patch.rank = body.rank as number | null;
       }
 
-      const item = updateWorkItem(params.id, patch, "operator");
-      if (!item) return notFound(res);
-      return json(res, { workItem: item });
+      try {
+        const result = updateWorkItemConditional(params.id, patch, {
+          expectedVersion: precondition.expectedVersion,
+          ...(idempotencyKey ? { idempotencyKey } : {}),
+          actor: "operator",
+        });
+        if (!result) return notFound(res);
+        return json(res, { workItem: result.item, replayed: result.replayed });
+      } catch (err) {
+        if (err instanceof WorkItemVersionConflictError) {
+          return json(res, {
+            error: "Todo changed since it was loaded.",
+            code: "todo_version_conflict",
+            currentVersion: err.currentVersion,
+          }, 409);
+        }
+        if (err instanceof WorkItemIdempotencyConflictError) {
+          return json(res, {
+            error: "This Todo edit key was already used for a different request.",
+            code: "todo_idempotency_conflict",
+            currentVersion: err.currentVersion,
+          }, 409);
+        }
+        throw err;
+      }
     }
 
     // POST|PUT /api/work-items/:id/status — GRS-021c guarded status update.

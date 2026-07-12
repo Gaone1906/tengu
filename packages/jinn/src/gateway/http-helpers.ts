@@ -22,6 +22,49 @@ export interface ReadBodyOpts {
 export interface ReadJsonBodyOpts extends ReadBodyOpts {
   /** Treat an empty/whitespace-only body as `{ ok: true, body: null }` instead of a 400. */
   allowEmpty?: boolean;
+  /** Route-specific fixed body for JSON syntax/duplicate-key rejection. */
+  invalidJsonResponse?: unknown;
+  /** Reject ambiguous duplicate top-level object members. */
+  rejectDuplicateTopLevelKeys?: boolean;
+  /** Route-specific fixed body for an exceeded maxBytes limit. */
+  tooLargeResponse?: unknown;
+}
+
+function hasDuplicateTopLevelObjectKeys(raw: string): boolean {
+  const seen = new Set<string>();
+  let depth = 0;
+  let stringStart = -1;
+  let expectingTopLevelKey = false;
+
+  for (let i = 0; i < raw.length; i++) {
+    const char = raw[i];
+    if (stringStart >= 0) {
+      if (char === "\\") {
+        i++;
+        continue;
+      }
+      if (char !== '"') continue;
+      if (depth === 1 && expectingTopLevelKey) {
+        const key = JSON.parse(raw.slice(stringStart, i + 1)) as string;
+        if (seen.has(key)) return true;
+        seen.add(key);
+        expectingTopLevelKey = false;
+      }
+      stringStart = -1;
+      continue;
+    }
+    if (char === '"') {
+      stringStart = i;
+    } else if (char === "{" || char === "[") {
+      depth++;
+      if (depth === 1 && char === "{") expectingTopLevelKey = true;
+    } else if (char === "}" || char === "]") {
+      depth--;
+    } else if (char === "," && depth === 1) {
+      expectingTopLevelKey = true;
+    }
+  }
+  return false;
 }
 
 export function readBody(req: HttpRequest, opts: ReadBodyOpts = {}): Promise<string> {
@@ -85,16 +128,21 @@ export async function readJsonBody(
       // drains instead of destroying — the response must actually reach the wire).
       // Connection: close tells the client not to reuse the exchange.
       res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
-      res.end(JSON.stringify({ error: "Payload too large" }));
+      res.end(JSON.stringify(opts.tooLargeResponse ?? { error: "Payload too large" }));
       return { ok: false };
     }
     throw err;
   }
   if (opts.allowEmpty && !raw.trim()) return { ok: true, body: null };
   try {
-    return { ok: true, body: JSON.parse(raw) };
+    const body: unknown = JSON.parse(raw);
+    if (opts.rejectDuplicateTopLevelKeys && hasDuplicateTopLevelObjectKeys(raw)) {
+      errorJson(res, opts.invalidJsonResponse ?? { error: "Invalid JSON in request body" }, 400);
+      return { ok: false };
+    }
+    return { ok: true, body };
   } catch {
-    errorJson(res, { error: "Invalid JSON in request body" }, 400);
+    errorJson(res, opts.invalidJsonResponse ?? { error: "Invalid JSON in request body" }, 400);
     return { ok: false };
   }
 }

@@ -45,10 +45,11 @@ describe("work-item store — create / get / list", () => {
     expect(wi.status).toBe("backlog");
     expect(wi.priority).toBe(2);
     expect(wi.source).toBe("human");
+    expect(wi.version).toBe(1);
     expect(wi.closedAt).toBeNull();
 
     const fetched = store.getWorkItem(wi.id);
-    expect(fetched).toMatchObject({ id: wi.id, title: "Design the dispatcher", status: "backlog" });
+    expect(fetched).toMatchObject({ id: wi.id, title: "Design the dispatcher", status: "backlog", version: 1 });
   });
 
   it("filters listWorkItems by status / department / assignee", () => {
