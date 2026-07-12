@@ -26,6 +26,7 @@ vi.mock("@/lib/auth", () => ({
 function workItem(status: WorkItemStatusWire): WorkItemFullWire {
   return {
     id: todoId[status],
+    version: 7,
     title: `Todo ${status}`,
     body: null,
     status,
@@ -53,6 +54,22 @@ function workItem(status: WorkItemStatusWire): WorkItemFullWire {
 
 function detail(status: WorkItemStatusWire): WorkItemDetailWire {
   return { workItem: workItem(status), spendUsd: 0, workflowRun: null, events: [] }
+}
+
+function editResult(item: WorkItemFullWire, patch: Record<string, unknown>, version: number, replayed = false) {
+  const editable = { ...patch }
+  delete editable.expectedVersion
+  delete editable.idempotencyKey
+  return {
+    workItem: { ...item, ...editable, version },
+    replayed,
+  }
+}
+
+function patchBodies(): Array<Record<string, unknown>> {
+  return authFetch.mock.calls
+    .filter(([, init]) => (init as RequestInit | undefined)?.method === "PATCH")
+    .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>)
 }
 
 function renderSheet(status: WorkItemStatusWire) {
@@ -241,7 +258,7 @@ describe("Todo detail editing and dialog behavior", () => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         await pending
-        return new Response(JSON.stringify({ workItem: { ...value.workItem, title: "Durable title" } }), { status: 200, headers: { "Content-Type": "application/json" } })
+        return new Response(JSON.stringify(editResult(value.workItem, JSON.parse(String(init.body)), 8)), { status: 200, headers: { "Content-Type": "application/json" } })
       }
       return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
     })
@@ -273,7 +290,7 @@ describe("Todo detail editing and dialog behavior", () => {
         const patch = JSON.parse(String(init.body)) as Record<string, unknown>
         patches.push(patch)
         await (patches.length === 1 ? first : second)
-        return new Response(JSON.stringify({ workItem: { ...value.workItem, ...patch } }), { status: 200, headers: { "Content-Type": "application/json" } })
+        return new Response(JSON.stringify(editResult(value.workItem, patch, patches.length + 7)), { status: 200, headers: { "Content-Type": "application/json" } })
       }
       return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
     })
@@ -282,7 +299,7 @@ describe("Todo detail editing and dialog behavior", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
     fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "First title" } })
     fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
-    await waitFor(() => expect(patches).toEqual([{ title: "First title" }]))
+    await waitFor(() => expect(patches.map(({ title }) => ({ title }))).toEqual([{ title: "First title" }]))
 
     fireEvent.click(screen.getByRole("button", { name: "Close" }))
     fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
@@ -290,7 +307,7 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(onClose).not.toHaveBeenCalled()
 
     finishFirst()
-    await waitFor(() => expect(patches).toEqual([{ title: "First title" }, { title: "Latest title" }]))
+    await waitFor(() => expect(patches.map(({ title }) => ({ title }))).toEqual([{ title: "First title" }, { title: "Latest title" }]))
     expect(onClose).not.toHaveBeenCalled()
 
     finishSecond()
@@ -324,12 +341,13 @@ describe("Todo detail editing and dialog behavior", () => {
     const value = detail("backlog")
     const remote = detail("backlog")
     remote.workItem.title = "Remote acknowledged title"
+    remote.workItem.version = 8
     remote.workItem.updatedAt = "2026-07-12T12:00:00.000Z"
     persistTodoJournal(value.workItem.id, {
       revision: 1,
       patch: { title: "Recovered local title" },
       baseline: { title: value.workItem.title },
-      baselineVersion: value.workItem.updatedAt,
+      baselineVersion: value.workItem.version,
     })
     const onClose = vi.fn()
     authFetch.mockImplementation(async (path: string) => {
@@ -353,21 +371,23 @@ describe("Todo detail editing and dialog behavior", () => {
     const value = detail("backlog")
     const remote = detail("backlog")
     remote.workItem.title = "Remote acknowledged title"
+    remote.workItem.version = 8
     remote.workItem.updatedAt = "2026-07-12T12:00:00.000Z"
     persistTodoJournal(value.workItem.id, {
       revision: 1,
       patch: { title: "Recovered local title" },
       baseline: { title: value.workItem.title },
-      baselineVersion: value.workItem.updatedAt,
+      baselineVersion: value.workItem.version,
     })
     const calls: string[] = []
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         calls.push("patch")
-        const patch = JSON.parse(String(init.body)) as Partial<WorkItemFullWire>
-        Object.assign(remote.workItem, patch, { updatedAt: "2026-07-12T12:01:00.000Z" })
-        return new Response(JSON.stringify({ workItem: remote.workItem }), { status: 200, headers: { "Content-Type": "application/json" } })
+        const patch = JSON.parse(String(init.body)) as Record<string, unknown>
+        const result = editResult(remote.workItem, patch, 9)
+        Object.assign(remote.workItem, result.workItem, { updatedAt: "2026-07-12T12:01:00.000Z" })
+        return new Response(JSON.stringify(result), { status: 200, headers: { "Content-Type": "application/json" } })
       }
       calls.push("get")
       return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
@@ -380,7 +400,165 @@ describe("Todo detail editing and dialog behavior", () => {
 
     await waitFor(() => expect(calls).toEqual(expect.arrayContaining(["get", "patch"])))
     expect(calls.indexOf("get")).toBeLessThan(calls.indexOf("patch"))
-    expect(JSON.parse(String((authFetch.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "PATCH")?.[1] as RequestInit).body))).toEqual({ title: "Recovered local title" })
+    const body = JSON.parse(String((authFetch.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "PATCH")?.[1] as RequestInit).body)) as Record<string, unknown>
+    expect(body).toMatchObject({ title: "Recovered local title", expectedVersion: 8 })
+    expect(body.idempotencyKey).toEqual(expect.any(String))
+  })
+
+  it("sends the detail's numeric version and immutable key, never updatedAt", async () => {
+    const value = detail("backlog")
+    value.workItem.version = 41
+    value.workItem.updatedAt = "2099-12-31T23:59:59.999Z"
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        const patch = JSON.parse(String(init.body)) as Record<string, unknown>
+        return new Response(JSON.stringify(editResult(value.workItem, patch, 42)), { status: 200, headers: { "Content-Type": "application/json" } })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Conditional title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+
+    await waitFor(() => expect(patchBodies()).toHaveLength(1))
+    expect(patchBodies()[0]).toMatchObject({ title: "Conditional title", expectedVersion: 41 })
+    expect(patchBodies()[0].idempotencyKey).toMatch(/^[0-9a-f-]{36}$/i)
+    expect(JSON.stringify(patchBodies()[0])).not.toContain(value.workItem.updatedAt)
+    const firstPatch = authFetch.mock.calls.findIndex(([, init]) => (init as RequestInit | undefined)?.method === "PATCH")
+    const firstDetailRead = authFetch.mock.calls.findIndex(([path, init]) =>
+      String(path).endsWith(`/api/work-items/${value.workItem.id}`)
+      && !(init as RequestInit | undefined)?.method)
+    expect(firstPatch).toBeGreaterThanOrEqual(0)
+    expect(firstDetailRead === -1 || firstDetailRead > firstPatch).toBe(true)
+  })
+
+  it("exact-replays one lost-response request without a blind transport retry", async () => {
+    const value = detail("backlog")
+    let attempts = 0
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        attempts += 1
+        if (attempts === 1) throw new TypeError("network response was lost")
+        return new Response(JSON.stringify(editResult(value.workItem, JSON.parse(String(init.body)), 8, true)), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Replay me exactly" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+
+    await screen.findByRole("button", { name: "Retry" })
+    expect(patchBodies()).toHaveLength(1)
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }))
+    await waitFor(() => expect(patchBodies()).toHaveLength(2))
+    expect(patchBodies()[1]).toEqual(patchBodies()[0])
+  })
+
+  it("rebases unrelated edits on a freshly loaded version with a new request key", async () => {
+    const value = detail("backlog")
+    const remote = detail("backlog")
+    remote.workItem.version = 8
+    remote.workItem.priority = 3
+    let patchAttempt = 0
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        patchAttempt += 1
+        if (patchAttempt === 1) {
+          return new Response(JSON.stringify({
+            code: "todo_version_conflict",
+            currentVersion: 8,
+            error: "private conflict wi_never_render",
+          }), { status: 409, headers: { "Content-Type": "application/json" } })
+        }
+        return new Response(JSON.stringify(editResult(remote.workItem, JSON.parse(String(init.body)), 9)), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Keep my title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    await screen.findByRole("status", { name: "Todo changed elsewhere" })
+
+    const first = patchBodies()[0]
+    fireEvent.click(screen.getByRole("button", { name: "Rebase edits" }))
+    await waitFor(() => expect(patchBodies()).toHaveLength(2))
+    const rebased = patchBodies()[1]
+    expect(rebased).toMatchObject({ title: "Keep my title", expectedVersion: 8 })
+    expect(rebased).not.toHaveProperty("priority")
+    expect(rebased.idempotencyKey).not.toBe(first.idempotencyKey)
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Todo changed elsewhere" })).toBeNull())
+  })
+
+  it("keeps a same-field conflict blocked after Rebase and names the field", async () => {
+    const value = detail("backlog")
+    const remote = detail("backlog")
+    remote.workItem.version = 8
+    remote.workItem.title = "Remote title"
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({ code: "todo_version_conflict", currentVersion: 8, error: "hidden" }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Local title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    await screen.findByRole("status", { name: "Todo changed elsewhere" })
+    fireEvent.click(screen.getByRole("button", { name: "Rebase edits" }))
+
+    expect(await screen.findByText("Title still conflicts")).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Rebase edits" })).toBeNull()
+    expect(patchBodies()).toHaveLength(1)
+  })
+
+  it("rejects an unversioned reconciliation read before it can replace the authoritative cache", async () => {
+    const value = detail("backlog")
+    const invalid = detail("backlog")
+    delete invalid.workItem.version
+    let conflicted = false
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH" && !conflicted) {
+        conflicted = true
+        return new Response(JSON.stringify({ code: "todo_version_conflict", currentVersion: 8, error: "hidden" }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify(invalid), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    const { client } = renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Local title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    await screen.findByRole("status", { name: "Todo changed elsewhere" })
+    fireEvent.click(screen.getByRole("button", { name: "Rebase edits" }))
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Couldn't rebase these edits")
+    expect((client.getQueryData<WorkItemDetailWire>(["work-item", value.workItem.id]))?.workItem.version).toBe(7)
+    expect(patchBodies()).toHaveLength(1)
   })
 
   it("redacts opaque backend ids from a real escalated 403 error surface", async () => {
@@ -503,10 +681,95 @@ describe("Todo detail editing and dialog behavior", () => {
 
     expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Reload remote" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Rebase edits" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Overwrite remote" })).toBeTruthy()
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull()
     expect(screen.getByTestId("detail-sheet").innerHTML).not.toMatch(/wi_[a-z0-9_-]+/i)
     expect(screen.getByTestId("detail-sheet").innerHTML).not.toContain("private conflict payload")
+  })
+
+  it("preflights Overwrite, rotates the key, and keeps a second conflict mounted", async () => {
+    const value = detail("backlog")
+    const remote = detail("backlog")
+    remote.workItem.version = 8
+    remote.workItem.title = "Remote title"
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({
+          code: "todo_version_conflict",
+          currentVersion: Number(remote.workItem.version) + 1,
+          error: "conflict wi_private_payload",
+        }), { status: 409, headers: { "Content-Type": "application/json" } })
+      }
+      return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Explicit local title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    await screen.findByRole("status", { name: "Todo changed elsewhere" })
+    const original = patchBodies()[0]
+
+    fireEvent.click(screen.getByRole("button", { name: "Overwrite remote" }))
+    await waitFor(() => expect(patchBodies()).toHaveLength(2))
+    expect(patchBodies()[1]).toMatchObject({ title: "Explicit local title", expectedVersion: 8 })
+    expect(patchBodies()[1].idempotencyKey).not.toBe(original.idempotencyKey)
+    expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+    expect(screen.getByTestId("detail-sheet").innerHTML).not.toMatch(/wi_[a-z0-9_-]+/i)
+  })
+
+  it.each([
+    [400, "todo_invalid_patch", "invalid"],
+    [403, "work_item_approval_pending", "awaiting approval"],
+    [428, "todo_precondition_required", "requires a current version"],
+  ] as const)("maps typed PATCH %s errors to safe actionable copy", async (status, code, copy) => {
+    const value = detail("backlog")
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        return new Response(JSON.stringify({
+          code,
+          error: "SQLITE /private/path token=secret wi_hidden_error connector stack",
+        }), { status, headers: { "Content-Type": "application/json" } })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Rejected title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+
+    const alert = await screen.findByRole("alert")
+    expect(alert.textContent?.toLowerCase()).toContain(copy)
+    expect(alert.textContent).not.toMatch(/wi_[a-z0-9_-]+|SQLITE|private\/path|token=|connector|stack/i)
+    expect(alert.getAttribute("aria-label") ?? "").not.toMatch(/wi_[a-z0-9_-]+|token=/i)
+  })
+
+  it("prioritizes recoverable journal cleanup over conflict actions", async () => {
+    const value = detail("backlog")
+    persistTodoJournal(value.workItem.id, {
+      revision: 1,
+      patch: { title: "Recovered title" },
+      baseline: { title: value.workItem.title },
+      baselineVersion: 7,
+      conflictFields: ["title"],
+      cleanupPending: true,
+      cleanupIntentFields: ["title"],
+    })
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    const alert = await screen.findByRole("alert")
+    expect(alert.textContent).toContain("Couldn't clear this recovered draft")
+    expect(screen.getByRole("button", { name: "Retry cleanup" })).toBeTruthy()
+    expect(screen.queryByRole("status", { name: "Todo changed elsewhere" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Overwrite remote" })).toBeNull()
   })
 
   it("uses Escape to cancel a field edit before Escape can close the sheet", () => {
@@ -526,11 +789,12 @@ describe("Todo detail editing and dialog behavior", () => {
 
 function renderSheetWithDetail(value: WorkItemDetailWire, onClose = vi.fn()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
-  return render(
+  const rendered = render(
     <QueryClientProvider client={client}>
       <MemoryRouter>
         <DetailSheet id={value.workItem.id} initial={value} byName={new Map()} resolving={false} onApprove={() => {}} onSendBack={() => {}} onClose={onClose} />
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  return { ...rendered, client }
 }

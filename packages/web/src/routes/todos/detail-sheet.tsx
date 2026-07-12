@@ -2,7 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
 import { X, Check, ChevronRight, MessageSquareText } from "lucide-react"
-import { api, type Employee, type LinkedSessionWire, type WorkItemDetailWire, type WorkItemStatusWire } from "@/lib/api"
+import {
+  api,
+  isPositiveTodoVersion,
+  type Employee,
+  type LinkedSessionWire,
+  type WorkItemDetailWire,
+  type WorkItemEditRequest,
+  type WorkItemFullWire,
+  type WorkItemStatusWire,
+} from "@/lib/api"
 import {
   STATUS_LABEL,
   effectiveVerifyMode,
@@ -26,7 +35,9 @@ import { StatusCircle } from "./state-glyph"
 import { displayNameOf, formatRelativeTime } from "./util"
 import { useSetWorkItemStatus } from "./use-todos"
 import { TodoDialog } from "./todo-dialog"
-import { useTodoDraft, type TodoDraftPatch, type TodoEditableDraft } from "./use-todo-draft"
+import { TodoConflictActions } from "./conflict-actions"
+import { invalidateTodoCaches, mergeTodoIntoCaches } from "./todo-edit-request"
+import { useTodoDraft, type TodoDraftPatch, type TodoEditableDraft, type TodoRemoteSnapshot } from "./use-todo-draft"
 
 /* GRS-021d — the detail sheet: a DECISION (design's middle depth). Mobile = an
  * opaque bottom sheet that scrolls FROM INSIDE (pinned header, scrollable body,
@@ -198,7 +209,7 @@ function SheetBody({
   byName: Map<string, Employee>
   employees: Employee[]
   departments: string[]
-  onEdit: (patch: Parameters<typeof api.updateWorkItem>[1]) => void
+  onEdit: (patch: TodoDraftPatch) => void
 }) {
   const navigate = useNavigate()
   const item = detail.workItem
@@ -390,6 +401,22 @@ function SheetBody({
   )
 }
 
+function todoRemoteSnapshot(item: WorkItemFullWire): TodoRemoteSnapshot {
+  if (!isPositiveTodoVersion(item.version)) {
+    throw new Error("Todo response is missing an authoritative version")
+  }
+  return {
+    draft: {
+      title: item.title,
+      body: item.body ?? "",
+      assignee: item.assignee,
+      department: item.department,
+      priority: item.priority,
+    },
+    version: item.version,
+  }
+}
+
 function DecisionFooter({
   detail,
   resolving,
@@ -570,6 +597,7 @@ export function DetailSheet({
   const [showCloseGuard, setShowCloseGuard] = useState(false)
   const [conflictBusy, setConflictBusy] = useState(false)
   const [conflictError, setConflictError] = useState<string | null>(null)
+  const [rebaseAttempted, setRebaseAttempted] = useState(false)
   const titleRef = useRef<HTMLInputElement>(null)
   const titleBeforeEdit = useRef("")
   useEffect(() => {
@@ -586,32 +614,26 @@ export function DetailSheet({
   }), [detail])
   const loadRemote = useCallback(async () => {
     const fresh = await api.getWorkItem(id)
+    const remote = todoRemoteSnapshot(fresh.workItem)
     queryClient.setQueryData(["work-item", id], fresh)
-    return {
-      draft: {
-        title: fresh.workItem.title,
-        body: fresh.workItem.body ?? "",
-        assignee: fresh.workItem.assignee,
-        department: fresh.workItem.department,
-        priority: fresh.workItem.priority,
-      },
-      version: fresh.workItem.updatedAt,
-    }
+    return remote
   }, [id, queryClient])
-  const saveRemote = useCallback(async (patch: TodoDraftPatch) => {
-    const result = await api.updateWorkItem(id, patch)
-    queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) =>
-      current ? { ...current, workItem: { ...current.workItem, ...result.workItem } } : current,
-    )
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["work-items"] }),
-      queryClient.invalidateQueries({ queryKey: ["work-item", id] }),
-    ])
+  const saveRemote = useCallback(async (request: WorkItemEditRequest) => {
+    const result = await api.updateWorkItem(id, request)
+    mergeTodoIntoCaches(queryClient, result.workItem)
+    queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) => current
+      ? { ...current, workItem: result.workItem }
+      : current)
+    await invalidateTodoCaches(queryClient, id)
+    return {
+      remote: todoRemoteSnapshot(result.workItem),
+      replayed: result.replayed,
+    }
   }, [id, queryClient])
   const draftState = useTodoDraft({
     id,
     initial: initialDraft,
-    serverVersion: detail?.workItem.updatedAt,
+    serverVersion: detail?.workItem.version,
     save: saveRemote,
     loadRemote,
   })
@@ -625,8 +647,14 @@ export function DetailSheet({
     return () => window.removeEventListener("beforeunload", guardReload)
   }, [draftState.hasUnsaved])
   useEffect(() => {
-    if (detail) draftState.replaceInitial(initialDraft, detail.workItem.updatedAt)
+    if (detail) draftState.replaceInitial(initialDraft, detail.workItem.version)
   }, [detail, initialDraft, draftState.replaceInitial])
+
+  useEffect(() => {
+    if (draftState.recoveredConflict) return
+    setConflictError(null)
+    setRebaseAttempted(false)
+  }, [draftState.recoveredConflict])
 
   const displayDetail = useMemo<WorkItemDetailWire | undefined>(() => detail ? {
     ...detail,
@@ -660,7 +688,7 @@ export function DetailSheet({
   }
 
   const requestClose = useCallback(() => {
-    if (draftState.recoveredConflict) return
+    if (draftState.cleanupPending || draftState.recoveredConflict) return
     if (draftState.status === "error") {
       setShowCloseGuard(true)
       return
@@ -680,8 +708,23 @@ export function DetailSheet({
     setConflictError(null)
     try {
       draftState.reloadRemote(await loadRemote())
+      setRebaseAttempted(false)
     } catch (cause) {
       setConflictError(operatorSafeTodoError(cause, "Couldn't reload this Todo"))
+    } finally {
+      setConflictBusy(false)
+    }
+  }, [conflictBusy, draftState, loadRemote])
+
+  const rebaseConflict = useCallback(async () => {
+    if (conflictBusy) return
+    setConflictBusy(true)
+    setConflictError(null)
+    try {
+      draftState.rebaseRemote(await loadRemote())
+      setRebaseAttempted(true)
+    } catch (cause) {
+      setConflictError(operatorSafeTodoError(cause, "Couldn't rebase these edits"))
     } finally {
       setConflictBusy(false)
     }
@@ -692,8 +735,8 @@ export function DetailSheet({
     setConflictBusy(true)
     setConflictError(null)
     try {
-      const patch = draftState.prepareOverwrite(await loadRemote())
-      draftState.save(patch)
+      draftState.overwriteRemote(await loadRemote())
+      setRebaseAttempted(false)
     } catch (cause) {
       setConflictError(operatorSafeTodoError(cause, "Couldn't prepare the overwrite"))
     } finally {
@@ -789,48 +832,35 @@ export function DetailSheet({
 
         {/* Scrollable body */}
         <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-[0_20px_20px]" data-scrollable>
-          {draftState.recoveredConflict && (
+          {draftState.cleanupPending ? (
             <div
-              role="status"
-              aria-label="Todo changed elsewhere"
-              className="mb-3 rounded-[var(--radius-lg)] bg-[var(--fill-tertiary)] p-3.5 shadow-[var(--shadow-subtle)]"
+              role="alert"
+              className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
             >
-              <div className="flex items-center gap-2 text-[length:var(--text-footnote)] font-semibold text-[var(--text-primary)]">
-                <span className="size-[7px] flex-none rounded-full bg-[var(--system-orange)]" aria-hidden />
-                Todo changed elsewhere
-              </div>
-              <p className="mt-1.5 text-pretty text-[length:var(--text-footnote)] leading-[1.45] text-[var(--text-secondary)]">
-                Your recovered edits overlap a newer change. Reload the remote version, or explicitly overwrite it with your draft.
-              </p>
-              {conflictError && <p className="mt-2 text-[length:var(--text-caption1)] text-[var(--system-red)]">{conflictError}</p>}
-              <div className="mt-2.5 flex flex-wrap justify-end gap-1">
-                <button
-                  type="button"
-                  disabled={conflictBusy}
-                  onClick={() => void reloadConflict()}
-                  className="min-h-11 rounded-full px-3.5 text-[length:var(--text-footnote)] font-semibold text-[var(--text-secondary)] transition-[background-color,transform] hover:bg-[var(--fill-secondary)] active:scale-[0.96] disabled:opacity-50"
-                >
-                  Reload remote
-                </button>
-                <button
-                  type="button"
-                  disabled={conflictBusy}
-                  onClick={() => void overwriteConflict()}
-                  className="min-h-11 rounded-full bg-[var(--accent-fill)] px-3.5 text-[length:var(--text-footnote)] font-semibold text-[var(--accent)] transition-transform active:scale-[0.96] disabled:opacity-50"
-                >
-                  Overwrite remote
-                </button>
-              </div>
+              <span className="min-w-0 flex-1 break-words">Couldn't clear this recovered draft locally. Retry cleanup before closing.</span>
+              <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">
+                Retry cleanup
+              </button>
             </div>
-          )}
-          {((draftState.error && !draftState.recoveredConflict) || transitionError) && (
+          ) : draftState.recoveredConflict ? (
+            <TodoConflictActions
+              fields={draftState.conflictFields}
+              sameFieldConflict={rebaseAttempted}
+              busy={conflictBusy}
+              error={conflictError}
+              onReload={() => void reloadConflict()}
+              onRebase={() => void rebaseConflict()}
+              onOverwrite={() => void overwriteConflict()}
+            />
+          ) : null}
+          {((draftState.error && !draftState.cleanupPending && !draftState.recoveredConflict) || transitionError) && (
             <div
               role="alert"
               data-testid="sheet-save-error"
               className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
             >
               <span className="min-w-0 flex-1 break-words">{draftState.error ? operatorSafeTodoError(draftState.error, "Couldn't save") : transitionError}</span>
-              {draftState.status === "error" && !draftState.recoveredConflict && <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">Retry</button>}
+              {draftState.status === "error" && !draftState.cleanupPending && !draftState.recoveredConflict && <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">Retry</button>}
             </div>
           )}
           {showCloseGuard && (
