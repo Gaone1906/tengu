@@ -17,6 +17,7 @@ export * from './custom-triggers.js';
 export * from './mutation-lock.js';
 export * from './poll-trigger.js';
 export * from './authoring.js';
+export * from './approval-authority.js';
 
 /** Default evidence root under JINN_HOME when no explicit override is set. */
 export function defaultWorkflowEvidenceRoot(): string {

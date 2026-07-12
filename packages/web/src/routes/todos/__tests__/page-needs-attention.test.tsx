@@ -75,7 +75,7 @@ describe("TodosPage Needs You inbox", () => {
     searchWorkItems.mockReset()
     getWorkItem.mockReset()
     getOrg.mockReset().mockResolvedValue(org)
-    decideWorkItemApproval.mockReset().mockResolvedValue({ workItem: {}, escalated: false, mirrored: false })
+    decideWorkItemApproval.mockReset().mockResolvedValue({ workItem: {}, escalated: false })
     escalateWorkItemApproval.mockReset().mockResolvedValue({ workItem: {} })
     listWorkItems.mockImplementation((params?: { needsAttentionFor?: string }) => {
       if (params?.needsAttentionFor) {

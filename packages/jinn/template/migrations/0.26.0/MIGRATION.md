@@ -48,15 +48,15 @@ match while keeping any user-specific customizations.
   Direct skip-level delegation remains allowed when it is faster, but the IC's
   manager is notified so the manager retains visibility; hierarchy is advisory
   and does not block or reroute direct access.
-- **Todos** — the company's task ledger. Delegations, cron fires, and workflow
-  runs enter it automatically; the COO creates one Todo per sub-task when
+- **Todos** — the company's task ledger. Delegations and cron fires enter it
+  automatically; the COO creates one Todo per sub-task when
   decomposing a goal. Employees keep their own Todo current (`in_review` when
   finished, `blocked` with a reason, `escalated` only when a decision is needed)
   and never mark their own item `done` — the reviewer does.
 - **Workflows** — reusable automations (the HOW). Todos and Workflows are
   separate: Todos record live work; Workflows define how recurring work runs.
 - **Triggers** — durable bindings that wake Workflows. Keep the wake-up binding
-  separate from the Workflow procedure and the Todo for each live run. Inspect
+  separate from the Workflow procedure and independently authored Todos. Inspect
   them with `list_triggers`; use `create_trigger` only for supported webhook or
   poll bindings. Configure schedule and `todo-status` wake-ups through the
   Workflow definition.

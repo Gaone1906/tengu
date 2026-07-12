@@ -143,8 +143,8 @@ describe("template company doctrine", () => {
           "run_workflow_by_name",
           "list_workflow_runs",
           "get_workflow_run",
-          "decide_work_item_approval",
-          "escalate_work_item_approval",
+          "escalate_workflow_gate",
+          "human Workflow approval surface",
           "jinn workflow run <name>",
           "idempotencyKey",
           "PLAN",
@@ -207,11 +207,14 @@ describe("template company doctrine", () => {
     expect(workflowSkill).not.toContain("Approval gates are human-only");
     expect(workflowSkill).not.toContain("must route the decision to the operator");
     expect(workflowSkill).toContain("routed manager/COO");
+    expect(workflowSkill).toContain("native pending approval on the run");
+    expect(workflowSkill).toContain("escalate_workflow_gate");
 
     const todoSkill = readTemplate("skills/todo-handling/SKILL.md");
     expect(todoSkill).toContain("identical pending request");
     expect(todoSkill).toContain("does not perform approval decisions");
-    expect(todoSkill).toContain("mirrored workflow gate");
+    expect(todoSkill).toContain("Workflow and Todo approvals are separate authorities");
+    expect(todoSkill).toContain("never resolve, project, or mutate Workflow gates");
     expect(todoSkill).toContain("maxRounds");
 
     for (const [name, skill] of [["workflow", workflowSkill], ["todo-handling", todoSkill]] as const) {

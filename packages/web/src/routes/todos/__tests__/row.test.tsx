@@ -39,10 +39,7 @@ function compact(over: Partial<WorkItemCompactWire> = {}): WorkItemCompactWire {
   }
 }
 
-function detailFor(
-  status: WorkItemStatusWire,
-  workflowRun: { workflowId: string; runId: string } | null,
-): WorkItemDetailWire {
+function detailFor(status: WorkItemStatusWire): WorkItemDetailWire {
   const workItem: WorkItemFullWire = {
     id: "wi_private_row_1",
     title: "Publish the weekly digest",
@@ -69,16 +66,18 @@ function detailFor(
     updatedAt: "2026-07-06T11:00:00.000Z",
     closedAt: null,
   }
-  return { workItem, spendUsd: 0, workflowRun, events: [] }
+  return { workItem, spendUsd: 0, events: [] }
 }
 
 function renderRow(
   item: WorkItemCompactWire,
   detail?: WorkItemDetailWire,
   handlers: { onOpen?: (id: string) => void; onRename?: (id: string, title: string) => Promise<void> } = {},
+  sessions?: LinkedSessionWire[],
 ) {
   const onOpen = handlers.onOpen ?? vi.fn()
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  if (sessions) qc.setQueryData(["work-item-sessions", item.id], sessions)
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
@@ -96,19 +95,19 @@ function renderRow(
 }
 
 describe("TodoRow execution context (render)", () => {
-  it("shows changing execution state without run metadata at rest", () => {
-    const run = { workflowId: "wf-digest", runId: "run-2026-07-06-abcdef123" }
-    renderRow(compact({ status: "executing" }), detailFor("executing", run))
+  it("shows changing execution state with its linked session", () => {
+    renderRow(compact({ status: "executing" }), detailFor("executing"), {}, [
+      { id: "sess-123456789", title: "Digest run", status: "running" },
+    ])
 
     expect(screen.getByTestId("todo-exec")).toBeTruthy()
     expect(screen.getByText(/^Working/)).toBeTruthy()
-    expect(screen.queryByText(/run-2026/i)).toBeNull()
-    expect(screen.getByRole("button", { name: "Open workflow run" })).toBeTruthy()
+    expect(screen.queryByText(/sess-123/i)).toBeNull()
+    expect(screen.getByRole("button", { name: "Open session" })).toBeTruthy()
   })
 
   it("lets the group carry blocked state instead of repeating a row badge", () => {
-    const run = { workflowId: "wf-digest", runId: "run-abc" }
-    renderRow(compact({ status: "blocked" }), detailFor("blocked", run))
+    renderRow(compact({ status: "blocked" }), detailFor("blocked"))
 
     expect(screen.queryByTestId("todo-exec")).toBeNull()
     expect(screen.queryByText(/^Working/)).toBeNull()
@@ -116,10 +115,10 @@ describe("TodoRow execution context (render)", () => {
   })
 
   it("shows nothing extra on a plain (non-active) Todo with no run", () => {
-    renderRow(compact({ status: "assigned" }), detailFor("assigned", null))
+    renderRow(compact({ status: "assigned" }), detailFor("assigned"))
 
     expect(screen.queryByTestId("todo-exec")).toBeNull()
-    expect(screen.queryByRole("button", { name: "Open workflow run" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Open session" })).toBeNull()
   })
 
   it("opens the sheet from the whole row", () => {
@@ -237,18 +236,13 @@ describe("TodoRow inline rename", () => {
 describe("executionContext (pure)", () => {
   const sessions: LinkedSessionWire[] = [{ id: "sess-123456789", title: "Digest run", status: "running" }]
 
-  it("prefers the workflow run for an active item", () => {
-    const ctx = executionContext(compact({ status: "executing" }), detailFor("executing", { workflowId: "wf-x", runId: "run-abc" }))
-    expect(ctx).toEqual({ kind: "run", label: "Workflow run", value: "run-abc", href: "/workflow/wf-x" })
-  })
-
-  it("falls back to the linked session when there is no run", () => {
-    const ctx = executionContext(compact({ status: "executing" }), detailFor("executing", null), sessions)
+  it("uses the linked session for an active item", () => {
+    const ctx = executionContext(compact({ status: "executing" }), detailFor("executing"), sessions)
     expect(ctx).toEqual({ kind: "session", label: "Session", value: "Digest run", href: "/?session=sess-123456789" })
   })
 
-  it("returns null for a non-active status even if a run exists", () => {
-    expect(executionContext(compact({ status: "in_review" }), detailFor("in_review", { workflowId: "wf", runId: "run-1" }))).toBeNull()
+  it("returns null for a non-active status even when a session is linked", () => {
+    expect(executionContext(compact({ status: "in_review" }), detailFor("in_review"), sessions)).toBeNull()
   })
 
   it("returns null when detail has not loaded yet (no layout jump)", () => {
@@ -256,6 +250,6 @@ describe("executionContext (pure)", () => {
   })
 
   it("returns null for an active item with neither a run nor a session", () => {
-    expect(executionContext(compact({ status: "blocked" }), detailFor("blocked", null), [])).toBeNull()
+    expect(executionContext(compact({ status: "blocked" }), detailFor("blocked"), [])).toBeNull()
   })
 })

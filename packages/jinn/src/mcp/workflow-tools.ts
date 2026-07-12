@@ -186,7 +186,7 @@ const NODE_SCHEMA = closed({
   id: scalar, type: { enum: ["trigger", "step", "gate", "switch", "fail", "wait"] }, label: scalar,
   position: schemaRef("p"), actor: schemaRef("a"), role: scalar, trigger: schemaRef("t"), gate: schemaRef("g"),
   gates: { items: schemaRef("g") }, optional: scalar, cadence: scalar, instructions: scalar, options: schemaRef("o"),
-  todoTransition: scalar, switchMode: scalar, failMessage: scalar, waitMinutes: scalar, waitUntil: scalar,
+  switchMode: scalar, failMessage: scalar, waitMinutes: scalar, waitUntil: scalar,
 });
 const EDGE_SCHEMA = closed({
   id: scalar, from: scalar, to: scalar, kind: scalar, label: scalar, gate: schemaRef("g"),
@@ -220,7 +220,7 @@ const SOP_WAKE_UP_SCHEMA = closed({
 });
 const SOP_STEP_SCHEMA = closed({
   id: scalar, title: scalar, label: scalar, employee: scalar, engine: scalar, role: scalar,
-  instruction: scalar, instructions: scalar, optional: scalar, options: schemaRef("o"), todoTransition: scalar,
+  instruction: scalar, instructions: scalar, optional: scalar, options: schemaRef("o"),
 });
 const WORKFLOW_SCHEMA_DEFS = {
   ...BASE_WORKFLOW_SCHEMA_DEFS,
@@ -495,7 +495,6 @@ export function buildWorkflowTools(): JinnMcpTool[] {
         reportMode: {
           type: "string",
           enum: ["resume", "silent"],
-          description: "resume reports parked/terminal run state back to this session; silent keeps durable activity without resuming it.",
         },
       },
       required: ["workflowId"],
@@ -541,7 +540,6 @@ export function buildWorkflowTools(): JinnMcpTool[] {
         reportMode: {
           type: "string",
           enum: ["resume", "silent"],
-          description: "resume reports parked/terminal run state back to this session; silent keeps durable activity without resuming it.",
         },
       },
       required: ["name"],
@@ -600,6 +598,28 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       if (status >= 400) throw gatewayFailure(`editing pending step "${nodeId}" on run "${runId}"`, status, body);
       const run = (body ?? {}) as { stepPromptRevision?: unknown };
       return { run: body, hint: `Prompt edit recorded at revision ${String(run.stepPromptRevision ?? "?")}.` };
+    },
+  };
+
+  const escalateWorkflowGate: JinnMcpTool = {
+    name: "escalate_workflow_gate",
+    description: "Escalate a pending Workflow gate approval.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workflowId: { type: "string" },
+        runId: { type: "string" },
+      },
+      required: ["workflowId", "runId"],
+    },
+    handler: async (args, ctx) => {
+      assertBoundCaller(ctx);
+      const workflowId = requireString(args, "workflowId");
+      const runId = requireString(args, "runId");
+      const route = `${wfPath(workflowId)}/runs/${encodeURIComponent(runId)}/gate-approval/escalate`;
+      const { status, body } = await gatewayRequest(ctx, "POST", route, {});
+      if (status >= 400) throw gatewayFailure(`escalating gate approval on run "${runId}"`, status, body);
+      return { run: body, hint: "Workflow gate approval escalated for an operator decision." };
     },
   };
 
@@ -678,7 +698,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
   // approvals/gates are a §4 pending-primitive domain ("primitive first, wrapper
   // later") — so resolution stays on the HTTP route (web doorbell buttons,
   // operator curl) until the approvals-as-records primitive + 012d-3 write gates
-  // exist. No policy/config substrate is invented here; absence IS the gate.
+  // exist. Escalation is safe to expose because it cannot decide or resume a run.
 
   return [
     listWorkflows,
@@ -693,6 +713,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
     startWorkflowRun,
     runWorkflowByName,
     editWorkflowRunStepPrompt,
+    escalateWorkflowGate,
     listTriggers,
     createTrigger,
     deleteTrigger,

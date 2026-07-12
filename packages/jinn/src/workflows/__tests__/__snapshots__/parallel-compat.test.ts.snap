@@ -990,6 +990,14 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
   },
   "definitionVersion": 1,
   "endedAt": "2026-07-04T18:00:00.000Z",
+  "gateDecisions": [
+    {
+      "actor": "operator",
+      "at": "2026-07-04T18:00:00.000Z",
+      "decision": "approve",
+      "gateKey": "op-ok",
+    },
+  ],
   "order": [
     "i",
     "chk",
@@ -1292,7 +1300,15 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
     ],
     "name": "golden-park",
     "updatedAt": "2026-07-04T18:00:00.000Z"
-  }
+  },
+  "gateDecisions": [
+    {
+      "gateKey": "op-ok",
+      "decision": "approve",
+      "actor": "operator",
+      "at": "2026-07-04T18:00:00.000Z"
+    }
+  ]
 }
 "
 `;
@@ -1427,6 +1443,17 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
     "b",
   ],
   "parked": {
+    "approval": {
+      "decidedAt": null,
+      "decidedBy": null,
+      "escalatedAt": null,
+      "requestedAt": "2026-07-04T18:00:00.000Z",
+      "requestedBy": "workflow-run",
+      "requesterEmployee": null,
+      "state": "pending",
+      "target": "Jinn",
+      "targetKind": "virtual",
+    },
     "at": "2026-07-04T18:00:00.000Z",
     "description": "operator approves",
     "evaluator": "human-approval",
@@ -1589,7 +1616,18 @@ exports[`GRS-016a compat goldens — v2 definitions (no concurrency field) execu
     "evaluator": "human-approval",
     "ref": "op-ok",
     "description": "operator approves",
-    "at": "2026-07-04T18:00:00.000Z"
+    "at": "2026-07-04T18:00:00.000Z",
+    "approval": {
+      "requesterEmployee": null,
+      "target": "Jinn",
+      "targetKind": "virtual",
+      "requestedAt": "2026-07-04T18:00:00.000Z",
+      "requestedBy": "workflow-run",
+      "escalatedAt": null,
+      "state": "pending",
+      "decidedBy": null,
+      "decidedAt": null
+    }
   },
   "order": [
     "i",

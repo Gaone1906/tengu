@@ -128,7 +128,7 @@ describe('todo-status-change workflow trigger', () => {
     expect(outcomes).toEqual([]);
   });
 
-  it('suppresses a second non-terminal run for the same definition and Todo', async () => {
+  it('starts distinct event ids independently while an earlier run for the same Todo is active', async () => {
     createDefinition(root, def('cycle-wf', trigger('in_review')), { now });
 
     const first = await fireTodoStatusChangeWorkflows(deps(), {
@@ -145,9 +145,25 @@ describe('todo-status-change workflow trigger', () => {
       toStatus: 'in_review',
       item: { source: 'human', department: null, assignee: null },
     });
+    const replay = await fireTodoStatusChangeWorkflows(deps(), {
+      id: 'wie_b',
+      workItemId: 'wi_cycle',
+      fromStatus: 'executing',
+      toStatus: 'in_review',
+      item: { source: 'human', department: null, assignee: null },
+    });
 
     expect(first[0].outcome).toBe('started');
-    expect(second).toEqual([{ workflowId: 'cycle-wf', outcome: 'suppressed', detail: expect.stringContaining('non-terminal') }]);
+    expect(second[0].outcome).toBe('started');
+    if (first[0].outcome !== 'started' || second[0].outcome !== 'started') return;
+    expect(second[0].run.runId).not.toBe(first[0].run.runId);
+    expect(replay).toEqual([{
+      workflowId: 'cycle-wf',
+      outcome: 'duplicate',
+      runId: second[0].run.runId,
+      detail: expect.stringContaining(second[0].run.runId),
+    }]);
+    expect(listRuns(root, 'cycle-wf')).toHaveLength(2);
   });
 
   it('replays a transition event that committed before the listener was installed exactly once', async () => {

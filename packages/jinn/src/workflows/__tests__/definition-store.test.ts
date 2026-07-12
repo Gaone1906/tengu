@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -55,6 +55,22 @@ afterEach(() => {
 });
 
 describe('createDefinition', () => {
+  it('strips a legacy todoTransition on read and warns once per definition version', () => {
+    const legacy = makeDef('legacy-todo-transition') as EditableWorkflowDefinition & {
+      nodes: Array<EditableWorkflowDefinition['nodes'][number] & { todoTransition?: string }>;
+    };
+    legacy.nodes[1].todoTransition = 'in_review';
+    const dir = path.join(root, 'workflows');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${legacy.id}.definition.json`), JSON.stringify(legacy), 'utf8');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    expect(getDefinition(root, legacy.id)?.nodes[1]).not.toHaveProperty('todoTransition');
+    expect(getDefinition(root, legacy.id)?.nodes[1]).not.toHaveProperty('todoTransition');
+    expect(warn.mock.calls.filter(([message]) => message.includes(legacy.id))).toHaveLength(1);
+    warn.mockRestore();
+  });
+
   it.each([
     ['root mysteryMode', (value: Record<string, unknown>) => { value.mysteryMode = true; }],
     ['node onError', (value: Record<string, unknown>) => {
@@ -279,7 +295,6 @@ describe('updateDefinition', () => {
       ['session option', (draft) => { draft.nodes[1].options = { session: { mode: 'fresh' } }; }],
       ['cadence', (draft) => { draft.nodes[1].cadence = 'once daily'; }],
       ['optional', (draft) => { draft.nodes[1].optional = true; }],
-      ['Todo transition', (draft) => { draft.nodes[1].todoTransition = 'in_review'; }],
       ['edge label', (draft) => { draft.edges[1].label = 'continue'; }],
       ['edge kind', (draft) => { draft.edges[1].kind = 'handoff'; }],
       ['error lane pairing', (draft) => {

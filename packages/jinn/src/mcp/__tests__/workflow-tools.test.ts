@@ -126,6 +126,7 @@ describe("workflow tools — registry + schemas", () => {
       "start_workflow_run",
       "run_workflow_by_name",
       "edit_workflow_run_step_prompt",
+      "escalate_workflow_gate",
       "list_triggers",
       "create_trigger",
       "delete_trigger",
@@ -164,6 +165,7 @@ describe("workflow tools — registry + schemas", () => {
     expect(tool("start_workflow_run").inputSchema.required).toEqual(["workflowId"]);
     expect(tool("run_workflow_by_name").inputSchema.required).toEqual(["name"]);
     expect(tool("edit_workflow_run_step_prompt").inputSchema.required).toEqual(["workflowId", "runId", "nodeId", "prompt"]);
+    expect(tool("escalate_workflow_gate").inputSchema.required).toEqual(["workflowId", "runId"]);
     expect(tool("create_trigger").inputSchema.required).toEqual(["kind", "name", "event", "targetWorkflowId"]);
     expect(tool("delete_trigger").inputSchema.required).toEqual(["name"]);
   });
@@ -851,6 +853,24 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(out.hint).toMatch(/revision 1/i);
   });
 
+  it("escalate_workflow_gate POSTs the native gate escalation route", async () => {
+    const { calls, ctx } = stub(() => ({
+      status: 200,
+      body: { runId: "run-1", status: "parked", parked: { approval: { escalatedAt: "2026-07-12T12:00:00.000Z" } } },
+    }));
+    const out = await tool("escalate_workflow_gate").handler({
+      workflowId: "wf",
+      runId: "run-1",
+    }, ctx) as { run: { runId: string }; hint: string };
+    expect(calls[0]).toMatchObject({
+      url: "http://127.0.0.1:7777/api/workflow-definitions/wf/runs/run-1/gate-approval/escalate",
+      method: "POST",
+      body: {},
+    });
+    expect(out.run.runId).toBe("run-1");
+    expect(out.hint).toMatch(/escalated/i);
+  });
+
   it("run_workflow_by_name invokes the canonical-name route with input, prompt overrides, and idempotency", async () => {
     const { calls, ctx } = stub(() => ({
       status: 201,
@@ -1484,7 +1504,6 @@ describe("workflow tools — integration against the real routes/stores", () => 
     const ctx: JinnMcpContext = { gatewayUrl: "http://gateway.test", fetchFn: apiFetch(), ...cooMcpIdentity };
     const triggerStore = await import("../../workflows/custom-triggers.js");
     const pollExecutions = await import("../../workflows/poll-executions.js");
-    const approvals = await import("../../work-items/approvals.js");
     const command = writePinnablePollScript("atomic-original-poll");
     const steps = [{ id: "handle", engine: "codex", instruction: "Handle the event." }];
 
@@ -1502,16 +1521,15 @@ describe("workflow tools — integration against the real routes/stores", () => 
         steps,
       },
     }, ctx);
-    const original = triggerStore.getWorkflowTriggerBinding(evidenceRoot, "original-poll-hook");
-    expect(original?.kind).toBe("poll");
-    if (!original || original.kind !== "poll") throw new Error("expected original poll binding");
-    expect(original.approvalWorkItemId).toBeTruthy();
-    const approval = await approvals.decideWorkItemApproval({
-      id: original.approvalWorkItemId!,
-      decision: "approve",
-      decidedBy: "coo",
-    }, {});
-    expect(approval.ok).toBe(true);
+    const pending = triggerStore.getWorkflowTriggerBinding(evidenceRoot, "original-poll-hook");
+    expect(pending?.kind).toBe("poll");
+    if (!pending || pending.kind !== "poll") throw new Error("expected original poll binding");
+    const original = await triggerStore.decidePollActivationApproval(
+      evidenceRoot,
+      pending.name,
+      "approve",
+      "coo",
+    );
     expect(triggerStore.publicWorkflowTriggerBinding(original).activation).toBe("active");
     const stagedPaths = original.activationContract?.executableArtifacts
       .filter((artifact) => artifact.role === "executable")

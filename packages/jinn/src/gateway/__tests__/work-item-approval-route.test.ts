@@ -25,8 +25,8 @@ import {
  *   3. NATIVE CONSEQUENCE RULES: approve+in_review → done; reject+in_review →
  *      bounce (rounds++, critique) / max-rounds → escalated; a non-in_review
  *      decision is recorded, status untouched.
- *   4. MIRRORED park: a REAL parked run's Todo, decided through THIS route,
- *      unparks + completes via the shipped resolve-gate authority.
+ *   4. NATIVE WORKFLOW GATES: parked runs use their own approval authority and
+ *      remain fully decoupled from Todo approvals.
  */
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-appr-route-"));
@@ -60,7 +60,6 @@ type Approvals = typeof import("../../work-items/approvals.js");
 type DefStore = typeof import("../../workflows/definition-store.js");
 type Def = typeof import("../../workflows/definition.js");
 type RunRec = typeof import("../../workflows/run-reconciler.js");
-type Bridge = typeof import("../../work-items/workflow-bridge.js");
 type Registry = typeof import("../../sessions/registry.js");
 let api: Api;
 let store: Store;
@@ -68,7 +67,6 @@ let approvals: Approvals;
 let defStore: DefStore;
 let defMod: Def;
 let runRec: RunRec;
-let bridgeMod: Bridge;
 let registry: Registry;
 let cooSession: import("../../shared/types.js").Session;
 let managerSession: import("../../shared/types.js").Session;
@@ -195,7 +193,6 @@ beforeAll(async () => {
   defStore = await import("../../workflows/definition-store.js");
   defMod = await import("../../workflows/definition.js");
   runRec = await import("../../workflows/run-reconciler.js");
-  bridgeMod = await import("../../work-items/workflow-bridge.js");
   registry = await import("../../sessions/registry.js");
   registry.initDb();
   cooSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "coo", title: "coo", employee: "coo" });
@@ -354,7 +351,9 @@ describe("POST /api/work-items/:id/approval — native consequence rules", () =>
     const item = pendingItem("in_review");
     const resp = await decide(item.id, { decision: "approve", note: "ship it" });
     expect(resp.status).toBe(200);
-    expect(resp.body).toMatchObject({ mirrored: false, escalated: false });
+    expect(resp.body).toMatchObject({ escalated: false });
+    expect(resp.body).not.toHaveProperty("mirrored");
+    expect(resp.body).not.toHaveProperty("runStatus");
     expect(resp.body.workItem.status).toBe("done");
     expect(resp.body.workItem.approvalState).toBe("approved");
     const kinds = store.listWorkItemEvents(item.id).map((e) => e.kind);
@@ -390,7 +389,7 @@ describe("POST /api/work-items/:id/approval — native consequence rules", () =>
   });
 });
 
-describe("POST /api/work-items/:id/approval — mirrored workflow park (integration)", () => {
+describe("native Workflow gate approval integration", () => {
   // trigger → step a (output:'none', fires at spawn) → approval gate. The step
   // fires immediately so the run PARKS at the gate with no engine round-trip; the
   // gate is the last node so approving it completes the run with nothing to spawn.
@@ -413,259 +412,112 @@ describe("POST /api/work-items/:id/approval — mirrored workflow park (integrat
     } as import("../../workflows/definition.js").EditableWorkflowDefinition;
   }
 
-  // Create a REAL parked run on the evidence root using a stub spawn (so it parks
-  // without a live engine), minting + mirroring the Todo via the real bridge. The
-  // DECISION then goes through the real handleApiRequest route.
-  async function seedParkedRun(id: string): Promise<{ runId: string; todoId: string }> {
+  async function seedNativeParkedRun(id: string): Promise<{ runId: string }> {
     const def = gateDef(id);
+    def.ownerEmployee = "platform-worker";
     defStore.createDefinition(evidenceRoot, def);
-    const stubDeps = {
+    const started = await runRec.startWorkflowRun({
       root: evidenceRoot,
       getDefinition: defStore.getDefinition,
       probeStepSession: () => ({ found: false as const }),
-      spawnStep: async () => ({ sessionId: `stub:${id}` }),
-      workItems: bridgeMod.createWorkflowTodoBridge(),
-      now: () => "2026-07-05T10:00:00.000Z",
-    } as unknown as Parameters<RunRec["startWorkflowRun"]>[0];
-    const started = await runRec.startWorkflowRun(stubDeps, def);
+      spawnStep: async () => ({ sessionId: `stub-native:${id}` }),
+      now: () => "2026-07-12T12:00:00.000Z",
+    }, def, {
+      invocation: { sessionId: workerSession.id, reportMode: "resume" },
+    });
     expect(started.status).toBe("parked");
-    const todo = store.getWorkItemBySourceRef("workflow", `workflow:${id}:${started.runId}`)!;
-    expect(todo).toBeTruthy();
-    return { runId: started.runId, todoId: todo.id };
+    expect(store.getWorkItemBySourceRef("workflow", `workflow:${id}:${started.runId}`)).toBeUndefined();
+    return { runId: started.runId };
   }
 
-  it("projects real approval authority and Needs-you routing onto a parked run per current principal", async () => {
-    const workflowId = "appr-int-capability";
-    const { runId, todoId } = await seedParkedRun(workflowId);
-
-    // Prove the capability is derived from the same real Todo that powers the
-    // Needs-you queue, not guessed from run.status or accepted after a 403 click.
-    const cooQueue = await call("GET", "/api/work-items?needsAttentionFor=me&limit=100", undefined, cooHeaders());
-    expect(cooQueue.status).toBe(200);
-    expect((cooQueue.body.workItems as Array<{ id: string }>).some((item) => item.id === todoId)).toBe(true);
-
-    const workerQueue = await call("GET", "/api/work-items?needsAttentionFor=me&limit=100", undefined, workerHeaders());
-    expect(workerQueue.status).toBe(200);
-    expect((workerQueue.body.workItems as Array<{ id: string }>).some((item) => item.id === todoId)).toBe(false);
-
-    const authorized = await call("GET", `/api/workflow-definitions/${workflowId}/runs/${runId}`, undefined, cooHeaders());
-    expect(authorized.status).toBe(200);
-    expect(authorized.body.approvalCapability).toEqual({
-      canDecide: true,
-      target: "coo",
-      needsYou: true,
-      escalated: false,
+  it("routes native gate decisions to the requesting employee's manager/root and forbids self-approval", async () => {
+    const workflowId = "appr-native-manager";
+    const { runId } = await seedNativeParkedRun(workflowId);
+    const before = await call("GET", `/api/workflow-definitions/${workflowId}/runs/${runId}`, undefined, managerHeaders());
+    expect(before.status).toBe(200);
+    expect(before.body.parked.approval).toMatchObject({
+      state: "pending",
+      requesterEmployee: "platform-worker",
+      target: "platform-manager",
+      targetKind: "employee",
     });
+    expect(before.body.approvalCapability).toMatchObject({ canDecide: true, target: "platform-manager", needsYou: true });
 
-    const unauthorized = await call("GET", `/api/workflow-definitions/${workflowId}/runs/${runId}`, undefined, workerHeaders());
-    expect(unauthorized.status).toBe(200);
-    expect(unauthorized.body.approvalCapability).toEqual({
-      canDecide: false,
-      target: "coo",
-      needsYou: false,
-      escalated: false,
-    });
-
-    // Read projection must never weaken the mutation boundary.
-    const forbidden = await call(
+    const self = await call(
       "POST",
       `/api/workflow-definitions/${workflowId}/runs/${runId}/resolve-gate`,
       { decision: "approve" },
       workerHeaders(),
     );
-    expect(forbidden.status).toBe(403);
-    expect(store.getWorkItem(todoId)!.approvalState).toBe("pending");
-  });
+    expect(self.status).toBe(403);
 
-  it("a real parked run → approve via the Todo route → run unparks + completes through resolve-gate", async () => {
-    const { runId, todoId } = await seedParkedRun("appr-int-ok");
-
-    // The run's Todo carries a MIRRORED pending approval (one operator queue).
-    const todo = store.getWorkItem(todoId)!;
-    expect(todo.approvalState).toBe("pending");
-    expect(todo.approvalRequest).toBe("Publish the report?");
-    expect(todo.approvalRef).toBe(`workflow-gate:appr-int-ok:${runId}:ap`);
-
-    // Approve through the ONE Todo route — it routes to the shipped resolve-gate.
-    const decideResp = await call("POST", `/api/work-items/${todoId}/approval`, { decision: "approve" }, cooHeaders());
-    expect(decideResp.status).toBe(200);
-    expect(decideResp.body.mirrored).toBe(true);
-    expect(decideResp.body.workItem.approvalState).toBe("approved");
-
-    // The parked run actually unparked and completed via resolve-gate semantics.
-    const runResp = await call("GET", `/api/workflow-definitions/appr-int-ok/runs/${runId}`);
-    expect(runResp.status).toBe(200);
-    expect(runResp.body.status).toBe("completed");
-    // …and the run's terminal reflected onto the Todo (completed → done).
-    expect(store.getWorkItem(todoId)!.status).toBe("done");
-  });
-
-  it("a real parked run → send back (reject) via the Todo route → run fails through resolve-gate", async () => {
-    const { runId, todoId } = await seedParkedRun("appr-int-reject");
-
-    const decideResp = await call("POST", `/api/work-items/${todoId}/approval`, { decision: "reject", note: "not yet" }, cooHeaders());
-    expect(decideResp.status).toBe(200);
-    expect(decideResp.body.mirrored).toBe(true);
-    expect(decideResp.body.workItem.approvalState).toBe("rejected");
-
-    const runResp = await call("GET", `/api/workflow-definitions/appr-int-reject/runs/${runId}`);
-    expect(runResp.body.status).toBe("failed");
-    // failed run → blocked Todo (terminal reflect).
-    expect(store.getWorkItem(todoId)!.status).toBe("blocked");
-  });
-
-  it("rejects operator cancellation of a pending Workflow-gate mirror and leaves the run authority resolvable", async () => {
-    const workflowId = "appr-int-cancel-conflict";
-    const { runId, todoId } = await seedParkedRun(workflowId);
-    const before = store.getWorkItem(todoId)!;
-    expect(before.approvalState).toBe("pending");
-    expect(before.approvalRef).toBe(`workflow-gate:${workflowId}:${runId}:ap`);
-
-    const archive = await call(
-      "POST",
-      `/api/work-items/${todoId}/archive`,
-      { note: "operator tried to archive the mirror" },
-    );
-    expect(archive.status).toBe(409);
-    expect(archive.body.error).toMatch(/Workflow.*gate.*run.*author/i);
-
-    const cancel = await call(
-      "PUT",
-      `/api/work-items/${todoId}/status`,
-      { status: "cancelled", note: "operator tried to cancel the mirror" },
-    );
-
-    expect(cancel.status).toBe(409);
-    expect(cancel.body.error).toMatch(/Workflow.*gate.*run.*author/i);
-    expect(store.getWorkItem(todoId)).toMatchObject({
-      status: before.status,
-      approvalState: "pending",
-      approvalRef: before.approvalRef,
-    });
-
-    const bridge = bridgeMod.createWorkflowTodoBridge();
-    bridge.mirrorParkedGate(
-      { workflowId, runId, title: workflowId, status: "parked" },
-      { ref: "ap", description: "Publish the report?" },
-    );
-    expect(store.listWorkItemEvents(todoId).filter((event) => event.kind === "approval_requested")).toHaveLength(1);
-
-    const resolve = await call(
+    const approved = await call(
       "POST",
       `/api/workflow-definitions/${workflowId}/runs/${runId}/resolve-gate`,
       { decision: "approve" },
+      managerHeaders(),
+    );
+    expect(approved.status).toBe(200);
+    expect(approved.body.status).toBe("completed");
+    expect(approved.body.gateDecisions).toEqual([
+      expect.objectContaining({ gateKey: "ap", decision: "approve", actor: "platform-manager" }),
+    ]);
+
+    const duplicate = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/resolve-gate`,
+      { decision: "approve" },
+      managerHeaders(),
+    );
+    expect(duplicate.status).toBe(409);
+    const after = await call("GET", `/api/workflow-definitions/${workflowId}/runs/${runId}`);
+    expect(after.body.gateDecisions).toHaveLength(1);
+    expect(store.getWorkItemBySourceRef("workflow", `workflow:${workflowId}:${runId}`)).toBeUndefined();
+  });
+
+  it("lets the hierarchy root reject a native gate and fails the run", async () => {
+    const workflowId = "appr-native-reject";
+    const { runId } = await seedNativeParkedRun(workflowId);
+    const rejected = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/resolve-gate`,
+      { decision: "reject" },
       cooHeaders(),
     );
-    expect(resolve.status).toBe(200);
-    expect(resolve.body.status).toBe("completed");
-    expect(store.getWorkItem(todoId)).toMatchObject({ status: "done", approvalState: "approved" });
-
-    const needsYou = await call("GET", "/api/work-items?needsAttentionFor=me&limit=100");
-    expect((needsYou.body.workItems as Array<{ id: string }>).some((candidate) => candidate.id === todoId)).toBe(false);
+    expect(rejected.status).toBe(200);
+    expect(rejected.body.status).toBe("failed");
+    expect(rejected.body.gateDecisions).toEqual([
+      expect.objectContaining({ gateKey: "ap", decision: "reject", actor: "coo" }),
+    ]);
   });
 
-  // QA finding 1 (mirror/resolve desync): a gate resolved DIRECTLY through the
-  // shipped resolve-gate route (the workflow UI's own Review button — NOT the Todo
-  // route) must ALSO clear the mirrored Todo approval, or it ghosts in "Needs you"
-  // forever and can't be repaired (retrying the Todo route → 409 run-not-parked).
-  it("a gate resolved DIRECTLY via resolve-gate clears the mirrored Todo (no ghost in Needs-you)", async () => {
-    const { runId, todoId } = await seedParkedRun("appr-int-direct");
-    expect(store.getWorkItem(todoId)!.approvalState).toBe("pending"); // mirror pending
-
-    const workerBypass = await call("POST", `/api/workflow-definitions/appr-int-direct/runs/${runId}/resolve-gate`, { decision: "approve" }, workerHeaders());
-    expect(workerBypass.status).toBe(403);
-    expect(store.getWorkItem(todoId)!.approvalState).toBe("pending");
-
-    const operatorBypass = await call("POST", `/api/workflow-definitions/appr-int-direct/runs/${runId}/resolve-gate`, { decision: "approve" });
-    expect(operatorBypass.status).toBe(403);
-    expect(store.getWorkItem(todoId)!.approvalState).toBe("pending");
-
-    const spoofedManagerBypass = await call(
+  it("lets an authenticated operator decide only after native gate escalation", async () => {
+    const workflowId = "appr-native-escalated";
+    const { runId } = await seedNativeParkedRun(workflowId);
+    const before = await call(
       "POST",
-      `/api/workflow-definitions/appr-int-direct/runs/${runId}/resolve-gate`,
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/resolve-gate`,
       { decision: "approve" },
-      unmarkedCallerHeaders(managerSession),
     );
-    expect(spoofedManagerBypass.status).toBe(403);
-    expect(store.getWorkItem(todoId)!.approvalState).toBe("pending");
+    expect(before.status).toBe(403);
 
-    const bogusCapBypass = await call(
+    const escalated = await call(
       "POST",
-      `/api/workflow-definitions/appr-int-direct/runs/${runId}/resolve-gate`,
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/gate-approval/escalate`,
+      { reason: "operator decision required" },
+      managerHeaders(),
+    );
+    expect(escalated.status).toBe(200);
+    expect(escalated.body.parked.approval.escalatedAt).toBeTruthy();
+
+    const approved = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/resolve-gate`,
       { decision: "approve" },
-      unmarkedCallerHeaders(managerSession, "bogus"),
     );
-    expect(bogusCapBypass.status).toBe(403);
-    expect(store.getWorkItem(todoId)!.approvalState).toBe("pending");
-
-    // Resolve through the DIRECT resolve-gate route (bypasses the Todo route).
-    const resolveResp = await call("POST", `/api/workflow-definitions/appr-int-direct/runs/${runId}/resolve-gate`, { decision: "approve" }, cooHeaders());
-    expect(resolveResp.status).toBe(200);
-    expect(resolveResp.body.status).toBe("completed");
-
-    // The ledger reacted: the mirror is CLEARED (not pending) — no ghost.
-    const todo = store.getWorkItem(todoId)!;
-    expect(todo.approvalState).not.toBe("pending");
-    expect(todo.approvalState).toBe("approved");
-    expect(todo.status).toBe("done"); // terminal reflect still lands
-
-    // "Needs you" derivation (approval_state='pending' ∪ blocked ∪ escalated) no
-    // longer lists this Todo.
-    const needsYou = store.listWorkItems().filter(
-      (w) => w.approvalState === "pending" || w.status === "blocked" || w.status === "escalated",
-    );
-    expect(needsYou.some((w) => w.id === todoId)).toBe(false);
-
-    // And retrying the Todo route is a clean refusal, not a partial repair.
-    const retry = await call("POST", `/api/work-items/${todoId}/approval`, { decision: "approve" }, cooHeaders());
-    expect(retry.status).toBe(409); // no pending approval to decide
-  });
-
-  it("a Todo-triggered parked run can be resolved directly via resolve-gate using the original Todo mirror", async () => {
-    const workflowId = "appr-int-todo-triggered";
-    const def = gateDef(workflowId);
-    def.nodes[0].trigger = { kind: "todo-status-change", toStatus: "in_review" } as never;
-    defStore.createDefinition(evidenceRoot, def);
-    const triggerTodo = store.createWorkItem({
-      title: "triggering Todo",
-      status: "in_review",
-      source: "human",
-      assignee: "platform-worker",
-      department: "platform",
-    });
-    const stubDeps = {
-      root: evidenceRoot,
-      getDefinition: defStore.getDefinition,
-      probeStepSession: () => ({ found: false as const }),
-      spawnStep: async () => ({ sessionId: `stub:${workflowId}` }),
-      workItems: bridgeMod.createWorkflowTodoBridge(),
-      now: () => "2026-07-05T10:00:00.000Z",
-    } as unknown as Parameters<RunRec["startWorkflowRun"]>[0];
-
-    const started = await runRec.startWorkflowRun(stubDeps, def, {
-      trigger: { kind: "todo-status-change", fireRef: "wie_todo_gate" } as never,
-      triggerTodoId: triggerTodo.id,
-    });
-    expect(started.status).toBe("parked");
-    expect(store.getWorkItemBySourceRef("workflow", `workflow:${workflowId}:${started.runId}`)).toBeFalsy();
-    expect(store.getWorkItem(triggerTodo.id)!.approvalRef).toBe(`workflow-gate:${workflowId}:${started.runId}:ap`);
-
-    const resolveResp = await call("POST", `/api/workflow-definitions/${workflowId}/runs/${started.runId}/resolve-gate`, { decision: "approve" }, cooHeaders());
-
-    expect(resolveResp.status).toBe(200);
-    expect(resolveResp.body.status).toBe("completed");
-    const todoAfter = store.getWorkItem(triggerTodo.id)!;
-    expect(todoAfter.approvalState).toBe("approved");
-    expect(todoAfter.approvalDecidedBy).toBe("coo");
-  });
-
-  it("a gate REJECTED directly via resolve-gate clears the mirror to rejected + blocks the Todo", async () => {
-    const { runId, todoId } = await seedParkedRun("appr-int-direct-reject");
-    const resolveResp = await call("POST", `/api/workflow-definitions/appr-int-direct-reject/runs/${runId}/resolve-gate`, { decision: "reject" }, cooHeaders());
-    expect(resolveResp.status).toBe(200);
-    expect(resolveResp.body.status).toBe("failed");
-    const todo = store.getWorkItem(todoId)!;
-    expect(todo.approvalState).toBe("rejected"); // mirror cleared, not pending
-    expect(todo.status).toBe("blocked");
+    expect(approved.status).toBe(200);
+    expect(approved.body.gateDecisions).toEqual([
+      expect.objectContaining({ decision: "approve", actor: "operator" }),
+    ]);
   });
 });

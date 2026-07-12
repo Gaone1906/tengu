@@ -83,7 +83,7 @@ describe('todo-status replay event claims', () => {
     expect(ids).not.toContain(e1);
   });
 
-  it('does not resurrect a live-suppressed event after the blocking run settles', async () => {
+  it('persists a distinct live event claim and never replays it after the earlier run settles', async () => {
     const store = await import('../../work-items/store.js');
     const transitions = await import('../../work-items/transitions.js');
     transitions.setTodoStatusChangeListener(null);
@@ -108,32 +108,33 @@ describe('todo-status replay event claims', () => {
       toStatus: 'executing',
       item: { source: 'human', department: null, assignee: null },
     });
-    const suppressedEvent = transitions.transition(todo.id, 'in_review', 'qa').event!;
-    const suppressed = await fireTodoStatusChangeWorkflows(deps(), {
-      id: suppressedEvent.id,
+    const distinctEvent = transitions.transition(todo.id, 'in_review', 'qa').event!;
+    const distinct = await fireTodoStatusChangeWorkflows(deps(), {
+      id: distinctEvent.id,
       workItemId: todo.id,
       fromStatus: 'executing',
       toStatus: 'in_review',
       item: { source: 'human', department: null, assignee: null },
     });
-    expect(suppressed.map((outcome) => outcome.outcome)).toEqual(['suppressed']);
+    expect(distinct.map((outcome) => outcome.outcome)).toEqual(['started']);
     const registry = await import('../../sessions/registry.js');
-    const suppressedClaim = registry.initDb().prepare(
+    const distinctClaim = registry.initDb().prepare(
       'SELECT state, outcomes FROM workflow_todo_event_claims WHERE event_id = ?',
-    ).get(suppressedEvent.id) as { state: string; outcomes: string };
-    expect(suppressedClaim.state).toBe('processed');
-    expect(JSON.parse(suppressedClaim.outcomes)).toEqual([
-      expect.objectContaining({ workflowId: 'suppressed-wf', outcome: 'suppressed' }),
+    ).get(distinctEvent.id) as { state: string; outcomes: string };
+    expect(distinctClaim.state).toBe('processed');
+    expect(JSON.parse(distinctClaim.outcomes)).toEqual([
+      expect.objectContaining({ workflowId: 'suppressed-wf', outcome: 'started' }),
     ]);
 
-    const blockingRunSummary = listRuns(root, 'suppressed-wf')[0];
-    const blockingRun = getRun(root, 'suppressed-wf', blockingRunSummary.runId)!;
+    if (first[0].outcome !== 'started') return;
+    const blockingRun = getRun(root, 'suppressed-wf', first[0].run.runId)!;
     saveRun(root, { ...blockingRun, status: 'failed', endedAt: now() });
     await replayMissedTodoStatusChangeWorkflowFires(deps(), { limit: 50 });
 
     expect(listRuns(root, 'suppressed-wf').filter(
-      (run) => 'fireRef' in run.trigger && run.trigger.fireRef === suppressedEvent.id,
-    )).toHaveLength(0);
+      (run) => 'fireRef' in run.trigger && run.trigger.fireRef === distinctEvent.id,
+    )).toHaveLength(1);
+    expect(listRuns(root, 'suppressed-wf')).toHaveLength(2);
   });
 
   it('does not let a later-created definition retroactively match a live no-match event', async () => {

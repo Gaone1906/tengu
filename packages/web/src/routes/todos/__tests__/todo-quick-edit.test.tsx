@@ -38,7 +38,6 @@ function detail(version: number, changes: Partial<WorkItemDetailWire["workItem"]
       ...changes,
     },
     spendUsd: 0,
-    workflowRun: null,
     events: [],
   }
 }

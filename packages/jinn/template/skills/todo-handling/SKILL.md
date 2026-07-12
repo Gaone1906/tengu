@@ -5,7 +5,7 @@ description: Create, assign, update, review, and archive Jinn Todos through the 
 
 # Todo Handling Skill
 
-Use this skill for durable work ownership and status tracking. Todos are the live company ledger; Workflows are the reusable HOW. A Workflow run, delegation, cron fire, or connector may mint a Todo automatically, so search before creating a duplicate.
+Use this skill for durable work ownership and status tracking. Todos are the live company ledger; Workflows are the reusable HOW. A delegation, cron fire, or connector may mint a Todo automatically, so search before creating a duplicate. Workflow runs remain independent and never mint or own Todos.
 
 ## Find the right Todo
 
@@ -39,11 +39,11 @@ Create a Todo only for durable work that needs an owner or review trail:
 3. Use `assign_work_item` when assignment was not supplied or must change. Verify the employee with `get_employee` or `find_employees` first.
 4. Use `delegate_task` instead when the assignee should start immediately; it can use an existing `workItemId` or mint and link a new Todo atomically.
 
-Do not invent provenance or attach approval fields during creation. Delegation, cron, workflow, connector, goal, and session bridges mint their own source records.
+Do not invent provenance or attach approval fields during creation. Delegation, cron, connector, goal, and session bridges mint their own source records.
 
 ## Approval flow
 
-Approvals are routed records on a Todo, separate from its lifecycle status. Generic `update_work_item` does not perform approval decisions, review-bounce accounting, or mirrored workflow-gate side effects; never use it as a substitute while an approval is pending.
+Approvals are routed records on a Todo, separate from its lifecycle status. Generic `update_work_item` does not perform approval decisions or review-bounce accounting; never use it as a substitute while an approval is pending.
 
 1. The Todo owner or linked execution session, its manager, or the COO requests a decision with `request_work_item_approval`:
 
@@ -72,14 +72,14 @@ Approvals are routed records on a Todo, separate from its lifecycle status. Gene
 
 4. If the routed manager/COO deliberately needs operator/aCEO authority, call `escalate_work_item_approval` with the pending Todo id and an optional reason. Escalation exposes the pending approval to that path; it does not approve or reject it.
 
-When a Workflow parks, Jinn creates a mirrored workflow gate approval on its Todo automatically. `decide_work_item_approval` routes the decision back to the run: approval resolves the gate and lets the run continue, while rejection resolves it as failed. For a run-owned Workflow Todo, terminal reflection then sets `done` on completion or `blocked` on failure; Todo-status-triggered workflows follow their authored Todo transitions. Do not manually recreate the mirror with `request_work_item_approval`.
+Workflow and Todo approvals are separate authorities. Todo approval tools never resolve, project, or mutate Workflow gates; Workflow completion, failure, timeout, cancellation, and approval decisions never change a Todo. A `todo-status` Workflow trigger consumes only the immutable event and Todo id as provenance, never ownership.
 
 ## Keep status honest
 
 - Worker finished and ready for review: `update_work_item` to `in_review` with a note naming artifacts, checks, and remaining risks.
 - Cannot proceed without an external change: move to `blocked` and state the concrete blocker plus what would unblock it.
 - A non-approval manager/operator decision is required: move to `escalated` and summarize the options and recommendation. For a pending approval, use `escalate_work_item_approval` instead.
-- Reviewer accepts ungated work: move it to `done` with verification evidence. If an approval is pending, use `decide_work_item_approval` instead so all approval and Workflow consequences occur.
+- Reviewer accepts ungated work: move it to `done` with verification evidence. If an approval is pending, use `decide_work_item_approval` instead so the Todo approval consequence is recorded atomically.
 - Never mark your own produced work `done`; the reviewer owns completion. Do not use `done` to hide partial work or a failed verification.
 
 Example:

@@ -320,18 +320,15 @@ describe('validateDefinition', () => {
     }
   });
 
-  it('accepts step todoTransition and refuses it on non-step nodes or with invalid statuses', () => {
-    const ok = validDef();
-    ok.nodes[1].todoTransition = 'executing';
-    expect(validateDefinition(ok).ok).toBe(true);
+  it('rejects todoTransition as unsupported authoring', () => {
+    const authored = validDef() as EditableWorkflowDefinition & {
+      nodes: Array<EditableWorkflowDefinition['nodes'][number] & { todoTransition?: string }>;
+    };
+    authored.nodes[1].todoTransition = 'executing';
 
-    const misplaced = validDef();
-    misplaced.nodes[0].todoTransition = 'executing';
-    expect(validateDefinition(misplaced).errors.map((e) => e.code)).toContain('misplaced-todo-transition');
-
-    const bad = validDef();
-    bad.nodes[1].todoTransition = 'reviewing' as never;
-    expect(validateDefinition(bad).errors.map((e) => e.code)).toContain('bad-todo-transition');
+    expect(validateDefinition(authored).errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'todo-transition-not-supported', ref: authored.nodes[1].id }),
+    ]));
   });
 
   it('rejects an unknown edge kind', () => {

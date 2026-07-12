@@ -45,6 +45,7 @@ import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/id
 import {
   applyWorkflowCronSync,
   fireTodoStatusChangeWorkflows,
+  migrateWorkflowTriggerStore,
   replayMissedTodoStatusChangeWorkflowFires,
   resolveWorkflowEvidence,
   startPollTriggerRunner,
@@ -1035,6 +1036,11 @@ export async function startGateway(
   // honestly in the runner (inert, same guard as the workflow routes).
   const workflowRunDeps = workflowEvidenceRoot ? workflowRunDriverDeps(workflowEvidenceRoot, apiContext) : undefined;
   if (workflowEvidenceRoot && workflowRunDeps) {
+    try {
+      await migrateWorkflowTriggerStore(workflowEvidenceRoot);
+    } catch (err) {
+      logger.warn(`Workflow trigger store migration failed at boot: ${err instanceof Error ? err.message : err}`);
+    }
     try {
       applyWorkflowCronSync(workflowEvidenceRoot, {
         log: (level, message) => logger[level](message),

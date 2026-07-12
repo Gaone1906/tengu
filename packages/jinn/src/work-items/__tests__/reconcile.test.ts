@@ -101,14 +101,12 @@ describe("deriveWorkItemStatus — pure truth table (GRS-021a elevated vocabular
     expect(D()("blocked", ["interrupted", "waiting"])).toBe("executing");
   });
 
-  it("WORKFLOW items derive only executing — settles between steps never move them", () => {
-    // The run driver owns workflow terminals (workflow-bridge.ts); a step settle
-    // mid-run must not read as review-ready (or trust-auto-close mid-run).
+  it("gives historical Workflow provenance no special lifecycle semantics", () => {
     expect(D()("executing", ["running"], "workflow")).toBe("executing");
     expect(D()("backlog", ["running"], "workflow")).toBe("executing");
-    expect(D()("executing", ["idle"], "workflow")).toBe("executing");
-    expect(D()("executing", ["interrupted"], "workflow")).toBe("executing");
-    expect(D()("backlog", ["idle"], "workflow")).toBe("backlog");
+    expect(D()("executing", ["idle"], "workflow")).toBe("in_review");
+    expect(D()("executing", ["interrupted"], "workflow")).toBe("blocked");
+    expect(D()("backlog", ["idle"], "workflow")).toBe("in_review");
   });
 });
 
@@ -244,17 +242,6 @@ describe("reconcileWorkItem — integration against real store + registry", () =
     expect(store.getWorkItem(wi.id)?.status).toBe("assigned");
   });
 
-  it("WORKFLOW item: step settle does NOT move it; the bridge's run-terminal does", async () => {
-    const bridge = (await import("../workflow-bridge.js")).createWorkflowTodoBridge();
-    const run = { runId: "run-rc-1", workflowId: "wf-rc", title: "wf run" };
-    bridge.mintRunItem(run);
-    const item = store.getWorkItemBySourceRef("workflow", "workflow:wf-rc:run-rc-1")!;
-    linkedSession("s-wf-step1", item.id, "idle", "2026-07-01T00:00:00.000Z"); // step 1 settled, run mid-flight
-
-    expect(reconcile.reconcileWorkItem(item.id)?.item.status).toBe("backlog"); // untouched — not in_review, not done
-    bridge.onRunTerminal({ ...run, status: "completed" });
-    expect(store.getWorkItem(item.id)?.status).toBe("done");
-  });
 });
 
 describe("reconcileActiveWorkItems / startup sweep — the recoverStaleSessions moment", () => {

@@ -1615,6 +1615,8 @@ export function WorkflowEditView({
   const [savedTick, setSavedTick] = useState(0)
   const [triggerBindings, setTriggerBindings] = useState<WorkflowTriggerBindingWire[]>([])
   const [triggerLoadError, setTriggerLoadError] = useState<string | null>(null)
+  const [triggerApprovalError, setTriggerApprovalError] = useState<string | null>(null)
+  const [triggerApprovalBusy, setTriggerApprovalBusy] = useState(false)
   const [wakeUpDraft, setWakeUpDraft] = useState<WakeUpDraft>(EMPTY_WAKE_UP)
 
   const load = useCallback(() => {
@@ -1673,6 +1675,7 @@ export function WorkflowEditView({
     return edgesForDefinition({ ...def, nodes: visibleGraph.nodes, edges: visibleGraph.edges })
   }, [def, graph, layoutPreview])
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null
+  const activeTriggerBinding = def ? activeTriggerBindingFor(def.id, triggerBindings) : null
 
   const onNodeDraftChange = useCallback(
     (id: string, patch: Partial<NodeDraft>) => {
@@ -1688,6 +1691,20 @@ export function WorkflowEditView({
     setLayoutPreview(null)
     setSaveError(null)
   }, [])
+
+  const decidePollActivation = useCallback(async (decision: "approve" | "reject") => {
+    if (!activeTriggerBinding || activeTriggerBinding.kind !== "poll" || triggerApprovalBusy) return
+    setTriggerApprovalBusy(true)
+    setTriggerApprovalError(null)
+    try {
+      const { trigger } = await api.decideWorkflowTriggerActivationApproval(activeTriggerBinding.name, decision)
+      setTriggerBindings((current) => current.map((binding) => binding.name === trigger.name ? trigger : binding))
+    } catch (err) {
+      setTriggerApprovalError(err instanceof Error ? err.message : "Approval decision failed")
+    } finally {
+      setTriggerApprovalBusy(false)
+    }
+  }, [activeTriggerBinding, triggerApprovalBusy])
 
   const anyLabelBlank = useMemo(
     () => Object.values(drafts).some((d) => d.label.trim() === ""),
@@ -1966,6 +1983,47 @@ export function WorkflowEditView({
       )}
 
       <WakeUpEditor draft={wakeUpDraft} loadError={triggerLoadError} onChange={onWakeUpDraftChange} />
+
+      {activeTriggerBinding?.kind === "poll" && activeTriggerBinding.approval && (
+        <div
+          data-testid="wf-poll-approval"
+          className="mx-[var(--space-4)] mt-2 flex flex-wrap items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-tertiary)] px-3 py-2 text-[length:var(--text-caption1)]"
+        >
+          <span className="font-[var(--weight-semibold)] text-[var(--text-primary)]">
+            {activeTriggerBinding.approval.state === "pending"
+              ? "Pending approval"
+              : activeTriggerBinding.approval.state === "approved"
+                ? "Approved"
+                : "Rejected"}
+          </span>
+          <span className="text-[var(--text-tertiary)]">
+            Poll activation · routed to {activeTriggerBinding.approval.target ?? "an organization approver"}
+          </span>
+          {activeTriggerBinding.approval.state === "pending" && (
+            <div className="ml-auto flex gap-1.5">
+              <button
+                type="button"
+                data-testid="wf-poll-reject"
+                disabled={triggerApprovalBusy}
+                onClick={() => void decidePollActivation("reject")}
+                className="min-h-8 rounded-[var(--radius-sm)] px-2.5 text-[var(--system-red)] hover:bg-[var(--fill-quaternary)] disabled:opacity-40"
+              >
+                Reject
+              </button>
+              <button
+                type="button"
+                data-testid="wf-poll-approve"
+                disabled={triggerApprovalBusy}
+                onClick={() => void decidePollActivation("approve")}
+                className="min-h-8 rounded-[var(--radius-sm)] bg-[var(--accent)] px-2.5 font-[var(--weight-semibold)] text-[var(--accent-contrast)] disabled:opacity-40"
+              >
+                Approve
+              </button>
+            </div>
+          )}
+          {triggerApprovalError && <span className="w-full text-[var(--system-red)]">{triggerApprovalError}</span>}
+        </div>
+      )}
 
       <div className="relative flex min-h-0 flex-1">
         <div className="flex min-h-0 flex-1 flex-col">

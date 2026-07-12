@@ -12,8 +12,7 @@ import { transition } from './transitions.js';
  * approval fields; `transitions.ts` still owns status. The anti-bottleneck
  * principle is LAW: a fresh Todo NEVER carries an approval (the store's create
  * path structurally cannot attach one) — approval is attached only here, where a
- * routed decision is genuinely required (a mirrored workflow park, or later a
- * deliberately-gated high-impact item via the 021c MCP write).
+ * routed decision is genuinely required for a deliberately-gated Todo.
  *
  * REQUESTING is agent-legal (`requestApproval`); DECIDING is authority-gated by
  * the gateway helper (manager/COO by default; operator/aCEO only after explicit
@@ -26,19 +25,12 @@ import { transition } from './transitions.js';
  *     the bounce that reaches maxRounds `escalated`s instead — the transitions
  *     module enforces that)
  *   - any OTHER status              → the decision is recorded, status UNTOUCHED
- *   - a MIRRORED approval (`approval_ref` starts `workflow-gate:`) routes the
- *     decision to the SHIPPED resolve-gate API — the run store stays the single
- *     authority; this module only clears the mirror once resolve succeeds, and
- *     the run's own terminal reflect owns the Todo's STATUS.
  */
-
-export const WORKFLOW_GATE_REF_PREFIX = 'workflow-gate:';
 
 export interface RequestApprovalInput {
   /** What is being asked of the routed approver (the gate/description text). */
   request: string;
-  /** NULL = native approval; `workflow-gate:<defId>:<runId>:<gateRef>` = a mirror
-   *  of a parked workflow run (deciding it routes to resolve-gate). */
+  /** Optional opaque audit/correlation reference. */
   ref?: string | null;
   /** Employee slug expected to decide this approval (manager/COO by default). */
   target?: string | null;
@@ -54,13 +46,6 @@ export class ApprovalNotPendingError extends Error {
   constructor(id: string) {
     super(`work item ${id} has no pending approval to decide`);
     this.name = 'ApprovalNotPendingError';
-  }
-}
-
-export class WorkflowGateCancellationConflictError extends Error {
-  constructor(id: string) {
-    super(`work item ${id} mirrors a pending Workflow gate; the Workflow run is the lifecycle authority — resolve the run gate before cancelling its Todo`);
-    this.name = 'WorkflowGateCancellationConflictError';
   }
 }
 
@@ -164,11 +149,9 @@ function decideApproval(id: string, decision: ApprovalDecision, decidedBy: strin
 }
 
 /**
- * Cancel a Todo while closing any outstanding native approval record in the same
- * SQLite transaction. A pending Workflow-gate mirror is refused: the run store
- * is its lifecycle authority, and resolving the gate is the only path allowed to
- * settle that mirror. Callers are authority-checked by the gateway before
- * reaching this persistence primitive.
+ * Cancel a Todo while closing any outstanding approval record in the same SQLite
+ * transaction. Callers are authority-checked by the gateway before reaching this
+ * persistence primitive.
  */
 export function archiveWorkItem(id: string, actor: string, opts: ArchiveWorkItemOptions = {}): WorkItem {
   const db = initDb();
@@ -176,9 +159,6 @@ export function archiveWorkItem(id: string, actor: string, opts: ArchiveWorkItem
     let item = getWorkItem(id);
     if (!item) throw new Error(`archiveWorkItem: work item ${id} not found`);
     if (item.approvalState === 'pending') {
-      if (item.approvalRef?.startsWith(WORKFLOW_GATE_REF_PREFIX)) {
-        throw new WorkflowGateCancellationConflictError(id);
-      }
       item = decideApproval(id, 'reject', actor, opts.note ?? 'Todo archived');
     }
     if (item.status === 'cancelled') return item;
@@ -187,22 +167,6 @@ export function archiveWorkItem(id: string, actor: string, opts: ArchiveWorkItem
       ...(opts.callerSessionId ? { callerSessionId: opts.callerSessionId } : {}),
       detail: { action: 'archive', ...(opts.note ? { note: opts.note } : {}) },
     }).item;
-  });
-  return txn();
-}
-
-/** Clear a workflow-gate mirror after the run authority resolved the gate. This is
- * the only exported raw-decision wrapper; it refuses native approvals so the
- * public/native path stays behind `decideWorkItemApproval` + gateway authority. */
-export function recordMirroredApprovalDecision(id: string, decision: ApprovalDecision, decidedBy: string, note?: string): WorkItem {
-  const db = initDb();
-  const txn = db.transaction((): WorkItem => {
-    const item = getWorkItem(id);
-    if (!item) throw new Error(`recordMirroredApprovalDecision: work item ${id} not found`);
-    if (!item.approvalRef?.startsWith(WORKFLOW_GATE_REF_PREFIX)) {
-      throw new Error(`recordMirroredApprovalDecision: work item ${id} is not a workflow-gate mirror`);
-    }
-    return decideApproval(id, decision, decidedBy, note);
   });
   return txn();
 }
@@ -235,27 +199,6 @@ export function escalateApproval(id: string, actor: string, reason?: string): Wo
   return txn();
 }
 
-/** The outcome the route needs from the shipped resolve-gate API — structural,
- *  so this module never imports the workflow engine (the injected-deps seam). */
-export interface ResolveWorkflowGateOutcome {
-  outcome: 'resolved' | 'not-found' | 'not-parked';
-  runStatus?: string;
-}
-
-export interface DecideWorkItemApprovalDeps {
-  /**
-   * Routes a mirrored decision to the shipped resolve-gate authority. The route
-   * wires `resolveWorkflowRunGate(workflowRunDriverDeps(root, ctx), …)`; absent
-   * means no workflow evidence root is configured (a mirror cannot be routed).
-   */
-  resolveWorkflowGate?: (
-    workflowId: string,
-    runId: string,
-    decision: ApprovalDecision,
-    decidedBy: string,
-  ) => Promise<ResolveWorkflowGateOutcome>;
-}
-
 export interface DecideWorkItemApprovalInput {
   id: string;
   decision: ApprovalDecision;
@@ -267,23 +210,10 @@ export interface DecideWorkItemApprovalInput {
 export type DecideWorkItemApprovalResult =
   | {
       ok: false;
-      code: 'not-found' | 'no-pending' | 'evidence-root-missing' | 'run-not-found' | 'run-not-parked';
+      code: 'not-found' | 'no-pending';
       message: string;
-      runStatus?: string;
     }
-  | { ok: true; item: WorkItem; escalated: boolean; mirrored: boolean; runStatus?: string };
-
-/** Parse a mirror ref `workflow-gate:<defId>:<runId>:<gateRef>` — defId and runId
- *  never carry a colon; the gateRef may (`parked.ref ?? description`). */
-function parseWorkflowGateRef(ref: string): { workflowId: string; runId: string; gateRef: string } {
-  const rest = ref.slice(WORKFLOW_GATE_REF_PREFIX.length);
-  const firstColon = rest.indexOf(':');
-  const secondColon = rest.indexOf(':', firstColon + 1);
-  const workflowId = firstColon < 0 ? rest : rest.slice(0, firstColon);
-  const runId = firstColon < 0 ? '' : secondColon < 0 ? rest.slice(firstColon + 1) : rest.slice(firstColon + 1, secondColon);
-  const gateRef = secondColon < 0 ? '' : rest.slice(secondColon + 1);
-  return { workflowId, runId, gateRef };
-}
+  | { ok: true; item: WorkItem; escalated: boolean };
 
 /**
  * Apply a NATIVE approval decision + its fixed status consequence in ONE SQLite
@@ -335,7 +265,6 @@ function applyNativeDecisionAtomic(
  */
 export async function decideWorkItemApproval(
   input: DecideWorkItemApprovalInput,
-  deps: DecideWorkItemApprovalDeps,
 ): Promise<DecideWorkItemApprovalResult> {
   const decidedBy = input.decidedBy ?? 'operator';
   const item = getWorkItem(input.id);
@@ -344,54 +273,12 @@ export async function decideWorkItemApproval(
     return { ok: false, code: 'no-pending', message: `work item ${input.id} has no pending approval to decide` };
   }
 
-  const ref = item.approvalRef;
-  if (ref && ref.startsWith(WORKFLOW_GATE_REF_PREFIX)) {
-    // MIRRORED park: the run store is the single authority — route the decision
-    // to resolve-gate, and only clear the mirror once it actually resolves. The
-    // run's own terminal reflect (completed → done, failed → blocked) owns the
-    // Todo's STATUS; this module never drives status for a mirror.
-    if (!deps.resolveWorkflowGate) {
-      return {
-        ok: false,
-        code: 'evidence-root-missing',
-        message: 'workflow evidence root is not configured — a mirrored approval cannot be routed to resolve-gate',
-      };
-    }
-    const { workflowId, runId } = parseWorkflowGateRef(ref);
-    const res = await deps.resolveWorkflowGate(workflowId, runId, input.decision, decidedBy);
-    if (res.outcome === 'not-found') {
-      return { ok: false, code: 'run-not-found', message: `the workflow run ${runId} behind this approval no longer exists` };
-    }
-    if (res.outcome === 'not-parked') {
-      return {
-        ok: false,
-        code: 'run-not-parked',
-        message: `the workflow run ${runId} is ${res.runStatus ?? 'not parked'}, not awaiting this gate`,
-        ...(res.runStatus ? { runStatus: res.runStatus } : {}),
-      };
-    }
-    // Resolved. The run authority owns the gate; the LEDGER reacts — the run-side
-    // `clearParkMirror` hook (wired into resolveWorkflowRunGate) already cleared
-    // the mirror so it can't ghost in the operator's queue (QA finding 1). Clear
-    // here too if it is somehow still pending (a caller that did not wire the
-    // bridge — e.g. the unit stubs), so a pending mirror NEVER survives a resolve.
-    // Idempotent: when the hook already cleared it, just record the operator's note.
-    let item2 = getWorkItem(input.id)!;
-    if (item2.approvalState === 'pending') {
-      item2 = decideApproval(input.id, input.decision, decidedBy, input.note);
-    } else if (input.note !== undefined && input.note !== '') {
-      appendWorkItemEvent({ workItemId: input.id, kind: 'note', actor: decidedBy, detail: { decision: input.decision, note: input.note } });
-      item2 = getWorkItem(input.id)!;
-    }
-    return { ok: true, item: item2, escalated: false, mirrored: true, ...(res.runStatus ? { runStatus: res.runStatus } : {}) };
-  }
-
   // NATIVE decision → record it AND apply the fixed consequence rules ATOMICALLY
   // (QA finding 2): one transaction, guarded on `pending`, so a status-write
   // failure or a decide-after-resolve race can never leave a half-applied state.
   try {
     const { item: updated, escalated } = applyNativeDecisionAtomic(input.id, input.decision, decidedBy, input.note);
-    return { ok: true, item: updated, escalated, mirrored: false };
+    return { ok: true, item: updated, escalated };
   } catch (err) {
     if (err instanceof ApprovalNotPendingError) return { ok: false, code: 'no-pending', message: err.message };
     throw err; // a real write failure — the whole decision rolled back; surface it

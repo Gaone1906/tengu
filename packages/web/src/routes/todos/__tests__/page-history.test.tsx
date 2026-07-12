@@ -70,7 +70,6 @@ const detail: WorkItemDetailWire = {
     closedAt: null,
   },
   spendUsd: 0,
-  workflowRun: null,
   events: [],
 }
 const org: OrgData = {

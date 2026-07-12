@@ -24,10 +24,9 @@ import { selectLinkedSession } from "./detail-sheet"
  * work. F2 or the action menu renames inline (Enter commits, Esc reverts), and
  * touch long-press opens the same Open/Rename/Move contract. */
 
-/** What an active item is executing — a workflow run, or (fallback) its linked
- *  session. Pure + exported so the surfacing logic stays unit-testable. */
+/** What an active item is executing. Pure + exported so the surfacing logic stays unit-testable. */
 export type ExecContext = {
-  kind: "run" | "session"
+  kind: "session"
   label: string
   value: string
   href: string
@@ -45,14 +44,6 @@ export function executionContext(
 ): ExecContext | null {
   const active = item.status === "executing" || item.status === "blocked"
   if (!active || !detail) return null
-  if (detail.workflowRun) {
-    return {
-      kind: "run",
-      label: "Workflow run",
-      value: shortRef(detail.workflowRun.runId),
-      href: `/workflow/${encodeURIComponent(detail.workflowRun.workflowId)}`,
-    }
-  }
   const session = selectLinkedSession(sessions)
   if (session) {
     const title = session.title?.trim()
@@ -114,11 +105,9 @@ export function TodoRow({
   const navigate = useNavigate()
   const isDone = item.status === "done"
   const timeHint = formatRelativeTime(item.updatedAt, now)
-  // GRS-024b: prefer the already-fetched workflowRun (zero extra cost); only
-  // fall back to the linked-sessions call for an active item that has a session
-  // but no run. The key matches the detail sheet's, so react-query dedupes it.
+  // The key matches the detail sheet's linked-session query, so react-query dedupes it.
   const active = item.status === "executing" || item.status === "blocked"
-  const wantSession = active && !!detail && !detail.workflowRun
+  const wantSession = active && !!detail
   const { data: sessions } = useQuery({
     queryKey: ["work-item-sessions", item.id],
     queryFn: () => api.listWorkItemSessions(item.id),
@@ -259,7 +248,7 @@ export function TodoRow({
             <StateLine state="working" dispatchedAt={Date.parse(item.updatedAt) || undefined} className="flex-none whitespace-nowrap" />
             <button
               type="button"
-              aria-label={exec.kind === "run" ? "Open workflow run" : "Open session"}
+              aria-label="Open session"
               onClick={() => navigate(exec.href)}
               className="pointer-events-auto relative z-[3] flex-none cursor-pointer text-[length:var(--text-caption1)] font-semibold text-[var(--accent)] opacity-0 transition-opacity duration-150 group-hover/row:opacity-100 focus-visible:opacity-100"
             >

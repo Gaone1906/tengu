@@ -121,19 +121,11 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     const winnerDeps: RunDriverDeps = {
       ...winner.deps,
       syncRunSession: () => { sideEffects.push('winner:session'); return 'run-session'; },
-      workItems: {
-        mintRunItem: () => { sideEffects.push('winner:todo'); },
-        linkRunSession: () => { sideEffects.push('winner:todo-session'); },
-      } as unknown as NonNullable<RunDriverDeps['workItems']>,
     };
     let winnerStart: Promise<WorkflowRun> | undefined;
     const loserDeps: RunDriverDeps = {
       ...loser.deps,
       syncRunSession: () => { sideEffects.push('loser:session'); return 'loser-session'; },
-      workItems: {
-        mintRunItem: () => { sideEffects.push('loser:todo'); },
-        linkRunSession: () => { sideEffects.push('loser:todo-session'); },
-      } as unknown as NonNullable<RunDriverDeps['workItems']>,
       publishInitialRun: (rootPath, candidate) => {
         winnerStart = startWorkflowRun(winnerDeps, def, options);
         return publishInitialWorkflowRun(rootPath, candidate);
@@ -147,9 +139,8 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     expect(losingResult.runId).toBe(winningResult.runId);
     expect([...winner.spawnCalls, ...loser.spawnCalls]).toHaveLength(1);
     expect(sideEffects).not.toContain('loser:session');
-    expect(sideEffects).not.toContain('loser:todo');
-    expect(sideEffects).not.toContain('loser:todo-session');
-    expect(sideEffects.filter((effect) => effect === 'winner:todo')).toHaveLength(1);
+    expect(sideEffects.length).toBeGreaterThan(0);
+    expect(new Set(sideEffects)).toEqual(new Set(['winner:session']));
   });
 
   it('returns the published failed snapshot to an interleaved loser without loser projection', async () => {

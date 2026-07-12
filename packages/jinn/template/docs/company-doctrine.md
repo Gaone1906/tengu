@@ -20,7 +20,7 @@ For company state, the Jinn MCP is the hands. Employees should use it to read an
 
 ## 5. Uniform Contracts
 
-The same contract should hold everywhere: sources emit events, Triggers match events, Workflows run repeatable procedures, and Todos record live work. Avoid parallel concepts that do the same job in different shapes.
+The same contract should hold everywhere: sources emit events, Triggers match events, Workflows run repeatable procedures, and Todos independently record owned work. A Workflow may consume an immutable Todo-status event as provenance, but it never creates, links, owns, or mutates that Todo. Avoid parallel concepts that do the same job in different shapes.
 
 ## 6. Lean Identity Context
 

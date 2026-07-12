@@ -11,14 +11,12 @@ type Registry = typeof import("../../sessions/registry.js");
 type Transitions = typeof import("../transitions.js");
 type Approvals = typeof import("../approvals.js");
 type Reconcile = typeof import("../reconcile.js");
-type WorkflowBridge = typeof import("../workflow-bridge.js");
 
 let store: Store;
 let registry: Registry;
 let transitions: Transitions;
 let approvals: Approvals;
 let reconcile: Reconcile;
-let workflowBridge: WorkflowBridge;
 
 beforeAll(async () => {
   store = await import("../store.js");
@@ -26,7 +24,6 @@ beforeAll(async () => {
   transitions = await import("../transitions.js");
   approvals = await import("../approvals.js");
   reconcile = await import("../reconcile.js");
-  workflowBridge = await import("../workflow-bridge.js");
   registry.initDb();
 });
 
@@ -86,10 +83,11 @@ describe("Todo version mutation sensitivity", () => {
     expect(approvals.escalateApproval(item.id, "reviewer", "needs operator").version).toBe(3);
     expect(store.listWorkItemEvents(item.id)).toHaveLength(eventCount);
 
-    const decided = await approvals.decideWorkItemApproval(
-      { id: item.id, decision: "approve", decidedBy: "reviewer" },
-      {},
-    );
+    const decided = await approvals.decideWorkItemApproval({
+      id: item.id,
+      decision: "approve",
+      decidedBy: "reviewer",
+    });
     expect(decided.ok && decided.item.version).toBe(4);
   });
 
@@ -104,23 +102,4 @@ describe("Todo version mutation sensitivity", () => {
     expect(reconcile.reconcileWorkItem(item.id)).toMatchObject({ changed: false, item: { version: 3 } });
   });
 
-  it("increments Workflow mirror and terminal state changes without churn on mirror replay", () => {
-    const bridge = workflowBridge.createWorkflowTodoBridge();
-    const run = { runId: "run-version", workflowId: "workflow-version", title: "Workflow version" };
-    bridge.mintRunItem(run);
-    const item = store.getWorkItemBySourceRef("workflow", workflowBridge.workflowRunSourceRef(run))!;
-
-    bridge.mirrorParkedGate(run, { ref: "approve", description: "Approve" });
-    expect(store.getWorkItem(item.id)?.version).toBe(2);
-    bridge.mirrorParkedGate(run, { ref: "approve", description: "Approve" });
-    expect(store.getWorkItem(item.id)?.version).toBe(2);
-    bridge.clearParkMirror(run, "approve", "operator");
-    expect(store.getWorkItem(item.id)?.version).toBe(3);
-
-    const terminalRun = { ...run, runId: "run-terminal", status: "completed" };
-    bridge.mintRunItem(terminalRun);
-    const terminalItem = store.getWorkItemBySourceRef("workflow", workflowBridge.workflowRunSourceRef(terminalRun))!;
-    bridge.onRunTerminal(terminalRun);
-    expect(store.getWorkItem(terminalItem.id)).toMatchObject({ status: "done", version: 2 });
-  });
 });

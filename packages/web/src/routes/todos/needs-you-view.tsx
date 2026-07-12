@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Check, ExternalLink, MessageSquareText, TerminalSquare, TriangleAlert } from "lucide-react"
+import { Check, ExternalLink, MessageSquareText, TriangleAlert } from "lucide-react"
 import type { Employee, WorkItemCompactWire } from "@/lib/api"
 import { EmployeeChip } from "@/components/ui/employee-chip"
 import { publicWorkItemReference } from "@/lib/todos"
@@ -32,15 +32,6 @@ function shortRef(id: string): string {
 }
 
 function WorkRef({ item }: { item: WorkItemCompactWire }) {
-  if (item.workflowRun) {
-    const runRef = publicWorkItemReference(item.workflowRun.runId)
-    return (
-      <span className="inline-flex min-w-0 items-center gap-1.5 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
-        <TerminalSquare size={12.5} strokeWidth={1.75} aria-hidden />
-        <span className="truncate">{runRef ? `Run · ${shortRef(runRef)}` : "Run"}</span>
-      </span>
-    )
-  }
   if (item.sessionRef) {
     // Gateway shape is { sessionId, ref? } — the ref suffix is the human label
     // when present, else the shortened session id.

@@ -155,7 +155,7 @@ Sub-agents = the engine's native parallel workers for your own legwork. They are
 
 ### Todos
 
-Todos are the company's task ledger. Every main task lives in it - delegations, cron fires, and workflow runs are entered automatically; when you (COO) decompose an operator goal, create one Todo per sub-task (`create_work_item`) or delegate directly (which mints one). Employees: keep your Todo current - move it to `in_review` when you finish, `blocked` (with the reason) when you cannot proceed, and `escalated` only when a decision is needed; route it to a manager/COO by default, not the operator. Never mark your own item `done` - your reviewer does. Quick questions do not need a Todo; anything worth reporting does.
+Todos are the company's task ledger. Delegations and cron fires are entered automatically; when you (COO) decompose an operator goal, create one Todo per sub-task (`create_work_item`) or delegate directly (which mints one). Employees: keep your Todo current - move it to `in_review` when you finish, `blocked` (with the reason) when you cannot proceed, and `escalated` only when a decision is needed; route it to a manager/COO by default, not the operator. Never mark your own item `done` - your reviewer does. Quick questions do not need a Todo; anything worth reporting does.
 
 ### Workflows
 
@@ -163,7 +163,7 @@ Workflows are reusable automations - the HOW. Use or propose one when a job is r
 
 ### Triggers
 
-Triggers are durable bindings that wake Workflows when supported events or polls match. Keep the wake-up binding separate from the Workflow procedure and the Todo that records each live run. Inspect bindings with `list_triggers`; use `create_trigger` only for supported webhook or poll bindings. Configure schedule and `todo-status` wake-ups through the Workflow definition, and avoid duplicate bindings.
+Triggers are durable bindings that wake Workflows when supported events or polls match. Keep the wake-up binding separate from both the Workflow procedure and independently authored Todos. Inspect bindings with `list_triggers`; use `create_trigger` only for supported webhook or poll bindings. Configure schedule and `todo-status` wake-ups through the Workflow definition, and avoid duplicate bindings.
 
 ### Child Session Protocol (Callbacks + Poll Fallback)
 

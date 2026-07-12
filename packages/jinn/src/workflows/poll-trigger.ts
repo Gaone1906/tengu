@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { getWorkItem } from '../work-items/store.js';
 import {
   createWorkflowTriggerBinding,
   getWorkflowTriggerBinding,
@@ -65,12 +64,12 @@ interface CommandResult {
 
 function approvalSatisfied(binding: PollWorkflowTriggerBinding): { ok: true } | { ok: false; detail: string } {
   if (binding.activation === 'disabled') return { ok: false, detail: 'poll trigger is disabled' };
-  if (!binding.approvalWorkItemId) return { ok: false, detail: 'poll trigger has no approval' };
+  if (!binding.approval) return { ok: false, detail: 'poll trigger has no native approval' };
   if (!pollActivationContractMatches(binding)) {
     return { ok: false, detail: 'approved executable artifact changed or can no longer be resolved' };
   }
-  const item = getWorkItem(binding.approvalWorkItemId);
-  return item?.approvalState === 'approved'
+  return binding.approval.state === 'approved'
+    && binding.approval.activationContractHash === binding.activationContractHash
     ? { ok: true }
     : { ok: false, detail: 'poll trigger approval is not approved' };
 }

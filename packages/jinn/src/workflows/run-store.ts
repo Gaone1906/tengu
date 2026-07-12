@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { OrderWarning } from './order.js';
 import type { EditableWorkflowDefinition } from './definition.js';
 import type { StepOutcome } from './handoff.js';
+import type { WorkflowGateApprovalRecord } from './approval-authority.js';
 import {
   canonicalWorkflowRunJson,
   type WorkflowRunInvocationClaim,
@@ -188,6 +189,15 @@ export interface ParkedGate {
   /** When the run parked (GRS-014b). A parked run keeps endedAt null — parking is not
    * terminal; resume lands with the GRS-014e resolve-gate API. */
   at?: string;
+  /** Frozen native approval route for this parked episode. */
+  approval?: WorkflowGateApprovalRecord;
+}
+
+export interface WorkflowGateDecision {
+  gateKey: string;
+  decision: 'approve' | 'reject';
+  actor: string;
+  at: string;
 }
 
 export type WorkflowTriggerSource = 'manual' | 'schedule' | 'todo-status-change' | 'event-webhook' | 'check-poll' | (string & {});
@@ -353,6 +363,8 @@ export interface WorkflowRun {
    * the same gate forever.
    */
   resolvedRunGates?: string[];
+  /** Append-only native gate decision evidence. */
+  gateDecisions?: WorkflowGateDecision[];
   /**
    * Honest drain (GRS-016a): set when a required step fails while OTHER receipts are
    * still in flight (only possible under concurrency > 1). While present: status stays

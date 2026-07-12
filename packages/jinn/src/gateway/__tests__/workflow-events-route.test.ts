@@ -26,12 +26,16 @@ type DefStore = typeof import('../../workflows/definition-store.js');
 type CustomTriggers = typeof import('../../workflows/custom-triggers.js');
 type Registry = typeof import('../../sessions/registry.js');
 type Identity = typeof import('../../mcp/identity.js');
+type Poll = typeof import('../../workflows/poll-trigger.js');
+type WorkItemStore = typeof import('../../work-items/store.js');
 
 let api: Api;
 let defStore: DefStore;
 let triggers: CustomTriggers;
 let registry: Registry;
 let identity: Identity;
+let poll: Poll;
+let workItems: WorkItemStore;
 
 const apiCtx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
@@ -48,6 +52,8 @@ beforeAll(async () => {
   triggers = await import('../../workflows/custom-triggers.js');
   registry = await import('../../sessions/registry.js');
   identity = await import('../../mcp/identity.js');
+  poll = await import('../../workflows/poll-trigger.js');
+  workItems = await import('../../work-items/store.js');
   registry.initDb();
 });
 
@@ -247,10 +253,10 @@ describe('workflow trigger authoring routes', () => {
     expect(allowed.status).toBe(201);
   });
 
-  it('poll trigger creation mints a pending COO approval bound to the exact execution contract', async () => {
+  it('approves and executes a poll trigger through native activation records without a Todo', async () => {
     seedWorkflow('poll-wf');
     const checkScript = path.join(home, 'check.sh');
-    fs.writeFileSync(checkScript, '#!/bin/sh\nprintf \'%s\' \'{"fire":false}\'\n', 'utf8');
+    fs.writeFileSync(checkScript, '#!/bin/sh\nprintf \'%s\' \'{"fire":true,"payload":{"ready":true}}\'\n', 'utf8');
     fs.chmodSync(checkScript, 0o700);
     const session = registry.createSession({ engine: 'codex', source: 'web', sourceRef: 'poll-caller', employee: 'coo' });
     const headers = {
@@ -278,11 +284,15 @@ describe('workflow trigger authoring routes', () => {
     const body = created.json<{
       trigger: {
         activation: string;
-        approvalWorkItemId: string;
         activationContractHash?: string;
         activationContract?: Record<string, unknown>;
+        approval: {
+          state: string;
+          target: string | null;
+          targetKind: string;
+          activationContractHash: string;
+        };
       };
-      approval: { workItem: { approvalState: string; approvalTarget: string; body: string | null; approvalRequest: string | null } };
     }>();
     expect(body.trigger).toMatchObject({
       activation: 'pending_approval',
@@ -296,25 +306,37 @@ describe('workflow trigger authoring routes', () => {
         stdoutMaxBytes: 2048,
         stderrMaxBytes: 1024,
       },
+      approval: {
+        state: 'pending',
+        target: 'coo',
+        targetKind: 'employee',
+        activationContractHash: expect.any(String),
+      },
     });
-    expect(body.approval.workItem).toMatchObject({ approvalState: 'pending', approvalTarget: 'coo' });
-    const approvalText = `${body.approval.workItem.body ?? ''}\n${body.approval.workItem.approvalRequest ?? ''}`;
-    for (const expected of [
-      checkScript,
-      'intervalSeconds: 60',
-      'cwdPolicy:',
-      'envPolicy:',
-      'timeoutMs: 1200',
-      'stdoutMaxBytes: 2048',
-      'stderrMaxBytes: 1024',
-      body.trigger.activationContractHash,
-    ]) {
-      expect(approvalText).toContain(expected);
-    }
+    expect(workItems.getWorkItemBySourceRef('workflow', 'workflow-trigger:poll-ready:activation')).toBeUndefined();
+
+    const approved = await request('POST', '/api/workflow-triggers/poll-ready/activation-approval', {
+      headers,
+      body: { decision: 'approve' },
+    });
+    expect(approved.status).toBe(200);
+    expect(approved.json<{ trigger: { activation: string; approval: { state: string; decidedBy: string } } }>().trigger)
+      .toMatchObject({ activation: 'active', approval: { state: 'approved', decidedBy: 'coo' } });
+
+    const binding = triggers.getWorkflowTriggerBinding(evidenceRoot, 'poll-ready');
+    if (!binding || binding.kind !== 'poll') throw new Error('expected poll binding');
+    const fired = await poll.runPollTriggerOnce({
+      root: evidenceRoot,
+      getDefinition: defStore.getDefinition,
+      probeStepSession: () => ({ found: false }),
+      spawnStep: async () => ({ sessionId: 'poll-route-step' }),
+      now: () => '2026-07-06T09:00:00.000Z',
+    }, binding, { now: () => '2026-07-06T09:00:00.000Z' });
+    expect(fired.outcome).toBe('fired');
 
     const listed = await request('GET', '/api/workflow-triggers');
     expect(listed.json<{ triggers: Array<{ name: string; secretToken?: string; activation?: string }> }>().triggers).toContainEqual(
-      expect.objectContaining({ name: 'poll-ready', activation: 'pending_approval' }),
+      expect.objectContaining({ name: 'poll-ready', activation: 'active' }),
     );
     expect(JSON.stringify(listed.json())).not.toContain('binding-secret');
   });

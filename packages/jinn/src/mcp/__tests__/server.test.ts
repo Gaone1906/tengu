@@ -99,6 +99,7 @@ describe("buildTools", () => {
       "delete_trigger",
       "edit_workflow_run_step_prompt",
       "escalate_work_item_approval",
+      "escalate_workflow_gate",
       "find_employees",
       "get_cron_run_history",
       "get_employee",
@@ -198,7 +199,7 @@ describe("handleMcpRequest — protocol", () => {
 describe("handleMcpRequest — tools/call", () => {
   it("compiles every advertised registry schema or supplies its shared runtime schema", () => {
     const tools = buildTools();
-    expect(tools).toHaveLength(46);
+    expect(tools).toHaveLength(47);
     for (const tool of tools) {
       expect(() => tool.runtimeSchema ?? z.fromJSONSchema({ ...tool.inputSchema, additionalProperties: false } as Parameters<typeof z.fromJSONSchema>[0]), tool.name).not.toThrow();
     }

@@ -4,14 +4,14 @@ import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
 // The two run tools now advertise the sole reportMode contract. Keep a narrow
-// 24-token headroom over the pinned Pi projection rather than hiding capability.
+// 53-token headroom over the pinned Pi projection rather than hiding capability.
 const MAX_MANIFEST_TOKENS = 7175;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 6840, sha256: "7590820f909650d71b853625d051f363386b218203edf248f622e79bd93e99f3" },
-  pi: { tokens: 7151, sha256: "59684d52826d81df8b69501ed730604a460400940fa3ec7af8a1fbd1c0803b12" },
-  openai: { tokens: 6964, sha256: "5e15ccb12c30e1dcf6d72ca4c9a0bc2389f3f15c2f83981aa294575c773f2269" },
+  rpc: { tokens: 6803, sha256: "7950c4e26ac98f4271773e386ac523821b37474304f0b6c535937bee7898e34e" },
+  pi: { tokens: 7122, sha256: "b6448b9886cb1183cc0f12cb6c6e361c6148ddeeb8fbb70f55e7b3d8940dcfe3" },
+  openai: { tokens: 6930, sha256: "8606e56a300319ace277c1b0882f890cc7febaf601c33c5199228d1ab0d0665f" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -42,6 +42,7 @@ const EXPECTED_TOOL_NAMES = [
   "delegate_task",
   "delete_trigger",
   "edit_workflow_run_step_prompt",
+  "escalate_workflow_gate",
   "escalate_work_item_approval",
   "find_employees",
   "get_cron_run_history",
@@ -91,6 +92,7 @@ const EXPECTED_REQUIRED = {
   delegate_task: ["task"],
   delete_trigger: ["name"],
   edit_workflow_run_step_prompt: ["workflowId", "runId", "nodeId", "prompt"],
+  escalate_workflow_gate: ["workflowId", "runId"],
   escalate_work_item_approval: ["id"],
   find_employees: [],
   get_cron_run_history: ["id"],
@@ -176,11 +178,11 @@ describe("tool manifest budget", () => {
     }
   });
 
-  it("fails closed when a 310-character manifest mutation exceeds the cap", async () => {
+  it("fails closed when a 350-character manifest mutation exceeds the cap", async () => {
     const tools = buildTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
     const sentence = " This ordinary manifest mutation adds realistic English guidance for a workflow tool without changing its schema contract.";
-    const prose = sentence.repeat(3).slice(0, 310);
-    expect(prose).toHaveLength(310);
+    const prose = sentence.repeat(4).slice(0, 350);
+    expect(prose).toHaveLength(350);
     const mutated = { tools: projectPiToolManifest(tools), mutation: prose };
     expect(await exactOrAttested("pi", JSON.stringify(mutated))).toBeGreaterThan(MAX_MANIFEST_TOKENS);
   });
@@ -192,14 +194,14 @@ describe("tool manifest budget", () => {
     expect(await exactOrAttested("pi", golden, unavailable)).toBe(ATTESTED.pi.tokens);
 
     const sentence = " This ordinary manifest mutation adds realistic English guidance for a workflow tool without changing its schema contract.";
-    const changed = JSON.stringify({ tools: projectPiToolManifest(tools), mutation: sentence.repeat(3).slice(0, 310) });
+    const changed = JSON.stringify({ tools: projectPiToolManifest(tools), mutation: sentence.repeat(4).slice(0, 350) });
     await expect(exactOrAttested("pi", changed, unavailable)).rejects.toThrow(/not the attested golden payload/);
   });
 
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(46);
+    expect(tools).toHaveLength(47);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);

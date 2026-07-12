@@ -1953,6 +1953,15 @@ export function resolveParkedGate(
   const next: WorkflowRun = { ...run, steps: run.steps.map((r) => ({ ...r })) };
   const at = now();
   const decidedBy = opts.decidedBy ?? 'operator';
+  next.gateDecisions = [
+    ...(run.gateDecisions ?? []),
+    {
+      gateKey: parked.ref ?? parked.description,
+      decision,
+      actor: decidedBy,
+      at,
+    },
+  ];
 
   if (decision === 'reject') {
     if (parked.scope === 'gateNode' && parked.nodeId) {

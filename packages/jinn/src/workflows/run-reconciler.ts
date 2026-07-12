@@ -46,7 +46,6 @@ import {
   publishInitialWorkflowRun,
   workflowTriggerSource,
   saveRun,
-  workflowRunTriggerTodoId,
   WORKFLOW_RUN_SCHEMA_VERSION,
   type WorkflowRun,
   type InitialWorkflowRunPublication,
@@ -64,9 +63,7 @@ import {
   WorkflowRunIdempotencyConflict,
   type WorkflowRunInvocationClaim,
 } from './run-idempotency.js';
-import type { WorkflowTodoBridge } from '../work-items/workflow-bridge.js';
-import { transition as transitionWorkItem } from '../work-items/transitions.js';
-import type { WorkItemStatus } from '../work-items/store.js';
+import { createPendingWorkflowGateApproval } from './approval-authority.js';
 
 /**
  * Workflow RUN RECONCILER + driver (GRS-014b) — the impure half of the v2 engine.
@@ -125,14 +122,6 @@ export interface RunDriverDeps {
    * (the gateway wires the session registry). Mid-run deletion is handled by the
    * probe/post failing honestly through the step's retry/onError policy. */
   sessionExists?: (sessionId: string) => boolean;
-  /**
-   * Todos-ledger bridge (GRS-021a): mints the run-level work item at start,
-   * links the step sessions the driver SPAWNS, and reflects run terminals
-   * (`completed → done`, `failed → blocked`). OPTIONAL and best-effort by
-   * contract — absent in unit tests and on drivers that don't wire it; a ledger
-   * failure must never affect the run (every call site is guarded).
-   */
-  workItems?: WorkflowTodoBridge;
   /** Gateway-owned projection of one durable workflow run into the session list.
    * Best-effort: a projection failure is logged and never changes run execution. */
   syncRunSession?: (run: WorkflowRun) => string | undefined;
@@ -164,104 +153,31 @@ function syncRunSessionBestEffort(deps: RunDriverDeps, run: WorkflowRun): string
  * best-effort, so a list/index failure can never roll back or fail execution. */
 function persistRun(deps: RunDriverDeps, candidate: WorkflowRun): WorkflowRun {
   const previous = getRun(deps.root, candidate.workflowId, candidate.runId);
+  let nativeCandidate = candidate;
+  if (candidate.status === 'parked' && candidate.parked && !candidate.parked.approval) {
+    const definition = candidate.definitionSnapshot ?? deps.getDefinition(deps.root, candidate.workflowId);
+    if (definition) {
+      nativeCandidate = {
+        ...candidate,
+        parked: {
+          ...candidate.parked,
+          approval: createPendingWorkflowGateApproval(
+            candidate,
+            definition,
+            candidate.parked.at ?? (deps.now ?? (() => new Date().toISOString()))(),
+          ),
+        },
+      };
+    }
+  }
   const stamped: WorkflowRun = {
-    ...candidate,
+    ...nativeCandidate,
     schemaVersion: WORKFLOW_RUN_SCHEMA_VERSION,
     revision: Math.max(previous?.revision ?? 0, candidate.revision ?? 0) + 1,
   };
   saveRun(deps.root, stamped);
   syncRunSessionBestEffort(deps, stamped);
   return stamped;
-}
-
-/** Clear a mirrored Todo approval to match a gate the RUN AUTHORITY resolved
- *  (GRS-021b QA finding 1) — best-effort, idempotent in the bridge (a no-op when
- *  there is no pending mirror). The ledger REACTS to the run; this never touches
- *  the run/resolve path, so park/resolve semantics and their goldens are unchanged. */
-function clearParkMirrorOnTodo(deps: RunDriverDeps, run: WorkflowRun | null, decision: 'approve' | 'reject', decidedBy = 'operator'): void {
-  if (!run) return;
-  try {
-    deps.workItems?.clearParkMirror(run, decision, decidedBy);
-  } catch (err) {
-    deps.log?.('warn', `[workflow-runs] run ${run.runId}: Todo park-mirror clear failed: ${(err as Error).message}`);
-  }
-}
-
-/** Reflect a terminal run onto its Todo (best-effort, idempotent in the bridge). */
-function reflectRunTerminalOnTodo(deps: RunDriverDeps, run: WorkflowRun | null): void {
-  if (!run || (run.status !== 'completed' && run.status !== 'failed')) return;
-  try {
-    deps.workItems?.onRunTerminal(run);
-  } catch (err) {
-    deps.log?.('warn', `[workflow-runs] run ${run.runId}: Todo terminal reflect failed: ${(err as Error).message}`);
-  }
-  // Terminal-repair: a terminal run must NEVER keep a pending mirror. Idempotent —
-  // when resolve already cleared it, this is a no-op (QA finding 1).
-  clearParkMirrorOnTodo(deps, run, run.status === 'failed' ? 'reject' : 'approve');
-}
-
-/**
- * Mirror a PARKED run's approval gate onto its Todo (GRS-021b, design §1.3): the
- * run surfaces in the ONE operator queue as a pending approval whose ref
- * (`workflow-gate:…`) routes any decision back to the shipped resolve-gate. Best-
- * effort like every ledger bridge — a throwing ledger NEVER changes park
- * semantics — and idempotent in the store (a sweep re-mirror of the same park is
- * event-silent). The run store stays the single authority; this only enqueues.
- */
-function mirrorParkOnTodo(deps: RunDriverDeps, run: WorkflowRun | null): void {
-  if (!run || run.status !== 'parked' || !run.parked) return;
-  try {
-    deps.workItems?.mirrorParkedGate(run, {
-      description: run.parked.description,
-      ...(run.parked.ref ? { ref: run.parked.ref } : {}),
-    });
-  } catch (err) {
-    deps.log?.('warn', `[workflow-runs] run ${run.runId}: Todo park mirror failed: ${(err as Error).message}`);
-  }
-}
-
-function settledStepKeys(run: WorkflowRun): Set<string> {
-  return new Set(
-    run.steps
-      .filter((s) => ['done', 'skipped', 'inline', 'checkpoint', 'routed', 'fired', 'failed'].includes(s.status))
-      .map((s) => `${s.nodeId}:${s.round ?? 1}:${s.status}`),
-  );
-}
-
-function applyTodoTransitions(
-  deps: RunDriverDeps,
-  def: EditableWorkflowDefinition,
-  before: WorkflowRun,
-  after: WorkflowRun,
-): WorkflowRun {
-  const triggerTodoId = workflowRunTriggerTodoId(after);
-  if (!triggerTodoId || after.status === 'failed' || after.status === 'cancelled' || after.stopping) return after;
-  const beforeSettled = settledStepKeys(before);
-  let current = after;
-  for (const receipt of after.steps) {
-    const key = `${receipt.nodeId}:${receipt.round ?? 1}:${receipt.status}`;
-    if (beforeSettled.has(key)) continue;
-    if (!['done', 'skipped', 'inline', 'checkpoint', 'routed', 'fired'].includes(receipt.status)) continue;
-    const node = def.nodes.find((n) => n.id === receipt.nodeId && n.type === 'step');
-    const toStatus = node?.todoTransition as WorkItemStatus | undefined;
-    if (!toStatus) continue;
-    try {
-      transitionWorkItem(triggerTodoId, toStatus, 'workflow-run', {
-        bounce: toStatus === 'executing',
-        detail: { workflowId: after.workflowId, runId: after.runId, nodeId: receipt.nodeId },
-      });
-    } catch (err) {
-      const now = deps.now ?? (() => new Date().toISOString());
-      current = requestWorkflowRunTerminal(current, 'failed', [{
-        code: 'todo-transition-failed',
-        message: `step "${receipt.nodeId}" could not transition Todo ${triggerTodoId} to ${toStatus}: ${(err as Error).message}`,
-        ref: receipt.nodeId,
-      }], now());
-      current = persistRun(deps, current);
-      return current;
-    }
-  }
-  return current;
 }
 
 export interface StartRunOptions {
@@ -284,8 +200,6 @@ export interface StartRunOptions {
   knownEngines?: Iterable<string>;
   maxNodes?: number;
   makeRunId?: () => string;
-  /** Legacy input seam: new todo-status starts carry this as trigger.payload.todoId. */
-  triggerTodoId?: string;
   /** Stable authorization namespace. Never use a session/capability/token value. */
   principal?: string;
   /** Allows transports to distinguish an exact replay (200) from a new run (201/422). */
@@ -476,22 +390,12 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
       return current;
     }
 
-    const beforeAdvance = current;
     const result = advanceRun(current, plan, deps.probeStepSession, now, {
       ...(deps.evaluateGate ? { evaluateGate: deps.evaluateGate } : {}),
       ...(deps.probeSessionTurn ? { probeSessionTurn: deps.probeSessionTurn } : {}),
     });
     current = result.run;
     if (result.changed) current = persistRun(deps, current);
-    let transitionRequestedStop = false;
-    if (result.changed) {
-      const progressed = applyTodoTransitions(deps, def, beforeAdvance, current);
-      if (progressed !== current) {
-        current = progressed;
-        if (current.status !== 'running') return current;
-        transitionRequestedStop = !!current.stopping && !beforeAdvance.stopping;
-      }
-    }
 
     // Execute STOP intents (GRS-016b timeouts) AFTER persisting the settle and
     // BEFORE any dispatch — a timeout-retry must stop the old attempt's session
@@ -515,7 +419,6 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
     // A Todo-transition failure can be discovered after the planner already
     // collected this pass's dispatch batch. Re-plan under `stopping` before using
     // those stale intents; a failing run must never start new siblings.
-    if (transitionRequestedStop) continue;
     // Quiescent only when a pass neither changed state nor asked for a dispatch. A
     // changed-but-dispatchless pass (a settle at an undecided loop boundary, a loop
     // splice, a loopExit stamp — GRS-014e; a drain settle or a parked probe-only
@@ -629,18 +532,6 @@ async function driveRunLocked(deps: RunDriverDeps, def: EditableWorkflowDefiniti
           : markRunning(current, nodeId, spawned, now, round);
         if (createdSharedSession) current = { ...current, sharedSessionId: spawned.sessionId };
         current = persistRun(deps, current);
-        // Todos ledger (GRS-021a): link the attempt the driver just SPAWNED to
-        // the run's work item — fresh spawns + the shared session at creation.
-        // Follow-up posts are skipped: a 'workflow'-mode reuse is already linked
-        // and an 'existing'-mode target is a session the workflow does not own.
-        // Best-effort: a ledger failure never affects the run.
-        if (mode === 'fresh' || createdSharedSession) {
-          try {
-            deps.workItems?.linkRunSession(current, spawned.sessionId);
-          } catch (linkErr) {
-            deps.log?.('warn', `[workflow-runs] run ${current.runId}: Todo step-link failed: ${(linkErr as Error).message}`);
-          }
-        }
       } catch (err) {
         current = markSpawnFailure(current, plan, nodeId, (err as Error).message, now, round);
         current = persistRun(deps, current);
@@ -679,9 +570,7 @@ export async function startWorkflowRun(
   const now = deps.now ?? (() => new Date().toISOString());
   let runId = (opts.makeRunId ?? (() => newRunId(now)))();
   const baseTrigger: WorkflowRunTrigger = opts.trigger ?? { kind: 'manual' };
-  const trigger: WorkflowRunTrigger = opts.triggerTodoId
-    ? normalizeWorkflowTrigger(baseTrigger, opts.triggerTodoId)
-    : baseTrigger;
+  const trigger: WorkflowRunTrigger = baseTrigger;
   // Freeze caller-owned data before any persistence or async spawn. Parameters
   // comes from JSON APIs, so a JSON round-trip is both the deep copy and the durable
   // wire-format boundary; later caller mutation cannot rewrite phase context.
@@ -695,7 +584,7 @@ export async function startWorkflowRun(
     ? JSON.parse(JSON.stringify(opts.stepOverrides)) as Record<string, WorkflowStepPromptOverride>
     : undefined;
 
-  const triggerEvent = normalizeWorkflowTrigger(trigger, opts.triggerTodoId);
+  const triggerEvent = normalizeWorkflowTrigger(trigger);
   if (triggerEvent.fireRef) {
     const principal = opts.principal ?? workflowRunPrincipal(undefined, triggerEvent.source);
     const request = createWorkflowRunInvocationRequest({
@@ -830,37 +719,20 @@ export async function startWorkflowRun(
     definitionSnapshot: def,
   };
 
-  // Publish the complete durable intent before any projection, Todo, or spawn.
+  // Publish the complete durable intent before any projection or spawn.
   // The exclusive hard-link elects one owner even when several gateway processes
   // recover the same preallocated claim simultaneously.
   const publication = publishCandidate(run);
   if (!publication.owned) return publication.run;
-  const runSessionId = publication.runSessionId;
 
-  // Todos ledger (GRS-021a, design §2 — the one missing structural mint point):
-  // a workflow run is company work, so it lands in the ledger right after its
-  // durable record exists and BEFORE any spawn (mint-with-intent). Idempotent on
-  // the `workflow:<workflowId>:<runId>` sourceRef; best-effort by contract.
-  const triggerTodoId = workflowRunTriggerTodoId(run);
-  try {
-    if (triggerTodoId) deps.workItems?.linkTriggeredRunItem(run, triggerTodoId);
-    else deps.workItems?.mintRunItem(run);
-    if (runSessionId) deps.workItems?.linkRunSession(run, runSessionId);
-  } catch (err) {
-    deps.log?.('warn', `[workflow-runs] run ${runId}: Todo ${triggerTodoId ? 'trigger-link' : 'mint'} failed: ${(err as Error).message}`);
-  }
-
-  const driven = await withRunAdvanceLock(runId, () => driveRunLocked(deps, def, resolved.plan, run));
-  reflectRunTerminalOnTodo(deps, driven);
-  mirrorParkOnTodo(deps, driven); // a run that parked at start surfaces to the operator (GRS-021b)
-  return driven;
+  return withRunAdvanceLock(runId, () => driveRunLocked(deps, def, resolved.plan, run));
 }
 
 export async function startWorkflowRunFromTrigger(
   deps: RunDriverDeps,
   def: EditableWorkflowDefinition,
   trigger: WorkflowTriggerEvent,
-  opts: Omit<StartRunOptions, 'trigger' | 'triggerTodoId'> = {},
+  opts: Omit<StartRunOptions, 'trigger'> = {},
 ): Promise<WorkflowRun> {
   return startWorkflowRun(deps, def, {
     ...opts,
@@ -943,13 +815,6 @@ export async function advanceWorkflowRunById(
 
     return driveRunLocked(deps, def, resolved.plan, run);
   });
-  // Todos ledger (GRS-021a): a sweep drive that lands the run terminal reflects
-  // it onto the run's work item. Idempotent in the bridge — re-reflecting an
-  // already-mapped terminal is a no-op.
-  reflectRunTerminalOnTodo(deps, result);
-  // GRS-021b: a sweep that leaves the run parked (a fresh park, or a still-parked
-  // probe-only pass) keeps the operator queue truthful — idempotent re-mirror.
-  mirrorParkOnTodo(deps, result);
   return result;
 }
 
@@ -1022,6 +887,37 @@ export type ResolveGateOutcome =
   | { outcome: 'not-found' }
   | { outcome: 'not-parked'; run: WorkflowRun };
 
+export type EscalateGateApprovalOutcome =
+  | { outcome: 'escalated'; run: WorkflowRun }
+  | { outcome: 'not-found' }
+  | { outcome: 'not-parked'; run: WorkflowRun };
+
+export async function escalateWorkflowRunGateApproval(
+  deps: RunDriverDeps,
+  workflowId: string,
+  runId: string,
+): Promise<EscalateGateApprovalOutcome> {
+  return withRunAdvanceLock(runId, async () => {
+    const run = getRun(deps.root, workflowId, runId);
+    if (!run) return { outcome: 'not-found' as const };
+    if (run.status !== 'parked' || !run.parked?.approval || run.parked.approval.state !== 'pending') {
+      return { outcome: 'not-parked' as const, run };
+    }
+    if (run.parked.approval.escalatedAt) return { outcome: 'escalated' as const, run };
+    const at = (deps.now ?? (() => new Date().toISOString()))();
+    return {
+      outcome: 'escalated' as const,
+      run: persistRun(deps, {
+        ...run,
+        parked: {
+          ...run.parked,
+          approval: { ...run.parked.approval, escalatedAt: at },
+        },
+      }),
+    };
+  });
+}
+
 /**
  * Resolve a PARKED run's human-approval gate (the API half of the accountability
  * doorbell — design D3: "who advances a parked run: only the resolve-gate route").
@@ -1079,16 +975,6 @@ export async function resolveWorkflowRunGate(
     const driven = await driveRunLocked(deps, def, compiled.plan, persistedResolution);
     return { outcome: 'resolved' as const, run: driven };
   });
-  // Todos ledger: the gate was resolved by the RUN AUTHORITY through THIS route —
-  // clear any mirrored Todo approval to match, no matter which surface called it
-  // (the Todo route or the workflow UI's own resolve-gate), so a pending mirror
-  // never ghosts in the operator's queue (GRS-021b QA finding 1). Then reflect any
-  // terminal (an operator rejection → failed, or a post-approval drive → completed).
-  // Both best-effort; a throwing ledger never changes resolve semantics.
-  if (outcome.outcome === 'resolved') {
-    clearParkMirrorOnTodo(deps, outcome.run, decision, opts.decidedBy ?? 'operator');
-    reflectRunTerminalOnTodo(deps, outcome.run);
-  }
   return outcome;
 }
 

@@ -31,13 +31,6 @@ import type { SessionAttemptOutcome } from '../shared/types.js';
  *     to `done` (actor `policy:trust`, event-audited), so cron/fire-and-forget
  *     items never pile into a fake review queue.
  *   - Newest attempt with an explicit `failed`/`interrupted` receipt → `blocked`.
- *   - EXCEPTION — `source: 'workflow'` items derive ONLY `executing` (in-flight
- *     evidence). A run's step sessions settle between steps, and deriving
- *     `in_review` there would lie (the run is mid-flight) — worse, a trust
- *     auto-close would close the item while steps remain. The RUN is the
- *     authority for workflow items: the run driver's terminal hook
- *     (`workflow-bridge.ts`) moves them to `done`/`blocked` when the run itself
- *     completes/fails.
  *
  * All writes go through the guarded `transitions.ts` (event-audited, optimistic,
  * sticky-safe) — the reconciler is a consumer of the state machine, not a second
@@ -60,7 +53,7 @@ const IN_FLIGHT: ReadonlySet<SessionStatus> = new Set<SessionStatus>(['running',
  * terminal receipts of its linked sessions **ordered newest-first** (as
  * `listSessionsByWorkItem` returns them, by `last_activity DESC`), return the
  * status the item SHOULD have. Never yields a sticky terminal — `done` is a
- * policy/run/human decision layered on top (the TRUST hook / workflow bridge).
+ * policy/human decision layered on top by the TRUST hook.
  */
 export function deriveWorkItemStatus(
   current: WorkItemStatus,
@@ -74,9 +67,6 @@ export function deriveWorkItemStatus(
   // submission; only an explicit review bounce may reopen execution.
   if (current === 'in_review') return current;
   if (attempts.some((attempt) => IN_FLIGHT.has(attempt.status))) return 'executing';
-  // Workflow items: settles between steps are NOT review-ready evidence — the
-  // run driver owns their terminal truth (see module docstring).
-  if (source === 'workflow') return current;
   // Nothing in flight — the most recent attempt (index 0, newest-first) is the
   // authority (an old clean settle must not mask a newer failure, and a newer
   // clean retry must clear an older failure).

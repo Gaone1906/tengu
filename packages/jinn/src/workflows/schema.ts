@@ -127,7 +127,6 @@ export const workflowNodeSchema = z.strictObject({
   cadence: z.string().optional(),
   instructions: z.string().optional(),
   options: workflowStepOptionsSchema.optional(),
-  todoTransition: z.enum(WORK_ITEM_STATUSES).optional(),
   switchMode: z.enum(SWITCH_MODES).optional(),
   failMessage: z.string().optional(),
   waitMinutes: z.number().int().optional(),
@@ -296,7 +295,6 @@ export const workflowSopStepSchema = z.strictObject({
   instructions: z.string().optional(),
   optional: z.boolean().optional(),
   options: workflowStepOptionsSchema.optional(),
-  todoTransition: z.enum(WORK_ITEM_STATUSES).optional(),
 });
 
 export const workflowSopSchema = z.strictObject({
@@ -323,7 +321,6 @@ export const workflowTriggerBindingPlanSchema = z.strictObject({
   timeoutMs: finiteNumber.optional(),
   stdoutMaxBytes: finiteNumber.optional(),
   stderrMaxBytes: finiteNumber.optional(),
-  approvalWorkItemId: z.string().optional(),
   activation: z.enum(['active', 'pending_approval', 'disabled']).optional(),
 });
 
@@ -412,55 +409,79 @@ export type WorkflowDirectUpdateTransport = z.infer<typeof workflowDirectUpdateT
 export type WorkflowMutateCreateTransport = z.infer<typeof workflowMutateCreateTransportSchema>;
 export type WorkflowMutateUpdateTransport = z.infer<typeof workflowMutateUpdateTransportSchema>;
 
+function assertNoTodoTransition(input: unknown): void {
+  const visit = (value: unknown): boolean => {
+    if (!value || typeof value !== 'object') return false;
+    if (Array.isArray(value)) return value.some(visit);
+    const record = value as Record<string, unknown>;
+    return Object.prototype.hasOwnProperty.call(record, 'todoTransition')
+      || Object.values(record).some(visit);
+  };
+  if (visit(input)) throw new Error('todoTransition is not supported; Workflows and Todos are independent');
+}
+
 export function parseWorkflowDefinition(input: unknown): WorkflowDefinitionDocument {
+  assertNoTodoTransition(input);
   return workflowDefinitionSchema.parse(input);
 }
 
 export function parseWorkflowDefinitionPatch(input: unknown): WorkflowDefinitionPatch {
+  assertNoTodoTransition(input);
   return workflowDefinitionPatchSchema.parse(input);
 }
 
 export function parseWorkflowSop(input: unknown): WorkflowSopInput {
+  assertNoTodoTransition(input);
   return workflowSopSchema.parse(input);
 }
 
 export function parseWorkflowPlanInput(input: unknown): WorkflowPlanInput {
+  assertNoTodoTransition(input);
   return workflowPlanInputSchema.parse(input);
 }
 
 export function parseWorkflowValidateInput(input: unknown): WorkflowValidateInput {
+  assertNoTodoTransition(input);
   return workflowValidateInputSchema.parse(input);
 }
 
 export function parseWorkflowCreateInput(input: unknown): WorkflowCreateInput {
+  assertNoTodoTransition(input);
   return workflowCreateInputSchema.parse(input);
 }
 
 export function parseWorkflowUpdateInput(input: unknown): WorkflowUpdateInput {
+  assertNoTodoTransition(input);
   return workflowUpdateInputSchema.parse(input);
 }
 
 export function parseWorkflowPlanTransport(input: unknown): WorkflowPlanTransport {
+  assertNoTodoTransition(input);
   return workflowPlanTransportSchema.parse(input);
 }
 
 export function parseWorkflowValidateTransport(input: unknown): WorkflowValidateTransport {
+  assertNoTodoTransition(input);
   return workflowValidateTransportSchema.parse(input);
 }
 
 export function parseWorkflowDirectCreateTransport(input: unknown): WorkflowDirectCreateTransport {
+  assertNoTodoTransition(input);
   return workflowDirectCreateTransportSchema.parse(input);
 }
 
 export function parseWorkflowDirectUpdateTransport(input: unknown): WorkflowDirectUpdateTransport {
+  assertNoTodoTransition(input);
   return workflowDirectUpdateTransportSchema.parse(input);
 }
 
 export function parseWorkflowMutateCreateTransport(input: unknown): WorkflowMutateCreateTransport {
+  assertNoTodoTransition(input);
   return workflowMutateCreateTransportSchema.parse(input);
 }
 
 export function parseWorkflowMutateUpdateTransport(input: unknown): WorkflowMutateUpdateTransport {
+  assertNoTodoTransition(input);
   return workflowMutateUpdateTransportSchema.parse(input);
 }
 

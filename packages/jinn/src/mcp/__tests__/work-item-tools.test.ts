@@ -72,7 +72,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("archive_work_item");
     expect(names).toContain("delete_trigger");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(46);
+    expect(names).toHaveLength(47);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {
@@ -117,7 +117,7 @@ describe("work-item tools — unit (stub gateway)", () => {
     expect(out.workItems[0]).toEqual({ id: "wi_1", title: "T", status: "blocked", assignee: null, department: null, source: "session", version: 7, updatedAt: null });
   });
 
-  it("get returns full detail including acceptance/policy/approval/spend/workflowRun", async () => {
+  it("get returns full Todo detail without projecting Workflow run state", async () => {
     const { ctx } = stub(() => ({
       status: 200,
       body: {
@@ -135,11 +135,11 @@ describe("work-item tools — unit (stub gateway)", () => {
           source: "workflow",
         },
         spendUsd: 1.25,
-        workflowRun: { workflowId: "wf", runId: "run_1" },
       },
     }));
     const out = (await tool("get_work_item").handler({ id: "wi_2" }, ctx)) as Record<string, unknown>;
-    expect(out).toMatchObject({ spendUsd: 1.25, workflowRun: { workflowId: "wf", runId: "run_1" } });
+    expect(out).toMatchObject({ spendUsd: 1.25 });
+    expect(out).not.toHaveProperty("workflowRun");
     expect(out.workItem).toMatchObject({ acceptance: "- pass", approvalState: "pending", rounds: 1 });
   });
 

@@ -44,7 +44,7 @@ describe("native approval decision atomicity (QA finding 2)", () => {
   it("happy path: approve+in_review commits the decision AND the status consequence together", async () => {
     inject.failTransition = false;
     const id = pendingInReview("atomic-ok");
-    const r = await approvals.decideWorkItemApproval({ id, decision: "approve", note: "ship" }, {});
+    const r = await approvals.decideWorkItemApproval({ id, decision: "approve", note: "ship" });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.item.status).toBe("done");
@@ -56,7 +56,7 @@ describe("native approval decision atomicity (QA finding 2)", () => {
   it("a failing STATUS write rolls back the WHOLE decision — no approved+in_review, no orphan event", async () => {
     const id = pendingInReview("atomic-rollback");
     inject.failTransition = true;
-    await expect(approvals.decideWorkItemApproval({ id, decision: "approve", note: "ship" }, {})).rejects.toThrow(
+    await expect(approvals.decideWorkItemApproval({ id, decision: "approve", note: "ship" })).rejects.toThrow(
       "injected status-write failure",
     );
     inject.failTransition = false;
@@ -72,7 +72,7 @@ describe("native approval decision atomicity (QA finding 2)", () => {
     expect(kinds).toEqual(["created", "approval_requested"]);
 
     // And the item is still cleanly decidable once the fault clears.
-    const r = await approvals.decideWorkItemApproval({ id, decision: "approve" }, {});
+    const r = await approvals.decideWorkItemApproval({ id, decision: "approve" });
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.item.status).toBe("done");
   });
@@ -80,7 +80,7 @@ describe("native approval decision atomicity (QA finding 2)", () => {
   it("a reject bounce is atomic too — a failing status write leaves rounds and approval untouched", async () => {
     const id = pendingInReview("atomic-reject");
     inject.failTransition = true;
-    await expect(approvals.decideWorkItemApproval({ id, decision: "reject", note: "no" }, {})).rejects.toThrow(
+    await expect(approvals.decideWorkItemApproval({ id, decision: "reject", note: "no" })).rejects.toThrow(
       "injected status-write failure",
     );
     inject.failTransition = false;

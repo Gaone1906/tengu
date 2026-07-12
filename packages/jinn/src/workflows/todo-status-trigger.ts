@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { getDefinition, listDefinitions } from './definition-store.js';
 import { startWorkflowRunFromTrigger, type RunDriverDeps } from './run-reconciler.js';
-import { findRunByTriggerFireRef, getRun, listActiveRunRefs, workflowRunTriggerTodoId, type WorkflowRun } from './run-store.js';
+import { findRunByTriggerFireRef, type WorkflowRun } from './run-store.js';
 import type { EditableWorkflowDefinition } from './definition.js';
 import { initDb } from '../sessions/registry.js';
 import type { WorkflowTrigger } from './derive.js';
@@ -34,8 +34,6 @@ export interface TodoStatusReplayOutcome {
   outcomes: Array<Pick<TodoStatusTriggerOutcome, 'workflowId' | 'outcome'>>;
 }
 
-const NON_TERMINAL_RUN_STATUSES = new Set(['running', 'parked', 'dispatched']);
-
 const TODO_EVENT_CLAIMS_TABLE = 'workflow_todo_event_claims';
 const CLAIMS_MIGRATION_KEY = 'todo_status_event_claims_migrated';
 const LEGACY_WATERMARK_KEY = 'todo_status_replay_watermark';
@@ -63,19 +61,6 @@ function triggerMatches(trigger: WorkflowTrigger, event: TodoStatusWorkflowEvent
   if (filter.department && filter.department !== event.item.department) return false;
   if (filter.assignee && filter.assignee !== event.item.assignee) return false;
   return true;
-}
-
-function hasNonTerminalRunForTodo(deps: RunDriverDeps, workflowId: string, todoId: string): boolean {
-  // Only active (non-terminal) runs can match — read the active-run index instead
-  // of parsing every lifetime run file for this workflow. The status re-check
-  // guards against a stale index entry.
-  for (const ref of listActiveRunRefs(deps.root)) {
-    if (ref.workflowId !== workflowId) continue;
-    const run = getRun(deps.root, workflowId, ref.runId);
-    if (!run || !NON_TERMINAL_RUN_STATUSES.has(run.status)) continue;
-    if (workflowRunTriggerTodoId(run) === todoId) return true;
-  }
-  return false;
 }
 
 /** Resolve every active workflow whose trigger is a todo-status-change, once — so
@@ -275,15 +260,6 @@ export async function fireTodoStatusChangeWorkflows(
       });
       continue;
     }
-    if (hasNonTerminalRunForTodo(deps, def.id, event.workItemId)) {
-      outcomes.push({
-        workflowId: def.id,
-        outcome: 'suppressed',
-        detail: `workflow "${def.id}" already has a non-terminal run linked to Todo ${event.workItemId}`,
-      });
-      continue;
-    }
-
     const run = await startWorkflowRunFromTrigger(deps, def, {
       source: 'todo-status-change',
       event: 'todo.status_changed',

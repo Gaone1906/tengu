@@ -907,11 +907,10 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     expect(JSON.stringify(misuse.body)).not.toContain("different private content");
   });
 
-  it("invalidates stale edits after status, approval, reconciler, and Workflow mirror changes", async () => {
+  it("invalidates stale edits after status, approval, and reconciler changes", async () => {
     const transitions = await import("../../work-items/transitions.js");
     const approvals = await import("../../work-items/approvals.js");
     const reconcile = await import("../../work-items/reconcile.js");
-    const workflow = await import("../../work-items/workflow-bridge.js");
     const stale: Array<{ id: string; version: number; currentVersion: number }> = [];
 
     const statusItem = store.createWorkItem({ title: "status stale" });
@@ -929,13 +928,6 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     reg.updateSession(session.id, { status: "running" });
     reconcile.reconcileWorkItem(reconciledItem.id);
     stale.push({ id: reconciledItem.id, version: beforeReconcile, currentVersion: beforeReconcile + 1 });
-
-    const bridge = workflow.createWorkflowTodoBridge();
-    const run = { workflowId: "route-cas-workflow", runId: "run-one", title: "Workflow stale" };
-    bridge.mintRunItem(run);
-    const workflowItem = store.getWorkItemBySourceRef("workflow", workflow.workflowRunSourceRef(run))!;
-    bridge.mirrorParkedGate(run, { ref: "approve", description: "Approve" });
-    stale.push({ id: workflowItem.id, version: workflowItem.version, currentVersion: 2 });
 
     for (const target of stale) {
       const cap = makeRes();
@@ -1052,17 +1044,17 @@ describe("POST /api/work-items — provenance and approval routing fields", () =
     expect(cooQueue.body.workItems[0]).toMatchObject({
       id: cooBlocked.id,
       sessionRef: { sessionId: coo.id },
-      workflowRun: null,
       approvalState: null,
       approvalTarget: null,
     });
     expect(cooQueue.body.workItems[1]).toMatchObject({
       id: cooApproval.id,
-      workflowRun: { workflowId: "wf-coo", runId: "run-1" },
       sessionRef: null,
       approvalState: "pending",
       approvalTarget: "coo",
     });
+    expect(cooQueue.body.workItems[0]).not.toHaveProperty("workflowRun");
+    expect(cooQueue.body.workItems[1]).not.toHaveProperty("workflowRun");
 
     const workerQueue = makeRes();
     await api.handleApiRequest(

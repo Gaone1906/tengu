@@ -65,7 +65,7 @@ function workItem(status: WorkItemStatusWire): WorkItemFullWire {
 }
 
 function detail(status: WorkItemStatusWire): WorkItemDetailWire {
-  return { workItem: workItem(status), spendUsd: 0, workflowRun: null, events: [] }
+  return { workItem: workItem(status), spendUsd: 0, events: [] }
 }
 
 function editResult(item: WorkItemFullWire, patch: Record<string, unknown>, version: number, replayed = false) {

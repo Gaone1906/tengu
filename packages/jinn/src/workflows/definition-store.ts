@@ -41,6 +41,7 @@ import { workflowDefinitionSchema } from './schema.js';
  */
 
 const DEFINITION_SUFFIX = '.definition.json';
+const warnedLegacyTodoTransitions = new Set<string>();
 
 /** Compact list-view row. Full graphs are only returned by `getDefinition`. */
 export interface WorkflowDefinitionSummary {
@@ -228,7 +229,23 @@ function readOne(root: string, id: string): EditableWorkflowDefinition | null {
     throw e;
   }
   try {
-    return JSON.parse(raw) as EditableWorkflowDefinition;
+    const parsed = JSON.parse(raw) as EditableWorkflowDefinition;
+    let stripped = false;
+    if (Array.isArray(parsed.nodes)) {
+      for (const node of parsed.nodes) {
+        if (!node || typeof node !== 'object' || !Object.prototype.hasOwnProperty.call(node, 'todoTransition')) continue;
+        delete (node as unknown as Record<string, unknown>).todoTransition;
+        stripped = true;
+      }
+    }
+    if (stripped) {
+      const warningKey = `${parsed.id ?? id}:${parsed.version ?? 'unknown'}`;
+      if (!warnedLegacyTodoTransitions.has(warningKey)) {
+        warnedLegacyTodoTransitions.add(warningKey);
+        console.warn(`[workflows] definition ${warningKey}: stripped legacy todoTransition; historical run snapshots remain unchanged`);
+      }
+    }
+    return parsed;
   } catch (e) {
     throw new WorkflowStoreError(
       'bad-input',

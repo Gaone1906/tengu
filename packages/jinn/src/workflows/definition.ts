@@ -4,7 +4,6 @@ import type {
   WorkflowLoop,
   WorkflowTrigger,
 } from './derive.js';
-import type { WorkItemStatus } from '../work-items/store.js';
 import { validateCronSchedule } from '../cron/validation.js';
 import {
   MAX_EDGE_CONDITIONS,
@@ -127,7 +126,6 @@ export type StepOnErrorMode = (typeof STEP_ON_ERROR_MODES)[number];
  * labels it and the target is validated at run start. */
 export type StepSessionMode = (typeof STEP_SESSION_MODES)[number];
 
-export type WorkflowTodoTransitionStatus = (typeof WORK_ITEM_STATUSES)[number];
 const WORK_ITEM_STATUS_SET = new Set<string>(WORK_ITEM_STATUSES);
 const WORK_ITEM_SOURCES = ['human', 'delegation', 'cron', 'workflow', 'session', 'connector', 'goal'] as const;
 const WORK_ITEM_SOURCE_SET = new Set<string>(WORK_ITEM_SOURCES);
@@ -243,8 +241,6 @@ export interface WorkflowNode {
    * — refused instead, the misplaced-* precedent). Additive: schemaVersion stays 1.
    */
   options?: StepNodeOptions;
-  /** Optional Todo progression to apply through guarded transitions when this step settles. */
-  todoTransition?: WorkItemStatus;
   /**
    * Switch evaluation mode (GRS-016c). Switch-only; absent = 'firstMatch'.
    */
@@ -404,8 +400,7 @@ export type ValidationCode =
   | 'trigger-todo-missing-status'
   | 'trigger-todo-bad-status'
   | 'trigger-todo-bad-filter'
-  | 'misplaced-todo-transition'
-  | 'bad-todo-transition'
+  | 'todo-transition-not-supported'
   | 'gate-node-missing-gate'
   | 'misplaced-gate-field'
   | 'misplaced-gates-field'
@@ -925,12 +920,8 @@ export function validateDefinition(def: EditableWorkflowDefinition): ValidationR
         validateStepOptions(n.options, n.id, n.optional === true, err);
       }
     }
-    if (n.todoTransition !== undefined) {
-      if (n.type !== 'step') {
-        err('misplaced-todo-transition', `node "${n.id}" of type "${n.type}" must not carry "todoTransition" (step-only)`, n.id);
-      } else if (!WORK_ITEM_STATUS_SET.has(n.todoTransition)) {
-        err('bad-todo-transition', `node "${n.id}" todoTransition "${n.todoTransition}" is invalid`, n.id);
-      }
+    if (Object.prototype.hasOwnProperty.call(n, 'todoTransition')) {
+      err('todo-transition-not-supported', `node "${n.id}" todoTransition is not supported; Workflows and Todos are independent`, n.id);
     }
     // GRS-016c: `switchMode` is switch-only; `failMessage` is fail-only + required
     // there; switch/fail nodes are ACTORLESS by construction (they spawn nothing —

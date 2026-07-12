@@ -11,19 +11,16 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'jinn-poll-trigger-home-')
 process.env.JINN_HOME = tmpHome;
 
 type Store = typeof import('../../work-items/store.js');
-type Approvals = typeof import('../../work-items/approvals.js');
 type Poll = typeof import('../poll-trigger.js');
 type RunStore = typeof import('../run-store.js');
 type CustomTriggers = typeof import('../custom-triggers.js');
 let store: Store;
-let approvals: Approvals;
 let poll: Poll;
 let runStore: RunStore;
 let customTriggers: CustomTriggers;
 
 beforeAll(async () => {
   store = await import('../../work-items/store.js');
-  approvals = await import('../../work-items/approvals.js');
   poll = await import('../poll-trigger.js');
   runStore = await import('../run-store.js');
   customTriggers = await import('../custom-triggers.js');
@@ -32,7 +29,6 @@ beforeAll(async () => {
 
 const FIXED = '2026-07-06T09:00:00.000Z';
 const now = () => FIXED;
-const nodeBin = process.execPath;
 const trigger: WorkflowNode = { id: 'trg', type: 'trigger', label: 'Manual', position: { x: 0, y: 0 }, trigger: { kind: 'manual' } };
 
 function step(id: string): WorkflowNode {
@@ -75,12 +71,8 @@ function harness(): RunDriverDeps {
   };
 }
 
-async function approvedWorkItem(name: string): Promise<string> {
-  const item = store.createWorkItem({ title: `Approve ${name}`, status: 'backlog', source: 'workflow', sourceRef: `workflow-trigger:${name}` });
-  approvals.requestApproval(item.id, { request: `Activate poll trigger ${name}`, target: 'coo' });
-  const decided = await approvals.decideWorkItemApproval({ id: item.id, decision: 'approve', decidedBy: 'coo' }, {});
-  expect(decided.ok).toBe(true);
-  return item.id;
+async function approveBinding(binding: import('../custom-triggers.js').PollWorkflowTriggerBinding) {
+  return customTriggers.decidePollActivationApproval(root, binding.name, 'approve', 'coo', { now });
 }
 
 function wait(ms: number): Promise<void> {
@@ -100,6 +92,100 @@ function staticOutputScript(name: string, output: string): string {
 }
 
 describe('workflow poll/check custom triggers', () => {
+  it('executes with a native approved activation record and no Todo approval', async () => {
+    createDefinition(root, def('poll-native-workflow', [trigger, step('a')]), { now });
+    const created = poll.createWorkflowTriggerBinding(root, {
+      kind: 'poll',
+      name: 'poll-native',
+      event: 'poll.ready',
+      targetWorkflowId: 'poll-native-workflow',
+      command: staticOutputScript('poll-native', JSON.stringify({ fire: true, payload: { ready: true } })),
+      intervalSeconds: 60,
+      timeoutMs: 1000,
+    }, { now }).binding;
+    const approved = await approveBinding(created);
+
+    const result = await poll.runPollTriggerOnce(harness(), approved, { now });
+
+    expect(result.outcome).toBe('fired');
+    expect(result.run?.trigger).toMatchObject({ source: 'poll', payload: { ready: true } });
+    expect(store.getWorkItemBySourceRef('workflow', 'workflow-trigger:poll-native:activation')).toBeUndefined();
+  });
+
+  it('revokes a native activation decision when the execution contract changes', async () => {
+    const created = poll.createWorkflowTriggerBinding(root, {
+      kind: 'poll',
+      name: 'poll-native-edit',
+      event: 'poll.ready',
+      targetWorkflowId: 'poll-native-workflow',
+      command: staticOutputScript('poll-native-edit-original', JSON.stringify({ fire: false })),
+      intervalSeconds: 60,
+      timeoutMs: 1000,
+    }, { now }).binding;
+    const approved = await approveBinding(created);
+
+    const edited = await customTriggers.updateWorkflowTriggerBinding(root, {
+      ...approved,
+      command: staticOutputScript('poll-native-edit-updated', JSON.stringify({ fire: false })),
+    });
+
+    expect(edited).toMatchObject({
+      activation: 'pending_approval',
+      approval: {
+        state: 'pending',
+        activationContractHash: expect.any(String),
+        decidedBy: null,
+        decidedAt: null,
+      },
+    });
+  });
+
+  it('migrates v1 Todo-backed poll approvals to native pending records once and requires reapproval', async () => {
+    const command = staticOutputScript('poll-v1-migration', JSON.stringify({ fire: false }));
+    const file = path.join(root, 'workflow-triggers', 'triggers.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      schemaVersion: 1,
+      triggers: [{
+        schemaVersion: 1,
+        kind: 'poll',
+        source: 'poll',
+        name: 'poll-v1-migration',
+        event: 'poll.ready',
+        targetWorkflowId: 'poll-native-workflow',
+        activation: 'active',
+        command,
+        intervalSeconds: 60,
+        timeoutMs: 1000,
+        approvalWorkItemId: 'wi_historical_audit_only',
+        createdAt: FIXED,
+        updatedAt: FIXED,
+      }],
+    }, null, 2));
+
+    await customTriggers.migrateWorkflowTriggerStore(root);
+    const first = fs.readFileSync(file, 'utf8');
+    await customTriggers.migrateWorkflowTriggerStore(root);
+    const second = fs.readFileSync(file, 'utf8');
+
+    expect(second).toBe(first);
+    const migrated = JSON.parse(first) as { schemaVersion: number; triggers: Array<Record<string, unknown>> };
+    expect(migrated.schemaVersion).toBe(2);
+    expect(migrated.triggers[0]).not.toHaveProperty('approvalWorkItemId');
+    expect(migrated.triggers[0]).toMatchObject({
+      schemaVersion: 2,
+      bindingRevision: expect.stringMatching(/^legacy-/),
+      activation: 'pending_approval',
+      activationContractHash: expect.any(String),
+      approval: {
+        state: 'pending',
+        activationContractHash: expect.any(String),
+        decidedBy: null,
+        decidedAt: null,
+      },
+    });
+  });
+
   it('exports and applies the exact poll child environment policy', () => {
     expect(customTriggers.POLL_ENV_ALLOWLIST).toEqual(['PATH', 'HOME', 'JINN_HOME']);
 
@@ -144,8 +230,7 @@ describe('workflow poll/check custom triggers', () => {
 
   it('fires on exit 0 with stdout JSON payload and emits the uniform poll trigger shape', async () => {
     createDefinition(root, def('poll-workflow', [trigger, step('a')]), { now });
-    const approvalWorkItemId = await approvedWorkItem('poll-ok');
-    const binding = poll.createWorkflowTriggerBinding(root, {
+    const binding = await approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-ok',
       event: 'poll.ready',
@@ -153,8 +238,7 @@ describe('workflow poll/check custom triggers', () => {
       command: staticOutputScript('poll-ok', JSON.stringify({ fire: true, payload: { ready: true, id: '42' } })),
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId,
-    }, { now }).binding;
+    }, { now }).binding);
 
     const result = await poll.runPollTriggerOnce(harness(), binding, { now });
 
@@ -170,8 +254,7 @@ describe('workflow poll/check custom triggers', () => {
 
   it('dedupes the same binding/output even when the poll script omits fireRef', async () => {
     createDefinition(root, def('poll-dedupe-workflow', [trigger, step('a')]), { now });
-    const approvalWorkItemId = await approvedWorkItem('poll-dedupe');
-    const binding = poll.createWorkflowTriggerBinding(root, {
+    const binding = await approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-dedupe',
       event: 'poll.ready',
@@ -179,8 +262,7 @@ describe('workflow poll/check custom triggers', () => {
       command: staticOutputScript('poll-dedupe', JSON.stringify({ fire: true, payload: { ready: true, id: 'same' } })),
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId,
-    }, { now }).binding;
+    }, { now }).binding);
 
     const first = await poll.runPollTriggerOnce(harness(), binding, { now });
     const second = await poll.runPollTriggerOnce(harness(), binding, { now });
@@ -199,8 +281,7 @@ describe('workflow poll/check custom triggers', () => {
 
   it('fails closed when executable poll fields changed after the approved activation contract', async () => {
     createDefinition(root, def('poll-mutate-workflow', [trigger, step('a')]), { now });
-    const approvalWorkItemId = await approvedWorkItem('poll-mutate');
-    const original = poll.createWorkflowTriggerBinding(root, {
+    const original = await approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-mutate',
       event: 'poll.ready',
@@ -208,8 +289,7 @@ describe('workflow poll/check custom triggers', () => {
       command: staticOutputScript('poll-mutate-original', JSON.stringify({ fire: true, payload: { id: 'original' } })),
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId,
-    }, { now }).binding;
+    }, { now }).binding);
 
     const mutated = await customTriggers.updateWorkflowTriggerBinding(root, {
       ...original,
@@ -223,7 +303,7 @@ describe('workflow poll/check custom triggers', () => {
     expect(result.outcome).toBe('not-approved');
     expect(runStore.listRuns(root, 'poll-mutate-workflow')).toHaveLength(0);
     expect(stored).toMatchObject({ activation: 'pending_approval' });
-    expect((stored as { approvalWorkItemId?: string } | null)?.approvalWorkItemId).toBeUndefined();
+    expect(stored).toMatchObject({ approval: { state: 'pending', decidedBy: null, decidedAt: null } });
   });
 
   it('runs the staged approved bytes when the original script is replaced', async () => {
@@ -231,8 +311,7 @@ describe('workflow poll/check custom triggers', () => {
     const script = path.join(root, 'poll-swap.sh');
     fs.writeFileSync(script, '#!/bin/sh\nprintf \'%s\' \'{"fire":true,"payload":{"id":"approved"}}\'\n', 'utf8');
     fs.chmodSync(script, 0o700);
-    const approvalWorkItemId = await approvedWorkItem('poll-swap');
-    const binding = poll.createWorkflowTriggerBinding(root, {
+    const binding = await approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-swap',
       event: 'poll.ready',
@@ -240,8 +319,7 @@ describe('workflow poll/check custom triggers', () => {
       command: script,
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId,
-    }, { now }).binding;
+    }, { now }).binding);
 
     fs.writeFileSync(script, '#!/bin/sh\nprintf \'%s\' \'{"fire":true,"payload":{"id":"replaced"}}\'\n', 'utf8');
     fs.chmodSync(script, 0o700);
@@ -262,8 +340,6 @@ describe('workflow poll/check custom triggers', () => {
     const script = path.join(root, 'poll-inline.sh');
     fs.writeFileSync(script, '#!/bin/sh\nprintf \'%s\' \'{"fire":true,"payload":{"id":"approved"}}\'\n', 'utf8');
     fs.chmodSync(script, 0o700);
-    const approvalWorkItemId = await approvedWorkItem('poll-inline');
-
     expect(() => poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-inline',
@@ -272,7 +348,6 @@ describe('workflow poll/check custom triggers', () => {
       command: `/bin/sh -c ${JSON.stringify(script)}`,
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId,
     }, { now })).toThrow(/not a fully pinnable poll command.*use a single absolute path/i);
 
     expect(runStore.listRuns(root, 'poll-inline-workflow')).toHaveLength(0);
@@ -286,7 +361,6 @@ describe('workflow poll/check custom triggers', () => {
     fs.writeFileSync(wrapper, `#!/bin/sh\n${helper}\n`, 'utf8');
     fs.chmodSync(helper, 0o700);
     fs.chmodSync(wrapper, 0o700);
-    const approvalWorkItemId = await approvedWorkItem('poll-unprovable');
     const attempt = (name: string, command: string) => () => poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name,
@@ -295,7 +369,6 @@ describe('workflow poll/check custom triggers', () => {
       command,
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId,
     }, { now });
 
     expect(attempt('poll-unprovable-wrapper', wrapper))
@@ -309,8 +382,7 @@ describe('workflow poll/check custom triggers', () => {
     const script = path.join(root, 'poll-pinnable.sh');
     fs.writeFileSync(script, '#!/bin/sh\nprintf \'%s\' \'{"fire":true,"payload":{"id":"pinned"}}\'\n', 'utf8');
     fs.chmodSync(script, 0o700);
-    const approvalWorkItemId = await approvedWorkItem('poll-pinnable');
-    const binding = poll.createWorkflowTriggerBinding(root, {
+    const binding = await approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-pinnable',
       event: 'poll.ready',
@@ -318,8 +390,7 @@ describe('workflow poll/check custom triggers', () => {
       command: script,
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId,
-    }, { now }).binding;
+    }, { now }).binding);
 
     const result = await poll.runPollTriggerOnce(harness(), binding, { now });
 
@@ -331,37 +402,29 @@ describe('workflow poll/check custom triggers', () => {
     expect(result.run?.trigger).toMatchObject({ payload: { id: 'pinned' } });
   });
 
-  it('does not auto-approve a legacy poll binding that has an approval item but no activation contract', async () => {
+  it('does not execute a poll binding until its native approval is decided', async () => {
     createDefinition(root, def('poll-legacy-workflow', [trigger, step('a')]), { now });
-    const approvalWorkItemId = await approvedWorkItem('poll-legacy');
-    const created = poll.createWorkflowTriggerBinding(root, {
+    const binding = poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-legacy',
       event: 'poll.ready',
       targetWorkflowId: 'poll-legacy-workflow',
-      command: `${nodeBin} -e "process.stdout.write(JSON.stringify({fire:true,payload:{id:'legacy'}}))"`,
+      command: staticOutputScript('poll-legacy', JSON.stringify({ fire: true, payload: { id: 'legacy' } })),
       intervalSeconds: 60,
       timeoutMs: 1000,
     }, { now }).binding;
 
-    const legacy = await customTriggers.updateWorkflowTriggerBinding(root, {
-      ...created,
-      approvalWorkItemId,
-      lastCheckedAt: FIXED,
-    });
-    if (legacy.kind !== 'poll') throw new Error('expected poll binding');
-    const result = await poll.runPollTriggerOnce(harness(), legacy, { now });
+    const result = await poll.runPollTriggerOnce(harness(), binding, { now });
     const stored = customTriggers.getWorkflowTriggerBinding(root, 'poll-legacy');
 
     expect(result.outcome).toBe('not-approved');
     expect(runStore.listRuns(root, 'poll-legacy-workflow')).toHaveLength(0);
-    expect((stored as { activationContractHash?: string } | null)?.activationContractHash).toBeUndefined();
+    expect(stored).toMatchObject({ activationContractHash: expect.any(String), approval: { state: 'pending' } });
   });
 
   it('treats fire:false, missing fire, and non-boolean fire as no-ops', async () => {
     createDefinition(root, def('poll-workflow', [trigger, step('a')]), { now });
-    const approvalWorkItemId = await approvedWorkItem('poll-fire-flag');
-    const mk = (name: string, stdoutObject: Record<string, unknown>) => poll.createWorkflowTriggerBinding(root, {
+    const mk = (name: string, stdoutObject: Record<string, unknown>) => approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name,
       event: 'poll.ready',
@@ -369,17 +432,16 @@ describe('workflow poll/check custom triggers', () => {
       command: staticOutputScript(name, JSON.stringify(stdoutObject)),
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId,
-    }, { now }).binding;
+    }, { now }).binding);
 
-    await expect(poll.runPollTriggerOnce(harness(), mk('poll-fire-false', { fire: false, payload: { ready: true } }), { now }))
+    await expect(poll.runPollTriggerOnce(harness(), await mk('poll-fire-false', { fire: false, payload: { ready: true } }), { now }))
       .resolves.toMatchObject({ outcome: 'no-fire' });
-    await expect(poll.runPollTriggerOnce(harness(), mk('poll-fire-absent', { payload: { ready: true } }), { now }))
+    await expect(poll.runPollTriggerOnce(harness(), await mk('poll-fire-absent', { payload: { ready: true } }), { now }))
       .resolves.toMatchObject({ outcome: 'no-fire' });
-    await expect(poll.runPollTriggerOnce(harness(), mk('poll-fire-string', { fire: 'true', payload: { ready: true } }), { now }))
+    await expect(poll.runPollTriggerOnce(harness(), await mk('poll-fire-string', { fire: 'true', payload: { ready: true } }), { now }))
       .resolves.toMatchObject({ outcome: 'no-fire' });
 
-    const fired = await poll.runPollTriggerOnce(harness(), mk('poll-fire-true', { fire: true, payload: { ready: true } }), { now });
+    const fired = await poll.runPollTriggerOnce(harness(), await mk('poll-fire-true', { fire: true, payload: { ready: true } }), { now });
     expect(fired.outcome).toBe('fired');
     expect(fired.run?.trigger).toMatchObject({
       source: 'poll',
@@ -388,10 +450,8 @@ describe('workflow poll/check custom triggers', () => {
     });
   });
 
-  it('does not run until the COO approval item is approved', async () => {
+  it('does not run until the native activation approval is approved', async () => {
     createDefinition(root, def('poll-workflow', [trigger, step('a')]), { now });
-    const item = store.createWorkItem({ title: 'Approve pending poll', status: 'backlog', source: 'workflow', sourceRef: 'workflow-trigger:poll-pending' });
-    approvals.requestApproval(item.id, { request: 'Activate poll trigger poll-pending', target: 'coo' });
     const binding = poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-pending',
@@ -400,7 +460,6 @@ describe('workflow poll/check custom triggers', () => {
       command: staticOutputScript('poll-pending', JSON.stringify({ ready: true })),
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId: item.id,
     }, { now }).binding;
 
     const result = await poll.runPollTriggerOnce(harness(), binding, { now });
@@ -410,8 +469,7 @@ describe('workflow poll/check custom triggers', () => {
 
   it('does not fire on nonzero exit or invalid JSON', async () => {
     createDefinition(root, def('poll-workflow', [trigger, step('a')]), { now });
-    const approvalWorkItemId = await approvedWorkItem('poll-bad');
-    const nonzero = poll.createWorkflowTriggerBinding(root, {
+    const nonzero = await approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-nonzero',
       event: 'poll.ready',
@@ -419,9 +477,8 @@ describe('workflow poll/check custom triggers', () => {
       command: pinnableScript('poll-nonzero', 'exit 2'),
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId,
-    }, { now }).binding;
-    const invalid = poll.createWorkflowTriggerBinding(root, {
+    }, { now }).binding);
+    const invalid = await approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-invalid',
       event: 'poll.ready',
@@ -429,8 +486,7 @@ describe('workflow poll/check custom triggers', () => {
       command: staticOutputScript('poll-invalid', 'not json'),
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId,
-    }, { now }).binding;
+    }, { now }).binding);
 
     await expect(poll.runPollTriggerOnce(harness(), nonzero, { now })).resolves.toMatchObject({ outcome: 'nonzero' });
     await expect(poll.runPollTriggerOnce(harness(), invalid, { now })).resolves.toMatchObject({ outcome: 'invalid-json' });
@@ -438,8 +494,7 @@ describe('workflow poll/check custom triggers', () => {
 
   it('kills a hung script on timeout and refuses oversized output', async () => {
     createDefinition(root, def('poll-workflow', [trigger, step('a')]), { now });
-    const approvalWorkItemId = await approvedWorkItem('poll-bounds');
-    const hung = poll.createWorkflowTriggerBinding(root, {
+    const hung = await approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-hung',
       event: 'poll.ready',
@@ -447,9 +502,8 @@ describe('workflow poll/check custom triggers', () => {
       command: pinnableScript('poll-hung', 'while :; do :; done'),
       intervalSeconds: 60,
       timeoutMs: 50,
-      approvalWorkItemId,
-    }, { now }).binding;
-    const noisy = poll.createWorkflowTriggerBinding(root, {
+    }, { now }).binding);
+    const noisy = await approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-noisy',
       event: 'poll.ready',
@@ -458,8 +512,7 @@ describe('workflow poll/check custom triggers', () => {
       intervalSeconds: 60,
       timeoutMs: 1000,
       stdoutMaxBytes: 32,
-      approvalWorkItemId,
-    }, { now }).binding;
+    }, { now }).binding);
 
     await expect(poll.runPollTriggerOnce(harness(), hung, { now })).resolves.toMatchObject({ outcome: 'timeout' });
     await expect(poll.runPollTriggerOnce(harness(), noisy, { now })).resolves.toMatchObject({ outcome: 'output-too-large' });
@@ -469,8 +522,6 @@ describe('workflow poll/check custom triggers', () => {
     createDefinition(root, def('poll-timeout-group-workflow', [trigger, step('a')]), { now });
     const first = staticOutputScript('poll-first', JSON.stringify({ fire: false }));
     const second = staticOutputScript('poll-second', JSON.stringify({ fire: false }));
-    const approvalWorkItemId = await approvedWorkItem('poll-timeout-group');
-
     expect(() => poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-timeout-group',
@@ -479,15 +530,13 @@ describe('workflow poll/check custom triggers', () => {
       command: `${first} & ${second}`,
       intervalSeconds: 60,
       timeoutMs: 50,
-      approvalWorkItemId,
     }, { now })).toThrow(/not a fully pinnable poll command/i);
   });
 
   it('deleting an in-flight poll binding aborts and awaits the command before returning', async () => {
     createDefinition(root, def('poll-delete-workflow', [trigger, step('a')]), { now });
     const script = pinnableScript('delete-in-flight', 'while :; do :; done');
-    const approvalWorkItemId = await approvedWorkItem('poll-delete-in-flight');
-    const binding = poll.createWorkflowTriggerBinding(root, {
+    const binding = await approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-delete-in-flight',
       event: 'poll.ready',
@@ -495,8 +544,7 @@ describe('workflow poll/check custom triggers', () => {
       command: script,
       intervalSeconds: 60,
       timeoutMs: 5_000,
-      approvalWorkItemId,
-    }, { now }).binding;
+    }, { now }).binding);
     const stagedPaths = binding.activationContract?.executableArtifacts
       .filter((artifact) => artifact.role === 'executable')
       .map((artifact) => artifact.path) ?? [];
@@ -516,8 +564,7 @@ describe('workflow poll/check custom triggers', () => {
   it('disabling an in-flight poll binding aborts and awaits the command before returning', async () => {
     createDefinition(root, def('poll-disable-workflow', [trigger, step('a')]), { now });
     const script = pinnableScript('disable-in-flight', 'while :; do :; done');
-    const approvalWorkItemId = await approvedWorkItem('poll-disable-in-flight');
-    const binding = poll.createWorkflowTriggerBinding(root, {
+    const binding = await approveBinding(poll.createWorkflowTriggerBinding(root, {
       kind: 'poll',
       name: 'poll-disable-in-flight',
       event: 'poll.ready',
@@ -525,8 +572,7 @@ describe('workflow poll/check custom triggers', () => {
       command: script,
       intervalSeconds: 60,
       timeoutMs: 5_000,
-      approvalWorkItemId,
-    }, { now }).binding;
+    }, { now }).binding);
 
     const execution = poll.runPollTriggerOnce(harness(), binding, { now });
     await wait(20);
@@ -543,7 +589,6 @@ describe('workflow poll/check custom triggers', () => {
 
   it('rejects poll scripts that dynamically resolve environment inputs', async () => {
     createDefinition(root, def('poll-env-workflow', [trigger, step('a')]), { now });
-    const approvalWorkItemId = await approvedWorkItem('poll-env');
     const script = pinnableScript('poll-env', `printf '%s' "$JINN_TEST_SECRET"`);
 
     expect(() => poll.createWorkflowTriggerBinding(root, {
@@ -554,7 +599,6 @@ describe('workflow poll/check custom triggers', () => {
       command: script,
       intervalSeconds: 60,
       timeoutMs: 1000,
-      approvalWorkItemId,
     }, { now })).toThrow(/not a fully pinnable poll command/i);
   });
 

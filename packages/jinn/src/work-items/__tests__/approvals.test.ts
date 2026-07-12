@@ -45,7 +45,7 @@ describe("requestApproval — the native approval-request write path", () => {
     expect(evts[0].detail).toMatchObject({ request: "Approve the deployment?" });
   });
 
-  it("carries a mirror ref when provided (workflow-gate mirror)", () => {
+  it("persists an opaque approval ref without assigning cross-domain meaning", () => {
     const item = store.createWorkItem({ title: "Run gate", status: "executing", source: "workflow" });
     const ref = "workflow-gate:def-a:run_1:gate-1";
     const out = approvals.requestApproval(item.id, { request: "Publish the report", ref, target: "coo" });
@@ -98,44 +98,14 @@ describe("requestApproval — the native approval-request write path", () => {
   });
 });
 
-/* ── raw decision door closure ───────────────────────────────────────────────── */
+/* ── raw decision door closure ─────────────────────────────────────────────── */
 
 describe("raw approval decision door", () => {
   it("does not export the low-level decideApproval writer", () => {
     expect("decideApproval" in approvals).toBe(false);
   });
-
-  it("exposes only a mirror-clear wrapper, and refuses native approvals", () => {
-    const item = store.createWorkItem({ title: "Native approval", status: "in_review", source: "human" });
-    approvals.requestApproval(item.id, { request: "ok?" });
-    expect(() => approvals.recordMirroredApprovalDecision(item.id, "approve", "coo")).toThrow(/not a workflow-gate mirror/i);
-    expect(store.getWorkItem(item.id)!.approvalState).toBe("pending");
-    expect(store.listWorkItemEvents(item.id).filter((e) => e.kind === "approval_decided")).toHaveLength(0);
-  });
-
-  it("mirror clear → decided stamps + one approval_decided event with the actor", () => {
-    const item = store.createWorkItem({ title: "Mirror approval", status: "executing", source: "workflow" });
-    approvals.requestApproval(item.id, {
-      request: "ok?",
-      ref: "workflow-gate:def-a:run-1:gate",
-      target: "coo",
-    });
-    const out = approvals.recordMirroredApprovalDecision(item.id, "approve", "coo");
-    expect(out.approvalState).toBe("approved");
-    expect(out.approvalDecidedBy).toBe("coo");
-    expect(out.approvalDecidedAt).toBeTruthy();
-    const evts = store.listWorkItemEvents(item.id).filter((e) => e.kind === "approval_decided");
-    expect(evts.length).toBe(1);
-    expect(evts[0].detail).toMatchObject({ decision: "approve", ref: "workflow-gate:def-a:run-1:gate" });
-  });
-
-  it("mirror clear throws instead of writing when no pending approval exists", () => {
-    const item = store.createWorkItem({ title: "No raw double decide", status: "executing", source: "workflow" });
-    approvals.requestApproval(item.id, { request: "ok?", ref: "workflow-gate:def-a:run-2:gate" });
-    approvals.recordMirroredApprovalDecision(item.id, "approve", "coo");
-    expect(() => approvals.recordMirroredApprovalDecision(item.id, "reject", "coo")).toThrow(/no pending approval/i);
-    expect(store.getWorkItem(item.id)!.approvalState).toBe("approved");
-    expect(store.listWorkItemEvents(item.id).filter((e) => e.kind === "approval_decided")).toHaveLength(1);
+  it("does not export a Workflow mirror decision writer", () => {
+    expect("recordMirroredApprovalDecision" in approvals).toBe(false);
   });
 });
 
@@ -143,23 +113,24 @@ describe("raw approval decision door", () => {
 
 describe("decideWorkItemApproval — native consequence rules", () => {
   it("not-found for an unknown item", async () => {
-    const r = await approvals.decideWorkItemApproval({ id: "wi_none", decision: "approve" }, {});
+    const r = await approvals.decideWorkItemApproval({ id: "wi_none", decision: "approve" });
     expect(r).toMatchObject({ ok: false, code: "not-found" });
   });
 
   it("no-pending when the item has no pending approval", async () => {
     const item = store.createWorkItem({ title: "No approval", status: "in_review", source: "human" });
-    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "approve" }, {});
+    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "approve" });
     expect(r).toMatchObject({ ok: false, code: "no-pending" });
   });
 
   it("APPROVE + in_review → done (approval_decided THEN status_change), not mirrored", async () => {
     const item = store.createWorkItem({ title: "Approve to done", status: "in_review", source: "human" });
     approvals.requestApproval(item.id, { request: "close it?" });
-    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "approve", note: "ship" }, {});
+    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "approve", note: "ship" });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.mirrored).toBe(false);
+    expect(r).not.toHaveProperty("mirrored");
+    expect(r).not.toHaveProperty("runStatus");
     expect(r.escalated).toBe(false);
     expect(r.item.status).toBe("done");
     expect(r.item.approvalState).toBe("approved");
@@ -174,7 +145,7 @@ describe("decideWorkItemApproval — native consequence rules", () => {
   it("APPROVE + backlog (non-in_review) → decision recorded, status UNTOUCHED (no status_change)", async () => {
     const item = store.createWorkItem({ title: "Plan approval on backlog", status: "backlog", source: "human" });
     approvals.requestApproval(item.id, { request: "proceed with the plan?" });
-    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "approve" }, {});
+    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "approve" });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.item.status).toBe("backlog");
@@ -186,7 +157,7 @@ describe("decideWorkItemApproval — native consequence rules", () => {
   it("REJECT + in_review → bounce to executing, rounds++, critique on the status_change", async () => {
     const item = store.createWorkItem({ title: "Send back", status: "in_review", source: "human" });
     approvals.requestApproval(item.id, { request: "good?" });
-    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "reject", note: "fix the tests" }, {});
+    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "reject", note: "fix the tests" });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.item.status).toBe("executing");
@@ -206,7 +177,7 @@ describe("decideWorkItemApproval — native consequence rules", () => {
       verifyPolicy: { mode: "verify", maxRounds: 1 },
     });
     approvals.requestApproval(item.id, { request: "good?" });
-    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "reject", note: "still wrong" }, {});
+    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "reject", note: "still wrong" });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.item.status).toBe("escalated");
@@ -219,7 +190,7 @@ describe("decideWorkItemApproval — native consequence rules", () => {
   it("REJECT + backlog → decision recorded, status UNTOUCHED", async () => {
     const item = store.createWorkItem({ title: "Reject a plan", status: "backlog", source: "human" });
     approvals.requestApproval(item.id, { request: "plan ok?" });
-    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "reject", note: "rethink" }, {});
+    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "reject", note: "rethink" });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.item.status).toBe("backlog");
@@ -228,88 +199,20 @@ describe("decideWorkItemApproval — native consequence rules", () => {
   });
 });
 
-/* ── decideWorkItemApproval — mirrored (workflow-park) routing (§1.3, item 4) ──── */
+describe("Todo approvals ignore historical Workflow-looking refs", () => {
+  it("applies the native decision and archive rules without Workflow routing", async () => {
+    const decidedItem = store.createWorkItem({ title: "Historical ref", status: "in_review", source: "workflow" });
+    approvals.requestApproval(decidedItem.id, { request: "approve", ref: "workflow-gate:old:def:gate" });
+    const decided = await approvals.decideWorkItemApproval({ id: decidedItem.id, decision: "approve", decidedBy: "coo" });
+    expect(decided).toMatchObject({ ok: true, item: { status: "done", approvalState: "approved" }, escalated: false });
+    expect(decided).not.toHaveProperty("mirrored");
+    expect(decided).not.toHaveProperty("runStatus");
 
-describe("decideWorkItemApproval — mirrored workflow-park routing", () => {
-  function mirrored(refGate: string) {
-    const item = store.createWorkItem({ title: "Parked run", status: "executing", source: "workflow" });
-    approvals.requestApproval(item.id, { request: "approve the run gate", ref: `workflow-gate:def-x:run_9:${refGate}` });
-    return item;
-  }
-
-  it("routes APPROVE to resolve-gate, parses defId/runId/gateRef, sets approved, does NOT run native transition", async () => {
-    const item = mirrored("gate-ref");
-    const calls: Array<{ workflowId: string; runId: string; decision: string }> = [];
-    const r = await approvals.decideWorkItemApproval(
-      { id: item.id, decision: "approve" },
-      {
-        resolveWorkflowGate: async (workflowId, runId, decision) => {
-          calls.push({ workflowId, runId, decision });
-          return { outcome: "resolved", runStatus: "completed" };
-        },
-      },
-    );
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.mirrored).toBe(true);
-    expect(calls).toEqual([{ workflowId: "def-x", runId: "run_9", decision: "approve" }]);
-    expect(r.item.approvalState).toBe("approved");
-    // the module does NOT drive status for a mirror — the run engine + terminal reflect do
-    expect(store.listWorkItemEvents(item.id).some((e) => e.kind === "status_change")).toBe(false);
-  });
-
-  it("preserves a gate ref that itself contains colons", async () => {
-    const item = mirrored("a:b:c");
-    const calls: Array<{ workflowId: string; runId: string }> = [];
-    await approvals.decideWorkItemApproval(
-      { id: item.id, decision: "approve" },
-      {
-        resolveWorkflowGate: async (workflowId, runId) => {
-          calls.push({ workflowId, runId });
-          return { outcome: "resolved" };
-        },
-      },
-    );
-    expect(calls).toEqual([{ workflowId: "def-x", runId: "run_9" }]);
-  });
-
-  it("routes REJECT to resolve-gate and marks rejected", async () => {
-    const item = mirrored("g");
-    const r = await approvals.decideWorkItemApproval(
-      { id: item.id, decision: "reject", note: "not yet" },
-      { resolveWorkflowGate: async () => ({ outcome: "resolved", runStatus: "failed" }) },
-    );
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.item.approvalState).toBe("rejected");
-    expect(r.mirrored).toBe(true);
-  });
-
-  it("run-not-parked → not decided, surfaces the run status", async () => {
-    const item = mirrored("g");
-    const r = await approvals.decideWorkItemApproval(
-      { id: item.id, decision: "approve" },
-      { resolveWorkflowGate: async () => ({ outcome: "not-parked", runStatus: "running" }) },
-    );
-    expect(r).toMatchObject({ ok: false, code: "run-not-parked", runStatus: "running" });
-    // the approval was NOT cleared — still pending for a retry
-    expect(store.getWorkItem(item.id)!.approvalState).toBe("pending");
-  });
-
-  it("run-not-found → not decided", async () => {
-    const item = mirrored("g");
-    const r = await approvals.decideWorkItemApproval(
-      { id: item.id, decision: "approve" },
-      { resolveWorkflowGate: async () => ({ outcome: "not-found" }) },
-    );
-    expect(r).toMatchObject({ ok: false, code: "run-not-found" });
-    expect(store.getWorkItem(item.id)!.approvalState).toBe("pending");
-  });
-
-  it("evidence-root-missing when a mirror decision has no resolve hook wired", async () => {
-    const item = mirrored("g");
-    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "approve" }, {});
-    expect(r).toMatchObject({ ok: false, code: "evidence-root-missing" });
-    expect(store.getWorkItem(item.id)!.approvalState).toBe("pending");
+    const archivedItem = store.createWorkItem({ title: "Historical archive", status: "in_review", source: "workflow" });
+    approvals.requestApproval(archivedItem.id, { request: "approve", ref: "workflow-gate:old:def:gate" });
+    expect(approvals.archiveWorkItem(archivedItem.id, "coo", { human: true })).toMatchObject({
+      status: "cancelled",
+      approvalState: "rejected",
+    });
   });
 });

@@ -117,9 +117,9 @@ import {
   applyWorkflowCronSync,
   fireWorkflowCronJob,
   resolveWorkflowRunGate,
+  escalateWorkflowRunGateApproval,
   editPendingWorkflowStepPrompt,
   MAX_WORKFLOW_STEP_PROMPT_CHARS,
-  workflowRunTriggerTodoId,
   workflowTriggerSource,
   artifactGatePasses,
   stateFlagPasses,
@@ -132,14 +132,15 @@ import {
   commitWorkflowTriggerMutationEffects,
   discardWorkflowTriggerMutationEffects,
   fireWorkflowEvent,
-  formatPollActivationApprovalRequest,
+  decidePollActivationApproval,
+  escalatePollActivationApproval,
   getWorkflowTriggerBinding,
   listWorkflowTriggerBindings,
   listPublicWorkflowTriggerBindings,
+  publicWorkflowTriggerBinding,
   sanitizeWorkflowTriggerPayload,
   updateWorkflowTriggerBinding,
   verifyAnyWorkflowTriggerBindingToken,
-  withPollActivationContract,
   withWorkflowMutationLock,
   workflowEventRateLimitKeyFromToken,
   WorkflowStoreError,
@@ -153,6 +154,7 @@ import {
   type RunDriverDeps,
   type WorkflowRun,
   type WorkflowReportMode,
+  resolveWorkflowApprovalDecisionAuthority,
   type SpawnContext,
   type SpawnResult,
 } from "../workflows/index.js";
@@ -220,13 +222,11 @@ import {
 } from "../work-items/store.js";
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
-import { createWorkflowTodoBridge } from "../work-items/workflow-bridge.js";
 import {
   archiveWorkItem,
   decideWorkItemApproval,
   escalateApproval,
   requestApproval,
-  WorkflowGateCancellationConflictError,
 } from "../work-items/approvals.js";
 import { resolveApprovalDecisionAuthority, resolveApprovalRouteTarget, resolveRootApprovalTarget } from "./approval-authority.js";
 import { scanOrg } from "./org.js";
@@ -1027,10 +1027,6 @@ export function workflowRunDriverDeps(root: string, context: ApiContext): RunDri
       }
       return false;
     },
-    // Todos ledger (GRS-021a): the run driver mints the run-level work item,
-    // links spawned step sessions, and reflects run terminals. Best-effort by
-    // contract inside the bridge — never load-bearing for the run.
-    workItems: createWorkflowTodoBridge(),
     log: (level, message) => logger[level](message),
   };
 }
@@ -1051,30 +1047,28 @@ function projectWorkflowRunApprovalCapability(
   approvalCapability: { canDecide: boolean; target: string | null; needsYou: boolean; escalated: boolean } | null;
 } {
   if (run.status !== "parked" || !run.parked) return { ...run, approvalCapability: null };
-  const triggerTodoId = workflowRunTriggerTodoId(run);
-  const item = getWorkItemBySourceRef("workflow", `workflow:${run.workflowId}:${run.runId}`)
-    ?? (triggerTodoId ? getWorkItem(triggerTodoId) : undefined);
-  if (!item) {
+  const approval = run.parked.approval;
+  if (!approval) {
     return {
       ...run,
       approvalCapability: { canDecide: false, target: null, needsYou: false, escalated: false },
     };
   }
-  const route = resolveApprovalRouteTarget(item);
-  const authority = resolveApprovalDecisionAuthority(headers, item, {
+  const authority = resolveWorkflowApprovalDecisionAuthority(headers, approval, {
+    allowOperator: true,
     operatorAuthenticated: verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
   });
-  const needsYou = authority.ok && item.approvalState === "pending" && (
-    (authority.authority.kind === "employee" && item.approvalTarget === authority.authority.employee) ||
-    (authority.authority.kind === "operator" && route.targetIsVirtualRoot)
+  const needsYou = authority.ok && approval.state === "pending" && (
+    (authority.authority.kind === "employee" && approval.target === authority.authority.employee) ||
+    (authority.authority.kind === "operator" && (approval.targetKind === "virtual" || !!approval.escalatedAt))
   );
   return {
     ...run,
     approvalCapability: {
       canDecide: authority.ok,
-      target: route.target,
+      target: approval.target,
       needsYou,
-      escalated: item.approvalEscalatedAt !== null,
+      escalated: approval.escalatedAt !== null,
     },
   };
 }
@@ -1418,52 +1412,14 @@ async function createWorkflowTriggerForActor(
   actor: string,
   effects?: ReturnType<typeof createWorkflowTriggerMutationEffects>,
 ): Promise<Record<string, unknown>> {
-  let approvalPayload: Record<string, unknown> | undefined;
   const input: Record<string, unknown> = { ...body, createdBy: actor };
   const created = createWorkflowTriggerBinding(
     root,
     input as unknown as Parameters<typeof createWorkflowTriggerBinding>[1],
   );
-  let bindingName = created.binding.name;
-  if (body.kind === "poll") {
-    if (created.binding.kind !== "poll") {
-      throw new Error("poll trigger creation returned a non-poll binding");
-    }
-    const triggerName = created.binding.name;
-    try {
-      const target = resolveRootApprovalTarget();
-      const pinnedBinding = withPollActivationContract(created.binding);
-      const approvalRequest = formatPollActivationApprovalRequest(pinnedBinding);
-      const item = createWorkItem({
-        title: `Activate poll trigger "${triggerName}"`,
-        body: approvalRequest,
-        status: "backlog",
-        source: "workflow",
-        sourceRef: `workflow-trigger:${triggerName}:activation`,
-        assignee: target?.name ?? null,
-        department: target?.department ?? null,
-      });
-      const workItem = requestApproval(item.id, {
-        request: approvalRequest,
-        target: target?.name ?? null,
-        actor,
-      });
-      const updated = await updateWorkflowTriggerBinding(root, {
-        ...pinnedBinding,
-        approvalWorkItemId: workItem.id,
-        activation: "pending_approval",
-      }, { effects });
-      bindingName = updated.name;
-      approvalPayload = { workItem };
-    } catch (approvalErr) {
-      await deleteWorkflowTriggerBinding(root, created.binding.name, { effects });
-      throw approvalErr;
-    }
-  }
   return {
-    trigger: listPublicWorkflowTriggerBindings(root).find((trigger) => trigger.name === bindingName) ?? created.binding,
+    trigger: listPublicWorkflowTriggerBindings(root).find((trigger) => trigger.name === created.binding.name) ?? created.binding,
     ...(created.secretToken ? { secretToken: created.secretToken } : {}),
-    ...(approvalPayload ? { approval: approvalPayload } : {}),
   };
 }
 
@@ -1730,16 +1686,9 @@ function compactWorkItem(item: WorkItem): Record<string, unknown> {
     approvalRef: item.approvalRef,
     approvalTarget: item.approvalTarget,
     approvalEscalatedAt: item.approvalEscalatedAt,
-    workflowRun: workflowRunRef(item),
     sessionRef: sessionRef(item),
     updatedAt: item.updatedAt,
   };
-}
-
-function workflowRunRef(item: WorkItem): Record<string, string> | null {
-  if (item.source !== 'workflow' || !item.sourceRef) return null;
-  const m = /^workflow:([^:]+):(.+)$/.exec(item.sourceRef);
-  return m ? { workflowId: m[1], runId: m[2] } : null;
 }
 
 function sessionRef(item: WorkItem): Record<string, string> | null {
@@ -1755,7 +1704,6 @@ function fullWorkItemPayload(item: WorkItem): Record<string, unknown> {
   return {
     workItem: item,
     spendUsd: getWorkItemSpend(item.id),
-    workflowRun: workflowRunRef(item),
     events: listWorkItemEvents(item.id),
   };
 }
@@ -3546,9 +3494,6 @@ export async function handleApiRequest(
             });
         return json(res, { workItem: result.item, escalated: result.escalated });
       } catch (err) {
-        if (err instanceof WorkflowGateCancellationConflictError) {
-          return json(res, { error: err.message }, 409);
-        }
         if (err instanceof TransitionError) {
           if (err.code === "not-found") return notFound(res);
           const human = err.code === "self-review-banned"
@@ -3647,9 +3592,6 @@ export async function handleApiRequest(
         });
         return json(res, { workItem: archived, archived: true });
       } catch (err) {
-        if (err instanceof WorkflowGateCancellationConflictError) {
-          return json(res, { error: err.message }, 409);
-        }
         if (err instanceof TransitionError) {
           if (err.code === "not-found") return notFound(res);
           const statusCode = err.code === "illegal-edge" ? 400 : 403;
@@ -3715,8 +3657,7 @@ export async function handleApiRequest(
     // explicit escalation persisted on the Todo.
     // {decision:"approve"|"reject", note?}. Native decisions apply the FIXED
     // consequence rules (approve+in_review → done; reject+in_review → bounce/escalate;
-    // otherwise the decision is recorded, status untouched). A MIRRORED workflow park
-    // routes the decision to the shipped resolve-gate authority.
+    // otherwise the decision is recorded, status untouched).
     params = matchRoute("/api/work-items/:id/approval", pathname);
     if (method === "POST" && params) {
       const parsed = await readJsonBody(req, res);
@@ -3738,31 +3679,15 @@ export async function handleApiRequest(
       });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
 
-      // The resolve-gate authority is wired only when a workflow evidence root
-      // exists; without it a mirrored decision reports evidence-root-missing (503).
-      const evidenceRoot = resolveWorkflowEvidenceRoot();
       const result = await decideWorkItemApproval(
         { id: params.id, decision, ...(note !== undefined ? { note } : {}), decidedBy: authority.authority.actor },
-        evidenceRoot
-          ? {
-              resolveWorkflowGate: async (workflowId, runId, d, decidedBy) => {
-                const r = await resolveWorkflowRunGate(workflowRunDriverDeps(evidenceRoot, context), workflowId, runId, d, { decidedBy });
-                return { outcome: r.outcome, ...(r.outcome !== "not-found" ? { runStatus: r.run.status } : {}) };
-              },
-            }
-          : {},
       );
       if (!result.ok) {
         switch (result.code) {
           case "not-found":
             return notFound(res);
-          case "evidence-root-missing":
-            return json(res, { error: result.message }, 503);
           case "no-pending":
-          case "run-not-found":
             return json(res, { error: result.message }, 409);
-          case "run-not-parked":
-            return json(res, { error: result.message, ...(result.runStatus ? { status: result.runStatus } : {}) }, 409);
           default:
             return json(res, { error: result.message }, 400);
         }
@@ -3770,8 +3695,6 @@ export async function handleApiRequest(
       return json(res, {
         workItem: result.item,
         escalated: result.escalated,
-        mirrored: result.mirrored,
-        ...(result.runStatus ? { runStatus: result.runStatus } : {}),
       });
     }
 
@@ -3909,6 +3832,56 @@ export async function handleApiRequest(
         } catch (err) {
           return workflowTriggerStoreErrorResponse(res, err);
         }
+      }
+    }
+
+    params = matchRoute("/api/workflow-triggers/:name/activation-approval", pathname);
+    if (method === "POST" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      const decision = (parsed.body as { decision?: unknown } | null)?.decision;
+      if (decision !== "approve" && decision !== "reject") {
+        return badRequest(res, 'decision must be "approve" or "reject"');
+      }
+      try {
+        return await withWorkflowMutationLock(root, async () => {
+          const binding = getWorkflowTriggerBinding(root, params!.name);
+          if (!binding || binding.kind !== "poll") return notFound(res);
+          const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, binding.approval, {
+            allowOperator: true,
+            operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+          });
+          if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+          const updated = await decidePollActivationApproval(root, binding.name, decision, authority.authority.actor);
+          return json(res, { trigger: publicWorkflowTriggerBinding(updated) });
+        });
+      } catch (err) {
+        return workflowTriggerStoreErrorResponse(res, err);
+      }
+    }
+
+    params = matchRoute("/api/workflow-triggers/:name/activation-approval/escalate", pathname);
+    if (method === "POST" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      try {
+        return await withWorkflowMutationLock(root, async () => {
+          const binding = getWorkflowTriggerBinding(root, params!.name);
+          if (!binding || binding.kind !== "poll") return notFound(res);
+          const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, binding.approval, {
+            allowOperator: false,
+            operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+          });
+          if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+          const updated = await escalatePollActivationApproval(root, binding.name);
+          return json(res, { trigger: publicWorkflowTriggerBinding(updated) });
+        });
+      } catch (err) {
+        return workflowTriggerStoreErrorResponse(res, err);
       }
     }
 
@@ -4343,6 +4316,38 @@ export async function handleApiRequest(
       return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
     }
 
+    // POST /api/workflow-definitions/:id/runs/:runId/gate-approval/escalate —
+    // escalate the frozen native approval route without touching a Todo.
+    params = matchRoute("/api/workflow-definitions/:id/runs/:runId/gate-approval/escalate", pathname);
+    if (method === "POST" && params) {
+      const root = resolveWorkflowEvidenceRoot();
+      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
+      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      const body = parsed.body && typeof parsed.body === "object" && !Array.isArray(parsed.body)
+        ? parsed.body as Record<string, unknown>
+        : {};
+      if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.trim().length === 0)) {
+        return badRequest(res, "reason must be a non-empty string when provided");
+      }
+      const run = getRun(root, params.id, params.runId);
+      if (!run) return notFound(res);
+      if (run.status !== "parked" || !run.parked?.approval || run.parked.approval.state !== "pending") {
+        return json(res, { error: `run is ${run.status}, not parked with a pending native approval`, status: run.status }, 409);
+      }
+      const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, run.parked.approval, {
+        allowOperator: false,
+        operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+      });
+      if (!authority.ok) return json(res, { error: authority.error }, authority.status);
+      const outcome = await escalateWorkflowRunGateApproval(workflowRunDriverDeps(root, context), params.id, params.runId);
+      if (outcome.outcome === "not-found") return notFound(res);
+      if (outcome.outcome === "not-parked") {
+        return json(res, { error: `run is ${outcome.run.status}, not parked with a pending native approval`, status: outcome.run.status }, 409);
+      }
+      return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
+    }
+
     // POST /api/workflow-definitions/:id/runs/:runId/resolve-gate — resolve a PARKED
     // run's human-approval gate (GRS-014e): {decision:"approve"} unparks and drives the
     // run forward through the same driver path the sweep uses; {decision:"reject"}
@@ -4360,21 +4365,11 @@ export async function handleApiRequest(
       }
       const run = getRun(root, params.id, params.runId);
       if (!run) return notFound(res);
-      const triggerTodoId = workflowRunTriggerTodoId(run);
-      let item = getWorkItemBySourceRef("workflow", `workflow:${params.id}:${params.runId}`)
-        ?? (triggerTodoId ? getWorkItem(triggerTodoId) : undefined);
-      if (!item && run.status === "parked" && run.parked) {
-        createWorkflowTodoBridge().mirrorParkedGate(run, {
-          description: run.parked.description,
-          ...(run.parked.ref ? { ref: run.parked.ref } : {}),
-        });
-        item = getWorkItemBySourceRef("workflow", `workflow:${params.id}:${params.runId}`)
-          ?? (triggerTodoId ? getWorkItem(triggerTodoId) : undefined);
+      if (run.status !== "parked" || !run.parked?.approval || run.parked.approval.state !== "pending") {
+        return json(res, { error: `run is ${run.status}, not parked with a pending native approval`, status: run.status }, 409);
       }
-      if (!item) {
-        return json(res, { error: "workflow gate resolution requires the mirrored Todo approval record" }, 409);
-      }
-      const authority = resolveApprovalDecisionAuthority(req.headers, item, {
+      const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, run.parked.approval, {
+        allowOperator: true,
         operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
       });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);

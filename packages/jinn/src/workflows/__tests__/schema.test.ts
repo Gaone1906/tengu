@@ -43,7 +43,6 @@ function validDefinition() {
           timeoutMinutes: 30,
           session: { mode: 'fresh' as const },
         },
-        todoTransition: 'in_review' as const,
       },
       {
         id: 'route',
@@ -139,7 +138,6 @@ function validSop() {
         retry: { maxAttempts: 2, on: ['error' as const] },
         session: { mode: 'fresh' as const },
       },
-      todoTransition: 'done' as const,
     }],
     concurrency: 2,
   };
@@ -238,6 +236,22 @@ describe('workflow SOP schema', () => {
 });
 
 describe('workflow authoring envelope schemas', () => {
+  it('rejects todoTransition in create, update, and SOP authoring', async () => {
+    const {
+      parseWorkflowCreateInput,
+      parseWorkflowSop,
+      parseWorkflowUpdateInput,
+    } = await import('../schema.js');
+    const definition: any = authoringDefinition();
+    definition.nodes[1].todoTransition = 'in_review';
+    const sop: any = validSop();
+    sop.steps[0].todoTransition = 'done';
+
+    expect(() => parseWorkflowCreateInput({ definition })).toThrow(/todoTransition.*not supported/i);
+    expect(() => parseWorkflowUpdateInput({ workflowId: 'demo', patch: { nodes: definition.nodes } })).toThrow(/todoTransition.*not supported/i);
+    expect(() => parseWorkflowSop(sop)).toThrow(/todoTransition.*not supported/i);
+  });
+
   it('parses plan, validate, create, and update inputs', async () => {
     const {
       parseWorkflowCreateInput,

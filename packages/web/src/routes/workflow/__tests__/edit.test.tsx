@@ -8,6 +8,7 @@ const updateWorkflowDefinition = vi.fn()
 const listWorkflowTriggers = vi.fn()
 const createWorkflowTrigger = vi.fn()
 const deleteWorkflowTrigger = vi.fn()
+const decideWorkflowTriggerActivationApproval = vi.fn()
 vi.mock("@/lib/api", () => ({
   api: {
     getWorkflowDefinition: (...a: unknown[]) => getWorkflowDefinition(...a),
@@ -15,6 +16,7 @@ vi.mock("@/lib/api", () => ({
     listWorkflowTriggers: (...a: unknown[]) => listWorkflowTriggers(...a),
     createWorkflowTrigger: (...a: unknown[]) => createWorkflowTrigger(...a),
     deleteWorkflowTrigger: (...a: unknown[]) => deleteWorkflowTrigger(...a),
+    decideWorkflowTriggerActivationApproval: (...a: unknown[]) => decideWorkflowTriggerActivationApproval(...a),
   },
 }))
 
@@ -263,6 +265,7 @@ describe("WorkflowEditView", () => {
       },
     }))
     deleteWorkflowTrigger.mockReset().mockResolvedValue({ deleted: true })
+    decideWorkflowTriggerActivationApproval.mockReset()
   })
 
   it("loads the definition and renders the edit toolbar with version", async () => {
@@ -502,6 +505,57 @@ describe("WorkflowEditView", () => {
       command: "node scripts/check.js",
       intervalSeconds: 300,
     })
+  })
+
+  it("approves a pending poll activation through the native Workflow approval", async () => {
+    const pending = {
+      schemaVersion: 2,
+      kind: "poll" as const,
+      name: "daily-check",
+      event: "check.ready",
+      targetWorkflowId: "sample-autonomy",
+      activation: "pending_approval" as const,
+      source: "poll" as const,
+      command: "node scripts/check.js",
+      intervalSeconds: 300,
+      createdAt: "2026-07-06T12:00:00.000Z",
+      updatedAt: "2026-07-06T12:00:00.000Z",
+      approval: {
+        requesterEmployee: "workflow-author",
+        target: "workflow-manager",
+        targetKind: "employee" as const,
+        requestedAt: "2026-07-06T12:00:00.000Z",
+        requestedBy: "workflow-trigger" as const,
+        escalatedAt: null,
+        state: "pending" as const,
+        activationContractHash: "sha256:contract",
+        decidedBy: null,
+        decidedAt: null,
+      },
+    }
+    listWorkflowTriggers.mockResolvedValue({ triggers: [pending], evidenceConfigured: true })
+    getWorkflowDefinition.mockResolvedValue(def())
+    decideWorkflowTriggerActivationApproval.mockResolvedValue({
+      trigger: {
+        ...pending,
+        activation: "active",
+        approval: {
+          ...pending.approval,
+          state: "approved",
+          decidedBy: "workflow-manager",
+          decidedAt: "2026-07-06T12:01:00.000Z",
+        },
+      },
+    })
+
+    render(<WorkflowEditView workflowId="sample-autonomy" />)
+
+    await waitFor(() => expect(screen.getByTestId("wf-poll-approval")).toBeTruthy())
+    expect(screen.getByTestId("wf-poll-approval").textContent).toContain("Pending approval")
+    fireEvent.click(screen.getByTestId("wf-poll-approve"))
+
+    await waitFor(() => expect(decideWorkflowTriggerActivationApproval).toHaveBeenCalledWith("daily-check", "approve"))
+    expect(screen.getByTestId("wf-poll-approval").textContent).toContain("Approved")
   })
 
   it("does not delete the current wake-up binding when replacement creation fails", async () => {

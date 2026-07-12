@@ -5,7 +5,6 @@ import {
   type WorkflowActor,
   type WorkflowEdge,
   type WorkflowNode,
-  type WorkflowTodoTransitionStatus,
 } from './definition.js';
 import type { WorkflowTrigger, TodoStatusChangeTriggerFilter } from './derive.js';
 import type { CreateWorkflowTriggerBindingInput, WorkflowTriggerFilter } from './custom-triggers.js';
@@ -44,7 +43,6 @@ export interface WorkflowSopStep {
   instructions?: string;
   optional?: boolean;
   options?: StepNodeOptions;
-  todoTransition?: WorkflowTodoTransitionStatus;
 }
 
 export interface WorkflowSop {
@@ -240,8 +238,6 @@ function compileStep(raw: unknown, index: number, used: Set<string>): WorkflowNo
   const optional = boolValue(step.optional);
   if (optional !== undefined) node.optional = optional;
   if (step.options !== undefined) node.options = asRecord(step.options, `${label}.options`) as unknown as StepNodeOptions;
-  const todoTransition = stringValue(step.todoTransition, `${label}.todoTransition`, false);
-  if (todoTransition) node.todoTransition = todoTransition as WorkflowTodoTransitionStatus;
   return node;
 }
 

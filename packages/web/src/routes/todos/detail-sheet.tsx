@@ -352,16 +352,11 @@ function SheetBody({
         </Group>
       </Section>
 
-      {(execSession || detail.workflowRun) && (
+      {execSession && (
         <Section label="Links">
           <Group>
             {execSession && (
               <Row k={sessionLinkLabel(execSession)} onClick={() => navigate(`/?session=${encodeURIComponent(execSession.id)}`)}>
-                <span className="text-[length:var(--text-caption1)] font-semibold text-[var(--accent)]">Open</span>
-              </Row>
-            )}
-            {detail.workflowRun && (
-              <Row k="Workflow run" onClick={() => navigate(`/workflow/${encodeURIComponent(detail.workflowRun!.workflowId)}`)}>
                 <span className="text-[length:var(--text-caption1)] font-semibold text-[var(--accent)]">Open</span>
               </Row>
             )}

@@ -661,7 +661,6 @@ export interface WorkItemCompactWire {
   approvalRef: string | null
   approvalTarget: string | null
   approvalEscalatedAt: string | null
-  workflowRun?: { workflowId: string; runId: string } | null
   sessionRef?: WorkItemSessionRefWire | null
   updatedAt: string
   /** Manual sort rank (design-todos §7.3). Null until the operator reorders. */
@@ -774,15 +773,12 @@ export interface WorkItemEventWire {
 export interface WorkItemDetailWire {
   workItem: WorkItemFullWire
   spendUsd: number
-  workflowRun: { workflowId: string; runId: string } | null
   events: WorkItemEventWire[]
 }
 
 export interface ApprovalDecisionResultWire {
   workItem: WorkItemFullWire
   escalated: boolean
-  mirrored: boolean
-  runStatus?: string
 }
 
 export interface ApprovalEscalationResultWire {
@@ -806,6 +802,20 @@ export interface WorkflowTriggerFilterWire {
   op: "equals" | "notEquals" | "exists" | "matches"
   value?: unknown
 }
+export interface WorkflowApprovalRouteWire {
+  requesterEmployee: string | null
+  target: string | null
+  targetKind: "employee" | "virtual" | "none"
+  requestedAt: string
+  requestedBy: string
+  escalatedAt: string | null
+}
+export interface PollActivationApprovalWire extends WorkflowApprovalRouteWire {
+  state: "pending" | "approved" | "rejected"
+  activationContractHash: string
+  decidedBy: string | null
+  decidedAt: string | null
+}
 export interface WorkflowTriggerBindingWire {
   schemaVersion?: number
   kind: WorkflowTriggerBindingKindWire
@@ -824,7 +834,7 @@ export interface WorkflowTriggerBindingWire {
   timeoutMs?: number
   stdoutMaxBytes?: number
   stderrMaxBytes?: number
-  approvalWorkItemId?: string
+  approval?: PollActivationApprovalWire
   lastCheckedAt?: string
   lastFiredAt?: string
   lastOutcome?: string
@@ -853,7 +863,6 @@ export type CreateWorkflowTriggerInputWire =
 export interface CreateWorkflowTriggerResultWire {
   trigger: WorkflowTriggerBindingWire
   secretToken?: string
-  approval?: { workItem: WorkItemFullWire }
 }
 
 export const api = {
@@ -974,6 +983,16 @@ export const api = {
     post<CreateWorkflowTriggerResultWire>("/api/workflow-triggers", input),
   deleteWorkflowTrigger: (name: string) =>
     del<{ deleted: boolean; name: string }>(`/api/workflow-triggers/${encodeURIComponent(name)}`),
+  decideWorkflowTriggerActivationApproval: (name: string, decision: "approve" | "reject") =>
+    post<{ trigger: WorkflowTriggerBindingWire }>(
+      `/api/workflow-triggers/${encodeURIComponent(name)}/activation-approval`,
+      { decision },
+    ),
+  escalateWorkflowTriggerActivationApproval: (name: string) =>
+    post<{ trigger: WorkflowTriggerBindingWire }>(
+      `/api/workflow-triggers/${encodeURIComponent(name)}/activation-approval/escalate`,
+      {},
+    ),
 
   /** GRS-014e: resolve a PARKED run's human-approval gate. Returns the updated run,
    * or throws with the gateway's error message (409 when the run is not parked). */

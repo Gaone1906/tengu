@@ -1102,14 +1102,16 @@ describe('resolve-gate route (GRS-014e) — approve/reject a parked run over HTT
     expect(run.steps[1].detail).toBe('approved by coo');
   });
 
-  it('repairs a missing mirrored Todo before resolving a parked run gate', async () => {
-    const runId = await parkRun('rg-repair-mirror');
-    registry.initDb().prepare("DELETE FROM work_items WHERE source = 'workflow' AND source_ref = ?").run(`workflow:rg-repair-mirror:${runId}`);
+  it('resolves a native parked gate without creating or repairing a Todo', async () => {
+    const runId = await parkRun('rg-native-only');
+    const sourceRef = `workflow:rg-native-only:${runId}`;
+    expect(registry.initDb().prepare("SELECT id FROM work_items WHERE source = 'workflow' AND source_ref = ?").get(sourceRef)).toBeUndefined();
 
-    const res = await callAsCoo('POST', `/api/workflow-definitions/rg-repair-mirror/runs/${runId}/resolve-gate`, { decision: 'approve' }, runCtx);
+    const res = await callAsCoo('POST', `/api/workflow-definitions/rg-native-only/runs/${runId}/resolve-gate`, { decision: 'approve' }, runCtx);
 
     expect(res.status).toBe(200);
     expect((res.body as { status: string }).status).toBe('completed');
+    expect(registry.initDb().prepare("SELECT id FROM work_items WHERE source = 'workflow' AND source_ref = ?").get(sourceRef)).toBeUndefined();
   });
 
   it('reject → 200 with a failed run and the gate-rejected error; downstream stayed pending', async () => {
