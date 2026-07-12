@@ -10,6 +10,7 @@ import type {
   WorkItemStatusWire,
   WorkItemSourceWire,
 } from "./api"
+import { ApiError } from "./api"
 
 // ── Display groups (the 5 board columns / mobile sections) ──────────────────
 // The DB carries 8 statuses; the board shows 5 groups. `blocked` and `escalated`
@@ -99,16 +100,24 @@ export function isOpen(status: WorkItemStatusWire): boolean {
   return !TERMINAL.has(status)
 }
 
-/** Backend errors remain useful to the operator without exposing transport
- * identities in visible or accessible UI. */
+const SAFE_TODO_ERROR_BY_CODE: Readonly<Record<string, string>> = {
+  WORK_ITEM_ESCALATED: "This Todo is escalated. Use the human operator surface for this transition.",
+  WORK_ITEM_APPROVAL_PENDING: "This Todo is awaiting approval. Resolve the approval before changing its status.",
+  WORK_ITEM_VERSION_CONFLICT: "This Todo changed elsewhere. Reload it before saving again.",
+  WORK_ITEM_NOT_FOUND: "This Todo no longer exists.",
+}
+
+/** Closed safe-copy mapping. Raw backend diagnostics stay on ApiError for
+ * protected diagnostics, never in visible or accessible operator output. */
 export function operatorSafeTodoError(error: unknown, fallback: string): string {
-  if (!(error instanceof Error) || !error.message.trim()) return fallback
-  const redacted = error.message
-    .replace(/\b(?:work[ -]?item|todo)\s+wi_[a-z0-9_-]+\b/gi, "this Todo")
-    .replace(/\bwi_[a-z0-9_-]+\b/gi, "this Todo")
-    .replace(/\s+/g, " ")
-    .trim()
-  return redacted || fallback
+  if (!(error instanceof ApiError)) return fallback
+  if (error.code && SAFE_TODO_ERROR_BY_CODE[error.code]) return SAFE_TODO_ERROR_BY_CODE[error.code]
+  if (error.status === 409 || error.status === 412) return SAFE_TODO_ERROR_BY_CODE.WORK_ITEM_VERSION_CONFLICT
+  if (error.status === 404) return SAFE_TODO_ERROR_BY_CODE.WORK_ITEM_NOT_FOUND
+  if (error.status === 403 && /\b(?:escalated|approval (?:is )?pending|sticky terminal)\b/i.test(error.message)) {
+    return "This transition needs explicit operator authority. Use the human operator surface if it is intentional."
+  }
+  return fallback
 }
 
 // ── Board grouping ──────────────────────────────────────────────────────────

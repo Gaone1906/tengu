@@ -3,6 +3,7 @@ import { Check, ChevronDown } from "lucide-react"
 import type { Employee, WorkItemCompactWire, WorkItemDetailWire } from "@/lib/api"
 import { StateCircle, type StateGlyphKey } from "./state-glyph"
 import { TodoRow } from "./row"
+import { todoPrivateRef } from "./todo-private-state"
 
 /* design-todos §4.2 — a collection gets ONE grouped inset: a quiet
  * --bg-secondary container carrying the page's only card shadow, with flat
@@ -212,6 +213,7 @@ export function TodoGroup({
             return (
               <div
                 key={item.id}
+                data-todo-anchor={todoPrivateRef(item.id)}
                 ref={(el) => {
                   wrapRefs.current[i] = el
                 }}

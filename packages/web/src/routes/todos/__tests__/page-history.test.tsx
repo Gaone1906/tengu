@@ -4,6 +4,7 @@ import { MemoryRouter, useLocation, useNavigate } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { OrgData, WorkItemCompactWire, WorkItemDetailWire } from "@/lib/api"
 import TodosPage from "../page"
+import { persistTodoJournal, todoPrivateRef } from "../todo-private-state"
 
 vi.mock("@/components/page-layout", () => ({ PageLayout: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 vi.mock("@/context/breadcrumb-context", () => ({ useBreadcrumbs: () => {} }))
@@ -167,6 +168,67 @@ describe("Todo detail navigation and draft recovery", () => {
     renderPage([{ pathname: "/todos", state: reloadState }])
     expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
     await waitFor(() => expect(screen.getByTestId("todo-ledger-scroll").scrollTop).toBe(417))
+  })
+
+  it("reloads enough pages to resolve and restore a second-page detail anchor", async () => {
+    const rows = Array.from({ length: 29 }, (_, index): WorkItemCompactWire => ({
+      ...compact,
+      id: `wi_page_${index + 1}`,
+      title: `Paged todo ${index + 1}`,
+    }))
+    listWorkItems.mockImplementation((params?: { status?: string; needsAttentionFor?: string; offset?: number; limit?: number }) => {
+      if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+      if (params?.status !== "backlog") return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+      const offset = params.offset ?? 0
+      const page = rows.slice(offset, offset + 20)
+      return Promise.resolve({ workItems: page, total: rows.length, nextOffset: offset + page.length < rows.length ? offset + page.length : null })
+    })
+    getWorkItem.mockImplementation((id: string) => Promise.resolve({
+      ...detail,
+      workItem: { ...detail.workItem, ...rows.find((row) => row.id === id), body: null, priority: 0 },
+    }))
+    const mounted = renderPage()
+    await screen.findByRole("button", { name: "Open Paged todo 20" })
+    fireEvent.click(screen.getByRole("button", { name: "Show 9 more" }))
+    const opener = await screen.findByRole("button", { name: "Open Paged todo 29" })
+    const ledgerScroll = screen.getByTestId("todo-ledger-scroll")
+    Object.defineProperty(ledgerScroll, "scrollTop", { configurable: true, writable: true, value: 1279 })
+    fireEvent.click(opener)
+    expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+    expect(currentState).toMatchObject({
+      todoAnchorRef: expect.stringMatching(/^td_/),
+      todoAnchorOffset: expect.any(Number),
+      todoPageDepth: { backlog: 2 },
+    })
+
+    const reloadState = currentState
+    mounted.unmount()
+    listWorkItems.mockClear()
+    renderPage([{ pathname: "/todos", state: reloadState }])
+
+    expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+    expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ status: "backlog", offset: 20 }))
+    expect(currentState).toEqual(reloadState)
+  })
+
+  it("offers explicit cleanup when a recovered Todo no longer exists", async () => {
+    const ref = todoPrivateRef(PRIVATE_ID)
+    persistTodoJournal(PRIVATE_ID, {
+      revision: 1,
+      patch: { title: "Unreachable recovered title" },
+      baseline: { title: compact.title },
+      baselineVersion: compact.updatedAt,
+    })
+    listWorkItems.mockResolvedValue({ workItems: [], total: 0, nextOffset: null })
+
+    renderPage([{ pathname: "/todos", state: { todoRef: ref, todoScroll: 20 } }])
+
+    expect(await screen.findByRole("dialog", { name: "Todo no longer exists" })).toBeTruthy()
+    expect(sessionStorage.getItem("jinn:todo-draft-journal:v2")).toContain("Unreachable recovered title")
+    fireEvent.click(screen.getByRole("button", { name: "Discard recovered draft" }))
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Todo no longer exists" })).toBeNull())
+    expect(JSON.stringify(currentState)).not.toContain(ref)
+    expect(sessionStorage.getItem("jinn:todo-draft-journal:v2")).toBeNull()
   })
 
   it("pushes filter history so Back and Forward restore the exact filter state", async () => {

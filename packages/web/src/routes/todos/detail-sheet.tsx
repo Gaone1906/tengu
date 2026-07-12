@@ -568,6 +568,8 @@ export function DetailSheet({
   const [editingTitle, setEditingTitle] = useState(false)
   const [closeAfterSave, setCloseAfterSave] = useState(false)
   const [showCloseGuard, setShowCloseGuard] = useState(false)
+  const [conflictBusy, setConflictBusy] = useState(false)
+  const [conflictError, setConflictError] = useState<string | null>(null)
   const titleRef = useRef<HTMLInputElement>(null)
   const titleBeforeEdit = useRef("")
   useEffect(() => {
@@ -582,6 +584,20 @@ export function DetailSheet({
     department: detail?.workItem.department ?? null,
     priority: detail?.workItem.priority ?? 0,
   }), [detail])
+  const loadRemote = useCallback(async () => {
+    const fresh = await api.getWorkItem(id)
+    queryClient.setQueryData(["work-item", id], fresh)
+    return {
+      draft: {
+        title: fresh.workItem.title,
+        body: fresh.workItem.body ?? "",
+        assignee: fresh.workItem.assignee,
+        department: fresh.workItem.department,
+        priority: fresh.workItem.priority,
+      },
+      version: fresh.workItem.updatedAt,
+    }
+  }, [id, queryClient])
   const saveRemote = useCallback(async (patch: TodoDraftPatch) => {
     const result = await api.updateWorkItem(id, patch)
     queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) =>
@@ -592,7 +608,13 @@ export function DetailSheet({
       queryClient.invalidateQueries({ queryKey: ["work-item", id] }),
     ])
   }, [id, queryClient])
-  const draftState = useTodoDraft({ id, initial: initialDraft, serverVersion: detail?.workItem.updatedAt, save: saveRemote })
+  const draftState = useTodoDraft({
+    id,
+    initial: initialDraft,
+    serverVersion: detail?.workItem.updatedAt,
+    save: saveRemote,
+    loadRemote,
+  })
   useEffect(() => {
     if (!draftState.hasUnsaved) return
     const guardReload = (event: BeforeUnloadEvent) => {
@@ -638,6 +660,7 @@ export function DetailSheet({
   }
 
   const requestClose = useCallback(() => {
+    if (draftState.recoveredConflict) return
     if (draftState.status === "error") {
       setShowCloseGuard(true)
       return
@@ -650,6 +673,33 @@ export function DetailSheet({
     }
     onClose()
   }, [draftState, onClose])
+
+  const reloadConflict = useCallback(async () => {
+    if (conflictBusy) return
+    setConflictBusy(true)
+    setConflictError(null)
+    try {
+      draftState.reloadRemote(await loadRemote())
+    } catch (cause) {
+      setConflictError(operatorSafeTodoError(cause, "Couldn't reload this Todo"))
+    } finally {
+      setConflictBusy(false)
+    }
+  }, [conflictBusy, draftState, loadRemote])
+
+  const overwriteConflict = useCallback(async () => {
+    if (conflictBusy) return
+    setConflictBusy(true)
+    setConflictError(null)
+    try {
+      const patch = draftState.prepareOverwrite(await loadRemote())
+      draftState.save(patch)
+    } catch (cause) {
+      setConflictError(operatorSafeTodoError(cause, "Couldn't prepare the overwrite"))
+    } finally {
+      setConflictBusy(false)
+    }
+  }, [conflictBusy, draftState, loadRemote])
 
   useEffect(() => {
     if (!closeAfterSave) return
@@ -739,8 +789,43 @@ export function DetailSheet({
 
         {/* Scrollable body */}
         <div className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-[0_20px_20px]" data-scrollable>
+          {draftState.recoveredConflict && (
+            <div
+              role="status"
+              aria-label="Todo changed elsewhere"
+              className="mb-3 rounded-[var(--radius-lg)] bg-[var(--fill-tertiary)] p-3.5 shadow-[var(--shadow-subtle)]"
+            >
+              <div className="flex items-center gap-2 text-[length:var(--text-footnote)] font-semibold text-[var(--text-primary)]">
+                <span className="size-[7px] flex-none rounded-full bg-[var(--system-orange)]" aria-hidden />
+                Todo changed elsewhere
+              </div>
+              <p className="mt-1.5 text-pretty text-[length:var(--text-footnote)] leading-[1.45] text-[var(--text-secondary)]">
+                Your recovered edits overlap a newer change. Reload the remote version, or explicitly overwrite it with your draft.
+              </p>
+              {conflictError && <p className="mt-2 text-[length:var(--text-caption1)] text-[var(--system-red)]">{conflictError}</p>}
+              <div className="mt-2.5 flex flex-wrap justify-end gap-1">
+                <button
+                  type="button"
+                  disabled={conflictBusy}
+                  onClick={() => void reloadConflict()}
+                  className="min-h-11 rounded-full px-3.5 text-[length:var(--text-footnote)] font-semibold text-[var(--text-secondary)] transition-[background-color,transform] hover:bg-[var(--fill-secondary)] active:scale-[0.96] disabled:opacity-50"
+                >
+                  Reload remote
+                </button>
+                <button
+                  type="button"
+                  disabled={conflictBusy}
+                  onClick={() => void overwriteConflict()}
+                  className="min-h-11 rounded-full bg-[var(--accent-fill)] px-3.5 text-[length:var(--text-footnote)] font-semibold text-[var(--accent)] transition-transform active:scale-[0.96] disabled:opacity-50"
+                >
+                  Overwrite remote
+                </button>
+              </div>
+            </div>
+          )}
           {(draftState.error || transitionError) && (
             <div
+              role="alert"
               data-testid="sheet-save-error"
               className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
             >

@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom"
 import { ArrowLeft, Plus } from "lucide-react"
@@ -34,14 +34,50 @@ import {
   useNeedsAttentionItems,
   useEscalateApproval,
   useUpdateWorkItem,
+  type LedgerPageDepth,
 } from "./use-todos"
-import { todoPrivateRef } from "./todo-private-state"
+import { clearTodoJournalByRef, todoPrivateRef } from "./todo-private-state"
 
 /* One calm open-work ledger. Search and Filter are the persistent controls;
  * Needs you and People become transient focused views instead of peer lenses.
  * Every view keeps the same 840px reading column and short opacity transition. */
 
 type TodoView = "ledger" | "needs" | "people"
+
+interface TodoHistoryState {
+  todoRef?: unknown
+  todoScroll?: unknown
+  todoAnchorRef?: unknown
+  todoAnchorOffset?: unknown
+  todoPageDepth?: unknown
+}
+
+const HISTORY_STATUSES: readonly WorkItemStatusWire[] = [
+  "backlog", "assigned", "executing", "blocked", "in_review", "escalated", "done", "cancelled",
+]
+
+function historyPageDepth(value: unknown): LedgerPageDepth | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null
+  const depth: LedgerPageDepth = {}
+  for (const status of HISTORY_STATUSES) {
+    const candidate = (value as Record<string, unknown>)[status]
+    if (typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 1) {
+      depth[status] = Math.min(50, Math.floor(candidate))
+    }
+  }
+  return Object.keys(depth).length > 0 ? depth : null
+}
+
+function cleanTodoHistoryState(state: TodoHistoryState | null): Record<string, unknown> | null {
+  if (!state) return null
+  const next = { ...state } as Record<string, unknown>
+  delete next.todoRef
+  delete next.todoScroll
+  delete next.todoAnchorRef
+  delete next.todoAnchorOffset
+  delete next.todoPageDepth
+  return Object.keys(next).length > 0 ? next : null
+}
 
 export function NewTodoDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const [title, setTitle] = useState("")
@@ -118,8 +154,17 @@ export default function TodosPage() {
   const location = useLocation()
   const navigate = useNavigate()
 
-  const historyState = location.state as { todoRef?: unknown; todoScroll?: unknown } | null
+  const historyState = location.state as TodoHistoryState | null
   const openRef = typeof historyState?.todoRef === "string" ? historyState.todoRef : null
+  const anchorRef = typeof historyState?.todoAnchorRef === "string" && /^td_[a-z0-9]+$/i.test(historyState.todoAnchorRef)
+    ? historyState.todoAnchorRef
+    : null
+  const anchorOffset = typeof historyState?.todoAnchorOffset === "number" && Number.isFinite(historyState.todoAnchorOffset)
+    ? historyState.todoAnchorOffset
+    : null
+  const savedPageDepth = historyPageDepth(historyState?.todoPageDepth)
+  const savedPageDepthKey = savedPageDepth ? JSON.stringify(savedPageDepth) : ""
+  const scrollRestoreKey = `${location.key}:${openRef ?? "closed"}`
   const ledgerScrollRef = useRef<HTMLDivElement>(null)
   const lastDetailScrollRef = useRef<number | null>(
     typeof historyState?.todoScroll === "number" && Number.isFinite(historyState.todoScroll)
@@ -127,6 +172,10 @@ export default function TodosPage() {
       : null,
   )
   const previousOpenRef = useRef(openRef)
+  const restoredScrollRef = useRef<string | null>(null)
+  const cancelledScrollRestoreRef = useRef<string | null>(null)
+  const pageRestoreRef = useRef<string | null>(null)
+  const [restoringPageDepth, setRestoringPageDepth] = useState(Boolean(openRef && savedPageDepth))
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [resolving, setResolving] = useState<Set<string>>(new Set())
   const [creating, setCreating] = useState(false)
@@ -217,13 +266,42 @@ export default function TodosPage() {
   )
 
   const onOpen = useCallback((id: string) => {
-    const todoScroll = ledgerScrollRef.current?.scrollTop ?? 0
+    const scroller = ledgerScrollRef.current
+    const todoScroll = scroller?.scrollTop ?? 0
+    const todoAnchorRef = todoPrivateRef(id)
+    const row = scroller?.querySelector<HTMLElement>(`[data-todo-anchor="${todoAnchorRef}"]`)
+    const todoAnchorOffset = row && scroller
+      ? row.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+      : 0
     lastDetailScrollRef.current = todoScroll
+    cancelledScrollRestoreRef.current = null
+    restoredScrollRef.current = null
     navigate(`${location.pathname}${location.search}`, {
-      state: { todoRef: todoPrivateRef(id), todoScroll },
+      state: { todoRef: todoAnchorRef, todoScroll, todoAnchorRef, todoAnchorOffset, todoPageDepth: ledger.pageDepth },
     })
-  }, [location.pathname, location.search, navigate])
+  }, [ledger.pageDepth, location.pathname, location.search, navigate])
   const closeDetail = useCallback(() => navigate(-1), [navigate])
+
+  // History keeps only safe row surrogates and the number of loaded pages.
+  // Rehydrate those pages before resolving the detail or restoring its anchor.
+  useEffect(() => {
+    if (!openRef || !savedPageDepth || !ledger.data) {
+      if (!openRef || !savedPageDepth) setRestoringPageDepth(false)
+      return
+    }
+    const token = `${location.key}:${openRef}:${savedPageDepthKey}`
+    if (pageRestoreRef.current === token) return
+    pageRestoreRef.current = token
+    let alive = true
+    setRestoringPageDepth(true)
+    void ledger.restorePageDepth(savedPageDepth).finally(() => {
+      if (alive) setRestoringPageDepth(false)
+    })
+    return () => { alive = false }
+    // The restore function is an observer over the same eight ledger queries;
+    // the history token and initial-page readiness are the intended triggers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.key, openRef, savedPageDepthKey, Boolean(ledger.data)])
 
   useLayoutEffect(() => {
     const stateScroll = typeof historyState?.todoScroll === "number" && Number.isFinite(historyState.todoScroll)
@@ -233,10 +311,35 @@ export default function TodosPage() {
     const detailClosed = !!previousOpenRef.current && !openRef
     const detailOpened = !previousOpenRef.current && !!openRef
     previousOpenRef.current = openRef
+    if (restoringPageDepth || restoredScrollRef.current === scrollRestoreKey) return
+    const scroller = ledgerScrollRef.current
+    if (!scroller || cancelledScrollRestoreRef.current === scrollRestoreKey) return
+    if (openRef && anchorRef && anchorOffset != null) {
+      const row = scroller.querySelector<HTMLElement>(`[data-todo-anchor="${anchorRef}"]`)
+      if (!row) return
+      const rowRect = row.getBoundingClientRect()
+      const scrollerRect = scroller.getBoundingClientRect()
+      const currentOffset = rowRect.top - scrollerRect.top
+      // Layout-less environments cannot resolve an anchor geometry; retain
+      // the numeric offset as a compatibility fallback for that case only.
+      if (rowRect.height === 0 && scrollerRect.height === 0 && stateScroll != null) scroller.scrollTop = stateScroll
+      else scroller.scrollTop += currentOffset - anchorOffset
+      restoredScrollRef.current = scrollRestoreKey
+      return
+    }
     if (!detailClosed && !detailOpened && stateScroll == null) return
     const target = stateScroll ?? lastDetailScrollRef.current
-    if (target != null && ledgerScrollRef.current) ledgerScrollRef.current.scrollTop = target
-  }, [historyState?.todoScroll, ledger.data, needs.data, openRef, peopleItems.data, view])
+    if (target != null) {
+      scroller.scrollTop = target
+      restoredScrollRef.current = scrollRestoreKey
+    }
+  }, [anchorOffset, anchorRef, historyState?.todoScroll, ledger.data, needs.data, openRef, peopleItems.data, restoringPageDepth, scrollRestoreKey, view])
+
+  const cancelPendingScrollRestore = useCallback(() => {
+    if (restoredScrollRef.current !== scrollRestoreKey) {
+      cancelledScrollRestoreRef.current = scrollRestoreKey
+    }
+  }, [scrollRestoreKey])
   const onToggle = useCallback((name: string) => {
     setExpanded((prev) => {
       const next = new Set(prev)
@@ -310,10 +413,35 @@ export default function TodosPage() {
   )
 
   const sheetInitial = openId ? detailById.get(openId) : undefined
+  const candidateQueriesSettled = !ledger.isLoading && !baseLedger.isLoading && !needs.isLoading && !peopleItems.isLoading
+  const candidateQueriesHealthy = !ledger.isError && !baseLedger.isError && !needs.isError && !peopleItems.isError
+  const missingRecoveredTodo = Boolean(
+    openRef && !openId && !restoringPageDepth && candidateQueriesSettled && candidateQueriesHealthy,
+  )
+  const discardMissingDraft = useCallback(() => {
+    if (openRef) clearTodoJournalByRef(openRef)
+    navigate(`${location.pathname}${location.search}`, {
+      replace: true,
+      state: cleanTodoHistoryState(historyState),
+    })
+  }, [historyState, location.pathname, location.search, navigate, openRef])
 
   return (
     <PageLayout>
-      <div ref={ledgerScrollRef} data-testid="todo-ledger-scroll" className="h-full overflow-y-auto" data-scrollable>
+      <div
+        ref={ledgerScrollRef}
+        data-testid="todo-ledger-scroll"
+        className="h-full overflow-y-auto"
+        data-scrollable
+        onWheel={cancelPendingScrollRestore}
+        onTouchStart={cancelPendingScrollRestore}
+        onPointerDown={cancelPendingScrollRestore}
+        onKeyDown={(event) => {
+          if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+            cancelPendingScrollRestore()
+          }
+        }}
+      >
         <div className="mx-auto max-w-[840px] px-5 pb-20 pt-6 md:pt-11">
           <header className="flex items-end justify-between gap-3">
             <div>
@@ -466,6 +594,29 @@ export default function TodosPage() {
           onSendBack={onSendBack}
           onClose={closeDetail}
         />
+      )}
+
+      {missingRecoveredTodo && (
+        <TodoDialog
+          label="Todo no longer exists"
+          onRequestClose={() => {}}
+          className="inset-x-3 bottom-3 rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-6 pb-[max(24px,env(safe-area-inset-bottom))] shadow-[var(--shadow-overlay)] motion-safe:data-[state=open]:animate-in motion-safe:data-[state=open]:slide-in-from-bottom-3 sm:left-1/2 sm:top-1/2 sm:bottom-auto sm:w-[420px] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:motion-safe:data-[state=open]:zoom-in-95"
+        >
+          <h2 className="text-[length:var(--text-title3)] font-semibold text-[var(--text-primary)]">Todo no longer exists</h2>
+          <p className="mt-2 text-[length:var(--text-footnote)] leading-relaxed text-[var(--text-secondary)]">
+            This Todo may have been removed elsewhere. Its recovered draft is still stored in this tab until you discard it.
+          </p>
+          <div className="mt-5 flex justify-end">
+            <button
+              type="button"
+              autoFocus
+              onClick={discardMissingDraft}
+              className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-semibold text-[var(--system-red)] transition-transform hover:scale-[0.98] active:scale-[0.96]"
+            >
+              Discard recovered draft
+            </button>
+          </div>
+        </TodoDialog>
       )}
 
       {creating && (

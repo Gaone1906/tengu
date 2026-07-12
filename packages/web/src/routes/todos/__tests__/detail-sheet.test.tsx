@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkItemDetailWire, WorkItemFullWire, WorkItemStatusWire } from "@/lib/api"
 import { DetailSheet, selectLinkedSession, sessionLinkLabel } from "../detail-sheet"
+import { persistTodoJournal } from "../todo-private-state"
 
 const authFetch = vi.fn()
 
@@ -188,6 +189,7 @@ describe("Todo detail session link copy", () => {
 
 describe("Todo detail editing and dialog behavior", () => {
   beforeEach(() => {
+    sessionStorage.clear()
     authFetch.mockReset().mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
       return new Response(JSON.stringify({ workItem: workItem("backlog") }), {
@@ -318,6 +320,69 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it("blocks automatic close for a recovered same-field conflict and reloads the remote value explicitly", async () => {
+    const value = detail("backlog")
+    const remote = detail("backlog")
+    remote.workItem.title = "Remote acknowledged title"
+    remote.workItem.updatedAt = "2026-07-12T12:00:00.000Z"
+    persistTodoJournal(value.workItem.id, {
+      revision: 1,
+      patch: { title: "Recovered local title" },
+      baseline: { title: value.workItem.title },
+      baselineVersion: value.workItem.updatedAt,
+    })
+    const onClose = vi.fn()
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(remote, onClose)
+
+    expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+    expect(screen.getByText("Recovered local title")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Close" }))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(authFetch.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === "PATCH")).toHaveLength(0)
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload remote" }))
+    expect(await screen.findByText("Remote acknowledged title")).toBeTruthy()
+    expect(screen.queryByRole("status", { name: "Todo changed elsewhere" })).toBeNull()
+  })
+
+  it("preflight-refetches before an explicit overwrite of a recovered same-field conflict", async () => {
+    const value = detail("backlog")
+    const remote = detail("backlog")
+    remote.workItem.title = "Remote acknowledged title"
+    remote.workItem.updatedAt = "2026-07-12T12:00:00.000Z"
+    persistTodoJournal(value.workItem.id, {
+      revision: 1,
+      patch: { title: "Recovered local title" },
+      baseline: { title: value.workItem.title },
+      baselineVersion: value.workItem.updatedAt,
+    })
+    const calls: string[] = []
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        calls.push("patch")
+        const patch = JSON.parse(String(init.body)) as Partial<WorkItemFullWire>
+        Object.assign(remote.workItem, patch, { updatedAt: "2026-07-12T12:01:00.000Z" })
+        return new Response(JSON.stringify({ workItem: remote.workItem }), { status: 200, headers: { "Content-Type": "application/json" } })
+      }
+      calls.push("get")
+      return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(remote)
+
+    expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+    calls.length = 0
+    fireEvent.click(screen.getByRole("button", { name: "Overwrite remote" }))
+
+    await waitFor(() => expect(calls).toEqual(expect.arrayContaining(["get", "patch"])))
+    expect(calls.indexOf("get")).toBeLessThan(calls.indexOf("patch"))
+    expect(JSON.parse(String((authFetch.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "PATCH")?.[1] as RequestInit).body))).toEqual({ title: "Recovered local title" })
+  })
+
   it("redacts opaque backend ids from a real escalated 403 error surface", async () => {
     const value = detail("escalated")
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
@@ -334,9 +399,34 @@ describe("Todo detail editing and dialog behavior", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel Todo" }))
     const error = await screen.findByTestId("sheet-save-error")
-    expect(error.textContent).toContain("Operator cannot cancel")
+    expect(error.textContent).toContain("explicit operator authority")
     expect(error.textContent).not.toMatch(/wi_[a-z0-9_-]+/i)
     expect(screen.getByTestId("detail-sheet").innerHTML).not.toMatch(/wi_[a-z0-9_-]+/i)
+  })
+
+  it.each([
+    "SQLITE_BUSY /srv/private.db token=supersecret",
+    "Error: connector slack failed at /opt/gateway/connectors.ts:42",
+    "<pre>stack trace\nAuthorization: Bearer private-token</pre>",
+  ])("never renders arbitrary backend diagnostics: %s", async (diagnostic) => {
+    const value = detail("escalated")
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PUT") {
+        return new Response(JSON.stringify({ error: diagnostic }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel Todo" }))
+    const error = await screen.findByRole("alert")
+    expect(error.textContent).toContain("Couldn't update status")
+    expect(error.textContent).not.toContain(diagnostic)
+    expect(screen.getByTestId("detail-sheet").innerHTML).not.toContain(diagnostic)
   })
 
   it("uses Escape to cancel a field edit before Escape can close the sheet", () => {

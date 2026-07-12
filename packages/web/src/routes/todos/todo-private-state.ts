@@ -1,19 +1,27 @@
-import type { TodoDraftPatch } from "./use-todo-draft"
+import type { TodoDraftPatch, TodoEditableDraft } from "./use-todo-draft"
 
 const SALT_KEY = "jinn:todo-tab-salt:v1"
 const JOURNAL_KEY = "jinn:todo-draft-journal:v2"
 const JOURNAL_TTL_MS = 24 * 60 * 60 * 1_000
 const MAX_JOURNALS = 50
 
-interface JournalEnvelope {
-  expiresAt: number
-  payload: string
+export type TodoDraftField = keyof TodoEditableDraft
+
+export interface TodoJournalPayload {
+  revision: number
+  /** Same-origin recovery intentionally stores operator-authored dirty values. */
+  patch: TodoDraftPatch
+  /** Baselines are limited to the same dirty fields so same-field conflicts can be detected. */
+  baseline: TodoDraftPatch
+  baselineVersion?: string
+  /** A response was lost for these fields; only a server reconciliation may clear them. */
+  uncertainFields?: TodoDraftField[]
 }
 
-interface JournalPayload {
-  revision: number
-  patch: TodoDraftPatch
-  baselineVersion?: string
+interface JournalEnvelope {
+  expiresAt: number
+  sequence: number
+  payload: TodoJournalPayload
 }
 
 function storage(): Storage | null {
@@ -56,91 +64,114 @@ export function todoPrivateRef(id: string): string {
   return digest(`${tabSalt()}\u0000${id}`)
 }
 
-function encode(value: unknown): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(value))
-  let binary = ""
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary)
+const FIELDS = new Set<TodoDraftField>(["title", "body", "assignee", "department", "priority"])
+
+function validPatch(value: unknown): value is TodoDraftPatch {
+  return !!value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).every((key) => FIELDS.has(key as TodoDraftField))
 }
 
-function decode<T>(value: string): T | null {
-  try {
-    const binary = atob(value)
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
-    return JSON.parse(new TextDecoder().decode(bytes)) as T
-  } catch {
-    return null
-  }
+function validPayload(value: unknown): value is TodoJournalPayload {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const payload = value as Partial<TodoJournalPayload>
+  return Number.isInteger(payload.revision)
+    && (payload.revision ?? 0) > 0
+    && validPatch(payload.patch)
+    && validPatch(payload.baseline)
+    && (payload.baselineVersion === undefined || typeof payload.baselineVersion === "string")
+    && (payload.uncertainFields === undefined
+      || (Array.isArray(payload.uncertainFields) && payload.uncertainFields.every((field) => FIELDS.has(field))))
 }
 
-function readEnvelopes(now = Date.now()): Record<string, JournalEnvelope> {
+function validEnvelope(ref: string, value: unknown, now: number): value is JournalEnvelope {
+  if (!/^td_[a-z0-9]+$/i.test(ref) || !value || typeof value !== "object" || Array.isArray(value)) return false
+  const envelope = value as Partial<JournalEnvelope>
+  return Number.isFinite(envelope.expiresAt)
+    && (envelope.expiresAt ?? 0) > now
+    && Number.isInteger(envelope.sequence)
+    && (envelope.sequence ?? 0) > 0
+    && validPayload(envelope.payload)
+}
+
+function parseEnvelopes(): Record<string, unknown> {
   const store = storage()
   if (!store) return {}
-  let parsed: Record<string, JournalEnvelope> = {}
   try {
-    const candidate = JSON.parse(store.getItem(JOURNAL_KEY) ?? "{}") as Record<string, JournalEnvelope>
-    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) parsed = candidate
+    const parsed = JSON.parse(store.getItem(JOURNAL_KEY) ?? "{}") as unknown
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
   } catch {
-    // Corrupt journals are orphaned state; discard them below.
+    return {}
   }
-  const valid = Object.entries(parsed)
-    .filter(([ref, entry]) => /^td_[a-z0-9]+$/i.test(ref)
-      && Number.isFinite(entry?.expiresAt)
-      && entry.expiresAt > now
-      && typeof entry.payload === "string"
-      && decode<JournalPayload>(entry.payload) !== null)
-    .sort((a, b) => b[1].expiresAt - a[1].expiresAt)
-    .slice(0, MAX_JOURNALS)
-  const cleaned = Object.fromEntries(valid)
-  try {
-    if (valid.length === 0) store.removeItem(JOURNAL_KEY)
-    else if (valid.length !== Object.keys(parsed).length) store.setItem(JOURNAL_KEY, JSON.stringify(cleaned))
-  } catch { /* storage is best-effort */ }
+}
+
+function orderedEntries(values: Record<string, JournalEnvelope>): Array<[string, JournalEnvelope]> {
+  return Object.entries(values).sort((a, b) =>
+    b[1].expiresAt - a[1].expiresAt
+      || b[1].sequence - a[1].sequence
+      || a[0].localeCompare(b[0]),
+  )
+}
+
+function readEnvelopes(now = Date.now(), clean = true): Record<string, JournalEnvelope> {
+  const store = storage()
+  if (!store) return {}
+  const parsed = parseEnvelopes()
+  const valid = Object.fromEntries(
+    Object.entries(parsed).filter(([ref, entry]) => validEnvelope(ref, entry, now)),
+  ) as Record<string, JournalEnvelope>
+  const cleaned = Object.fromEntries(orderedEntries(valid).slice(0, MAX_JOURNALS))
+  if (clean && JSON.stringify(parsed) !== JSON.stringify(cleaned)) {
+    try {
+      if (Object.keys(cleaned).length === 0) store.removeItem(JOURNAL_KEY)
+      else store.setItem(JOURNAL_KEY, JSON.stringify(cleaned))
+    } catch { /* storage is best-effort */ }
+  }
   return cleaned
 }
 
-function validPayload(value: JournalPayload | null): value is JournalPayload {
-  if (!value || !Number.isInteger(value.revision) || value.revision <= 0) return false
-  if (!value.patch || typeof value.patch !== "object" || Array.isArray(value.patch)) return false
-  const allowed = new Set(["title", "body", "assignee", "department", "priority"])
-  return Object.keys(value.patch).every((key) => allowed.has(key))
+export function loadTodoJournal(id: string): TodoJournalPayload | null {
+  return readEnvelopes()[todoPrivateRef(id)]?.payload ?? null
 }
 
-export function loadTodoJournal(id: string): JournalPayload | null {
-  const entry = readEnvelopes()[todoPrivateRef(id)]
-  if (!entry) return null
-  const payload = decode<JournalPayload>(entry.payload)
-  return validPayload(payload) ? payload : null
-}
-
-export function persistTodoJournal(id: string, payload: JournalPayload): void {
+export function persistTodoJournal(id: string, payload: TodoJournalPayload): void {
   const store = storage()
-  if (!store) return
+  if (!store || !validPayload(payload)) return
   try {
-    const journals = readEnvelopes()
-    journals[todoPrivateRef(id)] = {
-      expiresAt: Date.now() + JOURNAL_TTL_MS,
-      payload: encode(payload),
-    }
-    store.setItem(JOURNAL_KEY, JSON.stringify(journals))
+    // Parse/filter without a cleanup write: insertion, ordering, capping, and
+    // persistence are one deterministic storage mutation.
+    const now = Date.now()
+    const parsed = parseEnvelopes()
+    const journals = Object.fromEntries(
+      Object.entries(parsed).filter(([ref, entry]) => validEnvelope(ref, entry, now)),
+    ) as Record<string, JournalEnvelope>
+    const sequence = Math.max(0, ...Object.values(journals).map((entry) => entry.sequence)) + 1
+    journals[todoPrivateRef(id)] = { expiresAt: now + JOURNAL_TTL_MS, sequence, payload }
+    const capped = Object.fromEntries(orderedEntries(journals).slice(0, MAX_JOURNALS))
+    store.setItem(JOURNAL_KEY, JSON.stringify(capped))
   } catch {
     // Storage may be unavailable in hardened/private contexts. The mounted
     // revision queue remains authoritative until navigation or reload.
   }
 }
 
-export function clearTodoJournal(id: string, throughRevision?: number): void {
+export function clearTodoJournalByRef(ref: string, throughRevision?: number): void {
   const store = storage()
-  if (!store) return
+  if (!store || !/^td_[a-z0-9]+$/i.test(ref)) return
   try {
     const journals = readEnvelopes()
-    const ref = todoPrivateRef(id)
     const current = journals[ref]
     if (!current) return
-    const payload = decode<JournalPayload>(current.payload)
-    if (throughRevision != null && payload && payload.revision > throughRevision) return
+    if (throughRevision != null && current.payload.revision > throughRevision) return
     delete journals[ref]
     if (Object.keys(journals).length === 0) store.removeItem(JOURNAL_KEY)
     else store.setItem(JOURNAL_KEY, JSON.stringify(journals))
   } catch { /* storage is best-effort */ }
+}
+
+export function clearTodoJournal(id: string, throughRevision?: number): void {
+  clearTodoJournalByRef(todoPrivateRef(id), throughRevision)
 }

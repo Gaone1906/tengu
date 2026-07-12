@@ -44,6 +44,8 @@ export interface LedgerPage {
   nextOffset: number | null
 }
 
+export type LedgerPageDepth = Partial<Record<WorkItemStatusWire, number>>
+
 /** Fetch exactly ONE fixed-size page of one status at `offset`. Exported for
  *  unit tests — incremental paging (never a refetch-all) is the contract. */
 export async function fetchStatusPage(
@@ -158,6 +160,25 @@ export function useLedgerItems(filters: TodoFilters, now: number) {
     [backlog, assigned, executing, blocked, inReview, escalated, done, cancelled],
   )
 
+  const pageDepth = useMemo((): LedgerPageDepth => Object.fromEntries(
+    activePairs.map((pair) => [pair.status, pair.query.data?.pages.length ?? 0]),
+  ), [activePairs])
+
+  const restorePageDepth = useCallback(async (target: LedgerPageDepth) => {
+    await Promise.all(pairs.map(async (pair) => {
+      if (!active.has(pair.status)) return
+      const wanted = Math.max(1, Math.min(50, Math.floor(target[pair.status] ?? 1)))
+      let pages = pair.query.data?.pages ?? []
+      while (pages.length < wanted) {
+        const last = pages[pages.length - 1]
+        if (!last || last.nextOffset == null) break
+        const result = await pair.query.fetchNextPage()
+        pages = result.data?.pages ?? pages
+      }
+    }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- query observers are the eight stable hook results above
+  }, [backlog, assigned, executing, blocked, inReview, escalated, done, cancelled, filters])
+
   return {
     data,
     isLoading,
@@ -165,6 +186,8 @@ export function useLedgerItems(filters: TodoFilters, now: number) {
     error: firstError?.query.error ?? null,
     loadingMore,
     loadMore,
+    pageDepth,
+    restorePageDepth,
   }
 }
 

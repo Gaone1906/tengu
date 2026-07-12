@@ -74,20 +74,35 @@ export interface OrgData {
   hierarchy: OrgHierarchy;
 }
 
-async function extractErrorMessage(res: Response): Promise<string> {
+export class ApiError extends Error {
+  readonly status: number
+  readonly code?: string
+
+  constructor(status: number, message: string, code?: string) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+    this.code = code
+  }
+}
+
+async function responseError(res: Response): Promise<ApiError> {
+  let message = `API error: ${res.status}`
+  let code: string | undefined
   try {
     const body = await res.json();
-    if (body.error) return String(body.error);
-    if (body.message) return String(body.message);
+    if (body.error) message = String(body.error)
+    else if (body.message) message = String(body.message)
+    if (typeof body.code === "string" && body.code.trim()) code = body.code
   } catch {
-    // Response wasn't JSON — fall through
+    // Response wasn't JSON; status remains the typed UI-safe discriminator.
   }
-  return `API error: ${res.status}`;
+  return new ApiError(res.status, message, code)
 }
 
 async function get<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await authFetch(path, init);
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
@@ -97,13 +112,13 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
 async function del<T>(path: string): Promise<T> {
   const res = await authFetch(path, { method: "DELETE" });
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
@@ -113,7 +128,7 @@ async function put<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
@@ -123,7 +138,7 @@ async function patch<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await extractErrorMessage(res));
+  if (!res.ok) throw await responseError(res);
   return res.json();
 }
 
@@ -1046,7 +1061,7 @@ export const api = {
     // When known, scope the upload to the session so it lands in the date-bucketed uploads dir.
     if (sessionId) form.append('sessionId', sessionId)
     const res = await authFetch("/api/files", { method: 'POST', body: form })
-    if (!res.ok) throw new Error(await extractErrorMessage(res))
+    if (!res.ok) throw await responseError(res)
     return res.json()
   },
 };
