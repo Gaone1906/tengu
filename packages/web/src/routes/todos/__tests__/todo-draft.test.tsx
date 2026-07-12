@@ -1,8 +1,12 @@
 import { act, renderHook, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { ApiError } from "@/lib/api"
-import { useTodoDraft, type TodoDraftPatch, type TodoEditableDraft } from "../use-todo-draft"
+import { TodoApiError, type WorkItemEditRequest } from "@/lib/api"
 import { loadTodoJournal, persistTodoJournal } from "../todo-private-state"
+import {
+  useTodoDraft,
+  type TodoEditableDraft,
+  type TodoRemoteSnapshot,
+} from "../use-todo-draft"
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -14,7 +18,7 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-const first = {
+const first: TodoEditableDraft = {
   title: "First todo",
   body: "Original body",
   assignee: null,
@@ -22,440 +26,448 @@ const first = {
   priority: 0,
 }
 
-describe("useTodoDraft", () => {
+function snapshot(draft: TodoEditableDraft, version: number): TodoRemoteSnapshot {
+  return { draft, version }
+}
+
+function successful(remote = snapshot(first, 2), replayed = false) {
+  return { remote, replayed }
+}
+
+describe("useTodoDraft conditional state machine", () => {
   beforeEach(() => sessionStorage.clear())
 
-  it("recovers only locally dirty fields over fresh server data from another tab", () => {
-    const save = vi.fn().mockResolvedValue(undefined)
-    const tabA = renderHook(() => useTodoDraft({
-      id: "wi_private_multitab",
+  it("exact-replays two lost responses and a remount before any GET", async () => {
+    const calls: WorkItemEditRequest[] = []
+    const save = vi.fn(async (request: WorkItemEditRequest) => {
+      calls.push(structuredClone(request))
+      if (calls.length < 3) throw new TypeError("response lost")
+      return successful(snapshot({ ...first, title: "B" }, 8), true)
+    })
+    const loadRemote = vi.fn()
+    const mounted = renderHook(() => useTodoDraft({
+      id: "lost-twice",
       initial: first,
-      serverVersion: "version-a",
+      serverVersion: 7,
       save,
+      loadRemote,
     }))
-    act(() => tabA.result.current.change("title", "Tab A title"))
-    tabA.unmount()
-
-    const serverAfterTabB = { ...first, priority: 3 }
-    const recovered = renderHook(() => useTodoDraft({
-      id: "wi_private_multitab",
-      initial: serverAfterTabB,
-      serverVersion: "version-b",
-      save,
-    }))
-
-    expect(recovered.result.current.draft).toEqual({ ...serverAfterTabB, title: "Tab A title" })
-    expect(recovered.result.current.unsavedPatch()).toEqual({ title: "Tab A title" })
-    expect(recovered.result.current.recoveredConflict).toBe(false)
-  })
-
-  it("rebases a recovered patch when fresh detail arrives after the sheet mounts", () => {
-    const save = vi.fn().mockResolvedValue(undefined)
-    const firstMount = renderHook(() => useTodoDraft({ id: "wi_private_late_detail", initial: first, serverVersion: "a", save }))
-    act(() => firstMount.result.current.change("title", "Local title"))
-    firstMount.unmount()
-
-    const placeholder = { ...first, title: "", body: "", priority: 0 }
-    const recovered = renderHook(() => useTodoDraft({ id: "wi_private_late_detail", initial: placeholder, serverVersion: undefined, save }))
-    act(() => recovered.result.current.replaceInitial({ ...first, title: "Remote title", priority: 3 }, "b"))
-
-    expect(recovered.result.current.draft).toMatchObject({ title: "Local title", body: "Original body", priority: 3 })
-    expect(recovered.result.current.unsavedPatch()).toEqual({ title: "Local title" })
-  })
-
-  it("keeps the local edit dirty when the same field changed remotely", () => {
-    const save = vi.fn().mockResolvedValue(undefined)
-    const tabA = renderHook(() => useTodoDraft({
-      id: "wi_private_same_field",
-      initial: first,
-      serverVersion: "version-a",
-      save,
-    }))
-    act(() => tabA.result.current.change("title", "Unsaved local title"))
-    tabA.unmount()
-
-    const recovered = renderHook(() => useTodoDraft({
-      id: "wi_private_same_field",
-      initial: { ...first, title: "Remote title" },
-      serverVersion: "version-b",
-      save,
-    }))
-
-    expect(recovered.result.current.draft.title).toBe("Unsaved local title")
-    expect(recovered.result.current.hasUnsaved).toBe(true)
-    expect(recovered.result.current.recoveredConflict).toBe(true)
-  })
-
-  it("preserves a nullable field baseline when detecting a recovered same-field conflict", () => {
-    const save = vi.fn().mockResolvedValue(undefined)
-    const firstMount = renderHook(() => useTodoDraft({
-      id: "wi_private_nullable_conflict",
-      initial: first,
-      serverVersion: "version-a",
-      save,
-    }))
-    act(() => firstMount.result.current.change("assignee", "local-owner"))
-    firstMount.unmount()
-
-    const recovered = renderHook(() => useTodoDraft({
-      id: "wi_private_nullable_conflict",
-      initial: { ...first, assignee: "remote-owner" },
-      serverVersion: "version-b",
-      save,
-    }))
-
-    expect(recovered.result.current.draft.assignee).toBe("local-owner")
-    expect(recovered.result.current.recoveredConflict).toBe(true)
-    expect(loadTodoJournal("wi_private_nullable_conflict")?.baseline.assignee).toBeNull()
-  })
-
-  it("stores recoverable user-authored text honestly without storing the generated Todo id", () => {
-    const save = vi.fn().mockResolvedValue(undefined)
-    const { result } = renderHook(() => useTodoDraft({ id: "wi_private_storage_42", initial: first, save }))
-    const authored = "Reference wi_authored_inside_the_draft"
-    act(() => result.current.change("body", authored))
-
-    const persisted = Array.from({ length: sessionStorage.length }, (_, index) => {
-      const key = sessionStorage.key(index) ?? ""
-      return `${key}\n${sessionStorage.getItem(key) ?? ""}`
-    }).join("\n")
-    expect(persisted).toContain(authored)
-    expect(persisted).not.toContain("wi_private_storage_42")
-  })
-
-  it("caps raw recovery storage at exactly 50 entries and retains the newest same-time write", () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date("2026-07-12T08:00:00.000Z"))
-    for (let index = 0; index < 51; index += 1) {
-      persistTodoJournal(`item-${index}`, {
-        revision: 1,
-        patch: { title: `Draft ${index}` },
-        baseline: { title: `Original ${index}` },
-        baselineVersion: "version-a",
-      })
-    }
-
-    const raw = JSON.parse(sessionStorage.getItem("jinn:todo-draft-journal:v2") ?? "{}") as Record<string, unknown>
-    expect(Object.keys(raw)).toHaveLength(50)
-    expect(loadTodoJournal("item-50")?.patch.title).toBe("Draft 50")
-    expect(loadTodoJournal("item-0")).toBeNull()
-    vi.useRealTimers()
-  })
-
-  it("drops expired recovery journals", () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date("2026-07-12T08:00:00.000Z"))
-    const save = vi.fn().mockResolvedValue(undefined)
-    const firstMount = renderHook(() => useTodoDraft({ id: "wi_private_expiry", initial: first, save }))
-    act(() => firstMount.result.current.change("body", "Expired draft"))
-    firstMount.unmount()
-
-    vi.setSystemTime(new Date("2026-07-14T08:00:00.000Z"))
-    const recovered = renderHook(() => useTodoDraft({ id: "wi_private_expiry", initial: first, save }))
-    expect(recovered.result.current.draft).toEqual(first)
-    expect(recovered.result.current.hasUnsaved).toBe(false)
-    vi.useRealTimers()
-  })
-
-  it("acknowledges a revision that reverts exactly to the baseline", () => {
-    const save = vi.fn().mockResolvedValue(undefined)
-    const { result } = renderHook(() => useTodoDraft({ id: "wi_private_revert", initial: first, save }))
 
     act(() => {
-      result.current.change("title", "Temporary")
-      result.current.change("title", first.title)
+      mounted.result.current.change("title", "B")
+      mounted.result.current.save({ title: "B" })
+    })
+    await waitFor(() => expect(mounted.result.current.status).toBe("error"))
+    act(() => mounted.result.current.retry())
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(mounted.result.current.status).toBe("error"))
+    mounted.unmount()
+
+    const recovered = renderHook(() => useTodoDraft({
+      id: "lost-twice",
+      initial: first,
+      serverVersion: 7,
+      save,
+      loadRemote,
+    }))
+    await waitFor(() => expect(recovered.result.current.isAcknowledged).toBe(true))
+
+    expect(calls).toHaveLength(3)
+    expect(calls[1]).toEqual(calls[0])
+    expect(calls[2]).toEqual(calls[0])
+    expect(calls[0]).toMatchObject({ patch: { title: "B" }, expectedVersion: 7 })
+    expect(loadRemote).not.toHaveBeenCalled()
+  })
+
+  it("keeps A1 immutable while edits arrive and mints A2 only after A1 acknowledgement", async () => {
+    const a1 = deferred<ReturnType<typeof successful>>()
+    const a2 = deferred<ReturnType<typeof successful>>()
+    const save = vi.fn()
+      .mockReturnValueOnce(a1.promise)
+      .mockReturnValueOnce(a2.promise)
+    const { result } = renderHook(() => useTodoDraft({ id: "queue", initial: first, serverVersion: 7, save }))
+
+    act(() => {
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
+      result.current.change("title", "C")
+      result.current.change("priority", 3)
+      result.current.save(result.current.unsavedPatch())
     })
 
-    expect(result.current.unsavedPatch()).toEqual({})
-    expect(result.current.hasUnsaved).toBe(false)
-    expect(result.current.isAcknowledged).toBe(true)
-    expect(result.current.status).toBe("idle")
-    expect(Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.getItem(sessionStorage.key(i) ?? "")).join()).not.toContain("Temporary")
+    const a1Request = structuredClone(save.mock.calls[0]![0]) as WorkItemEditRequest
+    expect(a1Request).toMatchObject({ patch: { title: "B" }, expectedVersion: 7 })
+    expect(loadTodoJournal("queue")?.request?.patch).toEqual({ title: "B" })
+    expect(loadTodoJournal("queue")?.patch).toEqual({ title: "C", priority: 3 })
+    expect(save).toHaveBeenCalledTimes(1)
+
+    await act(async () => a1.resolve(successful(snapshot({ ...first, title: "B" }, 8))))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
+    const a2Request = save.mock.calls[1]![0] as WorkItemEditRequest
+    expect(a2Request).toMatchObject({ patch: { title: "C", priority: 3 }, expectedVersion: 8 })
+    expect(a2Request.idempotencyKey).not.toBe(a1Request.idempotencyKey)
+    expect(result.current.isAcknowledged).toBe(false)
+
+    await act(async () => a2.resolve(successful(snapshot({ ...first, title: "C", priority: 3 }, 9))))
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
   })
 
-  it("forgets a definitive failed patch when the user reverts to the baseline", async () => {
-    const failure = new ApiError(403, "private backend diagnostic", "WORK_ITEM_APPROVAL_PENDING")
-    const save = vi.fn().mockRejectedValue(failure)
-    const { result, unmount } = renderHook(() => useTodoDraft({ id: "definitive-revert", initial: first, save }))
+  it("does not mint A2 when replay returns a later same-field row", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "Remote R" }, 9), true))
+    const { result } = renderHook(() => useTodoDraft({ id: "later-row", initial: first, serverVersion: 7, save }))
 
     act(() => {
-      result.current.change("title", "Rejected title")
-      result.current.save({ title: "Rejected title" })
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
+      result.current.change("title", "C")
+    })
+    await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(result.current.draft.title).toBe("C")
+    expect(result.current.conflictFields).toEqual(["title"])
+    expect(result.current.isAcknowledged).toBe(false)
+  })
+
+  it("clears latest intent when a replay's current row already equals it", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "C" }, 9), true))
+    const { result } = renderHook(() => useTodoDraft({ id: "later-equal", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
+      result.current.change("title", "C")
+    })
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(result.current.draft.title).toBe("C")
+  })
+
+  it("adopts unrelated remote changes after acknowledgement", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "B", priority: 3 }, 8)))
+    const { result } = renderHook(() => useTodoDraft({ id: "remote-merge", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
+    })
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(result.current.draft).toEqual({ ...first, title: "B", priority: 3 })
+  })
+
+  it("loads an authoritative numeric version before the first PATCH", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "B" }, 5)))
+    const loadRemote = vi.fn().mockResolvedValue(snapshot(first, 4))
+    const { result } = renderHook(() => useTodoDraft({ id: "unknown-version", initial: first, save, loadRemote }))
+    act(() => {
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
+    })
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(loadRemote).toHaveBeenCalledTimes(1)
+    expect(save.mock.calls[0]![0]).toMatchObject({ expectedVersion: 4, patch: { title: "B" } })
+  })
+
+  it("never treats a legacy timestamp marker as CAS authority", async () => {
+    persistTodoJournal("legacy-version", {
+      revision: 1,
+      patch: { title: "B" },
+      baseline: { title: first.title },
+      baselineVersion: "2026-07-12T05:00:00.000Z",
+    })
+    const loadRemote = vi.fn().mockResolvedValue(snapshot(first, 4))
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "B" }, 5)))
+    const { result } = renderHook(() => useTodoDraft({ id: "legacy-version", initial: first, save, loadRemote }))
+    act(() => result.current.save(result.current.unsavedPatch()))
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(loadRemote).toHaveBeenCalledTimes(1)
+    expect(save.mock.calls[0]![0]).toMatchObject({ expectedVersion: 4 })
+  })
+
+  it.each([undefined, 0])("does not PATCH when GET returns version %s", async (version) => {
+    const save = vi.fn()
+    const loadRemote = vi.fn().mockResolvedValue({ draft: first, version })
+    const { result } = renderHook(() => useTodoDraft({ id: `bad-version-${version}`, initial: first, save, loadRemote }))
+    act(() => {
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
     })
     await waitFor(() => expect(result.current.status).toBe("error"))
-    expect(result.current.error).toBe(failure)
+    expect(save).not.toHaveBeenCalled()
+    expect(result.current.isAcknowledged).toBe(false)
+  })
 
-    act(() => result.current.change("title", first.title))
+  it("retries an unchanged definitive failure with the exact request", async () => {
+    const failure = new TodoApiError(403, "private", "WORK_ITEM_APPROVAL_PENDING")
+    const save = vi.fn()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "B" }, 8)))
+    const { result } = renderHook(() => useTodoDraft({ id: "definitive-retry", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
+    })
+    await waitFor(() => expect(result.current.error).toBe(failure))
+    const firstRequest = structuredClone(save.mock.calls[0]![0])
+    act(() => result.current.retry())
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save.mock.calls[1]![0]).toEqual(firstRequest)
+  })
 
-    expect(result.current.unsavedPatch()).toEqual({})
-    expect(result.current.hasUnsaved).toBe(false)
-    expect(result.current.isAcknowledged).toBe(true)
-    expect(result.current.status).toBe("idle")
-    expect(result.current.error).toBeNull()
-    expect(loadTodoJournal("definitive-revert")).toBeNull()
-    unmount()
+  it("retires a definitive failed request after an edit and mints a new key", async () => {
+    const failure = new TodoApiError(403, "private", "WORK_ITEM_APPROVAL_PENDING")
+    const save = vi.fn()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "C" }, 8)))
+    const { result } = renderHook(() => useTodoDraft({ id: "definitive-edit", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
+    })
+    await waitFor(() => expect(result.current.status).toBe("error"))
+    const oldKey = (save.mock.calls[0]![0] as WorkItemEditRequest).idempotencyKey
+    act(() => {
+      result.current.change("title", "C")
+      result.current.save({ title: "C" })
+    })
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save.mock.calls[1]![0]).toMatchObject({ patch: { title: "C" }, expectedVersion: 7 })
+    expect((save.mock.calls[1]![0] as WorkItemEditRequest).idempotencyKey).not.toBe(oldKey)
+  })
 
-    const recovered = renderHook(() => useTodoDraft({ id: "definitive-revert", initial: first, save }))
-    expect(recovered.result.current.draft).toEqual(first)
+  it("clears a definitive failure on exact revert and never resurrects it", async () => {
+    const failure = new TodoApiError(403, "private", "WORK_ITEM_APPROVAL_PENDING")
+    const save = vi.fn().mockRejectedValue(failure)
+    const mounted = renderHook(() => useTodoDraft({ id: "failed-revert", initial: first, serverVersion: 7, save }))
+    act(() => {
+      mounted.result.current.change("title", "B")
+      mounted.result.current.save({ title: "B" })
+    })
+    await waitFor(() => expect(mounted.result.current.status).toBe("error"))
+    act(() => mounted.result.current.change("title", first.title))
+    expect(mounted.result.current.isAcknowledged).toBe(true)
+    expect(mounted.result.current.error).toBeNull()
+    expect(loadTodoJournal("failed-revert")).toBeNull()
+    mounted.unmount()
+    const recovered = renderHook(() => useTodoDraft({ id: "failed-revert", initial: first, serverVersion: 7, save }))
     expect(recovered.result.current.hasUnsaved).toBe(false)
     act(() => recovered.result.current.retry())
     expect(save).toHaveBeenCalledTimes(1)
   })
 
   it.each([
-    new ApiError(403, "private approval payload", "WORK_ITEM_APPROVAL_PENDING"),
-    new ApiError(409, "private conflict payload", "todo_version_conflict"),
-    new ApiError(412, "private stale payload", "WORK_ITEM_VERSION_CONFLICT"),
-  ])("preserves structured draft errors: $status/$code", async (failure) => {
+    [409, "TODO_VERSION_CONFLICT", true],
+    [412, "WORK_ITEM_VERSION_CONFLICT", true],
+    [409, "TODO_IDEMPOTENCY_CONFLICT", false],
+    [409, undefined, false],
+    [412, undefined, false],
+    [428, "TODO_PRECONDITION_REQUIRED", false],
+    [400, "TODO_INVALID_VERSION", false],
+    [400, "TODO_INVALID_PATCH", false],
+  ] as const)("preserves typed %s/%s and classifies explicit version codes only", async (status, code, conflict) => {
+    const failure = new TodoApiError(status, "private diagnostic", code, 11)
     const save = vi.fn().mockRejectedValue(failure)
-    const { result } = renderHook(() => useTodoDraft({ id: `typed-${failure.status}`, initial: first, save }))
-
+    const { result } = renderHook(() => useTodoDraft({ id: `typed-${status}-${code}`, initial: first, serverVersion: 7, save }))
     act(() => {
-      result.current.change("title", "Rejected title")
-      result.current.save({ title: "Rejected title" })
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
     })
-
     await waitFor(() => expect(result.current.status).toBe("error"))
     expect(result.current.error).toBe(failure)
-    if (failure.status === 409 || failure.status === 412) {
-      expect(result.current.recoveredConflict).toBe(true)
-    }
+    expect(result.current.recoveredConflict).toBe(conflict)
   })
 
-  it("reconciles a committed mutation whose response was lost before acknowledging a local revert", async () => {
-    const lostResponse = deferred<void>()
-    let remote: TodoEditableDraft = { ...first }
-    let remoteVersion = "version-a"
-    const save = vi.fn(async (patch: TodoDraftPatch) => {
-      remote = { ...remote, ...patch }
-      remoteVersion = remoteVersion === "version-a" ? "version-b" : "version-c"
-      if (save.mock.calls.length === 1) await lostResponse.promise
-    })
-    const loadRemote = vi.fn(async () => ({ draft: remote, version: remoteVersion }))
-    const { result } = renderHook(() => useTodoDraft({
-      id: "ambiguous",
-      initial: first,
-      serverVersion: "version-a",
-      save,
-      loadRemote,
-    }))
-
+  it("reloads remote by discarding the conflicted request and intent", async () => {
+    const save = vi.fn().mockRejectedValue(new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8))
+    const { result } = renderHook(() => useTodoDraft({ id: "reload", initial: first, serverVersion: 7, save }))
     act(() => {
-      result.current.change("title", "Committed before disconnect")
-      result.current.save({ title: "Committed before disconnect" })
-      result.current.change("title", first.title)
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
     })
-    await waitFor(() => expect(remote.title).toBe("Committed before disconnect"))
-    await act(async () => lostResponse.reject(new TypeError("response stream reset")))
-    await waitFor(() => expect(result.current.status).toBe("error"))
-    expect(result.current.isAcknowledged).toBe(false)
-
-    act(() => result.current.retry())
-
-    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
-    expect(loadRemote).toHaveBeenCalledTimes(2)
-    expect(save).toHaveBeenCalledTimes(2)
-    expect(save).toHaveBeenNthCalledWith(2, { title: first.title })
-    expect(remote.title).toBe(first.title)
-    expect(sessionStorage.getItem("jinn:todo-draft-journal:v2")).toBeNull()
+    await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+    act(() => result.current.reloadRemote(snapshot({ ...first, title: "Remote" }, 8)))
+    expect(result.current.draft.title).toBe("Remote")
+    expect(result.current.isAcknowledged).toBe(true)
+    expect(loadTodoJournal("reload")).toBeNull()
   })
 
-  it("recovers an in-flight save after unmount as transport-uncertain and confirms before clearing", async () => {
-    const pending = deferred<void>()
-    const firstSave = vi.fn(() => pending.promise)
-    const firstMount = renderHook(() => useTodoDraft({
-      id: "wi_private_unmount_ambiguous",
-      initial: first,
-      serverVersion: "version-a",
-      save: firstSave,
-    }))
-
-    act(() => {
-      firstMount.result.current.change("title", "Possibly committed")
-      firstMount.result.current.save({ title: "Possibly committed" })
-    })
-    await waitFor(() => expect(firstSave).toHaveBeenCalledTimes(1))
-    firstMount.unmount()
-    expect(loadTodoJournal("wi_private_unmount_ambiguous")?.uncertainFields).toContain("title")
-
-    const retrySave = vi.fn().mockResolvedValue(undefined)
-    const loadRemote = vi.fn().mockResolvedValue({
-      draft: { ...first, title: "Possibly committed" },
-      version: "version-b",
-    })
-    const recovered = renderHook(() => useTodoDraft({
-      id: "wi_private_unmount_ambiguous",
-      initial: { ...first, title: "Possibly committed" },
-      serverVersion: "version-b",
-      save: retrySave,
-      loadRemote,
-    }))
-
-    expect(recovered.result.current.status).toBe("error")
-    expect(recovered.result.current.recoveredConflict).toBe(false)
-    act(() => recovered.result.current.retry())
-    await waitFor(() => expect(recovered.result.current.isAcknowledged).toBe(true))
-    expect(loadRemote).toHaveBeenCalledTimes(1)
-    expect(retrySave).not.toHaveBeenCalled()
-    expect(loadTodoJournal("wi_private_unmount_ambiguous")).toBeNull()
-  })
-
-  it("does not acknowledge a close-time edit until its own save settles", async () => {
-    const firstSave = deferred<void>()
-    const closeTimeSave = deferred<void>()
+  it("rebases unrelated fields with a new conditional request", async () => {
+    const conflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
     const save = vi.fn()
-      .mockReturnValueOnce(firstSave.promise)
-      .mockReturnValueOnce(closeTimeSave.promise)
-    const { result } = renderHook(() => useTodoDraft({ id: "one", initial: first, save }))
-
+      .mockRejectedValueOnce(conflict)
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "B", priority: 3 }, 9)))
+    const { result } = renderHook(() => useTodoDraft({ id: "rebase", initial: first, serverVersion: 7, save }))
     act(() => {
-      result.current.change("title", "First edit")
-      result.current.save({ title: "First edit" })
-      result.current.change("title", "Edited after close")
-      result.current.save(result.current.unsavedPatch())
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
     })
+    await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+    const oldKey = (save.mock.calls[0]![0] as WorkItemEditRequest).idempotencyKey
+    act(() => result.current.rebaseRemote(snapshot({ ...first, priority: 3 }, 8)))
+    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
+    expect(save.mock.calls[1]![0]).toMatchObject({ expectedVersion: 8, patch: { title: "B" } })
+    expect((save.mock.calls[1]![0] as WorkItemEditRequest).idempotencyKey).not.toBe(oldKey)
+    expect(result.current.draft.priority).toBe(3)
+  })
 
+  it("exposes same-field conflicts during rebase without PATCHing", async () => {
+    const failure = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
+    const save = vi.fn().mockRejectedValue(failure)
+    const { result } = renderHook(() => useTodoDraft({ id: "rebase-same", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "Local")
+      result.current.save({ title: "Local" })
+    })
+    await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+    act(() => result.current.rebaseRemote(snapshot({ ...first, title: "Remote" }, 8)))
     expect(save).toHaveBeenCalledTimes(1)
+    expect(result.current.draft.title).toBe("Local")
+    expect(result.current.conflictFields).toEqual(["title"])
     expect(result.current.isAcknowledged).toBe(false)
-
-    await act(async () => firstSave.resolve())
-    await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
-    expect(save).toHaveBeenNthCalledWith(2, { title: "Edited after close" })
-    expect(result.current.isAcknowledged).toBe(false)
-
-    await act(async () => closeTimeSave.resolve())
-    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
-    expect(result.current.draft.title).toBe("Edited after close")
   })
 
-  it("coalesces a failed first save with edits made while it was in flight", async () => {
-    const firstSave = deferred<void>()
-    const save = vi.fn()
-      .mockReturnValueOnce(firstSave.promise)
-      .mockResolvedValueOnce(undefined)
-    const { result } = renderHook(() => useTodoDraft({ id: "one", initial: first, save }))
-
+  it("overwrites only after a fresh version with a new key and keeps a second conflict blocked", async () => {
+    const firstConflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
+    const secondConflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 9)
+    const save = vi.fn().mockRejectedValueOnce(firstConflict).mockRejectedValueOnce(secondConflict)
+    const { result } = renderHook(() => useTodoDraft({ id: "overwrite", initial: first, serverVersion: 7, save }))
     act(() => {
-      result.current.change("title", "First edit")
-      result.current.save({ title: "First edit" })
-      result.current.change("title", "Latest edit")
+      result.current.change("title", "Local")
+      result.current.save({ title: "Local" })
+    })
+    await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+    const oldKey = (save.mock.calls[0]![0] as WorkItemEditRequest).idempotencyKey
+    act(() => result.current.overwriteRemote(snapshot({ ...first, title: "Remote" }, 8)))
+    expect(result.current.isAcknowledged).toBe(false)
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.error).toBe(secondConflict))
+    expect(save.mock.calls[1]![0]).toMatchObject({ expectedVersion: 8, patch: { title: "Local" } })
+    expect((save.mock.calls[1]![0] as WorkItemEditRequest).idempotencyKey).not.toBe(oldKey)
+    expect(result.current.recoveredConflict).toBe(true)
+    expect(result.current.isAcknowledged).toBe(false)
+  })
+
+  it("keeps close blocked through an edit made while A1 is saving and A2 is pending", async () => {
+    const a1 = deferred<ReturnType<typeof successful>>()
+    const a2 = deferred<ReturnType<typeof successful>>()
+    const save = vi.fn().mockReturnValueOnce(a1.promise).mockReturnValueOnce(a2.promise)
+    const { result } = renderHook(() => useTodoDraft({ id: "close", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
+      result.current.change("title", "C")
       result.current.save(result.current.unsavedPatch())
     })
-    await act(async () => firstSave.reject(new Error("Offline")))
-    await waitFor(() => expect(result.current.status).toBe("error"))
-
-    act(() => result.current.retry())
-    await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
-    expect(save).toHaveBeenCalledTimes(2)
-    expect(save).toHaveBeenNthCalledWith(2, { title: "Latest edit" })
-  })
-
-  it("keeps a failed second save recoverable and retries the latest revision", async () => {
-    const firstSave = deferred<void>()
-    const secondSave = deferred<void>()
-    const save = vi.fn()
-      .mockReturnValueOnce(firstSave.promise)
-      .mockReturnValueOnce(secondSave.promise)
-      .mockResolvedValueOnce(undefined)
-    const { result } = renderHook(() => useTodoDraft({ id: "one", initial: first, save }))
-
-    act(() => {
-      result.current.change("title", "First edit")
-      result.current.save({ title: "First edit" })
-      result.current.change("body", "Second edit")
-      result.current.save(result.current.unsavedPatch())
-    })
-    await act(async () => firstSave.resolve())
+    expect(result.current.isAcknowledged).toBe(false)
+    await act(async () => a1.resolve(successful(snapshot({ ...first, title: "B" }, 8))))
     await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
-    await act(async () => secondSave.reject(new Error("Still offline")))
-    await waitFor(() => expect(result.current.status).toBe("error"))
-
-    act(() => result.current.retry())
+    expect(result.current.isAcknowledged).toBe(false)
+    await act(async () => a2.resolve(successful(snapshot({ ...first, title: "C" }, 9))))
     await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
-    expect(save).toHaveBeenNthCalledWith(3, { body: "Second edit" })
   })
 
-  it("recovers an item-scoped draft after unmount and clears it only after acknowledgement", async () => {
-    const save = vi.fn().mockResolvedValue(undefined)
-    const firstMount = renderHook(() => useTodoDraft({ id: "one", initial: first, save }))
-    act(() => firstMount.result.current.change("body", "Recovered after reload"))
-    firstMount.unmount()
-
-    const secondMount = renderHook(() => useTodoDraft({ id: "one", initial: first, save }))
-    expect(secondMount.result.current.draft.body).toBe("Recovered after reload")
-    expect(secondMount.result.current.hasUnsaved).toBe(true)
-
-    act(() => secondMount.result.current.save(secondMount.result.current.unsavedPatch()))
-    await waitFor(() => expect(secondMount.result.current.isAcknowledged).toBe(true))
-    secondMount.unmount()
-
-    const thirdMount = renderHook(() => useTodoDraft({ id: "one", initial: first, save }))
-    expect(thirdMount.result.current.draft).toEqual(first)
-    expect(thirdMount.result.current.hasUnsaved).toBe(false)
-  })
-
-  it("serializes writes and never lets an older response overwrite a newer draft", async () => {
-    const one = deferred<void>()
-    const two = deferred<void>()
-    const save = vi.fn()
-      .mockReturnValueOnce(one.promise)
-      .mockReturnValueOnce(two.promise)
-    const { result } = renderHook(() => useTodoDraft({ id: "one", initial: first, save }))
-
+  it("atomically replaces A1 with A2 without a clear-then-add storage gap", async () => {
+    const a1 = deferred<ReturnType<typeof successful>>()
+    const a2 = deferred<ReturnType<typeof successful>>()
+    const save = vi.fn().mockReturnValueOnce(a1.promise).mockReturnValueOnce(a2.promise)
+    const { result } = renderHook(() => useTodoDraft({ id: "atomic-a2", initial: first, serverVersion: 7, save }))
     act(() => {
-      result.current.change("title", "Renamed")
-      result.current.save({ title: "Renamed" })
-      result.current.change("priority", 3)
-      result.current.save({ priority: 3 })
+      result.current.change("title", "B")
+      result.current.save({ title: "B" })
+      result.current.change("title", "C")
     })
+    const setItem = vi.spyOn(Storage.prototype, "setItem")
+    const removeItem = vi.spyOn(Storage.prototype, "removeItem")
+    setItem.mockClear()
+    removeItem.mockClear()
 
-    expect(save).toHaveBeenCalledTimes(1)
-    expect(result.current.status).toBe("saving")
-    expect(result.current.draft).toMatchObject({ title: "Renamed", priority: 3 })
-
-    await act(async () => one.resolve())
+    await act(async () => a1.resolve(successful(snapshot({ ...first, title: "B" }, 8))))
     await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
-    expect(save.mock.calls[1]?.[0]).toEqual({ priority: 3 })
-    await act(async () => two.resolve())
-    await waitFor(() => expect(result.current.status).toBe("saved"))
-    expect(result.current.draft).toMatchObject({ title: "Renamed", priority: 3 })
+    expect(removeItem).not.toHaveBeenCalled()
+    // One atomic A1→A2 install, then one prepared→dispatched lifecycle write.
+    expect(setItem).toHaveBeenCalledTimes(2)
+    expect(loadTodoJournal("atomic-a2")?.request).toMatchObject({ patch: { title: "C" }, expectedVersion: 8 })
+    setItem.mockRestore()
+    removeItem.mockRestore()
+    await act(async () => a2.resolve(successful(snapshot({ ...first, title: "C" }, 9))))
   })
 
-  it("preserves a failed draft and retries the exact pending patch", async () => {
-    const save = vi.fn()
-      .mockRejectedValueOnce(new Error("Network unavailable"))
-      .mockResolvedValueOnce(undefined)
-    const { result } = renderHook(() => useTodoDraft({ id: "one", initial: first, save }))
-
-    act(() => {
-      result.current.change("body", "Unsaved but durable")
-      result.current.save({ body: "Unsaved but durable" })
-    })
-    await waitFor(() => expect(result.current.status).toBe("error"))
-    expect(result.current.draft.body).toBe("Unsaved but durable")
-    expect(result.current.error).toEqual(new Error("Network unavailable"))
-
-    act(() => result.current.retry())
-    await waitFor(() => expect(result.current.status).toBe("saved"))
-    expect(save).toHaveBeenNthCalledWith(2, { body: "Unsaved but durable" })
-  })
-
-  it("isolates drafts when switching items while an earlier write is pending", async () => {
-    const pending = deferred<void>()
+  it("isolates an item switch from a late response without clearing the old journal", async () => {
+    const pending = deferred<ReturnType<typeof successful>>()
     const save = vi.fn().mockReturnValue(pending.promise)
     const { result, rerender } = renderHook(
-      ({ id, title }) => useTodoDraft({ id, initial: { ...first, title }, save }),
-      { initialProps: { id: "one", title: "First todo" } },
+      ({ id, title }) => useTodoDraft({ id, initial: { ...first, title }, serverVersion: 7, save }),
+      { initialProps: { id: "one", title: first.title } },
     )
-
     act(() => {
       result.current.change("title", "First changed")
       result.current.save({ title: "First changed" })
     })
     rerender({ id: "two", title: "Second todo" })
+    await act(async () => pending.resolve(successful(snapshot({ ...first, title: "First changed" }, 8))))
     expect(result.current.draft.title).toBe("Second todo")
+    expect(loadTodoJournal("one")?.request).toBeDefined()
+  })
 
-    await act(async () => pending.resolve())
-    expect(result.current.draft.title).toBe("Second todo")
+  it("recovers only dirty fields over fresh data and preserves storage privacy/cap", () => {
+    const save = vi.fn()
+    const firstMount = renderHook(() => useTodoDraft({ id: "private-multitab", initial: first, serverVersion: 7, save }))
+    act(() => firstMount.result.current.change("title", "User-authored wi_text"))
+    firstMount.unmount()
+    const recovered = renderHook(() => useTodoDraft({
+      id: "private-multitab",
+      initial: { ...first, priority: 3 },
+      serverVersion: 8,
+      save,
+    }))
+    expect(recovered.result.current.draft).toEqual({ ...first, title: "User-authored wi_text", priority: 3 })
+    expect(recovered.result.current.unsavedPatch()).toEqual({ title: "User-authored wi_text" })
+
+    const persisted = Array.from({ length: sessionStorage.length }, (_, index) => {
+      const key = sessionStorage.key(index) ?? ""
+      return `${key}\n${sessionStorage.getItem(key) ?? ""}`
+    }).join("\n")
+    expect(persisted).toContain("User-authored wi_text")
+    expect(persisted).not.toContain("private-multitab")
+  })
+
+  it("acknowledges an exact clean revert without transport", () => {
+    const save = vi.fn()
+    const { result } = renderHook(() => useTodoDraft({ id: "clean-revert", initial: first, serverVersion: 7, save }))
+    act(() => {
+      result.current.change("title", "Temporary")
+      result.current.change("title", first.title)
+    })
+    expect(result.current.unsavedPatch()).toEqual({})
+    expect(result.current.isAcknowledged).toBe(true)
+    expect(result.current.status).toBe("idle")
+    expect(loadTodoJournal("clean-revert")).toBeNull()
+  })
+
+  it("recovers an active request without replacing its sent fingerprint", async () => {
+    persistTodoJournal("recovered-active", {
+      revision: 2,
+      patch: { title: "C", priority: 3 },
+      baseline: { title: first.title, priority: 0 },
+      baselineVersion: 7,
+      uncertainFields: ["title"],
+      request: {
+        revision: 1,
+        patch: { title: "B" },
+        expectedVersion: 7,
+        idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+        state: "uncertain",
+      },
+    })
+    const save = vi.fn()
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "B" }, 8), true))
+      .mockResolvedValueOnce(successful(snapshot({ ...first, title: "C", priority: 3 }, 9)))
+    const { result } = renderHook(() => useTodoDraft({ id: "recovered-active", initial: first, serverVersion: 7, save }))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
+    expect(save.mock.calls[0]![0]).toEqual({
+      patch: { title: "B" },
+      expectedVersion: 7,
+      idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+    })
+    expect(save.mock.calls[1]![0]).toMatchObject({ patch: { title: "C", priority: 3 }, expectedVersion: 8 })
+    expect(result.current.isAcknowledged).toBe(true)
   })
 })
