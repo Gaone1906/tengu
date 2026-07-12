@@ -1,15 +1,18 @@
 import type { Ref } from "react"
-import type { TodoDraftField } from "./todo-private-state"
+import type { WorkItemEditPatch } from "@/lib/api"
 
-const FIELD_LABEL: Record<TodoDraftField, string> = {
+type TodoConflictField = keyof WorkItemEditPatch
+
+const FIELD_LABEL: Record<TodoConflictField, string> = {
   title: "Title",
   body: "Description",
   assignee: "Assignee",
   department: "Department",
   priority: "Priority",
+  rank: "Order",
 }
 
-function conflictLabel(fields: TodoDraftField[]): string {
+function conflictLabel(fields: TodoConflictField[]): string {
   const labels = fields.map((field) => FIELD_LABEL[field])
   if (labels.length === 1) return `${labels[0]} still conflicts`
   if (labels.length === 2) return `${labels[0]} and ${labels[1].toLowerCase()} still conflict`
@@ -25,8 +28,9 @@ export function TodoConflictActions({
   onRebase,
   onOverwrite,
   focusRef,
+  reloadOnly = false,
 }: {
-  fields: TodoDraftField[]
+  fields: TodoConflictField[]
   sameFieldConflict: boolean
   busy: boolean
   error?: string | null
@@ -34,6 +38,7 @@ export function TodoConflictActions({
   onRebase: () => void
   onOverwrite: () => void
   focusRef?: Ref<HTMLElement>
+  reloadOnly?: boolean
 }) {
   const fieldCopy = fields.length === 1 ? FIELD_LABEL[fields[0]].toLowerCase() : "edited fields"
 
@@ -51,7 +56,9 @@ export function TodoConflictActions({
         Todo changed elsewhere
       </div>
       <p className="mt-2 text-pretty text-[length:var(--text-footnote)] leading-[1.48] text-[var(--text-secondary)]">
-        {sameFieldConflict
+        {reloadOnly
+          ? "Reload remote clears this request before another edit can be started."
+          : sameFieldConflict
           ? `Reload remote discards all your local edits. Your ${fieldCopy} also changed remotely; overwrite applies only your edited fields to the latest version.`
           : "Reload remote discards all your local edits. Rebase keeps unrelated remote work; overwrite applies only your edited fields to the latest version."}
       </p>
@@ -74,7 +81,7 @@ export function TodoConflictActions({
         >
           Reload remote
         </button>
-        {!sameFieldConflict && (
+        {!reloadOnly && !sameFieldConflict && (
           <button
             type="button"
             disabled={busy}
@@ -84,14 +91,14 @@ export function TodoConflictActions({
             Rebase edits
           </button>
         )}
-        <button
+        {!reloadOnly && <button
           type="button"
           disabled={busy}
           onClick={onOverwrite}
           className={`min-h-11 rounded-full bg-[var(--accent-fill)] px-3.5 text-[length:var(--text-footnote)] font-semibold text-[var(--accent)] transition-transform active:scale-[0.96] disabled:opacity-50 ${sameFieldConflict ? "col-span-2 md:col-auto" : ""}`}
         >
           Overwrite remote
-        </button>
+        </button>}
       </div>
     </section>
   )

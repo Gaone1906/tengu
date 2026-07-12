@@ -33,10 +33,15 @@ import {
   useDecideApproval,
   useNeedsAttentionItems,
   useEscalateApproval,
-  useUpdateWorkItem,
   type LedgerPageDepth,
 } from "./use-todos"
 import { clearTodoJournalByRef, todoPrivateRef } from "./todo-private-state"
+import { TodoConflictActions } from "./conflict-actions"
+import {
+  clearTodoQuickEditRecoveryByRef,
+  hasTodoQuickEditRecovery,
+  useTodoQuickEdit,
+} from "./use-todo-quick-edit"
 
 /* One calm open-work ledger. Search and Filter are the persistent controls;
  * Needs you and People become transient focused views instead of peer lenses.
@@ -50,6 +55,7 @@ interface TodoHistoryState {
   todoAnchorRef?: unknown
   todoAnchorOffset?: unknown
   todoPageDepth?: unknown
+  todoQuickRef?: unknown
 }
 
 const HISTORY_STATUSES: readonly WorkItemStatusWire[] = [
@@ -76,6 +82,15 @@ function cleanTodoHistoryState(state: TodoHistoryState | null): Record<string, u
   delete next.todoAnchorRef
   delete next.todoAnchorOffset
   delete next.todoPageDepth
+  delete next.todoQuickRef
+  return Object.keys(next).length > 0 ? next : null
+}
+
+function cleanTodoQuickHistoryState(state: TodoHistoryState | null): Record<string, unknown> | null {
+  if (!state) return null
+  const next = { ...state } as Record<string, unknown>
+  delete next.todoQuickRef
+  if (!("todoRef" in next)) delete next.todoPageDepth
   return Object.keys(next).length > 0 ? next : null
 }
 
@@ -156,6 +171,9 @@ export default function TodosPage() {
 
   const historyState = location.state as TodoHistoryState | null
   const openRef = typeof historyState?.todoRef === "string" ? historyState.todoRef : null
+  const quickRef = typeof historyState?.todoQuickRef === "string" && /^td_[a-z0-9]+$/i.test(historyState.todoQuickRef)
+    ? historyState.todoQuickRef
+    : null
   const anchorRef = typeof historyState?.todoAnchorRef === "string" && /^td_[a-z0-9]+$/i.test(historyState.todoAnchorRef)
     ? historyState.todoAnchorRef
     : null
@@ -177,11 +195,13 @@ export default function TodosPage() {
   const restoredScrollRef = useRef<string | null>(null)
   const cancelledScrollRestoreRef = useRef<string | null>(null)
   const pageRestoreRef = useRef<string | null>(null)
-  const [restoringPageDepth, setRestoringPageDepth] = useState(Boolean(openRef && savedPageDepth))
+  const [restoringPageDepth, setRestoringPageDepth] = useState(Boolean((openRef || quickRef) && savedPageDepth))
+  const quickRecoveryRef = useRef<string | null>(null)
+  const quickConflictRef = useRef<HTMLElement>(null)
+  const locallyStartedQuickRefs = useRef(new Set<string>())
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [resolving, setResolving] = useState<Set<string>>(new Set())
   const [creating, setCreating] = useState(false)
-  const [editError, setEditError] = useState<string | null>(null)
 
   // Filters live in the URL (§4.3): shareable, refresh-proof.
   const [searchParams, setSearchParams] = useSearchParams()
@@ -234,7 +254,7 @@ export default function TodosPage() {
   const byName = useEmployeesByName(org.data?.employees)
   const decide = useDecideApproval()
   const escalate = useEscalateApproval()
-  const update = useUpdateWorkItem()
+  const quickEdit = useTodoQuickEdit()
 
   // People needs the FULL open set (true per-person counts), not a capped page.
   const peopleItems = usePeopleItems()
@@ -249,6 +269,16 @@ export default function TodosPage() {
     ]
     return candidates.find((item) => todoPrivateRef(item.id) === openRef)?.id ?? null
   }, [baseLedger.data, ledger.data, needs.data, openRef, peopleItems.data])
+  const quickId = useMemo(() => {
+    if (!quickRef) return null
+    const candidates = [
+      ...(ledger.data?.items ?? []),
+      ...(baseLedger.data?.items ?? []),
+      ...(needs.data ?? []),
+      ...(peopleItems.data ?? []),
+    ]
+    return candidates.find((item) => todoPrivateRef(item.id) === quickRef)?.id ?? null
+  }, [baseLedger.data, ledger.data, needs.data, peopleItems.data, quickRef])
 
   // Header counts from the gateway's true totals, never from fetched rows.
   const counts = useMemo(
@@ -267,12 +297,12 @@ export default function TodosPage() {
     [ledger.data],
   )
 
-  const onOpen = useCallback((id: string) => {
+  const openResolvedTodo = useCallback((id: string, requestedBy?: HTMLElement | null) => {
     const scroller = ledgerScrollRef.current
     const todoScroll = scroller?.scrollTop ?? 0
     const todoAnchorRef = todoPrivateRef(id)
     const row = scroller?.querySelector<HTMLElement>(`[data-todo-anchor="${todoAnchorRef}"]`)
-    const active = document.activeElement
+    const active = requestedBy ?? document.activeElement
     lastDetailOpenerRef.current = active instanceof HTMLElement && active !== document.body
       ? active
       : row?.querySelector<HTMLElement>("button") ?? null
@@ -286,16 +316,25 @@ export default function TodosPage() {
       state: { todoRef: todoAnchorRef, todoScroll, todoAnchorRef, todoAnchorOffset, todoPageDepth: ledger.pageDepth },
     })
   }, [ledger.pageDepth, location.pathname, location.search, navigate])
+  const onOpen = useCallback((id: string) => {
+    const requestedBy = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement
+      : null
+    if (!quickEdit.hasOutstanding(id)) {
+      openResolvedTodo(id, requestedBy)
+    }
+  }, [openResolvedTodo, quickEdit])
   const closeDetail = useCallback(() => navigate(-1), [navigate])
 
   // History keeps only safe row surrogates and the number of loaded pages.
   // Rehydrate those pages before resolving the detail or restoring its anchor.
   useEffect(() => {
-    if (!openRef || !savedPageDepth || !ledger.data) {
-      if (!openRef || !savedPageDepth) setRestoringPageDepth(false)
+    const recoveryRef = openRef ?? quickRef
+    if (!recoveryRef || !savedPageDepth || !ledger.data) {
+      if (!recoveryRef || !savedPageDepth) setRestoringPageDepth(false)
       return
     }
-    const token = `${location.key}:${openRef}:${savedPageDepthKey}`
+    const token = `${location.key}:${recoveryRef}:${savedPageDepthKey}`
     if (pageRestoreRef.current === token) return
     pageRestoreRef.current = token
     let alive = true
@@ -307,7 +346,7 @@ export default function TodosPage() {
     // The restore function is an observer over the same eight ledger queries;
     // the history token and initial-page readiness are the intended triggers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.key, openRef, savedPageDepthKey, Boolean(ledger.data)])
+  }, [location.key, openRef, quickRef, savedPageDepthKey, Boolean(ledger.data)])
 
   useLayoutEffect(() => {
     const stateScroll = typeof historyState?.todoScroll === "number" && Number.isFinite(historyState.todoScroll)
@@ -363,32 +402,35 @@ export default function TodosPage() {
     })
   }, [])
 
+  const runQuickEdit = useCallback(async (id: string, patch: { title?: string; rank?: number }) => {
+    const privateRef = todoPrivateRef(id)
+    locallyStartedQuickRefs.current.add(privateRef)
+    const markedState: TodoHistoryState = {
+      ...(historyState ?? {}),
+      todoQuickRef: privateRef,
+      todoPageDepth: ledger.pageDepth,
+    }
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: markedState })
+    await quickEdit.edit(id, patch)
+    if (!hasTodoQuickEditRecovery(id)) {
+      locallyStartedQuickRefs.current.delete(privateRef)
+      navigate(`${location.pathname}${location.search}`, {
+        replace: true,
+        state: cleanTodoQuickHistoryState(markedState),
+      })
+    }
+  }, [historyState, ledger.pageDepth, location.pathname, location.search, navigate, quickEdit])
+
   const onRename = useCallback(
-    (id: string, title: string) =>
-      new Promise<void>((resolve) => {
-        setEditError(null)
-        update.mutate(
-          { id, patch: { title } },
-          {
-            onError: (e) => setEditError(operatorSafeTodoError(e, "Couldn't rename")),
-            onSettled: () => resolve(),
-          },
-        )
-      }),
-    [update],
+    (id: string, title: string) => runQuickEdit(id, { title }),
+    [runQuickEdit],
   )
 
   const onRankChange = useCallback(
     (id: string, rank: number) => {
-      setEditError(null)
-      update.mutate(
-        { id, patch: { rank } },
-        // The view keeps its local order either way; a failure just means the
-        // order won't survive a reload until the gateway ships rank (§7.3).
-        { onError: (e) => setEditError(operatorSafeTodoError(e, "Couldn't save the order")) },
-      )
+      void runQuickEdit(id, { rank })
     },
-    [update],
+    [runQuickEdit],
   )
 
   const runDecision = useCallback(
@@ -444,6 +486,35 @@ export default function TodosPage() {
       target?.focus({ preventScroll: true })
     })
   }, [historyState, location.pathname, location.search, navigate, openRef])
+
+  useEffect(() => {
+    if (!quickRef || restoringPageDepth || !candidateQueriesSettled || !candidateQueriesHealthy) return
+    if (locallyStartedQuickRefs.current.has(quickRef)) return
+    const token = `${location.key}:${quickRef}:${quickId ?? "missing"}`
+    if (quickRecoveryRef.current === token) return
+    quickRecoveryRef.current = token
+    if (!quickId) {
+      clearTodoQuickEditRecoveryByRef(quickRef)
+      navigate(`${location.pathname}${location.search}`, {
+        replace: true,
+        state: cleanTodoQuickHistoryState(historyState),
+      })
+      return
+    }
+    void quickEdit.recover(quickId).then(() => {
+      if (hasTodoQuickEditRecovery(quickId)) return
+      navigate(`${location.pathname}${location.search}`, {
+        replace: true,
+        state: cleanTodoQuickHistoryState(historyState),
+      })
+    })
+  }, [candidateQueriesHealthy, candidateQueriesSettled, historyState, location.key, location.pathname, location.search, navigate, quickEdit, quickId, quickRef, restoringPageDepth])
+
+  useEffect(() => {
+    if (!quickEdit.recovery) return
+    const frame = window.requestAnimationFrame(() => quickConflictRef.current?.focus({ preventScroll: true }))
+    return () => window.cancelAnimationFrame(frame)
+  }, [quickEdit.recovery])
 
   return (
     <PageLayout>
@@ -526,13 +597,33 @@ export default function TodosPage() {
                     </div>
                   </section>
                 )}
-                {editError && (
+                {quickEdit.recovery && (
+                  <TodoConflictActions
+                    fields={quickEdit.recovery.fields}
+                    sameFieldConflict={quickEdit.recovery.sameFieldConflict}
+                    busy={quickEdit.recovery.busy}
+                    error={quickEdit.recovery.error}
+                    reloadOnly={quickEdit.recovery.reloadOnly}
+                    focusRef={quickConflictRef}
+                    onReload={() => {
+                      void quickEdit.reload().then(() => {
+                        navigate(`${location.pathname}${location.search}`, {
+                          replace: true,
+                          state: cleanTodoQuickHistoryState(historyState),
+                        })
+                      })
+                    }}
+                    onRebase={() => void quickEdit.rebase()}
+                    onOverwrite={() => void quickEdit.overwrite()}
+                  />
+                )}
+                {quickEdit.error && !quickEdit.recovery && (
                   <div
                     data-testid="todos-edit-error"
                     className="mb-4 rounded-[var(--radius-md)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
                     style={{ background: "var(--fill-quaternary)" }}
                   >
-                    {editError}
+                    {quickEdit.error}
                   </div>
                 )}
                 {ledger.isError ? (
@@ -553,6 +644,7 @@ export default function TodosPage() {
                     onOpen={onOpen}
                     onRename={onRename}
                     onRankChange={onRankChange}
+                    rankReset={quickEdit.rankResetId ? { id: quickEdit.rankResetId, revision: quickEdit.rankResetRevision } : null}
                     onLoadMore={onLoadMore}
                     onClearFilters={() => setFilters({ status: "open", q: filters.q })}
                     filtered={filtered}

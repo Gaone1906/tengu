@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import type { OrgData, WorkItemCompactWire, WorkItemDetailWire } from "@/lib/api"
+import { TodoApiError, type OrgData, type WorkItemCompactWire, type WorkItemDetailWire } from "@/lib/api"
 import TodosPage from "../page"
 import { persistTodoJournal, todoPrivateRef } from "../todo-private-state"
 
@@ -57,6 +57,7 @@ const detail: WorkItemDetailWire = {
     ...compact,
     body: null,
     priority: 0,
+    rank: compact.rank ?? null,
     acceptance: null,
     verifyPolicy: null,
     rounds: 0,
@@ -180,6 +181,121 @@ describe("Todo detail navigation and draft recovery", () => {
     expect((await screen.findByTestId("sheet-title")).textContent).toBe(compact.title)
     expect(screen.queryByText("Rejected title")).toBeNull()
     expect(updateWorkItem).toHaveBeenCalledTimes(1)
+  })
+
+  it("routes inline rename through the canonical conditional request and safe conflict surface", async () => {
+    updateWorkItem.mockRejectedValueOnce(new TodoApiError(409, "SQL token /private/path wi_secret", "TODO_VERSION_CONFLICT", 8))
+    renderPage()
+    const opener = await screen.findByRole("button", { name: "Open Recoverable todo" })
+    fireEvent.keyDown(opener, { key: "F2" })
+    fireEvent.change(screen.getByTestId("todo-rename"), { target: { value: "Desired title" } })
+    fireEvent.keyDown(screen.getByTestId("todo-rename"), { key: "Enter" })
+
+    await waitFor(() => expect(updateWorkItem).toHaveBeenCalledTimes(1))
+    expect(updateWorkItem.mock.calls[0][1]).toEqual(expect.objectContaining({
+      patch: { title: "Desired title" },
+      expectedVersion: 7,
+      idempotencyKey: expect.stringMatching(/^[0-9a-f-]{36}$/i),
+    }))
+    expect(await screen.findByText("Todo changed elsewhere")).toBeTruthy()
+    expect(document.body.textContent).not.toContain("SQL token")
+    expect(document.body.innerHTML).not.toContain("wi_secret")
+  })
+
+  it("waits for a same-item quick edit before opening detail", async () => {
+    let resolveUpdate!: (value: unknown) => void
+    updateWorkItem.mockImplementationOnce(() => new Promise((resolve) => { resolveUpdate = resolve }))
+    renderPage()
+    const opener = await screen.findByRole("button", { name: "Open Recoverable todo" })
+    fireEvent.keyDown(opener, { key: "F2" })
+    fireEvent.change(screen.getByTestId("todo-rename"), { target: { value: "Confirmed before open" } })
+    fireEvent.keyDown(screen.getByTestId("todo-rename"), { key: "Enter" })
+    await waitFor(() => expect(updateWorkItem).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Recoverable todo" }))
+    expect(screen.queryByTestId("detail-sheet")).toBeNull()
+    resolveUpdate({
+      workItem: { ...detail.workItem, version: 8, title: "Confirmed before open" },
+      replayed: false,
+    })
+    await waitFor(() => expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull())
+    fireEvent.click(screen.getByRole("button", { name: "Open Confirmed before open" }))
+    expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
+  })
+
+  it("restores second-page quick-edit depth and exact-replays without raw ids in history", async () => {
+    const rows = Array.from({ length: 29 }, (_, index): WorkItemCompactWire => ({
+      ...compact,
+      id: `wi_quick_page_${index + 1}`,
+      title: `Quick todo ${index + 1}`,
+      rank: index * 1024,
+    }))
+    listWorkItems.mockImplementation((params?: { status?: string; needsAttentionFor?: string; offset?: number }) => {
+      if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+      if (params?.status !== "backlog") return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+      const offset = params.offset ?? 0
+      const page = rows.slice(offset, offset + 20)
+      return Promise.resolve({ workItems: page, total: rows.length, nextOffset: offset + page.length < rows.length ? offset + page.length : null })
+    })
+    getWorkItem.mockImplementation((id: string) => Promise.resolve({
+      ...detail,
+      workItem: { ...detail.workItem, id, version: 7, title: rows.find((row) => row.id === id)?.title ?? "Todo", rank: rows.find((row) => row.id === id)?.rank ?? null },
+    }))
+    updateWorkItem
+      .mockRejectedValueOnce(new TypeError("lost response"))
+      .mockResolvedValueOnce({
+        workItem: { ...detail.workItem, id: rows[28].id, version: 8, title: rows[28].title, rank: rows[27].rank! - 512 },
+        replayed: true,
+      })
+    const mounted = renderPage()
+    await screen.findByRole("button", { name: "Open Quick todo 20" })
+    fireEvent.click(screen.getByRole("button", { name: "Show 9 more" }))
+    const row = (await screen.findByRole("button", { name: "Open Quick todo 29" })).closest('[data-testid="todo-row"]')!
+    fireEvent.pointerDown(row.querySelector('button[aria-label="Todo actions"]')!, { pointerType: "mouse", button: 0 })
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Move up" }))
+    await waitFor(() => expect(updateWorkItem).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(currentState).toMatchObject({ todoQuickRef: expect.stringMatching(/^td_/), todoPageDepth: { backlog: 2 } }))
+    expect(JSON.stringify(currentState)).not.toContain(rows[28].id)
+
+    const reloadState = currentState
+    const original = updateWorkItem.mock.calls[0][1]
+    mounted.unmount()
+    listWorkItems.mockClear()
+    renderPage([{ pathname: "/todos", state: reloadState }])
+    await waitFor(() => expect(updateWorkItem).toHaveBeenCalledTimes(2))
+    expect(updateWorkItem.mock.calls[1][1]).toEqual(original)
+    expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ status: "backlog", offset: 20 }))
+  })
+
+  it("removes only the failed row's optimistic rank instead of leaving a false saved order", async () => {
+    const rows = [0, 1, 2].map((rank): WorkItemCompactWire => ({
+      ...compact,
+      id: `wi_rank_${rank}`,
+      title: `Rank todo ${rank + 1}`,
+      rank: rank * 1024,
+    }))
+    listWorkItems.mockImplementation((params?: { status?: string; needsAttentionFor?: string }) => {
+      if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+      return Promise.resolve({ workItems: params?.status === "backlog" ? rows : [], total: params?.status === "backlog" ? 3 : 0, nextOffset: null })
+    })
+    getWorkItem.mockImplementation((id: string) => Promise.resolve({
+      ...detail,
+      workItem: { ...detail.workItem, id, title: rows.find((row) => row.id === id)?.title ?? "Todo", rank: rows.find((row) => row.id === id)?.rank ?? null },
+    }))
+    let rejectUpdate!: (error: unknown) => void
+    updateWorkItem.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectUpdate = reject }))
+    renderPage()
+    const third = await screen.findByRole("button", { name: "Open Rank todo 3" })
+    const row = third.closest('[data-testid="todo-row"]')!
+    fireEvent.pointerDown(row.querySelector('button[aria-label="Todo actions"]')!, { pointerType: "mouse", button: 0 })
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Move up" }))
+    await waitFor(() => expect(updateWorkItem).toHaveBeenCalledTimes(1))
+    const second = screen.getByRole("button", { name: "Open Rank todo 2" })
+    expect(third.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    rejectUpdate(new TodoApiError(428, "raw precondition", "TODO_PRECONDITION_REQUIRED"))
+    await waitFor(() => expect(second.compareDocumentPosition(third) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy())
+    expect(screen.getByTestId("todos-edit-error").textContent).not.toContain("raw precondition")
   })
 
   it("restores the nested ledger scroll after detail Back and Forward", async () => {

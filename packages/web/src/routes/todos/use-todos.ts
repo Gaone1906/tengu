@@ -295,21 +295,6 @@ export function useEscalateApproval() {
   })
 }
 
-/** The operator's pen (design-todos §7.4): title/body/assignee/department/
- *  priority/rank edits. 404s on gateways that predate the endpoint — callers
- *  surface the failure quietly; invalidation restores server truth either way. */
-export function useUpdateWorkItem() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: Parameters<typeof api.updateWorkItem>[1] }) =>
-      api.updateWorkItem(id, patch),
-    onSettled: () => {
-      void qc.invalidateQueries({ queryKey: ["work-items"] })
-      void qc.invalidateQueries({ queryKey: ["work-item"] })
-    },
-  })
-}
-
 /** Guarded status transition — the sheet only offers legal edges; the gateway
  *  stays the authority and refuses anything else readably. */
 export function useSetWorkItemStatus() {

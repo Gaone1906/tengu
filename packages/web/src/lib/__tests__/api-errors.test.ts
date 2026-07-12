@@ -30,7 +30,7 @@ describe("typed API errors", () => {
 
   it("sends the canonical conditional edit body and preserves replay metadata", async () => {
     authFetch.mockResolvedValue(new Response(JSON.stringify({
-      workItem: { id: "private-id", title: "Desired", version: 8 },
+      workItem: { id: "private-id", title: "Desired", version: 8, rank: 512 },
       replayed: true,
     }), { status: 200, headers: { "Content-Type": "application/json" } }))
 
@@ -50,6 +50,8 @@ describe("typed API errors", () => {
     })
     expect(result).toMatchObject({ workItem: { version: 8 }, replayed: true })
     expectTypeOf(result.workItem.version).toEqualTypeOf<number>()
+    expect(result.workItem.rank).toBe(512)
+    expectTypeOf(result.workItem.rank).toEqualTypeOf<number | null>()
   })
 
   it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(

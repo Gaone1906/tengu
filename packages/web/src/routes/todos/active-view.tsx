@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import type { Employee, WorkItemCompactWire, WorkItemDetailWire, WorkItemStatusWire } from "@/lib/api"
 import {
   groupBoard,
@@ -46,6 +46,7 @@ export function ActiveView({
   onOpen,
   onRename,
   onRankChange,
+  rankReset,
   onLoadMore,
   onClearFilters,
   filtered,
@@ -60,6 +61,7 @@ export function ActiveView({
   onRename: (id: string, title: string) => Promise<void>
   /** Persist a manual rank (fire-and-forget; the view keeps its local order). */
   onRankChange: (id: string, rank: number) => void
+  rankReset?: { id: string; revision: number } | null
   /** Fetch the next server page for these statuses (raises their `want`). */
   onLoadMore: (statuses: readonly WorkItemStatusWire[]) => void
   onClearFilters: () => void
@@ -69,35 +71,53 @@ export function ActiveView({
   loadingMore?: boolean
   now: number
 }) {
-  // Manual order overrides, per group, applied over the server order so a drag
-  // never snaps back while the rank PATCH round-trips.
-  const [orderOverride, setOrderOverride] = useState<Record<string, string[]>>({})
+  // Per-item rank optimism lets one failed edit reset without masking a
+  // different row's confirmed order.
+  const [rankOverride, setRankOverride] = useState<Record<string, number>>({})
+
+  useEffect(() => {
+    if (!rankReset) return
+    setRankOverride((current) => {
+      if (!(rankReset.id in current)) return current
+      const next = { ...current }
+      delete next[rankReset.id]
+      return next
+    })
+  }, [rankReset])
+
+  useEffect(() => {
+    setRankOverride((current) => {
+      let changed = false
+      const next = { ...current }
+      for (const item of data.items) {
+        if (item.id in next && Object.is(item.rank, next[item.id])) {
+          delete next[item.id]
+          changed = true
+        }
+      }
+      return changed ? next : current
+    })
+  }, [data.items])
 
   const history = isHistoryView(filters)
-  const groups = useMemo(() => (history ? [] : groupBoard(data.items)), [history, data.items])
+  const optimisticItems = useMemo(() => data.items.map((item) => item.id in rankOverride
+    ? { ...item, rank: rankOverride[item.id] }
+    : item), [data.items, rankOverride])
+  const groups = useMemo(() => (history ? [] : groupBoard(optimisticItems)), [history, optimisticItems])
   const historyGroups = useMemo(() => (history ? groupHistory(data.items, now) : []), [history, data.items, now])
 
-  const orderedItems = useCallback(
-    (key: string, items: WorkItemCompactWire[]): WorkItemCompactWire[] => {
-      const order = orderOverride[key]
-      if (!order) return items
-      const pos = new Map(order.map((id, i) => [id, i]))
-      return items.slice().sort((a, b) => (pos.get(a.id) ?? order.length) - (pos.get(b.id) ?? order.length))
-    },
-    [orderOverride],
-  )
-
   const reorder = useCallback(
-    (key: string, items: WorkItemCompactWire[]) => (id: string, fromIndex: number, toIndex: number) => {
+    (_key: string, items: WorkItemCompactWire[]) => (id: string, fromIndex: number, toIndex: number) => {
       const ids = items.map((i) => i.id)
       ids.splice(fromIndex, 1)
       ids.splice(toIndex, 0, id)
-      setOrderOverride((o) => ({ ...o, [key]: ids }))
       // Midpoint rank between the new neighbours (their current rank, else none).
       const byId = new Map(items.map((i) => [i.id, i]))
       const before = toIndex > 0 ? (byId.get(ids[toIndex - 1])?.rank ?? null) : null
       const after = toIndex < ids.length - 1 ? (byId.get(ids[toIndex + 1])?.rank ?? null) : null
-      onRankChange(id, rankBetween(before, after))
+      const rank = rankBetween(before, after)
+      setRankOverride((current) => ({ ...current, [id]: rank }))
+      onRankChange(id, rank)
     },
     [onRankChange],
   )
@@ -150,7 +170,7 @@ export function ActiveView({
         .filter((g) => g.items.length > 0)
         .map((g) => {
           const isDone = g.group === "done"
-          const ordered = orderedItems(g.group, g.items)
+          const ordered = g.items
           // TRUE total straight from the gateway (per-status counts of the
           // whole filtered set, not the fetched page).
           const total = GROUP_STATUSES[g.group].reduce((sum, s) => sum + (data.totalsByStatus[s] ?? 0), 0)
