@@ -4,10 +4,12 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   assertIsolatedTestHome,
+  canonicalPath,
   ensureIsolatedTestHome,
   isTempPath,
 } from '../../../vitest.test-home.js';
 import vitestConfig from '../../../vitest.config.js';
+import setupVitest from '../../../vitest.global-setup.js';
 import { JINN_HOME, SESSIONS_DB } from '../paths.js';
 import { initDb } from '../../sessions/registry.js';
 import { createWorkItem } from '../../work-items/store.js';
@@ -68,6 +70,38 @@ describe('Vitest JINN_HOME guard', () => {
     expect(result.created).toBe(true);
     expect(env.JINN_HOME).toBe(result.home);
     expect(isTempPath(result.home)).toBe(true);
+  });
+
+  it('routes generic test temp fixtures beneath the cleanup-owned home', () => {
+    const relative = path.relative(
+      canonicalPath(process.env.JINN_HOME!),
+      canonicalPath(os.tmpdir()),
+    );
+
+    expect(relative).not.toBe('');
+    expect(relative).not.toBe('..');
+    expect(relative.startsWith(`..${path.sep}`)).toBe(false);
+    expect(path.isAbsolute(relative)).toBe(false);
+  });
+
+  it('removes read-only fixture directories during run cleanup', () => {
+    const previousSystemTempRoot = process.env.JINN_VITEST_SYSTEM_TEMP_ROOT;
+    const teardown = setupVitest();
+    const runTempRoot = os.tmpdir();
+    const lockedDir = path.join(runTempRoot, 'locked-fixture');
+    const lockedFile = path.join(lockedDir, 'artifact');
+    fs.mkdirSync(lockedDir);
+    fs.writeFileSync(lockedFile, 'fixture');
+    fs.chmodSync(lockedFile, 0o500);
+    fs.chmodSync(lockedDir, 0o500);
+
+    try {
+      expect(() => teardown()).not.toThrow();
+      expect(process.env.JINN_VITEST_SYSTEM_TEMP_ROOT).toBe(previousSystemTempRoot);
+    } finally {
+      if (fs.existsSync(lockedDir)) fs.chmodSync(lockedDir, 0o700);
+      fs.rmSync(runTempRoot, { recursive: true, force: true });
+    }
   });
 
   it('routes a real work-item write to the guarded temp registry', () => {

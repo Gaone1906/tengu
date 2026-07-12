@@ -3,7 +3,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 const PROD_HOME = path.join(os.homedir(), '.jinn');
-const TEMP_ROOT = os.tmpdir();
+// Global setup redirects the workers' generic temp variables beneath JINN_HOME.
+// Keep the pre-redirect OS root for the safety check so JINN_HOME remains a
+// valid child of the real temp directory inside every worker.
+const TEMP_ROOT = process.env.JINN_VITEST_SYSTEM_TEMP_ROOT ?? os.tmpdir();
 
 /** Resolve symlinks in the existing prefix while preserving a missing tail. */
 export function canonicalPath(pathname: string): string {
