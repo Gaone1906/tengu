@@ -399,6 +399,100 @@ describe("useTodoQuickEdit", () => {
     expect(recovered.result.current.error).toBeNull()
   })
 
+  it.each([
+    ["different field", new TodoApiError(403, "forbidden", "TODO_FORBIDDEN"), { rank: 72 }, { rank: 72 }],
+    ["same field", new TodoApiError(428, "precondition", "TODO_PRECONDITION_REQUIRED"), { title: "Latest title" }, { title: "Latest title" }],
+  ] as const)("durably retains a queued %s after definitive failure when the next preflight is offline", async (_label, failure, queuedPatch, expectedPatch) => {
+    vi.spyOn(api, "getWorkItem")
+      .mockResolvedValueOnce(detail(7))
+      .mockRejectedValueOnce(new TypeError("offline preflight"))
+      .mockResolvedValueOnce(detail(7))
+    let rejectFirst!: (error: unknown) => void
+    const update = vi.spyOn(api, "updateWorkItem")
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject }))
+      .mockResolvedValueOnce({ workItem: detail(8, expectedPatch).workItem as never, replayed: false })
+    const first = setup()
+    let initial!: Promise<void>
+    let queued!: Promise<void>
+    act(() => { initial = first.result.current.edit(ID, { title: "Rejected title" }) })
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1))
+    const rejectedKey = update.mock.calls[0][1].idempotencyKey
+    act(() => { queued = first.result.current.edit(ID, queuedPatch) })
+
+    rejectFirst(failure)
+    await act(() => Promise.all([initial, queued]))
+
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(first.result.current.hasOutstanding(ID)).toBe(true)
+    expect(onlyStored()).toMatchObject({ desired: expectedPatch, pending: "retry" })
+    expect(onlyStored().active).toBeUndefined()
+    expect(JSON.stringify(onlyStored())).not.toContain(rejectedKey)
+    first.unmount()
+
+    const recovered = setup()
+    await act(() => recovered.result.current.recover(ID))
+    expect(update).toHaveBeenCalledTimes(2)
+    expect(update.mock.calls[1][1]).toMatchObject({ patch: expectedPatch, expectedVersion: 7 })
+    expect(update.mock.calls[1][1].idempotencyKey).not.toBe(rejectedKey)
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
+  })
+
+  it("falls back to a blocked no-key journal when the conflict-state transition cannot persist", async () => {
+    const nativeSetItem = Storage.prototype.setItem
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (key === "jinn:todo-quick-edit:v1" && value.includes('"state":"conflict"')) return
+      nativeSetItem.call(this, key, value)
+    })
+    vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7))
+    const update = vi.spyOn(api, "updateWorkItem").mockRejectedValueOnce(
+      new TodoApiError(409, "conflict", "TODO_VERSION_CONFLICT", 8),
+    )
+    const first = setup()
+
+    await act(() => first.result.current.edit(ID, { title: "Blocked desired" }))
+
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(onlyStored()).toMatchObject({ desired: { title: "Blocked desired" }, blocked: "version" })
+    expect(onlyStored().active).toBeUndefined()
+    first.unmount()
+
+    const recovered = setup()
+    await act(() => recovered.result.current.recover(ID))
+    expect(recovered.result.current.recovery).not.toBeNull()
+    expect(recovered.result.current.hasOutstanding(ID)).toBe(true)
+    act(() => { void recovered.result.current.edit(ID, { rank: 91 }) })
+    await Promise.resolve()
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(onlyStored()).toMatchObject({ desired: { title: "Blocked desired", rank: 91 }, blocked: "version" })
+  })
+
+  it("removes the dispatched journal when no conflict transition can be stored", async () => {
+    const nativeSetItem = Storage.prototype.setItem
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (key === "jinn:todo-quick-edit:v1"
+        && (value.includes('"state":"conflict"') || value.includes('"blocked":"version"'))) return
+      nativeSetItem.call(this, key, value)
+    })
+    vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7))
+    const update = vi.spyOn(api, "updateWorkItem").mockRejectedValueOnce(
+      new TodoApiError(409, "conflict", "TODO_VERSION_CONFLICT", 8),
+    )
+    const first = setup()
+
+    await act(() => first.result.current.edit(ID, { title: "Memory-only conflict" }))
+
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(first.result.current.recovery?.error).toBe("This conflict couldn't be stored safely. Keep this page open and choose how to reconcile it.")
+    expect(first.result.current.hasOutstanding(ID)).toBe(true)
+    expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
+    first.unmount()
+
+    const recovered = setup()
+    await act(() => recovered.result.current.recover(ID))
+    expect(update).toHaveBeenCalledTimes(1)
+    expect(recovered.result.current.hasOutstanding(ID)).toBe(false)
+  })
+
   it("rejects an intent that cannot be durably admitted while preserving the active request", async () => {
     vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7))
     let resolveFirst!: (value: Awaited<ReturnType<typeof api.updateWorkItem>>) => void
