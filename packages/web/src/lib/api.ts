@@ -88,6 +88,14 @@ export class ApiError extends Error {
   }
 }
 
+/** Structured conditional-edit failure for the Todos surface. */
+export class TodoApiError extends ApiError {
+  constructor(status: number, message: string, code?: string, currentVersion?: number) {
+    super(status, message, code, currentVersion)
+    this.name = "TodoApiError"
+  }
+}
+
 async function responseError(res: Response): Promise<ApiError> {
   let message = `API error: ${res.status}`
   let code: string | undefined
@@ -578,6 +586,8 @@ export interface WorkItemSessionRefWire {
 /** The compact row GET /api/work-items returns (list/board/people). */
 export interface WorkItemCompactWire {
   id: string
+  /** Positive monotonic whole-row revision on CAS-capable gateways. */
+  version?: number
   title: string
   status: WorkItemStatusWire
   assignee: string | null
@@ -617,6 +627,8 @@ export interface VerifyPolicyWire {
 /** The full row GET /api/work-items/:id returns under `workItem`. */
 export interface WorkItemFullWire {
   id: string
+  /** Positive monotonic whole-row revision on CAS-capable gateways. */
+  version?: number
   title: string
   body: string | null
   status: WorkItemStatusWire
@@ -639,6 +651,26 @@ export interface WorkItemFullWire {
   createdAt: string
   updatedAt: string
   closedAt: string | null
+}
+
+export interface WorkItemEditPatch {
+  title?: string
+  body?: string
+  assignee?: string | null
+  department?: string | null
+  priority?: number
+  rank?: number
+}
+
+export interface WorkItemEditRequest {
+  patch: WorkItemEditPatch
+  expectedVersion: number
+  idempotencyKey: string
+}
+
+export interface WorkItemEditResultWire {
+  workItem: WorkItemFullWire
+  replayed: boolean
 }
 
 export interface WorkItemEventWire {
@@ -1033,10 +1065,23 @@ export const api = {
   /** The operator's pen (design-todos §7.3–4): PATCH title/body/assignee/
    *  department/priority/rank. 404s on gateways that predate the endpoint —
    *  callers surface the failure quietly and keep the read view intact. */
-  updateWorkItem: (
+  updateWorkItem: async (
     id: string,
-    input: Partial<{ title: string; body: string; assignee: string | null; department: string | null; priority: number; rank: number }>,
-  ) => patch<{ workItem: WorkItemFullWire }>(`/api/work-items/${encodeURIComponent(id)}`, input),
+    input: WorkItemEditRequest,
+  ): Promise<WorkItemEditResultWire> => {
+    try {
+      return await patch<WorkItemEditResultWire>(`/api/work-items/${encodeURIComponent(id)}`, {
+        ...input.patch,
+        expectedVersion: input.expectedVersion,
+        idempotencyKey: input.idempotencyKey,
+      })
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw new TodoApiError(error.status, error.message, error.code, error.currentVersion)
+      }
+      throw error
+    }
+  },
   /** Guarded status transition (legal edges only — the gateway owns legality). */
   setWorkItemStatus: (id: string, status: WorkItemStatusWire, note?: string) =>
     put<{ workItem: WorkItemFullWire; escalated: boolean }>(

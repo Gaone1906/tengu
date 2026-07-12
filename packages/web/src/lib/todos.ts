@@ -100,6 +100,11 @@ export function isOpen(status: WorkItemStatusWire): boolean {
   return !TERMINAL.has(status)
 }
 
+/** A Todo revision is authoritative only when it is a positive safe integer. */
+export function isPositiveTodoVersion(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+}
+
 const SAFE_TODO_ERROR_BY_CODE: Readonly<Record<string, string>> = {
   WORK_ITEM_ESCALATED: "This Todo is escalated. Use the human operator surface for this transition.",
   WORK_ITEM_APPROVAL_PENDING: "This Todo is awaiting approval. Resolve the approval before changing its status.",
