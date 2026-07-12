@@ -1,12 +1,23 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { MemoryRouter } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkItemDetailWire, WorkItemFullWire, WorkItemStatusWire } from "@/lib/api"
 import { DetailSheet, selectLinkedSession, sessionLinkLabel } from "../detail-sheet"
-import { persistTodoJournal } from "../todo-private-state"
+import { loadTodoJournal, persistTodoJournal } from "../todo-private-state"
 
 const authFetch = vi.fn()
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
 
 const todoId: Record<WorkItemStatusWire, string> = {
   backlog: "wi_backlog",
@@ -64,6 +75,23 @@ function editResult(item: WorkItemFullWire, patch: Record<string, unknown>, vers
     workItem: { ...item, ...editable, version },
     replayed,
   }
+}
+
+function persistTypedConflict(value: WorkItemDetailWire, title = "Recovered local title") {
+  persistTodoJournal(value.workItem.id, {
+    revision: 1,
+    patch: { title },
+    baseline: { title: value.workItem.title },
+    baselineVersion: value.workItem.version,
+    conflictFields: ["title"],
+    request: {
+      revision: 1,
+      patch: { title },
+      expectedVersion: value.workItem.version!,
+      idempotencyKey: crypto.randomUUID(),
+      state: "conflict",
+    },
+  })
 }
 
 function patchBodies(): Array<Record<string, unknown>> {
@@ -356,7 +384,10 @@ describe("Todo detail editing and dialog behavior", () => {
     })
     renderSheetWithDetail(remote, onClose)
 
-    expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+    const conflict = await screen.findByRole("status", { name: "Todo changed elsewhere" })
+    expect(conflict).toBeTruthy()
+    await waitFor(() => expect(document.activeElement).toBe(conflict))
+    expect(conflict.textContent).toContain("Reload remote discards all your local edits")
     expect(screen.getByText("Recovered local title")).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "Close" }))
     expect(onClose).not.toHaveBeenCalled()
@@ -365,6 +396,7 @@ describe("Todo detail editing and dialog behavior", () => {
     fireEvent.click(screen.getByRole("button", { name: "Reload remote" }))
     expect(await screen.findByText("Remote acknowledged title")).toBeTruthy()
     expect(screen.queryByRole("status", { name: "Todo changed elsewhere" })).toBeNull()
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" })))
   })
 
   it("preflight-refetches before an explicit overwrite of a recovered same-field conflict", async () => {
@@ -505,6 +537,7 @@ describe("Todo detail editing and dialog behavior", () => {
   })
 
   it("keeps a same-field conflict blocked after Rebase and names the field", async () => {
+    const user = userEvent.setup()
     const value = detail("backlog")
     const remote = detail("backlog")
     remote.workItem.version = 8
@@ -525,9 +558,12 @@ describe("Todo detail editing and dialog behavior", () => {
     fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Local title" } })
     fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
     await screen.findByRole("status", { name: "Todo changed elsewhere" })
-    fireEvent.click(screen.getByRole("button", { name: "Rebase edits" }))
+    await user.click(screen.getByRole("button", { name: "Rebase edits" }))
 
     expect(await screen.findByText("Title still conflicts")).toBeTruthy()
+    const conflict = screen.getByRole("status", { name: "Todo changed elsewhere" })
+    expect(conflict.textContent).toContain("Reload remote discards all your local edits")
+    await waitFor(() => expect(document.activeElement).toBe(conflict))
     expect(screen.queryByRole("button", { name: "Rebase edits" })).toBeNull()
     expect(patchBodies()).toHaveLength(1)
   })
@@ -559,6 +595,218 @@ describe("Todo detail editing and dialog behavior", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("Couldn't rebase these edits")
     expect((client.getQueryData<WorkItemDetailWire>(["work-item", value.workItem.id]))?.workItem.version).toBe(7)
     expect(patchBodies()).toHaveLength(1)
+  })
+
+  it("serializes rapid mixed conflict actions before React can rerender", async () => {
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    const read = deferred<Response>()
+    let detailReads = 0
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      detailReads += 1
+      return read.promise
+    })
+    renderSheetWithDetail(value)
+    const rebase = await screen.findByRole("button", { name: "Rebase edits" })
+    const overwrite = screen.getByRole("button", { name: "Overwrite remote" })
+
+    act(() => {
+      rebase.click()
+      overwrite.click()
+    })
+
+    expect(detailReads).toBe(1)
+    read.resolve(new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }))
+  })
+
+  it("keeps the synchronous action lock across pointer and keyboard activation", async () => {
+    const user = userEvent.setup()
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    const read = deferred<Response>()
+    let detailReads = 0
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      detailReads += 1
+      return read.promise
+    })
+    renderSheetWithDetail(value)
+    const rebase = await screen.findByRole("button", { name: "Rebase edits" })
+
+    await user.pointer([{ target: rebase, keys: "[MouseLeft]" }])
+    rebase.focus()
+    await user.keyboard("[Enter]")
+
+    expect(detailReads).toBe(1)
+    read.resolve(new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } }))
+  })
+
+  it("keeps every conflict action disabled while a rebased PATCH is still reconciling", async () => {
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    const remote = { ...value, workItem: { ...value.workItem, version: 8, priority: 3 } }
+    const patchResponse = deferred<Response>()
+    let detailReads = 0
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") return patchResponse.promise
+      detailReads += 1
+      return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(await screen.findByRole("button", { name: "Rebase edits" }))
+    await waitFor(() => expect(patchBodies()).toHaveLength(1))
+
+    for (const name of ["Reload remote", "Rebase edits", "Overwrite remote"]) {
+      expect(screen.getByRole("button", { name }).hasAttribute("disabled")).toBe(true)
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Overwrite remote" }))
+    expect(detailReads).toBe(1)
+    patchResponse.resolve(new Response(JSON.stringify(editResult(remote.workItem, { title: "Recovered local title" }, 9)), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }))
+  })
+
+  it("invalidates an old action before reopening the same Todo id", async () => {
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    const read = deferred<Response>()
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      return read.promise
+    })
+    const first = renderSheetWithDetail(value)
+    fireEvent.click(await screen.findByRole("button", { name: "Rebase edits" }))
+    first.unmount()
+    const reopened = renderSheetWithDetail(value)
+    expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+
+    await act(async () => {
+      read.resolve(new Response(JSON.stringify({ ...value, workItem: { ...value.workItem, version: 8, priority: 3 } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      await read.promise
+    })
+
+    expect(patchBodies()).toHaveLength(0)
+    expect(loadTodoJournal(value.workItem.id)?.request?.state).toBe("conflict")
+    expect(screen.getByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+    reopened.unmount()
+  })
+
+  it("invalidates an old action synchronously when the sheet switches Todo ids", async () => {
+    const firstValue = detail("backlog")
+    const secondValue = detail("assigned")
+    persistTypedConflict(firstValue, "First local")
+    persistTypedConflict(secondValue, "Second local")
+    const read = deferred<Response>()
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      return read.promise
+    })
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+    const node = (value: WorkItemDetailWire) => (
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <DetailSheet id={value.workItem.id} initial={value} byName={new Map()} resolving={false} onApprove={() => {}} onSendBack={() => {}} onClose={() => {}} />
+        </MemoryRouter>
+      </QueryClientProvider>
+    )
+    const rendered = render(node(firstValue))
+    fireEvent.click(await screen.findByRole("button", { name: "Rebase edits" }))
+    rendered.rerender(node(secondValue))
+    expect(await screen.findByText("Second local")).toBeTruthy()
+
+    await act(async () => {
+      read.resolve(new Response(JSON.stringify({ ...firstValue, workItem: { ...firstValue.workItem, version: 8, priority: 3 } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }))
+      await read.promise
+    })
+
+    expect(patchBodies()).toHaveLength(0)
+    expect(loadTodoJournal(firstValue.workItem.id)?.request?.state).toBe("conflict")
+    expect(loadTodoJournal(secondValue.workItem.id)?.request?.state).toBe("conflict")
+  })
+
+  it("does not let a stale reconciliation GET downgrade the exact detail cache", async () => {
+    const value = detail("backlog")
+    value.workItem.version = 12
+    persistTypedConflict(value)
+    const stale = detail("backlog")
+    stale.workItem.version = 8
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      return new Response(JSON.stringify(stale), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    const { client } = renderSheetWithDetail(value)
+
+    fireEvent.click(await screen.findByRole("button", { name: "Reload remote" }))
+    await waitFor(() => expect(authFetch).toHaveBeenCalled())
+
+    expect(client.getQueryData<WorkItemDetailWire>(["work-item", value.workItem.id])?.workItem.version).toBe(12)
+  })
+
+  it("does not let a stale PATCH response overwrite a newer exact detail cache", async () => {
+    const value = detail("backlog")
+    const patchResponse = deferred<Response>()
+    const refetch = deferred<Response>()
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") return patchResponse.promise
+      return refetch.promise
+    })
+    const { client } = renderSheetWithDetail(value)
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Local title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    await waitFor(() => expect(patchBodies()).toHaveLength(1))
+    client.setQueryData(["work-item", value.workItem.id], {
+      ...value,
+      spendUsd: 12,
+      workItem: { ...value.workItem, version: 12, title: "Newer cached title" },
+    })
+
+    patchResponse.resolve(new Response(JSON.stringify(editResult(value.workItem, { title: "Local title" }, 8)), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }))
+    await waitFor(() => expect(authFetch.mock.calls.some(([path, init]) => String(path).endsWith(value.workItem.id) && !(init as RequestInit | undefined)?.method)).toBe(true))
+
+    expect(client.getQueryData<WorkItemDetailWire>(["work-item", value.workItem.id])).toMatchObject({
+      spendUsd: 12,
+      workItem: { version: 12, title: "Newer cached title" },
+    })
+    refetch.resolve(new Response(JSON.stringify(client.getQueryData(["work-item", value.workItem.id])), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }))
+  })
+
+  it("updates equal-version outer detail metadata without regressing the Todo", async () => {
+    const value = detail("backlog")
+    value.workItem.version = 8
+    value.spendUsd = 1
+    persistTypedConflict(value)
+    const equal = { ...value, spendUsd: 9, events: [{ id: "event-safe" }] } as unknown as WorkItemDetailWire
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      return new Response(JSON.stringify(equal), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    const { client } = renderSheetWithDetail(value)
+
+    fireEvent.click(await screen.findByRole("button", { name: "Reload remote" }))
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Todo changed elsewhere" })).toBeNull())
+
+    expect(client.getQueryData<WorkItemDetailWire>(["work-item", value.workItem.id])).toMatchObject({
+      spendUsd: 9,
+      workItem: { version: 8 },
+    })
   })
 
   it("redacts opaque backend ids from a real escalated 403 error surface", async () => {
@@ -679,13 +927,73 @@ describe("Todo detail editing and dialog behavior", () => {
     fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Conflicting title" } })
     fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
 
-    expect(await screen.findByRole("status", { name: "Todo changed elsewhere" })).toBeTruthy()
+    const conflict = await screen.findByRole("status", { name: "Todo changed elsewhere" })
+    expect(conflict).toBeTruthy()
+    await waitFor(() => expect(document.activeElement).toBe(conflict))
+    expect(conflict.textContent).toContain("Reload remote discards all your local edits")
     expect(screen.getByRole("button", { name: "Reload remote" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Rebase edits" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Overwrite remote" })).toBeTruthy()
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull()
     expect(screen.getByTestId("detail-sheet").innerHTML).not.toMatch(/wi_[a-z0-9_-]+/i)
     expect(screen.getByTestId("detail-sheet").innerHTML).not.toContain("private conflict payload")
+  })
+
+  it("suppresses exact Retry for an idempotency conflict and reloads before minting a new key", async () => {
+    const value = detail("backlog")
+    let patchAttempt = 0
+    authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (init?.method === "PATCH") {
+        patchAttempt += 1
+        if (patchAttempt === 1) {
+          return new Response(JSON.stringify({
+            code: "todo_idempotency_conflict",
+            error: "private payload wi_hidden token=secret",
+          }), { status: 409, headers: { "Content-Type": "application/json" } })
+        }
+        return new Response(JSON.stringify(editResult(value.workItem, JSON.parse(String(init.body)), 8)), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      }
+      return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
+    })
+    renderSheetWithDetail(value)
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "First local title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+    const alert = await screen.findByRole("alert")
+    expect(alert.textContent).toContain("Reload remote to discard all local edits")
+    expect(alert.textContent).not.toMatch(/wi_[a-z0-9_-]+|token=/i)
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull()
+    const firstKey = patchBodies()[0].idempotencyKey
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload remote" }))
+    await waitFor(() => expect(screen.queryByText(/Reload remote to discard all local edits/)).toBeNull())
+    fireEvent.click(screen.getByRole("button", { name: "Edit title" }))
+    fireEvent.change(screen.getByTestId("sheet-title-edit"), { target: { value: "Second local title" } })
+    fireEvent.keyDown(screen.getByTestId("sheet-title-edit"), { key: "Enter" })
+
+    await waitFor(() => expect(patchBodies()).toHaveLength(2))
+    expect(patchBodies()[1].idempotencyKey).not.toBe(firstKey)
+  })
+
+  it("restores focus to the invoking conflict action after a safe async error", async () => {
+    const value = detail("backlog")
+    persistTypedConflict(value)
+    authFetch.mockImplementation(async (path: string) => {
+      if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      throw new TypeError("offline")
+    })
+    renderSheetWithDetail(value)
+    const rebase = await screen.findByRole("button", { name: "Rebase edits" })
+    rebase.focus()
+
+    fireEvent.click(rebase)
+    expect((await screen.findByRole("alert")).textContent).toContain("Couldn't rebase these edits")
+    await waitFor(() => expect(document.activeElement).toBe(rebase))
   })
 
   it("preflights Overwrite, rotates the key, and keeps a second conflict mounted", async () => {
@@ -768,6 +1076,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const alert = await screen.findByRole("alert")
     expect(alert.textContent).toContain("Couldn't clear this recovered draft")
     expect(screen.getByRole("button", { name: "Retry cleanup" })).toBeTruthy()
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Retry cleanup" })))
     expect(screen.queryByRole("status", { name: "Todo changed elsewhere" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Overwrite remote" })).toBeNull()
   })

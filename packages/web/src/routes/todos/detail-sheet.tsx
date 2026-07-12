@@ -21,6 +21,7 @@ import {
   provenanceLabel,
   formatCost,
   isOpen,
+  isTodoIdempotencyConflictError,
   operatorSafeTodoError,
 } from "@/lib/todos"
 import {
@@ -37,7 +38,7 @@ import { useSetWorkItemStatus } from "./use-todos"
 import { TodoDialog } from "./todo-dialog"
 import { TodoConflictActions } from "./conflict-actions"
 import { invalidateTodoCaches, mergeTodoIntoCaches } from "./todo-edit-request"
-import { useTodoDraft, type TodoDraftPatch, type TodoEditableDraft, type TodoRemoteSnapshot } from "./use-todo-draft"
+import { useTodoDraft, type TodoConflictMode, type TodoDraftPatch, type TodoEditableDraft, type TodoRemoteSnapshot } from "./use-todo-draft"
 
 /* GRS-021d — the detail sheet: a DECISION (design's middle depth). Mobile = an
  * opaque bottom sheet that scrolls FROM INSIDE (pinned header, scrollable body,
@@ -417,6 +418,43 @@ function todoRemoteSnapshot(item: WorkItemFullWire): TodoRemoteSnapshot {
   }
 }
 
+function mergeDetailResponse(
+  current: WorkItemDetailWire | undefined,
+  incoming: WorkItemDetailWire,
+): WorkItemDetailWire {
+  if (!current) return incoming
+  const currentVersion = current.workItem.version
+  const incomingVersion = incoming.workItem.version
+  if (isPositiveTodoVersion(currentVersion)
+    && (!isPositiveTodoVersion(incomingVersion) || incomingVersion < currentVersion)) return current
+  return {
+    ...current,
+    ...incoming,
+    workItem: { ...current.workItem, ...incoming.workItem },
+  }
+}
+
+function mergeSavedDetail(
+  current: WorkItemDetailWire | undefined,
+  incoming: WorkItemFullWire,
+): WorkItemDetailWire | undefined {
+  if (!current) return current
+  const currentVersion = current.workItem.version
+  if (isPositiveTodoVersion(currentVersion)
+    && (!isPositiveTodoVersion(incoming.version) || incoming.version < currentVersion)) return current
+  return { ...current, workItem: { ...current.workItem, ...incoming } }
+}
+
+type ConflictActionName = "reload" | "rebase" | "overwrite"
+
+interface ConflictActionControl {
+  id: string
+  mounted: boolean
+  busy: boolean
+  token: number
+  focus: HTMLElement | null
+}
+
 function DecisionFooter({
   detail,
   resolving,
@@ -597,9 +635,33 @@ export function DetailSheet({
   const [showCloseGuard, setShowCloseGuard] = useState(false)
   const [conflictBusy, setConflictBusy] = useState(false)
   const [conflictError, setConflictError] = useState<string | null>(null)
-  const [rebaseAttempted, setRebaseAttempted] = useState(false)
   const titleRef = useRef<HTMLInputElement>(null)
   const titleBeforeEdit = useRef("")
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const conflictSurfaceRef = useRef<HTMLElement>(null)
+  const cleanupRetryRef = useRef<HTMLButtonElement>(null)
+  const previousConflictRef = useRef<{ id: string; mode: TodoConflictMode }>({ id, mode: "none" })
+  const actionControlRef = useRef<ConflictActionControl>({ id, mounted: false, busy: false, token: 0, focus: null })
+  if (actionControlRef.current.id !== id) {
+    actionControlRef.current.id = id
+    actionControlRef.current.mounted = false
+    actionControlRef.current.busy = false
+    actionControlRef.current.token += 1
+    actionControlRef.current.focus = null
+    previousConflictRef.current = { id, mode: "none" }
+  }
+  useEffect(() => {
+    const control = actionControlRef.current
+    control.id = id
+    control.mounted = true
+    return () => {
+      if (control.id !== id) return
+      control.mounted = false
+      control.busy = false
+      control.token += 1
+      control.focus = null
+    }
+  }, [id])
   useEffect(() => {
     if (editingTitle) titleRef.current?.select()
   }, [editingTitle])
@@ -612,18 +674,24 @@ export function DetailSheet({
     department: detail?.workItem.department ?? null,
     priority: detail?.workItem.priority ?? 0,
   }), [detail])
-  const loadRemote = useCallback(async () => {
+  const fetchRemote = useCallback(async () => {
     const fresh = await api.getWorkItem(id)
     const remote = todoRemoteSnapshot(fresh.workItem)
-    queryClient.setQueryData(["work-item", id], fresh)
-    return remote
+    return { fresh, remote }
+  }, [id])
+  const commitRemote = useCallback((fresh: WorkItemDetailWire) => {
+    mergeTodoIntoCaches(queryClient, fresh.workItem)
+    queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) => mergeDetailResponse(current, fresh))
   }, [id, queryClient])
+  const loadRemote = useCallback(async () => {
+    const loaded = await fetchRemote()
+    commitRemote(loaded.fresh)
+    return loaded.remote
+  }, [commitRemote, fetchRemote])
   const saveRemote = useCallback(async (request: WorkItemEditRequest) => {
     const result = await api.updateWorkItem(id, request)
     mergeTodoIntoCaches(queryClient, result.workItem)
-    queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) => current
-      ? { ...current, workItem: result.workItem }
-      : current)
+    queryClient.setQueryData<WorkItemDetailWire>(["work-item", id], (current) => mergeSavedDetail(current, result.workItem))
     await invalidateTodoCaches(queryClient, id)
     return {
       remote: todoRemoteSnapshot(result.workItem),
@@ -653,8 +721,26 @@ export function DetailSheet({
   useEffect(() => {
     if (draftState.recoveredConflict) return
     setConflictError(null)
-    setRebaseAttempted(false)
   }, [draftState.recoveredConflict])
+
+  useEffect(() => {
+    const previous = previousConflictRef.current.id === id ? previousConflictRef.current.mode : "none"
+    if (draftState.cleanupPending) {
+      previousConflictRef.current = { id, mode: "none" }
+      queueMicrotask(() => cleanupRetryRef.current?.focus())
+      return
+    }
+    const mode = draftState.conflictMode
+    if (mode === "none") {
+      previousConflictRef.current = { id, mode }
+      if (previous !== "none") queueMicrotask(() => closeButtonRef.current?.focus())
+      return
+    }
+    previousConflictRef.current = { id, mode }
+    if (previous === "none" || (mode === "same-field" && previous !== "same-field")) {
+      queueMicrotask(() => conflictSurfaceRef.current?.focus())
+    }
+  }, [draftState.cleanupPending, draftState.conflictMode, id])
 
   const displayDetail = useMemo<WorkItemDetailWire | undefined>(() => detail ? {
     ...detail,
@@ -662,6 +748,10 @@ export function DetailSheet({
   } : undefined, [detail, draftState.draft])
   const pending = displayDetail?.workItem.approvalState === "pending"
   const execSession = selectLinkedSession(sessions)
+  const idempotencyConflict = isTodoIdempotencyConflictError(draftState.error)
+  const conflictActionsBlocked = conflictBusy
+    || draftState.conflictMode === "reconciling"
+    || draftState.status === "saving"
 
   const edit = (patch: TodoDraftPatch) => {
     for (const [field, value] of Object.entries(patch) as [keyof TodoEditableDraft, TodoEditableDraft[keyof TodoEditableDraft]][]) {
@@ -702,47 +792,54 @@ export function DetailSheet({
     onClose()
   }, [draftState, onClose])
 
-  const reloadConflict = useCallback(async () => {
-    if (conflictBusy) return
-    setConflictBusy(true)
-    setConflictError(null)
-    try {
-      draftState.reloadRemote(await loadRemote())
-      setRebaseAttempted(false)
-    } catch (cause) {
-      setConflictError(operatorSafeTodoError(cause, "Couldn't reload this Todo"))
-    } finally {
-      setConflictBusy(false)
-    }
-  }, [conflictBusy, draftState, loadRemote])
+  const ownsAction = useCallback((token: number) => {
+    const control = actionControlRef.current
+    return control.id === id && control.mounted && control.token === token
+  }, [id])
 
-  const rebaseConflict = useCallback(async () => {
-    if (conflictBusy) return
+  const runConflictAction = useCallback(async (action: ConflictActionName) => {
+    const control = actionControlRef.current
+    if (!control.mounted
+      || control.id !== id
+      || control.busy
+      || draftState.conflictMode === "reconciling"
+      || draftState.status === "saving") return
+    control.busy = true
+    control.token += 1
+    control.focus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const token = control.token
     setConflictBusy(true)
     setConflictError(null)
+    let restoreFocus = false
     try {
-      draftState.rebaseRemote(await loadRemote())
-      setRebaseAttempted(true)
+      const loaded = await fetchRemote()
+      if (!ownsAction(token)) return
+      commitRemote(loaded.fresh)
+      if (!ownsAction(token)) return
+      if (action === "reload") draftState.reloadRemote(loaded.remote)
+      else if (action === "rebase") draftState.rebaseRemote(loaded.remote)
+      else draftState.overwriteRemote(loaded.remote)
     } catch (cause) {
-      setConflictError(operatorSafeTodoError(cause, "Couldn't rebase these edits"))
+      if (!ownsAction(token)) return
+      const fallback = action === "reload"
+        ? "Couldn't reload this Todo"
+        : action === "rebase"
+          ? "Couldn't rebase these edits"
+          : "Couldn't prepare the overwrite"
+      setConflictError(operatorSafeTodoError(cause, fallback))
+      restoreFocus = true
     } finally {
+      if (!ownsAction(token)) return
+      control.busy = false
       setConflictBusy(false)
+      if (restoreFocus) {
+        const target = control.focus
+        queueMicrotask(() => {
+          if (ownsAction(token) && target?.isConnected) target.focus()
+        })
+      }
     }
-  }, [conflictBusy, draftState, loadRemote])
-
-  const overwriteConflict = useCallback(async () => {
-    if (conflictBusy) return
-    setConflictBusy(true)
-    setConflictError(null)
-    try {
-      draftState.overwriteRemote(await loadRemote())
-      setRebaseAttempted(false)
-    } catch (cause) {
-      setConflictError(operatorSafeTodoError(cause, "Couldn't prepare the overwrite"))
-    } finally {
-      setConflictBusy(false)
-    }
-  }, [conflictBusy, draftState, loadRemote])
+  }, [commitRemote, draftState, fetchRemote, id, ownsAction])
 
   useEffect(() => {
     if (!closeAfterSave) return
@@ -821,6 +918,7 @@ export function DetailSheet({
             )}
           </div>
           <button
+            ref={closeButtonRef}
             type="button"
             aria-label="Close"
             onClick={requestClose}
@@ -838,19 +936,20 @@ export function DetailSheet({
               className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
             >
               <span className="min-w-0 flex-1 break-words">Couldn't clear this recovered draft locally. Retry cleanup before closing.</span>
-              <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">
+              <button ref={cleanupRetryRef} type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">
                 Retry cleanup
               </button>
             </div>
           ) : draftState.recoveredConflict ? (
             <TodoConflictActions
               fields={draftState.conflictFields}
-              sameFieldConflict={rebaseAttempted}
-              busy={conflictBusy}
+              sameFieldConflict={draftState.conflictMode === "same-field"}
+              busy={conflictActionsBlocked}
               error={conflictError}
-              onReload={() => void reloadConflict()}
-              onRebase={() => void rebaseConflict()}
-              onOverwrite={() => void overwriteConflict()}
+              focusRef={conflictSurfaceRef}
+              onReload={() => void runConflictAction("reload")}
+              onRebase={() => void runConflictAction("rebase")}
+              onOverwrite={() => void runConflictAction("overwrite")}
             />
           ) : null}
           {((draftState.error && !draftState.cleanupPending && !draftState.recoveredConflict) || transitionError) && (
@@ -859,8 +958,22 @@ export function DetailSheet({
               data-testid="sheet-save-error"
               className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--radius-md)] bg-[var(--fill-quaternary)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
             >
-              <span className="min-w-0 flex-1 break-words">{draftState.error ? operatorSafeTodoError(draftState.error, "Couldn't save") : transitionError}</span>
-              {draftState.status === "error" && !draftState.cleanupPending && !draftState.recoveredConflict && <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">Retry</button>}
+              <span className="min-w-0 flex-1 break-words">
+                {draftState.error ? operatorSafeTodoError(draftState.error, "Couldn't save") : transitionError}
+                {idempotencyConflict && conflictError ? ` ${conflictError}` : null}
+              </span>
+              {idempotencyConflict ? (
+                <button
+                  type="button"
+                  disabled={conflictBusy}
+                  onClick={() => void runConflictAction("reload")}
+                  className="min-h-11 rounded-full px-3 font-semibold disabled:opacity-50"
+                >
+                  Reload remote
+                </button>
+              ) : draftState.status === "error" && !draftState.cleanupPending && !draftState.recoveredConflict ? (
+                <button type="button" onClick={draftState.retry} className="min-h-11 rounded-full px-3 font-semibold">Retry</button>
+              ) : null}
             </div>
           )}
           {showCloseGuard && (

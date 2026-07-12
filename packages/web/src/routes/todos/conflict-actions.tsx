@@ -1,3 +1,4 @@
+import type { Ref } from "react"
 import type { TodoDraftField } from "./todo-private-state"
 
 const FIELD_LABEL: Record<TodoDraftField, string> = {
@@ -23,6 +24,7 @@ export function TodoConflictActions({
   onReload,
   onRebase,
   onOverwrite,
+  focusRef,
 }: {
   fields: TodoDraftField[]
   sameFieldConflict: boolean
@@ -31,11 +33,14 @@ export function TodoConflictActions({
   onReload: () => void
   onRebase: () => void
   onOverwrite: () => void
+  focusRef?: Ref<HTMLElement>
 }) {
   const fieldCopy = fields.length === 1 ? FIELD_LABEL[fields[0]].toLowerCase() : "edited fields"
 
   return (
     <section
+      ref={focusRef}
+      tabIndex={-1}
       role="status"
       aria-label="Todo changed elsewhere"
       aria-busy={busy}
@@ -47,8 +52,8 @@ export function TodoConflictActions({
       </div>
       <p className="mt-2 text-pretty text-[length:var(--text-footnote)] leading-[1.48] text-[var(--text-secondary)]">
         {sameFieldConflict
-          ? `Your ${fieldCopy} also changed remotely. Reload the remote ${fieldCopy}, or explicitly overwrite it with your edit.`
-          : "The Todo changed after you opened it. Rebase keeps unrelated remote work; overwrite applies only your edited fields to the latest version."}
+          ? `Reload remote discards all your local edits. Your ${fieldCopy} also changed remotely; overwrite applies only your edited fields to the latest version.`
+          : "Reload remote discards all your local edits. Rebase keeps unrelated remote work; overwrite applies only your edited fields to the latest version."}
       </p>
       {sameFieldConflict && fields.length > 0 && (
         <span className="mt-2.5 inline-flex min-h-7 items-center rounded-full bg-[var(--fill-secondary)] px-2.5 text-[length:var(--text-caption1)] font-semibold text-[var(--text-secondary)]">

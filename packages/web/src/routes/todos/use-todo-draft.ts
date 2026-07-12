@@ -25,6 +25,7 @@ export interface TodoEditableDraft {
 
 export type TodoDraftPatch = Partial<TodoEditableDraft>
 export type TodoSaveStatus = "idle" | "dirty" | "saving" | "saved" | "error"
+export type TodoConflictMode = "none" | "unreconciled" | "same-field" | "reconciling"
 
 export interface TodoRemoteSnapshot {
   draft: TodoEditableDraft
@@ -1187,12 +1188,22 @@ export function useTodoDraft({
     || cleanupPending
     || runningRef.current
     || !!failureRef.current
+  const conflictMode: TodoConflictMode = !recoveredConflict
+    ? "none"
+    : activeRef.current?.state === "conflict"
+      ? "unreconciled"
+      : activeRef.current
+        ? "reconciling"
+        : conflictFields.length > 0
+          ? "same-field"
+          : "unreconciled"
 
   return {
     draft,
     status,
     error,
     recoveredConflict,
+    conflictMode,
     conflictFields,
     change,
     save,

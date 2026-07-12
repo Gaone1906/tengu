@@ -165,6 +165,7 @@ describe("useTodoDraft conditional state machine", () => {
       result.current.change("title", "C")
     })
     await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
+    expect(result.current.conflictMode).toBe("unreconciled")
 
     expect(save).toHaveBeenCalledTimes(1)
     expect(result.current.draft.title).toBe("C")
@@ -366,6 +367,7 @@ describe("useTodoDraft conditional state machine", () => {
     await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
     const oldKey = (save.mock.calls[0]![0] as WorkItemEditRequest).idempotencyKey
     act(() => result.current.rebaseRemote(snapshot({ ...first, priority: 3 }, 8)))
+    expect(result.current.conflictMode).toBe("reconciling")
     await waitFor(() => expect(result.current.isAcknowledged).toBe(true))
     expect(save.mock.calls[1]![0]).toMatchObject({ expectedVersion: 8, patch: { title: "B" } })
     expect((save.mock.calls[1]![0] as WorkItemEditRequest).idempotencyKey).not.toBe(oldKey)
@@ -404,6 +406,7 @@ describe("useTodoDraft conditional state machine", () => {
     expect(save).toHaveBeenCalledTimes(1)
     expect(result.current.draft.title).toBe("Local")
     expect(result.current.conflictFields).toEqual(["title"])
+    expect(result.current.conflictMode).toBe("same-field")
     expect(result.current.isAcknowledged).toBe(false)
   })
 
@@ -419,6 +422,7 @@ describe("useTodoDraft conditional state machine", () => {
     await waitFor(() => expect(result.current.recoveredConflict).toBe(true))
     const oldKey = (save.mock.calls[0]![0] as WorkItemEditRequest).idempotencyKey
     act(() => result.current.overwriteRemote(snapshot({ ...first, title: "Remote" }, 8)))
+    expect(result.current.conflictMode).toBe("reconciling")
     expect(result.current.isAcknowledged).toBe(false)
     await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(result.current.error).toBe(secondConflict))
@@ -487,6 +491,7 @@ describe("useTodoDraft conditional state machine", () => {
     }))
     expect(recovered.result.current.recoveredConflict).toBe(true)
     expect(recovered.result.current.conflictFields).toEqual(["title"])
+    expect(recovered.result.current.conflictMode).toBe("reconciling")
     await act(async () => Promise.resolve())
     expect(save).toHaveBeenCalledTimes(2)
   })
@@ -534,6 +539,7 @@ describe("useTodoDraft conditional state machine", () => {
     }))
     expect(recovered.result.current.recoveredConflict).toBe(true)
     expect(recovered.result.current.conflictFields).toEqual(["title"])
+    expect(recovered.result.current.conflictMode).toBe("reconciling")
     await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
     replay.resolve(successful(snapshot({ ...first, title: "Local", priority: 3 }, 9), true))
   })
@@ -1189,6 +1195,7 @@ describe("useTodoDraft conditional state machine", () => {
       save,
     }))
     expect(recovered.result.current.conflictFields).toEqual(["title"])
+    expect(recovered.result.current.conflictMode).toBe("same-field")
     act(() => recovered.result.current.rebaseRemote(snapshot({ ...first, title: "Remote title" }, 8)))
     expect(recovered.result.current.conflictFields).toEqual(["title"])
     expect(save).toHaveBeenCalledTimes(1)
@@ -1217,6 +1224,7 @@ describe("useTodoDraft conditional state machine", () => {
     act(() => result.current.rebaseRemote(candidate))
 
     expect(result.current.conflictFields).toEqual(["title", "priority"])
+    expect(result.current.conflictMode).toBe("unreconciled")
     expect(result.current.draft).toMatchObject({ title: "Local title", body: first.body, priority: 3 })
     expect(loadTodoJournal("rebase-conflict-atomic")?.conflictFields).toEqual(["title", "priority"])
     write.mockRestore()

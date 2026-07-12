@@ -24,6 +24,7 @@ import {
   dateBucketOf,
   groupHistory,
   isTodoVersionConflictError,
+  isTodoIdempotencyConflictError,
   operatorSafeTodoError,
   type TodoFilters,
 } from "../todos"
@@ -72,6 +73,12 @@ describe("displayGroupOf / attention / stateKey", () => {
 })
 
 describe("conditional edit errors", () => {
+  it("classifies only the typed idempotency conflict code", () => {
+    expect(isTodoIdempotencyConflictError(new TodoApiError(409, "private", "todo_idempotency_conflict"))).toBe(true)
+    expect(isTodoIdempotencyConflictError(new TodoApiError(409, "private", "todo_version_conflict"))).toBe(false)
+    expect(isTodoIdempotencyConflictError(new Error("TODO_IDEMPOTENCY_CONFLICT"))).toBe(false)
+  })
+
   it.each([
     "todo_version_conflict",
     "WORK_ITEM_VERSION_CONFLICT",
@@ -89,7 +96,7 @@ describe("conditional edit errors", () => {
   })
 
   it.each([
-    ["todo_idempotency_conflict", "This edit request conflicts with an earlier request. Retry it as a new edit."],
+    ["todo_idempotency_conflict", "This edit request conflicts with an earlier request. Reload remote to discard all local edits before starting a new edit."],
     ["todo_precondition_required", "This Todo requires a current version before it can be saved. Reload it and try again."],
     ["todo_invalid_version", "This Todo version is invalid. Reload it and try again."],
     ["todo_invalid_patch", "This Todo edit is invalid. Review the changed fields and try again."],
