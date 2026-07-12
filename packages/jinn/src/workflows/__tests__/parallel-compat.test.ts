@@ -11,7 +11,7 @@ import {
 } from '../run-reconciler.js';
 import { stepSessionKey, type StepSessionProbe } from '../advance.js';
 import { createDefinition, getDefinition } from '../definition-store.js';
-import { getRun, type WorkflowRun } from '../run-store.js';
+import { getRun, WORKFLOW_RUN_SCHEMA_VERSION, type WorkflowRun } from '../run-store.js';
 import {
   WORKFLOW_DEFINITION_SCHEMA_VERSION,
   type EditableWorkflowDefinition,
@@ -20,25 +20,29 @@ import {
 } from '../definition.js';
 
 /**
- * GRS-016a COMPAT CORNERSTONE — byte-identical v2 golden records.
+ * GRS-016a COMPAT CORNERSTONE — byte-identical v2 execution goldens.
  *
  * These snapshots were GENERATED ON THE PRE-PARALLEL v2 ENGINE (GRS-014e state,
  * commit f28bfa2 lineage) and committed BEFORE any GRS-016a engine change. Every
  * fixture below is a definition WITHOUT the new `concurrency` field — the compat
  * contract is that such definitions execute byte-identically under the parallel
- * build (absent concurrency = 1 = the sequential v2 engine).
+ * build (absent concurrency = 1 = the sequential v2 engine), apart from later
+ * operator-approved persistence-envelope migrations.
  *
  * Determinism: fixed injected clock (every timestamp is the same constant), fixed
  * injected runId, deterministic stub spawner/prober, and a drive loop that settles
  * scripted sessions then sweeps to quiescence — so the final persisted run FILE
  * (read raw off disk, definitionSnapshot included) is fully reproducible and the
- * snapshot equality IS byte-level equality: each scenario snapshots BOTH the
- * parsed object (readability) AND the raw utf8 file string (`raw-bytes` — the true
- * byte-level assertion; GRS-016a-fix, Codex finding 4).
+ * snapshot equality IS byte-level equality after projecting away only the approved
+ * schema-v3 run envelope (`schemaVersion: 3` plus `revision`): each scenario
+ * snapshots BOTH the parsed object (readability) AND the raw utf8 file string
+ * (`raw-bytes` — the true byte-level assertion; GRS-016a-fix, Codex finding 4).
  *
- * If an engine change breaks one of these snapshots, that is a COMPAT REGRESSION
- * on v2 definitions — do not update the snapshot; fix the engine. (Updating them
- * is legitimate only for a deliberate, operator-approved semantics change.)
+ * The actual parked/terminal file is separately required to carry schema v3 and a
+ * positive safe-integer revision. If the legacy projection breaks a snapshot, that
+ * is behavioral drift beyond the approved envelope — do not update the snapshot;
+ * fix the engine. The describe title is retained because it is part of Vitest's
+ * snapshot identity; "byte-identically" there means after this explicit projection.
  */
 
 const FIXED = '2026-07-04T18:00:00.000Z';
@@ -124,13 +128,37 @@ async function sweepUntilQuiet(deps: RunDriverDeps, workflowId: string, runId: s
  * on the pre-parallel v2 engine (commit 5ce55f7 checked out in a scratch worktree)
  * and must never be regenerated on a newer engine.
  */
-function diskRaw(workflowId: string, runId: string): string {
+function actualDiskRaw(workflowId: string, runId: string): string {
   return fs.readFileSync(path.join(root, 'reports', 'runs', workflowId, `${runId}.json`), 'utf8');
 }
 
-/** Parsed view of the same file — kept as a readability aid next to the raw bytes. */
-function diskRecord(workflowId: string, runId: string): unknown {
-  return JSON.parse(diskRaw(workflowId, runId));
+function actualDiskRun(workflowId: string, runId: string): { raw: string; record: WorkflowRun } {
+  const raw = actualDiskRaw(workflowId, runId);
+  const record = JSON.parse(raw) as WorkflowRun;
+  expect(WORKFLOW_RUN_SCHEMA_VERSION).toBe(3);
+  expect(record.schemaVersion).toBe(WORKFLOW_RUN_SCHEMA_VERSION);
+  expect(Number.isSafeInteger(record.revision) && (record.revision ?? 0) > 0).toBe(true);
+  return { raw, record };
+}
+
+/** Parsed v2-compatible view: remove only the approved schema-v3 run envelope. */
+function legacyCompatibleDiskRecord(workflowId: string, runId: string): unknown {
+  const { record } = actualDiskRun(workflowId, runId);
+  const projected = { ...record } as Record<string, unknown>;
+  projected.schemaVersion = 2;
+  delete projected.revision;
+  return projected;
+}
+
+/** Raw v2-compatible bytes: preserve all ordering/formatting outside the v3 envelope. */
+function legacyCompatibleDiskRaw(workflowId: string, runId: string): string {
+  const { raw, record } = actualDiskRun(workflowId, runId);
+  const currentSchemaLine = `  "schemaVersion": ${WORKFLOW_RUN_SCHEMA_VERSION},`;
+  const legacySchemaLine = '  "schemaVersion": 2,';
+  const revisionLine = `  "revision": ${record.revision},\n`;
+  expect(raw.split(currentSchemaLine)).toHaveLength(2);
+  expect(raw.split(revisionLine)).toHaveLength(2);
+  return raw.replace(currentSchemaLine, legacySchemaLine).replace(revisionLine, '');
 }
 
 const runIdOf = (n: number) => () => `run-golden-${n}`;
@@ -155,8 +183,8 @@ describe('GRS-016a compat goldens — v2 definitions (no concurrency field) exec
     const final = await sweepUntilQuiet(deps, d.id, started.runId);
 
     expect(final.status).toBe('completed');
-    expect(diskRecord(d.id, started.runId)).toMatchSnapshot();
-    expect(diskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
+    expect(legacyCompatibleDiskRecord(d.id, started.runId)).toMatchSnapshot();
+    expect(legacyCompatibleDiskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
   });
 
   it('golden 2: sample-shaped branching graph (fan-out + fan-in) executes sequentially in topo order', async () => {
@@ -181,8 +209,8 @@ describe('GRS-016a compat goldens — v2 definitions (no concurrency field) exec
     const final = getRun(root, d.id, started.runId)!;
     expect(final.status).toBe('completed');
     expect(final.steps.map((s) => s.nodeId)).toEqual(['select', 'implement', 'adversary', 'steer', 'decide']);
-    expect(diskRecord(d.id, started.runId)).toMatchSnapshot();
-    expect(diskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
+    expect(legacyCompatibleDiskRecord(d.id, started.runId)).toMatchSnapshot();
+    expect(legacyCompatibleDiskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
   });
 
   it('golden 3: inline steps + artifact checkpoint + mid-graph approval park, then approve to completion', async () => {
@@ -201,8 +229,8 @@ describe('GRS-016a compat goldens — v2 definitions (no concurrency field) exec
     const parked = await sweepUntilQuiet(deps, d.id, started.runId);
     expect(parked.status).toBe('parked');
     // Golden 3a: the PARKED record — downstream honestly pending.
-    expect(diskRecord(d.id, started.runId)).toMatchSnapshot('parked');
-    expect(diskRaw(d.id, started.runId)).toMatchSnapshot('parked raw-bytes');
+    expect(legacyCompatibleDiskRecord(d.id, started.runId)).toMatchSnapshot('parked');
+    expect(legacyCompatibleDiskRaw(d.id, started.runId)).toMatchSnapshot('parked raw-bytes');
 
     const resolved = await resolveWorkflowRunGate(deps, d.id, started.runId, 'approve');
     expect(resolved.outcome).toBe('resolved');
@@ -210,8 +238,8 @@ describe('GRS-016a compat goldens — v2 definitions (no concurrency field) exec
     const final = await sweepUntilQuiet(deps, d.id, started.runId);
     expect(final.status).toBe('completed');
     // Golden 3b: the COMPLETED record after operator approval.
-    expect(diskRecord(d.id, started.runId)).toMatchSnapshot('approved-completed');
-    expect(diskRaw(d.id, started.runId)).toMatchSnapshot('approved-completed raw-bytes');
+    expect(legacyCompatibleDiskRecord(d.id, started.runId)).toMatchSnapshot('approved-completed');
+    expect(legacyCompatibleDiskRaw(d.id, started.runId)).toMatchSnapshot('approved-completed raw-bytes');
   });
 
   it('golden 4: gate-less bounded loop runs exactly maxRoundsPerRun rounds with in-place spliced receipts', async () => {
@@ -240,8 +268,8 @@ describe('GRS-016a compat goldens — v2 definitions (no concurrency field) exec
     expect(final.status).toBe('completed');
     expect(final.rounds).toBe(2);
     expect(final.steps.map((s) => `${s.nodeId}@${s.round ?? 1}`)).toEqual(['a@1', 'b@1', 'a@2', 'b@2', 'c@1']);
-    expect(diskRecord(d.id, started.runId)).toMatchSnapshot();
-    expect(diskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
+    expect(legacyCompatibleDiskRecord(d.id, started.runId)).toMatchSnapshot();
+    expect(legacyCompatibleDiskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
   });
 
   it('golden 5: a required step erroring fails the run immediately with downstream pending', async () => {
@@ -258,8 +286,8 @@ describe('GRS-016a compat goldens — v2 definitions (no concurrency field) exec
     expect(final.steps.map((s) => [s.nodeId, s.status])).toEqual([
       ['a', 'done'], ['b', 'failed'], ['c', 'pending'],
     ]);
-    expect(diskRecord(d.id, started.runId)).toMatchSnapshot();
-    expect(diskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
+    expect(legacyCompatibleDiskRecord(d.id, started.runId)).toMatchSnapshot();
+    expect(legacyCompatibleDiskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
   });
 
   it('golden 6: an optional step settling with no output is skipped and the chain keeps advancing', async () => {
@@ -274,8 +302,8 @@ describe('GRS-016a compat goldens — v2 definitions (no concurrency field) exec
 
     expect(final.status).toBe('completed');
     expect(final.steps.map((s) => [s.nodeId, s.status])).toEqual([['a', 'skipped'], ['b', 'done']]);
-    expect(diskRecord(d.id, started.runId)).toMatchSnapshot();
-    expect(diskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
+    expect(legacyCompatibleDiskRecord(d.id, started.runId)).toMatchSnapshot();
+    expect(legacyCompatibleDiskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
   });
 
   it('golden 7: interrupted step respawns once (attempt 2) under a NEW sessionKey then completes', async () => {
@@ -292,8 +320,8 @@ describe('GRS-016a compat goldens — v2 definitions (no concurrency field) exec
 
     expect(final.status).toBe('completed');
     expect(final.steps.find((s) => s.nodeId === 'a')?.attempt).toBe(2);
-    expect(diskRecord(d.id, started.runId)).toMatchSnapshot();
-    expect(diskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
+    expect(legacyCompatibleDiskRecord(d.id, started.runId)).toMatchSnapshot();
+    expect(legacyCompatibleDiskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
   });
 
   it('golden 8: advanceWorkflowRunById on a single run matches the sweep path (same driver)', async () => {
@@ -303,7 +331,7 @@ describe('GRS-016a compat goldens — v2 definitions (no concurrency field) exec
     settle(started.runId, 'a', 1);
     const advanced = await advanceWorkflowRunById(deps, d.id, started.runId);
     expect(advanced?.status).toBe('completed');
-    expect(diskRecord(d.id, started.runId)).toMatchSnapshot();
-    expect(diskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
+    expect(legacyCompatibleDiskRecord(d.id, started.runId)).toMatchSnapshot();
+    expect(legacyCompatibleDiskRaw(d.id, started.runId)).toMatchSnapshot('raw-bytes');
   });
 });

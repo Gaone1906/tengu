@@ -18,7 +18,7 @@ import {
   type WorkflowNode,
   type WorkflowEdge,
 } from '../definition.js';
-import type { WorkflowRun } from '../run-store.js';
+import { WORKFLOW_RUN_SCHEMA_VERSION, type WorkflowRun } from '../run-store.js';
 
 const FIXED = '2026-07-04T18:00:00.000Z';
 const now = () => FIXED;
@@ -81,7 +81,9 @@ describe('mintSequentialRun', () => {
   it('mints pending receipts in edge-implied topo order (trigger excluded) with attempt 0', () => {
     const def = chain([trigger, step('a'), artifactGate('g'), step('b', { actor: undefined })]);
     const { run } = mint(def);
-    expect(run.schemaVersion).toBe(2);
+    expect(WORKFLOW_RUN_SCHEMA_VERSION).toBe(3);
+    expect(run.schemaVersion).toBe(WORKFLOW_RUN_SCHEMA_VERSION);
+    expect(run.revision).toBe(1);
     expect(run.status).toBe('running');
     expect(run.order).toEqual(['a', 'g', 'b']);
     expect(run.steps.map((s) => [s.nodeId, s.status, s.attempt])).toEqual([
