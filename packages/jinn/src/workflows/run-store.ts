@@ -652,6 +652,61 @@ export function saveRun(root: string, run: WorkflowRun): WorkflowRun {
   return run;
 }
 
+export type InitialWorkflowRunPublication =
+  | { outcome: 'published'; run: WorkflowRun }
+  | { outcome: 'existing'; run: WorkflowRun };
+
+/**
+ * Publish the immutable initial run snapshot exactly once across processes.
+ * The complete, fsynced temp inode is hard-linked into its final name, so losers
+ * can never observe a partially-written winner and can never replace it.
+ */
+export function publishInitialWorkflowRun(root: string, run: WorkflowRun): InitialWorkflowRunPublication {
+  assertSafeId(run.workflowId, 'workflow id');
+  assertSafeId(run.runId, 'run id');
+  const directory = runsDir(root, run.workflowId);
+  const target = runFile(root, run.workflowId, run.runId);
+  fs.mkdirSync(directory, { recursive: true });
+  const temp = path.join(directory, `.${run.runId}.initial-${randomUUID()}.tmp`);
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(temp, 'wx', 0o600);
+    fs.writeFileSync(descriptor, JSON.stringify(run, null, 2) + '\n', 'utf8');
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    try {
+      fs.linkSync(temp, target);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      const existing = getRun(root, run.workflowId, run.runId);
+      if (!existing) {
+        throw new WorkflowRunStoreError('bad-input', `initial run "${run.runId}" exists but could not be read`);
+      }
+      return { outcome: 'existing', run: existing };
+    }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    try { fs.unlinkSync(temp); } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+
+  // The linked final name and temp cleanup are one durable directory state.
+  try {
+    const directoryFd = fs.openSync(directory, 'r');
+    try { fs.fsyncSync(directoryFd); } finally { fs.closeSync(directoryFd); }
+  } catch {
+    /* directory fsync is not portable */
+  }
+  try {
+    updateActiveRunIndexForRun(root, run);
+  } catch {
+    /* index self-heals (rebuild-on-miss + startup rebuild) */
+  }
+  return { outcome: 'published', run };
+}
+
 /* ── Active-run index (GRS perf batch) ─────────────────────────────────────────
  * A run is TERMINAL once completed/failed/cancelled; everything else
  * (running/parked/dispatched) is still "active" and may need advancing or

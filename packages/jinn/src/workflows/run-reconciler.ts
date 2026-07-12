@@ -43,10 +43,12 @@ import {
   rebuildActiveRunIndex,
   newRunId,
   normalizeWorkflowTrigger,
+  publishInitialWorkflowRun,
   workflowTriggerSource,
   saveRun,
   workflowRunTriggerTodoId,
   type WorkflowRun,
+  type InitialWorkflowRunPublication,
   type WorkflowRunInvocation,
   type WorkflowStepPromptOverride,
   type RunStepStatus,
@@ -85,9 +87,9 @@ import type { WorkItemStatus } from '../work-items/store.js';
  *   3. (GRS-014e) the resolve-gate route will unpark and call back into the driver.
  *   Parked runs are deliberately NOT swept — nothing polls a human.
  *
- * CONCURRENCY: a per-runId in-process mutex serializes route-vs-sweep advancement
- * (single gateway process is the run store's stated contract). One misbehaving run
- * never kills a sweep — every run is driven under its own try/catch.
+ * CONCURRENCY: exclusive initial publication elects one owner across processes;
+ * only that owner may project/mint/spawn. A per-runId in-process mutex then
+ * serializes route-vs-sweep advancement. One misbehaving run never kills a sweep.
  */
 
 export interface RunDriverDeps {
@@ -132,8 +134,19 @@ export interface RunDriverDeps {
   /** Gateway-owned projection of one durable workflow run into the session list.
    * Best-effort: a projection failure is logged and never changes run execution. */
   syncRunSession?: (run: WorkflowRun) => string | undefined;
+  /** Injectable publication boundary for deterministic concurrency tests. */
+  publishInitialRun?: (root: string, run: WorkflowRun) => InitialWorkflowRunPublication;
   now?: () => string;
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
+}
+
+function publishInitialRun(
+  deps: RunDriverDeps,
+  run: WorkflowRun,
+): { owned: true; run: WorkflowRun; runSessionId: string | undefined } | { owned: false; run: WorkflowRun } {
+  const publication = (deps.publishInitialRun ?? publishInitialWorkflowRun)(deps.root, run);
+  if (publication.outcome === 'existing') return { owned: false, run: publication.run };
+  return { owned: true, run: publication.run, runSessionId: syncRunSessionBestEffort(deps, publication.run) };
 }
 
 function syncRunSessionBestEffort(deps: RunDriverDeps, run: WorkflowRun): string | undefined {
@@ -736,12 +749,19 @@ export async function startWorkflowRun(
     parked: null,
     errors,
   });
+  const publishCandidate = (candidate: WorkflowRun) => {
+    const publication = publishInitialRun(deps, candidate);
+    if (!publication.owned && triggerEvent.fireRef) {
+      opts.onIdempotencyReplay?.();
+      deps.log?.('info', `[workflow-runs] concurrent invocation replayed as ${publication.run.runId}`);
+    }
+    return publication;
+  };
 
   const resolved = compilePlan(def, opts);
   if (!resolved.ok) {
     const run = failedRun(resolved.errors);
-    persistRun(deps, run);
-    return run;
+    return publishCandidate(run).run;
   }
 
   // Session modes (GRS-016e): refuse at START, honestly, what this driver cannot
@@ -757,8 +777,7 @@ export async function startWorkflowRun(
       message: `step "${followUpStep.nodeId}" uses session mode "${followUpStep.sessionMode}" but this gateway's run driver provides no follow-up session support`,
       ref: followUpStep.nodeId,
     }]);
-    persistRun(deps, run);
-    return run;
+    return publishCandidate(run).run;
   }
   if (deps.sessionExists) {
     for (const s of resolved.plan.steps) {
@@ -769,8 +788,7 @@ export async function startWorkflowRun(
           message: `step "${s.nodeId}" targets session "${s.sessionTarget}", which does not exist on this gateway`,
           ref: s.nodeId,
         }]);
-        persistRun(deps, run);
-        return run;
+        return publishCandidate(run).run;
       }
     }
   }
@@ -781,8 +799,7 @@ export async function startWorkflowRun(
   });
   if (!minted.ok) {
     const run = failedRun(minted.errors);
-    persistRun(deps, run);
-    return run;
+    return publishCandidate(run).run;
   }
 
   // Freeze the definition CONTENT into the record (GRS-014b-fix, Codex finding 2):
@@ -795,10 +812,12 @@ export async function startWorkflowRun(
     definitionSnapshot: def,
   };
 
-  // Durable intent (incl. the frozen definition) BEFORE any spawn — and saved
-  // synchronously with the fireIso dedupe scan above (GRS-014d), so a same-tick
-  // duplicate schedule fire sees this file before it can mint a second run.
-  const runSessionId = persistRun(deps, run);
+  // Publish the complete durable intent before any projection, Todo, or spawn.
+  // The exclusive hard-link elects one owner even when several gateway processes
+  // recover the same preallocated claim simultaneously.
+  const publication = publishCandidate(run);
+  if (!publication.owned) return publication.run;
+  const runSessionId = publication.runSessionId;
 
   // Todos ledger (GRS-021a, design §2 — the one missing structural mint point):
   // a workflow run is company work, so it lands in the ledger right after its

@@ -13,7 +13,7 @@ import {
 } from '../run-reconciler.js';
 import { markDispatching, stepSessionKey, type SpawnContext, type StepSessionProbe } from '../advance.js';
 import { createDefinition, getDefinition, updateDefinition, WorkflowStoreError } from '../definition-store.js';
-import { claimWorkflowRunInvocation, getRun, saveRun, type WorkflowRun } from '../run-store.js';
+import { claimWorkflowRunInvocation, getRun, publishInitialWorkflowRun, saveRun, type WorkflowRun } from '../run-store.js';
 import {
   WORKFLOW_DEFINITION_SCHEMA_VERSION,
   type EditableWorkflowDefinition,
@@ -106,6 +106,86 @@ function harness(overrides: Partial<RunDriverDeps> = {}) {
 }
 
 describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
+  it('gives exactly one interleaved full-start caller ownership of initial side effects', async () => {
+    const def = createDefinition(root, chainDef('publication-owner', [trigger, step('a')]), { now });
+    const options = {
+      trigger: { source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'publication-key' } as const,
+      invocation: { input: { ticket: 'ABC-42' } },
+      principal: 'employee:owner',
+      makeRunId: () => 'run-preallocated-owner',
+    };
+    const winner = harness();
+    const loser = harness();
+    const sideEffects: string[] = [];
+    const winnerDeps: RunDriverDeps = {
+      ...winner.deps,
+      syncRunSession: () => { sideEffects.push('winner:session'); return 'run-session'; },
+      workItems: {
+        mintRunItem: () => { sideEffects.push('winner:todo'); },
+        linkRunSession: () => { sideEffects.push('winner:todo-session'); },
+      } as unknown as NonNullable<RunDriverDeps['workItems']>,
+    };
+    let winnerStart: Promise<WorkflowRun> | undefined;
+    const loserDeps: RunDriverDeps = {
+      ...loser.deps,
+      syncRunSession: () => { sideEffects.push('loser:session'); return 'loser-session'; },
+      workItems: {
+        mintRunItem: () => { sideEffects.push('loser:todo'); },
+        linkRunSession: () => { sideEffects.push('loser:todo-session'); },
+      } as unknown as NonNullable<RunDriverDeps['workItems']>,
+      publishInitialRun: (rootPath, candidate) => {
+        winnerStart = startWorkflowRun(winnerDeps, def, options);
+        return publishInitialWorkflowRun(rootPath, candidate);
+      },
+    };
+
+    const losingResult = await startWorkflowRun(loserDeps, def, options);
+    if (!winnerStart) throw new Error('publication interleaving was not reached');
+    const winningResult = await winnerStart;
+
+    expect(losingResult.runId).toBe(winningResult.runId);
+    expect([...winner.spawnCalls, ...loser.spawnCalls]).toHaveLength(1);
+    expect(sideEffects).not.toContain('loser:session');
+    expect(sideEffects).not.toContain('loser:todo');
+    expect(sideEffects).not.toContain('loser:todo-session');
+    expect(sideEffects.filter((effect) => effect === 'winner:todo')).toHaveLength(1);
+  });
+
+  it('returns the published failed snapshot to an interleaved loser without loser projection', async () => {
+    const def = chainDef('failed-publication-owner', [trigger, step('a')]);
+    def.edges = [{ id: 'broken', from: 'trg', to: 'missing', kind: 'sequence' }];
+    const options = {
+      trigger: { source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'failed-publication-key' } as const,
+      principal: 'employee:owner',
+      makeRunId: () => 'run-preallocated-failed',
+    };
+    const winner = harness({ syncRunSession: () => 'winner-session' });
+    const loser = harness();
+    const projections: string[] = [];
+    const winnerDeps: RunDriverDeps = {
+      ...winner.deps,
+      syncRunSession: () => { projections.push('winner'); return 'winner-session'; },
+    };
+    let winnerStart: Promise<WorkflowRun> | undefined;
+    const loserDeps: RunDriverDeps = {
+      ...loser.deps,
+      syncRunSession: () => { projections.push('loser'); return 'loser-session'; },
+      publishInitialRun: (rootPath, candidate) => {
+        winnerStart = startWorkflowRun(winnerDeps, def, options);
+        return publishInitialWorkflowRun(rootPath, candidate);
+      },
+    };
+
+    const losingResult = await startWorkflowRun(loserDeps, def, options);
+    if (!winnerStart) throw new Error('failed publication interleaving was not reached');
+    const winningResult = await winnerStart;
+
+    expect(winningResult.status).toBe('failed');
+    expect(losingResult).toEqual(winningResult);
+    expect(projections).toEqual(['winner']);
+    expect([...winner.spawnCalls, ...loser.spawnCalls]).toHaveLength(0);
+  });
+
   it('replays only exact canonical intent and rejects changed input before a second spawn', async () => {
     const def = createDefinition(root, chainDef('intent-bound', [trigger, step('a')]), { now });
     const { deps, spawnCalls } = harness();

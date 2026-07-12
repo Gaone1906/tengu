@@ -8,6 +8,7 @@ import {
   saveRun,
   claimWorkflowRunInvocation,
   getWorkflowRunInvocationClaim,
+  publishInitialWorkflowRun,
   getRun,
   listRuns,
   findRunByFire,
@@ -269,6 +270,79 @@ describe('workflow invocation claims', () => {
     } finally {
       wait.mockRestore();
     }
+  });
+});
+
+describe('exclusive initial run publication', () => {
+  it('fsyncs the complete temp inode and final directory state before returning', () => {
+    const run = makeRun({ runId: 'run-durable-publication', workflowId: 'wf' });
+    const fsync = vi.spyOn(fs, 'fsyncSync');
+    try {
+      expect(publishInitialWorkflowRun(root, run).outcome).toBe('published');
+      expect(fsync).toHaveBeenCalledTimes(2);
+    } finally {
+      fsync.mockRestore();
+    }
+  });
+
+  it('allows exactly one complete run publication across competing processes', async () => {
+    const run = makeRun({ runId: 'run-publish-race', workflowId: 'wf', status: 'running' });
+    const dir = path.join(root, 'reports', 'runs', 'wf');
+    const target = path.join(dir, 'run-publish-race.json');
+    fs.mkdirSync(dir, { recursive: true });
+    const child = spawnChild(process.execPath, ['-e', `
+      const fs = require('node:fs');
+      const path = require('node:path');
+      const target = process.argv[1];
+      const contents = process.argv[2];
+      process.on('message', ({ at }) => {
+        while (Date.now() < at) {}
+        const temp = path.join(path.dirname(target), '.child-initial-' + process.pid + '.tmp');
+        let outcome = 'published';
+        let fd;
+        try {
+          fd = fs.openSync(temp, 'wx', 0o600);
+          fs.writeFileSync(fd, contents);
+          fs.fsyncSync(fd);
+          fs.closeSync(fd);
+          fd = undefined;
+          fs.linkSync(temp, target);
+        } catch (error) {
+          outcome = error && error.code === 'EEXIST' ? 'existing' : 'error';
+        } finally {
+          if (fd !== undefined) fs.closeSync(fd);
+          try { fs.unlinkSync(temp); } catch {}
+        }
+        process.send(outcome);
+        process.exit(outcome === 'error' ? 1 : 0);
+      });
+    `, target, JSON.stringify(run, null, 2) + '\n'], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+    await new Promise<void>((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+    const childOutcome = new Promise<string>((resolve) => child.once('message', (value) => resolve(String(value))));
+    const at = Date.now() + 75;
+    child.send({ at });
+    while (Date.now() < at) { /* align both publishers */ }
+    const parent = publishInitialWorkflowRun(root, run);
+    const other = await childOutcome;
+
+    expect([parent.outcome, other].filter((outcome) => outcome === 'published')).toHaveLength(1);
+    expect([parent.outcome, other].filter((outcome) => outcome === 'existing')).toHaveLength(1);
+    expect(getRun(root, 'wf', 'run-publish-race')).toEqual(run);
+    expect(fs.readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('fails closed instead of overwriting a corrupt existing initial run', () => {
+    const run = makeRun({ runId: 'run-corrupt-publication', workflowId: 'wf' });
+    const dir = path.join(root, 'reports', 'runs', 'wf');
+    fs.mkdirSync(dir, { recursive: true });
+    const target = path.join(dir, 'run-corrupt-publication.json');
+    fs.writeFileSync(target, '{broken', 'utf8');
+
+    expect(() => publishInitialWorkflowRun(root, run)).toThrow(WorkflowRunStoreError);
+    expect(fs.readFileSync(target, 'utf8')).toBe('{broken');
   });
 });
 
