@@ -1,4 +1,5 @@
 import type { TodoDraftPatch, TodoEditableDraft } from "./use-todo-draft"
+import type { WorkItemEditRequest } from "@/lib/api"
 
 const SALT_KEY = "jinn:todo-tab-salt:v1"
 const JOURNAL_KEY = "jinn:todo-draft-journal:v2"
@@ -7,15 +8,25 @@ const MAX_JOURNALS = 50
 
 export type TodoDraftField = keyof TodoEditableDraft
 
+export type TodoJournalRequestState = "prepared" | "dispatched" | "uncertain" | "failed" | "conflict"
+
+export interface TodoJournalRequest extends WorkItemEditRequest {
+  revision: number
+  state: TodoJournalRequestState
+}
+
 export interface TodoJournalPayload {
   revision: number
   /** Same-origin recovery intentionally stores operator-authored dirty values. */
   patch: TodoDraftPatch
   /** Baselines are limited to the same dirty fields so same-field conflicts can be detected. */
   baseline: TodoDraftPatch
-  baselineVersion?: string
+  /** Timestamp strings belong only to request-less legacy v2 recovery entries. */
+  baselineVersion?: string | number
   /** A response was lost for these fields; only a server reconciliation may clear them. */
   uncertainFields?: TodoDraftField[]
+  /** Present only after a logical conditional edit has been prepared. */
+  request?: TodoJournalRequest
 }
 
 interface JournalEnvelope {
@@ -65,34 +76,86 @@ export function todoPrivateRef(id: string): string {
 }
 
 const FIELDS = new Set<TodoDraftField>(["title", "body", "assignee", "department", "priority"])
+const PAYLOAD_KEYS = new Set(["revision", "patch", "baseline", "baselineVersion", "uncertainFields", "request"])
+const REQUEST_KEYS = new Set(["revision", "patch", "expectedVersion", "idempotencyKey", "state"])
+const ENVELOPE_KEYS = new Set(["expiresAt", "sequence", "payload"])
+const REQUEST_STATES = new Set<TodoJournalRequestState>(["prepared", "dispatched", "uncertain", "failed", "conflict"])
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value)
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+  return Object.keys(value).every((key) => allowed.has(key))
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+}
 
 function validPatch(value: unknown): value is TodoDraftPatch {
-  return !!value
-    && typeof value === "object"
-    && !Array.isArray(value)
-    && Object.keys(value).every((key) => FIELDS.has(key as TodoDraftField))
+  if (!isRecord(value)) return false
+  return Object.entries(value).every(([key, fieldValue]) => {
+    if (!FIELDS.has(key as TodoDraftField)) return false
+    if (key === "title" || key === "body") return typeof fieldValue === "string"
+    if (key === "assignee" || key === "department") return fieldValue === null || typeof fieldValue === "string"
+    return key === "priority" && typeof fieldValue === "number" && Number.isFinite(fieldValue)
+  })
+}
+
+function samePatchFields(a: TodoDraftPatch, b: TodoDraftPatch): boolean {
+  const aKeys = Object.keys(a) as TodoDraftField[]
+  const bKeys = Object.keys(b)
+  return aKeys.length === bKeys.length && aKeys.every((field) => Object.prototype.hasOwnProperty.call(b, field))
+}
+
+function samePatch(a: TodoDraftPatch, b: TodoDraftPatch): boolean {
+  return samePatchFields(a, b)
+    && (Object.keys(a) as TodoDraftField[]).every((field) => Object.is(a[field], b[field]))
+}
+
+function validRequest(value: unknown, revision: number, patch: TodoDraftPatch): value is TodoJournalRequest {
+  if (!isRecord(value) || !hasOnlyKeys(value, REQUEST_KEYS)) return false
+  if (!isPositiveSafeInteger(value.revision) || value.revision !== revision) return false
+  if (!validPatch(value.patch) || !samePatch(value.patch, patch)) return false
+  return isPositiveSafeInteger(value.expectedVersion)
+    && typeof value.idempotencyKey === "string"
+    && UUID_PATTERN.test(value.idempotencyKey)
+    && REQUEST_STATES.has(value.state as TodoJournalRequestState)
+}
+
+function validUncertainFields(value: unknown, patch: TodoDraftPatch): value is TodoDraftField[] | undefined {
+  if (value === undefined) return true
+  if (!Array.isArray(value)) return false
+  const fields = value as unknown[]
+  return new Set(fields).size === fields.length
+    && fields.every((field) => typeof field === "string"
+      && FIELDS.has(field as TodoDraftField)
+      && Object.prototype.hasOwnProperty.call(patch, field))
 }
 
 function validPayload(value: unknown): value is TodoJournalPayload {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false
-  const payload = value as Partial<TodoJournalPayload>
-  return Number.isInteger(payload.revision)
-    && (payload.revision ?? 0) > 0
-    && validPatch(payload.patch)
-    && validPatch(payload.baseline)
-    && (payload.baselineVersion === undefined || typeof payload.baselineVersion === "string")
-    && (payload.uncertainFields === undefined
-      || (Array.isArray(payload.uncertainFields) && payload.uncertainFields.every((field) => FIELDS.has(field))))
+  if (!isRecord(value) || !hasOnlyKeys(value, PAYLOAD_KEYS)) return false
+  if (!isPositiveSafeInteger(value.revision) || !validPatch(value.patch) || !validPatch(value.baseline)) return false
+  if (!samePatchFields(value.patch, value.baseline) || !validUncertainFields(value.uncertainFields, value.patch)) return false
+
+  if (value.request === undefined) {
+    // The legacy v2 string was an updatedAt-like recovery marker, never a CAS
+    // version. Keep it recoverable without synthesising request metadata.
+    return value.baselineVersion === undefined || typeof value.baselineVersion === "string"
+  }
+  return validRequest(value.request, value.revision, value.patch)
+    && (value.baselineVersion === undefined || isPositiveSafeInteger(value.baselineVersion))
 }
 
 function validEnvelope(ref: string, value: unknown, now: number): value is JournalEnvelope {
-  if (!/^td_[a-z0-9]+$/i.test(ref) || !value || typeof value !== "object" || Array.isArray(value)) return false
-  const envelope = value as Partial<JournalEnvelope>
-  return Number.isFinite(envelope.expiresAt)
-    && (envelope.expiresAt ?? 0) > now
-    && Number.isInteger(envelope.sequence)
-    && (envelope.sequence ?? 0) > 0
-    && validPayload(envelope.payload)
+  if (!/^td_[a-z0-9]+$/i.test(ref) || !isRecord(value) || !hasOnlyKeys(value, ENVELOPE_KEYS)) return false
+  return typeof value.expiresAt === "number"
+    && Number.isFinite(value.expiresAt)
+    && value.expiresAt > now
+    && isPositiveSafeInteger(value.sequence)
+    && validPayload(value.payload)
 }
 
 function parseEnvelopes(): Record<string, unknown> {
@@ -148,8 +211,19 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
     const journals = Object.fromEntries(
       Object.entries(parsed).filter(([ref, entry]) => validEnvelope(ref, entry, now)),
     ) as Record<string, JournalEnvelope>
+    const ref = todoPrivateRef(id)
+    const current = journals[ref]?.payload
+    if (current && payload.revision < current.revision) return
+    if (current?.request) {
+      if (!payload.request) return
+      if (payload.revision === current.revision
+        && (payload.request.revision !== current.request.revision
+          || payload.request.expectedVersion !== current.request.expectedVersion
+          || payload.request.idempotencyKey !== current.request.idempotencyKey
+          || !samePatch(payload.request.patch, current.request.patch))) return
+    }
     const sequence = Math.max(0, ...Object.values(journals).map((entry) => entry.sequence)) + 1
-    journals[todoPrivateRef(id)] = { expiresAt: now + JOURNAL_TTL_MS, sequence, payload }
+    journals[ref] = { expiresAt: now + JOURNAL_TTL_MS, sequence, payload }
     const capped = Object.fromEntries(orderedEntries(journals).slice(0, MAX_JOURNALS))
     store.setItem(JOURNAL_KEY, JSON.stringify(capped))
   } catch {
