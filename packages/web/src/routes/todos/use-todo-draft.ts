@@ -37,8 +37,6 @@ export interface TodoSaveResult {
 
 type FailureKind = "ambiguous" | "definitive" | "conflict" | null
 
-const FIELDS = ["title", "body", "assignee", "department", "priority"] as const
-
 function fieldsOf(patch: TodoDraftPatch): TodoDraftField[] {
   return Object.keys(patch) as TodoDraftField[]
 }
@@ -207,8 +205,8 @@ export function useTodoDraft({
   const activeDurableRef = useRef(!!recoveredRequest)
   const cleanupPendingRef = useRef(!!recovered?.cleanupPending)
   const cleanupSnapshotRef = useRef<TodoRemoteSnapshot | null>(null)
-  const cleanupBoundaryRevisionRef = useRef<number | null>(recovered?.cleanupPending ? recovered.revision : null)
-  const cleanupSaveRequestedRef = useRef(false)
+  const cleanupIntentFieldsRef = useRef(new Set<TodoDraftField>(recovered?.cleanupIntentFields ?? []))
+  const cleanupSaveRequestedRef = useRef(recovered?.cleanupSaveRequested === true)
   const runningRef = useRef(false)
   const failureRef = useRef<FailureKind>(startingFailure)
   const localRevisionRef = useRef(recovered ? recovered.revision : 0)
@@ -247,6 +245,7 @@ export function useTodoDraft({
       ...dirtyFieldsRef.current,
       ...conflicts,
       ...fieldsOf(active?.patch ?? {}),
+      ...cleanupIntentFieldsRef.current,
     ])
     if (fields.size === 0 && !active && !cleanupPendingRef.current) return null
     const version = active?.expectedVersion ?? baselineVersionRef.current
@@ -258,6 +257,8 @@ export function useTodoDraft({
       uncertainFields: active?.state === "uncertain" ? fieldsOf(active.patch) : undefined,
       conflictFields: conflicts.size > 0 ? [...conflicts] : undefined,
       cleanupPending: cleanupPendingRef.current || undefined,
+      cleanupIntentFields: cleanupPendingRef.current ? [...cleanupIntentFieldsRef.current] : undefined,
+      cleanupSaveRequested: cleanupPendingRef.current && cleanupSaveRequestedRef.current ? true : undefined,
       request: active ?? undefined,
     }
   }, [])
@@ -297,7 +298,7 @@ export function useTodoDraft({
     activeDurableRef.current = false
     cleanupPendingRef.current = false
     cleanupSnapshotRef.current = null
-    cleanupBoundaryRevisionRef.current = null
+    cleanupIntentFieldsRef.current.clear()
     cleanupSaveRequestedRef.current = false
     runningRef.current = false
     failureRef.current = null
@@ -335,7 +336,7 @@ export function useTodoDraft({
 
   const blockCleanup = useCallback((active: TodoJournalRequest | null, target: TodoRemoteSnapshot | null) => {
     if (!cleanupPendingRef.current) {
-      cleanupBoundaryRevisionRef.current = localRevisionRef.current
+      cleanupIntentFieldsRef.current = new Set()
       cleanupSaveRequestedRef.current = false
     }
     cleanupPendingRef.current = true
@@ -371,8 +372,24 @@ export function useTodoDraft({
       && samePatch(stored.patch, patchFor(dirtyFieldsRef.current, draftRef.current))
   }, [id])
 
+  const durableCleanupIntent = useCallback((): boolean => {
+    if (!cleanupPendingRef.current) return true
+    const stored = loadTodoJournal(id)
+    if (!stored?.cleanupPending
+      || stored.revision !== Math.max(1, localRevisionRef.current)
+      || (stored.cleanupSaveRequested === true) !== cleanupSaveRequestedRef.current) return false
+    const storedFields = new Set(stored.cleanupIntentFields ?? [])
+    return storedFields.size === cleanupIntentFieldsRef.current.size
+      && [...cleanupIntentFieldsRef.current].every((field) => storedFields.has(field))
+  }, [id])
+
   const retryCleanup = useCallback(async () => {
     if (!cleanupPendingRef.current || runningRef.current) return
+    persistCurrent()
+    if (!durableCleanupIntent()) {
+      if (mountedRef.current) setError(cleanupRecoveryError())
+      return
+    }
     const epoch = epochRef.current
     let target = cleanupSnapshotRef.current
     if (!target) {
@@ -400,20 +417,21 @@ export function useTodoDraft({
       }
       runningRef.current = false
     }
+    persistCurrent()
+    if (!durableCleanupIntent()) {
+      if (mountedRef.current) setError(cleanupRecoveryError())
+      return
+    }
     const active = activeRef.current
     if (!removeJournal(active)) {
       blockCleanup(active && activeDurableRef.current ? active : null, target)
       return
     }
-    const boundaryRevision = cleanupBoundaryRevisionRef.current
-    const keepNewerIntent = boundaryRevision !== null && localRevisionRef.current > boundaryRevision
     const saveRequested = cleanupSaveRequestedRef.current
     const desired = draftRef.current
     const remaining = new Set<TodoDraftField>()
-    if (keepNewerIntent) {
-      for (const field of FIELDS) {
-        if (!Object.is(desired[field], target.draft[field])) remaining.add(field)
-      }
+    for (const field of cleanupIntentFieldsRef.current) {
+      if (!Object.is(desired[field], target.draft[field])) remaining.add(field)
     }
 
     remoteRef.current = target.draft
@@ -422,7 +440,7 @@ export function useTodoDraft({
     activeDurableRef.current = false
     cleanupPendingRef.current = false
     cleanupSnapshotRef.current = null
-    cleanupBoundaryRevisionRef.current = null
+    cleanupIntentFieldsRef.current.clear()
     cleanupSaveRequestedRef.current = false
     runningRef.current = false
     failureRef.current = null
@@ -455,7 +473,7 @@ export function useTodoDraft({
     } else if (mountedRef.current) {
       setStatus("dirty")
     }
-  }, [blockCleanup, durableIntent, localPersistenceError, markClean, persistCurrent, publishConflict, publishDraft, removeJournal])
+  }, [blockCleanup, durableCleanupIntent, durableIntent, localPersistenceError, markClean, persistCurrent, publishConflict, publishDraft, removeJournal])
 
   const installFreshRequest = useCallback((
     version: number,
@@ -772,8 +790,8 @@ export function useTodoDraft({
     activeDurableRef.current = !!storedRequest
     cleanupPendingRef.current = !!stored?.cleanupPending
     cleanupSnapshotRef.current = null
-    cleanupBoundaryRevisionRef.current = stored?.cleanupPending ? stored.revision : null
-    cleanupSaveRequestedRef.current = false
+    cleanupIntentFieldsRef.current = new Set(stored?.cleanupIntentFields ?? [])
+    cleanupSaveRequestedRef.current = stored?.cleanupSaveRequested === true
     runningRef.current = false
     failureRef.current = nextFailure
     localRevisionRef.current = stored ? stored.revision : 0
@@ -801,7 +819,8 @@ export function useTodoDraft({
   const change = useCallback(<K extends keyof TodoEditableDraft>(field: K, value: TodoEditableDraft[K]) => {
     if (draftRef.current[field] === value) return
     const previousRevision = Math.max(1, localRevisionRef.current)
-    const cleanupTarget = cleanupSnapshotRef.current?.draft ?? remoteRef.current
+    const cleanupTarget = cleanupSnapshotRef.current?.draft ?? null
+    const baselineTarget = cleanupTarget ?? remoteRef.current
     let active = activeRef.current
     if (!cleanupPendingRef.current && active && !activeDurableRef.current && !runningRef.current) {
       activeRef.current = null
@@ -810,15 +829,17 @@ export function useTodoDraft({
       if (mountedRef.current) setError(null)
     }
     if (!dirtyFieldsRef.current.has(field)) {
-      (baselineByFieldRef.current as Record<string, unknown>)[field] = cleanupTarget[field]
+      (baselineByFieldRef.current as Record<string, unknown>)[field] = baselineTarget[field]
     }
     localRevisionRef.current += 1
     publishDraft({ ...draftRef.current, [field]: value })
     if (cleanupPendingRef.current) {
-      if (Object.is(value, cleanupTarget[field])) {
+      if (cleanupTarget && Object.is(value, cleanupTarget[field])) {
+        cleanupIntentFieldsRef.current.delete(field)
         dirtyFieldsRef.current.delete(field)
         delete baselineByFieldRef.current[field]
       } else {
+        cleanupIntentFieldsRef.current.add(field)
         dirtyFieldsRef.current.add(field)
       }
       publishConflict(new Set(conflictFieldsRef.current))
@@ -877,7 +898,26 @@ export function useTodoDraft({
       if (draftRef.current[field] !== value) change(field, value)
     }
     if (cleanupPendingRef.current) {
+      const target = cleanupSnapshotRef.current?.draft ?? null
+      let metadataChanged = !cleanupSaveRequestedRef.current
+      for (const field of fieldsOf(patch)) {
+        const desired = draftRef.current[field]
+        const shouldKeep = !target || !Object.is(desired, target[field])
+        if (shouldKeep !== cleanupIntentFieldsRef.current.has(field)) metadataChanged = true
+        if (shouldKeep) {
+          cleanupIntentFieldsRef.current.add(field)
+          if (!dirtyFieldsRef.current.has(field)) {
+            (baselineByFieldRef.current as Record<string, unknown>)[field] = target ? target[field] : remoteRef.current[field]
+          }
+          dirtyFieldsRef.current.add(field)
+        } else {
+          cleanupIntentFieldsRef.current.delete(field)
+          dirtyFieldsRef.current.delete(field)
+          delete baselineByFieldRef.current[field]
+        }
+      }
       cleanupSaveRequestedRef.current = true
+      if (metadataChanged) localRevisionRef.current += 1
       persistCurrent()
       void retryCleanup()
       return

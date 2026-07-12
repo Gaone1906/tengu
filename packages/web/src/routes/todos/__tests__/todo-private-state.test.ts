@@ -77,6 +77,58 @@ describe("Todo private CAS journal", () => {
     expect(loadTodoJournal(TODO_ID)?.request?.state).toBe("failed")
   })
 
+  it("persists cleanup intent fields and the queued-save bit", () => {
+    persistTodoJournal(TODO_ID, {
+      ...payload("dispatched"),
+      cleanupPending: true,
+      cleanupIntentFields: ["title"],
+      cleanupSaveRequested: true,
+    } as never)
+
+    expect(loadTodoJournal(TODO_ID)).toMatchObject({
+      cleanupPending: true,
+      cleanupIntentFields: ["title"],
+      cleanupSaveRequested: true,
+    })
+  })
+
+  it.each([
+    ["mask without cleanup", { cleanupIntentFields: ["title"] }],
+    ["save without cleanup", { cleanupSaveRequested: true }],
+    ["false save bit", { cleanupPending: true, cleanupSaveRequested: false }],
+    ["duplicate field", { cleanupPending: true, cleanupIntentFields: ["title", "title"] }],
+    ["unsupported field", { cleanupPending: true, cleanupIntentFields: ["rank"] }],
+    ["field outside patch", { cleanupPending: true, cleanupIntentFields: ["body"] }],
+  ])("rejects malformed cleanup intent metadata: %s", (_label, metadata) => {
+    writeEnvelope(TODO_ID, { ...payload(), ...metadata })
+    expect(loadTodoJournal(TODO_ID)).toBeNull()
+    expect(sessionStorage.getItem(JOURNAL_KEY)).toBeNull()
+  })
+
+  it("uses the higher revision cleanup mask exactly instead of unioning stale fields", () => {
+    persistTodoJournal(TODO_ID, {
+      revision: 2,
+      patch: { title: "New title", body: "New body" },
+      baseline: { title: "Old title", body: "Old body" },
+      baselineVersion: 7,
+      cleanupPending: true,
+      cleanupIntentFields: ["title", "body"],
+      cleanupSaveRequested: true,
+    })
+    persistTodoJournal(TODO_ID, {
+      revision: 3,
+      patch: { title: "New title", body: "Old body" },
+      baseline: { title: "Old title", body: "Old body" },
+      baselineVersion: 7,
+      cleanupPending: true,
+      cleanupIntentFields: ["title"],
+      cleanupSaveRequested: true,
+    })
+
+    expect(loadTodoJournal(TODO_ID)?.cleanupIntentFields).toEqual(["title"])
+    expect(loadTodoJournal(TODO_ID)?.cleanupSaveRequested).toBe(true)
+  })
+
   it.each([
     ["duplicate", ["title", "title"]],
     ["unsupported", ["rank"]],
@@ -603,6 +655,49 @@ describe("Todo private CAS journal", () => {
 
       expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, null)).toBe(false)
       expect(loadTodoJournal(TODO_ID)).toEqual(current)
+    })
+
+    it("includes cleanup intent metadata in semantic transition readback", () => {
+      const current = currentWithNewerIntent()
+      const next = {
+        revision: 3,
+        patch: { title: "Newest" },
+        baseline: { title: "Server current" },
+        baselineVersion: 7,
+        cleanupPending: true as const,
+        cleanupIntentFields: ["title"] as const,
+        cleanupSaveRequested: true as const,
+        request: activeRequest(),
+      }
+      persistTodoJournal(TODO_ID, current as never)
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, next as never)).toBe(true)
+      expect(loadTodoJournal(TODO_ID)).toMatchObject({
+        cleanupIntentFields: ["title"],
+        cleanupSaveRequested: true,
+      })
+    })
+
+    it("rejects transition readback when storage mutates cleanup intent metadata", () => {
+      const current = currentWithNewerIntent()
+      const next = {
+        revision: 3,
+        patch: { title: "Newest" },
+        baseline: { title: "Server current" },
+        baselineVersion: 7,
+        cleanupPending: true as const,
+        cleanupIntentFields: ["title"] as const,
+        cleanupSaveRequested: true as const,
+        request: activeRequest(),
+      }
+      persistTodoJournal(TODO_ID, current as never)
+      const original = Storage.prototype.setItem
+      vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+        const mutated = String(value).replace('"cleanupIntentFields":["title"]', '"cleanupIntentFields":[]')
+        return original.call(this, key, mutated)
+      })
+
+      expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, next as never)).toBe(false)
     })
 
     it.each([

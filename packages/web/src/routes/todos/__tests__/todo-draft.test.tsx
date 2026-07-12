@@ -752,6 +752,178 @@ describe("useTodoDraft conditional state machine", () => {
     expect(result.current.draft.title).toBe("Newest")
   })
 
+  it("rehydrates requestless cleanup intent and queued Save after repeated removal failures", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "Newest" }, 13)))
+    const mounted = renderHook(() => useTodoDraft({
+      id: "cleanup-requestless-remount",
+      initial: first,
+      serverVersion: 7,
+      save,
+    }))
+    act(() => mounted.result.current.change("title", "Temporary"))
+    const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "QuotaExceededError")
+    })
+    act(() => mounted.result.current.change("title", first.title))
+    act(() => mounted.result.current.save({ title: "Newest" }))
+    act(() => mounted.result.current.retry())
+    expect(loadTodoJournal("cleanup-requestless-remount")).toMatchObject({
+      cleanupPending: true,
+      cleanupIntentFields: ["title"],
+      cleanupSaveRequested: true,
+    })
+    mounted.unmount()
+    remove.mockRestore()
+
+    const loadRemote = vi.fn().mockResolvedValue(snapshot({ ...first, title: "Fresh" }, 12))
+    const recovered = renderHook(() => useTodoDraft({
+      id: "cleanup-requestless-remount",
+      initial: first,
+      serverVersion: 7,
+      save,
+      loadRemote,
+    }))
+    expect(recovered.result.current.draft.title).toBe("Newest")
+    act(() => recovered.result.current.retry())
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(save.mock.calls[0]![0]).toMatchObject({ patch: { title: "Newest" }, expectedVersion: 12 })
+  })
+
+  it("rehydrates cleanup intent queued while a remote cleanup read was unresolved", async () => {
+    persistTodoJournal("cleanup-get-remount", {
+      revision: 1,
+      patch: { title: "Recovered" },
+      baseline: { title: first.title },
+      baselineVersion: 7,
+      cleanupPending: true,
+    })
+    const pendingRemote = deferred<TodoRemoteSnapshot>()
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "Newest" }, 14)))
+    const mounted = renderHook(() => useTodoDraft({
+      id: "cleanup-get-remount",
+      initial: first,
+      serverVersion: 7,
+      save,
+      loadRemote: vi.fn().mockReturnValue(pendingRemote.promise),
+    }))
+    act(() => mounted.result.current.retry())
+    act(() => mounted.result.current.save({ title: "Newest" }))
+    expect(loadTodoJournal("cleanup-get-remount")).toMatchObject({
+      cleanupIntentFields: ["title"],
+      cleanupSaveRequested: true,
+    })
+    mounted.unmount()
+    await act(async () => pendingRemote.resolve(snapshot({ ...first, title: "Obsolete" }, 11)))
+
+    const loadRemote = vi.fn().mockResolvedValue(snapshot({ ...first, title: "Fresh" }, 13))
+    const recovered = renderHook(() => useTodoDraft({
+      id: "cleanup-get-remount",
+      initial: first,
+      serverVersion: 7,
+      save,
+      loadRemote,
+    }))
+    act(() => recovered.result.current.retry())
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(save.mock.calls[0]![0]).toMatchObject({ patch: { title: "Newest" }, expectedVersion: 13 })
+  })
+
+  it("restores cleanup intent after switching A to B and back to A", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "Newest A" }, 12)))
+    const loadA = vi.fn().mockResolvedValue(snapshot({ ...first, title: "Fresh A" }, 11))
+    const mounted = renderHook(
+      ({ id, initial, version, loadRemote }: {
+        id: string
+        initial: TodoEditableDraft
+        version: number
+        loadRemote?: () => Promise<TodoRemoteSnapshot>
+      }) => useTodoDraft({ id, initial, serverVersion: version, save, loadRemote }),
+      {
+        initialProps: {
+          id: "cleanup-switch-a",
+          initial: first,
+          version: 7,
+          loadRemote: undefined as (() => Promise<TodoRemoteSnapshot>) | undefined,
+        },
+      },
+    )
+    act(() => mounted.result.current.change("title", "Temporary A"))
+    const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "QuotaExceededError")
+    })
+    act(() => mounted.result.current.change("title", first.title))
+    act(() => mounted.result.current.save({ title: "Newest A" }))
+    mounted.rerender({ id: "cleanup-switch-b", initial: { ...first, title: "Todo B" }, version: 4, loadRemote: undefined })
+    await waitFor(() => expect(mounted.result.current.draft.title).toBe("Todo B"))
+    remove.mockRestore()
+    mounted.rerender({ id: "cleanup-switch-a", initial: first, version: 7, loadRemote: loadA })
+    await waitFor(() => expect(mounted.result.current.draft.title).toBe("Newest A"))
+
+    act(() => mounted.result.current.retry())
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(save.mock.calls[0]![0]).toMatchObject({ patch: { title: "Newest A" }, expectedVersion: 11 })
+  })
+
+  it("drops pre-cleanup fields but saves only cleanup-time fields after remount", async () => {
+    const save = vi.fn().mockResolvedValue(successful(snapshot({ ...first, title: "Remote", priority: 3 }, 13)))
+    const mounted = renderHook(() => useTodoDraft({ id: "cleanup-field-mask", initial: first, serverVersion: 7, save }))
+    act(() => mounted.result.current.change("title", "Stale local title"))
+    const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "QuotaExceededError")
+    })
+    act(() => mounted.result.current.reloadRemote(snapshot({ ...first, title: "Remote" }, 12)))
+    act(() => mounted.result.current.save({ priority: 3 }))
+    expect(loadTodoJournal("cleanup-field-mask")).toMatchObject({
+      cleanupIntentFields: ["priority"],
+      cleanupSaveRequested: true,
+    })
+    mounted.unmount()
+    remove.mockRestore()
+
+    const remote = snapshot({ ...first, title: "Remote" }, 12)
+    const recovered = renderHook(() => useTodoDraft({
+      id: "cleanup-field-mask",
+      initial: remote.draft,
+      serverVersion: remote.version,
+      save,
+      loadRemote: vi.fn().mockResolvedValue(remote),
+    }))
+    act(() => recovered.result.current.retry())
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(save.mock.calls[0]![0]).toMatchObject({ patch: { priority: 3 }, expectedVersion: 12 })
+    expect(save.mock.calls[0]![0].patch).not.toHaveProperty("title")
+    expect(recovered.result.current.draft.title).toBe("Remote")
+  })
+
+  it("restores a cleanup-time change as requestless intent without dispatching", async () => {
+    const save = vi.fn()
+    const mounted = renderHook(() => useTodoDraft({ id: "cleanup-change-remount", initial: first, serverVersion: 7, save }))
+    act(() => mounted.result.current.change("title", "Stale local title"))
+    const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new DOMException("blocked", "QuotaExceededError")
+    })
+    act(() => mounted.result.current.reloadRemote(snapshot({ ...first, title: "Remote" }, 12)))
+    act(() => mounted.result.current.change("body", "Cleanup-time body"))
+    expect(loadTodoJournal("cleanup-change-remount")).toMatchObject({ cleanupIntentFields: ["body"] })
+    mounted.unmount()
+    remove.mockRestore()
+
+    const remote = snapshot({ ...first, title: "Remote" }, 12)
+    const recovered = renderHook(() => useTodoDraft({
+      id: "cleanup-change-remount",
+      initial: remote.draft,
+      serverVersion: remote.version,
+      save,
+      loadRemote: vi.fn().mockResolvedValue(remote),
+    }))
+    act(() => recovered.result.current.retry())
+    await waitFor(() => expect(recovered.result.current.cleanupPending).toBe(false))
+    expect(recovered.result.current.draft).toMatchObject({ title: "Remote", body: "Cleanup-time body" })
+    expect(loadTodoJournal("cleanup-change-remount")).toMatchObject({ patch: { body: "Cleanup-time body" } })
+    expect(loadTodoJournal("cleanup-change-remount")?.request).toBeUndefined()
+    expect(save).not.toHaveBeenCalled()
+  })
+
   it("keeps active cleanup blocked when journal removal silently does nothing", async () => {
     const conflict = new TodoApiError(409, "private", "TODO_VERSION_CONFLICT", 8)
     const save = vi.fn().mockRejectedValueOnce(conflict)

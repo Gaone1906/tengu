@@ -32,6 +32,10 @@ export interface TodoJournalPayload {
   conflictFields?: TodoDraftField[]
   /** A confirmed acknowledgement/discard is waiting only on journal removal. */
   cleanupPending?: true
+  /** Fields changed after cleanup began; exact, ordered provenance rather than a union. */
+  cleanupIntentFields?: TodoDraftField[]
+  /** Save was explicitly requested while cleanup was blocked. */
+  cleanupSaveRequested?: true
   /** Present only after a logical conditional edit has been prepared. */
   request?: TodoJournalRequest
 }
@@ -95,7 +99,8 @@ function existingTodoPrivateRef(id: string): string | null {
 
 const FIELDS = new Set<TodoDraftField>(["title", "body", "assignee", "department", "priority"])
 const PAYLOAD_KEYS = new Set([
-  "revision", "patch", "baseline", "baselineVersion", "uncertainFields", "conflictFields", "cleanupPending", "request",
+  "revision", "patch", "baseline", "baselineVersion", "uncertainFields", "conflictFields", "cleanupPending",
+  "cleanupIntentFields", "cleanupSaveRequested", "request",
 ])
 const REQUEST_KEYS = new Set(["revision", "patch", "expectedVersion", "idempotencyKey", "state"])
 const ENVELOPE_KEYS = new Set(["expiresAt", "sequence", "payload"])
@@ -153,6 +158,8 @@ function samePayload(a: TodoJournalPayload, b: TodoJournalPayload): boolean {
     && sameOptionalFields(a.uncertainFields, b.uncertainFields)
     && sameOptionalFields(a.conflictFields, b.conflictFields)
     && a.cleanupPending === b.cleanupPending
+    && sameOptionalFields(a.cleanupIntentFields, b.cleanupIntentFields)
+    && a.cleanupSaveRequested === b.cleanupSaveRequested
     && sameJournalRequest(a.request, b.request)
 }
 
@@ -198,13 +205,26 @@ function validConflictFields(value: unknown, patch: TodoDraftPatch): value is To
       && Object.prototype.hasOwnProperty.call(patch, field))
 }
 
+function validCleanupIntentFields(value: unknown, patch: TodoDraftPatch): value is TodoDraftField[] | undefined {
+  if (value === undefined) return true
+  if (!Array.isArray(value)) return false
+  const fields = value as unknown[]
+  return new Set(fields).size === fields.length
+    && fields.every((field) => typeof field === "string"
+      && FIELDS.has(field as TodoDraftField)
+      && Object.prototype.hasOwnProperty.call(patch, field))
+}
+
 function validPayload(value: unknown): value is TodoJournalPayload {
   if (!isRecord(value) || !hasOnlyKeys(value, PAYLOAD_KEYS)) return false
   if (!isPositiveSafeInteger(value.revision) || !validPatch(value.patch) || !validPatch(value.baseline)) return false
   if (!samePatchFields(value.patch, value.baseline)
     || !validUncertainFields(value.uncertainFields, value.patch)
     || !validConflictFields(value.conflictFields, value.patch)
-    || (value.cleanupPending !== undefined && value.cleanupPending !== true)) return false
+    || !validCleanupIntentFields(value.cleanupIntentFields, value.patch)
+    || (value.cleanupPending !== undefined && value.cleanupPending !== true)
+    || (value.cleanupSaveRequested !== undefined && value.cleanupSaveRequested !== true)
+    || (!value.cleanupPending && (value.cleanupIntentFields !== undefined || value.cleanupSaveRequested !== undefined))) return false
 
   if (value.request === undefined) {
     // The legacy v2 string was an updatedAt-like recovery marker, never a CAS
@@ -349,6 +369,8 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
         uncertainFields,
         conflictFields: unionFields(current.conflictFields, payload.conflictFields),
         cleanupPending: current.cleanupPending || payload.cleanupPending || undefined,
+        cleanupIntentFields: latestIntent.cleanupIntentFields,
+        cleanupSaveRequested: current.cleanupSaveRequested || latestIntent.cleanupSaveRequested || undefined,
         request,
       }
     } else if (current && payload.revision < current.revision) {
@@ -358,6 +380,8 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
         ...payload,
         conflictFields: unionFields(current.conflictFields, payload.conflictFields),
         cleanupPending: current.cleanupPending || payload.cleanupPending || undefined,
+        cleanupIntentFields: payload.cleanupIntentFields,
+        cleanupSaveRequested: current.cleanupSaveRequested || payload.cleanupSaveRequested || undefined,
       }
     }
     const sequence = Math.max(0, ...Object.values(journals).map((entry) => entry.sequence)) + 1
