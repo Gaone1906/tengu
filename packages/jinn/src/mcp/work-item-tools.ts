@@ -10,6 +10,14 @@ const STATUSES = ["backlog", "assigned", "executing", "in_review", "done", "bloc
 const SOURCES = ["human", "delegation", "cron", "workflow", "session", "connector", "goal"] as const;
 const AGENT_UPDATE_STATUSES = ["executing", "in_review", "blocked", "escalated", "done"] as const;
 const VERIFY_MODES = ["trust", "verify", "thorough"] as const;
+const ACTIVITY_RECEIPT_HINT = "Preview or Open the persisted activity receipt in this chat.";
+
+function mutationResult(body: unknown, hint: string): Record<string, unknown> {
+  const value = body && typeof body === "object" && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : { result: body };
+  return { ...value, hint: `${hint} ${ACTIVITY_RECEIPT_HINT}` };
+}
 
 function assertIdentity(ctx: JinnMcpContext): void {
   assertBoundCaller(ctx);
@@ -266,7 +274,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       if (verifyPolicy) body.verifyPolicy = validateVerifyPolicy(verifyPolicy);
       const { status, body: resp } = await gatewayRequest(ctx, "POST", "/api/work-items", body);
       if (status >= 400) throw gatewayFailure("creating work item", status, resp);
-      return { ...(resp as Record<string, unknown>), hint: "Next: assign_work_item or update_work_item." };
+      return mutationResult(resp, "Next: assign_work_item or update_work_item.");
     },
   };
 
@@ -298,7 +306,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       if (note !== undefined) payload.note = note;
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/status`, payload);
       if (status >= 400) throw gatewayFailure(`updating work item "${id}"`, status, body);
-      return body;
+      return mutationResult(body, "Todo status updated.");
     },
   };
 
@@ -320,7 +328,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       const assignee = requireString(args, "assignee");
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/assign`, { assignee });
       if (status >= 400) throw gatewayFailure(`assigning work item "${id}"`, status, body);
-      return body;
+      return mutationResult(body, "Todo assigned.");
     },
   };
 
@@ -344,7 +352,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       if (note !== undefined) payload.note = note;
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/archive`, payload);
       if (status >= 400) throw gatewayFailure(`archiving work item "${id}"`, status, body);
-      return body;
+      return mutationResult(body, "Todo archived.");
     },
   };
 

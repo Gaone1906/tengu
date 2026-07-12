@@ -304,6 +304,31 @@ describe("parseGrokJsonLine", () => {
     }]);
   });
 
+  it("correlates a successful MCP receipt with the native Grok tool id", () => {
+    const done = parseGrokJsonLine(JSON.stringify({
+      method: "session/update",
+      params: {
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-1",
+          title: "update_work_item",
+          status: "completed",
+          content: [{ type: "content", content: { type: "text", text: "ok" } }],
+          rawOutput: {
+            content: [{ type: "text", text: '{"activityReceiptId":"todo:wi_release"}' }],
+          },
+        },
+      },
+    }));
+    expect(done?.deltas).toEqual([{
+      type: "tool_result",
+      content: "ok",
+      toolName: "update_work_item",
+      toolId: "call-1",
+      activityReceiptId: "todo:wi_release",
+    }]);
+  });
+
   it("parses Grok plan and retry updates as status", () => {
     const plan = parseGrokJsonLine(JSON.stringify({
       method: "session/update",

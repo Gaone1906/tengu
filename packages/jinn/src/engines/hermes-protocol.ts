@@ -1,5 +1,6 @@
 // packages/jinn/src/engines/hermes-protocol.ts
 import type { ChatBlockStatus, JsonObject, StreamDelta } from "../shared/types.js";
+import { extractActivityReceiptId } from "../shared/activity-receipts.js";
 
 export function encodeModelChoice(provider: string | undefined, model: string): string {
   const m = (model || "").trim();
@@ -113,7 +114,13 @@ export function mapSessionUpdate(update: Record<string, unknown>): HermesUpdate 
       const id = String(update.toolCallId ?? update.toolId ?? "");
       const status = String(update.status ?? "");
       if (status === "completed" || status === "failed") {
-        deltas.push({ type: "tool_result", content: status, toolId: id });
+        const activityReceiptId = extractActivityReceiptId(textOf(update.content), { isError: status === "failed" });
+        deltas.push({
+          type: "tool_result",
+          content: status,
+          toolId: id,
+          ...(activityReceiptId ? { activityReceiptId } : {}),
+        });
       }
       return { deltas };
     }

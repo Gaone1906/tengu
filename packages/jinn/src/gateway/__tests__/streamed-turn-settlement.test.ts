@@ -140,6 +140,38 @@ beforeEach(() => {
 });
 
 describe("completed streamed-turn settlement", () => {
+  it("persists interleaved receipt metadata on the exact matching tool rows through reload", async () => {
+    const { reload } = await runTurn([
+      { type: "tool_use", content: "Search", toolName: "Search", toolId: "call-1" },
+      { type: "tool_use", content: "Search", toolName: "Search", toolId: "call-2" },
+      { type: "tool_result", content: "ok", toolName: "Search", toolId: "call-1", activityReceiptId: "todo:wi_one" },
+      { type: "tool_result", content: "ok", toolName: "Search", toolId: "call-2", activityReceiptId: "todo:wi_two" },
+    ], { sessionId: "engine-correlated", result: "Done." });
+
+    const tools = (reload.messages as Array<Record<string, unknown>>)
+      .filter((message) => message.toolCall === "Search");
+    expect(tools).toHaveLength(2);
+    expect(tools.map((message) => ({ toolId: message.toolId, meta: message.meta }))).toEqual([
+      { toolId: "call-1", meta: { activityReceiptId: "todo:wi_one" } },
+      { toolId: "call-2", meta: { activityReceiptId: "todo:wi_two" } },
+    ]);
+  });
+
+  it("falls back to the most recent open same-name tool rather than one global last tool", async () => {
+    const { reload } = await runTurn([
+      { type: "tool_use", content: "Search", toolName: "Search" },
+      { type: "tool_use", content: "Read", toolName: "Read" },
+      { type: "tool_result", content: "ok", toolName: "Search", activityReceiptId: "todo:wi_search" },
+    ], { sessionId: "engine-name-fallback", result: "Done." });
+
+    const messages = reload.messages as Array<Record<string, unknown>>;
+    expect(messages.find((message) => message.toolCall === "Search")).toMatchObject({
+      content: "Used Search",
+      meta: { activityReceiptId: "todo:wi_search" },
+    });
+    expect(messages.find((message) => message.toolCall === "Read")).toMatchObject({ content: "Using Read" });
+  });
+
   it("reloads the same completed fold membership as the live web completion path", async () => {
     const { reload } = await runTurn([
       { type: "text", content: "Inspecting the workspace." },

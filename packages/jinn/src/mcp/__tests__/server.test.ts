@@ -200,6 +200,33 @@ describe("handleMcpRequest — protocol", () => {
 });
 
 describe("handleMcpRequest — tools/call", () => {
+  it("assigns one deterministic activity operation identity to each tools/call", async () => {
+    const seen: Array<{ id: string; toolName: string } | undefined> = [];
+    const tool: JinnMcpTool = {
+      name: "mutate_thing",
+      description: "mutation fixture",
+      inputSchema: { type: "object", properties: {} },
+      handler: async (_args, callCtx) => {
+        seen.push(callCtx.activityOperation);
+        return { activityReceiptId: "todo:wi_release" };
+      },
+    };
+
+    const [first, second] = await Promise.all([
+      handleMcpRequest({ id: 41, method: "tools/call", params: { name: tool.name, arguments: {} } }, [tool], stubCtx(() => ({ status: 200, body: {} }))),
+      handleMcpRequest({ id: 42, method: "tools/call", params: { name: tool.name, arguments: {} } }, [tool], stubCtx(() => ({ status: 200, body: {} }))),
+    ]);
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0]?.toolName).toBe("mutate_thing");
+    expect(seen[1]?.toolName).toBe("mutate_thing");
+    expect(seen[0]?.id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(seen[1]?.id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(seen[0]?.id).not.toBe(seen[1]?.id);
+    expect(JSON.parse((((first!.result as any).content[0].text) as string))).toEqual({ activityReceiptId: "todo:wi_release" });
+    expect(JSON.parse((((second!.result as any).content[0].text) as string))).toEqual({ activityReceiptId: "todo:wi_release" });
+  });
+
   it("compiles every advertised registry schema or supplies its shared runtime schema", () => {
     const tools = buildTools();
     expect(tools).toHaveLength(50);

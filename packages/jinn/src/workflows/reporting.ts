@@ -127,7 +127,10 @@ function workflowRunBlockId(workflowId: string, runId: string): string {
   return `workflow-run:${readableWorkflow}:${readableRun}:${digest}`;
 }
 
-export function workflowRunActivityEnvelope(run: WorkflowRun): ChatBlockEnvelope {
+export function workflowRunActivityEnvelope(
+  run: WorkflowRun,
+  action = run.revision === 1 ? 'started' : 'updated',
+): ChatBlockEnvelope {
   const completedSteps = completedStepCount(run);
   const latestError = run.errors?.at(-1)?.message?.trim();
   const preview = latestOutcomePreview(run);
@@ -143,7 +146,7 @@ export function workflowRunActivityEnvelope(run: WorkflowRun): ChatBlockEnvelope
       payload: {
         workflowId: run.workflowId,
         runId: run.runId,
-        action: run.revision === 1 ? 'started' : 'updated',
+        action,
         runStatus: run.status,
         startedAt: run.startedAt,
         endedAt: run.endedAt,

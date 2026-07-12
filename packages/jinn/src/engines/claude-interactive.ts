@@ -15,6 +15,7 @@ import type { HookRegistry, HookPayload } from "../gateway/hook-registry.js";
 import { SsePtyProxy, MAIN_AGENT_SENTINEL, type SseDataEvent, type UpstreamActivityInfo } from "./sse-pty-proxy.js";
 import { neutralizeForPaste } from "../shared/skill-commands.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
+import { extractActivityReceiptId } from "../shared/activity-receipts.js";
 
 export type { PtyControlEvent } from "./pty-view-engine.js";
 
@@ -206,10 +207,26 @@ export function buildInteractiveArgs(o: InteractiveArgsOpts): string[] {
 export function claudeHookToDeltas(h: Record<string, unknown>): StreamDelta[] {
   if (h.hook_event_name !== "PostToolUse") return [];
   const toolName = typeof h.tool_name === "string" ? h.tool_name : undefined;
+  const response = h.tool_response;
+  const responseRecord = response && typeof response === "object" && !Array.isArray(response)
+    ? response as Record<string, unknown>
+    : undefined;
+  const responseText = Array.isArray(responseRecord?.content)
+    ? (responseRecord.content as unknown[])
+        .find((entry) => entry && typeof entry === "object" && (entry as Record<string, unknown>).type === "text")
+    : undefined;
+  const receiptSource = responseText && typeof responseText === "object"
+    ? (responseText as Record<string, unknown>).text
+    : response;
+  const isError = h.is_error === true || responseRecord?.isError === true || responseRecord?.is_error === true;
+  const activityReceiptId = extractActivityReceiptId(receiptSource, { isError });
+  const toolId = typeof h.tool_use_id === "string" && h.tool_use_id ? h.tool_use_id : undefined;
   return [{
     type: "tool_result",
     content: String(h.tool_name ?? ""),
     toolName,
+    ...(toolId ? { toolId } : {}),
+    ...(activityReceiptId ? { activityReceiptId } : {}),
   }];
 }
 

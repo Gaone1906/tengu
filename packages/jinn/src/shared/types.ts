@@ -1,5 +1,12 @@
 export type StreamDeltaType = "text" | "text_snapshot" | "tool_use" | "tool_result" | "status" | "error" | "context" | "block";
 
+type CompanyChangedBase = { action: string; id: string; sessionId?: string };
+export type CompanyChangedEvent =
+  | (CompanyChangedBase & { entity: "todo"; version: number; value?: JsonObject })
+  | (CompanyChangedBase & { entity: "workflow-definition"; version: number })
+  | (CompanyChangedBase & { entity: "workflow-run"; workflowId: string; runId: string; version: number })
+  | (CompanyChangedBase & { entity: "workflow-trigger"; workflowId: string; revision: string });
+
 /** Generous but bounded body size for durable communication-card metadata. */
 export const STRUCTURED_MESSAGE_BODY_MAX_CHARS = 16_000;
 
@@ -81,6 +88,9 @@ export interface StreamDelta {
   content: string;
   toolName?: string;
   toolId?: string;
+  /** Stable server-authored activity block id carried only by a successful
+   * matching tool result. Persisted onto that exact tool row for reload. */
+  activityReceiptId?: string;
   /** First 200 chars of the stringified tool input. Present on PreToolUse-sourced
    *  `tool_use` deltas (fired just before the tool runs, full input assembled).
    *  Absent on the SSE-proxy `content_block_start` delta (input not yet known). */

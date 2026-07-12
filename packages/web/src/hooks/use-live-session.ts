@@ -731,6 +731,10 @@ export function useLiveSession(
           setMessages((prev) => {
             const updated = [...prev]
             const toolId = typeof p.toolId === 'string' && p.toolId ? p.toolId : undefined
+            const toolName = typeof p.toolName === 'string' && p.toolName ? p.toolName : undefined
+            const activityReceiptId = typeof p.activityReceiptId === 'string' && p.activityReceiptId
+              ? p.activityReceiptId
+              : undefined
             let targetIndex = -1
             if (toolId) {
               targetIndex = updated.findIndex((m) =>
@@ -739,11 +743,14 @@ export function useLiveSession(
                 m.toolId === toolId &&
                 !m.content.startsWith('Used '),
               )
-            }
-            if (targetIndex < 0) {
+            } else if (toolName) {
               for (let i = updated.length - 1; i >= 0; i--) {
                 const m = updated[i]
-                if (m.role === 'assistant' && m.toolCall && !m.content.startsWith('Used ')) {
+                if (
+                  m.role === 'assistant' &&
+                  m.toolCall === toolName &&
+                  !m.content.startsWith('Used ')
+                ) {
                   targetIndex = i
                   break
                 }
@@ -751,7 +758,13 @@ export function useLiveSession(
             }
             if (targetIndex >= 0) {
               const target = updated[targetIndex]
-              updated[targetIndex] = { ...target, content: `Used ${target.toolCall}` }
+              updated[targetIndex] = {
+                ...target,
+                content: `Used ${target.toolCall}`,
+                ...(activityReceiptId
+                  ? { meta: { ...(target.meta ?? {}), activityReceiptId } }
+                  : {}),
+              }
             }
             return updated
           })

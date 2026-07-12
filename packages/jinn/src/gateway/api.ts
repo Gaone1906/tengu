@@ -68,6 +68,7 @@ import {
   insertMessageAfter,
   insertPartialMessage,
   updatePartialMessage,
+  settlePartialToolMessage,
   applyBlockEnvelope,
   deletePartialMessages,
   settlePartialMessages,
@@ -94,6 +95,7 @@ import {
   RESTART_ACK_META_KEY,
 } from "../sessions/registry.js";
 import { blockFallbackText, validateBlockEnvelope } from "../shared/blocks.js";
+import { extractActivityReceiptId } from "../shared/activity-receipts.js";
 import { forkEngineSession } from "../sessions/fork.js";
 import { removeCodexSessionHome } from "../engines/codex.js";
 import { ptySnapshotStore } from "../engines/pty-snapshot.js";
@@ -159,6 +161,8 @@ import {
   type RunDriverDeps,
   type WorkflowRun,
   type WorkflowReportMode,
+  type WorkflowTriggerBinding,
+  workflowTriggerBindingRevision,
   resolveWorkflowApprovalDecisionAuthority,
   type SpawnContext,
   type SpawnResult,
@@ -201,10 +205,23 @@ import { isJsonMediaType } from "./media-type.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
 import { deliverClaimedSessionDelivery, notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions, recoverPendingSessionDeliveries } from "../sessions/callbacks.js";
-import { projectWorkflowRunActivity, type WorkflowReportingContext } from "../workflows/reporting.js";
+import { projectWorkflowRunActivity, workflowRunActivityEnvelope, type WorkflowReportingContext } from "../workflows/reporting.js";
 import { clearDelegationCompletionContract, DELEGATION_COMPLETION_TRACKED_META_KEY } from "../sessions/delegation-completion-contract.js";
 import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
-import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
+import {
+  ACTIVITY_OPERATION_HEADER,
+  ACTIVITY_TOOL_HEADER,
+  TOOL_CALL_HEADER,
+  TOOL_CALL_HEADER_VALUE,
+  UNIDENTIFIED_TOOL_CALL_ERROR,
+  verifySessionCapability,
+} from "../mcp/identity.js";
+import {
+  persistAndEmitActivityBlock,
+  todoActivityBlock,
+  workflowDefinitionActivityBlock,
+  type ActivityOperation,
+} from "./chat-activity.js";
 import {
   createWorkItem,
   getWorkItem,
@@ -863,10 +880,15 @@ export async function postWorkflowStepFollowUp(ctx: FollowUpContext, context: Ap
  * (registry by deterministic sessionKey), real spawner. Injected — the driver module
  * itself stays gateway-free.
  */
-export function workflowRunDriverDeps(root: string, context: ApiContext): RunDriverDeps {
+export function workflowRunDriverDeps(
+  root: string,
+  context: ApiContext,
+  options: { activitySessionId?: string } = {},
+): RunDriverDeps {
   return {
     root,
     reporting: workflowReportingContext(context),
+    onRunStarted: (run) => emitWorkflowRunCompanyChanged(context, run, "started", options.activitySessionId),
     todoEventFeed: createWorkflowTodoEventFeed(),
     getDefinition,
     probeStepSession: (sessionKey) => {
@@ -984,10 +1006,56 @@ function projectWorkflowOperationActivity(
   run: WorkflowRun,
   headers: HttpRequest["headers"],
   context: ApiContext,
+  action: string,
+  changed = true,
+): string | undefined {
+  const target = verifiedActivityTarget(headers, context);
+  return persistAndEmitActivityBlock({
+    context: {
+      sessionExists: (sessionId) => !!getSession(sessionId),
+      applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
+      emit: (event, payload) => context.emit?.(event, payload),
+      log: (message) => logger.warn(message),
+    },
+    ...target,
+    envelope: workflowRunActivityEnvelope(run, action),
+    ...(changed ? {
+      companyEvent: {
+        entity: "workflow-run" as const,
+        action,
+        id: run.runId,
+        workflowId: run.workflowId,
+        runId: run.runId,
+        version: Math.max(1, run.revision ?? 1),
+        ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+      },
+    } : {}),
+  });
+}
+
+function emitWorkflowRunCompanyChanged(
+  context: ApiContext,
+  run: WorkflowRun,
+  action: string,
+  sessionId?: string,
 ): void {
-  const identity = resolveScopedWriteCallerIdentity(headers, context);
-  const actingSessionId = identity.kind === "session" ? identity.callerId : undefined;
-  projectWorkflowRunActivity(run, workflowReportingContext(context), actingSessionId);
+  persistAndEmitActivityBlock({
+    context: {
+      sessionExists: (candidate) => !!getSession(candidate),
+      applyBlock: (candidate, envelope, fallback) => applyBlockEnvelope(candidate, envelope, fallback),
+      emit: (event, payload) => context.emit?.(event, payload),
+      log: (message) => logger.warn(message),
+    },
+    companyEvent: {
+      entity: "workflow-run",
+      action,
+      id: run.runId,
+      workflowId: run.workflowId,
+      runId: run.runId,
+      version: Math.max(1, run.revision ?? 1),
+      ...(sessionId ? { sessionId } : {}),
+    },
+  });
 }
 
 interface WorkflowRunRequestBody {
@@ -1190,7 +1258,9 @@ async function runWorkflowDefinitionFromHttp(
     : undefined;
   let replayed = false;
   try {
-    const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context), def, trigger, {
+    const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context, {
+      ...(identity.kind === "session" ? { activitySessionId: identity.callerId } : {}),
+    }), def, trigger, {
       knownEmployees,
       knownEngines,
       principal: authority.actor === "operator" ? "operator" : `employee:${authority.actor}`,
@@ -1199,9 +1269,16 @@ async function runWorkflowDefinitionFromHttp(
       ...(invocation ? { invocation } : {}),
       ...(validated.stepOverrides ? { stepOverrides: validated.stepOverrides } : {}),
     });
-    projectWorkflowOperationActivity(run, req.headers, context);
+    const activityReceiptId = projectWorkflowOperationActivity(
+      run,
+      req.headers,
+      context,
+      replayed ? "replayed" : "started",
+      false,
+    );
     const status = replayed ? 200 : run.status === "failed" ? 422 : 201;
-    return json(res, projectWorkflowRunApprovalCapability(run, req.headers, context), status);
+    const response = projectWorkflowRunApprovalCapability(run, req.headers, context) as unknown as Record<string, unknown>;
+    return json(res, status >= 400 ? response : withActivityReceipt(response, activityReceiptId), status);
   } catch (err) {
     if (err instanceof WorkflowRunIdempotencyConflict) {
       return json(res, {
@@ -1920,6 +1997,122 @@ function resolveScopedWriteCallerIdentity(headers: HttpRequest["headers"], conte
       verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME)
       || (!shouldRequireGatewayAuth(context.getConfig()) && isSameOriginBrowserRequest(headers, context.getConfig())),
   });
+}
+
+function singleHeader(headers: HttpRequest["headers"], name: string): string | undefined {
+  const raw = headers[name];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function verifiedActivityTarget(
+  headers: HttpRequest["headers"],
+  context: ApiContext,
+): { sessionId?: string; operation?: ActivityOperation } {
+  const identity = resolveScopedWriteCallerIdentity(headers, context);
+  if (identity.kind !== "session") return {};
+  const operationId = singleHeader(headers, ACTIVITY_OPERATION_HEADER);
+  const toolName = singleHeader(headers, ACTIVITY_TOOL_HEADER);
+  const toolMarker = singleHeader(headers, TOOL_CALL_HEADER);
+  const operation = toolMarker === TOOL_CALL_HEADER_VALUE
+    && operationId !== undefined
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operationId)
+    && toolName !== undefined
+    && toolName.length <= 160
+      ? { id: operationId, toolName }
+      : undefined;
+  return { sessionId: identity.callerId, ...(operation ? { operation } : {}) };
+}
+
+function persistTodoMutationActivity(
+  req: HttpRequest,
+  context: ApiContext,
+  item: WorkItem,
+  action: string,
+  changed = true,
+): string | undefined {
+  const target = verifiedActivityTarget(req.headers, context);
+  return persistAndEmitActivityBlock({
+    context: {
+      sessionExists: (sessionId) => !!getSession(sessionId),
+      applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
+      emit: (event, payload) => context.emit?.(event, payload),
+      log: (message) => logger.warn(message),
+    },
+    ...target,
+    envelope: todoActivityBlock(item, action),
+    ...(changed ? {
+      companyEvent: {
+        entity: "todo" as const,
+        action,
+        id: item.id,
+        version: item.version,
+        value: item as unknown as JsonObject,
+        ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+      },
+    } : {}),
+  });
+}
+
+function persistWorkflowDefinitionMutationActivity(
+  req: HttpRequest,
+  context: ApiContext,
+  definition: EditableWorkflowDefinition,
+  action: string,
+  changed = true,
+): string | undefined {
+  const target = verifiedActivityTarget(req.headers, context);
+  return persistAndEmitActivityBlock({
+    context: {
+      sessionExists: (sessionId) => !!getSession(sessionId),
+      applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
+      emit: (event, payload) => context.emit?.(event, payload),
+      log: (message) => logger.warn(message),
+    },
+    ...target,
+    envelope: workflowDefinitionActivityBlock(definition, action),
+    ...(changed ? {
+      companyEvent: {
+        entity: "workflow-definition" as const,
+        action,
+        id: definition.id,
+        version: definition.version,
+        ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+      },
+    } : {}),
+  });
+}
+
+function persistWorkflowTriggerMutationActivity(
+  req: HttpRequest,
+  context: ApiContext,
+  binding: WorkflowTriggerBinding,
+  definition: EditableWorkflowDefinition | null,
+  action: string,
+): string | undefined {
+  const target = verifiedActivityTarget(req.headers, context);
+  return persistAndEmitActivityBlock({
+    context: {
+      sessionExists: (sessionId) => !!getSession(sessionId),
+      applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
+      emit: (event, payload) => context.emit?.(event, payload),
+      log: (message) => logger.warn(message),
+    },
+    ...target,
+    ...(definition ? { envelope: workflowDefinitionActivityBlock(definition, action) } : {}),
+    companyEvent: {
+      entity: "workflow-trigger",
+      action,
+      id: binding.name,
+      workflowId: binding.targetWorkflowId,
+      revision: workflowTriggerBindingRevision(binding),
+      ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+    },
+  });
+}
+
+function withActivityReceipt<T extends Record<string, unknown>>(body: T, activityReceiptId: string | undefined): T & { activityReceiptId?: string } {
+  return activityReceiptId ? { ...body, activityReceiptId } : body;
 }
 
 function isSameOriginBrowserRequest(
@@ -3331,7 +3524,8 @@ export async function handleApiRequest(
       };
       try {
         const item = createWorkItem(input);
-        return json(res, { workItem: item }, 201);
+        const activityReceiptId = persistTodoMutationActivity(req, context, item, "created");
+        return json(res, withActivityReceipt({ workItem: item }, activityReceiptId), 201);
       } catch (err) {
         return badRequest(res, err instanceof Error ? err.message : String(err));
       }
@@ -3459,7 +3653,8 @@ export async function handleApiRequest(
           actor: "operator",
         });
         if (!result) return notFound(res);
-        return json(res, { workItem: result.item, replayed: result.replayed });
+        const activityReceiptId = persistTodoMutationActivity(req, context, result.item, "metadata-updated", !result.replayed);
+        return json(res, withActivityReceipt({ workItem: result.item, replayed: result.replayed }, activityReceiptId));
       } catch (err) {
         if (err instanceof WorkItemVersionConflictError) {
           return json(res, {
@@ -3526,7 +3721,8 @@ export async function handleApiRequest(
               callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
               detail: note ? { note } : undefined,
             });
-        return json(res, { workItem: result.item, escalated: result.escalated });
+        const activityReceiptId = persistTodoMutationActivity(req, context, result.item, "status-transitioned");
+        return json(res, withActivityReceipt({ workItem: result.item, escalated: result.escalated }, activityReceiptId));
       } catch (err) {
         if (err instanceof TransitionError) {
           if (err.code === "not-found") return notFound(res);
@@ -3586,7 +3782,8 @@ export async function handleApiRequest(
       try {
         const item = assignWorkItem(params.id, assignee, employee.department ?? null, workItemActor(caller));
         if (!item) return notFound(res);
-        return json(res, { workItem: item });
+        const activityReceiptId = persistTodoMutationActivity(req, context, item, "assigned");
+        return json(res, withActivityReceipt({ workItem: item }, activityReceiptId));
       } catch (err) {
         if (err instanceof TransitionError) {
           const statusCode = err.code === "conflict" ? 409 : 400;
@@ -3624,7 +3821,8 @@ export async function handleApiRequest(
           ...(caller.kind === "session" ? { callerSessionId: caller.callerId } : {}),
           ...(note ? { note } : {}),
         });
-        return json(res, { workItem: archived, archived: true });
+        const activityReceiptId = persistTodoMutationActivity(req, context, archived, "archived");
+        return json(res, withActivityReceipt({ workItem: archived, archived: true }, activityReceiptId));
       } catch (err) {
         if (err instanceof TransitionError) {
           if (err.code === "not-found") return notFound(res);
@@ -3676,13 +3874,13 @@ export async function handleApiRequest(
           return badRequest(res, `approval target "${target}" is not an org employee or the configured root approval target`);
         }
       }
-      return json(res, {
-        workItem: requestApproval(params.id, {
+      const updated = requestApproval(params.id, {
           request,
           ...(target ? { target } : {}),
           actor: workItemActor(caller),
-        }),
-      });
+        });
+      const activityReceiptId = persistTodoMutationActivity(req, context, updated, "approval-requested", updated.version !== item.version);
+      return json(res, withActivityReceipt({ workItem: updated }, activityReceiptId));
     }
 
     // POST /api/work-items/:id/approval — approval DECISION surface.
@@ -3726,10 +3924,11 @@ export async function handleApiRequest(
             return json(res, { error: result.message }, 400);
         }
       }
-      return json(res, {
+      const activityReceiptId = persistTodoMutationActivity(req, context, result.item, "approval-decided");
+      return json(res, withActivityReceipt({
         workItem: result.item,
         escalated: result.escalated,
-      });
+      }, activityReceiptId));
     }
 
     // POST /api/work-items/:id/approval/escalate — routed approval authority can
@@ -3748,7 +3947,9 @@ export async function handleApiRequest(
       const body = (parsed.body ?? {}) as { reason?: unknown };
       const reason = typeof body.reason === "string" ? body.reason : undefined;
       try {
-        return json(res, { workItem: escalateApproval(params.id, authority.authority.actor, reason) });
+        const updated = escalateApproval(params.id, authority.authority.actor, reason);
+        const activityReceiptId = persistTodoMutationActivity(req, context, updated, "approval-escalated");
+        return json(res, withActivityReceipt({ workItem: updated }, activityReceiptId));
       } catch (err) {
         if (err instanceof Error && /no pending approval/i.test(err.message)) {
           return json(res, { error: err.message }, 409);
@@ -3865,7 +4066,17 @@ export async function handleApiRequest(
         const actor = authority.actor;
         try {
           return await withWorkflowMutationLock(root, async () => {
-            return json(res, await createWorkflowTriggerForActor(root, body, actor), 201);
+            const response = await createWorkflowTriggerForActor(root, body, actor);
+            const binding = getWorkflowTriggerBinding(root, String((response.trigger as Record<string, unknown>).name));
+            if (!binding) throw new WorkflowTriggerStoreError("not-found", "created workflow trigger was not readable");
+            const activityReceiptId = persistWorkflowTriggerMutationActivity(
+              req,
+              context,
+              binding,
+              targetWorkflow,
+              "trigger-created",
+            );
+            return json(res, withActivityReceipt(response, activityReceiptId), 201);
           });
         } catch (err) {
           return workflowTriggerStoreErrorResponse(res, err);
@@ -3893,9 +4104,16 @@ export async function handleApiRequest(
           });
           if (!authority.ok) return json(res, { error: authority.error }, authority.status);
           const updated = await decidePollActivationApproval(root, binding.name, decision, authority.authority.actor);
-          return json(res, {
+          const activityReceiptId = persistWorkflowTriggerMutationActivity(
+            req,
+            context,
+            updated,
+            getDefinition(root, updated.targetWorkflowId),
+            "trigger-approval-decided",
+          );
+          return json(res, withActivityReceipt({
             trigger: projectWorkflowTriggerApprovalCapability(publicWorkflowTriggerBinding(updated), req.headers, context),
-          });
+          }, activityReceiptId));
         });
       } catch (err) {
         return workflowTriggerStoreErrorResponse(res, err);
@@ -3918,9 +4136,16 @@ export async function handleApiRequest(
           });
           if (!authority.ok) return json(res, { error: authority.error }, authority.status);
           const updated = await escalatePollActivationApproval(root, binding.name);
-          return json(res, {
+          const activityReceiptId = persistWorkflowTriggerMutationActivity(
+            req,
+            context,
+            updated,
+            getDefinition(root, updated.targetWorkflowId),
+            "trigger-approval-escalated",
+          );
+          return json(res, withActivityReceipt({
             trigger: projectWorkflowTriggerApprovalCapability(publicWorkflowTriggerBinding(updated), req.headers, context),
-          });
+          }, activityReceiptId));
         });
       } catch (err) {
         return workflowTriggerStoreErrorResponse(res, err);
@@ -3944,7 +4169,14 @@ export async function handleApiRequest(
             }
             const deleted = await deleteWorkflowTriggerBinding(root, triggerName);
             if (!deleted) return notFound(res);
-            return json(res, { deleted: true, name: triggerName, orphaned: true });
+            const activityReceiptId = persistWorkflowTriggerMutationActivity(
+              req,
+              context,
+              binding,
+              null,
+              "trigger-deleted",
+            );
+            return json(res, withActivityReceipt({ deleted: true, name: triggerName, orphaned: true }, activityReceiptId));
           }
           const authority = authorizeWorkflowOperation(req.headers, targetWorkflow, "bind-trigger", context);
           if (!authority.ok) {
@@ -3952,7 +4184,14 @@ export async function handleApiRequest(
           }
           const deleted = await deleteWorkflowTriggerBinding(root, triggerName);
           if (!deleted) return notFound(res);
-          return json(res, { deleted: true, name: triggerName });
+          const activityReceiptId = persistWorkflowTriggerMutationActivity(
+            req,
+            context,
+            binding,
+            targetWorkflow,
+            "trigger-deleted",
+          );
+          return json(res, withActivityReceipt({ deleted: true, name: triggerName }, activityReceiptId));
         });
       } catch (err) {
         return workflowTriggerStoreErrorResponse(res, err);
@@ -4121,7 +4360,9 @@ export async function handleApiRequest(
         } catch (cleanupErr) {
           logger.warn(`workflow mutation post-commit trigger cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
         }
-        return json(res, committed, body.operation === "create" ? 201 : 200);
+        const action = body.operation === "create" ? "created" : "updated";
+        const activityReceiptId = persistWorkflowDefinitionMutationActivity(req, context, committed.definition, action);
+        return json(res, withActivityReceipt(committed, activityReceiptId), body.operation === "create" ? 201 : 200);
       });
     }
 
@@ -4168,7 +4409,8 @@ export async function handleApiRequest(
             { layoutIntent: requestedLayoutIntent === "manual" || requestedLayoutIntent === "normalize" ? requestedLayoutIntent : "generated" },
           );
           syncWorkflowCronJobsForRoot(root); // GRS-014d: schedule triggers become managed cron jobs
-          return json(res, created, 201);
+          const activityReceiptId = persistWorkflowDefinitionMutationActivity(req, context, created, "created");
+          return json(res, withActivityReceipt(created as unknown as Record<string, unknown>, activityReceiptId), 201);
         } catch (err) {
           return workflowStoreErrorResponse(res, err);
         }
@@ -4196,7 +4438,8 @@ export async function handleApiRequest(
           definitionPatch: workflowDefinitionAuthorityResetPatch(authority),
         });
         syncWorkflowCronJobsForRoot(root); // a duplicate is a create — its schedule syncs too
-        return json(res, dup, 201);
+        const activityReceiptId = persistWorkflowDefinitionMutationActivity(req, context, dup, "duplicated");
+        return json(res, withActivityReceipt(dup as unknown as Record<string, unknown>, activityReceiptId), 201);
       } catch (err) {
         return workflowStoreErrorResponse(res, err);
       }
@@ -4218,7 +4461,8 @@ export async function handleApiRequest(
         }
         const retired = retireDefinition(root, params.id);
         syncWorkflowCronJobsForRoot(root); // GRS-014d: retiring removes the managed cron job
-        return json(res, retired);
+        const activityReceiptId = persistWorkflowDefinitionMutationActivity(req, context, retired, "retired");
+        return json(res, withActivityReceipt(retired as unknown as Record<string, unknown>, activityReceiptId));
       } catch (err) {
         return workflowStoreErrorResponse(res, err);
       }
@@ -4355,8 +4599,11 @@ export async function handleApiRequest(
           status: outcome.status,
         }, 409);
       }
-      projectWorkflowOperationActivity(outcome.run, req.headers, context);
-      return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
+      const activityReceiptId = projectWorkflowOperationActivity(outcome.run, req.headers, context, "step-prompt-edited");
+      return json(res, withActivityReceipt(
+        projectWorkflowRunApprovalCapability(outcome.run, req.headers, context) as unknown as Record<string, unknown>,
+        activityReceiptId,
+      ));
     }
 
     // POST /api/workflow-definitions/:id/runs/:runId/cancel — request the real
@@ -4402,8 +4649,11 @@ export async function handleApiRequest(
           status: outcome.run.status,
         }, 409);
       }
-      projectWorkflowOperationActivity(outcome.run, req.headers, context);
-      return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
+      const activityReceiptId = projectWorkflowOperationActivity(outcome.run, req.headers, context, "cancelled");
+      return json(res, withActivityReceipt(
+        projectWorkflowRunApprovalCapability(outcome.run, req.headers, context) as unknown as Record<string, unknown>,
+        activityReceiptId,
+      ));
     }
 
     // POST /api/workflow-definitions/:id/runs/:runId/gate-approval/adopt —
@@ -4422,8 +4672,11 @@ export async function handleApiRequest(
       if (outcome.outcome === "not-parked") {
         return json(res, { error: `run is ${outcome.run.status}, not parked`, status: outcome.run.status }, 409);
       }
-      projectWorkflowOperationActivity(outcome.run, req.headers, context);
-      return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
+      const activityReceiptId = projectWorkflowOperationActivity(outcome.run, req.headers, context, "gate-approval-adopted");
+      return json(res, withActivityReceipt(
+        projectWorkflowRunApprovalCapability(outcome.run, req.headers, context) as unknown as Record<string, unknown>,
+        activityReceiptId,
+      ));
     }
 
     // POST /api/workflow-definitions/:id/runs/:runId/gate-approval/escalate —
@@ -4458,8 +4711,11 @@ export async function handleApiRequest(
       if (outcome.outcome === "not-parked") {
         return json(res, { error: `run is ${outcome.run.status}, not parked with a pending native approval`, status: outcome.run.status }, 409);
       }
-      projectWorkflowOperationActivity(outcome.run, req.headers, context);
-      return json(res, projectWorkflowRunApprovalCapability(outcome.run, req.headers, context));
+      const activityReceiptId = projectWorkflowOperationActivity(outcome.run, req.headers, context, "gate-approval-escalated");
+      return json(res, withActivityReceipt(
+        projectWorkflowRunApprovalCapability(outcome.run, req.headers, context) as unknown as Record<string, unknown>,
+        activityReceiptId,
+      ));
     }
 
     // POST /api/workflow-definitions/:id/runs/:runId/resolve-gate — resolve a PARKED
@@ -4496,8 +4752,11 @@ export async function handleApiRequest(
         if (result.outcome === "not-parked") {
           return json(res, { error: `run is ${result.run.status}, not parked`, status: result.run.status }, 409);
         }
-        projectWorkflowOperationActivity(result.run, req.headers, context);
-        return json(res, projectWorkflowRunApprovalCapability(result.run, req.headers, context));
+        const activityReceiptId = projectWorkflowOperationActivity(result.run, req.headers, context, "gate-approval-decided");
+        return json(res, withActivityReceipt(
+          projectWorkflowRunApprovalCapability(result.run, req.headers, context) as unknown as Record<string, unknown>,
+          activityReceiptId,
+        ));
       } catch (err) {
         if (err instanceof WorkflowRunStoreError) {
           return json(res, { error: err.message, code: err.code }, err.code === "not-found" ? 404 : 400);
@@ -4578,7 +4837,8 @@ export async function handleApiRequest(
         const safePatch = authority.canSetWorkflowAuthority ? typedPatch : stripWorkflowAuthorityFields(typedPatch);
         const updated = updateDefinition(root, params.id, safePatch, { expectedVersion, ...(layoutIntent ? { layoutIntent } : {}) });
         syncWorkflowCronJobsForRoot(root); // GRS-014d: schedule/status edits re-derive the managed cron job
-        return json(res, updated);
+        const activityReceiptId = persistWorkflowDefinitionMutationActivity(req, context, updated, "updated");
+        return json(res, withActivityReceipt(updated as unknown as Record<string, unknown>, activityReceiptId));
       } catch (err) {
         return workflowStoreErrorResponse(res, err);
       }
@@ -4967,6 +5227,28 @@ export async function handleApiRequest(
         });
       }
       maybeEmitTalkGraph(session.id, "added", { getSession, emit: context.emit });
+
+      // The delegation card above is the atomic response's sole transcript row.
+      // Publish the Todo cache invalidation through the shared boundary without
+      // synthesizing a second Todo activity block for the same delegation.
+      const delegatedItem = getWorkItem(workItem.id) ?? workItem;
+      const activityTarget = verifiedActivityTarget(req.headers, context);
+      persistAndEmitActivityBlock({
+        context: {
+          sessionExists: (sessionId) => !!getSession(sessionId),
+          applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
+          emit: (event, payload) => context.emit?.(event, payload),
+          log: (message) => logger.warn(message),
+        },
+        companyEvent: {
+          entity: "todo",
+          action: "delegated",
+          id: delegatedItem.id,
+          version: delegatedItem.version,
+          value: delegatedItem as unknown as JsonObject,
+          ...(activityTarget.sessionId ? { sessionId: activityTarget.sessionId } : {}),
+        },
+      });
 
       return json(res, {
         workItemId: workItem.id,
@@ -6836,8 +7118,7 @@ async function runWebSession(
     let partialSeq = 0;
     let curTextId: string | null = null; // the growing text-block row, null between blocks
     let curText = "";
-    let lastToolId: string | null = null; // last tool row, for the tool_result → "Used" update
-    let lastToolName: string | null = null;
+    const openPartialTools: Array<{ messageId: string; toolName: string; toolId?: string }> = [];
     let partialFlushTimer: ReturnType<typeof setTimeout> | null = null;
     const flushPartialText = () => {
       partialFlushTimer = null;
@@ -6863,12 +7144,31 @@ async function runWebSession(
         flushPartialText(); // finalize the text block before the tool
         if (partialFlushTimer) { clearTimeout(partialFlushTimer); partialFlushTimer = null; }
         const tool = delta.toolName || String(delta.content ?? "");
-        lastToolName = tool;
-        lastToolId = insertPartialMessage(currentSession.id, "assistant", `Using ${tool}`, partialSeq++, tool);
+        const messageId = insertPartialMessage(
+          currentSession.id,
+          "assistant",
+          `Using ${tool}`,
+          partialSeq++,
+          tool,
+          delta.toolId,
+        );
+        openPartialTools.push({ messageId, toolName: tool, ...(delta.toolId ? { toolId: delta.toolId } : {}) });
         curTextId = null; curText = ""; // a fresh text block begins after the tool
       } else if (delta.type === "tool_result") {
-        const tool = delta.toolName || lastToolName || String(delta.content ?? "");
-        if (lastToolId) updatePartialMessage(lastToolId, `Used ${tool}`);
+        const matchIndex = delta.toolId
+          ? openPartialTools.findIndex((entry) => entry.toolId === delta.toolId)
+          : (() => {
+              if (!delta.toolName) return -1;
+              for (let index = openPartialTools.length - 1; index >= 0; index--) {
+                if (openPartialTools[index].toolName === delta.toolName) return index;
+              }
+              return -1;
+            })();
+        if (matchIndex >= 0) {
+          const [match] = openPartialTools.splice(matchIndex, 1);
+          const activityReceiptId = extractActivityReceiptId({ activityReceiptId: delta.activityReceiptId });
+          settlePartialToolMessage(match.messageId, `Used ${match.toolName}`, activityReceiptId);
+        }
       } else if (delta.type === "block" && delta.block) {
         flushPartialText();
         if (partialFlushTimer) { clearTimeout(partialFlushTimer); partialFlushTimer = null; }
@@ -6976,6 +7276,7 @@ async function runWebSession(
             content: outgoingDelta.content,
             toolName: outgoingDelta.toolName,
             toolId: outgoingDelta.toolId,
+            activityReceiptId: outgoingDelta.activityReceiptId,
             input: outgoingDelta.input,
             block: outgoingDelta.block,
           });

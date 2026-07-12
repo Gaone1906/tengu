@@ -30,6 +30,23 @@ describe("claudeHookToDeltas", () => {
       tool_name: "Bash",
     })).toEqual([{ type: "tool_result", content: "Bash", toolName: "Bash" }]);
   });
+
+  it("correlates a successful MCP receipt with the native Claude tool id", () => {
+    expect(claudeHookToDeltas({
+      hook_event_name: "PostToolUse",
+      tool_name: "mcp__jinn__update_work_item",
+      tool_use_id: "call-1",
+      tool_response: {
+        content: [{ type: "text", text: '{"activityReceiptId":"todo:wi_release"}' }],
+      },
+    })).toEqual([{
+      type: "tool_result",
+      content: "mcp__jinn__update_work_item",
+      toolName: "mcp__jinn__update_work_item",
+      toolId: "call-1",
+      activityReceiptId: "todo:wi_release",
+    }]);
+  });
 });
 
 describe("TurnResolver", () => {

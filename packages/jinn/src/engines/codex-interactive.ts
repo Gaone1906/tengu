@@ -13,6 +13,7 @@ import { PtyStreamManager, createPtyHandle, setCapped } from "./pty-stream.js";
 import { tailTranscriptLines, type TranscriptTailer } from "./transcript-tailer.js";
 import type { PtyControlEvent, PtyIdleSpawnOpts, PtySnapshotSubscription, PtyViewEngine } from "./pty-view-engine.js";
 import { codexCliFlags, extractCodexContextTokens } from "./codex.js";
+import { extractActivityReceiptId } from "../shared/activity-receipts.js";
 
 const CODEX_SESSIONS_DIR = path.join(os.homedir(), ".codex", "sessions");
 const TURN_TIMEOUT_MS = 14 * 24 * 60 * 60 * 1000;
@@ -152,11 +153,15 @@ export function codexTranscriptLineToDeltas(line: string): {
   }
 
   if (payload.type === "function_call_output") {
+    const activityReceiptId = extractActivityReceiptId(payload.output, {
+      isError: payload.is_error === true || payload.error !== undefined,
+    });
     return {
       deltas: [{
         type: "tool_result",
         content: "Done",
         toolId: String(payload.call_id || ""),
+        ...(activityReceiptId ? { activityReceiptId } : {}),
       }],
     };
   }

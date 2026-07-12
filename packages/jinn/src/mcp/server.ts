@@ -1,4 +1,5 @@
 import readline from "node:readline";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -233,7 +234,10 @@ export async function handleMcpRequest(
     }
     try {
       const args = parseToolArguments(tool, msg.params?.arguments ?? {});
-      const result = await tool.handler(args, ctx);
+      const result = await tool.handler(args, {
+        ...ctx,
+        activityOperation: { id: crypto.randomUUID(), toolName: tool.name },
+      });
       const text = typeof result === "string" ? result : JSON.stringify(result);
       return ok(id, { content: [{ type: "text", text }] });
     } catch (e) {

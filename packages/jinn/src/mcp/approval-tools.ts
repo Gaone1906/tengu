@@ -2,6 +2,14 @@ import { UNIDENTIFIED_TOOL_CALL_ERROR } from "./identity.js";
 import { gatewayRequest, JinnMcpToolError, type JinnMcpContext, type JinnMcpTool } from "./toolkit.js";
 
 const DECISIONS = ["approve", "reject"] as const;
+const ACTIVITY_RECEIPT_HINT = "Preview or Open the persisted activity receipt in this chat.";
+
+function mutationResult(body: unknown, hint: string): Record<string, unknown> {
+  const value = body && typeof body === "object" && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : { result: body };
+  return { ...value, hint: `${hint} ${ACTIVITY_RECEIPT_HINT}` };
+}
 
 function assertIdentity(ctx: JinnMcpContext): void {
   if (!ctx.callerSessionId) throw new JinnMcpToolError(UNIDENTIFIED_TOOL_CALL_ERROR);
@@ -57,7 +65,7 @@ export function buildApprovalTools(): JinnMcpTool[] {
       if (target !== undefined) payload.target = target;
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/approval/request`, payload);
       if (status >= 400) throw gatewayFailure(`requesting approval for work item "${id}"`, status, body);
-      return body;
+      return mutationResult(body, "Approval requested.");
     },
   };
 
@@ -85,7 +93,7 @@ export function buildApprovalTools(): JinnMcpTool[] {
       if (note !== undefined) payload.note = note;
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/approval`, payload);
       if (status >= 400) throw gatewayFailure(`deciding approval for work item "${id}"`, status, body);
-      return body;
+      return mutationResult(body, "Approval decided.");
     },
   };
 
@@ -108,7 +116,7 @@ export function buildApprovalTools(): JinnMcpTool[] {
       if (reason !== undefined) payload.reason = reason;
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/approval/escalate`, payload);
       if (status >= 400) throw gatewayFailure(`escalating approval for work item "${id}"`, status, body);
-      return body;
+      return mutationResult(body, "Approval escalated.");
     },
   };
 

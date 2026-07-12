@@ -124,6 +124,22 @@ describe("CodexInteractiveEngine transcript parsing", () => {
     }]);
   });
 
+  it("correlates a successful MCP receipt with the native Codex call id", () => {
+    expect(codexTranscriptLineToDeltas(JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: "call-1",
+        output: '{"activityReceiptId":"todo:wi_release"}',
+      },
+    })).deltas).toEqual([{
+      type: "tool_result",
+      content: "Done",
+      toolId: "call-1",
+      activityReceiptId: "todo:wi_release",
+    }]);
+  });
+
   it("uses last_token_usage for context deltas", () => {
     const parsed = codexTranscriptLineToDeltas(JSON.stringify({
       type: "event_msg",

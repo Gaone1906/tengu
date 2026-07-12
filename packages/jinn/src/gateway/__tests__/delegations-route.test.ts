@@ -420,12 +420,22 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
       },
     });
     expect(typeof handoff?.payload.dispatchedAt).toBe("number");
+    expect(parentMessages.flatMap((message) => message.blocks ?? []).filter((block) => block.id === `todo:${resp.body.workItemId}`)).toEqual([]);
     expect(emittedEvents).toContainEqual(expect.objectContaining({
       event: "session:delta",
       payload: expect.objectContaining({
         sessionId: parentId,
         type: "block",
         block: expect.objectContaining({ op: "put" }),
+      }),
+    }));
+    expect(emittedEvents).toContainEqual(expect.objectContaining({
+      event: "company:changed",
+      payload: expect.objectContaining({
+        entity: "todo",
+        action: "delegated",
+        id: resp.body.workItemId,
+        sessionId: parentId,
       }),
     }));
   });

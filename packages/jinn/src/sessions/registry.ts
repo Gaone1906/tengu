@@ -528,6 +528,9 @@ export function migrateMessagesSchema(database: Database.Database): void {
   if (!colNames.has('tool_call')) {
     database.exec('ALTER TABLE messages ADD COLUMN tool_call TEXT');
   }
+  if (!colNames.has('tool_id')) {
+    database.exec('ALTER TABLE messages ADD COLUMN tool_id TEXT');
+  }
   if (!colNames.has('blocks')) {
     database.exec('ALTER TABLE messages ADD COLUMN blocks TEXT');
   }
@@ -2375,6 +2378,8 @@ export interface SessionMessage {
   partial?: boolean;
   /** Tool name when this block is a tool call — lets a reloaded block render as a tool card. */
   toolCall?: string;
+  /** Native engine call id used to correlate interleaved tool results. */
+  toolId?: string;
   /** Structured Chat Mode blocks rendered by the web UI. */
   blocks?: ChatBlock[];
   /** Safe structured UI metadata, used for reload-stable callback attribution. */
@@ -2391,6 +2396,7 @@ interface MessageRow {
   partial: number | null;
   seq: number | null;
   tool_call: string | null;
+  tool_id: string | null;
   blocks: string | null;
   meta: string | null;
 }
@@ -2452,6 +2458,7 @@ function rowToMessage(r: MessageRow): SessionMessage {
   if (meta) msg.meta = meta;
   if (r.partial) msg.partial = true;
   if (r.tool_call) msg.toolCall = r.tool_call;
+  if (r.tool_id) msg.toolId = r.tool_id;
   return msg;
 }
 
@@ -2531,7 +2538,7 @@ export function insertMessageAfter(
 export function getMessages(sessionId: string): SessionMessage[] {
   const db = initDb();
   const rows = db
-    .prepare('SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks, meta FROM messages WHERE session_id = ? ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC')
+    .prepare('SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, tool_id, blocks, meta FROM messages WHERE session_id = ? ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC')
     .all(sessionId) as MessageRow[];
   return rows.map(rowToMessage);
 }
@@ -2545,7 +2552,7 @@ export function getMessages(sessionId: string): SessionMessage[] {
 export function getPartialMessages(sessionId: string): SessionMessage[] {
   const db = initDb();
   const rows = db
-    .prepare('SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks, meta FROM messages WHERE session_id = ? AND partial = 1 ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC')
+    .prepare('SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, tool_id, blocks, meta FROM messages WHERE session_id = ? AND partial = 1 ORDER BY timestamp ASC, COALESCE(seq, 0) ASC, rowid ASC')
     .all(sessionId) as MessageRow[];
   return rows.map(rowToMessage);
 }
@@ -2564,7 +2571,7 @@ export function getMessagePage(sessionId: string, options: MessagePageOptions = 
 
     rows = db
       .prepare(`
-        SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks, meta
+        SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, tool_id, blocks, meta
         FROM messages
         WHERE session_id = ?
           AND (
@@ -2588,7 +2595,7 @@ export function getMessagePage(sessionId: string, options: MessagePageOptions = 
   } else {
     rows = db
       .prepare(`
-        SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, blocks, meta
+        SELECT rowid, id, role, content, timestamp, media, partial, seq, tool_call, tool_id, blocks, meta
         FROM messages
         WHERE session_id = ?
         ORDER BY timestamp DESC, COALESCE(seq, 0) DESC, rowid DESC
@@ -2724,7 +2731,7 @@ export function applyBlockEnvelope(
 
   if (existing) {
     const oldBlock = existing.blocks.find((block) => block.id === envelope.block.id);
-    if (envelope.op === "patch" && oldBlock && envelope.block.version < oldBlock.version) {
+    if (oldBlock && envelope.block.version < oldBlock.version) {
       return existing.row.id;
     }
     const nextBlocks = existing.blocks.map((block) =>
@@ -2775,11 +2782,18 @@ export function applyBlockEnvelope(
  * `toolCall` is set when the block is a tool call (renders as a tool card on reload).
  * These rows are usually wiped by `deletePartialMessages` at turn end.
  */
-export function insertPartialMessage(sessionId: string, role: string, content: string, seq: number, toolCall?: string): string {
+export function insertPartialMessage(
+  sessionId: string,
+  role: string,
+  content: string,
+  seq: number,
+  toolCall?: string,
+  toolId?: string,
+): string {
   const db = initDb();
   const id = uuidv4();
-  db.prepare('INSERT INTO messages (id, session_id, role, content, timestamp, partial, seq, tool_call) VALUES (?, ?, ?, ?, ?, 1, ?, ?)').run(
-    id, sessionId, role, content, Date.now(), seq, toolCall ?? null,
+  db.prepare('INSERT INTO messages (id, session_id, role, content, timestamp, partial, seq, tool_call, tool_id) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)').run(
+    id, sessionId, role, content, Date.now(), seq, toolCall ?? null, toolId ?? null,
   );
   return id;
 }
@@ -2788,6 +2802,20 @@ export function insertPartialMessage(sessionId: string, role: string, content: s
 export function updatePartialMessage(id: string, content: string): void {
   const db = initDb();
   db.prepare('UPDATE messages SET content = ? WHERE id = ? AND partial = 1').run(content, id);
+}
+
+/** Settle one exact partial tool row and attach its durable activity receipt. */
+export function settlePartialToolMessage(id: string, content: string, activityReceiptId?: string): void {
+  const db = initDb();
+  const row = db.prepare('SELECT meta FROM messages WHERE id = ? AND partial = 1').get(id) as { meta: string | null } | undefined;
+  if (!row) return;
+  const current = parseMetaColumn(row.meta) ?? {};
+  const meta = activityReceiptId ? { ...current, activityReceiptId } : current;
+  db.prepare('UPDATE messages SET content = ?, meta = ? WHERE id = ? AND partial = 1').run(
+    content,
+    Object.keys(meta).length > 0 ? JSON.stringify(meta) : null,
+    id,
+  );
 }
 
 /** Replace a stored (non-partial) message's text in place. Used by external-turn

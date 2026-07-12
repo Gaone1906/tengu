@@ -380,6 +380,31 @@ describe("workflow tools — registry + schemas", () => {
   });
 });
 
+describe("workflow tools — persisted activity receipts", () => {
+  it("lifts definition and run receipts to the MCP result root with a persisted-receipt hint", async () => {
+    const create = stub(() => ({
+      status: 201,
+      body: {
+        definition: { id: "wf-receipt", name: "wf-receipt", title: "Receipt", version: 1 },
+        activityReceiptId: "workflow-definition:wf-receipt",
+      },
+    }));
+    const created = await tool("create_workflow").handler({
+      definition: { id: "wf-receipt", name: "wf-receipt", title: "Receipt", nodes: [], edges: [] },
+    }, create.ctx) as Record<string, unknown>;
+    expect(created.activityReceiptId).toBe("workflow-definition:wf-receipt");
+    expect(created.hint).toMatch(/Preview or Open the persisted activity receipt in this chat\./);
+
+    const start = stub(() => ({
+      status: 201,
+      body: { workflowId: "wf-receipt", runId: "run-1", status: "running", activityReceiptId: "workflow-run:wf-receipt:run-1" },
+    }));
+    const started = await tool("start_workflow_run").handler({ workflowId: "wf-receipt" }, start.ctx) as Record<string, unknown>;
+    expect(started.activityReceiptId).toBe("workflow-run:wf-receipt:run-1");
+    expect(started.hint).toMatch(/Preview or Open the persisted activity receipt in this chat\./);
+  });
+});
+
 describe("workflow tools — unit (stub gateway)", () => {
   it.each(["plan_workflow", "validate_workflow", "create_workflow"])(
     "%s rejects unknown raw-definition fields before any gateway call",

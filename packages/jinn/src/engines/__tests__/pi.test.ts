@@ -94,11 +94,48 @@ async function startRun(): Promise<{ engine: PiEngine; promise: Promise<EngineRe
   return { engine, promise, call };
 }
 
+async function startStreamingRun(onStream: (delta: import("../../shared/types.js").StreamDelta) => void) {
+  const engine = new PiEngine();
+  const promise = engine.run({
+    prompt: "hello",
+    cwd: "/tmp",
+    sessionId: "jinn-pi-stream",
+    model: "ollama/gemma4:12b",
+    onStream,
+  });
+  await flush();
+  return { promise, call: spawnCalls[spawnCalls.length - 1]! };
+}
+
 beforeEach(() => {
   spawnCalls.length = 0;
 });
 
 describe("PiEngine lifecycle", () => {
+
+  it("correlates a successful MCP receipt with the native Pi tool id", async () => {
+    const deltas: import("../../shared/types.js").StreamDelta[] = [];
+    const { promise, call } = await startStreamingRun((delta) => deltas.push(delta));
+    call.proc.emitStdout(JSON.stringify({
+      type: "tool_execution_end",
+      toolName: "update_work_item",
+      toolCallId: "call-1",
+      result: { content: [{ type: "text", text: '{"activityReceiptId":"todo:wi_release"}' }] },
+    }) + "\n");
+    call.proc.emitStdout(agentEnd("done") + "\n");
+    await flush();
+    call.proc.close(0);
+    await promise;
+
+    expect(deltas).toContainEqual({
+      type: "tool_result",
+      content: '{"activityReceiptId":"todo:wi_release"}',
+      toolName: "update_work_item",
+      toolId: "call-1",
+      activityReceiptId: "todo:wi_release",
+    });
+  });
+
   it("records agent_end output but resolves only after the process closes", async () => {
     const { promise, call } = await startRun();
     let settled = false;

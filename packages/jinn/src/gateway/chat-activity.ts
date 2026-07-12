@@ -1,0 +1,128 @@
+import type { WorkItem } from "../work-items/store.js";
+import type { EditableWorkflowDefinition } from "../workflows/definition.js";
+import type {
+  ActivityReceipt,
+  ChatBlockEnvelope,
+  CompanyChangedEvent,
+} from "../shared/types.js";
+import { blockFallbackText } from "../shared/blocks.js";
+
+export interface ActivityOperation {
+  id: string;
+  toolName: string;
+}
+
+export interface ChatActivityContext {
+  sessionExists: (sessionId: string) => boolean;
+  applyBlock: (sessionId: string, envelope: ChatBlockEnvelope, fallback: string) => unknown;
+  emit: (event: string, payload: unknown) => void;
+  log?: (message: string) => void;
+}
+
+function todoBlockStatus(status: WorkItem["status"]) {
+  if (status === "backlog" || status === "assigned") return "queued" as const;
+  if (status === "executing") return "running" as const;
+  if (status === "done") return "completed" as const;
+  if (status === "cancelled") return "error" as const;
+  return "waiting" as const;
+}
+
+export function todoActivityBlock(item: WorkItem, action: string): ChatBlockEnvelope {
+  return {
+    op: "put",
+    block: {
+      id: `todo:${item.id}`,
+      type: "todo-activity",
+      version: item.version,
+      status: todoBlockStatus(item.status),
+      title: item.title,
+      summary: item.status.replace(/_/g, " "),
+      payload: {
+        todoId: item.id,
+        action,
+        status: item.status,
+        assignee: item.assignee,
+        approvalState: item.approvalState,
+        updatedAt: item.updatedAt,
+      },
+    },
+  };
+}
+
+export function workflowDefinitionActivityBlock(
+  definition: EditableWorkflowDefinition,
+  action: string,
+): ChatBlockEnvelope {
+  return {
+    op: "put",
+    block: {
+      id: `workflow-definition:${definition.id}`,
+      type: "workflow-definition",
+      version: definition.version,
+      status: definition.status === "retired" ? "completed" : "done",
+      title: definition.title,
+      summary: action.replace(/-/g, " "),
+      payload: {
+        workflowId: definition.id,
+        action,
+        definitionStatus: definition.status,
+        ...(definition.updatedAt ? { updatedAt: definition.updatedAt } : {}),
+        openPath: `/workflow/${encodeURIComponent(definition.id)}`,
+      },
+    },
+  };
+}
+
+function stampActivityReceipt(
+  envelope: ChatBlockEnvelope,
+  operation: ActivityOperation | undefined,
+): ChatBlockEnvelope {
+  if (!operation) return envelope;
+  const activityReceipt: ActivityReceipt = {
+    id: envelope.block.id,
+    operationId: operation.id,
+    toolName: operation.toolName,
+  };
+  return {
+    ...envelope,
+    block: {
+      ...envelope.block,
+      payload: { ...envelope.block.payload, activityReceipt },
+    },
+  };
+}
+
+/** One persistence/event boundary for all server-authored company mutations.
+ * The domain record is already durable when this runs. A verified acting
+ * Session gets one stable transcript block; every real mutation gets exactly
+ * one company event after that persistence. */
+export function persistAndEmitActivityBlock(options: {
+  context: ChatActivityContext;
+  sessionId?: string;
+  operation?: ActivityOperation;
+  envelope?: ChatBlockEnvelope;
+  companyEvent?: CompanyChangedEvent;
+}): string | undefined {
+  const { context, sessionId } = options;
+  const envelope = options.envelope
+    ? stampActivityReceipt(options.envelope, options.operation)
+    : undefined;
+  let activityReceiptId: string | undefined;
+  if (envelope && sessionId && context.sessionExists(sessionId)) {
+    try {
+      const fallback = blockFallbackText(envelope.block);
+      context.applyBlock(sessionId, envelope, fallback);
+      context.emit("session:delta", {
+        sessionId,
+        type: "block",
+        content: fallback,
+        block: envelope,
+      });
+      activityReceiptId = envelope.block.id;
+    } catch (error) {
+      context.log?.(`activity receipt persistence failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (options.companyEvent) context.emit("company:changed", options.companyEvent);
+  return activityReceiptId;
+}

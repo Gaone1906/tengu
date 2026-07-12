@@ -1049,6 +1049,47 @@ describe("useLiveSession (read-only)", () => {
     expect(result.current.messages.find((m) => m.toolCall === "read")?.content).toBe("Using read")
   })
 
+  it("attaches interleaved receipt ids to the exact matching live tool rows", async () => {
+    getSession.mockResolvedValue({ status: "running", messages: [] })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() => useLiveSession("s-receipts", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+
+    act(() => {
+      emit("session:delta", { sessionId: "s-receipts", type: "tool_use", toolName: "search", toolId: "call-1" })
+      emit("session:delta", { sessionId: "s-receipts", type: "tool_use", toolName: "search", toolId: "call-2" })
+      emit("session:delta", { sessionId: "s-receipts", type: "tool_result", toolName: "search", toolId: "call-1", activityReceiptId: "todo:wi_one" })
+      emit("session:delta", { sessionId: "s-receipts", type: "tool_result", toolName: "search", toolId: "call-2", activityReceiptId: "todo:wi_two" })
+    })
+
+    expect(result.current.messages.filter((m) => m.toolCall === "search").map((m) => ({
+      toolId: m.toolId,
+      meta: m.meta,
+    }))).toEqual([
+      { toolId: "call-1", meta: { activityReceiptId: "todo:wi_one" } },
+      { toolId: "call-2", meta: { activityReceiptId: "todo:wi_two" } },
+    ])
+  })
+
+  it("uses the most recent still-open same-name row when a result has no tool id", async () => {
+    getSession.mockResolvedValue({ status: "running", messages: [] })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() => useLiveSession("s-name-fallback", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+
+    act(() => {
+      emit("session:delta", { sessionId: "s-name-fallback", type: "tool_use", toolName: "search" })
+      emit("session:delta", { sessionId: "s-name-fallback", type: "tool_use", toolName: "read" })
+      emit("session:delta", { sessionId: "s-name-fallback", type: "tool_result", toolName: "search", activityReceiptId: "todo:wi_search" })
+    })
+
+    expect(result.current.messages.find((m) => m.toolCall === "search")).toMatchObject({
+      content: "Used search",
+      meta: { activityReceiptId: "todo:wi_search" },
+    })
+    expect(result.current.messages.find((m) => m.toolCall === "read")?.content).toBe("Using read")
+  })
+
   it("ignores obsolete block types from live deltas", async () => {
     getSession.mockResolvedValue({ status: "running", messages: [] })
     const { subscribe, emit } = makeBus()

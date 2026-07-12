@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { gatewayRequest, JinnMcpToolError, type JinnMcpContext } from "../toolkit.js";
+import {
+  ACTIVITY_OPERATION_HEADER,
+  ACTIVITY_TOOL_HEADER,
+} from "../identity.js";
 
 /**
  * GRS-015-fix — transport failure modes of the shared gateway client (Codex
@@ -9,6 +13,41 @@ import { gatewayRequest, JinnMcpToolError, type JinnMcpContext } from "../toolki
  */
 
 describe("gatewayRequest — transport failure modes", () => {
+  it("forwards activity correlation only for a bound Session MCP operation", async () => {
+    let headers: Record<string, string> = {};
+    const fetchFn = (async (_input: string | URL, init?: RequestInit) => {
+      headers = init?.headers as Record<string, string>;
+      return { status: 200, text: async () => '{"activityReceiptId":"todo:wi_release"}' } as unknown as Response;
+    }) as unknown as typeof fetch;
+    const ctx: JinnMcpContext = {
+      gatewayUrl: "http://x",
+      callerSessionId: "session-1",
+      sessionCapability: "signed-capability",
+      activityOperation: { id: "2ce1c337-0f11-4d19-a2ac-4130ce738455", toolName: "update_work_item" },
+      fetchFn,
+    };
+
+    await gatewayRequest(ctx, "POST", "/api/work-items/wi_release/status", { status: "in_review" });
+
+    expect(headers[ACTIVITY_OPERATION_HEADER]).toBe(ctx.activityOperation?.id);
+    expect(headers[ACTIVITY_TOOL_HEADER]).toBe("update_work_item");
+  });
+
+  it.each([
+    [{ activityOperation: { id: "forged", toolName: "update_work_item" } }, "unbound"],
+    [{ callerSessionId: "session-1", activityOperation: { id: "forged", toolName: "update_work_item" } }, "missing capability"],
+    [{ sessionCapability: "cap", activityOperation: { id: "forged", toolName: "update_work_item" } }, "missing session"],
+  ])("does not forward forged activity headers from %s context", async (extra, _label) => {
+    let headers: Record<string, string> = {};
+    const fetchFn = (async (_input: string | URL, init?: RequestInit) => {
+      headers = init?.headers as Record<string, string>;
+      return { status: 200, text: async () => "{}" } as unknown as Response;
+    }) as unknown as typeof fetch;
+    await gatewayRequest({ gatewayUrl: "http://x", fetchFn, ...extra } as JinnMcpContext, "POST", "/api/work-items", {});
+    expect(headers[ACTIVITY_OPERATION_HEADER]).toBeUndefined();
+    expect(headers[ACTIVITY_TOOL_HEADER]).toBeUndefined();
+  });
+
   it("times out a wedged gateway with a structured error naming route, budget, and gateway URL", async () => {
     const never = (() => new Promise<never>(() => {})) as unknown as typeof fetch;
     const ctx: JinnMcpContext = { gatewayUrl: "http://127.0.0.1:7797", fetchFn: never, timeoutMs: 50 };

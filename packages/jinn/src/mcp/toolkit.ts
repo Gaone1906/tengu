@@ -1,4 +1,12 @@
-import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, TOOL_CALL_HEADER, TOOL_CALL_HEADER_VALUE, UNIDENTIFIED_TOOL_CALL_ERROR } from "./identity.js";
+import {
+  ACTIVITY_OPERATION_HEADER,
+  ACTIVITY_TOOL_HEADER,
+  CALLER_SESSION_CAPABILITY_HEADER,
+  CALLER_SESSION_HEADER,
+  TOOL_CALL_HEADER,
+  TOOL_CALL_HEADER_VALUE,
+  UNIDENTIFIED_TOOL_CALL_ERROR,
+} from "./identity.js";
 import type { z } from "zod";
 
 /**
@@ -27,6 +35,9 @@ export interface JinnMcpContext {
    *  jinn server env. Scoped write routes verify this value against
    *  callerSessionId before treating a tool-marked call as that session. */
   sessionCapability?: string;
+  /** One immutable operation identity minted by handleMcpRequest for this
+   * tools/call and forwarded only with a fully bound Session capability. */
+  activityOperation?: { id: string; toolName: string };
   /** Injectable fetch for tests; defaults to the global `fetch`. */
   fetchFn?: typeof fetch;
   /** Per-request budget in ms (default {@link GATEWAY_TIMEOUT_MS}); tests shrink it. */
@@ -100,6 +111,10 @@ export async function gatewayRequest(
   headers[TOOL_CALL_HEADER] = TOOL_CALL_HEADER_VALUE;
   if (ctx.callerSessionId) headers[CALLER_SESSION_HEADER] = ctx.callerSessionId;
   if (ctx.sessionCapability) headers[CALLER_SESSION_CAPABILITY_HEADER] = ctx.sessionCapability;
+  if (ctx.callerSessionId && ctx.sessionCapability && ctx.activityOperation) {
+    headers[ACTIVITY_OPERATION_HEADER] = ctx.activityOperation.id;
+    headers[ACTIVITY_TOOL_HEADER] = ctx.activityOperation.toolName;
+  }
   const ac = new AbortController();
   const init: RequestInit = { method, headers, signal: ac.signal };
   if (body !== undefined) {

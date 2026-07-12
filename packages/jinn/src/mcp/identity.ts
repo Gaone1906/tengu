@@ -70,6 +70,10 @@ export const CALLER_SESSION_CAPABILITY_HEADER = "x-jinn-session-capability";
 export const TOOL_CALL_HEADER = "x-jinn-tool-call";
 export const TOOL_CALL_HEADER_VALUE = "jinn-mcp";
 
+/** Per-tools/call correlation authored by the built-in Session-bound MCP server. */
+export const ACTIVITY_OPERATION_HEADER = "x-jinn-activity-operation";
+export const ACTIVITY_TOOL_HEADER = "x-jinn-activity-tool";
+
 /** The shared refusal for a tool call that lost its identity — thrown by the
  *  tool handlers (local pre-check) and returned as the routes' 403 body
  *  (substrate backstop, so even a buggy/old tool build cannot fail open). */

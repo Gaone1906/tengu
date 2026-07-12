@@ -12,6 +12,7 @@ import {
   workflowUpdateInputSchema,
   workflowValidateInputSchema,
 } from "../workflows/schema.js";
+import { extractActivityReceiptId } from "../shared/activity-receipts.js";
 
 /**
  * GRS-015 — the WORKFLOW tool group of the `jinn` MCP server: agents create,
@@ -159,6 +160,17 @@ function runOwnershipHint(reportMode: "resume" | "silent" | undefined): string {
   return reportMode === "silent"
     ? "Silent mode: this run belongs to this session and updates its durable activity, but will not resume it."
     : "This run belongs and reports back to this session.";
+}
+
+const ACTIVITY_RECEIPT_HINT = "Preview or Open the persisted activity receipt in this chat.";
+
+function activityReceiptFields(body: unknown): { activityReceiptId?: string } {
+  const activityReceiptId = extractActivityReceiptId(body);
+  return activityReceiptId ? { activityReceiptId } : {};
+}
+
+function mutationHint(hint: string): string {
+  return `${hint} ${ACTIVITY_RECEIPT_HINT}`;
 }
 
 const wfPath = (id: string): string => `/api/workflow-definitions/${encodeURIComponent(id)}`;
@@ -432,7 +444,8 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       return {
         definition: created,
         trigger: response.trigger,
-        hint: `Created from ${args.sop !== undefined ? "SOP" : "raw graph"} v${String(created.version ?? 1)}. Next: run_workflow_by_name { name: "${String(created.name ?? created.id ?? "")}" }.`,
+        ...activityReceiptFields(body),
+        hint: mutationHint(`Created from ${args.sop !== undefined ? "SOP" : "raw graph"} v${String(created.version ?? 1)}. Next: run_workflow_by_name { name: "${String(created.name ?? created.id ?? "")}" }.`),
       };
     },
   };
@@ -466,7 +479,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       if (status >= 400) throw gatewayFailure(`updating workflow "${id}"`, status, body);
       const response = (body ?? {}) as Record<string, unknown>;
       const updated = (response.definition ?? response) as Record<string, unknown>;
-      return { definition: updated, trigger: response.trigger, hint: `Updated to version ${String(updated.version ?? "?")}.` };
+      return { definition: updated, trigger: response.trigger, ...activityReceiptFields(body), hint: mutationHint(`Updated to version ${String(updated.version ?? "?")}.`) };
     },
   };
 
@@ -483,7 +496,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const id = requireString(args, "workflowId");
       const { status, body } = await gatewayRequest(ctx, "POST", `${wfPath(id)}/retire`, {});
       if (status >= 400) throw gatewayFailure(`retiring workflow "${id}"`, status, body);
-      return { definition: body, hint: `Workflow "${id}" retired.` };
+      return { definition: body, ...activityReceiptFields(body), hint: mutationHint(`Workflow "${id}" retired.`) };
     },
   };
 
@@ -528,7 +541,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       }
       if (status >= 400) throw gatewayFailure(`starting a run of "${id}"`, status, body);
       const run = (body ?? {}) as RunView;
-      return { run: body, hint: `Started ${String(run.runId ?? "?")}. ${runOwnershipHint(reportMode)} ${runHint(run)}` };
+      return { run: body, ...activityReceiptFields(body), hint: mutationHint(`Started ${String(run.runId ?? "?")}. ${runOwnershipHint(reportMode)} ${runHint(run)}`) };
     },
   };
 
@@ -572,7 +585,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       }
       if (status >= 400) throw gatewayFailure(`running workflow name "${name}"`, status, body);
       const run = (body ?? {}) as RunView;
-      return { run: body, hint: `Started ${String(run.runId ?? "?")}. ${runOwnershipHint(reportMode)} ${runHint(run)}` };
+      return { run: body, ...activityReceiptFields(body), hint: mutationHint(`Started ${String(run.runId ?? "?")}. ${runOwnershipHint(reportMode)} ${runHint(run)}`) };
     },
   };
 
@@ -597,7 +610,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const { status, body } = await gatewayRequest(ctx, "POST", route, reason ? { reason } : {});
       if (status >= 400) throw gatewayFailure(`cancelling Workflow run "${runId}"`, status, body);
       const run = (body ?? {}) as RunView;
-      return { run: body, hint: `Cancellation recorded. ${runHint(run)}` };
+      return { run: body, ...activityReceiptFields(body), hint: mutationHint(`Cancellation recorded. ${runHint(run)}`) };
     },
   };
 
@@ -627,7 +640,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const { status, body } = await gatewayRequest(ctx, "PATCH", route, { prompt });
       if (status >= 400) throw gatewayFailure(`editing pending step "${nodeId}" on run "${runId}"`, status, body);
       const run = (body ?? {}) as { stepPromptRevision?: unknown };
-      return { run: body, hint: `Prompt edit recorded at revision ${String(run.stepPromptRevision ?? "?")}.` };
+      return { run: body, ...activityReceiptFields(body), hint: mutationHint(`Prompt edit recorded at revision ${String(run.stepPromptRevision ?? "?")}.`) };
     },
   };
 
@@ -649,7 +662,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const route = `${wfPath(workflowId)}/runs/${encodeURIComponent(runId)}/gate-approval/escalate`;
       const { status, body } = await gatewayRequest(ctx, "POST", route, {});
       if (status >= 400) throw gatewayFailure(`escalating gate approval on run "${runId}"`, status, body);
-      return { run: body, hint: "Workflow gate approval escalated for an operator decision." };
+      return { run: body, ...activityReceiptFields(body), hint: mutationHint("Workflow gate approval escalated for an operator decision.") };
     },
   };
 
@@ -701,7 +714,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const hint = payload.kind === "poll"
         ? "Poll trigger pending approval."
         : "Webhook trigger created. Next: POST /api/workflow-events.";
-      return { ...(body as Record<string, unknown>), hint };
+      return { ...(body as Record<string, unknown>), hint: mutationHint(hint) };
     },
   };
 
@@ -718,7 +731,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const name = requireString(args, "name");
       const { status, body } = await gatewayRequest(ctx, "DELETE", `/api/workflow-triggers/${encodeURIComponent(name)}`);
       if (status >= 400) throw gatewayFailure(`deleting workflow trigger "${name}"`, status, body);
-      return body;
+      return { ...(body as Record<string, unknown>), hint: mutationHint(`Workflow trigger "${name}" deleted.`) };
     },
   };
 
@@ -743,7 +756,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const route = `/api/workflow-triggers/${encodeURIComponent(name)}/activation-approval`;
       const { status, body } = await gatewayRequest(ctx, "POST", route, { decision });
       if (status >= 400) throw gatewayFailure(`deciding poll activation "${name}"`, status, body);
-      return { ...(body as Record<string, unknown>), hint: `Poll activation ${decision === "approve" ? "approved" : "rejected"}.` };
+      return { ...(body as Record<string, unknown>), hint: mutationHint(`Poll activation ${decision === "approve" ? "approved" : "rejected"}.`) };
     },
   };
 
@@ -761,7 +774,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const route = `/api/workflow-triggers/${encodeURIComponent(name)}/activation-approval/escalate`;
       const { status, body } = await gatewayRequest(ctx, "POST", route, {});
       if (status >= 400) throw gatewayFailure(`escalating poll activation "${name}"`, status, body);
-      return { ...(body as Record<string, unknown>), hint: "Poll activation escalated for an operator decision." };
+      return { ...(body as Record<string, unknown>), hint: mutationHint("Poll activation escalated for an operator decision.") };
     },
   };
 

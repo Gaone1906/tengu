@@ -140,6 +140,10 @@ export interface RunDriverDeps {
   publishInitialRun?: (root: string, run: WorkflowRun) => InitialWorkflowRunPublication;
   /** Best-effort durable chat projection + shared Session delivery claim. */
   reporting?: WorkflowReportingContext;
+  /** One post-publication mutation hook. Runs only for the process that won the
+   * initial durable publication, after the start operation reaches its returned
+   * snapshot; exact idempotency replays never call it. */
+  onRunStarted?: (run: WorkflowRun) => void;
   now?: () => string;
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
 }
@@ -740,11 +744,15 @@ export async function startWorkflowRun(
     }
     return publication;
   };
+  const finishInitialPublication = (publication: { owned: boolean; run: WorkflowRun }): WorkflowRun => {
+    if (publication.owned) deps.onRunStarted?.(publication.run);
+    return publication.run;
+  };
 
   const resolved = compilePlan(def, opts);
   if (!resolved.ok) {
     const run = failedRun(resolved.errors);
-    return publishCandidate(run).run;
+    return finishInitialPublication(publishCandidate(run));
   }
 
   // Session modes (GRS-016e): refuse at START, honestly, what this driver cannot
@@ -760,7 +768,7 @@ export async function startWorkflowRun(
       message: `step "${followUpStep.nodeId}" uses session mode "${followUpStep.sessionMode}" but this gateway's run driver provides no follow-up session support`,
       ref: followUpStep.nodeId,
     }]);
-    return publishCandidate(run).run;
+    return finishInitialPublication(publishCandidate(run));
   }
   if (deps.sessionExists) {
     for (const s of resolved.plan.steps) {
@@ -771,7 +779,7 @@ export async function startWorkflowRun(
           message: `step "${s.nodeId}" targets session "${s.sessionTarget}", which does not exist on this gateway`,
           ref: s.nodeId,
         }]);
-        return publishCandidate(run).run;
+        return finishInitialPublication(publishCandidate(run));
       }
     }
   }
@@ -782,7 +790,7 @@ export async function startWorkflowRun(
   });
   if (!minted.ok) {
     const run = failedRun(minted.errors);
-    return publishCandidate(run).run;
+    return finishInitialPublication(publishCandidate(run));
   }
 
   // Freeze the definition CONTENT into the record (GRS-014b-fix, Codex finding 2):
@@ -802,7 +810,9 @@ export async function startWorkflowRun(
   const publication = publishCandidate(run);
   if (!publication.owned) return publication.run;
 
-  return withRunAdvanceLock(runId, () => driveRunLocked(deps, def, resolved.plan, publication.run));
+  const started = await withRunAdvanceLock(runId, () => driveRunLocked(deps, def, resolved.plan, publication.run));
+  deps.onRunStarted?.(started);
+  return started;
 }
 
 export async function startWorkflowRunFromTrigger(

@@ -4,6 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import type { InterruptibleEngine, EngineRunOpts, EngineResult, StreamDelta } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
+import { extractActivityReceiptId } from "../shared/activity-receipts.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import { buildEngineChildEnv } from "../shared/child-env.js";
 import { tailTranscriptLines, type TranscriptTailer } from "./transcript-tailer.js";
@@ -341,6 +342,15 @@ export function parseGrokJsonLine(line: string): GrokParsedLine | null {
       const completed = ["completed", "complete", "done", "success", "failed", "failure", "error"].includes(status);
       if (!completed) return { deltas, sessionId: nestedSessionId, terminal: false, contextTokens };
       const toolName = update ? toolNameFromGrokUpdate(update) : undefined;
+      const rawOutput = asRecord(update?.rawOutput);
+      const rawContent = Array.isArray(rawOutput?.content)
+        ? (rawOutput.content as unknown[])
+            .find((entry) => asRecord(entry)?.type === "text")
+        : undefined;
+      const activityReceiptId = extractActivityReceiptId(
+        asRecord(rawContent)?.text ?? update?.rawOutput,
+        { isError: ["failed", "failure", "error"].includes(status) || rawOutput?.isError === true },
+      );
       return {
         deltas: [
           ...deltas,
@@ -349,6 +359,7 @@ export function parseGrokJsonLine(line: string): GrokParsedLine | null {
             content: update ? toolResultTextFromGrokUpdate(update) : "Done",
             toolName,
             toolId: update ? stringField(update, ["toolCallId", "tool_call_id", "id"]) : undefined,
+            ...(activityReceiptId ? { activityReceiptId } : {}),
           },
         ],
         sessionId: nestedSessionId,

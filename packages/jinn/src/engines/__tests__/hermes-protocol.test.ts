@@ -126,6 +126,23 @@ describe("mapSessionUpdate", () => {
 
     expect(r.deltas).toEqual([{ type: "tool_result", content: "completed", toolId: "search-1" }]);
   });
+
+  it("correlates a successful MCP receipt with the native Hermes tool id", () => {
+    const r = mapSessionUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-1",
+      title: "update_work_item",
+      status: "completed",
+      content: { type: "text", text: '{"activityReceiptId":"todo:wi_release"}' },
+    });
+
+    expect(r.deltas).toEqual([{
+      type: "tool_result",
+      content: "completed",
+      toolId: "call-1",
+      activityReceiptId: "todo:wi_release",
+    }]);
+  });
 });
 
 // Hermes delivers streamed answer text as incremental agent_message_chunk

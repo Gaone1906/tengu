@@ -8,6 +8,7 @@ import { resolveBin } from "../shared/resolve-bin.js";
 import { JINN_HOME } from "../shared/paths.js";
 import { buildEngineChildEnv } from "../shared/child-env.js";
 import { cleanupPiJinnMcpExtension, piJinnSessionEnv, writePiJinnMcpExtension, type PiMcpExtensionHandle } from "./pi-mcp.js";
+import { extractActivityReceiptId } from "../shared/activity-receipts.js";
 
 interface LiveProcess {
   proc: ChildProcess;
@@ -221,11 +222,19 @@ export class PiEngine implements InterruptibleEngine {
           }
           case "tool_execution_end": {
             if (onStream) {
+              const result = parsed.result && typeof parsed.result === "object" && !Array.isArray(parsed.result)
+                ? parsed.result as Record<string, unknown>
+                : undefined;
+              const text = this.toolResultText(parsed);
+              const activityReceiptId = extractActivityReceiptId(text, {
+                isError: parsed.isError === true || result?.isError === true || result?.is_error === true,
+              });
               onStream({
                 type: "tool_result",
-                content: this.toolResultText(parsed),
+                content: text,
                 toolName: typeof parsed.toolName === "string" ? parsed.toolName : undefined,
                 toolId: typeof parsed.toolCallId === "string" ? parsed.toolCallId : undefined,
+                ...(activityReceiptId ? { activityReceiptId } : {}),
               });
             }
             break;

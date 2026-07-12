@@ -104,6 +104,16 @@ describe("work-item tools — registry + schemas", () => {
 });
 
 describe("work-item tools — unit (stub gateway)", () => {
+  it("preserves the route receipt at the MCP result root and points at the persisted chat receipt", async () => {
+    const { ctx } = stub(() => ({
+      status: 201,
+      body: { workItem: { id: "wi_receipt", title: "Receipt", status: "backlog" }, activityReceiptId: "todo:wi_receipt" },
+    }));
+    const out = await tool("create_work_item").handler({ title: "Receipt" }, ctx) as Record<string, unknown>;
+    expect(out.activityReceiptId).toBe("todo:wi_receipt");
+    expect(out.hint).toMatch(/Preview or Open the persisted activity receipt in this chat\./);
+  });
+
   it("list passes status/source/assignee filters and returns compact summaries", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: { workItems: [{ id: "wi_1", title: "T", body: "MUST NOT LEAK", status: "blocked", source: "session", version: 7 }] } }));
     const out = (await tool("list_work_items").handler({ status: "blocked", source: "session", assignee: "qa", limit: 99 }, ctx)) as {
