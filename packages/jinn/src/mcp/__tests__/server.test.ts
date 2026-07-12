@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { z } from "zod";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -193,6 +194,46 @@ describe("handleMcpRequest — protocol", () => {
 });
 
 describe("handleMcpRequest — tools/call", () => {
+  it("compiles every advertised registry schema or supplies its shared runtime schema", () => {
+    const tools = buildTools();
+    expect(tools).toHaveLength(44);
+    for (const tool of tools) {
+      expect(() => tool.runtimeSchema ?? z.fromJSONSchema({ ...tool.inputSchema, additionalProperties: false } as Parameters<typeof z.fromJSONSchema>[0]), tool.name).not.toThrow();
+    }
+  });
+  it.each([
+    ["missing required", {}],
+    ["wrong type", { count: "one" }],
+    ["unknown field", { count: 1, mysteryMode: true }],
+  ])("rejects %s arguments before invoking the handler", async (_label, args) => {
+    let calls = 0;
+    const tool: JinnMcpTool = {
+      name: "strict-tool",
+      description: "strict input",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { count: { type: "number" } },
+        required: ["count"],
+      },
+      handler: async () => {
+        calls += 1;
+        return { ok: true };
+      },
+    };
+
+    const response = await handleMcpRequest(
+      { id: 30, method: "tools/call", params: { name: tool.name, arguments: args } },
+      [tool],
+      stubCtx(() => ({ status: 200, body: {} })),
+    );
+    const result = response!.result as { isError?: boolean; content: Array<{ text: string }> };
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/invalid arguments/i);
+    expect(calls).toBe(0);
+  });
+
   it("list_employees returns real gateway data as text content", async () => {
     const org = { employees: [{ name: "chief-of-staff", rank: "manager" }] };
     const ctx = stubCtx((url) => {

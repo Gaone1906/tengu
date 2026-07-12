@@ -182,6 +182,95 @@ describe('workflow-definition CRUD routes', () => {
     expect((res.body as { errors: Array<{ code: string }> }).errors.some((e) => e.code === 'missing-trigger')).toBe(true);
   });
 
+  it.sequential('rejects unknown fields at plan/direct/mutate seams before persistence', async () => {
+    const planned = await call('POST', '/api/workflow-definitions/plan', {
+      definition: {
+        ...validDef,
+        schemaVersion: 1,
+        version: 1,
+        status: 'active',
+        mysteryMode: true,
+      },
+    });
+    expect(planned.status).toBe(400);
+
+    const directCreate = await call('POST', '/api/workflow-definitions', {
+      ...validDef,
+      id: 'strict-direct-create',
+      mysteryMode: true,
+    });
+    expect(directCreate.status).toBe(400);
+    expect(fs.existsSync(path.join(evidenceRoot, 'workflows', 'strict-direct-create.definition.json'))).toBe(false);
+
+    const mutateCreateDefinition: any = {
+      ...structuredClone(validDef),
+      id: 'strict-mutate-create',
+      schemaVersion: 1,
+      version: 1,
+      status: 'active',
+    };
+    mutateCreateDefinition.nodes[1] = {
+      ...mutateCreateDefinition.nodes[1],
+      options: { retry: { maxAttempts: 2, on: ['error'], mysteryMode: true } },
+    };
+    const mutateCreate = await call('POST', '/api/workflow-definitions/mutate', {
+      operation: 'create',
+      definition: mutateCreateDefinition,
+    });
+    expect(mutateCreate.status).toBe(400);
+    expect(fs.existsSync(path.join(evidenceRoot, 'workflows', 'strict-mutate-create.definition.json'))).toBe(false);
+  });
+
+  it.sequential('rejects unknown direct/mutate update fields without changing bytes or version', async () => {
+    await call('POST', '/api/workflow-definitions', { ...validDef, id: 'strict-direct-update' });
+    const directFile = path.join(evidenceRoot, 'workflows', 'strict-direct-update.definition.json');
+    const directBefore = fs.readFileSync(directFile);
+    const directNodes: any[] = structuredClone(validDef.nodes);
+    directNodes[1].onError = 'continue';
+
+    const directUpdate = await call('PUT', '/api/workflow-definitions/strict-direct-update', {
+      nodes: directNodes,
+      expectedVersion: 1,
+    });
+    expect(directUpdate.status).toBe(400);
+    expect(fs.readFileSync(directFile).equals(directBefore)).toBe(true);
+    expect((await call('GET', '/api/workflow-definitions/strict-direct-update')).body).toMatchObject({ version: 1 });
+
+    await call('POST', '/api/workflow-definitions', { ...validDef, id: 'strict-mutate-update' });
+    const mutateFile = path.join(evidenceRoot, 'workflows', 'strict-mutate-update.definition.json');
+    const mutateBefore = fs.readFileSync(mutateFile);
+    const mutateUpdate = await call('POST', '/api/workflow-definitions/mutate', {
+      operation: 'update',
+      workflowId: 'strict-mutate-update',
+      expectedVersion: 1,
+      patch: { mysteryMode: true },
+    });
+    expect(mutateUpdate.status).toBe(400);
+    expect(fs.readFileSync(mutateFile).equals(mutateBefore)).toBe(true);
+    expect((await call('GET', '/api/workflow-definitions/strict-mutate-update')).body).toMatchObject({ version: 1 });
+  });
+
+  it('plans a loaded persisted definition with recognized provenance and authority metadata', async () => {
+    const created = await call('POST', '/api/workflow-definitions', { ...validDef, id: 'loaded-plan', owner: 'jimbo' });
+    expect(created.status).toBe(201);
+    const planned = await call('POST', '/api/workflow-definitions/plan', { definition: created.body });
+    expect(planned.status).toBe(200);
+    expect(planned.body).toMatchObject({ ok: true, definition: { id: 'loaded-plan' } });
+  });
+
+  it('direct generated create auto-places nodes that omit positions', async () => {
+    const nodes = structuredClone(validDef.nodes) as Array<Record<string, unknown>>;
+    delete nodes[1].position;
+    const created = await call('POST', '/api/workflow-definitions', {
+      ...validDef,
+      id: 'generated-no-position',
+      nodes,
+      layoutIntent: 'generated',
+    });
+    expect(created.status).toBe(201);
+    expect((created.body as { nodes: Array<{ position?: unknown }> }).nodes[1].position).toBeDefined();
+  });
+
   it('rejects a reachable non-loop cycle at plan, create, and update before persistence', async () => {
     const acyclic = {
       ...validDef,

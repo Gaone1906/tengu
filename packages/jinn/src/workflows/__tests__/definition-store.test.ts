@@ -55,6 +55,23 @@ afterEach(() => {
 });
 
 describe('createDefinition', () => {
+  it.each([
+    ['root mysteryMode', (value: Record<string, unknown>) => { value.mysteryMode = true; }],
+    ['node onError', (value: Record<string, unknown>) => {
+      ((value.nodes as Array<Record<string, unknown>>)[1]).onError = 'continue';
+    }],
+    ['nested retry option', (value: Record<string, unknown>) => {
+      const node = (value.nodes as Array<Record<string, unknown>>)[1];
+      node.options = { retry: { maxAttempts: 2, on: ['error'], mysteryMode: true } };
+    }],
+  ])('rejects unknown %s fields and writes no file', (_label, mutate) => {
+    const input = makeDef(`strict-create-${_label.replaceAll(' ', '-')}`) as unknown as Record<string, unknown>;
+    mutate(input);
+
+    expect(() => createDefinition(root, input as unknown as EditableWorkflowDefinition, { now })).toThrowError(WorkflowStoreError);
+    expect(fs.existsSync(path.join(root, 'workflows', `${input.id}.definition.json`))).toBe(false);
+  });
+
   it('writes a validated file, stamping version 1 / schemaVersion / updatedAt', () => {
     const def = createDefinition(root, makeDef('alpha', { version: 99, updatedAt: 'stale' }), { now });
     expect(def.version).toBe(1);
@@ -180,6 +197,19 @@ describe('listDefinitions', () => {
 });
 
 describe('updateDefinition', () => {
+  it('rejects an unknown nested field without changing bytes or version', () => {
+    createDefinition(root, makeDef('strict-update'), { now });
+    const file = path.join(root, 'workflows', 'strict-update.definition.json');
+    const before = fs.readFileSync(file);
+    const nodes = structuredClone(makeDef('strict-update').nodes) as unknown as Array<Record<string, unknown>>;
+    nodes[1].onError = 'continue';
+
+    expect(() => updateDefinition(root, 'strict-update', { nodes } as unknown as Partial<EditableWorkflowDefinition>, { now }))
+      .toThrowError(WorkflowStoreError);
+    expect(fs.readFileSync(file).equals(before)).toBe(true);
+    expect(getDefinition(root, 'strict-update')?.version).toBe(1);
+  });
+
   it('bumps version, sets updatedAt, and shallow-merges the patch', () => {
     createDefinition(root, makeDef('u1'), { now });
     const updated = updateDefinition(root, 'u1', { title: 'Renamed', description: 'new' }, { now: () => '2026-07-03T16:00:00.000Z' });

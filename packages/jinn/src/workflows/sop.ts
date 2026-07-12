@@ -9,6 +9,7 @@ import {
 } from './definition.js';
 import type { WorkflowTrigger, TodoStatusChangeTriggerFilter } from './derive.js';
 import type { CreateWorkflowTriggerBindingInput, WorkflowTriggerFilter } from './custom-triggers.js';
+import { parseWorkflowSop } from './schema.js';
 
 export type WorkflowSopWakeUpKind = 'manual' | 'schedule' | 'todo-status' | 'todo-status-change' | 'event' | 'poll';
 
@@ -245,7 +246,7 @@ function compileStep(raw: unknown, index: number, used: Set<string>): WorkflowNo
 }
 
 export function compileWorkflowSop(input: unknown): WorkflowSopCompileResult {
-  const sop = asRecord(input, 'sop');
+  const sop = parseWorkflowSop(input) as unknown as Record<string, unknown>;
   const id = stringValue(sop.id, 'sop.id');
   const title = stringValue(sop.title, 'sop.title');
   const name = stringValue(sop.name, 'sop.name', false) ?? id;

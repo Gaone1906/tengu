@@ -15,6 +15,7 @@ import {
   WorkflowLayoutError,
   type WorkflowLayoutIntent,
 } from './layout.js';
+import { workflowDefinitionSchema } from './schema.js';
 
 /**
  * File-backed CRUD store for editable workflow definitions (GRS-011b).
@@ -274,6 +275,27 @@ function assertNameAvailable(root: string, name: string, exceptId?: string): voi
 
 /** Validate a to-be-written definition; throw a `validation` error carrying every problem. */
 function assertValid(def: EditableWorkflowDefinition, what: string): void {
+  const strict = workflowDefinitionSchema.safeParse(def);
+  if (!strict.success) {
+    const errors: ValidationError[] = strict.error.issues.map((issue) => ({
+      code: issue.code === 'unrecognized_keys'
+        ? 'unsupported-field'
+        : issue.path.at(-1) === 'position'
+          ? 'missing-node-position'
+          : issue.path[0] === 'edges' && issue.path.length === 1
+            ? 'edges-not-array'
+            : issue.path.at(-1) === 'gates'
+              ? 'gates-not-array'
+              : issue.path[0] === 'title'
+                ? 'missing-title'
+                : issue.path[0] === 'id'
+                  ? 'missing-id'
+                : 'invalid-schema',
+      message: `${issue.path.join('.') || 'definition'}: ${issue.message}`,
+      ...(issue.path.length > 0 ? { ref: issue.path.join('.') } : {}),
+    }));
+    throw new WorkflowStoreError('validation', `${what} failed schema validation`, errors);
+  }
   const result = validateDefinition(def);
   if (!result.ok) {
     throw new WorkflowStoreError('validation', `${what} failed validation`, result.errors);

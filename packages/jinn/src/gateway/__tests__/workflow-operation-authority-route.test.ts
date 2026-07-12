@@ -295,6 +295,49 @@ describe('uniform workflow operation authority', () => {
     expect(worker.body).not.toMatchObject({ critical: true, classification: 'critical', authority: 'operator' });
   });
 
+  it('preserves recognized legacy authority fields for privileged direct API callers', async () => {
+    const operator = { authorization: 'Bearer gateway-secret' };
+    const created = await request('POST', '/api/workflow-definitions', {
+      headers: operator,
+      body: workflowDef('legacy-authority-direct', {
+        ownerEmployee: 'owner',
+        workflowOwner: 'owner',
+        creator: 'operator',
+        author: 'operator',
+        ownerDepartment: 'platform',
+        workflowDepartment: 'platform',
+        critical: true,
+        cooOwned: false,
+        requiresCooApproval: true,
+        classification: 'critical',
+        authority: 'operator',
+      }),
+    });
+
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({
+      ownerEmployee: 'owner',
+      workflowOwner: 'owner',
+      creator: 'operator',
+      author: 'operator',
+      ownerDepartment: 'platform',
+      workflowDepartment: 'platform',
+      critical: true,
+      cooOwned: false,
+      requiresCooApproval: true,
+      classification: 'critical',
+      authority: 'operator',
+      createdBy: 'operator',
+    });
+
+    const updated = await request('PUT', '/api/workflow-definitions/legacy-authority-direct', {
+      headers: operator,
+      body: { authority: 'coo', expectedVersion: 1 },
+    });
+    expect(updated.status).toBe(200);
+    expect(updated.body).toMatchObject({ authority: 'coo', version: 2 });
+  });
+
   it('keeps manual layout provenance operator-only across create, mutate, and PUT routes', async () => {
     const validManual = (id: string) => workflowDef(id, {
       nodes: [

@@ -12,6 +12,32 @@ import {
   validateConditionShape,
   type WorkflowCondition,
 } from './condition.js';
+import {
+  ACTOR_KINDS,
+  EDGE_KINDS,
+  NODE_TYPES,
+  STEP_EFFORT_LEVELS,
+  STEP_ON_ERROR_MODES,
+  STEP_OUTPUT_MODES,
+  STEP_RETRY_CAUSES,
+  STEP_SESSION_MODES,
+  SWITCH_MODES,
+  WORK_ITEM_STATUSES,
+  workflowDefinitionSchema,
+} from './schema.js';
+
+export {
+  ACTOR_KINDS,
+  EDGE_KINDS,
+  NODE_TYPES,
+  STEP_EFFORT_LEVELS,
+  STEP_ON_ERROR_MODES,
+  STEP_OUTPUT_MODES,
+  STEP_RETRY_CAUSES,
+  STEP_SESSION_MODES,
+  SWITCH_MODES,
+  WORK_ITEM_STATUSES,
+} from './schema.js';
 
 /**
  * Editable workflow definition primitive (GRS-011a).
@@ -59,7 +85,6 @@ export const MAX_WORKFLOW_DEFINITION_BYTES = 256 * 1024;
 
 /** Effort levels the effort override accepts (engine-interpreted; the closed set the
  * inspector's picker offers — a typo like "ultra" must fail at authoring time). */
-export const STEP_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
 export type StepEffortLevel = (typeof STEP_EFFORT_LEVELS)[number];
 
 /** Failure causes a per-node retry policy may cover. `interrupted` also covers a
@@ -69,7 +94,6 @@ export type StepEffortLevel = (typeof STEP_EFFORT_LEVELS)[number];
  * respawn-once), and folding timeouts in would make every option-less node silently
  * re-burn its whole wall-clock/token budget after a timeout — against the operator
  * ruling that a timeout STOPS the spend. Retrying a timeout is an explicit opt-in. */
-export const STEP_RETRY_CAUSES = ['error', 'no-output', 'interrupted', 'timeout'] as const;
 export type StepRetryCause = (typeof STEP_RETRY_CAUSES)[number];
 
 /** Hard ceiling on retry.maxAttempts (design §2.1): attempts are engine sessions —
@@ -86,13 +110,11 @@ export const MAX_WAIT_MINUTES = 10080;
 
 /** Output modes. `none` (GRS-016d) is fire-and-forget: the receipt settles `fired`
  * at spawn, the session is never awaited, and the run never blocks on it. */
-export const STEP_OUTPUT_MODES = ['handoff', 'full', 'none'] as const;
 export type StepOutputMode = (typeof STEP_OUTPUT_MODES)[number];
 
 /** onError modes. `error-edge` (GRS-016d) routes a terminal step failure down the
  * node's error-lane out-edge(s) instead of failing the run — the lane⇔mode pairing
  * is validator-enforced in both directions. */
-export const STEP_ON_ERROR_MODES = ['fail-run', 'continue', 'error-edge'] as const;
 export type StepOnErrorMode = (typeof STEP_ON_ERROR_MODES)[number];
 
 /** Session modes (GRS-016e, design §2.1). `fresh` (the default when absent) = v2:
@@ -103,10 +125,8 @@ export type StepOnErrorMode = (typeof STEP_ON_ERROR_MODES)[number];
  * strictly serialized. `existing` = the node posts its turn into an operator-picked
  * LIVE gateway session (same marker correlation) — the riskiest brick; the inspector
  * labels it and the target is validated at run start. */
-export const STEP_SESSION_MODES = ['fresh', 'workflow', 'existing'] as const;
 export type StepSessionMode = (typeof STEP_SESSION_MODES)[number];
 
-export const WORK_ITEM_STATUSES = ['backlog', 'assigned', 'executing', 'in_review', 'done', 'blocked', 'escalated', 'cancelled'] as const;
 export type WorkflowTodoTransitionStatus = (typeof WORK_ITEM_STATUSES)[number];
 const WORK_ITEM_STATUS_SET = new Set<string>(WORK_ITEM_STATUSES);
 const WORK_ITEM_SOURCES = ['human', 'delegation', 'cron', 'workflow', 'session', 'connector', 'goal'] as const;
@@ -164,7 +184,6 @@ export interface StepNodeOptions {
  * `switch` (N-way deterministic router) and `fail` (authored stop-and-error) are
  * GRS-016c; `wait` (sweep-clocked pause) is GRS-016d. All three are ACTORLESS —
  * they spawn nothing. */
-export const NODE_TYPES = ['trigger', 'step', 'gate', 'switch', 'fail', 'wait'] as const;
 export type NodeType = (typeof NODE_TYPES)[number];
 
 /** Switch evaluation modes (GRS-016c, design §2.3). `firstMatch` (the default when
@@ -173,14 +192,12 @@ export type NodeType = (typeof NODE_TYPES)[number];
  * no conditioned edge passed, regardless of where it is declared). `allMatches`:
  * every passing conditioned edge activates; no-`when` edges activate only if nothing
  * else did. */
-export const SWITCH_MODES = ['firstMatch', 'allMatches'] as const;
 export type SwitchMode = (typeof SWITCH_MODES)[number];
 
 /** Cap on a fail node's authored message (it becomes a receipt detail + run error). */
 export const MAX_FAIL_MESSAGE_CHARS = 500;
 
 /** Who performs a step: a Jinn employee or a raw engine. */
-export const ACTOR_KINDS = ['employee', 'engine'] as const;
 export type ActorKind = (typeof ACTOR_KINDS)[number];
 
 export interface WorkflowActor {
@@ -256,7 +273,6 @@ export interface WorkflowNode {
   waitUntil?: string;
 }
 
-export const EDGE_KINDS = ['handoff', 'sequence', 'loop'] as const;
 export type EdgeKind = (typeof EDGE_KINDS)[number];
 
 export interface WorkflowEdge {
@@ -334,11 +350,28 @@ export interface EditableWorkflowDefinition {
   evidenceRoot?: string;
   /** ISO string set by the CRUD layer on save (GRS-011b); optional here. */
   updatedAt?: string;
+  /** Canonical server stamps plus legacy aliases retained for readable persisted records. */
+  owner?: string;
+  ownerEmployee?: string;
+  workflowOwner?: string;
+  createdBy?: string;
+  creator?: string;
+  author?: string;
+  department?: string;
+  ownerDepartment?: string;
+  workflowDepartment?: string;
+  critical?: boolean;
+  cooOwned?: boolean;
+  requiresCooApproval?: boolean;
+  classification?: string;
+  authority?: string;
 }
 
 /* ── Validation ─────────────────────────────────────────────────────────────── */
 
 export type ValidationCode =
+  | 'invalid-schema'
+  | 'unsupported-field'
   | 'bad-schema-version'
   | 'missing-id'
   | 'bad-name'
@@ -672,6 +705,28 @@ function validateStepOptions(options: unknown, nodeId: string, optional: boolean
 export function validateDefinition(def: EditableWorkflowDefinition): ValidationResult {
   const errors: ValidationError[] = [];
   const err: PushError = (code, message, ref) => errors.push({ code, message, ref });
+
+  // Zod's safeParse reports schema failures, but it deliberately does not swallow
+  // exceptions thrown by hostile property accessors. The semantic validator below
+  // already treats those condition objects as invalid plain data, so keep this
+  // strict-shape preflight best-effort and let the total condition inspector emit
+  // the actionable bad-edge-condition diagnostic.
+  let strictShape: ReturnType<typeof workflowDefinitionSchema.safeParse> | null = null;
+  try {
+    strictShape = workflowDefinitionSchema.safeParse(def);
+  } catch {
+    // In-process hostile objects cannot arrive through JSON, but validation remains
+    // total for callers that construct an object directly.
+  }
+  if (strictShape && !strictShape.success) {
+    for (const issue of strictShape.error.issues) {
+      if (issue.code !== 'unrecognized_keys') continue;
+      const where = issue.path.length > 0 ? issue.path.join('.') : 'definition';
+      for (const key of issue.keys) {
+        err('unsupported-field', `${where} has unsupported field "${key}"`, where);
+      }
+    }
+  }
 
   if (def.schemaVersion !== WORKFLOW_DEFINITION_SCHEMA_VERSION) {
     err('bad-schema-version', `schemaVersion must be ${WORKFLOW_DEFINITION_SCHEMA_VERSION}`);
@@ -1198,7 +1253,12 @@ export function parseDefinition(json: string): EditableWorkflowDefinition {
   } catch (e) {
     throw new Error(`workflow definition is not valid JSON: ${(e as Error).message}`);
   }
-  const def = obj as EditableWorkflowDefinition;
+  const parsed = workflowDefinitionSchema.safeParse(obj);
+  if (!parsed.success) {
+    const summary = parsed.error.issues.map((issue) => `${issue.path.join('.') || 'definition'}: ${issue.message}`).join(', ');
+    throw new Error(`workflow definition failed schema validation: ${summary}`);
+  }
+  const def = parsed.data as EditableWorkflowDefinition;
   const result = validateDefinition(def);
   if (!result.ok) {
     const summary = result.errors.map((e) => e.code).join(', ');

@@ -4,10 +4,45 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
-import { buildWorkflowTools } from "../workflow-tools.js";
+import { buildWorkflowTools, workflowAdvertisedComponentSchemas } from "../workflow-tools.js";
 import { handleMcpRequest, buildTools } from "../server.js";
 import type { JinnMcpContext, JinnMcpTool } from "../toolkit.js";
 import { planWorkflowAuthoringInput } from "../../workflows/authoring.js";
+import { workflowComponentJsonSchemas } from "../../workflows/schema.js";
+
+type JsonSchema = Record<string, unknown>;
+
+function closedSurface(schema: JsonSchema): Record<string, string[]> {
+  const defs = (schema.$defs ?? {}) as Record<string, JsonSchema>;
+  const surfaces = new Map<string, string[]>();
+  const activeRefs = new Set<string>();
+  const visit = (value: unknown, path: string): void => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const node = value as JsonSchema;
+    if (typeof node.$ref === "string") {
+      const key = node.$ref.split("/").at(-1)!;
+      if (activeRefs.has(key)) return; // z.json() is intentionally scalar/runtime-only here.
+      activeRefs.add(key);
+      visit(defs[key], path);
+      activeRefs.delete(key);
+      return;
+    }
+    for (const key of ["anyOf", "oneOf"] as const) {
+      if (Array.isArray(node[key])) for (const branch of node[key] as unknown[]) visit(branch, path);
+    }
+    if (node.properties && typeof node.properties === "object") {
+      expect(node.additionalProperties, `${path} must be closed`).toBe(false);
+      const keys = Object.keys(node.properties as Record<string, unknown>).sort();
+      const existing = surfaces.get(path);
+      if (existing) expect(keys, `${path} union branches must expose the same closed surface`).toEqual(existing);
+      else surfaces.set(path, keys);
+      for (const [key, child] of Object.entries(node.properties as Record<string, unknown>)) visit(child, `${path}.${key}`);
+    }
+    if (node.items) visit(node.items, `${path}[]`);
+  };
+  visit(schema, "$root");
+  return Object.fromEntries([...surfaces.entries()].sort(([a], [b]) => a.localeCompare(b)));
+}
 
 /**
  * GRS-015 — the workflow MCP tool group.
@@ -184,7 +219,7 @@ describe("workflow tools — registry + schemas", () => {
         };
       };
     };
-    for (const name of ["position", "actor", "retry", "session", "options", "filter", "trigger", "gate", "condition"]) {
+    for (const name of ["p", "a", "r", "s", "o", "f", "t", "g", "c"]) {
       expect(schema.$defs?.[name]?.additionalProperties, name).toBe(false);
     }
     expect(schema.properties.definition.properties?.nodes?.items?.additionalProperties).toBe(false);
@@ -215,7 +250,35 @@ describe("workflow tools — registry + schemas", () => {
     const update = authoringTool("update_workflow");
     expect.soft(update.additionalProperties, "update_workflow input").toBe(false);
     expect.soft(update.$defs, "update_workflow shared definitions").toEqual(plan.$defs);
-    expect.soft(update.properties.patch, "update_workflow patch").toMatchObject(rawDefinition as object);
+    expect.soft(update.properties.patch, "update_workflow patch").toMatchObject({
+      type: "object",
+      additionalProperties: false,
+    });
+    expect.soft((update.properties.patch as { properties?: Record<string, unknown> }).properties, "immutable update fields")
+      .not.toHaveProperty("id");
+  });
+
+  it("proves recursive closed-surface parity with every shared Zod workflow component", () => {
+    expect(Object.keys(workflowAdvertisedComponentSchemas).sort()).toEqual(Object.keys(workflowComponentJsonSchemas).sort());
+    for (const name of Object.keys(workflowComponentJsonSchemas) as Array<keyof typeof workflowComponentJsonSchemas>) {
+      expect(closedSurface(workflowAdvertisedComponentSchemas[name] as JsonSchema), `${String(name)} allowed property surface`)
+        .toEqual(closedSurface(workflowComponentJsonSchemas[name] as JsonSchema));
+    }
+  });
+
+  it("keeps all four advertised authoring envelopes on the same graph surface", () => {
+    const authoring = Object.fromEntries(buildWorkflowTools().filter((tool) => ["plan_workflow", "validate_workflow", "create_workflow", "update_workflow"].includes(tool.name)).map((tool) => [tool.name, tool.inputSchema]));
+    const graph = (name: string, key: "definition" | "patch") => (authoring[name].properties as Record<string, unknown>)[key];
+    expect(graph("validate_workflow", "definition")).toEqual(graph("plan_workflow", "definition"));
+    expect(graph("create_workflow", "definition")).toEqual(graph("plan_workflow", "definition"));
+    const planSurface = closedSurface(graph("plan_workflow", "definition") as JsonSchema);
+    const patchSurface = closedSurface(graph("update_workflow", "patch") as JsonSchema);
+    for (const component of ["nodes", "edges", "runGates", "loop"]) {
+      expect(Object.fromEntries(Object.entries(patchSurface).filter(([path]) => path.includes(`.${component}`))))
+        .toEqual(Object.fromEntries(Object.entries(planSurface).filter(([path]) => path.includes(`.${component}`))));
+    }
+    expect((graph("update_workflow", "patch") as JsonSchema).properties).not.toHaveProperty("id");
+    expect((((graph("plan_workflow", "definition") as JsonSchema).properties as Record<string, JsonSchema>).edges.items as JsonSchema).properties).not.toHaveProperty("on");
   });
 
   it("teaches onError, error lanes, switch, wait, and fail before authors commit", () => {
@@ -223,6 +286,7 @@ describe("workflow tools — registry + schemas", () => {
       additionalProperties?: boolean;
       description?: string;
       pattern?: string;
+      enum?: string[];
       $ref?: string;
       properties?: Record<string, Schema>;
       items?: Schema;
@@ -240,17 +304,17 @@ describe("workflow tools — registry + schemas", () => {
         ? (schema as Schema & { $defs?: Record<string, Schema> }).$defs?.[optionsRef]
         : undefined;
 
-      expect.soft(node?.properties?.type?.pattern ?? "", `${name} node types`).toContain("switch");
-      expect.soft(node?.properties?.type?.pattern ?? "", `${name} node types`).toContain("wait");
-      expect.soft(node?.properties?.type?.pattern ?? "", `${name} node types`).toContain("fail");
+      expect.soft(node?.properties?.type?.enum ?? [], `${name} node types`).toContain("switch");
+      expect.soft(node?.properties?.type?.enum ?? [], `${name} node types`).toContain("wait");
+      expect.soft(node?.properties?.type?.enum ?? [], `${name} node types`).toContain("fail");
       expect.soft(node?.properties ?? {}, `${name} switch contract`).toHaveProperty("switchMode");
       expect.soft(node?.properties ?? {}, `${name} wait contract`).toHaveProperty("waitMinutes");
       expect.soft(node?.properties ?? {}, `${name} wait contract`).toHaveProperty("waitUntil");
       expect.soft(node?.properties ?? {}, `${name} fail contract`).toHaveProperty("failMessage");
-      expect.soft(options?.properties?.onError?.pattern, `${name} onError contract`).toBe("^(fail-run|continue|error-edge)$");
+      expect.soft(options?.properties?.onError?.enum, `${name} onError contract`).toEqual(["fail-run", "continue", "error-edge"]);
       expect.soft(edge?.properties?.lane?.pattern, `${name} error lane contract`).toBe("^error$");
       expect.soft(edge?.properties ?? {}, `${name} unsupported edge.on`).not.toHaveProperty("on");
-      expect.soft(edge?.properties?.when?.items?.$ref, `${name} switch conditions`).toBe("#/$defs/condition");
+      expect.soft(edge?.properties?.when?.items?.$ref, `${name} switch conditions`).toBe("#/$defs/c");
     }
   });
 
@@ -279,7 +343,7 @@ describe("workflow tools — registry + schemas", () => {
       const edge = graph?.properties?.edges?.items;
 
       expect(schema.additionalProperties, `${name} input`).toBe(false);
-      expect(sop?.description, `${name} SOP guidance`).toBe(teaching);
+      expect(sop?.description, `${name} SOP guidance`).toBe(name === "plan_workflow" ? teaching : undefined);
       expect(sop?.additionalProperties, `${name} SOP`).toBe(false);
       expect(wakeUp?.additionalProperties, `${name} SOP wakeUp`).toBe(false);
       expect(step?.additionalProperties, `${name} SOP step`).toBe(false);
@@ -304,6 +368,57 @@ describe("workflow tools — registry + schemas", () => {
 });
 
 describe("workflow tools — unit (stub gateway)", () => {
+  it.each(["plan_workflow", "validate_workflow", "create_workflow"])(
+    "%s rejects unknown raw-definition fields before any gateway call",
+    async (name) => {
+      const { calls, ctx } = stub(() => ({ status: 200, body: { ok: true } }));
+      const response = await handleMcpRequest(
+        {
+          id: 70,
+          method: "tools/call",
+          params: {
+            name,
+            arguments: {
+              definition: {
+                id: "strict-mcp",
+                title: "Strict MCP",
+                nodes: [
+                  { id: "wake", type: "trigger", label: "Wake", trigger: { kind: "manual" } },
+                  { id: "work", type: "step", label: "Work", onError: "continue" },
+                ],
+                edges: [{ id: "e", from: "wake", to: "work" }],
+                mysteryMode: true,
+              },
+            },
+          },
+        },
+        buildTools(),
+        ctx,
+      );
+      const result = response!.result as { isError?: boolean; content: Array<{ text: string }> };
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toMatch(/invalid arguments/i);
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    ["create_workflow", { definition: { id: "forged", title: "Forged", nodes: [], edges: [], owner: "forged" } }],
+    ["update_workflow", { workflowId: "forged", patch: { createdBy: "forged" } }],
+  ])("%s rejects caller authority injection before any gateway call", async (name, args) => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: {} }));
+    const response = await handleMcpRequest(
+      { id: 71, method: "tools/call", params: { name, arguments: args } },
+      buildTools(),
+      ctx,
+    );
+    const result = response!.result as { isError?: boolean };
+
+    expect(result.isError).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
   it("list_workflows GETs the definitions route and passes summaries through", async () => {
     const { calls, ctx } = stub(() => ({
       status: 200,

@@ -6,6 +6,7 @@ import {
   type WorkflowLayoutDiagnostics,
   type WorkflowLayoutIntent,
 } from "./layout.js";
+import { parseWorkflowPlanInput, parseWorkflowPlanTransport, WORKFLOW_AUTHORITY_FIELDS } from "./schema.js";
 
 export interface WorkflowAuthoringPlan {
   ok: boolean;
@@ -41,9 +42,10 @@ function requireObject(args: Record<string, unknown>, name: string): Record<stri
 }
 
 export function compileWorkflowAuthoringInput(args: Record<string, unknown>): WorkflowSopCompileResult {
-  if (args.sop !== undefined) return compileWorkflowSop(args.sop);
-  if (args.definition !== undefined) {
-    const placed = autoPlaceWorkflowNodes(requireObject(args, "definition"));
+  const parsed = parseWorkflowPlanInput(args);
+  if ('sop' in parsed) return compileWorkflowSop(parsed.sop);
+  if ('definition' in parsed) {
+    const placed = autoPlaceWorkflowNodes(parsed.definition as unknown as Record<string, unknown>);
     return {
       definition: {
         ...placed,
@@ -56,7 +58,14 @@ export function compileWorkflowAuthoringInput(args: Record<string, unknown>): Wo
 }
 
 export function planWorkflowAuthoringInput(args: Record<string, unknown>): WorkflowAuthoringPlan {
-  const compiled = compileWorkflowAuthoringInput(args);
+  const transport = parseWorkflowPlanTransport(args);
+  let callerSafe = transport as unknown as Record<string, unknown>;
+  if ('definition' in transport) {
+    const definition = { ...transport.definition } as Record<string, unknown>;
+    for (const key of [...WORKFLOW_AUTHORITY_FIELDS, 'updatedAt', 'layout']) delete definition[key];
+    callerSafe = { ...transport, definition };
+  }
+  const compiled = compileWorkflowAuthoringInput(callerSafe);
   const validation = validateDefinition(compiled.definition);
   const execution = resolveExecutionPlan(compiled.definition);
   const requestedIntent = args.layoutIntent;
