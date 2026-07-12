@@ -168,19 +168,24 @@ describe("workflow tools — registry + schemas", () => {
     expect(tool("delete_trigger").inputSchema.required).toEqual(["name"]);
   });
 
-  it("declares structured optional run input, per-step overrides, and a bounded idempotency key", () => {
+  it("declares structured optional run input, per-step overrides, a bounded idempotency key, and only the report mode", () => {
     const schema = tool("start_workflow_run").inputSchema as {
-      properties: Record<string, { type?: string; maxLength?: number }>;
+      properties: Record<string, { type?: string; maxLength?: number; enum?: string[]; description?: string }>;
     };
     expect(schema.properties.input).toMatchObject({ type: "object" });
     expect(schema.properties.stepOverrides).toMatchObject({ type: "object" });
     expect(schema.properties.idempotencyKey).toMatchObject({ type: "string", maxLength: 256 });
+    expect(schema.properties.reportMode).toMatchObject({ type: "string", enum: ["resume", "silent"] });
+    expect(schema.properties).not.toHaveProperty("sessionId");
+    expect(schema.properties).not.toHaveProperty("notify");
     const byNameSchema = tool("run_workflow_by_name").inputSchema as {
-      properties: Record<string, { type?: string; maxLength?: number }>;
+      properties: Record<string, { type?: string; maxLength?: number; enum?: string[]; description?: string }>;
     };
     expect(byNameSchema.properties.input).toMatchObject({ type: "object" });
     expect(byNameSchema.properties.stepOverrides).toMatchObject({ type: "object" });
     expect(byNameSchema.properties.idempotencyKey).toMatchObject({ type: "string", maxLength: 256 });
+    expect(byNameSchema.properties.reportMode).toMatchObject({ type: "string", enum: ["resume", "silent"] });
+    expect(byNameSchema.properties).not.toHaveProperty("sessionId");
   });
 
   it("closes the nested raw-definition edge schema and exposes only the supported error lane", () => {
@@ -770,6 +775,7 @@ describe("workflow tools — unit (stub gateway)", () => {
     expect(calls[0].body).toEqual({});
     expect(out.run.runId).toBe("run-1");
     expect(out.hint).toContain("run-1");
+    expect(out.hint).toContain("This run belongs and reports back to this session.");
     expect(out.hint).toMatch(/get_workflow_run/);
   });
 
@@ -783,12 +789,26 @@ describe("workflow tools — unit (stub gateway)", () => {
       input: { ticket: { id: "ABC-42" }, priority: 2 },
       stepOverrides: { verify: { prompt: "Check migrations." } },
       idempotencyKey: "request-42",
+      reportMode: "silent",
     }, ctx);
     expect(calls[0].body).toEqual({
       input: { ticket: { id: "ABC-42" }, priority: 2 },
       stepOverrides: { verify: { prompt: "Check migrations." } },
       idempotencyKey: "request-42",
+      reportMode: "silent",
     });
+  });
+
+  it("start_workflow_run explains explicit silent ownership without exposing a session id", async () => {
+    const { ctx } = stub(() => ({
+      status: 201,
+      body: { runId: "run-silent", status: "completed", steps: [] },
+    }));
+
+    const out = await tool("start_workflow_run").handler({ workflowId: "wf", reportMode: "silent" }, ctx) as { hint: string };
+
+    expect(out.hint).toContain("Silent mode: this run belongs to this session and updates its durable activity, but will not resume it.");
+    expect(out.hint).not.toContain("session-test");
   });
 
   it("start_workflow_run surfaces a sanitized typed idempotency conflict with safe run guidance", async () => {
@@ -841,6 +861,7 @@ describe("workflow tools — unit (stub gateway)", () => {
       input: { request: "implement this" },
       stepOverrides: { verify: { prompt: "Check the acceptance criteria." } },
       idempotencyKey: "request-42",
+      reportMode: "resume",
     }, ctx)) as { run: { runId: string }; hint: string };
     expect(calls[0]).toMatchObject({
       url: "http://127.0.0.1:7777/api/workflow-runs/by-name",
@@ -850,9 +871,11 @@ describe("workflow tools — unit (stub gateway)", () => {
         input: { request: "implement this" },
         stepOverrides: { verify: { prompt: "Check the acceptance criteria." } },
         idempotencyKey: "request-42",
+        reportMode: "resume",
       },
     });
     expect(out.run.runId).toBe("run-by-name");
+    expect(out.hint).toContain("This run belongs and reports back to this session.");
   });
 
   it("run_workflow_by_name surfaces an unknown canonical name clearly", async () => {

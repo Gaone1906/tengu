@@ -29,6 +29,7 @@ import { WORKFLOW_DEFINITION_SCHEMA_VERSION, type EditableWorkflowDefinition } f
 function makeRun(over: Partial<WorkflowRun> = {}): WorkflowRun {
   return {
     schemaVersion: WORKFLOW_RUN_SCHEMA_VERSION,
+    revision: 1,
     runId: 'run-1',
     workflowId: 'wf',
     definitionVersion: 3,
@@ -109,6 +110,35 @@ describe('saveRun / getRun', () => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, 'bad.json'), '{not json', 'utf8');
     expect(() => getRun(root, 'wf', 'bad')).toThrow(WorkflowRunStoreError);
+  });
+
+  it('round-trips separate v3 parameters and invoking-session relation', () => {
+    const current = makeRun({
+      runId: 'run-v3-relation',
+      parameters: { input: { ticket: 'ABC-42' }, idempotencyKey: 'request-42' },
+      invocation: { sessionId: 'session-a', reportMode: 'resume' },
+    });
+
+    saveRun(root, current);
+
+    expect(getRun(root, current.workflowId, current.runId)).toMatchObject({
+      schemaVersion: 3,
+      revision: 1,
+      parameters: { input: { ticket: 'ABC-42' }, idempotencyKey: 'request-42' },
+      invocation: { sessionId: 'session-a', reportMode: 'resume' },
+    });
+  });
+
+  it('rejects an input-shaped invocation on a v3 record', () => {
+    const dir = path.join(root, 'reports', 'runs', 'wf');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'bad-v3-invocation.json'), JSON.stringify({
+      ...makeRun({ runId: 'bad-v3-invocation' }),
+      schemaVersion: 3,
+      invocation: { input: { ticket: 'ABC-42' }, idempotencyKey: 'request-42' },
+    }), 'utf8');
+
+    expect(() => getRun(root, 'wf', 'bad-v3-invocation')).toThrow(/invocation/i);
   });
 });
 
@@ -274,6 +304,15 @@ describe('workflow invocation claims', () => {
 });
 
 describe('exclusive initial run publication', () => {
+  it('defaults a new v3 publication to revision 1 exactly once', () => {
+    const candidate = makeRun({ runId: 'run-default-revision', revision: undefined });
+
+    const publication = publishInitialWorkflowRun(root, candidate);
+
+    expect(publication).toMatchObject({ outcome: 'published', run: { schemaVersion: 3, revision: 1 } });
+    expect(getRun(root, 'wf', 'run-default-revision')).toMatchObject({ schemaVersion: 3, revision: 1 });
+  });
+
   it('fsyncs the complete temp inode and final directory state before returning', () => {
     const run = makeRun({ runId: 'run-durable-publication', workflowId: 'wf' });
     const fsync = vi.spyOn(fs, 'fsyncSync');
@@ -384,6 +423,29 @@ describe('id safety', () => {
 });
 
 describe('read-time legacy mapping (GRS-014a) — v1 passed → dispatched, no file rewrites', () => {
+  it('normalizes the exact v2 invocation wire shape to parameters without rewriting evidence', () => {
+    const dir = path.join(root, 'reports', 'runs', 'legacy-workflow');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'legacy-run.json');
+    const rawV2 = {
+      ...makeRun({ runId: 'legacy-run', workflowId: 'legacy-workflow' }),
+      schemaVersion: 2,
+      invocation: { input: { ticket: 'ABC-42' }, idempotencyKey: 'request-42' },
+    };
+    delete (rawV2 as { revision?: number }).revision;
+    fs.writeFileSync(file, JSON.stringify(rawV2, null, 2) + '\n', 'utf8');
+    const before = fs.readFileSync(file);
+
+    const legacy = getRun(root, 'legacy-workflow', 'legacy-run')!;
+
+    expect(legacy.schemaVersion).toBe(2);
+    expect(legacy.parameters).toEqual({ input: { ticket: 'ABC-42' }, idempotencyKey: 'request-42' });
+    expect(legacy.invocation).toBeUndefined();
+    expect(legacy.revision).toBe(0);
+    expect(fs.readFileSync(file)).toEqual(before);
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toHaveProperty('invocation.input.ticket', 'ABC-42');
+  });
+
   it("serves a v1 'passed' record as 'dispatched' and leaves the file byte-identical", () => {
     const file = writeLegacyRun(root, 'wf', 'legacy-passed', 'passed');
     const before = sha256(file);

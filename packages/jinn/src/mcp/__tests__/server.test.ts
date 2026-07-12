@@ -236,6 +236,25 @@ describe("handleMcpRequest — tools/call", () => {
     expect(calls).toBe(0);
   });
 
+  it('accepts only resume|silent for workflow reportMode at the MCP boundary', async () => {
+    const tools = buildTools();
+    const invalid = await handleMcpRequest(
+      { id: 31, method: 'tools/call', params: { name: 'start_workflow_run', arguments: { workflowId: 'wf', reportMode: 'notify' } } },
+      tools,
+      stubCtx(() => ({ status: 201, body: { runId: 'must-not-run', status: 'completed', steps: [] } })),
+    );
+    expect((invalid!.result as { isError?: boolean }).isError).toBe(true);
+
+    const valid = await handleMcpRequest(
+      { id: 32, method: 'tools/call', params: { name: 'run_workflow_by_name', arguments: { name: 'wf', reportMode: 'silent' } } },
+      tools,
+      stubCtx(() => ({ status: 201, body: { runId: 'run-silent', status: 'completed', steps: [] } })),
+    );
+    const result = valid!.result as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain('Silent mode');
+  });
+
   it("list_employees returns real gateway data as text content", async () => {
     const org = { employees: [{ name: "chief-of-staff", rank: "manager" }] };
     const ctx = stubCtx((url) => {

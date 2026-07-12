@@ -541,14 +541,30 @@ export type WorkflowRunTriggerWire =
   fireIso?: string
   }
 
+export type WorkflowReportModeWire = 'resume' | 'silent'
+
+export interface WorkflowRunParametersWire {
+  input: Record<string, unknown>
+  idempotencyKey?: string
+}
+
+export interface WorkflowRunInvocationWire {
+  sessionId: string
+  reportMode: WorkflowReportModeWire
+}
+
 export interface WorkflowRunWire {
-  /** Absent on legacy v1 records; 2 on records written since GRS-014a. */
+  /** Absent/older on legacy evidence; 3 on current records. */
   schemaVersion?: number
+  /** Current records are monotonic from 1; normalized legacy reads expose 0. */
+  revision?: number
   runId: string
   workflowId: string
   definitionVersion: number
   title: string
   trigger: WorkflowRunTriggerWire
+  parameters?: WorkflowRunParametersWire
+  invocation?: WorkflowRunInvocationWire
   status: WorkflowRunStatusWire
   startedAt: string
   endedAt: string | null

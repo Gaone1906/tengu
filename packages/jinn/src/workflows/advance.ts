@@ -396,6 +396,7 @@ export function mintSequentialRun(
     ok: true,
     run: {
       schemaVersion: WORKFLOW_RUN_SCHEMA_VERSION,
+      revision: 1,
       runId,
       workflowId: plan.workflowId,
       definitionVersion: plan.version,

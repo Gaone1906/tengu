@@ -152,6 +152,7 @@ import {
   type FollowUpPostResult,
   type RunDriverDeps,
   type WorkflowRun,
+  type WorkflowReportMode,
   type SpawnContext,
   type SpawnResult,
 } from "../workflows/index.js";
@@ -1039,6 +1040,7 @@ interface WorkflowRunRequestBody {
   input?: unknown;
   stepOverrides?: unknown;
   idempotencyKey?: unknown;
+  reportMode?: unknown;
 }
 
 function projectWorkflowRunApprovalCapability(
@@ -1099,6 +1101,7 @@ function validateWorkflowRunRequestBody(
   input?: Record<string, unknown>;
   stepOverrides?: Record<string, { prompt: string }>;
   idempotencyKey?: string;
+  reportMode: WorkflowReportMode;
 } | { ok: false; error: string } {
   if (body.input !== undefined && (!body.input || typeof body.input !== "object" || Array.isArray(body.input))) {
     return { ok: false, error: "input must be a JSON object" };
@@ -1140,11 +1143,19 @@ function validateWorkflowRunRequestBody(
       return { ok: false, error: "idempotencyKey must not contain control characters" };
     }
   }
+  let reportMode: WorkflowReportMode = "resume";
+  if (body.reportMode !== undefined) {
+    if (body.reportMode !== "resume" && body.reportMode !== "silent") {
+      return { ok: false, error: 'reportMode must be exactly "resume" or "silent"' };
+    }
+    reportMode = body.reportMode;
+  }
   return {
     ok: true,
     ...(body.input !== undefined ? { input: body.input as Record<string, unknown> } : {}),
     ...(stepOverrides ? { stepOverrides } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
+    reportMode,
   };
 }
 
@@ -1164,6 +1175,10 @@ async function runWorkflowDefinitionFromHttp(
   if (expectedId !== undefined && def.id !== expectedId) {
     return badRequest(res, `definition file "${expectedId}" has mismatched id "${def.id}"`);
   }
+  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  const invocation = identity.kind === "session"
+    ? { sessionId: identity.callerId, reportMode: validated.reportMode }
+    : undefined;
   const { scanOrg } = await import("./org.js");
   const knownEmployees = [...scanOrg().keys()];
   const knownEngines = [...context.sessionManager.getEngines().keys()];
@@ -1180,7 +1195,7 @@ async function runWorkflowDefinitionFromHttp(
         payload: { workflowId: def.id, requestedBy: "api" },
         ...(validated.idempotencyKey ? { fireRef: validated.idempotencyKey } : {}),
       };
-  const invocation = validated.input !== undefined || validated.idempotencyKey !== undefined
+  const parameters = validated.input !== undefined || validated.idempotencyKey !== undefined
     ? {
         input: validated.input ?? {},
         ...(validated.idempotencyKey ? { idempotencyKey: validated.idempotencyKey } : {}),
@@ -1193,6 +1208,7 @@ async function runWorkflowDefinitionFromHttp(
       knownEngines,
       principal: authority.actor === "operator" ? "operator" : `employee:${authority.actor}`,
       onIdempotencyReplay: () => { replayed = true; },
+      ...(parameters ? { parameters } : {}),
       ...(invocation ? { invocation } : {}),
       ...(validated.stepOverrides ? { stepOverrides: validated.stepOverrides } : {}),
     });
@@ -4234,6 +4250,7 @@ export async function handleApiRequest(
           input: raw.input,
           stepOverrides: raw.stepOverrides,
           idempotencyKey: raw.idempotencyKey,
+          reportMode: raw.reportMode,
           trigger: "manual",
         });
       } catch (err) {
@@ -4285,7 +4302,7 @@ export async function handleApiRequest(
     // PATCH /api/workflow-definitions/:id/runs/:runId/pending-steps/:nodeId —
     // replace one run-local phase prompt before that phase starts. The run driver
     // serializes this with dispatch and appends actor/time/before/after evidence;
-    // invocation.input and the frozen definition snapshot remain untouched.
+    // parameters.input and the frozen definition snapshot remain untouched.
     params = matchRoute("/api/workflow-definitions/:id/runs/:runId/pending-steps/:nodeId", pathname);
     if (method === "PATCH" && params) {
       const root = resolveWorkflowEvidenceRoot();

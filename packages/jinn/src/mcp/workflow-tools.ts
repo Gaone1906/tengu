@@ -63,6 +63,15 @@ function optionalString(args: Record<string, unknown>, name: string, max: number
   return text;
 }
 
+function optionalReportMode(args: Record<string, unknown>): "resume" | "silent" | undefined {
+  const value = args.reportMode;
+  if (value === undefined) return undefined;
+  if (value !== "resume" && value !== "silent") {
+    throw new JinnMcpToolError('reportMode must be exactly "resume" or "silent"');
+  }
+  return value;
+}
+
 /** Pretty-print a body for error text without flooding the model. */
 function asText(body: unknown, max = 4000): string {
   const text = typeof body === "string" ? body : JSON.stringify(body, null, 2);
@@ -139,6 +148,12 @@ function runHint(run: RunView): string {
     default:
       return "See status and steps[].";
   }
+}
+
+function runOwnershipHint(reportMode: "resume" | "silent" | undefined): string {
+  return reportMode === "silent"
+    ? "Silent mode: this run belongs to this session and updates its durable activity, but will not resume it."
+    : "This run belongs and reports back to this session.";
 }
 
 const wfPath = (id: string): string => `/api/workflow-definitions/${encodeURIComponent(id)}`;
@@ -477,6 +492,11 @@ export function buildWorkflowTools(): JinnMcpTool[] {
         input: { type: "object" },
         stepOverrides: { type: "object", description: "Map stepId to {prompt}." },
         idempotencyKey: { type: "string", maxLength: 256 },
+        reportMode: {
+          type: "string",
+          enum: ["resume", "silent"],
+          description: "resume reports parked/terminal run state back to this session; silent keeps durable activity without resuming it.",
+        },
       },
       required: ["workflowId"],
     },
@@ -486,10 +506,12 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const input = optionalObject(args, "input");
       const stepOverrides = optionalObject(args, "stepOverrides");
       const idempotencyKey = optionalString(args, "idempotencyKey", 256);
+      const reportMode = optionalReportMode(args);
       const requestBody = {
         ...(input ? { input } : {}),
         ...(stepOverrides ? { stepOverrides } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(reportMode ? { reportMode } : {}),
       };
       const { status, body } = await gatewayRequest(ctx, "POST", `${wfPath(id)}/run`, requestBody);
       if (status === 422) {
@@ -502,7 +524,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       }
       if (status >= 400) throw gatewayFailure(`starting a run of "${id}"`, status, body);
       const run = (body ?? {}) as RunView;
-      return { run: body, hint: `Started ${String(run.runId ?? "?")}. ${runHint(run)}` };
+      return { run: body, hint: `Started ${String(run.runId ?? "?")}. ${runOwnershipHint(reportMode)} ${runHint(run)}` };
     },
   };
 
@@ -516,6 +538,11 @@ export function buildWorkflowTools(): JinnMcpTool[] {
         input: { type: "object" },
         stepOverrides: { type: "object", description: "Map stepId to {prompt}." },
         idempotencyKey: { type: "string", maxLength: 256 },
+        reportMode: {
+          type: "string",
+          enum: ["resume", "silent"],
+          description: "resume reports parked/terminal run state back to this session; silent keeps durable activity without resuming it.",
+        },
       },
       required: ["name"],
     },
@@ -525,11 +552,13 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       const input = optionalObject(args, "input");
       const stepOverrides = optionalObject(args, "stepOverrides");
       const idempotencyKey = optionalString(args, "idempotencyKey", 256);
+      const reportMode = optionalReportMode(args);
       const requestBody = {
         name,
         ...(input ? { input } : {}),
         ...(stepOverrides ? { stepOverrides } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(reportMode ? { reportMode } : {}),
       };
       const { status, body } = await gatewayRequest(ctx, "POST", "/api/workflow-runs/by-name", requestBody);
       if (status === 422) {
@@ -540,7 +569,7 @@ export function buildWorkflowTools(): JinnMcpTool[] {
       }
       if (status >= 400) throw gatewayFailure(`running workflow name "${name}"`, status, body);
       const run = (body ?? {}) as RunView;
-      return { run: body, hint: `Started ${String(run.runId ?? "?")}. ${runHint(run)}` };
+      return { run: body, hint: `Started ${String(run.runId ?? "?")}. ${runOwnershipHint(reportMode)} ${runHint(run)}` };
     },
   };
 

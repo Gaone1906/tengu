@@ -69,6 +69,40 @@ describe('workflow run invocation canonicalization', () => {
     expect(WORKFLOW_RUN_IDEMPOTENCY_CONFLICT).toBe('workflow-run-idempotency-conflict');
   });
 
+  it('binds exact parameters and invoking-session relation into the request fingerprint', () => {
+    const def = definition();
+    const common = {
+      definition: def,
+      trigger: { source: 'manual', event: 'workflow.manual_started', payload: { workflowId: def.id } },
+      input: { ticket: 'ABC-42' },
+      principal: 'employee:owner',
+    };
+    const resume = createWorkflowRunInvocationRequest({
+      ...common,
+      invocation: { sessionId: 'session-a', reportMode: 'resume' },
+    });
+    const exact = createWorkflowRunInvocationRequest({
+      ...common,
+      invocation: { reportMode: 'resume', sessionId: 'session-a' },
+    });
+    const silent = createWorkflowRunInvocationRequest({
+      ...common,
+      invocation: { sessionId: 'session-a', reportMode: 'silent' },
+    });
+    const otherSession = createWorkflowRunInvocationRequest({
+      ...common,
+      invocation: { sessionId: 'session-b', reportMode: 'resume' },
+    });
+
+    expect(resume).toMatchObject({
+      input: { ticket: 'ABC-42' },
+      invocation: { sessionId: 'session-a', reportMode: 'resume' },
+    });
+    expect(fingerprintWorkflowRunInvocationRequest(exact)).toBe(fingerprintWorkflowRunInvocationRequest(resume));
+    expect(fingerprintWorkflowRunInvocationRequest(silent)).not.toBe(fingerprintWorkflowRunInvocationRequest(resume));
+    expect(fingerprintWorkflowRunInvocationRequest(otherSession)).not.toBe(fingerprintWorkflowRunInvocationRequest(resume));
+  });
+
   it.each([
     ['definition version', (r: ReturnType<typeof createWorkflowRunInvocationRequest>) => ({ ...r, definitionVersion: r.definitionVersion + 1 })],
     ['definition digest', (r: ReturnType<typeof createWorkflowRunInvocationRequest>) => ({ ...r, definitionDigest: '0'.repeat(64) })],

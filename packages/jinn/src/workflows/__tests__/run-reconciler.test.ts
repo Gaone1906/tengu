@@ -110,7 +110,8 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     const def = createDefinition(root, chainDef('publication-owner', [trigger, step('a')]), { now });
     const options = {
       trigger: { source: 'manual', event: 'workflow.manual_started', payload: {}, fireRef: 'publication-key' } as const,
-      invocation: { input: { ticket: 'ABC-42' } },
+      parameters: { input: { ticket: 'ABC-42' } },
+      invocation: { sessionId: 'session-owner', reportMode: 'resume' as const },
       principal: 'employee:owner',
       makeRunId: () => 'run-preallocated-owner',
     };
@@ -194,22 +195,43 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     } as const;
     const first = await startWorkflowRun(deps, def, {
       trigger: runTrigger,
-      invocation: { input: { ticket: 'ABC-42', nested: { b: 2, a: 1 } } },
+      parameters: { input: { ticket: 'ABC-42', nested: { b: 2, a: 1 } } },
+      invocation: { sessionId: 'session-owner', reportMode: 'resume' },
       principal: 'employee:owner',
     });
     let replayed = false;
     const exact = await startWorkflowRun(deps, def, {
       trigger: { ...runTrigger, payload: { a: 1, b: 2 } },
-      invocation: { input: { nested: { a: 1, b: 2 }, ticket: 'ABC-42' } },
+      parameters: { input: { nested: { a: 1, b: 2 }, ticket: 'ABC-42' } },
+      invocation: { sessionId: 'session-owner', reportMode: 'resume' },
       principal: 'employee:owner',
       onIdempotencyReplay: () => { replayed = true; },
     });
 
     expect(exact.runId).toBe(first.runId);
+    expect(exact.parameters).toEqual(first.parameters);
+    expect(exact.invocation).toEqual({ sessionId: 'session-owner', reportMode: 'resume' });
     expect(replayed).toBe(true);
     await expect(startWorkflowRun(deps, def, {
       trigger: runTrigger,
-      invocation: { input: { ticket: 'CHANGED' } },
+      parameters: { input: { ticket: 'CHANGED' } },
+      invocation: { sessionId: 'session-owner', reportMode: 'resume' },
+      principal: 'employee:owner',
+    })).rejects.toMatchObject({
+      code: 'workflow-run-idempotency-conflict', runId: first.runId,
+    });
+    await expect(startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      parameters: { input: { ticket: 'ABC-42', nested: { a: 1, b: 2 } } },
+      invocation: { sessionId: 'session-other', reportMode: 'resume' },
+      principal: 'employee:owner',
+    })).rejects.toMatchObject({
+      code: 'workflow-run-idempotency-conflict', runId: first.runId,
+    });
+    await expect(startWorkflowRun(deps, def, {
+      trigger: runTrigger,
+      parameters: { input: { ticket: 'ABC-42', nested: { a: 1, b: 2 } } },
+      invocation: { sessionId: 'session-owner', reportMode: 'silent' },
       principal: 'employee:owner',
     })).rejects.toMatchObject({
       code: 'workflow-run-idempotency-conflict', runId: first.runId,
@@ -244,7 +266,7 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
 
     const recovered = await startWorkflowRun(deps, def, {
       trigger: runTrigger,
-      invocation: { input: { ticket: 'ABC-42' } },
+      parameters: { input: { ticket: 'ABC-42' } },
       principal: 'employee:owner',
     });
 
@@ -262,7 +284,7 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     const initialStepOverrides = { b: { prompt: 'Original run-local prompt.' } };
     const first = await startWorkflowRun(deps, def, {
       trigger: runTrigger,
-      invocation: { input: { ticket: 'ABC-42' } },
+      parameters: { input: { ticket: 'ABC-42' } },
       stepOverrides: initialStepOverrides,
       principal: 'employee:owner',
     });
@@ -274,7 +296,7 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     let replayed = false;
     const exact = await startWorkflowRun(deps, def, {
       trigger: runTrigger,
-      invocation: { input: { ticket: 'ABC-42' } },
+      parameters: { input: { ticket: 'ABC-42' } },
       stepOverrides: initialStepOverrides,
       principal: 'employee:owner',
       onIdempotencyReplay: () => { replayed = true; },
@@ -301,11 +323,16 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
         payload: { workflowId: def.id, requestedBy: 'api' },
         fireRef: 'request-42',
       },
-      invocation: { input, idempotencyKey: 'request-42' },
+      parameters: { input, idempotencyKey: 'request-42' },
+      invocation: { sessionId: 'session-a', reportMode: 'resume' },
     });
 
-    expect(started.invocation).toEqual({ input, idempotencyKey: 'request-42' });
-    expect(getRun(root, def.id, started.runId)?.invocation).toEqual(started.invocation);
+    expect(started.parameters).toEqual({ input, idempotencyKey: 'request-42' });
+    expect(started.invocation).toEqual({ sessionId: 'session-a', reportMode: 'resume' });
+    expect(getRun(root, def.id, started.runId)).toMatchObject({
+      parameters: started.parameters,
+      invocation: started.invocation,
+    });
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0].prompt).toContain('## Run input (data)');
     expect(spawnCalls[0].prompt).toContain('"id": "ABC-42"');
@@ -316,8 +343,28 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
 
     // The caller cannot mutate the persisted/promoted snapshot after invocation.
     input.ticket.id = 'MUTATED';
-    expect(getRun(root, def.id, started.runId)?.invocation?.input).toMatchObject({ ticket: { id: 'ABC-42' } });
+    expect(getRun(root, def.id, started.runId)?.parameters?.input).toMatchObject({ ticket: { id: 'ABC-42' } });
     expect(spawnCalls[0].prompt).not.toContain('MUTATED');
+  });
+
+  it('publishes revision 1 and increments exactly once for each persisted mutation', async () => {
+    const def = createDefinition(root, chainDef('revisioned', [trigger, step('a')]), { now });
+    const projectedRevisions: number[] = [];
+    const { deps } = harness({
+      syncRunSession: (run) => {
+        projectedRevisions.push(run.revision!);
+        return undefined;
+      },
+    });
+
+    const started = await startWorkflowRun(deps, def, {
+      parameters: { input: { ticket: 'ABC-42' } },
+      invocation: { sessionId: 'session-a', reportMode: 'resume' },
+    });
+
+    expect(projectedRevisions).toEqual([1, 2, 3]);
+    expect(started.revision).toBe(3);
+    expect(getRun(root, def.id, started.runId)?.revision).toBe(3);
   });
 
   it('uses a frozen per-phase prompt override only for the targeted pending phase', async () => {
@@ -331,7 +378,7 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     const stepOverrides = { verify: { prompt: 'Verify only the migration safety checks.' } };
 
     const started = await startWorkflowRun(deps, def, {
-      invocation: { input },
+      parameters: { input },
       stepOverrides,
     } as never);
 
@@ -349,7 +396,7 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     expect(verifySpawn.prompt).not.toContain('Run the authored verification.');
     expect(verifySpawn.prompt).not.toContain('MUTATED-OVERRIDE');
     const persisted = getRun(root, def.id, started.runId)!;
-    expect(persisted.invocation?.input).toEqual({ ticket: { id: 'ABC-42' } });
+    expect(persisted.parameters?.input).toEqual({ ticket: { id: 'ABC-42' } });
     expect(persisted.stepOverrides).toEqual({
       verify: { prompt: 'Verify only the migration safety checks.' },
     });
@@ -363,7 +410,7 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     ]), { now });
     const { deps, spawnCalls, settle } = harness();
     const started = await startWorkflowRun(deps, def, {
-      invocation: { input: { ticket: 'ABC-42' } },
+      parameters: { input: { ticket: 'ABC-42' } },
     });
 
     const edited = await editPendingWorkflowStepPrompt(
@@ -385,7 +432,7 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
       before: 'Run the original checks.',
       after: 'Run the revised migration checks.',
     }]);
-    expect(edited.run.invocation?.input).toEqual({ ticket: 'ABC-42' });
+    expect(edited.run.parameters?.input).toEqual({ ticket: 'ABC-42' });
 
     settle(started.runId, 'plan', 1);
     await sweepWorkflowRuns(deps);
@@ -410,7 +457,48 @@ describe('startWorkflowRun + sweep — the sequential lifecycle', () => {
     expect(settledPhaseEdit).toMatchObject({ outcome: 'not-pending', status: 'done' });
     const persisted = getRun(root, def.id, started.runId)!;
     expect(persisted.stepPromptEdits).toHaveLength(1);
-    expect(persisted.invocation?.input).toEqual({ ticket: 'ABC-42' });
+    expect(persisted.parameters?.input).toEqual({ ticket: 'ABC-42' });
+  });
+
+  it('upgrades a raw active v2 run on its first real mutation without inventing an invocation relation', async () => {
+    const def = createDefinition(root, chainDef('legacy-edit', [trigger, step('verify', { instructions: 'Run checks.' })]), { now });
+    const { deps } = harness();
+    const dir = path.join(root, 'reports', 'runs', def.id);
+    const file = path.join(dir, 'legacy-run.json');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({
+      schemaVersion: 2,
+      runId: 'legacy-run',
+      workflowId: def.id,
+      definitionVersion: def.version,
+      title: def.title,
+      trigger: { source: 'manual', event: 'workflow.manual_started', payload: {} },
+      invocation: { input: { ticket: 'ABC-42' }, idempotencyKey: 'request-42' },
+      status: 'running',
+      startedAt: FIXED,
+      endedAt: null,
+      steps: [{ nodeId: 'verify', label: 'VERIFY', actor: { kind: 'engine', ref: 'codex' }, status: 'pending', attempt: 0, at: FIXED }],
+      parked: null,
+      order: ['verify'],
+      definitionSnapshot: def,
+    }, null, 2) + '\n', 'utf8');
+
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toMatchObject({ schemaVersion: 2, invocation: { input: { ticket: 'ABC-42' } } });
+    expect(getRun(root, def.id, 'legacy-run')).toMatchObject({
+      schemaVersion: 2,
+      revision: 0,
+      parameters: { input: { ticket: 'ABC-42' }, idempotencyKey: 'request-42' },
+    });
+
+    const edited = await editPendingWorkflowStepPrompt(deps, def.id, 'legacy-run', 'verify', 'Run revised checks.', { actor: 'owner' });
+
+    expect(edited).toMatchObject({ outcome: 'edited', run: { schemaVersion: 3, revision: 1 } });
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toMatchObject({
+      schemaVersion: 3,
+      revision: 1,
+      parameters: { input: { ticket: 'ABC-42' }, idempotencyKey: 'request-42' },
+    });
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).not.toHaveProperty('invocation');
   });
 
   it('runs a two-step chain: B spawns ONLY after A settles; completed only after B settles', async () => {

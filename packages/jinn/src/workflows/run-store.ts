@@ -35,11 +35,11 @@ import {
 /**
  * Run-record schema version (GRS-014a). v1 records (no `schemaVersion` field) used the
  * dishonest run-level `passed` (= "the walk finished", while spawned sessions were still
- * running — the KISS-audit honesty gap). v2 retires `passed` for the vocabulary below.
- * Migration is READ-TIME ONLY: `getRun`/`listRuns` map a v1 `passed` to `dispatched` in
- * memory; run files are frozen evidence and are never rewritten.
+ * running — the KISS-audit honesty gap). v2 retired `passed`; v3 separates immutable
+ * run parameters from the verified invoking-Session relation and adds monotonic revision.
+ * Compatibility normalization is READ-TIME ONLY; legacy evidence is never rewritten.
  */
-export const WORKFLOW_RUN_SCHEMA_VERSION = 2;
+export const WORKFLOW_RUN_SCHEMA_VERSION = 3;
 
 /**
  * Step states. The GRS-014b sequential step machine drives
@@ -231,13 +231,21 @@ export function workflowTriggerSource(trigger: WorkflowRunTrigger): string {
  * also copied to the manual trigger's fireRef by the run route for file-enforced
  * idempotency.
  */
-export interface WorkflowRunInvocation {
+export interface WorkflowRunParameters {
   input: Record<string, unknown>;
   idempotencyKey?: string;
 }
 
+export type WorkflowReportMode = 'resume' | 'silent';
+
+/** The verified Session that invoked this run and its sole reporting policy. */
+export interface WorkflowRunInvocation {
+  sessionId: string;
+  reportMode: WorkflowReportMode;
+}
+
 /** A run-local replacement for one step's authored task text. This is deliberately
- * separate from both immutable invocation input and the frozen definition snapshot:
+ * separate from both immutable run parameters and the frozen definition snapshot:
  * the definition remains honest evidence while the effective pending-phase prompt
  * can be tailored for this run. */
 export interface WorkflowStepPromptOverride {
@@ -285,13 +293,17 @@ export type WorkflowRunStatus =
 export interface WorkflowRun {
   /** Absent on legacy v1 files; WORKFLOW_RUN_SCHEMA_VERSION on records written since GRS-014a. */
   schemaVersion?: number;
+  /** Monotonic persisted mutation revision. Legacy v1/v2 reads normalize to 0. */
+  revision?: number;
   runId: string;
   workflowId: string;
   /** The definition version this run executed (so a later edit doesn't rewrite history). */
   definitionVersion: number;
   title: string;
   trigger: WorkflowRunTrigger;
-  /** Frozen structured context supplied when this particular run was invoked. */
+  /** Frozen structured parameters supplied for this particular run. */
+  parameters?: WorkflowRunParameters;
+  /** Verified invoking Session relation. Absent for browser/CLI/system and legacy runs. */
   invocation?: WorkflowRunInvocation;
   /** Current effective per-step prompt replacements for this run. Initial values
    * are frozen at start; later changes are admitted only for pending phases and
@@ -635,21 +647,28 @@ export function newRunId(now: () => string = () => new Date().toISOString()): st
   return `run-${stamp}-${randomUUID().slice(0, 8)}`;
 }
 
+function currentRunForWrite(run: WorkflowRun): WorkflowRun {
+  return run.schemaVersion === WORKFLOW_RUN_SCHEMA_VERSION && run.revision === undefined
+    ? { ...run, revision: 1 }
+    : run;
+}
+
 /** Persist a run record (create or overwrite the same runId). */
 export function saveRun(root: string, run: WorkflowRun): WorkflowRun {
   assertSafeId(run.workflowId, 'workflow id');
   assertSafeId(run.runId, 'run id');
-  writeAtomic(runFile(root, run.workflowId, run.runId), JSON.stringify(run, null, 2) + '\n');
+  const persisted = currentRunForWrite(run);
+  writeAtomic(runFile(root, persisted.workflowId, persisted.runId), JSON.stringify(persisted, null, 2) + '\n');
   // Keep the active-run index in lockstep so the reconciler sweep and the Todo
   // trigger read O(active) instead of O(all-lifetime-runs). Best-effort: a failed
   // update is corrected by rebuild-on-miss and the boot-time rebuild, so it must
   // never fail the save.
   try {
-    updateActiveRunIndexForRun(root, run);
+    updateActiveRunIndexForRun(root, persisted);
   } catch {
     /* index self-heals (rebuild-on-miss + startup rebuild) */
   }
-  return run;
+  return persisted;
 }
 
 export type InitialWorkflowRunPublication =
@@ -662,16 +681,17 @@ export type InitialWorkflowRunPublication =
  * can never observe a partially-written winner and can never replace it.
  */
 export function publishInitialWorkflowRun(root: string, run: WorkflowRun): InitialWorkflowRunPublication {
-  assertSafeId(run.workflowId, 'workflow id');
-  assertSafeId(run.runId, 'run id');
-  const directory = runsDir(root, run.workflowId);
-  const target = runFile(root, run.workflowId, run.runId);
+  const persisted = currentRunForWrite(run);
+  assertSafeId(persisted.workflowId, 'workflow id');
+  assertSafeId(persisted.runId, 'run id');
+  const directory = runsDir(root, persisted.workflowId);
+  const target = runFile(root, persisted.workflowId, persisted.runId);
   fs.mkdirSync(directory, { recursive: true });
-  const temp = path.join(directory, `.${run.runId}.initial-${randomUUID()}.tmp`);
+  const temp = path.join(directory, `.${persisted.runId}.initial-${randomUUID()}.tmp`);
   let descriptor: number | undefined;
   try {
     descriptor = fs.openSync(temp, 'wx', 0o600);
-    fs.writeFileSync(descriptor, JSON.stringify(run, null, 2) + '\n', 'utf8');
+    fs.writeFileSync(descriptor, JSON.stringify(persisted, null, 2) + '\n', 'utf8');
     fs.fsyncSync(descriptor);
     fs.closeSync(descriptor);
     descriptor = undefined;
@@ -679,9 +699,9 @@ export function publishInitialWorkflowRun(root: string, run: WorkflowRun): Initi
       fs.linkSync(temp, target);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      const existing = getRun(root, run.workflowId, run.runId);
+      const existing = getRun(root, persisted.workflowId, persisted.runId);
       if (!existing) {
-        throw new WorkflowRunStoreError('bad-input', `initial run "${run.runId}" exists but could not be read`);
+        throw new WorkflowRunStoreError('bad-input', `initial run "${persisted.runId}" exists but could not be read`);
       }
       return { outcome: 'existing', run: existing };
     }
@@ -700,11 +720,11 @@ export function publishInitialWorkflowRun(root: string, run: WorkflowRun): Initi
     /* directory fsync is not portable */
   }
   try {
-    updateActiveRunIndexForRun(root, run);
+    updateActiveRunIndexForRun(root, persisted);
   } catch {
     /* index self-heals (rebuild-on-miss + startup rebuild) */
   }
-  return { outcome: 'published', run };
+  return { outcome: 'published', run: persisted };
 }
 
 /* ── Active-run index (GRS perf batch) ─────────────────────────────────────────
@@ -812,6 +832,25 @@ function updateActiveRunIndexForRun(root: string, run: WorkflowRun): void {
  *     `'manual'|'schedule'` string; it is wrapped into the `WorkflowRunTrigger` object
  *     (`{kind}` — no cronJobId/fireIso existed to lose) so every consumer sees ONE shape.
  */
+function isWorkflowRunParameters(value: unknown): value is WorkflowRunParameters {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return isPlainPayload(record.input)
+    && (record.idempotencyKey === undefined || typeof record.idempotencyKey === 'string');
+}
+
+function isWorkflowRunInvocation(value: unknown): value is WorkflowRunInvocation {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return keys.length === 2
+    && keys[0] === 'reportMode'
+    && keys[1] === 'sessionId'
+    && typeof record.sessionId === 'string'
+    && record.sessionId.trim() !== ''
+    && (record.reportMode === 'resume' || record.reportMode === 'silent');
+}
+
 function normalizeRun(run: WorkflowRun): WorkflowRun {
   let out = run;
   const schemaVersion = typeof out.schemaVersion === 'number' ? out.schemaVersion : 1;
@@ -821,6 +860,25 @@ function normalizeRun(run: WorkflowRun): WorkflowRun {
   if (typeof (out.trigger as unknown) === 'string') {
     const kind = (out.trigger as unknown as string) === 'schedule' ? 'schedule' : 'manual';
     out = { ...out, trigger: { kind } };
+  }
+  if (schemaVersion < WORKFLOW_RUN_SCHEMA_VERSION) {
+    const legacyInvocation = (out as unknown as Record<string, unknown>).invocation;
+    const { invocation: _legacyInvocation, ...legacy } = out as WorkflowRun & { invocation?: unknown };
+    out = {
+      ...legacy,
+      revision: 0,
+      ...(isWorkflowRunParameters(legacyInvocation) ? { parameters: legacyInvocation } : {}),
+    } as WorkflowRun;
+  } else {
+    if (!Number.isSafeInteger(out.revision) || (out.revision ?? 0) < 1) {
+      throw new WorkflowRunStoreError('bad-input', `run "${out.runId}" has an invalid v3 revision`);
+    }
+    if (out.parameters !== undefined && !isWorkflowRunParameters(out.parameters)) {
+      throw new WorkflowRunStoreError('bad-input', `run "${out.runId}" has invalid v3 parameters`);
+    }
+    if (out.invocation !== undefined && !isWorkflowRunInvocation(out.invocation)) {
+      throw new WorkflowRunStoreError('bad-input', `run "${out.runId}" has an invalid v3 invocation relation`);
+    }
   }
   return out;
 }

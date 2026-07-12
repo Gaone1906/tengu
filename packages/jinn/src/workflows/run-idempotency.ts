@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { EditableWorkflowDefinition } from './definition.js';
+import type { WorkflowRunInvocation } from './run-store.js';
 
 export const WORKFLOW_RUN_IDEMPOTENCY_CONFLICT = 'workflow-run-idempotency-conflict' as const;
 export const WORKFLOW_RUN_IDEMPOTENCY_CONFLICT_MESSAGE =
@@ -18,6 +19,7 @@ export interface WorkflowRunInvocationRequest {
   definitionDigest: string;
   trigger: CanonicalWorkflowRunTrigger;
   input: Record<string, unknown>;
+  invocation?: WorkflowRunInvocation;
   initialStepOverrides: Record<string, unknown>;
   principal: string;
 }
@@ -70,6 +72,7 @@ export function createWorkflowRunInvocationRequest(args: {
   definition: EditableWorkflowDefinition;
   trigger: CanonicalWorkflowRunTrigger;
   input?: Record<string, unknown>;
+  invocation?: WorkflowRunInvocation;
   initialStepOverrides?: Record<string, unknown>;
   principal: string;
 }): WorkflowRunInvocationRequest {
@@ -79,6 +82,7 @@ export function createWorkflowRunInvocationRequest(args: {
     definitionDigest: digestWorkflowDefinition(args.definition),
     trigger: args.trigger,
     input: args.input ?? {},
+    ...(args.invocation ? { invocation: args.invocation } : {}),
     initialStepOverrides: args.initialStepOverrides ?? {},
     principal: args.principal,
   })) as WorkflowRunInvocationRequest;

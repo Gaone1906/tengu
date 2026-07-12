@@ -3,16 +3,15 @@ import crypto from "node:crypto";
 import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
-// The two output-parity actions (chat attachment + connector delivery) admitted
-// in 2026-07 add 122 Pi-wrapper tokens. Keep a narrow 25-token headroom rather
-// than deleting real capability to preserve the former round-number cap.
-const MAX_MANIFEST_TOKENS = 7100;
+// The two run tools now advertise the sole reportMode contract. Keep a narrow
+// 24-token headroom over the pinned Pi projection rather than hiding capability.
+const MAX_MANIFEST_TOKENS = 7175;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 6764, sha256: "d566c2174ad7c49514e6fd9b5dd89a3e910961e04451bdd3c06e3f65975af683" },
-  pi: { tokens: 7075, sha256: "9dd60ccf0b868a14d02f28b2bfe24beac8135a8ba299d8f98589b428a18d9046" },
-  openai: { tokens: 6888, sha256: "8827ae87cadfa7df860829827248a3c9d64c51307fe0a278dbfcd783b5f532e1" },
+  rpc: { tokens: 6840, sha256: "7590820f909650d71b853625d051f363386b218203edf248f622e79bd93e99f3" },
+  pi: { tokens: 7151, sha256: "59684d52826d81df8b69501ed730604a460400940fa3ec7af8a1fbd1c0803b12" },
+  openai: { tokens: 6964, sha256: "5e15ccb12c30e1dcf6d72ca4c9a0bc2389f3f15c2f83981aa294575c773f2269" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -141,10 +140,12 @@ const EXPECTED_ENUMS = {
   ],
   search_messages: [["properties.role", ["user", "assistant"]]],
   search_sessions: [["properties.status", ["idle", "running", "error", "waiting", "interrupted"]]],
+  run_workflow_by_name: [["properties.reportMode", ["resume", "silent"]]],
   search_work_items: [
     ["properties.status", ["backlog", "assigned", "executing", "in_review", "done", "blocked", "escalated", "cancelled"]],
     ["properties.source", ["human", "delegation", "cron", "workflow", "session", "connector", "goal"]],
   ],
+  start_workflow_run: [["properties.reportMode", ["resume", "silent"]]],
   update_work_item: [["properties.status", ["executing", "in_review", "blocked", "escalated", "done"]]],
 } as const;
 
@@ -159,7 +160,7 @@ function collectEnums(value: unknown, path: string[] = []): Array<[string, strin
 }
 
 describe("tool manifest budget", () => {
-  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7100 o200k_base tokens", async () => {
+  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7175 o200k_base tokens", async () => {
     const tools = buildTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
     const wrappers = {
       rpc: { jsonrpc: "2.0", id: 1, result: { tools } },

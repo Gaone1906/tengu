@@ -28,12 +28,17 @@ fs.writeFileSync(
   path.join(orgDir, 'coo.yaml'),
   'name: coo\ndisplayName: COO\ndepartment: platform\nrank: executive\nengine: codex\nmodel: gpt-5.5\npersona: Runs the company.\n',
 );
+fs.writeFileSync(
+  path.join(orgDir, 'worker.yaml'),
+  'name: worker\ndisplayName: Worker\ndepartment: platform\nrank: employee\nreportsTo: coo\nengine: codex\nmodel: gpt-5.5\npersona: Executes platform work.\n',
+);
 
 type Api = typeof import('../api.js');
 type Registry = typeof import('../../sessions/registry.js');
 let api: Api;
 let registry: Registry;
 let cooSession: import('../../shared/types.js').Session;
+let workerSession: import('../../shared/types.js').Session;
 
 function makeRes() {
   let status = 200;
@@ -107,10 +112,14 @@ async function call(method: string, url: string, body?: unknown, context: import
 }
 
 function cooHeaders(): Record<string, string> {
+  return sessionHeaders(cooSession);
+}
+
+function sessionHeaders(session: import('../../shared/types.js').Session): Record<string, string> {
   return {
     [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
-    [CALLER_SESSION_HEADER]: cooSession.id,
-    [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(cooSession.id),
+    [CALLER_SESSION_HEADER]: session.id,
+    [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(session.id),
   };
 }
 
@@ -120,11 +129,24 @@ async function callAsCoo(method: string, url: string, body?: unknown, context: i
   return cap;
 }
 
+async function callAsSession(session: import('../../shared/types.js').Session, method: string, url: string, body?: unknown, context: import('../api.js').ApiContext = ctx) {
+  const cap = makeRes();
+  await api.handleApiRequest(makeReq(method, url, body, sessionHeaders(session)), cap.res, context);
+  return cap;
+}
+
+async function callWithHeaders(method: string, url: string, body: unknown, headers: Record<string, string>, context: import('../api.js').ApiContext = ctx) {
+  const cap = makeRes();
+  await api.handleApiRequest(makeReq(method, url, body, headers), cap.res, context);
+  return cap;
+}
+
 beforeAll(async () => {
   api = await import('../api.js');
   registry = await import('../../sessions/registry.js');
   registry.initDb();
   cooSession = registry.createSession({ engine: 'codex', source: 'web', sourceRef: 'coo', title: 'coo', employee: 'coo' });
+  workerSession = registry.createSession({ engine: 'codex', source: 'web', sourceRef: 'worker', title: 'worker', employee: 'worker' });
 });
 
 beforeEach(() => {
@@ -445,7 +467,7 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     edges: edges.map((e) => ({ ...e, kind: 'sequence' })),
   });
 
-  it('POST :id/run persists a schemaVersion-2 run with an honest earned terminal for an all-inline chain', async () => {
+  it('POST :id/run persists a schemaVersion-3 run with an honest earned terminal for an all-inline chain', async () => {
     const linear = inlineDef('run-linear', [
       { id: 'e0', from: 'trg', to: 'sa' },
       { id: 'e1', from: 'sa', to: 'sb' },
@@ -453,18 +475,115 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     await call('POST', '/api/workflow-definitions', linear);
     const res = await call('POST', '/api/workflow-definitions/run-linear/run', undefined, runCtx);
     expect(res.status).toBe(201);
-    const run = res.body as { runId: string; schemaVersion: number; status: string; order: string[]; orderWarning?: unknown; invocation?: unknown };
-    expect(run.schemaVersion).toBe(2);
+    const run = res.body as { runId: string; schemaVersion: number; revision: number; status: string; order: string[]; orderWarning?: unknown; parameters?: unknown; invocation?: unknown };
+    expect(run.schemaVersion).toBe(3);
+    expect(run.revision).toBeGreaterThanOrEqual(1);
     expect(run.status).toBe('completed'); // all-inline: every step genuinely finished in the drive
     expect(run.order).toEqual(['sa', 'sb']);
     expect(run.orderWarning).toBeUndefined();
     expect(run.invocation).toBeUndefined(); // bodyless/manual callers remain compatible
-    // The persisted record carries the same v2 stamp.
+    expect(run.parameters).toBeUndefined();
+    // The persisted record carries the same v3 stamp.
     const onDisk = JSON.parse(
       fs.readFileSync(path.join(evidenceRoot, 'reports', 'runs', 'run-linear', `${run.runId}.json`), 'utf8'),
     );
-    expect(onDisk.schemaVersion).toBe(2);
+    expect(onDisk.schemaVersion).toBe(3);
+    expect(onDisk.revision).toBe(run.revision);
     expect(onDisk.status).toBe('completed');
+  });
+
+  it('binds default-resume invocation identically for verified root and ordinary employee sessions', async () => {
+    for (const [label, session] of [['root', cooSession], ['employee', workerSession]] as const) {
+      const id = `run-rank-${label}`;
+      const definition = inlineDef(id, [
+        { id: 'e0', from: 'trg', to: 'sa' },
+        { id: 'e1', from: 'sa', to: 'sb' },
+      ]);
+      const created = await callAsSession(session, 'POST', '/api/workflow-definitions', definition, runCtx);
+      expect(created.status).toBe(201);
+
+      const started = await callAsSession(session, 'POST', `/api/workflow-definitions/${id}/run`, {
+        input: { ticket: 'ABC-42' },
+      }, runCtx);
+
+      expect(started.status).toBe(201);
+      expect(started.body).toMatchObject({
+        schemaVersion: 3,
+        parameters: { input: { ticket: 'ABC-42' } },
+        invocation: { sessionId: session.id, reportMode: 'resume' },
+      });
+    }
+  });
+
+  it('persists explicit silent, replays the original relation, and conflicts when report intent changes', async () => {
+    const definition = inlineDef('run-silent-replay', [
+      { id: 'e0', from: 'trg', to: 'sa' },
+      { id: 'e1', from: 'sa', to: 'sb' },
+    ]);
+    expect((await callAsSession(workerSession, 'POST', '/api/workflow-definitions', definition, runCtx)).status).toBe(201);
+    const request = {
+      input: { ticket: 'ABC-42' },
+      idempotencyKey: 'silent-request-42',
+      reportMode: 'silent',
+    };
+
+    const first = await callAsSession(workerSession, 'POST', '/api/workflow-definitions/run-silent-replay/run', request, runCtx);
+    expect(first.status).toBe(201);
+    expect(first.body).toMatchObject({
+      parameters: { input: { ticket: 'ABC-42' }, idempotencyKey: 'silent-request-42' },
+      invocation: { sessionId: workerSession.id, reportMode: 'silent' },
+    });
+
+    const replay = await callAsSession(workerSession, 'POST', '/api/workflow-definitions/run-silent-replay/run', request, runCtx);
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({
+      runId: (first.body as { runId: string }).runId,
+      invocation: { sessionId: workerSession.id, reportMode: 'silent' },
+    });
+
+    const changed = await callAsSession(workerSession, 'POST', '/api/workflow-definitions/run-silent-replay/run', {
+      ...request,
+      reportMode: 'resume',
+    }, runCtx);
+    expect(changed.status).toBe(409);
+    expect(changed.body).toMatchObject({ code: 'workflow-run-idempotency-conflict', runId: (first.body as { runId: string }).runId });
+  });
+
+  it('never trusts a client-supplied session id and rejects an unverified identified caller', async () => {
+    const definition = inlineDef('run-verified-caller-only', [
+      { id: 'e0', from: 'trg', to: 'sa' },
+      { id: 'e1', from: 'sa', to: 'sb' },
+    ]);
+    await call('POST', '/api/workflow-definitions', definition);
+
+    const unverified = await callWithHeaders('POST', '/api/workflow-definitions/run-verified-caller-only/run', {
+      reportMode: 'silent',
+      sessionId: cooSession.id,
+      invocation: { sessionId: cooSession.id, reportMode: 'silent' },
+    }, {
+      [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+      [CALLER_SESSION_HEADER]: workerSession.id,
+    }, runCtx);
+    expect(unverified.status).toBe(403);
+
+    const operator = await call('POST', '/api/workflow-definitions/run-verified-caller-only/run', {
+      reportMode: 'silent',
+      sessionId: cooSession.id,
+      invocation: { sessionId: cooSession.id, reportMode: 'silent' },
+    }, runCtx);
+    expect(operator.status).toBe(201);
+    expect((operator.body as { invocation?: unknown }).invocation).toBeUndefined();
+  });
+
+  it('rejects report modes outside the exact resume|silent vocabulary', async () => {
+    const definition = inlineDef('run-report-mode-invalid', [
+      { id: 'e0', from: 'trg', to: 'sa' },
+      { id: 'e1', from: 'sa', to: 'sb' },
+    ]);
+    await call('POST', '/api/workflow-definitions', definition);
+    const response = await callAsCoo('POST', '/api/workflow-definitions/run-report-mode-invalid/run', { reportMode: 'notify' }, runCtx);
+    expect(response.status).toBe(400);
+    expect((response.body as { error: string }).error).toMatch(/reportMode.*resume.*silent/i);
   });
 
   it('POST :id/run replays exact intent with 200 and rejects changed intent with a sanitized typed 409', async () => {
@@ -481,13 +600,15 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     expect(first.status).toBe(201);
     const firstRun = first.body as {
       runId: string;
-      invocation: { input: Record<string, unknown>; idempotencyKey: string };
+      parameters: { input: Record<string, unknown>; idempotencyKey: string };
+      invocation?: unknown;
       trigger: { fireRef?: string };
     };
-    expect(firstRun.invocation).toEqual({
+    expect(firstRun.parameters).toEqual({
       input: { ticket: { id: 'ABC-42' }, priority: 2 },
       idempotencyKey: 'request-42',
     });
+    expect(firstRun.invocation).toBeUndefined();
     expect(firstRun.trigger.fireRef).toBe('request-42');
 
     const replay = await call('POST', '/api/workflow-definitions/run-input/run', {
@@ -545,7 +666,7 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     const run = started.body as {
       runId: string;
       status: string;
-      invocation: { input: Record<string, unknown> };
+      parameters: { input: Record<string, unknown> };
       stepOverrides: Record<string, { prompt: string }>;
     };
     expect(run.status).toBe('parked');
@@ -556,7 +677,7 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
     }, promptRunCtx);
     expect(edited.status).toBe(200);
     expect(edited.body).toMatchObject({
-      invocation: { input: { ticket: 'ABC-42' } },
+      parameters: { input: { ticket: 'ABC-42' } },
       stepOverrides: { verify: { prompt: 'Run the revised pending-phase checks.' } },
       stepPromptRevision: 1,
       stepPromptEdits: [{
@@ -597,39 +718,44 @@ describe('run route — GRS-014b sequential engine + honest statuses + legacy ma
       ]),
       name: 'full-cycle-workflow',
     };
-    await call('POST', '/api/workflow-definitions', definition);
+    await callAsSession(workerSession, 'POST', '/api/workflow-definitions', definition, runCtx);
 
-    const first = await call('POST', '/api/workflow-runs/by-name', {
+    const first = await callAsSession(workerSession, 'POST', '/api/workflow-runs/by-name', {
       name: 'full-cycle-workflow',
       input: { request: 'implement this', ticket: 'ABC-42' },
       idempotencyKey: 'agent-request-42',
+      reportMode: 'resume',
     }, runCtx);
     expect(first.status).toBe(201);
     const firstRun = first.body as {
       runId: string;
       workflowId: string;
-      invocation: { input: Record<string, unknown>; idempotencyKey: string };
+      parameters: { input: Record<string, unknown>; idempotencyKey: string };
+      invocation: { sessionId: string; reportMode: string };
       trigger: { source: string; event: string };
     };
     expect(firstRun.workflowId).toBe('run-by-name-record');
     expect(firstRun.trigger).toMatchObject({ source: 'manual', event: 'workflow.manual_started' });
-    expect(firstRun.invocation).toEqual({
+    expect(firstRun.parameters).toEqual({
       input: { request: 'implement this', ticket: 'ABC-42' },
       idempotencyKey: 'agent-request-42',
     });
+    expect(firstRun.invocation).toEqual({ sessionId: workerSession.id, reportMode: 'resume' });
 
-    const replay = await call('POST', '/api/workflow-runs/by-name', {
+    const replay = await callAsSession(workerSession, 'POST', '/api/workflow-runs/by-name', {
       name: 'full-cycle-workflow',
       input: { ticket: 'ABC-42', request: 'implement this' },
       idempotencyKey: 'agent-request-42',
+      reportMode: 'resume',
     }, runCtx);
     expect(replay.status).toBe(200);
     expect((replay.body as typeof firstRun).runId).toBe(firstRun.runId);
 
-    const duplicate = await call('POST', '/api/workflow-runs/by-name', {
+    const duplicate = await callAsSession(workerSession, 'POST', '/api/workflow-runs/by-name', {
       name: 'full-cycle-workflow',
       input: { request: 'must not replace the original input' },
       idempotencyKey: 'agent-request-42',
+      reportMode: 'resume',
     }, runCtx);
     expect(duplicate.status).toBe(409);
     expect(duplicate.body).toMatchObject({
