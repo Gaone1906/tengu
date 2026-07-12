@@ -2554,11 +2554,12 @@ export async function handleApiRequest(
       if (!auth.ok) return json(res, { error: auth.reason || "Unauthorized" }, 401);
       const requestingSessionId = headerValue(req, "x-jinn-session-id")?.trim();
       if (requestingSessionId) {
+        const requestingSession = getSession(requestingSessionId);
+        if (requestingSession && rejectLegacyWorkflowSessionAccess(res, requestingSession, "mutation")) return;
         const completed = markRunningQueueItemsCompletedForSession(requestingSessionId);
         if (completed > 0) {
           logger.info(`Completed ${completed} active queue item(s) for restart-requesting session ${requestingSessionId}`);
         }
-        const requestingSession = getSession(requestingSessionId);
         const transportMeta = (requestingSession?.transportMeta && typeof requestingSession.transportMeta === "object" && !Array.isArray(requestingSession.transportMeta))
           ? { ...(requestingSession.transportMeta as JsonObject) }
           : {};
@@ -4692,6 +4693,7 @@ export async function handleApiRequest(
         }
       }
       const delegatorSession = parentSessionId ? getSession(parentSessionId) : undefined;
+      if (delegatorSession && rejectLegacyWorkflowSessionAccess(res, delegatorSession, "mutation")) return;
 
       const title = (
         typeof body.title === "string" && body.title.trim() ? (body.title as string).trim() : task.split("\n")[0].trim()
@@ -4947,6 +4949,8 @@ export async function handleApiRequest(
           logger.warn(`Ignoring unknown x-jinn-caller-session "${spawnCaller.callerId}" on session spawn`);
         }
       }
+      const parentSession = typeof body.parentSessionId === "string" ? getSession(body.parentSessionId) : undefined;
+      if (parentSession && rejectLegacyWorkflowSessionAccess(res, parentSession, "mutation")) return;
       const config = context.getConfig();
       const employeeName = coercePortalEmployee(body.employee, config.portal?.portalName);
       let employeeDefaults: { engine: string; model: string; effortLevel?: string; employee?: string } | undefined;

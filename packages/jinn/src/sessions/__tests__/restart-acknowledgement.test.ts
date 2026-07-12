@@ -38,4 +38,54 @@ describe("consumeRestartAcknowledgements", () => {
     expect(registry.consumeRestartAcknowledgements()).toBe(0);
     expect(registry.getMessages(session.id).filter((message) => message.content === "Gateway restarted successfully.")).toHaveLength(1);
   });
+
+  it("acknowledges ordinary sessions while leaving a legacy Workflow run marker and messages byte-identical", () => {
+    const legacy = registry.createSession({
+      engine: "workflow",
+      source: "web",
+      sourceRef: "workflow-run:restart-legacy:parent",
+      sessionKey: "workflow-run:restart-legacy:parent",
+      workflowProvenance: {
+        kind: "run",
+        workflowId: "restart-review",
+        workflowName: "restart-review",
+        runId: "restart-legacy",
+        triggerSource: "manual",
+      },
+    });
+    registry.updateSession(legacy.id, {
+      transportMeta: {
+        keep: "legacy",
+        restartAcknowledgedAt: "2026-07-11T08:00:00.000Z",
+      },
+    });
+    registry.insertMessage(legacy.id, "notification", "Historical restart evidence");
+
+    const ordinary = registry.createSession({
+      engine: "claude",
+      source: "web",
+      sourceRef: "web:restart-ordinary-control",
+    });
+    registry.updateSession(ordinary.id, {
+      transportMeta: {
+        keep: "ordinary",
+        restartAcknowledgedAt: "2026-07-11T08:00:00.000Z",
+      },
+    });
+
+    const database = registry.initDb();
+    const legacySnapshot = () => ({
+      session: database.prepare("SELECT * FROM sessions WHERE id = ?").get(legacy.id),
+      messages: database.prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY id").all(legacy.id),
+    });
+    const before = legacySnapshot();
+
+    expect(registry.consumeRestartAcknowledgements()).toBe(1);
+    expect(legacySnapshot()).toEqual(before);
+    expect(registry.getMessages(ordinary.id).at(-1)).toMatchObject({
+      role: "notification",
+      content: "Gateway restarted successfully.",
+    });
+    expect(registry.getSession(ordinary.id)?.transportMeta).toEqual({ keep: "ordinary" });
+  });
 });

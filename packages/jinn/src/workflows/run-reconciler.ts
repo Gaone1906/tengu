@@ -73,19 +73,23 @@ import { createPendingWorkflowGateApproval, freezeWorkflowApprovalEscalation } f
  * durable: it persists every transition (atomic run-file overwrites), executes
  * dispatch intents (mint-before-spawn: persist `dispatching`, spawn under the
  * deterministic sessionKey, persist `running`), and re-advances until the run is
- * in flight, parked, or terminal.
+ * in flight, quietly parked, or terminal.
  *
  * WHO ADVANCES A RUN (design D3 — no second scheduler):
  *   1. `startWorkflowRun` — the POST …/run route mints the durable record BEFORE any
  *      spawn, then drives the first advancement.
  *   2. `startWorkflowRunReconciler` — a 15s sweep (the same setInterval primitive
  *      `gateway/status-reconciler.ts` uses) plus one immediate STARTUP sweep. It reads
- *      each running run's step session by deterministic sessionKey and re-derives.
+ *      each running run's step session by deterministic sessionKey and re-derives;
+ *      native-approved parked runs with in-flight siblings are probed for truthful
+ *      sibling evidence without auto-resolving or unparking them.
  *      Boot ordering matters: the gateway starts it after `recoverStaleSessions()` has
  *      stamped dead sessions `interrupted`, so the sweep sees truthful evidence —
  *      that IS the crash-recovery story (GRS-003a pattern).
  *   3. (GRS-014e) the resolve-gate route will unpark and call back into the driver.
- *   Parked runs are deliberately NOT swept — nothing polls a human.
+ *   Quiet parked runs are not swept — nothing polls a human. Native-approved
+ *   parked runs with in-flight siblings are swept probe-only and never auto-resolve
+ *   or unpark.
  *
  * CONCURRENCY: exclusive initial publication elects one owner across processes;
  * only that owner may mint/spawn. A per-runId in-process mutex then
@@ -1067,7 +1071,7 @@ export async function resolveWorkflowRunGate(
 
 /* ── Sweeping ───────────────────────────────────────────────────────────────── */
 
-/** One sweep: advance every `running` run on the evidence root. Returns how many runs
+/** One sweep: reconcile every sweepable active run on the evidence root. Returns how many runs
  * were examined. Per-run failures are logged, never fatal to the sweep. */
 export async function sweepWorkflowRuns(deps: RunDriverDeps): Promise<number> {
   let examined = 0;
@@ -1084,9 +1088,10 @@ export async function sweepWorkflowRuns(deps: RunDriverDeps): Promise<number> {
     }
     if (!run) continue; // run file gone — stale index entry, pruned on next rebuild
     if (run.status === 'parked' && !run.parked?.approval) continue;
-    // Sweepable (GRS-016a): running runs, plus parked runs whose sibling sessions
-    // are still in flight (probe-only settles — a park freezes dispatch, not
-    // evidence). Parked-and-quiet runs wait on a human; terminals are done.
+    // Sweepable (GRS-016a): running runs, plus native-approved parked runs whose
+    // sibling sessions are still in flight (probe-only settles — a park freezes
+    // dispatch, not evidence). Parked-and-quiet runs wait on a human; terminals
+    // are done.
     if (run.status !== 'running' && !(run.status === 'parked' && hasInFlightSteps(run))) continue;
     examined++;
     try {
@@ -1118,7 +1123,7 @@ export function startWorkflowRunReconciler(deps: RunDriverDeps, opts: RunReconci
     sweeping = true;
     try {
       const examined = await sweepWorkflowRuns(deps);
-      if (examined > 0) deps.log?.('info', `[workflow-runs] ${label} sweep advanced ${examined} running run(s)`);
+      if (examined > 0) deps.log?.('info', `[workflow-runs] ${label} sweep reconciled ${examined} active run(s)`);
     } catch (err) {
       deps.log?.('warn', `[workflow-runs] ${label} sweep failed: ${(err as Error).message}`);
     } finally {

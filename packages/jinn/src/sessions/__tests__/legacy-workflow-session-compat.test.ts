@@ -66,7 +66,8 @@ describe("legacy Workflow run Session compatibility", () => {
     });
     database.prepare(`
       UPDATE sessions
-      SET id = 'legacy-run-session', status = 'running', last_activity = '2026-01-02T03:04:05.000Z'
+      SET id = 'legacy-run-session', status = 'running', last_activity = '2026-01-02T03:04:05.000Z',
+          transport_meta = '{"keep":"legacy-evidence","restartAcknowledgedAt":"2026-01-02T03:04:05.000Z"}'
       WHERE id = ?
     `).run(createdParent.id);
 
@@ -89,8 +90,10 @@ describe("legacy Workflow run Session compatibility", () => {
     database.prepare("UPDATE sessions SET id = 'legacy-phase-session' WHERE id = ?").run(createdPhase.id);
 
     database.prepare(`
-      INSERT INTO messages (id, session_id, role, content, timestamp)
-      VALUES ('legacy-message', 'legacy-run-session', 'notification', 'Historical callback', 1767323045000)
+      INSERT INTO messages (id, session_id, role, content, timestamp, partial)
+      VALUES
+        ('legacy-message', 'legacy-run-session', 'notification', 'Historical callback', 1767323045000, NULL),
+        ('legacy-partial', 'legacy-run-session', 'assistant', 'Historical partial evidence', 1767323045001, 1)
     `).run();
     database.prepare(`
       INSERT INTO queue_items (
@@ -128,6 +131,23 @@ describe("legacy Workflow run Session compatibility", () => {
         )
     `).run();
 
+    const ordinary = registry.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: "web:ordinary-boot-cleanup",
+      sessionKey: "web:ordinary-boot-cleanup",
+    });
+    registry.updateSession(ordinary.id, {
+      transportMeta: {
+        keep: "ordinary",
+        restartAcknowledgedAt: "2026-01-02T03:04:05.000Z",
+      },
+    });
+    database.prepare(`
+      INSERT INTO messages (id, session_id, role, content, timestamp, partial)
+      VALUES ('ordinary-partial', ?, 'assistant', 'Stranded ordinary stream', 1767323045002, 1)
+    `).run(ordinary.id);
+
     const checksumBeforeReopen = legacyRowsChecksum();
     registry.__closeDbForTest();
     registry.initDb();
@@ -137,11 +157,26 @@ describe("legacy Workflow run Session compatibility", () => {
     expect(registry.recoverStaleSessions()).toBe(0);
     expect(registry.recoverStaleQueueItems()).toBe(0);
     expect(legacyRowsChecksum()).toBe(checksumBeforeReopen);
+    expect(registry.clearAllPartialMessages()).toBe(1);
+    expect(legacyRowsChecksum()).toBe(checksumBeforeReopen);
+    expect(registry.consumeRestartAcknowledgements()).toBe(1);
+    expect(legacyRowsChecksum()).toBe(checksumBeforeReopen);
+    expect(registry.getMessages(ordinary.id).map((message) => message.content)).toEqual([
+      "Gateway restarted successfully.",
+    ]);
+    expect(registry.getSession(ordinary.id)?.transportMeta).toEqual({ keep: "ordinary" });
 
     const legacyParent = registry.getSession("legacy-run-session")!;
     const phase = registry.getSession("legacy-phase-session")!;
     expect(legacyParent.workflowProvenance?.kind).toBe("run");
-    expect(registry.getMessages(legacyParent.id).map((message) => message.id)).toEqual(["legacy-message"]);
+    expect(registry.getMessages(legacyParent.id).map((message) => message.id)).toEqual([
+      "legacy-message",
+      "legacy-partial",
+    ]);
+    expect(legacyParent.transportMeta).toEqual({
+      keep: "legacy-evidence",
+      restartAcknowledgedAt: "2026-01-02T03:04:05.000Z",
+    });
     expect(registry.getQueueItems(legacyParent.sessionKey).map((item) => item.id)).toEqual(["legacy-queue"]);
     expect(registry.getCallbackDelivery("legacy-delivery")).toBeDefined();
     expect(registry.getCallbackDelivery("legacy-delivery-accepted")).toMatchObject({

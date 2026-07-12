@@ -2091,7 +2091,7 @@ export function consumeRestartAcknowledgements(): number {
   const database = initDb();
   const jsonPath = `$.${RESTART_ACK_META_KEY}`;
   const rows = database
-    .prepare("SELECT id FROM sessions WHERE json_type(transport_meta, ?) = 'text'")
+    .prepare("SELECT id FROM sessions WHERE json_type(transport_meta, ?) = 'text' AND (workflow_kind IS NULL OR workflow_kind <> 'run')")
     .all(jsonPath) as Array<{ id: string }>;
   if (rows.length === 0) return 0;
 
@@ -2118,7 +2118,7 @@ export function consumeRestartAcknowledgements(): number {
 export function getInterruptedSessions(): Session[] {
   const db = initDb();
   const rows = db.prepare(
-    "SELECT * FROM sessions WHERE status = 'interrupted' AND engine_session_id IS NOT NULL ORDER BY last_activity DESC",
+    "SELECT * FROM sessions WHERE status = 'interrupted' AND engine_session_id IS NOT NULL AND (workflow_kind IS NULL OR workflow_kind <> 'run') ORDER BY last_activity DESC",
   ).all() as Record<string, unknown>[];
   return rows.map(rowToSession);
 }
@@ -2794,7 +2794,15 @@ export function settlePartialMessages(sessionId: string, preserveMessageIds: Rea
 /** Boot sweep: drop any partial blocks stranded by a mid-turn gateway restart. */
 export function clearAllPartialMessages(): number {
   const db = initDb();
-  return db.prepare('DELETE FROM messages WHERE partial = 1').run().changes;
+  return db.prepare(`
+    DELETE FROM messages
+    WHERE partial = 1
+      AND NOT EXISTS (
+        SELECT 1 FROM sessions
+        WHERE sessions.id = messages.session_id
+          AND sessions.workflow_kind = 'run'
+      )
+  `).run().changes;
 }
 
 interface CallbackDeliveryRow {
