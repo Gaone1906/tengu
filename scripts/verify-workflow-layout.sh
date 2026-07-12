@@ -4,7 +4,11 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ORIGINAL_HOME="$HOME"
 HELPER="${JINN_SANDBOX_HELPER:-$ORIGINAL_HOME/.jinn/skills/jinn-sandbox/scripts/jinn-sandbox.sh}"
-PORT="${JINN_VERIFY_PORT:-7800}"
+PORT="${JINN_VERIFY_PORT:-8060}"
+TMP_BASE="${JINN_VERIFY_TMP_ROOT:-/tmp}"
+MIN_FREE_BYTES="${JINN_VERIFY_MIN_FREE_BYTES:-2147483648}"
+MIN_FREE_INODES="${JINN_VERIFY_MIN_FREE_INODES:-10000}"
+POLICY="$REPO/e2e/workflow-layout/harness-policy.mjs"
 RUN_AUTHORS=0
 
 # Keep the helper, gateway, seed scripts, and Playwright on one Node ABI. On
@@ -20,7 +24,8 @@ export PATH="$NODE_DIR:$PATH"
 
 if [[ "${1:-}" == "--with-authors" ]]; then RUN_AUTHORS=1; shift; fi
 if [[ $# -ne 0 ]]; then echo "Usage: $0 [--with-authors]" >&2; exit 2; fi
-if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 7800 )); then echo "JINN_VERIFY_PORT must be an integer at or above 7800" >&2; exit 2; fi
+if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 8060 )); then echo "JINN_VERIFY_PORT must be an integer at or above 8060" >&2; exit 2; fi
+if [[ ! "$MIN_FREE_BYTES" =~ ^[0-9]+$ || ! "$MIN_FREE_INODES" =~ ^[0-9]+$ ]]; then echo "disk preflight limits must be non-negative integers" >&2; exit 2; fi
 if [[ ! -x "$HELPER" ]]; then echo "Sandbox helper not found: $HELPER" >&2; exit 2; fi
 if [[ "$RUN_AUTHORS" -eq 1 && "${JINN_IMPLEMENTATION_GREEN:-}" != "1" ]]; then
   echo "Author probes require JINN_IMPLEMENTATION_GREEN=1 after focused implementation gates pass" >&2
@@ -28,8 +33,12 @@ if [[ "$RUN_AUTHORS" -eq 1 && "${JINN_IMPLEMENTATION_GREEN:-}" != "1" ]]; then
 fi
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then echo "Candidate port $PORT is already in use" >&2; exit 2; fi
 
+# Fail before allocating the run root when either byte or inode headroom is
+# insufficient. Both thresholds are overrideable for constrained CI hosts.
+node "$POLICY" preflight "$TMP_BASE" "$MIN_FREE_BYTES" "$MIN_FREE_INODES"
+
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-workflow-layout"
-VERIFY_ROOT="$(mktemp -d /tmp/jinn-workflow-layout.XXXXXX)"
+VERIFY_ROOT="$(mktemp -d "$TMP_BASE/jinn-workflow-layout.XXXXXX")"
 HOST_HOME="$VERIFY_ROOT/host"
 # The daemon lifecycle intentionally sanitizes inherited CODEX_HOME. Put the
 # disposable auth/config at its HOME-based fallback as well, so detached child
@@ -40,22 +49,58 @@ ARTIFACTS="$SANDBOX_HOME/sandbox-artifacts/$RUN_ID"
 BASE_URL="http://127.0.0.1:$PORT"
 SOURCE_AUTH="${JINN_VERIFY_CODEX_AUTH:-${CODEX_HOME:-$ORIGINAL_HOME/.codex}/auth.json}"
 STARTED=0
+EXPECTED_CHECKS=111
+if [[ "$RUN_AUTHORS" -eq 1 ]]; then EXPECTED_CHECKS=151; fi
+
+# Refuse any target that is not the exact loopback candidate and dedicated
+# sandbox home beneath this newly-created verification root.
+if ! node "$POLICY" assert-target "$VERIFY_ROOT" "$SANDBOX_HOME" "$BASE_URL" >/dev/null; then
+  echo "Refusing non-sandbox workflow-layout verification target" >&2
+  exit 2
+fi
 
 cleanup() {
+  local status=$?
+  trap - EXIT
   if [[ "$STARTED" -eq 1 ]]; then
     env HOME="$HOST_HOME" CODEX_HOME="$CODEX_BASE" JINN_REPO="$REPO" \
       "$HELPER" stop workflow-layout-verification >/dev/null 2>&1 || true
+    for _ in {1..20}; do
+      if ! lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then break; fi
+      sleep 0.25
+    done
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+      echo "Incomplete verification: candidate listener leak remains on port $PORT" >&2
+      status=3
+    fi
   fi
-  rm -rf "$CODEX_BASE"
-  find "$SANDBOX_HOME/tmp/codex-homes" \( -name auth.json -o -name config.toml \) -delete 2>/dev/null || true
-  rm -f "$SANDBOX_HOME/gateway.json" "$SANDBOX_HOME/secrets/mcp-session-capability.key"
-  find "$VERIFY_ROOT" -name auth.json -delete 2>/dev/null || true
-  echo "Scrubbed retained Codex auth links/overlay config, gateway token, and MCP capability key."
+  if [[ -d "$ARTIFACTS" ]]; then
+    if ! node "$POLICY" finalize "$ARTIFACTS" >/dev/null; then status=3; fi
+    if ! node "$POLICY" require-complete "$ARTIFACTS" "$EXPECTED_CHECKS" >/dev/null; then status=3; fi
+  elif [[ "$STARTED" -eq 1 ]]; then
+    echo "Incomplete verification: artifact root is missing" >&2
+    status=3
+  fi
+  local cleanup_targets=()
+  for target in \
+    "$CODEX_BASE" \
+    "$SANDBOX_HOME/tmp" \
+    "$SANDBOX_HOME/cache" \
+    "$SANDBOX_HOME/gateway.json" \
+    "$SANDBOX_HOME/secrets/mcp-session-capability.key"; do
+    if [[ -e "$target" || -L "$target" ]]; then cleanup_targets+=("$target"); fi
+  done
+  if (( ${#cleanup_targets[@]} > 0 )); then
+    node "$POLICY" cleanup-run "$VERIFY_ROOT" "${cleanup_targets[@]}" || status=3
+  fi
+  echo "Scrubbed only current-run Codex homes, sandbox caches, gateway token, and MCP capability key."
   echo "Retained verification root: $VERIFY_ROOT"
   echo "Retained sandbox home: $SANDBOX_HOME"
   echo "Artifacts: $ARTIFACTS"
+  exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 mkdir -p "$HOST_HOME" "$CODEX_BASE"
 node "$REPO/e2e/workflow-layout/bootstrap-sandbox.mjs" \

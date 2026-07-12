@@ -1,10 +1,12 @@
 # Workflow layout browser verification
 
-This suite is deliberately excluded from the default Playwright config. Run it only through `scripts/verify-workflow-layout.sh`; the wrapper creates a fake `HOME`, an isolated instance registry, a fresh Jinn home, and a candidate gateway on an explicit port at or above 7800.
+This suite is deliberately excluded from the default Playwright config. Run it only through `scripts/verify-workflow-layout.sh`; the wrapper creates a fake `HOME`, an isolated instance registry, a fresh Jinn home, and a candidate gateway on an explicit port at or above 8060 (8060 by default). Port 7777 and every non-sandbox origin/home are refused.
 
 The five GPT-5.5-low author probes are additionally opt-in with `--with-authors` and require `JINN_IMPLEMENTATION_GREEN=1`. Their session database, Codex overlays, and definitions stay beneath the throwaway sandbox home. Traces and video are disabled because authorization headers must not enter retained artifacts.
 
-The retained artifact tree contains sanitized environment metadata, fixture requests/responses, author session records when enabled, per-cell geometry/accessibility JSON, interaction records, PNGs for each lifecycle state, JUnit output, and an HTML report. The default deterministic run discovers 110 browser checks; `--with-authors` discovers 150. The wrapper stops only its fake-home registry entry, scrubs Codex/gateway capability material, and prints the retained paths on exit.
+The wrapper preflights both free bytes and free inodes before creating anything. The retained artifact tree keeps all sanitized environment, fixture, author, per-cell geometry/accessibility, and interaction metrics, plus exactly 64 screenshots of deterministic evidence: every canonical shape across all eight cells, dark/normal desktop+mobile run and manual states, two high-value gesture frames, and authorized/unauthorized approval evidence. Screenshots remain capped at 16 MiB. A compact line reporter and completion JSON replace duplicate HTML/JUnit reports. The entire artifact bundle is limited to 2,048 files and 128 MiB.
+
+The default deterministic run discovers 111 browser checks: 13 checks in each of eight viewport/theme/motion cells plus seven global checks. `--with-authors` discovers 151: 18 checks in every cell plus the same seven globals. Missing checks/results, timeouts, ENOSPC, blank pages, leaked browser contexts/listeners, or a missing/blank completion record make the run hard-incomplete. Cleanup removes only paths enumerated beneath the newly-created verification root; it never scans or deletes pre-existing scratch directories. Each author session's Codex home is removed after its sanitized final response and definition are retained.
 
 ## Stable production selectors required by central integration
 

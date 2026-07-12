@@ -15,15 +15,15 @@ import {
   visibleRunEdges,
 } from "./metrics.mjs"
 
-test("candidate URL is an exact loopback origin on port 7800 or higher", () => {
-  assert.equal(assertCandidateBaseUrl("http://127.0.0.1:7800"), "http://127.0.0.1:7800")
+test("candidate URL is an exact loopback origin on port 8060 or higher", () => {
+  assert.equal(assertCandidateBaseUrl("http://127.0.0.1:8060"), "http://127.0.0.1:8060")
   for (const bad of [
     "http://127.0.0.1:7777",
-    "http://localhost:7800",
-    "https://127.0.0.1:7800",
-    "http://127.0.0.1:7800/workflow",
-    "http://127.0.0.1:7799",
-    "http://127.0.0.2:7800",
+    "http://localhost:8060",
+    "https://127.0.0.1:8060",
+    "http://127.0.0.1:8060/workflow",
+    "http://127.0.0.1:8059",
+    "http://127.0.0.2:8060",
   ]) assert.throws(() => assertCandidateBaseUrl(bad), /candidate|loopback|port|origin/i)
 })
 

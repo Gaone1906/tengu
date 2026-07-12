@@ -5,6 +5,7 @@ import { test, expect, type Browser, type BrowserContext, type Page } from '@pla
 import { artifactWriter, gatewayToken, pollUntil, sandboxClient, verificationEnv } from './api-client.mjs'
 import { authorRequests, canonicalFixtures, scenarioFixtures } from './fixtures.mjs'
 import { assertCandidateBaseUrl, isBlockedStaticAsset, matrixCells, positionsMatch, summarizeMetricViolations, visibleRunEdges } from './metrics.mjs'
+import { shouldCaptureScreenshot } from './harness-policy.mjs'
 
 type Cell = ReturnType<typeof matrixCells>[number]
 type Definition = {
@@ -35,7 +36,7 @@ const runCases = [
 
 function safeNetworkUrl(raw: string) {
   const url = new URL(raw)
-  return ['http:', 'ws:'].includes(url.protocol) && url.hostname === '127.0.0.1' && Number(url.port) >= 7800 && url.port === new URL(origin).port
+  return ['http:', 'ws:'].includes(url.protocol) && url.hostname === '127.0.0.1' && Number(url.port) >= 8060 && url.port === new URL(origin).port
 }
 
 type PrincipalHeaders = Record<string, string>
@@ -86,8 +87,12 @@ async function isolatedContext(browser: Browser, cell: Cell, principalHeaders: P
   return { context, violations }
 }
 
+const openContexts = new Set<BrowserContext>()
+
 async function openPage(browser: Browser, cell: Cell, route: string, principalHeaders: PrincipalHeaders = {}) {
   const { context, violations } = await isolatedContext(browser, cell, principalHeaders)
+  openContexts.add(context)
+  context.once('close', () => openContexts.delete(context))
   const page = await context.newPage()
   const consoleErrors: string[] = []
   const pageErrors: string[] = []
@@ -95,6 +100,8 @@ async function openPage(browser: Browser, cell: Cell, route: string, principalHe
   page.on('pageerror', (error) => pageErrors.push(error.message))
   page.on('websocket', (socket) => { if (!safeNetworkUrl(socket.url())) violations.push(socket.url()) })
   await page.goto(`${origin}${route}`, { waitUntil: 'networkidle' })
+  const rendered = await page.locator('body *:visible').count()
+  if (rendered === 0) throw new Error(`blank page after navigation: ${route}`)
   return { context, page, violations, consoleErrors, pageErrors }
 }
 
@@ -106,6 +113,12 @@ function screenshotPath(...segments: string[]) {
   const target = path.join(env.artifacts, 'screenshots', ...segments)
   fs.mkdirSync(path.dirname(target), { recursive: true })
   return target
+}
+
+async function captureScreenshot(page: Page, ...segments: string[]) {
+  const relative = path.join(...segments)
+  if (!shouldCaptureScreenshot(relative)) return
+  await page.screenshot({ path: screenshotPath(...segments) })
 }
 
 function visibleTestId(page: Page, testId: string) {
@@ -303,6 +316,13 @@ async function startFromUi(browser: Browser, id: string, terminal: string) {
 }
 
 test.describe.serial('isolated workflow layout verification', () => {
+  test.afterEach(async () => {
+    if (openContexts.size === 0) return
+    const leaked = [...openContexts]
+    await Promise.allSettled(leaked.map((context) => context.close()))
+    throw new Error(`listener leak: ${leaked.length} browser context(s) remained open after a check`)
+  })
+
   test('candidate health and fixtures are sandbox-local', async () => {
     const status = await api('GET', '/api/status')
     expect(status.ok).toBeTruthy()
@@ -329,7 +349,7 @@ test.describe.serial('isolated workflow layout verification', () => {
           const a11y = await basicAccessibility(opened.page)
           const key = artifactKey(cell)
           write(`metrics/${key}/${id}-initial.json`, { metrics: initialMetrics, violations: initialViolations, a11y, networkViolations: opened.violations, consoleErrors: opened.consoleErrors, pageErrors: opened.pageErrors })
-          await opened.page.screenshot({ path: screenshotPath(key, `${id}-initial.png`) })
+          await captureScreenshot(opened.page, key, `${id}-initial.png`)
 
           await opened.page.getByRole('button', { name: 'Tidy', exact: true }).click()
           const apply = opened.page.getByRole('button', { name: 'Apply layout', exact: true })
@@ -339,11 +359,11 @@ test.describe.serial('isolated workflow layout verification', () => {
           const previewMetrics = await captureMetrics(opened.page, cell.viewport.key)
           const previewViolations = summarizeMetricViolations(previewMetrics, definition)
           write(`metrics/${key}/${id}-tidy-preview.json`, { metrics: previewMetrics, violations: previewViolations })
-          await opened.page.screenshot({ path: screenshotPath(key, `${id}-tidy-preview.png`) })
+          await captureScreenshot(opened.page, key, `${id}-tidy-preview.png`)
 
           const positionChanged = !positionsMatch(definition.nodes, preview)
           await apply.click()
-          await opened.page.screenshot({ path: screenshotPath(key, `${id}-applied.png`) })
+          await captureScreenshot(opened.page, key, `${id}-applied.png`)
           let saved = definition
           if (positionChanged) {
             await expect(opened.page.getByTestId('wf-edit-dirty')).toBeVisible()
@@ -356,7 +376,7 @@ test.describe.serial('isolated workflow layout verification', () => {
             await expect(opened.page.getByTestId('wf-edit-dirty')).toHaveCount(0)
             expect(Object.fromEntries(saved.nodes.map((node) => [node.id, node.position]))).toEqual(preview)
           }
-          await opened.page.screenshot({ path: screenshotPath(key, `${id}-saved.png`) })
+          await captureScreenshot(opened.page, key, `${id}-saved.png`)
 
           await opened.page.reload({ waitUntil: 'networkidle' })
           await opened.page.getByTestId('wf-canvas').waitFor()
@@ -364,11 +384,11 @@ test.describe.serial('isolated workflow layout verification', () => {
           const reloadMetrics = await captureMetrics(opened.page, cell.viewport.key)
           const reloadViolations = summarizeMetricViolations(reloadMetrics, saved)
           write(`metrics/${key}/${id}-reloaded.json`, { metrics: reloadMetrics, violations: reloadViolations })
-          await opened.page.screenshot({ path: screenshotPath(key, `${id}-reloaded.png`) })
+          await captureScreenshot(opened.page, key, `${id}-reloaded.png`)
 
           await opened.page.goto(`${origin}/workflow/${id}?mode=runs`, { waitUntil: 'networkidle' })
           await expect(opened.page.getByText('No runs yet. Use Run to start the first execution.')).toBeVisible()
-          await opened.page.screenshot({ path: screenshotPath(key, `${id}-executions-empty.png`) })
+          await captureScreenshot(opened.page, key, `${id}-executions-empty.png`)
           write(`interactions/lifecycle/${key}/${id}.json`, { preview, savedVersion: saved.version })
 
           expect(opened.violations).toEqual([])
@@ -396,13 +416,13 @@ test.describe.serial('isolated workflow layout verification', () => {
       const opened = await openPage(browser, cell, '/workflow/verify-manual?mode=edit')
       try {
         await opened.page.getByTestId('wf-canvas').waitFor()
-        await opened.page.screenshot({ path: screenshotPath(artifactKey(cell), 'verify-manual-before.png') })
+        await captureScreenshot(opened.page, artifactKey(cell), 'verify-manual-before.png')
         await opened.page.getByRole('button', { name: 'Tidy', exact: true }).click()
         const apply = opened.page.getByRole('button', { name: 'Apply layout', exact: true })
         await expect(apply).toBeVisible()
         const ids = manualFixture.nodes.map((node) => node.id)
         const preview = await rawNodePositions(opened.page, ids)
-        await opened.page.screenshot({ path: screenshotPath(artifactKey(cell), 'verify-manual-preview.png') })
+        await captureScreenshot(opened.page, artifactKey(cell), 'verify-manual-preview.png')
         await apply.click()
         await expect(opened.page.getByTestId('wf-edit-dirty')).toBeVisible()
         await opened.page.getByTestId('wf-edit-save').click()
@@ -412,7 +432,7 @@ test.describe.serial('isolated workflow layout verification', () => {
         await opened.page.reload({ waitUntil: 'networkidle' })
         await opened.page.getByTestId('wf-canvas').waitFor()
         expect(await rawNodePositions(opened.page, ids)).toEqual(preview)
-        await opened.page.screenshot({ path: screenshotPath(artifactKey(cell), 'verify-manual-reloaded.png') })
+        await captureScreenshot(opened.page, artifactKey(cell), 'verify-manual-reloaded.png')
         write(`interactions/apply/${artifactKey(cell)}.json`, { reset, preview, saved })
         expect(opened.violations).toEqual([])
       } finally {
@@ -440,7 +460,7 @@ test.describe.serial('isolated workflow layout verification', () => {
         const persisted = await readDefinition('verify-manual')
         expect(persisted.version).toBe(reset.version)
         expect(persisted.nodes.map((node) => node.position)).toEqual(reset.nodes.map((node) => node.position))
-        await opened.page.screenshot({ path: screenshotPath(artifactKey(cell), 'verify-manual-invalid-overlap.png') })
+        await captureScreenshot(opened.page, artifactKey(cell), 'verify-manual-invalid-overlap.png')
         write(`interactions/invalid/${artifactKey(cell)}.json`, { error: await error.textContent(), persisted })
         expect(opened.violations).toEqual([])
         expect(opened.pageErrors).toEqual([])
@@ -469,7 +489,7 @@ test.describe.serial('isolated workflow layout verification', () => {
           })
           const a11y = await basicAccessibility(opened.page)
           write(`metrics/${artifactKey(cell)}/${runCase.id}-${runCase.terminal}.json`, { metrics, violations, a11y, networkViolations: opened.violations, consoleErrors: opened.consoleErrors, pageErrors: opened.pageErrors })
-          await opened.page.screenshot({ path: screenshotPath(artifactKey(cell), `${runCase.id}-${runCase.terminal}.png`) })
+          await captureScreenshot(opened.page, artifactKey(cell), `${runCase.id}-${runCase.terminal}.png`)
           expect(opened.violations).toEqual([])
           expect(opened.pageErrors).toEqual([])
           expect(opened.consoleErrors).toEqual([])
@@ -499,14 +519,14 @@ test.describe.serial('isolated workflow layout verification', () => {
       await opened.page.getByRole('menuitem', { name: 'Step', exact: true }).click()
       await expect(opened.page.locator('[data-testid^="wf-node-"][data-node-id]')).toHaveCount(originalIds.size + 1)
       const addedId = (await mainNodeIds(opened.page)).find((id) => !originalIds.has(id))!
-      await opened.page.screenshot({ path: screenshotPath('gestures', '01-added.png') })
+      await captureScreenshot(opened.page, 'gestures', '01-added.png')
 
       await fitAll(opened.page)
       await dragNodeBy(opened.page, addedId, 120, 80)
       await fitAll(opened.page)
       await connectByGesture(opened.page, 'two', addedId)
       await expect(opened.page.getByTestId(`wf-edge-two-${addedId}`)).toBeVisible()
-      await opened.page.screenshot({ path: screenshotPath('gestures', '02-dragged-connected.png') })
+      await captureScreenshot(opened.page, 'gestures', '02-dragged-connected.png')
 
       const beforeTransient = new Set(await mainNodeIds(opened.page))
       await opened.page.getByRole('button', { name: 'Add', exact: true }).click()
@@ -520,7 +540,7 @@ test.describe.serial('isolated workflow layout verification', () => {
       await opened.page.keyboard.press('Delete')
       await expect(opened.page.getByTestId('wf-edge-e2')).toHaveCount(0)
       await connectByGesture(opened.page, 'one', 'two')
-      await opened.page.screenshot({ path: screenshotPath('gestures', '03-removed-reconnected.png') })
+      await captureScreenshot(opened.page, 'gestures', '03-removed-reconnected.png')
 
       const position = (await rawNodePositions(opened.page, [addedId]))[addedId]
       await opened.page.getByTestId('wf-edit-save').click()
@@ -534,7 +554,7 @@ test.describe.serial('isolated workflow layout verification', () => {
       await opened.page.reload({ waitUntil: 'networkidle' })
       await opened.page.getByTestId('wf-canvas').waitFor()
       expect((await rawNodePositions(opened.page, [addedId]))[addedId]).toEqual(position)
-      await opened.page.screenshot({ path: screenshotPath('gestures', '04-reloaded.png') })
+      await captureScreenshot(opened.page, 'gestures', '04-reloaded.png')
       write('interactions/gestures.json', { addedId, transientId, position, saved })
       expect(opened.violations).toEqual([])
       expect(opened.pageErrors).toEqual([])
@@ -554,6 +574,7 @@ test.describe.serial('isolated workflow layout verification', () => {
       await expect(visibleTestId(opened.page, 'wf-gate-reject')).toHaveCount(0)
       await expect(visibleText(opened.page, /Waiting on layout-author-1/i)).toBeVisible()
       await expect(visibleText(opened.page, /ask the routed owner to escalate/i)).toBeVisible()
+      await captureScreenshot(opened.page, 'approval', 'unauthorized-waiting.png')
       const parked = await api('GET', '/api/workflow-definitions/verify-run-approval/runs')
       expect(parked.body?.runs?.[0]?.status).toBe('parked')
       const forbidden = await api(
@@ -593,7 +614,7 @@ test.describe.serial('isolated workflow layout verification', () => {
       await expect(visibleText(opened.page, /^completed$/i)).toBeVisible()
       await expect(visibleTestId(opened.page, 'wf-gate-approve')).toHaveCount(0)
       write('interactions/verify-run-approval-authorized.json', completed.body)
-      await opened.page.screenshot({ path: screenshotPath('approval', 'authorized-completed.png') })
+      await captureScreenshot(opened.page, 'approval', 'authorized-completed.png')
       expect(opened.violations).toEqual([])
       expect(opened.pageErrors).toEqual([])
     } finally {

@@ -34,7 +34,7 @@ if (phase !== "jinn-home") throw new Error("--phase must be codex-home or jinn-h
 const home = required("--home")
 const port = Number(args.get("--port"))
 const artifacts = required("--artifacts")
-if (!Number.isInteger(port) || port < 7800) throw new Error("sandbox port must be 7800 or higher")
+if (!Number.isInteger(port) || port < 8060) throw new Error("sandbox port must be 8060 or higher")
 if (!fs.existsSync(path.join(home, "config.yaml"))) throw new Error("sandbox setup must run before jinn-home bootstrap")
 if (!artifacts.startsWith(`${home}${path.sep}`)) throw new Error("artifacts must remain inside the sandbox home")
 

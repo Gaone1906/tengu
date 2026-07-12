@@ -1,6 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { assertCandidateBaseUrl } from "./metrics.mjs"
+import { sanitizeArtifactValue } from "./harness-policy.mjs"
 
 export function verificationEnv() {
   const home = process.env.JINN_VERIFY_HOME
@@ -29,7 +30,7 @@ export function artifactWriter(root) {
     const target = path.resolve(root, relative)
     if (!target.startsWith(`${path.resolve(root)}${path.sep}`)) throw new Error("artifact path escaped root")
     fs.mkdirSync(path.dirname(target), { recursive: true })
-    fs.writeFileSync(target, `${JSON.stringify(value, null, 2)}\n`)
+    fs.writeFileSync(target, `${JSON.stringify(sanitizeArtifactValue(value), null, 2)}\n`)
     return target
   }
 }

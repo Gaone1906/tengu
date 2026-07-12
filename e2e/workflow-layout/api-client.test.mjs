@@ -7,13 +7,13 @@ import path from "node:path"
 import { artifactWriter, gatewayToken, sandboxClient, verificationEnv } from "./api-client.mjs"
 
 test("sandbox client rejects every origin other than its exact candidate", async () => {
-  const request = sandboxClient({ baseUrl: "http://127.0.0.1:7800", token: "throwaway" })
+  const request = sandboxClient({ baseUrl: "http://127.0.0.1:8060", token: "throwaway" })
   await assert.rejects(
-    request("GET", "http://127.0.0.1:7801/api/status"),
+    request("GET", "http://127.0.0.1:8061/api/status"),
     /refusing non-candidate request origin/i,
   )
   await assert.rejects(
-    request("GET", "http://localhost:7800/api/status"),
+    request("GET", "http://localhost:8060/api/status"),
     /refusing non-candidate request origin/i,
   )
 })
@@ -39,7 +39,7 @@ test("verification environment refuses a production-shaped home or external arti
     base: process.env.JINN_VERIFY_BASE_URL,
   }
   try {
-    process.env.JINN_VERIFY_BASE_URL = "http://127.0.0.1:7800"
+    process.env.JINN_VERIFY_BASE_URL = "http://127.0.0.1:8060"
     process.env.JINN_VERIFY_HOME = "/tmp/.jinn"
     process.env.JINN_VERIFY_ARTIFACTS = "/tmp/.jinn/artifacts"
     assert.throws(() => verificationEnv(), /dedicated workflow-layout verification home/i)

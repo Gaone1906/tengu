@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { artifactWriter, gatewayToken, pollUntil, sandboxClient, verificationEnv } from "./api-client.mjs"
 import { authorRequests } from "./fixtures.mjs"
+import { removeAuthorCodexHome, sanitizeArtifactValue } from "./harness-policy.mjs"
 
 if (process.env.JINN_VERIFY_RUN_AUTHORS !== "1") {
   throw new Error("authoring is opt-in; set JINN_VERIFY_RUN_AUTHORS=1 only after implementation is green")
@@ -37,14 +38,15 @@ for (const author of authorRequests()) {
     (result) => result.ok && ["idle", "error"].includes(result.body?.status),
     { label: `author ${createdAuthor.expectedWorkflowId}` },
   )
-  write(`authoring/sessions/${createdAuthor.expectedWorkflowId}-final.json`, final)
+  write(`authoring/sessions/${createdAuthor.expectedWorkflowId}-final.json`, sanitizeArtifactValue(final))
   assertNoForeignGatewayContext(final.body, `final session ${createdAuthor.expectedWorkflowId}`)
   if (final.body.status !== "idle" || final.body.engine !== "codex" || final.body.model !== "gpt-5.5" || final.body.effortLevel !== "low") {
     throw new Error(`author ${createdAuthor.expectedWorkflowId} did not settle with the pinned model contract`)
   }
   const definition = await request("GET", `/api/workflow-definitions/${encodeURIComponent(createdAuthor.expectedWorkflowId)}`)
-  write(`authoring/definitions/${createdAuthor.expectedWorkflowId}.json`, definition)
+  write(`authoring/definitions/${createdAuthor.expectedWorkflowId}.json`, sanitizeArtifactValue(definition))
   if (!definition.ok || definition.body?.id !== createdAuthor.expectedWorkflowId) throw new Error(`author did not create ${createdAuthor.expectedWorkflowId}`)
+  removeAuthorCodexHome(env.home, createdAuthor.sessionId)
 }
 
 write("authoring/session-ids.json", created.map(({ expectedWorkflowId, sessionId }) => ({ expectedWorkflowId, sessionId })))

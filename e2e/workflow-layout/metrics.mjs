@@ -26,7 +26,7 @@ export function assertCandidateBaseUrl(value) {
     throw new Error("candidate URL must use the exact http://127.0.0.1 loopback origin")
   }
   const port = Number(url.port)
-  if (!Number.isInteger(port) || port < 7800) throw new Error("candidate port must be 7800 or higher")
+  if (!Number.isInteger(port) || port < 8060) throw new Error("candidate port must be 8060 or higher")
   if (url.pathname !== "/" || url.search || url.hash) throw new Error("candidate URL must be an origin without path, query, or hash")
   return url.origin
 }
