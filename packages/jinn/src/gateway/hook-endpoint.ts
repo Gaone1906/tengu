@@ -27,6 +27,20 @@ export function handleHookPost(
   providedSecret: string | undefined,
   body: { jinnSessionId?: string; hook?: HookPayload },
 ): { status: number; body: string } {
+  const rejected = validateHookPost(ctx, providedSecret, body);
+  if (rejected) return rejected;
+  ctx.reg.deliver(body.jinnSessionId!, body.hook!);
+  return { status: 200, body: "ok" };
+}
+
+/** Authenticate and validate a hook without delivering it. The API route uses
+ * this seam to classify an authenticated target before HookRegistry effects;
+ * handleHookPost keeps its standalone validate-and-deliver contract. */
+export function validateHookPost(
+  ctx: HookEndpointCtx,
+  providedSecret: string | undefined,
+  body: { jinnSessionId?: string; hook?: HookPayload },
+): { status: number; body: string } | undefined {
   // Loopback check first — defense-in-depth alongside any upstream check.
   if (!isLoopback(ctx.remoteAddress)) {
     return { status: 403, body: "forbidden" };
@@ -55,6 +69,5 @@ export function handleHookPost(
       return { status: 451, body: decision.reason || "Command blocked by Jinn security policy" };
     }
   }
-  ctx.reg.deliver(body.jinnSessionId, body.hook);
-  return { status: 200, body: "ok" };
+  return undefined;
 }

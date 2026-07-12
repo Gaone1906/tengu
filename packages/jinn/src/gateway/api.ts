@@ -247,7 +247,7 @@ import {
   parseWorkflowPlanTransport,
 } from "../workflows/schema.js";
 import { loadInstances } from "../cli/instances.js";
-import { handleHookPost, isLoopback } from "./hook-endpoint.js";
+import { isLoopback, validateHookPost } from "./hook-endpoint.js";
 import {
   authenticateGatewayRequest,
   authCookieHeaders,
@@ -4600,9 +4600,27 @@ export async function handleApiRequest(
         ? `delegation-idempotency:${idempotencyDigest}`
         : undefined;
 
+      // Parent resolution must outrank durable idempotency replay: a historical
+      // Workflow run projection stays read-only even when the key already owns
+      // an ordinary delegation receipt. Explicit body parent wins; otherwise
+      // the authenticated caller is used best-effort (unknown → parentless).
+      let parentSessionId: string | undefined =
+        typeof body.parentSessionId === "string" ? (body.parentSessionId as string) : undefined;
+      let delegatorSession = parentSessionId ? getSession(parentSessionId) : undefined;
+      if (delegationCaller.kind === "session" && body.parentSessionId === undefined) {
+        delegatorSession = getSession(delegationCaller.callerId);
+        if (delegatorSession) {
+          parentSessionId = delegationCaller.callerId;
+        } else {
+          logger.warn(`Ignoring unknown x-jinn-caller-session "${delegationCaller.callerId}" on delegation`);
+        }
+      }
+      if (delegatorSession && rejectLegacyWorkflowSessionAccess(res, delegatorSession, "mutation")) return;
+
       // A completed first call is the durable idempotency receipt. Resolve it
-      // before re-validating mutable request context: the caller-chosen key owns
-      // the result, and a retry must return that original pair without effects.
+      // before re-validating the remaining mutable request context: the caller-
+      // chosen key owns the result, and an ordinary retry returns the original
+      // pair without effects.
       if (idempotencySessionKey) {
         const replay = getSessionBySessionKey(idempotencySessionKey);
         if (replay) {
@@ -4679,21 +4697,6 @@ export async function handleApiRequest(
       }, employeeDefaults);
       if (!selection.ok) return badRequest(res, selection.error || "invalid engine/model/effort");
       const engineName = selection.engine || config.engines.default;
-
-      // Parent resolution — the GRS-017a identity seam, spawn-route semantics:
-      // explicit body.parentSessionId wins (internal callers); else the declared
-      // caller identity, best-effort (unknown id → warn + parentless).
-      let parentSessionId: string | undefined =
-        typeof body.parentSessionId === "string" ? (body.parentSessionId as string) : undefined;
-      if (delegationCaller.kind === "session" && body.parentSessionId === undefined) {
-        if (getSession(delegationCaller.callerId)) {
-          parentSessionId = delegationCaller.callerId;
-        } else {
-          logger.warn(`Ignoring unknown x-jinn-caller-session "${delegationCaller.callerId}" on delegation`);
-        }
-      }
-      const delegatorSession = parentSessionId ? getSession(parentSessionId) : undefined;
-      if (delegatorSession && rejectLegacyWorkflowSessionAccess(res, delegatorSession, "mutation")) return;
 
       const title = (
         typeof body.title === "string" && body.title.trim() ? (body.title as string).trim() : task.split("\n")[0].trim()
@@ -6338,29 +6341,33 @@ export async function handleApiRequest(
       const _parsed = await readJsonBody(req, res, { maxBytes: HOOK_BODY_MAX_BYTES });
       if (!_parsed.ok) return;
       const hookBody = _parsed.body as { jinnSessionId?: string; hook?: import("./hook-registry.js").HookPayload };
-      const result = handleHookPost(
+      const rejected = validateHookPost(
         { reg: context.hookRegistry, secret: context.hookSecret, remoteAddress: remote },
         req.headers["x-jinn-hook-secret"] as string | undefined,
         hookBody,
       );
+      if (rejected) return json(res, { message: rejected.body }, rejected.status);
+      const jinnSessionId = hookBody.jinnSessionId!;
+      const hook = hookBody.hook!;
+      const target = getSession(jinnSessionId);
+      if (target && rejectLegacyWorkflowSessionAccess(res, target, "mutation")) return;
+      context.hookRegistry.deliver(jinnSessionId, hook);
       // Central engineSessionId capture: persist claude's OWN session id the moment
       // it reports one (SessionStart, or Stop as backup), independent of turn state.
       // Without this, an interrupted turn or an idle CLI-view spawn never persisted
       // the id, so the next cold respawn ran `claude` with resume:none → a fresh
       // conversation (the convo-wipe bug). Write-once guarded so it's not chatty.
       if (
-        result.status === 200 &&
-        hookBody.jinnSessionId &&
-        (hookBody.hook?.hook_event_name === "SessionStart" || hookBody.hook?.hook_event_name === "Stop") &&
-        typeof hookBody.hook?.session_id === "string" &&
-        hookBody.hook.session_id
+        (hook.hook_event_name === "SessionStart" || hook.hook_event_name === "Stop") &&
+        typeof hook.session_id === "string" &&
+        hook.session_id
       ) {
-        const existing = getSession(hookBody.jinnSessionId);
-        if (existing && getEngineSessionRef(existing, "claude").id !== hookBody.hook.session_id) {
-          recordEngineSessionId(hookBody.jinnSessionId, "claude", hookBody.hook.session_id);
+        const existing = getSession(jinnSessionId);
+        if (existing && getEngineSessionRef(existing, "claude").id !== hook.session_id) {
+          recordEngineSessionId(jinnSessionId, "claude", hook.session_id);
         }
       }
-      return json(res, { message: result.body }, result.status);
+      return json(res, { message: "ok" });
     }
 
     return notFound(res);

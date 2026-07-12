@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, ensureSessionCapability } from "../../mcp/identity.js";
+import { HookRegistry } from "../hook-registry.js";
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-legacy-workflow-boundaries-"));
 process.env.JINN_HOME = home;
@@ -19,6 +21,9 @@ let workItems: WorkItems;
 const engineRuns: Array<Record<string, unknown>> = [];
 const events: Array<{ event: string; payload: unknown }> = [];
 const restartGateway = vi.fn();
+const hookRegistry = new HookRegistry(30_000, 5_000, 10);
+const unclaimedHooks = vi.fn();
+hookRegistry.setUnclaimedHookHandler(unclaimedHooks);
 const engine = {
   name: "codex",
   run: vi.fn(async (opts: Record<string, unknown>) => {
@@ -49,6 +54,8 @@ const context = {
   startTime: Date.now(),
   gatewayAuthToken: "test-token",
   restartGateway,
+  hookRegistry,
+  hookSecret: "hook-secret",
   emit: (event: string, payload: unknown) => events.push({ event, payload }),
   sessionManager: {
     getEngine: (name: string) => name === "codex" ? engine : undefined,
@@ -83,6 +90,7 @@ async function request(
   pathname: string,
   body?: unknown,
   headers: Record<string, string> = {},
+  remoteAddress = "127.0.0.1",
 ) {
   const cap = responseCapture();
   const req = Object.assign(Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]), {
@@ -94,6 +102,7 @@ async function request(
       ...(body === undefined ? {} : { "content-type": "application/json" }),
       ...headers,
     },
+    socket: { remoteAddress },
   });
   await api.handleApiRequest(req as Parameters<Api["handleApiRequest"]>[0], cap.res, context);
   return cap;
@@ -143,11 +152,32 @@ function durableSnapshot() {
   };
 }
 
+function hookRuntimeSnapshot() {
+  const state = hookRegistry as unknown as {
+    listeners: Map<string, unknown>;
+    buffer: Map<string, unknown[]>;
+    unclaimedTimers: Map<string, unknown>;
+  };
+  return {
+    listeners: [...state.listeners.keys()].sort(),
+    buffered: [...state.buffer.keys()].sort(),
+    timers: [...state.unclaimedTimers.keys()].sort(),
+  };
+}
+
 function callerHeaders(sessionId: string): Record<string, string> {
   return {
     [CALLER_SESSION_HEADER]: sessionId,
     [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(sessionId),
   };
+}
+
+async function waitForSettledSession(sessionId: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (registry.getSession(sessionId)?.status !== "running") return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`Session ${sessionId} did not settle`);
 }
 
 beforeAll(async () => {
@@ -158,11 +188,238 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  hookRegistry.dispose();
   registry.__closeDbForTest();
   fs.rmSync(home, { recursive: true, force: true });
 });
 
 describe("legacy Workflow run mutation boundaries", () => {
+  it("guards an explicit legacy parent before replaying an operator delegation receipt", async () => {
+    const key = "operator-replay-before-legacy-guard";
+    const first = await request("POST", "/api/delegations", {
+      engine: "codex",
+      task: "Create the original ordinary delegation",
+      idempotencyKey: key,
+    });
+    expect(first.status).toBe(201);
+    await waitForSettledSession(first.body.sessionId);
+    const legacy = legacyParent("delegation-replay-explicit");
+    const before = durableSnapshot();
+    const runsBefore = engineRuns.length;
+    const eventsBefore = events.length;
+
+    const replay = await request("POST", "/api/delegations", {
+      engine: "codex",
+      task: "Create the original ordinary delegation",
+      idempotencyKey: key,
+      parentSessionId: legacy.id,
+    });
+
+    expect(replay.status).toBe(409);
+    expect(replay.body.legacyWorkflowRun).toEqual({
+      workflowId: "release-review",
+      runId: "delegation-replay-explicit",
+      openPath: "/workflow/release-review?mode=runs&run=delegation-replay-explicit",
+    });
+    expect(durableSnapshot()).toEqual(before);
+    expect(engineRuns).toHaveLength(runsBefore);
+    expect(events).toHaveLength(eventsBefore);
+  });
+
+  it("guards a caller-derived legacy parent before replaying a pre-upgrade receipt", async () => {
+    const legacy = legacyParent("delegation-replay-derived");
+    const key = "pre-upgrade-derived-replay";
+    const digest = crypto.createHash("sha256").update(`${legacy.id}\0${key}`).digest("hex");
+    const item = workItems.createWorkItem({
+      title: "Historical delegation receipt",
+      body: "Compatibility evidence",
+      source: "session",
+      sourceRef: `session:${legacy.id}:historical-receipt`,
+    });
+    const receipt = registry.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: `historical-receipt:${legacy.id}`,
+      sessionKey: `delegation-idempotency:${digest}`,
+      parentSessionId: legacy.id,
+    });
+    workItems.linkSession(item.id, receipt.id);
+    const before = durableSnapshot();
+    const runsBefore = engineRuns.length;
+    const eventsBefore = events.length;
+
+    const replay = await request("POST", "/api/delegations", {
+      engine: "codex",
+      task: "Retry historical receipt",
+      idempotencyKey: key,
+    }, callerHeaders(legacy.id));
+
+    expect(replay.status).toBe(409);
+    expect(replay.body.legacyWorkflowRun).toEqual({
+      workflowId: "release-review",
+      runId: "delegation-replay-derived",
+      openPath: "/workflow/release-review?mode=runs&run=delegation-replay-derived",
+    });
+    expect(durableSnapshot()).toEqual(before);
+    expect(engineRuns).toHaveLength(runsBefore);
+    expect(events).toHaveLength(eventsBefore);
+  });
+
+  it("keeps an ordinary delegation replay effect-free and validates bad idempotency input first", async () => {
+    const key = "ordinary-replay-control";
+    const beforeRuns = engineRuns.length;
+    const first = await request("POST", "/api/delegations", {
+      engine: "codex",
+      task: "Ordinary idempotent delegation",
+      idempotencyKey: key,
+    });
+    await waitForSettledSession(first.body.sessionId);
+    const afterFirst = durableSnapshot();
+    const afterFirstRuns = engineRuns.length;
+    const replay = await request("POST", "/api/delegations", {
+      engine: "codex",
+      task: "Ordinary idempotent delegation",
+      idempotencyKey: key,
+    });
+
+    expect(first.status).toBe(201);
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({
+      replayed: true,
+      workItemId: first.body.workItemId,
+      sessionId: first.body.sessionId,
+    });
+    expect(durableSnapshot()).toEqual(afterFirst);
+    expect(afterFirstRuns).toBe(beforeRuns + 1);
+    expect(engineRuns).toHaveLength(afterFirstRuns);
+
+    const legacy = legacyParent("delegation-invalid-idempotency");
+    const invalid = await request("POST", "/api/delegations", {
+      engine: "codex",
+      task: "Invalid input remains invalid",
+      idempotencyKey: "   ",
+      parentSessionId: legacy.id,
+    });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.error).toMatch(/idempotencyKey must be a non-empty string/);
+  });
+
+  it.each(["SessionStart", "Stop"] as const)(
+    "rejects an authenticated %s hook before legacy state or HookRegistry mutation",
+    async (hookEvent) => {
+      vi.useFakeTimers();
+      try {
+        const suffix = `hook-${hookEvent.toLowerCase()}`;
+        const legacy = legacyParent(suffix);
+        registry.updateSession(legacy.id, {
+          transportMeta: { keep: "historical-hook-evidence" },
+          engineSessionId: "historical-native-id",
+          engineSessions: { workflow: { id: "historical-native-id" } },
+        });
+        registry.insertMessage(legacy.id, "notification", "Historical hook evidence");
+        const seen: string[] = [];
+        if (hookEvent === "SessionStart") {
+          hookRegistry.register(legacy.id, (hook) => seen.push(hook.hook_event_name));
+        }
+        const before = durableSnapshot();
+        const runtimeBefore = hookRuntimeSnapshot();
+        const eventsBefore = events.length;
+        const fallbackBefore = unclaimedHooks.mock.calls.length;
+
+        const response = await request("POST", "/api/internal/hook", {
+          jinnSessionId: legacy.id,
+          hook: {
+            hook_event_name: hookEvent,
+            session_id: `new-native-${hookEvent}`,
+            ...(hookEvent === "Stop" ? { last_assistant_message: "Must not be delivered" } : {}),
+          },
+        }, { "x-jinn-hook-secret": "hook-secret" });
+
+        expect(response.status).toBe(409);
+        expect(response.body.legacyWorkflowRun).toEqual({
+          workflowId: "release-review",
+          runId: suffix,
+          openPath: `/workflow/release-review?mode=runs&run=${suffix}`,
+        });
+        expect(durableSnapshot()).toEqual(before);
+        expect(hookRuntimeSnapshot()).toEqual(runtimeBefore);
+        expect(seen).toEqual([]);
+        expect(events).toHaveLength(eventsBefore);
+        expect(vi.getTimerCount()).toBe(0);
+        await vi.runAllTimersAsync();
+        expect(unclaimedHooks).toHaveBeenCalledTimes(fallbackBefore);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("preserves ordinary authenticated hook delivery and write-once Claude native identity capture", async () => {
+    const ordinary = registry.createSession({
+      engine: "claude",
+      source: "web",
+      sourceRef: "web:ordinary-hook-control",
+      sessionKey: "web:ordinary-hook-control",
+    });
+    const seen: string[] = [];
+    hookRegistry.register(ordinary.id, (hook) => seen.push(hook.hook_event_name));
+
+    const start = await request("POST", "/api/internal/hook", {
+      jinnSessionId: ordinary.id,
+      hook: { hook_event_name: "SessionStart", session_id: "claude-native-control" },
+    }, { "x-jinn-hook-secret": "hook-secret" });
+    const afterStart = registry.initDb().prepare("SELECT * FROM sessions WHERE id = ?").get(ordinary.id);
+    const stop = await request("POST", "/api/internal/hook", {
+      jinnSessionId: ordinary.id,
+      hook: { hook_event_name: "Stop", session_id: "claude-native-control" },
+    }, { "x-jinn-hook-secret": "hook-secret" });
+
+    expect(start.status).toBe(200);
+    expect(stop.status).toBe(200);
+    expect(seen).toEqual(["SessionStart", "Stop"]);
+    expect(registry.getSession(ordinary.id)).toMatchObject({
+      engineSessionId: "claude-native-control",
+      engineSessions: { claude: { id: "claude-native-control" } },
+    });
+    expect(registry.initDb().prepare("SELECT * FROM sessions WHERE id = ?").get(ordinary.id)).toEqual(afterStart);
+  });
+
+  it("keeps hook authentication, validation, policy, and unknown-target behavior ahead of classification", async () => {
+    const legacy = legacyParent("hook-validation-order");
+    const badSecret = await request("POST", "/api/internal/hook", {
+      jinnSessionId: legacy.id,
+      hook: { hook_event_name: "Stop" },
+    }, { "x-jinn-hook-secret": "wrong-secret" });
+    expect(badSecret.status).toBe(403);
+
+    const nonLoopback = await request("POST", "/api/internal/hook", {
+      jinnSessionId: legacy.id,
+      hook: { hook_event_name: "Stop" },
+    }, { "x-jinn-hook-secret": "hook-secret" }, "10.0.0.5");
+    expect(nonLoopback.status).toBe(403);
+
+    const malformed = await request("POST", "/api/internal/hook", {}, {
+      "x-jinn-hook-secret": "hook-secret",
+    });
+    expect(malformed.status).toBe(400);
+
+    const blocked = await request("POST", "/api/internal/hook", {
+      jinnSessionId: legacy.id,
+      hook: { hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "rm -rf /" } },
+    }, { "x-jinn-hook-secret": "hook-secret" });
+    expect(blocked.status).toBe(451);
+
+    const unknown = `unknown-hook-target-${Date.now()}`;
+    const accepted = await request("POST", "/api/internal/hook", {
+      jinnSessionId: unknown,
+      hook: { hook_event_name: "SessionStart", session_id: "unknown-native" },
+    }, { "x-jinn-hook-secret": "hook-secret" });
+    expect(accepted.status).toBe(200);
+    const buffered: string[] = [];
+    hookRegistry.register(unknown, (hook) => buffered.push(hook.hook_event_name));
+    expect(buffered).toEqual(["SessionStart"]);
+  });
+
   it("rejects a restart before queue, Session, marker, callback, timer, emit, or restart state changes", async () => {
     vi.useFakeTimers();
     try {
