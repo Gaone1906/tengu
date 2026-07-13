@@ -149,10 +149,12 @@ function factsFor(block: ChatBlock): Fact[] {
   return facts
 }
 
-/** Only accept an internal workflow deep link authored by the server. */
-function safeWorkflowPath(value: JsonValue | undefined): string | null {
+/** Only accept the exact object route derived from the receipt's durable identity. */
+function safeWorkflowPath(value: JsonValue | undefined, expected: string, legacy?: string): string | null {
   const path = text(value)
-  return /^\/workflow\/[^/]/.test(path) && !path.includes('//') ? path : null
+  if (path === expected) return expected
+  if (legacy !== undefined && path === legacy) return expected
+  return null
 }
 
 export function CompanyActivityCard({ block }: { block: ChatBlock }) {
@@ -182,12 +184,16 @@ export function CompanyActivityCard({ block }: { block: ChatBlock }) {
       navigate('/todos', todoId ? { state: { todoRef: todoPrivateRef(todoId) } } : undefined)
       return
     }
-    const explicit = safeWorkflowPath(block.payload.openPath)
-    if (explicit) { navigate(explicit); return }
     const workflowId = encodeURIComponent(text(block.payload.workflowId))
-    if (block.type === 'workflow-definition') { navigate(`/workflow/${workflowId}?mode=edit`); return }
+    if (block.type === 'workflow-definition') {
+      const expected = `/workflow/${workflowId}?mode=edit`
+      const legacy = `/workflow/${workflowId}`
+      navigate(safeWorkflowPath(block.payload.openPath, expected, legacy) ?? expected)
+      return
+    }
     const runId = encodeURIComponent(text(block.payload.runId))
-    navigate(`/workflow/${workflowId}?mode=runs&run=${runId}`)
+    const expected = `/workflow/${workflowId}?mode=runs&run=${runId}`
+    navigate(safeWorkflowPath(block.payload.openPath, expected) ?? expected)
   }
 
   return (

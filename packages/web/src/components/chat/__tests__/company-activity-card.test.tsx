@@ -84,6 +84,15 @@ function renderCard(block: ChatBlock): Harness {
   return { router }
 }
 
+function renderPersistentCard(block: ChatBlock): Harness {
+  const router = createMemoryRouter(
+    [{ path: '*', element: <CompanyActivityCard block={block} /> }],
+    { initialEntries: ['/'] },
+  )
+  render(<RouterProvider router={router} />)
+  return { router }
+}
+
 describe('CompanyActivityCard', () => {
   it('renders a workflow-run object with title, kind, and honest state', () => {
     renderCard(runBlock())
@@ -153,6 +162,77 @@ describe('CompanyActivityCard', () => {
     expect(screen.getByText('Workflow')).toBeTruthy()
     expect(screen.getByText(/Updated to v4/)).toBeTruthy()
     await user.click(screen.getByRole('button', { name: 'Open Release review workflow' }))
+    expect(router.state.location.pathname + router.state.location.search).toBe(
+      '/workflow/release-review?mode=edit',
+    )
+  })
+
+  it('opens a historical persisted definition receipt with a legacy path in the editor without rewriting it', async () => {
+    const user = userEvent.setup()
+    const historical = definitionBlock({
+      payload: {
+        ...definitionBlock().payload,
+        openPath: '/workflow/release-review',
+      },
+    })
+    const { router } = renderCard(historical)
+
+    await user.click(screen.getByRole('button', { name: 'Open Release review workflow' }))
+
+    expect(historical.payload.openPath).toBe('/workflow/release-review')
+    expect(router.state.location.pathname + router.state.location.search).toBe(
+      '/workflow/release-review?mode=edit',
+    )
+  })
+
+  it.each([
+    ['an external URL', 'https://example.invalid/workflow/release-review'],
+    ['a different Workflow', '/workflow/other-workflow?mode=edit'],
+    ['the wrong lens', '/workflow/release-review?mode=runs&run=run-other'],
+  ])('does not let %s redirect a definition receipt away from its editor', async (_label, openPath) => {
+    const user = userEvent.setup()
+    const { router } = renderCard(definitionBlock({
+      payload: { ...definitionBlock().payload, openPath },
+    }))
+
+    await user.click(screen.getByRole('button', { name: 'Open Release review workflow' }))
+
+    expect(router.state.location.pathname + router.state.location.search).toBe(
+      '/workflow/release-review?mode=edit',
+    )
+  })
+
+  it.each([
+    ['a different Workflow', '/workflow/other-workflow?mode=runs&run=run-20260712010101-abcd1234'],
+    ['a different run', '/workflow/release-review?mode=runs&run=run-other'],
+  ])('does not let %s redirect a run receipt away from its exact execution', async (_label, openPath) => {
+    const user = userEvent.setup()
+    const { router } = renderCard(runBlock({
+      payload: { ...runBlock().payload, openPath },
+    }))
+
+    await user.click(screen.getByRole('button', { name: 'Open Release review workflow run' }))
+
+    expect(router.state.location.pathname + router.state.location.search).toBe(
+      '/workflow/release-review?mode=runs&run=run-20260712010101-abcd1234',
+    )
+  })
+
+  it.each(['click', 'keyboard'])('Open by %s does not toggle Preview', async (activation) => {
+    const user = userEvent.setup()
+    const { router } = renderPersistentCard(definitionBlock())
+    const preview = screen.getByRole('button', { name: 'Preview Release review workflow' })
+    const open = screen.getByRole('button', { name: 'Open Release review workflow' })
+
+    expect(preview.getAttribute('aria-expanded')).toBe('false')
+    if (activation === 'click') {
+      await user.click(open)
+    } else {
+      open.focus()
+      await user.keyboard('{Enter}')
+    }
+
+    expect(preview.getAttribute('aria-expanded')).toBe('false')
     expect(router.state.location.pathname + router.state.location.search).toBe(
       '/workflow/release-review?mode=edit',
     )

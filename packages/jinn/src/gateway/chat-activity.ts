@@ -70,7 +70,7 @@ export function workflowDefinitionActivityBlock(
         action,
         definitionStatus: definition.status,
         ...(definition.updatedAt ? { updatedAt: definition.updatedAt } : {}),
-        openPath: `/workflow/${encodeURIComponent(definition.id)}`,
+        openPath: `/workflow/${encodeURIComponent(definition.id)}?mode=edit`,
       },
     },
   };

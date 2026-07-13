@@ -306,6 +306,10 @@ describe("persisted Todo and Workflow operation activity", () => {
     const createdWorkflow = await call("POST", "/api/workflow-definitions", definition, toolHeaders(coo, "create_workflow"));
     expect(createdWorkflow.status).toBe(201);
     expect(createdWorkflow.body.activityReceiptId).toBe("workflow-definition:receipt-workflow");
+    expect(activityBlocks(coo.id).find((block) => block.id === "workflow-definition:receipt-workflow")?.payload).toMatchObject({
+      action: "created",
+      openPath: "/workflow/receipt-workflow?mode=edit",
+    });
     const updatedWorkflow = await call(
       "PUT",
       "/api/workflow-definitions/receipt-workflow",
@@ -313,6 +317,22 @@ describe("persisted Todo and Workflow operation activity", () => {
       toolHeaders(coo, "update_workflow"),
     );
     expect(updatedWorkflow.status).toBe(200);
+    expect(activityBlocks(coo.id).find((block) => block.id === "workflow-definition:receipt-workflow")?.payload).toMatchObject({
+      action: "updated",
+      openPath: "/workflow/receipt-workflow?mode=edit",
+    });
+
+    const retiredWorkflow = await call(
+      "POST",
+      "/api/workflow-definitions/receipt-workflow/retire",
+      {},
+      toolHeaders(coo, "retire_workflow"),
+    );
+    expect(retiredWorkflow.status).toBe(200);
+    expect(activityBlocks(coo.id).find((block) => block.id === "workflow-definition:receipt-workflow")?.payload).toMatchObject({
+      action: "retired",
+      openPath: "/workflow/receipt-workflow?mode=edit",
+    });
 
     const todoBlocks = activityBlocks(worker.id).filter((block) => block.id === `todo:${item.id}`);
     const workflowBlocks = activityBlocks(coo.id).filter((block) => block.id === "workflow-definition:receipt-workflow");
@@ -325,12 +345,16 @@ describe("persisted Todo and Workflow operation activity", () => {
     expect(workflowBlocks).toHaveLength(1);
     expect(workflowBlocks[0]).toMatchObject({
       type: "workflow-definition",
-      version: 2,
-      payload: { workflowId: "receipt-workflow", action: "updated" },
+      version: 3,
+      payload: {
+        workflowId: "receipt-workflow",
+        action: "retired",
+        openPath: "/workflow/receipt-workflow?mode=edit",
+      },
     });
     expect(todoBlocks[0].payload).not.toHaveProperty("workflowId");
     expect(workflowBlocks[0].payload).not.toHaveProperty("todoId");
-    expect(companyEvents()).toHaveLength(5);
+    expect(companyEvents()).toHaveLength(6);
   });
 
   it("emits browser mutations without a transcript receipt and ignores forged activity headers", async () => {
@@ -521,10 +545,28 @@ describe("persisted Todo and Workflow operation activity", () => {
       payload: {
         workflowId,
         action: "trigger-created",
-        openPath: `/workflow/${encodeURIComponent(workflowId)}`,
+        openPath: `/workflow/${encodeURIComponent(workflowId)}?mode=edit`,
       },
     });
     expect(activityBlocks(coo.id).filter((block) => block.id === receiptId)).toHaveLength(1);
+  });
+
+  it("preserves the full valid special-character Workflow id in the definition editor path", async () => {
+    const workflowId = "release.review_v1-special";
+    const created = await call(
+      "POST",
+      "/api/workflow-definitions",
+      { ...definition, id: workflowId, name: "special-workflow", title: "Special Workflow" },
+      toolHeaders(coo, "create_workflow"),
+    );
+    expect(created.status).toBe(201);
+
+    const block = activityBlocks(coo.id).find((candidate) => candidate.id === `workflow-definition:${workflowId}`);
+    expect(block?.payload).toMatchObject({
+      workflowId,
+      action: "created",
+      openPath: `/workflow/${encodeURIComponent(workflowId)}?mode=edit`,
+    });
   });
 
   it("patches the Task 5 run block on start/replay and the target definition block on trigger mutations", async () => {
