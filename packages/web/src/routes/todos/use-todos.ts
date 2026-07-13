@@ -138,6 +138,10 @@ export function useLedgerItems(filters: TodoFilters, now: number) {
   const isLoading = activePairs.some((p) => p.query.isPending && !p.query.isPlaceholderData)
   const firstError = activePairs.find((p) => p.query.isError)
   const loadingMore = activePairs.some((p) => p.query.isFetchingNextPage || p.query.isPlaceholderData)
+  // Any in-flight fetch — initial load, next-page, OR an ordinary background
+  // refetch/invalidation. Private-ref settlement must wait for ALL of these so a
+  // stale cached candidate can never enable a premature "missing" mid-refetch.
+  const isFetching = activePairs.some((p) => p.query.isFetching)
 
   const data = useMemo((): LedgerData | undefined => {
     if (activePairs.some((p) => p.query.data == null)) return undefined
@@ -192,6 +196,7 @@ export function useLedgerItems(filters: TodoFilters, now: number) {
     isError: !!firstError,
     error: firstError?.query.error ?? null,
     loadingMore,
+    isFetching,
     loadMore,
     pageDepth,
     restorePageDepth,
@@ -246,68 +251,93 @@ export function openIdsOf(items: WorkItemCompactWire[]): string[] {
   return items.filter((i) => OPEN_STATUSES.has(i.status)).map((i) => i.id)
 }
 
-/** Terminal statuses live outside the open ledger/Needs/People candidate lists,
- *  so a chat activity card's private ref to an existing done/cancelled Todo has
- *  no open row to hash-match. This canonical resolver hashes terminal rows to the
- *  same salted `todoPrivateRef` until one matches — its own query key (never merged
- *  into the visible ledger, counts, Needs, or People), and no raw id in the URL or
- *  history. `tabSalt` lives in sessionStorage, so the ref is stable across reload
- *  and this resolves identically on fresh nav and reload.
+/** A chat activity card's private ref to an existing Todo may point at a row that
+ *  is off the loaded ledger page, past the People/Needs caps, or in a terminal
+ *  (done/cancelled) status — none of which the loaded candidate lists cover. This
+ *  canonical resolver hashes EVERY row across ALL statuses to the same salted
+ *  `todoPrivateRef` until one matches. Its own query key (keyed by the private
+ *  ref, never a raw id) keeps it fully isolated from the visible ledger, counts,
+ *  Needs, and People. `tabSalt` lives in sessionStorage, so the ref is stable and
+ *  this resolves identically on fresh nav and reload.
  *
- *  Resolution is EXHAUSTIVE, never arbitrarily capped: it follows the server's
- *  `nextOffset` for each terminal status until the server itself reports no more
- *  (null nextOffset with `scanned >= total`). A NULL result therefore means
- *  "provably absent", and it is the ONLY input the page treats as missing. Any
- *  traversal anomaly — a page budget backstop, a repeated/decreasing/cyclic
- *  offset, or `nextOffset` vanishing while `total` says rows remain — is a
- *  RETRYABLE incomplete error, surfaced as retry UI, never as "no longer exists". */
-export class TerminalResolveIncompleteError extends Error {
+ *  Resolution is EXHAUSTIVE and HEALTHY-VERIFIED, never arbitrarily capped. For
+ *  each status it follows the server's contract (store.ts): `total` present and
+ *  stable, `offset` echoed, `nextOffset === offset + rows.length` or null, and a
+ *  status is proven absent only when `nextOffset === null` AND `consumed ===
+ *  total`. A NULL result therefore means "provably absent across every status",
+ *  and it is the ONLY input the page may treat as missing. ANY anomaly — missing/
+ *  changing total, an offset-metadata mismatch, a non-contiguous/repeated/cyclic
+ *  offset, a duplicate id, a malformed row, a truncated stream, or the runaway
+ *  page-budget backstop — is a RETRYABLE incomplete, surfaced as retry UI, never
+ *  as "no longer exists". */
+export class PrivateRefResolveIncompleteError extends Error {
   constructor(reason: string) {
     super(reason)
-    this.name = "TerminalResolveIncompleteError"
+    this.name = "PrivateRefResolveIncompleteError"
   }
 }
 
-const TERMINAL_STATUSES: readonly WorkItemStatusWire[] = ["done", "cancelled"]
-// Runaway backstop ONLY. Hitting it is an incomplete/retryable error, not a
-// "missing" classification — a real absence terminates via the server's own
-// nextOffset long before this. Sized far above any realistic terminal history.
-const TERMINAL_RESOLVE_PAGE_BUDGET = 1_000
+// Every status, so an off-page OPEN target resolves without leaning on the capped
+// People/Needs feeds. Runaway backstop ONLY (100k rows) — hitting it is a
+// retryable incomplete, never "missing"; a real absence terminates via the
+// server's own nextOffset long before this.
+const RESOLVE_STATUSES: readonly WorkItemStatusWire[] = LEDGER_STATUSES
+const RESOLVE_PAGE_BUDGET = 1_000
 
-export function useResolveTerminalRef(openRef: string | null, enabled: boolean) {
+function isSafeNonNegativeInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+}
+
+export function useResolvePrivateRef(openRef: string | null, enabled: boolean) {
   return useQuery<string | null>({
-    queryKey: ["work-items", "terminal-ref", openRef ?? ""],
+    queryKey: ["work-items", "ref-resolve", openRef ?? ""],
     enabled: enabled && Boolean(openRef),
     staleTime: 30_000,
     retry: false,
     queryFn: async ({ signal }): Promise<string | null> => {
-      let budget = TERMINAL_RESOLVE_PAGE_BUDGET
-      for (const status of TERMINAL_STATUSES) {
+      let budget = RESOLVE_PAGE_BUDGET
+      const seenIds = new Set<string>()
+      for (const status of RESOLVE_STATUSES) {
         let offset = 0
+        let consumed = 0
+        let stableTotal: number | null = null
         const visited = new Set<number>()
         for (;;) {
-          // Stop the traversal the moment the query is aborted (ref change,
-          // disable, unmount) — no further pages, even if the transport mock or a
-          // slow request would otherwise resolve.
-          if (signal?.aborted) throw new DOMException("terminal resolution aborted", "AbortError")
-          if (budget-- <= 0) throw new TerminalResolveIncompleteError("terminal page budget exhausted")
-          if (visited.has(offset)) throw new TerminalResolveIncompleteError("terminal offset repeated")
+          // Abort (ref change / disable / unmount) stops the walk immediately — no
+          // further pages even if a slow request would otherwise resolve.
+          if (signal?.aborted) throw new DOMException("private ref resolution aborted", "AbortError")
+          if (budget-- <= 0) throw new PrivateRefResolveIncompleteError("resolve page budget exhausted")
+          if (visited.has(offset)) throw new PrivateRefResolveIncompleteError("resolve offset repeated")
           visited.add(offset)
           const r = await api.listWorkItems({ status, offset, limit: GATEWAY_MAX_LIMIT }, signal)
-          const match = r.workItems.find((item) => todoPrivateRef(item.id) === openRef)
-          if (match) return match.id
+
+          if (!isSafeNonNegativeInt(r.total)) throw new PrivateRefResolveIncompleteError("resolve total missing/invalid")
+          if (stableTotal === null) stableTotal = r.total
+          else if (r.total !== stableTotal) throw new PrivateRefResolveIncompleteError("resolve total changed mid-traversal")
+          if (r.offset !== undefined && r.offset !== offset) throw new PrivateRefResolveIncompleteError("resolve offset metadata mismatch")
+
+          for (const item of r.workItems) {
+            if (!item || typeof item.id !== "string" || item.id.length === 0) {
+              throw new PrivateRefResolveIncompleteError("resolve malformed row")
+            }
+            if (seenIds.has(item.id)) throw new PrivateRefResolveIncompleteError("resolve duplicate id")
+            seenIds.add(item.id)
+            if (todoPrivateRef(item.id) === openRef) return item.id
+          }
+          consumed += r.workItems.length
+
           const next = r.nextOffset ?? null
           if (next === null) {
-            // Only trust "no more pages" when the server's total agrees; a missing
-            // nextOffset while rows remain is a truncated stream, not exhaustion.
-            const total = typeof r.total === "number" ? r.total : undefined
-            const scanned = offset + r.workItems.length
-            if (total !== undefined && scanned < total) {
-              throw new TerminalResolveIncompleteError("terminal stream truncated before total")
-            }
+            // Provably exhausted for this status only when the server's own total
+            // agrees; a null nextOffset with rows still owed is a truncated stream.
+            if (consumed !== stableTotal) throw new PrivateRefResolveIncompleteError("resolve truncated before total")
             break
           }
-          if (next <= offset) throw new TerminalResolveIncompleteError("terminal offset not monotonic")
+          // The server pages contiguously (nextOffset = offset + rows.length); any
+          // forward gap, repeat, or decrease is a broken/reordered stream.
+          if (!isSafeNonNegativeInt(next) || next !== offset + r.workItems.length) {
+            throw new PrivateRefResolveIncompleteError("resolve nextOffset not contiguous")
+          }
           offset = next
         }
       }

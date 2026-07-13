@@ -33,7 +33,7 @@ import {
   useDecideApproval,
   useNeedsAttentionItems,
   useEscalateApproval,
-  useResolveTerminalRef,
+  useResolvePrivateRef,
   type LedgerPageDepth,
 } from "./use-todos"
 import { clearTodoJournalByRef, todoPrivateRef } from "./todo-private-state"
@@ -424,41 +424,78 @@ export default function TodosPage() {
     return candidates.find((item) => todoPrivateRef(item.id) === openRef)?.id ?? null
   }, [baseLedger.data, ledger.data, needs.data, openRef, peopleItems.data])
 
-  // Only when the open lists are truly SETTLED (not initial-loading, not fetching
-  // a next page, not showing keepPreviousData placeholders, not refetching, not
-  // restoring page depth), healthy, and DON'T contain the ref do we fall through
-  // to the bounded terminal resolver. Using isFetching/placeholder — not just
-  // isLoading — means a stale cached active candidate can never flash a false
-  // "missing" mid-refetch. An active candidate always wins by precedence below
-  // and disables the terminal query. This query never feeds the visible
-  // ledger/counts/Needs/People.
-  const candidateQueriesSettled =
-    !ledger.isLoading && !ledger.loadingMore
-    && !baseLedger.isLoading && !baseLedger.loadingMore
-    && !needs.isFetching && !peopleItems.isFetching
-    && !restoringPageDepth
+  // The candidate lenses (open ledger, base open, Needs, People) are the FAST
+  // path — an in-view ref resolves instantly. They are "settled" only when every
+  // required source is fully idle: not initial-loading, not fetching a next page,
+  // not showing keepPreviousData placeholders, and not running any ordinary
+  // background refetch/invalidation (isFetching). Using isFetching — not just
+  // isLoading — means a stale cached candidate can never flash a false missing
+  // mid-refetch, and page-depth restoration blocks classification too.
+  const refCandidatesUnsettled =
+    ledger.isLoading || ledger.isFetching || ledger.loadingMore
+    || baseLedger.isLoading || baseLedger.isFetching || baseLedger.loadingMore
+    || needs.isFetching || peopleItems.isFetching
+    || restoringPageDepth
+  const refCandidatesSettled = !refCandidatesUnsettled
+  const refCandidatesError = ledger.isError || baseLedger.isError || needs.isError || peopleItems.isError
+  // Quick-edit recovery keeps its original (loose) settle/health gate — the strict
+  // isFetching-based gate above is only for private-ref classification.
+  const candidateQueriesSettled = !ledger.isLoading && !baseLedger.isLoading && !needs.isLoading && !peopleItems.isLoading
   const candidateQueriesHealthy = !ledger.isError && !baseLedger.isError && !needs.isError && !peopleItems.isError
-  const terminalResolveEnabled = Boolean(
-    openRef && !openIdFromLists && candidateQueriesSettled && candidateQueriesHealthy,
-  )
-  const terminalResolution = useResolveTerminalRef(openRef, terminalResolveEnabled)
-  const openId = openIdFromLists ?? (terminalResolveEnabled ? terminalResolution.data ?? null : null)
-  // The terminal resolver is "resolving" while it walks pages, and "unresolved"
-  // (retryable) on any incomplete/error — both keep the page OFF the missing path.
-  const terminalResolving = terminalResolveEnabled && !openIdFromLists && terminalResolution.isFetching
-  const terminalUnresolved = terminalResolveEnabled && !openIdFromLists && terminalResolution.isError
-  const terminalResolveProvenAbsent =
-    !terminalResolveEnabled
-    || (terminalResolution.isFetched && !terminalResolution.isFetching && !terminalResolution.isError)
 
-  // Abort any in-flight terminal traversal when the ref changes or the page
+  // Fall through to the exhaustive private-ref resolver only when the fast path
+  // is settled, healthy, and did NOT contain the ref. The resolver walks EVERY
+  // status (isolated from the visible feeds), so an off-page or terminal target
+  // resolves without leaning on the capped People/Needs lists. An active
+  // candidate always wins by precedence and disables the resolver.
+  const refResolveEnabled = Boolean(
+    openRef && !openIdFromLists && refCandidatesSettled && !refCandidatesError,
+  )
+  const refResolution = useResolvePrivateRef(openRef, refResolveEnabled)
+  const openId = openIdFromLists ?? (refResolveEnabled ? refResolution.data ?? null : null)
+
+  // Whole-pipeline state. "Resolving" spans BOTH the candidate sources settling
+  // and the resolver walking pages. "Unresolved" (retryable) covers a failed
+  // candidate source OR a resolver incomplete/error. "Proven absent" — the only
+  // gate to the missing dialog — requires the fast path settled+healthy AND the
+  // resolver to have healthily returned null.
+  const pipelineResolving = Boolean(
+    openRef && !openId
+    && (refCandidatesUnsettled || (refResolveEnabled && refResolution.isFetching)),
+  )
+  const pipelineUnresolved = Boolean(
+    openRef && !openId && !pipelineResolving
+    && (refCandidatesError || (refResolveEnabled && refResolution.isError)),
+  )
+  const refResolveProvenAbsent =
+    !refResolveEnabled
+    || (refResolution.isFetched && !refResolution.isFetching && !refResolution.isError)
+
+  // A late active candidate wins: drop any in-flight/cached resolver work for this
+  // ref so a stale null/result can never later reopen or misclassify it.
+  useEffect(() => {
+    if (openIdFromLists && openRef) {
+      void qc.cancelQueries({ queryKey: ["work-items", "ref-resolve", openRef] })
+      qc.removeQueries({ queryKey: ["work-items", "ref-resolve", openRef] })
+    }
+  }, [openIdFromLists, openRef, qc])
+
+  // Abort any in-flight resolver traversal when the ref changes or the page
   // unmounts — no later page fetches, no stale Todo opening under a new ref.
   useEffect(() => {
     const ref = openRef
     return () => {
-      if (ref) void qc.cancelQueries({ queryKey: ["work-items", "terminal-ref", ref] })
+      if (ref) void qc.cancelQueries({ queryKey: ["work-items", "ref-resolve", ref] })
     }
   }, [openRef, qc])
+
+  // Retry refetches the failed candidate sources FIRST (an active candidate may
+  // resolve the ref outright), then re-runs the resolver.
+  const retryRefResolution = useCallback(() => {
+    void qc.refetchQueries({ queryKey: ["work-items"] }).then(() => {
+      if (openRef) void refResolution.refetch()
+    })
+  }, [openRef, qc, refResolution])
   const quickIds = useMemo(() => {
     const candidates = [
       ...(ledger.data?.items ?? []),
@@ -758,8 +795,8 @@ export default function TodosPage() {
   // keeps the safe loading/error state instead of misreporting the Todo as gone.
   const missingRecoveredTodo = Boolean(
     openRef && !openId
-    && candidateQueriesSettled && candidateQueriesHealthy
-    && terminalResolveProvenAbsent,
+    && refCandidatesSettled && !refCandidatesError
+    && refResolveProvenAbsent,
   )
   const discardMissingDraft = useCallback(() => {
     if (openRef) clearTodoJournalByRef(openRef)
@@ -1034,7 +1071,7 @@ export default function TodosPage() {
         />
       )}
 
-      {terminalResolving && (
+      {pipelineResolving && (
         <div
           data-testid="todo-resolving"
           role="status"
@@ -1046,7 +1083,7 @@ export default function TodosPage() {
         </div>
       )}
 
-      {terminalUnresolved && (
+      {pipelineUnresolved && (
         <TodoDialog
           label="Couldn’t load this Todo"
           onRequestClose={() => {}}
@@ -1061,7 +1098,7 @@ export default function TodosPage() {
               type="button"
               autoFocus
               data-testid="todo-resolve-retry"
-              onClick={() => void terminalResolution.refetch()}
+              onClick={retryRefResolution}
               className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-semibold text-[var(--text-primary)] transition-transform hover:scale-[0.98] active:scale-[0.96]"
             >
               Retry
