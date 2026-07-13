@@ -197,8 +197,15 @@ export function CompanyActivityCard({ block }: { block: ChatBlock }) {
   }
 
   return (
+    // No data-block-id: block.id embeds the canonical Todo identity (todo:${id})
+    // and this receipt must never render it into the DOM. Reconciliation — live
+    // same-block patch vs. card replacement — is owned by the React key
+    // (key={block.id} in chat-messages), not by any DOM attribute, so identity
+    // stays in React internals and off every rendered surface. The one DOM reader
+    // of data-block-id (chat/page.tsx return-focus) only ever matches Handoff /
+    // Dispatch peek-source message ids, never a company-activity card. The
+    // non-identifying type tag remains for styling/debugging.
     <div
-      data-block-id={block.id}
       data-block-type={block.type}
       onKeyDown={handleKeyDown}
       className="my-[var(--space-2)] w-[min(480px,calc(100vw-var(--space-6)))] max-w-full rounded-[var(--radius-xl)] bg-[var(--fill-tertiary)] shadow-[var(--shadow-subtle)]"
