@@ -2,14 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { MarkdownView, SyntaxHighlighter, oneDark, oneLight } from "../markdown-view";
 import { ExternalLink, ArrowLeft } from "lucide-react";
 import { useTheme } from "@/routes/providers";
+import { buildFileReadRequest } from "@/lib/file-read-request";
 
-/** Shape returned by GET /api/files/read?path=<path>. */
+/** Shared fields returned by the scoped knowledge and managed-file readers. */
 interface FileReadResponse {
   content?: string;
-  mime: string;
-  size: number;
+  mime?: string;
+  size?: number;
   path: string;
-  resolvedPath: string;
+  resolvedPath?: string;
   binary?: boolean;
   tooLarge?: boolean;
 }
@@ -82,9 +83,10 @@ function formatSize(bytes: number): string {
 }
 
 /**
- * Shared file viewer. Fetches a file via GET /api/files/read and renders it as
- * markdown or syntax-highlighted code. Used both standalone (the /file route)
- * and embedded inside an in-app tab.
+ * Shared file viewer. Fetches knowledge/docs or managed files through their
+ * separate scoped read endpoints and renders markdown or syntax-highlighted
+ * code. Used both standalone (the /file route) and embedded inside an in-app
+ * tab.
  *
  * - `embedded === true`: no header chrome, fills its parent and scrolls
  *   internally, shows a subtle "open in new browser tab" affordance.
@@ -108,6 +110,7 @@ export function FileView({
   const [error, setError] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [loading, setLoading] = useState(true);
+  const request = useMemo(() => buildFileReadRequest(path), [path]);
 
   // Resolve whether to use a dark or light highlighter theme. ThemeProvider
   // sets data-theme on <html>; "light" is the only light variant.
@@ -120,9 +123,11 @@ export function FileView({
   }, [theme]);
 
   useEffect(() => {
-    if (!path) {
+    if (!request.ok) {
       setLoading(false);
-      setError("No file path provided");
+      setError(request.error);
+      setNotFound(false);
+      setData(null);
       return;
     }
     let cancelled = false;
@@ -131,7 +136,7 @@ export function FileView({
     setNotFound(false);
     setData(null);
 
-    fetch(`/api/files/read?path=${encodeURIComponent(path)}`)
+    fetch(request.url)
       .then(async (res) => {
         if (res.status === 404) {
           if (!cancelled) setNotFound(true);
@@ -163,7 +168,7 @@ export function FileView({
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [request]);
 
   // Set the document title to the file name for the standalone tab only.
   useEffect(() => {
@@ -217,18 +222,22 @@ export function FileView({
 
       {!loading && data && data.tooLarge && (
         <div className="text-[length:var(--text-body)] text-[var(--text-secondary)]">
-          File too large to preview ({formatSize(data.size)}).
+          File too large to preview
+          {typeof data.size === "number" ? ` (${formatSize(data.size)})` : ""}.
         </div>
       )}
 
       {!loading && data && !data.tooLarge && data.binary && (
         <div className="text-[length:var(--text-body)] text-[var(--text-secondary)]">
           <p>
-            Binary file ({data.mime}, {formatSize(data.size)}): cannot
-            preview.
+            Binary file
+            {data.mime || typeof data.size === "number"
+              ? ` (${[data.mime, typeof data.size === "number" ? formatSize(data.size) : ""].filter(Boolean).join(", ")})`
+              : ""}
+            : cannot preview.
           </p>
           <a
-            href={`/api/files/read?path=${encodeURIComponent(path)}`}
+            href={request.ok ? request.url : undefined}
             download
             className="inline-block mt-[var(--space-3)] text-[var(--accent)] underline"
           >
@@ -344,7 +353,7 @@ export function FileView({
         >
           {path || "(no path)"}
         </h1>
-        {data && (
+        {data && data.mime && typeof data.size === "number" && (
           <p className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)] mt-[var(--space-1)]">
             {data.mime} · {formatSize(data.size)}
           </p>
