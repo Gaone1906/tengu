@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -35,9 +35,43 @@ type ChatActivity = typeof import("../chat-activity.js");
 let api: Api;
 let registry: Registry;
 let chatActivity: ChatActivity;
+let callbacks: typeof import("../../sessions/callbacks.js");
 let coo: import("../../shared/types.js").Session;
 let worker: import("../../shared/types.js").Session;
 let emitted: Array<{ event: string; payload: any }> = [];
+const processFetch = globalThis.fetch;
+const pendingCallbackAttempts = new Set<{
+  promise: Promise<Response>;
+  reject: (reason: Error) => void;
+}>();
+
+function offlineCallbackFetch(): Promise<Response> {
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<Response>((_resolve, rejectAttempt) => {
+    reject = rejectAttempt;
+  });
+  const attempt = { promise, reject };
+  pendingCallbackAttempts.add(attempt);
+  void promise.then(
+    () => pendingCallbackAttempts.delete(attempt),
+    () => pendingCallbackAttempts.delete(attempt),
+  );
+  return promise;
+}
+
+async function settleFailedCallbackAttempts(): Promise<void> {
+  while (pendingCallbackAttempts.size > 0) {
+    const attempts = [...pendingCallbackAttempts];
+    for (const attempt of attempts) {
+      attempt.reject(new Error("chat activity route test callback transport is offline"));
+    }
+    await Promise.allSettled(attempts.map((attempt) => attempt.promise));
+    // Delivery failure persistence and retry scheduling happen after fetch
+    // rejects. Let that outer async chain finish before clearing its timer or
+    // allowing the next test to reset the database.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
 
 function makeRes(options?: { loseResponse?: boolean }) {
   let status = 200;
@@ -147,9 +181,35 @@ beforeAll(async () => {
   api = await import("../api.js");
   registry = await import("../../sessions/registry.js");
   chatActivity = await import("../chat-activity.js");
+  callbacks = await import("../../sessions/callbacks.js");
   registry.initDb();
+  globalThis.fetch = offlineCallbackFetch as typeof fetch;
   coo = registry.createSession({ engine: "codex", source: "web", sourceRef: "activity-coo", employee: "coo" });
   worker = registry.createSession({ engine: "codex", source: "web", sourceRef: "activity-worker", employee: "worker" });
+});
+
+afterEach(async () => {
+  await settleFailedCallbackAttempts();
+  expect(pendingCallbackAttempts.size, "callback delivery must settle before route-test teardown").toBe(0);
+  const unsettled = registry.initDb().prepare(`
+    SELECT COUNT(*) AS count
+    FROM callback_deliveries
+    WHERE status = 'pending' AND attempt_count > 0 AND last_error IS NULL
+  `).get() as { count: number };
+  expect(unsettled.count, "failed callback attempts must persist before retry reset").toBe(0);
+  callbacks.__resetCallbackRetrySweepForTest();
+});
+
+afterAll(async () => {
+  await settleFailedCallbackAttempts();
+  callbacks.__resetCallbackRetrySweepForTest();
+  globalThis.fetch = processFetch;
+  const { stopScheduler } = await import("../../cron/scheduler.js");
+  const { cleanupStagedPollExecutableArtifacts } = await import("../../workflows/poll-artifacts.js");
+  stopScheduler();
+  cleanupStagedPollExecutableArtifacts([], { cwd: home });
+  registry.__closeDbForTest();
+  fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
 });
 
 beforeEach(() => {
