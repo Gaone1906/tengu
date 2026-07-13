@@ -1,14 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
 import { AlertTriangle, RefreshCw } from "lucide-react"
-import { api } from "@/lib/api"
 import type {
   EngineLimitEngineSnapshot,
-  EngineLimitsResponse,
   EngineLimitWindow,
 } from "@/lib/api"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { Skeleton } from "@/components/ui/skeleton"
+import { deriveFreshness, useEngineLimits, type FreshnessKind } from "./use-engine-limits"
 
 const FEATURED_ENGINES = ["claude", "codex", "grok"]
 const DANGER = 90
@@ -32,9 +30,9 @@ function barColor(value?: number) {
   return (value ?? 0) >= DANGER ? "var(--system-red)" : "var(--accent)"
 }
 
-function resetLabel(iso?: string) {
+function resetLabel(iso: string | undefined, now: number) {
   if (!iso) return null
-  const diff = new Date(iso).getTime() - Date.now()
+  const diff = new Date(iso).getTime() - now
   if (diff <= 0) return "resetting now"
   const mins = Math.round(diff / 60000)
   if (mins < 60) return `resets in ${mins}m`
@@ -45,9 +43,9 @@ function resetLabel(iso?: string) {
   return `resets ${new Date(iso).toLocaleDateString()}`
 }
 
-function agoLabel(iso?: string) {
+function agoLabel(iso: string | undefined, now: number) {
   if (!iso) return "unknown"
-  const diff = Date.now() - new Date(iso).getTime()
+  const diff = now - new Date(iso).getTime()
   const mins = Math.max(0, Math.round(diff / 60000))
   if (mins < 1) return "just now"
   if (mins < 60) return `${mins}m ago`
@@ -56,18 +54,30 @@ function agoLabel(iso?: string) {
   return `${Math.round(hrs / 24)}d ago`
 }
 
-function freshness(engine: EngineLimitEngineSnapshot) {
-  if (engine.status === "error") return { color: "var(--system-red)", label: "Error" }
-  if (engine.stale) return { color: "var(--system-orange)", label: `Stale · ${agoLabel(engine.refreshedAt)}` }
-  if (engine.status === "live") return { color: "var(--system-green)", label: "Live" }
-  if (engine.status === "snapshot") return { color: "var(--text-tertiary)", label: `Updated ${agoLabel(engine.refreshedAt)}` }
-  return { color: "var(--text-quaternary)", label: "No data" }
+// Freshness kind → badge tone + label, evaluated at render time so a snapshot
+// that ages past the freshness window flips to "Stale" without a re-fetch and a
+// long-open tab can never present hours-old data as current.
+function badge(kind: FreshnessKind, engine: EngineLimitEngineSnapshot, now: number) {
+  switch (kind) {
+    case "live":
+      return { color: "var(--system-green)", label: "Live" }
+    case "fresh":
+      return { color: "var(--text-tertiary)", label: `Updated ${agoLabel(engine.refreshedAt, now)}` }
+    case "stale":
+      return { color: "var(--system-orange)", label: `Stale · ${agoLabel(engine.refreshedAt, now)}` }
+    case "error":
+      return { color: "var(--system-red)", label: "Error" }
+    case "unsupported":
+      return { color: "var(--text-quaternary)", label: "Unavailable" }
+    default:
+      return { color: "var(--text-quaternary)", label: "No data" }
+  }
 }
 
-function WindowBar({ window }: { window: EngineLimitWindow }) {
+function WindowBar({ window, now }: { window: EngineLimitWindow; now: number }) {
   const observed = window.usedPercent !== undefined
   const used = clampPercent(window.usedPercent)
-  const reset = resetLabel(window.resetsAtIso)
+  const reset = resetLabel(window.resetsAtIso, now)
 
   return (
     <div className="min-w-0">
@@ -94,16 +104,20 @@ function WindowBar({ window }: { window: EngineLimitWindow }) {
   )
 }
 
-function EngineCard({ engine }: { engine: EngineLimitEngineSnapshot }) {
+function EngineCard({ engine, now }: { engine: EngineLimitEngineSnapshot; now: number }) {
   const windows = engine.windows || []
-  const tone = freshness(engine)
+  const fresh = deriveFreshness(engine, now)
+  const tone = badge(fresh.kind, engine, now)
   const credits = engine.credits
   const creditLabel = credits?.unlimited
     ? "Unlimited credits"
     : credits?.balance
       ? `Credits ${credits.balance}`
       : null
-  const note = engine.error || (engine.stale ? "Snapshot is over 30 minutes old — may be out of date." : null)
+  const note =
+    engine.error ||
+    (fresh.kind === "stale" ? "Last-known snapshot is over 30 minutes old — may be out of date." : null) ||
+    (fresh.kind === "unsupported" ? engine.unsupportedReason ?? null : null)
 
   return (
     // Grouped-inset card (shared visual language): --bg-secondary carrying the
@@ -129,7 +143,7 @@ function EngineCard({ engine }: { engine: EngineLimitEngineSnapshot }) {
       {windows.length > 0 ? (
         <div className="mt-[var(--space-6)] grid gap-[var(--space-5)]">
           {windows.map((window) => (
-            <WindowBar key={`${engine.name}-${window.name}`} window={window} />
+            <WindowBar key={`${engine.name}-${window.name}`} window={window} now={now} />
           ))}
         </div>
       ) : (
@@ -156,32 +170,12 @@ function EngineCard({ engine }: { engine: EngineLimitEngineSnapshot }) {
 
 export default function LimitsPage() {
   useBreadcrumbs([{ label: 'Limits' }])
-  const [data, setData] = useState<EngineLimitsResponse | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [refreshing, setRefreshing] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const { data, phase, refreshing, error, refresh } = useEngineLimits()
+  // Read the clock once per render so every card/label shares one "now" and the
+  // freshness the user sees is honest for this paint.
+  const now = Date.now()
 
-  const refresh = useCallback(() => {
-    setRefreshing(true)
-    setError(null)
-    api
-      .refreshEngineLimits()
-      .then(setData)
-      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load engine limits"))
-      .finally(() => {
-        setLoading(false)
-        setRefreshing(false)
-      })
-  }, [])
-
-  useEffect(() => {
-    refresh()
-  }, [refresh])
-
-  const engines = useMemo(
-    () => FEATURED_ENGINES.map((name) => data?.engines[name]).filter(Boolean) as EngineLimitEngineSnapshot[],
-    [data],
-  )
+  const engines = FEATURED_ENGINES.map((name) => data?.engines[name]).filter(Boolean) as EngineLimitEngineSnapshot[]
 
   return (
     <PageLayout>
@@ -201,6 +195,7 @@ export default function LimitsPage() {
             <button
               onClick={refresh}
               aria-label="Refresh engine limits"
+              aria-busy={refreshing}
               className="inline-flex size-[38px] shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]"
             >
               <RefreshCw size={17} className={refreshing ? "animate-spin" : ""} />
@@ -212,11 +207,11 @@ export default function LimitsPage() {
               className="mb-5 rounded-[var(--radius-lg)] p-[10px_13px] text-[length:var(--text-footnote)] text-[var(--system-red)]"
               style={{ background: "color-mix(in srgb, var(--system-red) 8%, transparent)" }}
             >
-              {error}
+              {data ? `Couldn’t refresh — showing last-known values. (${error})` : error}
             </div>
           )}
 
-          {loading ? (
+          {phase === "loading" ? (
             <div className="grid gap-4 md:grid-cols-2">
               <Skeleton height={180} className="rounded-[var(--radius-xl)]" />
               <Skeleton height={180} className="rounded-[var(--radius-xl)]" />
@@ -224,7 +219,7 @@ export default function LimitsPage() {
           ) : (
             <div className="grid items-start gap-4 md:grid-cols-2">
               {engines.map((engine) => (
-                <EngineCard key={engine.name} engine={engine} />
+                <EngineCard key={engine.name} engine={engine} now={now} />
               ))}
             </div>
           )}
