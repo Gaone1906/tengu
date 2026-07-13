@@ -1165,6 +1165,22 @@ export async function startGateway(
     }
   });
 
+  // Node's parser rejects some malformed authorities before the request
+  // handler can validate them. Keep that boundary deterministic and never
+  // reflect or log raw Host/private input from the parser error.
+  server.on("clientError", (_error, socket) => {
+    if (!socket.writable) return;
+    const body = JSON.stringify({ error: "Invalid request authority" });
+    socket.end(
+      "HTTP/1.1 400 Bad Request\r\n"
+      + "Connection: close\r\n"
+      + "Content-Type: application/json\r\n"
+      + `Content-Length: ${Buffer.byteLength(body)}\r\n`
+      + "\r\n"
+      + body,
+    );
+  });
+
   // WebSocket server
   const wss = new WebSocketServer({ noServer: true });
   // Dedicated WS server for per-session PTY streams (/ws/pty/:sessionId) — kept
@@ -1239,7 +1255,7 @@ export async function startGateway(
       if (rejectNonOperatorPtyUpgradeCaller(req, socket, {
         operatorAuthenticated:
           verifyGatewayAuth(req.headers, gatewayAuthToken, JINN_HOME)
-          || (!authRequiredNow() && isSameOriginBrowserRequest(req.headers, currentConfig)),
+          || (!authRequiredNow() && isSameOriginBrowserRequest(req, currentConfig)),
       })) return;
       let sessionId: string;
       try {

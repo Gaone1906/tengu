@@ -55,17 +55,27 @@ async function request(
   body?: unknown,
   authenticated = true,
 ) {
+  const headers = {
+    host: authenticated ? "gateway.test" : "127.0.0.1:7777",
+    ...(authenticated ? { authorization: "Bearer test-token" } : {}),
+    ...(!authenticated ? {
+      origin: "http://127.0.0.1:7777",
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-origin",
+    } : {}),
+    "content-type": "application/json",
+  };
   const req = Object.assign(
     Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]),
     {
       method,
       url,
-      headers: {
-        host: authenticated ? "gateway.test" : "127.0.0.1:7777",
-        ...(authenticated ? { authorization: "Bearer test-token" } : {}),
-        ...(!authenticated ? { origin: "http://127.0.0.1:7777" } : {}),
-        "content-type": "application/json",
-      },
+      headers,
+      rawHeaders: Object.entries(headers).flatMap(([name, value]) => [name, value]),
+      ...(!authenticated ? {
+        socket: { remoteAddress: "127.0.0.1", localAddress: "127.0.0.1", localPort: 7777 },
+      } : {}),
     },
   );
   const cap = makeRes();

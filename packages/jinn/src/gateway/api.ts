@@ -1213,14 +1213,14 @@ async function runWorkflowDefinitionFromHttp(
   body: WorkflowRunRequestBody,
   expectedId?: string,
 ): Promise<void> {
-  const authority = authorizeWorkflowOperation(req.headers, def, "run", context);
+  const authority = authorizeWorkflowOperation(req, def, "run", context);
   if (!authority.ok) return json(res, { error: authority.error }, authority.status);
   const validated = validateWorkflowRunRequestBody(body, def);
   if (!validated.ok) return badRequest(res, validated.error);
   if (expectedId !== undefined && def.id !== expectedId) {
     return badRequest(res, `definition file "${expectedId}" has mismatched id "${def.id}"`);
   }
-  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  const identity = resolveScopedWriteCallerIdentity(req, context);
   const invocationSessionId = identity.kind === "session" && isActivityProjectionEligibleSession(identity.callerId)
     ? identity.callerId
     : undefined;
@@ -1945,7 +1945,7 @@ type WorkItemCaller =
   | { kind: 'session'; session: Session; callerId: string };
 
 function resolveWorkItemCaller(req: HttpRequest, res: ServerResponse, context: ApiContext): WorkItemCaller | undefined {
-  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  const identity = resolveScopedWriteCallerIdentity(req, context);
   if (identity.kind === "unidentified-tool" || identity.kind === "unauthenticated") {
     json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
     return undefined;
@@ -1960,7 +1960,7 @@ function resolveWorkItemCaller(req: HttpRequest, res: ServerResponse, context: A
 }
 
 function resolveNeedsAttentionTarget(req: HttpRequest, res: ServerResponse, requested: string, context: ApiContext): string | undefined {
-  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  const identity = resolveScopedWriteCallerIdentity(req, context);
   if (identity.kind === "unidentified-tool" || identity.kind === "unauthenticated") {
     json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
     return undefined;
@@ -1986,14 +1986,23 @@ function resolveNeedsAttentionTarget(req: HttpRequest, res: ServerResponse, requ
   return requested;
 }
 
-function resolveScopedWriteCallerIdentity(headers: HttpRequest["headers"], context: ApiContext) {
+function resolveScopedWriteCallerIdentity(requestOrHeaders: HttpRequest | HttpRequest["headers"], context: ApiContext) {
+  const possibleHeaders = (requestOrHeaders as { headers?: unknown }).headers;
+  const request = possibleHeaders
+    && typeof possibleHeaders === "object"
+    && !Array.isArray(possibleHeaders)
+    ? requestOrHeaders as HttpRequest
+    : undefined;
+  const headers: HttpRequest["headers"] = request
+    ? request.headers
+    : requestOrHeaders as HttpRequest["headers"];
   return resolveCallerIdentity(headers, {
     sessionExists: (sessionId) => !!getSession(sessionId),
     verifySessionCapability,
     requireCapability: true,
     operatorAuthenticated:
       verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME)
-      || (!shouldRequireGatewayAuth(context.getConfig()) && isSameOriginBrowserRequest(headers, context.getConfig())),
+      || (!shouldRequireGatewayAuth(context.getConfig()) && !!request && isSameOriginBrowserRequest(request, context.getConfig())),
   });
 }
 
@@ -2167,41 +2176,124 @@ function withActivityReceipt<T extends Record<string, unknown>>(body: T, activit
   return activityReceiptId ? { ...body, activityReceiptId } : body;
 }
 
-export function isSameOriginBrowserRequest(
-  headers: HttpRequest["headers"],
-  config: Pick<JinnConfig, "gateway">,
-): boolean {
-  const rawOrigin = headers.origin;
-  const origin = Array.isArray(rawOrigin) ? rawOrigin[0] : rawOrigin;
-  const rawHost = headers.host;
-  const host = Array.isArray(rawHost) ? rawHost[0] : rawHost;
-  if (!host) return false;
-  if (origin) {
-    try {
-      const parsed = new URL(origin);
-      return (parsed.protocol === "http:" || parsed.protocol === "https:")
-        && parsed.host.toLowerCase() === host.toLowerCase();
-    } catch {
-      return false;
+const FORWARDED_REQUEST_HEADERS = new Set([
+  "forwarded",
+  "via",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-forwarded-port",
+  "x-forwarded-proto",
+  "x-real-ip",
+]);
+
+type RequestAuthority = { hostname: string; port: number };
+
+function requestHeaderValues(req: Pick<HttpRequest, "headers" | "rawHeaders">, name: string): string[] {
+  const lowerName = name.toLowerCase();
+  if (Array.isArray(req.rawHeaders) && req.rawHeaders.length > 0) {
+    const values: string[] = [];
+    for (let index = 0; index < req.rawHeaders.length; index += 2) {
+      if (req.rawHeaders[index]?.toLowerCase() === lowerName) values.push(req.rawHeaders[index + 1] ?? "");
     }
+    return values;
   }
+  const raw = req.headers[lowerName];
+  if (Array.isArray(raw)) return raw;
+  return typeof raw === "string" ? [raw] : [];
+}
 
-  const rawFetchSite = headers["sec-fetch-site"];
-  const fetchSite = Array.isArray(rawFetchSite) ? rawFetchSite[0] : rawFetchSite;
-  const rawFetchMode = headers["sec-fetch-mode"];
-  const fetchMode = Array.isArray(rawFetchMode) ? rawFetchMode[0] : rawFetchMode;
-  if (fetchSite !== "same-origin" || fetchMode !== "cors") return false;
+function singleRequestHeader(req: Pick<HttpRequest, "headers" | "rawHeaders">, name: string): string | undefined {
+  const values = requestHeaderValues(req, name);
+  if (values.length !== 1) return undefined;
+  const value = values[0];
+  return value === value.trim() && value.length > 0 ? value : undefined;
+}
 
-  // Browsers omit Origin on ordinary same-origin GET fetches. Fetch Metadata is
-  // browser-controlled, while the expected Host check keeps arbitrary
-  // Origin-less traffic from inheriting operator identity.
-  const configuredHost = config.gateway.host || "127.0.0.1";
-  if (isLoopbackHost(configuredHost)) return isLoopbackHost(host);
+function parseRequestAuthority(req: Pick<HttpRequest, "headers" | "rawHeaders">): RequestAuthority | undefined {
+  const raw = singleRequestHeader(req, "host");
+  if (!raw || raw.length > 255 || !/^[\x21-\x7e]+$/.test(raw) || /[%/@\\?#,]/.test(raw)) return undefined;
+
+  let hostname: string;
+  let rawPort: string | undefined;
+  if (raw.startsWith("[")) {
+    const match = /^\[([0-9a-f:.]+)\](?::([0-9]+))?$/i.exec(raw);
+    if (!match) return undefined;
+    hostname = match[1].toLowerCase();
+    rawPort = match[2];
+  } else {
+    const match = /^([a-z0-9._-]+)(?::([0-9]+))?$/i.exec(raw);
+    if (!match) return undefined;
+    hostname = match[1].toLowerCase();
+    rawPort = match[2];
+  }
+  if (!hostname || hostname.startsWith(".") || hostname.endsWith(".") || hostname.includes("..")) return undefined;
+
+  const port = rawPort === undefined ? 80 : Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return undefined;
   try {
-    return new URL(`http://${host}`).hostname.toLowerCase() === configuredHost.toLowerCase();
+    const parsed = new URL(`http://${raw}`);
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) return undefined;
+  } catch {
+    return undefined;
+  }
+  return { hostname, port };
+}
+
+function isLoopbackAuthorityHost(hostname: string): boolean {
+  return isLoopback(hostname)
+    || hostname === "::1"
+    || hostname === "localhost"
+    || hostname.endsWith(".localhost");
+}
+
+function authorityMatchesListener(authority: RequestAuthority, localAddress: string, localPort: number): boolean {
+  if (authority.port !== localPort) return false;
+  if (authority.hostname === "localhost" || authority.hostname.endsWith(".localhost")) return true;
+  const normalizedLocalAddress = localAddress.toLowerCase().replace(/^::ffff:/, "");
+  return authority.hostname === normalizedLocalAddress;
+}
+
+function originMatchesAuthority(origin: string, authority: RequestAuthority): boolean {
+  try {
+    const parsed = new URL(origin);
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const port = parsed.port ? Number(parsed.port) : 80;
+    return parsed.protocol === "http:"
+      && !parsed.username
+      && !parsed.password
+      && parsed.origin !== "null"
+      && hostname === authority.hostname
+      && port === authority.port;
   } catch {
     return false;
   }
+}
+
+export function isSameOriginBrowserRequest(
+  req: Pick<HttpRequest, "headers" | "rawHeaders" | "socket">,
+  config: Pick<JinnConfig, "gateway">,
+): boolean {
+  if (shouldRequireGatewayAuth(config)) return false;
+  const socket = req.socket;
+  if (!socket || !isLoopback(socket.remoteAddress) || !isLoopback(socket.localAddress)) return false;
+  if (typeof socket.localPort !== "number") return false;
+  if ([...FORWARDED_REQUEST_HEADERS].some((name) => requestHeaderValues(req, name).length > 0)) return false;
+
+  const authority = parseRequestAuthority(req);
+  if (!authority
+    || !isLoopbackAuthorityHost(authority.hostname)
+    || !authorityMatchesListener(authority, socket.localAddress!, socket.localPort)) return false;
+
+  const fetchSite = singleRequestHeader(req, "sec-fetch-site");
+  const fetchMode = singleRequestHeader(req, "sec-fetch-mode");
+  const fetchDest = singleRequestHeader(req, "sec-fetch-dest");
+  const upgrade = singleRequestHeader(req, "upgrade")?.toLowerCase();
+  const expectedMode = upgrade === "websocket" ? "websocket" : "cors";
+  if (fetchSite !== "same-origin" || fetchMode !== expectedMode || fetchDest !== "empty") return false;
+
+  const origins = requestHeaderValues(req, "origin");
+  if (origins.length > 1 || (upgrade === "websocket" && origins.length !== 1)) return false;
+  return origins.length === 0 || originMatchesAuthority(origins[0], authority);
 }
 
 function isPublicIdentifiedCallerRoute(method: string, pathname: string): boolean {
@@ -2223,7 +2315,7 @@ function allowsUnauthenticatedMutation(method: string, pathname: string): boolea
 
 function rejectUnverifiedIdentifiedApiCaller(req: HttpRequest, res: ServerResponse, method: string, pathname: string, context: ApiContext): boolean {
   if (isPublicIdentifiedCallerRoute(method, pathname)) return false;
-  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  const identity = resolveScopedWriteCallerIdentity(req, context);
   if (identity.kind === "unauthenticated") {
     const mutating = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
     if (!mutating || allowsUnauthenticatedMutation(method, pathname)) return false;
@@ -2265,7 +2357,7 @@ function operatorOnlyControlPlaneRoute(method: string, pathname: string): string
 }
 
 function requireOperatorControlPlaneAuthority(req: HttpRequest, res: ServerResponse, action: string, context: ApiContext): boolean {
-  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  const identity = resolveScopedWriteCallerIdentity(req, context);
   if (identity.kind === "unidentified-tool" || identity.kind === "unauthenticated") {
     json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
     return false;
@@ -2278,7 +2370,7 @@ function requireOperatorControlPlaneAuthority(req: HttpRequest, res: ServerRespo
 }
 
 function requireCallbackRecoveryAuthority(req: HttpRequest, res: ServerResponse, context: ApiContext): boolean {
-  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  const identity = resolveScopedWriteCallerIdentity(req, context);
   if (identity.kind === "operator") return true;
   if (identity.kind === "session") {
     const session = getSession(identity.callerId);
@@ -2290,7 +2382,7 @@ function requireCallbackRecoveryAuthority(req: HttpRequest, res: ServerResponse,
 }
 
 function rejectScopedIdentityGrant(req: HttpRequest, res: ServerResponse, action: string, context: ApiContext): boolean {
-  const identity = resolveScopedWriteCallerIdentity(req.headers, context);
+  const identity = resolveScopedWriteCallerIdentity(req, context);
   if (identity.kind === "operator" || identity.kind === "unauthenticated") return false;
   if (identity.kind === "unidentified-tool") {
     json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
@@ -2339,12 +2431,12 @@ function hasDepartmentWorkflowAuthority(employee: Employee, workflowDepartment: 
 }
 
 function authorizeWorkflowOperation(
-  headers: HttpRequest["headers"],
+  requestOrHeaders: HttpRequest | HttpRequest["headers"],
   def: EditableWorkflowDefinition | null,
   op: WorkflowOperation,
   context: ApiContext,
 ): WorkflowOperationAuthority {
-  const identity = resolveScopedWriteCallerIdentity(headers, context);
+  const identity = resolveScopedWriteCallerIdentity(requestOrHeaders, context);
   if (identity.kind === "unidentified-tool" || identity.kind === "unauthenticated") {
     return { ok: false, status: 403, error: UNIDENTIFIED_TOOL_CALL_ERROR };
   }
@@ -2652,7 +2744,19 @@ export async function handleApiRequest(
   res: ServerResponse,
   context: ApiContext,
 ): Promise<void> {
-  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  if (!parseRequestAuthority(req)) {
+    return json(res, { error: "Invalid request authority" }, 400);
+  }
+  const rawTarget = req.url || "/";
+  if (!rawTarget.startsWith("/") || rawTarget.startsWith("//") || /[\x00-\x1f\\]/.test(rawTarget)) {
+    return json(res, { error: "Invalid request target" }, 400);
+  }
+  let url: URL;
+  try {
+    url = new URL(rawTarget, "http://localhost");
+  } catch {
+    return json(res, { error: "Invalid request target" }, 400);
+  }
   const pathname = url.pathname;
   const method = req.method || "GET";
   // Stash so json() can compress large responses without threading req everywhere.
@@ -3275,7 +3379,7 @@ export async function handleApiRequest(
       // (codex finding 2). Honor-system caveat (design §5): with a shared
       // bearer token the scoping is best-effort — it refuses to TEACH the
       // pattern, it cannot police curl.
-      const stopCaller = resolveScopedWriteCallerIdentity(req.headers, context);
+      const stopCaller = resolveScopedWriteCallerIdentity(req, context);
       if (stopCaller.kind === "unidentified-tool") {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
@@ -4123,7 +4227,7 @@ export async function handleApiRequest(
         if (!targetWorkflow) {
           return json(res, { error: "target workflow not found" }, 404);
         }
-        const authority = authorizeWorkflowOperation(req.headers, targetWorkflow, "bind-trigger", context);
+        const authority = authorizeWorkflowOperation(req, targetWorkflow, "bind-trigger", context);
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
@@ -4228,7 +4332,7 @@ export async function handleApiRequest(
           if (!binding) return notFound(res);
           const targetWorkflow = getDefinition(root, binding.targetWorkflowId);
           if (!targetWorkflow) {
-            const authority = authorizeWorkflowOperation(req.headers, null, "bind-trigger", context);
+            const authority = authorizeWorkflowOperation(req, null, "bind-trigger", context);
             if (!authority.ok) {
               return json(res, { error: authority.error }, authority.status);
             }
@@ -4243,7 +4347,7 @@ export async function handleApiRequest(
             );
             return json(res, withActivityReceipt({ deleted: true, name: triggerName, orphaned: true }, activityReceiptId));
           }
-          const authority = authorizeWorkflowOperation(req.headers, targetWorkflow, "bind-trigger", context);
+          const authority = authorizeWorkflowOperation(req, targetWorkflow, "bind-trigger", context);
           if (!authority.ok) {
             return json(res, { error: authority.error }, authority.status);
           }
@@ -4323,7 +4427,7 @@ export async function handleApiRequest(
         if (body.operation === "create") {
           const rawDefinition = body.definition as Record<string, unknown>;
           workflowId = body.definition.id;
-          const authority = authorizeWorkflowOperation(req.headers, null, "create", context);
+          const authority = authorizeWorkflowOperation(req, null, "create", context);
           if (!authority.ok) return json(res, { error: authority.error }, authority.status);
           if (requestedLayoutIntent === "manual" && authority.actor !== "operator") {
             return json(res, { error: "manual layout intent is operator-only" }, 403);
@@ -4337,14 +4441,14 @@ export async function handleApiRequest(
             ...workflowDefinitionAuthorPatch(authority),
           } as unknown as EditableWorkflowDefinition;
           if (reconcileSopTriggers) {
-            const bindingAuthority = authorizeWorkflowOperation(req.headers, definitionInput, "bind-trigger", context);
+            const bindingAuthority = authorizeWorkflowOperation(req, definitionInput, "bind-trigger", context);
             if (!bindingAuthority.ok) return json(res, { error: bindingAuthority.error }, bindingAuthority.status);
           }
         } else {
           workflowId = body.workflowId;
           const existing = getDefinition(root, workflowId);
           if (!existing) return notFound(res);
-          const authority = authorizeWorkflowOperation(req.headers, existing, "update", context);
+          const authority = authorizeWorkflowOperation(req, existing, "update", context);
           if (!authority.ok) return json(res, { error: authority.error }, authority.status);
           if (requestedLayoutIntent === "manual" && authority.actor !== "operator") {
             return json(res, { error: "manual layout intent is operator-only" }, 403);
@@ -4355,7 +4459,7 @@ export async function handleApiRequest(
             : stripWorkflowAuthorityFields(body.patch as Partial<EditableWorkflowDefinition>);
           expectedVersion = body.expectedVersion;
           if (reconcileSopTriggers) {
-            const bindingAuthority = authorizeWorkflowOperation(req.headers, existing, "bind-trigger", context);
+            const bindingAuthority = authorizeWorkflowOperation(req, existing, "bind-trigger", context);
             if (!bindingAuthority.ok) return json(res, { error: bindingAuthority.error }, bindingAuthority.status);
           }
         }
@@ -4460,7 +4564,7 @@ export async function handleApiRequest(
         try {
           const requestedLayoutIntent = body.layoutIntent;
           const { layoutIntent: _layoutIntent, ...definitionBody } = body;
-          const authority = authorizeWorkflowOperation(req.headers, null, "create", context);
+          const authority = authorizeWorkflowOperation(req, null, "create", context);
           if (!authority.ok) {
             return json(res, { error: authority.error }, authority.status);
           }
@@ -4493,7 +4597,7 @@ export async function handleApiRequest(
       try {
         const existing = getDefinition(root, params.id);
         if (!existing) return notFound(res);
-        const authority = authorizeWorkflowOperation(req.headers, existing, "duplicate", context);
+        const authority = authorizeWorkflowOperation(req, existing, "duplicate", context);
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
@@ -4520,7 +4624,7 @@ export async function handleApiRequest(
       try {
         const existing = getDefinition(root, params.id);
         if (!existing) return notFound(res);
-        const authority = authorizeWorkflowOperation(req.headers, existing, "retire", context);
+        const authority = authorizeWorkflowOperation(req, existing, "retire", context);
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
@@ -4634,7 +4738,7 @@ export async function handleApiRequest(
       const existingRun = getRun(root, params.id, params.runId);
       if (!existingRun) return notFound(res);
       const authorityDef = existingRun.definitionSnapshot ?? getDefinition(root, params.id);
-      const authority = authorizeWorkflowOperation(req.headers, authorityDef, "run", context);
+      const authority = authorizeWorkflowOperation(req, authorityDef, "run", context);
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
       const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_EVENT_BODY_MAX_BYTES });
       if (!parsed.ok) return;
@@ -4696,7 +4800,7 @@ export async function handleApiRequest(
       const run = getRun(root, params.id, params.runId);
       if (!run) return notFound(res);
       const definition = run.definitionSnapshot ?? getDefinition(root, params.id);
-      const authority = authorizeWorkflowOperation(req.headers, definition, "run", context);
+      const authority = authorizeWorkflowOperation(req, definition, "run", context);
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
       const outcome = await cancelWorkflowRun(workflowRunDriverDeps(root, context), params.id, params.runId, {
         actor: authority.actor,
@@ -4895,7 +4999,7 @@ export async function handleApiRequest(
       try {
         const existing = getDefinition(root, params.id);
         if (!existing) return notFound(res);
-        const authority = authorizeWorkflowOperation(req.headers, existing, "update", context);
+        const authority = authorizeWorkflowOperation(req, existing, "update", context);
         if (!authority.ok) {
           return json(res, { error: authority.error }, authority.status);
         }
@@ -4954,7 +5058,7 @@ export async function handleApiRequest(
       // a delegation always acts on behalf of a session, so a tool call whose
       // identity got lost must never fall through to the operator path. Headers
       // only — the identity gate outranks body validation.
-      const delegationCaller = resolveScopedWriteCallerIdentity(req.headers, context);
+      const delegationCaller = resolveScopedWriteCallerIdentity(req, context);
       if (delegationCaller.kind === "unidentified-tool") {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
@@ -5345,7 +5449,7 @@ export async function handleApiRequest(
       // A TOOL spawn that LOST its identity fails CLOSED (codex finding 2):
       // silently inheriting the operator's parentless spawn would orphan the
       // child and break the callback protocol without anyone noticing.
-      const spawnCaller = resolveScopedWriteCallerIdentity(req.headers, context);
+      const spawnCaller = resolveScopedWriteCallerIdentity(req, context);
       if (spawnCaller.kind === "unidentified-tool") {
         res.writeHead(403, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
@@ -5527,7 +5631,7 @@ export async function handleApiRequest(
       // are untouched. A TOOL send that LOST its identity fails CLOSED (codex
       // finding 2): without a caller it would bypass every guard and land as an
       // unprefixed operator-grade user message.
-      const msgCaller = resolveScopedWriteCallerIdentity(req.headers, context);
+      const msgCaller = resolveScopedWriteCallerIdentity(req, context);
       let parentFollowUp: { caller: Session; message: string } | undefined;
       if (msgCaller.kind === "unidentified-tool") {
         res.writeHead(403, { "Content-Type": "application/json" });

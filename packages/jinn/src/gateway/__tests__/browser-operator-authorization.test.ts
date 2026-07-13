@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -34,6 +35,7 @@ let server: http.Server;
 let baseUrl: string;
 let config: JinnConfig;
 let lastRequestHeaders: http.IncomingHttpHeaders = {};
+let handlerRejections = 0;
 
 const context = {
   getConfig: () => config,
@@ -75,6 +77,49 @@ async function needsAttentionViaRawHttp(headers: http.OutgoingHttpHeaders): Prom
   });
 }
 
+async function needsAttentionViaRawSocket(headerLines: string[]): Promise<{ status: number; body: Record<string, unknown> }> {
+  const target = new URL(baseUrl);
+  return await new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port: Number(target.port) });
+    const chunks: Buffer[] = [];
+    socket.once("connect", () => {
+      socket.write([
+        "GET /api/work-items?needsAttentionFor=me&limit=10 HTTP/1.1",
+        ...headerLines,
+        "Connection: close",
+        "",
+        "",
+      ].join("\r\n"));
+    });
+    socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+    socket.once("error", reject);
+    socket.once("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf-8");
+      const [head, payload = ""] = raw.split("\r\n\r\n", 2);
+      const status = Number.parseInt(head?.split("\r\n", 1)[0]?.split(" ")[1] ?? "0", 10);
+      const bodyText = /\r\ntransfer-encoding:\s*chunked\r\n/i.test(`\r\n${head}\r\n`)
+        ? decodeChunkedBody(payload)
+        : payload;
+      resolve({ status, body: JSON.parse(bodyText) as Record<string, unknown> });
+    });
+  });
+}
+
+function decodeChunkedBody(payload: string): string {
+  let offset = 0;
+  let decoded = "";
+  while (offset < payload.length) {
+    const lineEnd = payload.indexOf("\r\n", offset);
+    if (lineEnd < 0) break;
+    const size = Number.parseInt(payload.slice(offset, lineEnd), 16);
+    if (!Number.isFinite(size) || size === 0) break;
+    const start = lineEnd + 2;
+    decoded += payload.slice(start, start + size);
+    offset = start + size + 2;
+  }
+  return decoded;
+}
+
 function sameOriginFetchHeaders(): Record<string, string> {
   return {
     accept: "*/*",
@@ -98,6 +143,7 @@ beforeAll(async () => {
   server = http.createServer((req, res) => {
     lastRequestHeaders = req.headers;
     void api.handleApiRequest(req, res, context).catch((error: unknown) => {
+      handlerRejections += 1;
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
     });
@@ -131,9 +177,27 @@ describe("browser operator authorization", () => {
   });
 
   it.each([
+    ["Forwarded", { forwarded: "for=198.51.100.20;host=portal.example;proto=https" }],
+    ["Via", { via: "1.1 proxy.example" }],
+    ["X-Forwarded-For", { "x-forwarded-for": "198.51.100.20" }],
+    ["X-Forwarded-Host", { "x-forwarded-host": "portal.example" }],
+    ["X-Forwarded-Port", { "x-forwarded-port": "443" }],
+    ["X-Forwarded-Proto", { "x-forwarded-proto": "https" }],
+    ["X-Real-IP", { "x-real-ip": "198.51.100.20" }],
+  ])("rejects an external reverse-proxy-shaped Origin-less request carrying %s even when Host was rewritten to the loopback listener", async (_label, forwardedHeaders) => {
+    const result = await needsAttentionViaRawHttp({
+      ...sameOriginFetchHeaders(),
+      ...forwardedHeaders,
+    });
+
+    expect(result.status).toBe(403);
+  });
+
+  it.each([
     ["missing Fetch Metadata", {}],
     ["missing Fetch site", { "sec-fetch-mode": "cors" }],
     ["missing Fetch mode", { "sec-fetch-site": "same-origin" }],
+    ["missing Fetch destination", { "sec-fetch-site": "same-origin", "sec-fetch-mode": "cors" }],
     ["cross-site Fetch Metadata", { origin: "https://attacker.example", "sec-fetch-site": "cross-site", "sec-fetch-mode": "cors" }],
     ["navigation mode", { "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate" }],
   ])("rejects an unauthenticated Origin-less or non-same-origin client with %s", async (_label, headers) => {
@@ -151,6 +215,15 @@ describe("browser operator authorization", () => {
     expect(result.status).toBe(403);
   });
 
+  it("rejects a DNS-rebinding-style Host that embeds a loopback address", async () => {
+    const result = await needsAttentionViaRawHttp({
+      ...sameOriginFetchHeaders(),
+      host: "127.0.0.1.attacker.example",
+    });
+
+    expect(result.status).toBe(403);
+  });
+
   it("rejects inconsistent Origin and Host even when Fetch Metadata claims same-origin", async () => {
     const result = await needsAttentionViaRawHttp({
       ...sameOriginFetchHeaders(),
@@ -159,6 +232,80 @@ describe("browser operator authorization", () => {
     });
 
     expect(result.status).toBe(403);
+  });
+
+  it("rejects a same-origin Origin paired with navigation metadata", async () => {
+    const result = await needsAttentionViaRawHttp({
+      ...sameOriginFetchHeaders(),
+      origin: baseUrl,
+      "sec-fetch-mode": "navigate",
+    });
+
+    expect(result.status).toBe(403);
+  });
+
+  it("rejects a loopback Host whose port is not the actual listener port", async () => {
+    const result = await needsAttentionViaRawHttp({
+      ...sameOriginFetchHeaders(),
+      host: "127.0.0.1:1",
+    });
+
+    expect(result.status).toBe(403);
+  });
+
+  it("rejects a loopback literal that does not match the actual listener address", async () => {
+    const target = new URL(baseUrl);
+    const result = await needsAttentionViaRawHttp({
+      ...sameOriginFetchHeaders(),
+      host: `127.0.0.2:${target.port}`,
+    });
+
+    expect(result.status).toBe(403);
+  });
+
+  it("rejects duplicate Host authorities instead of accepting the first", async () => {
+    const target = new URL(baseUrl);
+    const result = await needsAttentionViaRawSocket([
+      `Host: ${target.host}`,
+      "Host: attacker.example",
+      "Sec-Fetch-Dest: empty",
+      "Sec-Fetch-Mode: cors",
+      "Sec-Fetch-Site: same-origin",
+    ]);
+
+    expect(result.status).toBe(400);
+    expect(result.body).toEqual({ error: "Invalid request authority" });
+  });
+
+  it("rejects duplicate browser metadata instead of accepting the first value", async () => {
+    const target = new URL(baseUrl);
+    const result = await needsAttentionViaRawSocket([
+      `Host: ${target.host}`,
+      "Sec-Fetch-Dest: empty",
+      "Sec-Fetch-Mode: cors",
+      "Sec-Fetch-Site: same-origin",
+      "Sec-Fetch-Site: cross-site",
+    ]);
+
+    expect(result.status).toBe(403);
+  });
+
+  it("rejects malformed Host without throwing through the handler or reflecting the authority", async () => {
+    const rejectionsBefore = handlerRejections;
+    const result = await needsAttentionViaRawSocket([
+      "Host: [private.internal",
+      "Sec-Fetch-Dest: empty",
+      "Sec-Fetch-Mode: cors",
+      "Sec-Fetch-Site: same-origin",
+    ]);
+
+    expect(result.status).toBe(400);
+    expect(result.body).toEqual({ error: "Invalid request authority" });
+    expect(JSON.stringify(result.body)).not.toContain("private.internal");
+    expect(handlerRejections).toBe(rejectionsBefore);
+
+    const followUp = await needsAttention(sameOriginFetchHeaders());
+    expect(followUp.status).toBe(200);
   });
 
   it("does not treat Fetch Metadata as operator authentication when gateway auth is enabled", async () => {
