@@ -1,6 +1,7 @@
 import { useEffect } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { Outlet, RouterProvider, createMemoryRouter, useNavigate } from "react-router-dom"
 import {
   DropdownMenu,
@@ -74,6 +75,7 @@ function Shell() {
 }
 
 function renderDirtyPage() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const router = createMemoryRouter([
     {
       path: "/",
@@ -81,7 +83,11 @@ function renderDirtyPage() {
       children: [{ path: "workflow/:id", element: <WorkflowPage /> }],
     },
   ], { initialEntries: ["/workflow/sample?mode=edit"] })
-  const view = render(<RouterProvider router={router} />)
+  const view = render(
+    <QueryClientProvider client={client}>
+      <RouterProvider router={router} />
+    </QueryClientProvider>,
+  )
   return { ...view, router }
 }
 
