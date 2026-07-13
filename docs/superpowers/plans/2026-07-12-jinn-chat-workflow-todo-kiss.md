@@ -14,7 +14,7 @@
 - Do not use parallel agents. After every scoped implementation commit, stop and wait for COO verification or a concrete follow-up before starting the next task.
 - After COO accepts this plan, Task 0 commits this plan document before any production edit. The plan must not remain untracked during implementation.
 - Before each production edit, add the named failing test and capture the exact failing assertion or missing symbol. A compile failure counts as RED only when the test intentionally imports the not-yet-created contract.
-- Use the focused commands written under each task. The live package filters are `jinn-cli` and `@jinn/web`; do not substitute the stale `jimmy` or `web` filters.
+- Use the focused commands written under each task. The live package filters are `jinn-cli` and `@jinn/web`; do not substitute obsolete package filters.
 - Run tests only with disposable `JINN_HOME` directories and non-default gateway ports. Never point implementation verification at an installed instance or port 7777.
 - Preserve all unrelated dirty files. Stage only paths named by the current task and inspect `git diff --cached --name-only` before each commit.
 - Do not add `Co-Authored-By` trailers.
@@ -1325,7 +1325,7 @@ Each commit must be independently focused, GREEN for its named tests, reviewed b
 
 ## Inspected Live Sources
 
-This plan is based on the current monorepo rather than stale `jimmy/` or Next.js examples. The implementation owner should re-open these exact files before editing if main has advanced:
+This plan is based on the current monorepo rather than obsolete package-layout or Next.js examples. The implementation owner should re-open these exact files before editing if main has advanced:
 
 - `package.json`, `packages/jinn/package.json`, `packages/web/package.json`, `packages/web/vite.config.ts`
 - `packages/jinn/src/shared/types.ts`, `packages/jinn/src/shared/blocks.ts`
