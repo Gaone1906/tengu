@@ -33,6 +33,7 @@ import {
   useDecideApproval,
   useNeedsAttentionItems,
   useEscalateApproval,
+  useResolveTerminalRef,
   type LedgerPageDepth,
 } from "./use-todos"
 import { clearTodoJournalByRef, todoPrivateRef } from "./todo-private-state"
@@ -410,7 +411,9 @@ export default function TodosPage() {
   // People needs the FULL open set (true per-person counts), not a capped page.
   const peopleItems = usePeopleItems()
 
-  const openId = useMemo(() => {
+  // Resolution against the loaded OPEN candidate lists (open ledger + Needs +
+  // People). Terminal (done/cancelled) Todos are absent here by design.
+  const openIdFromLists = useMemo(() => {
     if (!openRef) return null
     const candidates = [
       ...(ledger.data?.items ?? []),
@@ -420,6 +423,19 @@ export default function TodosPage() {
     ]
     return candidates.find((item) => todoPrivateRef(item.id) === openRef)?.id ?? null
   }, [baseLedger.data, ledger.data, needs.data, openRef, peopleItems.data])
+
+  // Only when the open lists are settled, healthy, and DON'T contain the ref do
+  // we fall through to the bounded terminal resolver — so an existing terminal
+  // Todo opens instead of false-positiving as missing. This query never feeds the
+  // visible ledger/counts/Needs/People.
+  const candidateQueriesSettled = !ledger.isLoading && !baseLedger.isLoading && !needs.isLoading && !peopleItems.isLoading
+  const candidateQueriesHealthy = !ledger.isError && !baseLedger.isError && !needs.isError && !peopleItems.isError
+  const terminalResolveEnabled = Boolean(
+    openRef && !openIdFromLists && !restoringPageDepth && candidateQueriesSettled && candidateQueriesHealthy,
+  )
+  const terminalResolution = useResolveTerminalRef(openRef, terminalResolveEnabled)
+  const terminalResolveSettled = !terminalResolveEnabled || (terminalResolution.isFetched && !terminalResolution.isFetching)
+  const openId = openIdFromLists ?? (terminalResolveEnabled ? terminalResolution.data ?? null : null)
   const quickIds = useMemo(() => {
     const candidates = [
       ...(ledger.data?.items ?? []),
@@ -714,10 +730,13 @@ export default function TodosPage() {
   )
 
   const sheetInitial = openId ? detailById.get(openId) : undefined
-  const candidateQueriesSettled = !ledger.isLoading && !baseLedger.isLoading && !needs.isLoading && !peopleItems.isLoading
-  const candidateQueriesHealthy = !ledger.isError && !baseLedger.isError && !needs.isError && !peopleItems.isError
+  // "Missing" is only honest once BOTH the open lists and the terminal resolver
+  // have settled healthily and neither matched. A slow or failed terminal lookup
+  // keeps the safe loading/error state instead of misreporting the Todo as gone.
   const missingRecoveredTodo = Boolean(
-    openRef && !openId && !restoringPageDepth && candidateQueriesSettled && candidateQueriesHealthy,
+    openRef && !openId && !restoringPageDepth
+    && candidateQueriesSettled && candidateQueriesHealthy
+    && terminalResolveSettled && !terminalResolution.isError,
   )
   const discardMissingDraft = useCallback(() => {
     if (openRef) clearTodoJournalByRef(openRef)

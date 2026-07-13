@@ -9,6 +9,7 @@ import {
 } from "@/lib/api"
 import { dateBounds, statusesFor, type TodoFilters } from "@/lib/todos"
 import { queryKeys } from "@/lib/query-keys"
+import { todoPrivateRef } from "./todo-private-state"
 
 /* GRS-021d/027 + design-todos §7 — the Todos data layer. The ledger keeps one
  * INFINITE query per status: every request is one fixed-size page
@@ -243,6 +244,38 @@ export function useOpenDetails(openIds: string[], enabled = true) {
 
 export function openIdsOf(items: WorkItemCompactWire[]): string[] {
   return items.filter((i) => OPEN_STATUSES.has(i.status)).map((i) => i.id)
+}
+
+/** Terminal statuses live outside the open ledger/Needs/People candidate lists,
+ *  so a chat activity card's private ref to an existing done/cancelled Todo has
+ *  no open row to hash-match. This canonical resolver hashes terminal rows to the
+ *  same salted `todoPrivateRef` until one matches — bounded paging, its own query
+ *  key (never merged into the visible ledger, counts, Needs, or People), and no
+ *  raw id in the URL or history. `tabSalt` lives in sessionStorage, so the ref is
+ *  stable across reload and this resolves identically on fresh nav and reload. */
+const TERMINAL_STATUSES: readonly WorkItemStatusWire[] = ["done", "cancelled"]
+const TERMINAL_RESOLVE_MAX_PAGES = 25
+
+export function useResolveTerminalRef(openRef: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: ["work-items", "terminal-ref", openRef ?? ""],
+    enabled: enabled && Boolean(openRef),
+    staleTime: 30_000,
+    queryFn: async (): Promise<string | null> => {
+      for (const status of TERMINAL_STATUSES) {
+        let offset = 0
+        for (let page = 0; page < TERMINAL_RESOLVE_MAX_PAGES; page += 1) {
+          const r = await api.listWorkItems({ status, offset, limit: GATEWAY_MAX_LIMIT })
+          const match = r.workItems.find((item) => todoPrivateRef(item.id) === openRef)
+          if (match) return match.id
+          const next = r.nextOffset ?? null
+          if (next === null || next === offset) break
+          offset = next
+        }
+      }
+      return null
+    },
+  })
 }
 
 export function useNeedsAttentionItems() {
