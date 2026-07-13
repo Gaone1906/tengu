@@ -293,21 +293,59 @@ function itemHasActiveDelegation(item: MessageItem): boolean {
   ))
 }
 
-function buildFoldSummary(run: MessageItem[], messages: Message[]): FoldSummaryData {
+function validTimestamp(value: number): number | null {
+  return Number.isFinite(value) && value > 0 ? value : null
+}
+
+/** A settled fold measures the durable transcript boundary: initiating user
+ * row → canonical final assistant/error row. Legacy rows may lack one boundary;
+ * in that case, recover only from timestamped evidence inside the same turn.
+ * A single evidence row cannot establish an interval by itself. */
+function settledDurationMs(messages: Message[], answerIndex: number): number | null {
+  if (answerIndex < 0 || answerIndex >= messages.length) return null
+
+  let userIndex = -1
+  for (let index = answerIndex - 1; index >= 0; index--) {
+    if (messages[index].role === 'user') {
+      userIndex = index
+      break
+    }
+  }
+
+  let startIndex = userIndex
+  let start = userIndex >= 0 ? validTimestamp(messages[userIndex].timestamp) : null
+  if (start === null) {
+    startIndex = -1
+    for (let index = userIndex + 1; index < answerIndex; index++) {
+      const timestamp = validTimestamp(messages[index].timestamp)
+      if (timestamp === null) continue
+      start = timestamp
+      startIndex = index
+      break
+    }
+  }
+
+  let endIndex = answerIndex
+  let end = validTimestamp(messages[answerIndex].timestamp)
+  if (end === null) {
+    endIndex = -1
+    for (let index = answerIndex - 1; index > userIndex; index--) {
+      const timestamp = validTimestamp(messages[index].timestamp)
+      if (timestamp === null) continue
+      end = timestamp
+      endIndex = index
+      break
+    }
+  }
+
+  if (start === null || end === null || startIndex === endIndex || end < start) return null
+  return end - start
+}
+
+function buildFoldSummary(run: MessageItem[], messages: Message[], answerIndex: number): FoldSummaryData {
   let tools = 0
   let updates = 0
   const teammates = new Set<string>()
-  // Teammate work happens elsewhere, so the row timestamps inside the region
-  // undercount it: a lone callback spans 0s. Track the outbound dispatch and
-  // the last arrival so the delegated wait counts as worked time.
-  let dispatchTs: number | null = null
-  let lastCallbackTs: number | null = null
-  const noteDispatch = (ts: number) => {
-    if (dispatchTs === null || ts < dispatchTs) dispatchTs = ts
-  }
-  const noteCallback = (ts: number) => {
-    if (lastCallbackTs === null || ts > lastCallbackTs) lastCallbackTs = ts
-  }
   for (const item of run) {
     if (item.kind === 'tool-group') {
       tools += item.msgs.length
@@ -315,13 +353,11 @@ function buildFoldSummary(run: MessageItem[], messages: Message[]): FoldSummaryD
     }
     if (item.kind === 'dispatch-call') {
       tools += 1
-      noteDispatch(item.msg.timestamp)
       continue
     }
     if (item.kind === 'callback-burst') {
       for (const entry of item.entries) {
         teammates.add(entry.data.employee)
-        noteCallback(entry.msg.timestamp)
       }
       continue
     }
@@ -330,13 +366,11 @@ function buildFoldSummary(run: MessageItem[], messages: Message[]): FoldSummaryD
       const callback = parseTeammateReply(msg)
       if (callback) {
         teammates.add(callback.employee)
-        noteCallback(msg.timestamp)
         continue
       }
       const relay = parseAgentRelay(msg)
       if (relay) {
         teammates.add(relay.fromLabel)
-        noteCallback(msg.timestamp)
       }
       continue
     }
@@ -346,27 +380,10 @@ function buildFoldSummary(run: MessageItem[], messages: Message[]): FoldSummaryD
       const employee = block.payload?.employee
       if (typeof employee === 'string' && employee) {
         teammates.add(employee)
-        noteDispatch(msg.timestamp)
       }
     }
   }
-  const first = itemFirstMsg(run[0]).timestamp
-  const last = itemLastMsg(run[run.length - 1]).timestamp
-  const intermediatesSpan = Math.max(0, last - first)
-  // Delegated span: dispatch (or the turn's user message when the dispatch
-  // isn't in the region) → the last callback arrival.
-  let teammateSpan = 0
-  if (lastCallbackTs !== null) {
-    let turnStart: number | null = null
-    for (let j = itemFirstRawIndex(run[0]) - 1; j >= 0; j--) {
-      if (messages[j].role === 'user') {
-        turnStart = messages[j].timestamp
-        break
-      }
-    }
-    teammateSpan = Math.max(0, lastCallbackTs - (dispatchTs ?? turnStart ?? first))
-  }
-  return { durationMs: Math.max(intermediatesSpan, teammateSpan), tools, teammates: teammates.size, updates }
+  return { durationMs: settledDurationMs(messages, answerIndex), tools, teammates: teammates.size, updates }
 }
 
 type RenderGroup =
@@ -456,7 +473,7 @@ function partitionForFold(
             : [item.msg]
         return rows.some((message) => message.blocks?.some((block) => liveTerminalDelegationIds.has(block.id)))
       }),
-      summary: buildFoldSummary(run, messages),
+      summary: buildFoldSummary(run, messages, answer),
       answerIdx: answer,
       animated: true,
     })
@@ -904,6 +921,7 @@ function closePartialMarkdown(text: string): string {
 /* ── Timestamp formatting ──────────────────────────────── */
 
 function formatTimestamp(ts: number): string {
+  if (validTimestamp(ts) === null) return ''
   const now = new Date()
   const date = new Date(ts)
   const isToday = now.toDateString() === date.toDateString()
@@ -918,7 +936,9 @@ function formatTimestamp(ts: number): string {
 }
 
 function shouldShowTimestamp(messages: Message[], index: number): boolean {
+  if (validTimestamp(messages[index]?.timestamp) === null) return false
   if (index === 0) return true
+  if (validTimestamp(messages[index - 1]?.timestamp) === null) return false
   const gap = messages[index].timestamp - messages[index - 1].timestamp
   return gap > 5 * 60 * 1000
 }

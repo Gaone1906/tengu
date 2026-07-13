@@ -260,6 +260,11 @@ function sessionMetaOf(session: Record<string, unknown>): SessionMetaUpdate {
   }
 }
 
+function normalizeHistoryTimestamp(value: unknown): number {
+  const timestamp = typeof value === 'number' || typeof value === 'string' ? Number(value) : Number.NaN
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0
+}
+
 function normalizeHistoryMessages(history: unknown): { messages: Message[]; firstPartialIndex: number } {
   const rows = Array.isArray(history) ? history as Record<string, unknown>[] : []
   const firstPartialIndex = rows.findIndex((m) => m.partial === true)
@@ -269,7 +274,10 @@ function normalizeHistoryMessages(history: unknown): { messages: Message[]; firs
       id: typeof m.id === 'string' ? m.id : crypto.randomUUID(),
       role: (m.role as 'user' | 'assistant' | 'notification') || 'assistant',
       content: String(m.content || m.text || ''),
-      timestamp: m.timestamp ? Number(m.timestamp) : Date.now(),
+      // Zero is an explicit "unknown" sentinel. Using Date.now() here makes a
+      // legacy row appear to have happened at hydration time and fabricates
+      // elapsed work whenever the transcript is reloaded.
+      timestamp: normalizeHistoryTimestamp(m.timestamp),
       ...(m.partial === true ? { partial: true } : {}),
       ...(typeof m.toolCall === 'string' && m.toolCall ? { toolCall: m.toolCall } : {}),
       ...(typeof m.toolId === 'string' && m.toolId ? { toolId: m.toolId } : {}),
@@ -978,7 +986,9 @@ export function useLiveSession(
             id: crypto.randomUUID(),
             role: 'assistant',
             content: errorText,
-            timestamp: Date.now(),
+            // This row repairs legacy display only; there is no persisted
+            // terminal boundary from which an honest elapsed interval exists.
+            timestamp: 0,
           })
         }
       }

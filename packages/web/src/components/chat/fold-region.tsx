@@ -17,7 +17,7 @@ import { ChevronDown, Settings } from 'lucide-react'
  */
 
 export interface FoldSummaryData {
-  durationMs: number
+  durationMs: number | null
   tools: number
   teammates: number
   /** Interim prose messages the model wrote on the way to the answer. */
@@ -25,6 +25,8 @@ export interface FoldSummaryData {
 }
 
 export function formatWorkDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return ''
+  if (ms < 1_000) return '<1s'
   const seconds = Math.max(0, Math.round(ms / 1000))
   if (seconds < 60) return `${seconds}s`
   const minutes = Math.floor(seconds / 60)
@@ -34,7 +36,8 @@ export function formatWorkDuration(ms: number): string {
 }
 
 export function foldSummaryWords(summary: FoldSummaryData): string[] {
-  const words = [`Worked for ${formatWorkDuration(summary.durationMs)}`]
+  const duration = summary.durationMs === null ? '' : formatWorkDuration(summary.durationMs)
+  const words = duration ? [`Worked for ${duration}`] : []
   if (summary.tools > 0) words.push(`${summary.tools} tool${summary.tools === 1 ? '' : 's'}`)
   if (summary.teammates > 0) words.push(`${summary.teammates} teammate${summary.teammates === 1 ? '' : 's'}`)
   if (summary.updates > 0) words.push(`${summary.updates} update${summary.updates === 1 ? '' : 's'}`)

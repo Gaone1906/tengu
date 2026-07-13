@@ -101,7 +101,7 @@ describe('the post-turn fold', () => {
   it('rests answered turns folded behind a work-summary ledger line', () => {
     const { container } = render(<ChatMessages messages={foldedTurn} loading={false} />)
 
-    const summary = screen.getByRole('button', { name: /Worked for 6m, 2 tools, 1 teammate\. Show the work\./ })
+    const summary = screen.getByRole('button', { name: /Worked for 7m, 2 tools, 1 teammate\. Show the work\./ })
     expect(summary.getAttribute('aria-expanded')).toBe('false')
     // Rendered dot separators, never glyph middots.
     expect(summary.textContent).not.toContain('·')
@@ -215,6 +215,8 @@ describe('the post-turn fold', () => {
   })
 
   it('formats work durations and omits zero-count summary segments', () => {
+    expect(formatWorkDuration(0)).toBe('<1s')
+    expect(formatWorkDuration(999)).toBe('<1s')
     expect(formatWorkDuration(5_000)).toBe('5s')
     expect(formatWorkDuration(90_000)).toBe('1m')
     expect(formatWorkDuration(3_720_000)).toBe('1h 2m')
@@ -222,6 +224,122 @@ describe('the post-turn fold', () => {
     expect(foldSummaryWords({ durationMs: 1_000, tools: 1, teammates: 0, updates: 0 })).toEqual(['Worked for 1s', '1 tool'])
     expect(foldSummaryWords({ durationMs: 1_000, tools: 2, teammates: 1, updates: 2 }))
       .toEqual(['Worked for 1s', '2 tools', '1 teammate', '2 updates'])
+  })
+
+  it.each([
+    {
+      case: 'tool-only',
+      messages: [
+        { id: 'u1', role: 'user', content: 'Run it.', timestamp: T0 },
+        { id: 't1', role: 'assistant', content: 'Used Bash', timestamp: T0 + 1_000, toolCall: 'Bash' },
+        { id: 'a1', role: 'assistant', content: 'Done.', timestamp: T0 + 2_400 },
+      ] satisfies Message[],
+      copy: /Worked for 2s, 1 tool\. Show the work\./,
+    },
+    {
+      case: 'interim-prose-only',
+      messages: [
+        { id: 'u1', role: 'user', content: 'Investigate.', timestamp: T0 },
+        { id: 'p1', role: 'assistant', content: 'Checking the logs.', timestamp: T0 + 1_000 },
+        { id: 'a1', role: 'assistant', content: 'Found it.', timestamp: T0 + 3_000 },
+      ] satisfies Message[],
+      copy: /Worked for 3s, 1 update\. Show the work\./,
+    },
+    {
+      case: 'mixed evidence',
+      messages: [
+        { id: 'u1', role: 'user', content: 'Fix it.', timestamp: T0 },
+        { id: 't1', role: 'assistant', content: 'Used Read', timestamp: T0 + 1_000, toolCall: 'Read' },
+        { id: 'p1', role: 'assistant', content: 'Applying the focused fix.', timestamp: T0 + 2_000 },
+        {
+          id: 'd1',
+          role: 'assistant',
+          content: 'Delegated review',
+          timestamp: T0 + 3_000,
+          blocks: [{
+            id: 'review',
+            type: 'delegation',
+            version: 1,
+            status: 'done',
+            payload: { employee: 'reviewer', employeeDisplay: 'Reviewer' },
+          }],
+        },
+        { id: 'a1', role: 'assistant', content: 'Fixed.', timestamp: T0 + 5_000 },
+      ] satisfies Message[],
+      copy: /Worked for 5s, 1 tool, 1 teammate, 1 update\. Show the work\./,
+    },
+    {
+      case: 'terminal error',
+      messages: [
+        { id: 'u1', role: 'user', content: 'Deploy it.', timestamp: T0 },
+        { id: 't1', role: 'assistant', content: 'Used deploy', timestamp: T0 + 1_000, toolCall: 'deploy' },
+        { id: 'a1', role: 'assistant', content: 'Error: deployment failed', timestamp: T0 + 4_000 },
+      ] satisfies Message[],
+      copy: /Worked for 4s, 1 tool\. Show the work\./,
+    },
+    {
+      case: 'rapid completion',
+      messages: [
+        { id: 'u1', role: 'user', content: 'Check.', timestamp: T0 },
+        { id: 't1', role: 'assistant', content: 'Used check', timestamp: T0 + 100, toolCall: 'check' },
+        { id: 'a1', role: 'assistant', content: 'Clear.', timestamp: T0 + 400 },
+      ] satisfies Message[],
+      copy: /Worked for <1s, 1 tool\. Show the work\./,
+    },
+  ])('measures $case work from the initiating user row through the terminal response', ({ messages, copy }) => {
+    render(<ChatMessages messages={messages} loading={false} />)
+    expect(screen.getByRole('button', { name: copy })).toBeTruthy()
+  })
+
+  it('freezes settled duration across rerenders and remounts instead of using the render clock', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(T0 + 10_000)
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Run it.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used Bash', timestamp: T0 + 500, toolCall: 'Bash' },
+      { id: 'a1', role: 'assistant', content: 'Done.', timestamp: T0 + 2_000 },
+    ]
+    const view = render(<ChatMessages messages={messages} loading={false} />)
+    expect(screen.getByRole('button', { name: /Worked for 2s, 1 tool\. Show the work\./ })).toBeTruthy()
+
+    vi.setSystemTime(T0 + 3_600_000)
+    view.rerender(<ChatMessages messages={messages} loading={false} />)
+    expect(screen.getByRole('button', { name: /Worked for 2s, 1 tool\. Show the work\./ })).toBeTruthy()
+
+    view.unmount()
+    render(<ChatMessages messages={messages.map((message) => ({ ...message }))} loading={false} />)
+    expect(screen.getByRole('button', { name: /Worked for 2s, 1 tool\. Show the work\./ })).toBeTruthy()
+  })
+
+  it('recovers one missing boundary from durable evidence without using the current clock', () => {
+    const missingStart: Message[] = [
+      { id: 'u1', role: 'user', content: 'Run it.', timestamp: Number.NaN },
+      { id: 't1', role: 'assistant', content: 'Used Bash', timestamp: T0 + 1_000, toolCall: 'Bash' },
+      { id: 'a1', role: 'assistant', content: 'Done.', timestamp: T0 + 3_000 },
+    ]
+    const first = render(<ChatMessages messages={missingStart} loading={false} />)
+    expect(screen.getByRole('button', { name: /Worked for 2s, 1 tool\. Show the work\./ })).toBeTruthy()
+    first.unmount()
+
+    const missingEnd: Message[] = [
+      { id: 'u1', role: 'user', content: 'Run it.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used Bash', timestamp: T0 + 1_500, toolCall: 'Bash' },
+      { id: 'a1', role: 'assistant', content: 'Done.', timestamp: Number.NaN },
+    ]
+    render(<ChatMessages messages={missingEnd} loading={false} />)
+    expect(screen.getByRole('button', { name: /Worked for 2s, 1 tool\. Show the work\./ })).toBeTruthy()
+  })
+
+  it('omits elapsed copy when legacy timestamps cannot establish a real interval', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Run it.', timestamp: Number.NaN },
+      { id: 't1', role: 'assistant', content: 'Used Bash', timestamp: Number.NaN, toolCall: 'Bash' },
+      { id: 'a1', role: 'assistant', content: 'Done.', timestamp: Number.NaN },
+    ]
+    render(<ChatMessages messages={messages} loading={false} />)
+    expect(screen.getByRole('button', { name: /^1 tool\. Show the work\./ })).toBeTruthy()
+    expect(screen.queryByText(/Worked for/)).toBeNull()
+    expect(screen.queryByText(/Invalid Date/)).toBeNull()
   })
 
   it('anchorScrollDuring compensates scrollTop by the anchor bottom delta each frame', () => {
@@ -378,11 +496,11 @@ describe('fold region boundary (turn structure)', () => {
     const messages: Message[] = [
       { id: 'u1', role: 'user', content: 'Ask dev to audit.', timestamp: T0 },
       callback('c1', 'dev', T0 + 300_000),
-      { id: 'a1', role: 'assistant', content: 'Audit relayed.', timestamp: T0 + 310_000 },
+      { id: 'a1', role: 'assistant', content: 'Audit relayed.', timestamp: T0 + 370_000 },
     ]
     render(<ChatMessages messages={messages} loading={false} />)
-    // Old behavior said "Worked for 0s" (single row, zero intermediates span).
-    expect(screen.getByRole('button', { name: /Worked for 5m, 1 teammate\. Show the work\./ })).toBeTruthy()
+    // The callback is middle evidence, not the settlement boundary.
+    expect(screen.getByRole('button', { name: /Worked for 6m, 1 teammate\. Show the work\./ })).toBeTruthy()
   })
 
   it('gives the summary row its own after-user inset outside the folding region', () => {
@@ -464,7 +582,7 @@ describe('fold region boundary (turn structure)', () => {
     // The existing beat + 420ms choreography performs the first collapse.
     act(() => vi.advanceTimersByTime(1200))
     expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBe('true')
-    expect(screen.getByRole('button', { name: /Worked for 4s, 1 tool, 1 teammate\. Show the work\./ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Worked for 9s, 1 tool, 1 teammate\. Show the work\./ })).toBeTruthy()
   })
 })
 

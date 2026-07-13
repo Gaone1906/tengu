@@ -189,6 +189,44 @@ describe("useLiveSession (read-only)", () => {
     expect(result.current.hasOlderMessages).toBe(true)
   })
 
+  it("keeps missing and malformed legacy timestamps unknown during hydration", async () => {
+    getSession.mockResolvedValue({
+      status: "idle",
+      messages: [
+        { id: "u1", role: "user", content: "legacy user" },
+        { id: "a1", role: "assistant", content: "legacy answer", timestamp: "not-a-timestamp" },
+      ],
+    })
+    const { subscribe } = makeBus()
+    const { result } = renderHook(() =>
+      useLiveSession("s1", { subscribe, readOnly: true }),
+    )
+
+    await act(async () => { await Promise.resolve() })
+
+    expect(result.current.messages.map((message) => message.timestamp)).toEqual([0, 0])
+  })
+
+  it("does not invent a settlement timestamp for an unpersisted legacy error", async () => {
+    getSession.mockResolvedValue({
+      status: "error",
+      lastError: "legacy failure",
+      messages: [
+        { id: "u1", role: "user", content: "legacy user" },
+        { id: "t1", role: "assistant", content: "Used Read", timestamp: 2_000, toolCall: "Read" },
+      ],
+    })
+    const { subscribe } = makeBus()
+    const { result } = renderHook(() =>
+      useLiveSession("s1", { subscribe, readOnly: true }),
+    )
+
+    await act(async () => { await Promise.resolve() })
+
+    expect(result.current.messages.map((message) => message.timestamp)).toEqual([0, 2_000, 0])
+    expect(result.current.messages.at(-1)?.content).toBe("Error: legacy failure")
+  })
+
   it("does not duplicate a persisted canonical terminal error during hydration", async () => {
     getSession.mockResolvedValue({
       status: "error",
