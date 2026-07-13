@@ -563,6 +563,36 @@ h1, h2, h3, h4, h5, h6 {
   .comm-arrive .comm-row::after { animation: jinn-comm-wash 0.8s linear both; }
 }
 
+/* Outbound follow-ups reuse the comms arrival rhythm without borrowing the
+   callback wash or voice-row identity. Only provenance-backed live block puts
+   receive this class; max-height grows the real layout while the row and chip
+   settle with explicit compositor-friendly properties. */
+.dispatch-arrive {
+  min-width: 0;
+  overflow: hidden;
+  animation: jinn-comm-room 180ms var(--ease-snappy) backwards;
+  animation-delay: var(--arrive-delay, 0ms);
+}
+.dispatch-arrive .dispatch-arrive-inner {
+  animation: jinn-dispatch-rise 200ms var(--ease-smooth) backwards;
+  animation-delay: calc(var(--arrive-delay, 0ms) + 40ms);
+}
+.dispatch-arrive .dispatch-chip > span {
+  animation: jinn-comm-chip 220ms var(--ease-snappy) backwards;
+  animation-delay: calc(var(--arrive-delay, 0ms) + 55ms);
+}
+@keyframes jinn-dispatch-rise {
+  from { opacity: 0; filter: blur(2px); transform: translateY(4px); }
+  to { opacity: 1; filter: none; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dispatch-arrive,
+  .dispatch-arrive .dispatch-arrive-inner,
+  .dispatch-arrive .dispatch-chip > span {
+    animation: none;
+  }
+}
+
 /* ============================================
    Utility Animation Classes
    ============================================ */

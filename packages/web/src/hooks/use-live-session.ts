@@ -35,7 +35,8 @@ import {
   isChatBlock,
   isTerminalDelegationStatus,
   type ChatBlockStatus,
-  type DelegationArrival,
+  type ChatBlockType,
+  type LiveBlockArrival,
 } from '@/lib/blocks'
 
 type Listener = (event: string, payload: unknown) => void
@@ -122,12 +123,12 @@ export interface UseLiveSessionResult {
   loadingOlderMessages: boolean
   /** Set when loading older history fails. */
   olderMessagesError: Error | null
-  /** One-use, UI-only provenance for first-time live delegation puts. */
-  delegationArrivals: ReadonlyMap<string, DelegationArrival>
+  /** One-use, UI-only provenance for first-time live delegation/dispatch puts. */
+  blockArrivals: ReadonlyMap<string, LiveBlockArrival>
   /** Delegations that settled live while this pane was mounted. */
   liveTerminalDelegationIds: ReadonlySet<string>
-  /** Coalesced polite live-region copy for rapid delegation batches. */
-  delegationAnnouncement: string
+  /** Coalesced polite live-region copy for rapid live-block batches. */
+  blockAnnouncement: string
   /** Re-load (reconcile) a session from the server. */
   reload: (id: string) => Promise<void>
   /** Load and prepend the next older message page. */
@@ -301,6 +302,16 @@ function delegationStatesOf(messages: Message[]): Map<string, ChatBlockStatus | 
     }
   }
   return states
+}
+
+function liveArrivalBlockIdsOf(messages: Message[]): Set<string> {
+  const ids = new Set<string>()
+  for (const message of messages) {
+    for (const block of message.blocks || []) {
+      if (block.type === 'delegation' || block.type === 'dispatch') ids.add(block.id)
+    }
+  }
+  return ids
 }
 
 function hasFinalAssistantAfterLastUser(messages: Message[]): boolean {
@@ -536,45 +547,45 @@ export function useLiveSession(
   const hasOlderMessagesRef = useRef(hasOlderMessages)
   const loadingOlderMessagesRef = useRef(false)
   const initialDelegationStates = delegationStatesOf(initialSnapshot?.messages ?? [])
-  const seenDelegationBlockIdsRef = useRef(new Set(initialDelegationStates.keys()))
+  const seenArrivalBlockIdsRef = useRef(liveArrivalBlockIdsOf(initialSnapshot?.messages ?? []))
   const delegationStatusRef = useRef(initialDelegationStates)
-  const delegationNonceRef = useRef(0)
-  const delegationBatchRef = useRef({ startedAt: 0, count: 0 })
-  const delegationArrivalTimersRef = useRef(new Map<string, number>())
+  const blockNonceRef = useRef(0)
+  const blockBatchRef = useRef({ startedAt: 0, count: 0 })
+  const blockArrivalTimersRef = useRef(new Map<string, number>())
   const terminalDelegationTimersRef = useRef(new Map<string, number>())
-  const delegationAnnouncementTimerRef = useRef<number | undefined>(undefined)
-  const delegationAnnouncementCountRef = useRef(0)
-  const [delegationArrivals, setDelegationArrivals] = useState<Map<string, DelegationArrival>>(() => new Map())
+  const blockAnnouncementTimerRef = useRef<number | undefined>(undefined)
+  const blockAnnouncementCountRef = useRef({ delegation: 0, dispatch: 0 })
+  const [blockArrivals, setBlockArrivals] = useState<Map<string, LiveBlockArrival>>(() => new Map())
   const [liveTerminalDelegationIds, setLiveTerminalDelegationIds] = useState<Set<string>>(() => new Set())
-  const [delegationAnnouncement, setDelegationAnnouncement] = useState('')
+  const [blockAnnouncement, setBlockAnnouncement] = useState('')
 
-  const rememberDelegationStates = useCallback((nextMessages: Message[]) => {
+  const rememberLiveBlockStates = useCallback((nextMessages: Message[]) => {
+    for (const id of liveArrivalBlockIdsOf(nextMessages)) seenArrivalBlockIdsRef.current.add(id)
     for (const [id, status] of delegationStatesOf(nextMessages)) {
-      seenDelegationBlockIdsRef.current.add(id)
       delegationStatusRef.current.set(id, status)
     }
   }, [])
 
-  const markLiveDelegationArrival = useCallback((blockId: string) => {
+  const markLiveBlockArrival = useCallback((blockId: string, blockType: ChatBlockType) => {
     const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
-    const batch = delegationBatchRef.current
+    const batch = blockBatchRef.current
     if (batch.count === 0 || now - batch.startedAt > 80) {
       batch.startedAt = now
       batch.count = 0
     }
     const delayMs = Math.min(2, batch.count) * 60
     batch.count += 1
-    const arrival = { nonce: ++delegationNonceRef.current, delayMs }
-    setDelegationArrivals((current) => {
+    const arrival = { nonce: ++blockNonceRef.current, delayMs }
+    setBlockArrivals((current) => {
       const next = new Map(current)
       next.set(blockId, arrival)
       return next
     })
 
-    window.clearTimeout(delegationArrivalTimersRef.current.get(blockId))
-    delegationArrivalTimersRef.current.set(blockId, window.setTimeout(() => {
-      delegationArrivalTimersRef.current.delete(blockId)
-      setDelegationArrivals((current) => {
+    window.clearTimeout(blockArrivalTimersRef.current.get(blockId))
+    blockArrivalTimersRef.current.set(blockId, window.setTimeout(() => {
+      blockArrivalTimersRef.current.delete(blockId)
+      setBlockArrivals((current) => {
         if (!current.has(blockId)) return current
         const next = new Map(current)
         next.delete(blockId)
@@ -582,13 +593,18 @@ export function useLiveSession(
       })
     }, delayMs + 420))
 
-    delegationAnnouncementCountRef.current += 1
-    setDelegationAnnouncement('')
-    window.clearTimeout(delegationAnnouncementTimerRef.current)
-    delegationAnnouncementTimerRef.current = window.setTimeout(() => {
-      const count = delegationAnnouncementCountRef.current
-      delegationAnnouncementCountRef.current = 0
-      setDelegationAnnouncement(count === 1 ? 'Delegation started' : `${count} delegations started`)
+    if (blockType !== 'delegation' && blockType !== 'dispatch') return
+    blockAnnouncementCountRef.current[blockType] += 1
+    setBlockAnnouncement('')
+    window.clearTimeout(blockAnnouncementTimerRef.current)
+    blockAnnouncementTimerRef.current = window.setTimeout(() => {
+      const { delegation, dispatch } = blockAnnouncementCountRef.current
+      blockAnnouncementCountRef.current = { delegation: 0, dispatch: 0 }
+      const parts = [
+        delegation === 0 ? '' : delegation === 1 ? 'Delegation started' : `${delegation} delegations started`,
+        dispatch === 0 ? '' : dispatch === 1 ? 'Follow-up sent' : `${dispatch} follow-ups sent`,
+      ].filter(Boolean)
+      setBlockAnnouncement(parts.join(', '))
     }, 80)
   }, [])
 
@@ -606,10 +622,21 @@ export function useLiveSession(
     }, 1_200))
   }, [])
 
+  const clearLiveBlockArrivalState = useCallback(() => {
+    for (const timer of blockArrivalTimersRef.current.values()) window.clearTimeout(timer)
+    blockArrivalTimersRef.current.clear()
+    window.clearTimeout(blockAnnouncementTimerRef.current)
+    blockAnnouncementTimerRef.current = undefined
+    blockAnnouncementCountRef.current = { delegation: 0, dispatch: 0 }
+    blockBatchRef.current = { startedAt: 0, count: 0 }
+    setBlockArrivals((current) => current.size === 0 ? current : new Map())
+    setBlockAnnouncement('')
+  }, [])
+
   useEffect(() => () => {
-    for (const timer of delegationArrivalTimersRef.current.values()) window.clearTimeout(timer)
+    for (const timer of blockArrivalTimersRef.current.values()) window.clearTimeout(timer)
     for (const timer of terminalDelegationTimersRef.current.values()) window.clearTimeout(timer)
-    window.clearTimeout(delegationAnnouncementTimerRef.current)
+    window.clearTimeout(blockAnnouncementTimerRef.current)
   }, [])
 
   useEffect(() => { messagesRef.current = messages }, [messages])
@@ -780,17 +807,22 @@ export function useLiveSession(
           clearStatusMessage()
           const envelope = isBlockEnvelope(p.block) ? p.block : null
           if (!envelope) return
+          const liveArrivalBlock = envelope.block.type === 'delegation' || envelope.block.type === 'dispatch'
+          const seenArrival = seenArrivalBlockIdsRef.current.has(envelope.block.id)
+          if (liveArrivalBlock && envelope.op === 'put' && !seenArrival) {
+            markLiveBlockArrival(envelope.block.id, envelope.block.type)
+          }
+          if (liveArrivalBlock && envelope.op !== 'remove') {
+            seenArrivalBlockIdsRef.current.add(envelope.block.id)
+          }
           if (envelope.block.type === 'delegation') {
             const id = envelope.block.id
             const previousStatus = delegationStatusRef.current.get(id)
-            const seen = seenDelegationBlockIdsRef.current.has(id)
-            if (envelope.op === 'put' && !seen) markLiveDelegationArrival(id)
             if (envelope.op !== 'remove') {
-              seenDelegationBlockIdsRef.current.add(id)
               const nextStatus = envelope.block.status ?? previousStatus
               delegationStatusRef.current.set(id, nextStatus)
               if (
-                seen
+                seenArrival
                 && isActiveDelegationStatus(previousStatus)
                 && isTerminalDelegationStatus(nextStatus)
               ) {
@@ -976,7 +1008,7 @@ export function useLiveSession(
       const history = session.messages || session.history || []
       const { messages: normalizedMessages, firstPartialIndex } = normalizeHistoryMessages(history)
       const backendMessages = reconcilePendingUserMessage(normalizedMessages)
-      rememberDelegationStates(backendMessages)
+      rememberLiveBlockStates(backendMessages)
       const isPagedHistory = Boolean(session.messagesPage && typeof session.messagesPage === 'object')
       if (session.status === 'error' && session.lastError) {
         const lastMessage = backendMessages[backendMessages.length - 1]
@@ -1075,6 +1107,7 @@ export function useLiveSession(
     // A cached resting target can skip loadSession entirely, so changing ids
     // must still invalidate any request started for the previous session.
     loadTokenRef.current += 1
+    clearLiveBlockArrivalState()
     if (!sessionId) {
       setMessages([])
       setLoading(false)
@@ -1101,7 +1134,7 @@ export function useLiveSession(
     // of view and must never inherit another session's animation sentinel.
     setLiveFinalResponseId(null)
     if (cached) {
-      rememberDelegationStates(cached.messages)
+      rememberLiveBlockStates(cached.messages)
       setMessages(reconcilePendingUserMessage(cached.messages))
       setLoading(cached.loading)
       setTurnPending(
@@ -1315,7 +1348,7 @@ export function useLiveSession(
     try {
       const page = await api.getSessionMessages(id, { before, limit: OLDER_MESSAGE_PAGE_SIZE })
       const { messages: olderMessages } = normalizeHistoryMessages(page.messages || [])
-      rememberDelegationStates(olderMessages)
+      rememberLiveBlockStates(olderMessages)
       setMessages((current) => mergeOlderMessages(olderMessages, current))
       setHasOlderMessages(page.hasOlder === true)
     } catch (err) {
@@ -1372,9 +1405,9 @@ export function useLiveSession(
     hasOlderMessages,
     loadingOlderMessages,
     olderMessagesError,
-    delegationArrivals,
+    blockArrivals,
     liveTerminalDelegationIds,
-    delegationAnnouncement,
+    blockAnnouncement,
     reload: loadSession,
     loadOlderMessages,
     beginSend,

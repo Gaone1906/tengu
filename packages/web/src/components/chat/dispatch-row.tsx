@@ -1,7 +1,8 @@
 import { ChevronRight, Redo2 } from 'lucide-react'
+import type { CSSProperties } from 'react'
 import { EmployeeChip } from '@/components/ui/employee-chip'
 import { stripMarkdown } from '@/lib/strip-markdown'
-import type { ChatBlock, JsonValue } from '@/lib/blocks'
+import type { ChatBlock, JsonValue, LiveBlockArrival } from '@/lib/blocks'
 import type { CommsPeekData } from './thread-peek'
 
 /**
@@ -43,7 +44,7 @@ export function DispatchRow({ employee, employeeDisplay, preview, targetSessionI
           employee={employee || employeeDisplay}
           displayName={employeeDisplay}
           size={20}
-          className="shrink-0 [&>span:last-child]:text-[length:var(--text-caption1)]"
+          className="dispatch-chip shrink-0 [&>span:last-child]:text-[length:var(--text-caption1)]"
         />
       )}
       <span className="min-w-0 flex-1 truncate text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">
@@ -85,16 +86,33 @@ export function DispatchRow({ employee, employeeDisplay, preview, targetSessionI
   )
 }
 
-export function DispatchBlockRow({ block, onPeek }: { block: ChatBlock; onPeek?: (peek: CommsPeekData) => void }) {
+export function DispatchBlockRow({
+  block,
+  onPeek,
+  arrival,
+}: {
+  block: ChatBlock
+  onPeek?: (peek: CommsPeekData) => void
+  arrival?: LiveBlockArrival
+}) {
+  const delayMs = Math.min(120, Math.max(0, arrival?.delayMs ?? 0))
   return (
-    <DispatchRow
-      employee={text(block.payload.employee)}
-      employeeDisplay={text(block.payload.employeeDisplay, text(block.payload.employee))}
-      preview={text(block.payload.preview)}
-      targetSessionId={text(block.payload.targetSessionId) || undefined}
-      messageId={block.id}
-      timestamp={typeof block.payload.sentAt === 'number' ? block.payload.sentAt : undefined}
-      onPeek={onPeek}
-    />
+    <div
+      className={`min-w-0 w-full max-w-full ${arrival ? 'dispatch-arrive' : ''}`}
+      data-dispatch-arrival={arrival?.nonce}
+      style={arrival ? ({ '--arrive-delay': `${delayMs}ms` } as CSSProperties) : undefined}
+    >
+      <div className={`min-w-0 max-w-full ${arrival ? 'dispatch-arrive-inner' : ''}`}>
+        <DispatchRow
+          employee={text(block.payload.employee)}
+          employeeDisplay={text(block.payload.employeeDisplay, text(block.payload.employee))}
+          preview={text(block.payload.preview)}
+          targetSessionId={text(block.payload.targetSessionId) || undefined}
+          messageId={block.id}
+          timestamp={typeof block.payload.sentAt === 'number' ? block.payload.sentAt : undefined}
+          onPeek={onPeek}
+        />
+      </div>
+    </div>
   )
 }

@@ -229,4 +229,37 @@ describe('dispatch block inline', () => {
     fireEvent.click(row)
     expect(onPeek).toHaveBeenCalledWith(expect.objectContaining({ kind: 'dispatch', sessionId: 'child-7' }))
   })
+
+  it('applies a capped one-time live arrival without changing the dispatch identity', () => {
+    const { container } = render(
+      <ChatBlockInline
+        arrival={{ nonce: 7, delayMs: 900 }}
+        onPeek={vi.fn()}
+        block={{
+          id: 'dp-live',
+          type: 'dispatch',
+          version: 1,
+          status: 'done',
+          payload: {
+            targetSessionId: 'child-live',
+            employee: 'analyst',
+            employeeDisplay: 'Analyst',
+            preview: 'Check the live row.',
+            sentAt: 1,
+          },
+        }}
+      />,
+    )
+
+    const arrival = container.querySelector('[data-dispatch-arrival="7"]') as HTMLElement
+    expect(arrival).toBeTruthy()
+    expect(arrival.className).toContain('w-full')
+    expect(arrival.className).toContain('max-w-full')
+    expect(arrival.className).toContain('min-w-0')
+    expect(arrival.querySelector('.dispatch-arrive-inner')?.className).toContain('min-w-0')
+    expect(arrival.querySelector('.dispatch-arrive-inner')?.className).toContain('max-w-full')
+    expect(arrival.style.getPropertyValue('--arrive-delay')).toBe('120ms')
+    expect(arrival.querySelector('[data-dispatch="linked"]')).toBeTruthy()
+    expect(container.querySelector('[data-delegation-arrival]')).toBeNull()
+  })
 })

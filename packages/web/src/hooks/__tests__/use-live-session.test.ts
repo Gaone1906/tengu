@@ -4,7 +4,7 @@
  * Verifies the behaviours the modal relies on and that the old refetch-only hook
  * never had: live token streaming, live media, and a running-state spinner.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { renderHook, act, waitFor } from "@testing-library/react"
 
 // Mock the API module the hook loads sessions through.
@@ -48,6 +48,10 @@ beforeEach(() => {
   getSession.mockReset()
   getSessionMessages.mockReset()
   __clearLiveSessionSnapshotCacheForTests()
+})
+
+afterEach(() => {
+  vi.useRealTimers()
 })
 
 describe("live session prefetch handoff", () => {
@@ -1117,12 +1121,12 @@ describe("useLiveSession (read-only)", () => {
     })
 
     act(() => { put("d1"); put("d2"); put("d3") })
-    expect([...result.current.delegationArrivals.entries()].map(([id, arrival]) => [id, arrival.delayMs]))
+    expect([...result.current.blockArrivals.entries()].map(([id, arrival]) => [id, arrival.delayMs]))
       .toEqual([["d1", 0], ["d2", 60], ["d3", 120]])
-    const firstNonce = result.current.delegationArrivals.get("d1")?.nonce
+    const firstNonce = result.current.blockArrivals.get("d1")?.nonce
 
     act(() => put("d1"))
-    expect(result.current.delegationArrivals.get("d1")?.nonce).toBe(firstNonce)
+    expect(result.current.blockArrivals.get("d1")?.nonce).toBe(firstNonce)
     expect(result.current.messages.filter((m) => m.blocks?.some((b) => b.id === "d1"))).toHaveLength(1)
   })
 
@@ -1139,14 +1143,163 @@ describe("useLiveSession (read-only)", () => {
     const { subscribe, emit } = makeBus()
     const { result } = renderHook(() => useLiveSession("s-hydrated", { subscribe, readOnly: true }))
     await waitFor(() => expect(result.current.messages).toHaveLength(1))
-    expect(result.current.delegationArrivals.size).toBe(0)
+    expect(result.current.blockArrivals.size).toBe(0)
 
     act(() => emit("session:delta", {
       sessionId: "s-hydrated",
       type: "block",
       block: { op: "patch", block: { id: "d1", type: "delegation", version: 2, status: "waiting", payload: {} } },
     }))
-    expect(result.current.delegationArrivals.size).toBe(0)
+    expect(result.current.blockArrivals.size).toBe(0)
+  })
+
+  it("animates only first-time live dispatch puts with stable bounded provenance and one announcement", async () => {
+    vi.useFakeTimers()
+    getSession.mockResolvedValue({ status: "running", messages: [] })
+    const { subscribe, emit } = makeBus()
+    const { result, unmount } = renderHook(() => useLiveSession("s-dispatch-live", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+    const envelope = (id: string, op: "put" | "patch" = "put") => ({
+      sessionId: "s-dispatch-live",
+      type: "block",
+      content: `Followed up: ${id}`,
+      block: {
+        op,
+        block: {
+          id,
+          type: "dispatch",
+          version: op === "put" ? 1 : 2,
+          status: "done",
+          payload: { targetSessionId: `child-${id}`, preview: id },
+        },
+      },
+    })
+
+    act(() => {
+      emit("session:delta", envelope("dp-1"))
+      emit("session:delta", envelope("dp-2"))
+      emit("session:delta", envelope("dp-3"))
+      emit("session:delta", envelope("dp-4"))
+    })
+
+    expect([...result.current.blockArrivals.entries()].map(([id, arrival]) => [id, arrival.delayMs]))
+      .toEqual([["dp-1", 0], ["dp-2", 60], ["dp-3", 120], ["dp-4", 120]])
+    const firstNonce = result.current.blockArrivals.get("dp-1")?.nonce
+    act(() => { vi.advanceTimersByTime(80) })
+    expect(result.current.blockAnnouncement).toBe("4 follow-ups sent")
+
+    act(() => {
+      emit("session:delta", envelope("dp-1"))
+      emit("session:delta", envelope("dp-1", "patch"))
+      vi.advanceTimersByTime(80)
+    })
+    expect(result.current.blockArrivals.get("dp-1")?.nonce).toBe(firstNonce)
+    expect(result.current.blockAnnouncement).toBe("4 follow-ups sent")
+    expect(result.current.messages.flatMap((message) => message.blocks ?? []).filter((block) => block.id === "dp-1"))
+      .toHaveLength(1)
+
+    act(() => { vi.advanceTimersByTime(500) })
+    expect(result.current.blockArrivals.size).toBe(0)
+    act(() => emit("session:delta", envelope("dp-1")))
+    expect(result.current.blockArrivals.size).toBe(0)
+
+    unmount()
+    vi.useRealTimers()
+  })
+
+  it("never creates dispatch arrival provenance from hydration, reconnect, pagination, or cached restoration", async () => {
+    const hydratedDispatch: Message = {
+      id: "hydrated-dispatch-message",
+      role: "assistant",
+      content: "Followed up: hydrated",
+      timestamp: 10,
+      blocks: [{
+        id: "dp-hydrated",
+        type: "dispatch",
+        version: 1,
+        status: "done",
+        payload: { targetSessionId: "child-hydrated", preview: "hydrated" },
+      }],
+    }
+    getSession.mockResolvedValue({
+      id: "s-dispatch-history",
+      status: "running",
+      messages: [hydratedDispatch],
+      messagesPage: { hasOlder: true },
+    })
+    getSessionMessages.mockResolvedValue({ messages: [{
+      ...hydratedDispatch,
+      id: "older-dispatch-message",
+      blocks: [{ ...hydratedDispatch.blocks![0], id: "dp-older" }],
+    }], hasOlder: false })
+    const { subscribe, emit } = makeBus()
+    const { result, rerender, unmount } = renderHook(
+      ({ connectionSeq }) => useLiveSession("s-dispatch-history", { subscribe, readOnly: true, connectionSeq }),
+      { initialProps: { connectionSeq: 0 } },
+    )
+    await waitFor(() => expect(result.current.messages).toHaveLength(1))
+    expect(result.current.blockArrivals.size).toBe(0)
+
+    act(() => emit("session:delta", {
+      sessionId: "s-dispatch-history",
+      type: "block",
+      block: { op: "patch", block: { ...hydratedDispatch.blocks![0], version: 2 } },
+    }))
+    expect(result.current.blockArrivals.size).toBe(0)
+
+    rerender({ connectionSeq: 1 })
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 320)) })
+    expect(result.current.blockArrivals.size).toBe(0)
+
+    await act(async () => { await result.current.loadOlderMessages() })
+    expect(result.current.blockArrivals.size).toBe(0)
+
+    unmount()
+    const cachedBus = makeBus()
+    const cached = renderHook(() => useLiveSession("s-dispatch-history", { subscribe: cachedBus.subscribe, readOnly: true }))
+    expect(cached.result.current.blockArrivals.size).toBe(0)
+    act(() => cachedBus.emit("session:delta", {
+      sessionId: "s-dispatch-history",
+      type: "block",
+      content: hydratedDispatch.content,
+      block: { op: "put", block: hydratedDispatch.blocks![0] },
+    }))
+    expect(cached.result.current.blockArrivals.size).toBe(0)
+    cached.unmount()
+  })
+
+  it("drops ephemeral dispatch arrival state across a session switch and Back restoration", async () => {
+    getSession.mockImplementation(async (id: string) => ({ id, status: "running", messages: [] }))
+    const { subscribe, emit } = makeBus()
+    const { result, rerender } = renderHook(
+      ({ sessionId }) => useLiveSession(sessionId, { subscribe, readOnly: true }),
+      { initialProps: { sessionId: "s-dispatch-a" } },
+    )
+    await act(async () => { await Promise.resolve() })
+    const livePut = {
+      sessionId: "s-dispatch-a",
+      type: "block",
+      content: "Followed up: keep the identity stable",
+      block: {
+        op: "put",
+        block: {
+          id: "dp-switch",
+          type: "dispatch",
+          version: 1,
+          status: "done",
+          payload: { targetSessionId: "child-switch", preview: "keep the identity stable" },
+        },
+      },
+    }
+
+    act(() => emit("session:delta", livePut))
+    expect(result.current.blockArrivals.has("dp-switch")).toBe(true)
+
+    act(() => rerender({ sessionId: "s-dispatch-b" }))
+    expect(result.current.blockArrivals.size).toBe(0)
+    act(() => rerender({ sessionId: "s-dispatch-a" }))
+    act(() => emit("session:delta", livePut))
+    expect(result.current.blockArrivals.size).toBe(0)
   })
 
   it("marks a live active-to-terminal patch for one anchored fold cycle", async () => {

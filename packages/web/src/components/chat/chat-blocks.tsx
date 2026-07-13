@@ -1,6 +1,6 @@
 import { AlertTriangle, Check, Circle, Loader2 } from 'lucide-react'
 import type { CSSProperties } from 'react'
-import type { ChatBlock, DelegationArrival, JsonObject, JsonValue } from '@/lib/blocks'
+import type { ChatBlock, LiveBlockArrival, JsonObject, JsonValue } from '@/lib/blocks'
 import { HandoffCard } from './handoff-card'
 import { DispatchBlockRow } from './dispatch-row'
 import { CompanyActivityCard } from './company-activity-card'
@@ -40,7 +40,7 @@ export function ChatBlockInline({
 }: {
   block: ChatBlock
   onPeek?: (peek: CommsPeekData) => void
-  arrival?: DelegationArrival
+  arrival?: LiveBlockArrival
 }) {
   if (block.type === 'delegation') {
     const card = (
@@ -61,7 +61,7 @@ export function ChatBlockInline({
   }
 
   if (block.type === 'dispatch') {
-    return <DispatchBlockRow block={block} onPeek={onPeek} />
+    return <DispatchBlockRow block={block} onPeek={onPeek} arrival={arrival} />
   }
 
   if (block.type === 'todo-activity' || block.type === 'workflow-definition' || block.type === 'workflow-run') {

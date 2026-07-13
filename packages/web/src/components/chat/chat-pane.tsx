@@ -164,9 +164,9 @@ export function ChatPane({
     hasOlderMessages,
     loadingOlderMessages,
     olderMessagesError,
-    delegationArrivals,
+    blockArrivals,
     liveTerminalDelegationIds,
-    delegationAnnouncement,
+    blockAnnouncement,
     loadOlderMessages,
     beginSend,
     failSend,
@@ -565,9 +565,9 @@ export function ChatPane({
           olderMessagesError={olderMessagesError}
           onLoadOlderMessages={loadOlderMessages}
           onPeek={onPeek}
-          delegationArrivals={delegationArrivals}
+          blockArrivals={blockArrivals}
           liveTerminalDelegationIds={liveTerminalDelegationIds}
-          delegationAnnouncement={delegationAnnouncement}
+          blockAnnouncement={blockAnnouncement}
         />
       ) : null}
 

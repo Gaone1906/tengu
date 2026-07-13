@@ -77,8 +77,8 @@ export interface ChatBlockEnvelope {
   block: ChatBlock
 }
 
-/** Ephemeral UI-only provenance for a genuinely new live delegation put. */
-export interface DelegationArrival {
+/** Ephemeral UI-only provenance for a genuinely new live chat-block put. */
+export interface LiveBlockArrival {
   nonce: number
   delayMs: number
 }

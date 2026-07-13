@@ -7,7 +7,7 @@ import { useOpenFile } from '@/components/chat/file-open-context'
 import { useStickToBottom } from '@/hooks/use-stick-to-bottom'
 import { useMessageTts, stopMessageTts } from './use-message-tts'
 import { ChatBlockInline, statusMark } from './chat-blocks'
-import { blockFallbackContent, isActiveDelegationStatus, type DelegationArrival } from '@/lib/blocks'
+import { blockFallbackContent, isActiveDelegationStatus, type LiveBlockArrival } from '@/lib/blocks'
 import { ChevronDown, Wrench } from 'lucide-react'
 import { parseTeammateReply, TeammateReply } from './teammate-reply'
 import { parseAgentRelay, AgentRelay } from './agent-relay'
@@ -1211,10 +1211,10 @@ interface MessageRowProps {
   onPeek?: (peek: CommsPeekData) => void
   /** Live-arrival stagger index for comms rows (null = not arriving). */
   arrival?: number | null
-  delegationArrivals?: ReadonlyMap<string, DelegationArrival>
+  blockArrivals?: ReadonlyMap<string, LiveBlockArrival>
 }
 
-const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loading, onRetry, onPeek, arrival, delegationArrivals }: MessageRowProps) {
+const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loading, onRetry, onPeek, arrival, blockArrivals }: MessageRowProps) {
   const isUser = msg.role === 'user'
   const isNotification = msg.role === 'notification'
   const showTimestamp = shouldShowTimestamp(messages, i)
@@ -1341,7 +1341,7 @@ const MessageRow = React.memo(function MessageRow({ msg, index: i, messages, loa
                   key={block.id}
                   block={block}
                   onPeek={onPeek}
-                  arrival={delegationArrivals?.get(block.id)}
+                  arrival={blockArrivals?.get(block.id)}
                 />
               ))}
             </div>
@@ -1417,9 +1417,9 @@ interface ChatMessagesProps {
   onLoadOlderMessages?: () => Promise<void> | void
   /** Open the read-only report panel for a comms ledger line. */
   onPeek?: (peek: CommsPeekData) => void
-  delegationArrivals?: ReadonlyMap<string, DelegationArrival>
+  blockArrivals?: ReadonlyMap<string, LiveBlockArrival>
   liveTerminalDelegationIds?: ReadonlySet<string>
-  delegationAnnouncement?: string
+  blockAnnouncement?: string
 }
 
 function latestTurnId(messages: Message[]): string | null {
@@ -1553,9 +1553,9 @@ export function ChatMessages({
   olderMessagesError = null,
   onLoadOlderMessages,
   onPeek,
-  delegationArrivals = new Map(),
+  blockArrivals = new Map(),
   liveTerminalDelegationIds = new Set(),
-  delegationAnnouncement = '',
+  blockAnnouncement = '',
 }: ChatMessagesProps) {
   // Stick-to-bottom: one hook owns follow-intent, growth-follow, resize/keyboard,
   // tab-return, mount-snap, and the jump affordance. See use-stick-to-bottom.ts.
@@ -1698,7 +1698,7 @@ export function ChatMessages({
   return (
     <div className="relative flex-1 min-h-0 bg-[var(--bg)]">
       <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {delegationAnnouncement}
+        {blockAnnouncement}
       </span>
       <div ref={setScrollContainerRef} style={{ overflowAnchor: 'auto' }} className="chat-messages-scroll h-full overflow-y-auto overflow-x-hidden bg-[var(--bg)] min-h-0">
         <div className="mx-auto w-full max-w-[var(--chat-measure)] pt-[72px] pb-[var(--space-6)] lg:pt-[88px]">
@@ -1757,7 +1757,7 @@ export function ChatMessages({
                   onRetry={onRetry}
                   onPeek={onPeek}
                   arrival={arrivalFor(msg.id)}
-                  delegationArrivals={delegationArrivals}
+                  blockArrivals={blockArrivals}
                 />
               )
             }
