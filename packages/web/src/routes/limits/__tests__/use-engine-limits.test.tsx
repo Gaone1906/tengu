@@ -223,9 +223,16 @@ describe("useEngineLimits — degraded-response preservation", () => {
     const authoritative = response([
       snapshot({ refreshedAt: capturedAt, windows: [{ name: "5h", usedPercent: 42, windowDurationMins: 300 }] }),
     ])
-    // A real provider-level error arriving as HTTP 200 with no usable windows.
+    // A real provider-level error arriving as HTTP 200 with no usable windows —
+    // its `error` carries a raw parser diagnostic + sensitive marker that must
+    // NOT be echoed into the client-facing annotation.
     const degraded = response([
-      snapshot({ status: "error", error: "provider blew up", windows: [], refreshedAt: new Date().toISOString() }),
+      snapshot({
+        status: "error",
+        error: "SENSITIVE-MARKER Unexpected token at position 2",
+        windows: [],
+        refreshedAt: new Date().toISOString(),
+      }),
     ])
     getEngineLimits.mockResolvedValueOnce(authoritative).mockResolvedValueOnce(degraded)
 
@@ -239,8 +246,10 @@ describe("useEngineLimits — degraded-response preservation", () => {
     // Authoritative windows preserved, with their ORIGINAL capture time…
     expect(claude?.windows?.[0].usedPercent).toBe(42)
     expect(claude?.refreshedAt).toBe(capturedAt)
-    // …and the current degradation surfaced honestly beside it.
-    expect(claude?.error).toContain("provider blew up")
+    // …the annotation is fixed client copy — never the raw server error string.
+    expect(claude?.error).toContain("last-known")
+    expect(claude?.error).not.toContain("SENSITIVE-MARKER")
+    expect(claude?.error).not.toContain("position")
     // Never fresh: the preserved snapshot classifies as stale-last-known.
     expect(deriveFreshness(claude!, Date.now()).kind).toBe("stale")
   })

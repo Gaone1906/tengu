@@ -158,13 +158,15 @@ async function collectClaudeLimits(config: JinnConfig): Promise<EngineLimitEngin
       costUsd: cost,
       stale,
     };
-  } catch (err) {
+  } catch {
+    // Never surface the raw parse/exception text: it can echo snapshot payload
+    // fragments or parser positions into the public projection. Fixed copy only.
     return {
       ...snap,
       status: "error",
       source: "claude-statusline",
       accountPlan,
-      error: err instanceof Error ? err.message : String(err),
+      error: "The latest Claude usage snapshot could not be read.",
     };
   }
 }

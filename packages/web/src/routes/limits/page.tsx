@@ -76,6 +76,26 @@ function badge(kind: FreshnessKind, engine: EngineLimitEngineSnapshot, now: numb
   }
 }
 
+// Fixed, operator-safe note per freshness kind. Deliberately does NOT render
+// `engine.error` verbatim: that field can carry raw parser/exception text, so
+// the client shows only allowlisted copy. `unsupportedReason` is collector-
+// authored literal copy (never exception-derived) and is safe to surface.
+function noteFor(engine: EngineLimitEngineSnapshot, kind: FreshnessKind): string | null {
+  switch (kind) {
+    case "stale":
+      return engine.error
+        ? "Couldn’t refresh — showing last-known values."
+        : "Last-known snapshot is over 30 minutes old — may be out of date."
+    case "error":
+      return "Latest limits couldn’t be read."
+    case "unavailable":
+    case "unsupported":
+      return engine.unsupportedReason ?? null
+    default:
+      return null
+  }
+}
+
 function WindowBar({ window, now }: { window: EngineLimitWindow; now: number }) {
   const observed = window.usedPercent !== undefined
   const used = clampPercent(window.usedPercent)
@@ -116,10 +136,7 @@ function EngineCard({ engine, now }: { engine: EngineLimitEngineSnapshot; now: n
     : credits?.balance
       ? `Credits ${credits.balance}`
       : null
-  const note =
-    engine.error ||
-    (fresh.kind === "stale" ? "Last-known snapshot is over 30 minutes old — may be out of date." : null) ||
-    (fresh.kind === "unsupported" || fresh.kind === "unavailable" ? engine.unsupportedReason ?? null : null)
+  const note = noteFor(engine, fresh.kind)
 
   return (
     // Grouped-inset card (shared visual language): --bg-secondary carrying the

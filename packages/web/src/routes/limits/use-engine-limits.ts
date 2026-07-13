@@ -69,8 +69,19 @@ export function deriveFreshness(engine: EngineLimitEngineSnapshot, nowMs: number
   return classifyAge(ageMs)
 }
 
-function degradedReason(engine: EngineLimitEngineSnapshot): string {
-  return engine.error || engine.unsupportedReason || `provider ${engine.status}`
+// Fixed, allowlisted phrase per degraded status — derived only from the status
+// enum, never from the server's (possibly raw) error/reason text.
+function degradedClause(status: EngineLimitEngineSnapshot["status"]): string {
+  switch (status) {
+    case "error":
+      return "the latest snapshot was unreadable"
+    case "unavailable":
+      return "the engine is unavailable"
+    case "unsupported":
+      return "live limits aren’t available"
+    default:
+      return "the latest refresh failed"
+  }
 }
 
 /**
@@ -94,7 +105,7 @@ export function mergeAuthoritative(
     if (pe && hasObservedWindows(pe)) {
       engines[name] = {
         ...pe, // keep authoritative windows + original refreshedAt/status/plan
-        error: `Couldn’t refresh — showing last-known values (${degradedReason(ne)}).`,
+        error: `Couldn’t refresh — showing last-known values (${degradedClause(ne.status)}).`,
       }
     }
   }

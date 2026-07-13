@@ -116,12 +116,21 @@ describe("collectEngineLimits — claude statusline snapshot", () => {
     expect(out.engines.claude.stale).toBeFalsy();
   });
 
-  it("degrades a malformed snapshot to status error without leaking file contents", async () => {
-    const secret = "sk-live-DEADBEEF-should-never-surface";
-    writeClaudeSnapshot("bad.json", `{ not json ${secret}`, 60_000);
+  it("degrades a malformed snapshot to fixed copy, leaking neither payload nor parser detail", async () => {
+    // Content BEGINS with a sensitive marker and is invalid JSON — the projection
+    // must expose neither the marker nor any parser diagnostic (position, token…).
+    const marker = "SENSITIVE-SNAPSHOT-MARKER-a1b2c3";
+    writeClaudeSnapshot("bad.json", `${marker} {"rate_limits": broken}`, 60_000);
     const out = await collectEngineLimits(cfg(), { engine: "claude" });
-    expect(out.engines.claude.status).toBe("error");
-    expect(JSON.stringify(out.engines.claude)).not.toContain(secret);
+    const claude = out.engines.claude;
+    expect(claude.status).toBe("error");
+    expect(claude.error).toBeTruthy(); // fixed operator-safe copy is present…
+
+    const projected = JSON.stringify(claude);
+    expect(projected).not.toContain(marker); // …but no payload fragment…
+    for (const diag of ["position", "Unexpected", "Expected", "in JSON", "SyntaxError"]) {
+      expect(projected).not.toContain(diag); // …and no raw parser diagnostic.
+    }
   });
 });
 
