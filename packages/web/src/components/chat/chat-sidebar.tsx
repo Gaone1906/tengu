@@ -1,8 +1,9 @@
 
 import React, { useEffect, useState, useRef, useCallback, useMemo, startTransition } from "react"
+import { Link } from "react-router-dom"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { useQueryClient } from "@tanstack/react-query"
-import { ChevronDown, Clock3, Copy, EllipsisVertical, Focus, Layers, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
+import { ChevronDown, ChevronRight, Clock3, Copy, EllipsisVertical, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
 import { api, type BackgroundActivity, type Employee, type SessionsResponse } from "@/lib/api"
 import { useOrg } from "@/hooks/use-employees"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
@@ -34,7 +35,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-import { mergeSidebarEmployees, bucketByDay, summarizeOlder, isFocusedSession } from "@/components/chat/chat-route-helpers"
+import { mergeSidebarEmployees, bucketByDay, summarizeOlder } from "@/components/chat/chat-route-helpers"
+import { ChatScopeMenu } from "@/components/chat/chat-scope-menu"
+import {
+  parseStoredChatScope,
+  partitionSessionsForScope,
+  shouldShowContactableRoster,
+  type ChatScope,
+} from "@/components/chat/chat-scope"
 
 interface Session {
   id: string
@@ -116,9 +124,7 @@ const COLLAPSE_STORAGE_KEY = "jinn-sidebar-collapsed"
 const EXPANDED_STORAGE_KEY = "jinn-sidebar-expanded"
 const PINNED_STORAGE_KEY = "jinn-pinned-sessions"
 const OLDER_EXPANDED_STORAGE_KEY = "jinn-sidebar-older-expanded"
-const FOCUS_MODE_STORAGE_KEY = "jinn-sidebar-focus-mode"
-
-type FocusMode = "focused" | "all"
+const CHAT_SCOPE_STORAGE_KEY = "jinn-sidebar-chat-scope"
 
 const formatTimeCache = new Map<string, string>()
 const FORMAT_TIME_CACHE_MAX = 200
@@ -1002,7 +1008,8 @@ export function ChatSidebar({
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [olderExpanded, setOlderExpanded] = useState(false)
-  const [focusMode, setFocusMode] = useState<FocusMode>("all")
+  const [chatScope, setChatScope] = useState<ChatScope>("all")
+  const scopeHydratedRef = useRef(false)
   const [loadingMore, setLoadingMore] = useState<Set<string>>(new Set())
   const [deleteTarget, setDeleteTarget] = useState<{
     type: "session" | "employee"
@@ -1019,7 +1026,22 @@ export function ChatSidebar({
     }
     return map
   }, [orgData])
+  const scopedSessions = useMemo(
+    () => partitionSessionsForScope(sessions, chatScope, employeeData, portalSlug, Date.now(), isVisibleSource),
+    [sessions, chatScope, employeeData, portalSlug],
+  )
   const onSessionsLoadedRef = useRef(onSessionsLoaded)
+
+  useEffect(() => {
+    if (scopeHydratedRef.current || loading || !orgData) return
+    scopeHydratedRef.current = true
+    try {
+      const stored = localStorage.getItem(CHAT_SCOPE_STORAGE_KEY)
+      setChatScope(parseStoredChatScope(stored, scopedSessions.projects))
+    } catch {
+      setChatScope("all")
+    }
+  }, [loading, orgData, scopedSessions.projects])
 
   useEffect(() => {
     onSessionsLoadedRef.current = onSessionsLoaded
@@ -1040,8 +1062,6 @@ export function ChatSidebar({
     setExpanded(loadExpandedState())
     try {
       setOlderExpanded(localStorage.getItem(OLDER_EXPANDED_STORAGE_KEY) === "true")
-      const stored = localStorage.getItem(FOCUS_MODE_STORAGE_KEY)
-      if (stored === "focused" || stored === "all") setFocusMode(stored)
     } catch {}
   }, [])
 
@@ -1062,9 +1082,9 @@ export function ChatSidebar({
     if (searchOpen) searchInputRef.current?.focus()
   }, [searchOpen])
 
-  const selectFocusMode = useCallback((mode: FocusMode) => {
-    setFocusMode(mode)
-    try { localStorage.setItem(FOCUS_MODE_STORAGE_KEY, mode) } catch {}
+  const selectChatScope = useCallback((scope: ChatScope) => {
+    setChatScope(scope)
+    try { localStorage.setItem(CHAT_SCOPE_STORAGE_KEY, scope) } catch {}
   }, [])
 
   const toggleOlderExpanded = useCallback(() => {
@@ -1180,6 +1200,7 @@ export function ChatSidebar({
   const {
     searching,
     searchRows,
+    attentionRows,
     pinnedRows,
     todayRows,
     yesterdayRows,
@@ -1199,7 +1220,7 @@ export function ChatSidebar({
     const searching = search.trim().length > 0
     const displayed = searching
       ? ((searchResults as Session[] | undefined) ?? []).filter(isVisibleSource)
-      : sessions
+      : scopedSessions.history
 
     // Resolve the avatar slug + human label for a flat row (see resolveRowIdentity).
     const toRow = (s: Session): FlatRow => ({
@@ -1213,6 +1234,7 @@ export function ChatSidebar({
       return {
         searching,
         searchRows,
+        attentionRows: [] as FlatRow[],
         pinnedRows: [] as FlatRow[],
         todayRows: [] as FlatRow[],
         yesterdayRows: [] as FlatRow[],
@@ -1229,13 +1251,11 @@ export function ChatSidebar({
       }
     }
 
-    // ---- Default mode: recency buckets + per-employee Older drawer. ----
-    // In "focused" mode the Today/Yesterday/Older buckets only contain the
-    // operator's own top-level chats (isFocusedSession); delegated children and
-    // other automated sessions are hidden until "All" is selected. The
-    // per-employee groups (drawer in All mode + keyboard cycling + contactable
-    // roster) are always built from every non-cron session so they stay stable.
-    const focused = focusMode === "focused"
+    // ---- Default mode: global attention + scoped flat recency buckets. ----
+    // `partitionSessionsForScope` permanently removes workflow, cron, child,
+    // and internal execution sessions. Attention remains global; history is
+    // filtered by the selected project lens without changing row structure.
+    const focused = true
     const now = new Date()
     const cronSessions: Session[] = []
     const directSessions: Session[] = []
@@ -1243,11 +1263,12 @@ export function ChatSidebar({
     const pinnedRows: FlatRow[] = []
     const todayRows: FlatRow[] = []
     const yesterdayRows: FlatRow[] = []
+    const attentionRows = scopedSessions.attention.map(toRow)
     // Focused-mode Older = older user-initiated chats, as flat rows (computed
     // from loaded sessions; the deep tail beyond the per-group window is reachable
     // via search). All-mode Older uses the authoritative `counts` instead.
     const olderFocusedRows: FlatRow[] = []
-    let hiddenAutomated = 0
+    const hiddenAutomated = scopedSessions.hiddenAutomated
     // today+yesterday sessions surfaced per group — drives the All-mode Older math.
     const recentByGroup: Record<string, number> = {}
 
@@ -1272,11 +1293,6 @@ export function ChatSidebar({
         recentByGroup[groupKey] = (recentByGroup[groupKey] ?? 0) + 1
         continue
       }
-      // Focused filter gates only the recency buckets, not the employee groups.
-      if (focused && !isFocusedSession(s)) {
-        hiddenAutomated += 1
-        continue
-      }
       const bucket = bucketByDay(getSessionActivity(s), now)
       if (bucket === "today") {
         todayRows.push(toRow(s))
@@ -1289,6 +1305,7 @@ export function ChatSidebar({
       }
     }
 
+    attentionRows.sort((a, b) => getSessionActivity(b.session).localeCompare(getSessionActivity(a.session)))
     pinnedRows.sort((a, b) => getSessionActivity(b.session).localeCompare(getSessionActivity(a.session)))
     todayRows.sort((a, b) => getSessionActivity(b.session).localeCompare(getSessionActivity(a.session)))
     yesterdayRows.sort((a, b) => getSessionActivity(b.session).localeCompare(getSessionActivity(a.session)))
@@ -1371,6 +1388,7 @@ export function ChatSidebar({
     return {
       searching,
       searchRows: [] as FlatRow[],
+      attentionRows,
       pinnedRows,
       todayRows,
       yesterdayRows,
@@ -1385,7 +1403,7 @@ export function ChatSidebar({
       cronSessions,
       cronTotal,
     }
-  }, [sessions, search, searchResults, employeeData, portalSlug, portalName, pinnedSessions, counts, focusMode])
+  }, [search, searchResults, scopedSessions, employeeData, portalSlug, portalName, pinnedSessions, counts])
 
   const cronCollapsed = collapsed.has("cron")
 
@@ -1395,7 +1413,7 @@ export function ChatSidebar({
   // Hidden while searching (search spans real sessions, not the roster) and the
   // COO/portal row is excluded (reachable via "New chat").
   const contactableEmployees = useMemo(() => {
-    if (search.trim()) return []
+    if (!shouldShowContactableRoster(chatScope, Boolean(search.trim()))) return []
     const sessionful = [...pinnedFlat, ...unpinnedFlat]
       .map((item) => item.employeeName)
       .filter((n): n is string => !!n)
@@ -1406,7 +1424,7 @@ export function ChatSidebar({
       .filter((name) => !sessionfulSet.has(name) && name !== portalSlug)
       .map((name) => employeeData.get(name))
       .filter((e): e is Employee => !!e)
-  }, [search, pinnedFlat, unpinnedFlat, orgData, employeeData, portalSlug])
+  }, [search, chatScope, pinnedFlat, unpinnedFlat, orgData, employeeData, portalSlug])
 
   // Emit flat session order for keyboard navigation (J/K/E shortcuts).
   // Visual order: Today → Yesterday → (Older drawer, if open) → Scheduled.
@@ -1422,20 +1440,12 @@ export function ChatSidebar({
       return { sessionIds: ids, employeeNames: [] as string[], employeeSessionMap: {} as Record<string, string[]> }
     }
 
+    for (const r of attentionRows) push(r.session.id)
     for (const r of pinnedRows) push(r.session.id)
     for (const r of todayRows) push(r.session.id)
     for (const r of yesterdayRows) push(r.session.id)
     if (olderExpanded) {
-      if (focusMode === "focused") {
-        for (const r of olderFocusedRows) push(r.session.id)
-      } else {
-        for (const item of [...olderPinned, ...olderUnpinned]) {
-          const sessionIds = item.sessions!.map((s) => s.id)
-          // Collapsed employee row reaches only its latest session; expanded reaches all.
-          if (expanded[item.employeeName!]) sessionIds.forEach(push)
-          else if (sessionIds.length) push(sessionIds[0])
-        }
-      }
+      for (const r of olderFocusedRows) push(r.session.id)
     }
     for (const s of sortedCron) push(s.id)
 
@@ -1448,7 +1458,7 @@ export function ChatSidebar({
       empMap[name] = item.sessions!.map((s) => s.id)
     }
     return { sessionIds: ids, employeeNames: empNames, employeeSessionMap: empMap }
-  }, [searching, searchRows, pinnedRows, todayRows, yesterdayRows, olderExpanded, focusMode, olderFocusedRows, olderPinned, olderUnpinned, expanded, sortedCron, pinnedFlat, unpinnedFlat])
+  }, [searching, searchRows, attentionRows, pinnedRows, todayRows, yesterdayRows, olderExpanded, olderFocusedRows, sortedCron, pinnedFlat, unpinnedFlat])
 
   useEffect(() => {
     const key = allFlatIds.sessionIds.join(',')
@@ -1546,6 +1556,10 @@ export function ChatSidebar({
       for (const row of searchRows) list.push({ kind: "flat", row })
       return list
     }
+    if (attentionRows.length > 0) {
+      list.push({ kind: "section", id: "needs", label: "Needs you", count: attentionRows.length })
+      for (const row of attentionRows) list.push({ kind: "flat", row })
+    }
     if (pinnedRows.length > 0) {
       // The section header carries the "pinned" signal, so rows inside it
       // drop their per-row pin glyph (hidePin) — one signal, not two.
@@ -1563,14 +1577,11 @@ export function ChatSidebar({
     if (olderSummary.chats > 0) {
       if (!olderExpanded) {
         list.push({ kind: "older-line" })
-      } else if (focusMode === "focused") {
-        // Focused Older = flat older user-initiated chats (no per-employee drawer).
+      } else {
+        // Older stays flat in every scope: selecting a lens must never turn
+        // history into a second navigation hierarchy.
         list.push({ kind: "older-header" })
         for (const row of olderFocusedRows) list.push({ kind: "flat", row })
-      } else {
-        list.push({ kind: "older-header" })
-        for (const item of olderPinned) list.push({ kind: "employee", item })
-        for (const item of olderUnpinned) list.push({ kind: "employee", item })
       }
     }
     if (cronSessions.length > 0) {
@@ -1581,7 +1592,7 @@ export function ChatSidebar({
       }
     }
     return list
-  }, [searching, searchRows, pinnedRows, todayRows, yesterdayRows, olderSummary.chats, olderExpanded, focusMode, olderFocusedRows, olderPinned, olderUnpinned, cronSessions.length, cronCollapsed, sortedCron, cronTotal])
+  }, [searching, searchRows, attentionRows, pinnedRows, todayRows, yesterdayRows, olderSummary.chats, olderExpanded, olderFocusedRows, cronSessions.length, cronCollapsed, sortedCron, cronTotal])
 
   const VIRTUALIZE_THRESHOLD = 50
   const shouldVirtualize = virtualItems.length >= VIRTUALIZE_THRESHOLD
@@ -1704,11 +1715,9 @@ export function ChatSidebar({
 
   return (
     <div className="relative z-10 flex h-full flex-col bg-[var(--sidebar-bg)] shadow-[var(--shadow-card)]">
-      {/* One slim control row. At rest it shows the Focused/All segmented
-          control (left) + a borderless search icon (right); tapping search
-          morphs the whole row into an inline search field. The page title and
-          "+ New" affordance now live in the header pill, so neither lives here.
-          Separation is fills only — no hairlines at rest. */}
+      {/* One slim control row. At rest it shows the project scope as plain text
+          plus borderless compose/search actions; tapping search morphs the
+          whole row into an inline field. The lens changes data, never layout. */}
       {/* Control band — part of the List surface (--sidebar-bg), not the
           Thread. A scroll-activated separator (below) is the only line; at rest
           it's borderless. */}
@@ -1727,31 +1736,13 @@ export function ChatSidebar({
             )}
             aria-hidden={searchOpen}
           >
-            {/* Focused (default) shows only the operator's own top-level chats;
-                All reveals delegated/automated sessions too. Persisted; search
-                spans everything regardless. */}
-            <div className="flex items-center gap-0.5 rounded-full bg-[var(--fill-tertiary)] p-0.5">
-              {([
-                { mode: "focused", Icon: Focus, aria: "Focused", tip: "Only chats you started" },
-                { mode: "all", Icon: Layers, aria: "All", tip: "Include automated & delegated sessions" },
-              ] as const).map(({ mode, Icon, aria, tip }) => (
-                <button
-                  key={mode}
-                  onClick={() => selectFocusMode(mode)}
-                  aria-pressed={focusMode === mode}
-                  aria-label={aria}
-                  title={tip}
-                  className={cn(
-                    "flex items-center justify-center rounded-full px-2.5 py-1.5 transition-all",
-                    focusMode === mode
-                      ? "bg-[var(--bg-secondary)] text-foreground shadow-[var(--shadow-subtle)]"
-                      : "text-muted-foreground hover:text-foreground"
-                  )}
-                >
-                  <Icon className="size-[15px]" strokeWidth={2} />
-                </button>
-              ))}
-            </div>
+            <ChatScopeMenu
+              value={chatScope}
+              projects={scopedSessions.projects}
+              totalCount={scopedSessions.conversationCount}
+              needsCount={scopedSessions.attention.length}
+              onChange={selectChatScope}
+            />
 
             <div className="flex-1" />
 
@@ -1833,13 +1824,15 @@ export function ChatSidebar({
           <div className="px-4 py-8 text-center text-xs text-[var(--text-quaternary)]">
             {search.trim() ? (
               "No matching chats"
-            ) : focusMode === "focused" && hiddenAutomated > 0 ? (
+            ) : chatScope === "needs" ? (
               <>
-                No personal chats here.{" "}
-                <button onClick={() => selectFocusMode("all")} className="text-[var(--accent)] hover:underline">
-                  View all ({hiddenAutomated} automated)
+                Nothing needs you right now.{" "}
+                <button onClick={() => selectChatScope("all")} className="text-[var(--accent)] hover:underline">
+                  View all chats
                 </button>
               </>
+            ) : chatScope.startsWith("project:") ? (
+              <>No chats in this project yet</>
             ) : (
               "No chats yet"
             )}
@@ -1875,6 +1868,18 @@ export function ChatSidebar({
             ))}
           </>
         )}
+
+        {!loading && !searching && hiddenAutomated > 0 ? (
+          <Link
+            to="/logs"
+            className="mt-1 flex min-h-10 w-full items-center gap-2 px-4 py-2 text-[11px] text-[var(--text-tertiary)] transition-colors duration-150 hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)]"
+          >
+            <span className="min-w-0 flex-1 truncate tabular-nums">
+              {hiddenAutomated} automated {hiddenAutomated === 1 ? "run" : "runs"} in Activity
+            </span>
+            <ChevronRight className="size-3.5 shrink-0 text-[var(--text-quaternary)]" />
+          </Link>
+        ) : null}
 
         {!loading && onContactEmployee && contactableEmployees.length > 0 ? (
           <div className="mt-3 pt-1">
