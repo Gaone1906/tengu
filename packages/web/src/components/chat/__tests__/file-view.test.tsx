@@ -67,6 +67,13 @@ const specialChatPaths = [
   ["files/文档.txt", "/api/files/read?path=files/%E6%96%87%E6%A1%A3.txt"],
 ] as const;
 
+const literalPercentChatPaths = [
+  ["files/report%2F2026.txt", "/api/files/read?path=files/report%252F2026.txt"],
+  ["files/report%5C2026.txt", "/api/files/read?path=files/report%255C2026.txt"],
+  ["files/report%002026.txt", "/api/files/read?path=files/report%25002026.txt"],
+  ["files/%2e", "/api/files/read?path=files/%252e"],
+] as const;
+
 function ChatFileHarness({ path }: { path: string }) {
   const [openedPath, setOpenedPath] = useState<string | null>(null);
   const messages: Message[] = [{
@@ -103,6 +110,40 @@ describe("FileView requests opened from chat", () => {
     fireEvent.click(link);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expectedUrl));
+  });
+
+  it.each(literalPercentChatPaths)("round-trips literal percent-like chat path %s", async (path, expectedUrl) => {
+    render(<ChatFileHarness path={path} />);
+
+    const link = screen.getByTitle(`Open ${path} in viewer`);
+    expect(link.getAttribute("href")).toBe(`/file?path=${encodeURIComponent(path)}`);
+    fireEvent.click(link);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expectedUrl));
+  });
+
+  it("keeps a lone-surrogate supported-root path as inline code", () => {
+    const path = `files/bad${String.fromCharCode(0xd800)}.txt`;
+
+    expect(() => render(<ChatFileHarness path={path} />)).not.toThrow();
+    expect(screen.getByText(path, { selector: "code" })).toBeTruthy();
+    expect(screen.queryByTitle(`Open ${path} in viewer`)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "files/../outside.txt",
+    "files/./report.txt",
+    "files//report.txt",
+    "files/nested\\report.txt",
+    "files/has\0nul.txt",
+    "files/has\u0001control.txt",
+  ])("keeps unsafe supported-root chat path %s as inline code", (path) => {
+    render(<ChatFileHarness path={path} />);
+
+    expect(screen.getByText(path, { selector: "code" })).toBeTruthy();
+    expect(screen.queryByTitle(`Open ${path} in viewer`)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it.each([

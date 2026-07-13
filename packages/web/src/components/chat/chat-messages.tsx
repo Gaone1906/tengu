@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { Message } from '@/lib/conversations'
 import { parseMedia, stripAttachedFilesBlock } from '@/lib/conversations'
+import { buildFileReadRequest } from '@/lib/file-read-request'
 import { MessageMedia } from './message-media'
 import { useOpenFile } from '@/components/chat/file-open-context'
 import { useStickToBottom } from '@/hooks/use-stick-to-bottom'
@@ -454,10 +455,20 @@ function ToolGroup({
 // that form an unambiguous boundary without making ordinary prose linkable.
 const FILE_PATH_CORE = String.raw`(?:~\/|\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9]{1,8}`
 const FILE_PATH_RE = new RegExp(`^${FILE_PATH_CORE}$`)
-const SUPPORTED_VIEWER_PATH_RE = /^(?:knowledge|docs|files|uploads)\/[^`\r\n]+$/
+const SUPPORTED_VIEWER_ROOT_RE = /^(?:knowledge|docs|files|uploads)\//
+
+function buildChatFileLink(path: string): { trimmed: string; href: string } | null {
+  const trimmed = path.trim()
+  if (SUPPORTED_VIEWER_ROOT_RE.test(trimmed)) {
+    if (!buildFileReadRequest(trimmed).ok) return null
+  } else if (!FILE_PATH_RE.test(trimmed)) {
+    return null
+  }
+  return { trimmed, href: `/file?path=${encodeURIComponent(trimmed)}` }
+}
+
 export function isFilePath(s: string): boolean {
-  const trimmed = s.trim()
-  return FILE_PATH_RE.test(trimmed) || SUPPORTED_VIEWER_PATH_RE.test(trimmed)
+  return buildChatFileLink(s) !== null
 }
 
 // Inline-formatter pattern, assembled from the shared FILE_PATH_CORE so the
@@ -477,8 +488,9 @@ const INLINE_RE_SOURCE =
 // Monospace + blue underline (no code-box background — that looked like an empty highlight).
 function FileLink({ path }: { path: string }) {
   const openFile = useOpenFile()
-  const trimmed = path.trim()
-  const href = `/file?path=${encodeURIComponent(trimmed)}`
+  const link = buildChatFileLink(path)
+  if (!link) return path
+  const { trimmed, href } = link
   return (
     <a
       href={href}
