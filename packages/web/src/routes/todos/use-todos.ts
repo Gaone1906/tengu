@@ -77,6 +77,22 @@ export async function fetchStatusPage(
   return { workItems: r.workItems, total: r.total ?? r.workItems.length, nextOffset: r.nextOffset ?? null }
 }
 
+/** The exact cache key for one status's paged rows: the filter identity plus the
+ *  Done window marker (open lens scopes Done to the recent week). Shared by the
+ *  query itself and by the ledger's exported candidate-key list so a scoped
+ *  refetch can never drift from the keys actually mounted. */
+export function ledgerQueryKey(
+  status: WorkItemStatusWire,
+  filters: TodoFilters,
+  windowMark: string,
+): readonly unknown[] {
+  return [
+    "work-items", "ledger", status,
+    filters.assignee ?? "", filters.department ?? "", filters.source ?? "", filters.date ?? "", filters.q ?? "",
+    windowMark,
+  ]
+}
+
 /** One status's paged rows. The key carries the filter identity plus the Done
  *  window marker (open lens scopes Done to the recent week); the concrete
  *  since/until instants live in the closure so the key doesn't churn with
@@ -90,11 +106,7 @@ function useStatusPages(
   enabled: boolean,
 ) {
   return useInfiniteQuery({
-    queryKey: [
-      "work-items", "ledger", status,
-      filters.assignee ?? "", filters.department ?? "", filters.source ?? "", filters.date ?? "", filters.q ?? "",
-      windowMark,
-    ],
+    queryKey: ledgerQueryKey(status, filters, windowMark),
     queryFn: ({ pageParam }) => fetchStatusPage(status, filters, since, until, pageParam),
     initialPageParam: 0,
     getNextPageParam: (last) => last.nextOffset ?? undefined,
@@ -175,6 +187,14 @@ export function useLedgerItems(filters: TodoFilters, now: number) {
     activePairs.map((pair) => [pair.status, pair.query.data?.pages.length ?? 0]),
   ), [activePairs])
 
+  // The EXACT cache keys of the ledger queries actually mounted for this filter —
+  // the candidate sources a private-ref Retry must refetch, and nothing broader.
+  const candidateKeys = useMemo(
+    (): readonly (readonly unknown[])[] => activePairs.map((pair) => ledgerQueryKey(pair.status, filters, markFor(pair.status))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the key values derive purely from the filter identity
+    [filters],
+  )
+
   const restorePageDepth = useCallback(async (target: LedgerPageDepth) => {
     await Promise.all(pairs.map(async (pair) => {
       if (!active.has(pair.status)) return
@@ -200,6 +220,7 @@ export function useLedgerItems(filters: TodoFilters, now: number) {
     loadMore,
     pageDepth,
     restorePageDepth,
+    candidateKeys,
   }
 }
 
@@ -336,14 +357,20 @@ export function useResolvePrivateRef(openRef: string | null, enabled: boolean) {
           }
 
           const pageConsumed = consumed + r.workItems.length
+          // Consumed rows can never exceed the server's own stable total; a page
+          // that pushes past it is a broken stream, not a place to trust a match.
+          if (pageConsumed > stableTotal) throw new PrivateRefResolveIncompleteError("resolve consumed exceeds total")
           if (next === null) {
-            // Provably exhausted for this status only when the server's own total
-            // agrees; a null nextOffset with rows still owed is a truncated stream.
+            // A null continuation is honest ONLY at exact exhaustion; short of the
+            // total it is a truncated stream.
             if (pageConsumed !== stableTotal) throw new PrivateRefResolveIncompleteError("resolve truncated before total")
-          } else if (next !== offset + r.workItems.length) {
+          } else {
+            // A non-null continuation is legal ONLY while rows remain owed against
+            // the stable total; advertised at or past exhaustion it is broken.
+            if (pageConsumed >= stableTotal) throw new PrivateRefResolveIncompleteError("resolve continuation past total")
             // The server pages contiguously (nextOffset = offset + rows.length); any
             // forward gap, repeat, or decrease is a broken/reordered stream.
-            throw new PrivateRefResolveIncompleteError("resolve nextOffset not contiguous")
+            if (next !== offset + r.workItems.length) throw new PrivateRefResolveIncompleteError("resolve nextOffset not contiguous")
           }
 
           // Page fully healthy → only now is a match trustworthy.

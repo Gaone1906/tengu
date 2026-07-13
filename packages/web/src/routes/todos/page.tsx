@@ -488,8 +488,8 @@ export default function TodosPage() {
     if (!openRef) return
     const drop = openIdFromLists != null || (!refResolveEnabled && refResolution.data == null)
     if (drop) {
-      void qc.cancelQueries({ queryKey: ["work-items", "ref-resolve", openRef] })
-      qc.removeQueries({ queryKey: ["work-items", "ref-resolve", openRef] })
+      void qc.cancelQueries({ queryKey: ["work-items", "ref-resolve", openRef], exact: true })
+      qc.removeQueries({ queryKey: ["work-items", "ref-resolve", openRef], exact: true })
     }
   }, [openRef, openIdFromLists, refResolveEnabled, refResolution.data, qc])
 
@@ -499,32 +499,53 @@ export default function TodosPage() {
     const ref = openRef
     return () => {
       if (ref) {
-        void qc.cancelQueries({ queryKey: ["work-items", "ref-resolve", ref] })
-        qc.removeQueries({ queryKey: ["work-items", "ref-resolve", ref] })
+        void qc.cancelQueries({ queryKey: ["work-items", "ref-resolve", ref], exact: true })
+        qc.removeQueries({ queryKey: ["work-items", "ref-resolve", ref], exact: true })
       }
     }
   }, [openRef, qc])
 
-  // Retry refetches ONLY the exact candidate keys (ledger/base, Needs, People) —
-  // never a broad ["work-items"] sweep and never the stale resolver observer. If a
-  // candidate now resolves the ref, the fast path wins and the resolver stays off
-  // (zero resolver calls). If they settle healthy-and-empty, normal re-enablement
-  // starts exactly one fresh traversal. A ref change during retry never restarts
-  // the old ref (the refetch is ref-agnostic; the old resolver was already dropped).
+  // The EXACT cache keys of the candidate sources actually mounted for this
+  // resolution: the open ledger's active status queries, the base open-lens
+  // queries, Needs-you (me), and People. Deduped so a Retry refetches precisely
+  // these — never a broad ["work-items","ledger"]/["work-items","needs-attention"]
+  // prefix that would also hit unrelated ledgers or another person's inbox.
+  const candidateRefetchKeys = useMemo((): (readonly unknown[])[] => {
+    const seen = new Set<string>()
+    const keys: (readonly unknown[])[] = []
+    const add = (key: readonly unknown[]) => {
+      const id = JSON.stringify(key)
+      if (seen.has(id)) return
+      seen.add(id)
+      keys.push(key)
+    }
+    for (const key of baseLedger.candidateKeys) add(key)
+    for (const key of ledger.candidateKeys) add(key)
+    add(["work-items", "needs-attention", "me"])
+    add(["work-items", "people-open"])
+    return keys
+  }, [baseLedger.candidateKeys, ledger.candidateKeys])
+  const candidateRefetchKeysRef = useRef(candidateRefetchKeys)
+  candidateRefetchKeysRef.current = candidateRefetchKeys
+
+  // Retry refetches ONLY the exact mounted candidate keys — never a broad
+  // ["work-items"] sweep and never the stale resolver observer. If a candidate now
+  // resolves the ref, the fast path wins and the resolver stays off (zero resolver
+  // calls). If they settle healthy-and-empty, normal re-enablement starts exactly
+  // one fresh traversal. A ref change during retry never restarts the old ref (the
+  // refetch is ref-agnostic; the old resolver was already dropped).
   const retryRefResolution = useCallback(async () => {
     const startRef = openRefLiveRef.current
     if (!startRef) return
-    await Promise.all([
-      qc.refetchQueries({ queryKey: ["work-items", "ledger"] }),
-      qc.refetchQueries({ queryKey: ["work-items", "needs-attention"] }),
-      qc.refetchQueries({ queryKey: ["work-items", "people-open"] }),
-    ])
+    await Promise.all(
+      candidateRefetchKeysRef.current.map((queryKey) => qc.refetchQueries({ queryKey, exact: true })),
+    )
     // A ref change mid-retry must never restart the old ref's traversal.
     if (openRefLiveRef.current !== startRef) return
     // Clear the stale resolver cache so the still-enabled observer runs exactly one
     // fresh traversal. If a candidate just resolved the ref, the resolver is
     // disabled and this is a harmless no-op (zero resolver calls).
-    qc.removeQueries({ queryKey: ["work-items", "ref-resolve", startRef] })
+    qc.removeQueries({ queryKey: ["work-items", "ref-resolve", startRef], exact: true })
   }, [qc])
   const quickIds = useMemo(() => {
     const candidates = [
