@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -70,10 +70,12 @@ let defMod: Def;
 let runRec: RunRec;
 let runStore: RunStore;
 let registry: Registry;
+let callbacks: typeof import("../../sessions/callbacks.js");
 let cooSession: import("../../shared/types.js").Session;
 let managerSession: import("../../shared/types.js").Session;
 let workerSession: import("../../shared/types.js").Session;
 let peerSession: import("../../shared/types.js").Session;
+const processFetch = globalThis.fetch;
 
 const apiCtx = {
   getConfig: () => ({
@@ -197,11 +199,27 @@ beforeAll(async () => {
   runRec = await import("../../workflows/run-reconciler.js");
   runStore = await import("../../workflows/run-store.js");
   registry = await import("../../sessions/registry.js");
+  callbacks = await import("../../sessions/callbacks.js");
   registry.initDb();
+  globalThis.fetch = async () => {
+    throw new Error("work-item approval route test callback transport is offline");
+  };
   cooSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "coo", title: "coo", employee: "coo" });
   managerSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "manager", title: "manager", employee: "platform-manager" });
   workerSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "worker", title: "worker", employee: "platform-worker" });
   peerSession = registry.createSession({ engine: "codex", source: "web", sourceRef: "peer", title: "peer", employee: "platform-peer" });
+});
+
+afterEach(async () => {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  callbacks.__resetCallbackRetrySweepForTest();
+});
+
+afterAll(() => {
+  globalThis.fetch = processFetch;
+  registry.__closeDbForTest();
+  fs.rmSync(tmpHome, { recursive: true, force: true });
+  fs.rmSync(evidenceRoot, { recursive: true, force: true });
 });
 
 describe("POST /api/work-items/:id/approval — COO-default authority + validation", () => {

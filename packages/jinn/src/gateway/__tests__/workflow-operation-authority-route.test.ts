@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,6 +45,8 @@ type Api = typeof import('../api.js');
 type Registry = typeof import('../../sessions/registry.js');
 let api: Api;
 let registry: Registry;
+let callbacks: typeof import('../../sessions/callbacks.js');
+const processFetch = globalThis.fetch;
 
 const apiCtx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
@@ -58,7 +60,11 @@ const apiCtx = {
 beforeAll(async () => {
   api = await import('../api.js');
   registry = await import('../../sessions/registry.js');
+  callbacks = await import('../../sessions/callbacks.js');
   registry.initDb();
+  globalThis.fetch = async () => {
+    throw new Error('workflow operation authority route test callback transport is offline');
+  };
 });
 
 beforeEach(() => {
@@ -67,9 +73,18 @@ beforeEach(() => {
   fs.rmSync(path.join(evidenceRoot, 'workflow-triggers'), { recursive: true, force: true });
 });
 
+afterEach(async () => {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  callbacks.__resetCallbackRetrySweepForTest();
+});
+
 afterAll(async () => {
+  globalThis.fetch = processFetch;
   const { stopScheduler } = await import('../../cron/scheduler.js');
   stopScheduler();
+  registry.__closeDbForTest();
+  fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(evidenceRoot, { recursive: true, force: true });
 });
 
 function makeRes() {

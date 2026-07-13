@@ -4,7 +4,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, ensureSessionCapability } from "../../mcp/identity.js";
 import { HookRegistry } from "../hook-registry.js";
 
@@ -17,6 +17,8 @@ type WorkItems = typeof import("../../work-items/store.js");
 let api: Api;
 let registry: Registry;
 let workItems: WorkItems;
+let callbacks: typeof import("../../sessions/callbacks.js");
+const processFetch = globalThis.fetch;
 
 const engineRuns: Array<Record<string, unknown>> = [];
 const events: Array<{ event: string; payload: unknown }> = [];
@@ -184,13 +186,23 @@ beforeAll(async () => {
   api = await import("../api.js");
   registry = await import("../../sessions/registry.js");
   workItems = await import("../../work-items/store.js");
+  callbacks = await import("../../sessions/callbacks.js");
   registry.initDb();
+  globalThis.fetch = async () => {
+    throw new Error("legacy workflow boundary test callback transport is offline");
+  };
 });
 
 afterAll(() => {
+  globalThis.fetch = processFetch;
   hookRegistry.dispose();
   registry.__closeDbForTest();
   fs.rmSync(home, { recursive: true, force: true });
+});
+
+afterEach(async () => {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  callbacks.__resetCallbackRetrySweepForTest();
 });
 
 describe("legacy Workflow run mutation boundaries", () => {

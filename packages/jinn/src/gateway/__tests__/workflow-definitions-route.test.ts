@@ -37,8 +37,10 @@ type Api = typeof import('../api.js');
 type Registry = typeof import('../../sessions/registry.js');
 let api: Api;
 let registry: Registry;
+let callbacks: typeof import('../../sessions/callbacks.js');
 let cooSession: import('../../shared/types.js').Session;
 let workerSession: import('../../shared/types.js').Session;
+const processFetch = globalThis.fetch;
 
 function makeRes() {
   let status = 200;
@@ -144,7 +146,11 @@ async function callWithHeaders(method: string, url: string, body: unknown, heade
 beforeAll(async () => {
   api = await import('../api.js');
   registry = await import('../../sessions/registry.js');
+  callbacks = await import('../../sessions/callbacks.js');
   registry.initDb();
+  globalThis.fetch = async () => {
+    throw new Error('workflow definition route test callback transport is offline');
+  };
   cooSession = registry.createSession({ engine: 'codex', source: 'web', sourceRef: 'coo', title: 'coo', employee: 'coo' });
   workerSession = registry.createSession({ engine: 'codex', source: 'web', sourceRef: 'worker', title: 'worker', employee: 'worker' });
 });
@@ -152,9 +158,18 @@ beforeAll(async () => {
 beforeEach(() => {
   fs.mkdirSync(path.join(evidenceRoot, 'workflows'), { recursive: true });
 });
-afterEach(() => {
+afterEach(async () => {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  callbacks.__resetCallbackRetrySweepForTest();
   fs.rmSync(path.join(evidenceRoot, 'workflows'), { recursive: true, force: true });
   fs.rmSync(path.join(evidenceRoot, 'reports'), { recursive: true, force: true });
+});
+
+afterAll(() => {
+  globalThis.fetch = processFetch;
+  registry.__closeDbForTest();
+  fs.rmSync(process.env.JINN_HOME!, { recursive: true, force: true });
+  fs.rmSync(evidenceRoot, { recursive: true, force: true });
 });
 
 describe('workflow-definition CRUD routes', () => {
