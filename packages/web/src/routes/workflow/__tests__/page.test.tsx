@@ -70,6 +70,7 @@ vi.mock("../run-view", () => ({
 }))
 
 import WorkflowPage from "../page"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 
 function Destination() {
   const location = useLocation()
@@ -113,7 +114,8 @@ function renderPage({
       ],
     },
   ], { initialEntries: entries, initialIndex })
-  return { router, ...render(<RouterProvider router={router} />) }
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return { router, ...render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>) }
 }
 
 async function makeDirty() {

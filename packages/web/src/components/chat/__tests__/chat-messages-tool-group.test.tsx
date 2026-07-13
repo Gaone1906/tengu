@@ -1,7 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { ChatMessages } from '../chat-messages'
 import type { Message } from '@/lib/conversations'
+
+/** Activity blocks render CompanyActivityCard, which reads useNavigate — those
+ *  cases render inside a router (the real chat page always is). */
+function renderRouted(messages: Message[], loading = false) {
+  return render(
+    <MemoryRouter>
+      <ChatMessages messages={messages} loading={loading} />
+    </MemoryRouter>,
+  )
+}
 
 describe('ChatMessages tool groups', () => {
   it('renders unsafe markdown links as plain text', () => {
@@ -240,5 +251,147 @@ describe('ChatMessages tool groups', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^1 tool$/i }))
     expect(screen.getByText('delegate_task')).toBeTruthy()
+  })
+
+  it('suppresses a correlated successful tool row when its activity block is present', () => {
+    const messages: Message[] = [
+      {
+        id: 'tool-update',
+        role: 'assistant',
+        content: 'Used update_work_item',
+        timestamp: 100,
+        toolCall: 'update_work_item',
+        meta: { activityReceiptId: 'todo:wi_release' },
+      },
+      {
+        id: 'block-msg',
+        role: 'assistant',
+        content: 'Todo “Prepare release” · in review',
+        timestamp: 101,
+        blocks: [{
+          id: 'todo:wi_release',
+          type: 'todo-activity',
+          version: 1,
+          status: 'waiting',
+          title: 'Prepare release',
+          payload: { todoId: 'wi_release', action: 'transitioned', status: 'in_review' },
+        }],
+      },
+    ]
+
+    renderRouted(messages)
+
+    // The activity object renders as its card…
+    expect(screen.getByText('Prepare release')).toBeTruthy()
+    // …and its redundant generic tool row is gone (no tool pill at all).
+    expect(screen.queryByRole('button', { name: /tool/i })).toBeNull()
+    expect(screen.queryByText('update_work_item')).toBeNull()
+  })
+
+  it('keeps an error tool row without a receipt, and a not-yet-present block does not suppress', () => {
+    const messages: Message[] = [
+      {
+        id: 'tool-ok',
+        role: 'assistant',
+        content: 'Used update_work_item',
+        timestamp: 100,
+        toolCall: 'update_work_item',
+        meta: { activityReceiptId: 'todo:wi_missing' }, // block not present yet
+      },
+      {
+        id: 'tool-err',
+        role: 'assistant',
+        content: 'Used create_work_item',
+        timestamp: 101,
+        toolCall: 'create_work_item', // error/read-only row, no receipt
+      },
+    ]
+
+    render(<ChatMessages messages={messages} loading={false} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /^2 tools$/i }))
+    expect(screen.getByText('update_work_item')).toBeTruthy()
+    expect(screen.getByText('create_work_item')).toBeTruthy()
+  })
+
+  it('does not suppress two uncorrelated same-name tool rows sharing one block', () => {
+    const messages: Message[] = [
+      {
+        id: 'tool-a',
+        role: 'assistant',
+        content: 'Used update_work_item',
+        timestamp: 100,
+        toolCall: 'update_work_item',
+      },
+      {
+        id: 'tool-b',
+        role: 'assistant',
+        content: 'Used update_work_item',
+        timestamp: 101,
+        toolCall: 'update_work_item',
+      },
+      {
+        id: 'block-msg',
+        role: 'assistant',
+        content: 'Todo “Prepare release” · in review',
+        timestamp: 102,
+        blocks: [{
+          id: 'todo:wi_amb',
+          type: 'todo-activity',
+          version: 1,
+          status: 'waiting',
+          title: 'Prepare release',
+          payload: {
+            todoId: 'wi_amb',
+            action: 'transitioned',
+            status: 'in_review',
+            activityReceipt: { id: 'todo:wi_amb', operationId: 'op-1', toolName: 'update_work_item' },
+          },
+        }],
+      },
+    ]
+
+    renderRouted(messages)
+
+    fireEvent.click(screen.getByRole('button', { name: /^2 tools$/i }))
+    const group = screen.getByTestId('tool-group-list')
+    expect(within(group).getAllByText('update_work_item')).toHaveLength(2)
+  })
+
+  it('suppresses one legacy row by strict 1:1 toolName match within a turn', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'update the todo', timestamp: 90 },
+      {
+        id: 'tool-legacy',
+        role: 'assistant',
+        content: 'Used update_work_item',
+        timestamp: 100,
+        toolCall: 'update_work_item', // no meta.activityReceiptId (pre-correlation reload)
+      },
+      {
+        id: 'block-msg',
+        role: 'assistant',
+        content: 'Todo “Prepare release” · in review',
+        timestamp: 101,
+        blocks: [{
+          id: 'todo:wi_legacy',
+          type: 'todo-activity',
+          version: 1,
+          status: 'waiting',
+          title: 'Prepare release',
+          payload: {
+            todoId: 'wi_legacy',
+            action: 'transitioned',
+            status: 'in_review',
+            activityReceipt: { id: 'todo:wi_legacy', operationId: 'op-9', toolName: 'update_work_item' },
+          },
+        }],
+      },
+    ]
+
+    renderRouted(messages)
+
+    expect(screen.getByText('Prepare release')).toBeTruthy()
+    expect(screen.queryByText('update_work_item')).toBeNull()
   })
 })

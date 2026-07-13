@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { useNavigate } from "react-router-dom"
+import { useQuery } from "@tanstack/react-query"
 import { Plus, Check, Pause, AlertCircle, Loader2, Workflow as WorkflowGlyph, ChevronRight } from "lucide-react"
 import { api, type WorkflowDefinitionSummaryWire } from "@/lib/api"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
+import { queryKeys } from "@/lib/query-keys"
 import { lastRunSummary, triggerSummaryOf, type LastRunTone } from "./status-line"
 
 /* GRS-019 — the Workflows LANDING: a calm card list (approved Style A).
@@ -171,44 +173,49 @@ export function NewWorkflowDialog({
   )
 }
 
+interface WorkflowListModel {
+  cards: WorkflowCardModel[]
+  evidenceConfigured: boolean
+  evidenceReason: string | null
+}
+
+// The list's read is now a React Query so WebSocket `company:changed`
+// invalidation of queryKeys.workflows.all refreshes it live (no page reload).
+async function loadWorkflowList(): Promise<WorkflowListModel> {
+  const list = await api.listWorkflowDefinitions()
+  const evidenceConfigured = list.evidenceConfigured
+  const evidenceReason = list.evidenceReason ?? null
+  if (!evidenceConfigured) return { cards: [], evidenceConfigured, evidenceReason }
+  const visible = list.definitions.filter((d) => d.status !== "retired").slice(0, LIST_DETAIL_CAP)
+  // One calm line each needs the trigger node + the newest run — fetched in
+  // parallel per definition; a single failure degrades that card, not the list.
+  const cards = await Promise.all(
+    visible.map(async (d): Promise<WorkflowCardModel> => {
+      const [defR, runsR] = await Promise.allSettled([
+        api.getWorkflowDefinition(d.id),
+        api.listWorkflowRuns(d.id),
+      ])
+      const trigger = defR.status === "fulfilled" ? triggerSummaryOf(defR.value) : "—"
+      const lastRun = lastRunSummary(runsR.status === "fulfilled" ? runsR.value.runs[0] : undefined)
+      return { id: d.id, title: d.title, status: d.status, trigger, lastRun }
+    }),
+  )
+  return { cards, evidenceConfigured, evidenceReason }
+}
+
 export default function WorkflowListPage() {
   useBreadcrumbs([{ label: "Workflows" }])
   const navigate = useNavigate()
-  const [cards, setCards] = useState<WorkflowCardModel[] | null>(null)
-  const [evidenceConfigured, setEvidenceConfigured] = useState(true)
-  const [evidenceReason, setEvidenceReason] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
 
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const list = await api.listWorkflowDefinitions()
-        if (cancelled) return
-        setEvidenceConfigured(list.evidenceConfigured)
-        setEvidenceReason(list.evidenceReason ?? null)
-        const visible = list.definitions.filter((d) => d.status !== "retired").slice(0, LIST_DETAIL_CAP)
-        // One calm line each needs the trigger node + the newest run — fetched in
-        // parallel per definition; a single failure degrades that card, not the list.
-        const detailed = await Promise.all(
-          visible.map(async (d): Promise<WorkflowCardModel> => {
-            const [defR, runsR] = await Promise.allSettled([
-              api.getWorkflowDefinition(d.id),
-              api.listWorkflowRuns(d.id),
-            ])
-            const trigger = defR.status === "fulfilled" ? triggerSummaryOf(defR.value) : "—"
-            const lastRun = lastRunSummary(runsR.status === "fulfilled" ? runsR.value.runs[0] : undefined)
-            return { id: d.id, title: d.title, status: d.status, trigger, lastRun }
-          }),
-        )
-        if (!cancelled) setCards(detailed)
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load workflows")
-      }
-    })()
-    return () => { cancelled = true }
-  }, [])
+  const { data, error: queryError } = useQuery({
+    queryKey: queryKeys.workflows.all,
+    queryFn: loadWorkflowList,
+  })
+  const cards = data?.cards ?? null
+  const evidenceConfigured = data?.evidenceConfigured ?? true
+  const evidenceReason = data?.evidenceReason ?? null
+  const error = queryError ? (queryError instanceof Error ? queryError.message : "Failed to load workflows") : null
 
   const open = useCallback((id: string) => navigate(`/workflow/${encodeURIComponent(id)}`), [navigate])
   const activeCount = useMemo(() => cards?.filter((c) => c.status === "active").length ?? 0, [cards])

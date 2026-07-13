@@ -16,6 +16,13 @@ export const queryKeys = {
     all: ['cron'] as const,
     runs: (id: string) => ['cron', id, 'runs'] as const,
   },
+  workflows: {
+    all: ['workflows'] as const,
+    definition: (id: string) => ['workflows', 'definition', id] as const,
+    runs: (id: string) => ['workflows', 'runs', id] as const,
+    run: (id: string, runId: string) => ['workflows', 'runs', id, runId] as const,
+    triggers: ['workflows', 'triggers'] as const,
+  },
   skills: {
     all: ['skills'] as const,
     detail: (name: string) => ['skills', name] as const,

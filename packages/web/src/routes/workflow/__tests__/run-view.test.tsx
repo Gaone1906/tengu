@@ -32,6 +32,12 @@ import {
   DefinitionRunView,
 } from "../run-view"
 import { nodeStatusColor, type CanvasNode } from "../canvas"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+
+function renderView(ui: React.ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>)
+}
 
 function runWire(overrides: Partial<WorkflowRunWire> = {}): WorkflowRunWire {
   return {
@@ -258,7 +264,7 @@ describe("DefinitionRunView (container)", () => {
     })
     getWorkflowRun.mockResolvedValue(runWire())
 
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
 
     await waitFor(() => expect(screen.getByTestId("wf-canvas")).toBeTruthy())
     expect(getWorkflowRun).toHaveBeenCalledWith("sample-autonomy", "run-20260704090000-abcd1234")
@@ -273,9 +279,56 @@ describe("DefinitionRunView (container)", () => {
 
   it("shows an empty state when there are no runs", async () => {
     listWorkflowRuns.mockResolvedValue({ evidenceConfigured: true, runs: [] })
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByText(/No runs yet/i)).toBeTruthy())
     expect(getWorkflowRun).not.toHaveBeenCalled()
+  })
+
+  it("selects the URL-named run even when it is off the first page and shows its chip", async () => {
+    listWorkflowRuns.mockResolvedValue({
+      evidenceConfigured: true,
+      runs: [
+        { runId: "run-newest", workflowId: "sample-autonomy", status: "completed", trigger: { kind: "manual" }, startedAt: "2026-07-06T09:00:00Z", endedAt: "2026-07-06T09:05:00Z", stepCount: 2, parked: false },
+      ],
+    })
+    getWorkflowRun.mockResolvedValue(runWire({ runId: "run-deep", status: "parked" }))
+
+    renderView(<DefinitionRunView workflowId="sample-autonomy" initialRunId="run-deep" />)
+
+    // The deep-linked run is fetched directly (not the newest) and surfaced as a chip.
+    await waitFor(() => expect(getWorkflowRun).toHaveBeenCalledWith("sample-autonomy", "run-deep"))
+    await waitFor(() => expect(screen.getByTestId("wf-run-run-deep")).toBeTruthy())
+  })
+
+  it("reports a run selection to onSelectRun so the page can update the URL", async () => {
+    const onSelectRun = vi.fn()
+    listWorkflowRuns.mockResolvedValue({
+      evidenceConfigured: true,
+      runs: [
+        { runId: "run-a", workflowId: "sample-autonomy", status: "completed", trigger: { kind: "manual" }, startedAt: "2026-07-06T09:00:00Z", endedAt: "2026-07-06T09:05:00Z", stepCount: 2, parked: false },
+        { runId: "run-b", workflowId: "sample-autonomy", status: "parked", trigger: { kind: "manual" }, startedAt: "2026-07-05T09:00:00Z", endedAt: null, stepCount: 2, parked: true },
+      ],
+    })
+    getWorkflowRun.mockResolvedValue(runWire({ runId: "run-a" }))
+
+    renderView(<DefinitionRunView workflowId="sample-autonomy" onSelectRun={onSelectRun} />)
+    await waitFor(() => expect(screen.getByTestId("wf-run-run-b")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("wf-run-run-b"))
+    expect(onSelectRun).toHaveBeenCalledWith("run-b")
+  })
+
+  it("reports a freshly started run id to onSelectRun", async () => {
+    const onSelectRun = vi.fn()
+    listWorkflowRuns.mockResolvedValue({ evidenceConfigured: true, runs: [] })
+    startWorkflowRun.mockResolvedValue(runWire({ runId: "run-fresh", status: "running", parked: null, endedAt: null }))
+
+    renderView(<DefinitionRunView workflowId="sample-autonomy" onSelectRun={onSelectRun} />)
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
+    fireEvent.click(screen.getByRole("button", { name: "Run" }))
+    fireEvent.change(screen.getByLabelText("Run input"), { target: { value: "{}" } })
+    fireEvent.click(screen.getByRole("button", { name: "Start run" }))
+
+    await waitFor(() => expect(onSelectRun).toHaveBeenCalledWith("run-fresh"))
   })
 
   it("starts a run from JSON input with a generated idempotency key and no raw REST instruction", async () => {
@@ -286,7 +339,7 @@ describe("DefinitionRunView (container)", () => {
       endedAt: null,
     }))
 
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
     expect(screen.queryByText(/POST \/api\/workflow-definitions/)).toBeNull()
 
@@ -307,7 +360,7 @@ describe("DefinitionRunView (container)", () => {
       .mockRejectedValueOnce(new Error("network blink"))
       .mockResolvedValueOnce(runWire({ status: "running", parked: null, endedAt: null }))
 
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
     fireEvent.click(screen.getByRole("button", { name: "Run" }))
     fireEvent.change(screen.getByLabelText("Run input"), { target: { value: '{"ticket":"A-1"}' } })
@@ -330,7 +383,7 @@ describe("DefinitionRunView (container)", () => {
       ))
       .mockResolvedValueOnce(runWire({ status: "running", parked: null, endedAt: null }))
 
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
     fireEvent.click(screen.getByRole("button", { name: "Run" }))
     fireEvent.change(screen.getByLabelText("Run input"), { target: { value: '{"ticket":"CHANGED"}' } })
@@ -370,7 +423,7 @@ describe("DefinitionRunView (container)", () => {
     startWorkflowRun.mockResolvedValue(failed)
     getWorkflowRun.mockResolvedValue(failed)
 
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByRole("button", { name: "Run" }).hasAttribute("disabled")).toBe(false))
     fireEvent.click(screen.getByRole("button", { name: "Run" }))
     fireEvent.click(screen.getByRole("button", { name: "Start run" }))
@@ -381,13 +434,13 @@ describe("DefinitionRunView (container)", () => {
 
   it("notes when workflow storage is misconfigured", async () => {
     listWorkflowRuns.mockResolvedValue({ evidenceConfigured: false, runs: [] })
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByText(/misconfigured/i)).toBeTruthy())
   })
 
   it("surfaces a load error without wedging", async () => {
     listWorkflowRuns.mockRejectedValue(new Error("boom"))
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByText("boom")).toBeTruthy())
   })
 
@@ -402,7 +455,7 @@ describe("DefinitionRunView (container)", () => {
       .mockRejectedValueOnce(new Error("network blink"))
       .mockResolvedValueOnce(runWire())
 
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
 
     await waitFor(() => expect(screen.getByTestId("wf-run-fetch-error").textContent).toContain("network blink"))
     expect(screen.getByText(/No run selected/i)).toBeTruthy()
@@ -431,7 +484,7 @@ describe("DefinitionRunView (container)", () => {
       },
     }))
 
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByTestId("wf-run-order-warning")).toBeTruthy())
     expect(screen.getByTestId("wf-run-order-warning").textContent).toMatch(/declaration order/)
     expect(screen.getByTestId("wf-run-order-warning").textContent).toMatch(/qa → orchestrate/)
@@ -446,7 +499,7 @@ describe("DefinitionRunView (container)", () => {
     })
     getWorkflowRun.mockResolvedValue(runWire({ status, parked: status === "parked" ? runWire().parked : null }))
 
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     const opener = await screen.findByRole("button", { name: "Cancel run" })
     opener.focus()
     fireEvent.click(opener)
@@ -467,7 +520,7 @@ describe("DefinitionRunView (container)", () => {
       ],
     })
     getWorkflowRun.mockResolvedValue(runWire({ status, parked: null }))
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByText(status)).toBeTruthy())
     expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull()
   })
@@ -483,7 +536,7 @@ describe("DefinitionRunView (container)", () => {
     let resolveCancel!: (value: WorkflowRunWire) => void
     cancelWorkflowRun.mockReturnValue(new Promise<WorkflowRunWire>((resolve) => { resolveCancel = resolve }))
 
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }))
     const dialog = await screen.findByRole("dialog")
     const confirm = within(dialog).getByRole("button", { name: "Cancel run" }) as HTMLButtonElement
@@ -517,7 +570,7 @@ describe("DefinitionRunView (container)", () => {
     getWorkflowRun.mockResolvedValue(runWire({ status: "running", parked: null }))
     cancelWorkflowRun.mockRejectedValue(new Error("run was already completed"))
 
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     fireEvent.click(await screen.findByRole("button", { name: "Cancel run" }))
     const dialog = await screen.findByRole("dialog")
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel run" }))
@@ -534,7 +587,7 @@ describe("DefinitionRunView (container)", () => {
       ],
     })
     getWorkflowRun.mockResolvedValue(runWire())
-    render(<DefinitionRunView workflowId="sample-autonomy" />)
+    renderView(<DefinitionRunView workflowId="sample-autonomy" />)
     await waitFor(() => expect(screen.getByTestId("wf-canvas")).toBeTruthy())
     expect(screen.queryByTestId("wf-run-order-warning")).toBeNull()
   })

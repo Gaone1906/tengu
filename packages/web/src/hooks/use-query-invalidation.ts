@@ -4,7 +4,48 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useGateway } from '@/hooks/use-gateway'
 import { queryKeys } from '@/lib/query-keys'
 import { patchSessionBackgroundActivity, removeFromSessionsCache } from '@/hooks/use-sessions'
+import { mergeTodoIntoCaches } from '@/routes/todos/todo-edit-request'
 import type { BackgroundActivity } from '@/lib/api'
+
+/** The one company mutation event (Todo, Workflow definition, run, trigger). */
+function handleCompanyChanged(
+  qc: ReturnType<typeof useQueryClient>,
+  p: Record<string, unknown>,
+): void {
+  const entity = typeof p.entity === 'string' ? p.entity : ''
+  const id = typeof p.id === 'string' ? p.id : ''
+  if (entity === 'todo') {
+    // Apply the safe version-aware patch synchronously; an older event can never
+    // overwrite a newer cached revision. Absent value → refetch the smallest keys.
+    const value = p.value
+    if (value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { id?: unknown }).id === 'string') {
+      mergeTodoIntoCaches(qc, value as { id: string; version?: number })
+    } else if (id) {
+      qc.invalidateQueries({ queryKey: ['work-items'] })
+      qc.invalidateQueries({ queryKey: ['work-item', id] })
+    }
+  } else if (entity === 'workflow-definition') {
+    qc.invalidateQueries({ queryKey: queryKeys.workflows.all })
+    if (id) qc.invalidateQueries({ queryKey: queryKeys.workflows.definition(id) })
+  } else if (entity === 'workflow-run') {
+    const workflowId = typeof p.workflowId === 'string' ? p.workflowId : ''
+    const runId = typeof p.runId === 'string' ? p.runId : ''
+    if (workflowId) {
+      qc.invalidateQueries({ queryKey: queryKeys.workflows.runs(workflowId) })
+      if (runId) qc.invalidateQueries({ queryKey: queryKeys.workflows.run(workflowId, runId) })
+    }
+  } else if (entity === 'workflow-trigger') {
+    const workflowId = typeof p.workflowId === 'string' ? p.workflowId : ''
+    qc.invalidateQueries({ queryKey: queryKeys.workflows.triggers })
+    if (workflowId) qc.invalidateQueries({ queryKey: queryKeys.workflows.definition(workflowId) })
+  }
+  // Loss recovery for the invoking transcript; normal session:delta stays the
+  // surgical live path when the session is streaming.
+  if (typeof p.sessionId === 'string' && p.sessionId) {
+    qc.invalidateQueries({ queryKey: queryKeys.sessions.detail(p.sessionId) })
+    qc.invalidateQueries({ queryKey: queryKeys.sessions.transcript(p.sessionId) })
+  }
+}
 
 /**
  * Subscribes to WebSocket events and invalidates React Query caches.
@@ -22,8 +63,14 @@ export function useQueryInvalidation() {
 
       switch (event) {
         case 'session:started':
+        case 'session:created':
+          // A freshly created session (e.g. a delegated child) joins the same
+          // list/linked-Todo caches as a started one.
           pendingRef.current.add('sessions')
           pendingRef.current.add('work-item-sessions')
+          break
+        case 'company:changed':
+          if (p) handleCompanyChanged(qc, p)
           break
         case 'session:updated':
           pendingRef.current.add('sessions')

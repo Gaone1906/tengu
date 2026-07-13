@@ -29,6 +29,12 @@ vi.mock("@/components/page-layout", () => ({
 vi.mock("@/context/breadcrumb-context", () => ({ useBreadcrumbs: () => {} }))
 
 import WorkflowListPage, { slugifyWorkflowId } from "../list"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+
+function renderWithClient(ui: React.ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>)
+}
 
 function summary(id: string, over: Record<string, unknown> = {}) {
   return { id, title: id, status: "active", version: 1, nodeCount: 2, edgeCount: 1, ...over }
@@ -87,7 +93,7 @@ describe("WorkflowListPage", () => {
       }),
     )
 
-    render(<WorkflowListPage />)
+    renderWithClient(<WorkflowListPage />)
     await waitFor(() => expect(screen.getByTestId("wf-card-sample-autonomy")).toBeTruthy())
 
     const card = screen.getByTestId("wf-card-sample-autonomy")
@@ -113,7 +119,7 @@ describe("WorkflowListPage", () => {
     getWorkflowDefinition.mockResolvedValue(definition("alive"))
     listWorkflowRuns.mockResolvedValue({ evidenceConfigured: true, runs: [] })
 
-    render(<WorkflowListPage />)
+    renderWithClient(<WorkflowListPage />)
     await waitFor(() => expect(screen.getByTestId("wf-card-alive")).toBeTruthy())
     expect(screen.queryByTestId("wf-card-dead")).toBeNull()
     expect(getWorkflowDefinition).not.toHaveBeenCalledWith("dead")
@@ -121,7 +127,7 @@ describe("WorkflowListPage", () => {
 
   it("shows the empty state with a create CTA when there are no workflows", async () => {
     listWorkflowDefinitions.mockResolvedValue({ evidenceConfigured: true, definitions: [] })
-    render(<WorkflowListPage />)
+    renderWithClient(<WorkflowListPage />)
     await waitFor(() => expect(screen.getByTestId("wf-empty")).toBeTruthy())
     expect(screen.getByText(/No workflows yet/)).toBeTruthy()
   })
@@ -130,7 +136,7 @@ describe("WorkflowListPage", () => {
     listWorkflowDefinitions.mockResolvedValue({ evidenceConfigured: true, definitions: [] })
     createWorkflowDefinition.mockResolvedValue({ ok: true, definition: { id: "morning-digest" } })
 
-    render(<WorkflowListPage />)
+    renderWithClient(<WorkflowListPage />)
     await waitFor(() => expect(screen.getByTestId("wf-empty")).toBeTruthy())
 
     fireEvent.click(screen.getByTestId("wf-new"))
@@ -150,7 +156,7 @@ describe("WorkflowListPage", () => {
     listWorkflowDefinitions.mockResolvedValue({ evidenceConfigured: true, definitions: [] })
     createWorkflowDefinition.mockResolvedValue({ ok: false, status: 409, message: "definition already exists" })
 
-    render(<WorkflowListPage />)
+    renderWithClient(<WorkflowListPage />)
     await waitFor(() => expect(screen.getByTestId("wf-empty")).toBeTruthy())
     fireEvent.click(screen.getByTestId("wf-new"))
     fireEvent.change(screen.getByTestId("wf-new-name"), { target: { value: "Dup" } })
@@ -166,7 +172,7 @@ describe("WorkflowListPage", () => {
       definitions: [],
       evidenceReason: 'JINN_WORKFLOW_EVIDENCE_ROOT is set to "/nope" but no such directory exists.',
     })
-    render(<WorkflowListPage />)
+    renderWithClient(<WorkflowListPage />)
     await waitFor(() => expect(screen.getByTestId("wf-evidence-error")).toBeTruthy())
     expect(screen.getByText(/misconfigured/i)).toBeTruthy()
     expect(screen.getByText(/no such directory exists/i)).toBeTruthy()
@@ -176,7 +182,7 @@ describe("WorkflowListPage", () => {
     listWorkflowDefinitions.mockResolvedValue({ evidenceConfigured: true, definitions: [summary("flaky")] })
     getWorkflowDefinition.mockRejectedValue(new Error("boom"))
     listWorkflowRuns.mockRejectedValue(new Error("boom"))
-    render(<WorkflowListPage />)
+    renderWithClient(<WorkflowListPage />)
     await waitFor(() => expect(screen.getByTestId("wf-card-flaky")).toBeTruthy())
     expect(screen.getByTestId("wf-card-flaky").textContent).toContain("No runs yet")
   })

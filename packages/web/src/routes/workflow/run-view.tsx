@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { RefreshCw, Clock, X, ExternalLink, Bell, Loader2, CheckCircle2, AlertCircle, Play, CircleStop } from "lucide-react"
 import {
   api, WorkflowApiError,
   type WorkflowRunWire, type WorkflowRunSummaryWire, type RunStepReceiptWire,
   type WorkflowNodeWire, type DerivedWorkflow, type WorkflowRunView,
 } from "@/lib/api"
+import { queryKeys } from "@/lib/query-keys"
 import {
   buildCanvasNodes, nodeStatusColor, InspectorStateCircle, deriveDisplayFields,
   nodesForRun, NodeInspector, type CanvasNode, type CanvasEdgeSpec,
@@ -862,19 +864,23 @@ export function DefinitionRunView({
   workflowId,
   liveAvailable = false,
   initialLive = false,
+  initialRunId = null,
+  onSelectRun,
 }: {
   workflowId: string
   liveAvailable?: boolean
   /** Deep link (?mode=live): open with the pinned Live chip selected. */
   initialLive?: boolean
+  /** Deep link (?run=…): open with this run selected, even when it is not on the
+   * first summary page — its detail is fetched directly and shown as a chip. */
+  initialRunId?: string | null
+  /** Selecting a run writes it into the URL (?run=…); the page owns history. */
+  onSelectRun?: (runId: string) => void
 }) {
+  const queryClient = useQueryClient()
   const [showLive, setShowLive] = useState(initialLive)
-  const [runs, setRuns] = useState<WorkflowRunSummaryWire[] | null>(null)
-  const [evidenceConfigured, setEvidenceConfigured] = useState(true)
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(initialRunId)
   const [run, setRun] = useState<WorkflowRunWire | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [refreshing, setRefreshing] = useState(false)
   const [runComposerOpen, setRunComposerOpen] = useState(false)
   const [runInput, setRunInput] = useState("{}")
   const [startingRun, setStartingRun] = useState(false)
@@ -886,11 +892,10 @@ export function DefinitionRunView({
   const [cancelError, setCancelError] = useState<string | null>(null)
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null)
   const cancelPendingRef = useRef(false)
-  // `error` is the LIST-level failure (loadRuns) — it replaces the whole view.
+  // `error` is the LIST-level failure — it replaces the whole view.
   // `runError` is scoped to the SELECTED run's fetch: a transient getWorkflowRun
   // failure shows an inline banner but keeps the selector mounted so the user can
   // pick another run to escape it (Lane-4 audit fix).
-  const [error, setError] = useState<string | null>(null)
   const [runError, setRunError] = useState<string | null>(null)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   // Bumped by Refresh so the SELECTED full run re-fetches even when its id is
@@ -898,32 +903,46 @@ export function DefinitionRunView({
   // stale because the fetch effect only keys on selectedRunId (Codex R1 Major).
   const [refreshKey, setRefreshKey] = useState(0)
 
-  const loadRuns = useCallback(() => {
-    setRefreshing(true)
-    setError(null)
-    api
-      .listWorkflowRuns(workflowId)
-      .then((r) => {
-        setEvidenceConfigured(r.evidenceConfigured)
-        setRuns(r.runs)
-        // Default-select the newest run (index 0) unless the current selection is still present.
-        setSelectedRunId((prev) => (prev && r.runs.some((x) => x.runId === prev) ? prev : r.runs[0]?.runId ?? null))
-      })
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load runs"))
-      .finally(() => {
-        setLoading(false)
-        setRefreshing(false)
-      })
-  }, [workflowId])
+  // The run list is a React Query so WebSocket `company:changed` invalidation of
+  // queryKeys.workflows.runs refreshes it live (a new run appears without a page
+  // reload). The SELECTED run's detail stays local — it owns transient fetch
+  // errors, refreshKey re-reads, and optimistic start/cancel/approve updates.
+  const runsQuery = useQuery({
+    queryKey: queryKeys.workflows.runs(workflowId),
+    queryFn: () => api.listWorkflowRuns(workflowId),
+  })
+  const runs = runsQuery.data?.runs ?? null
+  const evidenceConfigured = runsQuery.data?.evidenceConfigured ?? true
+  const loading = runsQuery.isLoading
+  const refreshing = runsQuery.isFetching
+  const error = runsQuery.error
+    ? (runsQuery.error instanceof Error ? runsQuery.error.message : "Failed to load runs")
+    : null
 
   const refresh = useCallback(() => {
-    loadRuns()
+    void runsQuery.refetch()
     setRefreshKey((k) => k + 1)
-  }, [loadRuns])
+  }, [runsQuery])
 
+  // The URL (deep link + browser back/forward) drives selection when it names a run.
   useEffect(() => {
-    loadRuns()
-  }, [loadRuns])
+    if (initialRunId) setSelectedRunId(initialRunId)
+  }, [initialRunId])
+
+  // Default-select the newest run once the list loads, unless a selection (the URL
+  // run included) is still valid. A run named by the URL but absent from the first
+  // page is kept selected — its detail is fetched directly and shown as a chip.
+  useEffect(() => {
+    if (!runs) return
+    setSelectedRunId((prev) => {
+      if (prev && (prev === initialRunId || runs.some((x) => x.runId === prev))) return prev
+      if (!prev) return initialRunId ?? runs[0]?.runId ?? null
+      return runs[0]?.runId ?? null
+    })
+    // initialRunId changes are handled by the effect above; depending on it here
+    // would clobber an explicit user selection when the URL run stays constant.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runs])
 
   // Load the full run whenever the selection (or refreshKey) changes. Clearing
   // `run` first means a stale run is never attributed to a newly-selected id
@@ -951,13 +970,30 @@ export function DefinitionRunView({
     }
   }, [workflowId, selectedRunId, refreshKey])
 
+  // Optimistically patch the cached run-summary list without a refetch. Used by
+  // start (prepend) and cancel (status update) so the strip reflects the action
+  // immediately; the live query still reconciles on the next invalidation.
+  const patchRunSummaries = useCallback(
+    (update: (current: WorkflowRunSummaryWire[]) => WorkflowRunSummaryWire[]) => {
+      queryClient.setQueryData<{ runs: WorkflowRunSummaryWire[]; evidenceConfigured: boolean }>(
+        queryKeys.workflows.runs(workflowId),
+        (current) => ({
+          evidenceConfigured: current?.evidenceConfigured ?? true,
+          runs: update(current?.runs ?? []),
+        }),
+      )
+    },
+    [queryClient, workflowId],
+  )
+
   const selectRun = useCallback((runId: string) => {
     setShowLive(false)
     setSelectedRunId(runId)
     setSelectedNodeId(null)
     setRunError(null)
+    onSelectRun?.(runId)
     if (runId === selectedRunId) setRefreshKey((k) => k + 1)
-  }, [selectedRunId])
+  }, [selectedRunId, onSelectRun])
 
   // A derived-only workflow (no definition runs yet) opens on its Live chip.
   useEffect(() => {
@@ -971,9 +1007,9 @@ export function DefinitionRunView({
       if (!selectedRunId) return
       const updated = await api.resolveWorkflowRunGate(workflowId, selectedRunId, decision)
       setRun(updated)
-      loadRuns()
+      void runsQuery.refetch()
     },
-    [workflowId, selectedRunId, loadRuns],
+    [workflowId, selectedRunId, runsQuery],
   )
 
   const startRun = useCallback(async (forceNew = false) => {
@@ -1007,9 +1043,10 @@ export function DefinitionRunView({
         stepCount: started.steps.length,
         parked: started.status === "parked",
       }
-      setRuns((current) => [summary, ...(current ?? []).filter((item) => item.runId !== summary.runId)])
+      patchRunSummaries((current) => [summary, ...current.filter((item) => item.runId !== summary.runId)])
       setRun(started)
       setSelectedRunId(started.runId)
+      onSelectRun?.(started.runId)
       setSelectedNodeId(null)
       setShowLive(false)
       setRunComposerOpen(false)
@@ -1024,7 +1061,7 @@ export function DefinitionRunView({
     } finally {
       setStartingRun(false)
     }
-  }, [idempotencyKey, runInput, startingRun, workflowId])
+  }, [idempotencyKey, runInput, startingRun, workflowId, patchRunSummaries, onSelectRun])
 
   const requestCancellation = useCallback(async () => {
     if (!selectedRunId || cancelPendingRef.current) return
@@ -1034,14 +1071,14 @@ export function DefinitionRunView({
     try {
       const updated = await api.cancelWorkflowRun(workflowId, selectedRunId)
       setRun(updated)
-      setRuns((current) => current?.map((item) => item.runId === updated.runId
+      patchRunSummaries((current) => current.map((item) => item.runId === updated.runId
         ? {
             ...item,
             status: updated.status,
             endedAt: updated.endedAt,
             parked: updated.status === "parked",
           }
-        : item) ?? null)
+        : item))
       setCancelDialogOpen(false)
     } catch (e) {
       setCancelError(e instanceof Error ? e.message : "Couldn’t cancel this run.")
@@ -1049,7 +1086,7 @@ export function DefinitionRunView({
       cancelPendingRef.current = false
       setCancellingRun(false)
     }
-  }, [selectedRunId, workflowId])
+  }, [selectedRunId, workflowId, patchRunSummaries])
 
   // Only render the full run when it matches the current selection — belt-and-
   // suspenders against a fetch for a previous selection landing late.
@@ -1062,6 +1099,29 @@ export function DefinitionRunView({
   const nodes: CanvasNode[] = useMemo(() => (activeRun ? nodesForDefinitionRun(activeRun) : []), [activeRun])
   const graphEdges = useMemo(() => (activeRun ? edgesForDefinitionRun(activeRun, nodes) : []), [activeRun, nodes])
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) ?? null
+
+  // A run deep-linked from outside the first summary page is surfaced as its own
+  // chip from the loaded detail so the URL selection stays visibly explicit.
+  const selectorRuns = useMemo<WorkflowRunSummaryWire[] | null>(() => {
+    if (!runs) return runs
+    if (!selectedRunId || runs.some((r) => r.runId === selectedRunId)) return runs
+    if (activeRun && activeRun.runId === selectedRunId) {
+      return [
+        {
+          runId: activeRun.runId,
+          workflowId: activeRun.workflowId,
+          status: activeRun.status,
+          trigger: activeRun.trigger,
+          startedAt: activeRun.startedAt,
+          endedAt: activeRun.endedAt,
+          stepCount: activeRun.steps.length,
+          parked: activeRun.status === "parked",
+        },
+        ...runs,
+      ]
+    }
+    return runs
+  }, [runs, selectedRunId, activeRun])
 
   if (loading) {
     return <div className="flex h-40 items-center justify-center text-[var(--text-tertiary)]">Loading runs…</div>
@@ -1152,7 +1212,7 @@ export function DefinitionRunView({
            * (the page header names the workflow), no receipt jargon. */}
           <div className="flex items-center gap-2 px-5 pb-1 pt-1">
             <DefinitionRunSelector
-              runs={runs}
+              runs={selectorRuns ?? runs}
               selected={showLive ? null : selectedRunId}
               onSelect={selectRun}
               liveAvailable={liveAvailable}

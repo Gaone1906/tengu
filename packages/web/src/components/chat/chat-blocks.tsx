@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react'
 import type { ChatBlock, DelegationArrival, JsonObject, JsonValue } from '@/lib/blocks'
 import { HandoffCard } from './handoff-card'
 import { DispatchBlockRow } from './dispatch-row'
+import { CompanyActivityCard } from './company-activity-card'
 import type { CommsPeekData } from './thread-peek'
 
 function asRecord(value: JsonValue | undefined): JsonObject | null {
@@ -61,6 +62,10 @@ export function ChatBlockInline({
 
   if (block.type === 'dispatch') {
     return <DispatchBlockRow block={block} onPeek={onPeek} />
+  }
+
+  if (block.type === 'todo-activity' || block.type === 'workflow-definition' || block.type === 'workflow-run') {
+    return <CompanyActivityCard block={block} />
   }
 
   const all = asArray(block.payload.items)

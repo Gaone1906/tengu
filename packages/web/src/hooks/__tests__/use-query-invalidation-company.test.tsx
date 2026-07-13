@@ -1,0 +1,116 @@
+import type { ReactNode } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { act, renderHook } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useQueryInvalidation } from '../use-query-invalidation'
+import { queryKeys } from '@/lib/query-keys'
+
+let listener: ((event: string, payload: unknown) => void) | undefined
+
+vi.mock('@/hooks/use-gateway', () => ({
+  useGateway: () => ({
+    subscribe: (next: (event: string, payload: unknown) => void) => {
+      listener = next
+      return () => { listener = undefined }
+    },
+  }),
+}))
+
+function setup() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const invalidate = vi.spyOn(client, 'invalidateQueries')
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  )
+  renderHook(() => useQueryInvalidation(), { wrapper })
+  return { client, invalidate }
+}
+
+function calledWithKey(invalidate: ReturnType<typeof vi.spyOn>, key: readonly unknown[]): boolean {
+  return invalidate.mock.calls.some((callArgs: unknown[]) => {
+    const arg = callArgs[0] as { queryKey?: unknown[] } | undefined
+    const queryKey = arg?.queryKey
+    return Array.isArray(queryKey) && JSON.stringify(queryKey) === JSON.stringify(key)
+  })
+}
+
+describe('company + session:created invalidation', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('treats session:created like a new session for session + linked-Todo lists', async () => {
+    const { invalidate } = setup()
+    act(() => listener?.('session:created', { sessionId: 'session-new' }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, queryKeys.sessions.all)).toBe(true)
+    expect(calledWithKey(invalidate, ['work-item-sessions'])).toBe(true)
+  })
+
+  it('patches a Todo cache by newer version and never regresses to an older one', async () => {
+    const { client } = setup()
+    client.setQueryData(['work-item', 'wi_release'], { id: 'wi_release', version: 5, status: 'executing' })
+
+    act(() => listener?.('company:changed', {
+      entity: 'todo', action: 'transitioned', id: 'wi_release', version: 6,
+      value: { id: 'wi_release', version: 6, status: 'in_review' },
+    }))
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect((client.getQueryData(['work-item', 'wi_release']) as { status: string }).status).toBe('in_review')
+
+    act(() => listener?.('company:changed', {
+      entity: 'todo', action: 'transitioned', id: 'wi_release', version: 4,
+      value: { id: 'wi_release', version: 4, status: 'executing' },
+    }))
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect((client.getQueryData(['work-item', 'wi_release']) as { status: string; version: number }).version).toBe(6)
+  })
+
+  it('invalidates Todo list + detail when a company todo event carries no value', async () => {
+    const { invalidate } = setup()
+    act(() => listener?.('company:changed', { entity: 'todo', action: 'archived', id: 'wi_gone', version: 9 }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, ['work-items'])).toBe(true)
+    expect(calledWithKey(invalidate, ['work-item', 'wi_gone'])).toBe(true)
+  })
+
+  it('invalidates workflow list + definition on a definition change', async () => {
+    const { invalidate } = setup()
+    act(() => listener?.('company:changed', {
+      entity: 'workflow-definition', action: 'updated', id: 'release-review', version: 4,
+    }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, queryKeys.workflows.all)).toBe(true)
+    expect(calledWithKey(invalidate, queryKeys.workflows.definition('release-review'))).toBe(true)
+  })
+
+  it('invalidates run list + detail on a run change', async () => {
+    const { invalidate } = setup()
+    act(() => listener?.('company:changed', {
+      entity: 'workflow-run', action: 'started', id: 'run-1', workflowId: 'release-review', runId: 'run-1', version: 3,
+    }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, queryKeys.workflows.runs('release-review'))).toBe(true)
+    expect(calledWithKey(invalidate, queryKeys.workflows.run('release-review', 'run-1'))).toBe(true)
+  })
+
+  it('invalidates trigger list + owning definition on a trigger change', async () => {
+    const { invalidate } = setup()
+    act(() => listener?.('company:changed', {
+      entity: 'workflow-trigger', action: 'created', id: 'nightly', workflowId: 'release-review', revision: 'r2',
+    }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, queryKeys.workflows.triggers)).toBe(true)
+    expect(calledWithKey(invalidate, queryKeys.workflows.definition('release-review'))).toBe(true)
+  })
+
+  it('invalidates the invoking session detail + transcript when sessionId is present', async () => {
+    const { invalidate } = setup()
+    act(() => listener?.('company:changed', {
+      entity: 'workflow-run', action: 'parked', id: 'run-1', workflowId: 'release-review', runId: 'run-1',
+      version: 3, sessionId: 'session-a',
+    }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(calledWithKey(invalidate, queryKeys.sessions.detail('session-a'))).toBe(true)
+    expect(calledWithKey(invalidate, queryKeys.sessions.transcript('session-a'))).toBe(true)
+  })
+})

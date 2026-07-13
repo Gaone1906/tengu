@@ -52,8 +52,76 @@ function isDispatchToolCall(msg: Message): boolean {
   return name === 'send_to_session' || name.endsWith('__send_to_session')
 }
 
+const ACTIVITY_BLOCK_TYPES = new Set(['todo-activity', 'workflow-definition', 'workflow-run'])
+
+// A completed generic tool row is redundant once its server-authored activity
+// object is present in the thread. Suppress it deterministically:
+//  · exact — the tool row's meta.activityReceiptId equals a present activity
+//    block id (the correlated, reload-safe path);
+//  · legacy — for reloads produced before correlation metadata existed, within
+//    ONE user turn, suppress exactly one completed row when exactly one unmatched
+//    activity block in that turn declares that tool name and exactly one completed
+//    row carries it. Never an active tool, an error/read-only row (no receipt), a
+//    row in another turn, or an ambiguous cardinality.
+function suppressedActivityToolIds(messages: Message[]): Set<string> {
+  const suppressed = new Set<string>()
+  const presentBlockIds = new Set<string>()
+  for (const message of messages) {
+    for (const block of message.blocks ?? []) {
+      if (ACTIVITY_BLOCK_TYPES.has(block.type)) presentBlockIds.add(block.id)
+    }
+  }
+  if (presentBlockIds.size === 0) return suppressed
+
+  const matchedBlockIds = new Set<string>()
+  for (const message of messages) {
+    if (!message.toolCall || !isToolDone(message) || !message.id) continue
+    const receiptId = message.meta?.activityReceiptId
+    if (typeof receiptId === 'string' && presentBlockIds.has(receiptId)) {
+      suppressed.add(message.id)
+      matchedBlockIds.add(receiptId)
+    }
+  }
+
+  // Legacy 1:1 fallback, partitioned by user turn.
+  let turnStart = 0
+  const flushTurn = (start: number, end: number) => {
+    const blockNames = new Map<string, number>()
+    const rowsByName = new Map<string, Message[]>()
+    for (let i = start; i < end; i++) {
+      const message = messages[i]
+      for (const block of message.blocks ?? []) {
+        if (!ACTIVITY_BLOCK_TYPES.has(block.type) || matchedBlockIds.has(block.id)) continue
+        const receipt = block.payload?.activityReceipt as { toolName?: unknown } | undefined
+        const toolName = typeof receipt?.toolName === 'string' ? receipt.toolName : ''
+        if (toolName) blockNames.set(toolName, (blockNames.get(toolName) ?? 0) + 1)
+      }
+      if (message.toolCall && isToolDone(message) && message.id
+        && !suppressed.has(message.id) && message.meta?.activityReceiptId === undefined) {
+        const list = rowsByName.get(message.toolCall) ?? []
+        list.push(message)
+        rowsByName.set(message.toolCall, list)
+      }
+    }
+    for (const [name, count] of blockNames) {
+      const rows = rowsByName.get(name)
+      if (count === 1 && rows && rows.length === 1 && rows[0].id) suppressed.add(rows[0].id)
+    }
+  }
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === 'user' && i > turnStart) {
+      flushTurn(turnStart, i)
+      turnStart = i
+    }
+  }
+  flushTurn(turnStart, messages.length)
+
+  return suppressed
+}
+
 function groupMessages(messages: Message[]): MessageItem[] {
   const items: MessageItem[] = []
+  const suppressedToolIds = suppressedActivityToolIds(messages)
   const hasDelegationBlock = messages.some((message) =>
     message.blocks?.some((block) => block.type === 'delegation'),
   )
@@ -78,7 +146,10 @@ function groupMessages(messages: Message[]): MessageItem[] {
         i < messages.length && messages[i].role === 'assistant' && messages[i].toolCall
         && !isDispatchToolCall(messages[i])
       ) {
-        if (!hasDelegationBlock || !isDelegationToolCall(messages[i])) toolMsgs.push(messages[i])
+        const suppressedByReceipt = Boolean(messages[i].id && suppressedToolIds.has(messages[i].id as string))
+        if ((!hasDelegationBlock || !isDelegationToolCall(messages[i])) && !suppressedByReceipt) {
+          toolMsgs.push(messages[i])
+        }
         i++
       }
       if (toolMsgs.length > 0) items.push({ kind: 'tool-group', msgs: toolMsgs, startIndex: start })

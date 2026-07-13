@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useBlocker, useNavigate, useParams, useSearchParams } from "react-router-dom"
+import { useQuery } from "@tanstack/react-query"
 import { ChevronLeft } from "lucide-react"
 import { api, type EditableWorkflowDefinitionWire } from "@/lib/api"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
+import { queryKeys } from "@/lib/query-keys"
 import { WorkflowEditView } from "./edit"
 import { DefinitionRunView } from "./run-view"
 import { WorkflowLeaveDialog } from "./workflow-leave-dialog"
+
+/** A workflow-run deep link encodes a run id; keep only safe id characters. */
+const RUN_ID_RE = /^[A-Za-z0-9._-]{1,128}$/
 
 /* GRS-019 / canvas-spec §6 — ONE workflow's surface, opened from the /workflow
  * list.
@@ -71,14 +76,16 @@ export default function WorkflowPage() {
   const { id } = useParams<{ id: string }>()
   const workflowId = id ?? ""
   const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const requestedModeParam = searchParams.get("mode")
   const requestedMode = modeFromParam(requestedModeParam) ?? "runs"
   const initialLive = requestedModeParam === "live"
 
-  const [definition, setDefinition] = useState<EditableWorkflowDefinitionWire | null>(null)
   const [hasDerived, setHasDerived] = useState(false)
   const [mode, setMode] = useState<Mode>(requestedMode)
+  // A run deep link is only meaningful in the Executions lens; validate its id.
+  const runParamRaw = searchParams.get("run")
+  const runParam = mode === "runs" && runParamRaw && RUN_ID_RE.test(runParamRaw) ? runParamRaw : null
   const [editDirty, setEditDirty] = useState(false)
   const [leaveActions, setLeaveActions] = useState<WorkflowLeaveActions | null>(null)
   const [pendingMode, setPendingMode] = useState<Mode | null>(null)
@@ -112,19 +119,26 @@ export default function WorkflowPage() {
     return () => window.removeEventListener("beforeunload", guard)
   }, [editDirty])
 
+  // The definition names the surface (title + status dot). It is a React Query so
+  // WebSocket `company:changed` invalidation of queryKeys.workflows.definition
+  // refreshes the header live after an edit elsewhere.
+  const definitionQuery = useQuery({
+    queryKey: queryKeys.workflows.definition(workflowId),
+    queryFn: () => api.getWorkflowDefinition(workflowId),
+    enabled: Boolean(workflowId),
+  })
+  const definition: EditableWorkflowDefinitionWire | null = definitionQuery.data ?? null
+
   useBreadcrumbs(useMemo(
     () => [{ label: "Workflows", href: "/workflow" }, { label: definition?.title ?? workflowId }],
     [definition?.title, workflowId],
   ))
 
-  // The definition names the surface (title + status dot). The derived Live
-  // projection is only offered when the gateway serves one for this id — it
-  // appears as the pinned "Live" chip inside Executions, never a third lens.
+  // The derived Live projection is only offered when the gateway serves one for
+  // this id — the pinned "Live" chip inside Executions, never a third lens. It is
+  // a separate derived store, not part of the definition/run key space.
   useEffect(() => {
     let cancelled = false
-    api.getWorkflowDefinition(workflowId)
-      .then((d) => { if (!cancelled) setDefinition(d) })
-      .catch(() => { /* header falls back to the id; Executions reports errors */ })
     api.listWorkflows()
       .then((w) => { if (!cancelled) setHasDerived(w.workflows.includes(workflowId)) })
       .catch(() => { /* no derived store — the Live chip stays hidden */ })
@@ -153,6 +167,27 @@ export default function WorkflowPage() {
   const goBack = useCallback(() => {
     navigate("/workflow")
   }, [navigate])
+
+  // Selecting a run writes it into the URL as a real history entry (replace:false)
+  // so browser back restores the prior run; a fresh run and refresh both persist.
+  const handleSelectRun = useCallback((runId: string) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.set("mode", "runs")
+      next.set("run", runId)
+      return next
+    }, { replace: false })
+  }, [setSearchParams])
+
+  // Editing has no run selection — drop a stale ?run= so the Edit URL stays clean.
+  useEffect(() => {
+    if (mode !== "edit" || !searchParams.has("run")) return
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete("run")
+      return next
+    }, { replace: true })
+  }, [mode, searchParams, setSearchParams])
 
   const finishLeave = useCallback(() => {
     const nextMode = pendingMode
@@ -245,6 +280,8 @@ export default function WorkflowPage() {
               workflowId={workflowId}
               liveAvailable={hasDerived}
               initialLive={initialLive}
+              initialRunId={runParam}
+              onSelectRun={handleSelectRun}
             />
           )}
         </div>
