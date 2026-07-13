@@ -1,15 +1,16 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, useLocation } from "react-router-dom"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { OrgData, WorkItemCompactWire, WorkItemDetailWire } from "@/lib/api"
 import TodosPage from "../page"
 import { todoPrivateRef } from "../todo-private-state"
 
-/* Task 10 defect: opening an EXISTING terminal (cancelled/done/archived) Todo
- * from a chat activity card false-positived as "Todo no longer exists" because
- * the private-ref resolver only searched the OPEN candidate lists. These pin the
- * bounded terminal resolver without leaking raw ids or broadening the ledger. */
+/* Task 10 defect + reviewer correction: opening an EXISTING terminal
+ * (done/cancelled/archived) Todo from a chat activity card must resolve its real
+ * detail sheet — never a false "Todo no longer exists" — with EXHAUSTIVE healthy
+ * resolution (no arbitrary page cap), a settlement-race-proof gate, visible
+ * resolving/error/retry UX, aborts, and no raw id in URL/history/storage/DOM. */
 
 vi.mock("@/components/page-layout", () => ({ PageLayout: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 vi.mock("@/context/breadcrumb-context", () => ({ useBreadcrumbs: () => {} }))
@@ -40,6 +41,14 @@ vi.mock("@/lib/api", async (importOriginal) => {
 })
 
 const org: OrgData = { departments: [], employees: [], hierarchy: { root: "coo", sorted: ["coo"], warnings: [] } }
+const empty = { workItems: [], total: 0, nextOffset: null }
+
+type ListParams = { status?: string; needsAttentionFor?: string; since?: string; offset?: number; limit?: number }
+/** A terminal-resolver call: a done/cancelled status page with no `since` window
+ *  and the full page size (the recent-window ledger uses `since` + limit 20). */
+function isTerminalCall(p?: ListParams): boolean {
+  return (p?.status === "done" || p?.status === "cancelled") && p?.since === undefined && p?.limit === 100
+}
 
 function compact(id: string, title: string, status: string): WorkItemCompactWire {
   return {
@@ -66,11 +75,12 @@ function RouterProbe() {
   return null
 }
 
-function renderAt(state: unknown) {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+let activeClient: QueryClient
+function renderAt(state: unknown, key = "k1") {
+  activeClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   return render(
-    <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={[{ pathname: "/todos", state }]}>
+    <QueryClientProvider client={activeClient}>
+      <MemoryRouter initialEntries={[{ pathname: "/todos", state, key }]}>
         <RouterProbe />
         <TodosPage />
       </MemoryRouter>
@@ -78,13 +88,15 @@ function renderAt(state: unknown) {
   )
 }
 
-// Open lists (open statuses + needs + people) are always empty here — the target
-// lives only in a terminal status, exactly like the reported defect.
-function mockTerminal(items: Record<string, WorkItemCompactWire[]>) {
-  listWorkItems.mockImplementation((params?: { status?: string; needsAttentionFor?: string; offset?: number }) => {
-    if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
-    const rows = (params?.status && items[params.status]) || []
-    return Promise.resolve({ workItems: rows, total: rows.length, nextOffset: null })
+/** Open sources (ledger/needs/people) are empty; a single terminal row is served
+ *  only to the exhaustive terminal-resolver call, exactly like the reported bug. */
+function serveTerminal(status: "done" | "cancelled", row: WorkItemCompactWire) {
+  listWorkItems.mockImplementation((p?: ListParams) => {
+    if (p?.needsAttentionFor) return Promise.resolve(empty)
+    if (isTerminalCall(p) && p?.status === status && (p?.offset ?? 0) === 0) {
+      return Promise.resolve({ workItems: [row], total: 1, nextOffset: null })
+    }
+    return Promise.resolve(empty)
   })
 }
 
@@ -97,10 +109,29 @@ describe("Terminal Todo resolution from a private ref", () => {
     getOrg.mockReset().mockResolvedValue(org)
     listWorkItemSessions.mockReset().mockResolvedValue([])
   })
+  afterEach(() => vi.useRealTimers())
 
-  it("opens an existing CANCELLED Todo's real detail sheet, not a missing dialog", async () => {
+  it("opens an OLD done Todo that is excluded from the recent-window open lens", async () => {
+    const c = compact("wi_old_done", "Shipped last quarter", "done")
+    // Recent-window ledger (since set) excludes it; exhaustive terminal finds it.
+    listWorkItems.mockImplementation((p?: ListParams) => {
+      if (p?.needsAttentionFor) return Promise.resolve(empty)
+      if (isTerminalCall(p) && p?.status === "done" && (p?.offset ?? 0) === 0) {
+        return Promise.resolve({ workItems: [c], total: 1, nextOffset: null })
+      }
+      return Promise.resolve(empty) // ledger done (since set) → excluded
+    })
+    getWorkItem.mockResolvedValue(detailOf(c))
+
+    renderAt({ todoRef: todoPrivateRef("wi_old_done") })
+
+    await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Shipped last quarter"))
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
+
+  it("opens an existing CANCELLED Todo and keeps the canonical id out of the URL and history", async () => {
     const c = compact("wi_cancelled", "Archived release plan", "cancelled")
-    mockTerminal({ cancelled: [c] })
+    serveTerminal("cancelled", c)
     getWorkItem.mockResolvedValue(detailOf(c))
 
     renderAt({ todoRef: todoPrivateRef("wi_cancelled") })
@@ -108,55 +139,132 @@ describe("Terminal Todo resolution from a private ref", () => {
     expect(await screen.findByTestId("detail-sheet")).toBeTruthy()
     await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Archived release plan"))
     expect(screen.queryByText("Todo no longer exists")).toBeNull()
-    // The canonical id never enters the URL or history state.
     expect(currentSearch).not.toContain("wi_cancelled")
     expect(JSON.stringify(currentState)).not.toContain("wi_cancelled")
+    // Privacy: no raw id in the DOM, sessionStorage, or any React Query key.
+    expect(document.body.innerHTML).not.toContain("wi_cancelled")
+    const storage = Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.getItem(sessionStorage.key(i) ?? "") ?? "").join("\n")
+    expect(storage).not.toContain("wi_cancelled")
+    const terminalKeys = activeClient.getQueryCache().findAll({ queryKey: ["work-items", "terminal-ref"] })
+    expect(terminalKeys.length).toBeGreaterThan(0)
+    for (const q of terminalKeys) expect(JSON.stringify(q.queryKey)).not.toContain("wi_cancelled")
   })
 
-  it("opens an existing DONE terminal Todo excluded from open lists", async () => {
-    const c = compact("wi_done", "Shipped the thing", "done")
-    mockTerminal({ done: [c] })
-    getWorkItem.mockResolvedValue(detailOf(c))
-
-    renderAt({ todoRef: todoPrivateRef("wi_done") })
-
-    await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Shipped the thing"))
-    expect(screen.queryByText("Todo no longer exists")).toBeNull()
-  })
-
-  it("resolves the same terminal Todo on a fresh reload carrying only the private ref", async () => {
+  it("resolves the same terminal Todo on a fresh remount carrying only the private ref", async () => {
     const c = compact("wi_reload", "Reloaded cancelled plan", "cancelled")
-    mockTerminal({ cancelled: [c] })
+    serveTerminal("cancelled", c)
     getWorkItem.mockResolvedValue(detailOf(c))
 
-    // Fresh mount with only the private ref in history state — no stored raw id.
-    renderAt({ todoRef: todoPrivateRef("wi_reload") })
-
+    const ref = todoPrivateRef("wi_reload")
+    const first = renderAt({ todoRef: ref })
     await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Reloaded cancelled plan"))
-    const persisted = Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.getItem(sessionStorage.key(i) ?? "") ?? "").join("\n")
-    expect(persisted).not.toMatch(/wi_reload/)
+    first.unmount()
+
+    // A true reload keeps sessionStorage (salt) but drops in-memory caches.
+    renderAt({ todoRef: ref }, "k2")
+    await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Reloaded cancelled plan"))
+    const storage = Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.getItem(sessionStorage.key(i) ?? "") ?? "").join("\n")
+    expect(storage).not.toContain("wi_reload")
   })
 
-  it("searches terminal pages and resolves a match beyond the first page", async () => {
-    const target = compact("wi_page2", "Second page cancelled", "cancelled")
-    const filler = Array.from({ length: 100 }, (_, i) => compact(`wi_filler_${i}`, `Filler ${i}`, "cancelled"))
-    listWorkItems.mockImplementation((params?: { status?: string; needsAttentionFor?: string; offset?: number }) => {
-      if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
-      if (params?.status !== "cancelled") return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
-      if ((params.offset ?? 0) === 0) return Promise.resolve({ workItems: filler, total: 101, nextOffset: 100 })
-      return Promise.resolve({ workItems: [target], total: 101, nextOffset: null })
+  it("resolves EXHAUSTIVELY without an arbitrary cap — a match past 5000 rows still opens", async () => {
+    const target = compact("wi_deep", "Deep terminal match", "cancelled")
+    const TARGET_OFFSET = 5100
+    listWorkItems.mockImplementation((p?: ListParams) => {
+      if (p?.needsAttentionFor) return Promise.resolve(empty)
+      if (!isTerminalCall(p) || p?.status !== "cancelled") return Promise.resolve(empty)
+      const offset = p?.offset ?? 0
+      if (offset >= TARGET_OFFSET) return Promise.resolve({ workItems: [target], total: TARGET_OFFSET + 1, nextOffset: null })
+      const filler = Array.from({ length: 100 }, (_, i) => compact(`wi_f_${offset}_${i}`, "f", "cancelled"))
+      return Promise.resolve({ workItems: filler, total: TARGET_OFFSET + 1, nextOffset: offset + 100 })
     })
     getWorkItem.mockResolvedValue(detailOf(target))
 
-    renderAt({ todoRef: todoPrivateRef("wi_page2") })
+    renderAt({ todoRef: todoPrivateRef("wi_deep") })
 
-    await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Second page cancelled"))
-    expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ status: "cancelled", offset: 100 }))
+    await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Deep terminal match"), { timeout: 3000 })
+    // Every terminal page asked the server for the max page size, and paging went
+    // well beyond the old 25-page (2500) cap.
+    expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ status: "cancelled", offset: TARGET_OFFSET, limit: 100 }), expect.anything())
   })
 
-  it("shows the explicit missing dialog only after the terminal lookup settles empty", async () => {
-    mockTerminal({}) // nothing anywhere
-    getWorkItem.mockResolvedValue(detailOf(compact("wi_x", "x", "cancelled")))
+  it("treats a truncated terminal stream (nextOffset gone while total remains) as retryable, not missing", async () => {
+    listWorkItems.mockImplementation((p?: ListParams) => {
+      if (p?.needsAttentionFor) return Promise.resolve(empty)
+      if (isTerminalCall(p) && p?.status === "done") {
+        // Server claims 500 rows but stops paging after one page → truncated.
+        return Promise.resolve({ workItems: Array.from({ length: 100 }, (_, i) => compact(`wi_t_${i}`, "t", "done")), total: 500, nextOffset: null })
+      }
+      return Promise.resolve(empty)
+    })
+    getWorkItem.mockResolvedValue(detailOf(compact("x", "x", "done")))
+
+    renderAt({ todoRef: todoPrivateRef("wi_truncated") })
+
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
+
+  it("treats a non-monotonic (cyclic) terminal offset as retryable, not missing", async () => {
+    listWorkItems.mockImplementation((p?: ListParams) => {
+      if (p?.needsAttentionFor) return Promise.resolve(empty)
+      if (isTerminalCall(p) && p?.status === "done") {
+        // nextOffset points back to 0 → cycle.
+        return Promise.resolve({ workItems: Array.from({ length: 100 }, (_, i) => compact(`wi_c_${i}`, "c", "done")), total: 999, nextOffset: 0 })
+      }
+      return Promise.resolve(empty)
+    })
+    getWorkItem.mockResolvedValue(detailOf(compact("x", "x", "done")))
+
+    renderAt({ todoRef: todoPrivateRef("wi_cyclic") })
+
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
+
+  it("shows a resolving indicator while the terminal lookup runs, never a premature missing", async () => {
+    let release: (() => void) | null = null
+    listWorkItems.mockImplementation((p?: ListParams) => {
+      if (p?.needsAttentionFor) return Promise.resolve(empty)
+      if (isTerminalCall(p) && p?.status === "done") {
+        return new Promise((resolve) => { release = () => resolve(empty) })
+      }
+      return Promise.resolve(empty)
+    })
+
+    renderAt({ todoRef: todoPrivateRef("wi_slow") })
+
+    expect(await screen.findByTestId("todo-resolving")).toBeTruthy()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+    act(() => release?.())
+  })
+
+  it("shows a retry action on lookup error and re-runs the search on Retry, never missing", async () => {
+    let attempt = 0
+    const c = compact("wi_retry", "Recovered on retry", "cancelled")
+    listWorkItems.mockImplementation((p?: ListParams) => {
+      if (p?.needsAttentionFor) return Promise.resolve(empty)
+      if (isTerminalCall(p) && p?.status === "done") {
+        attempt += 1
+        if (attempt === 1) return Promise.reject(new Error("offline"))
+        return Promise.resolve(empty)
+      }
+      if (isTerminalCall(p) && p?.status === "cancelled" && attempt >= 2) return Promise.resolve({ workItems: [c], total: 1, nextOffset: null })
+      return Promise.resolve(empty)
+    })
+    getWorkItem.mockResolvedValue(detailOf(c))
+
+    renderAt({ todoRef: todoPrivateRef("wi_retry") })
+
+    const retry = await screen.findByTestId("todo-resolve-retry")
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+    fireEvent.click(retry)
+    await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Recovered on retry"))
+  })
+
+  it("shows the explicit missing dialog only after an exhaustive, healthy, empty lookup", async () => {
+    listWorkItems.mockImplementation((p?: ListParams) => Promise.resolve(p?.needsAttentionFor ? empty : empty))
+    getWorkItem.mockResolvedValue(detailOf(compact("x", "x", "cancelled")))
 
     renderAt({ todoRef: todoPrivateRef("wi_ghost") })
 
@@ -164,20 +272,49 @@ describe("Terminal Todo resolution from a private ref", () => {
     expect(screen.queryByTestId("detail-sheet")).toBeNull()
   })
 
-  it("does not misreport a terminal-lookup error as missing", async () => {
-    listWorkItems.mockImplementation((params?: { status?: string; needsAttentionFor?: string }) => {
-      if (params?.needsAttentionFor) return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
-      if (params?.status === "done" || params?.status === "cancelled") return Promise.reject(new Error("offline"))
-      return Promise.resolve({ workItems: [], total: 0, nextOffset: null })
+  it("lets an active-lens candidate win without ever consulting the terminal resolver", async () => {
+    // A recent done shows in the open lens (since-scoped) → resolved from lists.
+    const c = compact("wi_recent_done", "Done this week", "done")
+    listWorkItems.mockImplementation((p?: ListParams) => {
+      if (p?.needsAttentionFor) return Promise.resolve(empty)
+      if (p?.status === "done" && p?.since !== undefined) return Promise.resolve({ workItems: [c], total: 1, nextOffset: null })
+      return Promise.resolve(empty)
     })
-    getWorkItem.mockResolvedValue(detailOf(compact("wi_x", "x", "cancelled")))
+    getWorkItem.mockResolvedValue(detailOf(c))
 
-    renderAt({ todoRef: todoPrivateRef("wi_err") })
+    renderAt({ todoRef: todoPrivateRef("wi_recent_done") })
 
-    // The terminal lookup hits the first terminal status ("done") and rejects;
-    // that error must keep the safe state, never the missing dialog.
-    await waitFor(() => expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ status: "done" })))
-    await new Promise((r) => setTimeout(r, 50))
-    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+    await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Done this week"))
+    // The terminal resolver was never needed.
+    expect(listWorkItems.mock.calls.some(([p]) => isTerminalCall(p as ListParams))).toBe(false)
+  })
+
+  it("runs zero resolver calls when no private ref is present", async () => {
+    listWorkItems.mockImplementation((p?: ListParams) => Promise.resolve(p?.needsAttentionFor ? empty : empty))
+
+    renderAt(null)
+
+    await waitFor(() => expect(listWorkItems).toHaveBeenCalled())
+    expect(listWorkItems.mock.calls.some(([p]) => isTerminalCall(p as ListParams))).toBe(false)
+  })
+
+  it("aborts the terminal traversal on unmount with no later terminal page calls", async () => {
+    let release: (() => void) | null = null
+    listWorkItems.mockImplementation((p?: ListParams) => {
+      if (p?.needsAttentionFor) return Promise.resolve(empty)
+      if (isTerminalCall(p) && p?.status === "done") {
+        return new Promise((resolve) => { release = () => resolve({ workItems: [], total: 0, nextOffset: null }) })
+      }
+      return Promise.resolve(empty)
+    })
+
+    const view = renderAt({ todoRef: todoPrivateRef("wi_abort") })
+    await screen.findByTestId("todo-resolving")
+    const before = listWorkItems.mock.calls.filter(([p]) => isTerminalCall(p as ListParams)).length
+    view.unmount()
+    act(() => release?.())
+    await new Promise((r) => setTimeout(r, 30))
+    const after = listWorkItems.mock.calls.filter(([p]) => isTerminalCall(p as ListParams)).length
+    expect(after).toBe(before) // no further terminal pages after unmount
   })
 })

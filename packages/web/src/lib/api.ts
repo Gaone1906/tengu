@@ -1244,7 +1244,7 @@ export const api = {
     q?: string
     offset?: number
     limit?: number
-  }) => {
+  }, signal?: AbortSignal) => {
     const q = new URLSearchParams()
     if (params?.status) q.set("status", params.status)
     if (params?.assignee) q.set("assignee", params.assignee)
@@ -1256,7 +1256,7 @@ export const api = {
     if (params?.q) q.set("q", params.q)
     if (params?.offset) q.set("offset", String(params.offset))
     q.set("limit", String(params?.limit ?? 20))
-    return get<WorkItemListWire>(`/api/work-items?${q.toString()}`)
+    return get<WorkItemListWire>(`/api/work-items?${q.toString()}`, signal ? { signal } : undefined)
   },
   /** GRS-021c: deterministic AND-composed Todo search (escaped-LIKE text over
    *  title + body). Same page params/payload as the list endpoint — the filter

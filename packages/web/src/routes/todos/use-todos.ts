@@ -249,27 +249,65 @@ export function openIdsOf(items: WorkItemCompactWire[]): string[] {
 /** Terminal statuses live outside the open ledger/Needs/People candidate lists,
  *  so a chat activity card's private ref to an existing done/cancelled Todo has
  *  no open row to hash-match. This canonical resolver hashes terminal rows to the
- *  same salted `todoPrivateRef` until one matches — bounded paging, its own query
- *  key (never merged into the visible ledger, counts, Needs, or People), and no
- *  raw id in the URL or history. `tabSalt` lives in sessionStorage, so the ref is
- *  stable across reload and this resolves identically on fresh nav and reload. */
+ *  same salted `todoPrivateRef` until one matches — its own query key (never merged
+ *  into the visible ledger, counts, Needs, or People), and no raw id in the URL or
+ *  history. `tabSalt` lives in sessionStorage, so the ref is stable across reload
+ *  and this resolves identically on fresh nav and reload.
+ *
+ *  Resolution is EXHAUSTIVE, never arbitrarily capped: it follows the server's
+ *  `nextOffset` for each terminal status until the server itself reports no more
+ *  (null nextOffset with `scanned >= total`). A NULL result therefore means
+ *  "provably absent", and it is the ONLY input the page treats as missing. Any
+ *  traversal anomaly — a page budget backstop, a repeated/decreasing/cyclic
+ *  offset, or `nextOffset` vanishing while `total` says rows remain — is a
+ *  RETRYABLE incomplete error, surfaced as retry UI, never as "no longer exists". */
+export class TerminalResolveIncompleteError extends Error {
+  constructor(reason: string) {
+    super(reason)
+    this.name = "TerminalResolveIncompleteError"
+  }
+}
+
 const TERMINAL_STATUSES: readonly WorkItemStatusWire[] = ["done", "cancelled"]
-const TERMINAL_RESOLVE_MAX_PAGES = 25
+// Runaway backstop ONLY. Hitting it is an incomplete/retryable error, not a
+// "missing" classification — a real absence terminates via the server's own
+// nextOffset long before this. Sized far above any realistic terminal history.
+const TERMINAL_RESOLVE_PAGE_BUDGET = 1_000
 
 export function useResolveTerminalRef(openRef: string | null, enabled: boolean) {
-  return useQuery({
+  return useQuery<string | null>({
     queryKey: ["work-items", "terminal-ref", openRef ?? ""],
     enabled: enabled && Boolean(openRef),
     staleTime: 30_000,
-    queryFn: async (): Promise<string | null> => {
+    retry: false,
+    queryFn: async ({ signal }): Promise<string | null> => {
+      let budget = TERMINAL_RESOLVE_PAGE_BUDGET
       for (const status of TERMINAL_STATUSES) {
         let offset = 0
-        for (let page = 0; page < TERMINAL_RESOLVE_MAX_PAGES; page += 1) {
-          const r = await api.listWorkItems({ status, offset, limit: GATEWAY_MAX_LIMIT })
+        const visited = new Set<number>()
+        for (;;) {
+          // Stop the traversal the moment the query is aborted (ref change,
+          // disable, unmount) — no further pages, even if the transport mock or a
+          // slow request would otherwise resolve.
+          if (signal?.aborted) throw new DOMException("terminal resolution aborted", "AbortError")
+          if (budget-- <= 0) throw new TerminalResolveIncompleteError("terminal page budget exhausted")
+          if (visited.has(offset)) throw new TerminalResolveIncompleteError("terminal offset repeated")
+          visited.add(offset)
+          const r = await api.listWorkItems({ status, offset, limit: GATEWAY_MAX_LIMIT }, signal)
           const match = r.workItems.find((item) => todoPrivateRef(item.id) === openRef)
           if (match) return match.id
           const next = r.nextOffset ?? null
-          if (next === null || next === offset) break
+          if (next === null) {
+            // Only trust "no more pages" when the server's total agrees; a missing
+            // nextOffset while rows remain is a truncated stream, not exhaustion.
+            const total = typeof r.total === "number" ? r.total : undefined
+            const scanned = offset + r.workItems.length
+            if (total !== undefined && scanned < total) {
+              throw new TerminalResolveIncompleteError("terminal stream truncated before total")
+            }
+            break
+          }
+          if (next <= offset) throw new TerminalResolveIncompleteError("terminal offset not monotonic")
           offset = next
         }
       }

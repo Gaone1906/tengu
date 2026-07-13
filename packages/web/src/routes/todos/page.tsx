@@ -424,18 +424,41 @@ export default function TodosPage() {
     return candidates.find((item) => todoPrivateRef(item.id) === openRef)?.id ?? null
   }, [baseLedger.data, ledger.data, needs.data, openRef, peopleItems.data])
 
-  // Only when the open lists are settled, healthy, and DON'T contain the ref do
-  // we fall through to the bounded terminal resolver — so an existing terminal
-  // Todo opens instead of false-positiving as missing. This query never feeds the
-  // visible ledger/counts/Needs/People.
-  const candidateQueriesSettled = !ledger.isLoading && !baseLedger.isLoading && !needs.isLoading && !peopleItems.isLoading
+  // Only when the open lists are truly SETTLED (not initial-loading, not fetching
+  // a next page, not showing keepPreviousData placeholders, not refetching, not
+  // restoring page depth), healthy, and DON'T contain the ref do we fall through
+  // to the bounded terminal resolver. Using isFetching/placeholder — not just
+  // isLoading — means a stale cached active candidate can never flash a false
+  // "missing" mid-refetch. An active candidate always wins by precedence below
+  // and disables the terminal query. This query never feeds the visible
+  // ledger/counts/Needs/People.
+  const candidateQueriesSettled =
+    !ledger.isLoading && !ledger.loadingMore
+    && !baseLedger.isLoading && !baseLedger.loadingMore
+    && !needs.isFetching && !peopleItems.isFetching
+    && !restoringPageDepth
   const candidateQueriesHealthy = !ledger.isError && !baseLedger.isError && !needs.isError && !peopleItems.isError
   const terminalResolveEnabled = Boolean(
-    openRef && !openIdFromLists && !restoringPageDepth && candidateQueriesSettled && candidateQueriesHealthy,
+    openRef && !openIdFromLists && candidateQueriesSettled && candidateQueriesHealthy,
   )
   const terminalResolution = useResolveTerminalRef(openRef, terminalResolveEnabled)
-  const terminalResolveSettled = !terminalResolveEnabled || (terminalResolution.isFetched && !terminalResolution.isFetching)
   const openId = openIdFromLists ?? (terminalResolveEnabled ? terminalResolution.data ?? null : null)
+  // The terminal resolver is "resolving" while it walks pages, and "unresolved"
+  // (retryable) on any incomplete/error — both keep the page OFF the missing path.
+  const terminalResolving = terminalResolveEnabled && !openIdFromLists && terminalResolution.isFetching
+  const terminalUnresolved = terminalResolveEnabled && !openIdFromLists && terminalResolution.isError
+  const terminalResolveProvenAbsent =
+    !terminalResolveEnabled
+    || (terminalResolution.isFetched && !terminalResolution.isFetching && !terminalResolution.isError)
+
+  // Abort any in-flight terminal traversal when the ref changes or the page
+  // unmounts — no later page fetches, no stale Todo opening under a new ref.
+  useEffect(() => {
+    const ref = openRef
+    return () => {
+      if (ref) void qc.cancelQueries({ queryKey: ["work-items", "terminal-ref", ref] })
+    }
+  }, [openRef, qc])
   const quickIds = useMemo(() => {
     const candidates = [
       ...(ledger.data?.items ?? []),
@@ -734,9 +757,9 @@ export default function TodosPage() {
   // have settled healthily and neither matched. A slow or failed terminal lookup
   // keeps the safe loading/error state instead of misreporting the Todo as gone.
   const missingRecoveredTodo = Boolean(
-    openRef && !openId && !restoringPageDepth
+    openRef && !openId
     && candidateQueriesSettled && candidateQueriesHealthy
-    && terminalResolveSettled && !terminalResolution.isError,
+    && terminalResolveProvenAbsent,
   )
   const discardMissingDraft = useCallback(() => {
     if (openRef) clearTodoJournalByRef(openRef)
@@ -1009,6 +1032,42 @@ export default function TodosPage() {
           onSendBack={onSendBack}
           onClose={closeDetail}
         />
+      )}
+
+      {terminalResolving && (
+        <div
+          data-testid="todo-resolving"
+          role="status"
+          aria-live="polite"
+          className="fixed inset-x-3 bottom-3 z-40 flex items-center gap-2.5 rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-4 shadow-[var(--shadow-overlay)] sm:left-1/2 sm:top-1/2 sm:bottom-auto sm:w-[420px] sm:-translate-x-1/2 sm:-translate-y-1/2"
+        >
+          <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-[var(--system-blue)] animate-[jinn-pulse_1.4s_infinite] motion-reduce:animate-none" />
+          <span className="text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">Finding this Todo…</span>
+        </div>
+      )}
+
+      {terminalUnresolved && (
+        <TodoDialog
+          label="Couldn’t load this Todo"
+          onRequestClose={() => {}}
+          className="inset-x-3 bottom-3 rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-6 pb-[max(24px,env(safe-area-inset-bottom))] shadow-[var(--shadow-overlay)] motion-safe:data-[state=open]:animate-in motion-safe:data-[state=open]:slide-in-from-bottom-3 sm:left-1/2 sm:top-1/2 sm:bottom-auto sm:w-[420px] sm:-translate-x-1/2 sm:-translate-y-1/2 sm:motion-safe:data-[state=open]:zoom-in-95"
+        >
+          <h2 className="text-[length:var(--text-title3)] font-semibold text-[var(--text-primary)]">Couldn’t load this Todo</h2>
+          <p className="mt-2 text-[length:var(--text-footnote)] leading-relaxed text-[var(--text-secondary)]">
+            The lookup didn’t finish. This Todo may still exist — retry the search.
+          </p>
+          <div className="mt-5 flex justify-end">
+            <button
+              type="button"
+              autoFocus
+              data-testid="todo-resolve-retry"
+              onClick={() => void terminalResolution.refetch()}
+              className="min-h-11 rounded-full bg-[var(--fill-secondary)] px-4 text-[length:var(--text-subheadline)] font-semibold text-[var(--text-primary)] transition-transform hover:scale-[0.98] active:scale-[0.96]"
+            >
+              Retry
+            </button>
+          </div>
+        </TodoDialog>
       )}
 
       {missingRecoveredTodo && (
