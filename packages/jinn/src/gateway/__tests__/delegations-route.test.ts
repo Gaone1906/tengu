@@ -4,7 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
-import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, ensureSessionCapability } from "../../mcp/identity.js";
+import {
+  ACTIVITY_OPERATION_HEADER,
+  ACTIVITY_TOOL_HEADER,
+  CALLER_SESSION_CAPABILITY_HEADER,
+  CALLER_SESSION_HEADER,
+  TOOL_CALL_HEADER,
+  TOOL_CALL_HEADER_VALUE,
+  ensureSessionCapability,
+} from "../../mcp/identity.js";
 
 // linkSession is wrapped in a passthrough spy so the codex-review finding-1
 // regression can inject a failure BETWEEN spawn and link (crash-window proof).
@@ -390,6 +398,14 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
     const linked = await call("GET", `/api/work-items/${workItemId}/sessions`);
     expect(linked.status).toBe(200);
     expect((linked.body as Array<{ id: string }>).map((s) => s.id)).toContain(sessionId);
+
+    const companyEvent = emittedEvents.find((entry) =>
+      entry.event === "company:changed" && entry.payload.id === workItemId,
+    );
+    expect(companyEvent?.payload).not.toHaveProperty("sessionId");
+    expect(resp.body).not.toHaveProperty("activityReceiptId");
+    expect(reg.getMessages(sessionId).flatMap((message) => message.blocks ?? []))
+      .not.toContainEqual(expect.objectContaining({ id: `todo:${workItemId}` }));
   });
 
   it("a session caller is auto-parent-linked and stamped into the sourceRef", async () => {
@@ -438,6 +454,58 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
         sessionId: parentId,
       }),
     }));
+    expect(resp.body).not.toHaveProperty("activityReceiptId");
+  });
+
+  it("keeps delegate_task receipt correlation separate from authenticated event provenance", async () => {
+    const parentId = await createOperatorSession("I am delegating through the built-in tool");
+    const resp = await call(
+      "POST",
+      "/api/delegations",
+      { employee: "qa-emp", task: "correlated child chore", title: "correlated child chore" },
+      {
+        [CALLER_SESSION_HEADER]: parentId,
+        [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(parentId),
+        [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+        [ACTIVITY_OPERATION_HEADER]: "123e4567-e89b-42d3-a456-426614174000",
+        [ACTIVITY_TOOL_HEADER]: "delegate_task",
+      },
+    );
+
+    expect(resp.status).toBe(201);
+    const parentBlocks = reg.getMessages(parentId).flatMap((message) => message.blocks ?? []);
+    expect(parentBlocks).toContainEqual(expect.objectContaining({
+      id: `dg-${resp.body.workItemId}`,
+      type: "delegation",
+    }));
+    expect(parentBlocks).not.toContainEqual(expect.objectContaining({ id: `todo:${resp.body.workItemId}` }));
+    expect(resp.body).not.toHaveProperty("activityReceiptId");
+    expect(emittedEvents).toContainEqual(expect.objectContaining({
+      event: "company:changed",
+      payload: expect.objectContaining({
+        entity: "todo",
+        action: "delegated",
+        id: resp.body.workItemId,
+        sessionId: parentId,
+      }),
+    }));
+  });
+
+  it("rejects an unverified caller header before delegation or event provenance", async () => {
+    const claimedParentId = await createOperatorSession("This identity must be verified");
+    const itemsBefore = workItemCount();
+    const eventsBefore = emittedEvents.length;
+    const resp = await call(
+      "POST",
+      "/api/delegations",
+      { employee: "qa-emp", task: "operator-owned child chore", title: "operator-owned child chore" },
+      { [CALLER_SESSION_HEADER]: claimedParentId },
+    );
+
+    expect(resp.status).toBe(403);
+    expect(resp.body.error).toMatch(/caller identity unavailable/i);
+    expect(workItemCount()).toBe(itemsBefore);
+    expect(emittedEvents).toHaveLength(eventsBefore);
   });
 
   it("records a parent follow-up as a dispatch block with exact fallback parity", async () => {

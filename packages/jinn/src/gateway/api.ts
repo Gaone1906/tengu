@@ -5299,7 +5299,9 @@ export async function handleApiRequest(
       // Publish the Todo cache invalidation through the shared boundary without
       // synthesizing a second Todo activity block for the same delegation.
       const delegatedItem = getWorkItem(workItem.id) ?? workItem;
-      const activityTarget = verifiedActivityTarget(req.headers, context, "delegate_task");
+      const eventSessionId = delegatorSession && isActivityProjectionEligibleSession(delegatorSession.id)
+        ? delegatorSession.id
+        : undefined;
       persistAndEmitActivityBlock({
         context: chatActivityContext(context),
         companyEvent: {
@@ -5308,7 +5310,7 @@ export async function handleApiRequest(
           id: delegatedItem.id,
           version: delegatedItem.version,
           value: delegatedItem as unknown as JsonObject,
-          ...(activityTarget.sessionId ? { sessionId: activityTarget.sessionId } : {}),
+          ...(eventSessionId ? { sessionId: eventSessionId } : {}),
         },
       });
 
