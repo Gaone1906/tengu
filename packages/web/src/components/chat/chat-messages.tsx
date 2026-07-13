@@ -1791,11 +1791,9 @@ export function ChatMessages({
             // Share the assistant text gutter (space-3 mobile / space-8 @lg) so the
             // indicator lines up flush with the messages and tool cards.
             <div className="assistant-msg-row mt-[var(--space-1)]">
-              {/* Inner pl-3 tucks the dot under the tool-chip's content (wrench),
-                  so it reads as the next line of the activity column rather than a
-                  stray dot at the chip's outer edge. (assistant-msg-row forces its
-                  own !important gutter, so the inset lives on this inner wrapper.) */}
-              <div className="flex items-center gap-1.5 pl-3">
+              {/* No inner inset — the dot/label sit flush at the assistant-msg-row
+                  gutter, sharing the same leading edge as assistant prose. */}
+              <div className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] animate-[jinn-pulse_1.4s_infinite] shrink-0" />
                 <span className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)] font-[var(--weight-medium)]">
                   Thinking
