@@ -1127,7 +1127,9 @@ describe("Todo detail navigation and draft recovery", () => {
       baseline: { title: compact.title },
       baselineVersion: compact.updatedAt,
     })
-    listWorkItems.mockResolvedValue({ workItems: [], total: 0, nextOffset: null })
+    // The missing dialog now flows through the exhaustive private-ref resolver,
+    // which validates the server's real pagination contract (offset present).
+    listWorkItems.mockResolvedValue({ workItems: [], total: 0, offset: 0, nextOffset: null })
 
     renderPage([{ pathname: "/todos", state: { todoRef: ref, todoScroll: 20 } }])
 

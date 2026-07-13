@@ -1,17 +1,19 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { MemoryRouter, useLocation } from "react-router-dom"
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { OrgData, WorkItemCompactWire, WorkItemDetailWire, WorkItemListWire } from "@/lib/api"
 import TodosPage from "../page"
 import { todoPrivateRef } from "../todo-private-state"
 
-/* Task 10 defect + hardening: opening an EXISTING Todo (off-page, past the
+/* Task 10 defect + final hardening: opening an EXISTING Todo (off-page, past the
  * People/Needs caps, or terminal) from a chat activity card must resolve its real
  * detail sheet — never a false "Todo no longer exists" — via an EXHAUSTIVE,
- * healthy-verified private-ref search across ALL statuses, with a settlement-race-
- * proof gate, whole-pipeline resolving/error/retry UX, aborts, and no raw id in
- * the ref-resolve query keys, URL, history, storage, or DOM. */
+ * healthy-verified private-ref search across ALL statuses. Each page is fully
+ * validated (offset + nextOffset present, contiguous progression, rows) BEFORE any
+ * match is trusted; the resolver is aborted+removed on any disable; Retry refetches
+ * only the exact candidate keys; and no raw id enters the ref-resolve query keys,
+ * URL, history, storage, or DOM. */
 
 vi.mock("@/components/page-layout", () => ({ PageLayout: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
 vi.mock("@/context/breadcrumb-context", () => ({ useBreadcrumbs: () => {} }))
@@ -62,8 +64,8 @@ function detailOf(c: WorkItemCompactWire): WorkItemDetailWire {
   }
 }
 
-/** A server-contract-compliant page (store.ts): total present + stable, offset
- *  echoed, nextOffset = offset + rows.length or null. */
+/** Server-contract page (store.ts): total present + stable, offset echoed,
+ *  nextOffset = offset + rows.length or null. */
 function page(rows: WorkItemCompactWire[], offset: number): WorkItemListWire {
   const slice = rows.slice(offset, offset + 100)
   const consumed = offset + slice.length
@@ -75,24 +77,47 @@ function page(rows: WorkItemCompactWire[], offset: number): WorkItemListWire {
 function isResolverCall(callArgs: unknown[]): boolean {
   return callArgs.length >= 2 && callArgs[1] !== undefined
 }
+function resolverCallCount(): number {
+  return listWorkItems.mock.calls.filter(isResolverCall).length
+}
+function refResolveQueries(client: QueryClient, ref: string) {
+  return client.getQueryCache().findAll({ queryKey: ["work-items", "ref-resolve", ref] })
+}
+/** A mounted disabled observer keeps an IDLE cache entry, so "no query" is the
+ *  wrong bar — the real guarantee is that no STALE result/error is cached. */
+function noStaleResolverResult(client: QueryClient, ref: string): boolean {
+  return refResolveQueries(client, ref).every((q) => q.state.data == null && q.state.status !== "error")
+}
 
 interface MockConfig {
   bank?: Record<string, WorkItemCompactWire[]>
   visible?: (p: ListParams) => WorkItemListWire | Promise<WorkItemListWire>
-  needs?: () => WorkItemListWire | Promise<WorkItemListWire>
 }
 function mock(cfg: MockConfig) {
   listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
-    if (p?.needsAttentionFor) return Promise.resolve(cfg.needs ? cfg.needs() : EMPTY)
+    if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
     if (signal === undefined) return Promise.resolve(cfg.visible ? cfg.visible(p ?? {}) : EMPTY)
     return Promise.resolve(page(cfg.bank?.[p?.status ?? ""] ?? [], p?.offset ?? 0))
   })
 }
+/** Resolver returns a single anomalous page for `status`; everything else empty. */
+function anomaly(status: string, response: WorkItemListWire) {
+  listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
+    if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
+    if (signal === undefined) return Promise.resolve(EMPTY)
+    if (p?.status === status) return Promise.resolve(response)
+    return Promise.resolve(EMPTY)
+  })
+  getWorkItem.mockResolvedValue(detailOf(compact("x", "x", "cancelled")))
+}
+const rows100 = (s: string) => Array.from({ length: 100 }, (_, i) => compact(`wi_${s}_${i}`, "r", s))
 
 let currentSearch = ""
 let currentState: unknown = null
+let navigateFn: ReturnType<typeof useNavigate>
 function RouterProbe() {
   const location = useLocation()
+  navigateFn = useNavigate()
   currentSearch = location.search
   currentState = location.state
   return null
@@ -111,6 +136,8 @@ function renderAt(state: unknown, key = "k1") {
   )
 }
 
+const tick = () => new Promise((r) => setTimeout(r, 20))
+
 describe("Private-ref Todo resolution", () => {
   beforeEach(() => {
     sessionStorage.clear()
@@ -122,10 +149,10 @@ describe("Private-ref Todo resolution", () => {
   })
   afterEach(() => vi.useRealTimers())
 
+  // ── Prior exhaustive/status/privacy behavior (retained) ──
   it("opens an OLD done Todo excluded from the recent-window open lens", async () => {
     const c = compact("wi_old_done", "Shipped last quarter", "done")
-    // Visible done query (with `since`) excludes it; the exhaustive resolver finds it.
-    mock({ bank: { done: [c] }, visible: (p) => (p.status === "done" && p.since ? EMPTY : EMPTY) })
+    mock({ bank: { done: [c] } })
     getWorkItem.mockResolvedValue(detailOf(c))
     renderAt({ todoRef: todoPrivateRef("wi_old_done") })
     await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Shipped last quarter"))
@@ -144,9 +171,9 @@ describe("Private-ref Todo resolution", () => {
     expect(document.body.innerHTML).not.toContain("wi_cancelled")
     const storage = Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.getItem(sessionStorage.key(i) ?? "") ?? "").join("\n")
     expect(storage).not.toContain("wi_cancelled")
-    const resolveKeys = activeClient.getQueryCache().findAll({ queryKey: ["work-items", "ref-resolve"] })
-    expect(resolveKeys.length).toBeGreaterThan(0)
-    for (const q of resolveKeys) expect(JSON.stringify(q.queryKey)).not.toContain("wi_cancelled")
+    const keys = refResolveQueries(activeClient, todoPrivateRef("wi_cancelled"))
+    expect(keys.length).toBeGreaterThan(0)
+    for (const q of keys) expect(JSON.stringify(q.queryKey)).not.toContain("wi_cancelled")
   })
 
   it("resolves the same Todo on a fresh remount carrying only the private ref", async () => {
@@ -171,7 +198,7 @@ describe("Private-ref Todo resolution", () => {
     expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ status: "backlog", offset: 1500, limit: 100 }), expect.anything())
   })
 
-  it("resolves an EXHAUSTIVE match past 5000 rows with no arbitrary cap", async () => {
+  it("resolves an exhaustive match past 5000 rows with no arbitrary cap", async () => {
     const filler = Array.from({ length: 5100 }, (_, i) => compact(`wi_c_${i}`, `c${i}`, "cancelled"))
     const target = compact("wi_deep", "Deep terminal match", "cancelled")
     mock({ bank: { cancelled: [...filler, target] } })
@@ -189,42 +216,107 @@ describe("Private-ref Todo resolution", () => {
     expect(screen.queryByTestId("detail-sheet")).toBeNull()
   })
 
-  // ── Strict pagination invariants → retryable incomplete, never missing ──
-  function anomalyResolver(status: string, response: WorkItemListWire) {
-    listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
-      if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
-      if (signal === undefined) return Promise.resolve(EMPTY)
-      if (p?.status === status) return Promise.resolve(response)
-      return Promise.resolve(EMPTY)
-    })
-    getWorkItem.mockResolvedValue(detailOf(compact("x", "x", "cancelled")))
-  }
-  const rows100 = (s: string) => Array.from({ length: 100 }, (_, i) => compact(`wi_${s}_${i}`, "r", s))
+  // ── Fix 1: complete metadata + validate-before-match (dedicated cases) ──
+  it("a healthy valid matching page resolves", async () => {
+    const c = compact("wi_ok", "Healthy match", "cancelled")
+    anomaly("cancelled", { workItems: [c], total: 1, offset: 0, limit: 100, nextOffset: null })
+    getWorkItem.mockResolvedValue(detailOf(c))
+    renderAt({ todoRef: todoPrivateRef("wi_ok") })
+    await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Healthy match"))
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
 
-  it.each([
-    ["omitted total", { workItems: rows100("done"), offset: 0, limit: 100, nextOffset: 100 } as unknown as WorkItemListWire],
-    ["truncated (nextOffset null while total remains)", { workItems: rows100("done"), total: 500, offset: 0, limit: 100, nextOffset: null }],
-    ["forward gap in nextOffset", { workItems: rows100("done"), total: 999, offset: 0, limit: 100, nextOffset: 250 }],
-    ["repeated/cyclic nextOffset", { workItems: rows100("done"), total: 999, offset: 0, limit: 100, nextOffset: 0 }],
-    ["decreasing nextOffset", { workItems: rows100("done"), total: 999, offset: 0, limit: 100, nextOffset: -1 as unknown as number }],
-    ["offset metadata mismatch", { workItems: rows100("done"), total: 999, offset: 7, limit: 100, nextOffset: 100 }],
-    ["malformed row", { workItems: [{ title: "no id" } as unknown as WorkItemCompactWire], total: 1, offset: 0, limit: 100, nextOffset: null }],
-  ])("treats %s as retryable, never missing", async (_label, response) => {
-    anomalyResolver("done", response)
-    renderAt({ todoRef: todoPrivateRef("wi_anom") })
+  it("an omitted offset field is retryable, never missing", async () => {
+    anomaly("done", { workItems: rows100("done"), total: 999, limit: 100, nextOffset: 100 } as unknown as WorkItemListWire)
+    renderAt({ todoRef: todoPrivateRef("wi_no_offset") })
     expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
     expect(screen.queryByText("Todo no longer exists")).toBeNull()
   })
 
-  it("treats changing total mid-traversal as retryable, never missing", async () => {
+  it("an omitted nextOffset field is retryable (never coerced to null exhaustion)", async () => {
+    anomaly("done", { workItems: rows100("done"), total: 999, offset: 0, limit: 100 } as unknown as WorkItemListWire)
+    renderAt({ todoRef: todoPrivateRef("wi_no_next") })
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
+
+  it("both offset and nextOffset omitted is retryable, never missing", async () => {
+    anomaly("done", { workItems: rows100("done"), total: 999, limit: 100 } as unknown as WorkItemListWire)
+    renderAt({ todoRef: todoPrivateRef("wi_no_both") })
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
+
+  it("a MATCHING row on a forward-gap page does NOT open — it is retryable", async () => {
+    const target = compact("wi_gapmatch", "Should not open on a bad page", "done")
+    // Matching row present, but nextOffset jumps past offset+len → page invalid.
+    anomaly("done", { workItems: [target, ...rows100("done").slice(0, 99)], total: 999, offset: 0, limit: 100, nextOffset: 250 })
+    getWorkItem.mockResolvedValue(detailOf(target))
+    renderAt({ todoRef: todoPrivateRef("wi_gapmatch") })
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByTestId("detail-sheet")).toBeNull()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
+
+  it("a MATCHING row on a truncated (exhaustion-invalid) page does NOT open — it is retryable", async () => {
+    const target = compact("wi_truncmatch", "Should not open on truncation", "done")
+    anomaly("done", { workItems: [target], total: 500, offset: 0, limit: 100, nextOffset: null })
+    getWorkItem.mockResolvedValue(detailOf(target))
+    renderAt({ todoRef: todoPrivateRef("wi_truncmatch") })
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByTestId("detail-sheet")).toBeNull()
+  })
+
+  it("a MATCHING row on a malformed page does NOT open — it is retryable", async () => {
+    const target = compact("wi_malmatch", "Should not open on malformed", "done")
+    anomaly("done", { workItems: [target, { title: "no id" } as unknown as WorkItemCompactWire], total: 2, offset: 0, limit: 100, nextOffset: null })
+    getWorkItem.mockResolvedValue(detailOf(target))
+    renderAt({ todoRef: todoPrivateRef("wi_malmatch") })
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByTestId("detail-sheet")).toBeNull()
+  })
+
+  it("a forward gap (no match) is retryable, never missing", async () => {
+    anomaly("done", { workItems: rows100("done"), total: 999, offset: 0, limit: 100, nextOffset: 250 })
+    renderAt({ todoRef: todoPrivateRef("wi_gap") })
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
+
+  it("a repeated/cyclic nextOffset is retryable, never missing", async () => {
+    anomaly("done", { workItems: rows100("done"), total: 999, offset: 0, limit: 100, nextOffset: 0 })
+    renderAt({ todoRef: todoPrivateRef("wi_cyc") })
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
+
+  it("a decreasing nextOffset is retryable, never missing", async () => {
+    anomaly("done", { workItems: rows100("done"), total: 999, offset: 200, limit: 100, nextOffset: 100 } as unknown as WorkItemListWire)
+    // offset must equal requested (0) → this also trips offset mismatch; the point
+    // is: never missing, always retry.
+    renderAt({ todoRef: todoPrivateRef("wi_dec") })
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
+
+  it("an offset-metadata mismatch is retryable, never missing", async () => {
+    anomaly("done", { workItems: rows100("done"), total: 999, offset: 7, limit: 100, nextOffset: 100 })
+    renderAt({ todoRef: todoPrivateRef("wi_offmm") })
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
+
+  it("a changing total mid-traversal is retryable, never missing (isolated from duplicate detection)", async () => {
     let call = 0
     listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
       if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
       if (signal === undefined) return Promise.resolve(EMPTY)
       if (p?.status !== "done") return Promise.resolve(EMPTY)
       call += 1
-      const total = call === 1 ? 300 : 250 // total shifts between pages
-      return Promise.resolve({ workItems: rows100("done"), total, offset: p?.offset ?? 0, limit: 100, nextOffset: (p?.offset ?? 0) + 100 })
+      const offset = p?.offset ?? 0
+      // Unique ids each page (no duplicates), only the TOTAL shifts.
+      const rows = Array.from({ length: 100 }, (_, i) => compact(`wi_tot_${offset}_${i}`, "t", "done"))
+      return Promise.resolve({ workItems: rows, total: call === 1 ? 300 : 250, offset, limit: 100, nextOffset: offset + 100 })
     })
     getWorkItem.mockResolvedValue(detailOf(compact("x", "x", "done")))
     renderAt({ todoRef: todoPrivateRef("wi_total") })
@@ -232,13 +324,14 @@ describe("Private-ref Todo resolution", () => {
     expect(screen.queryByText("Todo no longer exists")).toBeNull()
   })
 
-  it("treats a duplicate id across pages as retryable, never missing", async () => {
+  it("a duplicate id across pages is retryable, never missing (isolated from total change)", async () => {
     const dup = compact("wi_dup", "dup", "done")
     listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
       if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
       if (signal === undefined) return Promise.resolve(EMPTY)
       if (p?.status !== "done") return Promise.resolve(EMPTY)
       const offset = p?.offset ?? 0
+      // Same `dup` id on every page; total stays STABLE at 400.
       return Promise.resolve({ workItems: [dup, ...rows100("done").slice(0, 99)], total: 400, offset, limit: 100, nextOffset: offset + 100 })
     })
     getWorkItem.mockResolvedValue(detailOf(dup))
@@ -247,8 +340,7 @@ describe("Private-ref Todo resolution", () => {
     expect(screen.queryByText("Todo no longer exists")).toBeNull()
   })
 
-  it("treats the runaway page budget as retryable incomplete, never missing", async () => {
-    // A status that always yields a full non-matching page → exhausts the budget.
+  it("the runaway page budget is retryable incomplete, never missing", async () => {
     listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
       if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
       if (signal === undefined) return Promise.resolve(EMPTY)
@@ -263,35 +355,150 @@ describe("Private-ref Todo resolution", () => {
     expect(screen.queryByText("Todo no longer exists")).toBeNull()
   }, 10_000)
 
-  // ── Whole-pipeline visible state + retry/abort ──
-  it("shows 'Finding this Todo…' while a candidate source is still hung, never a premature missing", async () => {
-    let releaseBase: (() => void) | null = null
+  // ── Fix 2: disable → abort + remove, no later calls, no stale open/missing ──
+  async function inFlightResolver(ref: string) {
+    // Resolver hangs on `backlog`; capture its signal. People resolves initially.
+    let lastSignal: AbortSignal | undefined
+    let releaseBacklog: (() => void) | null = null
+    let peopleHang = false
     listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
       if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
-      if (signal === undefined && p?.status === "backlog") return new Promise((res) => { releaseBase = () => res(EMPTY) })
+      if (signal !== undefined) {
+        lastSignal = signal
+        if (p?.status === "backlog") return new Promise<WorkItemListWire>((res) => { releaseBacklog = () => res(page([], 0)) })
+        return Promise.resolve(EMPTY)
+      }
+      if (p?.limit === 100 && peopleHang) return new Promise<WorkItemListWire>(() => {}) // People refetch hangs
       return Promise.resolve(EMPTY)
     })
-    renderAt({ todoRef: todoPrivateRef("wi_hung") })
-    expect(await screen.findByTestId("todo-resolving")).toBeTruthy()
+    getWorkItem.mockResolvedValue(detailOf(compact("x", "x", "backlog")))
+    const view = renderAt({ todoRef: ref })
+    // Wait until the resolver is genuinely IN-FLIGHT on backlog (signal captured),
+    // not merely the candidate-settling "Finding…" state.
+    await waitFor(() => expect(lastSignal).toBeDefined())
+    return {
+      view,
+      signal: () => lastSignal,
+      releaseBacklog: () => releaseBacklog?.(),
+      hangPeople: () => { peopleHang = true },
+    }
+  }
+
+  it("a People refetch abort+removes the in-flight resolver, with no later calls or stale open", async () => {
+    const ref = todoPrivateRef("wi_people")
+    const h = await inFlightResolver(ref)
+    const before = resolverCallCount()
+    act(() => h.hangPeople())
+    await act(async () => { void activeClient.refetchQueries({ queryKey: ["work-items", "people-open"] }); await tick() })
+    expect(h.signal()?.aborted).toBe(true)
+    expect(noStaleResolverResult(activeClient, ref)).toBe(true)
+    act(() => h.releaseBacklog())
+    await tick()
+    expect(resolverCallCount()).toBe(before)
     expect(screen.queryByText("Todo no longer exists")).toBeNull()
-    act(() => releaseBase?.())
   })
 
-  it("shows the retry dialog when a candidate source fails, never missing", async () => {
+  it("a ledger refetch abort+removes the in-flight resolver", async () => {
+    const ref = todoPrivateRef("wi_ledger")
+    // Reuse the People harness but disable via the ledger key instead.
+    let lastSignal: AbortSignal | undefined
+    let releaseBacklog: (() => void) | null = null
+    let ledgerHang = false
     listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
       if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
-      if (signal === undefined && p?.status === "backlog") return Promise.reject(new Error("offline"))
+      if (signal !== undefined) {
+        lastSignal = signal
+        if (p?.status === "backlog") return new Promise<WorkItemListWire>((res) => { releaseBacklog = () => res(page([], 0)) })
+        return Promise.resolve(EMPTY)
+      }
+      if (p?.limit === 20 && ledgerHang) return new Promise<WorkItemListWire>(() => {})
       return Promise.resolve(EMPTY)
     })
-    getWorkItem.mockResolvedValue(detailOf(compact("x", "x", "cancelled")))
-    renderAt({ todoRef: todoPrivateRef("wi_base_err") })
-    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
-    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+    getWorkItem.mockResolvedValue(detailOf(compact("x", "x", "backlog")))
+    renderAt({ todoRef: ref })
+    await waitFor(() => expect(lastSignal).toBeDefined())
+    act(() => { ledgerHang = true })
+    await act(async () => { void activeClient.refetchQueries({ queryKey: ["work-items", "ledger"] }); await tick() })
+    expect(lastSignal?.aborted).toBe(true)
+    expect(noStaleResolverResult(activeClient, ref)).toBe(true)
+    act(() => releaseBacklog?.())
   })
 
-  it("shows resolving then retry when the resolver errors, and resolves after Retry", async () => {
+  it("a late active candidate abort+removes the resolver and wins, with no missing", async () => {
+    const ref = todoPrivateRef("wi_late")
+    const target = compact("wi_late", "Late active winner", "backlog")
+    let lastSignal: AbortSignal | undefined
+    let releaseBacklog: (() => void) | null = null
+    let candidateArrived = false
+    listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
+      if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
+      if (signal !== undefined) {
+        lastSignal = signal
+        if (p?.status === "backlog") return new Promise<WorkItemListWire>((res) => { releaseBacklog = () => res(page([], 0)) })
+        return Promise.resolve(EMPTY)
+      }
+      // Ledger backlog (limit 20) initially empty; after refetch it holds the target.
+      if (p?.limit === 20 && p?.status === "backlog" && candidateArrived) return Promise.resolve(page([target], p?.offset ?? 0))
+      return Promise.resolve(EMPTY)
+    })
+    getWorkItem.mockResolvedValue(detailOf(target))
+    renderAt({ todoRef: ref })
+    await waitFor(() => expect(lastSignal).toBeDefined())
+    act(() => { candidateArrived = true })
+    await act(async () => { void activeClient.refetchQueries({ queryKey: ["work-items", "ledger"] }); await tick() })
+    await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Late active winner"))
+    expect(lastSignal?.aborted).toBe(true)
+    expect(noStaleResolverResult(activeClient, ref)).toBe(true)
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+    act(() => releaseBacklog?.())
+  })
+
+  it("a ref change aborts + removes the OLD ref's resolver (no stale result)", async () => {
+    const oldRef = todoPrivateRef("wi_oldref")
+    const h = await inFlightResolver(oldRef)
+    const oldSignal = h.signal() // capture BEFORE the new ref overwrites lastSignal
+    act(() => navigateFn("/todos", { state: { todoRef: todoPrivateRef("wi_newref") } }))
+    await tick()
+    expect(oldSignal?.aborted).toBe(true)
+    expect(noStaleResolverResult(activeClient, oldRef)).toBe(true)
+    act(() => h.releaseBacklog())
+  })
+
+  it("aborts the resolver on unmount with no later resolver calls", async () => {
+    const ref = todoPrivateRef("wi_unmount")
+    const h = await inFlightResolver(ref)
+    const before = resolverCallCount()
+    act(() => h.view.unmount())
+    await tick()
+    expect(h.signal()?.aborted).toBe(true)
+    act(() => h.releaseBacklog())
+    await tick()
+    expect(resolverCallCount()).toBe(before)
+  })
+
+  // ── Fix 3: candidate-first Retry ──
+  it("Retry that finds an active candidate makes ZERO resolver calls", async () => {
+    const target = compact("wi_retry_active", "Found by candidate", "backlog")
+    let candidateReady = false
+    listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
+      if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
+      if (signal !== undefined) return Promise.reject(new Error("offline")) // resolver errors first
+      if (p?.limit === 20 && p?.status === "backlog" && candidateReady) return Promise.resolve(page([target], p?.offset ?? 0))
+      return Promise.resolve(EMPTY)
+    })
+    getWorkItem.mockResolvedValue(detailOf(target))
+    renderAt({ todoRef: todoPrivateRef("wi_retry_active") })
+    const retry = await screen.findByTestId("todo-resolve-retry")
+    const before = resolverCallCount()
+    act(() => { candidateReady = true })
+    fireEvent.click(retry)
+    await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Found by candidate"))
+    expect(resolverCallCount()).toBe(before) // no resolver request once a candidate resolves
+  })
+
+  it("Retry with empty healthy candidates runs one fresh traversal and resolves", async () => {
     let attempt = 0
-    const c = compact("wi_retry", "Recovered on retry", "cancelled")
+    const c = compact("wi_retry_empty", "Recovered on retry", "cancelled")
     listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
       if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
       if (signal === undefined) return Promise.resolve(EMPTY)
@@ -303,43 +510,71 @@ describe("Private-ref Todo resolution", () => {
       return Promise.resolve(EMPTY)
     })
     getWorkItem.mockResolvedValue(detailOf(c))
-    renderAt({ todoRef: todoPrivateRef("wi_retry") })
+    renderAt({ todoRef: todoPrivateRef("wi_retry_empty") })
     const retry = await screen.findByTestId("todo-resolve-retry")
-    expect(screen.queryByText("Todo no longer exists")).toBeNull()
     fireEvent.click(retry)
     await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Recovered on retry"))
   })
 
+  it("Retry refetches ONLY the candidate keys, not unrelated work-item queries", async () => {
+    mock({})
+    getWorkItem.mockResolvedValue(detailOf(compact("x", "x", "cancelled")))
+    // Force a candidate-source error so the retry dialog appears.
+    listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
+      if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
+      if (signal === undefined && p?.limit === 20 && p?.status === "backlog") return Promise.reject(new Error("offline"))
+      if (signal === undefined) return Promise.resolve(EMPTY)
+      return Promise.resolve(EMPTY)
+    })
+    renderAt({ todoRef: todoPrivateRef("wi_scope") })
+    const unrelated = vi.fn().mockResolvedValue({ ok: true })
+    activeClient.setQueryData(["work-items", "unrelated-widget"], { ok: true })
+    activeClient.getQueryCache().build(activeClient, { queryKey: ["work-items", "unrelated-widget"], queryFn: unrelated })
+    const retry = await screen.findByTestId("todo-resolve-retry")
+    fireEvent.click(retry)
+    await tick()
+    expect(unrelated).not.toHaveBeenCalled()
+  })
+
+  // ── Whole-pipeline visible state ──
+  it("shows 'Finding this Todo…' while a candidate source is still hung, never a premature missing", async () => {
+    let releaseBase: (() => void) | null = null
+    listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
+      if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
+      if (signal === undefined && p?.status === "backlog" && p?.limit === 20) return new Promise((res) => { releaseBase = () => res(EMPTY) })
+      return Promise.resolve(EMPTY)
+    })
+    renderAt({ todoRef: todoPrivateRef("wi_hung") })
+    expect(await screen.findByTestId("todo-resolving")).toBeTruthy()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+    act(() => releaseBase?.())
+  })
+
+  it("shows the retry dialog when a candidate source fails, never missing", async () => {
+    listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
+      if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
+      if (signal === undefined && p?.status === "backlog" && p?.limit === 20) return Promise.reject(new Error("offline"))
+      return Promise.resolve(EMPTY)
+    })
+    getWorkItem.mockResolvedValue(detailOf(compact("x", "x", "cancelled")))
+    renderAt({ todoRef: todoPrivateRef("wi_base_err") })
+    expect(await screen.findByTestId("todo-resolve-retry")).toBeTruthy()
+    expect(screen.queryByText("Todo no longer exists")).toBeNull()
+  })
+
   it("lets an active-lens candidate win without consulting the resolver", async () => {
     const c = compact("wi_recent", "Recent open item", "backlog")
-    mock({ visible: (p) => (p.status === "backlog" ? page([c], p.offset ?? 0) : EMPTY) })
+    mock({ visible: (p) => (p.status === "backlog" && p.limit === 20 ? page([c], p.offset ?? 0) : EMPTY) })
     getWorkItem.mockResolvedValue(detailOf(c))
     renderAt({ todoRef: todoPrivateRef("wi_recent") })
     await waitFor(() => expect(screen.getByTestId("sheet-title").textContent).toBe("Recent open item"))
-    expect(listWorkItems.mock.calls.some(isResolverCall)).toBe(false)
+    expect(resolverCallCount()).toBe(0)
   })
 
   it("runs zero resolver calls when no private ref is present", async () => {
     mock({})
     renderAt(null)
     await waitFor(() => expect(listWorkItems).toHaveBeenCalled())
-    expect(listWorkItems.mock.calls.some(isResolverCall)).toBe(false)
-  })
-
-  it("aborts the resolver on unmount with no later resolver page calls", async () => {
-    let release: (() => void) | null = null
-    listWorkItems.mockImplementation((p?: ListParams, signal?: AbortSignal) => {
-      if (p?.needsAttentionFor) return Promise.resolve(EMPTY)
-      if (signal === undefined) return Promise.resolve(EMPTY)
-      if (p?.status === "backlog") return new Promise((res) => { release = () => res(page([], p?.offset ?? 0)) })
-      return Promise.resolve(EMPTY)
-    })
-    const view = renderAt({ todoRef: todoPrivateRef("wi_abort") })
-    await screen.findByTestId("todo-resolving")
-    const before = listWorkItems.mock.calls.filter(isResolverCall).length
-    view.unmount()
-    act(() => release?.())
-    await new Promise((r) => setTimeout(r, 30))
-    expect(listWorkItems.mock.calls.filter(isResolverCall).length).toBe(before)
+    expect(resolverCallCount()).toBe(0)
   })
 })

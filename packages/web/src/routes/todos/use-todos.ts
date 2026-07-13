@@ -311,10 +311,21 @@ export function useResolvePrivateRef(openRef: string | null, enabled: boolean) {
           visited.add(offset)
           const r = await api.listWorkItems({ status, offset, limit: GATEWAY_MAX_LIMIT }, signal)
 
+          // Validate the COMPLETE page — metadata, every row, and the progression/
+          // exhaustion invariant — BEFORE trusting any match on it. A matching id on
+          // a page with a forward gap, a missing offset/nextOffset field, or a
+          // truncated stream must NOT open the Todo; it is a retryable incomplete.
           if (!isSafeNonNegativeInt(r.total)) throw new PrivateRefResolveIncompleteError("resolve total missing/invalid")
           if (stableTotal === null) stableTotal = r.total
           else if (r.total !== stableTotal) throw new PrivateRefResolveIncompleteError("resolve total changed mid-traversal")
-          if (r.offset !== undefined && r.offset !== offset) throw new PrivateRefResolveIncompleteError("resolve offset metadata mismatch")
+          // offset field REQUIRED, safe, and exactly the requested offset.
+          if (!isSafeNonNegativeInt(r.offset) || r.offset !== offset) {
+            throw new PrivateRefResolveIncompleteError("resolve offset metadata missing/mismatch")
+          }
+          // nextOffset field REQUIRED — explicit null or a safe integer (never coerced).
+          if (r.nextOffset === undefined) throw new PrivateRefResolveIncompleteError("resolve nextOffset missing")
+          const next: number | null = r.nextOffset
+          if (next !== null && !isSafeNonNegativeInt(next)) throw new PrivateRefResolveIncompleteError("resolve nextOffset invalid")
 
           for (const item of r.workItems) {
             if (!item || typeof item.id !== "string" || item.id.length === 0) {
@@ -322,22 +333,26 @@ export function useResolvePrivateRef(openRef: string | null, enabled: boolean) {
             }
             if (seenIds.has(item.id)) throw new PrivateRefResolveIncompleteError("resolve duplicate id")
             seenIds.add(item.id)
-            if (todoPrivateRef(item.id) === openRef) return item.id
           }
-          consumed += r.workItems.length
 
-          const next = r.nextOffset ?? null
+          const pageConsumed = consumed + r.workItems.length
           if (next === null) {
             // Provably exhausted for this status only when the server's own total
             // agrees; a null nextOffset with rows still owed is a truncated stream.
-            if (consumed !== stableTotal) throw new PrivateRefResolveIncompleteError("resolve truncated before total")
-            break
-          }
-          // The server pages contiguously (nextOffset = offset + rows.length); any
-          // forward gap, repeat, or decrease is a broken/reordered stream.
-          if (!isSafeNonNegativeInt(next) || next !== offset + r.workItems.length) {
+            if (pageConsumed !== stableTotal) throw new PrivateRefResolveIncompleteError("resolve truncated before total")
+          } else if (next !== offset + r.workItems.length) {
+            // The server pages contiguously (nextOffset = offset + rows.length); any
+            // forward gap, repeat, or decrease is a broken/reordered stream.
             throw new PrivateRefResolveIncompleteError("resolve nextOffset not contiguous")
           }
+
+          // Page fully healthy → only now is a match trustworthy.
+          for (const item of r.workItems) {
+            if (todoPrivateRef(item.id) === openRef) return item.id
+          }
+
+          consumed = pageConsumed
+          if (next === null) break
           offset = next
         }
       }
