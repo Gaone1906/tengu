@@ -221,6 +221,7 @@ import {
   todoActivityBlock,
   workflowDefinitionActivityBlock,
   type ActivityOperation,
+  type ChatActivityContext,
 } from "./chat-activity.js";
 import {
   createWorkItem,
@@ -983,10 +984,7 @@ export function workflowRunDriverDeps(
 
 export function workflowReportingContext(context: ApiContext): WorkflowReportingContext {
   return {
-    sessionExists: (sessionId) => {
-      const session = getSession(sessionId);
-      return Boolean(session && !isLegacyWorkflowRunSession(session));
-    },
+    sessionExists: isActivityProjectionEligibleSession,
     applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
     emitBlock: (sessionId, envelope, fallback) => {
       context.emit("session:delta", {
@@ -1009,14 +1007,9 @@ function projectWorkflowOperationActivity(
   action: string,
   changed = true,
 ): string | undefined {
-  const target = verifiedActivityTarget(headers, context);
+  const target = verifiedActivityTarget(headers, context, RUN_ACTIVITY_TOOLS[action] ?? []);
   return persistAndEmitActivityBlock({
-    context: {
-      sessionExists: (sessionId) => !!getSession(sessionId),
-      applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
-      emit: (event, payload) => context.emit?.(event, payload),
-      log: (message) => logger.warn(message),
-    },
+    context: chatActivityContext(context),
     ...target,
     envelope: workflowRunActivityEnvelope(run, action),
     ...(changed ? {
@@ -1040,12 +1033,7 @@ function emitWorkflowRunCompanyChanged(
   sessionId?: string,
 ): void {
   persistAndEmitActivityBlock({
-    context: {
-      sessionExists: (candidate) => !!getSession(candidate),
-      applyBlock: (candidate, envelope, fallback) => applyBlockEnvelope(candidate, envelope, fallback),
-      emit: (event, payload) => context.emit?.(event, payload),
-      log: (message) => logger.warn(message),
-    },
+    context: chatActivityContext(context),
     companyEvent: {
       entity: "workflow-run",
       action,
@@ -1053,7 +1041,7 @@ function emitWorkflowRunCompanyChanged(
       workflowId: run.workflowId,
       runId: run.runId,
       version: Math.max(1, run.revision ?? 1),
-      ...(sessionId ? { sessionId } : {}),
+      ...(sessionId && isActivityProjectionEligibleSession(sessionId) ? { sessionId } : {}),
     },
   });
 }
@@ -1231,8 +1219,16 @@ async function runWorkflowDefinitionFromHttp(
     return badRequest(res, `definition file "${expectedId}" has mismatched id "${def.id}"`);
   }
   const identity = resolveScopedWriteCallerIdentity(req.headers, context);
-  const invocation = identity.kind === "session"
-    ? { sessionId: identity.callerId, reportMode: validated.reportMode }
+  const invocationSessionId = identity.kind === "session" && isActivityProjectionEligibleSession(identity.callerId)
+    ? identity.callerId
+    : undefined;
+  const activitySessionId = verifiedActivityTarget(
+    req.headers,
+    context,
+    ["start_workflow_run", "run_workflow_by_name"],
+  ).sessionId;
+  const invocation = invocationSessionId
+    ? { sessionId: invocationSessionId, reportMode: validated.reportMode }
     : undefined;
   const { scanOrg } = await import("./org.js");
   const knownEmployees = [...scanOrg().keys()];
@@ -1259,7 +1255,7 @@ async function runWorkflowDefinitionFromHttp(
   let replayed = false;
   try {
     const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context, {
-      ...(identity.kind === "session" ? { activitySessionId: identity.callerId } : {}),
+      ...(activitySessionId ? { activitySessionId } : {}),
     }), def, trigger, {
       knownEmployees,
       knownEngines,
@@ -2005,24 +2001,90 @@ function singleHeader(headers: HttpRequest["headers"], name: string): string | u
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function isActivityProjectionEligibleSession(sessionId: string): boolean {
+  const session = getSession(sessionId);
+  return Boolean(session && !isLegacyWorkflowRunSession(session));
+}
+
+function hasActivityBlock(sessionId: string, blockId: string): boolean {
+  return getMessages(sessionId).some((message) => message.blocks?.some((block) => block.id === blockId));
+}
+
+let lastActivityOrder = 0;
+
+function nextActivityOrder(sessionId: string, blockId: string): number {
+  const existingOrder = getMessages(sessionId)
+    .flatMap((message) => message.blocks ?? [])
+    .find((block) => block.id === blockId)?.activityOrder ?? 0;
+  lastActivityOrder = Math.max(lastActivityOrder + 1, existingOrder + 1, Date.now() * 100);
+  return lastActivityOrder;
+}
+
+function chatActivityContext(context: ApiContext): ChatActivityContext {
+  return {
+    sessionExists: isActivityProjectionEligibleSession,
+    hasBlock: hasActivityBlock,
+    nextActivityOrder,
+    applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
+    emit: (event, payload) => context.emit?.(event, payload),
+    log: (message) => logger.warn(message),
+  };
+}
+
 function verifiedActivityTarget(
   headers: HttpRequest["headers"],
   context: ApiContext,
+  expectedTools: string | readonly string[],
 ): { sessionId?: string; operation?: ActivityOperation } {
   const identity = resolveScopedWriteCallerIdentity(headers, context);
   if (identity.kind !== "session") return {};
+  if (!isActivityProjectionEligibleSession(identity.callerId)) return {};
   const operationId = singleHeader(headers, ACTIVITY_OPERATION_HEADER);
   const toolName = singleHeader(headers, ACTIVITY_TOOL_HEADER);
   const toolMarker = singleHeader(headers, TOOL_CALL_HEADER);
+  const allowedTools = typeof expectedTools === "string" ? [expectedTools] : expectedTools;
   const operation = toolMarker === TOOL_CALL_HEADER_VALUE
     && operationId !== undefined
     && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operationId)
     && toolName !== undefined
     && toolName.length <= 160
+    && allowedTools.includes(toolName)
       ? { id: operationId, toolName }
       : undefined;
-  return { sessionId: identity.callerId, ...(operation ? { operation } : {}) };
+  return operation ? { sessionId: identity.callerId, operation } : {};
 }
+
+const TODO_ACTIVITY_TOOLS: Record<string, string> = {
+  created: "create_work_item",
+  "metadata-updated": "update_work_item",
+  "status-transitioned": "update_work_item",
+  assigned: "assign_work_item",
+  archived: "archive_work_item",
+  "approval-requested": "request_work_item_approval",
+  "approval-decided": "decide_work_item_approval",
+  "approval-escalated": "escalate_work_item_approval",
+};
+
+const WORKFLOW_DEFINITION_ACTIVITY_TOOLS: Record<string, string> = {
+  created: "create_workflow",
+  updated: "update_workflow",
+  retired: "retire_workflow",
+};
+
+const WORKFLOW_TRIGGER_ACTIVITY_TOOLS: Record<string, string> = {
+  "trigger-created": "create_trigger",
+  "trigger-deleted": "delete_trigger",
+  "trigger-approval-decided": "decide_poll_activation",
+  "trigger-approval-escalated": "escalate_poll_activation",
+};
+
+const RUN_ACTIVITY_TOOLS: Record<string, readonly string[]> = {
+  started: ["start_workflow_run", "run_workflow_by_name"],
+  replayed: ["start_workflow_run", "run_workflow_by_name"],
+  "step-prompt-edited": ["edit_workflow_run_step_prompt"],
+  cancelled: ["cancel_workflow_run"],
+  "gate-approval-escalated": ["escalate_workflow_gate"],
+};
 
 function persistTodoMutationActivity(
   req: HttpRequest,
@@ -2031,16 +2093,12 @@ function persistTodoMutationActivity(
   action: string,
   changed = true,
 ): string | undefined {
-  const target = verifiedActivityTarget(req.headers, context);
+  const target = verifiedActivityTarget(req.headers, context, TODO_ACTIVITY_TOOLS[action] ?? []);
   return persistAndEmitActivityBlock({
-    context: {
-      sessionExists: (sessionId) => !!getSession(sessionId),
-      applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
-      emit: (event, payload) => context.emit?.(event, payload),
-      log: (message) => logger.warn(message),
-    },
+    context: chatActivityContext(context),
     ...target,
     envelope: todoActivityBlock(item, action),
+    ...(!changed ? { idempotentReplay: true } : {}),
     ...(changed ? {
       companyEvent: {
         entity: "todo" as const,
@@ -2061,14 +2119,9 @@ function persistWorkflowDefinitionMutationActivity(
   action: string,
   changed = true,
 ): string | undefined {
-  const target = verifiedActivityTarget(req.headers, context);
+  const target = verifiedActivityTarget(req.headers, context, WORKFLOW_DEFINITION_ACTIVITY_TOOLS[action] ?? []);
   return persistAndEmitActivityBlock({
-    context: {
-      sessionExists: (sessionId) => !!getSession(sessionId),
-      applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
-      emit: (event, payload) => context.emit?.(event, payload),
-      log: (message) => logger.warn(message),
-    },
+    context: chatActivityContext(context),
     ...target,
     envelope: workflowDefinitionActivityBlock(definition, action),
     ...(changed ? {
@@ -2089,15 +2142,12 @@ function persistWorkflowTriggerMutationActivity(
   binding: WorkflowTriggerBinding,
   definition: EditableWorkflowDefinition | null,
   action: string,
+  changed = true,
 ): string | undefined {
-  const target = verifiedActivityTarget(req.headers, context);
+  if (!changed) return undefined;
+  const target = verifiedActivityTarget(req.headers, context, WORKFLOW_TRIGGER_ACTIVITY_TOOLS[action] ?? []);
   return persistAndEmitActivityBlock({
-    context: {
-      sessionExists: (sessionId) => !!getSession(sessionId),
-      applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
-      emit: (event, payload) => context.emit?.(event, payload),
-      log: (message) => logger.warn(message),
-    },
+    context: chatActivityContext(context),
     ...target,
     ...(definition ? { envelope: workflowDefinitionActivityBlock(definition, action) } : {}),
     companyEvent: {
@@ -3721,7 +3771,13 @@ export async function handleApiRequest(
               callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
               detail: note ? { note } : undefined,
             });
-        const activityReceiptId = persistTodoMutationActivity(req, context, result.item, "status-transitioned");
+        const activityReceiptId = persistTodoMutationActivity(
+          req,
+          context,
+          result.item,
+          "status-transitioned",
+          result.item.version !== item.version,
+        );
         return json(res, withActivityReceipt({ workItem: result.item, escalated: result.escalated }, activityReceiptId));
       } catch (err) {
         if (err instanceof TransitionError) {
@@ -3782,7 +3838,7 @@ export async function handleApiRequest(
       try {
         const item = assignWorkItem(params.id, assignee, employee.department ?? null, workItemActor(caller));
         if (!item) return notFound(res);
-        const activityReceiptId = persistTodoMutationActivity(req, context, item, "assigned");
+        const activityReceiptId = persistTodoMutationActivity(req, context, item, "assigned", item.version !== current.version);
         return json(res, withActivityReceipt({ workItem: item }, activityReceiptId));
       } catch (err) {
         if (err instanceof TransitionError) {
@@ -3948,7 +4004,13 @@ export async function handleApiRequest(
       const reason = typeof body.reason === "string" ? body.reason : undefined;
       try {
         const updated = escalateApproval(params.id, authority.authority.actor, reason);
-        const activityReceiptId = persistTodoMutationActivity(req, context, updated, "approval-escalated");
+        const activityReceiptId = persistTodoMutationActivity(
+          req,
+          context,
+          updated,
+          "approval-escalated",
+          updated.version !== item.version,
+        );
         return json(res, withActivityReceipt({ workItem: updated }, activityReceiptId));
       } catch (err) {
         if (err instanceof Error && /no pending approval/i.test(err.message)) {
@@ -4142,6 +4204,7 @@ export async function handleApiRequest(
             updated,
             getDefinition(root, updated.targetWorkflowId),
             "trigger-approval-escalated",
+            JSON.stringify(updated) !== JSON.stringify(binding),
           );
           return json(res, withActivityReceipt({
             trigger: projectWorkflowTriggerApprovalCapability(publicWorkflowTriggerBinding(updated), req.headers, context),
@@ -4649,7 +4712,9 @@ export async function handleApiRequest(
           status: outcome.run.status,
         }, 409);
       }
-      const activityReceiptId = projectWorkflowOperationActivity(outcome.run, req.headers, context, "cancelled");
+      const activityReceiptId = outcome.run.revision !== run.revision
+        ? projectWorkflowOperationActivity(outcome.run, req.headers, context, "cancelled")
+        : undefined;
       return json(res, withActivityReceipt(
         projectWorkflowRunApprovalCapability(outcome.run, req.headers, context) as unknown as Record<string, unknown>,
         activityReceiptId,
@@ -4711,7 +4776,9 @@ export async function handleApiRequest(
       if (outcome.outcome === "not-parked") {
         return json(res, { error: `run is ${outcome.run.status}, not parked with a pending native approval`, status: outcome.run.status }, 409);
       }
-      const activityReceiptId = projectWorkflowOperationActivity(outcome.run, req.headers, context, "gate-approval-escalated");
+      const activityReceiptId = outcome.run.revision !== run.revision
+        ? projectWorkflowOperationActivity(outcome.run, req.headers, context, "gate-approval-escalated")
+        : undefined;
       return json(res, withActivityReceipt(
         projectWorkflowRunApprovalCapability(outcome.run, req.headers, context) as unknown as Record<string, unknown>,
         activityReceiptId,
@@ -5232,14 +5299,9 @@ export async function handleApiRequest(
       // Publish the Todo cache invalidation through the shared boundary without
       // synthesizing a second Todo activity block for the same delegation.
       const delegatedItem = getWorkItem(workItem.id) ?? workItem;
-      const activityTarget = verifiedActivityTarget(req.headers, context);
+      const activityTarget = verifiedActivityTarget(req.headers, context, "delegate_task");
       persistAndEmitActivityBlock({
-        context: {
-          sessionExists: (sessionId) => !!getSession(sessionId),
-          applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
-          emit: (event, payload) => context.emit?.(event, payload),
-          log: (message) => logger.warn(message),
-        },
+        context: chatActivityContext(context),
         companyEvent: {
           entity: "todo",
           action: "delegated",

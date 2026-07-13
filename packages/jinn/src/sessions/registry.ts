@@ -2731,8 +2731,18 @@ export function applyBlockEnvelope(
 
   if (existing) {
     const oldBlock = existing.blocks.find((block) => block.id === envelope.block.id);
-    if (oldBlock && envelope.block.version < oldBlock.version) {
-      return existing.row.id;
+    if (oldBlock) {
+      if (envelope.block.version < oldBlock.version) return existing.row.id;
+      if (envelope.block.version === oldBlock.version
+        && (oldBlock.type === 'todo-activity'
+          || oldBlock.type === 'workflow-definition'
+          || oldBlock.type === 'workflow-run')) {
+        const oldOrder = oldBlock.activityOrder;
+        const nextOrder = envelope.block.activityOrder;
+        if (oldOrder === undefined && nextOrder === undefined) return existing.row.id;
+        if (nextOrder === undefined) return existing.row.id;
+        if (oldOrder !== undefined && nextOrder <= oldOrder) return existing.row.id;
+      }
     }
     const nextBlocks = existing.blocks.map((block) =>
       block.id === envelope.block.id

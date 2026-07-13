@@ -100,7 +100,7 @@ describe("web company activity block contracts", () => {
     })).toBe(false)
   })
 
-  it("ignores stale patches while equal-version patches remain mergeable", () => {
+  it("ignores stale patches while higher-order equal-version patches remain mergeable", () => {
     const run = parsedFixtures().find(({ block }) => block.type === "workflow-run")?.block
     expect(run).toBeDefined()
     if (!run) return
@@ -115,6 +115,7 @@ describe("web company activity block contracts", () => {
 
     expect(mergeBlock(run, {
       ...run,
+      activityOrder: 1,
       status: "completed",
       summary: "Completed",
       payload: { runStatus: "completed", completedSteps: 3 },
@@ -139,5 +140,45 @@ describe("web company activity block contracts", () => {
       },
     }, "Stale fallback", 200)
     expect(afterStalePatch).toEqual(currentMessages)
+  })
+
+  it("uses activity order to reject out-of-order equal-version definition operations", () => {
+    const envelope = (action: string, activityOrder: number) => ({
+      op: "put" as const,
+      block: {
+        id: "workflow-definition:ordered",
+        type: "workflow-definition" as const,
+        version: 7,
+        activityOrder,
+        status: "done" as const,
+        title: "Ordered workflow",
+        summary: action,
+        payload: {
+          workflowId: "ordered",
+          action,
+          definitionStatus: "active",
+          openPath: "/workflow/ordered",
+        },
+      },
+    })
+    const created = envelope("trigger-created", 10)
+    const deleted = envelope("trigger-deleted", 20)
+    const definitionUpdated = envelope("updated", 15)
+    const approvalDecided = envelope("trigger-approval-decided", 30)
+
+    let messages = applyBlockEnvelopeToMessages([], created, "created", 10)
+    messages = applyBlockEnvelopeToMessages(messages, deleted, "deleted", 20)
+    messages = applyBlockEnvelopeToMessages(messages, created, "late created", 30)
+    messages = applyBlockEnvelopeToMessages(messages, definitionUpdated, "late update", 40)
+    messages = applyBlockEnvelopeToMessages(messages, approvalDecided, "decided", 50)
+    expect(messages.flatMap((message) => message.blocks ?? [])).toEqual([
+      expect.objectContaining({
+        version: 7,
+        activityOrder: 30,
+        payload: expect.objectContaining({ action: "trigger-approval-decided" }),
+      }),
+    ])
+
+    expect(applyBlockEnvelopeToMessages(messages, approvalDecided, "decided", 60)).toEqual(messages)
   })
 })

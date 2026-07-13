@@ -776,6 +776,67 @@ describe("useLiveSession (read-only)", () => {
     expect(result.current.messages.filter((m) => m.content === "Intro")).toHaveLength(1)
   })
 
+  it("keeps equal-version Workflow activity monotonic across out-of-order live deltas and reload", async () => {
+    const block = (action: string, activityOrder: number) => ({
+      id: "workflow-definition:ordered-live",
+      type: "workflow-definition" as const,
+      version: 7,
+      activityOrder,
+      status: "done" as const,
+      title: "Ordered live workflow",
+      summary: action,
+      payload: {
+        workflowId: "ordered-live",
+        action,
+        definitionStatus: "active",
+        openPath: "/workflow/ordered-live",
+      },
+    })
+    getSession.mockResolvedValueOnce({ status: "running", messages: [] })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() => useLiveSession("s-ordered-live", { subscribe, readOnly: true }))
+    await act(async () => { await Promise.resolve() })
+
+    act(() => {
+      emit("session:delta", {
+        sessionId: "s-ordered-live",
+        type: "block",
+        content: "deleted",
+        block: { op: "put", block: block("trigger-deleted", 20) },
+      })
+      emit("session:delta", {
+        sessionId: "s-ordered-live",
+        type: "block",
+        content: "late created",
+        block: { op: "put", block: block("trigger-created", 10) },
+      })
+    })
+    expect(result.current.messages.flatMap((message) => message.blocks ?? [])[0]?.payload.action)
+      .toBe("trigger-deleted")
+
+    getSession.mockResolvedValueOnce({
+      status: "idle",
+      messages: [{
+        id: "persisted-ordered-live",
+        role: "assistant",
+        content: "decided",
+        timestamp: 30,
+        blocks: [block("trigger-approval-decided", 30)],
+      }],
+    })
+    await act(async () => { await result.current.reload("s-ordered-live") })
+    act(() => emit("session:delta", {
+      sessionId: "s-ordered-live",
+      type: "block",
+      content: "late definition update",
+      block: { op: "put", block: block("updated", 25) },
+    }))
+    expect(result.current.messages.flatMap((message) => message.blocks ?? [])[0]).toMatchObject({
+      activityOrder: 30,
+      payload: { action: "trigger-approval-decided" },
+    })
+  })
+
   it.each([
     {
       label: "successful",

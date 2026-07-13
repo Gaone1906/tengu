@@ -193,6 +193,15 @@ export function validateBlockEnvelope(input: unknown): BlockValidationResult {
   const version = typeof input.block.version === "number" && Number.isFinite(input.block.version)
     ? input.block.version
     : 1;
+  const activityOrderRaw = input.block.activityOrder;
+  const activityOrder = typeof activityOrderRaw === "number"
+    && Number.isSafeInteger(activityOrderRaw)
+    && activityOrderRaw > 0
+      ? activityOrderRaw
+      : undefined;
+  if (activityOrderRaw !== undefined && activityOrder === undefined) {
+    return { ok: false, error: "block activity order is invalid" };
+  }
   const payloadRaw = input.block.payload ?? {};
   if (!isJsonObject(payloadRaw)) return { ok: false, error: "block payload must be safe JSON" };
 
@@ -215,6 +224,7 @@ export function validateBlockEnvelope(input: unknown): BlockValidationResult {
     id,
     type,
     version,
+    ...(activityOrder ? { activityOrder } : {}),
     payload: payloadRaw,
     ...(status ? { status } : {}),
     ...(cleanText(input.block.sourceEngine, 80) ? { sourceEngine: cleanText(input.block.sourceEngine, 80) } : {}),

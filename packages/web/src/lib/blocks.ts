@@ -64,6 +64,7 @@ export interface ChatBlock {
   id: string
   type: ChatBlockType
   version: number
+  activityOrder?: number
   status?: ChatBlockStatus
   sourceEngine?: string
   title?: string
@@ -188,6 +189,11 @@ export function isChatBlock(value: unknown): value is ChatBlock {
   if (typeof value.id !== 'string' || !/^[A-Za-z0-9._:-]{1,96}$/.test(value.id.trim())) return false
   if (typeof value.type !== 'string' || !SUPPORTED_BLOCK_TYPES.has(value.type as ChatBlockType)) return false
   if (typeof value.version !== 'number' || !Number.isFinite(value.version)) return false
+  if (value.activityOrder !== undefined && (
+    typeof value.activityOrder !== 'number'
+    || !Number.isSafeInteger(value.activityOrder)
+    || value.activityOrder <= 0
+  )) return false
   if (!isRecord(value.payload) || !isSafeJson(value.payload)) return false
   if (value.status !== undefined && (
     typeof value.status !== 'string'
@@ -256,7 +262,7 @@ export function blockFallbackContent(block: ChatBlock): string {
 }
 
 export function mergeBlock(existing: ChatBlock, patch: ChatBlock): ChatBlock {
-  if (patch.version < existing.version) return existing
+  if (shouldIgnoreBlockUpdate(existing, patch)) return existing
   return {
     ...existing,
     ...patch,
@@ -268,6 +274,18 @@ export function mergeBlock(existing: ChatBlock, patch: ChatBlock): ChatBlock {
       ...patch.payload,
     },
   }
+}
+
+function shouldIgnoreBlockUpdate(existing: ChatBlock, incoming: ChatBlock): boolean {
+  if (incoming.version < existing.version) return true
+  if (incoming.version > existing.version) return false
+  const isActivity = existing.type === 'todo-activity'
+    || existing.type === 'workflow-definition'
+    || existing.type === 'workflow-run'
+  if (!isActivity) return false
+  if (existing.activityOrder === undefined && incoming.activityOrder === undefined) return true
+  if (incoming.activityOrder === undefined) return true
+  return existing.activityOrder !== undefined && incoming.activityOrder <= existing.activityOrder
 }
 
 function blockFallbackCandidates(block: ChatBlock): string[] {
@@ -313,7 +331,7 @@ export function applyBlockEnvelopeToMessages(
   if (existingIndex >= 0) {
     const existingBlock = (messages[existingIndex]?.blocks || [])
       .find((block) => block.id === envelope.block.id)
-    if (envelope.op === 'patch' && existingBlock && envelope.block.version < existingBlock.version) {
+    if (existingBlock && shouldIgnoreBlockUpdate(existingBlock, envelope.block)) {
       return messages
     }
     return messages.map((message, index) => {

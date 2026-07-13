@@ -27,13 +27,15 @@ beforeAll(async () => {
 });
 
 describe("messages partial (mid-turn streaming) blocks", () => {
-  it("adds nullable partial/seq/tool_call columns on init", () => {
+  it("adds nullable partial/seq/tool_call/tool_id/blocks/meta columns on init", () => {
     const db = reg.initDb();
     const cols = (db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>).map((c) => c.name);
     expect(cols).toContain("partial");
     expect(cols).toContain("seq");
     expect(cols).toContain("tool_call");
+    expect(cols).toContain("tool_id");
     expect(cols).toContain("blocks");
+    expect(cols).toContain("meta");
   });
 
   it("persists partial blocks in seq order with tool metadata, then wipes them", () => {
@@ -224,6 +226,57 @@ describe("messages partial (mid-turn streaming) blocks", () => {
       payload: { items: [{ id: "a", text: "Read code", status: "running" }] },
     });
     expect(message.blocks?.[0]?.payload).not.toHaveProperty("summary");
+  });
+
+  it("rejects out-of-order equal-version Workflow activity while exact replays stay byte-idempotent", () => {
+    newSession("workflow-activity-order");
+    const envelope = (action: string, activityOrder: number) => ({
+      op: "put" as const,
+      block: {
+        id: "workflow-definition:ordered",
+        type: "workflow-definition" as const,
+        version: 7,
+        activityOrder,
+        status: "done" as const,
+        title: "Ordered workflow",
+        summary: action,
+        payload: {
+          workflowId: "ordered",
+          action,
+          definitionStatus: "active",
+          openPath: "/workflow/ordered",
+        },
+      },
+    });
+
+    const created = envelope("trigger-created", 10);
+    const deleted = envelope("trigger-deleted", 20);
+    const definitionUpdated = envelope("updated", 15);
+    const approvalDecided = envelope("trigger-approval-decided", 30);
+    reg.applyBlockEnvelope("workflow-activity-order", created);
+    reg.applyBlockEnvelope("workflow-activity-order", deleted);
+    reg.applyBlockEnvelope("workflow-activity-order", created);
+    reg.applyBlockEnvelope("workflow-activity-order", definitionUpdated);
+    expect(reg.getMessages("workflow-activity-order")[0].blocks?.[0]).toMatchObject({
+      activityOrder: 20,
+      payload: { action: "trigger-deleted" },
+    });
+    reg.applyBlockEnvelope("workflow-activity-order", approvalDecided);
+
+    const persisted = reg.getMessages("workflow-activity-order");
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0].blocks?.[0]).toMatchObject({
+      version: 7,
+      activityOrder: 30,
+      payload: { action: "trigger-approval-decided" },
+    });
+
+    const beforeReplay = reg.initDb()
+      .prepare("SELECT content, blocks FROM messages WHERE session_id = ?")
+      .get("workflow-activity-order");
+    reg.applyBlockEnvelope("workflow-activity-order", approvalDecided);
+    expect(reg.initDb().prepare("SELECT content, blocks FROM messages WHERE session_id = ?").get("workflow-activity-order"))
+      .toEqual(beforeReplay);
   });
 
   it("updates synthetic block row text created with custom fallback text", () => {
@@ -475,11 +528,15 @@ describe("messages partial (mid-turn streaming) blocks", () => {
     expect(cols).toContain("partial");
     expect(cols).toContain("seq");
     expect(cols).toContain("tool_call");
+    expect(cols).toContain("tool_id");
     expect(cols).toContain("blocks");
-    const row = legacy.prepare("SELECT content, partial, seq, tool_call, blocks FROM messages WHERE id='m1'").get() as Record<string, unknown>;
+    expect(cols).toContain("meta");
+    const row = legacy.prepare("SELECT content, partial, seq, tool_call, tool_id, blocks, meta FROM messages WHERE id='m1'").get() as Record<string, unknown>;
     expect(row.content).toBe("old");
     expect(row.partial).toBeNull();
+    expect(row.tool_id).toBeNull();
     expect(row.blocks).toBeNull();
+    expect(row.meta).toBeNull();
     legacy.close();
   });
 });

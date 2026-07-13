@@ -86,7 +86,7 @@ const context = {
   },
 } as unknown as import("../api.js").ApiContext;
 
-function toolHeaders(session: import("../../shared/types.js").Session, toolName: string, operationId = crypto.randomUUID()) {
+function toolHeaders(session: import("../../shared/types.js").Session, toolName: string, operationId: string = crypto.randomUUID()) {
   return {
     [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
     [CALLER_SESSION_HEADER]: session.id,
@@ -94,6 +94,10 @@ function toolHeaders(session: import("../../shared/types.js").Session, toolName:
     [ACTIVITY_OPERATION_HEADER]: operationId,
     [ACTIVITY_TOOL_HEADER]: toolName,
   };
+}
+
+function omitHeader(headers: Record<string, string>, name: string): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers).filter(([key]) => key !== name));
 }
 
 async function call(
@@ -110,6 +114,13 @@ async function call(
 
 function activityBlocks(sessionId: string) {
   return registry.getMessages(sessionId).flatMap((message) => message.blocks ?? []);
+}
+
+function storedBlockBytes(sessionId: string, blockId: string): string | null {
+  const rows = registry.initDb()
+    .prepare("SELECT blocks FROM messages WHERE session_id = ? AND blocks IS NOT NULL ORDER BY rowid")
+    .all(sessionId) as Array<{ blocks: string }>;
+  return rows.find((row) => (JSON.parse(row.blocks) as Array<{ id: string }>).some((block) => block.id === blockId))?.blocks ?? null;
 }
 
 function companyEvents() {
@@ -150,6 +161,77 @@ beforeEach(() => {
 });
 
 describe("persisted Todo and Workflow operation activity", () => {
+  it("keeps historical Workflow-run Sessions byte-identical across signed Todo, definition, run, and trigger mutations", async () => {
+    const historical = registry.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: "historical-workflow-run-activity",
+      employee: "coo",
+      workflowProvenance: {
+        kind: "run",
+        workflowId: "historical-receipt-workflow",
+        workflowName: "Historical Receipt Workflow",
+        runId: "historical-run",
+        triggerSource: "manual",
+      },
+    });
+    registry.insertMessage(historical.id, "user", "Historical request");
+    registry.insertMessage(historical.id, "assistant", "Historical response");
+    const database = registry.initDb();
+    const snapshot = () => ({
+      session: database.prepare("SELECT * FROM sessions WHERE id = ?").get(historical.id),
+      messages: database.prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY rowid").all(historical.id),
+    });
+    const before = snapshot();
+
+    const createdTodo = await call(
+      "POST",
+      "/api/work-items",
+      { title: "Historical caller Todo" },
+      toolHeaders(historical, "create_work_item"),
+    );
+    expect(createdTodo.status).toBe(201);
+    expect(createdTodo.body).not.toHaveProperty("activityReceiptId");
+
+    const legacyDefinition = { ...definition, id: "historical-receipt-workflow" };
+    const createdDefinition = await call(
+      "POST",
+      "/api/workflow-definitions",
+      legacyDefinition,
+      toolHeaders(historical, "create_workflow"),
+    );
+    expect(createdDefinition.status).toBe(201);
+    expect(createdDefinition.body).not.toHaveProperty("activityReceiptId");
+
+    const started = await call(
+      "POST",
+      "/api/workflow-definitions/historical-receipt-workflow/run",
+      { idempotencyKey: "historical-run-start" },
+      toolHeaders(historical, "start_workflow_run"),
+    );
+    expect(started.status).toBe(201);
+    expect(started.body).not.toHaveProperty("activityReceiptId");
+
+    const createdTrigger = await call(
+      "POST",
+      "/api/workflow-triggers",
+      {
+        kind: "webhook",
+        name: "historical-receipt-trigger",
+        event: "historical.receipt.ready",
+        targetWorkflowId: "historical-receipt-workflow",
+      },
+      toolHeaders(historical, "create_trigger"),
+    );
+    expect(createdTrigger.status).toBe(201);
+    expect(createdTrigger.body).not.toHaveProperty("activityReceiptId");
+
+    expect(snapshot()).toEqual(before);
+    expect(emitted.filter((entry) => entry.event === "session:delta" && entry.payload.sessionId === historical.id)).toEqual([]);
+    expect(companyEvents()).toHaveLength(4);
+    expect(companyEvents().every((entry) => entry.payload.sessionId === undefined)).toBe(true);
+  });
+
   it("keeps independent stable Todo and Workflow definition blocks and emits once after each mutation", async () => {
     const createdTodo = await call("POST", "/api/work-items", { title: "Ship receipt" }, toolHeaders(worker, "create_work_item"));
     expect(createdTodo.status).toBe(201);
@@ -217,6 +299,172 @@ describe("persisted Todo and Workflow operation activity", () => {
     expect(forged.status).toBe(403);
     expect(companyEvents()).toEqual([]);
     expect(activityBlocks(worker.id)).toEqual([]);
+
+    const mismatched = await call("POST", "/api/work-items", { title: "Mismatched capability" }, {
+      [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+      [CALLER_SESSION_HEADER]: worker.id,
+      [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(coo.id),
+      [ACTIVITY_OPERATION_HEADER]: crypto.randomUUID(),
+      [ACTIVITY_TOOL_HEADER]: "create_work_item",
+    });
+    expect(mismatched.status).toBe(403);
+    expect(companyEvents()).toEqual([]);
+    expect(activityBlocks(worker.id)).toEqual([]);
+  });
+
+  it("suppresses receipt projection for incomplete, malformed, or route-mismatched correlation tuples", async () => {
+    const missingTool = await call(
+      "POST",
+      "/api/work-items",
+      { title: "Missing tool tuple" },
+      omitHeader(toolHeaders(worker, "create_work_item"), ACTIVITY_TOOL_HEADER),
+    );
+    expect(missingTool.status).toBe(201);
+    expect(missingTool.body).not.toHaveProperty("activityReceiptId");
+
+    const wrongTool = await call(
+      "POST",
+      "/api/work-items",
+      { title: "Wrong tool tuple" },
+      toolHeaders(worker, "delete_trigger"),
+    );
+    expect(wrongTool.status).toBe(201);
+    expect(wrongTool.body).not.toHaveProperty("activityReceiptId");
+
+    const missingOperation = await call(
+      "POST",
+      "/api/workflow-definitions",
+      { ...definition, id: "missing-operation-workflow" },
+      omitHeader(toolHeaders(coo, "create_workflow"), ACTIVITY_OPERATION_HEADER),
+    );
+    expect(missingOperation.status).toBe(201);
+    expect(missingOperation.body).not.toHaveProperty("activityReceiptId");
+
+    const malformedOperation = await call(
+      "POST",
+      "/api/workflow-definitions/missing-operation-workflow/run",
+      { idempotencyKey: "malformed-operation-run" },
+      toolHeaders(coo, "start_workflow_run", "not-a-uuid"),
+    );
+    expect(malformedOperation.status).toBe(201);
+    expect(malformedOperation.body).not.toHaveProperty("activityReceiptId");
+
+    const missingMarker = await call(
+      "POST",
+      "/api/workflow-triggers",
+      {
+        kind: "webhook",
+        name: "missing-marker-trigger",
+        event: "missing.marker",
+        targetWorkflowId: "missing-operation-workflow",
+      },
+      omitHeader(toolHeaders(coo, "create_trigger"), TOOL_CALL_HEADER),
+    );
+    expect(missingMarker.status).toBe(201);
+    expect(missingMarker.body).not.toHaveProperty("activityReceiptId");
+
+    expect(activityBlocks(worker.id)).toEqual([]);
+    expect(activityBlocks(coo.id)).toEqual([
+      expect.objectContaining({
+        type: "workflow-run",
+        payload: expect.not.objectContaining({ activityReceipt: expect.anything() }),
+      }),
+    ]);
+    expect(companyEvents()).toHaveLength(5);
+    expect(companyEvents().every((entry) => entry.payload.sessionId === undefined)).toBe(true);
+  });
+
+  it("projects receipts only for valid exact Todo, definition, run, and trigger tuples", async () => {
+    const todo = await call(
+      "POST",
+      "/api/work-items",
+      { title: "Exact Todo tuple" },
+      toolHeaders(worker, "create_work_item"),
+    );
+    expect(todo.body.activityReceiptId).toBe(`todo:${todo.body.workItem.id}`);
+
+    const exactDefinition = { ...definition, id: "exact-tuple-workflow" };
+    const workflow = await call(
+      "POST",
+      "/api/workflow-definitions",
+      exactDefinition,
+      toolHeaders(coo, "create_workflow"),
+    );
+    expect(workflow.body.activityReceiptId).toBe("workflow-definition:exact-tuple-workflow");
+
+    const run = await call(
+      "POST",
+      "/api/workflow-definitions/exact-tuple-workflow/run",
+      { idempotencyKey: "exact-tuple-run" },
+      toolHeaders(coo, "start_workflow_run"),
+    );
+    expect(run.body.activityReceiptId).toMatch(/^workflow-run:exact-tuple-workflow:/);
+
+    const trigger = await call(
+      "POST",
+      "/api/workflow-triggers",
+      {
+        kind: "webhook",
+        name: "exact-tuple-trigger",
+        event: "exact.tuple",
+        targetWorkflowId: "exact-tuple-workflow",
+      },
+      toolHeaders(coo, "create_trigger"),
+    );
+    expect(trigger.body.activityReceiptId).toBe("workflow-definition:exact-tuple-workflow");
+  });
+
+  it.each([76, 77, 128])("keeps %i-character Workflow identity through create, update, trigger, and durable reload", async (length) => {
+    const workflowId = `w${"a".repeat(length - 1)}`;
+    const longDefinition = { ...definition, id: workflowId, title: `Workflow ${length}` };
+    const created = await call(
+      "POST",
+      "/api/workflow-definitions",
+      longDefinition,
+      toolHeaders(coo, "create_workflow"),
+    );
+    expect(created.status).toBe(201);
+    const receiptId = created.body.activityReceiptId as string;
+    expect(receiptId).toBeTypeOf("string");
+    expect(receiptId.length).toBeLessThanOrEqual(96);
+    if (length === 76) expect(receiptId).toBe(`workflow-definition:${workflowId}`);
+
+    const updated = await call(
+      "PUT",
+      `/api/workflow-definitions/${encodeURIComponent(workflowId)}`,
+      { title: `Workflow ${length} updated`, expectedVersion: 1 },
+      toolHeaders(coo, "update_workflow"),
+    );
+    expect(updated.status).toBe(200);
+    expect(updated.body.activityReceiptId).toBe(receiptId);
+
+    const trigger = await call(
+      "POST",
+      "/api/workflow-triggers",
+      {
+        kind: "webhook",
+        name: `long-workflow-${length}`,
+        event: `long.workflow.${length}`,
+        targetWorkflowId: workflowId,
+      },
+      toolHeaders(coo, "create_trigger"),
+    );
+    expect(trigger.status).toBe(201);
+    expect(trigger.body.activityReceiptId).toBe(receiptId);
+
+    const reloaded = registry.getMessages(coo.id)
+      .flatMap((message) => message.blocks ?? [])
+      .find((block) => block.id === receiptId);
+    expect(reloaded).toMatchObject({
+      id: receiptId,
+      type: "workflow-definition",
+      payload: {
+        workflowId,
+        action: "trigger-created",
+        openPath: `/workflow/${encodeURIComponent(workflowId)}`,
+      },
+    });
+    expect(activityBlocks(coo.id).filter((block) => block.id === receiptId)).toHaveLength(1);
   });
 
   it("patches the Task 5 run block on start/replay and the target definition block on trigger mutations", async () => {
@@ -272,7 +520,7 @@ describe("persisted Todo and Workflow operation activity", () => {
       toolHeaders(coo, "resolve_workflow_gate"),
     );
     expect(decided.status).toBe(200);
-    expect(decided.body.activityReceiptId).toBe(runReceipt);
+    expect(decided.body).not.toHaveProperty("activityReceiptId");
 
     const cancellable = await call(
       "POST",
@@ -347,7 +595,7 @@ describe("persisted Todo and Workflow operation activity", () => {
     ]);
   });
 
-  it("treats equal versions as idempotent and refuses stale activity overwrites", async () => {
+  it("treats only exact equal activity as idempotent and refuses stale or unsequenced equal overwrites", async () => {
     const created = await call("POST", "/api/work-items", { title: "Monotonic" }, toolHeaders(worker, "create_work_item"));
     const item = created.body.workItem;
     const assigned = await call(
@@ -369,8 +617,13 @@ describe("persisted Todo and Workflow operation activity", () => {
     expect(activityBlocks(worker.id).filter((block) => block.id === `todo:${item.id}`)).toHaveLength(1);
     expect(activityBlocks(worker.id).find((block) => block.id === `todo:${item.id}`)).toMatchObject({
       version: current.version,
-      payload: { action: "equal-version-replay" },
+      payload: { action: "assigned" },
     });
+
+    const persisted = activityBlocks(worker.id).find((block) => block.id === `todo:${item.id}`)!;
+    const beforeReplay = storedBlockBytes(worker.id, `todo:${item.id}`);
+    registry.applyBlockEnvelope(worker.id, { op: "put", block: persisted }, "assigned");
+    expect(storedBlockBytes(worker.id, `todo:${item.id}`)).toBe(beforeReplay);
   });
 
   it("persists before a lost response and an idempotent approval replay reuses the same receipt without a second event", async () => {
@@ -391,6 +644,8 @@ describe("persisted Todo and Workflow operation activity", () => {
     });
     expect(companyEvents()).toHaveLength(1);
 
+    const blockBytes = storedBlockBytes(worker.id, `todo:${item.id}`);
+
     const replay = await call(
       "POST",
       `/api/work-items/${item.id}/approval/request`,
@@ -401,6 +656,171 @@ describe("persisted Todo and Workflow operation activity", () => {
     expect(replay.body.activityReceiptId).toBe(`todo:${item.id}`);
     expect(activityBlocks(worker.id).filter((block) => block.id === `todo:${item.id}`)).toHaveLength(1);
     expect(companyEvents()).toHaveLength(1);
+    expect(storedBlockBytes(worker.id, `todo:${item.id}`)).toBe(blockBytes);
+  });
+
+  it("keeps Todo status, assignment, and approval-escalation no-ops receipt-stable and mutation-silent", async () => {
+    const created = await call(
+      "POST",
+      "/api/work-items",
+      { title: "Todo no-op controls", assignee: "worker" },
+      toolHeaders(worker, "create_work_item"),
+    );
+    const todoId = created.body.workItem.id as string;
+    const blockId = `todo:${todoId}`;
+
+    const assigned = await call(
+      "POST",
+      `/api/work-items/${todoId}/assign`,
+      { assignee: "worker" },
+      toolHeaders(coo, "assign_work_item"),
+    );
+    expect(assigned.status).toBe(200);
+    const assignmentVersion = assigned.body.workItem.version;
+    const assignmentBytes = storedBlockBytes(coo.id, blockId);
+    const assignmentEvents = companyEvents().length;
+    const assignmentReplay = await call(
+      "POST",
+      `/api/work-items/${todoId}/assign`,
+      { assignee: "worker" },
+      toolHeaders(coo, "assign_work_item"),
+    );
+    expect(assignmentReplay.body).toMatchObject({ activityReceiptId: blockId, workItem: { version: assignmentVersion } });
+    expect(storedBlockBytes(coo.id, blockId)).toBe(assignmentBytes);
+    expect(companyEvents()).toHaveLength(assignmentEvents);
+
+    const transitioned = await call(
+      "POST",
+      `/api/work-items/${todoId}/status`,
+      { status: "executing" },
+      toolHeaders(worker, "update_work_item"),
+    );
+    const statusVersion = transitioned.body.workItem.version;
+    const statusBytes = storedBlockBytes(worker.id, blockId);
+    const statusEvents = companyEvents().length;
+    const statusReplay = await call(
+      "POST",
+      `/api/work-items/${todoId}/status`,
+      { status: "executing" },
+      toolHeaders(worker, "update_work_item"),
+    );
+    expect(statusReplay.body).toMatchObject({ activityReceiptId: blockId, workItem: { version: statusVersion } });
+    expect(storedBlockBytes(worker.id, blockId)).toBe(statusBytes);
+    expect(companyEvents()).toHaveLength(statusEvents);
+
+    await call(
+      "POST",
+      `/api/work-items/${todoId}/approval/request`,
+      { request: "Review no-op controls", target: "coo" },
+      toolHeaders(worker, "request_work_item_approval"),
+    );
+    const escalated = await call(
+      "POST",
+      `/api/work-items/${todoId}/approval/escalate`,
+      { reason: "Operator review" },
+      toolHeaders(coo, "escalate_work_item_approval"),
+    );
+    const escalationVersion = escalated.body.workItem.version;
+    const escalationBytes = storedBlockBytes(coo.id, blockId);
+    const escalationEvents = companyEvents().length;
+    const escalationReplay = await call(
+      "POST",
+      `/api/work-items/${todoId}/approval/escalate`,
+      { reason: "Operator review" },
+      toolHeaders(coo, "escalate_work_item_approval"),
+    );
+    expect(escalationReplay.body).toMatchObject({ activityReceiptId: blockId, workItem: { version: escalationVersion } });
+    expect(storedBlockBytes(coo.id, blockId)).toBe(escalationBytes);
+    expect(companyEvents()).toHaveLength(escalationEvents);
+  });
+
+  it("keeps run cancellation, gate escalation, and trigger escalation no-ops receipt-free and mutation-silent", async () => {
+    expect((await call("POST", "/api/workflow-definitions", definition, toolHeaders(coo, "create_workflow"))).status).toBe(201);
+
+    const gateRun = await call(
+      "POST",
+      "/api/workflow-definitions/receipt-workflow/run",
+      { idempotencyKey: "noop-gate-run" },
+      toolHeaders(coo, "start_workflow_run"),
+    );
+    const gateReceipt = gateRun.body.activityReceiptId as string;
+    const gateEscalated = await call(
+      "POST",
+      `/api/workflow-definitions/receipt-workflow/runs/${gateRun.body.runId}/gate-approval/escalate`,
+      {},
+      toolHeaders(coo, "escalate_workflow_gate"),
+    );
+    const gateRevision = gateEscalated.body.revision;
+    const gateBytes = storedBlockBytes(coo.id, gateReceipt);
+    const gateEvents = companyEvents().length;
+    const gateReplay = await call(
+      "POST",
+      `/api/workflow-definitions/receipt-workflow/runs/${gateRun.body.runId}/gate-approval/escalate`,
+      {},
+      toolHeaders(coo, "escalate_workflow_gate"),
+    );
+    expect(gateReplay.body).not.toHaveProperty("activityReceiptId");
+    expect(gateReplay.body.revision).toBe(gateRevision);
+    expect(storedBlockBytes(coo.id, gateReceipt)).toBe(gateBytes);
+    expect(companyEvents()).toHaveLength(gateEvents);
+
+    const cancellable = await call(
+      "POST",
+      "/api/workflow-definitions/receipt-workflow/run",
+      { idempotencyKey: "noop-cancel-run" },
+      toolHeaders(coo, "start_workflow_run"),
+    );
+    const cancelReceipt = cancellable.body.activityReceiptId as string;
+    const cancelled = await call(
+      "POST",
+      `/api/workflow-definitions/receipt-workflow/runs/${cancellable.body.runId}/cancel`,
+      { reason: "No longer needed" },
+      toolHeaders(coo, "cancel_workflow_run"),
+    );
+    const cancellationRevision = cancelled.body.revision;
+    const cancellationBytes = storedBlockBytes(coo.id, cancelReceipt);
+    const cancellationEvents = companyEvents().length;
+    const cancellationReplay = await call(
+      "POST",
+      `/api/workflow-definitions/receipt-workflow/runs/${cancellable.body.runId}/cancel`,
+      { reason: "No longer needed" },
+      toolHeaders(coo, "cancel_workflow_run"),
+    );
+    expect(cancellationReplay.body).not.toHaveProperty("activityReceiptId");
+    expect(cancellationReplay.body.revision).toBe(cancellationRevision);
+    expect(storedBlockBytes(coo.id, cancelReceipt)).toBe(cancellationBytes);
+    expect(companyEvents()).toHaveLength(cancellationEvents);
+
+    const pollScript = path.join(evidence, "noop-poll.sh");
+    fs.writeFileSync(pollScript, "#!/bin/sh\nprintf '%s' '{}'\n", "utf8");
+    fs.chmodSync(pollScript, 0o700);
+    expect((await call("POST", "/api/workflow-triggers", {
+      kind: "poll",
+      name: "noop-poll",
+      event: "noop.poll",
+      targetWorkflowId: "receipt-workflow",
+      command: pollScript,
+      intervalSeconds: 60,
+    }, toolHeaders(coo, "create_trigger"))).status).toBe(201);
+    const triggerEscalated = await call(
+      "POST",
+      "/api/workflow-triggers/noop-poll/activation-approval/escalate",
+      {},
+      toolHeaders(coo, "escalate_poll_activation"),
+    );
+    const triggerBytes = storedBlockBytes(coo.id, "workflow-definition:receipt-workflow");
+    const triggerEvents = companyEvents().length;
+    const triggerReplay = await call(
+      "POST",
+      "/api/workflow-triggers/noop-poll/activation-approval/escalate",
+      {},
+      toolHeaders(coo, "escalate_poll_activation"),
+    );
+    expect(triggerEscalated.status).toBe(200);
+    expect(triggerReplay.body).not.toHaveProperty("activityReceiptId");
+    expect(triggerReplay.body.trigger).toEqual(triggerEscalated.body.trigger);
+    expect(storedBlockBytes(coo.id, "workflow-definition:receipt-workflow")).toBe(triggerBytes);
+    expect(companyEvents()).toHaveLength(triggerEvents);
   });
 
   it("covers every canonical Todo mutation boundary with one typed event per durable write", async () => {

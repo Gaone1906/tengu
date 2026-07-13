@@ -71,6 +71,9 @@ export interface ChatBlock {
   id: string;
   type: ChatBlockType;
   version: number;
+  /** Monotonic server operation order for independent activity mutations that
+   * may share the same domain version (for example Workflow trigger changes). */
+  activityOrder?: number;
   status?: ChatBlockStatus;
   sourceEngine?: string;
   title?: string;

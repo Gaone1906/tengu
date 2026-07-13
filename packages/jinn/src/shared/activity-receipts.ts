@@ -1,6 +1,24 @@
+import { createHash } from "node:crypto";
+
 const ACTIVITY_RECEIPT_ID_MAX_CHARS = 96;
 const ACTIVITY_RESULT_MAX_CHARS = 16_000;
 const ACTIVITY_RECEIPT_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
+const WORKFLOW_DEFINITION_ACTIVITY_PREFIX = "workflow-definition:";
+const WORKFLOW_DEFINITION_DIGEST_CHARS = 16;
+
+/** Stable activity block id for the full 128-character Workflow id domain.
+ * Short ids remain readable; long ids retain a readable prefix plus a
+ * collision-resistant digest while preserving the full identity in payload. */
+export function workflowDefinitionActivityBlockId(workflowId: string): string {
+  const full = `${WORKFLOW_DEFINITION_ACTIVITY_PREFIX}${workflowId}`;
+  if (full.length <= ACTIVITY_RECEIPT_ID_MAX_CHARS) return full;
+  const digest = createHash("sha256").update(workflowId).digest("hex").slice(0, WORKFLOW_DEFINITION_DIGEST_CHARS);
+  const readableChars = ACTIVITY_RECEIPT_ID_MAX_CHARS
+    - WORKFLOW_DEFINITION_ACTIVITY_PREFIX.length
+    - 1
+    - digest.length;
+  return `${WORKFLOW_DEFINITION_ACTIVITY_PREFIX}${workflowId.slice(0, readableChars)}:${digest}`;
+}
 
 function exactResultObject(value: unknown): Record<string, unknown> | undefined {
   if (typeof value === "string") {
