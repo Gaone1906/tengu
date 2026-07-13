@@ -19,3 +19,5 @@ packages/jinn/.npmrc
 .hermes/
 # Local sprint/evidence sandboxes and captured runtime artifacts — never commit
 .jinn-*-sprint/
+# Local one-off recording/capture harnesses (contain personal paths) — never commit
+.tmp-*
