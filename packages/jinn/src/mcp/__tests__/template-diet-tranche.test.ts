@@ -10,6 +10,7 @@ const templatePath = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "..", "..", "..", "template", "CLAUDE.md",
 );
+const templateRoot = path.dirname(templatePath);
 
 /** Same ~4-chars-per-token approximation the 017b measurement used. */
 const approxTokens = (text: string): number => Math.ceil(text.length / 4);
@@ -60,6 +61,20 @@ describe("the GRS-017e template diet tranche (MCP-first realized)", () => {
 
     expect(remainingSideDoors).toEqual([]);
     expect(toolProtocolTokens).toBeGreaterThan(20);
+  });
+
+  it("ships compact Workflow run controls without routing through Todo tools", () => {
+    const workflowSkill = fs.readFileSync(path.join(templateRoot, "skills", "workflow", "SKILL.md"), "utf-8");
+    const todoSkill = fs.readFileSync(path.join(templateRoot, "skills", "todo-handling", "SKILL.md"), "utf-8");
+
+    expect(workflowSkill).toContain("activity receipts");
+    expect(workflowSkill).toContain("reportMode");
+    expect(workflowSkill).toContain("cancel_workflow_run");
+    expect(workflowSkill).toContain("Workflow run approval");
+    expect(workflowSkill).toContain("browser, CLI, cron, webhook, poll, and Todo-status");
+    expect(todoSkill).toContain("A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.");
+    expect(todoSkill).not.toContain("todoTransition");
+    expect(todoSkill).not.toContain("run's Todo");
   });
 });
 

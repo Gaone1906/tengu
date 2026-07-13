@@ -52,9 +52,11 @@ description: Builds and maintains the product codebase.
 
 ### Todos and Workflows
 
-Todos are the live work ledger. Employees find and update their assigned Todos, move finished work to `in_review`, and use `blocked` or `escalated` only when they cannot proceed.
+Todos are deliberately authored work in the live ledger. Employees find and update their assigned Todos, move finished work to `in_review`, and use `blocked` or `escalated` only when they cannot proceed.
 
-Workflows are reusable automations - the HOW. Use or propose one when the same job is repeatable, scheduled, or multi-step. Todos and Workflows stay separate: one records live work, the other defines how repeated work runs.
+Workflows are reusable automations - the HOW. Use or propose one when the same job is repeatable, scheduled, event-driven, or multi-step. A Workflow invocation never creates, links, transitions, approves, or mutates a Todo. A Todo-status trigger is a one-way input; the resulting Workflow run is independent.
+
+Workflow runs are durable records, not Sessions. A verified Session invocation reports and resumes that same Session unless its `reportMode` is `silent`; silent mode suppresses only resumption. Other start surfaces are invocation-less. Human gates and cancellation belong to the Workflow run and never change a Todo.
 
 ## Ranks
 

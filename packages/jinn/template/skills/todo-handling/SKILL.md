@@ -5,7 +5,7 @@ description: Create, assign, update, review, and archive Jinn Todos through the 
 
 # Todo Handling Skill
 
-Use this skill for durable work ownership and status tracking. Todos are the live company ledger; Workflows are the reusable HOW. A delegation, cron fire, or connector may mint a Todo automatically, so search before creating a duplicate. Workflow runs remain independent and never mint or own Todos.
+Use this skill for deliberately authored, durable work ownership and status tracking. Todos are the live company ledger; Workflows are the reusable HOW. Search before creating a duplicate. A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.
 
 ## Find the right Todo
 
@@ -37,9 +37,9 @@ Create a Todo only for durable work that needs an owner or review trail:
 1. Search for an existing item covering the same outcome.
 2. Call `create_work_item` with a concise title, enough context to act, and testable acceptance criteria.
 3. Use `assign_work_item` when assignment was not supplied or must change. Verify the employee with `get_employee` or `find_employees` first.
-4. Use `delegate_task` instead when the assignee should start immediately; it can use an existing `workItemId` or mint and link a new Todo atomically.
+4. Use `delegate_task` instead when the assignee should start immediately; it can use an existing `workItemId` or create and link a new Todo atomically.
 
-Do not invent provenance or attach approval fields during creation. Delegation, cron, connector, goal, and session bridges mint their own source records.
+Do not invent provenance or attach approval fields during creation. Each owning company surface records its own source provenance.
 
 ## Approval flow
 
@@ -72,7 +72,7 @@ Approvals are routed records on a Todo, separate from its lifecycle status. Gene
 
 4. If the routed manager/COO deliberately needs operator/aCEO authority, call `escalate_work_item_approval` with the pending Todo id and an optional reason. Escalation exposes the pending approval to that path; it does not approve or reject it.
 
-Workflow and Todo approvals are separate authorities. Todo approval tools never resolve, project, or mutate Workflow gates; Workflow completion, failure, timeout, cancellation, and approval decisions never change a Todo. A `todo-status` Workflow trigger consumes only the immutable event and Todo id as provenance, never ownership.
+Workflow and Todo approvals are separate authorities. Human Workflow gates use Workflow run approval, never Todo approval tools. Todo approval tools never resolve, project, or mutate Workflow gates; Workflow completion, failure, timeout, cancellation, and approval decisions never change a Todo. `cancel_workflow_run` touches no Todo. A Todo-status trigger is a one-way input; the resulting Workflow run is independent.
 
 ## Keep status honest
 
@@ -96,7 +96,7 @@ Use `archive_work_item` for obsolete or historical clutter while preserving its 
 
 ## Review loop
 
-1. Reviewer calls `get_work_item` and inspects the linked session/workflow evidence.
+1. Reviewer calls `get_work_item` and inspects the linked execution session plus any separately supplied evidence.
 2. If the Todo has a pending approval, use `decide_work_item_approval`; approve or reject with a precise evidence note.
 3. After a rejection, the worker revises, returns the Todo to `in_review`, and requests the next approval. The rejection path increments rounds and auto-escalates when the effective limit is reached.
 4. Use `escalate_work_item_approval` before the round cap only when the routed approver needs an operator/aCEO decision.

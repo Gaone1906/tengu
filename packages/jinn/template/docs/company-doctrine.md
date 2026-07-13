@@ -20,7 +20,13 @@ For company state, the Jinn MCP is the hands. Employees should use it to read an
 
 ## 5. Uniform Contracts
 
-The same contract should hold everywhere: sources emit events, Triggers match events, Workflows run repeatable procedures, and Todos independently record owned work. A Workflow may consume an immutable Todo-status event as provenance, but it never creates, links, owns, or mutates that Todo. Avoid parallel concepts that do the same job in different shapes.
+The same contract should hold everywhere: sources emit events, Triggers match events, Workflows run repeatable procedures, and Todos are deliberately authored to record owned work. Avoid parallel concepts that do the same job in different shapes.
+
+A Workflow invocation never creates, links, transitions, approves, or mutates a Todo. A Todo-status trigger is a one-way input; the resulting Workflow run is independent. Human gates use Workflow run approval, never Todo approval, and cancelling a Workflow run touches no Todo.
+
+Workflow runs are durable records, not Sessions. A verified Session invocation persists one `invocation: { sessionId, reportMode }` relation; a session-invoked Workflow reports to that same session unless reportMode is silent. Silent mode suppresses only Session resumption. Browser, CLI, cron, webhook, poll, and Todo-status starts are invocation-less unless a verified Session invokes them.
+
+Historical `engine: "workflow"` Sessions remain untouched, read-only evidence and redirect by their existing Workflow provenance. They are not live Workflow runs or live engine Sessions.
 
 ## 6. Lean Identity Context
 

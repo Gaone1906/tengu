@@ -5,7 +5,7 @@ description: Create, invoke, and track reusable Jinn Workflows with typed MCP to
 
 # Workflow Skill
 
-Use this skill when a job is repeatable, scheduled, event-driven, or has several durable phases. A Workflow is the reusable HOW; a Todo records one live piece of work. For a one-off cross-role task, use `delegate_task`. For a quick untracked question, use `spawn_session`.
+Use this skill when a job is repeatable, scheduled, event-driven, or has several durable phases. A Workflow is the reusable HOW. Workflow runs are durable records, not Sessions. A Workflow invocation never creates, links, transitions, approves, or mutates a Todo. For deliberately tracked one-off work, use a Todo or `delegate_task`; for a quick untracked question, use `spawn_session`.
 
 ## Names and discovery
 
@@ -52,6 +52,7 @@ For agent-side manual invocation, call `run_workflow_by_name`:
 {
   "name": "release-candidate-review",
   "input": { "candidate": "v2.4.0", "acceptance": "full suite green" },
+  "reportMode": "resume",
   "idempotencyKey": "release-v2.4.0-review"
 }
 ```
@@ -59,6 +60,8 @@ For agent-side manual invocation, call `run_workflow_by_name`:
 - `input` is a structured object frozen for that run and supplied to every phase.
 - Use one deterministic `idempotencyKey` per logical request. Reuse it only when retrying that same invocation; use a new key for genuinely new work.
 - Keep the returned `workflowId` and `runId`; they are the tracking coordinates.
+- A verified MCP Session invocation persists exactly one `invocation: { sessionId, reportMode }` relation. A session-invoked Workflow reports to that same session unless reportMode is silent. The default `resume` mode reports and resumes that Session; `reportMode: "silent"` suppresses only resumption, not durable run evidence or activity receipts.
+- All other start surfaces - browser, CLI, cron, webhook, poll, and Todo-status - are invocation-less unless a verified Session invokes them. They do not gain an invocation relation merely because an operator later views the run.
 
 CLI parity for an operator or local automation:
 
@@ -70,20 +73,26 @@ jinn workflow run <name> --input '{"candidate":"v2.4.0"}' --idempotency-key 'rel
 
 - Call `list_workflow_runs` with `workflowId` to find recent runs.
 - Call `get_workflow_run` with `workflowId` and `runId` for the current status, ordered `steps[]` receipts, errors, and linked phase-session evidence.
+- Mutating Workflow tools return bounded activity receipts for the invoking chat. Preview or open that persisted receipt instead of pasting a duplicate synthetic status message.
 - `running` means work is still in flight. `parked` means the run is waiting on its native routed Workflow approval. `completed` is terminal success. `failed` is an honest terminal failure; report the failed phase and `errors[]` instead of papering over it.
 - Do not busy-poll. Check when asked, when a callback/event wakes the session, or at a sensible operational boundary.
 - Report the canonical name, run id, terminal status, evidence/artifacts, and any failed or parked phase.
+- Historical `engine: "workflow"` Sessions remain untouched, read-only historical evidence. They redirect through their existing Workflow provenance; do not resume them or treat them as current Workflow runs.
 
 ## Loops, gates, and triggers
 
 - Every loop must be bounded with `loop.maxRoundsPerRun`. Give it a deterministic exit gate where possible. Exhausting the bound must remain a visible failure, not silent success.
-- When an approval gate parks a run, Jinn stores a native pending approval on the run. The routed manager/COO decides through the human Workflow approval surface. The resolved routed owner cannot decide their own approval, but an employee hierarchy root/COO is exempt from that enforcement check. Routed approvers should avoid approving work they personally executed and hand the decision to another authorized reviewer when possible.
+- When an approval gate parks a run, Jinn stores a native pending approval on the run. The routed manager/COO decides through the human Workflow approval surface for that run. Human gate decisions use Workflow run approval and never use Todo approval tools. The resolved routed owner cannot decide their own approval, but an employee hierarchy root/COO is exempt from that enforcement check. Routed approvers should avoid approving work they personally executed and hand the decision to another authorized reviewer when possible.
 - Todo tools never resolve or mutate a Workflow gate. If the routed manager/COO deliberately needs operator/aCEO involvement, call `escalate_workflow_gate`; operator escalation is not the default path for every gate.
 - Choose the wake-up that matches the job: `manual`, `schedule`, `todo-status`, `event`, or `poll`.
   - A schedule-backed SOP is synchronized to its managed cron trigger.
   - Event/webhook and poll bindings can be inspected with `list_triggers`; use `create_trigger` only for supported webhook or poll bindings.
   - Poll triggers begin approval-gated because they execute a command.
 - Avoid duplicate schedules or trigger bindings. Retire an obsolete definition with `retire_workflow`; do not delete run evidence.
+
+## Cancel a run
+
+Call `cancel_workflow_run` with the bound `workflowId` and `runId`, plus an optional bounded reason. Cancellation is terminal for the run and stops its run-owned phase sessions. It never transitions, approves, cancels, or otherwise touches a Todo.
 
 ## Stop and escalate
 

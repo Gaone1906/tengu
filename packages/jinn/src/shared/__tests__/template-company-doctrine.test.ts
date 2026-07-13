@@ -27,6 +27,38 @@ describe("template company doctrine", () => {
     for (const heading of headings) expect(doctrine).toContain(heading);
   });
 
+  it("ships the locked Workflow and Todo separation contract without stale coupling guidance", () => {
+    const currentGuidanceFiles = [
+      "CLAUDE.md",
+      "docs/company-doctrine.md",
+      "docs/org.md",
+      "skills/todo-handling/SKILL.md",
+      "skills/workflow/SKILL.md",
+    ];
+    const shippedGuidance = currentGuidanceFiles
+      .map((rel) => readTemplate(rel))
+      .join("\n");
+
+    const lockedPrinciples = [
+      "A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.",
+      "A Todo-status trigger is a one-way input; the resulting Workflow run is independent.",
+      "A session-invoked Workflow reports to that same session unless reportMode is silent.",
+      "Workflow runs are durable records, not Sessions.",
+    ];
+    for (const principle of lockedPrinciples) expect(shippedGuidance).toContain(principle);
+
+    const staleCouplingGuidance = [
+      "mirrored workflow",
+      "run's Todo",
+      "Todo that records each live run",
+      "workflow runs are entered automatically",
+      "todoTransition",
+    ];
+    for (const stale of staleCouplingGuidance) {
+      expect(shippedGuidance.toLowerCase()).not.toContain(stale.toLowerCase());
+    }
+  });
+
   it("links the doctrine and keeps active template prose on Todos, not legacy task boards", () => {
     expect(readTemplate("CLAUDE.md")).toContain("docs/company-doctrine.md");
     expect(readTemplate("docs/overview.md")).toContain("company-doctrine.md");

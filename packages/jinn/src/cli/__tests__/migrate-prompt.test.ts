@@ -274,6 +274,30 @@ describe("composeMigrationPrompt: against the REAL shipped template migrations",
       expect(prompt).toContain(path.join(templateMigrationsDir, v));
     }
   });
+
+  it("stages the 0.27.0 Workflow/Todo separation migration with preservation and compatibility guidance", () => {
+    const migrationVersion = "0.27.0";
+    const packageJsonPath = path.resolve(templateMigrationsDir, "../../package.json");
+    const packageVersion = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")).version as string;
+    const migrationPath = path.join(templateMigrationsDir, migrationVersion, "MIGRATION.md");
+
+    expect(scanFutureMigrations(templateMigrationsDir, packageVersion)).toContain(migrationVersion);
+    expect(fs.existsSync(migrationPath)).toBe(true);
+
+    const migration = fs.readFileSync(migrationPath, "utf-8");
+    for (const preserved of ["employee names", "org structure", "secrets", "unrelated preferences"]) {
+      expect(migration).toContain(preserved);
+    }
+    expect(migration).toContain("historical Workflow-source Todos remain ordinary audit records");
+    expect(migration).toContain("callback_deliveries");
+    expect(migration).toContain("sole generalized delivery store");
+    expect(migration).toContain("requeue");
+    expect(migration).toContain("dead-letter");
+    expect(migration).toContain("historical `engine: \"workflow\"` Sessions");
+    expect(migration).toContain("read-only historical evidence");
+    expect(migration).toContain("Do not create a Workflow delivery store");
+    expect(migration).not.toContain("rewrite historical Workflow-source Todos");
+  });
 });
 
 describe("scanFutureMigrations: dirs staged above the package version", () => {
