@@ -7,6 +7,38 @@ export type CompanyChangedEvent =
   | (CompanyChangedBase & { entity: "workflow-run"; workflowId: string; runId: string; version: number })
   | (CompanyChangedBase & { entity: "workflow-trigger"; workflowId: string; revision: string });
 
+export interface NoteSummary {
+  /** Public path below JINN_HOME, for example knowledge/product/brief.md. */
+  path: string;
+  title: string;
+  preview: string;
+  /** Knowledge-relative directory; the root folder is an empty string. */
+  folder: string;
+  updatedAt: string;
+  /** SHA-256 of the exact file bytes. */
+  revision: string;
+}
+
+export interface NoteDocument extends NoteSummary {
+  /** Editable content after the first Markdown heading. */
+  body: string;
+}
+
+export interface NoteFolder {
+  path: string;
+  name: string;
+  count: number;
+}
+
+export type NoteStoreResult<T> =
+  | { ok: true; value: T }
+  | {
+      ok: false;
+      reason: "invalid-path" | "forbidden" | "not-found" | "conflict" | "too-large" | "already-exists";
+      detail: string;
+      currentRevision?: string;
+    };
+
 /** Generous but bounded body size for durable communication-card metadata. */
 export const STRUCTURED_MESSAGE_BODY_MAX_CHARS = 16_000;
 

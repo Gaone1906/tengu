@@ -1,4 +1,10 @@
 import { authFetch } from "@/lib/auth"
+import type {
+  CreateNoteInput,
+  NoteDocumentResponse,
+  NotesListResponse,
+  UpdateNoteInput,
+} from "@/routes/notes/types"
 
 export interface TranscriptContentBlock {
   type: 'text' | 'tool_use' | 'tool_result' | 'thinking'
@@ -926,6 +932,18 @@ export interface CreateWorkflowTriggerResultWire {
 }
 
 export const api = {
+  listNotes: (query?: string) => {
+    const params = new URLSearchParams()
+    if (query?.trim()) params.set("q", query.trim())
+    const suffix = params.toString()
+    return get<NotesListResponse>(`/api/notes${suffix ? `?${suffix}` : ""}`)
+  },
+  readNote: (path: string) =>
+    get<NoteDocumentResponse>(`/api/notes/read?path=${encodeURIComponent(path)}`),
+  createNote: (input: CreateNoteInput) =>
+    post<NoteDocumentResponse>("/api/notes", input),
+  updateNote: (input: UpdateNoteInput) =>
+    put<NoteDocumentResponse>("/api/notes", input),
   getStatus: () => get<Record<string, unknown>>("/api/status"),
   /** GRS-009: one workflow's definition + DERIVED run state (read-only). */
   getWorkflow: (id: string) => get<DerivedWorkflow>(`/api/workflows/${encodeURIComponent(id)}`),

@@ -8,7 +8,9 @@ The system should feel like placing simple blocks, not operating a framework. Pr
 
 ## 2. The Company Metaphor Is the API
 
-Employees, Todos, Workflows, and Triggers are the public model. Internal objects can be richer, but users and agents should think in company terms: who owns work, what is pending, how work runs, and what wakes it up.
+Employees, Todos, Workflows, Chats, and Notes are the public model. Internal objects can be richer, but users and agents should think in company terms: who owns work, what is pending, how work runs, where conversations happen, and which Markdown knowledge should persist.
+
+Triggers are a Workflow detail: they bind supported wake-up events and polls to a reusable procedure. Notes are Markdown files below `knowledge/`; `docs/` remains read-only reference material.
 
 ## 3. Anti-Bottleneck
 
@@ -16,11 +18,11 @@ Fresh work should not ping the operator by default. Employees handle their lane,
 
 ## 4. One Interface (MCP)
 
-For company state, the Jinn MCP is the hands. Employees should use it to read and update org, sessions, Todos, Workflows, cron, and reference material. Shell and filesystem access are for local implementation work or gaps the MCP does not cover.
+For company state, the Jinn MCP is the hands. Employees should use it to read and update org, sessions, Todos, Workflows, Notes, cron, and reference material. Shell and filesystem access are for local implementation work or gaps the MCP does not cover.
 
 ## 5. Uniform Contracts
 
-The same contract should hold everywhere: sources emit events, Triggers match events, Workflows run repeatable procedures, and Todos are deliberately authored to record owned work. Avoid parallel concepts that do the same job in different shapes.
+The same contract should hold everywhere: sources emit events, Workflow Triggers match events, Workflows run repeatable procedures, Todos are deliberately authored to record owned work, and Notes preserve Markdown knowledge. Avoid parallel concepts that do the same job in different shapes.
 
 A Workflow invocation never creates, links, transitions, approves, or mutates a Todo. A Todo-status trigger is a one-way input; the resulting Workflow run is independent. Human gates use Workflow run approval, never Todo approval, and cancelling a Workflow run touches no Todo.
 

@@ -25,6 +25,15 @@ describe("Todos nav + redirect", () => {
     expect(NAV_ITEMS.find((i) => i.href === "/todos")?.label).toBe("Todos")
   })
 
+  it("places Notes immediately after Todos in the shared desktop order", () => {
+    expect(NAV_ITEMS.slice(0, 4).map((item) => item.href)).toEqual([
+      "/",
+      "/todos",
+      "/notes",
+      "/workflow",
+    ])
+  })
+
   it("redirects the old /kanban path to /todos", () => {
     render(<Shell start="/kanban" />)
     expect(screen.getByTestId("todos-page")).toBeTruthy()

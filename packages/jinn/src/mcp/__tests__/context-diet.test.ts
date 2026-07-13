@@ -135,6 +135,7 @@ const ORG_GROUP = ["list_employees", "get_employee", "find_employees"];
 const NEW_IN_THIS_SLICE = ["get_employee", "find_employees"];
 const SESSION_GROUP = ["spawn_session", "send_to_session", "read_session", "list_sessions", "stop_session"];
 const COST_CRON_GROUP = ["cost_report", "list_cron_jobs", "get_cron_run_history"];
+const NOTE_GROUP = ["list_notes", "read_note", "create_note", "update_note"];
 const WORK_ITEM_GROUP = [
   "list_work_items",
   "get_work_item",
@@ -143,6 +144,14 @@ const WORK_ITEM_GROUP = [
   "update_work_item",
   "assign_work_item",
 ];
+
+it("keeps the Notes contract to exactly four compact tools", () => {
+  const names = buildTools()
+    .map((tool) => tool.name)
+    .filter((name) => NOTE_GROUP.includes(name));
+  expect(names).toEqual(NOTE_GROUP);
+  expect(schemaTokens(NOTE_GROUP)).toBeLessThan(schemaTokens(WORK_ITEM_GROUP));
+});
 
 describe("the measured context diet", () => {
   it("flag off (or absent) leaves the bootstrap byte-identical — no behavior change for non-MCP sessions", () => {
@@ -213,6 +222,7 @@ describe("the measured context diet", () => {
         orgGroup: schemaTokens(ORG_GROUP),
         sessionGroup: schemaTokens(SESSION_GROUP),
         costCronGroup: schemaTokens(COST_CRON_GROUP),
+        noteGroup: schemaTokens(NOTE_GROUP),
         workItemGroup: schemaTokens(WORK_ITEM_GROUP),
         commsSurface: schemaTokens([...ORG_GROUP, ...SESSION_GROUP]),
         fullBelt: schemaTokens(),

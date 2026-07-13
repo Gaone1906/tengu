@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom"
 import {
   MessageSquare, Users, ListChecks, Clock,
   Activity, Zap, Settings, Plus, Hash, Workflow, Gauge,
+  NotebookPen,
 } from "lucide-react"
 import {
   Command,
@@ -48,10 +49,11 @@ function saveRecent(item: RecentItem) {
 
 // Every top-level destination, so the command palette can reach anything the
 // mobile tab bar / More overflow reaches (kept in step with lib/nav NAV_ITEMS).
-const STATIC_PAGES = [
+export const STATIC_PAGES = [
   { id: "page-chat", label: "Chat", icon: MessageSquare, href: "/" },
-  { id: "page-workflow", label: "Workflows", icon: Workflow, href: "/workflow" },
   { id: "page-todos", label: "Todos", icon: ListChecks, href: "/todos" },
+  { id: "page-notes", label: "Notes", icon: NotebookPen, href: "/notes" },
+  { id: "page-workflow", label: "Workflows", icon: Workflow, href: "/workflow" },
   { id: "page-org", label: "Organization", icon: Users, href: "/org" },
   { id: "page-cron", label: "Cron", icon: Clock, href: "/cron" },
   { id: "page-limits", label: "Limits", icon: Gauge, href: "/limits" },

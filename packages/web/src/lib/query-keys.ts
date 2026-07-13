@@ -27,6 +27,11 @@ export const queryKeys = {
     all: ['skills'] as const,
     detail: (name: string) => ['skills', name] as const,
   },
+  notes: {
+    all: ['notes'] as const,
+    list: (query = '') => query ? ['notes', { query }] as const : ['notes'] as const,
+    document: (path: string) => ['note', path] as const,
+  },
   engines: {
     all: ['engines'] as const,
   },

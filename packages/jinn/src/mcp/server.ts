@@ -9,6 +9,7 @@ import { buildWorkflowTools } from "./workflow-tools.js";
 import { buildSessionTools } from "./session-tools.js";
 import { buildSearchTools } from "./search-tools.js";
 import { buildKnowledgeTools } from "./knowledge-tools.js";
+import { buildNoteTools } from "./note-tools.js";
 import { buildDelegationTools } from "./delegation-tools.js";
 import { buildOrgTools } from "./org-tools.js";
 import { buildWorkItemTools } from "./work-item-tools.js";
@@ -91,7 +92,7 @@ function serverLog(message: string): void {
  *  requested version when present (forward/backward tolerant), else this default. */
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
 const SERVER_NAME = "jinn";
-const SERVER_VERSION = "0.9.0"; // 0.9: GRS-020c/d cost+cron reads; 0.8: GRS-021c Todo/work-item verbs; 0.7: scoped knowledge; 0.6: company-reference search; 0.5: delegation transaction; 0.4: org group + measured diet; 0.3: sessions group + identity seam
+const SERVER_VERSION = "0.10.0"; // 0.10: revision-safe Notes; 0.9: cost+cron reads; 0.8: Todo/work-item verbs; 0.7: scoped knowledge
 
 // The tool/context contracts + gateway HTTP client live in toolkit.ts (shared by
 // tool groups without an import cycle); re-exported here so existing importers
@@ -108,7 +109,7 @@ export { gatewayGet, gatewayRequest, JinnMcpToolError, type JinnMcpContext, type
  * Growth discipline: the belt budget lives in the GRS-017 design §7 and the
  * GRS-020 design §4 (net context diet positive — measured in
  * mcp/__tests__/context-diet.test.ts and knowledge-diet.test.ts); at this
- * size (46) the hand-rolled protocol below is still comfortably sufficient —
+ * size (54) the hand-rolled protocol below is still comfortably sufficient —
  * revisit the SDK question only if a future group needs capabilities beyond
  * tools/list + tools/call (resources, prompts, progress).
  */
@@ -118,6 +119,7 @@ export function buildTools(): JinnMcpTool[] {
     ...buildSessionTools(),
     ...buildSearchTools(),
     ...buildKnowledgeTools(),
+    ...buildNoteTools(),
     ...buildCostTools(),
     ...buildCronTools(),
     ...buildDelegationTools(),

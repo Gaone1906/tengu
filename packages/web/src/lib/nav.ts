@@ -9,6 +9,7 @@ import {
   Zap,
   Settings,
   MoreHorizontal,
+  NotebookPen,
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 
@@ -18,11 +19,12 @@ export interface NavItem {
   icon: LucideIcon
 }
 
-// Order is deliberate: the three day-to-day surfaces (Chat, Todos, Workflows)
+// Order is deliberate: the four day-to-day surfaces (Chat, Todos, Notes, Workflows)
 // lead, mirroring the mobile tab bar's primary set; the rest follow.
 export const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Chat", icon: MessageSquare },
   { href: "/todos", label: "Todos", icon: ListChecks },
+  { href: "/notes", label: "Notes", icon: NotebookPen },
   { href: "/workflow", label: "Workflows", icon: Workflow },
   { href: "/org", label: "Organization", icon: Users },
   { href: "/cron", label: "Cron", icon: Clock },
@@ -42,7 +44,7 @@ export const NAV_ITEMS: NavItem[] = [
 // The "More" tab is not a NAV_ITEMS destination — it's the overflow entry point.
 export const MORE_NAV_ITEM: NavItem = { href: "/more", label: "More", icon: MoreHorizontal }
 
-const MOBILE_TAB_PRIMARY_HREFS = ["/", "/todos", "/workflow"] as const
+const MOBILE_TAB_PRIMARY_HREFS = ["/", "/todos", "/notes", "/workflow"] as const
 export const MOBILE_TAB_ITEMS: NavItem[] = [
   ...MOBILE_TAB_PRIMARY_HREFS.map((href) => NAV_ITEMS.find((item) => item.href === href)!),
   MORE_NAV_ITEM,

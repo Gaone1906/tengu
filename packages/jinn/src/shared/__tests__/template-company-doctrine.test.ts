@@ -160,15 +160,34 @@ describe("template company doctrine", () => {
 
     expect(template).toContain("### Todos");
     expect(template).toContain("### Workflows");
-    expect(template).toContain("### Triggers");
+    expect(template).toContain("#### Triggers");
+    expect(template).toContain("### Notes");
     expect(template).toContain("list_triggers");
     expect(template).toContain("create_trigger");
+    expect(template).toContain("list_notes");
+    expect(template).toContain("read_note");
+    expect(template).toContain("create_note");
+    expect(template).toContain("update_note");
     expect(template).toContain("the IC's manager is notified");
 
     expect(template).not.toContain("### Cross-Department Services");
     expect(template).not.toContain("org/service tools");
     expect(template).not.toContain("menu of available services");
     expect(template).not.toContain("provides:");
+  });
+
+  it("ships exactly five public blocks and keeps Triggers a Workflow detail", () => {
+    for (const rel of ["CLAUDE.md", "docs/company-doctrine.md", "docs/overview.md"]) {
+      const content = readTemplate(rel);
+      expect(content, rel).toContain("Employees, Todos, Workflows, Chats, and Notes");
+      expect(content, rel).not.toContain("Employees, Todos, Workflows, Triggers, and Notes");
+    }
+    const template = readTemplate("CLAUDE.md");
+    const doctrine = readTemplate("docs/company-doctrine.md");
+    expect(template).toContain("Triggers are a Workflow detail");
+    expect(doctrine).toContain("Triggers are a Workflow detail");
+    expect(template).toContain("read it before updating and pass its returned revision as expectedRevision");
+    expect(template).toContain("`docs/` remains read-only");
   });
 
   it("ships compact delegation doctrine for nested callbacks and execution quality", () => {

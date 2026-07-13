@@ -260,6 +260,14 @@ import { scanOrg } from "./org.js";
 import { resolveOrgHierarchy } from "./org-hierarchy.js";
 import { surfaceManagerVisibility } from "./manager-visibility.js";
 import { searchKnowledge, readKnowledgeFile } from "../knowledge/store.js";
+import {
+  NOTE_FILE_MAX_BYTES,
+  createNote,
+  listNotes,
+  readNote,
+  updateNote,
+  type NoteStoreResult,
+} from "../notes/store.js";
 import { planWorkflowAuthoringInput } from "../workflows/authoring.js";
 import {
   WORKFLOW_AUTHORITY_FIELDS,
@@ -1440,6 +1448,24 @@ function badRequest(res: ServerResponse, message: string): void {
   json(res, { error: message }, 400);
 }
 
+function noteStoreFailureResponse(
+  res: ServerResponse,
+  result: Extract<NoteStoreResult<unknown>, { ok: false }>,
+): void {
+  const status = {
+    "invalid-path": 400,
+    forbidden: 403,
+    "not-found": 404,
+    conflict: 409,
+    "too-large": 413,
+    "already-exists": 409,
+  }[result.reason];
+  json(res, {
+    error: result.detail,
+    ...(result.currentRevision ? { currentRevision: result.currentRevision } : {}),
+  }, status);
+}
+
 function serverError(res: ServerResponse, message: string): void {
   json(res, { error: message }, 500);
 }
@@ -1695,6 +1721,9 @@ function blocksEngineSwitch(transportState: Session["transportState"]): boolean 
  *  MCP tools cap earlier with a friendlier error; this is the substrate
  *  backstop so a hostile curl gets a clean 400, never HTTP-parser noise. */
 export const SEARCH_QUERY_ROUTE_CHAR_CAP = 1_024;
+
+/** JSON escaping can expand one byte to six characters (for example NUL). */
+const NOTES_BODY_ROUTE_MAX_BYTES = NOTE_FILE_MAX_BYTES * 6 + 64_000;
 
 /** Read a query param with NUL/control bytes stripped (GRS-020a-fix finding 2)
  *  and whitespace trimmed; empty-after-cleaning collapses to null. */
@@ -3176,6 +3205,73 @@ export async function handleApiRequest(
         return badRequest(res, "at least one filter is required (q, text, status, source, assignee, department, since, until, needsAttentionFor)");
       }
       return json(res, workItemPagePayload(queryWorkItems({ ...filter, limit, offset })));
+    }
+
+    // Notes is the editable projection of knowledge/**/*.md. docs/ remains on
+    // the legacy read-only knowledge surface and cannot enter these routes.
+    if (method === "GET" && pathname === "/api/notes") {
+      const q = readCleanSearchParam(url, "q") ?? undefined;
+      if (q && q.length > SEARCH_QUERY_ROUTE_CHAR_CAP) {
+        return badRequest(res, `q is too long (${q.length} chars, max ${SEARCH_QUERY_ROUTE_CHAR_CAP}) — shorten the query`);
+      }
+      return json(res, listNotes({ home: jinnHome, ...(q ? { query: q } : {}) }));
+    }
+
+    if (method === "GET" && pathname === "/api/notes/read") {
+      const rawPath = url.searchParams.get("path");
+      if (rawPath !== null && hasControlBytes(rawPath)) {
+        return badRequest(res, "path contains control bytes — pass a path returned by list_notes exactly");
+      }
+      if (!rawPath) return badRequest(res, "path is required");
+      const result = readNote(rawPath, jinnHome);
+      if (!result.ok) return noteStoreFailureResponse(res, result);
+      return json(res, { note: result.value });
+    }
+
+    if (method === "POST" && pathname === "/api/notes") {
+      const parsed = await readJsonBody(req, res, { maxBytes: NOTES_BODY_ROUTE_MAX_BYTES });
+      if (!parsed.ok) return;
+      const body = parsed.body && typeof parsed.body === "object" && !Array.isArray(parsed.body)
+        ? parsed.body as Record<string, unknown>
+        : {};
+      if (typeof body.title !== "string") return badRequest(res, "title is required and must be a string");
+      if (body.body !== undefined && typeof body.body !== "string") return badRequest(res, "body must be a string");
+      if (body.folder !== undefined && typeof body.folder !== "string") return badRequest(res, "folder must be a string");
+      const result = createNote({
+        title: body.title,
+        ...(typeof body.body === "string" ? { body: body.body } : {}),
+        ...(typeof body.folder === "string" ? { folder: body.folder } : {}),
+      }, jinnHome);
+      if (!result.ok) return noteStoreFailureResponse(res, result);
+      context.emit("notes:changed", { path: result.value.path, revision: result.value.revision, action: "created" });
+      return json(res, { note: result.value }, 201);
+    }
+
+    if (method === "PUT" && pathname === "/api/notes") {
+      const parsed = await readJsonBody(req, res, { maxBytes: NOTES_BODY_ROUTE_MAX_BYTES });
+      if (!parsed.ok) return;
+      const body = parsed.body && typeof parsed.body === "object" && !Array.isArray(parsed.body)
+        ? parsed.body as Record<string, unknown>
+        : {};
+      if (typeof body.path !== "string") return badRequest(res, "path is required and must be a string");
+      if (typeof body.expectedRevision !== "string") return badRequest(res, "expectedRevision is required and must be a string");
+      for (const field of ["title", "body", "append"] as const) {
+        if (body[field] !== undefined && typeof body[field] !== "string") return badRequest(res, `${field} must be a string`);
+      }
+      if (body.body !== undefined && body.append !== undefined) return badRequest(res, "body and append are mutually exclusive");
+      if (body.title === undefined && body.body === undefined && body.append === undefined) {
+        return badRequest(res, "at least one of title, body, or append is required");
+      }
+      const result = updateNote({
+        path: body.path,
+        expectedRevision: body.expectedRevision,
+        ...(typeof body.title === "string" ? { title: body.title } : {}),
+        ...(typeof body.body === "string" ? { body: body.body } : {}),
+        ...(typeof body.append === "string" ? { append: body.append } : {}),
+      }, jinnHome);
+      if (!result.ok) return noteStoreFailureResponse(res, result);
+      context.emit("notes:changed", { path: result.value.path, revision: result.value.revision, action: "updated" });
+      return json(res, { note: result.value });
     }
 
     // GET /api/knowledge/search — GRS-020b: deterministic token-AND search over

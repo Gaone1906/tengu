@@ -6,7 +6,7 @@
 
 **{{portalName}} is a bus, not a brain.** All AI intelligence comes from the engines natively. {{portalName}} adds no custom agentic loop, no prompt engineering layer, no opinions on how AI should behave. It delegates everything to professional tools (Claude Code CLI, Codex SDK, and the Antigravity engine for Gemini models) and focuses solely on routing, scheduling, and connectivity.
 
-The company operating model is in [company-doctrine.md](company-doctrine.md). The public blocks are Employees, Todos, Workflows, and Triggers.
+The company operating model is in [company-doctrine.md](company-doctrine.md). The public blocks are Employees, Todos, Workflows, Chats, and Notes.
 
 ## What {{portalName}} Does
 

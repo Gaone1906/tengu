@@ -1,18 +1,19 @@
 import { describe, it, expect } from 'vitest'
 import { NAV_ITEMS, MOBILE_TAB_ITEMS, OVERFLOW_ITEMS, MORE_NAV_ITEM } from '../nav'
 
-// GRS-022 — the mobile bottom tab bar is the sole mobile nav: 4 primary tabs
-// (Chat · Todos · Workflows · More), with everything else under the More
+// GRS-022 — the mobile bottom tab bar is the sole mobile nav: 5 primary tabs
+// (Chat · Todos · Notes · Workflows · More), with everything else under the More
 // overflow screen.
 describe('MOBILE_TAB_ITEMS', () => {
-  it('has exactly 4 entries', () => {
-    expect(MOBILE_TAB_ITEMS).toHaveLength(4)
+  it('has exactly 5 entries', () => {
+    expect(MOBILE_TAB_ITEMS).toHaveLength(5)
   })
 
   it('lists the primary hrefs in order, ending with More', () => {
     expect(MOBILE_TAB_ITEMS.map((item) => item.href)).toEqual([
       '/',
       '/todos',
+      '/notes',
       '/workflow',
       '/more',
     ])
@@ -22,7 +23,7 @@ describe('MOBILE_TAB_ITEMS', () => {
     expect(MOBILE_TAB_ITEMS.some((i) => i.href === '/todos' && i.label === 'Todos')).toBe(true)
   })
 
-  it('derives the 3 primary destinations from NAV_ITEMS (icons/labels stay in sync)', () => {
+  it('derives the 4 primary destinations from NAV_ITEMS (icons/labels stay in sync)', () => {
     for (const item of MOBILE_TAB_ITEMS) {
       if (item.href === MORE_NAV_ITEM.href) continue // More is the synthetic overflow entry
       expect(NAV_ITEMS).toContain(item)

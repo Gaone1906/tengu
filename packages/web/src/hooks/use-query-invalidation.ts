@@ -62,6 +62,12 @@ export function useQueryInvalidation() {
       const p = payload as Record<string, unknown> | undefined
 
       switch (event) {
+        case 'notes:changed':
+          qc.invalidateQueries({ queryKey: queryKeys.notes.all })
+          if (typeof p?.path === 'string' && p.path) {
+            qc.invalidateQueries({ queryKey: queryKeys.notes.document(p.path) })
+          }
+          return
         case 'session:started':
         case 'session:created':
           // A freshly created session (e.g. a delegated child) joins the same

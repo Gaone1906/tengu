@@ -9,6 +9,7 @@ const ChatPage = lazyRoute(() => import('./routes/chat/page'), 'chat')
 const CronPage = lazyRoute(() => import('./routes/cron/page'), 'cron')
 const CronDetailPage = lazyRoute(() => import('./routes/cron/detail'), 'cron-detail')
 const TodosPage = lazyRoute(() => import('./routes/todos/page'), 'todos')
+const NotesPage = lazyRoute(() => import('./routes/notes/page'), 'notes')
 const LogsPage = lazyRoute(() => import('./routes/logs/page'), 'logs')
 const LimitsPage = lazyRoute(() => import('./routes/limits/page'), 'limits')
 const OrgPage = lazyRoute(() => import('./routes/org/page'), 'org')
@@ -76,6 +77,7 @@ const router = createBrowserRouter([
       { path: '/cron', element: <CronPage /> },
       { path: '/cron/:id', element: <CronDetailPage /> },
       { path: '/todos', element: <TodosPage /> },
+      { path: '/notes', element: <NotesPage /> },
       // GRS-021d: Kanban became Todos. Old links redirect.
       { path: '/kanban', element: <Navigate to="/todos" replace /> },
       { path: '/logs', element: <LogsPage /> },

@@ -3,15 +3,15 @@ import crypto from "node:crypto";
 import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
-// Keep narrow headroom over the pinned Pi projection while advertising both
-// identity-routed native poll approval operations.
-const MAX_MANIFEST_TOKENS = 7377;
+// Keep the same narrow 53-token headroom over the pinned Pi projection after
+// admitting exactly four flat Notes tools (7,542 + 53 = 7,595).
+const MAX_MANIFEST_TOKENS = 7595;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 6983, sha256: "48e9a6ff94401f69852b29f7ecc4926fbada962dc07222361027f6a6385931ca" },
-  pi: { tokens: 7324, sha256: "50f18611149342517221452b1476a08acd9258913aa402dec6f806a22ae5ff8d" },
-  openai: { tokens: 7119, sha256: "014e38c0847589c7e5c913c41e98c185a73fa51b3639944be2e0697ede99d601" },
+  rpc: { tokens: 7177, sha256: "27fef6faf34fe59fba7d2baf24e99bf06488e3fd5a4e21ca222003c5bc821c54" },
+  pi: { tokens: 7542, sha256: "c355368bdd5c9d49d808599df48888c5b8bb6c60c84fdbc31ea25f22d4301b75" },
+  openai: { tokens: 7325, sha256: "83e83b682e41006127005ce31fd5ca3f868386e08a5fcdc2c44fb902796c7c29" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -36,6 +36,7 @@ const EXPECTED_TOOL_NAMES = [
   "assign_work_item",
   "cancel_workflow_run",
   "cost_report",
+  "create_note",
   "create_trigger",
   "create_work_item",
   "create_workflow",
@@ -57,6 +58,7 @@ const EXPECTED_TOOL_NAMES = [
   "list_cron_jobs",
   "list_employees",
   "list_files",
+  "list_notes",
   "list_sessions",
   "list_triggers",
   "list_work_items",
@@ -66,6 +68,7 @@ const EXPECTED_TOOL_NAMES = [
   "publish_attachment",
   "read_file",
   "read_knowledge",
+  "read_note",
   "read_session",
   "request_work_item_approval",
   "retire_workflow",
@@ -79,6 +82,7 @@ const EXPECTED_TOOL_NAMES = [
   "spawn_session",
   "start_workflow_run",
   "stop_session",
+  "update_note",
   "update_work_item",
   "update_workflow",
   "validate_workflow",
@@ -89,6 +93,7 @@ const EXPECTED_REQUIRED = {
   assign_work_item: ["id", "assignee"],
   cancel_workflow_run: ["workflowId", "runId"],
   cost_report: [],
+  create_note: ["title"],
   create_trigger: ["kind", "name", "event", "targetWorkflowId"],
   create_work_item: ["title"],
   create_workflow: [],
@@ -110,6 +115,7 @@ const EXPECTED_REQUIRED = {
   list_cron_jobs: [],
   list_employees: [],
   list_files: [],
+  list_notes: [],
   list_sessions: [],
   list_triggers: [],
   list_work_items: [],
@@ -119,6 +125,7 @@ const EXPECTED_REQUIRED = {
   publish_attachment: ["path"],
   read_file: ["path"],
   read_knowledge: ["path"],
+  read_note: ["path"],
   read_session: ["sessionId"],
   request_work_item_approval: ["id", "request"],
   retire_workflow: ["workflowId"],
@@ -132,6 +139,7 @@ const EXPECTED_REQUIRED = {
   spawn_session: ["prompt"],
   start_workflow_run: ["workflowId"],
   stop_session: ["sessionId"],
+  update_note: ["path", "expectedRevision"],
   update_work_item: ["id", "status"],
   update_workflow: ["workflowId"],
   validate_workflow: [],
@@ -169,7 +177,7 @@ function collectEnums(value: unknown, path: string[] = []): Array<[string, strin
 }
 
 describe("tool manifest budget", () => {
-  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7377 o200k_base tokens", async () => {
+  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7595 o200k_base tokens", async () => {
     const tools = buildTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
     const wrappers = {
       rpc: { jsonrpc: "2.0", id: 1, result: { tools } },
@@ -208,7 +216,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(50);
+    expect(tools).toHaveLength(54);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);
