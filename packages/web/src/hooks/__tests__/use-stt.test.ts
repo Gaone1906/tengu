@@ -52,12 +52,27 @@ class FakeMediaRecorder {
   }
 }
 
-function installMediaMocks() {
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+function createFakeStream() {
   const track = { stop: vi.fn() }
   const stream = {
     getTracks: () => [track],
   } as unknown as MediaStream
-  const getUserMedia = vi.fn().mockResolvedValue(stream)
+  return { stream, track }
+}
+
+function installMediaMocks(options?: { getUserMedia?: () => Promise<MediaStream> }) {
+  const { stream, track } = createFakeStream()
+  const getUserMedia = vi.fn(options?.getUserMedia ?? (() => Promise.resolve(stream)))
   const audioSession = { type: "auto" }
 
   Object.defineProperty(navigator, "mediaDevices", {
@@ -81,7 +96,7 @@ function installMediaMocks() {
     configurable: true,
   })
 
-  return { track, getUserMedia, audioSession }
+  return { track, stream, getUserMedia, audioSession }
 }
 
 async function flushMicrotasks() {
@@ -96,6 +111,133 @@ beforeEach(() => {
 })
 
 describe("useStt", () => {
+  it("acknowledges a mic request before model status resolves", async () => {
+    const status = deferred<{ available: boolean; downloading: boolean; languages: string[] }>()
+    sttStatus.mockReturnValue(status.promise)
+    installMediaMocks()
+    const { result } = renderHook(() => useStt())
+
+    let start!: ReturnType<typeof result.current.handleMicClick>
+    act(() => {
+      start = result.current.handleMicClick()
+    })
+
+    expect(result.current.state).toBe("starting")
+
+    status.resolve({ available: false, downloading: false, languages: ["en"] })
+    await act(async () => {
+      await start
+    })
+    expect(result.current.state).toBe("no-model")
+  })
+
+  it("stays in the starting state until microphone capture is live", async () => {
+    const permission = deferred<MediaStream>()
+    const { stream, getUserMedia } = installMediaMocks({
+      getUserMedia: () => permission.promise,
+    })
+    const { result } = renderHook(() => useStt())
+
+    let start!: ReturnType<typeof result.current.handleMicClick>
+    act(() => {
+      start = result.current.handleMicClick()
+    })
+    await act(flushMicrotasks)
+
+    expect(getUserMedia).toHaveBeenCalledTimes(1)
+    expect(result.current.state).toBe("starting")
+
+    permission.resolve(stream)
+    await act(async () => {
+      await start
+    })
+    expect(result.current.state).toBe("recording")
+  })
+
+  it("ignores rapid repeated starts while one attempt is pending", async () => {
+    const status = deferred<{ available: boolean; downloading: boolean; languages: string[] }>()
+    sttStatus.mockReturnValue(status.promise)
+    installMediaMocks()
+    const { result } = renderHook(() => useStt())
+
+    let first!: ReturnType<typeof result.current.handleMicClick>
+    let second!: ReturnType<typeof result.current.handleMicClick>
+    act(() => {
+      first = result.current.handleMicClick()
+      second = result.current.handleMicClick()
+    })
+
+    expect(sttStatus).toHaveBeenCalledTimes(1)
+
+    status.resolve({ available: false, downloading: false, languages: ["en"] })
+    await act(async () => {
+      await Promise.all([first, second])
+    })
+  })
+
+  it("stops a stream that resolves after the pending start was cancelled", async () => {
+    const permission = deferred<MediaStream>()
+    const { stream, track } = createFakeStream()
+    installMediaMocks({ getUserMedia: () => permission.promise })
+    const { result } = renderHook(() => useStt())
+
+    let start!: ReturnType<typeof result.current.handleMicClick>
+    act(() => {
+      start = result.current.handleMicClick()
+    })
+    await act(flushMicrotasks)
+
+    await act(async () => {
+      expect(await result.current.stopRecording()).toBeNull()
+    })
+    expect(result.current.state).toBe("idle")
+
+    permission.resolve(stream)
+    await act(async () => {
+      await start
+    })
+
+    expect(track.stop).toHaveBeenCalledTimes(1)
+    expect(result.current.state).toBe("idle")
+  })
+
+  it("reports microphone permission denial instead of returning silently to idle", async () => {
+    installMediaMocks({
+      getUserMedia: () => Promise.reject(new DOMException("denied", "NotAllowedError")),
+    })
+    const { result } = renderHook(() => useStt())
+
+    await act(async () => {
+      await result.current.handleMicClick()
+    })
+
+    expect(result.current.state).toBe("error")
+    expect(result.current.error).toMatch(/microphone access was denied/i)
+  })
+
+  it("surfaces model status and download failures as errors", async () => {
+    sttStatus.mockRejectedValueOnce(new Error("offline"))
+    installMediaMocks()
+    const { result, rerender } = renderHook(
+      ({ events }) => useStt(events),
+      { initialProps: { events: [] as Array<{ event: string; payload: unknown }> } },
+    )
+
+    await act(async () => {
+      await result.current.handleMicClick()
+    })
+    expect(result.current.state).toBe("error")
+    expect(result.current.error).toMatch(/speech recognition availability/i)
+
+    act(() => {
+      rerender({
+        events: [{ event: "stt:download:error", payload: { error: "Download interrupted" } }],
+      })
+    })
+    expect(result.current.state).toBe("error")
+    expect(result.current.error).toBe("Download interrupted")
+  })
+
   it("cancels recording without transcribing captured audio", async () => {
     const { track, audioSession } = installMediaMocks()
     const { result } = renderHook(() => useStt())

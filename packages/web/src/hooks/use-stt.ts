@@ -19,6 +19,7 @@ interface NavigatorWithAudioSession extends Navigator {
 
 export type SttState =
   | "idle"           // mic not active
+  | "starting"       // model/capture startup is pending
   | "no-model"       // model not downloaded, need to show download modal
   | "recording"      // actively recording
   | "transcribing"   // audio sent, waiting for result
@@ -37,7 +38,7 @@ export interface UseSttReturn {
   error: string | null
   /** Cycle to the next language */
   cycleLanguage: () => void
-  handleMicClick: () => void
+  handleMicClick: () => Promise<void>
   startRecording: () => Promise<void>
   stopRecording: () => Promise<string | null>
   cancelRecording: () => void
@@ -47,6 +48,23 @@ export interface UseSttReturn {
 }
 
 const MAX_RECORDING_MS = 30 * 60_000 // 30 minutes max
+
+interface StartAttempt {
+  cancelled: boolean
+}
+
+function microphoneStartError(error: unknown): string {
+  if (
+    error instanceof DOMException
+    && (error.name === "NotAllowedError" || error.name === "SecurityError")
+  ) {
+    return "Microphone access was denied. Allow access in your browser settings and try again."
+  }
+  if (error instanceof DOMException && error.name === "NotFoundError") {
+    return "No microphone was found."
+  }
+  return "Could not start voice input."
+}
 
 function setAudioSessionType(type: AudioSessionType): AudioSessionLike | null {
   if (typeof navigator === "undefined") return null
@@ -102,6 +120,7 @@ export function useStt(
   const streamRef = useRef<MediaStream | null>(null)
   const chunksRef = useRef<Blob[]>([])
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const startAttemptRef = useRef<StartAttempt | null>(null)
   // Resolve function for the stop promise — allows timeout to also trigger transcription
   const stopResolveRef = useRef<((text: string | null) => void) | null>(null)
   const mountedRef = useRef(true)
@@ -125,7 +144,8 @@ export function useStt(
     }
     if (latest.event === "stt:download:error") {
       setDownloadProgress(null)
-      setState("idle")
+      setError(typeof p.error === "string" ? p.error : "Speech recognition model download failed")
+      setState("error")
     }
   }, [wsEvents])
 
@@ -155,6 +175,8 @@ export function useStt(
   useEffect(() => {
     return () => {
       mountedRef.current = false
+      if (startAttemptRef.current) startAttemptRef.current.cancelled = true
+      startAttemptRef.current = null
       const recorder = mediaRecorderRef.current
       if (recorder) {
         recorder.ondataavailable = null
@@ -192,14 +214,22 @@ export function useStt(
       return status.available
     } catch {
       setAvailable(false)
-      return false
+      throw new Error("Could not check speech recognition availability.")
     }
   }, [])
 
-  const startRecordingInner = useCallback(async () => {
+  const startRecordingInner = useCallback(async (attempt: StartAttempt) => {
     try {
       setAudioSessionType("play-and-record")
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (
+        startAttemptRef.current !== attempt
+        || attempt.cancelled
+        || !mountedRef.current
+      ) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
       streamRef.current = stream
 
       const audioCtx = createAudioContext()
@@ -271,6 +301,7 @@ export function useStt(
       }
 
       recorder.start(5000)
+      startAttemptRef.current = null
       setState("recording")
 
       // Auto-stop after max duration (will trigger onstop → transcription)
@@ -279,29 +310,59 @@ export function useStt(
           mediaRecorderRef.current.stop()
         }
       }, MAX_RECORDING_MS)
-    } catch {
+    } catch (err) {
+      if (startAttemptRef.current !== attempt || attempt.cancelled || !mountedRef.current) return
+      startAttemptRef.current = null
       cleanup()
-      setState("idle")
+      setError(microphoneStartError(err))
+      setState("error")
     }
   }, [cleanup])
 
   const handleMicClick = useCallback(async () => {
-    if (state === "recording" || state === "transcribing") return
-    if (state === "error") { setError(null); setState("idle") }
+    if (startAttemptRef.current || state === "recording" || state === "transcribing") return
 
-    const isAvailable = await checkStatus()
-    if (isAvailable) {
-      await startRecordingInner()
-    } else {
-      setState("no-model")
+    const attempt: StartAttempt = { cancelled: false }
+    startAttemptRef.current = attempt
+    setError(null)
+    setState("starting")
+
+    try {
+      const isAvailable = await checkStatus()
+      if (startAttemptRef.current !== attempt || attempt.cancelled || !mountedRef.current) return
+      if (!isAvailable) {
+        startAttemptRef.current = null
+        setState("no-model")
+        return
+      }
+      await startRecordingInner(attempt)
+    } catch (err) {
+      if (startAttemptRef.current !== attempt || attempt.cancelled || !mountedRef.current) return
+      startAttemptRef.current = null
+      setError(err instanceof Error ? err.message : "Could not check speech recognition availability.")
+      setState("error")
     }
   }, [state, checkStatus, startRecordingInner])
 
   const startRecording = useCallback(async () => {
-    await startRecordingInner()
-  }, [startRecordingInner])
+    if (startAttemptRef.current || state === "recording" || state === "transcribing") return
+    const attempt: StartAttempt = { cancelled: false }
+    startAttemptRef.current = attempt
+    setError(null)
+    setState("starting")
+    await startRecordingInner(attempt)
+  }, [state, startRecordingInner])
+
+  const cancelStartAttempt = useCallback(() => {
+    const attempt = startAttemptRef.current
+    if (!attempt) return false
+    attempt.cancelled = true
+    startAttemptRef.current = null
+    return true
+  }, [])
 
   const stopRecording = useCallback(async (): Promise<string | null> => {
+    cancelStartAttempt()
     if (!mediaRecorderRef.current || mediaRecorderRef.current.state === "inactive") {
       setState("idle")
       return null
@@ -326,9 +387,10 @@ export function useStt(
         resolve(null)
       }
     })
-  }, [cleanup])
+  }, [cancelStartAttempt, cleanup])
 
   const cancelRecording = useCallback(() => {
+    cancelStartAttempt()
     const recorder = mediaRecorderRef.current
     if (recorder) {
       recorder.ondataavailable = null
@@ -342,7 +404,7 @@ export function useStt(
     stopResolveRef.current?.(null)
     stopResolveRef.current = null
     setState("idle")
-  }, [cleanup])
+  }, [cancelStartAttempt, cleanup])
 
   const startDownload = useCallback(() => {
     setDownloadProgress(0)

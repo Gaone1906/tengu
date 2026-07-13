@@ -588,22 +588,40 @@ export function ChatInput({
   const micHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const micToggleActiveRef = useRef(false)           // recording left on by a quick tap
 
+  function clearMicPress() {
+    micDownAtRef.current = null
+    if (micHoldTimerRef.current) clearTimeout(micHoldTimerRef.current)
+    micHoldTimerRef.current = null
+  }
+
   useEffect(() => {
     return () => {
       if (micHoldTimerRef.current) clearTimeout(micHoldTimerRef.current)
     }
   }, [])
 
+  useEffect(() => {
+    if (stt.state === 'idle' || stt.state === 'no-model' || stt.state === 'error') {
+      micToggleActiveRef.current = false
+    }
+  }, [stt.state])
+
   function handleMicPointerDown(e: React.PointerEvent<HTMLButtonElement>) {
     // Keep the card click-to-focus handler from also firing.
     e.stopPropagation()
     if (stt.state === 'transcribing') return
 
+    if (stt.state === 'starting') {
+      clearMicPress()
+      micToggleActiveRef.current = false
+      stt.cancelRecording()
+      return
+    }
+
     // Already recording from a previous quick tap → this press toggles it off.
     if (micToggleActiveRef.current || stt.state === 'recording') {
       micToggleActiveRef.current = false
-      micDownAtRef.current = null
-      if (micHoldTimerRef.current) { clearTimeout(micHoldTimerRef.current); micHoldTimerRef.current = null }
+      clearMicPress()
       void transcribeAndFill()
       return
     }
@@ -620,8 +638,7 @@ export function ChatInput({
   function handleMicPointerUp() {
     const downAt = micDownAtRef.current
     if (downAt == null) return // no active press (e.g. toggle-off already handled)
-    micDownAtRef.current = null
-    if (micHoldTimerRef.current) { clearTimeout(micHoldTimerRef.current); micHoldTimerRef.current = null }
+    clearMicPress()
 
     // If the model wasn't ready, recording never started — leave the modal alone.
     if (stt.state === 'no-model' || stt.state === 'transcribing') return
@@ -634,6 +651,13 @@ export function ChatInput({
       // Quick tap that started recording → leave it running; next tap stops it.
       micToggleActiveRef.current = true
     }
+  }
+
+  function handleMicPointerCancel(e: React.PointerEvent<HTMLButtonElement>) {
+    e.stopPropagation()
+    clearMicPress()
+    micToggleActiveRef.current = false
+    stt.cancelRecording()
   }
 
   const filteredCommands = useMemo(
@@ -840,20 +864,28 @@ export function ChatInput({
             aria-label={
               stt.state === 'recording' ? 'Stop recording'
               : stt.state === 'transcribing' ? 'Transcribing…'
+              : stt.state === 'starting' ? 'Starting voice input…'
               : 'Voice input'
             }
+            aria-busy={stt.state === 'starting' || stt.state === 'transcribing'}
+            data-state={stt.state}
             onPointerDown={handleMicPointerDown}
             onPointerUp={handleMicPointerUp}
-            onPointerCancel={handleMicPointerUp}
+            onPointerCancel={handleMicPointerCancel}
             disabled={stt.state === 'transcribing'}
-            className={`w-[36px] h-[36px] shrink-0 flex items-center justify-center border-none transition-all duration-150 ease-in-out touch-none select-none ${stt.state === 'recording' ? 'rounded-full bg-[var(--system-red)] text-white cursor-pointer' : `rounded-full bg-transparent text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)] ${stt.state === 'transcribing' ? 'cursor-wait' : 'cursor-pointer'}`}`}
+            className={`w-[36px] h-[36px] shrink-0 rounded-full flex items-center justify-center border-none transition-[scale,background-color,color] duration-150 ease-in-out active:scale-[0.96] touch-none select-none ${stt.state === 'recording' ? 'bg-[var(--system-red)] text-white cursor-pointer' : stt.state === 'starting' ? 'bg-[var(--accent-fill)] text-[var(--accent)] cursor-pointer' : `bg-transparent text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)] ${stt.state === 'transcribing' ? 'cursor-wait' : 'cursor-pointer'}`}`}
             title={
               stt.state === 'recording' ? 'Stop recording'
               : stt.state === 'transcribing' ? 'Transcribing…'
+              : stt.state === 'starting' ? 'Starting voice input… · press to cancel'
               : 'Hold to talk · tap to toggle'
             }
           >
-            {stt.state === 'recording' && stt.analyser ? (
+            {stt.state === 'starting' ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-[stt-spin_1s_linear_infinite]">
+                <path d="M12 2a10 10 0 0 1 10 10" />
+              </svg>
+            ) : stt.state === 'recording' && stt.analyser ? (
               <MicWaveform analyser={stt.analyser} />
             ) : stt.state === 'transcribing' ? (
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="animate-[stt-spin_1s_linear_infinite]">
