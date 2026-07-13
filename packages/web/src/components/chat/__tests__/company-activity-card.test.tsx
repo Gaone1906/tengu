@@ -187,4 +187,73 @@ describe('CompanyActivityCard', () => {
     await user.keyboard('{Enter}')
     expect(preview.getAttribute('aria-expanded')).toBe('true')
   })
+
+  it('closes an open Preview on Escape from the trigger and returns focus to it', async () => {
+    const user = userEvent.setup()
+    renderCard(runBlock())
+    const preview = screen.getByRole('button', { name: 'Preview Release review workflow run' })
+    await user.click(preview)
+    expect(screen.getByRole('region', { name: 'Release review workflow run details' })).toBeTruthy()
+
+    preview.focus()
+    await user.keyboard('{Escape}')
+
+    expect(preview.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByRole('region', { name: 'Release review workflow run details' })).toBeNull()
+    expect(document.activeElement).toBe(preview)
+  })
+
+  it('closes an open Preview on Escape from inside the details region and returns focus', async () => {
+    const user = userEvent.setup()
+    renderCard(runBlock())
+    const preview = screen.getByRole('button', { name: 'Preview Release review workflow run' })
+    await user.click(preview)
+    const region = screen.getByRole('region', { name: 'Release review workflow run details' })
+    region.focus()
+
+    await user.keyboard('{Escape}')
+
+    expect(preview.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByRole('region', { name: 'Release review workflow run details' })).toBeNull()
+    expect(document.activeElement).toBe(preview)
+  })
+
+  it('ignores unrelated keys and does not navigate on Escape', async () => {
+    const user = userEvent.setup()
+    const { router } = renderCard(runBlock())
+    const preview = screen.getByRole('button', { name: 'Preview Release review workflow run' })
+    await user.click(preview)
+    preview.focus()
+
+    await user.keyboard('{ArrowDown}')
+    expect(preview.getAttribute('aria-expanded')).toBe('true') // unrelated key leaves it open
+
+    await user.keyboard('{Escape}')
+    expect(preview.getAttribute('aria-expanded')).toBe('false')
+    expect(router.state.location.pathname).toBe('/') // Escape never triggers Open/navigation
+  })
+
+  it('scopes Escape to the currently open card only', async () => {
+    const user = userEvent.setup()
+    const other = definitionBlock()
+    const router = createMemoryRouter(
+      [{ path: '/', element: (
+        <>
+          <CompanyActivityCard block={runBlock()} />
+          <CompanyActivityCard block={other} />
+        </>
+      ) }],
+      { initialEntries: ['/'] },
+    )
+    render(<RouterProvider router={router} />)
+
+    const runPreview = screen.getByRole('button', { name: 'Preview Release review workflow run' })
+    await user.click(runPreview)
+    runPreview.focus()
+    await user.keyboard('{Escape}')
+
+    expect(runPreview.getAttribute('aria-expanded')).toBe('false')
+    // The other card was never opened and is untouched by the run card's Escape.
+    expect(screen.getByRole('button', { name: 'Preview Release review workflow' }).getAttribute('aria-expanded')).toBe('false')
+  })
 })

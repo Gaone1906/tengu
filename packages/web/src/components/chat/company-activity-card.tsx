@@ -1,4 +1,4 @@
-import { useId, useState, type ComponentType } from 'react'
+import { useId, useRef, useState, type ComponentType, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, ArrowUpRight, Check, ChevronDown, ListChecks, Play, Workflow } from 'lucide-react'
 import type { ChatBlock, JsonValue } from '@/lib/blocks'
@@ -163,7 +163,18 @@ function safeWorkflowPath(value: JsonValue | undefined): string | null {
 export function CompanyActivityCard({ block }: { block: ChatBlock }) {
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
+  const previewRef = useRef<HTMLButtonElement>(null)
   const regionId = useId()
+
+  // Escape closes an open Preview and returns focus to its trigger — the standard
+  // disclosure affordance. Scoped to this card's subtree (no global listener, no
+  // modal semantics); when collapsed the key bubbles normally for any ancestor.
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Escape' || !open) return
+    event.stopPropagation()
+    setOpen(false)
+    previewRef.current?.focus()
+  }
   const meta = kindMeta(block)
   const state = stateView(block)
   const facts = factsFor(block)
@@ -188,6 +199,7 @@ export function CompanyActivityCard({ block }: { block: ChatBlock }) {
     <div
       data-block-id={block.id}
       data-block-type={block.type}
+      onKeyDown={handleKeyDown}
       className="my-[var(--space-2)] w-[min(480px,calc(100vw-var(--space-6)))] max-w-full rounded-[var(--radius-xl)] bg-[var(--fill-tertiary)] shadow-[var(--shadow-subtle)]"
     >
       <div className="flex min-h-16 flex-wrap items-center gap-[var(--space-3)] py-[var(--space-3)] pl-[var(--space-3)] pr-[var(--space-2)] max-[504px]:pb-[var(--space-2)]">
@@ -212,6 +224,7 @@ export function CompanyActivityCard({ block }: { block: ChatBlock }) {
         <span className="ml-[var(--space-1)] flex shrink-0 items-center gap-[var(--space-1)] max-[504px]:ml-[calc(36px+var(--space-3)-var(--space-2))] max-[504px]:basis-full">
           {facts.length > 0 && (
             <button
+              ref={previewRef}
               type="button"
               onClick={() => setOpen((v) => !v)}
               aria-expanded={open}
@@ -244,8 +257,9 @@ export function CompanyActivityCard({ block }: { block: ChatBlock }) {
         <div
           id={regionId}
           role="region"
+          tabIndex={-1}
           aria-label={`${objectName} details`}
-          className="grid gap-[var(--space-2)] pb-[var(--space-3)] pl-[calc(var(--space-3)+36px+var(--space-3))] pr-[var(--space-3)] max-[504px]:pl-[var(--space-3)]"
+          className="grid gap-[var(--space-2)] pb-[var(--space-3)] pl-[calc(var(--space-3)+36px+var(--space-3))] pr-[var(--space-3)] outline-none max-[504px]:pl-[var(--space-3)]"
         >
           {facts.map((fact) => (
             <div key={fact.label} className="flex min-h-[18px] items-baseline gap-[var(--space-3)]">
