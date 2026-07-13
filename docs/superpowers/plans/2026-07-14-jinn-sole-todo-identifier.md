@@ -49,8 +49,12 @@ Every row requires an explicit operator acceptance. `YES` is the recommended def
 | Block migration on every nonterminal Workflow run containing a legacy Todo ID | **YES** | Full-scan `running`, `parked`, and `dispatched` runs, including stopping/indexed cases; no new execution projection |
 | Keep immutable callback/Activity bytes frozen while live copies, projections, and serializers rekey or neutralize them | **YES** | Audit hashes remain stable; current APIs/search/engine input never expose or execute old identity |
 | Make cross-instance import refusal-only in this ticket | **YES** | No remap protocol or import surface is invented; unsupported/unprovenanced imports fail closed |
+| Require a clean-tab cutover with no draft loss | **YES** | Migration refuses dirty Todo journals/tabs; stale state is quarantined for explicit operator copy/recovery and is never silently cleared or mapped through a legacy alias |
+| Require a two-stage guard release before the migration release | **YES** | Record concrete `G` (first guard-capable) and `M` (first migration-capable) semvers: legacy serving requires `>=G`, epoch-2 serving requires `>=M`, and the exact mixed-version matrix refuses every incompatible opener |
+| Fix the prefix and deterministic migration order | **YES** | v1 uses `JIN-`; legacy rows sort by `created_at`, then bytewise legacy ID, with no configurable namespace |
+| Enforce the mixed-version upgrade boundary | **YES** | Legacy binaries cannot open an epoch-2 database; guard-only binaries cannot serve a staged/migrated database; migration binaries refuse unguarded legacy state |
 
-The locked browser privacy contract is not an operator choice: canonical IDs stay out of URL/history/browser storage/DOM through salted private references.
+The locked browser privacy contract is not an operator choice: canonical IDs stay out of URL/history/browser storage/DOM through salted private references. Task 0 cannot close until the operator records an answer for all nine rows, including concrete `G` and `M` semvers selected by the two-stage row, and an independent reviewer approves this revision.
 
 ## Decisions Proposed for Approval
 
@@ -63,6 +67,8 @@ Use a fixed uppercase `JIN-` prefix for v1. The grammar is:
 ```
 
 The number is a positive base-10 integer with no sign, whitespace, separators, zero, or leading zeroes. Prefix configurability is deliberately excluded from v1: it adds parser, migration, privacy, import, and support states without improving the required instance-local identity model.
+
+The only accepted production source grammar is exact lowercase `^wi_[0-9a-f]{12}$`, matching the current generator. Add one shared identity module with `parseLegacyTodoId`, `findLegacyTodoIds`, `parseTodoId`, and `formatTodoId`. `parseLegacyTodoId` accepts the whole string only; `findLegacyTodoIds` finds the same token only when the preceding and following characters are absent or outside `[A-Za-z0-9_]`, then revalidates every candidate with `parseLegacyTodoId`, so longer hex/identifier runs cannot partially match. Mapping, Workflow, callback, Activity, session transport/message/block scanners, and migration validation all call these shared functions; ad-hoc legacy regexes are forbidden. Preflight rejects every `work_items.id` that does not match the exact legacy grammar—including arbitrary `wi_*`, uppercase hex, wrong length, whitespace, or already-current/mixed IDs—instead of silently mapping it. Noncanonical `wi_*` in arbitrary user prose remains a non-reference string unless a supported structured field claims it as a Todo ID, in which case the malformed structured value blocks migration.
 
 ### Sole-ID schema
 
@@ -195,13 +201,16 @@ The phrase “sole canonical ID” applies to resolvable live identity. It canno
 |---|---|---|---|---|
 | `sessions.work_item_id` | `work-items/store.ts:linkSession`, delegation/cron | Spend, linked attempts, transition/reconciliation, deletion retention | Authoritatively rewritable for ordinary live sessions | Rekey exact values; every non-null live value must resolve after swap |
 | Legacy `workflow_kind='run'` session `work_item_id` | Historical Workflow bridge | Legacy read compatibility | Immutable historical evidence | Default policy: preserve whole legacy row bytes and make the old value inert. Any still-actionable row aborts migration |
-| `sessions.transport_meta.delegationCompletionContract.workItemId` | Delegation completion contract | Completion CAS and validation | Authoritatively rewritable | Parse exact JSON shape, rekey with `sessions.work_item_id`, serialize canonically only for approved nonlegacy rows; malformed/mismatch aborts |
-| `sessions.session_key` and `source_ref` exactly `delegation:<TodoID>` | Non-idempotent delegation | Session lookup/routing and provenance | Authoritatively rewritable structured reference | Rekey exact recognized format and all `queue_items.session_key` joins in one transaction; do not rewrite unrelated prefixes |
+| Linked `sessions.transport_meta.delegationCompletionContract.workItemId` | Delegation completion contract | Completion CAS and validation | Authoritatively rewritable | Full-scan every nonlegacy `transport_meta`; parse the exact guard shape, require equality with non-null `sessions.work_item_id`, and rekey both; malformed/mismatch aborts |
+| Detached completion contract in a duplicated session | `duplicateSession()` copies `transport_meta` but omits `work_item_id` and parent linkage | Session detail/list serialization; completion contract is non-actionable because enforcement requires both parent and `work_item_id` | Supported derived live copy | Recognize exact `{workItemId,state}` under the tracked metadata shape, rekey through the migration map without requiring `sessions.work_item_id`, preserve all other metadata, and prove no completion CAS/recovery path can act on it; malformed/unknown legacy-bearing metadata aborts |
+| `sessions.session_key` and/or `source_ref` exactly `delegation:<TodoID>` | Non-idempotent delegation and duplication | Session lookup/routing and provenance | Authoritatively rewritable structured reference | Rekey each recognized field independently and all matching `queue_items.session_key` joins. A duplicate may retain delegation `source_ref` while receiving `session_key=web:*` and no `work_item_id`; that is supported, not a mismatch |
 | `queue_items.session_key` | Session enqueue | Queue dispatch | Authoritatively rewritable when it equals a rewritten delegation key | Rekey exact join; no partial/running queue may exist at cutover |
 | Manager-visibility callback `payload.message` Todo prose, `payload.meta.workItemId`, and `source_attempt=manager-visibility:<TodoID>` | `notifyManagerVisibility` | Retry/requeue, callback recovery API, acceptance | Live/retryable while pending/dead-letter | Structurally rekey all three as one coupled value; template mismatch, malformed JSON, or identity collision aborts |
 | Accepted manager-visibility callback row | `acceptSessionDelivery` | Exactly-once evidence and duplicate receipt | Immutable historical evidence | Preserve every callback row byte, including old prose/meta/source attempt; never requeue, resolve, or return its raw payload from a current API |
-| Accepted callback's linked `queue_items.prompt` | Callback acceptance copies `payload.message` | Restart replay, engine input, queue API | Authoritatively rewritable machine copy | Follow accepted callback `queue_item_id`; rekey the exact manager-visibility Todo line for pending, running, completed, and cancelled rows while preserving row identity/status/timestamps; arbitrary prompts are untouched |
+| Accepted callback's linked internal `queue_items.prompt` | Callback acceptance copies `payload.message` | Restart replay and engine input; ordinary public queue listing excludes internal rows | Authoritatively rewritable machine copy | Follow accepted callback `queue_item_id`; rekey the exact manager-visibility Todo line for pending, running, completed, and cancelled rows while preserving row identity/status/timestamps; arbitrary prompts are untouched |
 | Accepted callback's linked notification `messages.meta.workItemId` | Callback acceptance copies `payload.meta` | Message page/detail APIs and live WebSocket | Authoritatively rewritable transcript projection | Follow accepted callback `message_id`; rewrite only `workItemId` and any exact structured `sourceAttempt` if present; preserve unrelated meta, message ID, content, timestamp |
+| Duplicated manager-visibility `messages.meta` | `duplicateSession()` copies every message `meta` byte-for-byte under fresh message/session IDs | `rowToMessage`, raw message page/detail APIs, WebSocket transcript | Supported authoritatively rewritable copy | Full-scan every nonlegacy `messages.meta`, recognize the exact manager-visibility metadata shape independently of callback/message linkage, rekey `workItemId`/`sourceAttempt`, and preserve unrelated fields. A clone with no `work_item_id` is valid supported state, not corruption |
+| Other `sessions.transport_meta` and `messages.meta` objects | Session/message producers and same-instance duplication | Raw session/message serialization and engine/UI behavior | Structured scan boundary | Parse every nonlegacy row, classify each exact Todo-bearing field with the shared legacy scanner, and rekey or neutralize only an enumerated schema. Any unclassified structured legacy Todo reference blocks migration; arbitrary values without an exact legacy token remain byte-identical |
 | Manager-visibility notification `messages.content` | Callback `displayMessage` | Transcript APIs/UI/search | Non-reference string | Preserve; current display text contains employee/title but no Todo ID |
 | Session message/queue and dead-letter API serialization | `rowToMessage`, `getMessagePage`, `getQueueItems`, callback recovery list | Browser/MCP/operator clients | Live presentation boundary | Require current-epoch JIN in structured metadata, return rekeyed queue prompts, and neutralize/refuse frozen legacy callback payloads; never emit accepted callback raw evidence |
 | Delegation chat block `id=dg-<TodoID>` and `payload.workItemId` | Delegation route/callback | Chat activity card patch/open behavior | Authoritatively rewritable for nonlegacy rows | Rewrite coupled block ID and payload together; validate exact structure/version |
@@ -210,10 +219,14 @@ The phrase “sole canonical ID” applies to resolvable live identity. It canno
 | Tool `messages.meta.activityReceiptId` | Stream/tool settlement | Web tool-row suppression | Authoritatively rewritable when it exactly matches a rewritten block | Rewrite the full receipt token; missing/ambiguous correlations abort or are explicitly inert evidence |
 | Synthetic message PK `block-${block.id}-${uuid}` | `applyBlockEnvelope` | Message context/jump anchors; rendered `data-message-id` today | Non-reference opaque message identity after block rekey | Do not parse as a Todo alias or rewrite historical PKs. Future producer uses `block-${uuid}`; web must never render raw backend IDs |
 | Accepted callback identity, payload, `message_id`, `queue_item_id` | `acceptSessionDelivery` | Exactly-once delivery evidence | Immutable historical evidence | Preserve bytes. Old IDs are inert; accepted deliveries cannot be requeued or used to resolve a Todo |
+| Accepted callback tombstone after supported manager-session deletion | `deleteSession(s)` atomically removes an unlinked target session plus its messages/queue but leaves accepted callback evidence | Direct evidence lookup only; excluded from pending/dead recovery and requeue | Immutable historical evidence in a supported all-absent state | Preserve and manifest-hash the callback row byte-for-byte when `status='accepted'` and target session, linked message, and linked queue row are all absent. The old payload remains non-actionable and is never included by live/recovery serializers |
+| Partial accepted-callback dangling state | Corrupt/manual deletion or interrupted unsupported mutation | Ambiguous evidence/projection ownership | Corruption | Abort when only some of target session, linked message, and linked queue row exist, when an existing projection belongs to another session, or when an accepted target exists while either projection is missing; do not repair frozen evidence by guessing |
 | Legacy Workflow callback/message/queue rows | Historical Workflow session bridge | Legacy transcript/diagnostics | Immutable historical evidence | Preserve Task 4/5 byte checksums and keep the session unreachable through current mutation/navigation surfaces |
 | Pending partial messages/active sessions | Live engine turn | Stream settlement | Live transient state | Must be zero. Migration is offline and refuses active/partial work rather than guessing ownership |
 
-`callback_deliveries.message_id` points to the notification message inserted during acceptance, not the synthetic block row inserted by `applyBlockEnvelope`. Acceptance separately copies callback data into the queue and notification message, so freezing the accepted callback does not freeze those copies. Migration follows the callback's durable `queue_item_id`/`message_id`, rewrites those live projections, and verifies message pages, session detail, queue APIs, dead-letter APIs, restart replay, and live WebSocket output cannot expose the old ID. Search/context anchors that escape to clients expire at the identity epoch.
+`callback_deliveries.message_id` points to the notification message inserted during acceptance, not the synthetic block row inserted by `applyBlockEnvelope`. Acceptance separately copies callback data into the internal queue and notification message, so freezing the accepted callback does not freeze those copies. Migration follows linked projections when present **and** independently full-scans every nonlegacy `sessions.transport_meta`, `messages.meta`, and `messages.blocks`, because supported duplication severs callback and `work_item_id` correlations while copying structured Todo references. It rewrites recognized live copies and verifies raw message pages, session list/detail/duplicate responses, dead-letter APIs, restart/engine replay, live WebSocket output, and duplicated transcripts cannot expose the old structured identity. The ordinary queue list excludes internal callback rows, so their safety proof is direct database validation plus replay behavior, not a claim that the public queue endpoint returns them. Search/context anchors that escape to clients expire at the identity epoch.
+
+For each accepted callback, preflight permits exactly two states. **Fully projected:** target session, linked notification message, and linked internal queue row all exist; both projections belong to `target_session_id`, the message role is `notification`, and the queue row is internal (its lifecycle may be pending/running/completed/cancelled). **Tombstone:** all three are absent while the accepted callback retains its non-null recorded IDs and otherwise valid lifecycle. Source-session absence is independent historical provenance and does not change this target predicate. Current deletion removes target messages, queue rows, and the unlinked session in one transaction; accepted rows are not selected by pending recovery or dead-letter listing, accepted rows fail the dead-letter requeue status check, and a callback POST must resolve the now-absent target session before it can reach duplicate acceptance. The migration inventories the frozen row and a guard-capable release codifies these reader/recovery exclusions. Any other presence tuple, ownership/role/internal mismatch, or partial combination is a deterministic preflight no-go; if the guard release cannot prove atomic all-absent deletion and non-actionability against then-current code, it must first prevent deletion of such targets and ship a reviewed deterministic existing-row classifier before migration release.
 
 For edit receipts, rebuild the table so its durable key is `(schema_epoch, key_digest)` while preserving every existing row as epoch 1. Epoch-2 lookup first checks whether the same digest exists in epoch 1; if so, it returns the cutover reload/fresh-key result rather than applying a request. It then performs normal epoch-2 fingerprint matching. This preserves old receipt bytes, prevents cross-identity replay, and does not create an old-ID resolver.
 
@@ -245,7 +258,7 @@ There is no new execution projection. Blocking runs must reach a terminal state 
 
 There is currently no production caller of the normalized activity append API outside the activity module, but existing instance data cannot be assumed empty. Projection rebuild alone is unsafe because current search indexes raw `object_id` and list/story queries reconstruct raw events and links. Add `activity_projection_meta(singleton, todo_identity_epoch, sanitizer_version)`, make rebuild take the identity epoch, and make list/story queries fail closed unless projection and Todo epochs match.
 
-At epoch 2, the presentation function recognizes only boundary-delimited legacy canonical tokens matching `wi_[0-9a-f]{12}`, sanitizes every public string/nested detail value containing one, replaces an exact legacy Todo object ID with a stable noncanonical `historical-todo:<activity-event-id>` marker plus `historical: true`, omits its href, and drops links whose safely decoded href contains a legacy token. It does not know the migration map and cannot resolve the marker. Activity cursor payloads include the identity epoch so old cursors fail. List, preview, story detail, aggregate links, FTS input, repeated rebuilds, and API JSON all use the same deterministic presentation function. Invalid encoding, unsafe JSON, or any value that cannot be safely neutralized makes Activity queries and migration fail closed rather than emit raw evidence.
+At epoch 2, the presentation function calls the shared `findLegacyTodoIds` scanner for exact boundary-delimited `^wi_[0-9a-f]{12}$` tokens, sanitizes every public string/nested detail value containing one, replaces an exact legacy Todo object ID with a stable noncanonical `historical-todo:<activity-event-id>` marker plus `historical: true`, omits its href, and drops links whose safely decoded href contains a legacy token. It does not know the migration map and cannot resolve the marker. Activity cursor payloads include the identity epoch so old cursors fail. List, preview, story detail, aggregate links, FTS input, repeated rebuilds, and API JSON all use the same deterministic presentation function. Invalid encoding, unsafe JSON, or any value that cannot be safely neutralized makes Activity queries and migration fail closed rather than emit raw evidence.
 
 ### REST, MCP, CLI, search, and types
 
@@ -271,7 +284,9 @@ All handlers call one parser. No route-specific fallback, case folding, whitespa
 | Quick-edit/CAS journals | Persist private `td_*`, expected version, and patch intent | Bump journal schema/epoch; stale pre-cutover entries fail closed and request reload/fresh edit | Derived operational state |
 | Network fetch paths | Authenticated requests may include canonical ID | JIN is allowed on the network path, but not copied into browser location/history/storage/DOM | External transport |
 | Todo cards and technical refs | Card uses private refs; `publicWorkItemReference` suppresses old scheme | Suppress every canonical JIN ID from source/approval technical labels too | Privacy boundary |
-| Chat message wrapper | Renders raw backend `msg.id` in `data-message-id` | Render a salted/private message anchor; keep backend ID in memory only | Privacy defect to fix RED-first |
+| Chat message/tool-group wrappers | `chat-messages.tsx` renders raw backend IDs in `data-message-id`; capture/restore queries those attributes | Render domain-separated salted `cm_*` message anchors and query `data-message-ref`; backend IDs remain React/in-memory/network values only | Privacy defect to fix RED-first |
+| Delegation/handoff, generic block, and comms wrappers | `handoff-card.tsx`, `dispatch-row.tsx`, `chat-blocks.tsx`, and `comms-callout.tsx` render raw `block.id`/source IDs; migrated delegation IDs are `dg-JIN-N` | Render salted `cb_*` block anchors in `data-block-ref`/`data-source-message-ref`; never render the raw block/message ID | Privacy defect to fix RED-first |
+| Thread preview/history/focus restoration | `CommsPeekData.messageId` receives raw block/message ID, and the entire preview is copied into `history.state.threadPreview`; `routes/chat/page.tsx` queries raw attributes on return | Keep the full preview only in a per-tab in-memory map keyed by a validated private `sourceAnchor`; history stores only that private preview ref. Use private refs for focus lookup and reject/strip old raw preview state without deleting drafts | Derived private state |
 | Activity cards/inline cards | Card omits block ID and uses private open action | Preserve; full-transcript privacy test must include parent wrappers, attributes, links, storage, and location | Privacy boundary |
 
 The contract phrase “routes/UI accept and emit JIN-N” is reconciled as follows:
@@ -281,7 +296,9 @@ The contract phrase “routes/UI accept and emit JIN-N” is reconciled as follo
 - A user may type the literal text `JIN-7`; user-authored content is not a system privacy leak and must not be rewritten.
 - A human-visible “copy Todo ID” feature would conflict with the approved privacy contract and is out of scope unless that contract is explicitly changed.
 
-The current full chat transcript leaks the block-derived message primary key through `data-message-id`, even though the activity card itself hides `data-block-id`. The implementation must first add a failing full-transcript privacy canary, then use private message anchors in the DOM and make future synthetic block-message IDs domain-independent. Historical message primary keys remain opaque message identities; parsing the embedded substring as a Todo is forbidden.
+Add one browser-only `chat-private-anchors.ts` utility that reuses the per-tab random salt pattern but domain-separates inputs: `messagePrivateAnchor(raw) = cm_<digest(salt, "message", raw)>` and `blockPrivateAnchor(raw) = cb_<digest(salt, "block", raw)>`. Only the random salt is stored in `sessionStorage`; no raw ID-to-anchor map or canonical ID is persisted. The functions are synchronous and deterministic for a tab, so anchors survive rerender/history navigation and focus restoration. A different tab gets unrelated anchors. Collision detection is maintained in memory and fails closed instead of rendering an ambiguous anchor. Full `CommsPeekData` stays in an in-memory map keyed by the private ref; `history.state` stores only that ref. If a reload loses the map, the preview closes safely instead of reconstructing a raw identifier.
+
+The current full chat transcript leaks block-derived message primary keys through `data-message-id`, raw delegation/generic block IDs through `data-block-id`, comms source IDs through `data-source-message-id`, and the same raw preview ID through `history.state`. The implementation must first add failing full-transcript/history privacy canaries, then convert `handoff-card.tsx`, `dispatch-row.tsx`, `chat-blocks.tsx`, `comms-callout.tsx`, `chat-messages.tsx`, `thread-peek.tsx`, and `routes/chat/page.tsx` to private anchors. React keys and authenticated network/in-memory records may retain backend IDs; DOM attributes, History API state, storage, links, location, focus selectors, and serialized preview/cache keys may not. Future synthetic block-message IDs become domain-independent; historical message primary keys remain opaque identities and are never parsed as Todo aliases.
 
 ### Import, export, backups, templates, tests, and docs
 
@@ -290,7 +307,7 @@ The current full chat transcript leaks the block-derived message primary key thr
 | Instance storage | Each selected instance home owns one `sessions/registry.db` | Allocator and namespace are instance-local |
 | Instance creation/listing | `jinn create` seeds a fresh home; instance listing reports metadata | Fresh DB starts `last_value` at 0; first allocation returns 1; no data merge occurs |
 | Todo/session DB import/export/merge/restore | No supported CLI, API, or MCP surface exists | Refusal-only: do not add or imply import/remap behavior in this ticket |
-| Same-instance session duplication | Copies transcript/session bytes | Preflight scans duplicates; this is not cross-instance import |
+| Same-instance session duplication | Copies `source_ref`, `transport_meta`, and every message `blocks`/`meta` while detaching relational Todo/parent/callback links | Full-scan and rekey/neutralize every recognized structured copy; supported duplication is not corruption or cross-instance import |
 | SQLite backup | No user-facing Todo backup command | Migration itself creates a verified offline backup as an operational prerequisite |
 | Template `todo-handling` and related public skills/docs | Current examples contain legacy IDs | Update active public examples to `JIN-N`; do not rewrite historical migration prompts/plans |
 | Existing template migrations | Historical versioned prompts | Add a new versioned migration note when implementation ships; preserve old prompts |
@@ -319,11 +336,14 @@ The migration writes a permission-restricted audit manifest outside the live loo
   "sourceScheme": "wi-v1",
   "targetScheme": "jin-v1",
   "scope": "instance-local",
+  "legacyGrammar": "^wi_[0-9a-f]{12}$",
+  "minimumLegacyGuardVersion": "<concrete G semver>",
+  "minimumServedVersion": "<concrete M semver>",
   "createdAt": "<ISO-8601>",
   "sourceDatabaseSha256": "<digest>",
   "backupSha256": "<digest>",
   "rows": [
-    { "ordinal": 1, "oldId": "wi_legacy_a", "newId": "JIN-1", "createdAt": "<stored value>" }
+    { "ordinal": 1, "oldId": "wi_00000000000a", "newId": "JIN-1", "createdAt": "<stored value>" }
   ],
   "immutableEvidence": [
     { "surface": "workflow-run", "locatorDigest": "<digest>", "count": 1 }
@@ -360,11 +380,13 @@ Completed runs are idempotent no-ops keyed by the identity epoch and manifest di
 2. Refuse active engine turns, partial messages, pending queue execution, or a second gateway process.
 3. Checkpoint WAL, acquire an exclusive lock, run `PRAGMA integrity_check`, and verify the exact supported table/index/trigger schemas.
 4. Create a restorable SQLite backup using the SQLite backup API, fsync it, reopen it independently, run integrity check, and record its digest.
-5. Inventory every class in the graph. Direct references must resolve. Structured JSON must parse and match its paired relational value. Unknown reference-bearing shapes abort.
-6. Full-scan every raw Workflow run file, ignoring the active index. If any mapped old ID occurs in a nonterminal `running`, `parked`, or `dispatched` run—including a running/stopping drain—abort. Missing/corrupt/unreadable run files or indexes also fail closed.
+5. Validate every `work_items.id` with shared `parseLegacyTodoId`; any nonmatching, current, arbitrary `wi_*`, or mixed ID aborts. Inventory every class in the graph. Direct references must resolve. Full-scan all nonlegacy `sessions.transport_meta`, all `messages.meta`, all `messages.blocks`, and callback/queue structured fields rather than following only relational links. Recognized duplicate-session shapes are supported; unknown reference-bearing shapes abort.
+6. Full-scan every raw Workflow run file with shared `findLegacyTodoIds`, ignoring the active index. If any mapped old ID occurs in a nonterminal `running`, `parked`, or `dispatched` run—including a running/stopping drain—abort. Missing/corrupt/unreadable run files or indexes also fail closed.
 7. Inventory terminal Workflow and other immutable evidence without altering it. Prove each old literal is behind an epoch-aware serializer and unreachable from live Todo lookup, mutation, navigation, callback requeue, Workflow execution, or engine prompt behavior.
 8. Refuse a schema-1 trigger store until its existing `approvalWorkItemId` retirement migration is complete.
-9. Build the deterministic map, invariant snapshot, and temporary manifest; fsync before destructive SQL.
+9. Classify every accepted callback as fully projected or a legitimate all-absent tombstone; any partial dangling combination aborts. Inventory hashes for both accepted forms before changing live projections.
+10. Require the operator's recorded clean-tab/no-dirty-draft attestation. The guard-release web client preserves any unexpectedly stale journal read-only and presents explicit copy/recovery; it never silently deletes or submits it across the epoch.
+11. Build the deterministic map, invariant snapshot, and temporary manifest, including concrete `G` and `M` minimum-compatible semvers; fsync before destructive SQL.
 
 ### Atomic SQLite swap
 
@@ -375,8 +397,8 @@ Inside one exclusive/immediate transaction:
 3. Rekey `work_item_events.work_item_id` under the approved audit exception.
 4. Rekey ordinary live `sessions.work_item_id`.
 5. Rekey exact nonlegacy delegation session keys/source refs and matching queue keys.
-6. Structurally rekey supported completion-contract JSON, Todo/delegation blocks, receipts, tool metadata, and pending/dead-letter callback state. Do not recursive-search arbitrary JSON or prose.
-7. For every accepted manager-visibility callback, preserve the callback row bytes but follow its linked queue/message IDs: rekey the exact queue prompt Todo line and notification metadata while preserving their identity/status/timestamps/content.
+6. Structurally rekey supported completion-contract JSON, Todo/delegation blocks, receipts, tool metadata, and pending/dead-letter callback state. The full-table scan rekeys detached duplicated completion guards and every recognized duplicate `messages.meta`/`messages.blocks` copy even when no callback, `work_item_id`, or original message ID links it. Do not recursive-search arbitrary JSON or prose.
+7. For every fully projected accepted manager-visibility callback, preserve the callback row bytes but follow its linked queue/message IDs: rekey the exact queue prompt Todo line and notification metadata while preserving their identity/status/timestamps/content. Preserve legitimate all-absent accepted tombstones without fabricating projections.
 8. Preserve legacy Workflow session/callback/transcript bytes and accepted callback bytes. Install central serializers/requeue guards so old evidence is neither actionable nor emitted raw.
 9. Add receipt epoch 2 while retaining epoch-1 receipt bytes. Pre-cutover retries receive a reload/fresh-key outcome.
 10. Rebuild Activity projections through the epoch-2 presentation sanitizer, write projection epoch/sanitizer metadata, and invalidate old Activity cursors. Immutable events/hashes remain untouched.
@@ -396,7 +418,8 @@ Before serving requests, prove:
 - no live structured resolver input contains a legacy ID;
 - counts, statuses, versions, source/sourceRef, approvals, timestamps, event IDs/order, and event `detail` bytes match the pre-snapshot;
 - every coupled block ID/payload/receipt/tool-meta set is internally consistent;
-- pending/dead callbacks contain only current identities; accepted/legacy callback evidence hashes are unchanged; their linked queue/message/API projections contain no old identity;
+- pending/dead callbacks contain only current identities; accepted/legacy callback evidence hashes are unchanged; fully projected accepted rows have safe linked copies; all-absent tombstones remain absent and inert; partial dangling states are zero;
+- every nonlegacy session/message structured column was scanned, recognized duplicate copies were rekeyed or neutralized, raw messages/session APIs expose no old ID, and no unclassified exact legacy reference remains;
 - no nonterminal Workflow run contains a mapped legacy ID; all terminal run and legacy session evidence hashes are unchanged; REST/MCP read serialization contains no old identity;
 - immutable Activity rows and payload hashes are unchanged; projection metadata matches epoch 2; list/story/search/rebuild/API output contains no old token or link;
 - allocator `last_value = MAX(todo_id_allocations.value)`, the ledger contains exactly `1..N` immediately after migration, and high-water is at least the maximum live JIN suffix;
@@ -424,12 +447,13 @@ The current CLI merely warns about an old instance/template version and current 
 
 The safe rollout is two-stage:
 
-1. Ship a guard-capable release that understands the legacy epoch and refuses unknown/newer/incomplete epochs while still using the old identity scheme.
-2. After it is deployed everywhere that may open the database, ship the migration-capable release and run the reviewed offline cutover.
+1. Ship a guard-capable release `G` that understands the legacy epoch, exact source grammar, callback tombstone rules, browser clean-tab behavior, and refusal of unknown/newer/incomplete epochs while still using the old identity scheme.
+2. Record concrete `G` and first migration-capable release `M` semvers in the operator decision, release constants, persisted guard marker, and migration manifest. These exact values—not ranges chosen at runtime—define the boundary: supported legacy serving requires a binary `>= G`; served epoch 2 requires a binary `>= M`.
+3. After `G` is deployed everywhere that may open the database, ship `M` and run the reviewed offline cutover. Guard-only binaries `[G,M)` may open only the exact guarded legacy epoch and must refuse `staged` or later. Binaries `>=M` may perform migration only through the explicit offline command against an exact guarded legacy epoch; ordinary startup refuses unguarded legacy, mixed, incomplete, or newer state. Every binary `<G` is unsupported and must be proven stopped.
 
 The migration-capable gateway publishes an identity epoch in bootstrap/status responses. Mutations carry the epoch; mismatched clients receive upgrade/reload-required (`409` or `426`, selected consistently) before any write. Request serving never starts in `staged`, `swapping`, `validated`, `complete-unserved` without completing the served seal, `failed`, corrupt, or mixed states.
 
-An unsupported old binary remains outside the supported downgrade boundary. Migration is no-go until the independent reviewer accepts the two-stage requirement and the exact minimum compatible release.
+An unsupported old binary remains outside the supported downgrade boundary, but cutover cannot rely on that label alone: process/lock inspection and the persisted guard-version marker must prove none can open the database. Migration is no-go until the operator records both `G` and `M`, an independent reviewer accepts the exact matrix, and the migration command verifies the marker and exclusive ownership. Downgrade below `G` is refused before database open; after `served`, every binary below `M` is refused permanently.
 
 ## Cross-Instance Behavior
 
@@ -451,7 +475,8 @@ Each implementation task begins with a failing focused test, demonstrates the ex
 
 **Files:** Review this plan; no production files.
 
-- Operator records explicit acceptance or rejection for each of the five rows in “Operator Decision Gate”; the plan recommends `YES` for all five.
+- Operator records explicit acceptance or rejection for each of the nine rows in “Operator Decision Gate”; the plan recommends `YES` for all nine.
+- The record names concrete `G` and `M` semvers that become the legacy and served minimum compatible versions, confirms the clean-tab/no-draft-loss maintenance procedure, and accepts fixed `JIN-` plus `created_at`/bytewise-legacy-ID ordering and the mixed-version matrix.
 - A fresh reviewer who did not author this revision verifies every graph class and technical risk against the repository.
 - Gate remains closed if an operator answer is absent/conditional, any recommended policy is rejected without replacement architecture, or independent review does not approve the revised map.
 
@@ -467,7 +492,7 @@ Each implementation task begins with a failing focused test, demonstrates the ex
 - Add `packages/jinn/src/work-items/__tests__/allocator.test.ts`
 - Modify `packages/jinn/src/work-items/__tests__/store.test.ts`
 
-RED cases: grammar edges, safe-integer overflow, empty/one/many allocations, allocator singleton DELETE/REPLACE rejection, equal/decreasing/skipped high-water update rejection, ledger UPDATE/DELETE rejection, archive/raw-delete nonreuse, failed Todo/event transaction after a committed burn, crash after burn before create, racing duplicate sourceRefs with permitted gaps, and numeric tie-break ordering.
+RED cases: current grammar edges, exact legacy `^wi_[0-9a-f]{12}$` acceptance, uppercase/short/long/nonhex/arbitrary-`wi_*` rejection, boundary-delimited frozen-text scanning, shared-parser parity across mapping/Workflow/callback/Activity/session callers, safe-integer overflow, empty/one/many allocations, allocator singleton DELETE/REPLACE rejection, equal/decreasing/skipped high-water update rejection, ledger UPDATE/DELETE rejection, archive/raw-delete nonreuse, failed Todo/event transaction after a committed burn, crash after burn before create, racing duplicate sourceRefs with permitted gaps, and numeric tie-break ordering.
 
 GREEN: central parser/formatter, guarded high-water/ledger, committed allocation primitive, and separate atomic Todo/event creation transaction. Assert every returned ordinal has a durable ledger row before creation begins; never assert contiguous live Todo IDs.
 
@@ -486,7 +511,7 @@ GREEN: central parser/formatter, guarded high-water/ledger, committed allocation
 - Add `packages/jinn/src/work-items/__tests__/identity-migration.test.ts`
 - Add `packages/jinn/src/work-items/__tests__/identity-migration-worker.mjs`
 
-RED fixtures: empty/current databases, equal creation timestamps, malformed IDs/timestamps, mixed/newer schemas, deterministic rerun, exclusive-lock races, fault injection at every state boundary, pre-serving restore, external-seal/DB-marker crash windows, post-serving restore refusal before filesystem replacement, and forward-repair rollback against the current migrated state.
+RED fixtures: empty/current databases, equal creation timestamps, malformed/nonexact legacy IDs and timestamps, mixed/newer schemas, binaries below/equal/above recorded `G` and `M`, unguarded legacy state, deterministic rerun, exclusive-lock races, fault injection at every state boundary, pre-serving restore, external-seal/DB-marker crash windows, post-serving restore refusal before filesystem replacement, create-after-cutover then failed restore, and forward-repair rollback against the current migrated state.
 
 GREEN: state machine through `complete-unserved` and irreversible `served`, backup verification, manifest staging, exact map, single swap transaction, postvalidation, pre-listen external seal, idempotent completion, pre-serving-only restore, forward-only post-serving repair, and hard startup refusal.
 
@@ -503,7 +528,7 @@ GREEN: state machine through `complete-unserved` and irreversible `served`, back
 - Add `packages/jinn/src/sessions/__tests__/todo-identity-migration.test.ts`
 - Modify `packages/jinn/src/sessions/__tests__/delegation-completion-contract.test.ts`
 
-RED: dangling event/session references, event byte-preservation, linked spend/attempt lookup, delegation key plus queue rewrite, completion-contract match/mismatch, epoch-1 edit retry, and epoch-2 CAS replay.
+RED: dangling event/session references, event byte-preservation, linked spend/attempt lookup, delegation key plus queue rewrite, linked completion-contract match/mismatch, a duplicated detached completion contract with no `work_item_id`, full nonlegacy `transport_meta` scan, unknown structured legacy-bearing metadata, epoch-1 edit retry, and epoch-2 CAS replay.
 
 GREEN: approved event-envelope rekey, live session/key rewrites, strict structured JSON handling, and receipt epoch boundary without version bumps.
 
@@ -536,15 +561,27 @@ GREEN: any nonterminal legacy-bearing run blocks before cutover regardless of in
 - Modify `packages/jinn/src/shared/blocks.ts`
 - Modify `packages/jinn/src/sessions/registry.ts`
 - Modify `packages/jinn/src/sessions/callbacks.ts`
+- Add `packages/web/src/lib/chat-private-anchors.ts`
+- Modify `packages/web/src/components/chat/handoff-card.tsx`
+- Modify `packages/web/src/components/chat/dispatch-row.tsx`
+- Modify `packages/web/src/components/chat/chat-blocks.tsx`
+- Modify `packages/web/src/components/chat/comms-callout.tsx`
+- Modify `packages/web/src/components/chat/thread-peek.tsx`
 - Modify `packages/web/src/components/chat/chat-messages.tsx`
+- Modify `packages/web/src/routes/chat/page.tsx`
 - Modify `packages/web/src/lib/blocks.ts`
 - Modify `packages/jinn/src/gateway/__tests__/manager-visibility.test.ts` and `callback-reliability.test.ts`
-- Modify `packages/jinn/src/sessions/__tests__/callback-deliveries.test.ts`
-- Modify `packages/web/src/components/chat/__tests__/company-activity-card.test.tsx`, `chat-messages-tool-group.test.tsx`, and `chat-messages-jump.test.tsx`
+- Modify `packages/jinn/src/sessions/__tests__/callback-deliveries.test.ts`, `delegation-completion-contract.test.ts`, and session duplication tests
+- Modify `packages/web/src/components/chat/__tests__/chat-blocks.test.tsx`, `company-activity-card.test.tsx`, `chat-messages-tool-group.test.tsx`, `chat-messages-jump.test.tsx`, and `comms-v2.test.tsx`
+- Add/modify route-level chat preview/history/focus tests and add `packages/web/src/lib/__tests__/chat-private-anchors.test.ts`
 
-RED: coupled Todo/delegation block migration, duplicate/malformed blocks, tool suppression, pending/dead manager-visibility callback's three coupled references, and an accepted-and-consumed manager-visibility fixture. Snapshot the accepted callback row; migrate; prove its bytes unchanged while the completed queue prompt and notification `meta.workItemId` are current, message/session/queue/dead-letter APIs and WebSocket output contain no old ID, restart does not consume twice, and duplicate callback response emits receipt IDs only. Also cover future domain-independent synthetic message IDs and full rendered transcript privacy.
+RED: coupled Todo/delegation block migration, duplicate/malformed blocks, tool suppression, pending/dead manager-visibility callback's three coupled references, and an accepted-and-consumed manager-visibility fixture. Snapshot the accepted callback row; migrate; prove its bytes unchanged while the completed queue prompt and notification `meta.workItemId` are current, raw `/api/sessions/:id/messages` and session detail, queue/dead-letter APIs, search/context output, and WebSocket output contain no old ID, restart does not consume twice, and duplicate callback response emits receipt IDs only.
 
-GREEN: structural rewrite for approved live callback/queue/message copies, byte-frozen accepted evidence, serializer defense-in-depth, stale callback barriers, private DOM message anchors, and zero system-generated canonical IDs in browser persistence/DOM.
+Add exact supported-duplication fixtures: duplicate a session containing a manager-visibility notification, confirm the fresh message ID and null `work_item_id` clone still carry copied metadata before migration, then prove the clone's raw messages API returns only JIN after migration; duplicate a session containing a completion guard, prove the detached contract is rekeyed without being treated as a relational mismatch or becoming actionable. Add accepted-callback fixtures for (a) target/message/queue present and consumed, (b) supported deletion leaving all three absent, and (c) every partial dangling permutation. The all-absent tombstone preserves callback bytes and is absent from pending/dead readers, requeue, recovery, duplicate POST, engine replay, and live API serialization; partial states block.
+
+Browser RED fixtures use an interactive and noninteractive delegation block `dg-JIN-42`. Assert `JIN-42` and `dg-JIN-42` are absent from serialized DOM, URL, `history.state`, `sessionStorage`, and `localStorage`; only `cb_*`/`cm_*` attributes appear. Disconnect/remount the source card, navigate back from preview, and prove focus returns through the same private block anchor. Prepend messages and prove scroll restoration through the private message anchor. Reject old raw `messageId` history entries, test teammate/relay/dispatch/generic-block wrappers, same-tab stability, cross-tab salt separation, and storage containing only the salt. Also cover future domain-independent synthetic message IDs.
+
+GREEN: full-table structural rewrite for approved live callback/queue/message/session duplicate copies, byte-frozen accepted evidence and tombstones, serializer/recovery defense-in-depth, stale callback barriers, domain-separated private DOM message/block anchors with stable focus/scroll restoration, and zero system-generated canonical IDs in browser persistence/history/DOM.
 
 ### Task 6: Epoch-aware Activity presentation and search
 
@@ -590,9 +627,9 @@ GREEN: all boundaries share the parser; all producers use allocator; old strings
 - Modify `packages/web/src/routes/todos/__tests__/todo-private-state.test.ts`, `page-history.test.tsx`, `todo-quick-edit.test.tsx`, `todo-edit-request.test.ts`, and `quick-edit-retry-actions.test.tsx`
 - Modify gateway bootstrap/status typing and web query client handling
 
-RED: stale `td_*` selection, stale edit journal, dirty-draft cutover, epoch mismatch, technical source/approval labels containing JIN, query invalidation, reload behavior, Activity card click, and full ChatMessages wrapper. With canonical `JIN-42`, assert pathname/search, `history.state`, all browser storage, outerHTML/text/attributes/hrefs exclude it while the authenticated network call carries it.
+RED: stale `td_*` selection, stale edit journal, dirty-draft cutover refusal, unexpected stale-journal read-only quarantine/copy recovery, proof that no cleanup silently deletes operator text, epoch mismatch, technical source/approval labels containing JIN, query invalidation, reload behavior, Activity card click, and full ChatMessages wrapper. With canonical `JIN-42`, assert pathname/search, `history.state`, all browser storage, outerHTML/text/attributes/hrefs exclude it while the authenticated network call carries it.
 
-GREEN: versioned private namespace, fail-closed journal invalidation, neutral reload message, full query reset, epoch handshake, and private-only navigation state.
+GREEN: versioned private namespace, clean-tab cutover gate, fail-closed read-only stale-journal quarantine with explicit copy/recovery and no silent discard, neutral reload message, full query reset, epoch handshake, and private-only navigation state.
 
 ### Task 9: Current fixtures, templates, and active documentation
 
@@ -604,7 +641,7 @@ GREEN: versioned private namespace, fail-closed journal invalidation, neutral re
 - Modify `packages/jinn/template/skills/delegation/SKILL.md` and `packages/jinn/template/skills/management/SKILL.md` where the classified sweep finds current Todo-ID examples
 - Add a new versioned template migration note; do not edit historical migration prompts
 
-RED: repository classification test/lint that flags unexplained legacy literals in active code/templates while allowlisting named historical fixtures, schema object names, `wie_*`, and `wi-job`.
+RED: repository classification test/lint that flags unexplained legacy literals and any ad-hoc legacy Todo regex/parser outside `work-items/id.ts` in active code/templates while allowlisting named historical fixtures, schema object names, `wie_*`, and `wi-job`.
 
 GREEN: current examples use JIN; historical artifacts retain documented purpose; public templates remain generic.
 
@@ -617,7 +654,7 @@ GREEN: current examples use JIN; historical artifacts retain documented purpose;
 3. After serving is sealed, create `JIN-(N+1)`, inject a forward-repair failure, and prove the failed repair preserves that Todo and high-water; complete forward repair and prove the next creation is greater.
 4. Burn an ordinal, fail its Todo transaction, attempt forbidden legacy restore, run forward repair, and prove the next Todo skips the burned ordinal.
 5. Run concurrent allocator/boot workers with duplicate-sourceRef gaps allowed.
-6. Run parked resume/sweep, accepted-and-consumed manager visibility, Activity list/story/search/rebuild, refusal-only cross-instance, and browser privacy fixtures.
+6. Run parked resume/sweep; accepted-and-consumed and all-absent callback tombstone fixtures; duplicated manager message and detached completion-contract fixtures including raw message APIs; Activity list/story/search/rebuild; refusal-only cross-instance; exact legacy-grammar mismatch; and browser private-anchor/focus fixtures.
 7. Run browser QA against the disposable gateway.
 8. Run privacy and repository leak sweeps.
 9. Have a reviewer who did not implement the migration compare manifest, seals, pre/post invariants, and acceptance criteria.
@@ -630,13 +667,14 @@ GREEN: current examples use JIN; historical artifacts retain documented purpose;
 | Empty instance | No Todos, allocator/ledger absent | Complete-unserved epoch seeds `last_value=0`, empty ledger/manifest rows; first served allocation burns 1 and creates JIN-1 |
 | Current linked data | Todos/events/sessions/delegation/blocks/pending callback | Deterministic map; every live relation resolves; semantic bytes/versions preserved |
 | Equal timestamps | Multiple legacy IDs with identical `created_at` | Binary old-ID tie-break gives identical manifest on rerun |
-| Corrupt canonical row | Malformed old ID/null or wrong timestamp type | Preflight refusal; no DB or manifest publication change |
+| Corrupt canonical row | `wi_00000000000a` valid control plus uppercase, short, long, nonhex, arbitrary `wi_*`, null, or wrong timestamp type | Only the exact lowercase 12-hex control maps; every mismatch refuses with no DB/manifest publication change |
 | Dangling direct reference | Event/session/block points to missing Todo | Preflight refusal with exact class/locator digest |
 | Corrupt structured JSON | Completion contract/block/callback cannot parse or mismatches pair | Preflight refusal; no recursive best-effort rewrite |
 | Nonterminal Workflow blocker | Quiet parked, parked/in-flight, running/stopping, dispatched, stale index | Full file scan refuses every legacy-bearing run; resume/sweep cannot cross gate; terminalizing all blockers permits deterministic retry |
 | Terminal Workflow evidence | Completed/failed/cancelled run plus legacy run Session | File/session checksum unchanged; list/detail/MCP serializers expose no old identity/link |
 | Activity audit evidence | Immutable event contains old IDs/links in every public field | Raw bytes/hash unchanged; epoch-safe list/story/search/rebuild/API exposes no old token/link; epoch mismatch fails closed |
 | Callback lifecycle | Pending, dead-letter, accepted-and-consumed, poison, legacy | Pending/dead coupled references rekey or refuse; accepted row checksum unchanged; linked queue/message/API copies safe; no double consume |
+| Accepted callback tombstone | Supported manager-session deletion leaves accepted target/message/queue all absent; corrupt fixtures leave each partial permutation | All-absent row bytes/hash remain identical and no live reader/recovery/requeue can act or emit payload; every partial state refuses migration |
 | CAS boundary | Pre-cutover receipt plus post-cutover edit | Old key requests reload/fresh key; JIN retry is idempotent; Todo version unchanged by migration |
 | Interrupted transaction | Fault before/inside commit | SQLite rollback returns exact legacy invariant; rerun maps identically |
 | Commit/manifest interruption | Fault after commit before rename | Boot refuses serving, verifies digest, completes rename only |
@@ -645,12 +683,14 @@ GREEN: current examples use JIN; historical artifacts retain documented purpose;
 | Concurrent allocation | 16 and 32 workers, duplicate/nonduplicate sourceRefs | Unique strictly increasing burns; one Todo per idempotency key; permanent gaps allowed; no ordinal handed to creation is reused |
 | Concurrent boot | Multiple migration-capable processes | One owner migrates; others wait/refuse; no partial schema |
 | Mixed/newer binary | Legacy, guard-only, migrated, and unsupported epoch combinations | Matrix matches documented refusal; no old writer can commit |
-| Browser privacy | Todos, chat activity, search jump, reload, private selection/edit | No system-generated JIN in URL/history/storage/DOM; network/in-memory remains functional |
-| Same-instance duplicate | Duplicated sessions with block/contract refs | All nonlegacy live copies rekey consistently; frozen copies remain inert |
+| Browser privacy | Todos, chat activity, search jump, reload, private selection/edit, interactive/noninteractive `dg-JIN-42` handoff | No system-generated JIN in URL/history/storage/DOM; `cm_*`/`cb_*` anchors preserve focus/scroll; network/in-memory remains functional |
+| Same-instance duplicated manager message | Duplicate accepted manager transcript, fresh message/session IDs, clone has no `work_item_id`/callback link | Full `messages.meta` scan rekeys the clone; raw messages/session/search APIs expose only JIN; duplication is not labeled corruption |
+| Same-instance detached completion contract | Duplicate tracked session with `transport_meta` guard but no cloned `work_item_id` | Full transport scan rekeys exact guard, preserves other metadata, and proves completion CAS/recovery cannot act on clone |
 | Cross-instance refusal | Two isolated homes each own JIN-1; probe route/tool/CLI/instance listing | IDs remain local; no rows move; import route is 404, tool is absent/unknown, CLI has no import command |
 | Idempotent rerun | Completed migration invoked again | No bytes/counters/manifest rows change |
 | Pre-serving restore | `complete-unserved`, no external seal, no postmigration write | Verified whole legacy backup may restore offline; exact legacy state returns |
 | Post-serving rollback refusal | Seal served, create JIN-(N+1), request legacy restore | Refusal occurs before file replacement; new Todo and ledger/high-water remain intact |
+| Guard/migration release boundary | Binary below `G`, exact `G`, `[G,M)`, and `>=M`; legacy/unguarded/staged/served DB | Only the documented matrix opens; manifest records concrete `G` and `M`; older/mixed binaries refuse before mutation or serving |
 | Failed forward repair | Seal served, snapshot current migrated state, inject repair failure | Repair transaction rolls back to current JIN state; all post-cutover writes/high-water survive; instance stays closed until safe repair |
 | Successful forward repair | Same fixture after correcting fault | Current rows/versions/evidence survive, `H_after >= H_before`, next create exceeds every prior burn |
 
@@ -675,12 +715,12 @@ The operator table fixes the recommended product policy; these technical consequ
 2. **Permanent burns:** Verify the two-transaction create protocol, allocator/ledger guards, duplicate-sourceRef gaps, and forward-repair invariants. No returned allocation may ever roll back.
 3. **Workflow cutover availability:** The safe policy blocks on every nonterminal legacy-bearing run. If the operator cannot terminalize those runs before the maintenance window, migration remains blocked; no execution projection is added as a shortcut.
 4. **Legacy Workflow Sessions:** Preserve Task 4 bytes and refuse migration if any row remains operationally actionable. A blanket `sessions.work_item_id` rewrite is not acceptable without amending Task 4.
-5. **Callback fan-out:** Verify pending/dead coupled rewrites and accepted-callback byte preservation independently from linked queue/message/API projections. A missing linked row, malformed template, or collision is fail-closed.
+5. **Callback fan-out:** Verify pending/dead coupled rewrites, full-table duplicated metadata scans, and accepted-callback byte preservation independently from linked queue/message/API projections. A legitimate accepted all-absent tombstone is inventoried and inert; every partial dangling combination, malformed template, or collision is fail-closed.
 6. **Activity presentation:** Verify every public field and FTS input passes through one epoch-aware neutralizer while immutable bytes/hashes remain stable. Any bypass or unsafe parse is a migration blocker.
 7. **Live transcript blocks:** Approve narrow structural rewrites for nonlegacy machine-authored blocks only. Preserve prose and opaque message IDs. Abort on ambiguity.
 8. **Edit receipts:** Preserve epoch-1 receipt bytes but invalidate operational replay across cutover; require reload/fresh key. Recalculation is impossible because the original request is absent.
-9. **Mixed-version boundary:** Approve a guard release before the migration release and name the minimum compatible version. A single-release cutover cannot protect against arbitrary old binaries.
-10. **Browser state:** Private-ref privacy is locked. Stale private refs/edit journals fail closed at the epoch boundary; migration waits for no dirty drafts/tabs or accepts documented draft loss, never stores a canonical ID.
+9. **Mixed-version boundary:** Approve a guard release before the migration release and name concrete `G`/`M` minimum versions for legacy/served epochs. A single-release cutover cannot protect against arbitrary old binaries.
+10. **Browser state:** Private-ref privacy is locked. Migration requires clean tabs and no dirty Todo journals. Stale state is quarantined and surfaced for explicit copy/recovery; it is never silently discarded and never stores or reconstructs a canonical ID.
 11. **Migration orchestration:** Use an explicit offline command/maintenance gate rather than implicit ordinary startup migration. Do not overload the template-oriented `jinn migrate` command ambiguously.
 12. **Post-serving recovery:** Verify the external seal cannot disappear through supported restore tooling and that forward repair preserves all post-cutover writes plus allocation ledger/high-water. If proof fails, the instance stays offline.
 
@@ -688,15 +728,17 @@ The operator table fixes the recommended product policy; these technical consequ
 
 ### Architecture GO
 
-Implementation may begin only when the operator explicitly accepts all five recommended decisions in the operator table and a fresh independent reviewer approves this revised map and confirms:
+Implementation may begin only when the operator explicitly accepts all nine recommended decisions in the operator table, including concrete minimum-compatible `G` and `M` versions, and a fresh independent reviewer approves this revised map and confirms:
 
 - every field in the producer/consumer graph was checked against current source;
 - immutable evidence is separated from live resolvable state without a hidden alias;
 - the deterministic ordering and fixed prefix are accepted;
 - the backup/manifest/state-machine design is recoverable and idempotent;
 - full backup restoration is impossible after the served seal and forward repair preserves post-cutover writes/high-water;
-- the two-stage mixed-version boundary is operationally acceptable;
-- the locked private-reference browser contract is preserved;
+- the exact guard-release semver and two-stage mixed-version matrix are recorded and operationally acceptable;
+- the clean-tab/no-draft-loss procedure and locked private-reference browser contract are preserved;
+- full session/message structured scans cover supported clones without relational links, and accepted all-absent tombstones are proven inert;
+- private message/block anchors preserve transcript scroll and return focus without canonical values in history/DOM/storage;
 - the implementation sequence and fixture matrix cover the contract.
 
 ### Architecture NO-GO
@@ -704,13 +746,17 @@ Implementation may begin only when the operator explicitly accepts all five reco
 Do not implement if any of the following remains true:
 
 - any nonterminal Workflow run contains a mapped legacy ID, regardless of parked/stopping/index state;
+- any `work_items.id` is outside exact `^wi_[0-9a-f]{12}$` in the legacy epoch, or mapping/Workflow/callback/Activity/session scanners disagree on the shared valid/mismatch corpus;
 - a legacy Workflow session or accepted/dead callback still uses an old ID for a live action;
-- manager-visibility queue/message/API copies or Activity list/story/search serializers can emit an old ID;
+- manager-visibility queue/message/API copies, duplicated session metadata, or Activity list/story/search serializers can emit an old structured Todo identity;
+- a partial accepted-callback dangling state exists, or an all-absent tombstone is reachable by pending/dead recovery, requeue, engine replay, duplicate callback delivery, or live evidence serialization;
+- any nonlegacy `transport_meta`, `messages.meta`, or `messages.blocks` row with an exact legacy Todo reference is unclassified or missed by the full scan;
+- raw message/block IDs enter browser URL/history/storage/DOM, or private anchors fail stable scroll/focus restoration;
 - full legacy restore remains callable after the served seal or forward repair can lose a post-cutover write/high-water;
 - allocator deletion, replacement, decrease, or reuse of a burned ordinal remains possible;
 - epoch-1 edit-receipt behavior is unspecified;
-- old binaries may open the migrated database;
-- dirty browser drafts must survive without a permitted old-ID map;
+- concrete `G` and `M` are not recorded, a binary older than `G` may open the database, an epoch-2 binary older than `M` may serve, or a guard-only/migration binary opens a disallowed epoch;
+- dirty Todo drafts/tabs exist at the cutover gate or any client path silently clears/quarantines state without a visible recovery action;
 - a cross-instance import/remap is expected in this refusal-only ticket;
 - the operator has not accepted every decision-table row;
 - the independent reviewer is also the migration-map author.
@@ -730,17 +776,20 @@ Production cutover is a later gate. It additionally requires:
 
 Until then, do not restart, deploy, release, publish, or migrate a production instance.
 
-## V2 Re-Audit Evidence
+## V3 Re-Audit Evidence
 
 The rejection was re-audited against the current source before this revision. These are the load-bearing paths:
 
+- Exact legacy grammar: `packages/jinn/src/work-items/store.ts:216-219` generates lowercase 12-hex IDs and `work-items/__tests__/store.test.ts:44` asserts the same grammar, while `work-items/migrate.ts:32-60` has no source-ID CHECK. Migration therefore owns exact shared validation and rejects all other row IDs.
 - Allocation/create boundary: `packages/jinn/src/work-items/store.ts:216-219,345-404` currently generates before a deferred Todo/event transaction and rechecks sourceRef inside it; `packages/jinn/src/work-items/migrate.ts:32-60,150-185` has no allocator and demonstrates the current immediate table-swap primitive.
 - Boot/serve boundary: `packages/jinn/src/sessions/registry.ts:421-490,721-733` opens and migrates the instance DB; `packages/jinn/src/gateway/server.ts:307-309` initializes it and `:1339-1348` begins listening; `packages/jinn/src/cli/start.ts:53-60` currently warns rather than refuses version drift.
 - Workflow executability: `packages/jinn/src/workflows/run-store.ts:342-348` defines statuses and `:800-879` makes only completed/failed/cancelled terminal while indexing every other status. `run-reconciler.ts:426-436` passes trigger data to step prompts, `:1143-1200` resumes parked gates, and `:1207-1275` rebuilds/sweeps the active index. `handoff.ts:434-458` serializes trigger payloads; `condition.ts:176-190` reads scalar trigger payload values; `advance.ts:1010-1016,1674-1694` feeds conditions and drains stopping runs.
 - Manager visibility: `packages/jinn/src/sessions/callbacks.ts:50-80` writes Todo prose, `meta.workItemId`, and source attempt. `sessions/registry.ts:3335-3383` copies prompt/meta into queue/message rows and links their IDs to the accepted callback. `gateway/api.ts:473-525` replays pending callback queues, `:2828-2850` serializes dead letters, `:3263-3310` serializes messages/session detail, `:3553-3561` serializes queue prompts, and `:5645-5673` reloads authoritative callback payload.
+- Supported duplication: `packages/jinn/src/sessions/registry.ts:2283-2340` copies `transport_meta`, every message `blocks`/`meta`, and delegation `source_ref` under a fresh session/message identity while omitting `work_item_id` and parent linkage. `registry.ts:363-382,2457-2478,2554-2625` and `gateway/api.ts:2737-2751,3323-3406` return those copies through session list/detail and raw message APIs. Detached completion guards and cloned manager metadata are therefore full-scan inputs, not corruption.
+- Accepted tombstones: `packages/jinn/src/sessions/registry.ts:149-177` gives callbacks no cascading FK, while `:2343-2374` atomically deletes an unlinked target's messages, queue, and session without deleting accepted evidence. `:3120-3218`, `sessions/callbacks.ts:159-176,611-663`, and `gateway/api.ts:481-529,2857-2879,5729-5748` exclude all-absent accepted rows from pending/dead recovery, requeue, engine replay, and target delivery. Partial presence remains corruption.
 - Activity exposure: `packages/jinn/src/activity/migrate.ts:31-78,115-139` defines immutable hashed rows. `projection.ts:75-84,134-163` indexes raw object IDs and rebuilds from raw rows. `store.ts:183-223` reconstructs all raw fields. `query.ts:187-221,323-365` returns raw list/story events and links. `gateway/api.ts:6663-6691` serializes those results directly.
 - Cross-instance absence: `packages/jinn/bin/jinn.ts`, `packages/jinn/src/cli/create.ts:21-88`, `cli/instances.ts:6-24`, `gateway/api.ts:3024-3036`, and `mcp/server.ts:115-129,224-245` expose no Todo import/export/merge surface and reject unknown routes/tools.
-- Locked privacy: `packages/web/src/main.tsx:70-80` has only `/todos`; `routes/todos/todo-private-state.ts:63-90,344-435` uses salted private refs/journal keys; `page.tsx:141-175,578-608` sanitizes history and stores private refs; `group.tsx:213-217` uses private DOM anchors; `use-todos.ts:312-388` resolves in memory. `components/chat/chat-messages.tsx:1268-1270` is the known raw message-ID DOM leak covered by the RED privacy canary.
+- Locked privacy: `packages/web/src/main.tsx:70-80` has only `/todos`; `routes/todos/todo-private-state.ts:63-90,344-435` uses salted private refs/journal keys; Todo `page.tsx:141-175,578-608` sanitizes history and stores private refs. Chat currently leaks raw IDs through `handoff-card.tsx:68-95`, `dispatch-row.tsx:67-114`, `chat-blocks.tsx:36-81`, `comms-callout.tsx:88-109`, and `chat-messages.tsx:1268-1270,1506-1542,1715-1724`; `routes/chat/page.tsx:72-85,610-628,691-703` also stores the raw preview ID in history and uses it for focus. All move to per-tab `cm_*`/`cb_*` anchors.
 
 ## Audited File Inventory
 
@@ -756,17 +805,17 @@ This is the concrete repository reference graph used to produce the classificati
 - MCP: `packages/jinn/src/mcp/work-item-tools.ts`, `approval-tools.ts`, `delegation-tools.ts`, `server.ts`, and shared toolkit/error handling.
 - Other producers and shared contracts: `packages/jinn/src/cron/runner.ts`, `packages/jinn/src/shared/types.ts`, `blocks.ts`, and `activity-receipts.ts`.
 - Startup/instances/migration boundary: `packages/jinn/src/sessions/registry.ts`, `packages/jinn/src/gateway/server.ts`, `packages/jinn/src/cli/start.ts`, `migrate.ts`, `create.ts`, `instances.ts`, `packages/jinn/bin/jinn.ts`, and `packages/jinn/src/shared/paths.ts`.
-- Web privacy/data/CAS: `packages/web/src/lib/todos.ts`, `query-client.ts`, `packages/web/src/routes/todos/todo-private-state.ts`, `todo-edit-request.ts`, `use-todo-quick-edit.ts`, `use-todo-draft.ts`, `use-todos.ts`, `page.tsx`, `group.tsx`, `row.tsx`, `detail-sheet.tsx`, and `packages/web/src/components/chat/chat-messages.tsx` plus `company-activity-card.tsx`.
+- Web privacy/data/CAS: `packages/web/src/lib/todos.ts`, `query-client.ts`, planned `chat-private-anchors.ts`, `packages/web/src/routes/todos/todo-private-state.ts`, `todo-edit-request.ts`, `use-todo-quick-edit.ts`, `use-todo-draft.ts`, `use-todos.ts`, Todo `page.tsx`, `group.tsx`, `row.tsx`, `detail-sheet.tsx`, Chat `routes/chat/page.tsx`, and `packages/web/src/components/chat/chat-messages.tsx`, `handoff-card.tsx`, `dispatch-row.tsx`, `chat-blocks.tsx`, `comms-callout.tsx`, `thread-peek.tsx`, plus `company-activity-card.tsx`.
 
 ### Existing tests and fixtures with current or legacy ID literals
 
 - Work items: `packages/jinn/src/work-items/__tests__/store.test.ts`, `migrate.test.ts`, `fixtures/migration-worker.mjs`, `approvals.test.ts`, `approvals-atomicity.test.ts`, `transitions.test.ts`, `reconcile.test.ts`, `optimistic-concurrency.test.ts`, `version-mutations.test.ts`, and `list-limit.test.ts`.
 - Gateway: `packages/jinn/src/gateway/__tests__/work-items-route.test.ts`, `work-item-approval-route.test.ts`, `delegations-route.test.ts`, `manager-visibility.test.ts`, `callback-reliability.test.ts`, `chat-activity-route.test.ts`, `streamed-turn-settlement.test.ts`, `legacy-workflow-mutation-boundaries.test.ts`, and `workflow-session-grouping.test.ts`.
-- Sessions: `packages/jinn/src/sessions/registry.test.ts`, `__tests__/callback-deliveries.test.ts`, `callback-concurrent-init.test.ts`, `delegation-completion-contract.test.ts`, `legacy-workflow-session-compat.test.ts`, `messages-partial.test.ts`, and message-search/context tests.
+- Sessions: `packages/jinn/src/sessions/registry.test.ts`, `__tests__/registry-delete-queue-items.test.ts`, `callback-deliveries.test.ts`, `callback-concurrent-init.test.ts`, `delegation-completion-contract.test.ts`, `legacy-workflow-session-compat.test.ts`, `messages-partial.test.ts`, duplication tests, and message-search/context tests.
 - Workflows: `packages/jinn/src/workflows/__tests__/run-store.test.ts`, `todo-status-trigger.test.ts`, `todo-replay-watermark.test.ts`, `todo-capability-boundary.test.ts`, `condition.test.ts`, and `poll-trigger.test.ts`.
 - MCP: `packages/jinn/src/mcp/__tests__/work-item-tools.test.ts`, `delegation-tools.test.ts`, `server.test.ts`, `toolkit.test.ts`, and read-capability tests.
 - Engine/shared receipt propagation: Claude, Codex, Grok, Hermes, and Pi interactive/protocol tests; `packages/jinn/src/shared/__tests__/activity-receipts.test.ts`, `blocks.test.ts`, `company-activity-blocks.test.ts`, and `fixtures/company-activity-blocks.json`.
-- Web: Todo route detail/page/history/private-state/edit/draft/quick-edit/CAS/pagination tests; `packages/web/src/lib/__tests__/todos.test.ts`, `company-activity-blocks.test.ts`; chat block, tool-group, activity-card, parity, jump, and live-session/query-invalidation tests.
+- Web: Todo route detail/page/history/private-state/edit/draft/quick-edit/CAS/pagination tests; `packages/web/src/lib/__tests__/todos.test.ts`, `company-activity-blocks.test.ts`, planned private-anchor tests; `chat-blocks.test.tsx`, `chat-messages-jump.test.tsx`, `chat-messages-tool-group.test.tsx`, `comms-v2.test.tsx`, activity-card/parity tests, route-level preview/history/focus tests, and live-session/query-invalidation tests.
 - Activity: `packages/jinn/src/activity/__tests__/migration.test.ts`, `store.test.ts`, `query.test.ts`, and `performance.test.ts`.
 
 ### Templates and historical documentation
@@ -779,15 +828,15 @@ This is the concrete repository reference graph used to produce the classificati
 ## Self-Audit Checklist
 
 - [x] Canonical store, allocator, schema constraints, indexes, and ordering are covered.
-- [x] Events, sourceRef/idempotency, approvals, sessions, delegations, manager-visibility callback fan-out, queues, messages, APIs, and receipts are classified.
+- [x] Events, sourceRef/idempotency, approvals, sessions, delegations, manager-visibility callback fan-out, supported duplicated transport/message copies, accepted all-absent tombstones, queues, raw APIs, and receipts are classified.
 - [x] Workflow Todo-status triggers, every nonterminal run state/index/resume/sweep path, legacy compatibility, `source=workflow`, and one-way capability boundaries are preserved.
-- [x] Chat activity blocks, receipts, synthetic message IDs, CAS, React Query, private refs, and DOM privacy are reconciled.
+- [x] Chat activity blocks, receipts, synthetic message IDs, raw message/block DOM/history/focus consumers, CAS, React Query, private refs, and DOM privacy are reconciled.
 - [x] REST, MCP, CLI absence, search, shared types, cron, and WebSocket activity are covered.
 - [x] Activity immutable bytes/hashes, epoch presentation, list/story/search/rebuild/API, projections/FTS, backups, instances, tests, templates, docs, and migrations are covered.
 - [x] Deterministic map, permanent-burn allocator, staging, atomic swap, invariant validation, idempotence, crash recovery, pre-serving restore, post-serving forward repair, and mixed-version refusal are specified.
 - [x] Cross-instance behavior is grounded in current surfaces and scoped to explicit refusal; no remap protocol is invented.
 - [x] RED-to-GREEN tasks and verification fixtures cover current, corrupt, interrupted, concurrent, and collision cases.
 - [x] Risks, unresolved decisions, and exact architecture/deployment gates are explicit.
-- [x] The five operator decisions have recommended defaults and implementation remains forbidden until operator acceptance plus independent approval.
+- [x] All nine operator decisions have recommended defaults and implementation remains forbidden until every answer plus concrete `G`/`M` minimum-compatible releases is recorded and independent approval is received.
 - [x] Canonical-ID browser privacy is locked, not presented as an open decision.
 - [x] No production implementation or runtime mutation is authorized by this document.
