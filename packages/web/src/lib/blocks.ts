@@ -348,7 +348,6 @@ export function applyBlockEnvelopeToMessages(
         content: isSyntheticBlockMessage(message, oldBlock)
           ? fallback || blockFallbackContent(target)
           : message.content,
-        timestamp,
         blocks,
       }
     })

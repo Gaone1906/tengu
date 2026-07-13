@@ -814,6 +814,61 @@ describe("useLiveSession (read-only)", () => {
     expect(result.current.messages.filter((m) => m.content === "Intro")).toHaveLength(1)
   })
 
+  it("preserves a block evidence timestamp across a live patch and canonical reload", async () => {
+    const runningBlock = {
+      id: "plan-stable-time",
+      type: "task-list" as const,
+      version: 1,
+      title: "Plan",
+      payload: { items: [{ id: "a", text: "Read code", status: "running" }] },
+    }
+    const completedBlock = {
+      ...runningBlock,
+      version: 2,
+      status: "done" as const,
+      payload: { ...runningBlock.payload, summary: "Complete" },
+    }
+    getSession.mockResolvedValueOnce({
+      status: "running",
+      messages: [{
+        id: "persisted-plan",
+        role: "assistant",
+        content: "Plan",
+        timestamp: 2_000,
+        blocks: [runningBlock],
+      }],
+    })
+    const { subscribe, emit } = makeBus()
+    const { result } = renderHook(() =>
+      useLiveSession("s-stable-time", { subscribe, readOnly: true }),
+    )
+    await act(async () => { await Promise.resolve() })
+
+    act(() => emit("session:delta", {
+      sessionId: "s-stable-time",
+      type: "block",
+      content: "Plan complete",
+      block: { op: "patch", block: completedBlock },
+    }))
+    const liveTimestamp = result.current.messages[0]?.timestamp
+    expect(liveTimestamp).toBe(2_000)
+
+    getSession.mockResolvedValueOnce({
+      status: "idle",
+      messages: [{
+        id: "persisted-plan",
+        role: "assistant",
+        content: "Plan complete",
+        timestamp: 2_000,
+        blocks: [completedBlock],
+      }],
+    })
+    await act(async () => { await result.current.reload("s-stable-time") })
+
+    expect(result.current.messages[0]?.timestamp).toBe(liveTimestamp)
+    expect(result.current.messages[0]?.blocks?.[0]).toMatchObject({ version: 2, status: "done" })
+  })
+
   it("keeps equal-version Workflow activity monotonic across out-of-order live deltas and reload", async () => {
     const block = (action: string, activityOrder: number) => ({
       id: "workflow-definition:ordered-live",

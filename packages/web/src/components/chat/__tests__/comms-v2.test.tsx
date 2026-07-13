@@ -473,6 +473,10 @@ describe('fold region boundary (turn structure)', () => {
     expect(regions[0].textContent).not.toContain('dev')
     expect(regions[1].textContent).toContain('1 tool')
     expect(regions[1].textContent).toContain('dev')
+    // Each engine segment owns its own persisted interval. The child callback,
+    // not the original user row, starts the second 10-second segment.
+    expect(screen.getAllByRole('button', { name: /Worked for 10s/ })).toHaveLength(2)
+    expect(screen.getByRole('button', { name: /Worked for 10s, 1 tool, 1 teammate\. Show the work\./ })).toBeTruthy()
   })
 
   it('keeps system banners outside the fold and splits the region around them', () => {
@@ -487,6 +491,9 @@ describe('fold region boundary (turn structure)', () => {
     // The banner stays visible between two folded regions.
     expect(screen.getByText('Session context was compacted.')).toBeTruthy()
     expect(container.querySelectorAll('[data-fold-region]')).toHaveLength(2)
+    const summaries = screen.getAllByRole('button', { name: /Show the work/ })
+    expect(summaries).toHaveLength(2)
+    expect(summaries.filter((summary) => summary.getAttribute('aria-label')?.includes('Worked for 4s'))).toHaveLength(1)
     for (const region of container.querySelectorAll('[data-fold-region]')) {
       expect(region.getAttribute('aria-hidden')).toBe('true')
     }
@@ -582,7 +589,7 @@ describe('fold region boundary (turn structure)', () => {
     // The existing beat + 420ms choreography performs the first collapse.
     act(() => vi.advanceTimersByTime(1200))
     expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBe('true')
-    expect(screen.getByRole('button', { name: /Worked for 9s, 1 tool, 1 teammate\. Show the work\./ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Worked for 5s, 1 tool, 1 teammate\. Show the work\./ })).toBeTruthy()
   })
 })
 

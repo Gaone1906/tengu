@@ -297,13 +297,11 @@ function validTimestamp(value: number): number | null {
   return Number.isFinite(value) && value > 0 ? value : null
 }
 
-/** A settled fold measures the durable transcript boundary: initiating user
- * row → canonical final assistant/error row. Legacy rows may lack one boundary;
- * in that case, recover only from timestamped evidence inside the same turn.
- * A single evidence row cannot establish an interval by itself. */
-function settledDurationMs(messages: Message[], answerIndex: number): number | null {
-  if (answerIndex < 0 || answerIndex >= messages.length) return null
-
+/** Locate the durable start of the engine segment closed by `answerIndex`.
+ * The initiating user starts the first segment. After a completed reply, a
+ * callback/relay starts the next one; callbacks that arrive before any reply
+ * remain evidence inside the still-open initial segment. */
+function settledSegmentStartIndex(messages: Message[], answerIndex: number): number {
   let userIndex = -1
   for (let index = answerIndex - 1; index >= 0; index--) {
     if (messages[index].role === 'user') {
@@ -313,10 +311,34 @@ function settledDurationMs(messages: Message[], answerIndex: number): number | n
   }
 
   let startIndex = userIndex
-  let start = userIndex >= 0 ? validTimestamp(messages[userIndex].timestamp) : null
+  let completedReply = false
+  for (let index = userIndex + 1; index < answerIndex; index++) {
+    const message = messages[index]
+    if (isReinvocationBoundary(message)) {
+      if (completedReply) {
+        startIndex = index
+        completedReply = false
+      }
+      continue
+    }
+    if (!message.partial && isAnswerMessage(message)) completedReply = true
+  }
+  return startIndex
+}
+
+/** A settled fold measures one durable engine segment: initiating user or
+ * callback/relay boundary → canonical final assistant row. Legacy rows may lack
+ * one boundary; in that case, recover only from timestamped evidence inside
+ * the same segment. A single evidence row cannot establish an interval. */
+function settledDurationMs(messages: Message[], answerIndex: number): number | null {
+  if (answerIndex < 0 || answerIndex >= messages.length) return null
+
+  const segmentStartIndex = settledSegmentStartIndex(messages, answerIndex)
+  let startIndex = segmentStartIndex
+  let start = segmentStartIndex >= 0 ? validTimestamp(messages[segmentStartIndex].timestamp) : null
   if (start === null) {
     startIndex = -1
-    for (let index = userIndex + 1; index < answerIndex; index++) {
+    for (let index = segmentStartIndex + 1; index < answerIndex; index++) {
       const timestamp = validTimestamp(messages[index].timestamp)
       if (timestamp === null) continue
       start = timestamp
@@ -329,7 +351,7 @@ function settledDurationMs(messages: Message[], answerIndex: number): number | n
   let end = validTimestamp(messages[answerIndex].timestamp)
   if (end === null) {
     endIndex = -1
-    for (let index = answerIndex - 1; index > userIndex; index--) {
+    for (let index = answerIndex - 1; index > segmentStartIndex; index--) {
       const timestamp = validTimestamp(messages[index].timestamp)
       if (timestamp === null) continue
       end = timestamp
@@ -480,13 +502,17 @@ function partitionForFold(
   }
   // When a banner splits one turn into several regions they all answer at the
   // same instant — per-region scroll anchoring would double-compensate the
-  // shared scroller. Only the region nearest the answer plays the anchored
-  // choreography; earlier siblings fold with the instant path.
+  // shared scroller. Only the region nearest the answer owns the settled
+  // duration and plays the anchored choreography; earlier siblings fold with
+  // the instant path.
   const seenAnswers = new Set<number>()
   for (let g = groups.length - 1; g >= 0; g--) {
     const group = groups[g]
     if (group.kind !== 'fold' || group.answerIdx === -1) continue
-    if (seenAnswers.has(group.answerIdx)) group.animated = false
+    if (seenAnswers.has(group.answerIdx)) {
+      group.animated = false
+      group.summary = { ...group.summary, durationMs: null }
+    }
     seenAnswers.add(group.answerIdx)
   }
   return groups
