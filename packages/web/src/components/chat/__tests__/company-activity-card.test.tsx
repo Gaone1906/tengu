@@ -258,6 +258,23 @@ describe('CompanyActivityCard', () => {
     expect(card.className).not.toMatch(/\bborder\b/)
   })
 
+  it('indents the wrapped mobile action row inside its basis box, never with an outside margin', () => {
+    // Box-model regression (browser-verified separately with Playwright at 320/360/390):
+    // at ≤504px the action row wraps to its own line as flex-basis:100% + shrink-0,
+    // so it already fills the card's flex content box. An arbitrary-value LEFT MARGIN
+    // there lives OUTSIDE the border-box and pushes the 100%-basis row 40px past the
+    // card — 32px past its right edge, overflowing the scroller. The indent must ride in
+    // PADDING (inside the border-box under Tailwind's box-border) and the base margin
+    // must be zeroed at the breakpoint.
+    renderCard(runBlock())
+    const row = screen.getByRole('button', { name: 'Open Release review workflow run' }).parentElement as HTMLElement
+    expect(row).toBeTruthy()
+    expect(row.className).toContain('max-[504px]:basis-full')
+    expect(row.className).toMatch(/max-\[504px\]:pl-\[/) // indent moved inside the basis box
+    expect(row.className).not.toMatch(/max-\[504px\]:ml-\[/) // no outside-the-box arbitrary margin
+    expect(row.className).toContain('max-[504px]:ml-0') // base --space-1 margin neutralized on mobile
+  })
+
   it('Preview is keyboard operable', async () => {
     const user = userEvent.setup()
     renderCard(runBlock())

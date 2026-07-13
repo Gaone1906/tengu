@@ -223,7 +223,7 @@ export function CompanyActivityCard({ block }: { block: ChatBlock }) {
             <span className="min-w-0">{state.label}</span>
           </span>
         </span>
-        <span className="ml-[var(--space-1)] flex shrink-0 items-center gap-[var(--space-1)] max-[504px]:ml-[calc(36px+var(--space-3)-var(--space-2))] max-[504px]:basis-full">
+        <span className="ml-[var(--space-1)] flex shrink-0 items-center gap-[var(--space-1)] max-[504px]:ml-0 max-[504px]:basis-full max-[504px]:pl-[calc(36px+var(--space-3)-var(--space-2))]">
           {facts.length > 0 && (
             <button
               ref={previewRef}
