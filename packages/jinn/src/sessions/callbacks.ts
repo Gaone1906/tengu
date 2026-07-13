@@ -104,6 +104,20 @@ export function notifyParentSession(
 
   if (!childSession.parentSessionId) return;
 
+  // Cross-channel de-duplication: if the child already reported UP to this parent
+  // via send_to_session during its current attempt, that explicit relay and this
+  // automatic parent-completion callback are two injections of the SAME turn — the
+  // operator sees the second as a spurious "duplicate callback" wake. Suppress it.
+  // Errors always surface (the explicit report may predate the failure); a re-read
+  // sees the marker written mid-turn; and a NEW attempt mints a token that no
+  // longer matches, so the callback re-enables for genuinely new work.
+  if (!result.error) {
+    const fresh = getSession(childSession.id) ?? childSession;
+    if (fresh.attemptToken && fresh.transportMeta?.reportedToParentAttempt === fresh.attemptToken) {
+      return;
+    }
+  }
+
   // Run asynchronously — do not await in the caller
   _sendNotification(childSession, result, options).catch((err) => {
     logger.warn(`[callbacks] Failed to notify parent session ${childSession.parentSessionId}: ${err instanceof Error ? err.message : String(err)}`);

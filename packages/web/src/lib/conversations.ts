@@ -73,6 +73,13 @@ export function messageIdentityKey(m: Message): string {
  * copy AND show the snapshot copy → a duplicate. Matching on identity collapses
  * the two. Preserved messages are re-sorted by timestamp.
  *
+ * That same client-uuid → server-id gap also causes a FLICKER: when the snapshot's
+ * persisted twin replaces the optimistic row, the React key changes, remounting the
+ * user bubble and every turn/fold region anchored on its id. To avoid it we adopt
+ * the persisted twin's content but KEEP the optimistic id and timestamp, so the key
+ * stays stable across the swap. This holds across later snapshots too (the local id
+ * keeps winning), so the user message never remounts.
+ *
  * Preservation is capped by age: a message that failed to persist server-side
  * would otherwise be re-appended on every reconciliation forever. Only messages
  * younger than RECONCILE_PRESERVE_MAX_AGE_MS (by their `timestamp`) are kept —
@@ -85,19 +92,53 @@ export function reconcileMessages(
   snapshot: Message[],
   now: number = Date.now(),
 ): Message[] {
-  const snapshotIds = new Set(snapshot.map((m) => m.id))
-  const snapshotKeys = new Set(snapshot.map(messageIdentityKey))
+  // Queue local rows by identity so each snapshot row adopts AT MOST ONE local id.
+  // messageIdentityKey is content-only, so repeated identical messages ("ok",
+  // "yes") share a key; consuming per match keeps two "yes" server rows from both
+  // adopting the same optimistic id (which would collide React keys and turn
+  // anchors). Order is stable: both arrays are timestamp-sorted.
+  const localByKey = new Map<string, Message[]>()
+  for (const m of current) {
+    const key = messageIdentityKey(m)
+    const arr = localByKey.get(key)
+    if (arr) arr.push(m)
+    else localByKey.set(key, [m])
+  }
+  let rekeyed = false
+  const aligned = snapshot.map((m) => {
+    const arr = localByKey.get(messageIdentityKey(m))
+    if (!arr || arr.length === 0) return m
+    // An exact-id match is a normal already-synced row: consume it (so a later
+    // identical row can't reuse it) and leave it untouched.
+    const exactIdx = arr.findIndex((x) => x.id === m.id)
+    if (exactIdx !== -1) {
+      arr.splice(exactIdx, 1)
+      return m
+    }
+    // Otherwise the first queued local row is this server row's optimistic twin.
+    // Keep the server content (canonical urls/blocks); adopt the local id +
+    // timestamp so the React key never changes across the re-id.
+    const twin = arr.shift()!
+    rekeyed = true
+    return { ...m, id: twin.id, timestamp: twin.timestamp }
+  })
+  // Preserve reference identity when nothing was re-keyed: callers rely on
+  // `=== snapshot` to skip re-renders when the merge is a no-op.
+  const base = rekeyed ? aligned : snapshot
+
+  const baseIds = new Set(base.map((m) => m.id))
+  const baseKeys = new Set(base.map(messageIdentityKey))
   const pending = current.filter(
     (m) =>
       m.media &&
       m.media.length > 0 &&
       m.id &&
       now - m.timestamp <= RECONCILE_PRESERVE_MAX_AGE_MS &&
-      !snapshotIds.has(m.id) &&
-      !snapshotKeys.has(messageIdentityKey(m)),
+      !baseIds.has(m.id) &&
+      !baseKeys.has(messageIdentityKey(m)),
   )
-  if (pending.length === 0) return snapshot
-  return [...snapshot, ...pending].sort((a, b) => a.timestamp - b.timestamp)
+  if (pending.length === 0) return base
+  return [...base, ...pending].sort((a, b) => a.timestamp - b.timestamp)
 }
 
 // --- Intermediate message persistence (localStorage) ---

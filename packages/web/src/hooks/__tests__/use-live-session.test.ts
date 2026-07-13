@@ -1253,10 +1253,16 @@ describe("useLiveSession (editable write path)", () => {
     await act(async () => { await result.current.reload("s-race") })
     expect(result.current.messages).toEqual([existing, optimistic])
 
-    // Once the canonical row arrives, its identity replaces the optimistic copy once.
+    // Once the canonical row arrives, it dedupes to ONE user message — and the
+    // optimistic id is preserved (content adopts the server row) so the row and
+    // its turn/fold key never remount: no first-send flicker.
     getSession.mockResolvedValueOnce({ status: "idle", messages: [existing, echoed] })
     await act(async () => { await result.current.reload("s-race") })
-    expect(result.current.messages).toEqual([existing, echoed])
+    const users = result.current.messages.filter((m) => m.role === "user")
+    expect(users).toHaveLength(1)
+    expect(users[0].id).toBe("client-u1")
+    expect(users[0].content).toBe("Run it")
+    expect(result.current.messages.map((m) => m.id)).toEqual(["a1", "client-u1"])
   })
 
   it("hydrates from the in-memory session cache immediately while revalidating", async () => {

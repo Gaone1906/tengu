@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type http from "node:http";
 import { rejectUnverifiedIdentifiedUpgradeCaller } from "../server.js";
 import * as server from "../server.js";
+import { isSameOriginBrowserRequest } from "../api.js";
 import {
   CALLER_SESSION_CAPABILITY_HEADER,
   CALLER_SESSION_HEADER,
@@ -90,6 +91,34 @@ describe("PTY WebSocket upgrade authority", () => {
       { sessionExists: (id: string) => id === "s-1" },
     );
 
+    expect(rejected).toBe(true);
+    expect(socket.destroyed).toBe(true);
+    expect(socket.writes.join("")).toContain("403 Forbidden");
+  });
+
+  it("accepts a same-origin browser PTY upgrade via operator trust (CLI view fix)", () => {
+    // A browser WebSocket sends an Origin but cannot send Authorization, so the
+    // gateway grants operator identity via the same-origin fallback. Regression
+    // guard for the empty-CLI-terminal bug (operator-only gate 403'd the view).
+    const socket = new FakeUpgradeSocket();
+    const guard = (server as any).rejectNonOperatorPtyUpgradeCaller;
+    const headers = { host: "127.0.0.1:7801", origin: "http://127.0.0.1:7801" };
+    const sameOrigin = isSameOriginBrowserRequest(headers, { gateway: { host: "127.0.0.1" } } as never);
+    expect(sameOrigin).toBe(true);
+
+    const rejected = guard(req(headers), socket, { operatorAuthenticated: sameOrigin });
+    expect(rejected).toBe(false);
+    expect(socket.destroyed).toBe(false);
+  });
+
+  it("rejects a cross-origin browser PTY upgrade (no operator trust)", () => {
+    const socket = new FakeUpgradeSocket();
+    const guard = (server as any).rejectNonOperatorPtyUpgradeCaller;
+    const headers = { host: "127.0.0.1:7801", origin: "http://evil.example" };
+    const sameOrigin = isSameOriginBrowserRequest(headers, { gateway: { host: "127.0.0.1" } } as never);
+    expect(sameOrigin).toBe(false);
+
+    const rejected = guard(req(headers), socket, { operatorAuthenticated: sameOrigin });
     expect(rejected).toBe(true);
     expect(socket.destroyed).toBe(true);
     expect(socket.writes.join("")).toContain("403 Forbidden");

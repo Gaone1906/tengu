@@ -559,6 +559,46 @@ describe("session tools — integration against the real routes/registry", () =>
     expect(registry.getSession(spawned.sessionId)).toMatchObject({ status: "interrupted", attemptOutcome: "interrupted" });
   });
 
+  it("an operator-authenticated relay (role:notification + from) lands as a 📨 relay banner, not a user message", async () => {
+    const target = await createOperatorSession("REPS division top");
+    // A COO routes a message between divisions via the operator API once the
+    // lateral hop budget between them is spent. Before the fix this landed as a
+    // bare `user` message that masqueraded as the operator typing.
+    const relay = await apiFetch()(`http://gateway.test/api/sessions/${target}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer test-token" },
+      body: JSON.stringify({
+        role: "notification",
+        from: "yorio-lead",
+        message: "GREEN-LIGHT: clear to merge reps/workspace-conversion.",
+      }),
+    });
+    expect(relay.status).toBe(200);
+
+    const messages = registry.getMessages(target);
+    const banner = messages[messages.length - 1];
+    expect(banner.role).toBe("notification");
+    expect(banner.content).toContain("📨");
+    expect(banner.content).toContain("GREEN-LIGHT: clear to merge");
+    const meta = typeof banner.meta === "string" ? JSON.parse(banner.meta) : banner.meta;
+    expect(meta).toMatchObject({ kind: "agent-relay", fromLabel: "yorio-lead", hops: 1 });
+    expect(meta.fromSessionId).toBeUndefined();
+  });
+
+  it("an operator message WITHOUT role:notification is still a plain user message (unchanged)", async () => {
+    const target = await createOperatorSession("a division top");
+    const op = await apiFetch()(`http://gateway.test/api/sessions/${target}/message`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer test-token" },
+      body: JSON.stringify({ message: "operator says: wrap up" }),
+    });
+    expect(op.status).toBe(200);
+    const messages = registry.getMessages(target);
+    const last = messages[messages.length - 1];
+    expect(last.role).toBe("user");
+    expect(last.content).toBe("operator says: wrap up");
+  });
+
   it("a tool spawn that lost identity or claims an unknown caller id is refused at the route", async () => {
     // Marker without identity → the route refuses even if a (buggy/old) tool build skipped the local check.
     const lost = await apiFetch()("http://gateway.test/api/sessions", {

@@ -1590,6 +1590,22 @@ export function clearDelegationCompletionGuard(id: string, expectedWorkItemId: s
   return result.changes === 1 ? getSession(id) : undefined;
 }
 
+/**
+ * Record that a child explicitly reported UP to its parent via send_to_session
+ * during its current attempt. The automatic parent-completion callback for that
+ * same attempt is a duplicate of the explicit relay, so notifyParentSession
+ * suppresses it when this marker matches the child's live attempt token. The
+ * marker is per-attempt: a new turn mints a new token, so it self-expires.
+ */
+export function recordChildReportedToParent(id: string, attemptToken: string): void {
+  const db = initDb();
+  db.prepare(`
+    UPDATE sessions
+    SET transport_meta = json_set(COALESCE(transport_meta, '{}'), '$.reportedToParentAttempt', ?)
+    WHERE id = ?
+  `).run(attemptToken, id);
+}
+
 /** Persisted nudge claims whose queue post may have been lost to a restart. */
 export function listDelegationCompletionNudgedSessions(): Session[] {
   const db = initDb();

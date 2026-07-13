@@ -543,6 +543,50 @@ describe("notifyParentSession", () => {
       .toBeLessThan(fetchSpy.mock.invocationCallOrder[0]);
   });
 
+  it("suppresses the auto callback when the child already reported to its parent this attempt", async () => {
+    // The child sent to its parent via send_to_session during attempt-001, which
+    // recorded the marker. The automatic parent-completion callback for the SAME
+    // attempt is a duplicate and must not create a second parent wake.
+    const child = makeSession({ transportMeta: { reportedToParentAttempt: "attempt-001" } });
+    vi.mocked(getSession).mockImplementation((id: string) =>
+      id === child.id ? child : makeSession({ id: "parent-001", parentSessionId: null, status: "idle" }),
+    );
+
+    notifyParentSession(child, { result: "already relayed this to the parent" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(claimSessionDelivery).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("still fires the auto callback when the marker is from a stale (earlier) attempt", async () => {
+    // A new turn minted attempt-002; the attempt-001 marker no longer matches, so
+    // genuinely new work still surfaces to the parent.
+    const child = makeSession({ attemptToken: "attempt-002", transportMeta: { reportedToParentAttempt: "attempt-001" } });
+    vi.mocked(getSession).mockImplementation((id: string) =>
+      id === child.id ? child : makeSession({ id: "parent-001", parentSessionId: null, status: "idle" }),
+    );
+
+    notifyParentSession(child, { result: "fresh work from the re-invoked turn" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(claimSessionDelivery).toHaveBeenCalledOnce();
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it("still surfaces an ERROR even if the child reported to its parent this attempt", async () => {
+    // Errors always surface — the explicit report may predate the failure.
+    const child = makeSession({ transportMeta: { reportedToParentAttempt: "attempt-001" } });
+    vi.mocked(getSession).mockImplementation((id: string) =>
+      id === child.id ? child : makeSession({ id: "parent-001", parentSessionId: null, status: "idle" }),
+    );
+
+    notifyParentSession(child, { error: "it broke after reporting" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
   it("does not post an already accepted callback receipt", async () => {
     const child = makeSession();
     const claimed = vi.mocked(claimSessionDelivery).getMockImplementation()!({

@@ -131,25 +131,59 @@ function isSystemBanner(msg: Message): boolean {
   return msg.role === 'notification' && !parseTeammateReply(msg) && !parseAgentRelay(msg)
 }
 
+/** A child callback ("dev replied") or an agent relay ("From dev [hop N]"): an
+ *  injected notification that RE-INVOKES the model, starting a fresh engine turn
+ *  inside the same logical (user) turn. It closes the previous segment so the
+ *  earlier reply stays visible, and folds into the engine turn it triggers. */
+function isReinvocationBoundary(msg: Message): boolean {
+  return msg.role === 'notification' && Boolean(parseTeammateReply(msg) || parseAgentRelay(msg))
+}
+
 /**
- * For each raw message index, the index of its turn's FINAL answer — the last
- * assistant prose message before the next user message — or -1 while the turn
- * has not produced one. The fold boundary derives from this: everything
- * between the user message and the final answer is working evidence.
+ * For each raw message index, the index of the answer that closes ITS engine-turn
+ * segment — the last non-partial assistant prose message in the run of work that
+ * ends at the next user message OR the next child re-invocation (callback/relay).
+ * -1 while that segment has produced no answer yet.
+ *
+ * One logical (user) turn can hold several engine turns: the model replies and
+ * stops, a child callback re-invokes it, it replies again. Each engine turn keeps
+ * its OWN closing answer, so the fold before it is scoped to just that segment's
+ * work — the earlier reply and its "Worked for" fold are preserved rather than
+ * swallowed by one region reaching the turn's very last block. Interim prose
+ * WITHIN one engine turn still folds; only the segment's last answer is a boundary.
  * Exported for tests.
  */
 export function finalAnswerIndices(messages: Message[]): number[] {
   const out = new Array<number>(messages.length).fill(-1)
-  let answer = -1
+  let nextReply = -1
+  // After a re-invocation boundary the NEXT prose above it closes a fresh
+  // segment — a preserved reply. But a segment that produced NO prose (pure tool
+  // work before a callback) must keep folding toward the downstream reply, so we
+  // only re-point `nextReply` when that armed prose actually appears; tools-only
+  // work therefore stays in one fold instead of orphaning as bare rows.
+  let armed = false
   for (let j = messages.length - 1; j >= 0; j--) {
     if (messages[j].role === 'user') {
-      answer = -1
+      nextReply = -1
+      armed = false
+      out[j] = -1
       continue
     }
-    // A restored `partial` prose row is still middle evidence. Only the
-    // non-partial row written at turn completion can bound a persisted fold.
-    if (answer === -1 && !messages[j].partial && isAnswerMessage(messages[j])) answer = j
-    out[j] = answer
+    if (isReinvocationBoundary(messages[j])) {
+      // The trigger folds into the engine turn it started (the segment below),
+      // and arms the next prose above it as that turn's preserved reply.
+      out[j] = nextReply
+      armed = true
+      continue
+    }
+    // A restored `partial` prose row is still middle evidence. The first
+    // non-partial prose after a boundary (or the turn's first) is a preserved
+    // reply; later prose in the same engine turn is interim and folds toward it.
+    if (!messages[j].partial && isAnswerMessage(messages[j]) && (nextReply === -1 || armed)) {
+      nextReply = j
+      armed = false
+    }
+    out[j] = nextReply
   }
   return out
 }
@@ -284,11 +318,12 @@ function partitionForFold(
     return 'head'
   }
 
-  // The fold wraps the turn's ENTIRE middle: everything between the user
-  // message and the turn's final answer — tool calls, interim prose,
-  // callbacks, relays, delegation and dispatch rows. Only the final answer
-  // (and anything arriving after it) stays outside. System banners stay
-  // outside too; a mid-turn banner splits the region.
+  // A fold wraps the work leading up to each visible answer: tool calls,
+  // interim prose, the triggering callbacks/relays, delegation and dispatch
+  // rows BEFORE that segment's answer. The answer stays outside, and the work
+  // after it opens a NEW fold — so one logical turn can hold several
+  // (fold → visible reply) segments (reply, child re-invoke, reply again).
+  // System banners stay outside too; a mid-turn banner splits the region.
   const folds = (item: MessageItem): boolean => {
     const msg = itemFirstMsg(item)
     if (msg.role === 'user') return false
@@ -311,9 +346,9 @@ function partitionForFold(
       i++
       continue
     }
-    // Consecutive foldable items form one region. A run never crosses a turn
-    // boundary by construction: the user message and the final answer are
-    // both non-foldable, so they break it.
+    // Consecutive foldable items form one region. A run never crosses a
+    // segment boundary by construction: the user message, each segment's
+    // answer, and any interim reply are all non-foldable, so they break it.
     const run: MessageItem[] = []
     while (i < items.length && folds(items[i])) {
       run.push(items[i])
@@ -321,11 +356,12 @@ function partitionForFold(
     }
     const answer = answerIdx[itemFirstRawIndex(run[0])]
     const answered = answer !== -1
-    // Region identity is TURN-scoped, never first-item-scoped: when the real
-    // answer lands, an interim answer reclassifies as evidence and becomes
-    // the region's new first item — a first-item key would remount the
-    // region as a fresh instance resting folded, snap-collapsing the whole
-    // middle at the swap frame instead of playing the anchored fold.
+    // Region identity is TURN-scoped with a per-turn sequence, never
+    // first-item-scoped: a turn can hold several folds (one before each
+    // answer), and streaming can grow a run's first evidence row — a
+    // first-item key would remount the region as a fresh instance resting
+    // folded, snap-collapsing the middle instead of playing the anchored fold.
+    // The (anchorId, seq) pair keeps each fold stable across those changes.
     let turnAnchor = -1
     for (let j = itemFirstRawIndex(run[0]); j >= 0; j--) {
       if (messages[j].role === 'user') {

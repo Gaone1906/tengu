@@ -92,6 +92,7 @@ import {
   isLegacyWorkflowRunSession,
   legacyWorkflowRunLocation,
   initDb,
+  recordChildReportedToParent,
   RESTART_ACK_META_KEY,
 } from "../sessions/registry.js";
 import { blockFallbackText, validateBlockEnvelope } from "../shared/blocks.js";
@@ -2165,7 +2166,7 @@ function withActivityReceipt<T extends Record<string, unknown>>(body: T, activit
   return activityReceiptId ? { ...body, activityReceiptId } : body;
 }
 
-function isSameOriginBrowserRequest(
+export function isSameOriginBrowserRequest(
   headers: HttpRequest["headers"],
   config: Pick<JinnConfig, "gateway">,
 ): boolean {
@@ -5549,11 +5550,51 @@ export async function handleApiRequest(
         body.meta = plan.meta;
         if (session.parentSessionId === caller.id) {
           parentFollowUp = { caller, message: String(rawMessage) };
+        } else if (caller.parentSessionId === session.id && caller.attemptToken) {
+          // The child is reporting UP to its parent via send_to_session. The
+          // automatic parent-completion callback fired at this child's settle
+          // would be a SECOND injection of the same turn (the operator sees a
+          // spurious "duplicate callback" wake). Mark the attempt so
+          // notifyParentSession suppresses that redundant callback.
+          recordChildReportedToParent(caller.id, caller.attemptToken);
         }
         // Conservative on later failure (e.g. engine unavailable): the hop tag
         // may be recorded for an undelivered message, which only ever tightens
         // the budget, never loosens it.
         sessionCommGuards.recordDelivery(params.id, plan.hops);
+      } else if (
+        msgCaller.kind === "operator" &&
+        body.role === "notification" &&
+        typeof body.from === "string" &&
+        body.from.trim() &&
+        (body.message || body.prompt)
+      ) {
+        // An operator-authenticated caller may post a LABELED inter-session relay
+        // (e.g. a COO routing a message between sessions once the lateral hop
+        // budget between them is spent). Without this it falls through as a bare
+        // `user` message that masquerades as the operator typing. Stamp the same
+        // 📨 relay framing + agent-relay meta a session-origin send_to_session
+        // would, so it renders as a relay banner instead. Operator origin ⇒ a
+        // fresh hop with no lateral cap; `fromSessionId` is optional (pass the
+        // real source session to make the relay openable/linked).
+        const fromLabel = stripControlChars(body.from).trim().slice(0, 160);
+        const relayFromSessionId = typeof body.fromSessionId === "string" && body.fromSessionId.trim()
+          ? stripControlChars(body.fromSessionId).trim().slice(0, 160)
+          : undefined;
+        const relayBody = String(body.message || body.prompt);
+        body.message = relayFromSessionId
+          ? `📨 Message relayed from session ${relayFromSessionId} (${fromLabel}) via the operator:\n\n${relayBody}\n\n` +
+            `To reply: send_to_session { sessionId: "${relayFromSessionId}" }.`
+          : `📨 Message relayed from ${fromLabel} via the operator:\n\n${relayBody}`;
+        body.displayMessage = `📨 From ${fromLabel}: ${relayBody.slice(0, 200)}${relayBody.length > 200 ? "…" : ""}`;
+        body.meta = {
+          kind: "agent-relay",
+          ...(relayFromSessionId ? { fromSessionId: relayFromSessionId } : {}),
+          fromLabel,
+          hops: 1,
+          maxHops: sessionCommGuards.maxHops(),
+          fullMessage: relayBody.slice(0, STRUCTURED_MESSAGE_BODY_MAX_CHARS),
+        };
       } else if (body.role !== "notification") {
         // A genuine user/operator message resets the target's relay-hop chain —
         // an operator instruction is a fresh start, not hop N of a relay.
@@ -5604,10 +5645,13 @@ export async function handleApiRequest(
           const fromEmployee = typeof rawMeta.fromEmployee === "string" ? stripControlChars(rawMeta.fromEmployee).trim().slice(0, 160) : "";
           const hops = typeof rawMeta.hops === "number" && Number.isFinite(rawMeta.hops) ? Math.floor(rawMeta.hops) : 0;
           const maxHops = typeof rawMeta.maxHops === "number" && Number.isFinite(rawMeta.maxHops) ? Math.floor(rawMeta.maxHops) : 0;
-          if (fromSessionId && fromLabel && hops > 0 && maxHops > 0 && fullMessage !== undefined) {
+          // fromSessionId is OPTIONAL: a session-origin send always carries it,
+          // but an operator-origin relay has no source session and is still a
+          // valid, renderable relay (the web parser treats it as non-openable).
+          if (fromLabel && hops > 0 && maxHops > 0 && fullMessage !== undefined) {
             notificationMeta = {
               kind: "agent-relay",
-              fromSessionId,
+              ...(fromSessionId ? { fromSessionId } : {}),
               fromLabel,
               ...(fromEmployee ? { fromEmployee } : {}),
               hops,

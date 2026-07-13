@@ -40,7 +40,7 @@ import { reconcileWorkItemsOnStartup, startWorkItemReconciler } from "../work-it
 import { setTodoStatusChangeListener } from "../work-items/transitions.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
-import { handleApiRequest, resumePendingWebQueueItems, workflowRunDriverDeps, workflowCronFireHandler, type ApiContext } from "./api.js";
+import { handleApiRequest, isSameOriginBrowserRequest, resumePendingWebQueueItems, workflowRunDriverDeps, workflowCronFireHandler, type ApiContext } from "./api.js";
 import { resolveCallerIdentity, sessionCommGuards, LATERAL_MAX_HOPS, type CallerIdentityOptions } from "./session-comm-guards.js";
 import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
 import {
@@ -1230,8 +1230,16 @@ export async function startGateway(
     // Dedicated per-session PTY channel for the live xterm CLI view.
     const ptyMatch = reqUrl.split("?")[0].match(/^\/ws\/pty\/([^/]+)$/);
     if (ptyMatch) {
+      // A browser WebSocket cannot send an Authorization header and has no auth
+      // cookie on a loopback gateway, so verifyGatewayAuth alone rejected the
+      // operator's own CLI view (empty terminal). Trust a same-origin browser
+      // upgrade as operator when gateway auth isn't required — mirroring the
+      // same-origin fetch trust for HTTP writes — while auth-required gateways
+      // and header-bearing tool callers stay gated exactly as before.
       if (rejectNonOperatorPtyUpgradeCaller(req, socket, {
-        operatorAuthenticated: verifyGatewayAuth(req.headers, gatewayAuthToken, JINN_HOME),
+        operatorAuthenticated:
+          verifyGatewayAuth(req.headers, gatewayAuthToken, JINN_HOME)
+          || (!authRequiredNow() && isSameOriginBrowserRequest(req.headers, currentConfig)),
       })) return;
       let sessionId: string;
       try {

@@ -92,9 +92,12 @@ describe('reconcileMessages — inbound user-message duplicate regression (v0.16
     const merged = reconcileMessages([optimisticUserMsg], [serverUserMsg], 5001)
     const userMsgs = merged.filter((m) => m.role === 'user' && m.content === 'what you see here?')
     expect(userMsgs).toHaveLength(1)
-    // the surviving copy is the server one (canonical /api/files urls)
-    expect(userMsgs[0].id).toBe('server-canonical-id')
+    // The surviving copy takes the server's canonical /api/files media urls, but
+    // KEEPS the optimistic id so the React key is stable (no first-send remount
+    // flicker). The base64 data: urls are gone; the id is the local one.
+    expect(userMsgs[0].id).toBe('client-random-uuid')
     expect(userMsgs[0].media).toHaveLength(2)
+    expect(userMsgs[0].media?.every((x) => x.url.startsWith('/api/files/'))).toBe(true)
   })
 
   it('still preserves an outbound agent attachment that the snapshot lacks (no regression)', () => {
@@ -108,6 +111,28 @@ describe('reconcileMessages — inbound user-message duplicate regression (v0.16
     // snapshot has only A; B is a distinct local attachment not yet in snapshot → preserved
     const merged = reconcileMessages([a, b], [a], 100)
     expect(merged.map((m) => m.id)).toEqual(['s-a', 'local-b'])
+  })
+})
+
+describe('reconcileMessages — repeated identical content (id-collision regression)', () => {
+  it('maps each server twin to a DISTINCT optimistic id, never collapsing two identical messages onto one id', () => {
+    const u1: Message = { id: 'client-a', role: 'user', content: 'yes', timestamp: 100 }
+    const reply: Message = { id: 'srv-r', role: 'assistant', content: 'ok', timestamp: 150 }
+    const u2: Message = { id: 'client-b', role: 'user', content: 'yes', timestamp: 200 }
+    const current = [u1, reply, u2]
+    // The server persisted BOTH "yes" messages under canonical ids.
+    const snapshot: Message[] = [
+      { id: 'srv-1', role: 'user', content: 'yes', timestamp: 101 },
+      reply,
+      { id: 'srv-2', role: 'user', content: 'yes', timestamp: 201 },
+    ]
+    const merged = reconcileMessages(current, snapshot, 300)
+
+    // Each "yes" keeps its own optimistic id (stable, distinct keys) — not both
+    // collapsed onto client-a, which would duplicate React keys and turn anchors.
+    expect(merged.filter((m) => m.content === 'yes').map((m) => m.id)).toEqual(['client-a', 'client-b'])
+    // No duplicate ids anywhere in the merged transcript.
+    expect(new Set(merged.map((m) => m.id)).size).toBe(merged.length)
   })
 })
 

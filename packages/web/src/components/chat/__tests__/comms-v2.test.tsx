@@ -262,6 +262,20 @@ describe('fold region boundary (turn structure)', () => {
     expect(finalAnswerIndices(messages)).toEqual([-1, 3, 3, 3, -1, -1])
   })
 
+  it('folds a callback burst (and the tools-only segment before it) into the turn they trigger, not split', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used grep', timestamp: T0 + 1_000, toolCall: 'grep' },
+      callback('c1', 'dev', T0 + 2_000),
+      callback('c2', 'qa', T0 + 3_000),
+      { id: 't2', role: 'assistant', content: 'Used bash', timestamp: T0 + 4_000, toolCall: 'bash' },
+      { id: 'a1', role: 'assistant', content: 'All done.', timestamp: T0 + 5_000 },
+    ]
+    // Both callbacks share the single downstream reply (index 5), and the
+    // tools-only pre-callback segment folds toward it instead of orphaning.
+    expect(finalAnswerIndices(messages)).toEqual([-1, 5, 5, 5, 5, 5])
+  })
+
   it('treats persisted partial prose as evidence, never as the final answer', () => {
     const messages: Message[] = [
       { id: 'u1', role: 'user', content: 'Go.', timestamp: T0 },
@@ -294,40 +308,53 @@ describe('fold region boundary (turn structure)', () => {
     expect(screen.getByRole('button', { name: /^1 tool$/ })).toBeTruthy()
   })
 
-  it('folds the ENTIRE turn middle: tools, interim prose, delegation, callbacks — only the final answer stays out', () => {
+  it('folds interim prose within one engine turn, keeping only that turn\'s reply visible', () => {
     const messages: Message[] = [
       { id: 'u1', role: 'user', content: 'Redesign the panel.', timestamp: T0 },
       { id: 't1', role: 'assistant', content: 'Used file_read', timestamp: T0 + 5_000, toolCall: 'file_read' },
       { id: 'p1', role: 'assistant', content: 'Reading the current layout first.', timestamp: T0 + 10_000 },
-      {
-        id: 'd1',
-        role: 'assistant',
-        content: 'Delegated to dev',
-        timestamp: T0 + 20_000,
-        blocks: [{ id: 'b1', version: 1, type: 'delegation', status: 'done', payload: { employee: 'dev', employeeDisplay: 'Dev' } }],
-      },
-      callback('c1', 'dev', T0 + 200_000),
-      { id: 'a1', role: 'assistant', content: 'Panel redesigned end to end.', timestamp: T0 + 210_000 },
-      callback('c2', 'analyst', T0 + 900_000),
+      { id: 'a1', role: 'assistant', content: 'Panel redesigned end to end.', timestamp: T0 + 20_000 },
     ]
     const { container } = render(<ChatMessages messages={messages} loading={false} onPeek={vi.fn()} />)
 
-    const region = container.querySelector('[data-fold-region]')!
-    // Every intermediate is inside the folded region…
+    // One engine turn → one fold. Its tool call and interim prose collapse…
+    const regions = container.querySelectorAll('[data-fold-region]')
+    expect(regions).toHaveLength(1)
+    const region = regions[0]
     expect(region.getAttribute('aria-hidden')).toBe('true')
     expect(region.textContent).toContain('1 tool')
     expect(region.textContent).toContain('Reading the current layout first.')
-    expect(region.textContent).toContain('Dev')
-    expect(region.textContent).toContain('dev')
-    // …the final answer is not…
+    // …only the turn's final reply stays out.
     expect(region.textContent).not.toContain('Panel redesigned end to end.')
     expect(screen.getByText('Panel redesigned end to end.')).toBeTruthy()
-    // …and a callback arriving AFTER the answer stays visible in the thread.
-    const postAnswer = screen.getByRole('button', { name: /analyst replied.*Open report/ })
-    expect(region.contains(postAnswer)).toBe(false)
-    // The summary counts the full scope honestly (dev appears in both the
-    // delegation and the callback — one teammate).
-    expect(screen.getByRole('button', { name: /Worked for 3m, 1 tool, 1 teammate, 1 update\. Show the work\./ })).toBeTruthy()
+  })
+
+  it('preserves each reply and opens a fresh fold when a child re-invokes the same turn', () => {
+    // One logical (user) turn, two engine turns: the model replies and stops,
+    // a child callback re-invokes it, it replies again. Each reply must stay
+    // visible; each engine turn's work folds separately, and the triggering
+    // callback folds into the turn it started — not the earlier reply's fold.
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'Coordinate the redesign.', timestamp: T0 },
+      { id: 't1', role: 'assistant', content: 'Used file_read', timestamp: T0 + 5_000, toolCall: 'file_read' },
+      { id: 'a1', role: 'assistant', content: 'Dispatched dev; will report back.', timestamp: T0 + 10_000 },
+      callback('c1', 'dev', T0 + 200_000),
+      { id: 't2', role: 'assistant', content: 'Used bash', timestamp: T0 + 205_000, toolCall: 'bash' },
+      { id: 'a2', role: 'assistant', content: 'Panel redesigned end to end.', timestamp: T0 + 210_000 },
+    ]
+    const { container } = render(<ChatMessages messages={messages} loading={false} onPeek={vi.fn()} />)
+
+    const regions = container.querySelectorAll('[data-fold-region]')
+    expect(regions).toHaveLength(2)
+    // Both replies stay visible; neither is swallowed by the other's fold.
+    expect(screen.getByText('Dispatched dev; will report back.')).toBeTruthy()
+    expect(screen.getByText('Panel redesigned end to end.')).toBeTruthy()
+    // The first fold is just the first turn's work; the child callback belongs
+    // to the SECOND fold (the engine turn it re-invoked).
+    expect(regions[0].textContent).toContain('1 tool')
+    expect(regions[0].textContent).not.toContain('dev')
+    expect(regions[1].textContent).toContain('1 tool')
+    expect(regions[1].textContent).toContain('dev')
   })
 
   it('keeps system banners outside the fold and splits the region around them', () => {
@@ -406,7 +433,9 @@ describe('fold region boundary (turn structure)', () => {
     expect(container.querySelector('[data-fold]')).toBeNull()
 
     // The true final response is a new assistant prose row. Its arrival alone
-    // derives the completed middle region; the answer remains outside it.
+    // derives the completed middle region. The final answer stays outside it —
+    // and so does the engine turn's earlier reply ("On it, delegating now."),
+    // which the child callback re-invocation preserves.
     const done: Message[] = [
       ...middle,
       { id: 'a1', role: 'assistant', content: 'All wired up.', timestamp: T0 + 9_000 },
@@ -422,8 +451,12 @@ describe('fold region boundary (turn structure)', () => {
     )
     const region = container.querySelector('[data-fold-region]')!
     expect(region).toBeTruthy()
-    expect(region.textContent).toContain('On it, delegating now.')
+    // The folded region holds the tool work and the dev callback…
+    expect(region.textContent).toContain('dev')
+    // …not the two visible replies.
+    expect(region.textContent).not.toContain('On it, delegating now.')
     expect(region.textContent).not.toContain('All wired up.')
+    expect(screen.getByText('On it, delegating now.')).toBeTruthy()
     expect(screen.getByText('All wired up.')).toBeTruthy()
     expect(region.getAttribute('aria-hidden')).toBeNull()
     expect(container.querySelector('[data-fold-summary]')).toBeNull()
@@ -431,7 +464,7 @@ describe('fold region boundary (turn structure)', () => {
     // The existing beat + 420ms choreography performs the first collapse.
     act(() => vi.advanceTimersByTime(1200))
     expect(container.querySelector('[data-fold-region]')?.getAttribute('aria-hidden')).toBe('true')
-    expect(screen.getByRole('button', { name: /Worked for 4s, 1 tool, 1 teammate, 1 update\. Show the work\./ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Worked for 4s, 1 tool, 1 teammate\. Show the work\./ })).toBeTruthy()
   })
 })
 
