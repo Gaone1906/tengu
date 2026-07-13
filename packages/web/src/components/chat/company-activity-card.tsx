@@ -93,8 +93,11 @@ function stateView(block: ChatBlock): StateView {
 }
 
 function StateMark({ tone }: { tone: Tone }) {
-  if (tone === 'done') return <Check size={12} strokeWidth={2.5} aria-hidden="true" className="mt-[2px] shrink-0" />
-  if (tone === 'error') return <AlertTriangle size={12} strokeWidth={2} aria-hidden="true" className="mt-[2px] shrink-0" />
+  // The mark carries the semantic tone (decorative, aria-hidden); the status
+  // WORD conveys the same state to assistive tech, so these colors are exempt
+  // from the 4.5:1 text rule and keep tone off the readable copy.
+  if (tone === 'done') return <Check size={12} strokeWidth={2.5} aria-hidden="true" className="mt-[2px] shrink-0 text-[var(--text-tertiary)]" />
+  if (tone === 'error') return <AlertTriangle size={12} strokeWidth={2} aria-hidden="true" className="mt-[2px] shrink-0 text-[var(--system-red)]" />
   if (tone === 'working') {
     return (
       <span
@@ -105,14 +108,6 @@ function StateMark({ tone }: { tone: Tone }) {
   }
   const bg = tone === 'waiting' ? 'bg-[var(--system-orange)]' : 'bg-[var(--text-quaternary)]'
   return <span aria-hidden="true" className={`mt-[5px] size-1.5 shrink-0 rounded-full ${bg}`} />
-}
-
-const TONE_TEXT: Record<Tone, string> = {
-  waiting: 'text-[var(--system-orange)]',
-  working: 'text-[var(--system-blue)]',
-  done: 'text-[var(--text-tertiary)]',
-  error: 'text-[var(--system-red)]',
-  neutral: 'text-[var(--text-tertiary)]',
 }
 
 interface Fact {
@@ -212,10 +207,11 @@ export function CompanyActivityCard({ block }: { block: ChatBlock }) {
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-baseline gap-[var(--space-2)] text-[length:var(--text-footnote)] leading-[var(--leading-snug)]">
             <span className="truncate font-[var(--weight-semibold)] text-[var(--text-primary)]">{title}</span>
-            <span className="shrink-0 font-[var(--weight-regular)] text-[var(--text-tertiary)]">{meta.label}</span>
+            <span className="shrink-0 font-[var(--weight-regular)] text-[var(--text-secondary)]">{meta.label}</span>
           </span>
           <span
-            className={`mt-[var(--space-1)] flex min-h-4 items-start gap-[6px] text-[length:var(--text-caption1)] font-[var(--weight-medium)] [font-variant-numeric:tabular-nums] ${TONE_TEXT[state.tone]}`}
+            data-activity-state={state.tone}
+            className="mt-[var(--space-1)] flex min-h-4 items-start gap-[6px] text-[length:var(--text-caption1)] font-[var(--weight-medium)] [font-variant-numeric:tabular-nums] text-[var(--text-secondary)]"
           >
             <StateMark tone={state.tone} />
             <span className="min-w-0">{state.label}</span>
@@ -263,7 +259,7 @@ export function CompanyActivityCard({ block }: { block: ChatBlock }) {
         >
           {facts.map((fact) => (
             <div key={fact.label} className="flex min-h-[18px] items-baseline gap-[var(--space-3)]">
-              <span className="w-[76px] shrink-0 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">{fact.label}</span>
+              <span className="w-[76px] shrink-0 text-[length:var(--text-caption1)] text-[var(--text-secondary)]">{fact.label}</span>
               <span
                 className={[
                   'min-w-0 break-words text-[length:var(--text-footnote)] leading-[var(--leading-normal)] [font-variant-numeric:tabular-nums]',

@@ -233,6 +233,42 @@ describe('CompanyActivityCard', () => {
     expect(router.state.location.pathname).toBe('/') // Escape never triggers Open/navigation
   })
 
+  const TONE_CASES: Array<[string, ChatBlock]> = [
+    ['waiting', runBlock()],
+    ['working', runBlock({ status: 'running', payload: { ...runBlock().payload, runStatus: 'running' } })],
+    ['done', definitionBlock()],
+    ['error', runBlock({ status: 'error', payload: { ...runBlock().payload, runStatus: 'failed' } })],
+    ['neutral', runBlock({ status: 'running', payload: { ...runBlock().payload, runStatus: 'cancelled' } })],
+  ]
+
+  it.each(TONE_CASES)('renders %s status copy on a readable ≥AA token, tone via the mark', (tone, block) => {
+    renderCard(block)
+    const line = document.querySelector(`[data-activity-state="${tone}"]`) as HTMLElement
+    expect(line).toBeTruthy()
+    // Readable copy sits on --text-secondary (≥4.5:1 in both themes)…
+    expect(line.className).toContain('text-[var(--text-secondary)]')
+    // …never on the sub-AA tokens the browser axe flagged in light.
+    expect(line.className).not.toContain('--text-tertiary')
+    expect(line.className).not.toContain('--system-orange')
+    expect(line.className).not.toContain('--system-blue')
+  })
+
+  it('renders the kind label on a readable ≥AA token, not sub-AA tertiary ink', () => {
+    renderCard(runBlock())
+    const kind = screen.getByText('Workflow run')
+    expect(kind.className).toContain('text-[var(--text-secondary)]')
+    expect(kind.className).not.toContain('text-[var(--text-tertiary)]')
+  })
+
+  it('renders expanded fact labels on a readable ≥AA token', async () => {
+    const user = userEvent.setup()
+    renderCard(runBlock())
+    await user.click(screen.getByRole('button', { name: 'Preview Release review workflow run' }))
+    const label = screen.getByText('Needs')
+    expect(label.className).toContain('text-[var(--text-secondary)]')
+    expect(label.className).not.toContain('text-[var(--text-tertiary)]')
+  })
+
   it('scopes Escape to the currently open card only', async () => {
     const user = userEvent.setup()
     const other = definitionBlock()
