@@ -33,3 +33,21 @@ export function resolveMessageAudiences(prompt: string, speechDerived: boolean):
     engine: speechDerived ? `${SPEECH_CONTEXT_NOTE}\n\n${prompt}` : prompt,
   };
 }
+
+/**
+ * Whether the hidden note may ride the engine prompt for this dispatch.
+ *
+ * The note is only safe when the prompt is NOT operator-visible. Interactive
+ * dispatch bracketed-pastes the prompt into the live PTY/xterm, so a rendered
+ * prompt (`promptRendered`) must stay byte-for-byte the operator's text — the
+ * note is dropped there rather than leaked. Headless dispatch sends the prompt
+ * straight to the model, so the note rides it (exactly once, non-rendered).
+ * Notifications (callbacks, relays) never qualify.
+ */
+export function speechContextApplies(opts: {
+  speech: boolean;
+  isNotification: boolean;
+  promptRendered: boolean;
+}): boolean {
+  return opts.speech && !opts.isNotification && !opts.promptRendered;
+}

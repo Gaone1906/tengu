@@ -202,7 +202,7 @@ import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir } from "./files.js";
 import { readJsonBody, readBodyRaw } from "./http-helpers.js";
-import { resolveMessageAudiences } from "./speech-context.js";
+import { resolveMessageAudiences, speechContextApplies } from "./speech-context.js";
 import { isJsonMediaType } from "./media-type.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
@@ -5464,7 +5464,12 @@ export async function handleApiRequest(
 
       // Speech-derived first messages carry a hidden context note to the engine
       // only; the persisted/queued `prompt` above stays the operator's exact text.
-      const { engine: newSessionEnginePrompt } = resolveMessageAudiences(prompt, body.speech === true);
+      // Interactive dispatch pastes the prompt into the visible PTY, so the note
+      // is suppressed there (ptyEngine truthy) and only rides headless dispatch.
+      const { engine: newSessionEnginePrompt } = resolveMessageAudiences(
+        prompt,
+        speechContextApplies({ speech: body.speech === true, isNotification: false, promptRendered: !!ptyEngine }),
+      );
       dispatchWebSessionRun(session, newSessionEnginePrompt, engine, config, context, { queueItemId, attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined });
 
       return json(res, serializeSession(session, context), 201);
@@ -5875,9 +5880,14 @@ export async function handleApiRequest(
 
       // Speech-derived operator messages carry a hidden context note to the engine
       // only. Everything persisted/queued/emitted above uses the clean `prompt`;
-      // notifications (callbacks, relays) never qualify. Recomputed per request →
-      // exactly one note, never persisted, never duplicated on retry/reload/reconnect.
-      const { engine: enginePrompt } = resolveMessageAudiences(prompt, body.speech === true && !isNotification);
+      // notifications (callbacks, relays) never qualify, and interactive dispatch
+      // (ptyEngine truthy) suppresses the note so the visible PTY paste stays the
+      // operator's exact text. Recomputed per request → exactly one note, never
+      // persisted, never rendered, never duplicated on retry/reload/reconnect.
+      const { engine: enginePrompt } = resolveMessageAudiences(
+        prompt,
+        speechContextApplies({ speech: body.speech === true, isNotification, promptRendered: !!ptyEngine }),
+      );
       dispatchWebSessionRun(session, enginePrompt, engine, config, context, { queueItemId, attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined });
 
       return json(res, {
