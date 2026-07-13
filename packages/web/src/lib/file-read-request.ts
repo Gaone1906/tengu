@@ -6,27 +6,6 @@ export type FileReadRequest =
   | { ok: true; url: string }
   | { ok: false; error: string };
 
-function encodedSegmentError(segment: string): string | null {
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(segment);
-  } catch {
-    // A literal or malformed percent is a valid filename character. It will be
-    // encoded below, so the backend receives it as data rather than syntax.
-    return null;
-  }
-  if (decoded === "." || decoded === "..") {
-    return "File path contains encoded traversal segments";
-  }
-  if (decoded.includes("/") || decoded.includes("\\")) {
-    return "File path contains an encoded separator";
-  }
-  if (CONTROL_BYTES.test(decoded)) {
-    return "File path contains encoded control bytes";
-  }
-  return null;
-}
-
 /** Build the scoped gateway request for a path already decoded once by the UI. */
 export function buildFileReadRequest(path: string): FileReadRequest {
   if (!path) return { ok: false, error: "No file path provided" };
@@ -50,10 +29,6 @@ export function buildFileReadRequest(path: string): FileReadRequest {
   if (segments.some((segment) => segment === "")) {
     return { ok: false, error: "File path must be a normalized relative path" };
   }
-  for (const segment of segments) {
-    const error = encodedSegmentError(segment);
-    if (error) return { ok: false, error };
-  }
 
   const root = segments[0];
   try {
@@ -61,6 +36,9 @@ export function buildFileReadRequest(path: string): FileReadRequest {
       return { ok: true, url: `/api/knowledge/read?path=${encodeURIComponent(path)}` };
     }
     if (MANAGED_ROOTS.has(root)) {
+      // `path` is already decoded once by URLSearchParams. Encode its segments
+      // once for this request so literal `%2F` filename text travels as `%252F`
+      // and the gateway receives `%2F` as data, never as a path separator.
       const encodedPath = segments.map(encodeURIComponent).join("/");
       return { ok: true, url: `/api/files/read?path=${encodedPath}` };
     }

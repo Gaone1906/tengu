@@ -58,6 +58,15 @@ const supportedPaths = [
   ["uploads/2026-07/report.txt", "/api/files/read?path=uploads/2026-07/report.txt"],
 ] as const;
 
+const specialChatPaths = [
+  ["files/nested dir/report.txt", "/api/files/read?path=files/nested%20dir/report.txt"],
+  ["files/100%.txt", "/api/files/read?path=files/100%25.txt"],
+  ["files/topic#1.txt", "/api/files/read?path=files/topic%231.txt"],
+  ["files/query?.txt", "/api/files/read?path=files/query%3F.txt"],
+  ["files/café.txt", "/api/files/read?path=files/caf%C3%A9.txt"],
+  ["files/文档.txt", "/api/files/read?path=files/%E6%96%87%E6%A1%A3.txt"],
+] as const;
+
 function ChatFileHarness({ path }: { path: string }) {
   const [openedPath, setOpenedPath] = useState<string | null>(null);
   const messages: Message[] = [{
@@ -86,21 +95,22 @@ describe("FileView requests opened from chat", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expectedUrl));
   });
 
-  it("preserves literal managed separators while encoding special path segments", async () => {
-    const path = "files/nested dir/100% #? café 文档.txt";
-    render(<FileView path={path} embedded />);
+  it.each(specialChatPaths)("linkifies and opens special chat path %s", async (path, expectedUrl) => {
+    render(<ChatFileHarness path={path} />);
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
-      "/api/files/read?path=files/nested%20dir/100%25%20%23%3F%20caf%C3%A9%20%E6%96%87%E6%A1%A3.txt",
-    ));
+    const link = screen.getByTitle(`Open ${path} in viewer`);
+    expect(link.getAttribute("href")).toBe(`/file?path=${encodeURIComponent(path)}`);
+    fireEvent.click(link);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expectedUrl));
   });
 
   it.each([
     ["secrets/api-keys.json", /Unsupported file root/],
     ["../outside.txt", /traversal/],
     ["files/../outside.txt", /traversal/],
-    ["files/%2e%2e/outside.txt", /encoded traversal/],
-    ["files%2Foutside.txt", /encoded separator/],
+    ["files//outside.txt", /normalized/],
+    ["files%2Foutside.txt", /Unsupported file root/],
     ["/etc/passwd", /relative/],
     ["C:\\Windows\\system.ini", /relative|forward slash/],
     ["files\\outside.txt", /forward slash/],
@@ -118,5 +128,34 @@ describe("FileView requests opened from chat", () => {
 
     expect(await screen.findByText("knowledge body")).toBeTruthy();
     expect(screen.queryByText(/NaN B|undefined/)).toBeNull();
+  });
+
+  it("shows invalid Unicode safely without fetching or a broken pop-out link", async () => {
+    const path = `files/bad${String.fromCharCode(0xd800)}.txt`;
+    render(<FileView path={path} embedded />);
+
+    expect(await screen.findByText(/invalid Unicode/)).toBeTruthy();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.queryByTitle("Open in new browser tab")).toBeNull();
+  });
+
+  it("does not label the JSON read route as a binary download", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        path: "files/archive.zip",
+        resolvedPath: "/managed/files/archive.zip",
+        mime: "application/zip",
+        size: 1024,
+        binary: true,
+        tooLarge: false,
+      }),
+    } as Response);
+
+    render(<FileView path="files/archive.zip" embedded />);
+
+    expect(await screen.findByText(/Binary file/)).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Download file" })).toBeNull();
   });
 });

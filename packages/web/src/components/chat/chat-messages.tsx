@@ -448,16 +448,16 @@ function ToolGroup({
 
 /* ── Markdown rendering ─────────────────────────────────── */
 
-// Single source of truth for the file-path pattern: optional ~/ or / prefix,
-// ≥1 slash-separated segment, ending in a short extension. Requiring a slash +
-// an extension filters out branch names (feat/clickable-file-paths), mime types
-// (text/markdown), version numbers (0.16.1) and bare words (config.yaml — no slash).
-// Both the anchored test (isFilePath) and the inline-formatter alternative below
-// derive from this core string so the two can never drift apart.
+// Bare paths stay deliberately narrow: optional ~/ or / prefix, ≥1
+// slash-separated segment, and a short extension. Backticked paths may use the
+// viewer's supported roots and broader filename characters; the backticks give
+// that form an unambiguous boundary without making ordinary prose linkable.
 const FILE_PATH_CORE = String.raw`(?:~\/|\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9]{1,8}`
 const FILE_PATH_RE = new RegExp(`^${FILE_PATH_CORE}$`)
+const SUPPORTED_VIEWER_PATH_RE = /^(?:knowledge|docs|files|uploads)\/[^`\r\n]+$/
 export function isFilePath(s: string): boolean {
-  return FILE_PATH_RE.test(s.trim())
+  const trimmed = s.trim()
+  return FILE_PATH_RE.test(trimmed) || SUPPORTED_VIEWER_PATH_RE.test(trimmed)
 }
 
 // Inline-formatter pattern, assembled from the shared FILE_PATH_CORE so the
@@ -467,7 +467,7 @@ const INLINE_RE_SOURCE =
   String.raw`\[([^\]]+)\]\(([^)]+)\)` +                 // [text](url)
   String.raw`|(https?:\/\/[^\s<]+[^\s<.,;:!?)}\]'"])` + // bare URL
   String.raw`|(\*\*(.+?)\*\*)` +                        // **bold**
-  '|(`([^`]+)`)' +                                      // `inline code`
+  '|(`([^`\r\n]+)`)' +                                  // `inline code`
   String.raw`|\*([^*]+)\*` +                            // *italic*
   `|(${FILE_PATH_CORE})`                                // bare file path
 

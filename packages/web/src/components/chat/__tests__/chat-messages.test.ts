@@ -7,16 +7,20 @@ import {
   USER_COLLAPSE_SLACK,
 } from '../chat-messages'
 
-// Pins the file-path detection behaviour so the shared FILE_PATH_CORE regex
-// (used both for isFilePath and the inline-formatter's bare-path alternative)
-// cannot silently drift. Rule: optional ~/ or / prefix, ≥1 slash-separated
-// segment, ending in a short extension.
+// Pins both accepted forms: narrow generic paths (also recognized bare in
+// prose) and broader supported-root paths recognized inside backticks.
 describe('isFilePath', () => {
   const shouldLink = [
     'docs/superpowers/specs/2026-05-31-support-design.md',
     '~/Projects/jinn/packages/web/src/main.tsx',
     '/etc/hosts.conf',
     'skills/foo/SKILL.md',
+    'files/nested dir/report.txt',
+    'files/100%.txt',
+    'files/topic#1.txt',
+    'files/query?.txt',
+    'files/café.txt',
+    'files/文档.txt',
   ]
 
   const shouldNotLink = [
@@ -27,6 +31,7 @@ describe('isFilePath', () => {
     'and/or',                    // prose: slash but no extension
     'config.yaml',               // bare filename: extension but NO slash (slash is required)
     'https://example.com/x.md',  // URL: handled by the URL branch, not the path branch
+    'files/line\nbreak.txt',     // backticked paths must not span lines
   ]
 
   it.each(shouldLink)('treats %s as a file path', (s) => {

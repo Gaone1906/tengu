@@ -111,6 +111,9 @@ export function FileView({
   const [notFound, setNotFound] = useState(false);
   const [loading, setLoading] = useState(true);
   const request = useMemo(() => buildFileReadRequest(path), [path]);
+  // The request preflight already exercises the same URI encoding. Only offer
+  // a pop-out after it succeeds, so malformed Unicode cannot crash rendering.
+  const popOutUrl = request.ok ? `/file?path=${encodeURIComponent(path)}` : null;
 
   // Resolve whether to use a dark or light highlighter theme. ThemeProvider
   // sets data-theme on <html>; "light" is the only light variant.
@@ -236,13 +239,6 @@ export function FileView({
               : ""}
             : cannot preview.
           </p>
-          <a
-            href={request.ok ? request.url : undefined}
-            download
-            className="inline-block mt-[var(--space-3)] text-[var(--accent)] underline"
-          >
-            Download file
-          </a>
         </div>
       )}
 
@@ -304,15 +300,19 @@ export function FileView({
           ) : (
             <span />
           )}
-          <a
-            href={`/file?path=${encodeURIComponent(path)}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            title="Open in new browser tab"
-            className="pointer-events-auto inline-flex size-8 items-center justify-center rounded-full border border-[var(--separator)] bg-[var(--material-thick)] text-[var(--text-tertiary)] backdrop-blur-md transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)]"
-          >
-            <ExternalLink size={16} />
-          </a>
+          {popOutUrl ? (
+            <a
+              href={popOutUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open in new browser tab"
+              className="pointer-events-auto inline-flex size-8 items-center justify-center rounded-full border border-[var(--separator)] bg-[var(--material-thick)] text-[var(--text-tertiary)] backdrop-blur-md transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)]"
+            >
+              <ExternalLink size={16} />
+            </a>
+          ) : (
+            <span />
+          )}
         </div>
         {/* Content starts just below the sticky row (which reserves its own
             height); on scroll it slides up behind the floating chips. min-w-0
