@@ -23,13 +23,14 @@ let invalidateModelRegistry: () => void;
 
 const NODE = process.execPath; // always an executable absolute path → engineAvailable=true
 
-function cfg(): JinnConfig {
+function cfg(engineOverrides: Record<string, unknown> = {}): JinnConfig {
   return {
     gateway: { port: 7799, host: "127.0.0.1" },
     engines: {
       default: "claude",
       claude: { bin: NODE, model: "opus" },
       codex: { bin: NODE, model: "gpt-5.5" },
+      ...engineOverrides,
     },
     models: {
       claude: { default: "opus", models: [{ id: "opus", supportsEffort: true, effortLevels: ["low"] }] },
@@ -38,6 +39,8 @@ function cfg(): JinnConfig {
     connectors: {},
   } as unknown as JinnConfig;
 }
+
+const MISSING_BIN = path.join(os.tmpdir(), "definitely-not-a-real-cli-xyz");
 
 function writeClaudeSnapshot(name: string, body: string, ageMs: number): string {
   const file = path.join(CLAUDE_DIR, name);
@@ -149,9 +152,21 @@ describe("collectEngineLimits — recovery + unsupported", () => {
     expect(b.engines.claude.windows?.[0]?.usedPercent).toBe(55);
   });
 
-  it("reports an engine with no local quota endpoint as unsupported", async () => {
-    const out = await collectEngineLimits(cfg(), { engine: "grok" });
+  it("reports an installed engine with no local quota endpoint as unsupported", async () => {
+    const out = await collectEngineLimits(cfg({ grok: { bin: NODE } }), { engine: "grok" });
     expect(out.engines.grok.status).toBe("unsupported");
     expect(out.engines.grok.unsupportedReason).toBeTruthy();
+  });
+
+  it("distinguishes a not-installed CLI (unavailable) from an unsupported one", async () => {
+    // Grok CLI missing → temporarily unavailable, not durably unsupported.
+    const grok = await collectEngineLimits(cfg({ grok: { bin: MISSING_BIN } }), { engine: "grok" });
+    expect(grok.engines.grok.status).toBe("unavailable");
+    expect(grok.engines.grok.unsupportedReason).toBeTruthy();
+
+    // A first-class engine whose CLI is missing is unavailable, not unsupported.
+    invalidateModelRegistry(); // each config change rebuilds the registry (as a fresh process would)
+    const claude = await collectEngineLimits(cfg({ claude: { bin: MISSING_BIN } }), { engine: "claude" });
+    expect(claude.engines.claude.status).toBe("unavailable");
   });
 });

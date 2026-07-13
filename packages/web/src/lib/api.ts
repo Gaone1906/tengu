@@ -297,7 +297,9 @@ export interface EngineLimitBucket {
 export interface EngineLimitEngineSnapshot {
   name: string;
   available: boolean;
-  status: "live" | "snapshot" | "static" | "unsupported" | "error";
+  // `unavailable` = engine CLI not installed (temporary); `unsupported` = CLI
+  // installed but no local quota endpoint.
+  status: "live" | "snapshot" | "static" | "unavailable" | "unsupported" | "error";
   source: string;
   refreshedAt: string;
   defaultModel?: string;
@@ -1100,8 +1102,8 @@ export const api = {
   getEngines: () => get<EnginesResponse>("/api/engines"),
   /** Force re-discovery of dynamic (pi) models, returning the rebuilt registry. */
   refreshEngines: () => post<EnginesResponse>("/api/engines/refresh"),
-  getEngineLimits: (engine?: string) =>
-    get<EngineLimitsResponse>(`/api/engine-limits${engine ? `?engine=${encodeURIComponent(engine)}` : ""}`),
+  getEngineLimits: (engine?: string, init?: RequestInit) =>
+    get<EngineLimitsResponse>(`/api/engine-limits${engine ? `?engine=${encodeURIComponent(engine)}` : ""}`, init),
   refreshEngineLimits: (engine?: string) =>
     post<EngineLimitsResponse>(`/api/engine-limits/refresh${engine ? `?engine=${encodeURIComponent(engine)}` : ""}`, {}),
   getSessions: () => get<SessionsResponse>("/api/sessions"),

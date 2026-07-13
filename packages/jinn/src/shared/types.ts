@@ -733,7 +733,9 @@ export interface EngineLimitBucket {
 export interface EngineLimitEngineSnapshot {
   name: string;
   available: boolean;
-  status: "live" | "snapshot" | "static" | "unsupported" | "error";
+  // `unavailable` = the engine CLI is not installed (temporary — install it).
+  // `unsupported` = the CLI is installed but exposes no local quota endpoint.
+  status: "live" | "snapshot" | "static" | "unavailable" | "unsupported" | "error";
   source: string;
   refreshedAt: string;
   defaultModel?: string;

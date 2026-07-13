@@ -67,8 +67,10 @@ function badge(kind: FreshnessKind, engine: EngineLimitEngineSnapshot, now: numb
       return { color: "var(--system-orange)", label: `Stale · ${agoLabel(engine.refreshedAt, now)}` }
     case "error":
       return { color: "var(--system-red)", label: "Error" }
+    case "unavailable":
+      return { color: "var(--text-tertiary)", label: "Unavailable" }
     case "unsupported":
-      return { color: "var(--text-quaternary)", label: "Unavailable" }
+      return { color: "var(--text-quaternary)", label: "Unsupported" }
     default:
       return { color: "var(--text-quaternary)", label: "No data" }
   }
@@ -117,7 +119,7 @@ function EngineCard({ engine, now }: { engine: EngineLimitEngineSnapshot; now: n
   const note =
     engine.error ||
     (fresh.kind === "stale" ? "Last-known snapshot is over 30 minutes old — may be out of date." : null) ||
-    (fresh.kind === "unsupported" ? engine.unsupportedReason ?? null : null)
+    (fresh.kind === "unsupported" || fresh.kind === "unavailable" ? engine.unsupportedReason ?? null : null)
 
   return (
     // Grouped-inset card (shared visual language): --bg-secondary carrying the
@@ -170,10 +172,7 @@ function EngineCard({ engine, now }: { engine: EngineLimitEngineSnapshot; now: n
 
 export default function LimitsPage() {
   useBreadcrumbs([{ label: 'Limits' }])
-  const { data, phase, refreshing, error, refresh } = useEngineLimits()
-  // Read the clock once per render so every card/label shares one "now" and the
-  // freshness the user sees is honest for this paint.
-  const now = Date.now()
+  const { data, phase, refreshing, error, now, refresh } = useEngineLimits()
 
   const engines = FEATURED_ENGINES.map((name) => data?.engines[name]).filter(Boolean) as EngineLimitEngineSnapshot[]
 

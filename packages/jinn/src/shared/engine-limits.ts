@@ -54,7 +54,7 @@ function baseSnapshot(config: JinnConfig, engine: string): EngineLimitEngineSnap
   return {
     name: engine,
     available: entry?.available ?? false,
-    status: entry?.available ? "static" : "unsupported",
+    status: entry?.available ? "static" : "unavailable",
     source: "model-registry",
     refreshedAt: nowIso(),
     defaultModel: entry?.defaultModel,
@@ -112,7 +112,7 @@ async function claudeAuthPlan(config: JinnConfig): Promise<string | undefined> {
 async function collectClaudeLimits(config: JinnConfig): Promise<EngineLimitEngineSnapshot> {
   const snap = baseSnapshot(config, "claude");
   if (!snap.available) {
-    return { ...snap, status: "unsupported", unsupportedReason: "Claude CLI is not installed." };
+    return { ...snap, status: "unavailable", unsupportedReason: "Claude CLI is not installed." };
   }
 
   const latest = claudeSnapshotFile(CLAUDE_LIMITS_DIR);
@@ -368,7 +368,7 @@ function readCodexRollupSnapshot(): CodexRollup | null {
 async function collectCodexLimits(config: JinnConfig): Promise<EngineLimitEngineSnapshot> {
   const snap = baseSnapshot(config, "codex");
   if (!snap.available) {
-    return { ...snap, status: "unsupported", unsupportedReason: "Codex CLI is not installed." };
+    return { ...snap, status: "unavailable", unsupportedReason: "Codex CLI is not installed." };
   }
 
   // Primary: latest session rollout snapshot on disk (light, never races).
@@ -418,11 +418,13 @@ async function collectCodexLimits(config: JinnConfig): Promise<EngineLimitEngine
 
 function collectUnsupported(config: JinnConfig, engine: string, reason: string): EngineLimitEngineSnapshot {
   const snap = baseSnapshot(config, engine);
+  // An installed CLI with no quota endpoint is durably unsupported; a missing
+  // CLI is only temporarily unavailable (install it and it works).
   return {
     ...snap,
-    status: snap.available ? "unsupported" : "unsupported",
+    status: snap.available ? "unsupported" : "unavailable",
     source: "model-registry",
-    unsupportedReason: reason,
+    unsupportedReason: snap.available ? reason : `${engine} CLI is not installed.`,
   };
 }
 
@@ -457,7 +459,7 @@ export async function collectEngineLimits(
       const snap = baseSnapshot(config, name);
       engines[name] = {
         ...snap,
-        status: snap.available ? "static" : "unsupported",
+        status: snap.available ? "static" : "unavailable",
         source: "agy models + interactive /credits",
         windows: [planWindow("5h", 300), planWindow("7d", 10_080)],
         unsupportedReason: "Antigravity exposes plan windows and G1 credit controls through the interactive `/credits` and `/settings` UI, but no stable non-interactive JSON quota endpoint was found.",
