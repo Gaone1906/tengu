@@ -202,6 +202,7 @@ import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir } from "./files.js";
 import { readJsonBody, readBodyRaw } from "./http-helpers.js";
+import { resolveMessageAudiences } from "./speech-context.js";
 import { isJsonMediaType } from "./media-type.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
@@ -5461,7 +5462,10 @@ export async function handleApiRequest(
       const queueItemId = enqueueQueueItem(session.id, queueSessionKey, prompt);
       context.emit("queue:updated", { sessionId: session.id, sessionKey: queueSessionKey });
 
-      dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId, attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined });
+      // Speech-derived first messages carry a hidden context note to the engine
+      // only; the persisted/queued `prompt` above stays the operator's exact text.
+      const { engine: newSessionEnginePrompt } = resolveMessageAudiences(prompt, body.speech === true);
+      dispatchWebSessionRun(session, newSessionEnginePrompt, engine, config, context, { queueItemId, attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined });
 
       return json(res, serializeSession(session, context), 201);
     }
@@ -5869,7 +5873,12 @@ export async function handleApiRequest(
         context.emit("queue:updated", { sessionId: session.id, sessionKey });
       }
 
-      dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId, attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined });
+      // Speech-derived operator messages carry a hidden context note to the engine
+      // only. Everything persisted/queued/emitted above uses the clean `prompt`;
+      // notifications (callbacks, relays) never qualify. Recomputed per request →
+      // exactly one note, never persisted, never duplicated on retry/reload/reconnect.
+      const { engine: enginePrompt } = resolveMessageAudiences(prompt, body.speech === true && !isNotification);
+      dispatchWebSessionRun(session, enginePrompt, engine, config, context, { queueItemId, attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined });
 
       return json(res, {
         status: "queued",

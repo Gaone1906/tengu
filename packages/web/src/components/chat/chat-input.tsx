@@ -115,10 +115,35 @@ export function resolveTranscriptLanding(armed: boolean, transcript: string): Tr
   return transcript.trim().length > 0 ? 'send' : 'disarm'
 }
 
+/* ── Speech-to-text provenance ─────────────────────────────────────────────
+ * One bit per composed message: does its text contain any speech-to-text
+ * content? Typing never sets it, any dictated fragment does, a full clear
+ * resets it, and sending consumes it. A pure transition so the rule is testable
+ * without driving the microphone. The bit rides `onSend` to the gateway, which
+ * hands the engine a hidden context note — the operator's text is never changed.
+ */
+export type SpeechProvenanceEvent =
+  | { type: 'transcript' }          // a dictated fragment landed in the field
+  | { type: 'edit'; value: string } // a manual keystroke / clear changed the field
+  | { type: 'send' }                // the message was dispatched
+
+export function nextSpeechProvenance(current: boolean, event: SpeechProvenanceEvent): boolean {
+  switch (event.type) {
+    case 'transcript':
+      return true
+    case 'edit':
+      // A full clear wipes provenance; any other edit (incl. typing alongside
+      // dictated text) preserves it, so a mixed message stays speech-derived.
+      return event.value.trim().length === 0 ? false : current
+    case 'send':
+      return false
+  }
+}
+
 interface ChatInputProps {
   disabled: boolean
   loading: boolean
-  onSend: (message: string, media?: MediaAttachment[], interrupt?: boolean) => void
+  onSend: (message: string, media?: MediaAttachment[], interrupt?: boolean, speech?: boolean) => void
   onInterrupt?: () => void
   onNewSession: () => void
   onStatusRequest: () => void
@@ -244,6 +269,10 @@ export function ChatInput({
   // without re-creating itself (and without stale-closure races on send).
   const valueRef = useRef('')
   const armedRef = useRef(false)
+  // Speech-to-text provenance for the CURRENTLY composed message (see
+  // nextSpeechProvenance). A ref, not state: it is read synchronously on send
+  // and must never trigger a re-render.
+  const speechRef = useRef(false)
   const pendingAttachmentsRef = useRef<MediaAttachment[]>([])
   armedRef.current = sendArmed
   pendingAttachmentsRef.current = pendingAttachments
@@ -369,6 +398,12 @@ export function ChatInput({
     const val = e.target.value
     setValue(val)
 
+    // A manual edit updates provenance: a full clear resets it, any other edit
+    // preserves it (so typing beside dictated text keeps the message speech-
+    // derived). Programmatic transcript fills bypass onChange, so they never
+    // reach here — they set provenance directly in applyTranscript.
+    speechRef.current = nextSpeechProvenance(speechRef.current, { type: 'edit', value: val })
+
     // Any real keystroke (typing, clearing, editing) while a send is queued
     // means the operator took over — disarm cleanly so nothing auto-fires under
     // them. Programmatic transcript fills don't go through onChange, so they
@@ -465,6 +500,11 @@ export function ChatInput({
 
     if ((!trimmed && !hasMedia) || disabled) return
 
+    // Capture provenance before any reset, then consume it — this message's
+    // speech-derived state must not bleed into the next one.
+    const speech = speechRef.current
+    speechRef.current = nextSpeechProvenance(speechRef.current, { type: 'send' })
+
     const command = resolveClientCommand(trimmed)
     if (command === 'new') {
       setValue('')
@@ -490,7 +530,7 @@ export function ChatInput({
       textareaRef.current.style.height = 'auto'
     }
 
-    onSend(trimmed, mediaToSend, false)
+    onSend(trimmed, mediaToSend, false, speech)
   }
 
   function handleSubmit() {
@@ -549,12 +589,17 @@ export function ChatInput({
     const merged = prev ? prev + ' ' + text : text
     if (action === 'send') {
       // Armed + real words → fire the combined message now, then clear + disarm.
+      // Dictated words landed, so this send is speech-derived.
+      speechRef.current = nextSpeechProvenance(speechRef.current, { type: 'transcript' })
       sendText(merged, pendingAttachmentsRef.current)
       return
     }
     if (action === 'fill') {
       // Normal dictation (not armed) → drop the text in and keep editing.
-      if (text.trim().length > 0) setValue(merged)
+      if (text.trim().length > 0) {
+        speechRef.current = nextSpeechProvenance(speechRef.current, { type: 'transcript' })
+        setValue(merged)
+      }
       textareaRef.current?.focus()
       return
     }

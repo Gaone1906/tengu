@@ -314,7 +314,7 @@ export function ChatPane({
   }, [sessionId])
 
   const handleSend = useCallback(
-    async (message: string, media?: MediaAttachment[], interrupt?: boolean) => {
+    async (message: string, media?: MediaAttachment[], interrupt?: boolean, speech?: boolean) => {
       const userMsg: Message = {
         id: crypto.randomUUID(),
         role: 'user',
@@ -348,6 +348,7 @@ export function ChatPane({
             engine: selector.engine,
             model: selector.model,
             effortLevel: selector.effortLevel,
+            speech,
           })
           if (viewMode === 'cli' && supportsCliPreference(selector.engine)) (params as Record<string, unknown>).mode = 'interactive'
           const session = (await api.createSession(params)) as Record<string, unknown>
@@ -361,7 +362,7 @@ export function ChatPane({
           // CLI view → route to the interactive PTY engine so the user sees the prompt
           // get injected into the live xterm + claude's streaming response.
           const mode = viewMode === 'cli' && supportsCli(currentSession?.engine as string | undefined) ? 'interactive' : undefined
-          await api.sendMessage(sid, { message, interrupt: interrupt || undefined, attachments: attachmentIds, mode })
+          await api.sendMessage(sid, { message, interrupt: interrupt || undefined, attachments: attachmentIds, mode, speech: speech || undefined })
           onRefresh?.()
         }
       } catch (err) {

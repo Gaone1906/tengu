@@ -69,11 +69,15 @@ export function buildNewSessionParams(opts: {
   model?: string | null
   /** Effort level for the new session (only sent for effort-capable models). */
   effortLevel?: string | null
+  /** True when the first message contains speech-to-text-derived content. */
+  speech?: boolean
 }): Record<string, unknown> {
   const params: Record<string, unknown> = {
     source: 'web',
     prompt: opts.message,
   }
+
+  if (opts.speech) params.speech = true
 
   if (opts.selectedEmployee) {
     params.employee = opts.selectedEmployee
