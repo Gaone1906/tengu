@@ -77,16 +77,20 @@ let workerSession: import("../../shared/types.js").Session;
 let peerSession: import("../../shared/types.js").Session;
 const processFetch = globalThis.fetch;
 
+const apiConfig = {
+  gateway: { host: "127.0.0.1", authDisabled: true },
+  engines: { default: "codex", codex: { bin: "codex", model: "gpt-5.5" } },
+  sessions: {},
+  mcp: {},
+};
+
 const apiCtx = {
-  getConfig: () => ({
-    gateway: {},
-    engines: { default: "codex", codex: { bin: "codex", model: "gpt-5.5" } },
-    sessions: {},
-    mcp: {},
-  }),
+  getConfig: () => apiConfig,
+  config: apiConfig,
   connectors: new Map(),
   startTime: Date.now(),
   gatewayAuthToken: "test-token",
+  jinnHome: tmpHome,
   emit: () => {},
   sessionManager: {
     getEngines: () => new Map([["codex", {}]]),
@@ -94,6 +98,53 @@ const apiCtx = {
     getQueue: () => ({ isRunning: () => false, getPendingCount: () => 0, clearQueue: () => undefined }),
   },
 } as unknown as import("../api.js").ApiContext;
+
+const viteOrigin = "http://127.0.0.1:4174";
+const gatewayAuthority = "127.0.0.1:7800";
+
+function browserReq(
+  method: string,
+  urlPath: string,
+  body?: unknown,
+  overrides: Record<string, string> = {},
+) {
+  const payload = body !== undefined ? [Buffer.from(JSON.stringify(body))] : [];
+  const headers: Record<string, string> = {
+    host: gatewayAuthority,
+    accept: "application/json",
+    referer: `${viteOrigin}/workflows`,
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    "user-agent": "Mozilla/5.0 Chrome/149.0.0.0 Safari/537.36",
+    ...(body !== undefined ? { "content-type": "application/json" } : {}),
+    ...(method !== "GET" ? { origin: viteOrigin } : {}),
+    ...overrides,
+  };
+  const req = Object.assign(Readable.from(payload), {
+    method,
+    url: urlPath,
+    headers,
+    rawHeaders: Object.entries(headers).flatMap(([name, value]) => [name, value]),
+    socket: {
+      remoteAddress: "127.0.0.1",
+      localAddress: "127.0.0.1",
+      localPort: 7800,
+    },
+  });
+  return req as unknown as Parameters<Api["handleApiRequest"]>[0];
+}
+
+async function browserCall(
+  method: string,
+  urlPath: string,
+  body?: unknown,
+  overrides: Record<string, string> = {},
+): Promise<{ status: number; body: any }> {
+  const cap = makeRes();
+  await api.handleApiRequest(browserReq(method, urlPath, body, overrides), cap.res, apiCtx);
+  return { status: cap.status, body: cap.body };
+}
 
 function makeRes() {
   let status = 200;
@@ -573,6 +624,95 @@ describe("native Workflow gate approval integration", () => {
         }),
       }),
     ]);
+  });
+
+  it("projects and resolves an explicitly escalated native gate for an auth-disabled browser behind Vite", async () => {
+    const workflowId = "appr-native-vite-browser";
+    const { runId } = await seedNativeParkedRun(workflowId);
+    const escalated = await call(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/gate-approval/escalate`,
+      { reason: "operator decision required" },
+      managerHeaders(),
+    );
+    expect(escalated.status).toBe(200);
+    expect(escalated.body.parked.approval).toMatchObject({
+      operatorEntitled: true,
+      escalation: { target: "operator", targetKind: "operator" },
+    });
+
+    const authState = await browserCall("GET", "/api/auth/state");
+    expect(authState).toMatchObject({
+      status: 200,
+      body: { authRequired: false, authenticated: true },
+    });
+
+    const projected = await browserCall(
+      "GET",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}`,
+    );
+    expect(projected.status).toBe(200);
+    expect(projected.body.approvalCapability).toMatchObject({
+      canDecide: true,
+      target: "platform-manager",
+      needsYou: true,
+      escalated: true,
+    });
+
+    const approved = await browserCall(
+      "POST",
+      `/api/workflow-definitions/${workflowId}/runs/${runId}/resolve-gate`,
+      { decision: "approve" },
+    );
+    expect(approved.status).toBe(200);
+    expect(approved.body.gateDecisions).toEqual([
+      expect.objectContaining({
+        decision: "approve",
+        actor: "operator",
+        approval: expect.objectContaining({
+          operatorEntitled: true,
+          decidedBy: "operator",
+        }),
+      }),
+    ]);
+  });
+
+  it("keeps forged and unentitled auth-disabled browser gate decisions fail-closed with zero run effects", async () => {
+    const forgedWorkflowId = "appr-native-forged-vite-browser";
+    const { runId: forgedRunId } = await seedNativeParkedRun(forgedWorkflowId);
+    expect((await call(
+      "POST",
+      `/api/workflow-definitions/${forgedWorkflowId}/runs/${forgedRunId}/gate-approval/escalate`,
+      { reason: "operator decision required" },
+      managerHeaders(),
+    )).status).toBe(200);
+    const forgedBefore = runStore.getRun(evidenceRoot, forgedWorkflowId, forgedRunId)!;
+
+    const forged = await browserCall(
+      "POST",
+      `/api/workflow-definitions/${forgedWorkflowId}/runs/${forgedRunId}/resolve-gate`,
+      { decision: "approve" },
+      { origin: "https://attacker.example" },
+    );
+    expect(forged.status).toBe(403);
+    expect(runStore.getRun(evidenceRoot, forgedWorkflowId, forgedRunId)).toEqual(forgedBefore);
+
+    const unentitledWorkflowId = "appr-native-unentitled-vite-browser";
+    const { runId: unentitledRunId } = await seedNativeParkedRun(unentitledWorkflowId);
+    const projected = await browserCall(
+      "GET",
+      `/api/workflow-definitions/${unentitledWorkflowId}/runs/${unentitledRunId}`,
+    );
+    expect(projected.body.approvalCapability).toMatchObject({ canDecide: false, escalated: false });
+    const unentitledBefore = runStore.getRun(evidenceRoot, unentitledWorkflowId, unentitledRunId)!;
+
+    const unentitled = await browserCall(
+      "POST",
+      `/api/workflow-definitions/${unentitledWorkflowId}/runs/${unentitledRunId}/resolve-gate`,
+      { decision: "approve" },
+    );
+    expect(unentitled.status).toBe(403);
+    expect(runStore.getRun(evidenceRoot, unentitledWorkflowId, unentitledRunId)).toEqual(unentitledBefore);
   });
 
   it("requires explicit legacy adoption before a parked approval can be decided", async () => {

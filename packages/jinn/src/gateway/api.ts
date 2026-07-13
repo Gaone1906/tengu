@@ -1058,7 +1058,7 @@ interface WorkflowRunRequestBody {
 
 function projectWorkflowRunApprovalCapability(
   run: WorkflowRun,
-  headers: HttpRequest["headers"],
+  requestOrHeaders: HttpRequest | HttpRequest["headers"],
   context: ApiContext,
 ): WorkflowRun & {
   approvalCapability: { canDecide: boolean; target: string | null; needsYou: boolean; escalated: boolean } | null;
@@ -1071,9 +1071,10 @@ function projectWorkflowRunApprovalCapability(
       approvalCapability: { canDecide: false, target: null, needsYou: false, escalated: false },
     };
   }
+  const headers = scopedCallerHeaders(requestOrHeaders);
   const authority = resolveWorkflowApprovalDecisionAuthority(headers, approval, {
     allowOperator: true,
-    operatorAuthenticated: verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+    operatorAuthenticated: scopedOperatorAuthenticated(requestOrHeaders, context),
   });
   const needsYou = authority.ok && approval.state === "pending" && (
     (authority.authority.kind === "employee" && approval.target === authority.authority.employee) ||
@@ -1092,7 +1093,7 @@ function projectWorkflowRunApprovalCapability(
 
 function projectWorkflowTriggerApprovalCapability(
   binding: ReturnType<typeof publicWorkflowTriggerBinding>,
-  headers: HttpRequest["headers"],
+  requestOrHeaders: HttpRequest | HttpRequest["headers"],
   context: ApiContext,
 ): ReturnType<typeof publicWorkflowTriggerBinding> & {
   approvalCapability?: {
@@ -1105,9 +1106,10 @@ function projectWorkflowTriggerApprovalCapability(
 } {
   if (binding.kind !== "poll") return binding;
   const approval = binding.approval;
+  const headers = scopedCallerHeaders(requestOrHeaders);
   const authority = resolveWorkflowApprovalDecisionAuthority(headers, approval, {
     allowOperator: true,
-    operatorAuthenticated: verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+    operatorAuthenticated: scopedOperatorAuthenticated(requestOrHeaders, context),
   });
   const pending = approval.state === "pending";
   const canDecide = pending && authority.ok;
@@ -1275,7 +1277,7 @@ async function runWorkflowDefinitionFromHttp(
       false,
     );
     const status = replayed ? 200 : run.status === "failed" ? 422 : 201;
-    const response = projectWorkflowRunApprovalCapability(run, req.headers, context) as unknown as Record<string, unknown>;
+    const response = projectWorkflowRunApprovalCapability(run, req, context) as unknown as Record<string, unknown>;
     return json(res, status >= 400 ? response : withActivityReceipt(response, activityReceiptId), status);
   } catch (err) {
     if (err instanceof WorkflowRunIdempotencyConflict) {
@@ -1986,16 +1988,29 @@ function resolveNeedsAttentionTarget(req: HttpRequest, res: ServerResponse, requ
   return requested;
 }
 
-function resolveScopedWriteCallerIdentity(requestOrHeaders: HttpRequest | HttpRequest["headers"], context: ApiContext) {
+function scopedCallerRequest(
+  requestOrHeaders: HttpRequest | HttpRequest["headers"],
+): HttpRequest | undefined {
   const possibleHeaders = (requestOrHeaders as { headers?: unknown }).headers;
-  const request = possibleHeaders
+  return possibleHeaders
     && typeof possibleHeaders === "object"
     && !Array.isArray(possibleHeaders)
     ? requestOrHeaders as HttpRequest
     : undefined;
-  const headers: HttpRequest["headers"] = request
+}
+
+function scopedCallerHeaders(
+  requestOrHeaders: HttpRequest | HttpRequest["headers"],
+): HttpRequest["headers"] {
+  const request = scopedCallerRequest(requestOrHeaders);
+  return request
     ? request.headers
     : requestOrHeaders as HttpRequest["headers"];
+}
+
+function resolveScopedWriteCallerIdentity(requestOrHeaders: HttpRequest | HttpRequest["headers"], context: ApiContext) {
+  const request = scopedCallerRequest(requestOrHeaders);
+  const headers = scopedCallerHeaders(requestOrHeaders);
   return resolveCallerIdentity(headers, {
     sessionExists: (sessionId) => !!getSession(sessionId),
     verifySessionCapability,
@@ -2004,6 +2019,13 @@ function resolveScopedWriteCallerIdentity(requestOrHeaders: HttpRequest | HttpRe
       verifyGatewayAuth(headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME)
       || (!shouldRequireGatewayAuth(context.getConfig()) && !!request && isSameOriginBrowserRequest(request, context.getConfig())),
   });
+}
+
+function scopedOperatorAuthenticated(
+  requestOrHeaders: HttpRequest | HttpRequest["headers"],
+  context: ApiContext,
+): boolean {
+  return resolveScopedWriteCallerIdentity(requestOrHeaders, context).kind === "operator";
 }
 
 function singleHeader(headers: HttpRequest["headers"], name: string): string | undefined {
@@ -2269,6 +2291,33 @@ function originMatchesAuthority(origin: string, authority: RequestAuthority): bo
   }
 }
 
+function originMatchesLoopbackViteProxy(
+  req: Pick<HttpRequest, "headers" | "rawHeaders">,
+  origin: string,
+  authority: RequestAuthority,
+): boolean {
+  try {
+    const parsed = new URL(origin);
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (parsed.protocol !== "http:"
+      || parsed.username
+      || parsed.password
+      || parsed.origin === "null"
+      || !isLoopbackAuthorityHost(hostname)
+      || hostname !== authority.hostname) return false;
+
+    // Vite's loopback changeOrigin proxy rewrites Host to the gateway listener
+    // while preserving the browser-facing Origin and Referer ports. Require both
+    // browser headers to agree on that exact loopback origin; forwarding headers,
+    // external origins, non-loopback sockets, and auth-enabled gateways have
+    // already failed closed above.
+    const referer = singleRequestHeader(req, "referer");
+    return !!referer && new URL(referer).origin === parsed.origin;
+  } catch {
+    return false;
+  }
+}
+
 export function isSameOriginBrowserRequest(
   req: Pick<HttpRequest, "headers" | "rawHeaders" | "socket">,
   config: Pick<JinnConfig, "gateway">,
@@ -2293,7 +2342,9 @@ export function isSameOriginBrowserRequest(
 
   const origins = requestHeaderValues(req, "origin");
   if (origins.length > 1 || (upgrade === "websocket" && origins.length !== 1)) return false;
-  return origins.length === 0 || originMatchesAuthority(origins[0], authority);
+  return origins.length === 0
+    || originMatchesAuthority(origins[0], authority)
+    || (upgrade !== "websocket" && originMatchesLoopbackViteProxy(req, origins[0], authority));
 }
 
 function isPublicIdentifiedCallerRoute(method: string, pathname: string): boolean {
@@ -4069,7 +4120,7 @@ export async function handleApiRequest(
       if (!item) return notFound(res);
       const authority = resolveApprovalDecisionAuthority(req.headers, item, {
         operatorCanActOnRootTarget: true,
-        operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+        operatorAuthenticated: scopedOperatorAuthenticated(req, context),
       });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
 
@@ -4103,7 +4154,7 @@ export async function handleApiRequest(
       if (!item) return notFound(res);
       const authority = resolveApprovalDecisionAuthority(req.headers, item, {
         operatorCanActOnRootTarget: true,
-        operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+        operatorAuthenticated: scopedOperatorAuthenticated(req, context),
       });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
       const body = (parsed.body ?? {}) as { reason?: unknown };
@@ -4207,7 +4258,7 @@ export async function handleApiRequest(
         try {
           return json(res, {
             triggers: listPublicWorkflowTriggerBindings(root)
-              .map((binding) => projectWorkflowTriggerApprovalCapability(binding, req.headers, context)),
+              .map((binding) => projectWorkflowTriggerApprovalCapability(binding, req, context)),
             evidenceConfigured: true,
           });
         } catch (err) {
@@ -4268,7 +4319,7 @@ export async function handleApiRequest(
           if (!binding || binding.kind !== "poll") return notFound(res);
           const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, binding.approval, {
             allowOperator: true,
-            operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+            operatorAuthenticated: scopedOperatorAuthenticated(req, context),
           });
           if (!authority.ok) return json(res, { error: authority.error }, authority.status);
           const updated = await decidePollActivationApproval(root, binding.name, decision, authority.authority.actor);
@@ -4280,7 +4331,7 @@ export async function handleApiRequest(
             "trigger-approval-decided",
           );
           return json(res, withActivityReceipt({
-            trigger: projectWorkflowTriggerApprovalCapability(publicWorkflowTriggerBinding(updated), req.headers, context),
+            trigger: projectWorkflowTriggerApprovalCapability(publicWorkflowTriggerBinding(updated), req, context),
           }, activityReceiptId));
         });
       } catch (err) {
@@ -4300,7 +4351,7 @@ export async function handleApiRequest(
           if (!binding || binding.kind !== "poll") return notFound(res);
           const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, binding.approval, {
             allowOperator: false,
-            operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+            operatorAuthenticated: scopedOperatorAuthenticated(req, context),
           });
           if (!authority.ok) return json(res, { error: authority.error }, authority.status);
           const updated = await escalatePollActivationApproval(root, binding.name);
@@ -4313,7 +4364,7 @@ export async function handleApiRequest(
             JSON.stringify(updated) !== JSON.stringify(binding),
           );
           return json(res, withActivityReceipt({
-            trigger: projectWorkflowTriggerApprovalCapability(publicWorkflowTriggerBinding(updated), req.headers, context),
+            trigger: projectWorkflowTriggerApprovalCapability(publicWorkflowTriggerBinding(updated), req, context),
           }, activityReceiptId));
         });
       } catch (err) {
@@ -4770,7 +4821,7 @@ export async function handleApiRequest(
       }
       const activityReceiptId = projectWorkflowOperationActivity(outcome.run, req.headers, context, "step-prompt-edited");
       return json(res, withActivityReceipt(
-        projectWorkflowRunApprovalCapability(outcome.run, req.headers, context) as unknown as Record<string, unknown>,
+        projectWorkflowRunApprovalCapability(outcome.run, req, context) as unknown as Record<string, unknown>,
         activityReceiptId,
       ));
     }
@@ -4822,7 +4873,7 @@ export async function handleApiRequest(
         ? projectWorkflowOperationActivity(outcome.run, req.headers, context, "cancelled")
         : undefined;
       return json(res, withActivityReceipt(
-        projectWorkflowRunApprovalCapability(outcome.run, req.headers, context) as unknown as Record<string, unknown>,
+        projectWorkflowRunApprovalCapability(outcome.run, req, context) as unknown as Record<string, unknown>,
         activityReceiptId,
       ));
     }
@@ -4845,7 +4896,7 @@ export async function handleApiRequest(
       }
       const activityReceiptId = projectWorkflowOperationActivity(outcome.run, req.headers, context, "gate-approval-adopted");
       return json(res, withActivityReceipt(
-        projectWorkflowRunApprovalCapability(outcome.run, req.headers, context) as unknown as Record<string, unknown>,
+        projectWorkflowRunApprovalCapability(outcome.run, req, context) as unknown as Record<string, unknown>,
         activityReceiptId,
       ));
     }
@@ -4874,7 +4925,7 @@ export async function handleApiRequest(
       }
       const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, run.parked.approval, {
         allowOperator: false,
-        operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+        operatorAuthenticated: scopedOperatorAuthenticated(req, context),
       });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
       const outcome = await escalateWorkflowRunGateApproval(workflowRunDriverDeps(root, context), params.id, params.runId);
@@ -4886,7 +4937,7 @@ export async function handleApiRequest(
         ? projectWorkflowOperationActivity(outcome.run, req.headers, context, "gate-approval-escalated")
         : undefined;
       return json(res, withActivityReceipt(
-        projectWorkflowRunApprovalCapability(outcome.run, req.headers, context) as unknown as Record<string, unknown>,
+        projectWorkflowRunApprovalCapability(outcome.run, req, context) as unknown as Record<string, unknown>,
         activityReceiptId,
       ));
     }
@@ -4916,7 +4967,7 @@ export async function handleApiRequest(
       }
       const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, run.parked.approval, {
         allowOperator: true,
-        operatorAuthenticated: verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME),
+        operatorAuthenticated: scopedOperatorAuthenticated(req, context),
       });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
       try {
@@ -4927,7 +4978,7 @@ export async function handleApiRequest(
         }
         const activityReceiptId = projectWorkflowOperationActivity(result.run, req.headers, context, "gate-approval-decided");
         return json(res, withActivityReceipt(
-          projectWorkflowRunApprovalCapability(result.run, req.headers, context) as unknown as Record<string, unknown>,
+          projectWorkflowRunApprovalCapability(result.run, req, context) as unknown as Record<string, unknown>,
           activityReceiptId,
         ));
       } catch (err) {
@@ -4960,7 +5011,7 @@ export async function handleApiRequest(
       try {
         const run = getRun(root, params.id, params.runId);
         if (!run) return notFound(res);
-        return json(res, projectWorkflowRunApprovalCapability(run, req.headers, context));
+        return json(res, projectWorkflowRunApprovalCapability(run, req, context));
       } catch (err) {
         if (err instanceof WorkflowRunStoreError) return json(res, { error: err.message, code: err.code }, 400);
         return workflowStoreErrorResponse(res, err);

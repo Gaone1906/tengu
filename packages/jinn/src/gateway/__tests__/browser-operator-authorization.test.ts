@@ -33,9 +33,12 @@ type Api = typeof import("../api.js");
 let api: Api;
 let server: http.Server;
 let baseUrl: string;
+let viteProxy: http.Server;
+let viteBaseUrl: string;
 let config: JinnConfig;
 let lastRequestHeaders: http.IncomingHttpHeaders = {};
 let handlerRejections = 0;
+let registry: typeof import("../../sessions/registry.js");
 
 const context = {
   getConfig: () => config,
@@ -44,11 +47,15 @@ const context = {
   gatewayAuthToken: "gateway-token",
   jinnHome: testHome,
   sessionManager: {
+    getEngine: () => undefined,
+    getEngines: () => new Map(),
     getQueue: () => ({
       getPendingCount: () => 0,
       getTransportState: (_key: string, status: string) => status,
+      clearQueue: () => undefined,
     }),
   },
+  emit: () => undefined,
 } as unknown as import("../api.js").ApiContext;
 
 async function needsAttention(headers: HeadersInit = {}): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -131,12 +138,32 @@ function sameOriginFetchHeaders(): Record<string, string> {
   };
 }
 
+function viteBrowserHeaders(method: "GET" | "POST", origin = viteBaseUrl): Record<string, string> {
+  return {
+    accept: "application/json",
+    referer: `${viteBaseUrl}/workflows`,
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    "user-agent": "Mozilla/5.0 Chrome/149.0.0.0 Safari/537.36",
+    ...(method === "POST" ? { "content-type": "application/json", origin } : {}),
+  };
+}
+
+async function stopViaViteProxy(sessionId: string, headers: Record<string, string>): Promise<Response> {
+  return fetch(`${viteBaseUrl}/api/sessions/${sessionId}/stop`, {
+    method: "POST",
+    headers,
+    body: "{}",
+  });
+}
+
 beforeAll(async () => {
   api = await import("../api.js");
-  const registry = await import("../../sessions/registry.js");
+  registry = await import("../../sessions/registry.js");
   registry.initDb();
   config = {
-    gateway: { host: "127.0.0.1" },
+    gateway: { host: "127.0.0.1", authDisabled: true },
     engines: { default: "codex", codex: {}, claude: {} },
   } as JinnConfig;
 
@@ -154,9 +181,34 @@ beforeAll(async () => {
   });
   const address = server.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${address.port}`;
+
+  // Minimal real-network model of Vite's configured changeOrigin proxy: the
+  // gateway-facing Host is rewritten, browser Origin/Referer are preserved,
+  // and no Forwarded/X-Forwarded headers are added.
+  viteProxy = http.createServer((req, res) => {
+    const target = new URL(req.url || "/", baseUrl);
+    const upstream = http.request(target, {
+      method: req.method,
+      headers: { ...req.headers, host: new URL(baseUrl).host },
+    }, (upstreamRes) => {
+      res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+      upstreamRes.pipe(res);
+    });
+    upstream.on("error", (error) => {
+      res.writeHead(502, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: error.message }));
+    });
+    req.pipe(upstream);
+  });
+  await new Promise<void>((resolve, reject) => {
+    viteProxy.once("error", reject);
+    viteProxy.listen(0, "127.0.0.1", resolve);
+  });
+  viteBaseUrl = `http://127.0.0.1:${(viteProxy.address() as AddressInfo).port}`;
 });
 
 afterAll(async () => {
+  await new Promise<void>((resolve, reject) => viteProxy.close((error) => error ? reject(error) : resolve()));
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   fs.rmSync(testHome, { recursive: true, force: true });
 });
@@ -314,7 +366,7 @@ describe("browser operator authorization", () => {
       const result = await needsAttention(sameOriginFetchHeaders());
       expect(result.status).toBe(403);
     } finally {
-      config = { ...config, gateway: { host: "127.0.0.1" } } as JinnConfig;
+      config = { ...config, gateway: { host: "127.0.0.1", authDisabled: true } } as JinnConfig;
     }
   });
 
@@ -324,7 +376,95 @@ describe("browser operator authorization", () => {
       const result = await needsAttention({ authorization: "Bearer gateway-token", "user-agent": "api-client/1.0" });
       expect(result.status).toBe(200);
     } finally {
-      config = { ...config, gateway: { host: "127.0.0.1" } } as JinnConfig;
+      config = { ...config, gateway: { host: "127.0.0.1", authDisabled: true } } as JinnConfig;
+    }
+  });
+
+  it("recognizes an auth-disabled browser mutation through the real Vite proxy shape", async () => {
+    const session = registry.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: "vite-browser-stop",
+      title: "Vite browser stop",
+    });
+    registry.updateSession(session.id, { status: "running" });
+
+    const response = await stopViaViteProxy(session.id, viteBrowserHeaders("POST"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "stopped", sessionId: session.id });
+    expect(registry.getSession(session.id)?.status).toBe("interrupted");
+    expect(lastRequestHeaders).toMatchObject({
+      host: new URL(baseUrl).host,
+      origin: viteBaseUrl,
+      referer: `${viteBaseUrl}/workflows`,
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-origin",
+    });
+    expect(lastRequestHeaders["x-forwarded-for"]).toBeUndefined();
+  });
+
+  it("keeps cross-origin, forged, and forwarded Vite-shaped mutations fail-closed with zero session effects", async () => {
+    const session = registry.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: "forged-vite-browser-stop",
+      title: "Forged Vite browser stop",
+    });
+    registry.updateSession(session.id, { status: "running" });
+
+    const response = await stopViaViteProxy(
+      session.id,
+      viteBrowserHeaders("POST", "https://attacker.example"),
+    );
+
+    expect(response.status).toBe(403);
+    expect(registry.getSession(session.id)?.status).toBe("running");
+
+    const forgedLoopbackOrigin = await stopViaViteProxy(
+      session.id,
+      viteBrowserHeaders("POST", "http://127.0.0.1:1"),
+    );
+    expect(forgedLoopbackOrigin.status).toBe(403);
+    expect(registry.getSession(session.id)?.status).toBe("running");
+
+    const forwarded = await stopViaViteProxy(session.id, {
+      ...viteBrowserHeaders("POST"),
+      "x-forwarded-for": "127.0.0.1",
+    });
+    expect(forwarded.status).toBe(403);
+    expect(registry.getSession(session.id)?.status).toBe("running");
+  });
+
+  it("keeps auth-enabled Vite browser mutations credential-bound", async () => {
+    config = { ...config, gateway: { host: "127.0.0.1", authRequired: true } } as JinnConfig;
+    try {
+      const denied = registry.createSession({
+        engine: "codex",
+        source: "web",
+        sourceRef: "auth-enabled-vite-denied",
+        title: "Auth enabled denied",
+      });
+      registry.updateSession(denied.id, { status: "running" });
+      expect((await stopViaViteProxy(denied.id, viteBrowserHeaders("POST"))).status).toBe(403);
+      expect(registry.getSession(denied.id)?.status).toBe("running");
+
+      const allowed = registry.createSession({
+        engine: "codex",
+        source: "web",
+        sourceRef: "auth-enabled-vite-token",
+        title: "Auth enabled token",
+      });
+      registry.updateSession(allowed.id, { status: "running" });
+      const response = await stopViaViteProxy(allowed.id, {
+        ...viteBrowserHeaders("POST"),
+        authorization: "Bearer gateway-token",
+      });
+      expect(response.status).toBe(200);
+      expect(registry.getSession(allowed.id)?.status).toBe("interrupted");
+    } finally {
+      config = { ...config, gateway: { host: "127.0.0.1", authDisabled: true } } as JinnConfig;
     }
   });
 });
