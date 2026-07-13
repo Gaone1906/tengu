@@ -298,6 +298,57 @@ describe("composeMigrationPrompt: against the REAL shipped template migrations",
     expect(migration).toContain("Do not create a Workflow delivery store");
     expect(migration).not.toContain("rewrite historical Workflow-source Todos");
   });
+
+  it("discovers and composes the real 0.26.0 to 0.27.0 migration range", () => {
+    const versions = scanMigrationPrompts(templateMigrationsDir, "0.26.0", "0.27.0");
+    expect(versions).toEqual(["0.27.0"]);
+
+    const prompt = composeMigrationPrompt({
+      templateMigrationsDir,
+      versions,
+      fromVersion: "0.26.0",
+      toVersion: "0.27.0",
+      instanceHome: "/home/operator/.jinn",
+    });
+    expect(prompt).toContain("Migration 0.27.0");
+    expect(prompt).toContain("A Workflow invocation never");
+    expect(prompt).toContain("historical Workflow-source Todos remain ordinary audit records");
+    expect(prompt).toContain("callback_deliveries");
+  });
+
+  it("composes the 0.27.0 prompt without mutating a personalized instance fixture", () => {
+    const instanceHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-personalized-migration-"));
+    const fixture = new Map<string, string>([
+      ["CLAUDE.md", "# Custom Root\n\nOperator preference: concise status notes.\n"],
+      ["org/research/custom-lead.yaml", "name: custom-lead\ndepartment: research\nrank: manager\n"],
+      ["secrets/api-keys.json", JSON.stringify({ fixture_service: { api_key: "fixture-only" } }, null, 2)],
+      ["knowledge/preferences.md", "# Preferences\n\nKeep custom terminology.\n"],
+    ]);
+
+    try {
+      for (const [rel, content] of fixture) {
+        const file = path.join(instanceHome, rel);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content, "utf-8");
+      }
+
+      const prompt = composeMigrationPrompt({
+        templateMigrationsDir,
+        versions: scanMigrationPrompts(templateMigrationsDir, "0.26.0", "0.27.0"),
+        fromVersion: "0.26.0",
+        toVersion: "0.27.0",
+        instanceHome,
+      });
+
+      expect(prompt).toContain(instanceHome);
+      expect(prompt).toContain("Preserve custom employee names, org structure, secrets, unrelated preferences");
+      for (const [rel, content] of fixture) {
+        expect(fs.readFileSync(path.join(instanceHome, rel), "utf-8"), rel).toBe(content);
+      }
+    } finally {
+      fs.rmSync(instanceHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("scanFutureMigrations: dirs staged above the package version", () => {

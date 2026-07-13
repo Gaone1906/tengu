@@ -976,7 +976,7 @@ describe("POST /api/work-items — provenance and approval routing fields", () =
     };
   }
 
-  it("rejects caller-supplied provenance and mints normal tool-created Todos as session source", async () => {
+  it("rejects caller-supplied provenance and assigns normal tool-created Todos to the session source", async () => {
     const caller = reg.createSession({ engine: "codex", source: "web", sourceRef: "caller", title: "caller", employee: "platform-worker" });
 
     const spoof = makeRes();
@@ -986,7 +986,9 @@ describe("POST /api/work-items — provenance and approval routing fields", () =
       ctx,
     );
     expect(spoof.status).toBe(400);
-    expect(spoof.body.error).toMatch(/provenance.*dedicated bridge|cannot be supplied/i);
+    expect(spoof.body.error).toContain("cron and delegation create their own records");
+    expect(spoof.body.error).toContain("source=workflow is historical audit provenance and is not currently minted");
+    expect(spoof.body.error).not.toMatch(/cron\/workflow\/delegation source records are minted|dedicated bridges?/i);
 
     const ok = makeRes();
     await api.handleApiRequest(makeReq("POST", "/api/work-items", { title: "Normal" }, toolHeaders(caller.id)), ok.res, ctx);

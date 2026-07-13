@@ -3557,7 +3557,7 @@ export async function handleApiRequest(
         return badRequest(res, `approval fields (${approvalKeys.join(", ")}) cannot be attached at Todo creation — approvals are requested/decided through the approval authority surface`);
       }
       if (body.provenance !== undefined) {
-        return badRequest(res, "provenance cannot be supplied on public Todo creation — cron/workflow/delegation source records are minted only by their dedicated bridges; normal tool/session creation is source=session");
+        return badRequest(res, "provenance cannot be supplied on public Todo creation — the server assigns source provenance: public creation uses source=human or source=session, while cron and delegation create their own records; source=workflow is historical audit provenance and is not currently minted");
       }
       const title = typeof body.title === "string" ? stripControlChars(body.title).trim() : "";
       if (!title) return badRequest(res, "title is required");

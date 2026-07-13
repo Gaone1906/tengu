@@ -71,10 +71,22 @@ describe("the GRS-017e template diet tranche (MCP-first realized)", () => {
     expect(workflowSkill).toContain("reportMode");
     expect(workflowSkill).toContain("cancel_workflow_run");
     expect(workflowSkill).toContain("Workflow run approval");
+    expect(workflowSkill).toContain("escalate_workflow_gate");
     expect(workflowSkill).toContain("browser, CLI, cron, webhook, poll, and Todo-status");
     expect(todoSkill).toContain("A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.");
-    expect(todoSkill).not.toContain("todoTransition");
-    expect(todoSkill).not.toContain("run's Todo");
+    expect(todoSkill).toContain("Todo approvals affect only the Todo.");
+    expect(todoSkill).toContain("Workflow operations never mutate Todos.");
+    for (const workflowControl of [
+      "Workflow gate",
+      "Workflow run approval",
+      "human Workflow",
+      "cancel_workflow_run",
+      "escalate_workflow_gate",
+      "todoTransition",
+      "run's Todo",
+    ]) {
+      expect(todoSkill, workflowControl).not.toContain(workflowControl);
+    }
   });
 });
 

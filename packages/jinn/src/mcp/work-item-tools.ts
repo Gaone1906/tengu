@@ -159,7 +159,7 @@ function validateVerifyPolicy(policy: Record<string, unknown>): Record<string, u
 function rejectProvenance(args: Record<string, unknown>): void {
   if (args.provenance !== undefined) {
     throw new JinnMcpToolError(
-      "provenance cannot be supplied by create_work_item — cron/workflow/delegation source records are minted only by their dedicated bridge; normal tool/session creation is source=session",
+      "provenance cannot be supplied by create_work_item — the server assigns source provenance: create_work_item uses source=session, while cron and delegation create their own records; source=workflow is historical audit provenance and is not currently minted",
     );
   }
 }

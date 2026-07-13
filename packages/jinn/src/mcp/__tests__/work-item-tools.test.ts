@@ -192,7 +192,7 @@ describe("work-item tools — unit (stub gateway)", () => {
     const { calls, ctx } = stub(() => ({ status: 201, body: {} }), "sess-caller");
     await expect(
       tool("create_work_item").handler({ title: "Spoof", provenance: { source: "workflow", sourceRef: "workflow:wf:run" } }, ctx),
-    ).rejects.toThrow(/provenance.*dedicated bridge|cannot be supplied/i);
+    ).rejects.toThrow(/cron and delegation create their own records.*source=workflow is historical audit provenance and is not currently minted/i);
     expect(calls).toHaveLength(0);
   });
 

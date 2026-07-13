@@ -11,6 +11,10 @@ function readRepo(rel: string): string {
   return fs.readFileSync(path.join(process.cwd(), "..", "..", rel), "utf-8");
 }
 
+function readPackage(rel: string): string {
+  return fs.readFileSync(path.join(process.cwd(), rel), "utf-8");
+}
+
 describe("template company doctrine", () => {
   it("ships the seven locked company-doctrine headings", () => {
     const doctrine = readTemplate("docs/company-doctrine.md");
@@ -27,26 +31,52 @@ describe("template company doctrine", () => {
     for (const heading of headings) expect(doctrine).toContain(heading);
   });
 
-  it("ships the locked Workflow and Todo separation contract without stale coupling guidance", () => {
-    const currentGuidanceFiles = [
-      "CLAUDE.md",
-      "docs/company-doctrine.md",
-      "docs/org.md",
-      "skills/todo-handling/SKILL.md",
-      "skills/workflow/SKILL.md",
+  it("enforces the Workflow/Todo contract on each active template surface", () => {
+    const surfaces = [
+      {
+        rel: "CLAUDE.md",
+        required: [
+          "A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.",
+          "A Todo-status trigger is a one-way input; the resulting Workflow run is independent.",
+          "A session-invoked Workflow reports to that same session unless reportMode is silent.",
+          "Workflow runs are durable records, not Sessions.",
+        ],
+      },
+      {
+        rel: "docs/company-doctrine.md",
+        required: [
+          "A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.",
+          "A Todo-status trigger is a one-way input; the resulting Workflow run is independent.",
+          "Workflow runs are durable records, not Sessions.",
+        ],
+      },
+      {
+        rel: "docs/org.md",
+        required: [
+          "A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.",
+          "A Todo-status trigger is a one-way input; the resulting Workflow run is independent.",
+          "Workflow runs are durable records, not Sessions.",
+        ],
+      },
+      {
+        rel: "skills/todo-handling/SKILL.md",
+        required: [
+          "A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.",
+          "Todo approvals affect only the Todo.",
+          "Workflow operations never mutate Todos.",
+        ],
+      },
+      {
+        rel: "skills/workflow/SKILL.md",
+        required: [
+          "A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.",
+          "Workflow runs are durable records, not Sessions.",
+          "reportMode: \"silent\"",
+          "cancel_workflow_run",
+          "Workflow run approval",
+        ],
+      },
     ];
-    const shippedGuidance = currentGuidanceFiles
-      .map((rel) => readTemplate(rel))
-      .join("\n");
-
-    const lockedPrinciples = [
-      "A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.",
-      "A Todo-status trigger is a one-way input; the resulting Workflow run is independent.",
-      "A session-invoked Workflow reports to that same session unless reportMode is silent.",
-      "Workflow runs are durable records, not Sessions.",
-    ];
-    for (const principle of lockedPrinciples) expect(shippedGuidance).toContain(principle);
-
     const staleCouplingGuidance = [
       "mirrored workflow",
       "run's Todo",
@@ -54,8 +84,28 @@ describe("template company doctrine", () => {
       "workflow runs are entered automatically",
       "todoTransition",
     ];
-    for (const stale of staleCouplingGuidance) {
-      expect(shippedGuidance.toLowerCase()).not.toContain(stale.toLowerCase());
+
+    for (const surface of surfaces) {
+      const content = readTemplate(surface.rel);
+      for (const principle of surface.required) expect(content, `${surface.rel}: ${principle}`).toContain(principle);
+      for (const stale of staleCouplingGuidance) {
+        expect(content.toLowerCase(), `${surface.rel}: ${stale}`).not.toContain(stale.toLowerCase());
+      }
+    }
+  });
+
+  it("keeps active API and MCP provenance guidance on current producers, not Workflow bridges", () => {
+    const activeGuidance = [
+      { rel: "src/gateway/api.ts", content: readPackage("src/gateway/api.ts") },
+      { rel: "src/mcp/work-item-tools.ts", content: readPackage("src/mcp/work-item-tools.ts") },
+    ];
+
+    for (const surface of activeGuidance) {
+      expect(surface.rel).not.toContain("template/migrations/");
+      expect(surface.content, surface.rel).toContain("cron and delegation create their own records");
+      expect(surface.content, surface.rel).toContain("source=workflow is historical audit provenance and is not currently minted");
+      expect(surface.content, surface.rel).not.toMatch(/cron\/workflow\/delegation source records are minted/i);
+      expect(surface.content, surface.rel).not.toMatch(/dedicated bridges?/i);
     }
   });
 
@@ -245,8 +295,10 @@ describe("template company doctrine", () => {
     const todoSkill = readTemplate("skills/todo-handling/SKILL.md");
     expect(todoSkill).toContain("identical pending request");
     expect(todoSkill).toContain("does not perform approval decisions");
-    expect(todoSkill).toContain("Workflow and Todo approvals are separate authorities");
-    expect(todoSkill).toContain("never resolve, project, or mutate Workflow gates");
+    expect(todoSkill).toContain("Todo approvals affect only the Todo");
+    expect(todoSkill).toContain("Workflow operations never mutate Todos");
+    expect(todoSkill).not.toContain("Workflow gate");
+    expect(todoSkill).not.toContain("cancel_workflow_run");
     expect(todoSkill).toContain("maxRounds");
 
     for (const [name, skill] of [["workflow", workflowSkill], ["todo-handling", todoSkill]] as const) {

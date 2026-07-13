@@ -72,7 +72,7 @@ Approvals are routed records on a Todo, separate from its lifecycle status. Gene
 
 4. If the routed manager/COO deliberately needs operator/aCEO authority, call `escalate_work_item_approval` with the pending Todo id and an optional reason. Escalation exposes the pending approval to that path; it does not approve or reject it.
 
-Workflow and Todo approvals are separate authorities. Human Workflow gates use Workflow run approval, never Todo approval tools. Todo approval tools never resolve, project, or mutate Workflow gates; Workflow completion, failure, timeout, cancellation, and approval decisions never change a Todo. `cancel_workflow_run` touches no Todo. A Todo-status trigger is a one-way input; the resulting Workflow run is independent.
+Todo approvals affect only the Todo. Workflow operations never mutate Todos. A Todo-status trigger is a one-way input; the resulting Workflow run is independent.
 
 ## Keep status honest
 
