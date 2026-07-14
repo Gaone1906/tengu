@@ -53,9 +53,13 @@ describe("gateway auth", () => {
     expect(authenticateGatewayRequest(req({ authorization: `${scheme} wrong`, cookie: "jinn_auth=wrong" }), "tok").ok).toBe(false);
   });
 
-  it("does not require gateway bearer auth for loopback hook relay endpoint", () => {
+  it("leaves proof-based pairing routes to route-local auth", () => {
     expect(authRequiredForRequest("POST", "/api/internal/hook")).toBe(false);
     expect(authRequiredForRequest("GET", "/api/internal/hook")).toBe(true);
+    expect(authRequiredForRequest("POST", "/api/auth/pairing-challenges")).toBe(false);
+    expect(authRequiredForRequest("GET", "/api/auth/pairing-challenges")).toBe(true);
+    expect(authRequiredForRequest("POST", "/api/auth/pairing-codes")).toBe(false);
+    expect(authRequiredForRequest("GET", "/api/auth/pairing-codes")).toBe(true);
   });
 
   it("requires auth for remote/network exposure but not default loopback unless explicitly enabled", () => {

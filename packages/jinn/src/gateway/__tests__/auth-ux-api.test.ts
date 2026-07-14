@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleApiRequest, type ApiContext } from "../api.js";
-import { pairingSetupResponse } from "../../cli/pair.js";
+import { requestPairingCode } from "../../cli/pair.js";
 import {
   createAuthSession,
   issueLocalBootstrapGrant,
@@ -88,6 +88,10 @@ function browserCookie(jinnHome: string, remoteAddress = "127.0.0.1"): string {
   return `jinn_auth=${session.secret}; jinn_device=${session.device.id}`;
 }
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe("auth UX API routes", () => {
   it("reports safe auth state without exposing the token", async () => {
     const cap = makeRes();
@@ -122,7 +126,47 @@ describe("auth UX API routes", () => {
     expect(JSON.stringify(cap.body)).not.toContain("gateway-token");
   });
 
-  it("rejects bearer-only pairing-code creation and keeps the CLI on the browser path", async () => {
+  it("mints a pairing code after one valid loopback filesystem challenge", async () => {
+    const context = ctx();
+    const created = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-challenges", { body: {} }),
+      created.res,
+      context,
+    );
+
+    expect(created.status).toBe(200);
+    expect(created.body).toMatchObject({
+      challengeId: expect.any(String),
+      nonce: expect.any(String),
+      path: expect.any(String),
+      ttlSeconds: 10,
+    });
+    expect(created.body.path).toBe(path.join((context as any).jinnHome, `pair-challenge-${created.body.challengeId}`));
+    fs.writeFileSync(created.body.path, created.body.nonce, { mode: 0o600 });
+    fs.chmodSync(created.body.path, 0o600);
+
+    const minted = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-codes", { body: { challengeId: created.body.challengeId } }),
+      minted.res,
+      context,
+    );
+    expect(minted.status).toBe(200);
+    expect(minted.body.code).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+    expect(fs.existsSync(created.body.path)).toBe(false);
+
+    const replay = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-codes", { body: { challengeId: created.body.challengeId } }),
+      replay.res,
+      context,
+    );
+    expect(replay.status).toBe(403);
+    expect(replay.body.code).toBeUndefined();
+  });
+
+  it("rejects bearer-only pairing-code creation", async () => {
     const context = ctx();
     const bearer = makeRes();
     await handleApiRequest(
@@ -136,10 +180,6 @@ describe("auth UX API routes", () => {
 
     expect(bearer.status).toBe(403);
     expect(bearer.body.code).toBeUndefined();
-    expect(pairingSetupResponse(7777)).toMatchObject({
-      action: "create_pairing_code_in_browser",
-      url: "http://127.0.0.1:7777/settings",
-    });
 
     const unauthenticated = makeRes();
     await handleApiRequest(
@@ -149,6 +189,142 @@ describe("auth UX API routes", () => {
     );
     expect(unauthenticated.status).toBe(403);
     expect(unauthenticated.body.code).toBeUndefined();
+  });
+
+  it("rejects non-loopback challenge issuance and redemption", async () => {
+    const context = ctx();
+    const remote = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-challenges", {
+        remoteAddress: "100.64.1.2",
+        host: "localhost:7777",
+        body: {},
+      }),
+      remote.res,
+      context,
+    );
+    expect(remote.status).toBe(403);
+
+    const proxied = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-challenges", {
+        remoteAddress: "127.0.0.1",
+        host: "tailnet.example.ts.net",
+        body: {},
+      }),
+      proxied.res,
+      context,
+    );
+    expect(proxied.status).toBe(403);
+
+    const local = makeRes();
+    await handleApiRequest(makeReq("POST", "/api/auth/pairing-challenges", { body: {} }), local.res, context);
+    fs.writeFileSync(local.body.path, local.body.nonce, { mode: 0o600 });
+    const remoteMint = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-codes", {
+        remoteAddress: "100.64.1.2",
+        host: "localhost:7777",
+        body: { challengeId: local.body.challengeId },
+      }),
+      remoteMint.res,
+      context,
+    );
+    expect(remoteMint.status).toBe(403);
+    expect(remoteMint.body.code).toBeUndefined();
+
+    const proxiedMint = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-codes", {
+        remoteAddress: "127.0.0.1",
+        host: "tailnet.example.ts.net",
+        body: { challengeId: local.body.challengeId },
+      }),
+      proxiedMint.res,
+      context,
+    );
+    expect(proxiedMint.status).toBe(403);
+    expect(proxiedMint.body.code).toBeUndefined();
+    fs.rmSync(local.body.path, { force: true });
+  });
+
+  it("rejects expired and mismatched challenge proofs as terminal", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const context = ctx();
+    const expired = makeRes();
+    await handleApiRequest(makeReq("POST", "/api/auth/pairing-challenges", { body: {} }), expired.res, context);
+    fs.writeFileSync(expired.body.path, expired.body.nonce, { mode: 0o600 });
+
+    now.mockReturnValue(11_001);
+    const expiredMint = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-codes", { body: { challengeId: expired.body.challengeId } }),
+      expiredMint.res,
+      context,
+    );
+    expect(expiredMint.status).toBe(403);
+    expect(fs.existsSync(expired.body.path)).toBe(false);
+
+    now.mockReturnValue(20_000);
+    const mismatch = makeRes();
+    await handleApiRequest(makeReq("POST", "/api/auth/pairing-challenges", { body: {} }), mismatch.res, context);
+    fs.writeFileSync(mismatch.body.path, "wrong nonce", { mode: 0o600 });
+    const mismatchMint = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-codes", { body: { challengeId: mismatch.body.challengeId } }),
+      mismatchMint.res,
+      context,
+    );
+    expect(mismatchMint.status).toBe(403);
+    expect(fs.existsSync(mismatch.body.path)).toBe(false);
+
+    fs.writeFileSync(mismatch.body.path, mismatch.body.nonce, { mode: 0o600 });
+    const retried = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/pairing-codes", { body: { challengeId: mismatch.body.challengeId } }),
+      retried.res,
+      context,
+    );
+    expect(retried.status).toBe(403);
+    fs.rmSync(mismatch.body.path, { force: true });
+  });
+
+  it("keeps the CLI request sequence aligned with the real route contract", async () => {
+    const context = ctx();
+    const requests: Array<{ pathname: string; authorization: string | null }> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const headers = new Headers(init?.headers);
+      requests.push({ pathname: url.pathname, authorization: headers.get("authorization") });
+      const rawBody = init?.body === undefined ? undefined : String(init.body);
+      const cap = makeRes();
+      await handleApiRequest(
+        makeReq(init?.method ?? "GET", url.pathname, {
+          body: rawBody ? JSON.parse(rawBody) : undefined,
+          authorization: headers.get("authorization") ?? undefined,
+          host: url.host,
+          remoteAddress: "127.0.0.1",
+        }),
+        cap.res,
+        context,
+      );
+      return new Response(JSON.stringify(cap.body), {
+        status: cap.status,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const pairing = await requestPairingCode({
+      port: 7777,
+      jinnHome: (context as any).jinnHome,
+      fetchImpl,
+    });
+
+    expect(pairing.code).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+    expect(requests).toEqual([
+      { pathname: "/api/auth/pairing-challenges", authorization: null },
+      { pathname: "/api/auth/pairing-codes", authorization: null },
+    ]);
   });
 
   it("rejects remote and proxied local bootstrap without setting cookies", async () => {

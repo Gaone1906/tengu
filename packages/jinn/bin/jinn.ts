@@ -69,8 +69,8 @@ program
 
 program
   .command("pair")
-  .description("Show how to create a pairing code in the local dashboard")
-  .option("--json", "Print pairing instructions as JSON")
+  .description("Create a one-time code for pairing another browser")
+  .option("--json", "Print raw JSON")
   .action(async (opts: { json?: boolean }) => {
     const { runPair } = await import("../src/cli/pair.js");
     await runPair(opts);

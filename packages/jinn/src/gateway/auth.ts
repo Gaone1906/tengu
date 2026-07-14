@@ -200,6 +200,8 @@ export function authRequiredForRequest(method: string | undefined, pathname: str
   if (pathname === "/api/status") return false;
   if (pathname === "/api/auth/state" && (method || "GET").toUpperCase() === "GET") return false;
   if (pathname === "/api/auth/bootstrap" && (method || "GET").toUpperCase() === "POST") return false;
+  if (pathname === "/api/auth/pairing-challenges" && (method || "GET").toUpperCase() === "POST") return false;
+  if (pathname === "/api/auth/pairing-codes" && (method || "GET").toUpperCase() === "POST") return false;
   if (pathname === "/api/auth/pair" && (method || "GET").toUpperCase() === "POST") return false;
   if (pathname === "/api/auth/logout" && (method || "GET").toUpperCase() === "POST") return false;
   if (pathname === "/api/internal/hook" && (method || "GET").toUpperCase() === "POST") return false;

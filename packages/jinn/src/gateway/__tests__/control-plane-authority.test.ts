@@ -358,6 +358,10 @@ describe("control-plane writes require operator authority", () => {
   });
 
   it("rejects bearer-issued pairing codes, including scoped callers carrying bearer auth", async () => {
+    const challenge = await call("POST", "/api/auth/pairing-challenges", {}, toolHeaders(worker));
+    expect(challenge.status).toBe(403);
+    expect(challenge.body.challengeId).toBeUndefined();
+
     const bearer = await call("POST", "/api/auth/pairing-codes", {}, { authorization: "Bearer test-token" });
     expect(bearer.status).toBe(403);
     expect(bearer.body.code).toBeUndefined();
@@ -407,7 +411,6 @@ describe("control-plane writes require operator authority", () => {
     { method: "POST", path: "/api/onboarding", body: { portalName: "Worker Portal" }, label: "onboarding config write" },
     { method: "POST", path: "/api/stt/download", body: {}, label: "stt model download/config enable" },
     { method: "PUT", path: "/api/stt/config", body: { languages: ["en"] }, label: "stt config" },
-    { method: "POST", path: "/api/auth/pairing-codes", body: {}, label: "auth pairing code mint" },
     { method: "DELETE", path: "/api/auth/devices/device-1", body: undefined, label: "auth device revoke" },
   ])("rejects capability-bound workers on $label", async (route) => {
     resetCronJobs();

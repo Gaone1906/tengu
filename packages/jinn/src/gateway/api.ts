@@ -303,6 +303,11 @@ import {
   touchAuthSession,
   verifyGatewayAuth,
 } from "./auth.js";
+import {
+  consumePairingChallenge,
+  issuePairingChallenge,
+  PAIRING_CHALLENGE_TTL_MS,
+} from "./pairing-challenge.js";
 import { markTranscriptSyncedThrough, scheduleOnLoadTailSync, transcriptEntryText } from "./external-turns.js";
 import { getOrchestratorPersona } from "../talk/orchestrator-persona.js";
 import {
@@ -2515,6 +2520,8 @@ function isPublicIdentifiedCallerRoute(method: string, pathname: string): boolea
 function allowsUnauthenticatedMutation(method: string, pathname: string): boolean {
   if (method !== "POST") return false;
   return pathname === "/api/auth/bootstrap"
+    || pathname === "/api/auth/pairing-challenges"
+    || pathname === "/api/auth/pairing-codes"
     || pathname === "/api/auth/pair"
     || pathname === "/api/auth/logout"
     || pathname === "/api/internal/hook"
@@ -2537,7 +2544,6 @@ function rejectUnverifiedIdentifiedApiCaller(req: HttpRequest, res: ServerRespon
 function operatorOnlyControlPlaneRoute(method: string, pathname: string): string | null {
   if ((method === "PUT" || method === "PATCH") && pathname === "/api/config") return "config update";
   if (method === "POST" && pathname === "/api/onboarding") return "onboarding config update";
-  if (method === "POST" && pathname === "/api/auth/pairing-codes") return "auth pairing-code mint";
   if (method === "DELETE" && pathname.startsWith("/api/auth/devices/")) return "auth device revoke";
   if (method === "POST" && pathname === "/api/engines/refresh") return "engine registry refresh";
   if (method === "POST" && pathname === "/api/engine-limits/refresh") return "engine limits refresh";
@@ -3043,8 +3049,34 @@ export async function handleApiRequest(
       return json(res, { status: "ok", authRequired: true, device: { ...session.device, current: true } });
     }
 
-    // POST /api/auth/pairing-codes — local authenticated helper for pairing a
-    // second browser. Codes are short-lived, single-use, and only stored hashed.
+    // POST /api/auth/pairing-challenges — begin proof that the caller controls
+    // JINN_HOME as its owner. Loopback is required too, but is not itself identity.
+    // This deliberately proves same-user filesystem control, not human presence:
+    // a local agent with shell access can complete it. Such a process can already
+    // rewrite the persisted browser-device store, so this does not weaken a real
+    // boundary against that adversary.
+    if (method === "POST" && pathname === "/api/auth/pairing-challenges") {
+      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: AUTH_BODY_MAX_BYTES });
+      if (!parsed.ok) return;
+      if (!context.gatewayAuthToken) return json(res, { error: "Gateway auth token is not configured" }, 503);
+      if (rejectScopedIdentityGrant(req, res, "auth pairing challenge", context)) return;
+      const localCaller = isLoopback(req.socket.remoteAddress)
+        && isLoopbackHost(Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host);
+      if (!localCaller) return json(res, { error: "Pairing challenges can only be created locally" }, 403);
+
+      const challenge = issuePairingChallenge(jinnHome);
+      return json(res, {
+        challengeId: challenge.challengeId,
+        nonce: challenge.nonce,
+        path: challenge.path,
+        expiresAt: new Date(challenge.expiresAt).toISOString(),
+        ttlSeconds: Math.floor(PAIRING_CHALLENGE_TTL_MS / 1000),
+      });
+    }
+
+    // POST /api/auth/pairing-codes — local helper for pairing a second browser.
+    // Existing local browser sessions may mint directly. The CLI instead redeems
+    // a single-use filesystem challenge; bearer possession alone stays forbidden.
     if (method === "POST" && pathname === "/api/auth/pairing-codes") {
       const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: AUTH_BODY_MAX_BYTES });
       if (!parsed.ok) return;
@@ -3053,11 +3085,21 @@ export async function handleApiRequest(
       if (bearer) {
         return json(res, { error: "Pairing codes require an authenticated browser session; bearer tokens cannot mint browser pairing material" }, 403);
       }
-      const auth = authenticateGatewayRequest(req, context.gatewayAuthToken, jinnHome);
-      if (!auth.ok) return json(res, { error: auth.reason || "Unauthorized" }, 401);
-      const localBrowser = isLoopback(req.socket.remoteAddress)
+      if (rejectScopedIdentityGrant(req, res, "auth pairing-code mint", context)) return;
+      const localCaller = isLoopback(req.socket.remoteAddress)
         && isLoopbackHost(Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host);
-      if (!localBrowser) return json(res, { error: "Pairing codes can only be created locally" }, 403);
+      if (!localCaller) return json(res, { error: "Pairing codes can only be created locally" }, 403);
+
+      const body = parsed.body && typeof parsed.body === "object" ? parsed.body as Record<string, unknown> : {};
+      const challengeId = typeof body.challengeId === "string" ? body.challengeId : undefined;
+      if (challengeId) {
+        if (!consumePairingChallenge(jinnHome, challengeId)) {
+          return json(res, { error: "Missing, invalid, expired, or already used pairing challenge" }, 403);
+        }
+      } else {
+        const auth = authenticateGatewayRequest(req, context.gatewayAuthToken, jinnHome);
+        if (!auth.ok) return json(res, { error: auth.reason || "Unauthorized" }, 403);
+      }
       const issued = issuePairingCode();
       return json(res, {
         status: "ok",

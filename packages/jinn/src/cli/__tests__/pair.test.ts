@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   formatPairedDevices,
-  formatPairingSetupInstructions,
-  pairingSetupResponse,
+  formatPairingInstructions,
   requestPairedDevices,
+  requestPairingCode,
   requestUnpairDevice,
 } from "../pair.js";
 
@@ -12,22 +15,99 @@ describe("pair CLI helpers", () => {
     vi.restoreAllMocks();
   });
 
-  it("directs pairing-code creation to the authenticated local browser", () => {
-    expect(pairingSetupResponse(7777)).toEqual({
-      action: "create_pairing_code_in_browser",
-      url: "http://127.0.0.1:7777/settings",
-      section: "Pairing",
+  it("completes a loopback filesystem challenge without sending bearer auth", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pair-cli-"));
+    const challengeId = "challenge-id-1234567890";
+    const nonce = "nonce-value-1234567890";
+    const challengePath = path.join(home, `pair-challenge-${challengeId}`);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/pairing-challenges")) {
+        return new Response(JSON.stringify({
+          challengeId,
+          nonce,
+          path: challengePath,
+          expiresAt: "2026-07-14T20:00:10.000Z",
+          ttlSeconds: 10,
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+
+      expect(url).toBe("http://127.0.0.1:7777/api/auth/pairing-codes");
+      expect(JSON.parse(String(init?.body))).toEqual({ challengeId });
+      expect(fs.readFileSync(challengePath, "utf-8")).toBe(nonce);
+      expect(fs.statSync(challengePath).mode & 0o777).toBe(0o600);
+      return new Response(JSON.stringify({
+        status: "ok",
+        code: "ABCD-EFGH-JKLM",
+        expiresAt: "2026-07-14T20:05:00.000Z",
+        ttlSeconds: 300,
+      }), { status: 200, headers: { "content-type": "application/json" } });
     });
+
+    const result = await requestPairingCode({
+      port: 7777,
+      jinnHome: home,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    expect(result.code).toBe("ABCD-EFGH-JKLM");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [, init] of fetchMock.mock.calls) {
+      expect(new Headers(init?.headers).has("authorization")).toBe(false);
+    }
+    expect(fs.existsSync(challengePath)).toBe(false);
   });
 
-  it("prints browser pairing instructions without claiming the CLI minted a code", () => {
-    const text = formatPairingSetupInstructions(pairingSetupResponse(7777));
+  it("cleans up its proof file on failure and refuses a server path outside JINN_HOME", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pair-cli-failure-"));
+    const challengeId = "challenge-id-failure0001";
+    const challengePath = path.join(home, `pair-challenge-${challengeId}`);
+    const failingFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        challengeId,
+        nonce: "nonce-value-failure0001",
+        path: challengePath,
+        expiresAt: "2026-07-14T20:00:10.000Z",
+        ttlSeconds: 10,
+      }), { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "challenge rejected" }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      }));
 
-    expect(text).toContain("http://127.0.0.1:7777/settings");
-    expect(text).toContain("Settings > Pairing");
-    expect(text).toContain("Create pairing code");
-    expect(text).toContain("other device");
-    expect(text).not.toContain("Code:");
+    await expect(requestPairingCode({
+      port: 7777,
+      jinnHome: home,
+      fetchImpl: failingFetch as unknown as typeof fetch,
+    })).rejects.toThrow("challenge rejected");
+    expect(fs.existsSync(challengePath)).toBe(false);
+
+    const outside = path.join(os.tmpdir(), `pair-challenge-${challengeId}`);
+    const outsideFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      challengeId,
+      nonce: "nonce-value-failure0001",
+      path: outside,
+      expiresAt: "2026-07-14T20:00:10.000Z",
+      ttlSeconds: 10,
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    await expect(requestPairingCode({
+      port: 7777,
+      jinnHome: home,
+      fetchImpl: outsideFetch as unknown as typeof fetch,
+    })).rejects.toThrow(/outside JINN_HOME/i);
+    expect(fs.existsSync(outside)).toBe(false);
+  });
+
+  it("prints the usable pairing code and browser instructions", () => {
+    const text = formatPairingInstructions({
+      code: "ABCD-EFGH-JKLM",
+      expiresAt: "2026-07-14T20:05:00.000Z",
+      ttlSeconds: 300,
+    }, 7777);
+
+    expect(text).toContain("ABCD-EFGH-JKLM");
+    expect(text).toContain("Open Jinn on the other device");
+    expect(text).toContain("5 minutes");
     expect(text).not.toContain("gateway-token");
   });
 
@@ -97,7 +177,7 @@ describe("pair CLI helpers", () => {
     expect(text).toContain("This Mac");
     expect(text).toContain("iPhone browser");
     expect(text).toContain("jinn unpair -- -device-2");
-    expect(text).not.toContain("Create a code with jinn pair");
+    expect(formatPairedDevices([])).toContain("Create a code with jinn pair");
     expect(text).not.toContain("gateway-token");
   });
 });
