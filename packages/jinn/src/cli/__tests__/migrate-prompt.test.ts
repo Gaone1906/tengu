@@ -253,6 +253,25 @@ describe("composeMigrationPrompt: against the REAL shipped template migrations",
     expect(prompt).not.toContain("confirmed release version");
   });
 
+  it("ships the runtime's Workflow/Todo separation guidance within the current package boundary", () => {
+    const packageJsonPath = path.resolve(templateMigrationsDir, "../../package.json");
+    const packageVersion = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")).version as string;
+    const versions = scanMigrationPrompts(templateMigrationsDir, "0.25.0", packageVersion);
+    const prompt = composeMigrationPrompt({
+      templateMigrationsDir,
+      versions,
+      fromVersion: "0.25.0",
+      toVersion: packageVersion,
+      instanceHome: "/home/user/.jinn",
+    });
+
+    expect(prompt).toContain("A Workflow invocation never");
+    expect(prompt).toContain("historical Workflow-source Todos remain ordinary audit records");
+    expect(prompt).toContain("callback_deliveries");
+    expect(prompt).toContain('historical `engine: "workflow"` Sessions');
+    expect(scanFutureMigrations(templateMigrationsDir, packageVersion)).not.toContain("0.27.0");
+  });
+
   it("composes every shipped migration with no dead ~/.jinn/migrations staging references", () => {
     const versions = scanMigrationPrompts(templateMigrationsDir, "0.0.0", "999.0.0");
     expect(versions.length).toBeGreaterThan(0);
@@ -275,13 +294,16 @@ describe("composeMigrationPrompt: against the REAL shipped template migrations",
     }
   });
 
-  it("stages the 0.27.0 Workflow/Todo separation migration with preservation and compatibility guidance", () => {
-    const migrationVersion = "0.27.0";
+  it("keeps the Workflow/Todo separation migration within 0.26.0 with preservation and compatibility guidance", () => {
+    const migrationVersion = "0.26.0";
     const packageJsonPath = path.resolve(templateMigrationsDir, "../../package.json");
     const packageVersion = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")).version as string;
     const migrationPath = path.join(templateMigrationsDir, migrationVersion, "MIGRATION.md");
 
-    expect(scanFutureMigrations(templateMigrationsDir, packageVersion)).toContain(migrationVersion);
+    expect(scanMigrationPrompts(templateMigrationsDir, "0.25.0", packageVersion)).toContain(
+      migrationVersion,
+    );
+    expect(scanFutureMigrations(templateMigrationsDir, packageVersion)).not.toContain("0.27.0");
     expect(fs.existsSync(migrationPath)).toBe(true);
 
     const migration = fs.readFileSync(migrationPath, "utf-8");
@@ -299,24 +321,12 @@ describe("composeMigrationPrompt: against the REAL shipped template migrations",
     expect(migration).not.toContain("rewrite historical Workflow-source Todos");
   });
 
-  it("discovers and composes the real 0.26.0 to 0.27.0 migration range", () => {
+  it("does not defer already-shipped Workflow/Todo semantics to 0.27.0", () => {
     const versions = scanMigrationPrompts(templateMigrationsDir, "0.26.0", "0.27.0");
-    expect(versions).toEqual(["0.27.0"]);
-
-    const prompt = composeMigrationPrompt({
-      templateMigrationsDir,
-      versions,
-      fromVersion: "0.26.0",
-      toVersion: "0.27.0",
-      instanceHome: "/home/operator/.jinn",
-    });
-    expect(prompt).toContain("Migration 0.27.0");
-    expect(prompt).toContain("A Workflow invocation never");
-    expect(prompt).toContain("historical Workflow-source Todos remain ordinary audit records");
-    expect(prompt).toContain("callback_deliveries");
+    expect(versions).toEqual([]);
   });
 
-  it("composes the 0.27.0 prompt without mutating a personalized instance fixture", () => {
+  it("composes the current release prompt without mutating a personalized instance fixture", () => {
     const instanceHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-personalized-migration-"));
     const fixture = new Map<string, string>([
       ["CLAUDE.md", "# Custom Root\n\nOperator preference: concise status notes.\n"],
@@ -334,9 +344,9 @@ describe("composeMigrationPrompt: against the REAL shipped template migrations",
 
       const prompt = composeMigrationPrompt({
         templateMigrationsDir,
-        versions: scanMigrationPrompts(templateMigrationsDir, "0.26.0", "0.27.0"),
-        fromVersion: "0.26.0",
-        toVersion: "0.27.0",
+        versions: scanMigrationPrompts(templateMigrationsDir, "0.25.0", "0.26.0"),
+        fromVersion: "0.25.0",
+        toVersion: "0.26.0",
         instanceHome,
       });
 

@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.26.0] - 2026-07-14
+
+> Jinn becomes a full company operating system: employees now work through a native MCP company surface, Todos become the durable work ledger, Workflows become a real automation engine, and the web app gains first-class Notes, Skills, Cron, and activity receipts.
+
+### ✨ Features
+- **Company operations through MCP.** A built-in Jinn MCP now gives every supported engine a typed surface for employees and org structure, sessions and delegation, Todos, Workflows and Triggers, approvals, Notes and knowledge, cron and cost reads, connectors, attachments, and managed files. Tool discovery is compact and capability-scoped so employees get the right hands without carrying the whole platform manual in every turn.
+- **Todos become the live work ledger.** Durable work items now support assignment, priorities, ranking, filters, pagination, manual start/cancel transitions, approval requests, archival, optimistic concurrency, conflict recovery, and manager visibility. Delegation is task-bound and completion is reviewer-driven instead of being treated as disposable session state.
+- **A production Workflow engine.** Author reusable graph workflows with sequential, conditional, parallel, and switch paths; per-phase engine/model/effort and prompt overrides; invocation inputs; native approvals; idempotent runs; evidence; reporting; cancellation; and durable execution history. Triggers cover schedules, webhooks, polls, and Todo-status events with hardened validation and provenance.
+- **Visual Workflow editor and execution view.** The web app adds an LTR canvas editor, node inspector, branch-aware geometry, run history, live status, approval controls, evidence links, and mobile-fitted navigation, backed by extensive layout and lifecycle verification.
+- **Notes over company knowledge.** A new Apple Notes-style workspace provides folders, search, Markdown editing, microphone dictation, and MCP-backed note operations while keeping the existing knowledge base available as durable company context.
+- **Skills and Cron become first-class documents.** Skills can be browsed and edited as raw `SKILL.md` documents, while Cron gains the shared Ledger list/detail language and clearer schedule descriptions.
+- **Company activity receipts in Chat.** Delegations, callbacks, follow-ups, Todo mutations, and Workflow operations now render as structured, durable activity with previews and deep links. Live turn evidence folds cleanly into the final answer without losing what happened.
+- **Version-aware migrations.** `jinn migrate` now discovers and composes only the migration guidance needed for the installed version, preserves customized instance files, safely stamps YAML, and warns about intentionally staged future migrations.
+- **Durable terminal snapshots.** Interactive engine PTYs can restore serialized terminal state across reconnects and gateway restarts, including rebuilt xterm headless/serialization support in the shipped CLI.
+
+### 🔒 Security / Reliability
+- **Verified operator and capability authority.** Browser bootstrap, same-origin writes, session operations, approvals, and delegated attachments now enforce explicit authority boundaries; sensitive MCP responses and engine environments are scrubbed by default.
+- **Reliable callbacks and delivery.** Parent callbacks are persisted, deduplicated, retryable, and restart-safe; outbound follow-ups share the same delivery path; delegation contracts require explicit completion or blocking signals; and report retries are bounded and observable.
+- **Workflow safety.** Trigger regexes run in isolated workers with timeouts and input caps, poll children receive allowlisted environments, mutations are atomic, parallel branches drain before settlement, and stale or cancelled executions cannot continue mutating state.
+- **Engine continuity.** Codex keeps a per-session home so MCP configuration survives resume and duplication; MCP identity is preserved across engine environment filters; Hermes streaming deduplicates authoritative snapshots; and rate-limited sessions recover without parking new user messages behind stale timers.
+- **Gateway lifecycle hardening.** Port takeovers are instance-verified, restart notices persist, proxy listeners shut down cleanly, queued attempt writes are guarded, and active turn evidence survives completion and reconnects.
+
+### ⚡ Performance / UX
+- **Faster boot and polling.** SQLite hot paths gained targeted indexes, startup reconciliation and FTS backfill yield until after listen, active runs use indexed lookups, and polled endpoints avoid hydrating entire session or activity tables.
+- **Smaller initial web load.** Stable vendor chunks are split, heavy routes and syntax grammars load lazily, and shell widgets/onboarding no longer block the critical path.
+- **Ledger-wide interface polish.** Todos, Workflows, Cron, Skills, Notes, Chat, Limits, and navigation now share a calmer responsive language with stronger mobile behavior, accessible contrast, preserved focus, URL-driven history, and resilient file previews.
+
+### 🛠️ Upgrade notes
+- Run **`jinn migrate --apply`** after upgrading. The 0.26 migration merges the company-autonomy doctrine, Todo/Workflow operating rules, MCP-first company surface, and updated management/migration skills into your customized instance without replacing your personal instructions.
+- Workflows require no new config key; evidence defaults to `<JINN_HOME>/workflow-evidence` and can be relocated with `JINN_WORKFLOW_EVIDENCE_ROOT`.
+- Hermes users may need to rebuild the Hermes 0.17.1 native binary/bridge after upgrading.
+
 ## [0.25.0] - 2026-07-07
 
 ### ✨ Features

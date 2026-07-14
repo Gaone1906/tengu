@@ -48,9 +48,9 @@ match while keeping any user-specific customizations.
   Direct skip-level delegation remains allowed when it is faster, but the IC's
   manager is notified so the manager retains visibility; hierarchy is advisory
   and does not block or reroute direct access.
-- **Todos** — the company's task ledger. Delegations and cron fires enter it
-  automatically; the COO creates one Todo per sub-task when
-  decomposing a goal. Employees keep their own Todo current (`in_review` when
+- **Todos** — the company's task ledger. Delegations and employee-targeted cron
+  fires enter it automatically; Workflow invocations do not. The COO creates
+  one Todo per sub-task when decomposing a goal. Employees keep their own Todo current (`in_review` when
   finished, `blocked` with a reason, `escalated` only when a decision is needed)
   and never mark their own item `done` — the reviewer does.
 - **Workflows** — reusable automations (the HOW). Todos and Workflows are
@@ -130,8 +130,9 @@ user-owned doc is unmodified.
 ### `skills/`
 
 The read-only references are `../../skills/management/SKILL.md`,
-`../../skills/self-heal/SKILL.md`, `../../skills/cron-manager/SKILL.md`, and
-`../../skills/migrate/SKILL.md`. Merge them like other user-owned files.
+`../../skills/self-heal/SKILL.md`, `../../skills/cron-manager/SKILL.md`,
+`../../skills/migrate/SKILL.md`, `../../skills/todo-handling/SKILL.md`, and
+`../../skills/workflow/SKILL.md`. Merge them like other user-owned files.
 
 - **`skills/management/SKILL.md`** — updated for the company metaphor: hiring,
   firing, and promotion now think in Employees/Todos/Workflows and route work
@@ -142,6 +143,71 @@ The read-only references are `../../skills/management/SKILL.md`,
   version-aware migration-prompt dispenser (this file is the first prompt it
   ships). If the user hasn't customized their migrate skill, replace it with the
   new template version and ensure its symlinks exist.
+
+### Separate Workflow runs from Todos and Sessions
+
+This release makes the company model unambiguous: Todos are deliberately
+authored, tracked work; Workflows are reusable procedures; and Workflow runs
+are durable execution records of those procedures. A Workflow invocation never
+creates, links, transitions, approves, or mutates a Todo. Workflow runs are not
+Sessions.
+
+Semantically merge this contract into customized copies of `CLAUDE.md` and,
+only when it is an independent regular file rather than the normal symlink,
+`AGENTS.md`. Reconcile the same wording in `docs/company-doctrine.md`,
+`docs/org.md`, `skills/todo-handling/SKILL.md`, and
+`skills/workflow/SKILL.md`:
+
+- Todos are deliberately authored work records. A Workflow invocation never
+  creates, links, transitions, approves, or mutates a Todo.
+- A Todo-status trigger is a one-way input; the resulting Workflow run is
+  independent. The immutable event and Todo id are provenance, not ownership.
+- Workflow runs are durable execution records, not Sessions.
+- A verified MCP Session invocation persists exactly one
+  `invocation: { sessionId, reportMode }` relation. That one relation means the
+  run belongs to, reports to, and resumes the same Session unless `reportMode`
+  is `silent`.
+- `reportMode: "silent"` suppresses only Session resumption. It does not remove
+  the invocation relation, run evidence, status, or activity receipt.
+- Browser, CLI, cron, webhook, poll, and Todo-status starts are invocation-less
+  unless a verified Session invokes them.
+- Human gate decisions use the Workflow run approval surface, never Todo
+  approval tools. `cancel_workflow_run` cancels a run and its run-owned phase
+  sessions without touching a Todo.
+- Mutating Workflow tools return bounded activity receipts for the invoking
+  chat; use Preview/Open rather than inventing duplicate status prose.
+
+Remove or rewrite stale stock guidance that describes a mirrored Workflow Todo,
+an automatically minted run Todo, a Todo that owns or records each live run, a
+run-owned Todo transition, or the removed `todoTransition` authoring field. Do
+not remove unrelated, user-authored Todo procedures.
+
+#### Preserve historical evidence
+
+The historical Workflow-source Todos remain ordinary audit records. Leave them
+untouched: do not delete them, change their status, relink them, or reinterpret
+them as live Workflow runs. New Workflow invocations do not continue that old
+coupling.
+
+The historical `engine: "workflow"` Sessions remain untouched, read-only historical evidence.
+They are excluded from focused, status, and live-engine
+treatment and redirect through their existing Workflow provenance. Do not
+delete, rewrite, resume, or backfill them merely to make them look like current
+runs.
+
+#### Preserve delivery compatibility
+
+`callback_deliveries` remains the sole generalized delivery store. Its current
+operator requeue and dead-letter surfaces remain the supported recovery path.
+Do not create a Workflow delivery store, add a parallel Workflow delivery
+lifecycle, rename the table, or rewrite delivery history during this guidance
+migration.
+
+Preserve custom employee names, org structure, secrets, unrelated preferences,
+project instructions, connector details, and every other unrelated piece of
+user-authored content while reconciling these semantics. Do not mutate runtime
+Todos, Workflow runs, Sessions, delivery rows, secrets, connectors, cron jobs,
+or unrelated config values.
 
 ### Config
 
@@ -179,5 +245,7 @@ otherwise the user runs `jinn migrate --mark-done 0.26.0`.
 ## Report
 
 Summarize: which `CLAUDE.md`/`AGENTS.md` sections you added or updated, which
-docs/skills you copied or merged, which config keys you added, any backups you
-created, and the Hermes-rebuild reminder if applicable.
+docs/skills you copied or merged, which stale Workflow–Todo coupling statements
+you removed, which config keys you added, any backups you created, what
+personalized content you preserved, and the Hermes-rebuild reminder if
+applicable. Confirm that no runtime record or delivery lifecycle was changed.
