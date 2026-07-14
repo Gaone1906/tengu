@@ -177,6 +177,7 @@ import {
   LOGS_DIR,
   TMP_DIR,
   FILES_DIR,
+  TEMPLATE_MIGRATIONS_DIR,
 } from "../shared/paths.js";
 import { saveConfigAtomic } from "../shared/config.js";
 import { logger } from "../shared/logger.js";
@@ -190,6 +191,9 @@ import { collectEngineLimits } from "../shared/engine-limits.js";
 import { handleRateLimit } from "../sessions/rate-limit-handler.js";
 import { cleanupMcpConfigFile } from "../mcp/resolver.js";
 import { resolveEngineRunMcp } from "../sessions/engine-run-mcp.js";
+import { getPendingInstanceMigration, type PendingInstanceMigration } from "../migrations/service.js";
+import { createMigrationSnapshot } from "../migrations/snapshot.js";
+import { getPackageVersion } from "../shared/version.js";
 import { pickEncoding, compressBuffer, MIN_COMPRESS_BYTES } from "./compress.js";
 import { canonicalCronJobId, loadJobs, saveJobs } from "../cron/jobs.js";
 import { summarizeCronRun } from "../cron/run-summary.js";
@@ -311,7 +315,7 @@ import {
 import { isTalkMuted } from "../talk/mute-state.js";
 import { maybeEmitTalkGraph } from "../talk/graph.js";
 import { onboardingNeeded, applyEngineChoice } from "./onboarding-policy.js";
-import { restartDetached } from "./lifecycle.js";
+import { restartDetached, type RestartDetachedOptions } from "./lifecycle.js";
 import { updateSkillContent } from "./skills.js";
 
 /** Max bytes accepted on /api/internal/hook (loopback-only relay payloads are tiny). */
@@ -437,7 +441,124 @@ export interface ApiContext {
   /** Test-injectable Jinn home for auth device storage. Defaults to shared JINN_HOME. */
   jinnHome?: string;
   /** Test-injectable gateway restart primitive. Defaults to lifecycle.restartDetached(). */
-  restartGateway?: () => void;
+  restartGateway?: (options: RestartDetachedOptions) => void;
+  /** Immutable port actually bound by this gateway process, unaffected by config hot reload. */
+  runtimePort?: number;
+  /** Test/package-lab overrides for automatic instance migration discovery. */
+  migrationMigrationsDir?: string;
+  migrationPackageVersion?: string;
+  /** Test seam; production uses the normal web-session dispatch machinery. */
+  dispatchInstanceMigration?: (session: Session, prompt: string) => void;
+}
+
+function pendingInstanceMigration(context: ApiContext): PendingInstanceMigration {
+  return getPendingInstanceMigration({
+    instanceHome: context.jinnHome ?? JINN_HOME,
+    packageVersion: context.migrationPackageVersion ?? getPackageVersion(),
+    migrationsDir: context.migrationMigrationsDir ?? TEMPLATE_MIGRATIONS_DIR,
+  });
+}
+
+const migrationOpenLocks = new Map<string, Promise<{ sessionId: string; migrationKey: string; reused: boolean }>>();
+
+function acceptedInstanceMigrationSession(
+  sessionKey: string,
+  prompt: string,
+): Session | undefined {
+  const session = getSessionBySessionKey(sessionKey);
+  if (!session) return undefined;
+  const hasAcceptedQueueIntent = getQueueItems(sessionKey).some((item) => (
+    item.sessionId === session.id && item.prompt === prompt
+  ));
+  return hasAcceptedQueueIntent || session.attemptOutcome === "succeeded" ? session : undefined;
+}
+
+function retireUnacceptedInstanceMigrationSession(sessionKey: string): void {
+  const session = getSessionBySessionKey(sessionKey);
+  if (!session) return;
+  updateSession(session.id, {
+    sessionKey: `retired:${sessionKey}:${session.id}`,
+    status: session.status === "error" ? "error" : "interrupted",
+    lastActivity: new Date().toISOString(),
+    lastError: session.lastError ?? "Migration handoff was not durably accepted; retired before retry.",
+  });
+}
+
+async function openInstanceMigration(
+  pending: PendingInstanceMigration,
+  req: HttpRequest,
+  context: ApiContext,
+): Promise<{ sessionId: string; migrationKey: string; reused: boolean }> {
+  const migrationKey = pending.migrationKey!;
+  const sessionKey = `instance-migration:${migrationKey}`;
+  const inFlight = migrationOpenLocks.get(migrationKey);
+  if (inFlight) return { ...(await inFlight), reused: true };
+  const create = Promise.resolve().then(async () => {
+    const prompt = pending.prompt!;
+    const accepted = acceptedInstanceMigrationSession(sessionKey, prompt);
+    if (accepted) return { sessionId: accepted.id, migrationKey, reused: true };
+    retireUnacceptedInstanceMigrationSession(sessionKey);
+
+    const config = context.getConfig();
+    const selection = validateNewSessionSelection(config, {});
+    if (!selection.ok) throw new Error(selection.error || "invalid default engine selection");
+    const engineName = selection.engine || config.engines.default;
+    const engine = context.sessionManager.getEngine(engineName);
+    if (!engine) throw new Error(`Engine "${engineName}" not available`);
+
+    createMigrationSnapshot({
+      instanceHome: context.jinnHome ?? JINN_HOME,
+      migrationKey,
+      fromVersion: pending.fromVersion,
+      toVersion: pending.toVersion,
+      changedFiles: pending.changedFiles,
+      materialization: pending.materialization,
+    });
+    const afterSnapshot = acceptedInstanceMigrationSession(sessionKey, prompt);
+    if (afterSnapshot) return { sessionId: afterSnapshot.id, migrationKey, reused: true };
+    retireUnacceptedInstanceMigrationSession(sessionKey);
+    const session = createSession({
+      engine: engineName,
+      source: "web",
+      sourceRef: sessionKey,
+      connector: "web",
+      sessionKey,
+      replyContext: { source: "web" },
+      userId: resolveUserHeader(req.headers, config.gateway.userHeader),
+      employee: undefined,
+      effortLevel: selection.effortLevel,
+      model: selection.model,
+      prompt,
+      promptExcerpt: `Finish v${pending.toVersion} setup`,
+      portalName: config.portal?.portalName,
+    });
+    insertMessage(session.id, "user", prompt);
+    updateSession(session.id, { status: "running", lastActivity: new Date().toISOString() });
+    session.status = "running";
+    const queueKey = session.sessionKey || session.sourceRef || session.id;
+    const queueItemId = enqueueQueueItem(session.id, queueKey, prompt);
+    context.emit("queue:updated", { sessionId: session.id, sessionKey: queueKey });
+    try {
+      if (context.dispatchInstanceMigration) context.dispatchInstanceMigration(session, prompt);
+      else {
+      dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId });
+      }
+    } catch (error) {
+      cancelQueueItem(queueItemId);
+      updateSession(session.id, {
+        status: "error",
+        attemptOutcome: "failed",
+        lastActivity: new Date().toISOString(),
+        lastError: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+    maybeEmitTalkGraph(session.id, "added", { getSession, emit: context.emit });
+    return { sessionId: session.id, migrationKey, reused: false };
+  });
+  migrationOpenLocks.set(migrationKey, create);
+  try { return await create; }
+  finally { migrationOpenLocks.delete(migrationKey); }
 }
 
 function killSessionEngines(context: ApiContext, session: Session, reason: string): void {
@@ -2983,6 +3104,42 @@ export async function handleApiRequest(
       return json(res, { status: "ok" });
     }
 
+    // GET /api/instance-migration — canonical, validated migration contract.
+    if (method === "GET" && pathname === "/api/instance-migration") {
+      try {
+        return json(res, pendingInstanceMigration(context));
+      } catch (error) {
+        logger.error(`Instance migration bundle validation failed: ${error instanceof Error ? error.message : String(error)}`);
+        return json(res, { error: "Installed instance migration bundle is invalid", code: "MIGRATION_BUNDLE_INVALID" }, 500);
+      }
+    }
+
+    // POST /api/instance-migration/open — snapshot first, then one durable COO session.
+    if (method === "POST" && pathname === "/api/instance-migration/open") {
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      let pending: PendingInstanceMigration;
+      try { pending = pendingInstanceMigration(context); }
+      catch (error) {
+        logger.error(`Instance migration open refused: ${error instanceof Error ? error.message : String(error)}`);
+        return json(res, { error: "Installed instance migration bundle is invalid", code: "MIGRATION_BUNDLE_INVALID" }, 500);
+      }
+      if (!pending.required || !pending.migrationKey) {
+        return json(res, { error: "Instance migration is not pending", code: "MIGRATION_NOT_PENDING" }, 409);
+      }
+      const body = parsed.body && typeof parsed.body === "object" ? parsed.body as Record<string, unknown> : {};
+      if (body.migrationKey !== pending.migrationKey) {
+        return json(res, { error: "Migration key no longer matches the pending bundle", code: "MIGRATION_KEY_MISMATCH" }, 409);
+      }
+      try {
+        const opened = await openInstanceMigration(pending, req, context);
+        return json(res, opened, opened.reused ? 200 : 201);
+      } catch (error) {
+        logger.error(`Instance migration session could not open: ${error instanceof Error ? error.message : String(error)}`);
+        return json(res, { error: "Could not create the migration snapshot and COO handoff", code: "MIGRATION_OPEN_FAILED" }, 500);
+      }
+    }
+
     // GET /api/status
     if (method === "GET" && pathname === "/api/status") {
       const config = context.getConfig();
@@ -2993,8 +3150,17 @@ export async function handleApiRequest(
       const connectors = Object.fromEntries(
         Array.from(context.connectors.values()).map((connector) => [connector.name, connector.getHealth()]),
       );
+      let migration: Pick<PendingInstanceMigration, "required" | "fromVersion" | "toVersion" | "versions"> & { error?: string };
+      try {
+        const pending = pendingInstanceMigration(context);
+        migration = { required: pending.required, fromVersion: pending.fromVersion, toVersion: pending.toVersion, versions: pending.versions };
+      } catch {
+        migration = { required: false, fromVersion: "unknown", toVersion: context.migrationPackageVersion ?? getPackageVersion(), versions: [], error: "invalid_bundle" };
+      }
       return json(res, {
         status: "ok",
+        version: context.migrationPackageVersion ?? getPackageVersion(),
+        migration,
         uptime: Math.floor((Date.now() - context.startTime) / 1000),
         port: config.gateway.port || 7777,
         // Derived from the model registry (single source of truth) so engine
@@ -3041,7 +3207,7 @@ export async function handleApiRequest(
       logger.info("Gateway restart requested via API");
       const timer = setTimeout(() => {
         try {
-          restartGateway();
+          restartGateway({ port: context.runtimePort ?? context.config.gateway.port ?? 7777 });
         } catch (err) {
           logger.error(`Failed to spawn gateway restart helper: ${err instanceof Error ? err.stack : err}`);
         }

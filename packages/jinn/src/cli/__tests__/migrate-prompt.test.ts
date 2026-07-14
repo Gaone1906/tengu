@@ -163,7 +163,7 @@ describe("composeMigrationPrompt: prompt composition", () => {
     expect(prompt).toContain("0.26.0");
   });
 
-  it("mentions the target version marker in the preamble/footer", () => {
+  it("requires snapshot and receipt verification without implying --apply success", () => {
     const dir = fixture([["0.26.0", true]]);
     const prompt = composeMigrationPrompt({
       templateMigrationsDir: dir,
@@ -174,7 +174,9 @@ describe("composeMigrationPrompt: prompt composition", () => {
     });
     expect(prompt).toContain("0.26.0");
     // Tells how the marker gets updated.
-    expect(prompt).toMatch(/jinn\.version|mark-done|--apply/i);
+    expect(prompt).toMatch(/snapshot/i);
+    expect(prompt).toMatch(/completion receipt/i);
+    expect(prompt).not.toMatch(/launched by `jinn migrate --apply`|updates that marker for you/i);
   });
 
   it("includes each version's resolved template source dir, and no dead staging path", () => {
@@ -249,7 +251,8 @@ describe("composeMigrationPrompt: against the REAL shipped template migrations",
     expect(prompt).toContain("manager is notified");
     expect(prompt).toContain("CLAUDE.md is canonical");
     expect(prompt).toContain("preserve every user-specific and operator-specific section");
-    expect(prompt).toContain(`jinn.version\` should read \`"${autonomyVersion}"`);
+    expect(prompt).toContain(`jinn migrate --mark-done ${autonomyVersion} --migration-key`);
+    expect(prompt).toContain("leave `jinn.version` unchanged");
     expect(prompt).not.toContain("confirmed release version");
   });
 

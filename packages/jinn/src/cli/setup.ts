@@ -21,6 +21,12 @@ import {
 } from "../shared/paths.js";
 import { initDb } from "../sessions/registry.js";
 import { getPackageVersion } from "../shared/version.js";
+import {
+  deriveTemplateMaterializationInputs,
+  materializeTemplateBytes,
+  materializeTemplateContent,
+  type TemplateMaterializationInputs,
+} from "../shared/template-materialization.js";
 
 const GREEN = "\x1b[32m";
 const YELLOW = "\x1b[33m";
@@ -84,21 +90,6 @@ function ensureFile(filePath: string, content: string): boolean {
 }
 
 /**
- * Apply template placeholder replacements to file content.
- * Only applies to .md and .yaml files.
- */
-function applyTemplateReplacements(
-  content: string,
-  replacements: Record<string, string>,
-): string {
-  let result = content;
-  for (const [placeholder, value] of Object.entries(replacements)) {
-    result = result.replaceAll(placeholder, value);
-  }
-  return result;
-}
-
-/**
  * Recursively copy template directory contents into dest, skipping files that already exist.
  * Applies template placeholder replacements to .md and .yaml files.
  * Returns list of created file paths.
@@ -106,7 +97,7 @@ function applyTemplateReplacements(
 function copyTemplateDir(
   srcDir: string,
   destDir: string,
-  replacements?: Record<string, string>,
+  materialization?: TemplateMaterializationInputs,
 ): string[] {
   const created: string[] = [];
   if (!fs.existsSync(srcDir)) return created;
@@ -119,16 +110,15 @@ function copyTemplateDir(
     const destPath = path.join(destDir, entry.name);
 
     if (entry.isDirectory()) {
-      created.push(...copyTemplateDir(srcPath, destPath, replacements));
+      created.push(...copyTemplateDir(srcPath, destPath, materialization));
     } else if (entry.name === ".gitkeep") {
       // skip .gitkeep — directory already created
       continue;
     } else if (!fs.existsSync(destPath)) {
       fs.mkdirSync(path.dirname(destPath), { recursive: true });
-      const ext = path.extname(entry.name).toLowerCase();
-      if (replacements && (ext === ".md" || ext === ".yaml" || ext === ".yml")) {
-        const content = fs.readFileSync(srcPath, "utf-8");
-        fs.writeFileSync(destPath, applyTemplateReplacements(content, replacements), "utf-8");
+      if (materialization) {
+        const content = fs.readFileSync(srcPath);
+        fs.writeFileSync(destPath, materializeTemplateBytes(srcPath, content, materialization));
       } else {
         fs.copyFileSync(srcPath, destPath);
       }
@@ -511,25 +501,20 @@ export async function runSetup(opts?: { force?: boolean }): Promise<void> {
   }
 
   // Read portal name from config for template replacements
-  const portalName = (() => {
+  const selectedConfig = (() => {
     try {
-      const cfg = yaml.load(fs.readFileSync(CONFIG_PATH, "utf-8")) as any;
-      return cfg?.portal?.portalName || "Jinn";
-    } catch { return "Jinn"; }
+      return yaml.load(fs.readFileSync(CONFIG_PATH, "utf-8")) as { portal?: { portalName?: string } };
+    } catch { return {}; }
   })();
-  const portalSlug = portalName.toLowerCase().replace(/\s+/g, "-");
-
-  const templateReplacements: Record<string, string> = {
-    "{{portalName}}": portalName,
-    "{{portalSlug}}": portalSlug,
-  };
+  const templateMaterialization = deriveTemplateMaterializationInputs(selectedConfig);
+  const { portalName, portalSlug } = templateMaterialization;
 
   const claudeMdPath = path.join(JINN_HOME, "CLAUDE.md");
   if (!fs.existsSync(claudeMdPath)) {
     let source = fs.existsSync(templateClaude)
       ? fs.readFileSync(templateClaude, "utf-8")
       : defaultClaudeMd(portalName);
-    source = applyTemplateReplacements(source, templateReplacements);
+    source = materializeTemplateContent(claudeMdPath, source, templateMaterialization);
     ensureFile(claudeMdPath, source);
     created.push(claudeMdPath);
   }
@@ -585,12 +570,12 @@ export async function runSetup(opts?: { force?: boolean }): Promise<void> {
   if (ensureDir(LOGS_DIR)) created.push(LOGS_DIR);
 
   // Copy template contents for docs, skills, and org (skips existing files)
-  created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "docs"), DOCS_DIR, templateReplacements));
-  created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "skills"), SKILLS_DIR, templateReplacements));
-  created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "org"), ORG_DIR, templateReplacements));
+  created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "docs"), DOCS_DIR, templateMaterialization));
+  created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "skills"), SKILLS_DIR, templateMaterialization));
+  created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "org"), ORG_DIR, templateMaterialization));
   // Seed talk/ (AURA voice persona + card-reference sidecar). The persona points
   // the orchestrator at talk/card-reference.md, so both must land in ~/.jinn/talk/.
-  created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "talk"), path.join(JINN_HOME, "talk"), templateReplacements));
+  created.push(...copyTemplateDir(path.join(TEMPLATE_DIR, "talk"), path.join(JINN_HOME, "talk"), templateMaterialization));
 
   // Copy skills.json manifest
   const templateSkillsJson = path.join(TEMPLATE_DIR, "skills.json");

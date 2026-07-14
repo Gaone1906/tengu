@@ -43,39 +43,25 @@ const OK = { ok: true as const };
 afterEach(() => setJinnAttachGate(null));
 
 describe("JINN_ATTACH_DEFAULT — THE FLIP LINE", () => {
-  it("is OFF in this build (the merge-day default flip changes exactly this constant + this test)", () => {
-    expect(JINN_ATTACH_DEFAULT).toBe(false);
+  it("is ON for upgraded instances that do not yet have an mcp block", () => {
+    expect(JINN_ATTACH_DEFAULT).toBe(true);
   });
 });
 
-describe("decideJinnAttachment — default-off = today's behavior for EVERY combination", () => {
-  const defaultOffMasters: (McpGlobalConfig | undefined)[] = [
-    undefined,
-    {} as McpGlobalConfig,
-    { gateway: {} } as McpGlobalConfig,
-    { gateway: { enabled: false } } as McpGlobalConfig,
-  ];
-  const neutralEmployees: (Employee | undefined)[] = [
-    undefined,
-    emp(),
-    emp({ mcp: false }),
-    emp({ mcp: ["search"] }),
-    emp({ mcp: ["jinn"] }), // requesting jinn in the allowlist does NOT force it on (unchanged semantics)
-    emp({ jinnMcp: false }),
-  ];
-
-  it("NO for every default-off master × neutral employee × engine — under EVERY gate state (gate cannot create attachment)", () => {
-    for (const gate of [null, OK, { ok: false as const, reason: "x" }]) {
-      for (const globalMcp of defaultOffMasters) {
-        for (const employee of neutralEmployees) {
-          for (const engine of [undefined, "claude", "codex", "hermes", "grok", "antigravity"]) {
-            const d = decideJinnAttachment({ globalMcp, employee, engine, gate });
-            expect(d.attach, `master=${JSON.stringify(globalMcp?.gateway)} emp=${JSON.stringify(employee?.mcp)}/${JSON.stringify((employee as { jinnMcp?: boolean } | undefined)?.jinnMcp)} engine=${engine} gate=${JSON.stringify(gate)}`).toBe(false);
-            expect(d.reason.length).toBeGreaterThan(0);
-          }
-        }
+describe("decideJinnAttachment — default-on upgrade behavior", () => {
+  it("attaches on capable engines when the mcp block is absent and the smoke gate passed", () => {
+    for (const globalMcp of [undefined, {} as McpGlobalConfig, { gateway: {} } as McpGlobalConfig]) {
+      for (const engine of [undefined, "claude", "codex", "hermes", "grok", "antigravity"]) {
+        expect(decideJinnAttachment({ globalMcp, engine, gate: OK }).attach).toBe(true);
       }
     }
+  });
+
+  it("keeps explicit global and employee opt-outs as kill switches", () => {
+    expect(decideJinnAttachment({ globalMcp: { gateway: { enabled: false } } as McpGlobalConfig, engine: "codex", gate: OK }).attach).toBe(false);
+    expect(decideJinnAttachment({ globalMcp: undefined, employee: emp({ jinnMcp: false }), engine: "codex", gate: OK }).attach).toBe(false);
+    expect(decideJinnAttachment({ globalMcp: undefined, employee: emp({ mcp: false }), engine: "codex", gate: OK }).attach).toBe(false);
+    expect(decideJinnAttachment({ globalMcp: undefined, employee: emp({ mcp: ["search"] }), engine: "codex", gate: OK }).attach).toBe(false);
   });
 });
 
@@ -138,7 +124,7 @@ describe("decideJinnAttachment — per-employee override (gate passed)", () => {
     expect(d.attach).toBe(false);
   });
 
-  it("jinnMcp: true force-attaches when the master default is off (single-employee pilot)", () => {
+  it("jinnMcp: true explicitly force-attaches (single-employee override)", () => {
     expect(decideJinnAttachment({ globalMcp: {} as McpGlobalConfig, engine: "codex", employee: emp({ jinnMcp: true }), gate: OK }).attach).toBe(true);
     // Even with NO mcp: section at all — the pilot needs no other MCP config.
     expect(decideJinnAttachment({ globalMcp: undefined, engine: "codex", employee: emp({ jinnMcp: true }), gate: OK }).attach).toBe(true);
@@ -153,7 +139,7 @@ describe("decideJinnAttachment — per-employee override (gate passed)", () => {
     expect(decideJinnAttachment({ globalMcp: ON, engine: "codex", employee: emp({ mcp: false }), gate: OK }).attach).toBe(false);
     expect(decideJinnAttachment({ globalMcp: ON, engine: "codex", employee: emp({ mcp: ["search"] }), gate: OK }).attach).toBe(false);
     expect(decideJinnAttachment({ globalMcp: ON, engine: "codex", employee: emp({ mcp: ["jinn"] }), gate: OK }).attach).toBe(true);
-    expect(decideJinnAttachment({ globalMcp: {} as McpGlobalConfig, engine: "codex", employee: emp({ mcp: ["jinn"] }), gate: OK }).attach).toBe(false);
+    expect(decideJinnAttachment({ globalMcp: {} as McpGlobalConfig, engine: "codex", employee: emp({ mcp: ["jinn"] }), gate: OK }).attach).toBe(true);
   });
 });
 
@@ -346,16 +332,16 @@ describe("armJinnAttachGate — boot/reload/org-reload wiring semantics", () => 
     }) as unknown as typeof fetch;
   const failFetch = (async () => ({ ok: false, status: 401 }) as Response) as unknown as typeof fetch;
 
-  it("NO attach path (globally off, no pilot) → gate reset to null and ZERO probes (default path stays byte-identical)", async () => {
+  it("default-on probes when config is absent, while explicit false disarms without another probe", async () => {
     setJinnAttachGate({ ok: false, reason: "stale" });
     const counter = { calls: 0 };
     const r = await armJinnAttachGate(undefined, { gatewayUrl: "http://127.0.0.1:7811", home, fetchFn: okFetch(counter) });
-    expect(r).toBeNull();
-    expect(getJinnAttachGate()).toBeNull();
-    expect(counter.calls).toBe(0);
+    expect(r).toEqual({ ok: true });
+    expect(getJinnAttachGate()).toEqual({ ok: true });
+    expect(counter.calls).toBe(1);
     await armJinnAttachGate({ gateway: { enabled: false } } as McpGlobalConfig, { gatewayUrl: "http://127.0.0.1:7811", home, fetchFn: okFetch(counter), employees: [emp()] });
     expect(getJinnAttachGate()).toBeNull();
-    expect(counter.calls).toBe(0);
+    expect(counter.calls).toBe(1);
   });
 
   it("kill switch beats a pilot: enabled:false + jinnMcp:true employee → disarm, no probe (nothing can attach anyway)", async () => {

@@ -110,16 +110,14 @@ describe("resolveMcpServers — built-in `jinn` gateway server (GRS-012b)", () =
     else process.env.JINN_GATEWAY_TOKEN = savedToken;
   });
 
-  it("is ABSENT unless mcp.gateway.enabled === true (conservative opt-in; Claude byte-unchanged)", () => {
-    // No gateway field at all.
-    expect(resolveMcpServers({ browser: { enabled: false } })).toEqual({ mcpServers: {} });
-    // Present but not exactly true.
+  it("is present by default for upgraded configs and explicit false remains the kill switch", () => {
+    expect(resolveMcpServers({ browser: { enabled: false } }).mcpServers).toHaveProperty("jinn");
     expect(
       resolveMcpServers({ browser: { enabled: false }, gateway: { enabled: false } }).mcpServers,
     ).not.toHaveProperty("jinn");
     expect(
       resolveMcpServers({ browser: { enabled: false }, gateway: {} }).mcpServers,
-    ).not.toHaveProperty("jinn");
+    ).toHaveProperty("jinn");
   });
 
   it("is PRESENT and points node at the server-entry when explicitly enabled", () => {

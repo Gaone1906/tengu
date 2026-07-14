@@ -27,6 +27,22 @@ export interface QueueItem {
   createdAt: string;
 }
 
+export interface InstanceMigration {
+  required: boolean
+  fromVersion: string
+  toVersion: string
+  versions: string[]
+  changedFiles: Array<{ path: string; operation: 'add' | 'modify' | 'remove' }>
+  prompt: string | null
+  migrationKey: string | null
+}
+
+export interface OpenInstanceMigrationResult {
+  sessionId: string
+  reused: boolean
+  migrationKey: string
+}
+
 export interface Employee {
   name: string;
   displayName: string;
@@ -932,6 +948,9 @@ export interface CreateWorkflowTriggerResultWire {
 }
 
 export const api = {
+  getInstanceMigration: () => get<InstanceMigration>('/api/instance-migration'),
+  openInstanceMigration: (migrationKey: string) =>
+    post<OpenInstanceMigrationResult>('/api/instance-migration/open', { migrationKey }),
   listNotes: (query?: string) => {
     const params = new URLSearchParams()
     if (query?.trim()) params.set("q", query.trim())

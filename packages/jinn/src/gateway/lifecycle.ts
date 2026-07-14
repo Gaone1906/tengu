@@ -10,6 +10,7 @@ import { startGateway } from "./server.js";
 import { loadConfig } from "../shared/config.js";
 import { gatewayBaseUrl } from "./gateway-info.js";
 import { ensureGatewayAuthToken } from "./auth.js";
+import { buildRestartEntryArgv } from "./restart-entry-options.js";
 
 export async function startForeground(config: JinnConfig): Promise<void> {
   const cleanup = await startGateway(config);
@@ -78,8 +79,17 @@ export interface LifecycleKillOptions {
   takePort?: boolean;
 }
 
-export function restartDetached(options: LifecycleKillOptions = {}): void {
-  const config = loadConfig();
+export interface RestartDetachedOptions extends LifecycleKillOptions {
+  port?: number;
+}
+
+export function restartDetached(options: RestartDetachedOptions = {}): void {
+  const loadedConfig = loadConfig();
+  const port = options.port ?? loadedConfig.gateway.port ?? 7777;
+  const config: JinnConfig = {
+    ...loadedConfig,
+    gateway: { ...loadedConfig.gateway, port },
+  };
   const __filename = fileURLToPath(import.meta.url);
   const candidateEntryScripts = [
     path.resolve(path.dirname(__filename), "restart-entry.js"),
@@ -87,8 +97,7 @@ export function restartDetached(options: LifecycleKillOptions = {}): void {
   ];
   const entryScript = candidateEntryScripts.find((p) => fs.existsSync(p)) ?? candidateEntryScripts[0];
 
-  const args = [entryScript];
-  if (options.takePort) args.push("--take-port");
+  const args = buildRestartEntryArgv(entryScript, { port, takePort: options.takePort });
 
   const child = spawn(process.execPath, args, {
     detached: true,

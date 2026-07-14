@@ -284,8 +284,8 @@ describe("per-engine jinn-server wiring (GRS-018 seam for GRS-017 default-on)", 
     });
   });
 
-  it("OFF position: without mcp.gateway.enabled, every adapter is a no-op for jinn", () => {
-    const resolved = resolveMcpServers(OFF, undefined);
+  it("explicit kill switch keeps every adapter a no-op for jinn", () => {
+    const resolved = resolveMcpServers({ ...OFF, gateway: { enabled: false } }, undefined);
     expect(resolved.mcpServers.jinn).toBeUndefined();
 
     // codex: no jinn override in argv.

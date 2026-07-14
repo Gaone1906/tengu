@@ -42,6 +42,6 @@ export async function runRestart(opts: RestartOptions = {}): Promise<void> {
     return;
   }
 
-  restartDetached({ takePort: opts.takePort });
+  restartDetached({ takePort: opts.takePort, port: config.gateway.port || 7777 });
   console.log("Gateway restarting in the background (detached). It will be back in a few seconds.");
 }

@@ -1,3 +1,6 @@
+# Instance migration bundle: 0.25.0 → 0.26.0
+
+<!-- BEGIN RELEASE RATIONALE -->
 # Migration: 0.26.0 — Company Autonomy Surface (Todos, Workflows, MCP-as-hands)
 
 ## Summary
@@ -238,9 +241,12 @@ or unrelated config values.
 
 ## Version marker
 
-After applying, the instance's `config.yaml` `jinn.version` should read `"0.26.0"`.
-If you were launched by `jinn migrate --apply`, jinn stamps this for you;
-otherwise the user runs `jinn migrate --mark-done 0.26.0`.
+Do not advance `config.yaml` from an engine exit code or from merely finishing
+the edits. After verification, write the canonical completion receipt beside
+the verified snapshot, covering every reviewed or skipped manifest path. Only
+then run the exact keyed `jinn migrate --mark-done 0.26.0 --migration-key …`
+command from the automatic migration prompt. Failed or interrupted work must
+leave `jinn.version` unchanged.
 
 ## Report
 
@@ -249,3 +255,120 @@ docs/skills you copied or merged, which stale Workflow–Todo coupling statement
 you removed, which config keys you added, any backups you created, what
 personalized content you preserved, and the Hermes-rebuild reminder if
 applicable. Confirm that no runtime record or delivery lifecycle was changed.
+<!-- END RELEASE RATIONALE -->
+
+This file is generated. The manifest is authoritative; each record below appears exactly once.
+The payload paths below are generic package sources. Before review, the gateway creates audited, read-only materialized base payload and materialized target payload copies beneath the instance migration snapshot using that instance's exact template replacements.
+Perform the three-way merge only from those materialized snapshot payloads and the current user-owned instance file. Never apply a raw generic payload or copy an unresolved placeholder into the instance. Preserve user customizations and never delete user content without explicit review and a snapshot.
+
+## `CLAUDE.md`
+
+- Operation: `modify`
+- Base payload: `files/base/CLAUDE.md`
+- Target payload: `files/target/CLAUDE.md`
+- Merge instruction: compare the audited materialized base with the current instance path `CLAUDE.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `docs/company-doctrine.md`
+
+- Operation: `add`
+- Base payload: none (file did not exist)
+- Target payload: `files/target/docs/company-doctrine.md`
+- Merge instruction: compare the audited materialized base with the current instance path `docs/company-doctrine.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `docs/cron.md`
+
+- Operation: `modify`
+- Base payload: `files/base/docs/cron.md`
+- Target payload: `files/target/docs/cron.md`
+- Merge instruction: compare the audited materialized base with the current instance path `docs/cron.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `docs/mcp.md`
+
+- Operation: `modify`
+- Base payload: `files/base/docs/mcp.md`
+- Target payload: `files/target/docs/mcp.md`
+- Merge instruction: compare the audited materialized base with the current instance path `docs/mcp.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `docs/org.md`
+
+- Operation: `modify`
+- Base payload: `files/base/docs/org.md`
+- Target payload: `files/target/docs/org.md`
+- Merge instruction: compare the audited materialized base with the current instance path `docs/org.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `docs/overview.md`
+
+- Operation: `modify`
+- Base payload: `files/base/docs/overview.md`
+- Target payload: `files/target/docs/overview.md`
+- Merge instruction: compare the audited materialized base with the current instance path `docs/overview.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `docs/self-modification.md`
+
+- Operation: `modify`
+- Base payload: `files/base/docs/self-modification.md`
+- Target payload: `files/target/docs/self-modification.md`
+- Merge instruction: compare the audited materialized base with the current instance path `docs/self-modification.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `skills/cron-manager/SKILL.md`
+
+- Operation: `modify`
+- Base payload: `files/base/skills/cron-manager/SKILL.md`
+- Target payload: `files/target/skills/cron-manager/SKILL.md`
+- Merge instruction: compare the audited materialized base with the current instance path `skills/cron-manager/SKILL.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `skills/delegation/SKILL.md`
+
+- Operation: `add`
+- Base payload: none (file did not exist)
+- Target payload: `files/target/skills/delegation/SKILL.md`
+- Merge instruction: compare the audited materialized base with the current instance path `skills/delegation/SKILL.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `skills/management/SKILL.md`
+
+- Operation: `modify`
+- Base payload: `files/base/skills/management/SKILL.md`
+- Target payload: `files/target/skills/management/SKILL.md`
+- Merge instruction: compare the audited materialized base with the current instance path `skills/management/SKILL.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `skills/migrate/SKILL.md`
+
+- Operation: `modify`
+- Base payload: `files/base/skills/migrate/SKILL.md`
+- Target payload: `files/target/skills/migrate/SKILL.md`
+- Merge instruction: compare the audited materialized base with the current instance path `skills/migrate/SKILL.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `skills/onboarding/SKILL.md`
+
+- Operation: `modify`
+- Base payload: `files/base/skills/onboarding/SKILL.md`
+- Target payload: `files/target/skills/onboarding/SKILL.md`
+- Merge instruction: compare the audited materialized base with the current instance path `skills/onboarding/SKILL.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `skills/self-heal/SKILL.md`
+
+- Operation: `modify`
+- Base payload: `files/base/skills/self-heal/SKILL.md`
+- Target payload: `files/target/skills/self-heal/SKILL.md`
+- Merge instruction: compare the audited materialized base with the current instance path `skills/self-heal/SKILL.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `skills/sync/SKILL.md`
+
+- Operation: `modify`
+- Base payload: `files/base/skills/sync/SKILL.md`
+- Target payload: `files/target/skills/sync/SKILL.md`
+- Merge instruction: compare the audited materialized base with the current instance path `skills/sync/SKILL.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `skills/todo-handling/SKILL.md`
+
+- Operation: `add`
+- Base payload: none (file did not exist)
+- Target payload: `files/target/skills/todo-handling/SKILL.md`
+- Merge instruction: compare the audited materialized base with the current instance path `skills/todo-handling/SKILL.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.
+
+## `skills/workflow/SKILL.md`
+
+- Operation: `add`
+- Base payload: none (file did not exist)
+- Target payload: `files/target/skills/workflow/SKILL.md`
+- Merge instruction: compare the audited materialized base with the current instance path `skills/workflow/SKILL.md` and the audited materialized target; preserve customized content, record unresolved placeholders as conflicts, and verify the result before completion.

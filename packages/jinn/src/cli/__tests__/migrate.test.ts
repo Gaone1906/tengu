@@ -43,6 +43,28 @@ vi.mock("../../shared/version.js", () => ({
   getInstanceVersion: vi.fn(() => "1.0.0"),
 }));
 
+const canonicalPending = {
+  required: true,
+  fromVersion: "1.0.0",
+  toVersion: "1.1.0",
+  versions: ["1.1.0"],
+  changedFiles: [{ path: "CLAUDE.md", operation: "modify" as const }],
+  prompt: "COMPOSED migration prompt body",
+  migrationKey: "a".repeat(64),
+  materialization: null,
+};
+
+vi.mock("../../migrations/service.js", () => ({
+  getPendingInstanceMigration: vi.fn(() => canonicalPending),
+}));
+
+vi.mock("../../migrations/completion.js", async () => {
+  const actual = await vi.importActual<typeof import("../../migrations/completion.js")>(
+    "../../migrations/completion.js",
+  );
+  return { ...actual, completeInstanceMigration: vi.fn() };
+});
+
 // Mock the pure prompt module so migrate.ts orchestration is tested in isolation.
 // formatStagedFutureNotice stays real (pure text) so the notice wiring is
 // exercised end-to-end; only the fs-scanning functions are stubbed.
@@ -62,6 +84,8 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { scanMigrationPrompts, scanFutureMigrations } from "../migrate-prompt.js";
 import { getInstanceVersion } from "../../shared/version.js";
+import { getPendingInstanceMigration } from "../../migrations/service.js";
+import { completeInstanceMigration } from "../../migrations/completion.js";
 import { stampVersionInYaml } from "../migrate.js";
 
 const mockExecFileSync = vi.mocked(execFileSync);
@@ -75,6 +99,8 @@ const mockScan = vi.mocked(scanMigrationPrompts);
 const mockScanFuture = vi.mocked(scanFutureMigrations);
 const mockReadFileSync = vi.mocked(fs.readFileSync);
 const mockGetInstanceVersion = vi.mocked(getInstanceVersion);
+const mockGetPending = vi.mocked(getPendingInstanceMigration);
+const mockComplete = vi.mocked(completeInstanceMigration);
 
 function assertNoFsWrites() {
   expect(mockWriteFileSync).not.toHaveBeenCalled();
@@ -90,6 +116,7 @@ describe("migrate: prompt dispenser", () => {
     mockExistsSync.mockReturnValue(true);
     mockScan.mockReturnValue(["1.1.0"]);
     mockScanFuture.mockReturnValue([]);
+    mockGetPending.mockReturnValue({ ...canonicalPending });
   });
 
   describe("default (print) mode", () => {
@@ -110,7 +137,7 @@ describe("migrate: prompt dispenser", () => {
     });
 
     it("prints an up-to-date message and writes nothing when the range is empty", async () => {
-      mockScan.mockReturnValue([]);
+      mockGetPending.mockReturnValue({ required: false, fromVersion: "1.1.0", toVersion: "1.1.0", versions: [], changedFiles: [], prompt: null, migrationKey: null, materialization: null });
       const { runMigrate } = await import("../migrate.js");
       const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
@@ -123,10 +150,8 @@ describe("migrate: prompt dispenser", () => {
       log.mockRestore();
     });
 
-    it("prints a future-staged notice when a migration dir sits above the package version", async () => {
-      // Instance up to date, but the next release's dir is pre-staged.
-      mockScan.mockReturnValue([]);
-      mockScanFuture.mockReturnValue(["1.2.0"]);
+    it("does not expose future staged bundles outside the installed package boundary", async () => {
+      mockGetPending.mockReturnValue({ required: false, fromVersion: "1.1.0", toVersion: "1.1.0", versions: [], changedFiles: [], prompt: null, migrationKey: null, materialization: null });
       const { runMigrate } = await import("../migrate.js");
       const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
@@ -134,13 +159,12 @@ describe("migrate: prompt dispenser", () => {
 
       assertNoFsWrites();
       const printed = log.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(printed).toMatch(/staged for a future release/i);
-      expect(printed).toContain("1.2.0");
+      expect(printed).not.toMatch(/future release/i);
       log.mockRestore();
     });
 
     it("errors clearly (not a silent 0.0.0) when the instance marker is a prerelease", async () => {
-      mockGetInstanceVersion.mockReturnValueOnce("1.0.0-beta.1");
+      mockGetPending.mockImplementationOnce(() => { throw new Error('instance marker is not a plain X.Y.Z version: 1.0.0-beta.1'); });
       const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
         throw new Error("process.exit called");
       }) as never);
@@ -161,121 +185,95 @@ describe("migrate: prompt dispenser", () => {
   });
 
   describe("--apply mode", () => {
-    it("launches the agent with the composed prompt, then stamps the marker", async () => {
+    it("is deprecated, prints the canonical prompt, and never launches or stamps", async () => {
       const { runMigrate } = await import("../migrate.js");
-      vi.spyOn(console, "log").mockImplementation(() => {});
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       await runMigrate({ apply: true });
 
-      expect(mockExecFileSync).toHaveBeenCalledTimes(1);
-      const [, args, options] = mockExecFileSync.mock.calls[0];
-      const argsArray = args as string[];
-
-      // cwd via options, never a --cwd CLI flag.
-      expect(argsArray).not.toContain("--cwd");
-      expect((options as any).cwd).toBeTypeOf("string");
-
-      // Subsidy-safe claude spawn: no headless -p/--print.
-      expect(argsArray).not.toContain("-p");
-      expect(argsArray).not.toContain("--print");
-      expect(argsArray).toContain("--dangerously-skip-permissions");
-
-      // The composed prompt is the last positional arg.
-      expect(argsArray[argsArray.length - 1]).toBe("COMPOSED migration prompt body");
-
-      // Marker advanced after a successful agent run (atomic write).
-      expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
-      expect(mockRenameSync).toHaveBeenCalledTimes(1);
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+      assertNoFsWrites();
+      expect(log.mock.calls.flat().join("\n")).toContain("COMPOSED migration prompt body");
+      expect(warn.mock.calls.flat().join("\n")).toMatch(/deprecated/i);
     });
 
-    it("applies but does NOT write when the config shape can't be safely stamped", async () => {
-      // Agent runs fine, but the marker can't be advanced (config.yaml is not
-      // valid YAML — tab indentation — so the stamper refuses rather than guess).
+    it("does not inspect or write invalid config", async () => {
       mockReadFileSync.mockReturnValueOnce("jinn:\n\tversion: 1.0.0\n");
       const log = vi.spyOn(console, "log").mockImplementation(() => {});
       vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
       const { runMigrate } = await import("../migrate.js");
 
       await runMigrate({ apply: true });
 
-      // Agent was launched; no marker write; no crash.
-      expect(mockExecFileSync).toHaveBeenCalledTimes(1);
-      expect(mockWriteFileSync).not.toHaveBeenCalled();
-      expect(mockRenameSync).not.toHaveBeenCalled();
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+      assertNoFsWrites();
       const printed = log.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(printed).toMatch(/Marker NOT advanced/i);
+      expect(printed).toContain("COMPOSED migration prompt body");
       log.mockRestore();
     });
 
-    it("does NOT crash and prints 'Marker NOT advanced' when jinn is a bare scalar", async () => {
-      // `jinn: false` is valid YAML but not a collection — setIn would throw.
-      // The agent runs successfully; the marker refuses cleanly; --apply must
-      // finish normally and print its message rather than crash with a trace.
+    it("does not crash or stamp when jinn is a bare scalar", async () => {
       mockReadFileSync.mockReturnValueOnce("jinn: false\n");
       const log = vi.spyOn(console, "log").mockImplementation(() => {});
       vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
       const { runMigrate } = await import("../migrate.js");
 
       await expect(runMigrate({ apply: true })).resolves.toBeUndefined();
 
-      expect(mockExecFileSync).toHaveBeenCalledTimes(1);
-      expect(mockWriteFileSync).not.toHaveBeenCalled();
-      expect(mockRenameSync).not.toHaveBeenCalled();
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+      assertNoFsWrites();
       const printed = log.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(printed).toMatch(/Marker NOT advanced/i);
+      expect(printed).toContain("COMPOSED migration prompt body");
       log.mockRestore();
     });
 
-    it("does NOT stamp the marker when the agent exits with an error", async () => {
+    it("never invokes a configured agent executable", async () => {
       mockExecFileSync.mockImplementationOnce(() => {
         throw new Error("agent failed");
       });
-      const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
-        throw new Error("process.exit called");
-      }) as never);
       vi.spyOn(console, "log").mockImplementation(() => {});
       vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(console, "warn").mockImplementation(() => {});
 
       const { runMigrate } = await import("../migrate.js");
 
-      await expect(runMigrate({ apply: true })).rejects.toThrow("process.exit called");
+      await expect(runMigrate({ apply: true })).resolves.toBeUndefined();
 
+      expect(mockExecFileSync).not.toHaveBeenCalled();
       expect(mockWriteFileSync).not.toHaveBeenCalled();
       expect(mockRenameSync).not.toHaveBeenCalled();
-      expect(exitSpy).toHaveBeenCalledWith(1);
-      exitSpy.mockRestore();
     });
   });
 
   describe("--mark-done mode", () => {
-    it("stamps an explicit version without scanning or launching an agent", async () => {
+    it("completes an explicit version through the snapshot/receipt gate", async () => {
       const { runMigrate } = await import("../migrate.js");
       vi.spyOn(console, "log").mockImplementation(() => {});
 
-      await runMigrate({ markDone: "1.1.0" });
+      await runMigrate({ markDone: "1.1.0", migrationKey: canonicalPending.migrationKey });
 
       expect(mockExecFileSync).not.toHaveBeenCalled();
       expect(mockScan).not.toHaveBeenCalled();
-      // Atomic stamp write.
-      expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
-      expect(mockRenameSync).toHaveBeenCalledTimes(1);
-      const written = String(mockWriteFileSync.mock.calls[0][1]);
-      expect(written).toContain("1.1.0");
+      expect(mockComplete).toHaveBeenCalledWith(expect.objectContaining({
+        targetVersion: "1.1.0",
+        expectedMigrationKey: canonicalPending.migrationKey,
+      }));
     });
 
     it("defaults to the package version when no explicit version is given", async () => {
       const { runMigrate } = await import("../migrate.js");
       vi.spyOn(console, "log").mockImplementation(() => {});
 
-      await runMigrate({ markDone: true });
+      await runMigrate({ markDone: true, migrationKey: canonicalPending.migrationKey });
 
-      expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
-      const written = String(mockWriteFileSync.mock.calls[0][1]);
-      expect(written).toContain("1.1.0"); // package version from mock
+      expect(mockComplete).toHaveBeenCalledWith(expect.objectContaining({ targetVersion: "1.1.0" }));
     });
 
     it("exits without writing when --mark-done can't safely stamp the config shape", async () => {
-      mockReadFileSync.mockReturnValueOnce("jinn:\n\tversion: 1.0.0\n");
+      mockComplete.mockImplementationOnce(() => { throw new Error("completion receipt is required"); });
       const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
         throw new Error("process.exit called");
       }) as never);
@@ -283,7 +281,7 @@ describe("migrate: prompt dispenser", () => {
 
       const { runMigrate } = await import("../migrate.js");
 
-      await expect(runMigrate({ markDone: "1.1.0" })).rejects.toThrow("process.exit called");
+      await expect(runMigrate({ markDone: "1.1.0", migrationKey: canonicalPending.migrationKey })).rejects.toThrow("process.exit called");
       expect(mockWriteFileSync).not.toHaveBeenCalled();
       expect(mockRenameSync).not.toHaveBeenCalled();
       expect(exitSpy).toHaveBeenCalledWith(1);
@@ -294,7 +292,7 @@ describe("migrate: prompt dispenser", () => {
       // Previously setIn threw here and --mark-done died with a stack trace.
       // Now it refuses cleanly → exit(1), no write, and the only error thrown is
       // the mocked process.exit (proving the refusal path, not a raw setIn throw).
-      mockReadFileSync.mockReturnValueOnce("jinn: false\n");
+      mockComplete.mockImplementationOnce(() => { throw new Error("config.yaml's jinn isn't a mapping"); });
       const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
         throw new Error("process.exit called");
       }) as never);
@@ -302,7 +300,7 @@ describe("migrate: prompt dispenser", () => {
 
       const { runMigrate } = await import("../migrate.js");
 
-      await expect(runMigrate({ markDone: "1.1.0" })).rejects.toThrow("process.exit called");
+      await expect(runMigrate({ markDone: "1.1.0", migrationKey: canonicalPending.migrationKey })).rejects.toThrow("process.exit called");
       expect(mockWriteFileSync).not.toHaveBeenCalled();
       expect(mockRenameSync).not.toHaveBeenCalled();
       expect(exitSpy).toHaveBeenCalledWith(1);
@@ -323,6 +321,49 @@ describe("migrate: prompt dispenser", () => {
       exitSpy.mockRestore();
     });
   });
+
+  describe.each([
+    { label: "non-TTY", isTTY: false, noColor: undefined },
+    { label: "TTY with NO_COLOR", isTTY: true, noColor: "" },
+  ])("plain output in $label mode", ({ isTTY, noColor }) => {
+    it("emits no ANSI for pending, current, deprecated apply, completion, or error paths", async () => {
+      const stdout = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
+      const stderr = Object.getOwnPropertyDescriptor(process.stderr, "isTTY")
+      const previousNoColor = process.env.NO_COLOR
+      Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: isTTY })
+      Object.defineProperty(process.stderr, "isTTY", { configurable: true, value: isTTY })
+      if (noColor === undefined) delete process.env.NO_COLOR
+      else process.env.NO_COLOR = noColor
+      const log = vi.spyOn(console, "log").mockImplementation(() => {})
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+      const error = vi.spyOn(console, "error").mockImplementation(() => {})
+      const exit = vi.spyOn(process, "exit").mockImplementation((() => { throw new Error("process.exit called") }) as never)
+      try {
+        const { runMigrate } = await import("../migrate.js")
+        await runMigrate({})
+        await runMigrate({ apply: true })
+        mockGetPending.mockReturnValueOnce({ required: false, fromVersion: "1.1.0", toVersion: "1.1.0", versions: [], changedFiles: [], prompt: null, migrationKey: null, materialization: null })
+        await runMigrate({})
+        await runMigrate({ markDone: "1.1.0", migrationKey: canonicalPending.migrationKey })
+        mockGetPending.mockImplementationOnce(() => { throw new Error("broken migration chain") })
+        await expect(runMigrate({})).rejects.toThrow("process.exit called")
+
+        const printed = [...log.mock.calls, ...warn.mock.calls, ...error.mock.calls].flat().join("\n")
+        expect(printed).not.toMatch(/\u001b\[/)
+      } finally {
+        log.mockRestore()
+        warn.mockRestore()
+        error.mockRestore()
+        exit.mockRestore()
+        if (stdout) Object.defineProperty(process.stdout, "isTTY", stdout)
+        else Reflect.deleteProperty(process.stdout, "isTTY")
+        if (stderr) Object.defineProperty(process.stderr, "isTTY", stderr)
+        else Reflect.deleteProperty(process.stderr, "isTTY")
+        if (previousNoColor === undefined) delete process.env.NO_COLOR
+        else process.env.NO_COLOR = previousNoColor
+      }
+    })
+  })
 });
 
 /**

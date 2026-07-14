@@ -61,7 +61,8 @@ function ctx(restartGateway = vi.fn()): ApiContext {
   return {
     gatewayAuthToken: "gateway-token",
     restartGateway,
-    getConfig: () => ({ gateway: { host: "127.0.0.1", port: 7777 }, engines: { default: "claude" } }),
+    runtimePort: 21877,
+    getConfig: () => ({ gateway: { host: "127.0.0.1", port: 21999 }, engines: { default: "claude" } }),
     connectors: new Map(),
     startTime: Date.now(),
   } as unknown as ApiContext;
@@ -100,7 +101,7 @@ describe("POST /api/system/restart", () => {
     expect(restartGateway).not.toHaveBeenCalled();
 
     await vi.runAllTimersAsync();
-    expect(restartGateway).toHaveBeenCalledTimes(1);
+    expect(restartGateway).toHaveBeenCalledWith({ port: 21877 });
   });
 
   it("completes the requesting session queue item before scheduling restart", async () => {

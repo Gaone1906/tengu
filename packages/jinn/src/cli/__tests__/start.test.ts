@@ -22,17 +22,31 @@ const lifecycle = vi.hoisted(() => ({
 const restartRequest = vi.hoisted(() => ({
   requestRestartFromGateway: vi.fn(async () => true),
 }));
+const migration = vi.hoisted(() => ({
+  getPendingInstanceMigration: vi.fn(() => ({
+    required: false,
+    fromVersion: "1.0.0",
+    toVersion: "1.0.0",
+    versions: [],
+    changedFiles: [],
+    prompt: null,
+    migrationKey: null,
+    materialization: null,
+  })),
+}));
 
 vi.mock("../../gateway/lifecycle.js", () => lifecycle);
 vi.mock("node:child_process", () => ({ spawn: childProcess.spawn }));
 vi.mock("../restart-request.js", () => restartRequest);
+vi.mock("../../migrations/service.js", () => migration);
 vi.mock("../../shared/config.js", () => ({
-  loadConfig: () => ({ gateway: { host: "127.0.0.1", port: 7777 }, engines: { default: "claude" } }),
+  loadConfig: () => ({ gateway: { host: "127.0.0.1", port: 21877 }, engines: { default: "claude" } }),
 }));
 vi.mock("../../shared/version.js", () => ({
   compareSemver: () => 0,
   getPackageVersion: () => "1.0.0",
   getInstanceVersion: () => "1.0.0",
+  isStrictSemver: (value: string) => /^\d+\.\d+\.\d+$/.test(value),
 }));
 
 const { runStart } = await import("../start.js");
@@ -40,6 +54,16 @@ const { consumeLocalBootstrapGrant } = await import("../../gateway/auth.js");
 
 beforeEach(() => {
   vi.clearAllMocks();
+  migration.getPendingInstanceMigration.mockReturnValue({
+    required: false,
+    fromVersion: "1.0.0",
+    toVersion: "1.0.0",
+    versions: [],
+    changedFiles: [],
+    prompt: null,
+    migrationKey: null,
+    materialization: null,
+  });
   fs.mkdirSync(tmpHome, { recursive: true });
 });
 
@@ -48,6 +72,25 @@ afterAll(() => {
 });
 
 describe("runStart", () => {
+  it("validates migrations successfully without falling through the warning path", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await runStart({ daemon: false });
+
+    expect(migration.getPendingInstanceMigration).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("warns on migration validation failure while continuing normal startup", async () => {
+    migration.getPendingInstanceMigration.mockImplementationOnce(() => { throw new Error("broken chain"); });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await runStart({ daemon: false });
+
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/broken chain/));
+    expect(restartRequest.requestRestartFromGateway).toHaveBeenCalledTimes(1);
+  });
+
   it("asks the running gateway to own the restart when one is already running", async () => {
     await runStart({ daemon: false });
 
@@ -70,7 +113,7 @@ describe("runStart", () => {
 
     await runStart({ daemon: false, takePort: true });
 
-    expect(lifecycle.restartDetached).toHaveBeenCalledWith({ takePort: true });
+    expect(lifecycle.restartDetached).toHaveBeenCalledWith({ takePort: true, port: 21877 });
   });
 
   it("opens an interactive dashboard with a valid one-time bootstrap grant", async () => {

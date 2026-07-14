@@ -24,6 +24,8 @@
     "test": "pnpm build && vitest run",
     "coverage": "vitest run --coverage",
     "test:watch": "vitest",
+    "migration:generate": "node scripts/instance-migration-bundle.mjs generate",
+    "migration:check": "node scripts/instance-migration-bundle.mjs check",
     "clean": "rm -rf dist"
   },
   "dependencies": {

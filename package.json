@@ -21,7 +21,8 @@
     "start": "pnpm build && node packages/jinn/dist/bin/jinn.js start",
     "stop": "node packages/jinn/dist/bin/jinn.js stop",
     "nuke": "node packages/jinn/dist/bin/jinn.js nuke",
-    "status": "node packages/jinn/dist/bin/jinn.js status"
+    "status": "node packages/jinn/dist/bin/jinn.js status",
+    "upgrade-lab": "node scripts/upgrade-lab/run.mjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

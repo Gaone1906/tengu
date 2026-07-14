@@ -37,13 +37,28 @@ Version lives in **one place**: `packages/jinn/package.json`.
    git commit -am "chore(release): jinn-cli vX.Y.Z"
    ```
 
-4. **Build + verify** from repo root:
+4. **Generate and review the instance migration gate.** Resolve the previous
+   release tag, then run:
+   ```bash
+   PREVIOUS_TAG="$(git describe --tags --abbrev=0 HEAD^)"
+   VERSION="$(node -p "require('./packages/jinn/package.json').version")"
+   pnpm --filter jinn-cli migration:generate -- --base-ref "$PREVIOUS_TAG" --version "$VERSION"
+   pnpm --filter jinn-cli migration:check -- --base-ref "$PREVIOUS_TAG" --version "$VERSION"
+   ```
+   If there are no instance-template changes, record that fact; do not create an
+   empty bundle. Otherwise review the preserved rationale and exact manifest
+   paths. The generator owns the payloads and per-file merge instructions.
+
+5. **Build + verify** from repo root:
    ```bash
    pnpm build      # turbo build + copies packages/web/out -> packages/jinn/dist/web
    pnpm typecheck && pnpm test
    ```
 
-5. **Publish to npm.** A gitignored npm **automation token** lives at
+   Run the exact-tarball upgrade lab. Release work cannot continue if
+   `migration:check` or any required upgrade scenario fails.
+
+6. **Publish to npm.** A gitignored npm **automation token** lives at
    **`packages/jinn/.npmrc`** (`//registry.npmjs.org/:_authToken=...`). npm reads
    it automatically when publishing from that directory, so it bypasses the
    account's interactive login + 2FA OTP. Publish:
@@ -56,18 +71,18 @@ Version lives in **one place**: `packages/jinn/package.json`.
      write `//registry.npmjs.org/:_authToken=<token>` to `packages/jinn/.npmrc`
      (it's already in `.gitignore` - never commit it).
 
-6. **Tag + push:**
+7. **Tag + push:**
    ```bash
    git tag vX.Y.Z && git push origin main --tags
    ```
 
-7. **Create the GitHub release** (publishing it triggers the Homebrew bump):
+8. **Create the GitHub release** (publishing it triggers the Homebrew bump):
    ```bash
    gh release create vX.Y.Z --title "vX.Y.Z" --notes "...release notes..."
    ```
    For a dry run, add `--draft` (drafts do NOT trigger the formula workflow).
 
-8. **Verify**: a `formula: bump to vX.Y.Z` commit lands on `main` within ~5 min
+9. **Verify**: a `formula: bump to vX.Y.Z` commit lands on `main` within ~5 min
    (check the bump-formula workflow run), and `npm view jinn-cli version` is X.Y.Z.
 
 ## Notes

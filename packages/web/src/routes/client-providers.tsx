@@ -9,6 +9,7 @@ import { BreadcrumbProvider } from '@/context/breadcrumb-context'
 import { EmojiFavicon } from '@/components/emoji-favicon'
 import { GatewayProvider } from '@/hooks/use-gateway'
 import { AuthGate, AuthProvider } from "@/routes/auth-provider"
+import { InstanceMigrationGate } from "@/components/migration/instance-migration-gate"
 
 function QueryInvalidationBridge() {
   useQueryInvalidation()
@@ -24,6 +25,7 @@ export function ClientProviders({ children }: { children: ReactNode }) {
             <AuthGate>
               <SettingsProvider>
                 <GatewayProvider>
+                  <InstanceMigrationGate />
                   {children}
                   <DocumentTitle />
                   <EmojiFavicon />

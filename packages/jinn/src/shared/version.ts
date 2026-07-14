@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import { CONFIG_PATH, TEMPLATE_DIR } from "./paths.js";
 
@@ -43,8 +44,18 @@ export function compareSemver(a: string, b: string): number {
 
 /** Read the package version from jinn-cli's package.json. */
 export function getPackageVersion(): string {
-  const pkgPath = path.join(TEMPLATE_DIR, "..", "package.json");
-  return JSON.parse(fs.readFileSync(pkgPath, "utf-8")).version;
+  // TEMPLATE_DIR resolves against the built layout; the second candidate finds the same
+  // manifest when this module runs straight from src, as it does under the test runner.
+  const candidates = [
+    path.join(TEMPLATE_DIR, "..", "package.json"),
+    path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"),
+  ];
+  for (const pkgPath of candidates) {
+    if (fs.existsSync(pkgPath)) {
+      return JSON.parse(fs.readFileSync(pkgPath, "utf-8")).version;
+    }
+  }
+  throw new Error("jinn-cli package.json not found");
 }
 
 /** Read the instance version from config.yaml. Returns "0.0.0" if not set. */

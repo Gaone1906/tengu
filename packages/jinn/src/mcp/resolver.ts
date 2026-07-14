@@ -164,10 +164,9 @@ function buildAvailableServers(config: McpGlobalConfig, attachJinn: boolean): Re
   // Built-in `jinn` MCP server — exposes company primitives (org, sessions,
   // work items, workflows, …) to MCP-capable engines as a thin HTTP client to
   // the local gateway (GRS-012b). Membership was decided by
-  // decideJinnAttachment (GRS-017e): the shipped default stays OFF
-  // (JINN_ATTACH_DEFAULT), keeping every existing config byte-unchanged until
-  // the operator opts in (`mcp.gateway.enabled: true`) or the merge-day
-  // default flip.
+  // decideJinnAttachment (GRS-017e): v0.26 defaults the built-in belt ON for
+  // upgraded instances with no new MCP block. `mcp.gateway.enabled: false`
+  // remains the explicit kill switch.
   if (attachJinn) {
     servers.jinn = buildJinnServerSpec();
   }

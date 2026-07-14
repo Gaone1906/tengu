@@ -1,7 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile } from "../resolver.js";
 import { setJinnAttachGate } from "../attachment.js";
 import type { Employee, McpGlobalConfig } from "../../shared/types.js";
@@ -9,8 +7,7 @@ import type { Employee, McpGlobalConfig } from "../../shared/types.js";
 /**
  * GRS-017e — the resolver consumes the ONE attachment decision point
  * (decideJinnAttachment): per-engine opt-out, per-employee force-on/off, the
- * smoke gate, and — load-bearing — a BYTE-IDENTICAL default-off path, asserted
- * against a golden fixture captured from the PRISTINE (pre-017e) resolver.
+ * smoke gate, and the default-on behavior introduced in v0.26.
  */
 
 const emp = (extra: Partial<Employee> = {}): Employee => ({ name: "e", ...extra }) as Employee;
@@ -18,29 +15,11 @@ const emp = (extra: Partial<Employee> = {}): Employee => ({ name: "e", ...extra 
 // GRS-017e-fix: the smoke gate is a mandatory conjunct of every positive
 // attach decision (unarmed = fail closed), so positive-path resolver tests run
 // with an armed-ok gate — exactly what a booted gateway provides. The
-// byte-identical default-off block below is gate-independent (negative
-// decisions never consult the gate) and passes under this arming too.
 beforeEach(() => setJinnAttachGate({ ok: true }));
 afterEach(() => setJinnAttachGate(null));
 
-describe("BYTE-IDENTICAL default-off (golden captured from the pre-017e resolver)", () => {
-  // The same normalization the golden generator applied — machine-specific
-  // paths only; every semantic byte must match.
-  const normalize = (s: string): string =>
-    s
-      .split(JSON.stringify(process.execPath).slice(1, -1)).join("<NODE>")
-      .replace(/[^"]*\/scrub-entry\.js/g, "<SCRUB>")
-      .replace(/[^"]*\/server-entry\.js/g, "<ENTRY>")
-      .split(JSON.stringify(process.env.HOME ?? "~").slice(1, -1)).join("<HOME>");
-
-  const golden = JSON.parse(
-    fs.readFileSync(
-      path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "grs-017e-default-off-golden.json"),
-      "utf-8",
-    ),
-  ) as Record<string, string>;
-
-  it("every default-off matrix case resolves to the exact pre-017e bytes", () => {
+describe("default-on attachment", () => {
+  it("adds jinn by default while retaining explicit global and employee opt-outs", () => {
     process.env.GRS17E_T = "expanded-secret-value";
     const cases: Array<{ id: string; globalMcp?: McpGlobalConfig; employee?: Employee }> = [
       { id: "no-global-no-emp" },
@@ -61,17 +40,21 @@ describe("BYTE-IDENTICAL default-off (golden captured from the pre-017e resolver
       { id: "gateway-absent-emp-requests-jinn", globalMcp: { browser: { enabled: false }, gateway: {} } as McpGlobalConfig, employee: emp({ mcp: ["jinn"] }) },
     ];
     for (const c of cases) {
-      expect(normalize(JSON.stringify(resolveMcpServers(c.globalMcp, c.employee))), c.id).toBe(golden[c.id]);
-      // The engine parameter must not perturb the default-off output either.
-      expect(normalize(JSON.stringify(resolveMcpServers(c.globalMcp, c.employee, "codex"))), `${c.id} (engine)`).toBe(golden[c.id]);
+      const expected = !["fetch-only-emp-false", "fetch-only-allowlist", "gateway-false-custom"].includes(c.id);
+      const resolved = resolveMcpServers(c.globalMcp, c.employee).mcpServers;
+      if (expected) expect(resolved, c.id).toHaveProperty("jinn");
+      else expect(resolved, c.id).not.toHaveProperty("jinn");
+      expect(Boolean(resolveMcpServers(c.globalMcp, c.employee, "codex").mcpServers.jinn), `${c.id} (engine)`).toBe(expected);
     }
     delete process.env.GRS17E_T;
   });
 
-  it("the claude temp-file bytes are identical too", () => {
+  it("the claude temp file includes the default-on built-in", () => {
     const p = writeMcpConfigFile(resolveMcpServers({ browser: { enabled: false }, fetch: { enabled: true } }), "grs017e-assert");
     try {
-      expect(normalize(fs.readFileSync(p, "utf-8"))).toBe(golden["claude-temp-file-bytes"]);
+      const parsed = JSON.parse(fs.readFileSync(p, "utf-8"));
+      expect(parsed.mcpServers).toHaveProperty("fetch");
+      expect(parsed.mcpServers).toHaveProperty("jinn");
     } finally {
       cleanupMcpConfigFile("grs017e-assert");
     }

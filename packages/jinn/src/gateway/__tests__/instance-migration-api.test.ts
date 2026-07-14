@@ -1,0 +1,202 @@
+import crypto from "node:crypto"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { Readable } from "node:stream"
+import type { ServerResponse } from "node:http"
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
+
+const registryHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-migration-api-registry-"))
+process.env.JINN_HOME = registryHome
+
+const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-migration-api-home-"))
+const migrationsDir = path.join(home, "package-migrations")
+const dispatched: Array<{ sessionId: string; prompt: string }> = []
+let engineAvailable = true
+let api: typeof import("../api.js")
+let registry: typeof import("../../sessions/registry.js")
+
+function seedBundle() {
+  fs.rmSync(home, { recursive: true, force: true })
+  fs.mkdirSync(path.join(home, "org"), { recursive: true })
+  fs.writeFileSync(path.join(home, "config.yaml"), "jinn:\n  version: \"0.25.0\"\n")
+  fs.writeFileSync(path.join(home, "CLAUDE.md"), "custom doctrine\n")
+  const dir = path.join(migrationsDir, "0.26.0")
+  fs.mkdirSync(path.join(dir, "files/base"), { recursive: true })
+  fs.mkdirSync(path.join(dir, "files/target"), { recursive: true })
+  fs.writeFileSync(path.join(dir, "files/base/CLAUDE.md"), "old doctrine\n")
+  fs.writeFileSync(path.join(dir, "files/target/CLAUDE.md"), "new doctrine\n")
+  const sha = (file: string) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")
+  fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify({
+    schemaVersion: 1,
+    version: "0.26.0",
+    baseVersion: "0.25.0",
+    generatedFrom: { baseRef: "v0.25.0", headRef: "WORKTREE" },
+    files: [{
+      path: "CLAUDE.md",
+      operation: "modify",
+      baseSha256: sha(path.join(dir, "files/base/CLAUDE.md")),
+      targetSha256: sha(path.join(dir, "files/target/CLAUDE.md")),
+      basePayload: "files/base/CLAUDE.md",
+      targetPayload: "files/target/CLAUDE.md",
+    }],
+  }, null, 2) + "\n")
+  fs.writeFileSync(path.join(dir, "MIGRATION.md"), "# migration\n")
+}
+
+function responseCapture() {
+  let status = 200
+  const chunks: Buffer[] = []
+  const res = {
+    writeHead(code: number) { status = code; return this },
+    setHeader() { return this },
+    end(chunk?: string | Buffer) { if (chunk) chunks.push(Buffer.from(chunk)) },
+  } as unknown as ServerResponse
+  return { res, status: () => status, text: () => Buffer.concat(chunks).toString("utf8") }
+}
+
+const context = {
+  getConfig: () => ({ gateway: {}, engines: { default: "codex", codex: {} }, portal: { portalName: "Portal" } }),
+  connectors: new Map(),
+  startTime: Date.now(),
+  gatewayAuthToken: "test-token-with-at-least-thirty-two-characters",
+  jinnHome: home,
+  migrationMigrationsDir: migrationsDir,
+  migrationPackageVersion: "0.26.0",
+  dispatchInstanceMigration: (session: { id: string }, prompt: string) => dispatched.push({ sessionId: session.id, prompt }),
+  emit: vi.fn(),
+  sessionManager: {
+    getEngine: () => engineAvailable ? ({ name: "codex", run: vi.fn() }) : undefined,
+    getEngines: () => new Map(),
+    getQueue: () => ({ getPendingCount: () => 0, getTransportState: (_key: string, state: string) => state }),
+  },
+} as unknown as import("../api.js").ApiContext
+
+async function request(method: string, url: string, body?: unknown, authorized = true) {
+  const encoded = body === undefined ? "" : JSON.stringify(body)
+  const req = Object.assign(Readable.from(encoded ? [Buffer.from(encoded)] : []), {
+    method,
+    url,
+    headers: {
+      host: "gateway.test",
+      ...(authorized ? { authorization: `Bearer ${context.gatewayAuthToken}` } : {}),
+      ...(encoded ? { "content-type": "application/json" } : {}),
+    },
+  })
+  const capture = responseCapture()
+  await api.handleApiRequest(req as never, capture.res, context)
+  return { status: capture.status(), body: JSON.parse(capture.text()) as Record<string, any> }
+}
+
+beforeAll(async () => {
+  api = await import("../api.js")
+  registry = await import("../../sessions/registry.js")
+  registry.initDb()
+})
+
+beforeEach(() => {
+  seedBundle()
+  dispatched.length = 0
+  engineAvailable = true
+  for (const session of registry.listSessions()) registry.deleteSession(session.id)
+})
+
+describe("instance migration API", () => {
+  it("adds version and a compact migration summary to status and exposes the canonical contract", async () => {
+    const status = await request("GET", "/api/status")
+    const migration = await request("GET", "/api/instance-migration")
+    expect(status.body).toMatchObject({ version: "0.26.0", migration: { required: true, fromVersion: "0.25.0", toVersion: "0.26.0" } })
+    expect(status.body.migration).not.toHaveProperty("prompt")
+    expect(migration.body).toMatchObject({ required: true, versions: ["0.26.0"] })
+    expect(migration.body.prompt).toContain("customized instance file")
+  })
+
+  it("requires browser mutation authority, snapshots first, and reuses one durable COO session", async () => {
+    const pending = await request("GET", "/api/instance-migration")
+    expect((await request("POST", "/api/instance-migration/open", { migrationKey: pending.body.migrationKey }, false)).status).toBe(403)
+    const [first, duplicate] = await Promise.all([
+      request("POST", "/api/instance-migration/open", { migrationKey: pending.body.migrationKey }),
+      request("POST", "/api/instance-migration/open", { migrationKey: pending.body.migrationKey }),
+    ])
+    expect(first.status).toBe(201)
+    expect(duplicate.status).toBe(200)
+    expect(first.body.sessionId).toBe(duplicate.body.sessionId)
+    expect([first.body.reused, duplicate.body.reused].sort()).toEqual([false, true])
+    expect(dispatched).toHaveLength(1)
+    const queue = registry.getQueueItems(`instance-migration:${pending.body.migrationKey}`)
+    expect(queue).toHaveLength(1)
+    expect(queue[0]).toMatchObject({ sessionId: first.body.sessionId, status: "pending" })
+    expect(fs.existsSync(path.join(home, ".migration-snapshots", pending.body.migrationKey, "snapshot.json"))).toBe(true)
+    expect(registry.getSessionBySessionKey(`instance-migration:${pending.body.migrationKey}`)?.id).toBe(first.body.sessionId)
+  })
+
+  it("persists nothing when the selected engine is unavailable, then accepts one retry durably across restart", async () => {
+    const pending = await request("GET", "/api/instance-migration")
+    engineAvailable = false
+
+    const unavailable = await request("POST", "/api/instance-migration/open", { migrationKey: pending.body.migrationKey })
+
+    expect(unavailable.status).toBe(500)
+    expect(registry.listSessions()).toHaveLength(0)
+    expect(registry.getQueueItems(`instance-migration:${pending.body.migrationKey}`)).toHaveLength(0)
+    expect(fs.existsSync(path.join(home, ".migration-snapshots", pending.body.migrationKey))).toBe(false)
+
+    engineAvailable = true
+    const [first, concurrent] = await Promise.all([
+      request("POST", "/api/instance-migration/open", { migrationKey: pending.body.migrationKey }),
+      request("POST", "/api/instance-migration/open", { migrationKey: pending.body.migrationKey }),
+    ])
+    expect([first.status, concurrent.status].sort()).toEqual([200, 201])
+    expect(first.body.sessionId).toBe(concurrent.body.sessionId)
+    expect(dispatched).toHaveLength(1)
+    expect(registry.getQueueItems(`instance-migration:${pending.body.migrationKey}`)).toHaveLength(1)
+
+    registry.__closeDbForTest()
+    registry.initDb()
+    expect(registry.getQueueItems(`instance-migration:${pending.body.migrationKey}`)).toHaveLength(1)
+    const afterRestart = await request("POST", "/api/instance-migration/open", { migrationKey: pending.body.migrationKey })
+    expect(afterRestart).toMatchObject({
+      status: 200,
+      body: { sessionId: first.body.sessionId, reused: true, migrationKey: pending.body.migrationKey },
+    })
+    expect(dispatched).toHaveLength(1)
+  })
+
+  it.each([
+    { label: "idle incomplete", status: "idle", attemptOutcome: null },
+    { label: "failed", status: "error", attemptOutcome: "failed" },
+  ] as const)("retires a $label row without accepted queue evidence before retrying", async ({ status, attemptOutcome }) => {
+    const pending = await request("GET", "/api/instance-migration")
+    const sessionKey = `instance-migration:${pending.body.migrationKey}`
+    const stale = registry.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: sessionKey,
+      connector: "web",
+      sessionKey,
+      prompt: pending.body.prompt,
+    })
+    registry.insertMessage(stale.id, "user", pending.body.prompt)
+    registry.updateSession(stale.id, { status, attemptOutcome })
+
+    const retry = await request("POST", "/api/instance-migration/open", { migrationKey: pending.body.migrationKey })
+
+    expect(retry.status).toBe(201)
+    expect(retry.body.reused).toBe(false)
+    expect(retry.body.sessionId).not.toBe(stale.id)
+    expect(registry.getSession(stale.id)?.sessionKey).toMatch(/^retired:instance-migration:/)
+    expect(registry.getQueueItems(sessionKey)).toHaveLength(1)
+    expect(dispatched).toHaveLength(1)
+  })
+
+  it("returns 409 after completion and creates nothing when bundle validation fails", async () => {
+    fs.writeFileSync(path.join(home, "config.yaml"), "jinn:\n  version: \"0.26.0\"\n")
+    expect((await request("GET", "/api/instance-migration")).body.required).toBe(false)
+    expect((await request("POST", "/api/instance-migration/open", { migrationKey: "x" })).status).toBe(409)
+
+    seedBundle()
+    fs.writeFileSync(path.join(migrationsDir, "0.26.0/files/target/CLAUDE.md"), "tampered")
+    expect((await request("GET", "/api/instance-migration")).status).toBe(500)
+    expect(registry.listSessions()).toHaveLength(0)
+  })
+})

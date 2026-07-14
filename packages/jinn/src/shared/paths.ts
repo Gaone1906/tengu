@@ -63,6 +63,8 @@ export const FILES_DIR = path.join(JINN_HOME, "files");
 /** Date-bucketed storage for files attached to / emitted by sessions. */
 export const UPLOADS_DIR = path.join(JINN_HOME, "uploads");
 export const TEMPLATE_MIGRATIONS_DIR = path.join(TEMPLATE_DIR, "migrations");
+/** Snapshot-first backups for automatic instance-template migrations. */
+export const MIGRATION_SNAPSHOTS_DIR = path.join(JINN_HOME, ".migration-snapshots");
 
 /** Path to the global multi-instance registry. Override only for isolated tests. */
 export const INSTANCES_REGISTRY = process.env.JINN_INSTANCES_REGISTRY || path.join(os.homedir(), ".jinn", "instances.json");

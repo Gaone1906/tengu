@@ -17,7 +17,7 @@ const restartRequest = vi.hoisted(() => ({
 vi.mock("../../gateway/lifecycle.js", () => lifecycle);
 vi.mock("../restart-request.js", () => restartRequest);
 vi.mock("../../shared/config.js", () => ({
-  loadConfig: () => ({ gateway: { host: "127.0.0.1", port: 7777 }, engines: { default: "claude" } }),
+  loadConfig: () => ({ gateway: { host: "127.0.0.1", port: 21877 }, engines: { default: "claude" } }),
 }));
 
 const { runRestart } = await import("../restart.js");
@@ -48,6 +48,6 @@ describe("runRestart", () => {
 
     await runRestart({ takePort: true });
 
-    expect(lifecycle.restartDetached).toHaveBeenCalledWith({ takePort: true });
+    expect(lifecycle.restartDetached).toHaveBeenCalledWith({ takePort: true, port: 21877 });
   });
 });

@@ -131,9 +131,10 @@ program
 
 program
   .command("migrate")
-  .description("Print (or apply) the migration prompt for template changes since your instance's version")
-  .option("--apply", "Pipe the composed migration prompt into this instance's agent, then advance the version marker")
-  .option("--mark-done [version]", "Mark the instance as migrated to <version> (default: package version) without running anything")
+  .description("Print the canonical pending instance-migration prompt or complete a verified migration")
+  .option("--apply", "Deprecated: print the canonical prompt without launching an agent or advancing the marker")
+  .option("--mark-done [version]", "Advance the marker only with a verified snapshot, receipt, and migration key")
+  .option("--migration-key <key>", "Expected key from the canonical automatic migration handoff")
   .action(async (opts) => {
     const { runMigrate } = await import("../src/cli/migrate.js");
     await runMigrate(opts);

@@ -990,6 +990,7 @@ export async function startGateway(
     sessionManager,
     startTime,
     gatewayBootId: bootId,
+    runtimePort: config.gateway.port || 7777,
     getConfig: () => currentConfig,
     emit,
     connectors: connectorMap,

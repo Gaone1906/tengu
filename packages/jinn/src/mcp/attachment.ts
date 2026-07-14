@@ -29,38 +29,28 @@ import { JINN_HOME } from "../shared/paths.js";
  *                               single-employee pilot before the global flip.
  *                               The existing `mcp: false` / allowlist semantics
  *                               are unchanged when `jinnMcp` is unset;
- *   5. the default            — {@link JINN_ATTACH_DEFAULT}, OFF in this build.
+ *   5. the default            — {@link JINN_ATTACH_DEFAULT}, ON since v0.26.
  *
  * …and then the AUTHED-SMOKE GATE is a MANDATORY CONJUNCT of every positive
  * result (GRS-017e-fix, codex finding 1): whatever arm said "attach" — master
- * on, employee pilot, future default-on — the decision only stands if the gate
+ * on, employee override, or the shipped default — the decision only stands if the gate
  * is armed AND passed ({@link runJinnAuthedSmokeTest} verified the builtin
  * server can authenticate on THIS gateway). Failed gate → no attach (broken
  * tools are worse than no tools; the reason was logged at arm time). UNARMED
  * gate → no attach either: an attach path whose probe has not run yet is
  * uncertainty, and this module fails CLOSED under uncertainty. Negative
- * decisions never consult the gate, so the default-off path stays byte-
- * identical with zero probes.
+ * decisions never consult the gate.
  *
  * The resolver (mcp/resolver.ts) is the only production caller; jinn-server
  * membership in a resolved set is decided HERE and nowhere else.
  */
 
 /**
- * THE FLIP LINE (GRS-017e deliverable: ready to flip, not flipped).
- *
- * The shipped default for `mcp.gateway.enabled: <absent>`. While `false`,
- * every existing config resolves byte-identical to today. Flipping default
- * attachment on for fresh/unconfigured gateways at merge time is exactly:
- *   1. set this constant to `true`;
- *   2. update the "THE FLIP LINE" test in __tests__/attachment.test.ts;
- *   3. release-note line: "employee sessions on MCP-capable engines now see
- *      the `jinn` company toolset by default; set `mcp.gateway.enabled: false`
- *      to restore the old behavior."
- * Until then the operator's one-line opt-in is `mcp:\n  gateway:\n    enabled: true`
- * in config.yaml (hot-reloads; the authed smoke gate re-arms on reload).
+ * Shipped default for `mcp.gateway.enabled: <absent>`. Since v0.26, employee
+ * sessions on MCP-capable engines receive the built-in company toolset by
+ * default. `mcp.gateway.enabled: false` remains the global kill switch.
  */
-export const JINN_ATTACH_DEFAULT = false;
+export const JINN_ATTACH_DEFAULT = true;
 
 /**
  * Engines whose adapters can consume a resolved MCP server set (grounded in
@@ -113,8 +103,7 @@ export function setJinnAttachGate(result: JinnSmokeResult | null): void {
 /**
  * Should jinn attachment be ON gateway-wide (before engine/employee scoping)?
  * This is also the "must the smoke gate be armed?" predicate: the probe only
- * runs when broad attachment would actually happen, so the default-off path
- * makes zero extra calls and stays byte-identical to today.
+ * runs only when broad attachment would actually happen.
  */
 export function jinnAttachGloballyOn(globalMcp: McpGlobalConfig | undefined): boolean {
   const enabled = globalMcp?.gateway?.enabled;
@@ -145,7 +134,7 @@ export function decideJinnAttachment(opts: {
   if (!verdict.attach) return verdict;
 
   // THE MANDATORY CONJUNCT. Every positive path — master on, employee pilot,
-  // a future default-on — must pass the authed smoke gate. Unarmed = the
+  // the shipped default — must pass the authed smoke gate. Unarmed = the
   // probe for this attach path has not run = uncertainty = fail closed
   // ({@link armJinnAttachGate} arms whenever any path could attach, so a
   // production `null` here means an arming gap or a pre-arm instant, and
