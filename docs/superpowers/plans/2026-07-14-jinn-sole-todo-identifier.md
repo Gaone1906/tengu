@@ -90,7 +90,9 @@ work_item_events.work_item_id
 
 Validate JIN at the event producer and before claim/run persistence, condition evaluation, or session creation. Remove unshipped `triggerTodoId` and poll `approvalWorkItemId` compatibility fields.
 
-Webhook and poll `payload.todoId` is recognized executable structure. When present, pass it through `parseTodoId` before custom-trigger filtering, idempotency hashing, claim/run persistence, Workflow condition evaluation, callback/queue work, or session creation. Exact legacy, malformed, non-string, and noncanonical values fail closed without side effects. Filters comparing `payload.todoId` and conditions comparing `trigger.payload.todoId` operate only on the validated canonical value. Unrelated payload fields and free-form strings remain inert data; do not recursively reject or sanitize them.
+Webhook and poll ingress treat only an own top-level `payload.todoId` as recognized Todo structure. Check prototype safety before reading it: an inherited/prototype `todoId` is invalid; an own value must be a string accepted by `parseTodoId`. Perform this validation before custom-trigger filtering, `fireRef` or hash derivation, claims, run/file persistence, Workflow conditions, callbacks, queues, or sessions. Exact legacy IDs, `JIN-0`, garbage, non-strings, and inherited values fail closed with zero side effects.
+
+An authored filter targeting `payload.todoId` and a condition targeting `trigger.payload.todoId` must apply the same own-property and `parseTodoId` validation and may compare only the resulting canonical value. Unrelated payload fields—including free-form prose containing an exact `wi_*` literal—are untouched inert data.
 
 ## Private Disposable Converter
 
@@ -153,7 +155,7 @@ Implementation is unauthorized until this plan receives fresh approval.
 
 **Shipped files:** `work-items/id.ts`, allocator/schema/store and focused tests; session startup preflight; REST/MCP/Workflow/auth modules; web Todo routes/components/state; deletion of private-ref code.
 
-RED then GREEN: strict grammar; fresh and `0.25.0`-shaped homes; empty prerelease replacement; no-write refusal for every nonempty/mixed/unknown shape; startup refusal when the exact ID trigger is absent/altered; 16/32-process allocation; crash/race gaps; direct SQL valid-to-valid, same-value, and high-water/orphaning ID updates; unclaimed/unburned/high-water-mismatch inserts; reinsertion of a deleted ID; attempted insertion of an abandoned burn; allocator/burn/issuance mutation; archive/delete/nonreuse; every product surface; legacy ingress; exact webhook/poll `payload.todoId`, filter, and condition cases proving validation precedes hashing/persistence/execution while unrelated strings remain inert; authz/enumeration; browser route/copy/a11y/clean-tab/no-draft-loss.
+RED then GREEN: strict grammar; fresh and `0.25.0`-shaped homes; empty prerelease replacement; no-write refusal for every nonempty/mixed/unknown shape; startup refusal when the exact ID trigger is absent/altered; 16/32-process allocation; crash/race gaps; direct SQL valid-to-valid, same-value, and high-water/orphaning ID updates; unclaimed/unburned/high-water-mismatch inserts; reinsertion of a deleted ID; attempted insertion of an abandoned burn; allocator/burn/issuance mutation; archive/delete/nonreuse; every product surface; legacy ingress; webhook and poll cases for valid `JIN-N`, exact legacy, `JIN-0`, garbage, non-string, inherited/prototype, absent, and prose-only values; exact filter/condition cases for the same structural rule. The valid control proceeds once; every rejected case proves zero filter, `fireRef`/hash, claim, persistence, condition, callback, queue, and session side effects; unrelated prose remains byte-identical and inert. Also verify authz/enumeration and browser route/copy/a11y/clean-tab/no-draft-loss.
 
 ### B. Disposable converter complete, dry-run only
 
