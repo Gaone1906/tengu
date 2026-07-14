@@ -2977,6 +2977,16 @@ export async function handleApiRequest(
       return;
     }
 
+    if (method === "GET" && pathname === "/api/features") {
+      return json(res, { notesEnabled: context.getConfig().gateway.notesEnabled === true });
+    }
+
+    if (pathname === "/api/notes" || pathname === "/api/notes/read") {
+      if (context.getConfig().gateway.notesEnabled !== true) {
+        return json(res, { error: "Notes are not enabled" }, 404);
+      }
+    }
+
     const controlPlaneAction = operatorOnlyControlPlaneRoute(method, pathname);
     if (controlPlaneAction && !requireOperatorControlPlaneAuthority(req, res, controlPlaneAction, context)) {
       return;

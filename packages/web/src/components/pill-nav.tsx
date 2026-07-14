@@ -4,9 +4,10 @@ import { Menu, Sun, Moon, Palette, ArrowLeftRight, PanelLeft } from "lucide-reac
 import { useTheme } from "@/routes/providers"
 import { useSettings } from "@/routes/settings-provider"
 import { THEMES, type ThemeId } from "@/lib/themes"
-import { NAV_ITEMS } from "@/lib/nav"
+import { navigationFor } from "@/lib/nav"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { cn } from "@/lib/utils"
+import { useFeatures } from "@/hooks/use-features"
 
 // ---------------------------------------------------------------------------
 // Frosted pill primitives (mockup _shared.css `.pill` recipe)
@@ -79,9 +80,11 @@ export function NavList({
   pathname: string
   onNavigate?: () => void
 }) {
+  const { data: features } = useFeatures()
+  const navItems = navigationFor(features?.notesEnabled === true).items
   return (
     <div className="flex flex-col gap-0.5 p-1.5">
-      {NAV_ITEMS.map((item) => {
+      {navItems.map((item) => {
         const isActive = isNavItemActive(item.href, pathname)
         const Icon = item.icon
         return (
@@ -279,6 +282,8 @@ export function NavRibbon({
   listOpen?: boolean
   onToggleList?: () => void
 }) {
+  const { data: features } = useFeatures()
+  const navItems = navigationFor(features?.notesEnabled === true).items
   const pathname = useLocation().pathname
   const { theme, setTheme } = useTheme()
   const { settings } = useSettings()
@@ -368,7 +373,7 @@ export function NavRibbon({
         </div>
 
         {/* Nav icons — per-icon piano reveal. */}
-        {NAV_ITEMS.map((item) => (
+        {navItems.map((item) => (
           <RibbonRow
             key={item.href}
             Icon={item.icon}
@@ -441,9 +446,11 @@ export function PillNav({ actions }: { actions?: ReactNode }) {
   // color and look faded — see the brand-mark color note below).
   const emoji = settings.portalEmoji ?? "\u{1F9DE}\u{FE0F}"
   const [navOpen, setNavOpen] = useState(false)
+  const { data: features } = useFeatures()
+  const navItems = navigationFor(features?.notesEnabled === true).items
 
   const title = items[0]?.label ?? ""
-  const navItem = NAV_ITEMS.find((n) => isNavItemActive(n.href, pathname))
+  const navItem = navItems.find((n) => isNavItemActive(n.href, pathname))
   const RouteIcon = navItem?.icon
 
   return (

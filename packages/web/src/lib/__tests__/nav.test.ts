@@ -1,19 +1,18 @@
 import { describe, it, expect } from 'vitest'
 import { NAV_ITEMS, MOBILE_TAB_ITEMS, OVERFLOW_ITEMS, MORE_NAV_ITEM } from '../nav'
 
-// GRS-022 — the mobile bottom tab bar is the sole mobile nav: 5 primary tabs
-// (Chat · Todos · Notes · Workflows · More), with everything else under the More
+// Notes are feature-gated, so the default tab bar contains the remaining primary
+// surfaces and More, with everything else under the More
 // overflow screen.
 describe('MOBILE_TAB_ITEMS', () => {
-  it('has exactly 5 entries', () => {
-    expect(MOBILE_TAB_ITEMS).toHaveLength(5)
+  it('has exactly 4 entries while Notes is disabled', () => {
+    expect(MOBILE_TAB_ITEMS).toHaveLength(4)
   })
 
   it('lists the primary hrefs in order, ending with More', () => {
     expect(MOBILE_TAB_ITEMS.map((item) => item.href)).toEqual([
       '/',
       '/todos',
-      '/notes',
       '/workflow',
       '/more',
     ])

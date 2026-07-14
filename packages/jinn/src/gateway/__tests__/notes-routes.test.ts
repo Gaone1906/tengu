@@ -13,6 +13,7 @@ let api: Api;
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-notes-route-data-"));
 const emitted: Array<{ event: string; payload: unknown }> = [];
+let notesEnabled = true;
 
 function seed(relativePath: string, content: string): string {
   const absolutePath = path.join(home, relativePath);
@@ -48,7 +49,7 @@ function makeRes() {
 }
 
 const apiContext = {
-  getConfig: () => ({ gateway: {}, engines: { default: "codex" }, sessions: {} }),
+  getConfig: () => ({ gateway: { notesEnabled }, engines: { default: "codex" }, sessions: {} }),
   connectors: new Map(),
   startTime: Date.now(),
   emit: (event: string, payload: unknown) => emitted.push({ event, payload }),
@@ -94,12 +95,32 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  notesEnabled = true;
   fs.rmSync(path.join(home, "knowledge"), { recursive: true, force: true });
   fs.mkdirSync(path.join(home, "knowledge"), { recursive: true });
   emitted.length = 0;
 });
 
 describe("Notes HTTP routes", () => {
+  it("returns 404 for every Notes endpoint when disabled", async () => {
+    notesEnabled = false;
+
+    for (const [method, target, body] of [
+      ["GET", "/api/notes", undefined],
+      ["GET", "/api/notes/read?path=knowledge%2Fplan.md", undefined],
+      ["POST", "/api/notes", { title: "Plan" }],
+      ["PUT", "/api/notes", { path: "knowledge/plan.md", expectedRevision: "a".repeat(64), body: "Updated" }],
+    ] as const) {
+      expect((await request(method, target, body)).status).toBe(404);
+    }
+  });
+
+  it("reports the Notes feature state", async () => {
+    expect(await request("GET", "/api/features")).toMatchObject({ status: 200, body: { notesEnabled: true } });
+    notesEnabled = false;
+    expect(await request("GET", "/api/features")).toMatchObject({ status: 200, body: { notesEnabled: false } });
+  });
+
   it("lists recursive folders and reads one note", async () => {
     seed("knowledge/product/brief.md", "# Launch brief\n\nShip calmly.\n");
 

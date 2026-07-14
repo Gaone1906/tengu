@@ -78,7 +78,7 @@ describe("note tool contracts", () => {
   });
 
   it("registers only those four new verbs on the full belt", () => {
-    const names = buildTools().map((candidate) => candidate.name);
+    const names = buildTools({ notesEnabled: true }).map((candidate) => candidate.name);
     expect(names.filter((name) => name.endsWith("_note") || name.endsWith("_notes"))).toEqual([
       "list_notes",
       "read_note",
@@ -86,6 +86,13 @@ describe("note tool contracts", () => {
       "update_note",
     ]);
     expect(names).toHaveLength(54);
+  });
+
+  it("omits Notes verbs from the full belt when the feature is disabled", () => {
+    const names = buildTools({ notesEnabled: false }).map((candidate) => candidate.name);
+
+    expect(names.filter((name) => name.endsWith("_note") || name.endsWith("_notes"))).toEqual([]);
+    expect(names).toHaveLength(50);
   });
 
   it("teaches read-before-update in the list result hint", async () => {
@@ -209,7 +216,7 @@ function makeRes() {
 }
 
 const apiContext = {
-  getConfig: () => ({ gateway: {}, engines: { default: "codex" }, sessions: {} }),
+  getConfig: () => ({ gateway: { notesEnabled: true }, engines: { default: "codex" }, sessions: {} }),
   connectors: new Map(),
   startTime: Date.now(),
   emit: () => {},

@@ -12,13 +12,13 @@ function renderAt(path: string) {
 }
 
 describe('MobileTabBar', () => {
-  // GRS-022: the sole mobile nav — 5 icon-only tabs. No visible labels, so the
+  // Notes is feature-gated; the default mobile nav has four icon-only tabs. No visible labels, so the
   // accessible name comes from each tab's aria-label.
-  it('renders exactly 5 tabs with accessible names', () => {
+  it('renders exactly 4 tabs with accessible names while Notes is disabled', () => {
     renderAt('/')
     const tabs = screen.getAllByRole('link')
-    expect(tabs).toHaveLength(5)
-    for (const label of ['Chat', 'Todos', 'Notes', 'Workflows', 'More']) {
+    expect(tabs).toHaveLength(4)
+    for (const label of ['Chat', 'Todos', 'Workflows', 'More']) {
       expect(screen.getByRole('link', { name: label })).toBeDefined()
     }
   })
@@ -28,7 +28,7 @@ describe('MobileTabBar', () => {
     expect(
       screen.getByRole('link', { name: 'Chat' }).getAttribute('aria-current')
     ).toBe('page')
-    for (const label of ['Todos', 'Notes', 'Workflows', 'More']) {
+    for (const label of ['Todos', 'Workflows', 'More']) {
       expect(
         screen.getByRole('link', { name: label }).getAttribute('aria-current')
       ).toBeNull()
@@ -45,12 +45,6 @@ describe('MobileTabBar', () => {
     ).toBeNull()
   })
 
-  it('marks Notes current on "/notes" without lighting More', () => {
-    renderAt('/notes')
-    expect(screen.getByRole('link', { name: 'Notes' }).getAttribute('aria-current')).toBe('page')
-    expect(screen.getByRole('link', { name: 'More' }).getAttribute('aria-current')).toBeNull()
-  })
-
   it('keeps the More tab lit on the More screen', () => {
     renderAt('/more')
     expect(
@@ -64,7 +58,7 @@ describe('MobileTabBar', () => {
       screen.getByRole('link', { name: 'More' }).getAttribute('aria-current')
     ).toBe('page')
     // ...and no primary tab steals the cue.
-    for (const label of ['Chat', 'Todos', 'Notes', 'Workflows']) {
+    for (const label of ['Chat', 'Todos', 'Workflows']) {
       expect(
         screen.getByRole('link', { name: label }).getAttribute('aria-current')
       ).toBeNull()

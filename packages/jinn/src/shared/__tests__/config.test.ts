@@ -51,6 +51,12 @@ describe("validateConfigShape", () => {
     expect(problems.some((p) => p.includes("gateway.port"))).toBe(true);
   });
 
+  it("accepts a boolean gateway.notesEnabled flag and rejects other values", () => {
+    expect(validateConfigShape({ gateway: { notesEnabled: false }, engines: { claude: {} } })).toEqual([]);
+    const problems = validateConfigShape({ gateway: { notesEnabled: "false" }, engines: { claude: {} } });
+    expect(problems.some((p) => p.includes("gateway.notesEnabled"))).toBe(true);
+  });
+
   it("rejects missing engines / engines.claude", () => {
     expect(validateConfigShape({})[0]).toContain("engines");
     const problems = validateConfigShape({ engines: { default: "codex" } });

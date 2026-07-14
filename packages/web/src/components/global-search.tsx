@@ -3,8 +3,7 @@ import { useCallback, useEffect, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import {
   MessageSquare, Users, ListChecks, Clock,
-  Activity, Zap, Settings, Plus, Hash, Workflow, Gauge,
-  NotebookPen,
+  Activity, Zap, Settings, Plus, Hash, Workflow, Gauge, NotebookPen,
 } from "lucide-react"
 import {
   Command,
@@ -21,6 +20,7 @@ import { useOrg } from "@/hooks/use-employees"
 import { useCronJobs } from "@/hooks/use-cron"
 import { useSessions } from "@/hooks/use-sessions"
 import { useSkills } from "@/hooks/use-skills"
+import { useFeatures } from "@/hooks/use-features"
 
 const RECENT_KEY = "jinn-command-recent"
 const MAX_RECENT = 5
@@ -49,10 +49,9 @@ function saveRecent(item: RecentItem) {
 
 // Every top-level destination, so the command palette can reach anything the
 // mobile tab bar / More overflow reaches (kept in step with lib/nav NAV_ITEMS).
-export const STATIC_PAGES = [
+const BASE_STATIC_PAGES = [
   { id: "page-chat", label: "Chat", icon: MessageSquare, href: "/" },
   { id: "page-todos", label: "Todos", icon: ListChecks, href: "/todos" },
-  { id: "page-notes", label: "Notes", icon: NotebookPen, href: "/notes" },
   { id: "page-workflow", label: "Workflows", icon: Workflow, href: "/workflow" },
   { id: "page-org", label: "Organization", icon: Users, href: "/org" },
   { id: "page-cron", label: "Cron", icon: Clock, href: "/cron" },
@@ -61,6 +60,15 @@ export const STATIC_PAGES = [
   { id: "page-skills", label: "Skills", icon: Zap, href: "/skills" },
   { id: "page-settings", label: "Settings", icon: Settings, href: "/settings" },
 ]
+
+export function staticPagesFor(notesEnabled: boolean) {
+  const notesPage = { id: "page-notes", label: "Notes", icon: NotebookPen, href: "/notes" }
+  return notesEnabled
+    ? [...BASE_STATIC_PAGES.slice(0, 2), notesPage, ...BASE_STATIC_PAGES.slice(2)]
+    : BASE_STATIC_PAGES
+}
+
+export const STATIC_PAGES = staticPagesFor(false)
 
 interface GlobalSearchProps {
   initialOpen?: boolean
@@ -77,6 +85,8 @@ export function GlobalSearch({ initialOpen = false }: GlobalSearchProps) {
   const { data: cronJobs } = useCronJobs()
   const { data: sessions } = useSessions()
   const { data: skills } = useSkills()
+  const { data: features } = useFeatures()
+  const staticPages = staticPagesFor(features?.notesEnabled === true)
 
   // Cmd+K toggle
   useEffect(() => {
@@ -141,7 +151,7 @@ export function GlobalSearch({ initialOpen = false }: GlobalSearchProps) {
 
               {/* Pages */}
               <CommandGroup heading="Pages">
-                {STATIC_PAGES.map(page => (
+                {staticPages.map(page => (
                   <CommandItem
                     key={page.id}
                     onSelect={() => navigate(page.href, { id: page.id, label: page.label, href: page.href, type: 'page' })}

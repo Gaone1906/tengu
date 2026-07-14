@@ -1,7 +1,8 @@
 import { Link, useLocation } from "react-router-dom"
 import { isNavItemActive } from "@/components/pill-nav"
-import { MOBILE_TAB_ITEMS, MORE_NAV_ITEM, OVERFLOW_HREFS } from "@/lib/nav"
+import { MORE_NAV_ITEM, navigationFor } from "@/lib/nav"
 import { cn } from "@/lib/utils"
+import { useFeatures } from "@/hooks/use-features"
 
 // ---------------------------------------------------------------------------
 // MobileTabBar — GRS-022. The SOLE mobile nav: an icon-only iOS-style bottom tab
@@ -22,11 +23,11 @@ import { cn } from "@/lib/utils"
 // are even after a one-tap dive out of the overflow list.
 // ---------------------------------------------------------------------------
 
-function isTabActive(href: string, pathname: string): boolean {
+function isTabActive(href: string, pathname: string, overflowHrefs: string[]): boolean {
   if (href === MORE_NAV_ITEM.href) {
     return (
       pathname === MORE_NAV_ITEM.href ||
-      OVERFLOW_HREFS.some((h) => isNavItemActive(h, pathname))
+      overflowHrefs.some((h) => isNavItemActive(h, pathname))
     )
   }
   return isNavItemActive(href, pathname)
@@ -34,6 +35,8 @@ function isTabActive(href: string, pathname: string): boolean {
 
 export function MobileTabBar() {
   const pathname = useLocation().pathname
+  const { data: features } = useFeatures()
+  const navigation = navigationFor(features?.notesEnabled === true)
 
   return (
     <nav
@@ -46,8 +49,8 @@ export function MobileTabBar() {
         "py-1.5 pb-[max(var(--safe-bottom),6px)]",
       )}
     >
-      {MOBILE_TAB_ITEMS.map((item) => {
-        const isActive = isTabActive(item.href, pathname)
+      {navigation.mobileItems.map((item) => {
+        const isActive = isTabActive(item.href, pathname, navigation.overflowHrefs)
         const Icon = item.icon
         return (
           <Link

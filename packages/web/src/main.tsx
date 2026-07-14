@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Navigate, Outlet, RouterProvider, createBrowserRouter } from 'react-router-dom'
 import { ClientProviders } from './routes/client-providers'
 import { lazyRoute } from './lib/lazy-route'
+import { useFeatures } from './hooks/use-features'
 import './routes/globals.css'
 
 const ChatPage = lazyRoute(() => import('./routes/chat/page'), 'chat')
@@ -29,6 +30,12 @@ function RouteLoading() {
       <div className="size-5 animate-spin rounded-full border-2 border-[var(--fill-tertiary)] border-t-[var(--accent)]" />
     </div>
   )
+}
+
+function NotesFeatureRoute() {
+  const { data: features, isPending } = useFeatures()
+  if (isPending) return <RouteLoading />
+  return features?.notesEnabled === true ? <NotesPage /> : <Navigate to="/" replace />
 }
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -78,9 +85,9 @@ const router = createBrowserRouter([
       { path: '/cron/:id', element: <CronDetailPage /> },
       { path: '/todos', element: <TodosPage /> },
       { path: '/todos/:todoId', element: <TodosPage /> },
-      { path: '/notes', element: <NotesPage /> },
+      { path: '/notes', element: <NotesFeatureRoute /> },
       // Folder/note deep links: /notes/f/<folder>, /notes/n/<rel>, or both.
-      { path: '/notes/*', element: <NotesPage /> },
+      { path: '/notes/*', element: <NotesFeatureRoute /> },
       // GRS-021d: Kanban became Todos. Old links redirect.
       { path: '/kanban', element: <Navigate to="/todos" replace /> },
       { path: '/logs', element: <LogsPage /> },

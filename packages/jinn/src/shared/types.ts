@@ -817,6 +817,8 @@ export interface JinnConfig {
     port: number;
     host: string;
     streaming?: boolean;
+    /** Expose the editable Notes feature. Defaults to false while the implementation stays dormant. */
+    notesEnabled?: boolean;
     /** Opt-in unsafe local convenience: allow POST /api/files to write a custom managed path. Default false. */
     allowFileCustomPaths?: boolean;
     /** Opt-in unsafe local convenience: allow POST /api/files {open:true} to open uploaded files. Default false. */

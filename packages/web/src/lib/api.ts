@@ -963,6 +963,7 @@ export const api = {
     post<NoteDocumentResponse>("/api/notes", input),
   updateNote: (input: UpdateNoteInput) =>
     put<NoteDocumentResponse>("/api/notes", input),
+  getFeatures: () => get<{ notesEnabled: boolean }>("/api/features"),
   getStatus: () => get<Record<string, unknown>>("/api/status"),
   /** GRS-009: one workflow's definition + DERIVED run state (read-only). */
   getWorkflow: (id: string) => get<DerivedWorkflow>(`/api/workflows/${encodeURIComponent(id)}`),
@@ -1174,6 +1175,8 @@ export const api = {
   getSessionChildren: (id: string) => get<Record<string, unknown>[]>(`/api/sessions/${id}/children`),
   updateSession: (id: string, data: { title?: string; engine?: string; model?: string; effortLevel?: string }) =>
     put<Record<string, unknown>>(`/api/sessions/${id}`, data),
+  archiveSession: (id: string) => post<Record<string, unknown>>(`/api/sessions/${id}/archive`, {}),
+  unarchiveSession: (id: string) => post<Record<string, unknown>>(`/api/sessions/${id}/unarchive`, {}),
   deleteSession: (id: string) => del<Record<string, unknown>>(`/api/sessions/${id}`),
   duplicateSession: (id: string) =>
     post<Record<string, unknown>>(`/api/sessions/${id}/duplicate`, {}),

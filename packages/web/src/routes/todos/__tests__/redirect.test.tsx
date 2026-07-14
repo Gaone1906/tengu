@@ -25,12 +25,12 @@ describe("Todos nav + redirect", () => {
     expect(NAV_ITEMS.find((i) => i.href === "/todos")?.label).toBe("Todos")
   })
 
-  it("places Notes immediately after Todos in the shared desktop order", () => {
+  it("hides Notes from the shared desktop order while disabled", () => {
     expect(NAV_ITEMS.slice(0, 4).map((item) => item.href)).toEqual([
       "/",
       "/todos",
-      "/notes",
       "/workflow",
+      "/org",
     ])
   })
 

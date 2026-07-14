@@ -66,11 +66,11 @@ export function cleanupPiJinnMcpExtension(handle: PiMcpExtensionHandle | undefin
 
 function piExtensionSource(): string {
   return `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { buildTools } from ${JSON.stringify(JINN_MCP_SERVER_MODULE_URL)};
+import { buildTools, notesEnabledFromConfig } from ${JSON.stringify(JINN_MCP_SERVER_MODULE_URL)};
 import { projectPiTool } from ${JSON.stringify(JINN_PI_MCP_MODULE_URL)};
 
 export default function jinnMcpExtension(pi: ExtensionAPI): void {
-  for (const tool of buildTools()) {
+  for (const tool of buildTools({ notesEnabled: notesEnabledFromConfig() })) {
     pi.registerTool({
       ...projectPiTool(tool),
       async execute(_toolCallId: string, params: Record<string, unknown> | undefined) {

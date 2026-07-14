@@ -39,6 +39,9 @@ export function validateConfigShape(config: unknown): string[] {
       if (c.gateway.host !== undefined && typeof c.gateway.host !== "string") {
         problems.push(`gateway.host must be a string (got ${typeof c.gateway.host})`);
       }
+      if (c.gateway.notesEnabled !== undefined && typeof c.gateway.notesEnabled !== "boolean") {
+        problems.push(`gateway.notesEnabled must be a boolean (got ${typeof c.gateway.notesEnabled})`);
+      }
       if (c.gateway.allowFileCustomPaths !== undefined && typeof c.gateway.allowFileCustomPaths !== "boolean") {
         problems.push(`gateway.allowFileCustomPaths must be a boolean (got ${typeof c.gateway.allowFileCustomPaths})`);
       }
