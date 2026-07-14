@@ -427,7 +427,7 @@ export function initDb(): Database.Database {
   // discover the same fresh or upgraded home concurrently; initialization is
   // serialized by SQLite instead of surfacing a transient SQLITE_BUSY.
   database.pragma('busy_timeout = 10000');
-  database.pragma('journal_mode = WAL');
+  runSqliteBusyRetry(() => database.pragma('journal_mode = WAL'));
   const initialize = database.transaction(() => {
     database.exec(CREATE_TABLE);
     database.exec(CREATE_MESSAGES_TABLE);
@@ -719,10 +719,14 @@ function ensureCallbackDeliveryIndexes(database: Database.Database): void {
 }
 
 function runImmediateMigrationWithRetry<T>(migration: Database.Transaction<() => T>): T {
+  return runSqliteBusyRetry(() => migration.immediate());
+}
+
+function runSqliteBusyRetry<T>(operation: () => T): T {
   const retryDelaysMs = [10, 50, 200];
   for (let attempt = 0; ; attempt++) {
     try {
-      return migration.immediate();
+      return operation();
     } catch (error) {
       const code = error && typeof error === 'object' && 'code' in error
         ? String((error as { code?: unknown }).code)
