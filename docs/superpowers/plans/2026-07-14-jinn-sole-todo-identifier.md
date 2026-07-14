@@ -1,4 +1,4 @@
-# JIN-N Sole Todo Identifier — v7
+# JIN-N Sole Todo Identifier — Final Architecture
 
 > **Status:** Architecture only. Implementation requires a fresh independent review. This document does not authorize conversion, restart, release, deployment, or publication.
 
@@ -49,7 +49,7 @@ Before WAL mode or any schema write, startup opens the database read-only and cl
 
 1. Todo tables absent, as in every public `0.25.0` home: create the clean JIN schema and allocator.
 2. Recognized prerelease Todo tables and every companion/reference are empty: transactionally replace them with the clean schema.
-3. Exact current JIN schema: verify schema, triggers, allocator, burn ledger, and reference invariants, then continue.
+3. Exact current JIN schema: verify schema, the exact `work_items_id_immutable` trigger SQL, allocator, burn ledger, and reference invariants, then continue.
 4. Any nonempty legacy/mixed/noncanonical table or edge, malformed/unknown Todo schema, or allocator mismatch: close and abort before writes or serving.
 
 The refusal does not echo data:
@@ -65,7 +65,7 @@ Fresh creation installs:
 - an append-only burn ledger containing ordinal plus a digest of a one-time random allocation claim, and a separate append-only issuance ledger;
 - transactional `BEGIN IMMEDIATE` allocation that commits the burn and returns the raw claim only to that caller before Todo creation;
 - an insert trigger that requires the JIN suffix to match its burn, have no issuance marker, and match the connection-local raw claim digest; an after-insert trigger atomically appends the issuance marker;
-- `BEFORE UPDATE OF id ON work_items` that always aborts, including `SET id = id`;
+- the exact `work_items_id_immutable BEFORE UPDATE OF id ON work_items` trigger, whose body unconditionally raises `ABORT`; there is no `WHEN` clause, so `SET id = id` also fails;
 - immutable/decreasing/deleting allocator, burn, and issuance guards.
 
 The raw claim is held only in memory for one create transaction and exposed to SQLite through a scoped registered function; ordinary/direct SQL sees no claim. Failure, crash, or lost idempotency race discards it, making the burn a permanent gap. Deleting a Todo leaves its issuance marker, so even a retained claim cannot recreate it. Burns, claims, and issuance markers are allocation evidence, not accepted or resolvable Todo identities. The private converter installs the same schema/triggers only after its rekey transaction.
@@ -90,13 +90,13 @@ work_item_events.work_item_id
 
 Validate JIN at the event producer and before claim/run persistence, condition evaluation, or session creation. Remove unshipped `triggerTodoId` and poll `approvalWorkItemId` compatibility fields.
 
-Webhook and poll payloads are executable ingress: bounded recursive validation rejects every exact `^wi_[0-9a-f]{12}$` string before claim, run-file, callback, queue, or session side effects. This is ordinary clean-model validation, not migration or aliasing. Other prose remains ordinary data and never resolves because every typed Todo ingress accepts only JIN.
+Webhook and poll `payload.todoId` is recognized executable structure. When present, pass it through `parseTodoId` before custom-trigger filtering, idempotency hashing, claim/run persistence, Workflow condition evaluation, callback/queue work, or session creation. Exact legacy, malformed, non-string, and noncanonical values fail closed without side effects. Filters comparing `payload.todoId` and conditions comparing `trigger.payload.todoId` operate only on the validated canonical value. Unrelated payload fields and free-form strings remain inert data; do not recursively reject or sanitize them.
 
 ## Private Disposable Converter
 
 ### One complete fail-closed slice
 
-No apply entry point may exist until one complete vertical slice has landed and passed tests: read-only inventory, deterministic mapping, every structured rewrite, Activity handling, invariants, external backup verification, dry run, apply engine kept unreachable, and restore rehearsal. Partial table/file rekey functions are testable internally but cannot be invoked destructively.
+No apply entry point may exist until one complete vertical slice has landed and passed tests: read-only inventory, deterministic mapping, every permitted structured rewrite, the Activity refusal gate, invariants, external backup verification, dry run, apply engine kept unreachable, and restore rehearsal. Partial table/file rekey functions are testable internally but cannot be invoked destructively.
 
 The tool defaults to dry run, requires full gateway downtime and an exclusive lock, refuses any changed inventory or unknown shape, and emits counts plus SHA-256 digests only. It contains no personal data or installed-instance default path. Apply is added last and requires the exact repeated dry-run digest plus a separately recorded operator authorization. Implementation/review never opens the real private database.
 
@@ -121,33 +121,28 @@ Session titles, prompt excerpts, errors, ordinary message/tool text, terminal qu
 
 Workflow and poll evidence traversal is converter-only: retain descriptors for each configured root; open every parent and leaf descriptor-relative with directory/no-follow checks; `fstat` bounded regular files; reject symlinks, special files, unexpected names, oversize data, or identity/parent swaps. A small reviewed POSIX helper may supply `openat`; there is no path-based fallback and no shipped scanner.
 
-### Private Activity matrix
+### Private Activity refusal gate
 
-Current production code exposes Activity through `GET /api/activity` and `GET /api/activity/:storyId`; both reconstruct raw event fields. Current source has no production caller of `appendActivityEvent`, so dry run first proves whether the private store has any Todo-linked Activity rows. If none are affected, preserve the ledger byte-for-byte and add no conversion dependency. If any exist, only the disposable converter performs this matrix inside its single transaction after temporarily removing immutability triggers:
+Current production code exposes Activity through `GET /api/activity` and `GET /api/activity/:storyId`; both reconstruct raw event fields. Current source has no production caller of `appendActivityEvent`, so the smallest contract is to require **zero affected Activity rows** in the private instance. The converter never rewrites Activity and product reads have no translation or legacy branch.
 
-| Field | Classification and converter action |
-|---|---|
-| `object_id` | When `object_type='todo'`, require a mapped source ID and rekey; an orphan/unknown shape aborts. Other object types are untouched. |
-| `object_href` | Rekey only a recognized Todo URL to `/todos/JIN-N`; any legacy-bearing unrecognized actionable URL aborts. |
-| `correlation_id` | Rekey only an enumerated Todo producer grammar; unknown legacy-bearing namespace aborts. |
-| `idempotency_key` | Same rule; preserve uniqueness and abort on collision. |
-| `detail_ref` | Rekey only an enumerated Todo reference. Work-item-event IDs and unrelated references are not Todo IDs and remain unchanged. |
-| decoded `detail_json` | Rekey enumerated structured `todoId`/`workItemId`/Todo-link members recursively. Free-form strings are immutable inert evidence; an exact legacy ID in an unknown structured identity position aborts. |
-| decoded `links_json` | Rekey recognized Todo link `href`/identity members; labels are prose. Unknown actionable legacy links abort. |
-| `story_id` | Recompute with the product `activityStoryId(kind, correlation_id, root_event_id)` only when an input changed; event IDs, sequence, timestamps, causation/root event IDs remain unchanged. |
-| `payload_hash` | Recompute from the fully rewritten persisted payload whenever a hash-covered field changed; otherwise require byte equality. |
-| story/projection/search tables | Drop and deterministically rebuild from converted events; verify story membership, counts, FTS content, and no dangling old story IDs. |
-| REST list/story/search outputs | Query both endpoints and search against the disposable converted fixture; no structured/actionable legacy identity may be returned, while inert prose may remain literal text. |
+Dry run first asserts the exact expected Activity schema, selects every physical column, validates every scalar, decodes `detail_json` and `links_json`, and recursively inventories every nested key/value/link member. The exhaustive scan covers:
 
-Reinstall and verify Activity immutability triggers before commit. Product reads have no translation or legacy compatibility branch.
+- event/derivation identity: `seq`, `id`, `story_id`, `correlation_id`, `causation_id`, `root_event_id`, `idempotency_key`, `payload_hash`;
+- typed actors/objects/actions: `kind`, `action`, `actor_type`, `actor_id`, `object_type`, `object_id`, `object_href`, `detail_ref`, and every decoded structured `todoId`, `workItemId`, reference, and `href` in detail/link JSON;
+- remaining scalar/prose fields: timestamps, display names, labels, outcomes, summaries, attempts, and decoded free-form values;
+- derived `activity_stories`, `activity_story_versions`, and `activity_event_search` rows plus both REST list/story/search outputs.
+
+An exact or recognized embedded prerelease Todo reference in any structured/actionable position is an affected row and blocks apply. Unknown schema, malformed JSON, an unclassifiable legacy-bearing field, projection mismatch, or API output containing a structured legacy Todo reference also blocks. The report contains only safe row locators, JSON paths, counts, and SHA-256 digests—never the value or a replacement map.
+
+Exact legacy text in a field proven to be free-form prose is recorded only in aggregate/digest evidence and remains inert. With zero affected structured rows, require byte-identical digests for `activity_events`, every projection/search table, and all Activity immutability triggers before and after the disposable conversion. Add no Activity mutation code and never drop its triggers.
 
 ### Offline runbook
 
 1. Stop the gateway without contacting port 7777; prove no process/listener, close Todo tabs, and prove no unresolved draft/edit operation.
 2. Copy the database/WAL and bounded Workflow/poll roots to external storage; verify digests plus SQLite integrity and rehearse restoration into a disposable location.
 3. Run dry run twice against the unchanged source; require identical inventory, map, file, and output digests.
-4. Stage rewritten Workflow evidence in a same-filesystem sibling. In one exclusive SQLite transaction, rekey the complete DB graph, handle Activity per the matrix, seed burns/high-water, install final schema/triggers, validate, destroy the map, and commit. Atomically replace the staged evidence root only after DB validation.
-5. Re-run the complete closed scan, referential/callback/message/Workflow/Activity/allocator invariants, and `PRAGMA integrity_check`. On any pre-start failure, remain offline and restore the verified backup.
+4. After the Activity gate proves zero affected rows, stage rewritten Workflow evidence in a same-filesystem sibling. In one exclusive SQLite transaction, rekey the remaining complete DB graph, seed burns/high-water, install the final schema including `work_items_id_immutable`, validate, destroy the map, and commit. Activity tables and triggers are untouched. Atomically replace the staged evidence root only after DB validation.
+5. Re-run the complete closed scan, exact ID-trigger schema audit, referential/callback/message/Workflow/allocator invariants, byte-identical Activity digests, and `PRAGMA integrity_check`. On any pre-start failure, remain offline and restore the verified backup.
 6. Independent review approves digest-only evidence. The operator separately authorizes conversion of the real instance and, later, starting the new binary. The converter never starts it.
 
 ## RED -> GREEN Delivery Order
@@ -158,13 +153,13 @@ Implementation is unauthorized until this plan receives fresh approval.
 
 **Shipped files:** `work-items/id.ts`, allocator/schema/store and focused tests; session startup preflight; REST/MCP/Workflow/auth modules; web Todo routes/components/state; deletion of private-ref code.
 
-RED then GREEN: strict grammar; fresh and `0.25.0`-shaped homes; empty prerelease replacement; no-write refusal for every nonempty/mixed/unknown shape; 16/32-process allocation; crash/race gaps; direct SQL valid-to-valid and same-value ID updates; unclaimed/unburned/high-water-mismatch inserts; reinsertion of a deleted ID; attempted insertion of an abandoned burn; allocator/burn/issuance mutation; archive/delete/nonreuse; every product surface; legacy ingress; webhook/poll recursive refusal; authz/enumeration; browser route/copy/a11y/clean-tab/no-draft-loss.
+RED then GREEN: strict grammar; fresh and `0.25.0`-shaped homes; empty prerelease replacement; no-write refusal for every nonempty/mixed/unknown shape; startup refusal when the exact ID trigger is absent/altered; 16/32-process allocation; crash/race gaps; direct SQL valid-to-valid, same-value, and high-water/orphaning ID updates; unclaimed/unburned/high-water-mismatch inserts; reinsertion of a deleted ID; attempted insertion of an abandoned burn; allocator/burn/issuance mutation; archive/delete/nonreuse; every product surface; legacy ingress; exact webhook/poll `payload.todoId`, filter, and condition cases proving validation precedes hashing/persistence/execution while unrelated strings remain inert; authz/enumeration; browser route/copy/a11y/clean-tab/no-draft-loss.
 
 ### B. Disposable converter complete, dry-run only
 
 **Private files:** only `tools/prerelease-todo-converter/**`; no bin/package/template/startup change.
 
-Land the complete inventory/map/DB/file/Activity/invariant/backup/restore vertical slice in one reviewable commit, but physically omit the apply entry point. Tests cover the entire closed graph, unknown/orphan/partial states, nonterminal Workflow and staged poll refusal, descriptor attacks, deterministic digests, and unchanged prose.
+Land the complete inventory/map/DB/file/Activity-gate/invariant/backup/restore vertical slice in one reviewable commit, but physically omit the apply entry point. Tests cover the entire closed graph, unknown/orphan/partial states, nonterminal Workflow and staged poll refusal, descriptor attacks, deterministic digests, unchanged prose, an empty/zero-row Activity fixture, a populated zero-affected fixture, and one affected-row refusal fixture for every structured Activity field/path (including `causation_id`) without emitting raw values.
 
 ### C. Rehearsal, then gated apply as the last private artifact
 
@@ -172,6 +167,6 @@ Run two identical dry runs, external backup verification, restore rehearsal, and
 
 ### D. Independent review and release verification
 
-A reviewer who did not implement A-C audits code, the closed reference graph, Activity matrix, package boundary, fixtures, and evidence. Run focused suites, then `pnpm test`, `pnpm typecheck`, `pnpm lint`, and `pnpm build`; recheck registry/tag history; inspect the tarball; leak-scan source/tests/templates; and verify no legacy producer, converter artifact, alias, private ref, or secondary Todo identity ships.
+A reviewer who did not implement A-C audits code, the closed reference graph, Activity refusal gate, package boundary, fixtures, and evidence. Run focused suites, then `pnpm test`, `pnpm typecheck`, `pnpm lint`, and `pnpm build`; recheck registry/tag history; inspect the tarball; leak-scan source/tests/templates; and verify no legacy producer, converter artifact, alias, private ref, or secondary Todo identity ships.
 
 Only an approved review may authorize implementation completion. Live conversion and first start require a later, explicit operator authorization; release/publication is a separate decision.
