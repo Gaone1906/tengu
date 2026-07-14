@@ -101,7 +101,7 @@ test("the executable is dry-run-only, has no instance defaults, and emits determ
     const cli = fileURLToPath(new URL("../dry-run.mjs", import.meta.url));
     const run = (restore) => spawnSync(process.execPath, [
       cli, "--database", source, "--backup", backup, "--restore-rehearsal", restore,
-      "--artifacts", manifest,
+      "--artifacts", manifest, "--prefix", "ICI",
     ], { encoding: "utf8" });
 
     const first = run(path.join(root, "restore-1.db"));

@@ -46,13 +46,13 @@ function readArtifactManifest(manifestPath) {
 }
 
 function parseArgs(argv) {
-  const allowed = new Set(["--database", "--backup", "--restore-rehearsal", "--artifacts"]);
+  const allowed = new Set(["--database", "--backup", "--restore-rehearsal", "--artifacts", "--prefix"]);
   const values = new Map();
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index];
     const value = argv[index + 1];
     if (!allowed.has(flag) || typeof value !== "string" || value.length === 0 || value.startsWith("--")) {
-      throw new Error("usage: dry-run.mjs --database <offline.db> --backup <external.db> --restore-rehearsal <new-path> --artifacts <manifest.json>");
+      throw new Error("usage: dry-run.mjs --database <offline.db> --backup <external.db> --restore-rehearsal <new-path> --artifacts <manifest.json> --prefix <AAA>");
     }
     if (values.has(flag)) throw new Error(`duplicate argument ${flag}`);
     values.set(flag, value);
@@ -65,6 +65,7 @@ function parseArgs(argv) {
     backupPath: values.get("--backup"),
     restorePath: values.get("--restore-rehearsal"),
     artifactManifestPath: values.get("--artifacts"),
+    prefix: values.get("--prefix"),
   };
 }
 
@@ -76,7 +77,7 @@ export function runDryRun(argv) {
     sourceRoots: manifest.sourceRoots,
     backupRoots: manifest.backupRoots,
   });
-  const databaseInventory = inventoryDatabaseForDryRun({ databasePath: paths.databasePath });
+  const databaseInventory = inventoryDatabaseForDryRun({ databasePath: paths.databasePath, prefix: paths.prefix });
   const inventory = databaseInventory.report;
   const artifacts = inventoryArtifactRoots(manifest.sourceRoots, databaseInventory.mapping);
   const restore = rehearseRestore({ backupPath: paths.backupPath, restorePath: paths.restorePath });

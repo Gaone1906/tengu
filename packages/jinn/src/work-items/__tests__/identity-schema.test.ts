@@ -16,6 +16,32 @@ function insertClaimedTodo(db: Database.Database, claim: ReturnType<typeof alloc
 }
 
 describe("the freshly created Todo schema", () => {
+  it("freezes the company-derived prefix on the first allocation", () => {
+    const db = new Database(":memory:");
+    migrateWorkItemsSchema(db, "absent");
+
+    const first = allocateWorkItemId(db, "2026-07-14T00:00:00.000Z", "IC-IDEV");
+    const second = allocateWorkItemId(db, "2026-07-14T00:00:01.000Z", "Acme Renamed");
+    const third = allocateWorkItemId(db, "2026-07-14T00:00:02.000Z", "AI");
+
+    expect(first.id).toBe("ICI-1");
+    expect(second.id).toBe("ICI-2");
+    expect(third.id).toBe("ICI-3");
+    expect(db.prepare("SELECT prefix FROM work_item_id_allocator WHERE singleton = 1").pluck().get()).toBe("ICI");
+    expect(() => db.prepare("UPDATE work_item_id_allocator SET prefix = 'ACM'").run()).toThrow(/allocator/i);
+  });
+
+  it("rejects a claimed insert whose prefix differs from the frozen allocator", () => {
+    const db = new Database(":memory:");
+    migrateWorkItemsSchema(db, "absent");
+    const claim = allocateWorkItemId(db, "2026-07-14T00:00:00.000Z", "IC-IDEV");
+
+    expect(() => useWorkItemAllocationClaim(db, claim, () => db.prepare(`
+      INSERT INTO work_items (id, title, created_at, updated_at)
+      VALUES ('ACM-1', 'wrong company', '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:00.000Z')
+    `).run())).toThrow(/allocation claim/i);
+  });
+
   it("satisfies its own verifier", () => {
     const db = new Database(":memory:");
 

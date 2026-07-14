@@ -161,6 +161,12 @@ describe("GET /api/work-items/:id/sessions", () => {
     expect(cap.body).toEqual([]);
   });
 
+  it("accepts a canonical company-derived route ID before lookup", async () => {
+    const cap = makeRes();
+    await api.handleApiRequest(makeReq("GET", "/api/work-items/ICI-999"), cap.res, ctx);
+    expect(cap.status).toBe(404);
+  });
+
   it.each(["wi_0123456789ab", "JIN-0", "JIN-01", "JIN-9007199254740992", "garbage"])(
     "rejects malformed Todo route id %s before storage lookup",
     async (id) => {
@@ -169,7 +175,7 @@ describe("GET /api/work-items/:id/sessions", () => {
         await api.handleApiRequest(makeReq("GET", `/api/work-items/${id}${suffix}`), cap.res, ctx);
         expect(cap.status).toBe(400);
         expect(cap.body).toEqual({
-          error: "Invalid Todo ID; expected JIN-N with a positive safe-integer suffix",
+          error: "Invalid Todo ID; expected <AAA>-N with a positive safe-integer suffix",
         });
       }
     },

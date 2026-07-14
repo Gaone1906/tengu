@@ -5,6 +5,7 @@ export interface EmployeeOverride {
 
 export interface JinnSettings {
   accentColor: string | null
+  companyName: string | null
   portalName: string | null
   portalSubtitle: string | null
   portalEmoji: string | null
@@ -18,6 +19,7 @@ export interface JinnSettings {
 
 export const DEFAULTS: JinnSettings = {
   accentColor: null,
+  companyName: null,
   portalName: null,
   portalSubtitle: null,
   portalEmoji: null,

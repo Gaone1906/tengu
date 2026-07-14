@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import { initDb } from '../sessions/registry.js';
+import { loadConfig } from '../shared/config.js';
+import { CONFIG_PATH } from '../shared/paths.js';
 import { parseTodoId } from './id.js';
 import { allocateWorkItemId, useWorkItemAllocationClaim } from './migrate.js';
 
@@ -345,8 +348,12 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   const db = initDb();
   const now = new Date().toISOString();
   // The burn commits before the create. An idempotent hit or a lost race discards the
-  // claim and leaves a permanent gap in the JIN sequence, which is valid by design.
-  const claim = allocateWorkItemId(db, now);
+  // claim and leaves a permanent gap in the company Todo sequence, which is valid by design.
+  // A configless disposable/test home retains the historical JIN default. Once a
+  // real config exists, malformed configuration must still fail closed rather than
+  // silently allocating from the wrong company namespace.
+  const companyName = fs.existsSync(CONFIG_PATH) ? loadConfig().portal?.companyName ?? 'Jinn' : 'Jinn';
+  const claim = allocateWorkItemId(db, now, companyName);
   const id = claim.id;
   const status: WorkItemStatus = input.status ?? 'backlog';
   const source: WorkItemSource = input.source ?? 'human';

@@ -35,7 +35,7 @@ function successful(remote = snapshot(first, 2), replayed = false) {
 }
 
 function testTodoId(label: string): string {
-  if (/^JIN-[1-9][0-9]*$/.test(label)) return label
+  if (/^[A-Z]{3}-[1-9][0-9]*$/.test(label)) return label
   let hash = 2166136261
   for (const char of label) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619)
   return `JIN-${(hash >>> 0) + 1}`

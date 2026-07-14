@@ -70,9 +70,9 @@ test("maps legacy Todos deterministically by created_at then binary id without e
   const { root, databasePath, first, second } = fixture();
   try {
     const db = new Database(databasePath, { readonly: true });
-    const mapping = buildTodoMapping(db);
+    const mapping = buildTodoMapping(db, "ICI");
     db.close();
-    assert.deepEqual([...mapping], [[first, "JIN-1"], [second, "JIN-2"]]);
+    assert.deepEqual([...mapping], [[first, "ICI-1"], [second, "ICI-2"]]);
 
     const before = fs.readFileSync(databasePath);
     const report = inventoryDatabase({ databasePath });
@@ -82,6 +82,18 @@ test("maps legacy Todos deterministically by created_at then binary id without e
     assert.doesNotMatch(JSON.stringify(report), /wi_[0-9a-f]{12}/);
     assert.ok(fs.readFileSync(databasePath).equals(before));
     assert.deepEqual(inventoryDatabase({ databasePath }), report);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("refuses a non-canonical company prefix before reading Todo rows", () => {
+  const { root, databasePath } = fixture();
+  try {
+    const db = new Database(databasePath, { readonly: true });
+    assert.throws(() => buildTodoMapping(db, "IC"), /three uppercase Latin letters/);
+    assert.throws(() => buildTodoMapping(db, "ici"), /three uppercase Latin letters/);
+    db.close();
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

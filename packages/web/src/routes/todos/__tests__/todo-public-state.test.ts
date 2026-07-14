@@ -4,7 +4,7 @@ import { isTodoId } from "@/lib/todo-id";
 
 const ID = "JIN-42";
 
-describe("public JIN Todo state", () => {
+describe("public company-prefixed Todo state", () => {
   beforeEach(() => sessionStorage.clear());
 
   it("keys recoverable draft state directly by the sole Todo id", () => {
@@ -22,10 +22,12 @@ describe("public JIN Todo state", () => {
     expect(loadTodoJournal(ID)?.patch).toEqual({ title: "draft" });
   });
 
-  it("accepts only the public safe-integer JIN-N grammar", () => {
+  it("accepts the public safe-integer AAA-N grammar", () => {
     expect(isTodoId("JIN-1")).toBe(true);
+    expect(isTodoId("ICI-1")).toBe(true);
+    expect(isTodoId("ACM-42")).toBe(true);
     expect(isTodoId("JIN-9007199254740991")).toBe(true);
-    for (const value of ["JIN-0", "JIN-01", "JIN-9007199254740992", "wi_0123456789ab", " JIN-1", 1]) {
+    for (const value of ["IC-1", "ICID-1", "ici-1", "I1I-1", "JIN-0", "JIN-01", "JIN-9007199254740992", "wi_0123456789ab", " JIN-1", 1]) {
       expect(isTodoId(value)).toBe(false);
     }
   });

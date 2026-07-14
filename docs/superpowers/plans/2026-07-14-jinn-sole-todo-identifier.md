@@ -1,14 +1,15 @@
-# JIN-N Sole Todo Identifier — Final Architecture
+# Company-Prefixed Sole Todo Identifier — Final Architecture
 
 > **Status:** Architecture only. Implementation requires a fresh independent review. This document does not authorize conversion, restart, release, deployment, or publication.
 
-**Goal:** Ship Todos for the first time with `JIN-1`, `JIN-2`, and so on as the sole identifier, while converting the operator's one private prerelease instance with a disposable offline tool that never enters the installed product.
+**Goal:** Ship Todos with a stable three-letter company prefix (`IC-IDEV` → `ICI-1`, `ICI-2`) as the sole identifier, while converting the operator's one private prerelease instance with a disposable offline tool that never enters the installed product.
 
 ## Locked Product Boundary
 
 Operator decision A is accepted:
 
-- `^JIN-[1-9][0-9]*$` is the only Todo grammar; suffixes above `Number.MAX_SAFE_INTEGER` are invalid. The fixed v1 prefix is `JIN`.
+- `^[A-Z]{3}-[1-9][0-9]*$` is the only Todo grammar; suffixes above `Number.MAX_SAFE_INTEGER` are invalid. Normalize the configured company name with NFKD, discard non-`A-Z` characters after uppercasing, and take the first three letters (`IC-IDEV` → `ICI`). Names yielding fewer than three letters are invalid.
+- The first committed allocation freezes the prefix in the singleton allocator. Later company-name changes never rewrite IDs or change that instance's prefix.
 - `work_items.id` is the database primary key and the visible/internal ID in REST, MCP, UI, URLs, search, logs, accessibility, copy/share, DOM state, and browser storage.
 - `JIN-N` is predictable, visible, and never authorization. Authentication and authorization protect every read and write.
 - The prerelease grammar is exactly `^wi_[0-9a-f]{12}$`. Public ingress rejects it; no alias, redirect, private reference, secondary identity, or runtime map remains.
@@ -34,7 +35,7 @@ This proves the public registry/tag boundary, not manually installed untagged bu
 
 | Boundary | Location | Contents |
 |---|---|---|
-| **Public, shipped** | `packages/jinn/src/**`, `packages/web/src/**`, compiled `dist/` | Clean JIN schema, parser, allocator, routes/surfaces, authorization, legacy-input rejection, and read-only startup refusal for nonempty prerelease data |
+| **Public, shipped** | `packages/jinn/src/**`, `packages/web/src/**`, compiled `dist/` | Clean company-prefix schema, parser, allocator, routes/surfaces, authorization, legacy-input rejection, and read-only startup refusal for nonempty prerelease data |
 | **Private, disposable** | repository root `tools/prerelease-todo-converter/**` only | Generic offline inventory/conversion/rehearsal tool; excluded from package `files`, bins, templates, migrations, startup, and installed assets |
 
 No public module imports the converter. It has no `jinn` command, runtime hook, network/listen code, or installed migration. `npm pack --dry-run` must prove it is absent. After the separately authorized private conversion, remove it from the release branch or archive it outside the shipped repository artifact.
@@ -47,9 +48,9 @@ Add `packages/jinn/src/work-items/id.ts` as the sole strict parser/formatter. To
 
 Before WAL mode or any schema write, startup opens the database read-only and classifies it:
 
-1. Todo tables absent, as in every public `0.25.0` home: create the clean JIN schema and allocator.
+1. Todo tables absent, as in every public `0.25.0` home: create the clean company-prefix schema and allocator.
 2. Recognized prerelease Todo tables and every companion/reference are empty: transactionally replace them with the clean schema.
-3. Exact current JIN schema: verify schema, the exact `work_items_id_immutable` trigger SQL, allocator, burn ledger, and reference invariants, then continue.
+3. Exact current company-prefix schema: verify schema, the exact `work_items_id_immutable` trigger SQL, allocator prefix, burn ledger, and reference invariants, then continue.
 4. Any nonempty legacy/mixed/noncanonical table or edge, malformed/unknown Todo schema, or allocator mismatch: close and abort before writes or serving.
 
 The refusal does not echo data:
@@ -61,10 +62,10 @@ Use the separately reviewed offline converter, or restore a supported public-ver
 
 Fresh creation installs:
 
-- canonical-ID `CHECK` constraints and a singleton high-water allocator;
+- canonical-ID `CHECK` constraints and a singleton allocator containing the frozen nullable prefix plus high water;
 - an append-only burn ledger containing ordinal plus a digest of a one-time random allocation claim, and a separate append-only issuance ledger;
 - transactional `BEGIN IMMEDIATE` allocation that commits the burn and returns the raw claim only to that caller before Todo creation;
-- an insert trigger that requires the JIN suffix to match its burn, have no issuance marker, and match the connection-local raw claim digest; an after-insert trigger atomically appends the issuance marker;
+- an insert trigger that requires the ID prefix to match the frozen allocator prefix, the suffix to match its burn, no issuance marker to exist, and the connection-local raw claim digest to match; an after-insert trigger atomically appends the issuance marker;
 - the exact `work_items_id_immutable BEFORE UPDATE OF id ON work_items` trigger, whose body unconditionally raises `ABORT`; there is no `WHEN` clause, so `SET id = id` also fails;
 - immutable/decreasing/deleting allocator, burn, and issuance guards.
 
@@ -72,8 +73,8 @@ The raw claim is held only in memory for one create transaction and exposed to S
 
 ### Product surfaces and authority
 
-- REST uses `/api/work-items/JIN-42`; the browser route is `/todos/JIN-42`. MCP fields, search, logs, activity blocks, accessible names, Copy ID, and Copy Link emit the same value.
-- Delete `todoPrivateRef`, salts, `td_*` history state, private lookup, DOM masking, and privacy-only fixtures. Draft/recovery state keys directly by JIN ID, with clean-tab and no-draft-loss tests.
+- REST may use `/api/work-items/ICI-42`; the browser route is `/todos/ICI-42`. MCP fields, search, logs, activity blocks, accessible names, Copy ID, and Copy Link emit the same value.
+- Delete `todoPrivateRef`, salts, `td_*` history state, private lookup, DOM masking, and privacy-only fixtures. Draft/recovery state keys directly by canonical Todo ID, with clean-tab and no-draft-loss tests.
 - The current CLI has no Todo CRUD surface; do not add one. A future CLI must use the same parser.
 - Authentication precedes existence checks. Anonymous known/unknown IDs fail identically. Authenticated adjacent-ID reads and every mutation/delegation/approval are allowed only by existing explicit grants; predictability grants nothing.
 - Cross-instance import remains refusal-only until a real import design exists.
@@ -88,9 +89,9 @@ work_item_events.work_item_id
   -> todo-status trigger.payload.todoId
 ```
 
-Validate JIN at the event producer and before claim/run persistence, condition evaluation, or session creation. Remove unshipped `triggerTodoId` and poll `approvalWorkItemId` compatibility fields.
+Validate the canonical company-prefixed ID at the event producer and before claim/run persistence, condition evaluation, or session creation. Remove unshipped `triggerTodoId` and poll `approvalWorkItemId` compatibility fields.
 
-Webhook and poll ingress treat only an own top-level `payload.todoId` as recognized Todo structure. Check prototype safety before reading it: an inherited/prototype `todoId` is invalid; an own value must be a string accepted by `parseTodoId`. Perform this validation before custom-trigger filtering, `fireRef` or hash derivation, claims, run/file persistence, Workflow conditions, callbacks, queues, or sessions. Exact legacy IDs, `JIN-0`, garbage, non-strings, and inherited values fail closed with zero side effects.
+Webhook and poll ingress treat only an own top-level `payload.todoId` as recognized Todo structure. Check prototype safety before reading it: an inherited/prototype `todoId` is invalid; an own value must be a string accepted by `parseTodoId`. Perform this validation before custom-trigger filtering, `fireRef` or hash derivation, claims, run/file persistence, Workflow conditions, callbacks, queues, or sessions. Exact legacy IDs, malformed company-prefixed IDs such as `ICI-0`, garbage, non-strings, and inherited values fail closed with zero side effects.
 
 An authored filter targeting `payload.todoId` may use only `equals` or `notEquals` with an own data-property `value` that is a string accepted by `parseTodoId`; valueless `exists` is also allowed. Reject `matches`, missing/inherited/accessor operands, and legacy, malformed, or non-string values. A condition targeting `trigger.payload.todoId` follows the same rule: only `eq` or `ne` may carry an own canonical string operand; valueless `exists` and `absent` are allowed; reject `gt`, `gte`, `lt`, `lte`, `contains`, `startsWith`, and every invalid operand shape/value. Enforce these restrictions when authoring/persisting the filter or definition and revalidate fail-closed immediately before execution, so malformed persisted artifacts cannot run. Unrelated payload fields—including free-form prose containing an exact `wi_*` literal—are untouched inert data.
 
@@ -102,7 +103,7 @@ No apply entry point may exist until one complete vertical slice has landed and 
 
 The tool defaults to dry run, requires full gateway downtime and an exclusive lock, refuses any changed inventory or unknown shape, and emits counts plus SHA-256 digests only. It contains no personal data or installed-instance default path. Apply is added last and requires the exact repeated dry-run digest plus a separately recorded operator authorization. Implementation/review never opens the real private database.
 
-Map exact source IDs by `created_at COLLATE BINARY, id COLLATE BINARY` to `JIN-1..JIN-N`; tied timestamps are resolved by unique legacy ID. Reject malformed/mixed IDs, collisions, or structured orphan IDs. The map exists only in memory/temporary tables and is destroyed before completion.
+Map exact source IDs by `created_at COLLATE BINARY, id COLLATE BINARY` to `<frozen-prefix>-1..<frozen-prefix>-N`; tied timestamps are resolved by unique legacy ID. The dry-run requires that explicit three-letter prefix. Reject malformed/mixed IDs, collisions, or structured orphan IDs. The map exists only in memory/temporary tables and is destroyed before completion.
 
 ### Closed structured graph
 
@@ -155,7 +156,7 @@ Implementation is unauthorized until this plan receives fresh approval.
 
 **Shipped files:** `work-items/id.ts`, allocator/schema/store and focused tests; session startup preflight; REST/MCP/Workflow/auth modules; web Todo routes/components/state; deletion of private-ref code.
 
-RED then GREEN: strict grammar; fresh and `0.25.0`-shaped homes; empty prerelease replacement; no-write refusal for every nonempty/mixed/unknown shape; startup refusal when the exact ID trigger is absent/altered; 16/32-process allocation; crash/race gaps; direct SQL valid-to-valid, same-value, and high-water/orphaning ID updates; unclaimed/unburned/high-water-mismatch inserts; reinsertion of a deleted ID; attempted insertion of an abandoned burn; allocator/burn/issuance mutation; archive/delete/nonreuse; every product surface; legacy ingress; webhook and poll cases for valid `JIN-N`, exact legacy, `JIN-0`, garbage, non-string, inherited/prototype, absent, and prose-only values. Filter tests enumerate valid `equals`/`notEquals`, valueless `exists`, `matches`, and every missing/inherited/accessor/legacy/malformed/non-string operand; condition tests enumerate valid `eq`/`ne`, valueless `exists`/`absent`, every rejected `gt`/`gte`/`lt`/`lte`/`contains`/`startsWith`, and the same invalid operands. Valid controls proceed once; authoring rejection creates no persisted artifact, pre-execution rejection creates no run or downstream effect, and unrelated prose remains byte-identical and inert. Also verify authz/enumeration and browser route/copy/a11y/clean-tab/no-draft-loss.
+RED then GREEN: company normalization, strict grammar, prefix freeze across company rename, fresh and `0.25.0`-shaped homes; empty prerelease replacement; no-write refusal for every nonempty/mixed/unknown shape; startup refusal when the exact ID trigger is absent/altered; 16/32-process allocation; crash/race gaps; direct SQL valid-to-valid, same-value, prefix, and high-water/orphaning updates; mismatched-prefix/unclaimed/unburned/high-water inserts; reinsertion of a deleted ID; attempted insertion of an abandoned burn; allocator/burn/issuance mutation; archive/delete/nonreuse; every product surface; legacy ingress; webhook and poll cases for a valid company-prefixed ID, exact legacy, malformed prefix/suffix, garbage, non-string, inherited/prototype, absent, and prose-only values. Filter tests enumerate valid `equals`/`notEquals`, valueless `exists`, `matches`, and every missing/inherited/accessor/legacy/malformed/non-string operand; condition tests enumerate valid `eq`/`ne`, valueless `exists`/`absent`, every rejected `gt`/`gte`/`lt`/`lte`/`contains`/`startsWith`, and the same invalid operands. Valid controls proceed once; authoring rejection creates no persisted artifact, pre-execution rejection creates no run or downstream effect, and unrelated prose remains byte-identical and inert. Also verify authz/enumeration and browser route/copy/a11y/clean-tab/no-draft-loss.
 
 ### B. Disposable converter complete, dry-run only
 

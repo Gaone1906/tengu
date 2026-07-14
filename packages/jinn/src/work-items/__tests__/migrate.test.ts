@@ -68,7 +68,7 @@ function currentDb(): string {
 }
 
 describe("startup Todo preflight — classification", () => {
-  it("creates the clean JIN schema for a home with no Todo tables", () => {
+  it("creates the clean company-prefix schema for a home with no Todo tables", () => {
     const file = seedDb();
 
     const db = new Database(file);
@@ -229,6 +229,7 @@ function runMigrationWave(
   file: string,
   round: number,
   type: "migrate" | "allocate" = "migrate",
+  companyNames?: string[],
 ): Promise<MigrationWorkerResult[]> {
   return Promise.all(children.map((child, worker) => new Promise<MigrationWorkerResult>((resolve, reject) => {
     const onError = (error: Error) => {
@@ -244,7 +245,14 @@ function runMigrationWave(
     };
     child.on("message", onMessage);
     child.once("error", onError);
-    child.send({ type, path: file, round, worker, now: `2026-07-14T00:00:${String(worker).padStart(2, "0")}.000Z` });
+    child.send({
+      type,
+      path: file,
+      round,
+      worker,
+      companyName: companyNames?.[worker],
+      now: `2026-07-14T00:00:${String(worker).padStart(2, "0")}.000Z`,
+    });
   })));
 }
 
@@ -276,11 +284,16 @@ describe("startup Todo preflight — concurrent first boot", () => {
     await Promise.all(workers.map((worker) => worker.ready));
 
     try {
-      const results = await runMigrationWave(workers.map((worker) => worker.child), file, 2, "allocate");
+      const companyNames = Array.from({ length: 32 }, (_, index) => index % 2 === 0 ? "IC-IDEV" : "Acme Labs");
+      const results = await runMigrationWave(workers.map((worker) => worker.child), file, 2, "allocate", companyNames);
       expect(results.filter((result) => !result.ok)).toEqual([]);
       expect(new Set(results.map((result) => result.id)).size).toBe(32);
+      const prefixes = new Set(results.map((result) => result.id?.slice(0, 3)));
+      expect(prefixes.size).toBe(1);
+      const [prefix] = [...prefixes];
+      expect(["ICI", "ACM"]).toContain(prefix);
       expect(results.map((result) => result.id).sort((a, b) => Number(a?.slice(4)) - Number(b?.slice(4))))
-        .toEqual(Array.from({ length: 32 }, (_, index) => `JIN-${index + 1}`));
+        .toEqual(Array.from({ length: 32 }, (_, index) => `${prefix}-${index + 1}`));
     } finally {
       for (const worker of workers) worker.child.disconnect();
     }

@@ -250,7 +250,7 @@ import {
   type WorkItemSource,
   type WorkItemStatus,
 } from "../work-items/store.js";
-import { isTodoId } from "../work-items/id.js";
+import { deriveTodoIdPrefix, isTodoId } from "../work-items/id.js";
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import { createWorkflowTodoEventFeed } from "../work-items/workflow-event-feed.js";
@@ -2095,7 +2095,7 @@ function workItemPagePayload(page: ReturnType<typeof queryWorkItems>): Record<st
 
 function requireTodoRouteId(res: ServerResponse, value: string): boolean {
   if (isTodoId(value)) return true;
-  badRequest(res, "Invalid Todo ID; expected JIN-N with a positive safe-integer suffix");
+  badRequest(res, "Invalid Todo ID; expected <AAA>-N with a positive safe-integer suffix");
   return false;
 }
 
@@ -6998,6 +6998,7 @@ export async function handleApiRequest(
         conversationNeeded: !setupComplete,
         sessionsCount,
         hasEmployees,
+        companyName: config.portal?.companyName ?? null,
         portalName: config.portal?.portalName ?? null,
         operatorName: config.portal?.operatorName ?? null,
       });
@@ -7009,7 +7010,14 @@ export async function handleApiRequest(
       if (!_parsed.ok) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
-      const { portalName, operatorName, language, engine, model, effortLevel } = body;
+      const { companyName, portalName, operatorName, language, engine, model, effortLevel } = body;
+      if (companyName !== undefined) {
+        try {
+          deriveTodoIdPrefix(companyName);
+        } catch (error) {
+          return badRequest(res, error instanceof Error ? error.message : "Invalid company name");
+        }
+      }
 
       // Read current config and merge engine choice + portal settings
       const config = context.getConfig();
@@ -7019,6 +7027,7 @@ export async function handleApiRequest(
           ...config.portal,
           onboarded: true,
           setupComplete: true,
+          ...(companyName !== undefined && { companyName }),
           ...(portalName !== undefined && { portalName: portalName || undefined }),
           ...(operatorName !== undefined && { operatorName: operatorName || undefined }),
           ...(language !== undefined && { language: language || undefined }),
@@ -7030,7 +7039,7 @@ export async function handleApiRequest(
       // debounced file-watcher fires ~1s later).
       saveConfigAtomic(updated, { lineWidth: -1 });
       context.reloadConfig?.();
-      logger.info(`Onboarding: portal name="${portalName}", operator="${operatorName}", language="${language}"`);
+      logger.info(`Onboarding: company configured=${companyName !== undefined}, portal name="${portalName}", operator="${operatorName}", language="${language}"`);
 
       const effectiveName = portalName || "Jinn";
       const languageSection = language && language !== "English"

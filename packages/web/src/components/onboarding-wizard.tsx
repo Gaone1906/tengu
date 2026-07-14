@@ -18,6 +18,7 @@ import { THEMES } from "@/lib/themes"
 import { api, type ModelInfo } from "@/lib/api"
 import { useModelRegistry } from "@/hooks/use-model-registry"
 import { buildNewSessionParams } from "@/components/chat/new-chat-helpers"
+import { deriveTodoIdPrefix } from "@/lib/todo-id"
 
 // ---------------------------------------------------------------------------
 // Accent color presets
@@ -87,6 +88,7 @@ interface OnboardingWizardProps {
 export function OnboardingWizard({ forceOpen, initialVisible, onClose }: OnboardingWizardProps) {
   const {
     settings,
+    setCompanyName,
     setPortalName,
     setOperatorName,
     setAccentColor,
@@ -108,6 +110,7 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
   const [direction, setDirection] = useState<"forward" | "back">("forward")
 
   // Local input values
+  const [localCompany, setLocalCompany] = useState("")
   const [localName, setLocalName] = useState("")
   const [localOperator, setLocalOperator] = useState("")
   const [localLanguage, setLocalLanguage] = useState(settings.language ?? "English")
@@ -125,10 +128,12 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
   })
 
   const TOTAL_STEPS = 5
+  const todoPrefixPreview = deriveTodoIdPrefix(localCompany)
 
   // First-run detection — check server-side flag, not just localStorage
   useEffect(() => {
     if (forceOpen || initialVisible) {
+      setLocalCompany(settings.companyName ?? "")
       setLocalName(settings.portalName ?? "")
       setLocalOperator(settings.operatorName ?? "")
       setVisible(true)
@@ -187,6 +192,7 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
   const handleNext = useCallback(async () => {
     // Commit name/operator/language on step 0
     if (step === 0) {
+      setCompanyName(localCompany || null)
       setPortalName(localName || null)
       setOperatorName(localOperator || null)
       setLanguage(localLanguage || "English")
@@ -204,6 +210,7 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
       setSubmitError(null)
       try {
         await api.completeOnboarding({
+          companyName: localCompany || undefined,
           portalName: localName || undefined,
           operatorName: localOperator || undefined,
           language: localLanguage || undefined,
@@ -263,11 +270,13 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
     }
   }, [
     step,
+    localCompany,
     localName,
     localOperator,
     localLanguage,
     forceOpen,
     onClose,
+    setCompanyName,
     setPortalName,
     setOperatorName,
     setLanguage,
@@ -362,6 +371,29 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
 
               <div className="flex flex-col gap-[var(--space-3)] text-left">
                 <div>
+                  <label htmlFor="onboarding-company-name" className="block text-[length:var(--text-caption1)] font-[var(--weight-medium)] text-[var(--text-tertiary)] mb-[var(--space-1)]">
+                    Company Name
+                  </label>
+                  <input
+                    id="onboarding-company-name"
+                    type="text"
+                    className="apple-input w-full bg-[var(--fill-tertiary)] rounded-[var(--radius-md)] px-3 py-2 text-[length:var(--text-subheadline)] text-[var(--text-primary)] outline-none border border-transparent focus:border-[var(--accent)] transition-colors placeholder:text-[var(--text-quaternary)]"
+                    placeholder="Acme Labs"
+                    value={localCompany}
+                    onChange={(e) => setLocalCompany(e.target.value)}
+                    autoFocus
+                  />
+                  {todoPrefixPreview ? (
+                    <p className="mt-[var(--space-1)] text-[length:var(--text-caption1)] text-[var(--text-secondary)]">
+                      New Todos will use IDs like {todoPrefixPreview}-1
+                    </p>
+                  ) : (
+                    <p role="alert" className="mt-[var(--space-1)] text-[length:var(--text-caption1)] text-[var(--system-red)]">
+                      Enter a company name with at least three Latin letters.
+                    </p>
+                  )}
+                </div>
+                <div>
                   <label className="block text-[length:var(--text-caption1)] font-[var(--weight-medium)] text-[var(--text-tertiary)] mb-[var(--space-1)]">
                     Portal Name
                   </label>
@@ -371,7 +403,6 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
                     placeholder="Jinn"
                     value={localName}
                     onChange={(e) => setLocalName(e.target.value)}
-                    autoFocus
                   />
                 </div>
 
@@ -712,7 +743,7 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
           )}
           <button
             onClick={handleNext}
-            disabled={submitting}
+            disabled={submitting || (step === 0 && !todoPrefixPreview)}
             className="px-[var(--space-6)] py-[var(--space-2)] rounded-[var(--radius-md)] bg-[var(--accent)] text-[var(--accent-contrast)] border-none cursor-pointer text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] transition-all duration-150 inline-flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {step === 0

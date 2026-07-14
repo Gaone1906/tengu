@@ -23,6 +23,13 @@ describe("fresh-install: talk seeding + config guidance", () => {
     expect(readFileSync(SETUP, "utf-8")).toMatch(/#\s*mcp:/);
   });
 
+  it("captures a company name independently and seeds a valid Todo-prefix source", () => {
+    const source = readFileSync(SETUP, "utf-8");
+    expect(source).toMatch(/What is your company called\?/);
+    expect(source).toMatch(/companyName:/);
+    expect(source).toMatch(/deriveTodoIdPrefix/);
+  });
+
   it("guides engine authentication after the version probe", () => {
     expect(readFileSync(SETUP, "utf-8")).toMatch(/does NOT mean the engine is logged in/);
   });

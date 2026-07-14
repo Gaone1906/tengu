@@ -4,14 +4,16 @@ This root-only tool inventories the operator's unsupported prerelease `wi_*` Tod
 
 Current boundary: **dry run only**. There is deliberately no apply or rewrite entry point.
 
-The dry run requires four explicit inputs:
+The dry run requires five explicit inputs. `--prefix` is the frozen three-letter
+company Todo prefix selected for the converted instance:
 
 ```text
 dry-run.mjs \
   --database <offline-source.db> \
   --backup <external-byte-exact-backup.db> \
   --restore-rehearsal <new-disposable-db-path> \
-  --artifacts <manifest.json>
+  --artifacts <manifest.json> \
+  --prefix <AAA>
 ```
 
 The manifest has no default roots:

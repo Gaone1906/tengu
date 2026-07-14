@@ -7,6 +7,7 @@ const Database = require("better-sqlite3");
 
 const LEGACY_TODO_ID = /^wi_[0-9a-f]{12}$/;
 const LEGACY_TODO_TOKEN = /wi_[0-9a-f]{12}/g;
+const TODO_PREFIX = /^[A-Z]{3}$/;
 const TODO_KEYS = new Set(["todoId", "workItemId", "work_item_id"]);
 const PROSE_KEYS = new Set(["title", "body", "content", "prompt", "summary", "note", "notes", "label", "error", "lastError"]);
 const PROSE_FIELDS = new Set([
@@ -67,7 +68,8 @@ function rowsWithLocator(db, table) {
   }
 }
 
-export function buildTodoMapping(db) {
+export function buildTodoMapping(db, prefix = "JIN") {
+  if (!TODO_PREFIX.test(prefix)) throw new Error("Todo prefix must be exactly three uppercase Latin letters");
   if (!tableExists(db, "work_items")) throw new Error("prerelease Todo table is missing");
   const names = new Set(columns(db, "work_items"));
   if (!names.has("id") || !names.has("created_at")) throw new Error("unknown prerelease work_items schema");
@@ -77,7 +79,7 @@ export function buildTodoMapping(db) {
     if (typeof row.id !== "string" || !LEGACY_TODO_ID.test(row.id) || typeof row.created_at !== "string") {
       throw new Error("mixed or malformed prerelease Todo identity");
     }
-    mapping.set(row.id, `JIN-${index + 1}`);
+    mapping.set(row.id, `${prefix}-${index + 1}`);
   }
   return mapping;
 }
@@ -96,8 +98,8 @@ function legacyTokens(value) {
   return [...new Set(value.match(LEGACY_TODO_TOKEN) ?? [])];
 }
 
-function inventoryOpenDatabase(db) {
-  const mapping = buildTodoMapping(db);
+function inventoryOpenDatabase(db, prefix) {
+  const mapping = buildTodoMapping(db, prefix);
   const blockers = [];
   const locationCounts = new Map();
   const handledFields = new Set(["work_items.id"]);
@@ -257,7 +259,7 @@ function inventoryOpenDatabase(db) {
   return { mapping, blockers, locations };
 }
 
-export function inventoryDatabaseForDryRun({ databasePath }) {
+export function inventoryDatabaseForDryRun({ databasePath, prefix = "JIN" }) {
   let stat = null;
   try {
     stat = typeof databasePath === "string" && databasePath ? fs.lstatSync(databasePath) : null;
@@ -269,7 +271,7 @@ export function inventoryDatabaseForDryRun({ databasePath }) {
   }
   const db = new Database(databasePath, { readonly: true, fileMustExist: true });
   try {
-    const { mapping, blockers, locations } = inventoryOpenDatabase(db);
+    const { mapping, blockers, locations } = inventoryOpenDatabase(db, prefix);
     const base = {
       schemaVersion: 1,
       ok: blockers.length === 0,

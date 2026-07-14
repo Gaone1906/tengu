@@ -303,6 +303,23 @@ describe("control-plane writes require operator authority", () => {
     writeConfig();
   });
 
+  it("persists a valid company name through onboarding and rejects an invalid prefix source", async () => {
+    writeConfig();
+
+    const valid = await call("POST", "/api/onboarding", { companyName: "IC-IDEV" }, {
+      authorization: "Bearer test-token",
+    });
+    expect(valid.status).toBe(200);
+    expect(readConfig().portal.companyName).toBe("IC-IDEV");
+
+    const invalid = await call("POST", "/api/onboarding", { companyName: "AI" }, {
+      authorization: "Bearer test-token",
+    });
+    expect(invalid.status).toBe(400);
+    expect(readConfig().portal.companyName).toBe("IC-IDEV");
+    writeConfig();
+  });
+
   it("rejects capability-bound auth bootstrap and pair before they mint operator cookies", async () => {
     const bootstrap = await call("POST", "/api/auth/bootstrap", {}, toolHeaders(worker));
     expect(bootstrap.status).toBe(403);

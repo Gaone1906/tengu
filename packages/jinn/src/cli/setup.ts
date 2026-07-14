@@ -21,6 +21,7 @@ import {
 } from "../shared/paths.js";
 import { initDb } from "../sessions/registry.js";
 import { getPackageVersion } from "../shared/version.js";
+import { deriveTodoIdPrefix } from "../work-items/id.js";
 import {
   deriveTemplateMaterializationInputs,
   materializeTemplateBytes,
@@ -285,7 +286,8 @@ models:
       - { id: "Claude Opus 4.6 (Thinking)", label: "Claude Opus 4.6 Thinking", supportsEffort: false, effortLevels: [], contextWindow: 200000 }
       - { id: "GPT-OSS 120B (Medium)", label: "GPT-OSS 120B Medium", supportsEffort: false, effortLevels: [], contextWindow: 131072 }
 connectors: {}
-portal: {}
+portal:
+  companyName: "Jinn"
 
 # ── Optional blocks (uncomment to customize) ──────────────────────────────
 # MCP servers give employees browser, search, fetch, and messaging tools.
@@ -450,11 +452,22 @@ export async function runSetup(opts?: { force?: boolean }): Promise<void> {
     : "Jinn";
 
   let chosenName = defaultName;
+  let chosenCompanyName = defaultName;
   type SetupEngine = "claude" | "codex" | "grok" | "hermes";
   let chosenEngine: SetupEngine = "claude";
 
   if (isInteractive) {
     console.log("");
+    while (true) {
+      chosenCompanyName = await prompt("What is your company called?", defaultName);
+      try {
+        const prefix = deriveTodoIdPrefix(chosenCompanyName);
+        info(`Todo IDs will start at ${prefix}-1`);
+        break;
+      } catch (error) {
+        warn(error instanceof Error ? error.message : "Enter a company name with at least three Latin letters");
+      }
+    }
     chosenName = await prompt("What should your AI assistant be called?", defaultName);
 
     // Determine available engines
@@ -494,8 +507,20 @@ export async function runSetup(opts?: { force?: boolean }): Promise<void> {
     source = source.replace(/version:\s*"[^"]*"/, `version: "${getPackageVersion()}"`);
     // Apply interactive choices
     source = source.replace(/default:\s*claude/, `default: ${chosenEngine}`);
+    const companyLine = `  companyName: ${JSON.stringify(chosenCompanyName)}`;
+    if (/^\s*companyName:/m.test(source)) {
+      source = source.replace(/^\s*companyName:.*$/m, companyLine);
+    } else if (/portal:\s*\{\}/.test(source)) {
+      source = source.replace(/portal:\s*\{\}/, `portal:\n${companyLine}`);
+    } else if (/^portal:\s*$/m.test(source)) {
+      source = source.replace(/^portal:\s*$/m, `portal:\n${companyLine}`);
+    } else {
+      source += `\nportal:\n${companyLine}\n`;
+    }
     if (chosenName !== "Jinn") {
-      source = source.replace("portal: {}", `portal:\n  portalName: "${chosenName}"`);
+      const portalNameLine = `  portalName: ${JSON.stringify(chosenName)}`;
+      if (/^\s*portalName:/m.test(source)) source = source.replace(/^\s*portalName:.*$/m, portalNameLine);
+      else source = source.replace(/^portal:\s*$/m, `portal:\n${portalNameLine}`);
     }
     ensureFile(CONFIG_PATH, source);
     created.push(CONFIG_PATH);

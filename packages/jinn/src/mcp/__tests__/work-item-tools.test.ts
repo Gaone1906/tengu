@@ -92,6 +92,9 @@ describe("work-item tools — registry + schemas", () => {
     const status = tool("update_work_item").inputSchema.properties.status as { enum: string[] };
     expect(status.enum).toEqual(["executing", "in_review", "blocked", "escalated", "done"]);
     expect(status.enum).not.toContain("cancelled");
+    expect(tool("get_work_item").inputSchema.properties.id).toMatchObject({
+      pattern: "^[A-Z]{3}-[1-9][0-9]*$",
+    });
   });
 
   it("ships the generic Todo doctrine in the repo template CLAUDE.md", () => {
@@ -104,6 +107,12 @@ describe("work-item tools — registry + schemas", () => {
 });
 
 describe("work-item tools — unit (stub gateway)", () => {
+  it("accepts a company-derived canonical ID and forwards it unchanged", async () => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: { id: "ICI-42", title: "Company Todo" } }));
+    await expect(tool("get_work_item").handler({ id: "ICI-42" }, ctx)).resolves.toMatchObject({ id: "ICI-42" });
+    expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/ICI-42");
+  });
+
   it.each(["wi_0123456789ab", "JIN-0", "JIN-01", "JIN-9007199254740992", " JIN-1 "])(
     "rejects noncanonical Todo id %s before contacting the gateway",
     async (id) => {

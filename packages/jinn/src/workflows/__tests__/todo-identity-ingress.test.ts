@@ -69,8 +69,8 @@ describe("structured Workflow Todo identity ingress", () => {
 
   it("accepts canonical exact Todo filters and a truly valueless exists filter", () => {
     for (const [index, filter] of [
-      { path: "payload.todoId", op: "equals", value: "JIN-1" },
-      { path: "payload.todoId", op: "notEquals", value: "JIN-2" },
+      { path: "payload.todoId", op: "equals", value: "ICI-1" },
+      { path: "payload.todoId", op: "notEquals", value: "ICI-2" },
       { path: "payload.todoId", op: "exists" },
     ].entries()) {
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-phase-a-filter-valid-"));

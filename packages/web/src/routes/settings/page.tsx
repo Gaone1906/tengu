@@ -13,6 +13,7 @@ import { useModelRegistry } from "@/hooks/use-model-registry"
 import { RemoteAccessPanel } from "@/components/auth/remote-access-panel"
 import { useAuth } from "@/routes/auth-provider"
 import { cn } from "@/lib/utils"
+import { deriveTodoIdPrefix } from "@/lib/todo-id"
 import {
   addModelOverride,
   hideModelOverride,
@@ -117,6 +118,7 @@ interface Config {
     defaultDelivery?: { connector?: string; channel?: string }
   }
   portal?: {
+    companyName?: string
     portalName?: string
     operatorName?: string
   }
@@ -465,6 +467,7 @@ export default function SettingsPage() {
   const {
     settings,
     setAccentColor,
+    setCompanyName,
     setPortalName,
     setPortalSubtitle,
     setOperatorName,
@@ -476,6 +479,8 @@ export default function SettingsPage() {
   const auth = useAuth()
 
   // Local branding inputs
+  const [companyNameValue, setCompanyNameValue] = useState(settings.companyName ?? "")
+  const companyPrefixPreview = deriveTodoIdPrefix(companyNameValue)
   const [nameValue, setNameValue] = useState(settings.portalName ?? "")
   const [subtitleValue, setSubtitleValue] = useState(settings.portalSubtitle ?? "")
   const [operatorNameValue, setOperatorNameValue] = useState(settings.operatorName ?? "")
@@ -526,6 +531,7 @@ export default function SettingsPage() {
 
   // Sync local values when settings change externally (e.g., reset)
   useEffect(() => {
+    setCompanyNameValue(settings.companyName ?? "")
     setNameValue(settings.portalName ?? "")
     setSubtitleValue(settings.portalSubtitle ?? "")
     setOperatorNameValue(settings.operatorName ?? "")
@@ -533,6 +539,7 @@ export default function SettingsPage() {
     setLanguageValue(settings.language ?? "English")
     setCustomHex(settings.accentColor ?? "")
   }, [
+    settings.companyName,
     settings.portalName,
     settings.portalSubtitle,
     settings.operatorName,
@@ -783,6 +790,31 @@ export default function SettingsPage() {
             <div
               className="flex flex-col gap-[var(--space-3)]"
             >
+              <div>
+                <label
+                  className="block text-[length:var(--text-caption1)] text-[var(--text-tertiary)] mb-[var(--space-1)]"
+                >
+                  Company Name
+                </label>
+                <input
+                  type="text"
+                  className={CONTROL_CLASS}
+                  placeholder="Acme Labs"
+                  value={companyNameValue}
+                  onChange={(e) => setCompanyNameValue(e.target.value)}
+                  onBlur={() => {
+                    if (!companyPrefixPreview) return
+                    setCompanyName(companyNameValue)
+                    api.completeOnboarding({ companyName: companyNameValue }).catch(() => {})
+                  }}
+                />
+                <p className={`mt-[var(--space-1)] text-[length:var(--text-caption1)] ${companyPrefixPreview ? "text-[var(--text-secondary)]" : "text-[var(--system-red)]"}`}>
+                  {companyPrefixPreview
+                    ? `Company-derived prefix: ${companyPrefixPreview}. The issued prefix stays frozen after the first Todo.`
+                    : "Enter a company name with at least three Latin letters."}
+                </p>
+              </div>
+
               <div>
                 <label
                   className="block text-[length:var(--text-caption1)] text-[var(--text-tertiary)] mb-[var(--space-1)]"

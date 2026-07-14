@@ -17,7 +17,7 @@ process.on("message", (message) => {
     const result = migrateWorkItemsSchema(db);
     let id;
     if (message.type === "allocate") {
-      const claim = allocateWorkItemId(db, message.now);
+      const claim = allocateWorkItemId(db, message.now, message.companyName ?? "Jinn");
       useWorkItemAllocationClaim(db, claim, () => db.prepare(`
         INSERT INTO work_items (id, title, created_at, updated_at)
         VALUES (?, ?, ?, ?)

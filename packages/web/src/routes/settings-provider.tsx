@@ -20,6 +20,7 @@ interface EmployeeDisplay {
 interface SettingsContextValue {
   settings: JinnSettings
   setAccentColor: (color: string | null) => void
+  setCompanyName: (name: string | null) => void
   setPortalName: (name: string | null) => void
   setPortalSubtitle: (subtitle: string | null) => void
   setPortalEmoji: (emoji: string | null) => void
@@ -35,8 +36,9 @@ interface SettingsContextValue {
 }
 
 const SettingsContext = createContext<SettingsContextValue>({
-  settings: { accentColor: null, portalName: null, portalSubtitle: null, portalEmoji: null, portalIcon: null, iconBgHidden: false, emojiOnly: false, operatorName: null, language: "English", employeeOverrides: {} },
+  settings: { accentColor: null, companyName: null, portalName: null, portalSubtitle: null, portalEmoji: null, portalIcon: null, iconBgHidden: false, emojiOnly: false, operatorName: null, language: "English", employeeOverrides: {} },
   setAccentColor: () => {},
+  setCompanyName: () => {},
   setPortalName: () => {},
   setPortalSubtitle: () => {},
   setPortalEmoji: () => {},
@@ -65,14 +67,15 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     setSettings(loadSettings())
   }, [])
 
-  // Then sync portalName/operatorName from backend config (source of truth) once
+  // Then sync companyName/portalName/operatorName from backend config (source of truth) once
   // the shared onboarding query resolves. This ensures the correct COO name
   // shows up even if localStorage has stale values from a previous onboarding.
   useEffect(() => {
-    if (!onboarding || (!onboarding.portalName && !onboarding.operatorName)) return
+    if (!onboarding || (!onboarding.companyName && !onboarding.portalName && !onboarding.operatorName)) return
     setSettings((prev) => {
       const merged = {
         ...prev,
+        ...(onboarding.companyName ? { companyName: onboarding.companyName } : {}),
         ...(onboarding.portalName ? { portalName: onboarding.portalName } : {}),
         ...(onboarding.operatorName ? { operatorName: onboarding.operatorName } : {}),
       }
@@ -113,6 +116,13 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const setPortalName = useCallback(
     (name: string | null) => {
       update((prev) => ({ ...prev, portalName: name || null }))
+    },
+    [update],
+  )
+
+  const setCompanyName = useCallback(
+    (name: string | null) => {
+      update((prev) => ({ ...prev, companyName: name || null }))
     },
     [update],
   )
@@ -207,6 +217,7 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const resetAll = useCallback(() => {
     update(() => ({
       accentColor: null,
+      companyName: null,
       portalName: null,
       portalSubtitle: null,
       portalEmoji: null,
@@ -224,6 +235,7 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
       value={{
         settings,
         setAccentColor,
+        setCompanyName,
         setPortalName,
         setPortalSubtitle,
         setPortalEmoji,

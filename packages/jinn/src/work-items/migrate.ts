@@ -1,14 +1,21 @@
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import Database, { type Database as DatabaseType } from "better-sqlite3";
-import { formatTodoId, isTodoId, todoIdOrdinal } from "./id.js";
+import {
+  deriveTodoIdPrefix,
+  formatTodoId,
+  isTodoId,
+  todoIdOrdinal,
+  todoIdPrefix,
+  TODO_ID_PREFIX_PATTERN,
+} from "./id.js";
 
 export const UNSUPPORTED_PRERELEASE_TODO_DATA =
   "Unsupported prerelease Todo data detected. This release cannot start or migrate it.\n" +
   "Use the separately reviewed offline converter, or restore a supported public-version backup.";
 
 const CANONICAL_ID_SQL = `
-  id GLOB 'JIN-[1-9]*'
+  id GLOB '[A-Z][A-Z][A-Z]-[1-9]*'
   AND substr(id, 5) NOT GLOB '*[^0-9]*'
   AND CAST(substr(id, 5) AS INTEGER) BETWEEN 1 AND 9007199254740991
   AND printf('%lld', CAST(substr(id, 5) AS INTEGER)) = substr(id, 5)
@@ -87,6 +94,7 @@ CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
 export const WORK_ITEM_ID_ALLOCATOR_TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_id_allocator (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  prefix TEXT CHECK (prefix IS NULL OR (length(prefix) = 3 AND prefix GLOB '[A-Z][A-Z][A-Z]')),
   high_water INTEGER NOT NULL CHECK (high_water BETWEEN 0 AND 9007199254740991)
 )
 `;
@@ -108,8 +116,8 @@ CREATE TABLE IF NOT EXISTS work_item_id_issuances (
 
 export const WORK_ITEM_IDENTITY_TABLES_DDL = `
 ${WORK_ITEM_ID_ALLOCATOR_TABLE_DDL};
-INSERT INTO work_item_id_allocator (singleton, high_water)
-  SELECT 1, 0 WHERE NOT EXISTS (SELECT 1 FROM work_item_id_allocator);
+INSERT INTO work_item_id_allocator (singleton, prefix, high_water)
+  SELECT 1, NULL, 0 WHERE NOT EXISTS (SELECT 1 FROM work_item_id_allocator);
 ${WORK_ITEM_ID_BURNS_TABLE_DDL};
 ${WORK_ITEM_ID_ISSUANCES_TABLE_DDL};
 `;
@@ -131,6 +139,9 @@ BEGIN SELECT RAISE(ABORT, 'Todo allocator is immutable'); END`,
 BEFORE UPDATE ON work_item_id_allocator
 WHEN NEW.singleton != OLD.singleton
   OR NEW.high_water != OLD.high_water + 1
+  OR jinn_work_item_claim_prefix() IS NULL
+  OR NEW.prefix != COALESCE(OLD.prefix, jinn_work_item_claim_prefix())
+  OR (OLD.prefix IS NOT NULL AND NEW.prefix != OLD.prefix)
   OR jinn_work_item_claim_digest() IS NULL
   OR NOT EXISTS (
     SELECT 1 FROM work_item_id_burns
@@ -171,6 +182,9 @@ BEGIN SELECT RAISE(ABORT, 'Todo issuance ledger is append-only'); END`,
   `CREATE TRIGGER IF NOT EXISTS work_items_claim_required
 BEFORE INSERT ON work_items
 WHEN jinn_work_item_claim_digest() IS NULL
+  OR jinn_work_item_claim_prefix() IS NULL
+  OR substr(NEW.id, 1, 3) != (SELECT prefix FROM work_item_id_allocator WHERE singleton = 1)
+  OR substr(NEW.id, 1, 3) != jinn_work_item_claim_prefix()
   OR NOT EXISTS (
     SELECT 1 FROM work_item_id_burns b
     WHERE b.ordinal = CAST(substr(NEW.id, 5) AS INTEGER)
@@ -201,6 +215,7 @@ const REQUIRED_TRIGGER_SQL = new Map<string, string>(
 );
 
 const activeClaims = new WeakMap<DatabaseType, string>();
+const activeClaimPrefixes = new WeakMap<DatabaseType, string>();
 const registeredDatabases = new WeakSet<DatabaseType>();
 
 function claimDigest(rawClaim: string): string {
@@ -213,44 +228,57 @@ export function registerWorkItemIdentityFunctions(db: DatabaseType): void {
     const claim = activeClaims.get(db);
     return claim ? claimDigest(claim) : null;
   });
+  db.function("jinn_work_item_claim_prefix", () => activeClaimPrefixes.get(db) ?? null);
   registeredDatabases.add(db);
 }
 
-function withClaim<T>(db: DatabaseType, rawClaim: string, fn: () => T): T {
+function withClaim<T>(db: DatabaseType, rawClaim: string, prefix: string, fn: () => T): T {
   if (activeClaims.has(db)) throw new Error("nested Todo allocation claim");
   activeClaims.set(db, rawClaim);
+  activeClaimPrefixes.set(db, prefix);
   try {
     return fn();
   } finally {
     activeClaims.delete(db);
+    activeClaimPrefixes.delete(db);
   }
 }
 
 export interface WorkItemAllocationClaim {
   id: string;
+  prefix: string;
   ordinal: number;
   /** One-time raw claim. It is never persisted. */
   rawClaim: string;
 }
 
 /** Commit the burn independently; a later failed create permanently leaves a gap. */
-export function allocateWorkItemId(db: DatabaseType, now = new Date().toISOString()): WorkItemAllocationClaim {
+export function allocateWorkItemId(
+  db: DatabaseType,
+  now = new Date().toISOString(),
+  companyName: unknown = "Jinn",
+): WorkItemAllocationClaim {
   registerWorkItemIdentityFunctions(db);
   const rawClaim = randomBytes(32).toString("hex");
-  const ordinal = withClaim(db, rawClaim, () => db.transaction(() => {
-    const current = db.prepare("SELECT high_water FROM work_item_id_allocator WHERE singleton = 1").pluck().get() as number;
-    const next = current + 1;
+  const allocation = db.transaction(() => {
+    const current = db.prepare("SELECT prefix, high_water FROM work_item_id_allocator WHERE singleton = 1")
+      .get() as { prefix: string | null; high_water: number };
+    const prefix = current.prefix ?? deriveTodoIdPrefix(companyName);
+    const next = current.high_water + 1;
     if (!Number.isSafeInteger(next)) throw new Error("Todo ID allocator exhausted");
-    db.prepare("INSERT INTO work_item_id_burns (ordinal, claim_digest, burned_at) VALUES (?, ?, ?)")
-      .run(next, claimDigest(rawClaim), now);
-    db.prepare("UPDATE work_item_id_allocator SET high_water = ? WHERE singleton = 1").run(next);
-    return next;
-  }).immediate());
-  return { id: formatTodoId(ordinal), ordinal, rawClaim };
+    return withClaim(db, rawClaim, prefix, () => {
+      db.prepare("INSERT INTO work_item_id_burns (ordinal, claim_digest, burned_at) VALUES (?, ?, ?)")
+        .run(next, claimDigest(rawClaim), now);
+      db.prepare("UPDATE work_item_id_allocator SET prefix = ?, high_water = ? WHERE singleton = 1")
+        .run(prefix, next);
+      return { prefix, ordinal: next };
+    });
+  }).immediate();
+  return { id: formatTodoId(allocation.prefix, allocation.ordinal), ...allocation, rawClaim };
 }
 
 export function useWorkItemAllocationClaim<T>(db: DatabaseType, claim: WorkItemAllocationClaim, fn: () => T): T {
-  return withClaim(db, claim.rawClaim, fn);
+  return withClaim(db, claim.rawClaim, claim.prefix, fn);
 }
 
 export type WorkItemSchemaPreflight = "absent" | "empty-prerelease" | "current";
@@ -331,15 +359,20 @@ export function verifyCurrentWorkItemSchema(db: DatabaseType): void {
   for (const [name, expected] of REQUIRED_TRIGGER_SQL) {
     if (sqlShape(triggerSql(db, name)) !== sqlShape(expected)) refusal();
   }
-  const allocator = db.prepare("SELECT singleton, high_water FROM work_item_id_allocator").all() as Array<{ singleton: number; high_water: number }>;
+  const allocator = db.prepare("SELECT singleton, prefix, high_water FROM work_item_id_allocator").all() as Array<{
+    singleton: number;
+    prefix: string | null;
+    high_water: number;
+  }>;
   if (allocator.length !== 1 || allocator[0].singleton !== 1 || !Number.isSafeInteger(allocator[0].high_water)) refusal();
-  const highWater = allocator[0].high_water;
+  const { prefix, high_water: highWater } = allocator[0];
+  if (highWater === 0 ? prefix !== null : typeof prefix !== "string" || !TODO_ID_PREFIX_PATTERN.test(prefix)) refusal();
   const burns = db.prepare("SELECT ordinal FROM work_item_id_burns ORDER BY ordinal").pluck().all() as number[];
   if (burns.length !== highWater || burns.some((ordinal, index) => ordinal !== index + 1)) refusal();
   const issuances = new Set(db.prepare("SELECT ordinal FROM work_item_id_issuances").pluck().all() as number[]);
   if ([...issuances].some((ordinal) => ordinal < 1 || ordinal > highWater)) refusal();
   const ids = db.prepare("SELECT id FROM work_items").pluck().all() as string[];
-  if (ids.some((id) => !isTodoId(id) || !issuances.has(todoIdOrdinal(id)))) refusal();
+  if (ids.some((id) => !isTodoId(id) || todoIdPrefix(id) !== prefix || !issuances.has(todoIdOrdinal(id)))) refusal();
   for (const table of ["work_item_events", "sessions"] as const) {
     if (!tableExists(db, table)) continue;
     const column = table === "sessions" ? "work_item_id" : "work_item_id";

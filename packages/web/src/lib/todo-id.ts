@@ -1,4 +1,14 @@
-const TODO_ID_PATTERN = /^JIN-([1-9][0-9]*)$/
+const TODO_ID_PATTERN = /^[A-Z]{3}-([1-9][0-9]*)$/
+
+export function deriveTodoIdPrefix(companyName: unknown): string | null {
+  if (typeof companyName !== "string") return null
+  const letters = companyName
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z]/g, "")
+  return letters.length >= 3 ? letters.slice(0, 3) : null
+}
 
 export function isTodoId(value: unknown): value is string {
   if (typeof value !== "string") return false

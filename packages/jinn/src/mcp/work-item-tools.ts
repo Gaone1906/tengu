@@ -12,7 +12,7 @@ const SOURCES = ["human", "delegation", "cron", "workflow", "session", "connecto
 const AGENT_UPDATE_STATUSES = ["executing", "in_review", "blocked", "escalated", "done"] as const;
 const VERIFY_MODES = ["trust", "verify", "thorough"] as const;
 const ACTIVITY_RECEIPT_HINT = "Preview or Open the persisted activity receipt in this chat.";
-const TODO_ID_SCHEMA = { type: "string", pattern: "^JIN-[1-9][0-9]*$" } as const;
+const TODO_ID_SCHEMA = { type: "string", pattern: "^[A-Z]{3}-[1-9][0-9]*$" } as const;
 
 function mutationResult(body: unknown, hint: string): Record<string, unknown> {
   const value = body && typeof body === "object" && !Array.isArray(body)
@@ -43,7 +43,7 @@ function requireTodoId(args: Record<string, unknown>): string {
   try {
     return parseTodoId(args.id);
   } catch {
-    throw new JinnMcpToolError("id must be a canonical Todo ID such as JIN-42");
+    throw new JinnMcpToolError("id must be a canonical Todo ID such as ACM-42");
   }
 }
 

@@ -6,6 +6,7 @@ import { queryKeys } from "@/lib/query-keys"
 import type { EnginesResponse } from "@/lib/api"
 
 const getEngines = vi.fn()
+const setCompanyName = vi.fn()
 const setPortalName = vi.fn()
 const setOperatorName = vi.fn()
 const setAccentColor = vi.fn()
@@ -23,11 +24,13 @@ vi.mock("@/lib/api", () => ({
 vi.mock("@/routes/settings-provider", () => ({
   useSettings: () => ({
     settings: {
+      companyName: "Acme Labs",
       portalName: "Jinn",
       operatorName: "Operator",
       language: "English",
       accentColor: "#3B82F6",
     },
+    setCompanyName,
     setPortalName,
     setOperatorName,
     setAccentColor,
@@ -80,6 +83,7 @@ function renderWizard() {
 beforeEach(() => {
   getEngines.mockReset()
   getEngines.mockRejectedValue(new Error("raw engine fetch should not run"))
+  setCompanyName.mockReset()
   setPortalName.mockReset()
   setOperatorName.mockReset()
   setAccentColor.mockReset()
@@ -88,6 +92,25 @@ beforeEach(() => {
 })
 
 describe("OnboardingWizard model registry", () => {
+  it("captures a distinct company name and previews its Todo prefix", async () => {
+    renderWizard()
+
+    const companyName = await screen.findByRole("textbox", { name: "Company Name" })
+    fireEvent.change(companyName, { target: { value: "IC-IDEV" } })
+
+    expect(screen.getByText("New Todos will use IDs like ICI-1")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    expect(setCompanyName).toHaveBeenCalledWith("IC-IDEV")
+  })
+
+  it("does not advance with a company name that cannot produce a prefix", async () => {
+    renderWizard()
+    fireEvent.change(await screen.findByRole("textbox", { name: "Company Name" }), { target: { value: "AI" } })
+    const next = screen.getByRole("button", { name: "Next" }) as HTMLButtonElement
+    expect(next.disabled).toBe(true)
+    expect(screen.getByRole("alert").textContent).toMatch(/three Latin letters/i)
+  })
+
   it("uses the shared model registry query cache for engine choices", async () => {
     renderWizard()
 
