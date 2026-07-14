@@ -1,5 +1,6 @@
 import { assertBoundCaller, gatewayRequest, JinnMcpToolError, type JinnMcpTool } from "./toolkit.js";
 import type { JinnMcpContext } from "./toolkit.js";
+import { parseTodoId } from "../work-items/id.js";
 
 export const WORK_ITEM_SEARCH_LIMIT_MAX = 20;
 export const WORK_ITEM_SEARCH_LIMIT_DEFAULT = 10;
@@ -11,6 +12,7 @@ const SOURCES = ["human", "delegation", "cron", "workflow", "session", "connecto
 const AGENT_UPDATE_STATUSES = ["executing", "in_review", "blocked", "escalated", "done"] as const;
 const VERIFY_MODES = ["trust", "verify", "thorough"] as const;
 const ACTIVITY_RECEIPT_HINT = "Preview or Open the persisted activity receipt in this chat.";
+const TODO_ID_SCHEMA = { type: "string", pattern: "^JIN-[1-9][0-9]*$" } as const;
 
 function mutationResult(body: unknown, hint: string): Record<string, unknown> {
   const value = body && typeof body === "object" && !Array.isArray(body)
@@ -35,6 +37,14 @@ function requireString(args: Record<string, unknown>, name: string, max = FILTER
   if (!s) throw new JinnMcpToolError(`${name} is required and must be a non-empty string`);
   assertLength(name, s, max);
   return s;
+}
+
+function requireTodoId(args: Record<string, unknown>): string {
+  try {
+    return parseTodoId(args.id);
+  } catch {
+    throw new JinnMcpToolError("id must be a canonical Todo ID such as JIN-42");
+  }
 }
 
 function optionalString(args: Record<string, unknown>, name: string, max = FILTER_CHAR_CAP): string | undefined {
@@ -201,12 +211,12 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     description: "Get one Todo full detail.",
     inputSchema: {
       type: "object",
-      properties: { id: { type: "string" } },
+      properties: { id: TODO_ID_SCHEMA },
       required: ["id"],
     },
     handler: async (args, ctx) => {
       assertIdentity(ctx);
-      const id = requireString(args, "id");
+      const id = requireTodoId(args);
       const { status, body } = await gatewayRequest(ctx, "GET", `/api/work-items/${encodeURIComponent(id)}`);
       if (status >= 400) throw gatewayFailure(`getting work item "${id}"`, status, body);
       return body;
@@ -284,7 +294,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        id: { type: "string" },
+        id: TODO_ID_SCHEMA,
         status: { type: "string", enum: [...AGENT_UPDATE_STATUSES] },
         note: { type: "string" },
       },
@@ -293,7 +303,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     handler: async (args, ctx) => {
       assertIdentity(ctx);
       rejectApprovalFields(args, "update_work_item");
-      const id = requireString(args, "id");
+      const id = requireTodoId(args);
       const rawStatus = requireString(args, "status");
       if (rawStatus === "cancelled") {
         throw new JinnMcpToolError("cancelling a Todo is a human surface decision; agents do not have a cancel tool.");
@@ -316,7 +326,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        id: { type: "string" },
+        id: TODO_ID_SCHEMA,
         assignee: { type: "string" },
       },
       required: ["id", "assignee"],
@@ -324,7 +334,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     handler: async (args, ctx) => {
       assertIdentity(ctx);
       rejectApprovalFields(args, "assign_work_item");
-      const id = requireString(args, "id");
+      const id = requireTodoId(args);
       const assignee = requireString(args, "assignee");
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/assign`, { assignee });
       if (status >= 400) throw gatewayFailure(`assigning work item "${id}"`, status, body);
@@ -338,7 +348,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     inputSchema: {
       type: "object",
       properties: {
-        id: { type: "string" },
+        id: TODO_ID_SCHEMA,
         note: { type: "string" },
       },
       required: ["id"],
@@ -346,7 +356,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     handler: async (args, ctx) => {
       assertIdentity(ctx);
       rejectApprovalFields(args, "archive_work_item");
-      const id = requireString(args, "id");
+      const id = requireTodoId(args);
       const payload: Record<string, unknown> = {};
       const note = optionalString(args, "note", 4000);
       if (note !== undefined) payload.note = note;

@@ -35,7 +35,7 @@ describe("Todo conditional edit requests", () => {
     patch.title = "Mutated after mint"
     patch.priority = 3
 
-    persistTodoJournal("wi_request_snapshot", {
+    persistTodoJournal("JIN-42", {
       revision: 1,
       patch: request.patch,
       baseline: { title: "Original", priority: 0 },
@@ -45,7 +45,7 @@ describe("Todo conditional edit requests", () => {
 
     expect(request.patch).toEqual({ title: "Sent title", priority: 1 })
     expect(request.patch).not.toBe(patch)
-    expect(loadTodoJournal("wi_request_snapshot")?.request?.patch).toEqual({ title: "Sent title", priority: 1 })
+    expect(loadTodoJournal("JIN-42")?.request?.patch).toEqual({ title: "Sent title", priority: 1 })
   })
 
   it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(

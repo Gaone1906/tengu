@@ -250,6 +250,7 @@ import {
   type WorkItemSource,
   type WorkItemStatus,
 } from "../work-items/store.js";
+import { isTodoId } from "../work-items/id.js";
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import { createWorkflowTodoEventFeed } from "../work-items/workflow-event-feed.js";
@@ -2090,6 +2091,12 @@ function workItemPagePayload(page: ReturnType<typeof queryWorkItems>): Record<st
     offset: page.offset,
     nextOffset: page.nextOffset,
   };
+}
+
+function requireTodoRouteId(res: ServerResponse, value: string): boolean {
+  if (isTodoId(value)) return true;
+  badRequest(res, "Invalid Todo ID; expected JIN-N with a positive safe-integer suffix");
+  return false;
 }
 
 type WorkItemCaller =
@@ -4003,6 +4010,7 @@ export async function handleApiRequest(
     // GET /api/work-items/:id — full Todo detail.
     params = matchRoute("/api/work-items/:id", pathname);
     if (method === "GET" && params) {
+      if (!requireTodoRouteId(res, params.id)) return;
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
       return json(res, fullWorkItemPayload(item));
@@ -4018,6 +4026,7 @@ export async function handleApiRequest(
       if (caller.kind !== "operator") {
         return json(res, { error: "editing Todo metadata and manual rank requires the authenticated operator surface" }, 403);
       }
+      if (!requireTodoRouteId(res, params.id)) return;
       const invalidJsonResponse = { error: "Todo edit request must be valid JSON.", code: "todo_invalid_patch" } as const;
       const tooLargeResponse = { error: "Todo edit request exceeds the 64 KiB limit.", code: "todo_edit_too_large" } as const;
       const contentLength = todoEditContentLength(req.headers["content-length"]);
@@ -4153,6 +4162,7 @@ export async function handleApiRequest(
       if (method === "PUT" && caller.kind !== "operator") {
         return json(res, { error: "manual Todo status PUT requires the authenticated operator surface" }, 403);
       }
+      if (!requireTodoRouteId(res, params.id)) return;
       const parsed = await readJsonBody(req, res);
       if (!parsed.ok) return;
       if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
@@ -4216,6 +4226,7 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const caller = resolveWorkItemCaller(req, res, context);
       if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
       const parsed = await readJsonBody(req, res);
       if (!parsed.ok) return;
       if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
@@ -4275,6 +4286,7 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const caller = resolveWorkItemCaller(req, res, context);
       if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
       const parsed = await readJsonBody(req, res, { allowEmpty: true });
       if (!parsed.ok) return;
       if (parsed.body !== undefined && (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body))) {
@@ -4312,6 +4324,7 @@ export async function handleApiRequest(
     // The read-back half of the GRS-002 work-item slice (cron mints+links an item).
     params = matchRoute("/api/work-items/:id/sessions", pathname);
     if (method === "GET" && params) {
+      if (!requireTodoRouteId(res, params.id)) return;
       const linked = listSessionsByWorkItem(params.id);
       return json(res, linked.map((s) => serializeSession(s, context)));
     }
@@ -4323,6 +4336,7 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const caller = resolveWorkItemCaller(req, res, context);
       if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
       const parsed = await readJsonBody(req, res);
       if (!parsed.ok) return;
       if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
@@ -4376,6 +4390,7 @@ export async function handleApiRequest(
       if (decision !== "approve" && decision !== "reject") {
         return badRequest(res, 'decision must be "approve" or "reject"');
       }
+      if (!requireTodoRouteId(res, params.id)) return;
       const noteRaw = (parsed.body as { note?: unknown }).note;
       const note = typeof noteRaw === "string" ? noteRaw : undefined;
       const item = getWorkItem(params.id);
@@ -4412,6 +4427,7 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const parsed = await readJsonBody(req, res, { allowEmpty: true });
       if (!parsed.ok) return;
+      if (!requireTodoRouteId(res, params.id)) return;
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
       const authority = resolveApprovalDecisionAuthority(req.headers, item, {

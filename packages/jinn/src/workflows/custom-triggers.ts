@@ -19,6 +19,7 @@ import {
   type PollActivationApprovalRecord,
 } from './approval-authority.js';
 import { withWorkflowMutationLock } from './mutation-lock.js';
+import { isTodoId } from '../work-items/id.js';
 
 export const TRIGGER_STORE_SCHEMA_VERSION = 2;
 const TRIGGER_DIR = 'workflow-triggers';
@@ -392,7 +393,6 @@ function bindingSemanticValue(binding: WorkflowTriggerBinding): Record<string, u
   delete value.updatedAt;
   if (binding.kind === 'poll') {
     delete value.approval;
-    delete value.approvalWorkItemId;
     delete value.activationContract;
     delete value.activationContractHash;
     delete value.lastCheckedAt;
@@ -565,18 +565,15 @@ export async function migrateWorkflowTriggerStore(root: string): Promise<boolean
     const store = readStore(root);
     const needsMigration = store.schemaVersion < TRIGGER_STORE_SCHEMA_VERSION
       || store.triggers.some((binding) => binding.schemaVersion < TRIGGER_STORE_SCHEMA_VERSION
-        || 'approvalWorkItemId' in binding
         || (binding.kind === 'poll' && !binding.approval));
     if (!needsMigration) return false;
     let migrated: WorkflowTriggerBinding[];
     try {
       migrated = store.triggers.map((binding) => {
-        const legacy = binding as WorkflowTriggerBinding & { approvalWorkItemId?: string };
-        const { approvalWorkItemId: _legacyApprovalWorkItemId, ...withoutLegacyApproval } = legacy;
         const normalized = {
-          ...withoutLegacyApproval,
+          ...binding,
           schemaVersion: TRIGGER_STORE_SCHEMA_VERSION,
-          bindingRevision: binding.bindingRevision ?? workflowTriggerBindingRevision(legacy),
+          bindingRevision: binding.bindingRevision ?? workflowTriggerBindingRevision(binding),
         } as WorkflowTriggerBinding;
         if (normalized.kind !== 'poll') return normalized;
         return withPendingPollActivationApproval(
@@ -687,6 +684,28 @@ function cleanFilter(input: unknown): WorkflowTriggerFilter[] | undefined {
     if (op !== 'equals' && op !== 'notEquals' && op !== 'exists' && op !== 'matches') {
       throw new WorkflowTriggerStoreError('invalid-input', 'filter.op must be equals, notEquals, exists, or matches');
     }
+    // Todo identity is exact-match only, so a pattern filter over it can never be authored.
+    if (pathValue === 'payload.todoId') {
+      const valueDescriptor = Object.getOwnPropertyDescriptor(rec, 'value');
+      if (op === 'matches') {
+        throw new WorkflowTriggerStoreError(
+          'invalid-input',
+          'filter.op "matches" is not permitted on payload.todoId; use equals, notEquals, or exists',
+        );
+      }
+      if (op === 'exists') {
+        if ('value' in rec) {
+          throw new WorkflowTriggerStoreError('invalid-input', 'filter.op "exists" takes no value on payload.todoId');
+        }
+      } else {
+        if (!valueDescriptor || !('value' in valueDescriptor) || !isTodoId(valueDescriptor.value)) {
+          throw new WorkflowTriggerStoreError(
+            'invalid-input',
+            'filter.value for payload.todoId must be an own canonical Todo ID string',
+          );
+        }
+      }
+    }
     if (op === 'matches') {
       if (typeof rec.value !== 'string') {
         throw new WorkflowTriggerStoreError('invalid-input', 'filter.value must be a string for matches');
@@ -712,7 +731,14 @@ function cleanFilter(input: unknown): WorkflowTriggerFilter[] | undefined {
         );
       }
     }
-    out.push({ path: pathValue, op, ...(rec.value !== undefined ? { value: sanitizeJsonValue(rec.value) } : {}) });
+    const valueDescriptor = Object.getOwnPropertyDescriptor(rec, 'value');
+    out.push({
+      path: pathValue,
+      op,
+      ...(valueDescriptor && 'value' in valueDescriptor && valueDescriptor.value !== undefined
+        ? { value: sanitizeJsonValue(valueDescriptor.value) }
+        : {}),
+    });
   }
   return out.length > 0 ? out : undefined;
 }
@@ -751,7 +777,29 @@ function sanitizeJsonValue(value: unknown, depth = 0): unknown {
   return null;
 }
 
+/**
+ * Prototype safety before reading: only an OWN data property named `todoId` is Todo
+ * structure. An inherited or accessor `todoId` is refused without invoking the getter,
+ * so a hostile payload cannot smuggle identity past ingress. An absent `todoId` — and any
+ * `wi_*` literal sitting in free-form prose elsewhere — stays inert, untouched data.
+ */
+function assertOwnCanonicalTodoId(payload: unknown): void {
+  if (typeof payload !== 'object' || payload === null) return;
+  if (!('todoId' in payload)) return;
+  const descriptor = Object.getOwnPropertyDescriptor(payload, 'todoId');
+  if (!descriptor) {
+    throw new WorkflowTriggerStoreError('invalid-input', 'own data property required for payload.todoId (inherited value refused)');
+  }
+  if (!('value' in descriptor)) {
+    throw new WorkflowTriggerStoreError('invalid-input', 'payload.todoId must be a data property, not an accessor');
+  }
+  if (!isTodoId(descriptor.value)) {
+    throw new WorkflowTriggerStoreError('invalid-input', 'payload.todoId must be a canonical Todo ID');
+  }
+}
+
 export function sanitizeWorkflowTriggerPayload(payload: unknown): Record<string, unknown> {
+  assertOwnCanonicalTodoId(payload);
   if (!isPlainObject(payload)) {
     throw new WorkflowTriggerStoreError('invalid-input', 'payload must be a JSON object');
   }
@@ -1050,7 +1098,13 @@ async function bindingMatchesEvent(binding: WorkflowTriggerBinding, input: FireW
   if (binding.kind !== 'webhook') return false;
   if (binding.activation !== 'active') return false;
   if (binding.event !== input.event) return false;
-  for (const f of binding.filter ?? []) {
+  let filters: WorkflowTriggerFilter[];
+  try {
+    filters = cleanFilter(binding.filter) ?? [];
+  } catch {
+    return false;
+  }
+  for (const f of filters) {
     if (!(await filterMatches(input, f, binding.name))) return false;
   }
   return true;

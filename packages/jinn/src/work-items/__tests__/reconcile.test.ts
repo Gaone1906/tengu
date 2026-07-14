@@ -112,7 +112,7 @@ describe("deriveWorkItemStatus — pure truth table (GRS-021a elevated vocabular
 
 describe("reconcileWorkItem — integration against real store + registry", () => {
   it("returns undefined for an unknown id", () => {
-    expect(reconcile.reconcileWorkItem("wi_nope")).toBeUndefined();
+    expect(reconcile.reconcileWorkItem("JIN-999")).toBeUndefined();
   });
 
   it("treats a historical Workflow Todo as audit-only in direct reconciliation", () => {

@@ -104,18 +104,34 @@ describe("work-item tools — registry + schemas", () => {
 });
 
 describe("work-item tools — unit (stub gateway)", () => {
+  it.each(["wi_0123456789ab", "JIN-0", "JIN-01", "JIN-9007199254740992", " JIN-1 "])(
+    "rejects noncanonical Todo id %s before contacting the gateway",
+    async (id) => {
+      for (const name of ["get_work_item", "update_work_item", "assign_work_item", "archive_work_item"]) {
+        const { calls, ctx } = stub(() => ({ status: 500, body: { error: "must not run" } }));
+        const args = name === "update_work_item"
+          ? { id, status: "executing" }
+          : name === "assign_work_item"
+            ? { id, assignee: "platform-worker" }
+            : { id };
+        await expect(tool(name).handler(args, ctx)).rejects.toThrow(/canonical Todo ID/i);
+        expect(calls).toEqual([]);
+      }
+    },
+  );
+
   it("preserves the route receipt at the MCP result root and points at the persisted chat receipt", async () => {
     const { ctx } = stub(() => ({
       status: 201,
-      body: { workItem: { id: "wi_receipt", title: "Receipt", status: "backlog" }, activityReceiptId: "todo:wi_receipt" },
+      body: { workItem: { id: "JIN-101", title: "Receipt", status: "backlog" }, activityReceiptId: "todo:JIN-101" },
     }));
     const out = await tool("create_work_item").handler({ title: "Receipt" }, ctx) as Record<string, unknown>;
-    expect(out.activityReceiptId).toBe("todo:wi_receipt");
+    expect(out.activityReceiptId).toBe("todo:JIN-101");
     expect(out.hint).toMatch(/Preview or Open the persisted activity receipt in this chat\./);
   });
 
   it("list passes status/source/assignee filters and returns compact summaries", async () => {
-    const { calls, ctx } = stub(() => ({ status: 200, body: { workItems: [{ id: "wi_1", title: "T", body: "MUST NOT LEAK", status: "blocked", source: "session", version: 7 }] } }));
+    const { calls, ctx } = stub(() => ({ status: 200, body: { workItems: [{ id: "JIN-1", title: "T", body: "MUST NOT LEAK", status: "blocked", source: "session", version: 7 }] } }));
     const out = (await tool("list_work_items").handler({ status: "blocked", source: "session", assignee: "qa", limit: 99 }, ctx)) as {
       workItems: Array<Record<string, unknown>>;
     };
@@ -125,7 +141,7 @@ describe("work-item tools — unit (stub gateway)", () => {
     expect(url.searchParams.get("source")).toBe("session");
     expect(url.searchParams.get("assignee")).toBe("qa");
     expect(url.searchParams.get("limit")).toBe("20");
-    expect(out.workItems[0]).toEqual({ id: "wi_1", title: "T", status: "blocked", assignee: null, department: null, source: "session", version: 7, updatedAt: null });
+    expect(out.workItems[0]).toEqual({ id: "JIN-1", title: "T", status: "blocked", assignee: null, department: null, source: "session", version: 7, updatedAt: null });
   });
 
   it("get returns full Todo detail without projecting Workflow run state", async () => {
@@ -133,7 +149,7 @@ describe("work-item tools — unit (stub gateway)", () => {
       status: 200,
       body: {
         workItem: {
-          id: "wi_2",
+          id: "JIN-2",
           title: "WF",
           body: "body",
           status: "in_review",
@@ -148,14 +164,14 @@ describe("work-item tools — unit (stub gateway)", () => {
         spendUsd: 1.25,
       },
     }));
-    const out = (await tool("get_work_item").handler({ id: "wi_2" }, ctx)) as Record<string, unknown>;
+    const out = (await tool("get_work_item").handler({ id: "JIN-2" }, ctx)) as Record<string, unknown>;
     expect(out).toMatchObject({ spendUsd: 1.25 });
     expect(out).not.toHaveProperty("workflowRun");
     expect(out.workItem).toMatchObject({ acceptance: "- pass", approvalState: "pending", rounds: 1 });
   });
 
   it("search uses the search route, caps hostile input locally, and returns no body dumps", async () => {
-    const { calls, ctx } = stub(() => ({ status: 200, body: { workItems: [{ id: "wi_s", title: "Needle", body: "SECRET", status: "backlog", source: "session" }] } }));
+    const { calls, ctx } = stub(() => ({ status: 200, body: { workItems: [{ id: "JIN-104", title: "Needle", body: "SECRET", status: "backlog", source: "session" }] } }));
     const out = (await tool("search_work_items").handler(
       { text: "%_\\ hostile", status: "backlog", department: "platform", limit: 999 },
       ctx,
@@ -176,7 +192,7 @@ describe("work-item tools — unit (stub gateway)", () => {
     const anon = stub(() => ({ status: 201, body: {} }), null);
     await expect(tool("create_work_item").handler({ title: "T" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
 
-    const { calls, ctx } = stub(() => ({ status: 201, body: { workItem: { id: "wi_new", title: "T", status: "backlog", approvalState: null } } }), "sess-caller");
+    const { calls, ctx } = stub(() => ({ status: 201, body: { workItem: { id: "JIN-103", title: "T", status: "backlog", approvalState: null } } }), "sess-caller");
     await expect(tool("create_work_item").handler({ title: "T", approvalRequest: "decide" }, ctx)).rejects.toThrow(
       /approval.*authority surface/i,
     );
@@ -207,40 +223,40 @@ describe("work-item tools — unit (stub gateway)", () => {
     const escalateTool = buildTools().find((t) => t.name === "escalate_work_item_approval")!;
     const { calls, ctx } = stub((call) => ({ status: 200, body: { ok: true, route: new URL(call.url).pathname } }), "sess-coo");
 
-    await requestTool.handler({ id: "wi_approval", request: "Approve release", target: "platform-manager" }, ctx);
-    await decideTool.handler({ id: "wi_approval", decision: "approve", note: "ship" }, ctx);
-    await escalateTool.handler({ id: "wi_approval", reason: "operator needed" }, ctx);
+    await requestTool.handler({ id: "JIN-102", request: "Approve release", target: "platform-manager" }, ctx);
+    await decideTool.handler({ id: "JIN-102", decision: "approve", note: "ship" }, ctx);
+    await escalateTool.handler({ id: "JIN-102", reason: "operator needed" }, ctx);
 
     expect(calls.map((c) => [c.method, new URL(c.url).pathname, c.body])).toEqual([
-      ["POST", "/api/work-items/wi_approval/approval/request", { request: "Approve release", target: "platform-manager" }],
-      ["POST", "/api/work-items/wi_approval/approval", { decision: "approve", note: "ship" }],
-      ["POST", "/api/work-items/wi_approval/approval/escalate", { reason: "operator needed" }],
+      ["POST", "/api/work-items/JIN-102/approval/request", { request: "Approve release", target: "platform-manager" }],
+      ["POST", "/api/work-items/JIN-102/approval", { decision: "approve", note: "ship" }],
+      ["POST", "/api/work-items/JIN-102/approval/escalate", { reason: "operator needed" }],
     ]);
   });
 
   it("update is identity-gated, refuses cancel locally, and readable gateway refusals name the human surface", async () => {
     const anon = stub(() => ({ status: 200, body: {} }), null);
-    await expect(tool("update_work_item").handler({ id: "wi_1", status: "blocked" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("update_work_item").handler({ id: "JIN-1", status: "blocked" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
     const { calls, ctx } = stub(() => ({ status: 403, body: { error: "self-review ban — use the human review surface" } }), "sess-1");
-    await expect(tool("update_work_item").handler({ id: "wi_1", status: "cancelled", note: "drop" }, ctx)).rejects.toThrow(
+    await expect(tool("update_work_item").handler({ id: "JIN-1", status: "cancelled", note: "drop" }, ctx)).rejects.toThrow(
       /cancelling.*human surface/i,
     );
-    await expect(tool("update_work_item").handler({ id: "wi_1", status: "done" }, ctx)).rejects.toThrow(/human review surface/i);
+    await expect(tool("update_work_item").handler({ id: "JIN-1", status: "done" }, ctx)).rejects.toThrow(/human review surface/i);
     expect(calls[0].method).toBe("POST");
-    expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/wi_1/status");
+    expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/JIN-1/status");
     expect(calls[0].body).toEqual({ status: "done" });
   });
 
   it("accepts executing and sends it through the guarded status route", async () => {
-    const { calls, ctx } = stub(() => ({ status: 200, body: { workItem: { id: "wi_1", status: "executing" } } }), "sess-1");
+    const { calls, ctx } = stub(() => ({ status: 200, body: { workItem: { id: "JIN-1", status: "executing" } } }), "sess-1");
 
-    await expect(tool("update_work_item").handler({ id: "wi_1", status: "executing" }, ctx)).resolves.toMatchObject({
+    await expect(tool("update_work_item").handler({ id: "JIN-1", status: "executing" }, ctx)).resolves.toMatchObject({
       workItem: { status: "executing" },
     });
     expect(calls).toEqual([
       expect.objectContaining({
         method: "POST",
-        url: "http://127.0.0.1:7777/api/work-items/wi_1/status",
+        url: "http://127.0.0.1:7777/api/work-items/JIN-1/status",
         body: { status: "executing" },
       }),
     ]);
@@ -248,25 +264,25 @@ describe("work-item tools — unit (stub gateway)", () => {
 
   it("assign validates through the route and maps readable 400 near-match errors", async () => {
     const { calls, ctx } = stub(() => ({ status: 400, body: { error: 'unknown employee "platfrom-dev". Did you mean "platform-dev"? Check find_employees.' } }), "sess-1");
-    await expect(tool("assign_work_item").handler({ id: "wi_1", assignee: "platfrom-dev" }, ctx)).rejects.toThrow(
+    await expect(tool("assign_work_item").handler({ id: "JIN-1", assignee: "platfrom-dev" }, ctx)).rejects.toThrow(
       /Did you mean "platform-dev".*find_employees/,
     );
-    expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/wi_1/assign");
+    expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/JIN-1/assign");
     expect(calls[0].body).toEqual({ assignee: "platfrom-dev" });
   });
 
   it("archive is identity-gated and posts to the non-deleting archive route", async () => {
     const anon = stub(() => ({ status: 200, body: {} }), null);
-    await expect(tool("archive_work_item").handler({ id: "wi_1", note: "stale" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
+    await expect(tool("archive_work_item").handler({ id: "JIN-1", note: "stale" }, anon.ctx)).rejects.toThrow(/caller identity unavailable/i);
 
-    const { calls, ctx } = stub(() => ({ status: 200, body: { workItem: { id: "wi_1", status: "cancelled" }, archived: true } }), "sess-1");
-    const out = (await tool("archive_work_item").handler({ id: "wi_1", note: "stale cleanup" }, ctx)) as {
+    const { calls, ctx } = stub(() => ({ status: 200, body: { workItem: { id: "JIN-1", status: "cancelled" }, archived: true } }), "sess-1");
+    const out = (await tool("archive_work_item").handler({ id: "JIN-1", note: "stale cleanup" }, ctx)) as {
       archived: boolean;
       workItem: { status: string };
     };
     expect(out).toMatchObject({ archived: true, workItem: { status: "cancelled" } });
     expect(calls[0].method).toBe("POST");
-    expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/wi_1/archive");
+    expect(calls[0].url).toBe("http://127.0.0.1:7777/api/work-items/JIN-1/archive");
     expect(calls[0].body).toEqual({ note: "stale cleanup" });
   });
 });
@@ -598,7 +614,7 @@ describe("work-item tools — integration against the real API + store", () => {
     await expect(requestTool.handler({ id: item.id, request: "Steal review" }, ctxFor(outsider.id))).rejects.toThrow(
       /403.*does not own|403.*cannot request approval/i,
     );
-    await expect(requestTool.handler({ id: "wi_missing", request: "Missing" }, ctxFor(owner.id))).rejects.toThrow(/404.*not found/i);
+    await expect(requestTool.handler({ id: "JIN-999", request: "Missing" }, ctxFor(owner.id))).rejects.toThrow(/404.*not found/i);
     await expect(requestTool.handler({ id: item.id, request: "Bad route", target: "unknown-reviewer" }, ctxFor(owner.id))).rejects.toThrow(
       /400.*not an org employee|400.*approval target/i,
     );
@@ -686,7 +702,7 @@ describe("work-item tools — integration against the real API + store", () => {
     await expect(tool("create_work_item").handler({ title: "Bad provenance source", provenance: { source: "bogus" } }, ctx)).rejects.toThrow(
       /provenance.*dedicated bridge|cannot be supplied/i,
     );
-    await expect(tool("update_work_item").handler({ id: "wi_missing", status: "blocked", note: "x", metadata: { approvalBypass: true } }, ctx)).rejects.toThrow(
+    await expect(tool("update_work_item").handler({ id: "JIN-9999", status: "blocked", note: "x", metadata: { approvalBypass: true } }, ctx)).rejects.toThrow(
       /approval.*authority surface/i,
     );
 

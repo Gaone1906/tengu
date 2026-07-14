@@ -2,7 +2,7 @@ import { useId, useRef, useState, type ComponentType, type KeyboardEvent as Reac
 import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, ArrowUpRight, Check, ChevronDown, ListChecks, Play, Workflow } from 'lucide-react'
 import type { ChatBlock, JsonValue } from '@/lib/blocks'
-import { todoPrivateRef } from '@/routes/todos/todo-private-state'
+import { todoPath } from '@/lib/todo-id'
 
 /* The company-activity object (plan Task 8). A quiet inline receipt — one soft
  * token surface showing the object's name + honest state, a Preview disclosure
@@ -177,11 +177,11 @@ export function CompanyActivityCard({ block }: { block: ChatBlock }) {
   const facts = factsFor(block)
   const title = block.title || block.summary || meta.label
   const objectName = `${title} ${meta.noun}`
+  const todoId = block.type === 'todo-activity' ? text(block.payload.todoId) : ''
 
   const openObject = () => {
     if (block.type === 'todo-activity') {
-      const todoId = text(block.payload.todoId)
-      navigate('/todos', todoId ? { state: { todoRef: todoPrivateRef(todoId) } } : undefined)
+      navigate(todoPath(todoId))
       return
     }
     const workflowId = encodeURIComponent(text(block.payload.workflowId))
@@ -197,16 +197,15 @@ export function CompanyActivityCard({ block }: { block: ChatBlock }) {
   }
 
   return (
-    // No data-block-id: block.id embeds the canonical Todo identity (todo:${id})
-    // and this receipt must never render it into the DOM. Reconciliation — live
-    // same-block patch vs. card replacement — is owned by the React key
-    // (key={block.id} in chat-messages), not by any DOM attribute, so identity
-    // stays in React internals and off every rendered surface. The one DOM reader
-    // of data-block-id (chat/page.tsx return-focus) only ever matches Handoff /
+    // Reconciliation — live same-block patch vs. card replacement — remains
+    // owned by the React key (key={block.id} in chat-messages). Todo identity is
+    // intentionally public and canonical, so the card exposes the same JIN-N
+    // value used by the URL and API instead of minting a browser-only alias.
     // Dispatch peek-source message ids, never a company-activity card. The
     // non-identifying type tag remains for styling/debugging.
     <div
       data-block-type={block.type}
+      data-todo-id={todoId || undefined}
       onKeyDown={handleKeyDown}
       className="my-[var(--space-2)] w-[min(480px,calc(100vw-var(--space-6)))] max-w-full rounded-[var(--radius-xl)] bg-[var(--fill-tertiary)] shadow-[var(--shadow-subtle)]"
     >
@@ -220,7 +219,9 @@ export function CompanyActivityCard({ block }: { block: ChatBlock }) {
         <span className="min-w-0 flex-1">
           <span className="flex min-w-0 items-baseline gap-[var(--space-2)] text-[length:var(--text-footnote)] leading-[var(--leading-snug)]">
             <span className="truncate font-[var(--weight-semibold)] text-[var(--text-primary)]">{title}</span>
-            <span className="shrink-0 font-[var(--weight-regular)] text-[var(--text-secondary)]">{meta.label}</span>
+              <span className="shrink-0 font-[var(--weight-regular)] text-[var(--text-secondary)]">
+                {meta.label}{todoId ? ` · ${todoId}` : ''}
+              </span>
           </span>
           <span
             data-activity-state={state.tone}

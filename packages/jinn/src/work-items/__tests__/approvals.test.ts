@@ -81,7 +81,7 @@ describe("requestApproval — the native approval-request write path", () => {
   });
 
   it("throws on an unknown item", () => {
-    expect(() => approvals.requestApproval("wi_missing", { request: "x" })).toThrow();
+    expect(() => approvals.requestApproval("JIN-999", { request: "x" })).toThrow();
   });
 
   it("persists explicit target:null as no target across a round trip", () => {
@@ -113,7 +113,7 @@ describe("raw approval decision door", () => {
 
 describe("decideWorkItemApproval — native consequence rules", () => {
   it("not-found for an unknown item", async () => {
-    const r = await approvals.decideWorkItemApproval({ id: "wi_none", decision: "approve" });
+    const r = await approvals.decideWorkItemApproval({ id: "JIN-999", decision: "approve" });
     expect(r).toMatchObject({ ok: false, code: "not-found" });
   });
 

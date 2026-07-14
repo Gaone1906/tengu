@@ -1,11 +1,10 @@
 import type { TodoDraftPatch, TodoEditableDraft } from "./use-todo-draft"
 import type { WorkItemEditRequest } from "@/lib/api"
+import { isTodoId } from "@/lib/todo-id"
 
-const SALT_KEY = "jinn:todo-tab-salt:v1"
 const JOURNAL_KEY = "jinn:todo-draft-journal:v2"
 const JOURNAL_TTL_MS = 24 * 60 * 60 * 1_000
 const MAX_JOURNALS = 50
-const SALT_PATTERN = /^[a-z0-9-]{12,}$/i
 
 export type TodoDraftField = keyof TodoEditableDraft
 
@@ -53,51 +52,8 @@ function storage(): Storage | null {
   return typeof sessionStorage === "undefined" ? null : sessionStorage
 }
 
-function randomSalt(): string {
-  const bytes = new Uint8Array(16)
-  globalThis.crypto?.getRandomValues?.(bytes)
-  if (bytes.some(Boolean)) return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")
-  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
-}
-
-function tabSalt(): string {
-  const store = storage()
-  if (!store) return "ephemeral"
-  const existing = store.getItem(SALT_KEY)
-  if (existing && SALT_PATTERN.test(existing)) return existing
-  const next = randomSalt()
-  try { store.setItem(SALT_KEY, next) } catch { /* in-memory editing still works */ }
-  return next
-}
-
-function digest(value: string): string {
-  // Two independently seeded FNV-1a lanes provide a compact, tab-salted
-  // surrogate. This is identity minimisation, not a canonical Todo key.
-  let a = 0x811c9dc5
-  let b = 0x9e3779b9
-  for (let i = 0; i < value.length; i += 1) {
-    const code = value.charCodeAt(i)
-    a = Math.imul(a ^ code, 0x01000193)
-    b = Math.imul(b ^ code, 0x85ebca6b)
-  }
-  return `td_${(a >>> 0).toString(36)}${(b >>> 0).toString(36)}`
-}
-
-/** A private, per-tab navigation/storage surrogate. It is deliberately not a
- * user-facing or canonical JIN-N identifier. */
-export function todoPrivateRef(id: string): string {
-  return digest(`${tabSalt()}\u0000${id}`)
-}
-
-function existingTodoPrivateRef(id: string): string | null {
-  const store = storage()
-  if (!store) return null
-  try {
-    const salt = store.getItem(SALT_KEY)
-    return salt && SALT_PATTERN.test(salt) ? digest(`${salt}\u0000${id}`) : null
-  } catch {
-    return null
-  }
+function canonicalTodoId(id: string): string | null {
+  return isTodoId(id) ? id : null
 }
 
 const FIELDS = new Set<TodoDraftField>(["title", "body", "assignee", "department", "priority"])
@@ -294,8 +250,8 @@ function protectedRequest(current: TodoJournalRequest, incoming: TodoJournalRequ
   return { ...current, state, failureCode }
 }
 
-function validEnvelope(ref: string, value: unknown, now: number): value is JournalEnvelope {
-  if (!/^td_[a-z0-9]+$/i.test(ref) || !isRecord(value) || !hasOnlyKeys(value, ENVELOPE_KEYS)) return false
+function validEnvelope(id: string, value: unknown, now: number): value is JournalEnvelope {
+  if (!isTodoId(id) || !isRecord(value) || !hasOnlyKeys(value, ENVELOPE_KEYS)) return false
   return typeof value.expiresAt === "number"
     && Number.isFinite(value.expiresAt)
     && value.expiresAt > now
@@ -342,12 +298,14 @@ function readEnvelopes(now = Date.now(), clean = true): Record<string, JournalEn
 }
 
 export function loadTodoJournal(id: string): TodoJournalPayload | null {
-  return readEnvelopes()[todoPrivateRef(id)]?.payload ?? null
+  const key = canonicalTodoId(id)
+  return key ? readEnvelopes()[key]?.payload ?? null : null
 }
 
 export function persistTodoJournal(id: string, payload: TodoJournalPayload): void {
   const store = storage()
-  if (!store || !validPayload(payload)) return
+  const ref = canonicalTodoId(id)
+  if (!store || !ref || !validPayload(payload)) return
   try {
     // Parse/filter without a cleanup write: insertion, ordering, capping, and
     // persistence are one deterministic storage mutation.
@@ -356,7 +314,6 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
     const journals = Object.fromEntries(
       Object.entries(parsed).filter(([ref, entry]) => validEnvelope(ref, entry, now)),
     ) as Record<string, JournalEnvelope>
-    const ref = todoPrivateRef(id)
     const current = journals[ref]?.payload
     let nextPayload = payload
     if (current?.request) {
@@ -403,8 +360,7 @@ export function persistTodoJournal(id: string, payload: TodoJournalPayload): voi
   }
 }
 
-/** Atomically replace one exact durable journal payload. Identity stays behind
- * the existing tab-private surrogate; callers never persist or compare raw IDs. */
+/** Atomically replace one exact durable journal payload keyed by the Todo ID. */
 export function transitionTodoJournalPayload(
   id: string,
   expectedPayload: TodoJournalPayload,
@@ -413,7 +369,7 @@ export function transitionTodoJournalPayload(
   const store = storage()
   if (!store || !validPayload(expectedPayload) || (nextPayload !== null && !validPayload(nextPayload))) return false
   try {
-    const ref = existingTodoPrivateRef(id)
+    const ref = canonicalTodoId(id)
     if (!ref) return false
     const now = Date.now()
     const parsed = parseEnvelopes()
@@ -453,7 +409,7 @@ export function transitionTodoJournal(
   if (nextPayload !== null
     && (!validTransitionPayload(nextPayload) || nextPayload.revision < expectedCurrentRevision)) return false
   try {
-    const ref = existingTodoPrivateRef(id)
+    const ref = canonicalTodoId(id)
     if (!ref) return false
     const now = Date.now()
     const parsed = parseEnvelopes()
@@ -481,23 +437,23 @@ export function transitionTodoJournal(
   }
 }
 
-export function clearTodoJournalByRef(ref: string, throughRevision?: number): boolean {
+function clearTodoJournalById(id: string, throughRevision?: number): boolean {
   const store = storage()
-  if (!store || !/^td_[a-z0-9]+$/i.test(ref)) return false
+  if (!store || !isTodoId(id)) return false
   try {
     const journals = readEnvelopes()
-    const current = journals[ref]
+    const current = journals[id]
     if (!current) return true
     if (throughRevision != null && current.payload.revision > throughRevision) return false
-    delete journals[ref]
+    delete journals[id]
     if (Object.keys(journals).length === 0) store.removeItem(JOURNAL_KEY)
     else store.setItem(JOURNAL_KEY, JSON.stringify(journals))
-    return !readEnvelopes(Date.now(), false)[ref]
+    return !readEnvelopes(Date.now(), false)[id]
   } catch {
     return false
   }
 }
 
 export function clearTodoJournal(id: string, throughRevision?: number): boolean {
-  return clearTodoJournalByRef(todoPrivateRef(id), throughRevision)
+  return clearTodoJournalById(id, throughRevision)
 }

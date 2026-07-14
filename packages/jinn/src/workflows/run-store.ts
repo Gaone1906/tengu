@@ -376,8 +376,6 @@ export interface WorkflowRun {
   stepPromptRevision?: number;
   /** Append-only audit trail for edits made after the run started. */
   stepPromptEdits?: WorkflowStepPromptEdit[];
-  /** Legacy field: new todo-status runs carry this as trigger.payload.todoId. */
-  triggerTodoId?: string;
   status: WorkflowRunStatus;
   startedAt: string;
   endedAt: string | null;
@@ -650,10 +648,9 @@ export function isWorkflowTriggerEvent(trigger: unknown): trigger is WorkflowTri
   );
 }
 
-export function normalizeWorkflowTrigger(trigger: unknown, legacyTriggerTodoId?: string): WorkflowTriggerEvent {
+export function normalizeWorkflowTrigger(trigger: unknown): WorkflowTriggerEvent {
   if (isWorkflowTriggerEvent(trigger)) {
     const payload = copyPayload(trigger.payload);
-    if (legacyTriggerTodoId && payload.todoId === undefined) payload.todoId = legacyTriggerTodoId;
     return {
       source: trigger.source,
       event: trigger.event,
@@ -667,8 +664,8 @@ export function normalizeWorkflowTrigger(trigger: unknown, legacyTriggerTodoId?:
     return source === 'schedule'
       ? { source, event: 'schedule.fire', payload: {} }
       : source === 'todo-status-change'
-        ? { source, event: 'todo.status_changed', payload: legacyTriggerTodoId ? { todoId: legacyTriggerTodoId } : {} }
-        : { source: 'manual', event: 'workflow.manual_started', payload: legacyTriggerTodoId ? { todoId: legacyTriggerTodoId } : {} };
+        ? { source, event: 'todo.status_changed', payload: {} }
+        : { source: 'manual', event: 'workflow.manual_started', payload: {} };
   }
 
   const record = trigger && typeof trigger === 'object' && !Array.isArray(trigger)
@@ -692,12 +689,11 @@ export function normalizeWorkflowTrigger(trigger: unknown, legacyTriggerTodoId?:
 
   if (kind === 'todo-status-change') {
     const payload: Record<string, unknown> = {};
-    if (legacyTriggerTodoId) payload.todoId = legacyTriggerTodoId;
     const fireRef = stringField(record, 'fireRef');
     return { source: 'todo-status-change', event: 'todo.status_changed', payload, ...(fireRef ? { fireRef } : {}) };
   }
 
-  return { source: 'manual', event: 'workflow.manual_started', payload: legacyTriggerTodoId ? { todoId: legacyTriggerTodoId } : {} };
+  return { source: 'manual', event: 'workflow.manual_started', payload: {} };
 }
 
 /* ── Public API ─────────────────────────────────────────────────────────────── */

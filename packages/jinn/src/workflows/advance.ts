@@ -1012,7 +1012,7 @@ export function advanceRun(
     ...(next.rounds !== undefined ? { rounds: next.rounds } : {}),
     runStatus: next.status,
     triggerKind: 'kind' in next.trigger ? next.trigger.kind : next.trigger.source,
-    trigger: normalizeWorkflowTrigger(next.trigger, next.triggerTodoId),
+    trigger: normalizeWorkflowTrigger(next.trigger),
   });
 
   // ── Bounded loop continuation (GRS-014e, design D4; GRS-016a: segment-settled) ──

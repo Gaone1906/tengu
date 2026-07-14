@@ -9,6 +9,7 @@ import {
   type WorkItemEditRequest,
   type WorkItemFullWire,
 } from "@/lib/api"
+import { isTodoId } from "@/lib/todo-id"
 import {
   isTodoIdempotencyConflictError,
   isTodoVersionConflictError,
@@ -20,7 +21,6 @@ import {
   mergeTodoIntoCaches,
   newTodoEditRequest,
 } from "./todo-edit-request"
-import { todoPrivateRef } from "./todo-private-state"
 
 export type TodoQuickEditField = keyof WorkItemEditPatch
 
@@ -152,7 +152,7 @@ function readStored(): StoredQuickEdits {
     const parsed = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? "{}") as StoredQuickEdits
     const now = Date.now()
     const entries = Object.entries(parsed)
-      .filter(([ref, value]) => /^td_[a-z0-9]+$/i.test(ref)
+      .filter(([ref, value]) => isTodoId(ref)
         && validStoredQuickEdit(value) && value.expiresAt > now)
       .sort((a, b) => b[1].expiresAt - a[1].expiresAt || a[0].localeCompare(b[0]))
       .slice(0, MAX_STORED)
@@ -177,27 +177,17 @@ function writeStored(value: StoredQuickEdits): boolean {
 }
 
 function loadStored(id: string): StoredQuickEdit | null {
-  return readStored()[todoPrivateRef(id)] ?? null
+  return isTodoId(id) ? readStored()[id] ?? null : null
 }
 
 export function hasTodoQuickEditRecovery(id: string): boolean {
   return loadStored(id) !== null
 }
 
-export function hasTodoQuickEditRecoveryByRef(ref: string): boolean {
-  return /^td_[a-z0-9]+$/i.test(ref) && readStored()[ref] !== undefined
-}
-
-export function clearTodoQuickEditRecoveryByRef(ref: string): void {
-  if (!/^td_[a-z0-9]+$/i.test(ref)) return
-  const all = readStored()
-  delete all[ref]
-  writeStored(all)
-}
-
 function storeEntry(id: string, value: Omit<StoredQuickEdit, "expiresAt">): boolean {
+  if (!isTodoId(id)) return false
   const all = readStored()
-  const ref = todoPrivateRef(id)
+  const ref = id
   all[ref] = { ...value, expiresAt: Date.now() + TTL_MS }
   const capped = Object.fromEntries(Object.entries(all)
     .sort((a, b) => b[1].expiresAt - a[1].expiresAt || a[0].localeCompare(b[0]))
@@ -211,7 +201,7 @@ function storeEntry(id: string, value: Omit<StoredQuickEdit, "expiresAt">): bool
 
 function clearStored(id: string): boolean {
   const all = readStored()
-  const ref = todoPrivateRef(id)
+  const ref = id
   delete all[ref]
   return writeStored(all) && readStored()[ref] === undefined
 }
@@ -360,9 +350,9 @@ function isAmbiguousTransport(error: unknown): boolean {
   return !(error instanceof TodoApiError) && (error instanceof TypeError || error instanceof DOMException)
 }
 
-/** Serialized conditional editor for compact Todo surfaces. The only durable
- * identity is the existing per-tab private surrogate; stored values are the
- * operator-authored patch plus immutable transport metadata, never raw ids. */
+/** Serialized conditional editor for compact Todo surfaces. Recovery entries
+ * use the same canonical JIN-N identity as the database and API, alongside the
+ * operator-authored patch and immutable transport metadata. */
 export function useTodoQuickEdit() {
   const client = useQueryClient()
   const entries = useRef(new Map<string, RuntimeEdit>())
@@ -797,7 +787,7 @@ export function useTodoQuickEdit() {
     hasRecovery: () => recoveries.current.size > 0,
     recover,
     recovery: recoveryEntry?.value ?? null,
-    recoveryRef: recoveryEntry ? todoPrivateRef(recoveryEntry.id) : null,
+    recoveryId: recoveryEntry?.id ?? null,
     error,
     rankResetRevisions,
     reload: () => reconcile("reload"),

@@ -20,14 +20,14 @@ function deferred<T>() {
 }
 
 const todoId: Record<WorkItemStatusWire, string> = {
-  backlog: "wi_backlog",
-  assigned: "wi_assigned",
-  executing: "wi_executing",
-  in_review: "wi_review",
-  done: "wi_done",
-  blocked: "wi_blocked",
-  escalated: "wi_escalated",
-  cancelled: "wi_cancelled",
+  backlog: "JIN-41",
+  assigned: "JIN-42",
+  executing: "JIN-43",
+  in_review: "JIN-44",
+  done: "JIN-45",
+  blocked: "JIN-46",
+  escalated: "JIN-47",
+  cancelled: "JIN-48",
 }
 
 vi.mock("@/lib/auth", () => ({
@@ -341,18 +341,18 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(screen.getByTestId("detail-sheet").innerHTML).not.toContain("border-t-[0.5px]")
   })
 
-  it("keeps transport ids out of identity UI, technical disclosures, and test selectors", () => {
-    const privateDetail = detail("backlog")
-    privateDetail.workItem.id = "wi_private_detail_42"
-    privateDetail.workItem.sourceRef = "workflow:wi_private_source:run"
-    privateDetail.workItem.approvalState = "pending"
-    privateDetail.workItem.approvalRequest = "Review the result"
-    privateDetail.workItem.approvalRef = "wi_private_approval"
-    renderSheetWithDetail(privateDetail)
+  it("shows the canonical Todo id and copies the same id and direct link", () => {
+    const publicDetail = detail("backlog")
+    publicDetail.workItem.id = "JIN-42"
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } })
+    renderSheetWithDetail(publicDetail)
     fireEvent.click(screen.getByTestId("tech-disclosure"))
-    expect(screen.getByTestId("detail-sheet").textContent).not.toMatch(/wi_[a-z0-9_-]+/i)
-    expect(screen.getByTestId("detail-sheet").innerHTML).not.toMatch(/wi_[a-z0-9_-]+/i)
-    expect(screen.queryByRole("button", { name: /Copy/ })).toBeNull()
+    expect(screen.getByTestId("todo-public-id").textContent).toBe("JIN-42")
+    fireEvent.click(screen.getByRole("button", { name: "Copy Todo ID JIN-42" }))
+    fireEvent.click(screen.getByRole("button", { name: "Copy link to JIN-42" }))
+    expect(writeText).toHaveBeenNthCalledWith(1, "JIN-42")
+    expect(writeText).toHaveBeenNthCalledWith(2, `${window.location.origin}/todos/JIN-42`)
   })
 
   it("keeps a pending title draft mounted until the serialized save completes", async () => {
@@ -1614,7 +1614,7 @@ describe("Todo detail editing and dialog behavior", () => {
     expect(patchBodies()).toHaveLength(1)
     expect((loadTodoJournal(value.workItem.id)?.request as Record<string, unknown> | undefined)?.failureCode)
       .toBe("TODO_IDEMPOTENCY_CONFLICT")
-    expect(sessionStorage.getItem("jinn:todo-draft-journal:v2")).not.toMatch(/private payload|wi_hidden|wi_backlog|token=secret/i)
+    expect(sessionStorage.getItem("jinn:todo-draft-journal:v2")).not.toMatch(/private payload|wi_hidden|token=secret/i)
     mounted.unmount()
 
     renderSheetWithDetail(value)

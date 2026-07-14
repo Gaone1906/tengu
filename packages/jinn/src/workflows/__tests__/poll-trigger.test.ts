@@ -140,7 +140,7 @@ describe('workflow poll/check custom triggers', () => {
     });
   });
 
-  it('migrates v1 Todo-backed poll approvals to native pending records once and requires reapproval', async () => {
+  it('migrates v1 poll approvals to native pending records once and requires reapproval', async () => {
     const command = staticOutputScript('poll-v1-migration', JSON.stringify({ fire: false }));
     const file = path.join(root, 'workflow-triggers', 'triggers.json');
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -157,7 +157,6 @@ describe('workflow poll/check custom triggers', () => {
         command,
         intervalSeconds: 60,
         timeoutMs: 1000,
-        approvalWorkItemId: 'wi_historical_audit_only',
         createdAt: FIXED,
         updatedAt: FIXED,
       }],
@@ -171,7 +170,6 @@ describe('workflow poll/check custom triggers', () => {
     expect(second).toBe(first);
     const migrated = JSON.parse(first) as { schemaVersion: number; triggers: Array<Record<string, unknown>> };
     expect(migrated.schemaVersion).toBe(2);
-    expect(migrated.triggers[0]).not.toHaveProperty('approvalWorkItemId');
     expect(migrated.triggers[0]).toMatchObject({
       schemaVersion: 2,
       bindingRevision: expect.stringMatching(/^legacy-/),
@@ -215,13 +213,13 @@ describe('workflow poll/check custom triggers', () => {
           schemaVersion: 1,
           kind: 'poll', source: 'poll', name: 'artifact-first', event: 'poll.first', targetWorkflowId: 'first',
           activation: 'active', command: staticOutputScript('artifact-first', JSON.stringify({ fire: false })), intervalSeconds: 60,
-          approvalWorkItemId: 'wi_historical_first', createdAt: FIXED, updatedAt: FIXED,
+          createdAt: FIXED, updatedAt: FIXED,
         },
         {
           schemaVersion: 1,
           kind: 'poll', source: 'poll', name: 'artifact-second', event: 'poll.second', targetWorkflowId: 'second',
           activation: 'active', command: path.join(root, 'missing-second.sh'), intervalSeconds: 60,
-          approvalWorkItemId: 'wi_historical_second', createdAt: FIXED, updatedAt: FIXED,
+          createdAt: FIXED, updatedAt: FIXED,
         },
       ],
     }, null, 2);
@@ -245,7 +243,7 @@ describe('workflow poll/check custom triggers', () => {
         schemaVersion: 1,
         kind: 'poll', source: 'poll', name: 'write-failure', event: 'poll.write', targetWorkflowId: 'write',
         activation: 'active', command: staticOutputScript('write-failure', JSON.stringify({ fire: false })), intervalSeconds: 60,
-        approvalWorkItemId: 'wi_historical_write', createdAt: FIXED, updatedAt: FIXED,
+        createdAt: FIXED, updatedAt: FIXED,
       }],
     }, null, 2);
     fs.writeFileSync(file, original);
@@ -277,7 +275,7 @@ describe('workflow poll/check custom triggers', () => {
         schemaVersion: 1,
         kind: 'poll', source: 'poll', name: 'cleanup-failure', event: 'poll.cleanup', targetWorkflowId: 'cleanup',
         activation: 'active', command: staticOutputScript('cleanup-failure', JSON.stringify({ fire: false })), intervalSeconds: 60,
-        approvalWorkItemId: 'wi_historical_cleanup', createdAt: FIXED, updatedAt: FIXED,
+        createdAt: FIXED, updatedAt: FIXED,
       }],
     }, null, 2));
     const staleDir = path.join(tmpHome, 'workflow-trigger-artifacts', 'stale-after-commit');

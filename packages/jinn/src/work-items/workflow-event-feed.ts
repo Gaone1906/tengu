@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { initDb } from '../sessions/registry.js';
 import type { WorkItemSource, WorkItemStatus } from './store.js';
+import { isTodoId } from './id.js';
 
 export interface WorkflowTodoStatusEvent {
   id: string;
@@ -130,6 +131,7 @@ const WORK_ITEM_SOURCES = new Set<WorkItemSource>([
 ]);
 
 function eventFromImmutableSnapshot(row: TodoEventRow): WorkflowTodoStatusEvent | null {
+  if (!isTodoId(row.work_item_id)) return null;
   if (!row.detail) return null;
   try {
     const detail = JSON.parse(row.detail) as { todoProvenance?: unknown };

@@ -372,7 +372,7 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
     });
     expect(resp.status).toBe(201);
     const { workItemId, sessionId } = resp.body as { workItemId: string; sessionId: string };
-    expect(workItemId).toMatch(/^wi_/);
+    expect(workItemId).toMatch(/^JIN-/);
     expect(sessionId).toBeTruthy();
 
     // The durable intent record, shaped from the delegation.
@@ -839,7 +839,7 @@ describe("POST /api/delegations — link-before-dispatch (codex review finding 1
     // The route reports the partial failure with BOTH preserved ids.
     expect(resp.status).toBe(500);
     const { workItemId, sessionId } = resp.body as { workItemId: string; sessionId: string };
-    expect(workItemId).toMatch(/^wi_/);
+    expect(workItemId).toMatch(/^JIN-/);
     expect(sessionId).toBeTruthy();
     expect(String(resp.body.error)).toMatch(/link/i);
 
@@ -881,7 +881,7 @@ describe("POST /api/delegations — mint-before-spawn ordering (the GRS-003b-2b 
       const resp = await call("POST", "/api/delegations", { engine: "codex", task: "doomed chore", title: "doomed" });
       // The spawn failed, but the response still carries the preserved intent.
       expect(resp.status).toBe(502);
-      expect(resp.body.workItemId).toMatch(/^wi_/);
+      expect(resp.body.workItemId).toMatch(/^JIN-/);
       expect(String(resp.body.error)).toMatch(/engine/i);
 
       const item = store.getWorkItem(resp.body.workItemId)!;

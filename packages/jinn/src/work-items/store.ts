@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { initDb } from '../sessions/registry.js';
+import { parseTodoId } from './id.js';
+import { allocateWorkItemId, useWorkItemAllocationClaim } from './migrate.js';
 
 /**
  * Work-item store — the substrate of the Todos ledger (GRS-002, elevated by
@@ -213,11 +215,6 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItem {
   };
 }
 
-/** `wi_<12 hex>` — short, sortable-enough, collision-safe for this scale. */
-function generateWorkItemId(): string {
-  return `wi_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
-}
-
 /** True only for a UNIQUE-constraint violation — NOT a CHECK violation (those must
  *  still surface as errors, e.g. an invalid status). better-sqlite3 sets `.code`. */
 function isUniqueConstraintError(err: unknown): boolean {
@@ -266,10 +263,11 @@ export interface AppendWorkItemEventInput {
  *  detail is stringified verbatim. */
 export function appendWorkItemEvent(input: AppendWorkItemEventInput): WorkItemEvent {
   const db = initDb();
+  const workItemId = parseTodoId(input.workItemId);
   const now = new Date().toISOString();
   const event: WorkItemEvent = {
     id: `wie_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
-    workItemId: input.workItemId,
+    workItemId,
     kind: input.kind,
     fromStatus: input.fromStatus ?? null,
     toStatus: input.toStatus ?? null,
@@ -305,9 +303,10 @@ export function appendWorkItemEvent(input: AppendWorkItemEventInput): WorkItemEv
 /** List an item's audit trail, oldest-first (the story reads top-down). */
 export function listWorkItemEvents(workItemId: string): WorkItemEvent[] {
   const db = initDb();
+  const id = parseTodoId(workItemId);
   const rows = db
     .prepare('SELECT * FROM work_item_events WHERE work_item_id = ? ORDER BY created_at, rowid')
-    .all(workItemId) as Record<string, unknown>[];
+    .all(id) as Record<string, unknown>[];
   return rows.map((row) => {
     let detail: Record<string, unknown> | null = null;
     if (typeof row.detail === 'string' && row.detail) {
@@ -345,7 +344,10 @@ export function listWorkItemEvents(workItemId: string): WorkItemEvent[] {
 export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   const db = initDb();
   const now = new Date().toISOString();
-  const id = generateWorkItemId();
+  // The burn commits before the create. An idempotent hit or a lost race discards the
+  // claim and leaves a permanent gap in the JIN sequence, which is valid by design.
+  const claim = allocateWorkItemId(db, now);
+  const id = claim.id;
   const status: WorkItemStatus = input.status ?? 'backlog';
   const source: WorkItemSource = input.source ?? 'human';
   const sourceRef = input.sourceRef ?? null;
@@ -401,12 +403,12 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
     appendWorkItemEvent({ workItemId: id, kind: 'created', toStatus: status, actor: source, detail: sourceRef ? { sourceRef } : null });
     return getWorkItem(id)!;
   });
-  return txn();
+  return useWorkItemAllocationClaim(db, claim, () => txn());
 }
 
 export function getWorkItem(id: string): WorkItem | undefined {
   const db = initDb();
-  const row = db.prepare('SELECT * FROM work_items WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  const row = db.prepare('SELECT * FROM work_items WHERE id = ?').get(parseTodoId(id)) as Record<string, unknown> | undefined;
   return row ? rowToWorkItem(row) : undefined;
 }
 
@@ -436,8 +438,19 @@ function workItemWhere(filter: ListWorkItemsFilter): { sql: string; values: unkn
   const values: unknown[] = [];
   if (filter.text) {
     const like = `%${filter.text.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
-    conditions.push("(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')");
-    values.push(like, like);
+    let exactTodoId: string | null = null;
+    try {
+      exactTodoId = parseTodoId(filter.text);
+    } catch {
+      // Non-ID text remains an ordinary title/body query.
+    }
+    if (exactTodoId) {
+      conditions.push("(id = ? OR title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')");
+      values.push(exactTodoId, like, like);
+    } else {
+      conditions.push("(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')");
+      values.push(like, like);
+    }
   }
   if (filter.status) {
     conditions.push('status = ?');
@@ -693,9 +706,10 @@ export function updateWorkItem(id: string, input: UpdateWorkItemInput, actor?: s
  *  sessions. Never stored (design §1.6) — always derived, never stale. */
 export function getWorkItemSpend(id: string): number {
   const db = initDb();
+  const workItemId = parseTodoId(id);
   const row = db
     .prepare('SELECT COALESCE(SUM(total_cost), 0) AS spend FROM sessions WHERE work_item_id = ?')
-    .get(id) as { spend: number };
+    .get(workItemId) as { spend: number };
   return row.spend;
 }
 
@@ -715,19 +729,20 @@ export function getWorkItemSpend(id: string): number {
  */
 export function linkSession(workItemId: string, sessionId: string): void {
   const db = initDb();
+  const todoId = parseTodoId(workItemId);
   const now = new Date().toISOString();
   const txn = db.transaction(() => {
     const session = db
       .prepare('SELECT work_item_id FROM sessions WHERE id = ?')
       .get(sessionId) as { work_item_id: string | null } | undefined;
     if (!session) throw new Error(`linkSession: session ${sessionId} not found`);
-    const workItemExists = db.prepare('SELECT 1 FROM work_items WHERE id = ?').get(workItemId);
-    if (!workItemExists) throw new Error(`linkSession: work item ${workItemId} not found`);
+    const workItemExists = db.prepare('SELECT 1 FROM work_items WHERE id = ?').get(todoId);
+    if (!workItemExists) throw new Error(`linkSession: work item ${todoId} not found`);
     // Already linked to this exact item → no write, no `updated_at` bump.
-    if (session.work_item_id === workItemId) return;
-    db.prepare('UPDATE sessions SET work_item_id = ? WHERE id = ?').run(workItemId, sessionId);
-    db.prepare('UPDATE work_items SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, workItemId);
-    appendWorkItemEvent({ workItemId, kind: 'session_linked', detail: { sessionId } });
+    if (session.work_item_id === todoId) return;
+    db.prepare('UPDATE sessions SET work_item_id = ? WHERE id = ?').run(todoId, sessionId);
+    db.prepare('UPDATE work_items SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, todoId);
+    appendWorkItemEvent({ workItemId: todoId, kind: 'session_linked', detail: { sessionId } });
   });
   txn();
 }

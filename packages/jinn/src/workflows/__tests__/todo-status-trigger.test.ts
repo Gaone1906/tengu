@@ -89,14 +89,14 @@ describe('todo-status-change workflow trigger', () => {
 
     const first = await fireTodoStatusChangeWorkflows(deps(), {
       id: 'wie_evt1',
-      workItemId: 'wi_1',
+      workItemId: 'JIN-1',
       fromStatus: 'executing',
       toStatus: 'in_review',
       item: { source: 'human', department: null, assignee: null },
     });
     const second = await fireTodoStatusChangeWorkflows(deps(), {
       id: 'wie_evt1',
-      workItemId: 'wi_1',
+      workItemId: 'JIN-1',
       fromStatus: 'executing',
       toStatus: 'in_review',
       item: { source: 'human', department: null, assignee: null },
@@ -109,7 +109,7 @@ describe('todo-status-change workflow trigger', () => {
       source: 'todo-status-change',
       event: 'todo.status_changed',
       payload: {
-        todoId: 'wi_1',
+        todoId: 'JIN-1',
         fromStatus: 'executing',
         toStatus: 'in_review',
         source: 'human',
@@ -127,7 +127,7 @@ describe('todo-status-change workflow trigger', () => {
 
     const outcomes = await fireTodoStatusChangeWorkflows(deps(), {
       id: 'wie_evt2',
-      workItemId: 'wi_2',
+      workItemId: 'JIN-2',
       fromStatus: 'executing',
       toStatus: 'in_review',
       item: { source: 'human', department: 'platform', assignee: null },
@@ -141,21 +141,21 @@ describe('todo-status-change workflow trigger', () => {
 
     const first = await fireTodoStatusChangeWorkflows(deps(), {
       id: 'wie_a',
-      workItemId: 'wi_cycle',
+      workItemId: 'JIN-3',
       fromStatus: 'executing',
       toStatus: 'in_review',
       item: { source: 'human', department: null, assignee: null },
     });
     const second = await fireTodoStatusChangeWorkflows(deps(), {
       id: 'wie_b',
-      workItemId: 'wi_cycle',
+      workItemId: 'JIN-3',
       fromStatus: 'executing',
       toStatus: 'in_review',
       item: { source: 'human', department: null, assignee: null },
     });
     const replay = await fireTodoStatusChangeWorkflows(deps(), {
       id: 'wie_b',
-      workItemId: 'wi_cycle',
+      workItemId: 'JIN-3',
       fromStatus: 'executing',
       toStatus: 'in_review',
       item: { source: 'human', department: null, assignee: null },

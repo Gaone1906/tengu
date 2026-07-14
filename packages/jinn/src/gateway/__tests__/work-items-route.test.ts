@@ -160,6 +160,20 @@ describe("GET /api/work-items/:id/sessions", () => {
     expect(cap.status).toBe(200);
     expect(cap.body).toEqual([]);
   });
+
+  it.each(["wi_0123456789ab", "JIN-0", "JIN-01", "JIN-9007199254740992", "garbage"])(
+    "rejects malformed Todo route id %s before storage lookup",
+    async (id) => {
+      for (const suffix of ["", "/sessions"]) {
+        const cap = makeRes();
+        await api.handleApiRequest(makeReq("GET", `/api/work-items/${id}${suffix}`), cap.res, ctx);
+        expect(cap.status).toBe(400);
+        expect(cap.body).toEqual({
+          error: "Invalid Todo ID; expected JIN-N with a positive safe-integer suffix",
+        });
+      }
+    },
+  );
 });
 
 describe("GET /api/work-items and /api/search/work-items — pagination, totals, and filters", () => {

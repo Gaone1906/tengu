@@ -80,7 +80,7 @@ describe("transition — the guarded edge map", () => {
   });
 
   it("throws not-found for an unknown item and is a silent no-op for same-status", () => {
-    expect(() => tr.transition("wi_nope", "done", "x")).toThrowError(/not found/);
+    expect(() => tr.transition("JIN-999", "done", "x")).toThrowError(/not found/);
     const wi = mk("blocked");
     const before = store.listWorkItemEvents(wi.id).length;
     const { item } = tr.transition(wi.id, "blocked", "x");

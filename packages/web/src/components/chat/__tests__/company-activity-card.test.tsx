@@ -6,10 +6,7 @@ import { CompanyActivityCard } from '../company-activity-card'
 import { ChatBlockInline } from '../chat-blocks'
 import type { ChatBlock } from '@/lib/blocks'
 
-// A private Todo whose canonical identity must never reach the rendered DOM.
-// CANON is deliberately distinctive so a leak is unmistakable and no human-facing
-// field (title/summary/facts) can coincidentally contain it.
-const CANON = 'wi_PROBE_LEAK_CANARY'
+const CANON = 'JIN-42'
 
 function probeTodoBlock(overrides: Partial<ChatBlock> = {}): ChatBlock {
   return {
@@ -45,24 +42,6 @@ function domSurfaces(root: HTMLElement) {
   return { outer: root.outerHTML, inner: root.innerHTML, text: root.textContent ?? '', attrs, hrefs }
 }
 
-function expectNoCanonicalId(root: HTMLElement) {
-  const { outer, inner, text, attrs, hrefs } = domSurfaces(root)
-  expect(outer).not.toContain(CANON)
-  expect(inner).not.toContain(CANON)
-  expect(text).not.toContain(CANON)
-  for (const attr of attrs) expect(attr).not.toContain(CANON)
-  for (const href of hrefs) expect(href).not.toContain(CANON)
-}
-
-function storageDump(store: Storage): string {
-  let out = ''
-  for (let i = 0; i < store.length; i += 1) {
-    const key = store.key(i) ?? ''
-    out += `${key}=${store.getItem(key) ?? ''}\n`
-  }
-  return out
-}
-
 function runBlock(overrides: Partial<ChatBlock> = {}): ChatBlock {
   return {
     id: 'workflow-run:release-review:run-20260712010101-abcd1234',
@@ -90,14 +69,14 @@ function runBlock(overrides: Partial<ChatBlock> = {}): ChatBlock {
 
 function todoBlock(overrides: Partial<ChatBlock> = {}): ChatBlock {
   return {
-    id: 'todo:wi_release',
+    id: 'todo:JIN-7',
     type: 'todo-activity',
     version: 2,
     status: 'waiting',
     title: 'Prepare release',
     summary: 'In review',
     payload: {
-      todoId: 'wi_release',
+      todoId: 'JIN-7',
       action: 'transitioned',
       status: 'in_review',
       assignee: 'designer',
@@ -133,7 +112,7 @@ function renderCard(block: ChatBlock): Harness {
   const router = createMemoryRouter(
     [
       { path: '/', element: <CompanyActivityCard block={block} /> },
-      { path: '/todos', element: <div>Todos page</div> },
+      { path: '/todos/:todoId', element: <div>Todo page</div> },
       { path: '/workflow/:id', element: <div>Workflow page</div> },
     ],
     { initialEntries: ['/'] },
@@ -208,70 +187,57 @@ describe('CompanyActivityCard', () => {
     expect(region.textContent).toContain('Deploy step exited 1')
   })
 
-  it('renders a Todo object and Open routes to the ledger without the canonical id in the URL', async () => {
+  it('renders a Todo object and Open routes to its canonical public URL', async () => {
     const user = userEvent.setup()
     const { router } = renderCard(todoBlock())
     expect(screen.getByText('Prepare release')).toBeTruthy()
-    expect(screen.getByText('Todo')).toBeTruthy()
+    expect(screen.getByText('Todo · JIN-7')).toBeTruthy()
     expect(screen.getByText(/In review/i)).toBeTruthy()
     await user.click(screen.getByRole('button', { name: 'Open Prepare release todo' }))
-    expect(router.state.location.pathname).toBe('/todos')
-    expect(router.state.location.search).not.toContain('wi_release')
+    expect(router.state.location.pathname).toBe('/todos/JIN-7')
+    expect(router.state.location.state).toBeNull()
   })
 
-  it('never renders the canonical Todo id anywhere in the card DOM (markup, attributes, text, hrefs)', () => {
+  it('renders the canonical Todo id as public object metadata', () => {
     const { container } = render(
       <MemoryRouter><CompanyActivityCard block={probeTodoBlock()} /></MemoryRouter>,
     )
-    // The card's real, human-facing content still renders…
     expect(screen.getByText('Sensitive matter')).toBeTruthy()
-    expect(screen.getByText('Todo')).toBeTruthy()
-    // …but the canonical Todo identity appears on no rendered surface.
-    expectNoCanonicalId(container as HTMLElement)
+    expect(screen.getByText('Todo · JIN-42')).toBeTruthy()
+    expect(domSurfaces(container as HTMLElement).outer).toContain(CANON)
   })
 
-  it('never leaks the canonical Todo id through the real chat block wrapper (ChatBlockInline)', () => {
+  it('keeps the canonical Todo id through the real chat block wrapper', () => {
     const { container } = render(
       <MemoryRouter><ChatBlockInline block={probeTodoBlock()} /></MemoryRouter>,
     )
     expect(screen.getByText('Sensitive matter')).toBeTruthy()
-    expectNoCanonicalId(container as HTMLElement)
+    expect(domSurfaces(container as HTMLElement).outer).toContain(CANON)
   })
 
-  it('keeps the canonical Todo id out of the URL, history, and storage — at rest and after Open', async () => {
+  it('uses the canonical Todo id in the URL without navigation indirection', async () => {
     const user = userEvent.setup()
     const router = createMemoryRouter(
       [
         { path: '/', element: <CompanyActivityCard block={probeTodoBlock()} /> },
-        { path: '/todos', element: <div>Todos page</div> },
+        { path: '/todos/:todoId', element: <div>Todo page</div> },
       ],
       { initialEntries: ['/'] },
     )
     render(<RouterProvider router={router} />)
 
-    const assertClean = () => {
-      const loc = router.state.location
-      expect(loc.pathname + loc.search + (loc.hash ?? '')).not.toContain(CANON)
-      expect(JSON.stringify(loc.state ?? null)).not.toContain(CANON)
-      expect(storageDump(window.sessionStorage)).not.toContain(CANON)
-      expect(storageDump(window.localStorage)).not.toContain(CANON)
-    }
-    assertClean()
-
-    // Open drills into the ledger by the hashed private ref only — never the id.
     await user.click(screen.getByRole('button', { name: 'Open Sensitive matter todo' }))
-    expect(router.state.location.pathname).toBe('/todos')
-    assertClean()
+    expect(router.state.location.pathname).toBe('/todos/JIN-42')
+    expect(router.state.location.state).toBeNull()
   })
 
-  it('patches a todo card in place on same-id updates and replaces it on id change, never leaking the id', () => {
+  it('patches a todo card in place on same-id updates and replaces it on id change', () => {
     const initial = probeTodoBlock()
     const { container, rerender } = render(
       <MemoryRouter><CompanyActivityCard key={initial.id} block={initial} /></MemoryRouter>,
     )
     const node1 = container.firstElementChild as HTMLElement
     expect(screen.getByText(/In review/i)).toBeTruthy()
-    expectNoCanonicalId(container as HTMLElement)
 
     // Same block.id, new payload → React reconciles in place by its key (not by
     // any DOM attribute): the exact same root DOM node is patched.
@@ -279,16 +245,14 @@ describe('CompanyActivityCard', () => {
     rerender(<MemoryRouter><CompanyActivityCard key={patched.id} block={patched} /></MemoryRouter>)
     expect(container.firstElementChild).toBe(node1)
     expect(screen.getByText(/^Done$/)).toBeTruthy()
-    expectNoCanonicalId(container as HTMLElement)
 
     // Different block.id → React remounts: the card is replaced with a new node.
     const replacement = probeTodoBlock({
-      id: 'todo:wi_OTHER_CANARY',
-      payload: { ...probeTodoBlock().payload, todoId: 'wi_OTHER_CANARY' },
+      id: 'todo:JIN-43',
+      payload: { ...probeTodoBlock().payload, todoId: 'JIN-43' },
     })
     rerender(<MemoryRouter><CompanyActivityCard key={replacement.id} block={replacement} /></MemoryRouter>)
     expect(container.firstElementChild).not.toBe(node1)
-    expectNoCanonicalId(container as HTMLElement)
   })
 
   it('renders a workflow-definition object and Open routes to the editor', async () => {

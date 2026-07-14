@@ -171,7 +171,7 @@ export function TodoRow({
     >
       <button
         type="button"
-        aria-label={`Open ${item.title}`}
+        aria-label={`Open ${item.id}: ${item.title}`}
         disabled={editing}
         onClick={() => {
           if (suppressClickRef.current) {
@@ -237,6 +237,12 @@ export function TodoRow({
             {item.assignee ? (
               <RowEmployee name={item.assignee} byName={byName} />
             ) : null}
+            <span
+              data-testid="todo-row-id"
+              className="font-mono text-[length:var(--text-caption1)] font-medium text-[var(--text-secondary)]"
+            >
+              {item.id}
+            </span>
             <span className="min-w-[30px] text-right text-[length:var(--text-caption1)] tabular-nums text-[var(--text-quaternary)]">
               {timeHint}
             </span>

@@ -77,6 +77,7 @@ const router = createBrowserRouter([
       { path: '/cron', element: <CronPage /> },
       { path: '/cron/:id', element: <CronDetailPage /> },
       { path: '/todos', element: <TodosPage /> },
+      { path: '/todos/:todoId', element: <TodosPage /> },
       { path: '/notes', element: <NotesPage /> },
       // Folder/note deep links: /notes/f/<folder>, /notes/n/<rel>, or both.
       { path: '/notes/*', element: <NotesPage /> },

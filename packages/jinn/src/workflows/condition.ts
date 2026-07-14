@@ -21,6 +21,8 @@
  * it without cycles; run evidence is accepted structurally via `ConditionEvidence`.
  */
 
+import { isTodoId } from '../work-items/id.js';
+
 /* ── Shapes ─────────────────────────────────────────────────────────────────── */
 
 export const CONDITION_OPS = [
@@ -30,6 +32,10 @@ export type ConditionOp = (typeof CONDITION_OPS)[number];
 
 /** Operators that take no `value` (they test presence, not comparison). */
 export const VALUELESS_OPS: ReadonlySet<ConditionOp> = new Set(['exists', 'absent']);
+
+/** The one typed Todo relationship a condition may read, and the only operators valid over it. */
+const TODO_ID_CONDITION_PATH = 'trigger.payload.todoId';
+const TODO_ID_CONDITION_OPS: ReadonlySet<string> = new Set(['eq', 'ne', 'exists', 'absent']);
 
 export type ConditionValue = string | number | boolean;
 
@@ -244,19 +250,36 @@ export function evaluateCondition(cond: WorkflowCondition, ev: ConditionEvidence
   let op: unknown;
   let path: unknown;
   let value: unknown;
+  let todoValueDescriptor: PropertyDescriptor | undefined;
   try {
     if (!cond || typeof cond !== 'object') return false;
     const c = cond as unknown as Record<string, unknown>;
     op = c.op;
     path = c.path;
-    value = c.value;
+    if (path === TODO_ID_CONDITION_PATH) {
+      todoValueDescriptor = Object.getOwnPropertyDescriptor(c, 'value');
+      if (todoValueDescriptor && !('value' in todoValueDescriptor)) return false;
+      value = todoValueDescriptor?.value;
+    } else {
+      value = c.value;
+    }
   } catch {
     return false; // a condition whose own fields cannot be read matches nothing
   }
   if (typeof op !== 'string' || !(CONDITION_OPS as readonly string[]).includes(op)) return false;
+  if (path === TODO_ID_CONDITION_PATH) {
+    if (!TODO_ID_CONDITION_OPS.has(op)) return false;
+    if (VALUELESS_OPS.has(op as ConditionOp)) {
+      if (todoValueDescriptor !== undefined) return false;
+    } else if (!todoValueDescriptor || !isTodoId(value)) {
+      return false;
+    }
+  }
   try {
     const parsed = parseConditionPath(path);
     const resolved = parsed ? resolveParsedPath(parsed, ev) : undefined;
+
+    if (path === TODO_ID_CONDITION_PATH && resolved !== undefined && !isTodoId(resolved)) return false;
 
     if (op === 'exists') return resolved !== undefined;
     if (op === 'absent') return resolved === undefined;
@@ -376,6 +399,22 @@ function validateConditionShapeInner(cond: unknown): string[] {
     return errors; // value rules are op-specific; meaningless without a known op
   }
   const valueless = VALUELESS_OPS.has(op as ConditionOp);
+  // Todo identity is an exact-match namespace, never an ordered or substring one.
+  if (c.path === TODO_ID_CONDITION_PATH) {
+    if (!TODO_ID_CONDITION_OPS.has(op)) {
+      errors.push(`op "${op}" is not permitted on ${TODO_ID_CONDITION_PATH}; use eq, ne, exists, or absent`);
+      return errors;
+    }
+    const valueDescriptor = Object.getOwnPropertyDescriptor(c, 'value');
+    if (valueless) {
+      if (valueDescriptor !== undefined) errors.push(`op "${op}" takes no value`);
+      return errors;
+    }
+    if (!valueDescriptor || !('value' in valueDescriptor) || !isTodoId(valueDescriptor.value)) {
+      errors.push(`${TODO_ID_CONDITION_PATH} requires a canonical Todo ID value`);
+    }
+    return errors;
+  }
   if (valueless) {
     if (c.value !== undefined) errors.push(`op "${op}" takes no value`);
     return errors;

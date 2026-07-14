@@ -3,9 +3,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api, TodoApiError, type WorkItemDetailWire, type WorkItemEditRequest } from "@/lib/api"
 import { hasTodoQuickEditRecovery, useTodoQuickEdit } from "../use-todo-quick-edit"
-import { todoPrivateRef } from "../todo-private-state"
 
-const ID = "wi_private_quick_edit"
+const ID = "JIN-42"
 
 function detail(version: number, changes: Partial<WorkItemDetailWire["workItem"]> = {}): WorkItemDetailWire {
   return {
@@ -60,7 +59,7 @@ function onlyStored(): any {
 
 function storePending(id: string, desired: Record<string, unknown>, baseline: Record<string, unknown> = {}) {
   sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify({
-    [todoPrivateRef(id)]: {
+    [id]: {
       expiresAt: Date.now() + 60_000,
       desired,
       baseline,
@@ -173,14 +172,14 @@ describe("useTodoQuickEdit", () => {
     expect(result.current.rankResetRevisions[ID]).toBeGreaterThan(before)
   })
 
-  it("stores no raw Todo identifier and keeps only the immutable minimal request", async () => {
+  it("keys recovery by the canonical Todo identifier and keeps only the immutable minimal request", async () => {
     const { result } = setup()
     vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7))
     vi.spyOn(api, "updateWorkItem").mockRejectedValueOnce(new TypeError("offline"))
     await act(() => result.current.edit(ID, { title: "Offline desired" }))
 
     const stored = sessionStorage.getItem("jinn:todo-quick-edit:v1") ?? ""
-    expect(stored).not.toContain(ID)
+    expect(stored).toContain(ID)
     expect(stored).toContain("Offline desired")
     expect(stored).not.toContain("createdAt")
     expect(stored).not.toContain("approvalState")
@@ -255,21 +254,21 @@ describe("useTodoQuickEdit", () => {
     expect(hasTodoQuickEditRecovery(ID)).toBe(true)
   })
 
-  it("caps journals at 50, cleans TTL expiry, and never stores generated ids", async () => {
+  it("caps journals at 50 and cleans TTL expiry", async () => {
     const { result } = setup()
     vi.spyOn(api, "getWorkItem").mockImplementation((id: string) => Promise.resolve(detail(7, { id })))
     vi.spyOn(api, "updateWorkItem").mockRejectedValue(new TypeError("offline"))
     for (let index = 0; index < 51; index += 1) {
-      await act(() => result.current.edit(`wi_private_cap_${index}`, { title: `Authored ${index}` }))
+      await act(() => result.current.edit(`JIN-${1000 + index}`, { title: `Authored ${index}` }))
     }
     const raw = sessionStorage.getItem("jinn:todo-quick-edit:v1") ?? "{}"
     expect(Object.keys(JSON.parse(raw))).toHaveLength(50)
-    expect(raw).not.toMatch(/wi_private_cap_/)
+    expect(raw).toContain("JIN-1050")
 
     const expired = Object.fromEntries(Object.entries(JSON.parse(raw) as Record<string, Record<string, unknown>>)
       .map(([key, value]) => [key, { ...value, expiresAt: 1 }]))
     sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify(expired))
-    expect(hasTodoQuickEditRecovery("wi_private_cap_50")).toBe(false)
+    expect(hasTodoQuickEditRecovery("JIN-1050")).toBe(false)
     expect(sessionStorage.getItem("jinn:todo-quick-edit:v1")).toBeNull()
   })
 
@@ -545,10 +544,10 @@ describe("useTodoQuickEdit", () => {
     vi.spyOn(api, "updateWorkItem").mockRejectedValue(new TodoApiError(428, "raw", "TODO_PRECONDITION_REQUIRED"))
     const { result } = setup()
     await act(() => Promise.all([
-      result.current.edit("wi_rank_a", { rank: 1 }),
-      result.current.edit("wi_rank_b", { rank: 2 }),
+      result.current.edit("JIN-100", { rank: 1 }),
+      result.current.edit("JIN-101", { rank: 2 }),
     ]))
-    expect(result.current.rankResetRevisions).toMatchObject({ wi_rank_a: 1, wi_rank_b: 1 })
+    expect(result.current.rankResetRevisions).toMatchObject({ "JIN-100": 1, "JIN-101": 1 })
   })
 
   it("resets a queued rank when the active same-item request definitively fails", async () => {
@@ -567,18 +566,18 @@ describe("useTodoQuickEdit", () => {
   })
 
   it("keeps multiple conflicts ordered and promotes the next recovery after resolving one", async () => {
-    const firstId = "wi_conflict_a"
-    const secondId = "wi_conflict_b"
+    const firstId = "JIN-100"
+    const secondId = "JIN-101"
     vi.spyOn(api, "getWorkItem").mockImplementation((id: string) => Promise.resolve(detail(8, { id })))
     vi.spyOn(api, "updateWorkItem").mockRejectedValue(new TodoApiError(409, "raw", "TODO_VERSION_CONFLICT", 8))
     const { result } = setup()
     await act(() => result.current.edit(firstId, { title: "First desired" }))
     await act(() => result.current.edit(secondId, { rank: 12 }))
 
-    expect(result.current.recoveryRef).toBe(todoPrivateRef(firstId))
+    expect(result.current.recoveryId).toBe(firstId)
     expect(result.current.recovery?.fields).toEqual(["title"])
     await act(() => result.current.reload())
-    expect(result.current.recoveryRef).toBe(todoPrivateRef(secondId))
+    expect(result.current.recoveryId).toBe(secondId)
     expect(result.current.recovery?.fields).toEqual(["rank"])
   })
 
@@ -819,13 +818,13 @@ describe("useTodoQuickEdit", () => {
   })
 
   it("prioritizes conflicts over ordered pending retries and promotes each pending recovery", async () => {
-    const firstId = "wi_pending_first"
-    const secondId = "wi_pending_second"
+    const firstId = "JIN-100"
+    const secondId = "JIN-101"
     storePending(firstId, { title: "First pending" })
     const firstStored = quickStorage()
     sessionStorage.setItem("jinn:todo-quick-edit:v1", JSON.stringify({
       ...firstStored,
-      [todoPrivateRef(secondId)]: {
+      [secondId]: {
         expiresAt: Date.now() + 60_001,
         desired: { rank: 41 },
         baseline: {},
@@ -843,17 +842,17 @@ describe("useTodoQuickEdit", () => {
 
     await act(() => result.current.recover(firstId))
     await act(() => result.current.recover(secondId))
-    expect(result.current.recoveryRef).toBe(todoPrivateRef(firstId))
+    expect(result.current.recoveryId).toBe(firstId)
     expect(result.current.recovery?.kind).toBe("retry")
 
     await act(() => result.current.edit(ID, { title: "Conflicting edit" }))
-    expect(result.current.recoveryRef).toBe(todoPrivateRef(ID))
+    expect(result.current.recoveryId).toBe(ID)
     expect(result.current.recovery?.kind).toBe("conflict")
 
     await act(() => result.current.reload())
-    expect(result.current.recoveryRef).toBe(todoPrivateRef(firstId))
+    expect(result.current.recoveryId).toBe(firstId)
     await act(() => result.current.discard())
-    expect(result.current.recoveryRef).toBe(todoPrivateRef(secondId))
+    expect(result.current.recoveryId).toBe(secondId)
     await act(() => result.current.discard())
     expect(result.current.recovery).toBeNull()
   })

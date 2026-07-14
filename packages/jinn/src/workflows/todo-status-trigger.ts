@@ -7,6 +7,7 @@ import type {
   WorkflowTodoEventClaimOutcome,
   WorkflowTodoStatusEvent,
 } from '../work-items/workflow-event-feed.js';
+import { parseTodoId } from '../work-items/id.js';
 
 export type TodoStatusWorkflowEvent = WorkflowTodoStatusEvent;
 
@@ -102,6 +103,7 @@ export async function fireTodoStatusChangeWorkflows(
   event: TodoStatusWorkflowEvent,
   preloadedDefs?: TodoStatusDef[],
 ): Promise<TodoStatusTriggerOutcome[]> {
+  const workItemId = parseTodoId(event.workItemId);
   const feed = requireEventFeed(deps);
   const outcomes: TodoStatusTriggerOutcome[] = [];
   const defs = preloadedDefs ?? loadActiveTodoStatusDefs(deps);
@@ -126,7 +128,7 @@ export async function fireTodoStatusChangeWorkflows(
         source: 'todo-status-change',
         event: 'todo.status_changed',
         payload: {
-          todoId: event.workItemId,
+          todoId: workItemId,
           fromStatus: event.fromStatus,
           toStatus: event.toStatus,
           source: event.item.source,
@@ -139,7 +141,7 @@ export async function fireTodoStatusChangeWorkflows(
         workflowId: def.id,
         outcome: run.status === 'failed' ? 'failed' : 'started',
         run,
-        detail: `workflow run ${run.runId} started from Todo ${event.workItemId} (status: ${run.status})`,
+        detail: `workflow run ${run.runId} started from Todo ${workItemId} (status: ${run.status})`,
       });
     }
     feed.completeEvent(event.id, outcomes.map((outcome) => ({

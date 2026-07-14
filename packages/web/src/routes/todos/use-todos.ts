@@ -9,7 +9,6 @@ import {
 } from "@/lib/api"
 import { dateBounds, statusesFor, type TodoFilters } from "@/lib/todos"
 import { queryKeys } from "@/lib/query-keys"
-import { todoPrivateRef } from "./todo-private-state"
 
 /* GRS-021d/027 + design-todos §7 — the Todos data layer. The ledger keeps one
  * INFINITE query per status: every request is one fixed-size page
@@ -187,8 +186,7 @@ export function useLedgerItems(filters: TodoFilters, now: number) {
     activePairs.map((pair) => [pair.status, pair.query.data?.pages.length ?? 0]),
   ), [activePairs])
 
-  // The EXACT cache keys of the ledger queries actually mounted for this filter —
-  // the candidate sources a private-ref Retry must refetch, and nothing broader.
+  // The exact cache keys of the ledger queries mounted for this filter.
   const candidateKeys = useMemo(
     (): readonly (readonly unknown[])[] => activePairs.map((pair) => ledgerQueryKey(pair.status, filters, markFor(pair.status))),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the key values derive purely from the filter identity
@@ -272,118 +270,22 @@ export function openIdsOf(items: WorkItemCompactWire[]): string[] {
   return items.filter((i) => OPEN_STATUSES.has(i.status)).map((i) => i.id)
 }
 
-/** A chat activity card's private ref to an existing Todo may point at a row that
- *  is off the loaded ledger page, past the People/Needs caps, or in a terminal
- *  (done/cancelled) status — none of which the loaded candidate lists cover. This
- *  canonical resolver hashes EVERY row across ALL statuses to the same salted
- *  `todoPrivateRef` until one matches. Its own query key (keyed by the private
- *  ref, never a raw id) keeps it fully isolated from the visible ledger, counts,
- *  Needs, and People. `tabSalt` lives in sessionStorage, so the ref is stable and
- *  this resolves identically on fresh nav and reload.
- *
- *  Resolution is EXHAUSTIVE and HEALTHY-VERIFIED, never arbitrarily capped. For
- *  each status it follows the server's contract (store.ts): `total` present and
- *  stable, `offset` echoed, `nextOffset === offset + rows.length` or null, and a
- *  status is proven absent only when `nextOffset === null` AND `consumed ===
- *  total`. A NULL result therefore means "provably absent across every status",
- *  and it is the ONLY input the page may treat as missing. ANY anomaly — missing/
- *  changing total, an offset-metadata mismatch, a non-contiguous/repeated/cyclic
- *  offset, a duplicate id, a malformed row, a truncated stream, or the runaway
- *  page-budget backstop — is a RETRYABLE incomplete, surfaced as retry UI, never
- *  as "no longer exists". */
-export class PrivateRefResolveIncompleteError extends Error {
-  constructor(reason: string) {
-    super(reason)
-    this.name = "PrivateRefResolveIncompleteError"
-  }
-}
-
-// Every status, so an off-page OPEN target resolves without leaning on the capped
-// People/Needs feeds. Runaway backstop ONLY (100k rows) — hitting it is a
-// retryable incomplete, never "missing"; a real absence terminates via the
-// server's own nextOffset long before this.
-const RESOLVE_STATUSES: readonly WorkItemStatusWire[] = LEDGER_STATUSES
-const RESOLVE_PAGE_BUDGET = 1_000
-
-function isSafeNonNegativeInt(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
-}
-
-export function useResolvePrivateRef(openRef: string | null, enabled: boolean) {
-  return useQuery<string | null>({
-    queryKey: ["work-items", "ref-resolve", openRef ?? ""],
-    enabled: enabled && Boolean(openRef),
-    staleTime: 30_000,
+/** Resolve a public Todo identifier directly. JIN-N is the database/API/browser
+ * identity, so deep links never reverse-scan list pages or derive a second key. */
+export function useTodoById(todoId: string | null) {
+  return useQuery<WorkItemDetailWire | null>({
+    queryKey: ["work-item", todoId ?? ""],
+    enabled: Boolean(todoId),
+    staleTime: 10_000,
     retry: false,
-    queryFn: async ({ signal }): Promise<string | null> => {
-      let budget = RESOLVE_PAGE_BUDGET
-      const seenIds = new Set<string>()
-      for (const status of RESOLVE_STATUSES) {
-        let offset = 0
-        let consumed = 0
-        let stableTotal: number | null = null
-        const visited = new Set<number>()
-        for (;;) {
-          // Abort (ref change / disable / unmount) stops the walk immediately — no
-          // further pages even if a slow request would otherwise resolve.
-          if (signal?.aborted) throw new DOMException("private ref resolution aborted", "AbortError")
-          if (budget-- <= 0) throw new PrivateRefResolveIncompleteError("resolve page budget exhausted")
-          if (visited.has(offset)) throw new PrivateRefResolveIncompleteError("resolve offset repeated")
-          visited.add(offset)
-          const r = await api.listWorkItems({ status, offset, limit: GATEWAY_MAX_LIMIT }, signal)
-
-          // Validate the COMPLETE page — metadata, every row, and the progression/
-          // exhaustion invariant — BEFORE trusting any match on it. A matching id on
-          // a page with a forward gap, a missing offset/nextOffset field, or a
-          // truncated stream must NOT open the Todo; it is a retryable incomplete.
-          if (!isSafeNonNegativeInt(r.total)) throw new PrivateRefResolveIncompleteError("resolve total missing/invalid")
-          if (stableTotal === null) stableTotal = r.total
-          else if (r.total !== stableTotal) throw new PrivateRefResolveIncompleteError("resolve total changed mid-traversal")
-          // offset field REQUIRED, safe, and exactly the requested offset.
-          if (!isSafeNonNegativeInt(r.offset) || r.offset !== offset) {
-            throw new PrivateRefResolveIncompleteError("resolve offset metadata missing/mismatch")
-          }
-          // nextOffset field REQUIRED — explicit null or a safe integer (never coerced).
-          if (r.nextOffset === undefined) throw new PrivateRefResolveIncompleteError("resolve nextOffset missing")
-          const next: number | null = r.nextOffset
-          if (next !== null && !isSafeNonNegativeInt(next)) throw new PrivateRefResolveIncompleteError("resolve nextOffset invalid")
-
-          for (const item of r.workItems) {
-            if (!item || typeof item.id !== "string" || item.id.length === 0) {
-              throw new PrivateRefResolveIncompleteError("resolve malformed row")
-            }
-            if (seenIds.has(item.id)) throw new PrivateRefResolveIncompleteError("resolve duplicate id")
-            seenIds.add(item.id)
-          }
-
-          const pageConsumed = consumed + r.workItems.length
-          // Consumed rows can never exceed the server's own stable total; a page
-          // that pushes past it is a broken stream, not a place to trust a match.
-          if (pageConsumed > stableTotal) throw new PrivateRefResolveIncompleteError("resolve consumed exceeds total")
-          if (next === null) {
-            // A null continuation is honest ONLY at exact exhaustion; short of the
-            // total it is a truncated stream.
-            if (pageConsumed !== stableTotal) throw new PrivateRefResolveIncompleteError("resolve truncated before total")
-          } else {
-            // A non-null continuation is legal ONLY while rows remain owed against
-            // the stable total; advertised at or past exhaustion it is broken.
-            if (pageConsumed >= stableTotal) throw new PrivateRefResolveIncompleteError("resolve continuation past total")
-            // The server pages contiguously (nextOffset = offset + rows.length); any
-            // forward gap, repeat, or decrease is a broken/reordered stream.
-            if (next !== offset + r.workItems.length) throw new PrivateRefResolveIncompleteError("resolve nextOffset not contiguous")
-          }
-
-          // Page fully healthy → only now is a match trustworthy.
-          for (const item of r.workItems) {
-            if (todoPrivateRef(item.id) === openRef) return item.id
-          }
-
-          consumed = pageConsumed
-          if (next === null) break
-          offset = next
-        }
+    queryFn: async ({ signal }): Promise<WorkItemDetailWire | null> => {
+      if (!todoId) return null
+      try {
+        return await api.getWorkItem(todoId, signal)
+      } catch (error) {
+        if (error && typeof error === "object" && "status" in error && error.status === 404) return null
+        throw error
       }
-      return null
     },
   })
 }

@@ -1,37 +1,23 @@
-import type { Database } from 'better-sqlite3';
+import { createHash, randomBytes } from "node:crypto";
+import fs from "node:fs";
+import Database, { type Database as DatabaseType } from "better-sqlite3";
+import { formatTodoId, isTodoId, todoIdOrdinal } from "./id.js";
 
-/**
- * GRS-021a — the Todo vocabulary migration (design §1.2).
- *
- * Elevates the GRS-002 `work_items` table to the Todos model: the 8-status
- * vocabulary (`backlog → assigned → executing → in_review → done | blocked |
- * escalated | cancelled`), the 7-value provenance enum, and the new columns
- * (acceptance, verify_policy, rounds, budget_usd, the approval fields).
- *
- * SQLite cannot ALTER a CHECK constraint, so expanding the enums is a guarded
- * table REBUILD: create `work_items_new` with the new DDL, `INSERT…SELECT` with
- * the CASE maps, drop the old table, rename — all inside ONE transaction, so a
- * failure at any point rolls back to the old table wholesale (rollback-safe by
- * construction; DDL is transactional in SQLite). Data maps:
- *
- *   status  open   → backlog        source  manual → human
- *   status  active → executing      source  session + source_ref 'delegate:%'
- *   (blocked/done/cancelled keep)           → delegation (GRS-017d formalized)
- *
- * Idempotent: the rebuild runs only when the live table's DDL predates the new
- * vocabulary (its CHECK lacks 'backlog'); fresh installs create the new shape
- * directly via WORK_ITEMS_TABLE_DDL and are never rebuilt. A row that maps onto
- * an invalid value (possible only via out-of-band corruption — the old CHECKs
- * forbid it) fails the new table's CHECK, aborts the transaction LOUDLY, and
- * leaves the old table fully intact: migration integrity over silent coercion.
- */
+export const UNSUPPORTED_PRERELEASE_TODO_DATA =
+  "Unsupported prerelease Todo data detected. This release cannot start or migrate it.\n" +
+  "Use the separately reviewed offline converter, or restore a supported public-version backup.";
 
-/** The Todos-model DDL — single source of truth, executed by initDb for fresh
- *  installs and by the rebuild for migrated ones. Keep the string 'backlog' in
- *  the status CHECK: it is the migration's already-migrated sentinel. */
+const CANONICAL_ID_SQL = `
+  id GLOB 'JIN-[1-9]*'
+  AND substr(id, 5) NOT GLOB '*[^0-9]*'
+  AND CAST(substr(id, 5) AS INTEGER) BETWEEN 1 AND 9007199254740991
+  AND printf('%lld', CAST(substr(id, 5) AS INTEGER)) = substr(id, 5)
+`;
+
+/** Clean first-release Todo table. There is no prerelease row migration path. */
 export const WORK_ITEMS_TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS work_items (
-  id                  TEXT PRIMARY KEY,
+  id                  TEXT PRIMARY KEY CHECK (${CANONICAL_ID_SQL}),
   title               TEXT NOT NULL,
   body                TEXT,
   status              TEXT NOT NULL DEFAULT 'backlog' CHECK (status IN ('backlog','assigned','executing','in_review','done','blocked','escalated','cancelled')),
@@ -59,128 +45,377 @@ CREATE TABLE IF NOT EXISTS work_items (
   closed_at           TEXT
 )`;
 
-/** Indexes for work_items — recreated by the rebuild (DROP TABLE removes them). */
 export const WORK_ITEMS_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_work_items_status     ON work_items(status);
 CREATE INDEX IF NOT EXISTS idx_work_items_department ON work_items(department);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_work_items_source_ref
   ON work_items(source, source_ref) WHERE source_ref IS NOT NULL;
--- Backs the default list/search ORDER BY (updated_at DESC, created_at DESC) so a
--- LIMIT-ed read walks the index tail instead of sorting the whole table.
 CREATE INDEX IF NOT EXISTS idx_work_items_recent     ON work_items(updated_at DESC, created_at DESC);
--- Covers the unfiltered dashboard page's complete deterministic ordering.
 CREATE INDEX IF NOT EXISTS idx_work_items_default_order
   ON work_items((rank IS NULL), rank, updated_at DESC, created_at DESC, id ASC);
--- Ranked rows lead within a raw-status group; unranked rows retain the stable
--- newest-first fallback used before manual ordering existed.
 CREATE INDEX IF NOT EXISTS idx_work_items_manual_order
   ON work_items(status, (rank IS NULL), rank, updated_at DESC, created_at DESC, id ASC);
 `;
 
-/** Append-only audit of Todo lifecycle (design §1.2 — earned by the approvals/
- *  bounces/escalations this phase ships). Queryable sibling of the cron-runs
- *  JSONL philosophy. `detail` is a JSON payload (critique text, session id, …). */
-export const WORK_ITEM_EVENTS_DDL = `
+export const WORK_ITEM_EVENTS_TABLE_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_events (
   id           TEXT PRIMARY KEY,
-  work_item_id TEXT NOT NULL,
+  work_item_id TEXT NOT NULL CHECK (${CANONICAL_ID_SQL.replaceAll("id", "work_item_id")}),
   kind         TEXT NOT NULL,
   from_status  TEXT,
   to_status    TEXT,
   actor        TEXT,
   detail       TEXT,
   created_at   TEXT NOT NULL
-);
+)
+`;
+
+export const WORK_ITEM_EVENTS_DDL = `
+${WORK_ITEM_EVENTS_TABLE_DDL};
 CREATE INDEX IF NOT EXISTS idx_wi_events_item ON work_item_events(work_item_id, created_at);
 `;
 
-/** Durable operator-edit receipts. Only digests are retained: the caller's key
- * is never persisted, and the request fingerprint covers Todo identity,
- * expected version, and canonical patch without retaining editable field data. */
 export const WORK_ITEM_EDIT_RECEIPTS_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
-  key_digest         TEXT PRIMARY KEY CHECK (length(key_digest) = 64),
+  key_digest          TEXT PRIMARY KEY CHECK (length(key_digest) = 64),
   request_fingerprint TEXT NOT NULL,
-  result_version    INTEGER NOT NULL CHECK (result_version >= 1),
-  created_at        TEXT NOT NULL
+  result_version      INTEGER NOT NULL CHECK (result_version >= 1),
+  created_at          TEXT NOT NULL
 );
 `;
 
-/** Columns copied straight through by the rebuild (everything the old shape had,
- *  minus the two CASE-mapped ones). New columns take their DDL defaults. */
-const CARRIED_COLUMNS = 'id, title, body, department, assignee, priority, source_ref, created_at, updated_at, closed_at';
+export const WORK_ITEM_ID_ALLOCATOR_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_id_allocator (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  high_water INTEGER NOT NULL CHECK (high_water BETWEEN 0 AND 9007199254740991)
+)
+`;
 
-export interface WorkItemsMigrationResult {
-  /** True when the rebuild actually ran (old vocabulary found and remapped). */
-  rebuilt: boolean;
-  /** Rows carried through the rebuild (0 when not rebuilt). */
-  rows: number;
+export const WORK_ITEM_ID_BURNS_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_id_burns (
+  ordinal INTEGER PRIMARY KEY CHECK (ordinal BETWEEN 1 AND 9007199254740991),
+  claim_digest TEXT NOT NULL UNIQUE CHECK (length(claim_digest) = 64 AND claim_digest NOT GLOB '*[^0-9a-f]*'),
+  burned_at TEXT NOT NULL
+)
+`;
+
+export const WORK_ITEM_ID_ISSUANCES_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_id_issuances (
+  ordinal INTEGER PRIMARY KEY CHECK (ordinal BETWEEN 1 AND 9007199254740991),
+  issued_at TEXT NOT NULL
+)
+`;
+
+export const WORK_ITEM_IDENTITY_TABLES_DDL = `
+${WORK_ITEM_ID_ALLOCATOR_TABLE_DDL};
+INSERT INTO work_item_id_allocator (singleton, high_water)
+  SELECT 1, 0 WHERE NOT EXISTS (SELECT 1 FROM work_item_id_allocator);
+${WORK_ITEM_ID_BURNS_TABLE_DDL};
+${WORK_ITEM_ID_ISSUANCES_TABLE_DDL};
+`;
+
+export const WORK_ITEM_ID_IMMUTABLE_TRIGGER_SQL = `CREATE TRIGGER IF NOT EXISTS work_items_id_immutable
+BEFORE UPDATE OF id ON work_items
+BEGIN
+  SELECT RAISE(ABORT, 'Todo ID is immutable');
+END`;
+
+/** One statement per entry. The installed DDL and the startup verifier's expected SQL are both
+ *  derived from this list, so a trigger body can never drift out of the schema it is checked against. */
+const WORK_ITEM_IDENTITY_TRIGGER_STATEMENTS: readonly string[] = [
+  `CREATE TRIGGER IF NOT EXISTS work_item_allocator_no_insert
+BEFORE INSERT ON work_item_id_allocator
+WHEN EXISTS (SELECT 1 FROM work_item_id_allocator)
+BEGIN SELECT RAISE(ABORT, 'Todo allocator is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS work_item_allocator_guard_update
+BEFORE UPDATE ON work_item_id_allocator
+WHEN NEW.singleton != OLD.singleton
+  OR NEW.high_water != OLD.high_water + 1
+  OR jinn_work_item_claim_digest() IS NULL
+  OR NOT EXISTS (
+    SELECT 1 FROM work_item_id_burns
+    WHERE ordinal = NEW.high_water AND claim_digest = jinn_work_item_claim_digest()
+  )
+BEGIN SELECT RAISE(ABORT, 'Todo allocator mutation refused'); END`,
+  `CREATE TRIGGER IF NOT EXISTS work_item_allocator_no_delete
+BEFORE DELETE ON work_item_id_allocator
+BEGIN SELECT RAISE(ABORT, 'Todo allocator is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS work_item_burn_guard_insert
+BEFORE INSERT ON work_item_id_burns
+WHEN NEW.ordinal != (SELECT high_water + 1 FROM work_item_id_allocator WHERE singleton = 1)
+  OR jinn_work_item_claim_digest() IS NULL
+  OR NEW.claim_digest != jinn_work_item_claim_digest()
+BEGIN SELECT RAISE(ABORT, 'Todo burn claim refused'); END`,
+  `CREATE TRIGGER IF NOT EXISTS work_item_burn_no_update
+BEFORE UPDATE ON work_item_id_burns
+BEGIN SELECT RAISE(ABORT, 'Todo burn ledger is append-only'); END`,
+  `CREATE TRIGGER IF NOT EXISTS work_item_burn_no_delete
+BEFORE DELETE ON work_item_id_burns
+BEGIN SELECT RAISE(ABORT, 'Todo burn ledger is append-only'); END`,
+  `CREATE TRIGGER IF NOT EXISTS work_item_issuance_guard_insert
+BEFORE INSERT ON work_item_id_issuances
+WHEN jinn_work_item_claim_digest() IS NULL
+  OR NOT EXISTS (
+    SELECT 1 FROM work_item_id_burns b
+    JOIN work_items w ON CAST(substr(w.id, 5) AS INTEGER) = b.ordinal
+    WHERE b.ordinal = NEW.ordinal AND b.claim_digest = jinn_work_item_claim_digest()
+  )
+BEGIN SELECT RAISE(ABORT, 'Todo issuance claim refused'); END`,
+  `CREATE TRIGGER IF NOT EXISTS work_item_issuance_no_update
+BEFORE UPDATE ON work_item_id_issuances
+BEGIN SELECT RAISE(ABORT, 'Todo issuance ledger is append-only'); END`,
+  `CREATE TRIGGER IF NOT EXISTS work_item_issuance_no_delete
+BEFORE DELETE ON work_item_id_issuances
+BEGIN SELECT RAISE(ABORT, 'Todo issuance ledger is append-only'); END`,
+  WORK_ITEM_ID_IMMUTABLE_TRIGGER_SQL,
+  `CREATE TRIGGER IF NOT EXISTS work_items_claim_required
+BEFORE INSERT ON work_items
+WHEN jinn_work_item_claim_digest() IS NULL
+  OR NOT EXISTS (
+    SELECT 1 FROM work_item_id_burns b
+    WHERE b.ordinal = CAST(substr(NEW.id, 5) AS INTEGER)
+      AND b.claim_digest = jinn_work_item_claim_digest()
+  )
+  OR EXISTS (
+    SELECT 1 FROM work_item_id_issuances i
+    WHERE i.ordinal = CAST(substr(NEW.id, 5) AS INTEGER)
+  )
+BEGIN SELECT RAISE(ABORT, 'Todo allocation claim refused'); END`,
+  `CREATE TRIGGER IF NOT EXISTS work_items_mark_issued
+AFTER INSERT ON work_items
+BEGIN
+  INSERT INTO work_item_id_issuances (ordinal, issued_at)
+  VALUES (CAST(substr(NEW.id, 5) AS INTEGER), NEW.created_at);
+END`,
+];
+
+export const WORK_ITEM_IDENTITY_TRIGGERS_DDL =
+  WORK_ITEM_IDENTITY_TRIGGER_STATEMENTS.map((statement) => `${statement};`).join("\n");
+
+const REQUIRED_TRIGGER_SQL = new Map<string, string>(
+  WORK_ITEM_IDENTITY_TRIGGER_STATEMENTS.map((statement) => {
+    const name = /^CREATE TRIGGER\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)/i.exec(statement)?.[1];
+    if (!name) throw new Error("unnamed Todo identity trigger");
+    return [name, statement] as const;
+  }),
+);
+
+const activeClaims = new WeakMap<DatabaseType, string>();
+const registeredDatabases = new WeakSet<DatabaseType>();
+
+function claimDigest(rawClaim: string): string {
+  return createHash("sha256").update(rawClaim).digest("hex");
 }
 
-function columnNames(db: Database): Set<string> {
-  const cols = db.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>;
-  return new Set(cols.map((col) => col.name));
+export function registerWorkItemIdentityFunctions(db: DatabaseType): void {
+  if (registeredDatabases.has(db)) return;
+  db.function("jinn_work_item_claim_digest", () => {
+    const claim = activeClaims.get(db);
+    return claim ? claimDigest(claim) : null;
+  });
+  registeredDatabases.add(db);
 }
 
-function ensureAdditiveWorkItemColumns(db: Database): void {
-  const cols = columnNames(db);
-  const alters: string[] = [];
-  if (!cols.has('rank')) alters.push('ALTER TABLE work_items ADD COLUMN rank REAL');
-  if (!cols.has('version')) alters.push('ALTER TABLE work_items ADD COLUMN version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1)');
-  if (!cols.has('approval_target')) alters.push('ALTER TABLE work_items ADD COLUMN approval_target TEXT');
-  if (!cols.has('approval_target_kind')) alters.push("ALTER TABLE work_items ADD COLUMN approval_target_kind TEXT CHECK (approval_target_kind IN ('employee','virtual','none'))");
-  if (!cols.has('approval_escalated_at')) alters.push('ALTER TABLE work_items ADD COLUMN approval_escalated_at TEXT');
-  for (const sql of alters) db.exec(sql);
-
-  const nextCols = alters.length ? columnNames(db) : cols;
-  if (nextCols.has('approval_target') && nextCols.has('approval_target_kind')) {
-    db.exec("UPDATE work_items SET approval_target_kind = 'virtual' WHERE approval_target IS NOT NULL AND approval_target_kind IS NULL");
+function withClaim<T>(db: DatabaseType, rawClaim: string, fn: () => T): T {
+  if (activeClaims.has(db)) throw new Error("nested Todo allocation claim");
+  activeClaims.set(db, rawClaim);
+  try {
+    return fn();
+  } finally {
+    activeClaims.delete(db);
   }
 }
 
-/**
- * Rebuild `work_items` to the Todo vocabulary if (and only if) the live table
- * still has the GRS-002 shape. Called from initDb BEFORE the CREATE IF NOT
- * EXISTS of the new DDL (order is irrelevant for correctness — the guard keys
- * off the table's own SQL — but running first keeps "one table, one shape" true
- * at every point in the sequence). Throws on failure with the transaction
- * rolled back; the caller (initDb) lets that propagate — a half-migrated store
- * must never serve requests.
- */
-export function migrateWorkItemsSchema(db: Database): WorkItemsMigrationResult {
-  const migrate = db.transaction((): WorkItemsMigrationResult => {
-    // BEGIN IMMEDIATE serializes schema inspection with every ALTER/rebuild
-    // across gateway processes. The table and columns are intentionally read
-    // only after the write lock is held, so a waiter observes the winner's
-    // committed schema instead of replaying its stale migration decision.
-    const row = db
-      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='work_items'")
-      .get() as { sql: string } | undefined;
-    if (!row) return { rebuilt: false, rows: 0 }; // fresh install — initDb creates the new shape
-    if (row.sql.includes("'backlog'")) {
-      ensureAdditiveWorkItemColumns(db);
-      return { rebuilt: false, rows: 0 }; // already migrated
-    }
+export interface WorkItemAllocationClaim {
+  id: string;
+  ordinal: number;
+  /** One-time raw claim. It is never persisted. */
+  rawClaim: string;
+}
 
-    db.exec(WORK_ITEMS_TABLE_DDL.replace('CREATE TABLE IF NOT EXISTS work_items', 'CREATE TABLE work_items_new'));
-    const copied = db
-      .prepare(
-        `INSERT INTO work_items_new (${CARRIED_COLUMNS}, status, source)
-         SELECT ${CARRIED_COLUMNS},
-           CASE status WHEN 'open' THEN 'backlog' WHEN 'active' THEN 'executing' ELSE status END,
-           CASE
-             WHEN source = 'manual' THEN 'human'
-             WHEN source = 'session' AND source_ref LIKE 'delegate:%' THEN 'delegation'
-             ELSE source
-           END
-         FROM work_items`,
-      )
-      .run();
-    db.exec('DROP TABLE work_items');
-    db.exec('ALTER TABLE work_items_new RENAME TO work_items');
+/** Commit the burn independently; a later failed create permanently leaves a gap. */
+export function allocateWorkItemId(db: DatabaseType, now = new Date().toISOString()): WorkItemAllocationClaim {
+  registerWorkItemIdentityFunctions(db);
+  const rawClaim = randomBytes(32).toString("hex");
+  const ordinal = withClaim(db, rawClaim, () => db.transaction(() => {
+    const current = db.prepare("SELECT high_water FROM work_item_id_allocator WHERE singleton = 1").pluck().get() as number;
+    const next = current + 1;
+    if (!Number.isSafeInteger(next)) throw new Error("Todo ID allocator exhausted");
+    db.prepare("INSERT INTO work_item_id_burns (ordinal, claim_digest, burned_at) VALUES (?, ?, ?)")
+      .run(next, claimDigest(rawClaim), now);
+    db.prepare("UPDATE work_item_id_allocator SET high_water = ? WHERE singleton = 1").run(next);
+    return next;
+  }).immediate());
+  return { id: formatTodoId(ordinal), ordinal, rawClaim };
+}
+
+export function useWorkItemAllocationClaim<T>(db: DatabaseType, claim: WorkItemAllocationClaim, fn: () => T): T {
+  return withClaim(db, claim.rawClaim, fn);
+}
+
+export type WorkItemSchemaPreflight = "absent" | "empty-prerelease" | "current";
+
+function sqlShape(sql: string | null | undefined): string {
+  return (sql ?? "")
+    .replace(/\bIF\s+NOT\s+EXISTS\b/gi, "")
+    .replace(/\s+/g, " ")
+    .replace(/;\s*$/, "")
+    .trim()
+    .toLowerCase();
+}
+
+const REQUIRED_TABLE_SQL = new Map<string, string>([
+  ["work_items", WORK_ITEMS_TABLE_DDL],
+  ["work_item_events", WORK_ITEM_EVENTS_TABLE_DDL],
+  ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
+  ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
+  ["work_item_id_burns", WORK_ITEM_ID_BURNS_TABLE_DDL],
+  ["work_item_id_issuances", WORK_ITEM_ID_ISSUANCES_TABLE_DDL],
+]);
+
+function tableExists(db: DatabaseType, name: string): boolean {
+  return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+}
+
+function tableCount(db: DatabaseType, name: string): number {
+  if (!tableExists(db, name)) return 0;
+  return Number(db.prepare(`SELECT COUNT(*) FROM "${name}"`).pluck().get());
+}
+
+function hasNonNullSessionTodoRefs(db: DatabaseType): boolean {
+  if (!tableExists(db, "sessions")) return false;
+  const columns = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "work_item_id")) return false;
+  return !!db.prepare("SELECT 1 FROM sessions WHERE work_item_id IS NOT NULL LIMIT 1").get();
+}
+
+function refusal(): never {
+  throw new Error(UNSUPPORTED_PRERELEASE_TODO_DATA);
+}
+
+function currentTableSql(db: DatabaseType, name: string): string | undefined {
+  return (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as { sql: string } | undefined)?.sql;
+}
+
+const PRERELEASE_WORK_ITEMS_TABLE_SQL = `
+CREATE TABLE work_items (
+  id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT,
+  status TEXT NOT NULL DEFAULT 'backlog' CHECK (status IN ('backlog','assigned','executing','in_review','done','blocked','escalated','cancelled')),
+  department TEXT, assignee TEXT, priority INTEGER NOT NULL DEFAULT 2 CHECK (priority BETWEEN 0 AND 3),
+  rank REAL, version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+  source TEXT NOT NULL DEFAULT 'human' CHECK (source IN ('human','delegation','cron','workflow','session','connector','goal')),
+  source_ref TEXT, acceptance TEXT, verify_policy TEXT, rounds INTEGER NOT NULL DEFAULT 0, budget_usd REAL,
+  approval_state TEXT CHECK (approval_state IN ('pending','approved','rejected')), approval_request TEXT, approval_ref TEXT,
+  approval_target TEXT, approval_target_kind TEXT CHECK (approval_target_kind IN ('employee','virtual','none')),
+  approval_escalated_at TEXT, approval_decided_by TEXT, approval_decided_at TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, closed_at TEXT
+)`;
+
+function recognizedEmptyPrerelease(db: DatabaseType): boolean {
+  if (tableCount(db, "work_items") !== 0 || tableCount(db, "work_item_events") !== 0
+    || tableCount(db, "work_item_edit_receipts") !== 0 || tableCount(db, "workflow_todo_event_claims") !== 0
+    || hasNonNullSessionTodoRefs(db)) return false;
+  if (tableExists(db, "work_items")
+    && sqlShape(currentTableSql(db, "work_items")) !== sqlShape(PRERELEASE_WORK_ITEMS_TABLE_SQL)) return false;
+  return true;
+}
+
+function triggerSql(db: DatabaseType, name: string): string | undefined {
+  return (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(name) as { sql: string } | undefined)?.sql;
+}
+
+export function verifyCurrentWorkItemSchema(db: DatabaseType): void {
+  for (const [name, expected] of REQUIRED_TABLE_SQL) {
+    if (sqlShape(currentTableSql(db, name)) !== sqlShape(expected)) refusal();
+  }
+  for (const [name, expected] of REQUIRED_TRIGGER_SQL) {
+    if (sqlShape(triggerSql(db, name)) !== sqlShape(expected)) refusal();
+  }
+  const allocator = db.prepare("SELECT singleton, high_water FROM work_item_id_allocator").all() as Array<{ singleton: number; high_water: number }>;
+  if (allocator.length !== 1 || allocator[0].singleton !== 1 || !Number.isSafeInteger(allocator[0].high_water)) refusal();
+  const highWater = allocator[0].high_water;
+  const burns = db.prepare("SELECT ordinal FROM work_item_id_burns ORDER BY ordinal").pluck().all() as number[];
+  if (burns.length !== highWater || burns.some((ordinal, index) => ordinal !== index + 1)) refusal();
+  const issuances = new Set(db.prepare("SELECT ordinal FROM work_item_id_issuances").pluck().all() as number[]);
+  if ([...issuances].some((ordinal) => ordinal < 1 || ordinal > highWater)) refusal();
+  const ids = db.prepare("SELECT id FROM work_items").pluck().all() as string[];
+  if (ids.some((id) => !isTodoId(id) || !issuances.has(todoIdOrdinal(id)))) refusal();
+  for (const table of ["work_item_events", "sessions"] as const) {
+    if (!tableExists(db, table)) continue;
+    const column = table === "sessions" ? "work_item_id" : "work_item_id";
+    const refs = db.prepare(`SELECT DISTINCT ${column} FROM ${table} WHERE ${column} IS NOT NULL`).pluck().all() as string[];
+    if (refs.some((id) => !isTodoId(id) || !ids.includes(id))) refusal();
+  }
+}
+
+function classifyOpenWorkItemsDatabase(db: DatabaseType): WorkItemSchemaPreflight {
+  const todoTables = [
+    "work_items", "work_item_events", "work_item_edit_receipts", "workflow_todo_event_claims",
+    "work_item_id_allocator", "work_item_id_burns", "work_item_id_issuances",
+  ].filter((name) => tableExists(db, name));
+  if (!tableExists(db, "work_items")) {
+    if (todoTables.some((name) => name.startsWith("work_item_id_"))) refusal();
+    if (recognizedEmptyPrerelease(db)) return todoTables.length > 0 || tableExists(db, "sessions")
+      ? "empty-prerelease"
+      : "absent";
+    return refusal();
+  }
+  try {
+    verifyCurrentWorkItemSchema(db);
+    return "current";
+  } catch {
+    if (todoTables.some((name) => name.startsWith("work_item_id_"))) refusal();
+    if (recognizedEmptyPrerelease(db)) return "empty-prerelease";
+    return refusal();
+  }
+}
+
+/** Read-only and side-effect free. It runs before WAL mode or any schema write. */
+export function preflightWorkItemsDatabase(filename: string): WorkItemSchemaPreflight {
+  if (!fs.existsSync(filename) || fs.statSync(filename).size === 0) return "absent";
+  let db: DatabaseType;
+  try {
+    db = new Database(filename, { readonly: true, fileMustExist: true });
+  } catch {
+    return refusal();
+  }
+  try {
+    return classifyOpenWorkItemsDatabase(db);
+  } finally {
+    db.close();
+  }
+}
+
+export interface WorkItemsMigrationResult { rebuilt: boolean; rows: number }
+
+/** Replace only a previously classified empty prerelease shape. */
+export function migrateWorkItemsSchema(
+  db: DatabaseType,
+  _preflight: WorkItemSchemaPreflight = tableExists(db, "work_items") ? "current" : "absent",
+): WorkItemsMigrationResult {
+  registerWorkItemIdentityFunctions(db);
+  const migrate = db.transaction((): WorkItemsMigrationResult => {
+    // The read-only preflight necessarily precedes the write lock. Reclassify after
+    // BEGIN IMMEDIATE so a concurrent winner's committed schema is never dropped.
+    const liveShape = classifyOpenWorkItemsDatabase(db);
+    if (liveShape === "empty-prerelease") {
+      for (const name of ["workflow_todo_event_claims", "work_item_edit_receipts", "work_item_events", "work_items"]) {
+        db.exec(`DROP TABLE IF EXISTS ${name}`);
+      }
+      if (tableExists(db, "meta")) {
+        db.prepare("DELETE FROM meta WHERE key IN ('todo_status_event_claims_migrated','todo_status_replay_watermark')").run();
+      }
+    } else if (liveShape === "current") {
+      return { rebuilt: false, rows: 0 };
+    }
+    db.exec(WORK_ITEM_IDENTITY_TABLES_DDL);
+    db.exec(WORK_ITEMS_TABLE_DDL);
     db.exec(WORK_ITEMS_INDEX_DDL);
-    ensureAdditiveWorkItemColumns(db);
-    return { rebuilt: true, rows: copied.changes };
+    db.exec(WORK_ITEM_EVENTS_DDL);
+    db.exec(WORK_ITEM_EDIT_RECEIPTS_DDL);
+    db.exec(WORK_ITEM_IDENTITY_TRIGGERS_DDL);
+    verifyCurrentWorkItemSchema(db);
+    return { rebuilt: liveShape === "empty-prerelease", rows: 0 };
   });
   return migrate.immediate();
 }

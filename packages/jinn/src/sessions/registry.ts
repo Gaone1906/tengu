@@ -7,11 +7,9 @@ import { SESSIONS_DB } from '../shared/paths.js';
 import { logger } from '../shared/logger.js';
 import {
   migrateWorkItemsSchema,
-  WORK_ITEM_EDIT_RECEIPTS_DDL,
-  WORK_ITEMS_TABLE_DDL,
-  WORK_ITEMS_INDEX_DDL,
-  WORK_ITEM_EVENTS_DDL,
+  preflightWorkItemsDatabase,
 } from '../work-items/migrate.js';
+import { parseTodoId } from '../work-items/id.js';
 import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, LegacyWorkflowRunLocation, ReplyContext, Session, SessionAttemptOutcome, SessionDelivery, SessionDeliveryIdentity, SessionDeliveryPayload, WorkflowSessionProvenance } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
 import { ptySnapshotStore } from '../engines/pty-snapshot.js';
@@ -420,6 +418,10 @@ export function legacyWorkflowRunLocation(session: Session): LegacyWorkflowRunLo
 
 export function initDb(): Database.Database {
   if (db) return db;
+  // Todo classification is deliberately the first database operation. It opens
+  // an existing file read-only and refuses unsupported prerelease data before
+  // WAL mode, migrations, or any other schema write can occur.
+  const todoPreflight = preflightWorkItemsDatabase(SESSIONS_DB);
   mkdirSync(path.dirname(SESSIONS_DB), { recursive: true });
   const database = new Database(SESSIONS_DB);
   db = database;
@@ -449,18 +451,9 @@ export function initDb(): Database.Database {
     database.exec(CREATE_PARENT_INDEX);
     database.exec(CREATE_WORKFLOW_RUN_INDEX);
     database.exec(CREATE_STATUS_INDEX);
-    // Work-item primitive (GRS-002 → GRS-021a Todos model): the vocabulary rebuild
-    // runs FIRST (a GRS-002-shape table is remapped onto the 8-status/7-source
-    // enums inside one rollback-safe transaction; a migration failure aborts boot
-    // by design — a half-migrated ledger must never serve), then CREATE IF NOT
-    // EXISTS covers fresh installs with the new shape directly. The nullable
-    // sessions.work_item_id FK is added by migrateSessionsSchema above. All
-    // idempotent for already-new DBs.
-    migrateWorkItemsSchema(database);
-    database.exec(WORK_ITEMS_TABLE_DDL);
-    database.exec(WORK_ITEMS_INDEX_DDL);
-    database.exec(WORK_ITEM_EVENTS_DDL);
-    database.exec(WORK_ITEM_EDIT_RECEIPTS_DDL);
+    // The next public release is the first Todo release: create the clean model
+    // directly, or replace only a read-only-preflighted empty prerelease shape.
+    migrateWorkItemsSchema(database, todoPreflight);
     database.exec(CREATE_WORK_ITEM_SESSION_INDEX);
     // Normalized operational Activity ledger. Additive and idempotent for both
     // fresh and existing homes; historical domain projection is checkpointed by
@@ -1532,6 +1525,7 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
  */
 export function claimDelegationCompletionNudge(id: string, workItemId: string): Session | undefined {
   const db = initDb();
+  const todoId = parseTodoId(workItemId);
   const result = db.prepare(`
     UPDATE sessions
     SET transport_meta = json_set(
@@ -1544,13 +1538,14 @@ export function claimDelegationCompletionNudge(id: string, workItemId: string): 
         json_extract(transport_meta, '$.delegationCompletionContract.workItemId') IS NULL
         OR json_extract(transport_meta, '$.delegationCompletionContract.workItemId') <> ?
       )
-  `).run(workItemId, id, workItemId);
+  `).run(todoId, id, todoId);
   return result.changes === 1 ? getSession(id) : undefined;
 }
 
 /** Atomically consume a previously claimed nudge before surfacing to parent. */
 export function markDelegationCompletionSurfaced(id: string, workItemId: string): Session | undefined {
   const db = initDb();
+  const todoId = parseTodoId(workItemId);
   const result = db.prepare(`
     UPDATE sessions
     SET transport_meta = json_set(
@@ -1561,20 +1556,21 @@ export function markDelegationCompletionSurfaced(id: string, workItemId: string)
     WHERE id = ?
       AND json_extract(transport_meta, '$.delegationCompletionContract.workItemId') = ?
       AND json_extract(transport_meta, '$.delegationCompletionContract.state') = 'nudged'
-  `).run(id, workItemId);
+  `).run(id, todoId);
   return result.changes === 1 ? getSession(id) : undefined;
 }
 
 /** Release only the nudge this caller owns; never erase a later surfaced state. */
 export function releaseDelegationCompletionNudge(id: string, workItemId: string): Session | undefined {
   const db = initDb();
+  const todoId = parseTodoId(workItemId);
   const result = db.prepare(`
     UPDATE sessions
     SET transport_meta = json_remove(transport_meta, '$.delegationCompletionContract')
     WHERE id = ?
       AND json_extract(transport_meta, '$.delegationCompletionContract.workItemId') = ?
       AND json_extract(transport_meta, '$.delegationCompletionContract.state') = 'nudged'
-  `).run(id, workItemId);
+  `).run(id, todoId);
   return result.changes === 1 ? getSession(id) : undefined;
 }
 
@@ -1585,12 +1581,13 @@ export function releaseDelegationCompletionNudge(id: string, workItemId: string)
  */
 export function clearDelegationCompletionGuard(id: string, expectedWorkItemId: string): Session | undefined {
   const db = initDb();
+  const todoId = parseTodoId(expectedWorkItemId);
   const result = db.prepare(`
     UPDATE sessions
     SET transport_meta = json_remove(transport_meta, '$.delegationCompletionContract')
     WHERE id = ?
       AND json_extract(transport_meta, '$.delegationCompletionContract.workItemId') = ?
-  `).run(id, expectedWorkItemId);
+  `).run(id, todoId);
   return result.changes === 1 ? getSession(id) : undefined;
 }
 
@@ -2113,9 +2110,10 @@ export function listChildSessions(parentSessionId: string): Session[] {
  */
 export function listSessionsByWorkItem(workItemId: string): Session[] {
   const db = initDb();
+  const todoId = parseTodoId(workItemId);
   const rows = db
     .prepare(`SELECT * FROM sessions WHERE work_item_id = ? ORDER BY last_activity DESC`)
-    .all(workItemId) as Record<string, unknown>[];
+    .all(todoId) as Record<string, unknown>[];
   return rows.map(rowToSession);
 }
 

@@ -369,7 +369,7 @@ describe("POST /api/work-items/:id/approval — COO-default authority + validati
   });
 
   it("404s an unknown item", async () => {
-    expect((await decide("wi_missing", { decision: "approve" })).status).toBe(404);
+    expect((await decide("JIN-999", { decision: "approve" })).status).toBe(404);
   });
 
   it("409s an item with no pending approval", async () => {

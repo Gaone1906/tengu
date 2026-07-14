@@ -22,7 +22,7 @@ vi.mock("@/routes/settings-provider", () => ({
 
 function compact(over: Partial<WorkItemCompactWire> = {}): WorkItemCompactWire {
   return {
-    id: "wi_private_row_1",
+    id: "JIN-42",
     title: "Publish the weekly digest",
     status: "executing",
     assignee: "jinn-designer",
@@ -41,7 +41,7 @@ function compact(over: Partial<WorkItemCompactWire> = {}): WorkItemCompactWire {
 
 function detailFor(status: WorkItemStatusWire): WorkItemDetailWire {
   const workItem: WorkItemFullWire = {
-    id: "wi_private_row_1",
+    id: "JIN-42",
     title: "Publish the weekly digest",
     body: null,
     status,
@@ -124,8 +124,8 @@ describe("TodoRow execution context (render)", () => {
   it("opens the sheet from the whole row", () => {
     const onOpen = vi.fn()
     renderRow(compact({ status: "assigned" }), undefined, { onOpen })
-    fireEvent.click(screen.getByRole("button", { name: "Open Publish the weekly digest" }))
-    expect(onOpen).toHaveBeenCalledWith("wi_private_row_1")
+    fireEvent.click(screen.getByRole("button", { name: "Open JIN-42: Publish the weekly digest" }))
+    expect(onOpen).toHaveBeenCalledWith("JIN-42")
   })
 
   it("wraps a dominant title and omits source metadata at rest", () => {
@@ -136,17 +136,10 @@ describe("TodoRow execution context (render)", () => {
     expect(screen.queryByText("Cron")).toBeNull()
   })
 
-  it("defers canonical key UI until the wire contract owns a dedicated key", () => {
-    const item = compact({ id: "future-key-142", status: "backlog" })
-    renderRow(item, undefined, { onRename: vi.fn() })
-    expect(screen.queryByText("future-key-142")).toBeNull()
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Todo actions" }), { button: 0, pointerType: "mouse" })
-    expect(screen.queryByRole("menuitem", { name: /Copy/ })).toBeNull()
-  })
-
-  it("does not leak opaque work-item ids into rendered row markup", () => {
-    const { container } = renderRow(compact({ id: "wi_private_dom_42", status: "backlog" }))
-    expect(container.innerHTML).not.toMatch(/wi_[a-z0-9_-]+/i)
+  it("renders the canonical Todo id in visible and accessible row identity", () => {
+    renderRow(compact({ id: "JIN-142", status: "backlog" }))
+    expect(screen.getByTestId("todo-row-id").textContent).toBe("JIN-142")
+    expect(screen.getByRole("button", { name: "Open JIN-142: Publish the weekly digest" })).toBeTruthy()
   })
 
   it.each([
@@ -182,19 +175,19 @@ describe("TodoRow inline rename", () => {
     const onRename = vi.fn().mockResolvedValue(undefined)
     renderRow(compact({ status: "backlog" }), undefined, { onRename })
 
-    fireEvent.keyDown(screen.getByRole("button", { name: "Open Publish the weekly digest" }), { key: "F2" })
+    fireEvent.keyDown(screen.getByRole("button", { name: "Open JIN-42: Publish the weekly digest" }), { key: "F2" })
     const input = screen.getByTestId("todo-rename")
     fireEvent.change(input, { target: { value: "  Publish the monthly digest " } })
     fireEvent.keyDown(input, { key: "Enter" })
 
-    expect(onRename).toHaveBeenCalledWith("wi_private_row_1", "Publish the monthly digest")
+    expect(onRename).toHaveBeenCalledWith("JIN-42", "Publish the monthly digest")
   })
 
   it("reverts on Escape without calling onRename", () => {
     const onRename = vi.fn()
     renderRow(compact({ status: "backlog" }), undefined, { onRename })
 
-    fireEvent.keyDown(screen.getByRole("button", { name: "Open Publish the weekly digest" }), { key: "F2" })
+    fireEvent.keyDown(screen.getByRole("button", { name: "Open JIN-42: Publish the weekly digest" }), { key: "F2" })
     const input = screen.getByTestId("todo-rename")
     fireEvent.change(input, { target: { value: "Different" } })
     fireEvent.keyDown(input, { key: "Escape" })
@@ -207,7 +200,7 @@ describe("TodoRow inline rename", () => {
     const onRename = vi.fn()
     renderRow(compact({ status: "backlog" }), undefined, { onRename })
 
-    fireEvent.keyDown(screen.getByRole("button", { name: "Open Publish the weekly digest" }), { key: "F2" })
+    fireEvent.keyDown(screen.getByRole("button", { name: "Open JIN-42: Publish the weekly digest" }), { key: "F2" })
     fireEvent.keyDown(screen.getByTestId("todo-rename"), { key: "Enter" })
 
     expect(onRename).not.toHaveBeenCalled()

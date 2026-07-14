@@ -3,16 +3,15 @@ import {
   clearTodoJournal,
   loadTodoJournal,
   persistTodoJournal,
-  todoPrivateRef,
   transitionTodoJournal,
   transitionTodoJournalPayload,
 } from "../todo-private-state"
 
 const JOURNAL_KEY = "jinn:todo-draft-journal:v2"
 const SALT_KEY = "jinn:todo-tab-salt:v1"
-const TODO_ID = "wi_private_journal_42"
+const TODO_ID = "JIN-1000"
 const UUID = "123e4567-e89b-42d3-a456-426614174000"
-const patch = { title: "Operator-authored wi_reference stays", assignee: null }
+const patch = { title: "Operator-authored JIN-1001 stays", assignee: null }
 const baseline = { title: "Original", assignee: "owner" }
 
 function request(state: "prepared" | "dispatched" | "uncertain" | "failed" | "conflict") {
@@ -45,7 +44,7 @@ function rawJournals(): Record<string, {
 
 function writeEnvelope(id: string, storedPayload: Record<string, unknown>): void {
   sessionStorage.setItem(JOURNAL_KEY, JSON.stringify({
-    [todoPrivateRef(id)]: {
+    [id]: {
       expiresAt: Date.now() + 60_000,
       sequence: 1,
       payload: storedPayload,
@@ -87,7 +86,8 @@ describe("Todo private CAS journal", () => {
     persistTodoJournal(TODO_ID, classified as never)
 
     expect(loadTodoJournal(TODO_ID)?.request).toEqual(classified.request)
-    expect(sessionStorage.getItem(JOURNAL_KEY)).not.toMatch(/message|diagnostic|wi_private_journal_42/i)
+    expect(sessionStorage.getItem(JOURNAL_KEY)).not.toMatch(/message|diagnostic/i)
+    expect(sessionStorage.getItem(JOURNAL_KEY)).toContain(TODO_ID)
   })
 
   it.each([
@@ -555,7 +555,7 @@ describe("Todo private CAS journal", () => {
   it("rejects a stored request whose active fields are missing from latest patch and baseline", () => {
     persistTodoJournal(TODO_ID, payload() as never)
     const journals = rawJournals()
-    const ref = todoPrivateRef(TODO_ID)
+    const ref = TODO_ID
     journals[ref].payload.request = {
       ...request("prepared"),
       patch: { title: patch.title, assignee: null, body: "sent" },
@@ -618,9 +618,9 @@ describe("Todo private CAS journal", () => {
     vi.setSystemTime(new Date("2026-07-12T08:00:00.000Z"))
     persistTodoJournal(TODO_ID, payload() as never)
     const journals = rawJournals()
-    const validRef = todoPrivateRef(TODO_ID)
+    const validRef = TODO_ID
     journals[validRef].expiresAt = Date.now() - 1
-    journals.wi_leaked_orphan = {
+    journals["JIN-1002"] = {
       expiresAt: Date.now() + 60_000,
       sequence: 2,
       payload: { id: TODO_ID },
@@ -635,7 +635,7 @@ describe("Todo private CAS journal", () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date("2026-07-12T08:00:00.000Z"))
     for (let index = 0; index < 51; index += 1) {
-      const id = `wi_private_cap_${index}`
+      const id = `JIN-${2000 + index}`
       const title = `Draft ${index}`
       persistTodoJournal(id, {
         revision: 1,
@@ -653,9 +653,9 @@ describe("Todo private CAS journal", () => {
     }
 
     expect(Object.keys(rawJournals())).toHaveLength(50)
-    expect(loadTodoJournal("wi_private_cap_50")?.patch.title).toBe("Draft 50")
-    expect(loadTodoJournal("wi_private_cap_0")).toBeNull()
-    expect(sessionStorage.getItem(JOURNAL_KEY)).not.toContain("wi_private_cap_50")
+    expect(loadTodoJournal("JIN-2050")?.patch.title).toBe("Draft 50")
+    expect(loadTodoJournal("JIN-2000")).toBeNull()
+    expect(sessionStorage.getItem(JOURNAL_KEY)).not.toContain("JIN-2000")
     expect(sessionStorage.getItem(JOURNAL_KEY)).toContain("Draft 50")
   })
 
@@ -858,7 +858,7 @@ describe("Todo private CAS journal", () => {
     })
 
     it("retains unrelated journals while retiring A1 in one mutation", () => {
-      persistTodoJournal("wi_unrelated", {
+      persistTodoJournal("JIN-1006", {
         revision: 1,
         patch: { title: "Other desired" },
         baseline: { title: "Other original" },
@@ -869,7 +869,7 @@ describe("Todo private CAS journal", () => {
 
       expect(transitionTodoJournal(TODO_ID, activeRequest(), 2, null)).toBe(true)
 
-      expect(loadTodoJournal("wi_unrelated")?.patch).toEqual({ title: "Other desired" })
+      expect(loadTodoJournal("JIN-1006")?.patch).toEqual({ title: "Other desired" })
       expect(setItem).toHaveBeenCalledTimes(1)
       expect(sessionStorage.getItem(JOURNAL_KEY)).not.toContain(TODO_ID)
     })
@@ -890,7 +890,7 @@ describe("Todo private CAS journal", () => {
     })
 
     it("performs zero writes when valid salted storage has no matching journal", () => {
-      todoPrivateRef(TODO_ID)
+      TODO_ID
       const setItem = vi.spyOn(Storage.prototype, "setItem")
       const removeItem = vi.spyOn(Storage.prototype, "removeItem")
 

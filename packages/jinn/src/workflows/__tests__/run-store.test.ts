@@ -526,7 +526,7 @@ describe('read-time trigger wrap (GRS-014d) — bare string → {kind}, no file 
     expect(getRun(root, 'wf', 'v2-obj')?.trigger).toEqual(trig);
   });
 
-  it('normalizes legacy object triggers into the uniform envelope and moves triggerTodoId into payload', () => {
+  it('normalizes legacy object triggers into the uniform envelope without inventing Todo identity', () => {
     expect(normalizeWorkflowTrigger({ kind: 'manual' })).toEqual({ source: 'manual', event: 'workflow.manual_started', payload: {} });
     expect(normalizeWorkflowTrigger({ kind: 'schedule', cronJobId: 'workflow:wf', fireIso: '2026-07-04T06:00:00.000Z' })).toEqual({
       source: 'schedule',
@@ -534,10 +534,10 @@ describe('read-time trigger wrap (GRS-014d) — bare string → {kind}, no file 
       payload: { cronJobId: 'workflow:wf', fireIso: '2026-07-04T06:00:00.000Z' },
       fireRef: '2026-07-04T06:00:00.000Z',
     });
-    expect(normalizeWorkflowTrigger({ kind: 'todo-status-change', fireRef: 'wie_evt1' }, 'wi_1')).toEqual({
+    expect(normalizeWorkflowTrigger({ kind: 'todo-status-change', fireRef: 'wie_evt1' })).toEqual({
       source: 'todo-status-change',
       event: 'todo.status_changed',
-      payload: { todoId: 'wi_1' },
+      payload: {},
       fireRef: 'wie_evt1',
     });
   });

@@ -41,7 +41,7 @@ describe("work-item store — schema", () => {
 describe("work-item store — create / get / list", () => {
   it("creates an item with sane defaults and reads it back", () => {
     const wi = store.createWorkItem({ title: "Design the dispatcher" });
-    expect(wi.id).toMatch(/^wi_[0-9a-f]{12}$/);
+    expect(wi.id).toMatch(/^JIN-[1-9][0-9]*$/);
     expect(wi.status).toBe("backlog");
     expect(wi.priority).toBe(2);
     expect(wi.source).toBe("human");
@@ -69,7 +69,7 @@ describe("work-item store — create / get / list", () => {
   });
 
   it("getWorkItem returns undefined for an unknown id", () => {
-    expect(store.getWorkItem("wi_does_not_exist")).toBeUndefined();
+    expect(store.getWorkItem("JIN-999")).toBeUndefined();
   });
 });
 
@@ -158,7 +158,7 @@ describe("work-item store — linkSession + read-back (GRS-002 consumer path)", 
 
   it("is atomic: linking to a missing work item rolls back the session write", () => {
     insertSession("sess-link-2");
-    expect(() => store.linkSession("wi_missing", "sess-link-2")).toThrow(/work item/);
+    expect(() => store.linkSession("JIN-999", "sess-link-2")).toThrow(/work item/);
     // The session update inside the same transaction must have rolled back.
     const row = db.prepare("SELECT work_item_id FROM sessions WHERE id = 'sess-link-2'").get() as {
       work_item_id: string | null;

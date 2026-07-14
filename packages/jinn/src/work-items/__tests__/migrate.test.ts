@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import { fork, type ChildProcess } from "node:child_process";
 import os from "node:os";
 import fs from "node:fs";
@@ -6,39 +6,192 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import {
+  allocateWorkItemId,
   migrateWorkItemsSchema,
-  WORK_ITEMS_TABLE_DDL,
-  WORK_ITEMS_INDEX_DDL,
-  WORK_ITEM_EVENTS_DDL,
+  preflightWorkItemsDatabase,
+  useWorkItemAllocationClaim,
+  verifyCurrentWorkItemSchema,
+  UNSUPPORTED_PRERELEASE_TODO_DATA,
 } from "../migrate.js";
 
-/** The GRS-002 shape, verbatim from the pre-021 registry DDL — what live DBs hold. */
-const OLD_DDL = `
-CREATE TABLE IF NOT EXISTS work_items (
-  id          TEXT PRIMARY KEY,
-  title       TEXT NOT NULL,
-  body        TEXT,
-  status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','active','blocked','done','cancelled')),
-  department  TEXT,
-  assignee    TEXT,
-  priority    INTEGER NOT NULL DEFAULT 2 CHECK (priority BETWEEN 0 AND 3),
-  source      TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual','cron','session','connector')),
-  source_ref  TEXT,
-  created_at  TEXT NOT NULL,
-  updated_at  TEXT NOT NULL,
-  closed_at   TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_work_items_status     ON work_items(status);
-CREATE INDEX IF NOT EXISTS idx_work_items_department ON work_items(department);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_work_items_source_ref
-  ON work_items(source, source_ref) WHERE source_ref IS NOT NULL;
-`;
+/**
+ * Startup classification for the first Todo release. There is no prerelease row
+ * migration path: a home is created clean, replaced when it is a recognizably EMPTY
+ * prerelease shell, verified when it is already current, or REFUSED — read-only, before
+ * any write — in every other case. Converting real prerelease rows is the job of the
+ * separate offline converter, never of startup.
+ */
 
-function oldShapeDb(): Database.Database {
-  const db = new Database(":memory:");
-  db.exec(OLD_DDL);
-  return db;
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-preflight-"));
+afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+
+let seq = 0;
+function dbPath(): string {
+  seq += 1;
+  return path.join(tmpRoot, `registry-${seq}.db`);
 }
+
+/** The unreleased `wi_*` shape, verbatim — the only prerelease table startup recognizes. */
+const PRERELEASE_DDL = `
+CREATE TABLE work_items (
+  id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT,
+  status TEXT NOT NULL DEFAULT 'backlog' CHECK (status IN ('backlog','assigned','executing','in_review','done','blocked','escalated','cancelled')),
+  department TEXT, assignee TEXT, priority INTEGER NOT NULL DEFAULT 2 CHECK (priority BETWEEN 0 AND 3),
+  rank REAL, version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+  source TEXT NOT NULL DEFAULT 'human' CHECK (source IN ('human','delegation','cron','workflow','session','connector','goal')),
+  source_ref TEXT, acceptance TEXT, verify_policy TEXT, rounds INTEGER NOT NULL DEFAULT 0, budget_usd REAL,
+  approval_state TEXT CHECK (approval_state IN ('pending','approved','rejected')), approval_request TEXT, approval_ref TEXT,
+  approval_target TEXT, approval_target_kind TEXT CHECK (approval_target_kind IN ('employee','virtual','none')),
+  approval_escalated_at TEXT, approval_decided_by TEXT, approval_decided_at TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, closed_at TEXT
+)`;
+
+const PRERELEASE_ROW = `INSERT INTO work_items (id, title, status, source, created_at, updated_at)
+  VALUES ('wi_0123456789ab', 'a real prerelease todo', 'backlog', 'human', 'x', 'x')`;
+
+/** Writes a file-backed database and closes it, as startup finds it on disk. */
+function seedDb(sql?: string): string {
+  const file = dbPath();
+  const db = new Database(file);
+  if (sql) db.exec(sql);
+  else db.exec("CREATE TABLE placeholder (id TEXT)");
+  db.close();
+  return file;
+}
+
+function currentDb(): string {
+  const file = dbPath();
+  const db = new Database(file);
+  migrateWorkItemsSchema(db, "absent");
+  db.close();
+  return file;
+}
+
+describe("startup Todo preflight — classification", () => {
+  it("creates the clean JIN schema for a home with no Todo tables", () => {
+    const file = seedDb();
+
+    const db = new Database(file);
+    migrateWorkItemsSchema(db, preflightWorkItemsDatabase(file));
+
+    expect(() => verifyCurrentWorkItemSchema(db)).not.toThrow();
+    expect(db.prepare("SELECT high_water FROM work_item_id_allocator WHERE singleton = 1").pluck().get()).toBe(0);
+    db.close();
+  });
+
+  it("replaces a recognized prerelease shape when it and every companion table are empty", () => {
+    const file = seedDb(`${PRERELEASE_DDL};
+      CREATE TABLE work_item_events (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL);
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, work_item_id TEXT);`);
+
+    expect(preflightWorkItemsDatabase(file)).toBe("empty-prerelease");
+
+    const db = new Database(file);
+    const result = migrateWorkItemsSchema(db, "empty-prerelease");
+
+    expect(result.rebuilt).toBe(true);
+    expect(() => verifyCurrentWorkItemSchema(db)).not.toThrow();
+    // The replacement is real: the old grammar can no longer be written.
+    expect(() => db.prepare(
+      "INSERT INTO work_items (id, title, created_at, updated_at) VALUES ('wi_0123456789ab', 't', 'x', 'x')",
+    ).run()).toThrow();
+    db.close();
+  });
+
+  it("verifies an already-current schema without rebuilding it", () => {
+    const file = currentDb();
+
+    expect(preflightWorkItemsDatabase(file)).toBe("current");
+
+    const db = new Database(file);
+    expect(migrateWorkItemsSchema(db, "current")).toEqual({ rebuilt: false, rows: 0 });
+    expect(() => verifyCurrentWorkItemSchema(db)).not.toThrow();
+    db.close();
+  });
+
+  it("reclassifies under the write lock before acting on a stale empty-prerelease result", () => {
+    const file = seedDb(PRERELEASE_DDL);
+    const stalePreflight = preflightWorkItemsDatabase(file);
+    expect(stalePreflight).toBe("empty-prerelease");
+
+    const winner = new Database(file);
+    migrateWorkItemsSchema(winner, stalePreflight);
+    const claim = allocateWorkItemId(winner, "2026-07-14T00:00:00.000Z");
+    useWorkItemAllocationClaim(winner, claim, () => winner.prepare(`
+      INSERT INTO work_items (id, title, created_at, updated_at)
+      VALUES (?, 'must survive stale startup', '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:00.000Z')
+    `).run(claim.id));
+    winner.close();
+
+    const staleStarter = new Database(file);
+    expect(migrateWorkItemsSchema(staleStarter, stalePreflight)).toEqual({ rebuilt: false, rows: 0 });
+    expect(staleStarter.prepare("SELECT title FROM work_items WHERE id = 'JIN-1'").pluck().get())
+      .toBe("must survive stale startup");
+    staleStarter.close();
+  });
+});
+
+describe("startup Todo preflight — refusal", () => {
+  it("refuses populated prerelease data and writes nothing", () => {
+    const file = seedDb(`${PRERELEASE_DDL}; ${PRERELEASE_ROW}`);
+    const before = fs.readFileSync(file);
+
+    expect(() => preflightWorkItemsDatabase(file)).toThrow(UNSUPPORTED_PRERELEASE_TODO_DATA);
+
+    // Read-only and side-effect free: the row survives, no identity table was created,
+    // and the file is byte-identical.
+    const db = new Database(file);
+    expect(db.prepare("SELECT COUNT(*) FROM work_items").pluck().get()).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) FROM sqlite_master WHERE name = 'work_item_id_allocator'").pluck().get()).toBe(0);
+    db.close();
+    expect(fs.readFileSync(file).equals(before)).toBe(true);
+  });
+
+  it("refuses a prerelease shell whose companion table still holds rows", () => {
+    const file = seedDb(`${PRERELEASE_DDL};
+      CREATE TABLE work_item_events (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL);
+      INSERT INTO work_item_events (id, work_item_id) VALUES ('e1', 'wi_0123456789ab');`);
+
+    expect(() => preflightWorkItemsDatabase(file)).toThrow(UNSUPPORTED_PRERELEASE_TODO_DATA);
+  });
+
+  it("refuses a current schema whose immutable-ID trigger was dropped", () => {
+    const file = currentDb();
+    const tamper = new Database(file);
+    tamper.exec("DROP TRIGGER work_items_id_immutable");
+    tamper.close();
+
+    expect(() => preflightWorkItemsDatabase(file)).toThrow(UNSUPPORTED_PRERELEASE_TODO_DATA);
+  });
+
+  it("refuses an unknown Todo schema it cannot classify", () => {
+    const file = seedDb(`CREATE TABLE work_items (id TEXT PRIMARY KEY, headline TEXT);
+      INSERT INTO work_items (id, headline) VALUES ('anything', 'foreign shape');`);
+
+    expect(() => preflightWorkItemsDatabase(file)).toThrow(UNSUPPORTED_PRERELEASE_TODO_DATA);
+  });
+
+  it("refuses without echoing any of the data it refused", () => {
+    const file = seedDb(`${PRERELEASE_DDL}; ${PRERELEASE_ROW}`);
+
+    const message = (() => {
+      try {
+        preflightWorkItemsDatabase(file);
+        return "";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    })();
+
+    expect(message).toBe(UNSUPPORTED_PRERELEASE_TODO_DATA);
+    expect(message).not.toMatch(/wi_0123456789ab|a real prerelease todo/);
+  });
+});
+
+/* ── Concurrent first boot ───────────────────────────────────────────────────
+ * Several gateway processes can open the same fresh home at once and all classify it
+ * as absent. Re-running the identity DDL must be a no-op, not an abort against the
+ * allocator's own immutability trigger. */
 
 interface MigrationWorkerResult {
   round: number;
@@ -46,7 +199,8 @@ interface MigrationWorkerResult {
   code?: string;
   message?: string;
   integrity?: string;
-  version?: number;
+  highWater?: number;
+  id?: string;
 }
 
 function startMigrationWorker(): { child: ChildProcess; ready: Promise<void> } {
@@ -70,8 +224,13 @@ function startMigrationWorker(): { child: ChildProcess; ready: Promise<void> } {
   return { child, ready };
 }
 
-function runMigrationWave(children: ChildProcess[], dbPath: string, round: number): Promise<MigrationWorkerResult[]> {
-  return Promise.all(children.map((child) => new Promise<MigrationWorkerResult>((resolve, reject) => {
+function runMigrationWave(
+  children: ChildProcess[],
+  file: string,
+  round: number,
+  type: "migrate" | "allocate" = "migrate",
+): Promise<MigrationWorkerResult[]> {
+  return Promise.all(children.map((child, worker) => new Promise<MigrationWorkerResult>((resolve, reject) => {
     const onError = (error: Error) => {
       child.off("message", onMessage);
       reject(error);
@@ -85,244 +244,53 @@ function runMigrationWave(children: ChildProcess[], dbPath: string, round: numbe
     };
     child.on("message", onMessage);
     child.once("error", onError);
-    child.send({ type: "migrate", path: dbPath, round });
+    child.send({ type, path: file, round, worker, now: `2026-07-14T00:00:${String(worker).padStart(2, "0")}.000Z` });
   })));
 }
 
-function insertOld(
-  db: Database.Database,
-  id: string,
-  status: string,
-  source: string,
-  sourceRef: string | null,
-): void {
-  db.prepare(
-    `INSERT INTO work_items (id, title, status, source, source_ref, created_at, updated_at, closed_at)
-     VALUES (?, ?, ?, ?, ?, '2026-07-01T00:00:00.000Z', '2026-07-02T00:00:00.000Z', ?)`,
-  ).run(id, `item ${id}`, status, source, sourceRef, status === "done" ? "2026-07-02T00:00:00.000Z" : null);
-}
+describe("startup Todo preflight — concurrent first boot", () => {
+  it("lets 16 processes migrate one fresh home without aborting or double-seeding", async () => {
+    const file = seedDb();
+    const workers = Array.from({ length: 16 }, () => startMigrationWorker());
+    await Promise.all(workers.map((worker) => worker.ready));
 
-const statusOf = (db: Database.Database, id: string): Record<string, unknown> =>
-  db.prepare("SELECT status, source, source_ref, version, rounds, approval_state, approval_target, approval_target_kind, approval_escalated_at FROM work_items WHERE id = ?").get(id) as Record<string, unknown>;
+    try {
+      const results = await runMigrationWave(workers.map((w) => w.child), file, 1);
 
-describe("migrateWorkItemsSchema — the GRS-021a vocabulary rebuild", () => {
-  it("maps every old row onto the Todo vocabulary (open→backlog, active→executing, manual→human, delegate-shaped session→delegation)", () => {
-    const db = oldShapeDb();
-    insertOld(db, "wi_open", "open", "manual", null);
-    insertOld(db, "wi_active", "active", "cron", "cron:job:1");
-    insertOld(db, "wi_blocked", "blocked", "connector", null);
-    insertOld(db, "wi_done", "done", "session", "delegate:abc:123");
-    insertOld(db, "wi_sess", "cancelled", "session", "session-born"); // non-delegate session stays session
-
-    const result = migrateWorkItemsSchema(db);
-    expect(result.rebuilt).toBe(true);
-    expect(result.rows).toBe(5);
-
-    expect(statusOf(db, "wi_open")).toMatchObject({ status: "backlog", source: "human" });
-    expect(statusOf(db, "wi_active")).toMatchObject({ status: "executing", source: "cron", source_ref: "cron:job:1" });
-    expect(statusOf(db, "wi_blocked")).toMatchObject({ status: "blocked", source: "connector" });
-    expect(statusOf(db, "wi_done")).toMatchObject({ status: "done", source: "delegation", source_ref: "delegate:abc:123" });
-    expect(statusOf(db, "wi_sess")).toMatchObject({ status: "cancelled", source: "session" });
-    // New columns exist with their defaults.
-    expect(statusOf(db, "wi_open")).toMatchObject({ version: 1, rounds: 0, approval_state: null, approval_target: null, approval_escalated_at: null });
-    // closed_at carried through.
-    const done = db.prepare("SELECT closed_at FROM work_items WHERE id = 'wi_done'").get() as { closed_at: string };
-    expect(done.closed_at).toBe("2026-07-02T00:00:00.000Z");
-  });
-
-  it("recreates the indexes (incl. the partial UNIQUE and the recency index) and the new CHECKs hold", () => {
-    const db = oldShapeDb();
-    insertOld(db, "wi_1", "open", "cron", "cron:j:1");
-    migrateWorkItemsSchema(db);
-
-    const indexes = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='work_items' AND name NOT LIKE 'sqlite_%'")
-      .all() as Array<{ name: string }>;
-    expect(new Set(indexes.map((i) => i.name))).toEqual(
-      new Set([
-        "idx_work_items_status",
-        "idx_work_items_department",
-        "idx_work_items_recent",
-        "idx_work_items_default_order",
-        "idx_work_items_manual_order",
-        "uq_work_items_source_ref",
-      ]),
-    );
-    // Partial UNIQUE still enforces machine-mint idempotency…
-    expect(() =>
-      db.prepare("INSERT INTO work_items (id,title,status,source,source_ref,created_at,updated_at) VALUES ('wi_dup','d','backlog','cron','cron:j:1','x','x')").run(),
-    ).toThrow(/UNIQUE/);
-    // …and the new CHECK rejects both the OLD vocabulary and garbage.
-    for (const bad of ["open", "active", "weird"]) {
-      expect(() =>
-        db.prepare(`INSERT INTO work_items (id,title,status,created_at,updated_at) VALUES ('wi_${bad}','b','${bad}','x','x')`).run(),
-      ).toThrow(/CHECK/);
+      expect(results.filter((result) => !result.ok)).toEqual([]);
+      expect(results.every((result) => result.integrity === "ok")).toBe(true);
+      expect(results.every((result) => result.highWater === 0)).toBe(true);
+    } finally {
+      for (const worker of workers) worker.child.disconnect();
     }
-  });
 
-  it("is idempotent: a second call is a no-op, and a fresh new-shape table is never rebuilt", () => {
-    const db = oldShapeDb();
-    insertOld(db, "wi_1", "open", "manual", null);
-    expect(migrateWorkItemsSchema(db).rebuilt).toBe(true);
-    expect(migrateWorkItemsSchema(db)).toEqual({ rebuilt: false, rows: 0 });
+    const db = new Database(file);
+    expect(db.prepare("SELECT COUNT(*) FROM work_item_id_allocator").pluck().get()).toBe(1);
+    expect(() => verifyCurrentWorkItemSchema(db)).not.toThrow();
+    db.close();
+  }, 30_000);
 
-    const fresh = new Database(":memory:");
-    fresh.exec(WORK_ITEMS_TABLE_DDL);
-    fresh.exec(WORK_ITEMS_INDEX_DDL);
-    expect(migrateWorkItemsSchema(fresh)).toEqual({ rebuilt: false, rows: 0 });
-
-    const empty = new Database(":memory:");
-    expect(migrateWorkItemsSchema(empty)).toEqual({ rebuilt: false, rows: 0 }); // no table — initDb creates it
-  });
-
-  it("adds approval routing columns to an already-migrated table without rebuilding rows", () => {
-    const db = new Database(":memory:");
-    db.exec(
-      WORK_ITEMS_TABLE_DDL
-        .replace("  approval_target     TEXT,\n", "")
-        .replace("  approval_escalated_at TEXT,\n", ""),
-    );
-    db.exec(WORK_ITEMS_INDEX_DDL);
-    db.prepare("INSERT INTO work_items (id,title,status,source,created_at,updated_at) VALUES ('wi_new','new','backlog','human','x','x')").run();
-
-    expect(migrateWorkItemsSchema(db)).toEqual({ rebuilt: false, rows: 0 });
-
-    const cols = db.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>;
-    expect(cols.map((c) => c.name)).toEqual(expect.arrayContaining(["approval_target", "approval_escalated_at"]));
-    expect(statusOf(db, "wi_new")).toMatchObject({ approval_target: null, approval_escalated_at: null });
-  });
-
-  it("adds nullable manual rank to an already-migrated table without rebuilding rows", () => {
-    const db = new Database(":memory:");
-    db.exec(WORK_ITEMS_TABLE_DDL.replace("  rank                REAL,\n", ""));
-    db.prepare("INSERT INTO work_items (id,title,status,source,created_at,updated_at) VALUES ('wi_rankless','rankless','backlog','human','x','x')").run();
-
-    expect(migrateWorkItemsSchema(db)).toEqual({ rebuilt: false, rows: 0 });
-
-    const cols = db.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>;
-    expect(cols.map((c) => c.name)).toContain("rank");
-    expect((db.prepare("SELECT rank FROM work_items WHERE id = 'wi_rankless'").get() as { rank: number | null }).rank).toBeNull();
-  });
-
-  it("adds and backfills a positive monotonic version on an already-migrated table without rebuilding rows", () => {
-    const db = new Database(":memory:");
-    db.exec(WORK_ITEMS_TABLE_DDL.replace("  version             INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),\n", ""));
-    db.prepare("INSERT INTO work_items (id,title,status,source,created_at,updated_at) VALUES ('wi_versionless','versionless','backlog','human','x','x')").run();
-
-    expect(migrateWorkItemsSchema(db)).toEqual({ rebuilt: false, rows: 0 });
-    expect(statusOf(db, "wi_versionless")).toMatchObject({ version: 1 });
-    expect(migrateWorkItemsSchema(db)).toEqual({ rebuilt: false, rows: 0 });
-
-    expect(() =>
-      db.prepare("INSERT INTO work_items (id,title,status,source,version,created_at,updated_at) VALUES ('wi_bad_version','bad','backlog','human',0,'x','x')").run(),
-    ).toThrow(/CHECK/);
-  });
-
-  it("serializes and rechecks an additive version migration across repeated 16/32-process waves", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-version-race-"));
+  it("lets 32 processes allocate distinct monotonic ids without reuse", async () => {
+    const file = currentDb();
     const workers = Array.from({ length: 32 }, () => startMigrationWorker());
     await Promise.all(workers.map((worker) => worker.ready));
 
     try {
-      for (let round = 0; round < 100; round++) {
-        const dbPath = path.join(root, `round-${round}.db`);
-        const seed = new Database(dbPath);
-        seed.exec(WORK_ITEMS_TABLE_DDL.replace("  version             INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),\n", ""));
-        seed.prepare("INSERT INTO work_items (id,title,status,source,created_at,updated_at) VALUES ('wi_versionless','versionless','backlog','human','x','x')").run();
-        seed.close();
-
-        const width = round % 2 === 0 ? 16 : 32;
-        const results = await runMigrationWave(workers.slice(0, width).map((worker) => worker.child), dbPath, round);
-        expect(
-          results.every((result) => result.ok && result.integrity === "ok" && result.version === 1),
-          `migration wave ${round} (${width} processes): ${JSON.stringify(results.filter((result) => !result.ok))}`,
-        ).toBe(true);
-
-        const reopened = new Database(dbPath);
-        const versionColumn = (reopened.prepare("PRAGMA table_info(work_items)").all() as Array<{ name: string }>).filter((column) => column.name === "version");
-        expect(versionColumn).toHaveLength(1);
-        expect(reopened.pragma("integrity_check", { simple: true })).toBe("ok");
-        expect(migrateWorkItemsSchema(reopened)).toEqual({ rebuilt: false, rows: 0 });
-        reopened.close();
-      }
+      const results = await runMigrationWave(workers.map((worker) => worker.child), file, 2, "allocate");
+      expect(results.filter((result) => !result.ok)).toEqual([]);
+      expect(new Set(results.map((result) => result.id)).size).toBe(32);
+      expect(results.map((result) => result.id).sort((a, b) => Number(a?.slice(4)) - Number(b?.slice(4))))
+        .toEqual(Array.from({ length: 32 }, (_, index) => `JIN-${index + 1}`));
     } finally {
       for (const worker of workers) worker.child.disconnect();
     }
-  }, 120_000);
 
-  it("backfills legacy non-null approval targets as virtual when adding target kind", () => {
-    const db = new Database(":memory:");
-    db.exec(WORK_ITEMS_TABLE_DDL.replace("  approval_target_kind TEXT CHECK (approval_target_kind IN ('employee','virtual','none')),\n", ""));
-    db.exec(WORK_ITEMS_INDEX_DDL);
-    db.prepare(
-      `INSERT INTO work_items
-         (id,title,status,source,approval_state,approval_request,approval_target,created_at,updated_at)
-       VALUES ('wi_legacy_target','legacy','backlog','human','pending','approve','Legacy Root','x','x')`,
-    ).run();
-
-    expect(migrateWorkItemsSchema(db)).toEqual({ rebuilt: false, rows: 0 });
-
-    expect(statusOf(db, "wi_legacy_target")).toMatchObject({
-      approval_target: "Legacy Root",
-      approval_target_kind: "virtual",
-    });
-  });
-
-  it("is rollback-safe: a row that cannot map aborts the WHOLE rebuild and leaves the old table intact", () => {
-    const db = oldShapeDb();
-    insertOld(db, "wi_good", "open", "manual", null);
-    // Simulate out-of-band corruption: a status the old CHECK would never allow,
-    // inserted with constraint checking off. The rebuild's ELSE branch carries it
-    // verbatim into the new CHECK, which must abort the transaction loudly.
-    db.pragma("ignore_check_constraints = 1");
-    insertOld(db, "wi_corrupt", "weird", "manual", null);
-    db.pragma("ignore_check_constraints = 0");
-
-    expect(() => migrateWorkItemsSchema(db)).toThrow(/CHECK/);
-
-    // Rollback: the OLD table survives wholesale — same shape, both rows, old vocabulary.
-    const sql = (db.prepare("SELECT sql FROM sqlite_master WHERE name='work_items'").get() as { sql: string }).sql;
-    expect(sql).toContain("'open'");
-    expect(sql).not.toContain("'backlog'");
-    const rows = db.prepare("SELECT id, status FROM work_items ORDER BY id").all() as Array<{ id: string; status: string }>;
-    expect(rows).toEqual([
-      { id: "wi_corrupt", status: "weird" },
-      { id: "wi_good", status: "open" },
-    ]);
-    // And no half-built work_items_new is left behind.
-    expect(db.prepare("SELECT name FROM sqlite_master WHERE name='work_items_new'").get()).toBeUndefined();
-  });
-});
-
-describe("migrateWorkItemsSchema — through the real initDb on an old-shape registry file", () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-migrate-"));
-
-  beforeAll(() => {
-    // Build a REAL old-shape registry DB file before the registry module loads,
-    // then point JINN_HOME at it — initDb must rebuild it transparently.
-    process.env.JINN_HOME = tmp;
-    fs.mkdirSync(path.join(tmp, "sessions"), { recursive: true });
-    const raw = new Database(path.join(tmp, "sessions", "registry.db"));
-    raw.exec(OLD_DDL);
-    insertOld(raw, "wi_live_open", "open", "cron", "cron:nightly:2026-07-01T00:00:00.000Z");
-    insertOld(raw, "wi_live_deleg", "active", "session", "delegate:coo:abcdef");
-    raw.close();
-  });
-
-  it("initDb rebuilds the old table, keeps versioned rows, and creates events plus edit receipts", async () => {
-    const reg = await import("../../sessions/registry.js");
-    const db = reg.initDb();
-
-    const sql = (db.prepare("SELECT sql FROM sqlite_master WHERE name='work_items'").get() as { sql: string }).sql;
-    expect(sql).toContain("'backlog'");
-
-    expect(statusOf(db, "wi_live_open")).toMatchObject({ status: "backlog", source: "cron", version: 1 });
-    expect(statusOf(db, "wi_live_deleg")).toMatchObject({ status: "executing", source: "delegation", version: 1 });
-
-    const events = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='work_item_events'").get();
-    expect(events).toBeTruthy();
-    const receipts = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='work_item_edit_receipts'").get();
-    expect(receipts).toBeTruthy();
-    void WORK_ITEM_EVENTS_DDL;
-  });
+    const db = new Database(file);
+    expect(db.prepare("SELECT high_water FROM work_item_id_allocator WHERE singleton = 1").pluck().get()).toBe(32);
+    expect(db.prepare("SELECT COUNT(*) FROM work_item_id_burns").pluck().get()).toBe(32);
+    expect(db.prepare("SELECT COUNT(*) FROM work_item_id_issuances").pluck().get()).toBe(32);
+    expect(db.prepare("SELECT COUNT(*) FROM work_items").pluck().get()).toBe(32);
+    expect(() => verifyCurrentWorkItemSchema(db)).not.toThrow();
+    db.close();
+  }, 30_000);
 });

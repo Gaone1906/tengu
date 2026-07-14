@@ -186,14 +186,14 @@ describe('evaluateCondition — operators', () => {
       trigger: {
         source: 'todo-status-change',
         event: 'todo.status_changed',
-        payload: { todoId: 'wi_1', fromStatus: 'executing', toStatus: 'in_review', count: 2, matched: true },
+        payload: { todoId: 'JIN-1', fromStatus: 'executing', toStatus: 'in_review', count: 2, matched: true },
         fireRef: 'wie_evt1',
       },
     });
 
     expect(evaluateCondition(cond('trigger.source', 'eq', 'todo-status-change'), ev)).toBe(true);
     expect(evaluateCondition(cond('trigger.event', 'eq', 'todo.status_changed'), ev)).toBe(true);
-    expect(evaluateCondition(cond('trigger.payload.todoId', 'eq', 'wi_1'), ev)).toBe(true);
+    expect(evaluateCondition(cond('trigger.payload.todoId', 'eq', 'JIN-1'), ev)).toBe(true);
     expect(evaluateCondition(cond('trigger.payload.toStatus', 'eq', 'in_review'), ev)).toBe(true);
     expect(evaluateCondition(cond('trigger.payload.count', 'gte', 2), ev)).toBe(true);
     expect(evaluateCondition(cond('trigger.payload.matched', 'eq', true), ev)).toBe(true);

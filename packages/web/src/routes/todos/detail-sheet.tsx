@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
-import { X, Check, ChevronRight, MessageSquareText } from "lucide-react"
+import { X, Check, ChevronRight, Copy, Link, MessageSquareText } from "lucide-react"
 import {
   api,
   isPositiveTodoVersion,
@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { StateLine } from "@/components/ui/state-line"
+import { todoPath } from "@/lib/todo-id"
 import { StatusCircle } from "./state-glyph"
 import { displayNameOf, formatRelativeTime } from "./util"
 import { useSetWorkItemStatus } from "./use-todos"
@@ -1050,11 +1051,34 @@ export function DetailSheet({
               </button>
             )}
             {displayDetail && (
-              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
-                <span>{STATUS_LABEL[displayDetail.workItem.status]} · updated {formatRelativeTime(displayDetail.workItem.updatedAt)}</span>
-                <span aria-live="polite" className="text-[var(--text-tertiary)]">
-                  {draftState.status === "saving" ? "Saving…" : draftState.status === "saved" ? "Saved" : null}
-                </span>
+              <div className="mt-1 min-w-0">
+                <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
+                  <span>{STATUS_LABEL[displayDetail.workItem.status]} · updated {formatRelativeTime(displayDetail.workItem.updatedAt)}</span>
+                  <span aria-live="polite" className="text-[var(--text-tertiary)]">
+                    {draftState.status === "saving" ? "Saving…" : draftState.status === "saved" ? "Saved" : null}
+                  </span>
+                </div>
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">
+                  <span data-testid="todo-public-id" className="font-mono font-medium text-[var(--text-primary)]">
+                    {displayDetail.workItem.id}
+                  </span>
+                  <button
+                    type="button"
+                    aria-label={`Copy Todo ID ${displayDetail.workItem.id}`}
+                    onClick={() => void navigator.clipboard?.writeText(displayDetail.workItem.id).catch(() => {})}
+                    className="grid min-h-10 min-w-10 place-items-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-primary)]"
+                  >
+                    <Copy size={14} aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Copy link to ${displayDetail.workItem.id}`}
+                    onClick={() => void navigator.clipboard?.writeText(`${window.location.origin}${todoPath(displayDetail.workItem.id)}`).catch(() => {})}
+                    className="grid min-h-10 min-w-10 place-items-center rounded-full text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-primary)]"
+                  >
+                    <Link size={14} aria-hidden />
+                  </button>
+                </div>
               </div>
             )}
           </div>

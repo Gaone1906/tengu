@@ -1356,7 +1356,8 @@ export const api = {
   createWorkItem: (input: { title: string; body?: string }) =>
     post<{ workItem: WorkItemFullWire }>("/api/work-items", input),
   /** GRS-021a: full Todo detail (property stack + live spend + audit). */
-  getWorkItem: (id: string) => get<WorkItemDetailWire>(`/api/work-items/${encodeURIComponent(id)}`),
+  getWorkItem: (id: string, signal?: AbortSignal) =>
+    get<WorkItemDetailWire>(`/api/work-items/${encodeURIComponent(id)}`, signal ? { signal } : undefined),
   /** GRS-021b: the operator's approval DECISION. Human-only server-side; a
    *  tool-marked caller is refused 403. Send-back is `reject` (+ optional note). */
   decideWorkItemApproval: (id: string, decision: "approve" | "reject", note?: string) =>
