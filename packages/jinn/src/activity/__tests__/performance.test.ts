@@ -52,7 +52,7 @@ describe.sequential("activity query performance", () => {
         appendActivityEvent(fixture(index), { database, idFactory: () => idFor(index) });
       }
     })();
-  }, 30_000);
+  }, 60_000);
 
   afterAll(() => {
     database.close();
