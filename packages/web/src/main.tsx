@@ -78,6 +78,8 @@ const router = createBrowserRouter([
       { path: '/cron/:id', element: <CronDetailPage /> },
       { path: '/todos', element: <TodosPage /> },
       { path: '/notes', element: <NotesPage /> },
+      // Folder/note deep links: /notes/f/<folder>, /notes/n/<rel>, or both.
+      { path: '/notes/*', element: <NotesPage /> },
       // GRS-021d: Kanban became Todos. Old links redirect.
       { path: '/kanban', element: <Navigate to="/todos" replace /> },
       { path: '/logs', element: <LogsPage /> },

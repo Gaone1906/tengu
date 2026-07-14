@@ -907,3 +907,86 @@ h1, h2, h3, h4, h5, h6 {
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
+
+/* Notes — grouped inset list separators (the iOS Notes idiom). Faint hairlines
+   INSIDE a grouped inset collection, inset from the row edge and suppressed
+   around a highlighted row. This is the one place separators are drawn at rest;
+   list rows elsewhere lean on fills + spacing. Desktop note lists are
+   full-bleed and carry no separators at all. */
+.notes-inset-row {
+  position: relative;
+}
+.notes-inset-row + .notes-inset-row::before {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 0;
+  height: 1px;
+  background: var(--separator);
+}
+.notes-inset-row[aria-pressed="true"]::before,
+.notes-inset-row[aria-pressed="true"] + .notes-inset-row::before {
+  display: none;
+}
+
+/* Notes — keep the note title at display size even on mobile, where the global
+   iOS zoom-guard forces inputs to 16px. The title is not a zoom risk (≥16px),
+   so it opts out with a higher-specificity !important. */
+.notes-title {
+  font-size: var(--text-title1) !important;
+}
+@media (min-width: 1024px) {
+  .notes-title {
+    font-size: 30px !important;
+  }
+}
+
+/* Rendered GFM task lists (shared markdown-view — notes, files, skills). The
+   default disabled <input> + a leading bullet reads as browser chrome; render
+   an Apple-style rounded checkbox instead and drop the list marker. */
+.jinn-markdown ul.contains-task-list {
+  list-style: none;
+  margin-left: 0;
+  padding-left: 2px;
+}
+/* The shared custom <ul> renderer drops remark-gfm's `contains-task-list`
+   class, so suppress the disc on the task-list <li> itself. */
+.jinn-markdown li.task-list-item {
+  padding-left: 0;
+  list-style: none;
+}
+.jinn-markdown li.task-list-item::marker {
+  content: "";
+}
+.jinn-markdown li.task-list-item input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 20px;
+  height: 20px;
+  margin: 0 10px 0 0;
+  vertical-align: -4px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--separator-opaque);
+  cursor: default;
+}
+.jinn-markdown li.task-list-item input[type="checkbox"]:checked {
+  background: var(--accent);
+  box-shadow: none;
+}
+.jinn-markdown li.task-list-item input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 3px;
+  width: 5px;
+  height: 9px;
+  border: solid var(--accent-contrast);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.jinn-markdown li.task-list-item.done,
+.jinn-markdown li.task-list-item:has(input:checked) {
+  color: var(--text-tertiary);
+}

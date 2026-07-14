@@ -1,16 +1,22 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { FileText } from "lucide-react"
-import { useSearchParams } from "react-router-dom"
+import { useLocation, useNavigate, useNavigationType } from "react-router-dom"
 import { useQueryClient } from "@tanstack/react-query"
 import { PageLayout } from "@/components/page-layout"
+import { useTheme } from "@/routes/providers"
 import { queryKeys } from "@/lib/query-keys"
 import { NoteSidebar } from "./note-sidebar"
 import { NoteList } from "./note-list"
 import { NoteEditor } from "./note-editor"
 import { useCreateNote, useNote, useNotes } from "./use-notes"
+import {
+  buildNotesPath,
+  loadLastNotesLocation,
+  parseNotesLocation,
+  persistLastNotesLocation,
+  type NotesLocation,
+} from "./notes-route"
 import type { NoteDocument, NoteSummary } from "./types"
-
-const ALL_FOLDER = "__all__"
 
 function useMobileNotesLayout(): boolean {
   const [mobile, setMobile] = useState(() => (
@@ -28,15 +34,29 @@ function useMobileNotesLayout(): boolean {
   return mobile
 }
 
+function useIsDark(): boolean {
+  const { theme } = useTheme()
+  return useMemo(() => {
+    if (typeof document !== "undefined") {
+      const attr = document.documentElement.getAttribute("data-theme")
+      if (attr) return attr !== "light"
+    }
+    return theme !== "light"
+  }, [theme])
+}
+
 export function NotePage() {
   const mobile = useMobileNotesLayout()
+  const isDark = useIsDark()
   const queryClient = useQueryClient()
-  const [params, setParams] = useSearchParams()
+  const navigate = useNavigate()
+  const navigationType = useNavigationType()
+  const { pathname } = useLocation()
   const [query, setQuery] = useState("")
-  const folderParam = params.get("folder")
-  const selectedFolder = folderParam === null || folderParam === ALL_FOLDER ? null : folderParam
-  const selectedPath = params.get("note")
-  const hasMobileFolder = folderParam !== null || selectedPath !== null
+
+  const location = useMemo(() => parseNotesLocation(pathname), [pathname])
+  const { folder: selectedFolder, notePath: selectedPath, listOpen } = location
+
   const notesQuery = useNotes(query)
   const documentQuery = useNote(selectedPath)
   const createNote = useCreateNote()
@@ -48,40 +68,62 @@ export function NotePage() {
       .toSorted((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
   }, [notesQuery.data?.notes, selectedFolder])
 
+  const go = useCallback((next: NotesLocation, opts?: { replace?: boolean }) => {
+    navigate(buildNotesPath(next), opts)
+  }, [navigate])
+
+  // Persist the current location so a later fresh visit can restore it.
+  useEffect(() => {
+    persistLastNotesLocation(location)
+  }, [location])
+
+  // Restore the last-open folder/note on a fresh landing at bare /notes — but
+  // only on a real page load / back-forward (POP), never when the operator taps
+  // the Notes tab (PUSH), where landing on the folders home is intended. Runs
+  // at most once per mount.
+  const restoredRef = useRef(false)
+  useEffect(() => {
+    if (restoredRef.current) return
+    if (listOpen || selectedFolder || selectedPath) { restoredRef.current = true; return }
+    if (navigationType === "PUSH") { restoredRef.current = true; return }
+    if (!notesQuery.data) return
+    restoredRef.current = true
+    const last = loadLastNotesLocation()
+    if (!last) return
+    const notes = notesQuery.data.notes
+    const noteStillExists = last.notePath ? notes.some((n) => n.path === last.notePath) : true
+    const folderStillExists = last.folder
+      ? notesQuery.data.folders.some((f) => f.path === last.folder)
+      : true
+    if (!noteStillExists && !folderStillExists) return
+    go({
+      folder: folderStillExists ? last.folder : null,
+      notePath: noteStillExists ? last.notePath : null,
+      listOpen: true,
+    }, { replace: true })
+  }, [go, listOpen, navigationType, notesQuery.data, selectedFolder, selectedPath])
+
+  // Desktop keeps a note open at all times: auto-select the newest visible note
+  // when none is chosen. Mobile leaves the list showing until the operator taps.
   useEffect(() => {
     if (mobile || selectedPath || visibleNotes.length === 0) return
-    const next = new URLSearchParams(params)
-    next.set("note", visibleNotes[0].path)
-    if (!next.has("folder")) next.set("folder", ALL_FOLDER)
-    setParams(next, { replace: true })
-  }, [mobile, params, selectedPath, setParams, visibleNotes])
+    go({ folder: selectedFolder, notePath: visibleNotes[0].path, listOpen: true }, { replace: true })
+  }, [go, mobile, selectedFolder, selectedPath, visibleNotes])
 
   function selectFolder(folder: string | null) {
-    const next = new URLSearchParams(params)
-    next.set("folder", folder === null ? ALL_FOLDER : folder)
-    next.delete("note")
-    setParams(next)
+    go({ folder, notePath: null, listOpen: true })
   }
 
   function selectNote(path: string) {
-    const next = new URLSearchParams(params)
-    if (!next.has("folder")) next.set("folder", ALL_FOLDER)
-    next.set("note", path)
-    setParams(next)
+    go({ folder: selectedFolder, notePath: path, listOpen: true })
   }
 
   function returnToList() {
-    const next = new URLSearchParams(params)
-    if (!next.has("folder")) next.set("folder", ALL_FOLDER)
-    next.delete("note")
-    setParams(next)
+    go({ folder: selectedFolder, notePath: null, listOpen: true })
   }
 
   function returnToFolders() {
-    const next = new URLSearchParams(params)
-    next.delete("folder")
-    next.delete("note")
-    setParams(next)
+    go({ folder: null, notePath: null, listOpen: false })
   }
 
   async function createNewNote() {
@@ -90,10 +132,7 @@ export function NotePage() {
       body: "",
       ...(selectedFolder !== null ? { folder: selectedFolder } : {}),
     })
-    const next = new URLSearchParams(params)
-    next.set("folder", folderParam ?? ALL_FOLDER)
-    next.set("note", note.path)
-    setParams(next)
+    go({ folder: selectedFolder, notePath: note.path, listOpen: true })
   }
 
   function acceptSavedNote(note: NoteDocument) {
@@ -109,22 +148,30 @@ export function NotePage() {
     )
   }
 
+  const folderTitle = selectedFolder === null
+    ? "All Notes"
+    : (notesQuery.data?.folders.find((f) => f.path === selectedFolder)?.name || selectedFolder || "Notes")
+
   const sidebar = (
     <NoteSidebar
       folders={notesQuery.data?.folders ?? []}
       total={notesQuery.data?.notes.length ?? 0}
       selectedFolder={selectedFolder}
+      listOpen={listOpen}
+      mobile={mobile}
       onSelect={selectFolder}
     />
   )
 
   const list = (
     <NoteList
+      title={folderTitle}
       notes={visibleNotes}
       selectedPath={selectedPath}
       query={query}
       loading={notesQuery.isPending}
       error={notesQuery.isError}
+      mobile={mobile}
       onQueryChange={setQuery}
       onSelect={selectNote}
       onCreate={() => { void createNewNote() }}
@@ -136,7 +183,9 @@ export function NotePage() {
     <NoteEditor
       key={documentQuery.data.note.path}
       note={documentQuery.data.note}
+      isDark={isDark}
       onBack={mobile ? returnToList : undefined}
+      backLabel={folderTitle}
       onSaved={acceptSavedNote}
     />
   ) : (
@@ -147,10 +196,10 @@ export function NotePage() {
     <PageLayout>
       {mobile ? (
         <div className="h-full overflow-hidden bg-[var(--bg)]">
-          {!hasMobileFolder ? sidebar : selectedPath ? editor : list}
+          {!listOpen ? sidebar : selectedPath ? editor : list}
         </div>
       ) : (
-        <div className="grid h-full min-w-0 grid-cols-[208px_320px_minmax(0,1fr)] overflow-hidden">
+        <div className="grid h-full min-w-0 grid-cols-[212px_320px_minmax(0,1fr)] overflow-hidden">
           {sidebar}
           {list}
           {editor}

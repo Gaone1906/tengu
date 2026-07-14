@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ChevronLeft, RotateCcw, ShieldAlert } from "lucide-react"
+import { Check, ChevronLeft, PenLine, RotateCcw, ShieldAlert } from "lucide-react"
 import { ApiError, api } from "@/lib/api"
+import { MarkdownView } from "@/components/markdown-view"
+import { cn } from "@/lib/utils"
 import type { NoteDocument } from "./types"
 import {
   clearNoteDraft,
@@ -222,27 +224,52 @@ function useRevisionSafeNote(note: NoteDocument, onSaved?: (note: NoteDocument) 
 
 export function NoteEditor({
   note,
+  isDark,
   onBack,
+  backLabel = "Notes",
   onSaved,
 }: {
   note: NoteDocument
+  isDark: boolean
   onBack?: () => void
+  backLabel?: string
   onSaved?: (note: NoteDocument) => void
 }) {
   const editor = useRevisionSafeNote(note, onSaved)
   const bodyRef = useRef<HTMLTextAreaElement>(null)
+  // The body has two modes: rendered markdown at rest, and a plain textarea for
+  // writing. A brand-new / empty note opens straight in writing mode. All save,
+  // conflict, draft, and dictation behaviour is unchanged across both.
+  const [editing, setEditing] = useState(() => editor.draft.body.trim() === "")
+
+  const startEditing = useCallback((caret?: "end") => {
+    setEditing(true)
+    requestAnimationFrame(() => {
+      const field = bodyRef.current
+      if (!field) return
+      field.focus()
+      if (caret === "end") {
+        const end = field.value.length
+        field.setSelectionRange(end, end)
+      }
+    })
+  }, [])
 
   const insertDictation = useCallback((text: string) => {
+    setEditing(true)
     const field = bodyRef.current
     const start = field?.selectionStart ?? editor.draft.body.length
     const end = field?.selectionEnd ?? start
     const inserted = insertTranscript(editor.draft.body, text, start, end)
     editor.change({ ...editor.draft, body: inserted.value })
     requestAnimationFrame(() => {
-      field?.focus()
-      field?.setSelectionRange(inserted.selection, inserted.selection)
+      const el = bodyRef.current
+      el?.focus()
+      el?.setSelectionRange(inserted.selection, inserted.selection)
     })
   }, [editor])
+
+  const hasBody = editor.draft.body.trim().length > 0
 
   return (
     <section className="relative flex h-full min-w-0 flex-col overflow-hidden bg-[var(--bg)]">
@@ -250,20 +277,42 @@ export function NoteEditor({
         {onBack && (
           <button
             type="button"
-            aria-label="Back to notes"
+            aria-label={`Back to ${backLabel}`}
             onClick={onBack}
-            className="flex size-11 shrink-0 items-center justify-center rounded-[var(--radius-lg)] text-[var(--accent)] transition-[scale,background-color] duration-150 active:scale-[0.96] hover:bg-[var(--fill-secondary)] lg:hidden"
+            className="-ml-1 flex shrink-0 items-center gap-0.5 text-[length:var(--text-body)] text-[var(--accent)] transition-opacity active:opacity-60 lg:hidden"
           >
-            <ChevronLeft size={26} aria-hidden />
+            <ChevronLeft size={24} aria-hidden />
+            <span className="max-w-[38vw] truncate">{backLabel}</span>
           </button>
         )}
         <span className="absolute left-1/2 -translate-x-1/2 tabular-nums text-[length:var(--text-caption1)] text-[var(--text-tertiary)] lg:static lg:ml-1 lg:translate-x-0">
           {saveLabel(editor.phase)}
         </span>
+        <div className="ml-auto flex shrink-0 items-center">
+          {editing ? (
+            <button
+              type="button"
+              onClick={() => { bodyRef.current?.blur(); setEditing(false) }}
+              className="flex min-h-9 items-center gap-1.5 rounded-[var(--radius-md)] px-2.5 text-[length:var(--text-subheadline)] font-[var(--weight-semibold)] text-[var(--accent)] transition-[scale,background-color] duration-150 active:scale-[0.96] hover:bg-[var(--fill-secondary)]"
+            >
+              <Check size={17} aria-hidden />
+              Done
+            </button>
+          ) : (
+            <button
+              type="button"
+              aria-label="Edit note"
+              onClick={() => startEditing("end")}
+              className="flex size-9 items-center justify-center rounded-[var(--radius-md)] text-[var(--text-tertiary)] transition-[scale,background-color,color] duration-150 active:scale-[0.96] hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)]"
+            >
+              <PenLine size={18} aria-hidden />
+            </button>
+          )}
+        </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-36 pt-20 lg:px-14 lg:pb-32 lg:pt-20">
-        <div className="mx-auto flex min-h-full w-full max-w-[760px] flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-36 pt-16 lg:px-14 lg:pb-32 lg:pt-20">
+        <div className="mx-auto flex min-h-full w-full max-w-[720px] flex-col">
           <div className="tabular-nums text-center text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
             {formatEditedAt(note.updatedAt)}
           </div>
@@ -271,17 +320,40 @@ export function NoteEditor({
             aria-label="Note title"
             value={editor.draft.title}
             onChange={(event) => editor.change({ ...editor.draft, title: event.target.value })}
-            className="mt-5 w-full border-0 bg-transparent text-balance text-[length:var(--text-title1)] font-[var(--weight-bold)] leading-[var(--leading-tight)] tracking-[var(--tracking-tight)] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)] lg:mt-7 lg:text-[30px]"
+            className="notes-title mt-5 w-full border-0 bg-transparent text-balance font-[var(--weight-bold)] leading-[var(--leading-tight)] tracking-[var(--tracking-tight)] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)] lg:mt-7"
             placeholder="Note title"
           />
-          <textarea
-            ref={bodyRef}
-            aria-label="Note body"
-            value={editor.draft.body}
-            onChange={(event) => editor.change({ ...editor.draft, body: event.target.value })}
-            className="mt-5 min-h-[55vh] w-full flex-1 resize-none border-0 bg-transparent text-pretty text-[length:var(--text-body)] leading-[1.62] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]"
-            placeholder="Start writing…"
-          />
+          {editing ? (
+            <textarea
+              ref={bodyRef}
+              aria-label="Note body"
+              value={editor.draft.body}
+              onChange={(event) => editor.change({ ...editor.draft, body: event.target.value })}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") { event.currentTarget.blur(); setEditing(false) }
+              }}
+              className="mt-5 min-h-[55vh] w-full flex-1 resize-none border-0 bg-transparent text-pretty text-[length:var(--text-body)] leading-[1.62] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]"
+              placeholder="Start writing…"
+            />
+          ) : (
+            <div
+              role="button"
+              tabIndex={0}
+              aria-label="Edit note body"
+              onClick={() => startEditing("end")}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") { event.preventDefault(); startEditing("end") }
+              }}
+              className={cn(
+                "mt-5 min-h-[55vh] w-full flex-1 cursor-text",
+                !hasBody && "text-[length:var(--text-body)] leading-[1.62] text-[var(--text-tertiary)]",
+              )}
+            >
+              {hasBody
+                ? <MarkdownView content={editor.draft.body} isDark={isDark} />
+                : "Start writing…"}
+            </div>
+          )}
         </div>
       </div>
 

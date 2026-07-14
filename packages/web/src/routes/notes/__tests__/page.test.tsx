@@ -115,6 +115,14 @@ function LocationProbe() {
   return <output data-testid="location">{location.pathname}{location.search}</output>
 }
 
+// The body renders as markdown at rest; the textarea only exists in edit mode.
+// Notes with a body open in reading mode, so save/draft tests reveal the
+// textarea first by clicking the Edit control.
+function enterEdit(): HTMLTextAreaElement {
+  fireEvent.click(screen.getByRole("button", { name: "Edit note" }))
+  return screen.getByLabelText("Note body") as HTMLTextAreaElement
+}
+
 beforeEach(() => {
   vi.useRealTimers()
   localStorage.clear()
@@ -174,14 +182,14 @@ describe("Notes page", () => {
       body: "",
       folder: "product",
     }))
-    expect(screen.getByTestId("location").textContent).toBe(
-      "/notes?folder=product&note=knowledge%2Fproduct%2Fnew-note.md",
-    )
+    await waitFor(() => expect(screen.getByTestId("location").textContent).toBe(
+      "/notes/f/product/n/product/new-note",
+    ))
   })
 
   it("keeps All Notes selected when creating a note there", async () => {
     setMobile(true)
-    renderPage("/notes?folder=__all__")
+    renderPage("/notes/all")
     fireEvent.click(await screen.findByRole("button", { name: "New note" }))
 
     await waitFor(() => expect(mocks.createNote).toHaveBeenCalledWith({
@@ -189,7 +197,7 @@ describe("Notes page", () => {
       body: "",
     }))
     await waitFor(() => expect(screen.getByTestId("location").textContent).toBe(
-      "/notes?folder=__all__&note=knowledge%2Fproduct%2Fnew-note.md",
+      "/notes/all/n/product/new-note",
     ))
   })
 
@@ -203,7 +211,7 @@ describe("Notes page", () => {
   it("debounces saves, then uses only the acknowledged revision for the next save", async () => {
     renderPage()
     const title = await screen.findByDisplayValue("Product principles")
-    const body = screen.getByLabelText("Note body")
+    const body = enterEdit()
     vi.useFakeTimers()
 
     fireEvent.change(title, { target: { value: "Product principles revised" } })
@@ -237,7 +245,8 @@ describe("Notes page", () => {
       .mockResolvedValueOnce({ note: { ...current, body: "Protected local draft", revision: "revision-10" } })
 
     renderPage()
-    const body = await screen.findByLabelText("Note body")
+    await screen.findByDisplayValue("Product principles")
+    const body = enterEdit()
     vi.useFakeTimers()
     fireEvent.change(body, { target: { value: "Protected local draft" } })
     await act(async () => vi.advanceTimersByTimeAsync(500))
@@ -268,9 +277,9 @@ describe("Notes page", () => {
     })
     vi.useFakeTimers()
 
-    renderPage("/notes?folder=__all__&note=knowledge%2Fproduct%2Fprinciples.md")
+    renderPage("/notes/all/n/product/principles")
     await act(async () => vi.advanceTimersByTimeAsync(10))
-    expect((screen.getByLabelText("Note body") as HTMLTextAreaElement).value).toBe("Offline local draft")
+    expect(enterEdit().value).toBe("Offline local draft")
     await act(async () => vi.advanceTimersByTimeAsync(500))
 
     expect(mocks.updateNote).toHaveBeenCalledWith({
@@ -282,10 +291,9 @@ describe("Notes page", () => {
   })
 
   it("refreshes a clean same-path editor when an external revision is refetched", async () => {
-    const { client } = renderPage(
-      "/notes?folder=__all__&note=knowledge%2Fproduct%2Fprinciples.md",
-    )
+    const { client } = renderPage("/notes/all/n/product/principles")
     expect(await screen.findByDisplayValue("Product principles")).toBeTruthy()
+    const body = enterEdit()
 
     const external = {
       ...productDocument,
@@ -302,7 +310,7 @@ describe("Notes page", () => {
     })
 
     expect(await screen.findByDisplayValue("Principles from another session")).toBeTruthy()
-    expect((screen.getByLabelText("Note body") as HTMLTextAreaElement).value).toBe("Fresh remote body")
+    expect(body.value).toBe("Fresh remote body")
     expect(screen.getByText(/Edited Jul 14 at 1:20 PM/i)).toBeTruthy()
   })
 
@@ -312,40 +320,40 @@ describe("Notes page", () => {
     expect(await screen.findByRole("heading", { name: "Folders" })).toBeTruthy()
 
     fireEvent.click(await screen.findByRole("button", { name: "Product" }))
-    expect(await screen.findByRole("heading", { name: "Notes" })).toBeTruthy()
+    expect(await screen.findByRole("heading", { name: "Product" })).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: /Product principles/ }))
-    expect(await screen.findByLabelText("Note body")).toBeTruthy()
+    expect(await screen.findByDisplayValue("Product principles")).toBeTruthy()
 
-    fireEvent.click(screen.getByRole("button", { name: "Back to notes" }))
-    expect(await screen.findByRole("heading", { name: "Notes" })).toBeTruthy()
-    expect(screen.getByTestId("location").textContent).toBe("/notes?folder=product")
+    fireEvent.click(screen.getByRole("button", { name: "Back to Product" }))
+    expect(await screen.findByRole("heading", { name: "Product" })).toBeTruthy()
+    expect(screen.getByTestId("location").textContent).toBe("/notes/f/product")
 
-    fireEvent.click(screen.getByRole("button", { name: "Back to folders" }))
+    fireEvent.click(screen.getByRole("button", { name: "Folders" }))
     expect(await screen.findByRole("heading", { name: "Folders" })).toBeTruthy()
     expect(screen.getByTestId("location").textContent).toBe("/notes")
   })
 
   it("uses deterministic URL-state back transitions from a direct mobile editor link", async () => {
     setMobile(true)
-    renderPage("/notes?folder=product&note=knowledge%2Fproduct%2Fprinciples.md")
-    expect(await screen.findByLabelText("Note body")).toBeTruthy()
+    renderPage("/notes/f/product/n/product/principles")
+    expect(await screen.findByDisplayValue("Product principles")).toBeTruthy()
 
-    fireEvent.click(screen.getByRole("button", { name: "Back to notes" }))
-    expect(await screen.findByRole("heading", { name: "Notes" })).toBeTruthy()
-    expect(screen.getByTestId("location").textContent).toBe("/notes?folder=product")
+    fireEvent.click(screen.getByRole("button", { name: "Back to Product" }))
+    expect(await screen.findByRole("heading", { name: "Product" })).toBeTruthy()
+    expect(screen.getByTestId("location").textContent).toBe("/notes/f/product")
 
-    fireEvent.click(screen.getByRole("button", { name: "Back to folders" }))
+    fireEvent.click(screen.getByRole("button", { name: "Folders" }))
     expect(await screen.findByRole("heading", { name: "Folders" })).toBeTruthy()
     expect(screen.getByTestId("location").textContent).toBe("/notes")
   })
 
   it("normalizes a note-only mobile direct link back to the All Notes list", async () => {
     setMobile(true)
-    renderPage("/notes?note=knowledge%2Fproduct%2Fprinciples.md")
-    expect(await screen.findByLabelText("Note body")).toBeTruthy()
+    renderPage("/notes/n/product/principles")
+    expect(await screen.findByDisplayValue("Product principles")).toBeTruthy()
 
-    fireEvent.click(screen.getByRole("button", { name: "Back to notes" }))
-    expect(await screen.findByRole("heading", { name: "Notes" })).toBeTruthy()
-    expect(screen.getByTestId("location").textContent).toBe("/notes?folder=__all__")
+    fireEvent.click(screen.getByRole("button", { name: "Back to All Notes" }))
+    expect(await screen.findByRole("heading", { name: "All Notes" })).toBeTruthy()
+    expect(screen.getByTestId("location").textContent).toBe("/notes/all")
   })
 })
