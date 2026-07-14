@@ -5,6 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleApiRequest, type ApiContext } from "../api.js";
+import { pairingSetupResponse } from "../../cli/pair.js";
 import {
   createAuthSession,
   issueLocalBootstrapGrant,
@@ -121,7 +122,7 @@ describe("auth UX API routes", () => {
     expect(JSON.stringify(cap.body)).not.toContain("gateway-token");
   });
 
-  it("rejects bearer-only and unauthenticated pairing-code creation", async () => {
+  it("rejects bearer-only pairing-code creation and keeps the CLI on the browser path", async () => {
     const context = ctx();
     const bearer = makeRes();
     await handleApiRequest(
@@ -135,6 +136,10 @@ describe("auth UX API routes", () => {
 
     expect(bearer.status).toBe(403);
     expect(bearer.body.code).toBeUndefined();
+    expect(pairingSetupResponse(7777)).toMatchObject({
+      action: "create_pairing_code_in_browser",
+      url: "http://127.0.0.1:7777/settings",
+    });
 
     const unauthenticated = makeRes();
     await handleApiRequest(

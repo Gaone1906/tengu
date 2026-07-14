@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   formatPairedDevices,
-  formatPairingInstructions,
+  formatPairingSetupInstructions,
+  pairingSetupResponse,
   requestPairedDevices,
-  requestPairingCode,
   requestUnpairDevice,
 } from "../pair.js";
 
@@ -12,46 +12,22 @@ describe("pair CLI helpers", () => {
     vi.restoreAllMocks();
   });
 
-  it("requests a pairing code from the local gateway auth endpoint", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({
-        status: "ok",
-        code: "ABCD-EFGH-JKLM",
-        expiresAt: "2026-06-24T10:00:00.000Z",
-        ttlSeconds: 300,
-      }), { status: 200, headers: { "content-type": "application/json" } }),
-    );
-
-    const result = await requestPairingCode({
-      port: 7777,
-      host: "100.95.1.62",
-      token: "gateway-token",
-      fetchImpl: fetchMock as unknown as typeof fetch,
+  it("directs pairing-code creation to the authenticated local browser", () => {
+    expect(pairingSetupResponse(7777)).toEqual({
+      action: "create_pairing_code_in_browser",
+      url: "http://127.0.0.1:7777/settings",
+      section: "Pairing",
     });
-
-    expect(result.code).toBe("ABCD-EFGH-JKLM");
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://100.95.1.62:7777/api/auth/pairing-codes",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({
-          authorization: "Bearer gateway-token",
-        }),
-      }),
-    );
   });
 
-  it("prints simple pairing instructions without leaking the gateway token", () => {
-    const text = formatPairingInstructions({
-      code: "ABCD-EFGH-JKLM",
-      expiresAt: "2026-06-24T10:00:00.000Z",
-      ttlSeconds: 300,
-    }, 7777);
+  it("prints browser pairing instructions without claiming the CLI minted a code", () => {
+    const text = formatPairingSetupInstructions(pairingSetupResponse(7777));
 
-    expect(text).toContain("ABCD-EFGH-JKLM");
-    expect(text).toContain("Open Jinn on the other device");
+    expect(text).toContain("http://127.0.0.1:7777/settings");
     expect(text).toContain("Settings > Pairing");
-    expect(text).toContain("5 minutes");
+    expect(text).toContain("Create pairing code");
+    expect(text).toContain("other device");
+    expect(text).not.toContain("Code:");
     expect(text).not.toContain("gateway-token");
   });
 
@@ -121,6 +97,7 @@ describe("pair CLI helpers", () => {
     expect(text).toContain("This Mac");
     expect(text).toContain("iPhone browser");
     expect(text).toContain("jinn unpair -- -device-2");
+    expect(text).not.toContain("Create a code with jinn pair");
     expect(text).not.toContain("gateway-token");
   });
 });

@@ -3,10 +3,10 @@ import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
 import { loadConfig } from "../shared/config.js";
 import { GATEWAY_INFO_FILE, JINN_HOME } from "../shared/paths.js";
 
-export interface PairingCodeResponse {
-  code: string;
-  expiresAt: string;
-  ttlSeconds?: number;
+export interface PairingSetupResponse {
+  action: "create_pairing_code_in_browser";
+  url: string;
+  section: "Pairing";
 }
 
 export interface PairedDeviceResponse {
@@ -29,7 +29,13 @@ export function gatewayHttpBase(port: number, host?: string): string {
   return gatewayBaseUrl({ port, host });
 }
 
-function gatewayConnection(): { port: number; host?: string; token: string } | null {
+interface GatewayRuntimeInfo {
+  port: number;
+  host?: string;
+  token?: string;
+}
+
+function gatewayRuntimeInfo(): GatewayRuntimeInfo | null {
   if (!fs.existsSync(JINN_HOME)) return null;
   const info = readGatewayInfo(GATEWAY_INFO_FILE);
   let configHost: string | undefined;
@@ -43,8 +49,12 @@ function gatewayConnection(): { port: number; host?: string; token: string } | n
   }
   const port = info?.port ?? configPort ?? 7777;
   const host = info?.host ?? configHost;
-  const token = info?.token;
-  return token ? { port, host, token } : null;
+  return { port, host, token: info?.token };
+}
+
+function gatewayConnection(): { port: number; host?: string; token: string } | null {
+  const info = gatewayRuntimeInfo();
+  return info?.token ? { port: info.port, host: info.host, token: info.token } : null;
 }
 
 async function jsonOrThrow<T>(res: Response, fallback: string): Promise<T> {
@@ -62,22 +72,12 @@ async function jsonOrThrow<T>(res: Response, fallback: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export async function requestPairingCode(opts: {
-  port: number;
-  host?: string;
-  token: string;
-  fetchImpl?: typeof fetch;
-}): Promise<PairingCodeResponse> {
-  const fetchImpl = opts.fetchImpl ?? fetch;
-  const res = await fetchImpl(`${gatewayHttpBase(opts.port, opts.host)}/api/auth/pairing-codes`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${opts.token}`,
-      "content-type": "application/json",
-    },
-    body: "{}",
-  });
-  return jsonOrThrow<PairingCodeResponse>(res, `Gateway rejected pairing-code creation (${res.status})`);
+export function pairingSetupResponse(port: number): PairingSetupResponse {
+  return {
+    action: "create_pairing_code_in_browser",
+    url: `http://127.0.0.1:${port}/settings`,
+    section: "Pairing",
+  };
 }
 
 export async function requestPairedDevices(opts: {
@@ -117,21 +117,15 @@ export async function requestUnpairDevice(opts: {
   return jsonOrThrow<UnpairDeviceResponse>(res, `Gateway rejected paired-browser removal (${res.status})`);
 }
 
-export function formatPairingInstructions(pairing: PairingCodeResponse, port: number): string {
-  const minutes = pairing.ttlSeconds ? Math.max(1, Math.ceil(pairing.ttlSeconds / 60)) : 5;
+export function formatPairingSetupInstructions(setup: PairingSetupResponse): string {
   return [
     "Pair a browser with Jinn",
     "",
-    `Code: ${pairing.code}`,
-    `Expires: ${minutes} minutes, single-use`,
+    "Pairing codes can only be created by an authenticated local browser.",
     "",
-    "On the other device:",
-    "  1. Open Jinn on the other device using your Tailscale/LAN URL.",
-    "  2. When Pair This Browser appears, enter the code above.",
-    "  3. After pairing, refreshes open the normal app.",
-    "",
-    "From the web UI, you can also create a code in Settings > Pairing.",
-    `Local dashboard: http://127.0.0.1:${port}`,
+    `  1. On the gateway machine, open ${setup.url}`,
+    `  2. In Settings > ${setup.section}, select "Create pairing code".`,
+    "  3. On the other device, open Jinn using its Tailscale/LAN URL and enter the code.",
   ].join("\n");
 }
 
@@ -141,7 +135,7 @@ export function formatPairedDevices(devices: PairedDeviceResponse[]): string {
       "Paired browsers",
       "",
       "No paired browsers yet.",
-      "Create a code with jinn pair, then open Jinn from the other browser and enter it.",
+      "Run jinn pair for the browser-based pairing steps.",
     ].join("\n");
   }
   const lines = ["Paired browsers", ""];
@@ -157,26 +151,21 @@ export function formatPairedDevices(devices: PairedDeviceResponse[]): string {
 }
 
 export async function runPair(opts: { json?: boolean } = {}): Promise<void> {
-  const connection = gatewayConnection();
   if (!fs.existsSync(JINN_HOME)) {
     console.error("Gateway is not set up. Run \"jinn setup\" first.");
     process.exitCode = 1;
     return;
   }
-  if (!connection) {
-    console.error("Gateway auth token was not found. Start Jinn first, then run \"jinn pair\".");
+  const info = gatewayRuntimeInfo();
+  if (!info) {
+    console.error("Gateway location could not be determined. Run \"jinn setup\" first.");
     process.exitCode = 1;
     return;
   }
 
-  try {
-    const pairing = await requestPairingCode(connection);
-    if (opts.json) console.log(JSON.stringify(pairing, null, 2));
-    else console.log(formatPairingInstructions(pairing, connection.port));
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exitCode = 1;
-  }
+  const setup = pairingSetupResponse(info.port);
+  if (opts.json) console.log(JSON.stringify(setup, null, 2));
+  else console.log(formatPairingSetupInstructions(setup));
 }
 
 export async function runUnpair(deviceId?: string, opts: { json?: boolean } = {}): Promise<void> {
