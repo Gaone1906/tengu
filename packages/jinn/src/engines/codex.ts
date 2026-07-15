@@ -293,6 +293,39 @@ export function removeCodexSessionHome(sessionId: string, baseDir: string = CODE
 }
 
 /**
+ * Startup sweep for orphaned per-session CODEX_HOME overlays. Homes are removed
+ * on session teardown, but a session whose record is gone (crash, hard delete,
+ * pre-fix accumulation) leaves its overlay behind forever — that leak grew to
+ * 276 dirs / 2.4GB. Given the set of session ids the registry still knows about,
+ * delete every overlay dir that is NOT backed by a live session. Never touches
+ * the shared caches (dot-dirs / SHARED_CODEX_HOME_DIRS live alongside overlays).
+ * Returns the number of orphan overlays removed.
+ */
+export function sweepOrphanCodexSessionHomes(
+  knownSessionIds: Iterable<string>,
+  baseDir: string = CODEX_HOMES_DIR,
+): number {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(baseDir);
+  } catch {
+    return 0; // no codex-homes dir yet — nothing to sweep
+  }
+  const keep = new Set<string>();
+  for (const id of knownSessionIds) keep.add(safeSessionDirName(id));
+  const shared = new Set<string>(SHARED_CODEX_HOME_DIRS);
+  let removed = 0;
+  for (const entry of entries) {
+    if (entry.startsWith(".") || shared.has(entry) || keep.has(entry)) continue;
+    try {
+      fs.rmSync(path.join(baseDir, entry), { recursive: true, force: true });
+      removed++;
+    } catch { /* best effort */ }
+  }
+  return removed;
+}
+
+/**
  * Build `codex exec` argv for a FRESH turn. When `homeActive` is true the builtin
  * jinn server rides the per-session CODEX_HOME config.toml, so it is skipped from
  * the argv `-c` overrides (its capability must never touch argv). No `--profile`:

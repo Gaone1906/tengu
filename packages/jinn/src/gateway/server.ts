@@ -24,7 +24,7 @@ import { recoverSessionDeliveryStateOnStartup } from "../sessions/callbacks.js";
 import { recoverWorkflowRunReporting } from "../workflows/reporting.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
 import { enforcePtyIdleCap, PtyLifecycleManager, type PtyLifecycleOpts } from "../engines/pty-lifecycle.js";
-import { CodexEngine } from "../engines/codex.js";
+import { CodexEngine, sweepOrphanCodexSessionHomes } from "../engines/codex.js";
 import { CodexInteractiveEngine } from "../engines/codex-interactive.js";
 import { AntigravityEngine } from "../engines/antigravity.js";
 import { PiEngine } from "../engines/pi.js";
@@ -313,6 +313,13 @@ export async function startGateway(
     try { cleanupOldUploads(30); } catch { /* best-effort */ }
   }, 24 * 60 * 60 * 1000);
   uploadCleanupTimer.unref?.();
+  // Retention: sweep orphaned per-session Codex CODEX_HOME overlays whose session
+  // records are gone (crash/hard-delete/pre-fix accumulation). This leak reached
+  // 276 dirs / 2.4GB. Keep overlays for every session the registry still lists.
+  try {
+    const swept = sweepOrphanCodexSessionHomes(listSessions().map((s) => s.id));
+    if (swept > 0) logger.info(`Swept ${swept} orphaned Codex session home(s)`);
+  } catch { /* best-effort */ }
   const recovered = recoverStaleSessions();
   if (recovered > 0) {
     logger.info(`Recovered ${recovered} stale session(s) — marked as "interrupted" for resume`);

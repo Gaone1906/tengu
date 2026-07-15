@@ -11,6 +11,9 @@ export const LOCAL_BOOTSTRAP_GRANT_TTL_MS = 60_000;
 const PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export const PAIRING_CODE_TTL_MS = 5 * 60 * 1000;
 export const AUTOMATED_AUTH_SESSION_TTL_MS = 60 * 60 * 1000;
+// touchAuthSession persists lastSeenAt at most once per window per device to
+// avoid a disk write on every authenticated request.
+export const AUTH_SESSION_TOUCH_THROTTLE_MS = 60 * 1000;
 
 export interface PairingCodeEntry {
   expiresAt: number;
@@ -325,9 +328,18 @@ function saveStoredAuthSessions(jinnHome: string, devices: StoredAuthSessionDevi
   fs.mkdirSync(jinnHome, { recursive: true });
   const file = authDevicesPath(jinnHome);
   const tmp = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify({ devices }, null, 2), { mode: 0o600 });
-  fs.renameSync(tmp, file);
-  fs.chmodSync(file, 0o600);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ devices }, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    fs.chmodSync(file, 0o600);
+  } catch (err) {
+    // A failed write (e.g. ENOSPC) must not leave a half-written tmp behind for
+    // the same pid to trip over on the next attempt. Clean it up and rethrow so
+    // callers that require durability (createAuthSession) still see the failure;
+    // best-effort callers (touchAuthSession) swallow it.
+    try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+    throw err;
+  }
 }
 
 function pruneStaleAutomatedAuthSessions(
@@ -400,14 +412,29 @@ export function touchAuthSession(
   const devices = loadStoredAuthSessions(jinnHome);
   const idx = devices.findIndex((d) => d.id === deviceId);
   if (idx < 0) return null;
-  devices[idx] = {
-    ...devices[idx],
+  const existing = devices[idx];
+  const nextIp = req.socket.remoteAddress;
+  const nextUa = headerValue(req.headers, "user-agent");
+  // Write-amplification guard: touchAuthSession runs on EVERY authenticated
+  // request. Persisting lastSeenAt each time hammers the disk (and, when the
+  // disk is full, floods the log with ENOSPC on the same tmp file). Only persist
+  // when a device attribute actually changed or the recorded lastSeenAt is stale
+  // beyond the throttle window.
+  const lastSeenMs = Date.parse(existing.lastSeenAt);
+  const stale = !Number.isFinite(lastSeenMs) || now - lastSeenMs >= AUTH_SESSION_TOUCH_THROTTLE_MS;
+  const attrsChanged = (nextIp !== undefined && nextIp !== existing.lastIp)
+    || (nextUa !== undefined && nextUa !== existing.userAgent);
+  const updated = {
+    ...existing,
     lastSeenAt: new Date(now).toISOString(),
-    ...(req.socket.remoteAddress ? { lastIp: req.socket.remoteAddress } : {}),
-    ...(headerValue(req.headers, "user-agent") ? { userAgent: headerValue(req.headers, "user-agent") } : {}),
+    ...(nextIp ? { lastIp: nextIp } : {}),
+    ...(nextUa ? { userAgent: nextUa } : {}),
   };
-  saveStoredAuthSessions(jinnHome, devices);
-  const { tokenHash: _tokenHash, ...device } = devices[idx];
+  const { tokenHash: _tokenHash, ...device } = updated;
+  if (!stale && !attrsChanged) return device; // skip the write entirely
+  devices[idx] = updated;
+  // Best-effort: a lastSeenAt refresh must never fail the request it rode in on.
+  try { saveStoredAuthSessions(jinnHome, devices); } catch { /* transient FS/ENOSPC — keep serving */ }
   return device;
 }
 

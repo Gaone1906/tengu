@@ -10,6 +10,28 @@ let minLevel: LogLevel = "info";
 let writeToStdout = true;
 let logStream: fs.WriteStream | null = null;
 
+// Bound gateway.log growth: an unrotated log grew to 11MB+ and, on a full disk,
+// was one of the writers that kept ENOSPC alive. Rotate at a fixed size and keep
+// a single previous generation (gateway.log.1) — KISS, no external logrotate.
+const MAX_LOG_BYTES = 25 * 1024 * 1024;
+let logPath: string | null = null;
+let logBytes = 0;
+
+function rotateIfNeeded(nextChunkBytes: number) {
+  if (!logStream || !logPath) return;
+  if (logBytes + nextChunkBytes <= MAX_LOG_BYTES) return;
+  const stream = logStream;
+  logStream = null;
+  stream.end();
+  try {
+    fs.renameSync(logPath, `${logPath}.1`); // overwrites the prior generation
+  } catch {
+    /* if rename fails (e.g. ENOSPC), fall through and reopen; truncation below */
+  }
+  logStream = fs.createWriteStream(logPath, { flags: "w" });
+  logBytes = 0;
+}
+
 export function configureLogger(opts: {
   level?: string;
   stdout?: boolean;
@@ -19,9 +41,9 @@ export function configureLogger(opts: {
   if (opts.stdout !== undefined) writeToStdout = opts.stdout;
   if (opts.file !== false) {
     fs.mkdirSync(LOGS_DIR, { recursive: true });
-    logStream = fs.createWriteStream(path.join(LOGS_DIR, "gateway.log"), {
-      flags: "a",
-    });
+    logPath = path.join(LOGS_DIR, "gateway.log");
+    try { logBytes = fs.statSync(logPath).size; } catch { logBytes = 0; }
+    logStream = fs.createWriteStream(logPath, { flags: "a" });
   }
 }
 
@@ -39,7 +61,15 @@ function log(level: LogLevel, message: string) {
   const safeMessage = redactText(message);
   const line = `${new Date().toISOString()} [${level.toUpperCase()}] ${safeMessage}`;
   if (writeToStdout) console.log(line);
-  if (logStream) logStream.write(line + "\n");
+  if (logStream) {
+    const chunk = line + "\n";
+    const bytes = Buffer.byteLength(chunk);
+    rotateIfNeeded(bytes);
+    if (logStream) {
+      logStream.write(chunk);
+      logBytes += bytes;
+    }
+  }
 }
 
 export const logger = {
