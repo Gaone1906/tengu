@@ -294,6 +294,7 @@ import {
   consumePairingCode,
   createAuthSession,
   createAuthState,
+  createFilePairingCodeStore,
   currentAuthDeviceId,
   hasGatewayBearerAuth,
   issuePairingCode,
@@ -3104,7 +3105,7 @@ export async function handleApiRequest(
         const auth = authenticateGatewayRequest(req, context.gatewayAuthToken, jinnHome);
         if (!auth.ok) return json(res, { error: auth.reason || "Unauthorized" }, 403);
       }
-      const issued = issuePairingCode();
+      const issued = issuePairingCode(createFilePairingCodeStore(jinnHome));
       return json(res, {
         status: "ok",
         code: issued.code,
@@ -3121,7 +3122,7 @@ export async function handleApiRequest(
       if (!parsed.ok) return;
       const body = parsed.body && typeof parsed.body === "object" ? parsed.body as Record<string, unknown> : {};
       const code = typeof body.code === "string" ? body.code : undefined;
-      const ok = consumePairingCode(undefined, code);
+      const ok = consumePairingCode(createFilePairingCodeStore(jinnHome), code);
       if (!ok || !context.gatewayAuthToken) return json(res, { error: "Invalid or expired pairing code" }, 401);
       const session = createAuthSession(jinnHome, req, { kind: "remote" });
       res.setHeader("Set-Cookie", authCookieHeaders(session.secret, session.device.id));

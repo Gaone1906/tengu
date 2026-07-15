@@ -33,7 +33,7 @@ describe("PairingScreen", () => {
 
     expect(screen.getByRole("button", { name: /pair with jinn cli/i })).toBeTruthy()
     expect(screen.getByRole("button", { name: /pair from web settings/i })).toBeTruthy()
-    expect(screen.getByText(/run this on the mac where jinn is running/i)).toBeTruthy()
+    expect(screen.getByText(/run this on the computer where jinn is running/i)).toBeTruthy()
     expect(screen.getByText(/jinn pair/i)).toBeTruthy()
 
     fireEvent.click(screen.getByRole("button", { name: /pair from web settings/i }))
@@ -41,6 +41,30 @@ describe("PairingScreen", () => {
     expect(screen.getByText(/open the already-paired local dashboard/i)).toBeTruthy()
     expect(screen.getByText(/Settings.*Pairing.*Create pairing code/i)).toBeTruthy()
     expect(screen.getByText(/Enter the code below/i)).toBeTruthy()
+  })
+
+  it("shows the instance-scoped pair command for a non-default instance", () => {
+    render(
+      <PairingScreen
+        authState={{ authRequired: true, authenticated: false, canBootstrapLocal: false, networkExposed: true, instance: "jinn-yorio" }}
+        pairing={false}
+        onPair={() => {}}
+      />,
+    )
+
+    expect(screen.getByText("jinn -i jinn-yorio pair")).toBeTruthy()
+  })
+
+  it("shows the bare pair command for the default instance", () => {
+    render(
+      <PairingScreen
+        authState={{ authRequired: true, authenticated: false, canBootstrapLocal: false, networkExposed: true, instance: "jinn" }}
+        pairing={false}
+        onPair={() => {}}
+      />,
+    )
+
+    expect(screen.getByText("jinn pair")).toBeTruthy()
   })
 
   it("toggles the open pairing flow closed when its header is clicked again", () => {
@@ -54,12 +78,12 @@ describe("PairingScreen", () => {
 
     const cliHeader = screen.getByRole("button", { name: /pair with jinn cli/i })
     expect(cliHeader.getAttribute("aria-expanded")).toBe("true")
-    expect(screen.getByText(/run this on the mac where jinn is running/i)).toBeTruthy()
+    expect(screen.getByText(/run this on the computer where jinn is running/i)).toBeTruthy()
 
     fireEvent.click(cliHeader)
 
     expect(cliHeader.getAttribute("aria-expanded")).toBe("false")
-    expect(screen.queryByText(/run this on the mac where jinn is running/i)).toBeNull()
+    expect(screen.queryByText(/run this on the computer where jinn is running/i)).toBeNull()
   })
 
   it("keeps fallback setup-token pairing explicit and ephemeral", () => {
@@ -93,7 +117,7 @@ describe("PairingScreen", () => {
       />,
     )
 
-    expect(screen.getByRole("alert").textContent).toMatch(/Create a new remote access code/i)
+    expect(screen.getByRole("alert").textContent).toMatch(/create one on this instance/i)
     expect(screen.getByLabelText(/remote access code/i).getAttribute("aria-invalid")).toBe("true")
     expect((screen.getByRole("button", { name: /pairing/i }) as HTMLButtonElement).disabled).toBe(true)
     expect(document.body.textContent).not.toContain("Bearer")

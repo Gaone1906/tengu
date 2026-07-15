@@ -4,6 +4,8 @@ import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
 import { PAIRING_CHALLENGE_FILE_PREFIX } from "../gateway/pairing-challenge.js";
 import { loadConfig } from "../shared/config.js";
 import { GATEWAY_INFO_FILE, JINN_HOME } from "../shared/paths.js";
+import { resolveJinnInstance, pairCommandFor } from "../shared/home.js";
+import { loadInstances } from "./instances.js";
 
 export interface PairingCodeResponse {
   code: string;
@@ -169,11 +171,18 @@ export async function requestUnpairDevice(opts: {
   return jsonOrThrow<UnpairDeviceResponse>(res, `Gateway rejected paired-browser removal (${res.status})`);
 }
 
-export function formatPairingInstructions(pairing: PairingCodeResponse, port: number): string {
+export function formatPairingInstructions(
+  pairing: PairingCodeResponse,
+  port: number,
+  instance = "jinn",
+): string {
   const minutes = pairing.ttlSeconds ? Math.max(1, Math.ceil(pairing.ttlSeconds / 60)) : 5;
   return [
     "Pair a browser with Jinn",
     "",
+    // Always name the instance this code belongs to: a code only pairs the
+    // instance that minted it, so an operator running several must see which one.
+    `Instance: ${instance} (port ${port})`,
     `Code: ${pairing.code}`,
     `Expires: ${minutes} minutes, single-use`,
     "",
@@ -221,10 +230,24 @@ export async function runPair(opts: { json?: boolean } = {}): Promise<void> {
     return;
   }
 
+  const instance = resolveJinnInstance();
   try {
     const pairing = await requestPairingCode({ port: info.port });
-    if (opts.json) console.log(JSON.stringify(pairing, null, 2));
-    else console.log(formatPairingInstructions(pairing, info.port));
+    if (opts.json) {
+      console.log(JSON.stringify({ ...pairing, instance }, null, 2));
+    } else {
+      console.log(formatPairingInstructions(pairing, info.port, instance));
+      // On the default instance, nudge multi-instance operators toward the -i
+      // form so they don't mint a code for `.jinn` when they meant another one.
+      if (instance === "jinn") {
+        const others = loadInstances().filter((i) => i.name !== "jinn");
+        if (others.length > 0) {
+          console.log("");
+          console.log(`This paired the default instance. ${others.length} other instance(s) exist.`);
+          console.log("To pair a different one, name it: jinn -i <instance> pair");
+        }
+      }
+    }
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exitCode = 1;

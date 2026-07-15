@@ -18,15 +18,20 @@ export function PairingScreen({ authState, pairing, error, onPair }: PairingScre
   const [mode, setMode] = useState<PairingMode>("code")
   const [flow, setFlow] = useState<PairingFlow>("cli")
   const networkLabel = authState?.networkExposed ? "Private network" : "Local gateway"
+  // The exact command that mints a code for THIS gateway. On a non-default
+  // instance it carries `-i <instance>`, so a multi-instance operator doesn't
+  // pair the wrong one — the single most common cause of "invalid code".
+  const instance = authState?.instance
+  const pairCommand = instance && instance !== "jinn" ? `jinn -i ${instance} pair` : "jinn pair"
   const visibleError = useMemo(() => {
     if (!error) return null
     if (/expired|invalid/i.test(error) && mode === "token") {
       return "Setup token was not accepted. Paste the current setup token or use a remote access code instead."
     }
     return /expired|invalid/i.test(error)
-      ? `${error}. Create a new remote access code from a paired local dashboard and try again.`
+      ? `${error}. Codes only work on the instance that created them — create one on this instance with "${pairCommand}", then enter it within a few minutes.`
       : error
-  }, [error, mode])
+  }, [error, mode, pairCommand])
   const errorId = visibleError ? "jinn-pairing-error" : undefined
 
   function submit(e: FormEvent) {
@@ -78,9 +83,9 @@ export function PairingScreen({ authState, pairing, error, onPair }: PairingScre
             {flow === "cli" && (
               <div id="jinn-pair-cli-flow" className="animate-auth-reveal rounded-[var(--radius-md)] bg-[var(--fill-tertiary)] px-[var(--space-3)] py-[var(--space-3)] shadow-[inset_0_0_0_1px_var(--separator)] text-[length:var(--text-footnote)] leading-[var(--leading-relaxed)] text-[var(--text-secondary)]">
                 <ol className="flex flex-col gap-1.5 text-pretty">
-                  <li>1. Run this on the Mac where Jinn is running.</li>
+                  <li>1. Run this on the computer where Jinn is running.</li>
                   <li>
-                    2. <span className="font-[var(--font-code)] text-[var(--text-primary)]">jinn pair</span>
+                    2. <span className="font-[var(--font-code)] text-[var(--text-primary)]">{pairCommand}</span>
                   </li>
                   <li>3. Copy the code it prints and enter the code below.</li>
                 </ol>
@@ -97,7 +102,7 @@ export function PairingScreen({ authState, pairing, error, onPair }: PairingScre
             {flow === "web" && (
               <div id="jinn-pair-web-flow" className="animate-auth-reveal rounded-[var(--radius-md)] bg-[var(--fill-tertiary)] px-[var(--space-3)] py-[var(--space-3)] shadow-[inset_0_0_0_1px_var(--separator)] text-[length:var(--text-footnote)] leading-[var(--leading-relaxed)] text-[var(--text-secondary)]">
                 <ol className="flex flex-col gap-1.5 text-pretty">
-                  <li>1. Open the already-paired local dashboard on the Mac running Jinn.</li>
+                  <li>1. Open the already-paired local dashboard on the computer running Jinn.</li>
                   <li>2. Go to Settings &gt; Pairing and press Create pairing code.</li>
                   <li>3. Bring the code back here. Enter the code below.</li>
                 </ol>

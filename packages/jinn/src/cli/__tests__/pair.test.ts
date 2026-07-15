@@ -111,6 +111,21 @@ describe("pair CLI helpers", () => {
     expect(text).not.toContain("gateway-token");
   });
 
+  it("labels the target instance so multi-instance operators pick the right one", () => {
+    const forDefault = formatPairingInstructions(
+      { code: "ABCD-EFGH-JKLM", expiresAt: "2026-07-14T20:05:00.000Z", ttlSeconds: 300 },
+      7777,
+    );
+    expect(forDefault).toContain("Instance: jinn (port 7777)");
+
+    const forYorio = formatPairingInstructions(
+      { code: "WAMP-EYJL-TEV3", expiresAt: "2026-07-14T20:05:00.000Z", ttlSeconds: 300 },
+      7801,
+      "jinn-yorio",
+    );
+    expect(forYorio).toContain("Instance: jinn-yorio (port 7801)");
+  });
+
   it("lists paired devices from the local gateway auth endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({

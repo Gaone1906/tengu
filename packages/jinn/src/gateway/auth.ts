@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { IncomingMessage } from "node:http";
 import type { JinnConfig } from "../shared/types.js";
+import { resolveJinnInstance } from "../shared/home.js";
 
 export const AUTH_COOKIE = "jinn_auth";
 export const AUTH_DEVICE_COOKIE = "jinn_device";
@@ -19,9 +20,52 @@ export interface PairingCodeEntry {
   expiresAt: number;
 }
 
-export type PairingCodeStore = Map<string, PairingCodeEntry>;
+/**
+ * Minimal store surface shared by the in-memory Map (tests, default) and the
+ * durable file-backed store used in production. A plain Map satisfies it.
+ */
+export interface PairingCodeStore {
+  get(hash: string): PairingCodeEntry | undefined;
+  set(hash: string, entry: PairingCodeEntry): void;
+  delete(hash: string): void;
+  entries(): IterableIterator<[string, PairingCodeEntry]>;
+}
 
 const pairingCodes: PairingCodeStore = new Map();
+
+/**
+ * Persist pairing codes under JINN_HOME so a gateway restart within the 5-minute
+ * TTL no longer silently invalidates an outstanding code. Only salted hashes and
+ * expiries are stored (never the raw code), at mode 0600, and always per-instance
+ * (each instance has its own JINN_HOME) — a code still only pairs the instance
+ * that minted it, which is the intended boundary.
+ */
+export function createFilePairingCodeStore(jinnHome: string): PairingCodeStore {
+  const file = path.join(jinnHome, "pairing-codes.json");
+  const load = (): Map<string, PairingCodeEntry> => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, { expiresAt?: unknown }>;
+      const map = new Map<string, PairingCodeEntry>();
+      for (const [hash, entry] of Object.entries(parsed)) {
+        if (entry && typeof entry.expiresAt === "number") map.set(hash, { expiresAt: entry.expiresAt });
+      }
+      return map;
+    } catch {
+      return new Map();
+    }
+  };
+  const save = (map: Map<string, PairingCodeEntry>): void => {
+    const obj: Record<string, PairingCodeEntry> = {};
+    for (const [hash, entry] of map) obj[hash] = { expiresAt: entry.expiresAt };
+    fs.writeFileSync(file, JSON.stringify(obj), { mode: 0o600 });
+  };
+  return {
+    get: (hash) => load().get(hash),
+    set: (hash, entry) => { const map = load(); map.set(hash, entry); save(map); },
+    delete: (hash) => { const map = load(); map.delete(hash); save(map); },
+    entries: () => load().entries(),
+  };
+}
 
 export interface LocalBootstrapGrantEntry {
   expiresAt: number;
@@ -272,6 +316,7 @@ export function createAuthState(
   authenticated: boolean;
   canBootstrapLocal: boolean;
   networkExposed: boolean;
+  instance: string;
 } {
   const authRequired = shouldRequireGatewayAuth(config);
   const authenticated = authRequired ? verifyGatewayAuth(req.headers, expectedToken, jinnHome) : true;
@@ -280,6 +325,10 @@ export function createAuthState(
     authenticated,
     canBootstrapLocal: Boolean(expectedToken && isLoopbackAddress(req.socket.remoteAddress) && isLoopbackHost(headerValue(req.headers, "host"))),
     networkExposed: isNetworkHost(config.gateway.host),
+    // Lets the browser show the exact `jinn -i <instance> pair` command for the
+    // gateway it is actually talking to, so multi-instance operators mint on the
+    // right one instead of the default.
+    instance: resolveJinnInstance(jinnHome),
   };
 }
 

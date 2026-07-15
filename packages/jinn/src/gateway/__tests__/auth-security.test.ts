@@ -10,6 +10,7 @@ import {
   consumeLocalBootstrapGrant,
   consumePairingCode,
   createAuthState,
+  createFilePairingCodeStore,
   createPairingCode,
   ensureGatewayAuthToken,
   listAuthSessions,
@@ -121,6 +122,28 @@ describe("gateway auth", () => {
     expect(normalizePairingCode("abcd efgh-jklm")).toBe("ABCDEFGHJKLM");
     expect(consumePairingCode(store, "abcd efgh jklm", 2_000)).toBe(true);
     expect(consumePairingCode(store, "ABCD-EFGH-JKLM", 2_001)).toBe(false);
+  });
+
+  it("persists pairing codes under JINN_HOME so they survive a gateway restart", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pairing-store-"));
+
+    // Mint against one store instance...
+    const issued = issuePairingCode(createFilePairingCodeStore(home), 1_000, () => "ABCD-EFGH-JKLM");
+    expect(issued.code).toBe("ABCD-EFGH-JKLM");
+
+    // ...only hashes hit disk, never the raw code.
+    const onDisk = fs.readFileSync(path.join(home, "pairing-codes.json"), "utf-8");
+    expect(onDisk).not.toContain("ABCD");
+
+    // A fresh store (as after a restart) still redeems it, and it stays single-use.
+    expect(consumePairingCode(createFilePairingCodeStore(home), "abcd-efgh-jklm", 2_000)).toBe(true);
+    expect(consumePairingCode(createFilePairingCodeStore(home), "ABCD-EFGH-JKLM", 2_001)).toBe(false);
+  });
+
+  it("expires persisted pairing codes past their TTL", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-pairing-store-ttl-"));
+    const issued = issuePairingCode(createFilePairingCodeStore(home), 1_000, () => "WXYZ-2345-6789");
+    expect(consumePairingCode(createFilePairingCodeStore(home), issued.code, issued.expiresAt + 1)).toBe(false);
   });
 
   it("creates short-lived single-use local bootstrap grants without storing the raw grant", () => {

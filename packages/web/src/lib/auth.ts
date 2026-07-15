@@ -3,6 +3,8 @@ export interface AuthState {
   authenticated: boolean
   canBootstrapLocal: boolean
   networkExposed: boolean
+  /** Instance name serving this page, so pairing hints can name `jinn -i <instance> pair`. */
+  instance?: string
 }
 
 export interface PairingCode {

@@ -8,6 +8,28 @@ export function resolveJinnHome(): string {
   return path.resolve(path.join(os.homedir(), `.${instance}`));
 }
 
+/**
+ * Resolve the instance NAME (not the home path) for user-facing hints such as
+ * the `jinn -i <name> pair` command. Derives from an explicit JINN_INSTANCE,
+ * else the JINN_HOME/passed-home basename with its leading dot stripped
+ * (`~/.jinn-yorio` -> `jinn-yorio`), falling back to the default `jinn`.
+ */
+export function resolveJinnInstance(jinnHome?: string): string {
+  if (process.env.JINN_INSTANCE) return process.env.JINN_INSTANCE;
+  const home = jinnHome ?? process.env.JINN_HOME;
+  if (home) {
+    const base = path.basename(path.resolve(home));
+    const name = base.startsWith(".") ? base.slice(1) : base;
+    if (name) return name;
+  }
+  return "jinn";
+}
+
+/** The exact CLI command that pairs a browser to this instance. */
+export function pairCommandFor(instance: string): string {
+  return instance && instance !== "jinn" ? `jinn -i ${instance} pair` : "jinn pair";
+}
+
 /** Resolve the durable per-instance key without freezing JINN_HOME at import. */
 export function resolveMcpSessionCapabilityKeyFile(jinnHome = resolveJinnHome()): string {
   return path.join(jinnHome, "secrets", "mcp-session-capability.key");
