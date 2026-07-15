@@ -3,6 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  authCookieHeaders,
+  authCookieName,
+  authDeviceCookieName,
   authenticateGatewayRequest,
   authRequiredForRequest,
   clearAuthCookieHeader,
@@ -122,6 +125,30 @@ describe("gateway auth", () => {
     expect(normalizePairingCode("abcd efgh-jklm")).toBe("ABCDEFGHJKLM");
     expect(consumePairingCode(store, "abcd efgh jklm", 2_000)).toBe(true);
     expect(consumePairingCode(store, "ABCD-EFGH-JKLM", 2_001)).toBe(false);
+  });
+
+  it("namespaces auth cookies per instance so same-host gateways don't clobber each other", () => {
+    // Cookies ignore port, so two instances on one host must use distinct names.
+    const jinnHome = path.join(os.homedir(), ".jinn");
+    const yorioHome = path.join(os.homedir(), ".jinn-yorio");
+
+    // Default instance keeps the bare names (no forced re-pair on upgrade).
+    expect(authCookieName(jinnHome)).toBe("jinn_auth");
+    expect(authDeviceCookieName(jinnHome)).toBe("jinn_device");
+
+    // A second instance gets its own namespace and cannot collide with the default.
+    expect(authCookieName(yorioHome)).toBe("jinn_auth_jinn-yorio");
+    expect(authDeviceCookieName(yorioHome)).toBe("jinn_device_jinn-yorio");
+    expect(authCookieName(yorioHome)).not.toBe(authCookieName(jinnHome));
+
+    // Ad-hoc/test homes (no leading-dot instance name) stay on the bare names.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-cookie-ns-"));
+    expect(authCookieName(tmp)).toBe("jinn_auth");
+
+    // Emitted Set-Cookie headers carry the namespaced name for a second instance.
+    const headers = authCookieHeaders("secret-value", "device-value", yorioHome);
+    expect(headers[0]).toContain("jinn_auth_jinn-yorio=");
+    expect(headers[1]).toContain("jinn_device_jinn-yorio=");
   });
 
   it("persists pairing codes under JINN_HOME so they survive a gateway restart", () => {

@@ -197,8 +197,8 @@ export function verifyGatewayAuth(
   const cookieRaw = headers.cookie;
   const cookie = Array.isArray(cookieRaw) ? cookieRaw[0] : cookieRaw;
   const parsed = parseCookieHeader(cookie);
-  const token = parsed[AUTH_COOKIE];
-  const deviceId = parsed[AUTH_DEVICE_COOKIE];
+  const token = parsed[authCookieName(jinnHome)];
+  const deviceId = parsed[authDeviceCookieName(jinnHome)];
   if (jinnHome && typeof token === "string" && typeof deviceId === "string" && verifyAuthSession(jinnHome, deviceId, token)) {
     return true;
   }
@@ -282,28 +282,55 @@ export function validateGatewayExposure(config: Pick<JinnConfig, "gateway">): { 
   return { ok: true };
 }
 
-export function authCookieHeader(token: string): string {
-  return `${AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`;
+/**
+ * Cookies are scoped by host but NOT by port (RFC 6265), so two gateway
+ * instances on the same host (e.g. one behind `tailscale serve`) would clobber
+ * each other's `jinn_auth`/`jinn_device` cookie and log each other out. Namespace
+ * the cookie name per instance to keep their sessions independent. Only real
+ * `~/.<name>` instance homes are namespaced: the default `jinn` keeps the bare
+ * names (no forced re-pair on upgrade) and ad-hoc/test homes stay hermetic.
+ */
+function cookieNamespace(jinnHome?: string): string {
+  const home = jinnHome ?? process.env.JINN_HOME;
+  if (!home) return "";
+  const base = path.basename(path.resolve(home));
+  if (!base.startsWith(".")) return "";
+  const name = base.slice(1).replace(/[^A-Za-z0-9_-]/g, "");
+  return name && name !== "jinn" ? name : "";
 }
 
-export function authDeviceCookieHeader(deviceId: string): string {
-  return `${AUTH_DEVICE_COOKIE}=${encodeURIComponent(deviceId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`;
+export function authCookieName(jinnHome?: string): string {
+  const ns = cookieNamespace(jinnHome);
+  return ns ? `${AUTH_COOKIE}_${ns}` : AUTH_COOKIE;
 }
 
-export function authCookieHeaders(secret: string, deviceId: string): string[] {
-  return [authCookieHeader(secret), authDeviceCookieHeader(deviceId)];
+export function authDeviceCookieName(jinnHome?: string): string {
+  const ns = cookieNamespace(jinnHome);
+  return ns ? `${AUTH_DEVICE_COOKIE}_${ns}` : AUTH_DEVICE_COOKIE;
 }
 
-export function clearAuthCookieHeader(): string {
-  return `${AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+export function authCookieHeader(token: string, jinnHome?: string): string {
+  return `${authCookieName(jinnHome)}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`;
 }
 
-export function clearAuthDeviceCookieHeader(): string {
-  return `${AUTH_DEVICE_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+export function authDeviceCookieHeader(deviceId: string, jinnHome?: string): string {
+  return `${authDeviceCookieName(jinnHome)}=${encodeURIComponent(deviceId)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000`;
 }
 
-export function clearAuthCookieHeaders(): string[] {
-  return [clearAuthCookieHeader(), clearAuthDeviceCookieHeader()];
+export function authCookieHeaders(secret: string, deviceId: string, jinnHome?: string): string[] {
+  return [authCookieHeader(secret, jinnHome), authDeviceCookieHeader(deviceId, jinnHome)];
+}
+
+export function clearAuthCookieHeader(jinnHome?: string): string {
+  return `${authCookieName(jinnHome)}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+export function clearAuthDeviceCookieHeader(jinnHome?: string): string {
+  return `${authDeviceCookieName(jinnHome)}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+}
+
+export function clearAuthCookieHeaders(jinnHome?: string): string[] {
+  return [clearAuthCookieHeader(jinnHome), clearAuthDeviceCookieHeader(jinnHome)];
 }
 
 export function createAuthState(
@@ -455,8 +482,8 @@ export function touchAuthSession(
   const cookieRaw = req.headers.cookie;
   const cookie = Array.isArray(cookieRaw) ? cookieRaw[0] : cookieRaw;
   const parsed = parseCookieHeader(cookie);
-  const secret = parsed[AUTH_COOKIE];
-  const deviceId = parsed[AUTH_DEVICE_COOKIE];
+  const secret = parsed[authCookieName(jinnHome)];
+  const deviceId = parsed[authDeviceCookieName(jinnHome)];
   if (!verifyAuthSession(jinnHome, deviceId, secret)) return null;
   const devices = loadStoredAuthSessions(jinnHome);
   const idx = devices.findIndex((d) => d.id === deviceId);
@@ -487,10 +514,13 @@ export function touchAuthSession(
   return device;
 }
 
-export function currentAuthDeviceId(headers: Record<string, string | string[] | undefined>): string | undefined {
+export function currentAuthDeviceId(
+  headers: Record<string, string | string[] | undefined>,
+  jinnHome?: string,
+): string | undefined {
   const cookieRaw = headers.cookie;
   const cookie = Array.isArray(cookieRaw) ? cookieRaw[0] : cookieRaw;
-  return parseCookieHeader(cookie)[AUTH_DEVICE_COOKIE];
+  return parseCookieHeader(cookie)[authDeviceCookieName(jinnHome)];
 }
 
 export function listAuthSessions(jinnHome: string, currentDeviceId?: string, now = Date.now()): PublicAuthSessionDevice[] {

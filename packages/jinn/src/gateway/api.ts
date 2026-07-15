@@ -3050,7 +3050,7 @@ export async function handleApiRequest(
         return json(res, { error: "Missing, invalid, or expired local bootstrap grant" }, 401);
       }
       const session = createAuthSession(jinnHome, req, { kind: "local" });
-      res.setHeader("Set-Cookie", authCookieHeaders(session.secret, session.device.id));
+      res.setHeader("Set-Cookie", authCookieHeaders(session.secret, session.device.id, jinnHome));
       return json(res, { status: "ok", authRequired: true, device: { ...session.device, current: true } });
     }
 
@@ -3125,7 +3125,7 @@ export async function handleApiRequest(
       const ok = consumePairingCode(createFilePairingCodeStore(jinnHome), code);
       if (!ok || !context.gatewayAuthToken) return json(res, { error: "Invalid or expired pairing code" }, 401);
       const session = createAuthSession(jinnHome, req, { kind: "remote" });
-      res.setHeader("Set-Cookie", authCookieHeaders(session.secret, session.device.id));
+      res.setHeader("Set-Cookie", authCookieHeaders(session.secret, session.device.id, jinnHome));
       return json(res, { status: "ok", authRequired: true, device: { ...session.device, current: true } });
     }
 
@@ -3134,7 +3134,7 @@ export async function handleApiRequest(
       const auth = authenticateGatewayRequest(req, context.gatewayAuthToken, jinnHome);
       if (!auth.ok) return json(res, { error: auth.reason || "Unauthorized" }, 401);
       touchAuthSession(jinnHome, req);
-      return json(res, { devices: listAuthSessions(jinnHome, currentAuthDeviceId(req.headers)) });
+      return json(res, { devices: listAuthSessions(jinnHome, currentAuthDeviceId(req.headers, jinnHome)) });
     }
 
     // DELETE /api/auth/devices/:id — shared unpair primitive used by Settings
@@ -3150,11 +3150,11 @@ export async function handleApiRequest(
         return badRequest(res, "Invalid paired browser id");
       }
       if (!deviceId) return badRequest(res, "Missing paired browser id");
-      const currentDevice = currentAuthDeviceId(req.headers);
+      const currentDevice = currentAuthDeviceId(req.headers, jinnHome);
       const removed = revokeAuthSession(jinnHome, deviceId);
       if (!removed) return json(res, { error: "Paired browser not found" }, 404);
       const current = Boolean(currentDevice && currentDevice === deviceId);
-      if (current) res.setHeader("Set-Cookie", clearAuthCookieHeaders());
+      if (current) res.setHeader("Set-Cookie", clearAuthCookieHeaders(jinnHome));
       return json(res, { status: "ok", current });
     }
 
@@ -3162,9 +3162,9 @@ export async function handleApiRequest(
     if (method === "POST" && pathname === "/api/auth/logout") {
       const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: AUTH_BODY_MAX_BYTES });
       if (!parsed.ok) return;
-      const currentDevice = currentAuthDeviceId(req.headers);
+      const currentDevice = currentAuthDeviceId(req.headers, jinnHome);
       if (currentDevice) revokeAuthSession(jinnHome, currentDevice);
-      res.setHeader("Set-Cookie", clearAuthCookieHeaders());
+      res.setHeader("Set-Cookie", clearAuthCookieHeaders(jinnHome));
       return json(res, { status: "ok" });
     }
 
