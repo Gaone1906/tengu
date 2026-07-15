@@ -250,7 +250,7 @@ import {
   type WorkItemSource,
   type WorkItemStatus,
 } from "../work-items/store.js";
-import { deriveTodoIdPrefix, isTodoId } from "../work-items/id.js";
+import { isTodoId, resolveTodoIdPrefix } from "../work-items/id.js";
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import { createWorkflowTodoEventFeed } from "../work-items/workflow-event-feed.js";
@@ -7031,6 +7031,20 @@ export async function handleApiRequest(
           (f) => String(f).endsWith(".yaml") && !String(f).endsWith("department.yaml")
         );
       const config = context.getConfig();
+      const allocator = initDb().prepare(
+        "SELECT prefix, high_water FROM work_item_id_allocator WHERE singleton = 1",
+      ).get() as { prefix: string | null; high_water: number };
+      let todoPrefix = allocator.prefix;
+      if (!todoPrefix) {
+        try {
+          todoPrefix = resolveTodoIdPrefix(
+            config.portal?.companyName ?? "Jinn",
+            config.portal?.companyPrefix,
+          );
+        } catch {
+          todoPrefix = null;
+        }
+      }
       const onboarded = config.portal?.onboarded === true;
       const setupComplete = config.portal?.setupComplete === true || onboarded;
       return json(res, {
@@ -7041,6 +7055,9 @@ export async function handleApiRequest(
         sessionsCount,
         hasEmployees,
         companyName: config.portal?.companyName ?? null,
+        companyPrefix: config.portal?.companyPrefix ?? null,
+        todoPrefix,
+        todoPrefixFrozen: allocator.prefix !== null,
         portalName: config.portal?.portalName ?? null,
         operatorName: config.portal?.operatorName ?? null,
       });
@@ -7052,17 +7069,33 @@ export async function handleApiRequest(
       if (!_parsed.ok) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
-      const { companyName, portalName, operatorName, language, engine, model, effortLevel } = body;
-      if (companyName !== undefined) {
+      const { companyName, companyPrefix, portalName, operatorName, language, engine, model, effortLevel } = body;
+      const config = context.getConfig();
+      const allocator = initDb().prepare(
+        "SELECT prefix FROM work_item_id_allocator WHERE singleton = 1",
+      ).get() as { prefix: string | null };
+      if (companyPrefix !== undefined && companyPrefix !== null) {
         try {
-          deriveTodoIdPrefix(companyName);
+          const requested = resolveTodoIdPrefix(companyName ?? config.portal?.companyName ?? "Jinn", companyPrefix);
+          if (allocator.prefix && requested !== allocator.prefix) {
+            return json(res, { error: `Todo prefix is frozen as ${allocator.prefix} after the first allocation` }, 409);
+          }
+        } catch (error) {
+          return badRequest(res, error instanceof Error ? error.message : "Invalid Todo prefix");
+        }
+      }
+      if (!allocator.prefix && (companyName !== undefined || companyPrefix !== undefined)) {
+        try {
+          resolveTodoIdPrefix(
+            companyName ?? config.portal?.companyName ?? "Jinn",
+            companyPrefix === null ? undefined : companyPrefix ?? config.portal?.companyPrefix,
+          );
         } catch (error) {
           return badRequest(res, error instanceof Error ? error.message : "Invalid company name");
         }
       }
 
       // Read current config and merge engine choice + portal settings
-      const config = context.getConfig();
       const updated = {
         ...applyEngineChoice(config, { engine, model, effortLevel }),
         portal: {
@@ -7070,6 +7103,7 @@ export async function handleApiRequest(
           onboarded: true,
           setupComplete: true,
           ...(companyName !== undefined && { companyName }),
+          ...(companyPrefix !== undefined && { companyPrefix: companyPrefix || undefined }),
           ...(portalName !== undefined && { portalName: portalName || undefined }),
           ...(operatorName !== undefined && { operatorName: operatorName || undefined }),
           ...(language !== undefined && { language: language || undefined }),

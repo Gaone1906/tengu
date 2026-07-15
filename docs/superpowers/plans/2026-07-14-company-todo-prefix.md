@@ -4,7 +4,7 @@
 
 **Goal:** Give each Jinn company a stable three-letter Todo prefix derived from its company name, so `IC-IDEV` creates `ICI-1`, `ICI-2`, and so on.
 
-**Architecture:** Add a dedicated `portal.companyName` setting rather than reusing the assistant-facing Portal Name. Normalize the first three ASCII letters of the company name and freeze that prefix inside the Todo allocator on its first allocation. Todo parsing accepts the public `<AAA>-N` grammar, while the database allocator and insert guards ensure one instance cannot issue a second prefix after initialization.
+**Architecture:** Add dedicated `portal.companyName` and optional `portal.companyPrefix` settings rather than reusing the assistant-facing Portal Name. Derive the human-intuitive default from word initials or a single word, let an explicit canonical override win, and freeze the chosen prefix inside the Todo allocator on its first allocation. Todo parsing accepts the public `<AAA>-N` grammar, while the database allocator and insert guards ensure one instance cannot issue a second prefix after initialization.
 
 **Tech Stack:** TypeScript, SQLite/better-sqlite3, YAML configuration, React 19, TanStack Query, Vitest, Node test runner.
 
@@ -12,7 +12,9 @@
 
 - Work directly on `main` and preserve the unrelated Chat Archive working-tree changes.
 - `portalName` continues to name the assistant/portal; `companyName` names the operator's company.
-- Normalize with Unicode NFKD, uppercase, discard non-ASCII letters, and take the first three letters. Reject names that yield fewer than three letters.
+- Normalize with Unicode NFKD, uppercase, and discard non-ASCII letters. Hyphens, dots, slashes, ampersands, and whitespace separate word-ish parts. Three or more parts use initials (`Build Sprint Labs` → `BSL`); one part uses its first three letters (`Jinn` → `JIN`); two parts fall back to the first word, with a short leading acronym completed by the next part (`Acme Corp` → `ACM`, `IC-IDEV` → `ICI`). Reject names that cannot produce three letters.
+- `portal.companyPrefix`, when present, wins over derivation and must match `^[A-Z]{3}$` exactly.
+- Before the first allocation, onboarding/settings show a concrete sequence such as `ICI-1, ICI-2, ...` and warn that the choice is permanent. Once frozen, settings show the allocator's actual prefix and do not offer a second one.
 - A company prefix is frozen by the first committed Todo allocation. Renaming the company never rewrites existing IDs and never changes the allocator prefix.
 - The public Todo grammar is `^[A-Z]{3}-[1-9][0-9]*$` with a positive safe-integer suffix.
 - The database, API, MCP, CLI, UI, URLs, search, logs, and copy/share surfaces use the same identifier.
@@ -29,12 +31,12 @@
 - Test: `packages/web/src/routes/todos/__tests__/todo-public-state.test.ts`
 
 **Interfaces:**
-- Produces: `deriveTodoIdPrefix(companyName: unknown): string`, generic `parseTodoId(value)`, `formatTodoId(prefix, ordinal)`, and equivalent web parsing.
+- Produces: `deriveTodoIdPrefix(companyName: unknown): string`, `resolveTodoIdPrefix(companyName, override)`, generic `parseTodoId(value)`, `formatTodoId(prefix, ordinal)`, and equivalent web parsing.
 - Consumes: raw configured company names and public Todo strings.
 
 - [ ] **Step 1: Write failing backend and web tests**
 
-Test that `IC-IDEV` derives `ICI`, punctuation is ignored, accented Latin letters normalize deterministically, fewer than three ASCII letters fail, `ICI-1` and `ACM-9007199254740991` parse, and malformed/lowercase/unsafe-integer IDs fail.
+Test `IC-IDEV → ICI`, `Build Sprint Labs → BSL`, `Acme Corp → ACM`, `Jinn → JIN`, separator variants, accented Latin normalization, override precedence/validation, fewer than three-letter refusal, canonical parsing, and malformed/lowercase/unsafe-integer rejection.
 
 - [ ] **Step 2: Run the focused tests and verify RED**
 
@@ -65,7 +67,7 @@ Expected: both focused files pass without warnings.
 - Test: `packages/jinn/src/work-items/__tests__/store.test.ts`
 
 **Interfaces:**
-- Consumes: `deriveTodoIdPrefix(loadConfig().portal.companyName)` on the first allocation.
+- Consumes: `resolveTodoIdPrefix(loadConfig().portal.companyName, loadConfig().portal.companyPrefix)` on the first allocation.
 - Produces: allocator row `{ singleton, prefix, high_water }`, immutable prefix guards, and `allocateWorkItemId(db, companyName)`.
 
 - [ ] **Step 1: Write failing allocator tests**
@@ -110,7 +112,7 @@ Expected: all focused allocator/store tests pass.
 
 - [ ] **Step 1: Write failing API and UI tests**
 
-Require a valid company name during first-run completion, persist `IC-IDEV`, expose the derived preview `ICI-1`, reject a name with fewer than three Latin letters, and keep Portal Name independent.
+Require a valid derivation or explicit override during first-run completion, persist `IC-IDEV`/`JNN`, expose `ICI-1, ICI-2, ...` or the override sequence before freeze, reject invalid values, show permanence, and keep Portal Name independent.
 
 - [ ] **Step 2: Run focused onboarding tests and verify RED**
 

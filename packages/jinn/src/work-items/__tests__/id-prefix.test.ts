@@ -4,16 +4,30 @@ import {
   deriveTodoIdPrefix,
   formatTodoId,
   parseTodoId,
+  resolveTodoIdPrefix,
   todoIdOrdinal,
   todoIdPrefix,
 } from "../id.js";
 
 describe("company-derived Todo identity", () => {
-  it("derives the first three normalized ASCII letters from the company name", () => {
+  it("uses intuitive word initials and single-word letter prefixes", () => {
     expect(deriveTodoIdPrefix("IC-IDEV")).toBe("ICI");
-    expect(deriveTodoIdPrefix("Acme Labs")).toBe("ACM");
+    expect(deriveTodoIdPrefix("Build Sprint Labs")).toBe("BSL");
+    expect(deriveTodoIdPrefix("Acme Corp")).toBe("ACM");
+    expect(deriveTodoIdPrefix("A Company")).toBe("ACO");
+    expect(deriveTodoIdPrefix("Jinn")).toBe("JIN");
+    expect(deriveTodoIdPrefix("Yorio")).toBe("YOR");
     expect(deriveTodoIdPrefix("Éclair Works")).toBe("ECL");
     expect(deriveTodoIdPrefix("  one.two  ")).toBe("ONE");
+  });
+
+  it("treats punctuation as word separators and lets a canonical override win", () => {
+    expect(deriveTodoIdPrefix("Build/Sprint&Labs")).toBe("BSL");
+    expect(resolveTodoIdPrefix("Build Sprint Labs", "JNN")).toBe("JNN");
+    expect(resolveTodoIdPrefix("Build Sprint Labs", undefined)).toBe("BSL");
+    for (const override of ["JN", "JINN", "jin", "J1N", " JNN ", 42]) {
+      expect(() => resolveTodoIdPrefix("Jinn", override)).toThrow(/prefix/i);
+    }
   });
 
   it("rejects company names that cannot produce three ASCII letters", () => {

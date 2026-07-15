@@ -1,13 +1,27 @@
 const TODO_ID_PATTERN = /^[A-Z]{3}-([1-9][0-9]*)$/
+const TODO_ID_PREFIX_PATTERN = /^[A-Z]{3}$/
 
 export function deriveTodoIdPrefix(companyName: unknown): string | null {
   if (typeof companyName !== "string") return null
-  const letters = companyName
+  const parts = companyName
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
-    .toUpperCase()
-    .replace(/[^A-Z]/g, "")
-  return letters.length >= 3 ? letters.slice(0, 3) : null
+    .split(/[\s.\/&-]+/)
+    .map((part) => part.toUpperCase().replace(/[^A-Z]/g, ""))
+    .filter(Boolean)
+  const prefix = parts.length >= 3
+    ? parts.slice(0, 3).map((part) => part[0]).join("")
+    : parts.length === 2 && parts[0].length < 3
+      ? `${parts[0]}${parts[1]}`.slice(0, 3)
+      : parts[0]?.slice(0, 3) ?? ""
+  return TODO_ID_PREFIX_PATTERN.test(prefix) ? prefix : null
+}
+
+export function resolveTodoIdPrefix(companyName: unknown, override?: unknown): string | null {
+  if (override !== undefined) {
+    return typeof override === "string" && TODO_ID_PREFIX_PATTERN.test(override) ? override : null
+  }
+  return deriveTodoIdPrefix(companyName)
 }
 
 export function isTodoId(value: unknown): value is string {

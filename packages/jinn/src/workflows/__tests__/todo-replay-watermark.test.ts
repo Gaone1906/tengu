@@ -84,7 +84,7 @@ describe('todo-status replay event claims', () => {
     failing.publishInitialRun = () => { throw new Error('injected publication failure'); };
     const event = {
       id: 'wie_exception_retry',
-      workItemId: 'wi_exception_retry',
+      workItemId: 'JIN-9001',
       fromStatus: 'executing' as const,
       toStatus: 'in_review' as const,
       item: { source: 'human' as const, department: null, assignee: null },
@@ -111,7 +111,7 @@ describe('todo-status replay event claims', () => {
     };
     const event = {
       id: 'wie_partial_retry',
-      workItemId: 'wi_partial_retry',
+      workItemId: 'JIN-9002',
       fromStatus: 'executing' as const,
       toStatus: 'in_review' as const,
       item: { source: 'human' as const, department: null, assignee: null },

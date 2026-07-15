@@ -4,11 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
-import { buildWorkflowTools, workflowAdvertisedComponentSchemas } from "../workflow-tools.js";
-import { handleMcpRequest, buildTools } from "../server.js";
 import type { JinnMcpContext, JinnMcpTool } from "../toolkit.js";
-import { planWorkflowAuthoringInput } from "../../workflows/authoring.js";
-import { workflowComponentJsonSchemas } from "../../workflows/schema.js";
+
+let buildWorkflowTools: typeof import("../workflow-tools.js").buildWorkflowTools;
+let workflowAdvertisedComponentSchemas: typeof import("../workflow-tools.js").workflowAdvertisedComponentSchemas;
+let handleMcpRequest: typeof import("../server.js").handleMcpRequest;
+let buildTools: typeof import("../server.js").buildTools;
+let planWorkflowAuthoringInput: typeof import("../../workflows/authoring.js").planWorkflowAuthoringInput;
+let workflowComponentJsonSchemas: typeof import("../../workflows/schema.js").workflowComponentJsonSchemas;
 
 type JsonSchema = Record<string, unknown>;
 
@@ -1144,6 +1147,10 @@ function writePinnablePollScript(name: string, output = "{\"fire\":false}"): str
 }
 
 beforeAll(async () => {
+  ({ buildWorkflowTools, workflowAdvertisedComponentSchemas } = await import("../workflow-tools.js"));
+  ({ handleMcpRequest, buildTools } = await import("../server.js"));
+  ({ planWorkflowAuthoringInput } = await import("../../workflows/authoring.js"));
+  ({ workflowComponentJsonSchemas } = await import("../../workflows/schema.js"));
   api = await import("../../gateway/api.js");
   const registry = await import("../../sessions/registry.js");
   const identity = await import("../identity.js");

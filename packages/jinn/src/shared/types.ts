@@ -676,6 +676,7 @@ export interface ConnectorInstance {
 
 export interface PortalConfig {
   companyName?: string;
+  companyPrefix?: string;
   portalName?: string;
   operatorName?: string;
   language?: string;

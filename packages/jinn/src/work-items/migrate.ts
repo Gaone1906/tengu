@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import Database, { type Database as DatabaseType } from "better-sqlite3";
 import {
-  deriveTodoIdPrefix,
+  resolveTodoIdPrefix,
   formatTodoId,
   isTodoId,
   todoIdOrdinal,
@@ -269,13 +269,14 @@ export function allocateWorkItemId(
   db: DatabaseType,
   now = new Date().toISOString(),
   companyName: unknown = "Jinn",
+  companyPrefix?: unknown,
 ): WorkItemAllocationClaim {
   registerWorkItemIdentityFunctions(db);
   const rawClaim = randomBytes(32).toString("hex");
   const allocation = db.transaction(() => {
     const current = db.prepare("SELECT prefix, high_water FROM work_item_id_allocator WHERE singleton = 1")
       .get() as { prefix: string | null; high_water: number };
-    const prefix = current.prefix ?? deriveTodoIdPrefix(companyName);
+    const prefix = current.prefix ?? resolveTodoIdPrefix(companyName, companyPrefix);
     const next = current.high_water + 1;
     if (!Number.isSafeInteger(next)) throw new Error("Todo ID allocator exhausted");
     return withClaim(db, rawClaim, prefix, () => {

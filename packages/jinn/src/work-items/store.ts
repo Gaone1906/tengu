@@ -352,8 +352,9 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   // A configless disposable/test home retains the historical JIN default. Once a
   // real config exists, malformed configuration must still fail closed rather than
   // silently allocating from the wrong company namespace.
-  const companyName = fs.existsSync(CONFIG_PATH) ? loadConfig().portal?.companyName ?? 'Jinn' : 'Jinn';
-  const claim = allocateWorkItemId(db, now, companyName);
+  const portal = fs.existsSync(CONFIG_PATH) ? loadConfig().portal : undefined;
+  const companyName = portal?.companyName ?? 'Jinn';
+  const claim = allocateWorkItemId(db, now, companyName, portal?.companyPrefix);
   const id = claim.id;
   const status: WorkItemStatus = input.status ?? 'backlog';
   const source: WorkItemSource = input.source ?? 'human';

@@ -3,15 +3,15 @@ import crypto from "node:crypto";
 import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
-// Keep the same narrow 53-token headroom over the pinned Pi projection after
-// admitting exactly four flat Notes tools (7,542 + 53 = 7,595).
+// Fixed provider budget. The generic company Todo grammar consumes the former
+// headroom, so tool prose is kept concise instead of raising this ceiling.
 const MAX_MANIFEST_TOKENS = 7595;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 7177, sha256: "27fef6faf34fe59fba7d2baf24e99bf06488e3fd5a4e21ca222003c5bc821c54" },
-  pi: { tokens: 7542, sha256: "c355368bdd5c9d49d808599df48888c5b8bb6c60c84fdbc31ea25f22d4301b75" },
-  openai: { tokens: 7325, sha256: "83e83b682e41006127005ce31fd5ca3f868386e08a5fcdc2c44fb902796c7c29" },
+  rpc: { tokens: 7229, sha256: "c0ff3fa30a860fdbc03fbfc26d13aa3586b3c1eba109218e2bd9044e311685b1" },
+  pi: { tokens: 7594, sha256: "62bc62c35e7d5d5fdfceb1e8e58ec59916c19a2dc529054f5eeadd7ef17ab090" },
+  openai: { tokens: 7377, sha256: "b01049f1e34dccc44c4076e3d5a258c66b5b9c3178b4178acd146d3e1c0f0f50" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;

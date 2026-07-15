@@ -18,7 +18,7 @@ import { THEMES } from "@/lib/themes"
 import { api, type ModelInfo } from "@/lib/api"
 import { useModelRegistry } from "@/hooks/use-model-registry"
 import { buildNewSessionParams } from "@/components/chat/new-chat-helpers"
-import { deriveTodoIdPrefix } from "@/lib/todo-id"
+import { resolveTodoIdPrefix } from "@/lib/todo-id"
 
 // ---------------------------------------------------------------------------
 // Accent color presets
@@ -111,6 +111,7 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
 
   // Local input values
   const [localCompany, setLocalCompany] = useState("")
+  const [localCompanyPrefix, setLocalCompanyPrefix] = useState("")
   const [localName, setLocalName] = useState("")
   const [localOperator, setLocalOperator] = useState("")
   const [localLanguage, setLocalLanguage] = useState(settings.language ?? "English")
@@ -128,7 +129,7 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
   })
 
   const TOTAL_STEPS = 5
-  const todoPrefixPreview = deriveTodoIdPrefix(localCompany)
+  const todoPrefixPreview = resolveTodoIdPrefix(localCompany, localCompanyPrefix || undefined)
 
   // First-run detection — check server-side flag, not just localStorage
   useEffect(() => {
@@ -211,6 +212,7 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
       try {
         await api.completeOnboarding({
           companyName: localCompany || undefined,
+          companyPrefix: localCompanyPrefix || undefined,
           portalName: localName || undefined,
           operatorName: localOperator || undefined,
           language: localLanguage || undefined,
@@ -383,13 +385,27 @@ export function OnboardingWizard({ forceOpen, initialVisible, onClose }: Onboard
                     onChange={(e) => setLocalCompany(e.target.value)}
                     autoFocus
                   />
+                  <label htmlFor="onboarding-company-prefix" className="mt-[var(--space-3)] block text-[length:var(--text-caption1)] font-[var(--weight-medium)] text-[var(--text-tertiary)] mb-[var(--space-1)]">
+                    Todo Prefix Override
+                  </label>
+                  <input
+                    id="onboarding-company-prefix"
+                    type="text"
+                    maxLength={3}
+                    className="apple-input w-full bg-[var(--fill-tertiary)] rounded-[var(--radius-md)] px-3 py-2 text-[length:var(--text-subheadline)] text-[var(--text-primary)] uppercase outline-none border border-transparent focus:border-[var(--accent)] transition-colors placeholder:text-[var(--text-quaternary)]"
+                    placeholder="Optional, e.g. JNN"
+                    value={localCompanyPrefix}
+                    onChange={(e) => setLocalCompanyPrefix(e.target.value.toUpperCase())}
+                  />
                   {todoPrefixPreview ? (
                     <p className="mt-[var(--space-1)] text-[length:var(--text-caption1)] text-[var(--text-secondary)]">
-                      New Todos will use IDs like {todoPrefixPreview}-1
+                      &quot;{localCompany}&quot; produces {todoPrefixPreview}-1, {todoPrefixPreview}-2, ... This prefix cannot be changed after the first Todo.
                     </p>
                   ) : (
                     <p role="alert" className="mt-[var(--space-1)] text-[length:var(--text-caption1)] text-[var(--system-red)]">
-                      Enter a company name with at least three Latin letters.
+                      {localCompanyPrefix
+                        ? "The override must be exactly three uppercase Latin letters."
+                        : "Enter a company name with at least three Latin letters."}
                     </p>
                   )}
                 </div>

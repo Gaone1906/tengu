@@ -8,7 +8,8 @@
 
 Operator decision A is accepted:
 
-- `^[A-Z]{3}-[1-9][0-9]*$` is the only Todo grammar; suffixes above `Number.MAX_SAFE_INTEGER` are invalid. Normalize the configured company name with NFKD, discard non-`A-Z` characters after uppercasing, and take the first three letters (`IC-IDEV` → `ICI`). Names yielding fewer than three letters are invalid.
+- `^[A-Z]{3}-[1-9][0-9]*$` is the only Todo grammar; suffixes above `Number.MAX_SAFE_INTEGER` are invalid. Normalize the configured company name with NFKD, uppercase, discard non-`A-Z` letters, and treat hyphens, dots, slashes, ampersands, and whitespace as word separators. Three or more parts use initials (`Build Sprint Labs` → `BSL`); a single part uses its first three letters (`Jinn` → `JIN`); two parts use the intuitive first-word fallback, with a short leading acronym completed from the next part (`Acme Corp` → `ACM`, `IC-IDEV` → `ICI`). Names unable to produce three letters are invalid. An explicit `portal.companyPrefix` wins and must match `^[A-Z]{3}$`.
+- Before the prefix freezes, onboarding/settings display the concrete derived or overridden sequence and state that the first allocation makes it permanent. After freeze, they display the allocator's actual prefix and cannot select a second one.
 - The first committed allocation freezes the prefix in the singleton allocator. Later company-name changes never rewrite IDs or change that instance's prefix.
 - `work_items.id` is the database primary key and the visible/internal ID in REST, MCP, UI, URLs, search, logs, accessibility, copy/share, DOM state, and browser storage.
 - `JIN-N` is predictable, visible, and never authorization. Authentication and authorization protect every read and write.

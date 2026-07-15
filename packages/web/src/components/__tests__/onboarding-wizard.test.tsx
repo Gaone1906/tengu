@@ -98,9 +98,25 @@ describe("OnboardingWizard model registry", () => {
     const companyName = await screen.findByRole("textbox", { name: "Company Name" })
     fireEvent.change(companyName, { target: { value: "IC-IDEV" } })
 
-    expect(screen.getByText("New Todos will use IDs like ICI-1")).toBeTruthy()
+    expect(screen.getByText(/"IC-IDEV" produces ICI-1, ICI-2/)).toBeTruthy()
+    expect(screen.getByText(/cannot be changed after the first Todo/i)).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "Next" }))
     expect(setCompanyName).toHaveBeenCalledWith("IC-IDEV")
+  })
+
+  it("allows an explicit canonical prefix override before allocation", async () => {
+    renderWizard()
+
+    fireEvent.change(await screen.findByRole("textbox", { name: "Company Name" }), { target: { value: "Build Sprint Labs" } })
+    expect(screen.getByText(/"Build Sprint Labs" produces BSL-1, BSL-2/)).toBeTruthy()
+
+    const override = screen.getByRole("textbox", { name: "Todo Prefix Override" })
+    fireEvent.change(override, { target: { value: "JNN" } })
+    expect(screen.getByText(/"Build Sprint Labs" produces JNN-1, JNN-2/)).toBeTruthy()
+
+    fireEvent.change(override, { target: { value: "jn" } })
+    expect(screen.getByRole("alert").textContent).toMatch(/three uppercase Latin letters/i)
+    expect((screen.getByRole("button", { name: "Next" }) as HTMLButtonElement).disabled).toBe(true)
   })
 
   it("does not advance with a company name that cannot produce a prefix", async () => {

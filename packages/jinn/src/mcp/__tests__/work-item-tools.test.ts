@@ -4,12 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
-import { buildTools } from "../server.js";
-import { buildWorkItemTools, WORK_ITEM_SEARCH_LIMIT_MAX, WORK_ITEM_QUERY_CHAR_CAP } from "../work-item-tools.js";
 import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, TOOL_CALL_HEADER, TOOL_CALL_HEADER_VALUE, ensureSessionCapability } from "../identity.js";
 import type { JinnMcpContext, JinnMcpTool } from "../toolkit.js";
 
 process.env.JINN_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-mcp-work-items-home-"));
+
+let buildTools: typeof import("../server.js").buildTools;
+let buildWorkItemTools: typeof import("../work-item-tools.js").buildWorkItemTools;
+let WORK_ITEM_SEARCH_LIMIT_MAX: typeof import("../work-item-tools.js").WORK_ITEM_SEARCH_LIMIT_MAX;
+let WORK_ITEM_QUERY_CHAR_CAP: typeof import("../work-item-tools.js").WORK_ITEM_QUERY_CHAR_CAP;
 
 interface SeenCall {
   url: string;
@@ -416,6 +419,8 @@ function seedOrg() {
 
 beforeAll(async () => {
   seedOrg();
+  ({ buildTools } = await import("../server.js"));
+  ({ buildWorkItemTools, WORK_ITEM_SEARCH_LIMIT_MAX, WORK_ITEM_QUERY_CHAR_CAP } = await import("../work-item-tools.js"));
   api = await import("../../gateway/api.js");
   registry = await import("../../sessions/registry.js");
   store = await import("../../work-items/store.js");

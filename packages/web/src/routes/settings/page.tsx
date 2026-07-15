@@ -10,10 +10,11 @@ import type { ThemeId } from "@/lib/themes"
 import { api } from "@/lib/api"
 import { EmojiPicker } from "@/components/ui/emoji-picker"
 import { useModelRegistry } from "@/hooks/use-model-registry"
+import { useOnboarding } from "@/hooks/use-onboarding"
 import { RemoteAccessPanel } from "@/components/auth/remote-access-panel"
 import { useAuth } from "@/routes/auth-provider"
 import { cn } from "@/lib/utils"
-import { deriveTodoIdPrefix } from "@/lib/todo-id"
+import { resolveTodoIdPrefix } from "@/lib/todo-id"
 import {
   addModelOverride,
   hideModelOverride,
@@ -119,6 +120,7 @@ interface Config {
   }
   portal?: {
     companyName?: string
+    companyPrefix?: string
     portalName?: string
     operatorName?: string
   }
@@ -480,7 +482,12 @@ export default function SettingsPage() {
 
   // Local branding inputs
   const [companyNameValue, setCompanyNameValue] = useState(settings.companyName ?? "")
-  const companyPrefixPreview = deriveTodoIdPrefix(companyNameValue)
+  const [companyPrefixValue, setCompanyPrefixValue] = useState("")
+  const { data: onboarding } = useOnboarding()
+  const companyPrefixFrozen = onboarding?.todoPrefixFrozen === true
+  const companyPrefixPreview = companyPrefixFrozen
+    ? onboarding?.todoPrefix ?? null
+    : resolveTodoIdPrefix(companyNameValue, companyPrefixValue || undefined)
   const [nameValue, setNameValue] = useState(settings.portalName ?? "")
   const [subtitleValue, setSubtitleValue] = useState(settings.portalSubtitle ?? "")
   const [operatorNameValue, setOperatorNameValue] = useState(settings.operatorName ?? "")
@@ -555,6 +562,7 @@ export default function SettingsPage() {
       .getConfig()
       .then((data) => {
         setConfig(data as Config)
+        setCompanyPrefixValue((data as Config).portal?.companyPrefix ?? "")
         setConfigError(null)
       })
       .catch((err) => setConfigError(err.message))
@@ -805,13 +813,39 @@ export default function SettingsPage() {
                   onBlur={() => {
                     if (!companyPrefixPreview) return
                     setCompanyName(companyNameValue)
-                    api.completeOnboarding({ companyName: companyNameValue }).catch(() => {})
+                    api.completeOnboarding({
+                      companyName: companyNameValue,
+                      ...(!companyPrefixFrozen && { companyPrefix: companyPrefixValue || null }),
+                    }).catch(() => {})
+                  }}
+                />
+                <label className="mt-[var(--space-3)] block text-[length:var(--text-caption1)] text-[var(--text-tertiary)] mb-[var(--space-1)]">
+                  Todo Prefix Override
+                </label>
+                <input
+                  type="text"
+                  maxLength={3}
+                  className={`${CONTROL_CLASS} uppercase disabled:opacity-60`}
+                  placeholder="Optional, e.g. JNN"
+                  value={companyPrefixFrozen ? onboarding?.todoPrefix ?? "" : companyPrefixValue}
+                  disabled={companyPrefixFrozen}
+                  onChange={(e) => setCompanyPrefixValue(e.target.value.toUpperCase())}
+                  onBlur={() => {
+                    if (!companyPrefixPreview || companyPrefixFrozen) return
+                    api.completeOnboarding({
+                      companyName: companyNameValue,
+                      companyPrefix: companyPrefixValue || null,
+                    }).catch(() => {})
                   }}
                 />
                 <p className={`mt-[var(--space-1)] text-[length:var(--text-caption1)] ${companyPrefixPreview ? "text-[var(--text-secondary)]" : "text-[var(--system-red)]"}`}>
                   {companyPrefixPreview
-                    ? `Company-derived prefix: ${companyPrefixPreview}. The issued prefix stays frozen after the first Todo.`
-                    : "Enter a company name with at least three Latin letters."}
+                    ? companyPrefixFrozen
+                      ? `Todo IDs use ${companyPrefixPreview}-1, ${companyPrefixPreview}-2, ... This prefix was frozen by the first Todo and cannot be changed.`
+                      : `"${companyNameValue}" produces ${companyPrefixPreview}-1, ${companyPrefixPreview}-2, ... It cannot be changed after the first Todo.`
+                    : companyPrefixValue
+                      ? "The override must be exactly three uppercase Latin letters."
+                      : "Enter a company name with at least three Latin letters."}
                 </p>
               </div>
 

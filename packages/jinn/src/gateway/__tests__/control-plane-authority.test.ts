@@ -303,20 +303,30 @@ describe("control-plane writes require operator authority", () => {
     writeConfig();
   });
 
-  it("persists a valid company name through onboarding and rejects an invalid prefix source", async () => {
+  it("reports the frozen Todo prefix, permits renames, and rejects a second prefix", async () => {
     writeConfig();
 
-    const valid = await call("POST", "/api/onboarding", { companyName: "IC-IDEV" }, {
+    const before = await call("GET", "/api/onboarding");
+    expect(before.status).toBe(200);
+    expect(JSON.parse(before.bodyText)).toMatchObject({ todoPrefix: "JIN", todoPrefixFrozen: true });
+
+    const valid = await call("POST", "/api/onboarding", { companyName: "IC-IDEV", companyPrefix: "JIN" }, {
       authorization: "Bearer test-token",
     });
     expect(valid.status).toBe(200);
     expect(readConfig().portal.companyName).toBe("IC-IDEV");
 
-    const invalid = await call("POST", "/api/onboarding", { companyName: "AI" }, {
+    const renamed = await call("POST", "/api/onboarding", { companyName: "AI" }, {
       authorization: "Bearer test-token",
     });
-    expect(invalid.status).toBe(400);
-    expect(readConfig().portal.companyName).toBe("IC-IDEV");
+    expect(renamed.status).toBe(200);
+    expect(readConfig().portal.companyName).toBe("AI");
+
+    const conflicting = await call("POST", "/api/onboarding", { companyPrefix: "ACM" }, {
+      authorization: "Bearer test-token",
+    });
+    expect(conflicting.status).toBe(409);
+    expect(readConfig().portal.companyPrefix).toBe("JIN");
     writeConfig();
   });
 
