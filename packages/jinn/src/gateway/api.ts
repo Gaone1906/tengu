@@ -54,6 +54,8 @@ import {
   getEngineSessionRef,
   createSession,
   updateSession,
+  archiveSession,
+  unarchiveSession,
   beginSessionAttempt,
   completeSessionAttempt,
   updateSessionForAttempt,
@@ -2553,6 +2555,8 @@ function operatorOnlyControlPlaneRoute(method: string, pathname: string): string
   if (method === "DELETE" && matchRoute("/api/sessions/:id", pathname)) return "session delete";
   if ((method === "PUT" || method === "PATCH") && matchRoute("/api/sessions/:id", pathname)) return "session metadata/model update";
   if (method === "POST" && matchRoute("/api/sessions/:id/duplicate", pathname)) return "session duplicate";
+  if (method === "POST" && matchRoute("/api/sessions/:id/archive", pathname)) return "session archive";
+  if (method === "POST" && matchRoute("/api/sessions/:id/unarchive", pathname)) return "session unarchive";
   if (method === "POST" && matchRoute("/api/sessions/:id/reset", pathname)) return "session reset";
   if (method === "POST" && pathname === "/api/sessions/bulk-delete") return "session bulk delete";
   if (method === "DELETE" && matchRoute("/api/sessions/:id/queue/:itemId", pathname)) return "session queue item cancel";
@@ -3734,6 +3738,36 @@ export async function handleApiRequest(
       logger.info(`Session deleted: ${params.id}`);
       context.emit("session:deleted", { sessionId: params.id });
       return json(res, { status: "deleted" });
+    }
+
+    // POST /api/sessions/:id/archive — reversible operator cleanup. The
+    // session, transcript, engine snapshot, and Codex overlay remain intact;
+    // normal list queries simply omit its archived_at row until unarchived.
+    params = matchRoute("/api/sessions/:id/archive", pathname);
+    if (method === "POST" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
+      if (session.status === "running" || session.status === "waiting") {
+        return json(res, { error: "Cannot archive a chat while it is running or waiting" }, 409);
+      }
+      const archived = archiveSession(params.id);
+      if (!archived) return notFound(res);
+      context.emit("session:updated", { sessionId: params.id });
+      return json(res, serializeSession(archived, context));
+    }
+
+    // POST /api/sessions/:id/unarchive — restore a retained chat to normal
+    // session lists without mutating its transcript or execution state.
+    params = matchRoute("/api/sessions/:id/unarchive", pathname);
+    if (method === "POST" && params) {
+      const session = getSession(params.id);
+      if (!session) return notFound(res);
+      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
+      const restored = unarchiveSession(params.id);
+      if (!restored) return notFound(res);
+      context.emit("session:updated", { sessionId: params.id });
+      return json(res, serializeSession(restored, context));
     }
 
     // POST /api/sessions/:id/stop

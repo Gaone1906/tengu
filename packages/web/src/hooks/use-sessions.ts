@@ -136,6 +136,27 @@ export function useDeleteSession() {
   })
 }
 
+/** Archive hides a retained session from normal lists; search remains the
+ * recovery surface, so invalidate both list and search query families. */
+export function useArchiveSession() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.archiveSession(id),
+    onSuccess: (_data, id) => {
+      removeFromSessionsCache(qc, [id])
+      qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
+    },
+  })
+}
+
+export function useUnarchiveSession() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.unarchiveSession(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.sessions.all }),
+  })
+}
+
 export function useBulkDeleteSessions() {
   const qc = useQueryClient()
   return useMutation({

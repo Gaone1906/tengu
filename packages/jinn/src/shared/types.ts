@@ -352,6 +352,9 @@ export interface Session {
   title: string | null;
   /** ≤140-char whitespace-flattened excerpt of the creation prompt — "what was asked". */
   promptExcerpt?: string | null;
+  /** Set when the operator hides this chat from normal lists; the session and
+   * transcript remain durable and searchable until explicitly unarchived. */
+  archivedAt?: string | null;
   parentSessionId: string | null;
   /** Explicit workflow/run/phase attribution for grouping and filtered reads. */
   workflowProvenance?: WorkflowSessionProvenance | null;

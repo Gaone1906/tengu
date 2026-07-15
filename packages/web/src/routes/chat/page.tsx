@@ -29,14 +29,14 @@ import { ShortcutOverlay } from '@/components/chat/shortcut-overlay'
 import { useChatTabs, type ChatTab } from '@/hooks/use-chat-tabs'
 import { invalidateLiveSessionSnapshot, prefetchLiveSessionSnapshot } from '@/hooks/use-live-session'
 import { useKeyboardShortcuts, type ShortcutDef } from '@/hooks/use-keyboard-shortcuts'
-import { useDeleteSession, useDuplicateSession, useSessions } from '@/hooks/use-sessions'
+import { useArchiveSession, useDeleteSession, useDuplicateSession, useSessions, useUnarchiveSession } from '@/hooks/use-sessions'
 import { clearIntermediateMessages } from '@/lib/conversations'
 import type { Message } from '@/lib/conversations'
 import { useSettings } from '@/routes/settings-provider'
 import { useQueryClient } from '@tanstack/react-query'
 import { queryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
-import { Check, Copy, MoreHorizontal, Search, Share2, Trash2 } from 'lucide-react'
+import { Archive, ArchiveRestore, Check, Copy, MoreHorizontal, Search, Share2, Trash2 } from 'lucide-react'
 import { writeViewMode, type ViewMode } from '@/lib/view-mode'
 import { shareDebugLog, clearDebugLog } from '@/lib/debug-log'
 
@@ -158,7 +158,7 @@ function ChatPage() {
   )
   // sessionMeta carries the sessionId it belongs to so the tab-label effect
   // can ignore stale meta from a previous session mid-switch (title flash fix).
-  const [sessionMeta, setSessionMeta] = useState<{ sessionId: string; engine?: string; engineSessionId?: string; model?: string; title?: string; employee?: string } | null>(null)
+  const [sessionMeta, setSessionMeta] = useState<{ sessionId: string; engine?: string; engineSessionId?: string; model?: string; title?: string; employee?: string; archivedAt?: string | null } | null>(null)
   // Sibling sessions for the currently selected employee (empty if direct/single session)
   const [employeeSessions, setEmployeeSessions] = useState<Array<{ id: string; title?: string; lastActivity?: string; createdAt?: string }>>([])
   // When true, user explicitly started a new chat — don't auto-select first session
@@ -224,6 +224,8 @@ function ChatPage() {
   const { events, connectionSeq, skillsVersion, subscribe } = useGateway()
   const chatTabs = useChatTabs()
   const deleteSessionMutation = useDeleteSession()
+  const archiveSessionMutation = useArchiveSession()
+  const unarchiveSessionMutation = useUnarchiveSession()
   const duplicateSessionMutation = useDuplicateSession()
   const sessionsQuery = useSessions()
   const qc = useQueryClient()
@@ -542,6 +544,41 @@ function ChatPage() {
     qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
   }, [chatTabs, deleteSessionMutation, qc, navigate, handleSelect, sessionsQuery.data])
 
+  // Archive follows the same one-step fallback as delete, but keeps the full
+  // transcript durable for search and an explicit future restore.
+  const handleArchiveSession = useCallback(async (id: string) => {
+    const wasActive = selectedIdRef.current === id
+    const allByRecency = (sessionsQuery.data ?? []).map((s) => String((s as { id?: unknown }).id ?? ''))
+    const fallback = wasActive
+      ? pickDeleteFallbackId(sidebarOrderRef.current.sessionIds, allByRecency, id)
+      : null
+    if (wasActive) pendingNavRef.current = fallback
+    try {
+      await archiveSessionMutation.mutateAsync(id)
+    } catch {
+      if (wasActive) pendingNavRef.current = undefined
+      return
+    }
+    chatTabs.closeTab(chatTabs.tabs.findIndex(t => t.kind === 'session' && t.sessionId === id))
+    setShowMoreMenu(false)
+    if (wasActive) {
+      if (fallback) handleSelect(fallback, { replace: true, navigateMobile: false })
+      else {
+        pendingNavRef.current = null
+        navigate('/', { replace: true })
+      }
+    }
+    qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
+  }, [archiveSessionMutation, chatTabs, qc, navigate, handleSelect, sessionsQuery.data])
+
+  const handleUnarchiveSession = useCallback(async (id: string) => {
+    try {
+      await unarchiveSessionMutation.mutateAsync(id)
+      setShowMoreMenu(false)
+      qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
+    } catch { /* retain the archived state until the gateway confirms restoration */ }
+  }, [unarchiveSessionMutation, qc])
+
   const handleDuplicate = useCallback(async (id: string) => {
     try {
       const result = await duplicateSessionMutation.mutateAsync(id) as { id?: string; title?: string; employee?: string }
@@ -592,7 +629,7 @@ function ChatPage() {
   // the tab-label effect) can ignore stale meta from a previous session.
   // We read selectedId via a ref (declared with the URL model above) so this
   // callback stays stable.
-  const handleSessionMetaChange = useCallback((meta: { title?: string; employee?: string; engine?: string; engineSessionId?: string; model?: string }) => {
+  const handleSessionMetaChange = useCallback((meta: { title?: string; employee?: string; engine?: string; engineSessionId?: string; model?: string; archivedAt?: string | null }) => {
     const sid = selectedIdRef.current
     if (!sid) return
     setSessionMeta({ sessionId: sid, ...meta })
@@ -934,6 +971,18 @@ function ChatPage() {
 
           {selectedId && (
             <>
+              <div className="my-0.5 border-t border-border" />
+              <button
+                onClick={() => {
+                  if (!selectedId) return
+                  if (sessionMeta?.archivedAt) handleUnarchiveSession(selectedId)
+                  else handleArchiveSession(selectedId)
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-accent"
+              >
+                {sessionMeta?.archivedAt ? <ArchiveRestore className="size-3.5" /> : <Archive className="size-3.5" />}
+                <span className="flex-1">{sessionMeta?.archivedAt ? 'Unarchive chat' : 'Archive chat'}</span>
+              </button>
               {/* DEVELOPER cluster */}
               <div className="my-0.5 border-t border-border" />
               <div className="px-3 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-[var(--text-tertiary)]">
@@ -1022,6 +1071,8 @@ function ChatPage() {
                 onSelect={handleSelect}
                 onNewChat={handleNewChat}
                 onDelete={handleDeleteSession}
+                onArchive={handleArchiveSession}
+                onUnarchive={handleUnarchiveSession}
                 onDuplicate={handleDuplicateFromSidebar}
                 onSessionsLoaded={handleSessionsLoaded}
                 onEmployeeSessionsAvailable={handleEmployeeSessionsAvailable}
@@ -1072,6 +1123,8 @@ function ChatPage() {
               onSelect={handleSelect}
               onNewChat={handleNewChat}
               onDelete={handleDeleteSession}
+              onArchive={handleArchiveSession}
+              onUnarchive={handleUnarchiveSession}
               onDuplicate={handleDuplicateFromSidebar}
               onSessionsLoaded={handleSessionsLoaded}
               onEmployeeSessionsAvailable={handleEmployeeSessionsAvailable}

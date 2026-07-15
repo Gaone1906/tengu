@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   attempt_outcome TEXT,
   attempt_token TEXT,
   attempt_terminal_version INTEGER NOT NULL DEFAULT 0,
+  archived_at TEXT,
   created_at TEXT NOT NULL,
   last_activity TEXT NOT NULL,
   last_error TEXT
@@ -382,6 +383,7 @@ function rowToSession(row: Record<string, unknown>): Session {
     model: (row.model as string) ?? null,
     title: (row.title as string) ?? null,
     promptExcerpt: (row.prompt_excerpt as string) ?? null,
+    archivedAt: (row.archived_at as string) ?? null,
     parentSessionId: (row.parent_session_id as string) ?? null,
     workflowProvenance: workflowProvenanceFromRow(row),
     userId: (row.user_id as string) ?? null,
@@ -1314,6 +1316,9 @@ export function migrateSessionsSchema(database: Database.Database): void {
     // Per-dispatch generation used for compare-and-set terminal writes.
     ['attempt_token', 'TEXT'],
     ['attempt_terminal_version', 'INTEGER NOT NULL', '0'],
+    // Archive is reversible: retain the durable chat and only hide it from
+    // normal list queries. NULL keeps all pre-existing sessions visible.
+    ['archived_at', 'TEXT'],
   ];
 
   for (const [name, type, defaultVal] of missingColumns) {
@@ -1460,6 +1465,7 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     model: opts.model ?? null,
     title,
     promptExcerpt,
+    archivedAt: null,
     parentSessionId: opts.parentSessionId ?? null,
     workflowProvenance: workflow,
     userId: opts.userId ?? null,
@@ -1510,6 +1516,7 @@ export interface UpdateSessionFields {
   lastActivity?: string;
   lastError?: string | null;
   title?: string;
+  archivedAt?: string | null;
   userId?: string | null;
 }
 
@@ -1599,6 +1606,10 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
     sets.push('title = ?');
     values.push(updates.title);
   }
+  if (updates.archivedAt !== undefined) {
+    sets.push('archived_at = ?');
+    values.push(updates.archivedAt);
+  }
   if (updates.userId !== undefined) {
     sets.push('user_id = ?');
     values.push(updates.userId);
@@ -1608,6 +1619,22 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
 
   values.push(id);
   db.prepare(`UPDATE sessions SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+  return getSession(id);
+}
+
+/** Hide a chat from normal lists without deleting its session, messages, or
+ * engine state. Repeated archive requests preserve the original timestamp. */
+export function archiveSession(id: string): Session | undefined {
+  const db = initDb();
+  db.prepare('UPDATE sessions SET archived_at = COALESCE(archived_at, ?) WHERE id = ?')
+    .run(new Date().toISOString(), id);
+  return getSession(id);
+}
+
+/** Restore an archived chat to every normal session list. */
+export function unarchiveSession(id: string): Session | undefined {
+  const db = initDb();
+  db.prepare('UPDATE sessions SET archived_at = NULL WHERE id = ?').run(id);
   return getSession(id);
 }
 
@@ -1938,7 +1965,7 @@ export interface ListSessionsFilter {
 
 export function listSessions(filter?: ListSessionsFilter): Session[] {
   const db = initDb();
-  const conditions: string[] = [];
+  const conditions: string[] = ['archived_at IS NULL'];
   const values: unknown[] = [];
 
   if (filter?.status) {
@@ -1968,7 +1995,7 @@ export function listSessions(filter?: ListSessionsFilter): Session[] {
 export function listRecentSessions(limit: number, offset = 0): Session[] {
   const db = initDb();
   const rows = db
-    .prepare('SELECT * FROM sessions ORDER BY last_activity DESC LIMIT ? OFFSET ?')
+    .prepare('SELECT * FROM sessions WHERE archived_at IS NULL ORDER BY last_activity DESC LIMIT ? OFFSET ?')
     .all(Math.max(0, Math.floor(limit)), Math.max(0, Math.floor(offset))) as Record<string, unknown>[];
   return rows.map(rowToSession);
 }
@@ -2052,6 +2079,7 @@ export function listRecentPerGroup(perGroup: number, portalSlug?: string | null)
       `SELECT * FROM (
          SELECT *, ROW_NUMBER() OVER (PARTITION BY ${keySql} ORDER BY last_activity DESC) AS __rn
          FROM sessions
+         WHERE archived_at IS NULL
        ) WHERE __rn <= ? ORDER BY last_activity DESC`,
     )
     .all(...params, perGroup) as Record<string, unknown>[];
@@ -2069,7 +2097,7 @@ export function listSessionsForGroup(
   const { clause, params } = groupFilter(group, portalSlug);
   const rows = db
     .prepare(
-      `SELECT * FROM sessions WHERE ${clause} ORDER BY last_activity DESC LIMIT ? OFFSET ?`,
+      `SELECT * FROM sessions WHERE archived_at IS NULL AND (${clause}) ORDER BY last_activity DESC LIMIT ? OFFSET ?`,
     )
     .all(...params, limit, offset) as Record<string, unknown>[];
   return rows.map(rowToSession);
@@ -2215,7 +2243,7 @@ export function getSessionGroupCounts(portalSlug?: string | null): Record<string
   const db = initDb();
   const { sql: keySql, params } = groupKeySql(portalSlug);
   const rows = db
-    .prepare(`SELECT ${keySql} AS grp, COUNT(*) AS n FROM sessions GROUP BY grp`)
+    .prepare(`SELECT ${keySql} AS grp, COUNT(*) AS n FROM sessions WHERE archived_at IS NULL GROUP BY grp`)
     .all(...params) as Array<{ grp: string; n: number }>;
   const out: Record<string, number> = {};
   for (const r of rows) out[r.grp] = r.n;

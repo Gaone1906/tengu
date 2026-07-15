@@ -166,3 +166,21 @@ describe("portal-slug sessions fold into the direct group", () => {
     expect(rows.filter((r) => r.employee === "alice").length).toBe(12);
   });
 });
+
+describe("archived sessions", () => {
+  it("hides archived chats from normal lists and counts but retains them for search", () => {
+    const before = reg.getSessionGroupCounts();
+
+    expect(reg.archiveSession("titled-1")).toMatchObject({ id: "titled-1", archivedAt: expect.any(String) });
+    expect(reg.listSessions().map((session) => session.id)).not.toContain("titled-1");
+    expect(reg.listRecentPerGroup(100).map((session) => session.id)).not.toContain("titled-1");
+    expect(before.zoe).toBe(1);
+    expect(reg.getSessionGroupCounts().zoe).toBeUndefined();
+    expect(reg.searchSessions("budget").map((session) => session.id)).toContain("titled-1");
+  });
+
+  it("restores archived chats to normal browsing", () => {
+    expect(reg.unarchiveSession("titled-1")).toMatchObject({ id: "titled-1", archivedAt: null });
+    expect(reg.listSessions().map((session) => session.id)).toContain("titled-1");
+  });
+});

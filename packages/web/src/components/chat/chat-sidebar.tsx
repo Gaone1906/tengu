@@ -9,7 +9,7 @@ import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { useSettings } from "@/routes/settings-provider"
 import { cleanPreview } from "@/lib/clean-preview"
 import { queryKeys } from "@/lib/query-keys"
-import { useSessions, useSessionCounts, useSessionSearch, useUpdateSession, useDeleteSession, useBulkDeleteSessions, useDuplicateSession } from "@/hooks/use-sessions"
+import { useSessions, useSessionCounts, useSessionSearch, useUpdateSession, useDeleteSession, useBulkDeleteSessions, useDuplicateSession, useArchiveSession, useUnarchiveSession } from "@/hooks/use-sessions"
 import {
   ContextMenu,
   ContextMenuTrigger,
@@ -51,6 +51,7 @@ interface Session {
   queueDepth?: number
   lastActivity?: string
   createdAt?: string
+  archivedAt?: string | null
   /** Background work (subagents/background tasks) still running while the
    *  session is officially idle. null/absent = none. Kept live via the
    *  session:background WS event (cache patch in useQueryInvalidation). */
@@ -72,6 +73,8 @@ interface ChatSidebarProps {
   onSelect: (id: string, opts?: { replace?: boolean; navigateMobile?: boolean }) => void
   onNewChat: () => void
   onDelete?: (id: string) => void
+  onArchive?: (id: string) => void
+  onUnarchive?: (id: string) => void
   onDuplicate?: (newSessionId: string) => void
   onSessionsLoaded?: (sessions: Session[]) => void
   onEmployeeSessionsAvailable?: (sessions: Session[]) => void
@@ -119,6 +122,12 @@ const OLDER_EXPANDED_STORAGE_KEY = "jinn-sidebar-older-expanded"
 const FOCUS_MODE_STORAGE_KEY = "jinn-sidebar-focus-mode"
 
 type FocusMode = "focused" | "all"
+
+/** An archived search result is intentionally selectable so its transcript can
+ * be reviewed and restored, despite being absent from default browse lists. */
+export function isArchivedSession(session: Pick<Session, "archivedAt"> | { archivedAt?: unknown }): boolean {
+  return typeof session.archivedAt === "string" && session.archivedAt.length > 0
+}
 
 const formatTimeCache = new Map<string, string>()
 const FORMAT_TIME_CACHE_MAX = 200
@@ -430,6 +439,7 @@ interface SessionRowProps {
   onEmployeeSessionsAvailable?: (sessions: Session[]) => void
   togglePin: (pinKey: string) => void
   handleDuplicate: (sessionId: string) => void
+  handleArchive: (session: Session) => void
   setDeleteTarget: (target: { type: "session" | "employee"; id: string; label: string; sessions?: Session[] } | null) => void
   setRenamingSessionId: (id: string | null) => void
   updateSessionTitle: (id: string, title: string) => void
@@ -448,6 +458,7 @@ const SessionRow = React.memo(function SessionRow({
   onEmployeeSessionsAvailable,
   togglePin,
   handleDuplicate,
+  handleArchive,
   setDeleteTarget,
   setRenamingSessionId,
   updateSessionTitle,
@@ -458,6 +469,7 @@ const SessionRow = React.memo(function SessionRow({
   const displayTitle = cleanPreview(sessionTitle) || sessionTitle
   const sessionTime = formatTime(getSessionActivity(session))
   const isPinned = pinnedSessions.has(session.id)
+  const isArchived = isArchivedSession(session)
   const isRenaming = renamingSessionId === session.id
   const RowTag = isRenaming ? "div" : "button"
 
@@ -552,6 +564,9 @@ const SessionRow = React.memo(function SessionRow({
               <DropdownMenuItem onClick={() => handleDuplicate(session.id)}>
                 Duplicate...
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => handleArchive(session)}>
+                {isArchived ? "Unarchive chat" : "Archive chat"}
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget({ type: "session", id: session.id, label: cleanPreview(sessionTitle) || "Untitled" })}>
                 Delete session
@@ -569,6 +584,9 @@ const SessionRow = React.memo(function SessionRow({
         </ContextMenuItem>
         <ContextMenuItem onClick={() => handleDuplicate(session.id)}>
           Duplicate...
+        </ContextMenuItem>
+        <ContextMenuItem onClick={() => handleArchive(session)}>
+          {isArchived ? "Unarchive chat" : "Archive chat"}
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem variant="destructive" onClick={() => setDeleteTarget({ type: "session", id: session.id, label: cleanPreview(sessionTitle) || "Untitled" })}>
@@ -599,6 +617,7 @@ interface FlatSessionRowProps {
   onEmployeeSessionsAvailable?: (sessions: Session[]) => void
   togglePin: (pinKey: string) => void
   handleDuplicate: (sessionId: string) => void
+  handleArchive: (session: Session) => void
   setDeleteTarget: (target: { type: "session" | "employee"; id: string; label: string; sessions?: Session[] } | null) => void
   setRenamingSessionId: (id: string | null) => void
   updateSessionTitle: (id: string, title: string) => void
@@ -622,6 +641,7 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
   onEmployeeSessionsAvailable,
   togglePin,
   handleDuplicate,
+  handleArchive,
   setDeleteTarget,
   setRenamingSessionId,
   updateSessionTitle,
@@ -632,6 +652,7 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
   const displayTitle = cleanPreview(rawTitle) || "Untitled"
   const time = formatTime(getSessionActivity(session))
   const isPinned = pinnedSessions.has(session.id)
+  const isArchived = isArchivedSession(session)
   const isRenaming = renamingSessionId === session.id
   const isUnread =
     !readSessions.has(session.id) && session.status !== "running" && session.status !== "error"
@@ -646,6 +667,9 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
       </DropdownMenuItem>
       <DropdownMenuItem onClick={() => handleDuplicate(session.id)}>
         Duplicate...
+      </DropdownMenuItem>
+      <DropdownMenuItem onClick={() => handleArchive(session)}>
+        {isArchived ? "Unarchive chat" : "Archive chat"}
       </DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget({ type: "session", id: session.id, label: displayTitle })}>
@@ -694,6 +718,9 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
                 >
                   {displayName}
                 </span>
+                {isArchived ? (
+                  <span className="shrink-0 text-[10px] font-medium text-[var(--text-tertiary)]">Archived</span>
+                ) : null}
                 <span className="shrink-0 text-[10px] tabular-nums text-[var(--text-quaternary)] group-hover/flat:lg:hidden group-has-[[data-state=open]]/flat:lg:hidden">{time}</span>
               </div>
               {isRenaming ? (
@@ -748,6 +775,9 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
         <ContextMenuItem onClick={() => handleDuplicate(session.id)}>
           Duplicate...
         </ContextMenuItem>
+        <ContextMenuItem onClick={() => handleArchive(session)}>
+          {isArchived ? "Unarchive chat" : "Archive chat"}
+        </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem variant="destructive" onClick={() => setDeleteTarget({ type: "session", id: session.id, label: displayTitle })}>
           <span className="flex-1">Delete session</span>
@@ -778,6 +808,7 @@ interface EmployeeRowProps {
   setRenamingSessionId: (id: string | null) => void
   updateSessionTitle: (id: string, title: string) => void
   handleDuplicate: (sessionId: string) => void
+  handleArchive: (session: Session) => void
 }
 
 const EmployeeRow = React.memo(function EmployeeRow({
@@ -800,6 +831,7 @@ const EmployeeRow = React.memo(function EmployeeRow({
   setRenamingSessionId,
   updateSessionTitle,
   handleDuplicate,
+  handleArchive,
 }: EmployeeRowProps) {
   const empName = item.employeeName!
   const empSessions = item.sessions!
@@ -834,6 +866,7 @@ const EmployeeRow = React.memo(function EmployeeRow({
     onEmployeeSessionsAvailable,
     togglePin,
     handleDuplicate,
+    handleArchive,
     setDeleteTarget,
     setRenamingSessionId,
     updateSessionTitle,
@@ -953,6 +986,8 @@ export function ChatSidebar({
   onSelect,
   onNewChat,
   onDelete,
+  onArchive,
+  onUnarchive,
   onDuplicate,
   onSessionsLoaded,
   onEmployeeSessionsAvailable,
@@ -969,6 +1004,8 @@ export function ChatSidebar({
   const counts = meta?.counts ?? {}
   const updateSessionMutation = useUpdateSession()
   const deleteSessionMutation = useDeleteSession()
+  const archiveSessionMutation = useArchiveSession()
+  const unarchiveSessionMutation = useUnarchiveSession()
   const bulkDeleteMutation = useBulkDeleteSessions()
   const duplicateSessionMutation = useDuplicateSession()
 
@@ -1174,6 +1211,32 @@ export function ChatSidebar({
       startTransition(() => {
         if (selectedId === sessionId) onNewChat()
       })
+    } catch {}
+  }
+
+  async function handleArchive(session: Session) {
+    try {
+      if (isArchivedSession(session)) {
+        if (onUnarchive) {
+          onUnarchive(session.id)
+          return
+        }
+        await unarchiveSessionMutation.mutateAsync(session.id)
+        return
+      }
+      if (onArchive) {
+        onArchive(session.id)
+        return
+      }
+      await archiveSessionMutation.mutateAsync(session.id)
+      setPinnedSessions((prev) => {
+        if (!prev.has(session.id)) return prev
+        const next = new Set(prev)
+        next.delete(session.id)
+        savePinnedSessions(next)
+        return next
+      })
+      if (selectedId === session.id) onNewChat()
     } catch {}
   }
 
@@ -1513,6 +1576,7 @@ export function ChatSidebar({
     onEmployeeSessionsAvailable,
     togglePin,
     handleDuplicate: handleDuplicateCb,
+    handleArchive,
     setDeleteTarget,
     setRenamingSessionId,
     updateSessionTitle,

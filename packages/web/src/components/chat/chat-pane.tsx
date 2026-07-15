@@ -72,7 +72,7 @@ interface ChatPaneProps {
   /** If set on mount, used as the initial user message before loadSession resolves — for the just-created-from-new-chat case. */
   pendingUserMessage?: Message
   /** Notify parent when session meta changes */
-  onSessionMetaChange?: (meta: { title?: string; employee?: string; engine?: string; engineSessionId?: string; model?: string }) => void
+  onSessionMetaChange?: (meta: { title?: string; employee?: string; engine?: string; engineSessionId?: string; model?: string; archivedAt?: string | null }) => void
   /** Notify parent to refresh sidebar */
   onRefresh?: () => void
   /** Portal name from settings */

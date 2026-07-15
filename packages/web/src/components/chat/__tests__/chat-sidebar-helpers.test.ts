@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { hasBackgroundActivity, isDirectSession, isRecentError, pickDeleteFallbackId, pickNeighborSessionId, resolveRowIdentity, shouldFloatPinned } from '../chat-sidebar'
+import { hasBackgroundActivity, isArchivedSession, isDirectSession, isRecentError, pickDeleteFallbackId, pickNeighborSessionId, resolveRowIdentity, shouldFloatPinned } from '../chat-sidebar'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -23,6 +23,17 @@ describe('chat sidebar grouping helpers', () => {
     expect(isDirectSession({ source: 'web', sourceRef: 'web:5', employee: 'jinn' }, 'jimbo')).toBe(false)
     // a portal-slug row is still a separate group when no slug is supplied
     expect(isDirectSession({ source: 'web', sourceRef: 'web:6', employee: 'jimbo' })).toBe(false)
+  })
+})
+
+describe('chat sidebar archive state', () => {
+  it('recognizes a search result retained in the archive', () => {
+    expect(isArchivedSession({ archivedAt: '2026-07-14T10:00:00.000Z' })).toBe(true)
+  })
+
+  it('treats null and absent archive timestamps as normal chats', () => {
+    expect(isArchivedSession({ archivedAt: null })).toBe(false)
+    expect(isArchivedSession({})).toBe(false)
   })
 })
 

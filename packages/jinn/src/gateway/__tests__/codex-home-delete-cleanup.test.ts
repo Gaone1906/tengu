@@ -113,6 +113,31 @@ beforeAll(async () => {
 });
 
 describe("session delete removes the per-session Codex CODEX_HOME overlay", () => {
+  it("archives without deleting the session, transcript, or Codex home", async () => {
+    const session = registry.createSession({ engine: "codex", source: "web", sourceRef: "archive-1", title: "archive-1" });
+    registry.insertMessage(session.id, "user", "retain this transcript");
+    const dir = seedCodexHome(session.id);
+
+    const res = await call("POST", `/api/sessions/${session.id}/archive`, {});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ id: session.id, archivedAt: expect.any(String) });
+    expect(registry.getSession(session.id)?.archivedAt).toEqual(expect.any(String));
+    expect(registry.getMessages(session.id).map((message) => message.content)).toContain("retain this transcript");
+    expect(fs.existsSync(dir)).toBe(true);
+  });
+
+  it("unarchives a retained chat", async () => {
+    const session = registry.createSession({ engine: "codex", source: "web", sourceRef: "unarchive-1", title: "unarchive-1" });
+    registry.archiveSession(session.id);
+
+    const res = await call("POST", `/api/sessions/${session.id}/unarchive`, {});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ id: session.id, archivedAt: null });
+    expect(registry.getSession(session.id)?.archivedAt).toBeNull();
+  });
+
   it("DELETE /api/sessions/:id removes the overlay dir (secret does not leak)", async () => {
     const s = registry.createSession({ engine: "codex", source: "web", sourceRef: "del-1", title: "del-1" });
     const dir = seedCodexHome(s.id);

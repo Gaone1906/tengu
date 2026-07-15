@@ -80,6 +80,7 @@ export interface SessionMetaUpdate {
   model?: string
   title?: string
   employee?: string
+  archivedAt?: string | null
 }
 
 export interface UseLiveSessionOptions {
@@ -258,6 +259,7 @@ function sessionMetaOf(session: Record<string, unknown>): SessionMetaUpdate {
     model: session.model ? String(session.model) : undefined,
     title: session.title ? String(session.title) : undefined,
     employee: session.employee ? String(session.employee) : undefined,
+    archivedAt: typeof session.archivedAt === 'string' ? session.archivedAt : null,
   }
 }
 
