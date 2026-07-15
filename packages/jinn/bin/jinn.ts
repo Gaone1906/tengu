@@ -3,6 +3,7 @@ import { Command } from "commander";
 import path from "node:path";
 import os from "node:os";
 import pkg from "../package.json" with { type: "json" };
+import { assertNativeRuntime } from "../src/shared/runtime-guard.js";
 
 const program = new Command();
 program
@@ -13,6 +14,10 @@ program
 
 // Pre-parse to set JINN_HOME before any module imports resolve paths
 program.hook("preAction", (thisCommand) => {
+  // Verify the native DB addon loads under this Node BEFORE any command pulls in
+  // better-sqlite3, so an ABI mismatch prints one clear instruction instead of a
+  // cryptic boot crash. Runs for real commands only (not --version/--help).
+  assertNativeRuntime();
   const opts = thisCommand.opts();
   if (opts.instance) {
     process.env.JINN_INSTANCE = opts.instance;

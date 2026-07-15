@@ -2,9 +2,18 @@
  * Entry point for the daemon child process.
  * Spawned by lifecycle.ts startDaemon().
  */
-import { loadConfig } from "../shared/config.js";
-import { startForeground } from "./lifecycle.js";
-import { logger } from "../shared/logger.js";
+import { assertNativeRuntime } from "../shared/runtime-guard.js";
+
+// Verify the native DB addon loads under this Node BEFORE the imports below pull
+// in better-sqlite3 (via lifecycle → server → registry). An ABI mismatch here
+// would otherwise crash the daemon with no visible output (stdio is ignored in
+// daemon mode). The static imports are therefore deferred to dynamic imports
+// that run only after the guard passes.
+assertNativeRuntime();
+
+const { loadConfig } = await import("../shared/config.js");
+const { startForeground } = await import("./lifecycle.js");
+const { logger } = await import("../shared/logger.js");
 
 // Safety-net: log uncaught exceptions / unhandled rejections instead of letting them
 // silently kill the daemon process (stdio is ignored in daemon mode, so these would

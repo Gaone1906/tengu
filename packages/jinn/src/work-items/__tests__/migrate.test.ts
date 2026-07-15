@@ -12,6 +12,7 @@ import {
   useWorkItemAllocationClaim,
   verifyCurrentWorkItemSchema,
   UNSUPPORTED_PRERELEASE_TODO_DATA,
+  CORRUPT_SESSIONS_DATABASE,
 } from "../migrate.js";
 
 /**
@@ -307,3 +308,23 @@ describe("startup Todo preflight — concurrent first boot", () => {
     db.close();
   }, 30_000);
 });
+
+describe("preflight distinguishes a corrupt DB from prerelease Todo data", () => {
+  it("throws the CORRUPT (not prerelease) message when the file is not a valid SQLite DB", () => {
+    const p = dbPath();
+    fs.writeFileSync(p, "this is not a sqlite database, just garbage bytes");
+    expect(() => preflightWorkItemsDatabase(p)).toThrow(CORRUPT_SESSIONS_DATABASE);
+    // and it must NOT mislabel corruption as a prerelease-Todo problem
+    try {
+      preflightWorkItemsDatabase(p);
+    } catch (err) {
+      expect((err as Error).message).not.toContain(UNSUPPORTED_PRERELEASE_TODO_DATA);
+    }
+  });
+
+  it("still classifies a genuinely empty/absent file as 'absent' (no false corruption)", () => {
+    const p = dbPath();
+    fs.writeFileSync(p, ""); // zero-length
+    expect(preflightWorkItemsDatabase(p)).toBe("absent");
+  });
+})

@@ -14,6 +14,18 @@ export const UNSUPPORTED_PRERELEASE_TODO_DATA =
   "Unsupported prerelease Todo data detected. This release cannot start or migrate it.\n" +
   "Use the separately reviewed offline converter, or restore a supported public-version backup.";
 
+export const CORRUPT_SESSIONS_DATABASE =
+  "The session database appears to be corrupt or is not a valid SQLite file — this is NOT a Todo-data\n" +
+  "problem. Restore it from a backup (check the 'backups/' folder next to registry.db, or your most\n" +
+  "recent copy) and restart.";
+
+/** SQLite surfaces file corruption via these substrings. */
+function isSqliteCorruption(message: string): boolean {
+  return /malformed|file is not a database|not a database|disk image is malformed|database is locked.*corrupt|SQLITE_CORRUPT|SQLITE_NOTADB/i.test(
+    message,
+  );
+}
+
 const CANONICAL_ID_SQL = `
   id GLOB '[A-Z][A-Z][A-Z]-[1-9]*'
   AND substr(id, 5) NOT GLOB '*[^0-9]*'
@@ -409,11 +421,21 @@ export function preflightWorkItemsDatabase(filename: string): WorkItemSchemaPref
   let db: DatabaseType;
   try {
     db = new Database(filename, { readonly: true, fileMustExist: true });
-  } catch {
-    return refusal();
+  } catch (err) {
+    // The file exists and is non-empty but won't open read-only — that is a
+    // corrupt/invalid database, not prerelease Todo data. Say so plainly.
+    throw new Error(`${CORRUPT_SESSIONS_DATABASE}\n(underlying: ${err instanceof Error ? err.message : String(err)})`);
   }
   try {
     return classifyOpenWorkItemsDatabase(db);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // A malformed DB can also surface here (mid-read). Distinguish corruption
+    // from a genuine prerelease-Todo refusal so the operator gets the right fix.
+    if (isSqliteCorruption(message)) {
+      throw new Error(`${CORRUPT_SESSIONS_DATABASE}\n(underlying: ${message})`);
+    }
+    throw err; // genuine UNSUPPORTED_PRERELEASE_TODO_DATA refusal or other — preserve it
   } finally {
     db.close();
   }

@@ -1,9 +1,10 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, existsSync, statSync, statfsSync, copyFileSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import { SESSIONS_DB } from '../shared/paths.js';
+import { getPackageVersion } from '../shared/version.js';
 import { logger } from '../shared/logger.js';
 import {
   migrateWorkItemsSchema,
@@ -416,13 +417,102 @@ export function legacyWorkflowRunLocation(session: Session): LegacyWorkflowRunLo
   };
 }
 
+// --- Upgrade safety around the session database -----------------------------
+// Migrations are transactional (atomic rollback on failure), but two failure
+// modes still deserve belt-and-suspenders: (1) running out of disk mid-migration
+// — the classic corruption trigger — and (2) an operator wanting to undo an
+// upgrade. So before an upgrade migration we refuse to proceed on a near-full
+// disk and snapshot the existing DB, logging where it went.
+const MIN_FREE_BYTES_FOR_DB = 200 * 1024 * 1024; // 200 MB headroom for a migration
+const DB_VERSION_SIDECAR = `${SESSIONS_DB}.version`;
+const DB_BACKUP_DIR = path.join(path.dirname(SESSIONS_DB), 'backups');
+const KEEP_PREMIGRATION_BACKUPS = 3;
+
+function preflightSessionDiskSpace(): void {
+  let free: number;
+  try {
+    const dir = existsSync(path.dirname(SESSIONS_DB))
+      ? path.dirname(SESSIONS_DB)
+      : path.dirname(path.dirname(SESSIONS_DB));
+    const fs = statfsSync(dir);
+    free = fs.bavail * fs.bsize;
+  } catch {
+    return; // can't stat the filesystem — don't block boot on that alone
+  }
+  if (free < MIN_FREE_BYTES_FOR_DB) {
+    const mb = Math.round(free / (1024 * 1024));
+    throw new Error(
+      `Refusing to open the session database: only ${mb} MB free on the disk holding ${SESSIONS_DB}. ` +
+        `Free up space before starting — running out of disk during a schema migration can corrupt the database.`,
+    );
+  }
+}
+
+function prunePremigrationBackups(): void {
+  try {
+    const bases = readdirSync(DB_BACKUP_DIR)
+      .filter((n) => n.startsWith('registry.db.pre-') && !n.endsWith('-wal') && !n.endsWith('-shm'))
+      .sort(); // ISO-timestamped names sort chronologically
+    for (const name of bases.slice(0, Math.max(0, bases.length - KEEP_PREMIGRATION_BACKUPS))) {
+      for (const suffix of ['', '-wal', '-shm']) rmSync(path.join(DB_BACKUP_DIR, name + suffix), { force: true });
+    }
+  } catch {
+    /* best-effort pruning */
+  }
+}
+
+function maybeBackupBeforeMigration(): void {
+  if (!existsSync(SESSIONS_DB) || statSync(SESSIONS_DB).size === 0) return; // fresh install — nothing to snapshot
+  const current = getPackageVersion();
+  let last = '';
+  try {
+    last = readFileSync(DB_VERSION_SIDECAR, 'utf8').trim();
+  } catch {
+    last = '';
+  }
+  if (last === current) return; // same version already booted — no upgrade migration expected
+  try {
+    mkdirSync(DB_BACKUP_DIR, { recursive: true });
+    // Idempotent per version: if a backup for this target version already exists
+    // (a prior boot, or a racing concurrent first-boot process just made one),
+    // don't snapshot again.
+    if (readdirSync(DB_BACKUP_DIR).some((n) => n.startsWith(`registry.db.pre-${current}-`))) return;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const from = last || 'preversioned';
+    const dest = path.join(DB_BACKUP_DIR, `registry.db.pre-${current}-from-${from}-${stamp}`);
+    // Copy the whole consistent set so a checkpoint-pending WAL rides with its base file.
+    for (const suffix of ['', '-wal', '-shm']) {
+      if (existsSync(SESSIONS_DB + suffix)) copyFileSync(SESSIONS_DB + suffix, dest + suffix);
+    }
+    logger.info(`Pre-migration session DB backup created: ${dest} (upgrade ${from} → ${current})`);
+    prunePremigrationBackups();
+  } catch (err) {
+    // A backup failure must not block boot, but it must be loud.
+    logger.warn(`Could not create pre-migration session DB backup: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+function recordDbVersion(): void {
+  try {
+    writeFileSync(DB_VERSION_SIDECAR, getPackageVersion(), 'utf8');
+  } catch {
+    /* best-effort — sidecar only gates the backup, never correctness */
+  }
+}
+
 export function initDb(): Database.Database {
   if (db) return db;
+  // Fail fast on a near-full disk before any write — running out of space during
+  // a migration is the classic corruption trigger.
+  preflightSessionDiskSpace();
   // Todo classification is deliberately the first database operation. It opens
   // an existing file read-only and refuses unsupported prerelease data before
   // WAL mode, migrations, or any other schema write can occur.
   const todoPreflight = preflightWorkItemsDatabase(SESSIONS_DB);
   mkdirSync(path.dirname(SESSIONS_DB), { recursive: true });
+  // Snapshot the existing DB before an upgrade migration mutates it (version-gated,
+  // so this runs once per upgrade, never on a steady-state boot).
+  maybeBackupBeforeMigration();
   const database = new Database(SESSIONS_DB);
   db = database;
   // Register the busy handler before WAL/DDL. Several gateway processes may
@@ -481,6 +571,9 @@ export function initDb(): Database.Database {
   });
   try {
     runImmediateMigrationWithRetry(initialize);
+    // Migration succeeded — stamp the version so the next boot at the same version
+    // skips the pre-migration backup.
+    recordDbVersion();
     return database;
   } catch (error) {
     database.close();
