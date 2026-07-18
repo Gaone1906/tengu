@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { MemoryRouter, useLocation } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { formatEditedAt } from "../note-editor"
 
 const mocks = vi.hoisted(() => ({
   listNotes: vi.fn(),
@@ -311,7 +312,9 @@ describe("Notes page", () => {
 
     expect(await screen.findByDisplayValue("Principles from another session")).toBeTruthy()
     expect(body.value).toBe("Fresh remote body")
-    expect(screen.getByText(/Edited Jul 14 at 1:20 PM/i)).toBeTruthy()
+    // Assert against the component's own formatter so this is timezone-agnostic
+    // (both render in the ambient TZ; CI runs UTC, dev machines do not).
+    expect(screen.getByText(formatEditedAt("2026-07-14T10:20:00.000Z"))).toBeTruthy()
   })
 
   it("uses a reversible folder to list to editor stack on mobile", async () => {

@@ -19,7 +19,7 @@ interface EditableNote {
   body: string
 }
 
-function formatEditedAt(value: string): string {
+export function formatEditedAt(value: string): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return "Edited recently"
   return `Edited ${date.toLocaleDateString([], { month: "short", day: "numeric" })} at ${date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`

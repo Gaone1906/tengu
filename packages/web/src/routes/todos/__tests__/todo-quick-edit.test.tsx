@@ -562,7 +562,10 @@ describe("useTodoQuickEdit", () => {
     act(() => { queued = result.current.edit(ID, { rank: 200 }) })
     rejectActive(new TodoApiError(400, "unsafe", "TODO_INVALID_PATCH"))
     await act(() => queued)
-    expect(result.current.rankResetRevisions[ID]).toBe(1)
+    // Poll rather than assert immediately: the rank reset is committed by an
+    // async state update that may not have flushed by the time `queued`
+    // resolves under load (CI parallelism), which made this flake.
+    await waitFor(() => expect(result.current.rankResetRevisions[ID]).toBe(1))
   })
 
   it("keeps multiple conflicts ordered and promotes the next recovery after resolving one", async () => {
