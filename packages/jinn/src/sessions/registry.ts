@@ -9,7 +9,9 @@ import { logger } from '../shared/logger.js';
 import {
   migrateWorkItemsSchema,
   preflightWorkItemsDatabase,
+  UNSUPPORTED_PRERELEASE_TODO_DATA,
 } from '../work-items/migrate.js';
+import type { WorkItemSchemaPreflight } from '../work-items/migrate.js';
 import { parseTodoId } from '../work-items/id.js';
 import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, LegacyWorkflowRunLocation, ReplyContext, Session, SessionAttemptOutcome, SessionDelivery, SessionDeliveryIdentity, SessionDeliveryPayload, WorkflowSessionProvenance } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
@@ -502,6 +504,42 @@ function recordDbVersion(): void {
   }
 }
 
+/**
+ * Read-only Todo preflight that tolerates a peer's concurrent first-boot migration.
+ *
+ * The preflight is deliberately read-only and runs before any lock, so several
+ * gateway processes discovering the same fresh/upgraded home at once can have one
+ * of them mid-migration while another probes. During that window the probe can
+ * momentarily observe an inconsistent schema shape (e.g. an uncheckpointed WAL a
+ * read-only connection can't fully resolve) and classify it as an unsupported
+ * prerelease refusal even though the database is perfectly valid.
+ *
+ * That early refusal is NOT authoritative: {@link migrateWorkItemsSchema} re-runs
+ * the SAME classification under `BEGIN IMMEDIATE` on the write connection — which
+ * has full, consistent visibility — and refuses genuinely-unsupported data there,
+ * rolling back without persisting any write. So on that specific refusal we retry
+ * the read-only probe within a bounded budget: genuinely-unsupported data is stable
+ * and keeps refusing (so we still refuse fast, before any write), while a racing
+ * migration commits a valid schema within the window and a retry then succeeds.
+ * Corruption/disk-space errors are not this refusal and propagate immediately.
+ */
+function preflightWorkItemsToleratingConcurrentInit(
+  filename: string,
+): WorkItemSchemaPreflight {
+  const deadline = Date.now() + 8000;
+  for (;;) {
+    try {
+      return preflightWorkItemsDatabase(filename);
+    } catch (error) {
+      const isPrereleaseRefusal =
+        error instanceof Error && error.message === UNSUPPORTED_PRERELEASE_TODO_DATA;
+      if (!isPrereleaseRefusal || Date.now() >= deadline) throw error;
+      // Synchronous sleep (initDb is sync) before re-reading a fresh snapshot.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+}
+
 export function initDb(): Database.Database {
   if (db) return db;
   // Fail fast on a near-full disk before any write — running out of space during
@@ -510,7 +548,7 @@ export function initDb(): Database.Database {
   // Todo classification is deliberately the first database operation. It opens
   // an existing file read-only and refuses unsupported prerelease data before
   // WAL mode, migrations, or any other schema write can occur.
-  const todoPreflight = preflightWorkItemsDatabase(SESSIONS_DB);
+  const todoPreflight = preflightWorkItemsToleratingConcurrentInit(SESSIONS_DB);
   mkdirSync(path.dirname(SESSIONS_DB), { recursive: true });
   // Snapshot the existing DB before an upgrade migration mutates it (version-gated,
   // so this runs once per upgrade, never on a steady-state boot).
