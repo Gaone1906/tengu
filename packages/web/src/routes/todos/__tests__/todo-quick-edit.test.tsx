@@ -553,19 +553,34 @@ describe("useTodoQuickEdit", () => {
   it("resets a queued rank when the active same-item request definitively fails", async () => {
     vi.spyOn(api, "getWorkItem").mockResolvedValue(detail(7))
     let rejectActive!: (error: unknown) => void
+    // The title request's definitive failure retires the rejected payload and,
+    // since the queued rank is the only intent left, `run()` immediately
+    // redispatches it as a fresh active request against a re-fetched baseline
+    // (see "retires a definitively failed request but sends a newer
+    // different-field intent with a fresh key"). That second dispatch must
+    // also be mocked: with only one `updateWorkItem` implementation queued,
+    // vi.spyOn previously fell through to the real (unmocked) network call,
+    // which happened to resolve 404 locally but hung/failed differently under
+    // CI's parallel suite — the actual source of the flake. Mocking it to
+    // fail definitively too makes `failedRankNeedsReset` deterministically
+    // true on that second attempt, which is what actually resets the rank.
     const update = vi.spyOn(api, "updateWorkItem")
       .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectActive = reject }))
+      .mockRejectedValueOnce(new TodoApiError(400, "unsafe", "TODO_INVALID_PATCH"))
     const { result } = setup()
     act(() => { void result.current.edit(ID, { title: "Active" }) })
     await waitFor(() => expect(update).toHaveBeenCalledTimes(1))
     let queued!: Promise<void>
     act(() => { queued = result.current.edit(ID, { rank: 200 }) })
-    rejectActive(new TodoApiError(400, "unsafe", "TODO_INVALID_PATCH"))
-    await act(() => queued)
+    await act(async () => {
+      rejectActive(new TodoApiError(400, "unsafe", "TODO_INVALID_PATCH"))
+      await queued
+    })
     // Poll rather than assert immediately: the rank reset is committed by an
     // async state update that may not have flushed by the time `queued`
-    // resolves under load (CI parallelism), which made this flake.
+    // resolves under load (CI parallelism).
     await waitFor(() => expect(result.current.rankResetRevisions[ID]).toBe(1))
+    expect(update).toHaveBeenCalledTimes(2)
   })
 
   it("keeps multiple conflicts ordered and promotes the next recovery after resolving one", async () => {
