@@ -264,7 +264,18 @@ async function readCodexRateLimits(config: JinnConfig): Promise<JsonRecord> {
       clearTimeout(timer);
       reject(new Error(stderr.trim() || "Codex app-server exited before returning rate limits"));
     });
-    child.stdin.write(`${JSON.stringify(initialize)}\n${JSON.stringify(request)}\n`);
+    // Writing to a child that has already exited (a real codex that died on
+    // startup, or a stubbed/immediately-exiting binary) surfaces EPIPE /
+    // ERR_STREAM_DESTROYED on stdin. That is an emitter separate from the child
+    // and, left unhandled, becomes an uncaughtException that crashes the whole
+    // process. The child's `close`/`error` handlers and the timeout already
+    // reject this read, so a failed stdin write is safe to swallow here.
+    child.stdin.on("error", () => {});
+    try {
+      child.stdin.write(`${JSON.stringify(initialize)}\n${JSON.stringify(request)}\n`);
+    } catch {
+      // Synchronous write failure — handled by close/error/timeout above.
+    }
     // Keep stdin OPEN until we settle or time out. `codex app-server --stdio`
     // exits as soon as stdin closes, so the previous fixed 1s close timer raced
     // the async rate-limit fetch and made the server exit before replying
