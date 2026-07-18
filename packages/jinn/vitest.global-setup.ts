@@ -8,6 +8,38 @@ import {
 
 const TEMP_ENV_KEYS = ['TMPDIR', 'TMP', 'TEMP'] as const;
 
+// Engine binaries the dispatch path probes for on PATH (models.ts engineAvailable).
+// A large slice of the gateway/session integration tests inject a STUB engine but
+// still traverse the real availability probe first; on a dev box the CLIs happen
+// to be installed so the probe passes, but a bare CI runner has none of them and
+// the session is blocked before the stub is ever consulted. We keep the suite
+// hermetic by dropping harmless no-op shims for these bins on PATH for the test
+// run — the shims are never executed (engines are stubbed), they only satisfy the
+// presence check so tests don't depend on what the host happens to have installed.
+const ENGINE_SHIM_BINS = ['codex'] as const;
+
+function installEngineShims(systemTempRoot: string): {
+  restore: () => void;
+} {
+  const shimDir = fs.mkdtempSync(path.join(systemTempRoot, 'jinn-engine-shims-'));
+  for (const bin of ENGINE_SHIM_BINS) {
+    const shimPath = path.join(shimDir, bin);
+    fs.writeFileSync(shimPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    fs.chmodSync(shimPath, 0o755);
+  }
+  const previousPath = process.env.PATH;
+  process.env.PATH = previousPath
+    ? `${shimDir}${path.delimiter}${previousPath}`
+    : shimDir;
+  return {
+    restore: () => {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      fs.rmSync(shimDir, { recursive: true, force: true });
+    },
+  };
+}
+
 function makeTestDirectoriesRemovable(root: string): void {
   if (!fs.existsSync(root)) return;
   const stat = fs.lstatSync(root);
@@ -38,7 +70,15 @@ export default function setup(): () => void {
   process.env.JINN_VITEST_SYSTEM_TEMP_ROOT = systemTempRoot;
   for (const key of TEMP_ENV_KEYS) process.env[key] = runTempRoot;
 
+  // Put no-op engine shims on PATH BEFORE the temp env is repointed, using the
+  // real system temp root so the shim dir lives outside the isolated home we tear
+  // down below. Prepended to PATH so worker forks (which inherit env at spawn)
+  // see the shimmed engines as available.
+  const engineShims = installEngineShims(systemTempRoot);
+
   return () => {
+    engineShims.restore();
+
     for (const key of TEMP_ENV_KEYS) {
       const previous = previousTempEnv[key];
       if (previous === undefined) delete process.env[key];
