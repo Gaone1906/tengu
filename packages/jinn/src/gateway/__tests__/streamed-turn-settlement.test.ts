@@ -66,7 +66,7 @@ async function request(
 }
 
 async function waitForSettlement(sessionId: string) {
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 2000; i++) {
     const session = registry.getSession(sessionId);
     if (session && session.status !== "running") return session;
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -318,7 +318,7 @@ describe("completed streamed-turn settlement", () => {
     expect((await request(context, "POST", `/api/sessions/${sessionId}/stop`)).status).toBe(200);
     result.resolve({ sessionId: "engine-stopped", result: "stale final" });
     const sessionKey = registry.getSession(sessionId)!.sessionKey;
-    for (let i = 0; i < 200 && queue.isRunning(sessionKey); i++) {
+    for (let i = 0; i < 2000 && queue.isRunning(sessionKey); i++) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
 

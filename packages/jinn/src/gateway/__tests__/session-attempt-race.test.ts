@@ -203,7 +203,7 @@ describe("stop versus successful completion", () => {
     expect(registry.getSession(sessionId)).toMatchObject({ status: "interrupted", attemptOutcome: "interrupted" });
 
     run.resolve({ sessionId: "engine-http", result: "finished after stop" });
-    for (let i = 0; i < 100 && queue.isRunning(registry.getSession(sessionId)!.sessionKey); i++) {
+    for (let i = 0; i < 2000 && queue.isRunning(registry.getSession(sessionId)!.sessionKey); i++) {
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
 

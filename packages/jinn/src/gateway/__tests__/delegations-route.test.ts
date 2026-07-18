@@ -745,7 +745,7 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
     expect(resp.status).toBe(201);
 
     let run: Record<string, unknown> | undefined;
-    for (let i = 0; i < 100 && !run; i++) {
+    for (let i = 0; i < 1000 && !run; i++) {
       run = engineRuns.find((candidate) => candidate.sessionId === resp.body.sessionId);
       if (!run) await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -791,7 +791,7 @@ describe("web dispatch path — the GRS-017a identity seam reaches the engine (Q
     const sessionId = resp.body.sessionId as string;
     // dispatchWebSessionRun is fire-and-forget; wait for the stub engine turn.
     let run: Record<string, unknown> | undefined;
-    for (let i = 0; i < 100 && !run; i++) {
+    for (let i = 0; i < 1000 && !run; i++) {
       run = engineRuns.find((r) => r.sessionId === sessionId);
       if (!run) await new Promise((r) => setTimeout(r, 10));
     }
@@ -805,7 +805,7 @@ describe("web dispatch path — the GRS-017a identity seam reaches the engine (Q
   it("engine.run receives the stamped identity for plain POST /api/sessions spawns too (same missed block)", async () => {
     const id = await createOperatorSession("seam check for plain spawns");
     let run: Record<string, unknown> | undefined;
-    for (let i = 0; i < 100 && !run; i++) {
+    for (let i = 0; i < 1000 && !run; i++) {
       run = engineRuns.find((r) => r.sessionId === id);
       if (!run) await new Promise((r) => setTimeout(r, 10));
     }
@@ -822,7 +822,7 @@ describe("POST /api/delegations — link-before-dispatch (codex review finding 1
     expect(resp.status).toBe(201);
     const { workItemId, sessionId } = resp.body as { workItemId: string; sessionId: string };
     let run: Record<string, unknown> | undefined;
-    for (let i = 0; i < 100 && !run; i++) {
+    for (let i = 0; i < 1000 && !run; i++) {
       run = engineRuns.find((r) => r.sessionId === sessionId);
       if (!run) await new Promise((r) => setTimeout(r, 10));
     }

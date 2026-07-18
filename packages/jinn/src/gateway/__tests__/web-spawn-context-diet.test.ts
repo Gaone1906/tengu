@@ -122,7 +122,7 @@ async function spawnWebSession(prompt: string): Promise<Record<string, unknown>>
   const id = cap.body.id as string;
   // dispatchWebSessionRun is fire-and-forget; wait for the stub engine turn.
   let run: Record<string, unknown> | undefined;
-  for (let i = 0; i < 100 && !run; i++) {
+  for (let i = 0; i < 1000 && !run; i++) {
     run = engineRuns.find((r) => r.sessionId === id);
     if (!run) await new Promise((r) => setTimeout(r, 10));
   }

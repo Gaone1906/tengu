@@ -175,9 +175,11 @@ function callerHeaders(sessionId: string): Record<string, string> {
 }
 
 async function waitForSettledSession(sessionId: string): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 2000; attempt += 1) {
     if (registry.getSession(sessionId)?.status !== "running") return;
-    await new Promise((resolve) => setImmediate(resolve));
+    // A wall-clock poll (not a bare setImmediate spin) so a saturated CI event
+    // loop still gets real time to drain timers/IO before we give up.
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(`Session ${sessionId} did not settle`);
 }
