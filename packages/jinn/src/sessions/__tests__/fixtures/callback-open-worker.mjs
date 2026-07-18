@@ -4,6 +4,14 @@ const [home, registryPath, wave, index] = process.argv.slice(2);
 process.env.JINN_HOME = home;
 
 try {
+  // The parent reads this worker's stdout and JSON.parses it. Registry init logs
+  // an INFO line (e.g. "Pre-migration session DB backup created: …") via the shared
+  // logger, which defaults to writeToStdout=true — that stray line ahead of our JSON
+  // breaks the parse. Silence stdout logging BEFORE the registry loads. Resolve the
+  // logger relative to the registry so this works regardless of CWD.
+  const loggerUrl = new URL("../shared/logger.js", pathToFileURL(registryPath).href).href;
+  const { configureLogger } = await import(loggerUrl);
+  configureLogger({ stdout: false, file: false });
   const registry = await import(pathToFileURL(registryPath).href);
   const payload = { message: "concurrent callback", displayMessage: "Worker replied" };
   const common = registry.claimSessionDelivery({
