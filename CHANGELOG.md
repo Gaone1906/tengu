@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.27.0] - 2026-07-19
+
+### ✨ Features
+- **Model-scoped Claude usage buckets in the Limits tab.** The Limits view now surfaces per-model weekly windows (for example a separate weekly bucket for Fable-class models) next to the 5-hour and all-models weekly windows, so you can see a model budget approaching its cap instead of hitting it blind. These buckets only exist in Claude's OAuth usage API and never appear in the statusline payload, so limit collection now reads the local Claude Code OAuth token and queries that API, mapping every bucket generically so new server-side buckets show up without further changes. It falls back to the statusline snapshot when offline, and `JINN_CLAUDE_USAGE_API=off` disables the network path entirely. The token is never logged or persisted.
+
+### 🐛 Fixes
+- **Chat no longer drops messages after a turn in long sessions.** In sessions past the paged snapshot window (more than 150 messages), completing a turn could hide already-rendered messages and reorder media, because the turn-start marker was an index into the newest-150 snapshot but was applied to the full rendered list. The turn start is now anchored by stable message id, so long transcripts stay intact across turn completions.
+- **Gateway no longer crashes on a broken pipe to the Codex app-server.** An EPIPE while writing to codex stdin is handled instead of taking down the whole process.
+- **Concurrent first-boot migrations are tolerated.** The read-only Todo preflight no longer fails when a second instance on the same host is running its first-boot database migration at the same time.
+
 ## [0.26.0] - 2026-07-18
 
 > Jinn becomes a full company operating system: employees now work through a native MCP company surface, Todos become the durable work ledger with a single company-prefixed identifier, Workflows become a real automation engine, and the web app gains first-class Skills, Cron, and activity receipts (plus opt-in Notes).
