@@ -925,7 +925,7 @@ let knowledgeCache: { builtAt: number; value: string | null } | null = null;
  */
 const KNOWLEDGE_MCP_MANIFEST = [
   "## Knowledge base",
-  "Company knowledge is in `knowledge/` + `docs/`: search with `search_knowledge`, then read a hit with `read_knowledge { path }`.",
+  "Search company knowledge in `knowledge/` + `docs/` with `search_knowledge`; `read_knowledge { path }` can read any relative file inside the Jinn instance.",
 ].join("\n");
 
 function buildKnowledgeContext(jinnMcpAttached?: boolean): string | null {

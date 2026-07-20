@@ -3525,11 +3525,9 @@ export async function handleApiRequest(
       return json(res, { query: q, results: searchKnowledge(q, jinnHome) });
     }
 
-    // GET /api/knowledge/read — GRS-020b: read ONE knowledge/docs file by the
-    // RELATIVE path knowledge search returned. SECURITY-CRITICAL (the
-    // exfiltration surface): the store enforces the scoped-root invariant —
-    // shape gate + realpath containment, so `..`, absolute paths, other roots,
-    // and symlink escapes are refused (400/403), never read. This route is
+    // GET /api/knowledge/read — read ONE file inside the active Jinn instance.
+    // SECURITY-CRITICAL: the store enforces instance-root containment, so
+    // `..`, absolute paths, and symlink escapes are refused (400/403). This route is
     // deliberately SEPARATE from the operator/UI GET /api/files/read.
     if (method === "GET" && pathname === "/api/knowledge/read") {
       // GRS-020b-fix: REJECT control bytes on the RAW path — never strip. The
@@ -3540,10 +3538,10 @@ export async function handleApiRequest(
       // primitive mirrors the same reject as defense-in-depth.
       const rawPath = url.searchParams.get("path");
       if (rawPath !== null && hasControlBytes(rawPath)) {
-        return badRequest(res, "path contains control bytes — pass the relative path exactly as knowledge search returned it");
+        return badRequest(res, "path contains control bytes");
       }
       const rel = readCleanSearchParam(url, "path");
-      if (!rel) return badRequest(res, 'path is required — a relative path from /api/knowledge/search, e.g. "knowledge/some-file.md"');
+      if (!rel) return badRequest(res, 'path is required — use a relative path inside the Jinn instance, e.g. "knowledge/some-file.md"');
       const result = readKnowledgeFile(rel, jinnHome);
       if (!result.ok) {
         if (result.reason === "forbidden") return json(res, { error: result.detail }, 403);

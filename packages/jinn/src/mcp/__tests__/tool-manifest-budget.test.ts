@@ -9,9 +9,9 @@ const MAX_MANIFEST_TOKENS = 7595;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 7229, sha256: "c0ff3fa30a860fdbc03fbfc26d13aa3586b3c1eba109218e2bd9044e311685b1" },
-  pi: { tokens: 7594, sha256: "62bc62c35e7d5d5fdfceb1e8e58ec59916c19a2dc529054f5eeadd7ef17ab090" },
-  openai: { tokens: 7377, sha256: "b01049f1e34dccc44c4076e3d5a258c66b5b9c3178b4178acd146d3e1c0f0f50" },
+  rpc: { tokens: 7228, sha256: "1988ca74514225dda0289b126550254d428b51d104615c5b3a482db720ce7f83" },
+  pi: { tokens: 7593, sha256: "3ddaf681a2b81d7e3e0bab455a13832951a7c556a13945e9216e4b3bae331555" },
+  openai: { tokens: 7376, sha256: "99b55075375cf8190760b0808ba13e780bc308673cd2dda31c0cb3d4b6ae82b9" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;

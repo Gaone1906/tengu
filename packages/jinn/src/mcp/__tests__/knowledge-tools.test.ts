@@ -95,10 +95,10 @@ describe("knowledge tools — registry + schemas", () => {
     expect(names).toHaveLength(54);
   });
 
-  it("domain teaching lives on search_knowledge; read stays short and names the roots", () => {
+  it("domain teaching lives on search_knowledge; read names the instance scope", () => {
     expect(tool("search_knowledge").description).toMatch(/knowledge\/ and docs\//);
     expect(tool("search_knowledge").description).toMatch(/snippets only/i);
-    expect(tool("read_knowledge").description).toMatch(/knowledge\/docs file/i);
+    expect(tool("read_knowledge").description).toMatch(/instance file/i);
   });
 });
 
@@ -119,12 +119,12 @@ describe("knowledge tools — unit (stub gateway)", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("read_knowledge refuses a path outside the two roots locally (no HTTP call)", async () => {
+  it("read_knowledge accepts any relative instance path and leaves containment to the gateway", async () => {
     const { calls, ctx } = stub(() => ({ status: 200, body: {} }));
-    for (const bad of ["secrets/api-keys.json", "/etc/passwd", "../knowledge/foo.md", "config.yaml"]) {
-      await expect(tool("read_knowledge").handler({ path: bad }, ctx)).rejects.toThrow(/knowledge\/|docs\//);
+    for (const accepted of ["knowledge/nested/foo.md", "secrets/api-keys.json", "config.yaml"]) {
+      await expect(tool("read_knowledge").handler({ path: accepted }, ctx)).resolves.toBeDefined();
     }
-    expect(calls).toHaveLength(0);
+    expect(calls).toHaveLength(3);
   });
 
   it("read_knowledge refuses a control-byte path locally (no HTTP call) — GRS-020b-fix", async () => {
@@ -221,7 +221,11 @@ beforeAll(async () => {
   seed("knowledge/q3-pricing.md", "# Q3 pricing\n\nThe zebrafish plan ships at 29 euro with annual billing.\n");
   seed("docs/billing.md", "# Billing\n\nInvoices reference the zebrafish plan id.\n");
   seed("secrets/api-keys.json", JSON.stringify({ secret: "TOPSECRET-mcp" }));
-  fs.symlinkSync(path.join(home, "secrets", "api-keys.json"), path.join(home, "knowledge", "escape.md"));
+  seed("config.yaml", "gateway:\n  port: 7777\n");
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-knowledge-mcp-outside-"));
+  const outsideFile = path.join(outsideDir, "outside.md");
+  fs.writeFileSync(outsideFile, "TOPSECRET-outside-mcp");
+  fs.symlinkSync(outsideFile, path.join(home, "knowledge", "escape.md"));
   api = await import("../../gateway/api.js");
   registry = await import("../../sessions/registry.js");
   registry.initDb();
@@ -257,6 +261,11 @@ describe("knowledge tools — integration against the real routes/store", () => 
     expect(read.title).toBe("Q3 pricing");
     expect(read.content).toContain("ships at 29 euro");
     expect(read.truncated).toBe(false);
+  });
+
+  it("reads a file outside knowledge and docs when it remains inside the instance", async () => {
+    const read = (await tool("read_knowledge").handler({ path: "config.yaml" }, ctx())) as { content: string };
+    expect(read.content).toContain("port: 7777");
   });
 
   it("refuses traversal through the real route with a readable 400 — never content", async () => {
@@ -296,7 +305,7 @@ describe("knowledge tools — integration against the real routes/store", () => 
 
   it("404s a missing file with the store's readable message", async () => {
     await expect(tool("read_knowledge").handler({ path: "knowledge/nope.md" }, ctx())).rejects.toThrow(
-      /failed \(404\).*no such knowledge file/,
+      /failed \(404\).*no such instance file/,
     );
   });
 });

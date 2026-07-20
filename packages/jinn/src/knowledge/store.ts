@@ -4,25 +4,15 @@ import { JINN_HOME } from "../shared/paths.js";
 import { stripControlChars, hasControlBytes } from "../sessions/registry.js";
 
 /**
- * GRS-020b — the scoped knowledge store: deterministic search + read over the
- * company's institutional knowledge (`~/.jinn/knowledge/*.md` and
- * `~/.jinn/docs/*.md`). This is the FIRST filesystem-reading primitive on the
- * MCP belt, so it carries the design's one hard security rule (GRS-020 §3, the
- * scoped-root invariant):
+ * GRS-020b — deterministic search over the company's institutional knowledge
+ * plus capped reads of files in the active Jinn instance. This is the FIRST
+ * filesystem-reading primitive on the MCP belt, so reads retain one hard rule:
  *
- *   - The two allowlisted roots are FIXED IN CODE. No caller-supplied path can
- *     name any other directory: `secrets/`, `config.yaml`, `sessions/`, and
- *     everything else under ~/.jinn are unreachable BY CONSTRUCTION, not by
- *     blocklist. An arbitrary-path read tool on the agent belt is an
- *     exfiltration surface — a prompt-injected employee could read
- *     `secrets/api-keys.json` and mail it out through any outbound channel.
- *   - A read path must (a) pass a conservative shape gate
- *     (`<root>/<flat-name>.md`, no separators inside the name, no control
- *     bytes, nothing absolute) and (b) REALPATH-resolve inside the realpath of
- *     its root — so a symlink inside knowledge/ pointing outside it is
- *     rejected even though its lexical path looks legal. Search applies the
- *     same realpath check before scanning any file, so escaped content can
- *     never leak through a snippet either.
+ *   - A read path must be relative and REALPATH-resolve inside the realpath of
+ *     the instance root. Traversal, absolute paths, control bytes, and symlink
+ *     escapes are rejected.
+ *   - Search remains scoped to flat Markdown files in knowledge/ and docs/ and
+ *     applies the same per-search-root realpath check before scanning a file.
  *
  * No LLM anywhere: search is case-insensitive token-AND matching (every
  * whitespace token of the query must appear in the filename or content), with
@@ -48,11 +38,11 @@ const SEARCH_FILE_MAX_BYTES = 2_000_000;
 const ROOT_LABELS = ["knowledge", "docs"] as const;
 export type KnowledgeRootLabel = (typeof ROOT_LABELS)[number];
 
-/** `<root-label>/<flat-file-name>.md` — one separator, conservative name
+/** Search-only `<root-label>/<flat-file-name>.md` gate — one separator, conservative name
  *  charset (no spaces, no further separators, so `..` can never be a path
  *  SEGMENT), lowercase `.md` only. The realpath check below is the authority;
  *  this gate just refuses garbage cheaply and readably. */
-const REL_PATH_PATTERN = /^(knowledge|docs)\/[A-Za-z0-9][A-Za-z0-9._-]{0,250}\.md$/;
+const SEARCH_REL_PATH_PATTERN = /^(knowledge|docs)\/[A-Za-z0-9][A-Za-z0-9._-]{0,250}\.md$/;
 
 function rootDir(home: string, label: KnowledgeRootLabel): string {
   return path.join(home, label);
@@ -169,7 +159,7 @@ export function searchKnowledge(query: string, home: string = JINN_HOME): Knowle
     }
     for (const name of names) {
       const relPath = `${label}/${name}`;
-      if (!REL_PATH_PATTERN.test(relPath)) continue; // odd names never enter the surface
+      if (!SEARCH_REL_PATH_PATTERN.test(relPath)) continue; // odd names never enter the surface
       let realFile: string;
       try {
         realFile = fs.realpathSync(path.join(rootDir(home, label), name));
@@ -216,50 +206,58 @@ export function searchKnowledge(query: string, home: string = JINN_HOME): Knowle
 /* ── Read ──────────────────────────────────────────────────────────────────── */
 
 /**
- * Read ONE knowledge/docs file by the relative path search returned.
- * SECURITY-CRITICAL (the exfiltration surface): the path must pass the shape
- * gate AND its realpath must resolve inside the realpath of its allowlisted
- * root — `..`, absolute paths, other roots, control bytes, nested paths, and
- * symlink escapes are all refused; content is capped at
+ * Read ONE file inside the active Jinn instance by relative path.
+ * SECURITY-CRITICAL: the path must be normalized and its realpath must resolve
+ * inside the realpath of the instance root. Traversal, absolute paths, control
+ * bytes, and symlink escapes are refused; content is capped at
  * {@link KNOWLEDGE_FILE_CHAR_CAP} with the intentional-cap marker.
  */
 export function readKnowledgeFile(relPath: string, home: string = JINN_HOME): KnowledgeReadResult {
   if (typeof relPath !== "string" || relPath.length === 0 || relPath.length > 300) {
-    return { ok: false, reason: "invalid-path", detail: "path must be a relative path like \"knowledge/some-file.md\" (as returned by knowledge search)" };
+    return { ok: false, reason: "invalid-path", detail: "path must be a relative path inside the Jinn instance" };
   }
   // GRS-020b-fix: REJECT (never strip) control bytes on the raw path — the
   // store is the defense-in-depth backstop so no caller (route or MCP tool)
   // can strip-then-accept a %00-tampered path into a valid one.
   if (hasControlBytes(relPath)) {
-    return { ok: false, reason: "invalid-path", detail: "path contains control bytes — pass the relative path exactly as knowledge search returned it" };
+    return { ok: false, reason: "invalid-path", detail: "path contains control bytes" };
   }
-  if (!REL_PATH_PATTERN.test(relPath)) {
+  const segments = relPath.split("/");
+  if (
+    relPath !== relPath.trim() ||
+    path.isAbsolute(relPath) ||
+    path.win32.isAbsolute(relPath) ||
+    relPath.includes("\\") ||
+    segments.some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
     return {
       ok: false,
       reason: "invalid-path",
-      detail: `path must be "knowledge/<file>.md" or "docs/<file>.md" (flat, relative, .md only) — got ${JSON.stringify(relPath.slice(0, 120))}. Only those two directories are readable; get paths from knowledge search.`,
+      detail: `path must be a normalized relative path inside the Jinn instance — got ${JSON.stringify(relPath.slice(0, 120))}`,
     };
   }
-  const [label, name] = relPath.split("/") as [KnowledgeRootLabel, string];
-  const realRoot = realRootOf(home, label);
-  if (!realRoot) return { ok: false, reason: "not-found", detail: `the ${label}/ directory does not exist` };
+
+  let realHome: string;
+  try {
+    realHome = fs.realpathSync(home);
+  } catch {
+    return { ok: false, reason: "not-found", detail: "the Jinn instance directory does not exist" };
+  }
 
   let realFile: string;
   try {
-    realFile = fs.realpathSync(path.join(rootDir(home, label), name));
+    realFile = fs.realpathSync(path.join(home, ...segments));
   } catch {
-    return { ok: false, reason: "not-found", detail: `no such knowledge file: ${relPath}` };
+    return { ok: false, reason: "not-found", detail: `no such instance file: ${relPath}` };
   }
-  if (!isInsideReal(realFile, realRoot)) {
-    // A symlink inside the root pointing outside it — the exact escape the
-    // realpath check exists for. Refused, never read.
-    return { ok: false, reason: "forbidden", detail: `${relPath} resolves outside the ${label}/ root and is not readable` };
+  if (!isInsideReal(realFile, realHome)) {
+    return { ok: false, reason: "forbidden", detail: `${relPath} resolves outside the Jinn instance and is not readable` };
   }
   let stat: fs.Stats;
   try {
     stat = fs.statSync(realFile);
   } catch {
-    return { ok: false, reason: "not-found", detail: `no such knowledge file: ${relPath}` };
+    return { ok: false, reason: "not-found", detail: `no such instance file: ${relPath}` };
   }
   if (!stat.isFile()) return { ok: false, reason: "not-found", detail: `${relPath} is not a regular file` };
 
@@ -274,7 +272,7 @@ export function readKnowledgeFile(relPath: string, home: string = JINN_HOME): Kn
   if (truncated) {
     content =
       content.slice(0, KNOWLEDGE_FILE_CHAR_CAP) +
-      `…[truncated ${totalChars - KNOWLEDGE_FILE_CHAR_CAP} chars — intentional cap; this is a knowledge excerpt — search for a narrower file if you need the rest]`;
+      `…[truncated ${totalChars - KNOWLEDGE_FILE_CHAR_CAP} chars — intentional cap; this is an instance file excerpt]`;
   }
-  return { ok: true, path: relPath, title: firstHeading(content, name), content, truncated, totalChars };
+  return { ok: true, path: relPath, title: firstHeading(content, path.basename(relPath)), content, truncated, totalChars };
 }
