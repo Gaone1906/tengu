@@ -30,20 +30,32 @@ const BASE =
     : "http://localhost:3000"
 
 const LOCAL_BOOTSTRAP_HASH_KEY = "jinn-bootstrap"
+const WORKSPACE_PAIRING_HASH_KEY = "jinn-pair"
 
-function takeLocalBootstrapGrant(): string | undefined {
+function takeHashValue(key: string): string | undefined {
   if (typeof window === "undefined") return undefined
   const params = new URLSearchParams(window.location.hash.replace(/^#/, ""))
-  const grant = params.get(LOCAL_BOOTSTRAP_HASH_KEY)?.trim()
-  if (!grant) return undefined
-  params.delete(LOCAL_BOOTSTRAP_HASH_KEY)
+  const value = params.get(key)?.trim()
+  if (!value) return undefined
+  params.delete(key)
   const nextHash = params.toString()
   window.history.replaceState(
     window.history.state,
     "",
     `${window.location.pathname}${window.location.search}${nextHash ? `#${nextHash}` : ""}`,
   )
-  return grant
+  return value
+}
+
+function takeLocalBootstrapGrant(): string | undefined {
+  return takeHashValue(LOCAL_BOOTSTRAP_HASH_KEY)
+}
+
+/** Consume the short-lived pairing code returned by authenticated workspace
+ * creation. URL fragments never reach the server or referrer, and are removed
+ * before the code is exchanged for the new instance's HttpOnly cookie. */
+export function takeWorkspacePairingCode(): string | undefined {
+  return takeHashValue(WORKSPACE_PAIRING_HASH_KEY)
 }
 
 function urlFor(path: string): string {

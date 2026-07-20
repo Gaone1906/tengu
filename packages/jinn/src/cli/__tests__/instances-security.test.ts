@@ -17,8 +17,14 @@ describe("instances registry isolation", () => {
     saveInstances([{ name: "test", port: 8000, home: testHome, createdAt: "2026-06-24T00:00:00.000Z" }]);
 
     expect(fs.existsSync(path.join(testHome, "instances.json"))).toBe(true);
-    expect(loadInstances()).toEqual([
-      { name: "test", port: 8000, home: testHome, createdAt: "2026-06-24T00:00:00.000Z" },
-    ]);
+    const loaded = loadInstances();
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0]).toMatchObject({
+      name: "test",
+      port: 8000,
+      home: testHome,
+      createdAt: "2026-06-24T00:00:00.000Z",
+    });
+    expect(loaded[0].id).toMatch(/^[0-9a-f-]{36}$/);
   });
 });

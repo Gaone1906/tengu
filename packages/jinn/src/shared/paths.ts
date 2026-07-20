@@ -1,8 +1,8 @@
 import path from "node:path";
-import os from "node:os";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolveJinnHome, resolveMcpSessionCapabilityKeyFile } from "./home.js";
+import { resolveInstancesRegistryPath, resolveLegacyInstancesRegistryPath } from "../instances/directory.js";
 
 export { resolveJinnHome } from "./home.js";
 
@@ -66,5 +66,7 @@ export const TEMPLATE_MIGRATIONS_DIR = path.join(TEMPLATE_DIR, "migrations");
 /** Snapshot-first backups for automatic instance-template migrations. */
 export const MIGRATION_SNAPSHOTS_DIR = path.join(JINN_HOME, ".migration-snapshots");
 
-/** Path to the global multi-instance registry. Override only for isolated tests. */
-export const INSTANCES_REGISTRY = process.env.JINN_INSTANCES_REGISTRY || path.join(os.homedir(), ".jinn", "instances.json");
+/** Host-scoped workspace directory, deliberately outside every JINN_HOME. */
+export const INSTANCES_REGISTRY = resolveInstancesRegistryPath();
+/** Pre-v0.28 registry location, read only for one-time automatic import. */
+export const LEGACY_INSTANCES_REGISTRY = resolveLegacyInstancesRegistryPath();

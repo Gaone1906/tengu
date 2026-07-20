@@ -7,6 +7,7 @@ import {
   listPairedDevices as fetchPairedDevices,
   logoutBrowser,
   pairBrowser,
+  takeWorkspacePairingCode,
   type AuthState,
   type PairedDevice,
   type PairingCode,
@@ -54,6 +55,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setError(null)
     try {
       let state = await getAuthState()
+      // Always consume the fragment before rendering. A private loopback-backed
+      // workspace may not need the credential, but it still must not linger in
+      // the address bar after the cross-workspace handoff.
+      const workspacePairingCode = takeWorkspacePairingCode()
+      if (state.authRequired && !state.authenticated) {
+        if (workspacePairingCode) {
+          try {
+            await pairBrowser(workspacePairingCode, "code")
+            state = await getAuthState()
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "The workspace launch code expired. Pair this browser manually.")
+          }
+        }
+      }
       if (shouldBootstrapLocal && state.authRequired && !state.authenticated && state.canBootstrapLocal) {
         if (await bootstrapLocalAuth()) state = await getAuthState()
       }

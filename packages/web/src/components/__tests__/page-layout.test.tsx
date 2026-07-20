@@ -43,6 +43,7 @@ function renderLayout() {
 
 beforeEach(() => {
   localStorage.clear()
+  window.history.replaceState(null, "", "/")
   getOnboarding.mockReset()
   getOnboarding.mockResolvedValue({ onboarded: true, needed: false })
 })
@@ -101,6 +102,17 @@ describe("PageLayout deferred shell widgets", () => {
     await waitFor(() => expect(getOnboarding).toHaveBeenCalledTimes(1))
     const wizard = await screen.findByTestId("onboarding-wizard")
     expect(wizard.getAttribute("data-initial-visible")).toBe("true")
+  })
+
+  it("honors a fresh-workspace onboarding launch even if this origin has stale local state", async () => {
+    localStorage.setItem("jinn-onboarded", "true")
+    window.history.replaceState(null, "", "/?onboarding=1")
+    getOnboarding.mockResolvedValue({ onboarded: false, needed: true })
+
+    renderLayout()
+
+    await waitFor(() => expect(getOnboarding).toHaveBeenCalledTimes(1))
+    expect(await screen.findByTestId("onboarding-wizard")).toBeTruthy()
   })
 
   it("does not import onboarding when the gateway is already onboarded", async () => {

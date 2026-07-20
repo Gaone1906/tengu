@@ -43,6 +43,22 @@ export interface OpenInstanceMigrationResult {
   migrationKey: string
 }
 
+export interface WorkspaceInfo {
+  id: string
+  name: string
+  displayName: string
+  port: number
+  running: boolean
+  current: boolean
+  switchUrl: string
+}
+
+export interface CreateWorkspaceResult {
+  instance: WorkspaceInfo
+  launchUrl: string
+  warning?: string
+}
+
 export interface Employee {
   name: string;
   displayName: string;
@@ -948,6 +964,8 @@ export interface CreateWorkflowTriggerResultWire {
 }
 
 export const api = {
+  listWorkspaces: () => get<WorkspaceInfo[]>('/api/instances'),
+  createWorkspace: (input: { name: string }) => post<CreateWorkspaceResult>('/api/instances', input),
   getInstanceMigration: () => get<InstanceMigration>('/api/instance-migration'),
   openInstanceMigration: (migrationKey: string) =>
     post<OpenInstanceMigrationResult>('/api/instance-migration/open', { migrationKey }),

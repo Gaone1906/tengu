@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { authFetch, createPairingCode, getAuthState, listPairedDevices, logoutBrowser, pairBrowser, unpairDevice } from "../auth"
+import { authFetch, createPairingCode, getAuthState, listPairedDevices, logoutBrowser, pairBrowser, takeWorkspacePairingCode, unpairDevice } from "../auth"
 
 function jsonResponse(status: number, body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -64,6 +64,14 @@ describe("web auth helpers", () => {
 
     expect(res.status).toBe(401)
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it("takes a one-time workspace pairing code from the fragment without disturbing onboarding", () => {
+    window.history.replaceState(null, "", "/?onboarding=1#jinn-pair=ABCD-EFGH-JKLM&view=chat")
+
+    expect(takeWorkspacePairingCode()).toBe("ABCD-EFGH-JKLM")
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe("/?onboarding=1#view=chat")
+    expect(takeWorkspacePairingCode()).toBeUndefined()
   })
 
   it("does not retry remote auth failures without local bootstrap", async () => {

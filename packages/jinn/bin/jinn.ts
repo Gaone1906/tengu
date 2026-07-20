@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import path from "node:path";
 import os from "node:os";
 import pkg from "../package.json" with { type: "json" };
 import { assertNativeRuntime } from "../src/shared/runtime-guard.js";
+import { loadInstances } from "../src/instances/directory.js";
+import { resolveInstanceHome } from "../src/instances/create.js";
 
 const program = new Command();
 program
@@ -21,7 +22,7 @@ program.hook("preAction", (thisCommand) => {
   const opts = thisCommand.opts();
   if (opts.instance) {
     process.env.JINN_INSTANCE = opts.instance;
-    process.env.JINN_HOME = path.join(os.homedir(), `.${opts.instance}`);
+    process.env.JINN_HOME = resolveInstanceHome(opts.instance, loadInstances(), os.homedir());
   }
 });
 

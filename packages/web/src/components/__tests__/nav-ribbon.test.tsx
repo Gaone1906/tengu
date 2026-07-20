@@ -4,6 +4,10 @@ import { MemoryRouter } from "react-router-dom"
 import { NavRibbon } from "../pill-nav"
 import { NAV_ITEMS } from "@/lib/nav"
 
+vi.mock("@/hooks/use-workspaces", () => ({
+  useWorkspaces: () => ({ data: [] }),
+}))
+
 function renderRibbon(props: { listOpen: boolean; path?: string }) {
   return render(
     <MemoryRouter initialEntries={[props.path ?? "/"]}>
@@ -22,7 +26,6 @@ describe("NavRibbon", () => {
     // The global (non-chat) rail has no list to fold → no toggle button.
     expect(screen.queryByLabelText("Show chats")).toBeNull()
     expect(screen.queryByLabelText("Hide chats")).toBeNull()
-    expect(container.querySelector("[aria-expanded]")).toBeNull()
     // The top slot is a brand mark that links home.
     expect(container.querySelector('a[href="/"]')).toBeTruthy()
   })

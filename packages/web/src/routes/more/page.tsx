@@ -1,12 +1,15 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { Link } from "react-router-dom"
-import { ChevronRight, Sun, Moon, Palette, ArrowLeftRight, type LucideIcon } from "lucide-react"
+import { ChevronRight, Sun, Moon, Palette, Plus, type LucideIcon } from "lucide-react"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { useTheme } from "@/routes/providers"
 import { THEMES, type ThemeId } from "@/lib/themes"
 import { NAV_ITEMS, OVERFLOW_ITEMS, type NavItem } from "@/lib/nav"
 import { cn } from "@/lib/utils"
+import { useWorkspaces } from "@/hooks/use-workspaces"
+import { CreateWorkspaceDialog } from "@/components/workspaces/create-workspace-dialog"
+import type { WorkspaceInfo } from "@/lib/api"
 
 // GRS-022 — the mobile "More" overflow. The 4th bottom-tab slot opens this
 // grouped iOS-Settings-style screen holding every destination that isn't a
@@ -125,69 +128,75 @@ function AppearanceRow() {
   )
 }
 
-interface InstanceInfo {
-  name: string
-  port: number
-  running: boolean
-  current: boolean
+function WorkspaceRow({ workspace, first }: { workspace: WorkspaceInfo; first: boolean }) {
+  const content = (
+    <>
+      <span
+        className="size-2 shrink-0 rounded-full"
+        style={{ background: workspace.running ? "var(--system-green)" : "var(--text-quaternary)" }}
+        aria-hidden
+      />
+      <span
+        className={cn(
+          "flex-1 truncate text-[length:var(--text-body)] tracking-[-0.01em]",
+          workspace.current
+            ? "font-[var(--weight-semibold)] text-[var(--text-primary)]"
+            : workspace.running
+              ? "text-[var(--text-secondary)]"
+              : "text-[var(--text-quaternary)]",
+        )}
+      >
+        {workspace.displayName}
+      </span>
+      <span className="text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">
+        {workspace.current ? "Current" : workspace.running ? "Online" : "Offline"}
+      </span>
+      {!workspace.current && workspace.running && (
+        <ChevronRight size={18} className="shrink-0 text-[var(--text-quaternary)]" aria-hidden />
+      )}
+    </>
+  )
+
+  const className = cn(
+    "flex h-[52px] w-full items-center gap-3 px-3.5 text-left transition-colors",
+    !first && "border-t-[0.5px] border-[var(--separator)]",
+    !workspace.current && workspace.running && "active:bg-[var(--fill-secondary)]",
+  )
+  if (!workspace.current && workspace.running) {
+    return <a href={workspace.switchUrl} className={className}>{content}</a>
+  }
+  return <div className={className}>{content}</div>
 }
 
-/** Instance switcher — re-homed from the retired nav footer. Only rendered when
- *  more than one instance is registered, so a single-instance setup stays clean. */
-function InstancesGroup() {
-  const [instances, setInstances] = useState<InstanceInfo[]>([])
-  useEffect(() => {
-    fetch("/api/instances")
-      .then((r) => r.json())
-      .then((d) => setInstances(Array.isArray(d) ? d : []))
-      .catch(() => {})
-  }, [])
-
-  if (instances.length <= 1) return null
+/** The phone keeps its familiar Settings-style list. Creation is a quiet final
+ *  row, while switching uses the server-provided origin instead of localhost. */
+function WorkspacesGroup() {
+  const { data: workspaces = [] } = useWorkspaces()
+  const [creating, setCreating] = useState(false)
 
   return (
     <>
-      <GroupLabel>Instances</GroupLabel>
+      <GroupLabel>Workspaces</GroupLabel>
       <Card>
-        {instances.map((inst, i) => (
-          <button
-            key={inst.port}
-            type="button"
-            onClick={() => {
-              if (!inst.current && inst.running) {
-                window.location.href = `http://localhost:${inst.port}/chat`
-              }
-            }}
-            disabled={inst.current || !inst.running}
-            className={cn(
-              "flex h-[52px] w-full items-center gap-3 px-3.5 text-left transition-colors",
-              i > 0 && "border-t-[0.5px] border-[var(--separator)]",
-              inst.current || !inst.running ? "cursor-default" : "active:bg-[var(--fill-secondary)]",
-            )}
-          >
-            <span
-              className="size-2 shrink-0 rounded-full"
-              style={{ background: inst.running ? "var(--system-green)" : "var(--text-quaternary)" }}
-              aria-hidden
-            />
-            <span
-              className={cn(
-                "flex-1 truncate text-[length:var(--text-body)] tracking-[-0.01em]",
-                inst.current
-                  ? "font-[var(--weight-semibold)] text-[var(--text-primary)]"
-                  : inst.running
-                    ? "text-[var(--text-secondary)]"
-                    : "text-[var(--text-quaternary)]",
-              )}
-            >
-              {inst.name}
-            </span>
-            {inst.current && (
-              <span className="text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">Current</span>
-            )}
-          </button>
+        {workspaces.map((workspace, index) => (
+          <WorkspaceRow key={workspace.id} workspace={workspace} first={index === 0} />
         ))}
+        <button
+          type="button"
+          onClick={() => setCreating(true)}
+          className={cn(
+            "flex h-[52px] w-full items-center gap-3 px-3.5 text-left text-[var(--text-primary)] transition-colors active:bg-[var(--fill-secondary)]",
+            workspaces.length > 0 && "border-t-[0.5px] border-[var(--separator)]",
+          )}
+        >
+          <span className="flex size-[29px] shrink-0 items-center justify-center rounded-[8px] bg-[var(--fill-tertiary)] text-[var(--text-secondary)]">
+            <Plus size={17} aria-hidden />
+          </span>
+          <span className="flex-1 text-[length:var(--text-body)] font-[var(--weight-medium)] tracking-[-0.01em]">Add workspace</span>
+          <ChevronRight size={18} className="shrink-0 text-[var(--text-quaternary)]" aria-hidden />
+        </button>
       </Card>
+      <CreateWorkspaceDialog open={creating} onOpenChange={setCreating} />
     </>
   )
 }
@@ -217,7 +226,7 @@ export default function MorePage() {
             <AppearanceRow />
           </Card>
 
-          <InstancesGroup />
+          <WorkspacesGroup />
         </div>
       </div>
     </PageLayout>

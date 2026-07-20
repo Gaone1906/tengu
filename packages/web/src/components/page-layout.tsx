@@ -65,8 +65,11 @@ function DeferredOnboardingWizard() {
   // Consumes the SAME shared onboarding query as SettingsProvider, so a clean
   // load only fetches /api/onboarding once. The localStorage short-circuit keeps
   // the query disabled for already-onboarded users (no request at all).
-  const onboardedLocally =
-    typeof window !== "undefined" && !!localStorage.getItem("jinn-onboarded")
+  const forceFreshWorkspaceOnboarding = typeof window !== "undefined"
+    && new URLSearchParams(window.location.search).get("onboarding") === "1"
+  const onboardedLocally = typeof window !== "undefined"
+    && !!localStorage.getItem("jinn-onboarded")
+    && !forceFreshWorkspaceOnboarding
   const { data, isError } = useOnboarding({ enabled: !onboardedLocally })
 
   useEffect(() => {

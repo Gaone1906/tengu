@@ -180,6 +180,7 @@ import {
   TMP_DIR,
   FILES_DIR,
   TEMPLATE_MIGRATIONS_DIR,
+  resolveHomeIdentity,
 } from "../shared/paths.js";
 import { saveConfigAtomic } from "../shared/config.js";
 import { logger } from "../shared/logger.js";
@@ -284,7 +285,13 @@ import {
   parseWorkflowMutateUpdateTransport,
   parseWorkflowPlanTransport,
 } from "../workflows/schema.js";
-import { loadInstances } from "../cli/instances.js";
+import { loadInstances, saveInstances, type Instance, type InstanceInput } from "../instances/directory.js";
+import { createInstance, type CreateInstanceInput, type CreateInstanceResult } from "../instances/create.js";
+import {
+  readTailscaleServeMappings,
+  resolveInstanceSwitchUrl,
+  type TailscaleServeMapping,
+} from "../instances/access.js";
 import { isLoopback, validateHookPost } from "./hook-endpoint.js";
 import {
   authenticateGatewayRequest,
@@ -458,6 +465,13 @@ export interface ApiContext {
   migrationPackageVersion?: string;
   /** Test seam; production uses the normal web-session dispatch machinery. */
   dispatchInstanceMigration?: (session: Session, prompt: string) => void;
+  /** Test seams for the host-level workspace directory and creation service. */
+  loadWorkspaceInstances?: () => Instance[];
+  saveWorkspaceInstances?: (instances: InstanceInput[]) => void;
+  checkWorkspaceRunning?: (instance: Instance, current: boolean) => Promise<boolean>;
+  readWorkspaceAccessMappings?: () => Promise<TailscaleServeMapping[]>;
+  createWorkspaceInstance?: (input: CreateInstanceInput) => Promise<CreateInstanceResult>;
+  issueWorkspacePairingCode?: (home: string) => string;
 }
 
 function pendingInstanceMigration(context: ApiContext): PendingInstanceMigration {
@@ -2547,6 +2561,7 @@ function rejectUnverifiedIdentifiedApiCaller(req: HttpRequest, res: ServerRespon
 function operatorOnlyControlPlaneRoute(method: string, pathname: string): string | null {
   if ((method === "PUT" || method === "PATCH") && pathname === "/api/config") return "config update";
   if (method === "POST" && pathname === "/api/onboarding") return "onboarding config update";
+  if (method === "POST" && pathname === "/api/instances") return "workspace creation";
   if (method === "DELETE" && pathname.startsWith("/api/auth/devices/")) return "auth device revoke";
   if (method === "POST" && pathname === "/api/engines/refresh") return "engine registry refresh";
   if (method === "POST" && pathname === "/api/engine-limits/refresh") return "engine limits refresh";
@@ -2958,6 +2973,76 @@ function checkInstanceHealth(port: number): Promise<boolean> {
   });
 }
 
+function requestWorkspaceOrigin(req: HttpRequest): string {
+  for (const candidate of [headerValue(req, "origin"), headerValue(req, "referer")]) {
+    if (!candidate) continue;
+    try {
+      const parsed = new URL(candidate);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") return parsed.origin;
+    } catch { /* try proxy/host headers */ }
+  }
+  const forwardedHost = headerValue(req, "x-forwarded-host")?.split(",")[0]?.trim();
+  const host = forwardedHost || headerValue(req, "host") || "127.0.0.1";
+  const forwardedProto = headerValue(req, "x-forwarded-proto")?.split(",")[0]?.trim();
+  const encrypted = Boolean((req.socket as { encrypted?: boolean } | undefined)?.encrypted);
+  return new URL(`${forwardedProto === "https" || encrypted ? "https" : "http"}://${host}`).origin;
+}
+
+function workspaceDisplayName(instance: Instance): string {
+  if (instance.displayName?.trim()) return instance.displayName.trim();
+  try {
+    const config = yaml.load(fs.readFileSync(path.join(instance.home, "config.yaml"), "utf8")) as {
+      portal?: { companyName?: unknown };
+    };
+    if (typeof config?.portal?.companyName === "string" && config.portal.companyName.trim()) {
+      return config.portal.companyName.trim();
+    }
+  } catch { /* registry name fallback */ }
+  const slug = instance.name.replace(/^jinn-/, "");
+  return slug ? slug.charAt(0).toUpperCase() + slug.slice(1) : "Jinn";
+}
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function defaultWorkspaceRunning(instance: Instance, current: boolean): Promise<boolean> {
+  if (current) return true;
+  try {
+    const info = JSON.parse(fs.readFileSync(path.join(instance.home, "gateway.json"), "utf8")) as { pid?: unknown; port?: unknown };
+    if (info.port !== instance.port || typeof info.pid !== "number" || !processIsAlive(info.pid)) return false;
+  } catch {
+    try {
+      const pid = Number.parseInt(fs.readFileSync(path.join(instance.home, "gateway.pid"), "utf8").trim(), 10);
+      if (!processIsAlive(pid)) return false;
+    } catch {
+      return false;
+    }
+  }
+  return checkInstanceHealth(instance.port);
+}
+
+function workspaceUrl(origin: string): string {
+  return new URL("/", origin).toString();
+}
+
+function workspaceView(instance: Instance, options: {
+  running: boolean;
+  current: boolean;
+  switchUrl: string;
+}) {
+  return {
+    id: instance.id,
+    name: instance.name,
+    displayName: workspaceDisplayName(instance),
+    port: instance.port,
+    running: options.running,
+    current: options.current,
+    switchUrl: workspaceUrl(options.switchUrl),
+  };
+}
+
 export async function handleApiRequest(
   req: HttpRequest,
   res: ServerResponse,
@@ -3280,19 +3365,91 @@ export async function handleApiRequest(
       return json(res, { status: "restarting" });
     }
 
-    // GET /api/instances
+    // GET /api/instances — active/pinned host workspaces with server-resolved
+    // launch URLs. The browser never guesses localhost or proxy/Tailscale ports.
     if (method === "GET" && pathname === "/api/instances") {
-      const instances = loadInstances();
-      const currentPort = context.getConfig().gateway.port || 7777;
-      const results = await Promise.all(
-        instances.map(async (inst) => ({
-          name: inst.name,
-          port: inst.port,
-          running: inst.port === currentPort ? true : await checkInstanceHealth(inst.port),
-          current: inst.port === currentPort,
-        }))
-      );
-      return json(res, results);
+      let instances = (context.loadWorkspaceInstances ?? loadInstances)();
+      const currentHome = resolveHomeIdentity(context.jinnHome ?? JINN_HOME);
+      const currentOrigin = requestWorkspaceOrigin(req);
+      const mappings = await (context.readWorkspaceAccessMappings ?? readTailscaleServeMappings)();
+      const runningCheck = context.checkWorkspaceRunning ?? defaultWorkspaceRunning;
+      const runtime = await Promise.all(instances.map(async (instance) => {
+        const current = resolveHomeIdentity(instance.home) === currentHome;
+        return { instance, current, running: await runningCheck(instance, current) };
+      }));
+
+      // Learn the current browser-facing origin for generic reverse proxies.
+      // Keep separate local/remote observations so localhost never overwrites a
+      // working remote URL, and prefer an exact provider mapping when present.
+      const currentRow = runtime.find((row) => row.current);
+      if (currentRow) {
+        const parsedOrigin = new URL(currentOrigin);
+        const local = isLoopbackHost(parsedOrigin.host);
+        const providerOrigin = mappings.find((mapping) => mapping.internalPort === currentRow.instance.port)?.externalUrl;
+        const observed = providerOrigin ?? currentOrigin;
+        const accessUrls = { ...currentRow.instance.accessUrls, [local ? "local" : "remote"]: observed };
+        if (currentRow.instance.accessUrls?.[local ? "local" : "remote"] !== observed) {
+          instances = instances.map((instance) => instance.id === currentRow.instance.id ? { ...instance, accessUrls } : instance);
+          (context.saveWorkspaceInstances ?? saveInstances)(instances);
+          currentRow.instance = { ...currentRow.instance, accessUrls };
+        }
+      }
+
+      return json(res, runtime
+        .filter(({ instance, current, running }) => current || running || instance.pinned === true)
+        .map(({ instance, current, running }) => workspaceView(instance, {
+          current,
+          running,
+          switchUrl: resolveInstanceSwitchUrl({ instance, currentOrigin, tailscaleMappings: mappings }),
+        })));
+    }
+
+    // POST /api/instances — create + start a clean workspace, clone safe local
+    // access configuration, and return a one-use fragment credential so the
+    // operator lands directly in the new instance's onboarding wizard.
+    if (method === "POST" && pathname === "/api/instances") {
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      const body = parsed.body && typeof parsed.body === "object" ? parsed.body as Record<string, unknown> : {};
+      if (typeof body.name !== "string" || !body.name.trim()) return badRequest(res, "Workspace name is required");
+      if (body.port !== undefined && (typeof body.port !== "number" || !Number.isSafeInteger(body.port))) {
+        return badRequest(res, "port must be an integer");
+      }
+      const currentConfig = context.getConfig();
+      const currentPort = context.runtimePort ?? currentConfig.gateway.port ?? 7777;
+      let created: CreateInstanceResult;
+      try {
+        created = await (context.createWorkspaceInstance ?? createInstance)({
+          name: body.name,
+          port: body.port as number | undefined,
+          currentPort,
+          gatewayHost: currentConfig.gateway.host,
+          authRequired: shouldRequireGatewayAuth(currentConfig),
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const conflict = /already exists|already in use/i.test(message);
+        const invalid = /workspace name|port must/i.test(message);
+        return json(res, { error: message }, conflict ? 409 : invalid ? 400 : 500);
+      }
+      const currentOrigin = requestWorkspaceOrigin(req);
+      const mappings = await (context.readWorkspaceAccessMappings ?? readTailscaleServeMappings)();
+      const switchOrigin = resolveInstanceSwitchUrl({
+        instance: created.instance,
+        currentOrigin,
+        tailscaleMappings: mappings,
+      });
+      const code = context.issueWorkspacePairingCode
+        ? context.issueWorkspacePairingCode(created.instance.home)
+        : issuePairingCode(createFilePairingCodeStore(created.instance.home)).code;
+      const launchUrl = new URL("/", switchOrigin);
+      launchUrl.searchParams.set("onboarding", "1");
+      launchUrl.hash = new URLSearchParams({ "jinn-pair": code }).toString();
+      return json(res, {
+        instance: workspaceView(created.instance, { running: true, current: false, switchUrl: switchOrigin }),
+        launchUrl: launchUrl.toString(),
+        ...(created.warning ? { warning: created.warning } : {}),
+      }, 201);
     }
 
     // GET /api/search/messages — GRS-020a company-reference search: FTS5 over

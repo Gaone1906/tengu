@@ -8,6 +8,7 @@ const logoutBrowser = vi.fn()
 const createPairingCode = vi.fn()
 const listPairedDevices = vi.fn()
 const unpairDevice = vi.fn()
+const takeWorkspacePairingCode = vi.fn()
 
 vi.mock("@/lib/auth", () => ({
   getAuthState: (...args: unknown[]) => getAuthState(...args),
@@ -17,6 +18,7 @@ vi.mock("@/lib/auth", () => ({
   createPairingCode: (...args: unknown[]) => createPairingCode(...args),
   listPairedDevices: (...args: unknown[]) => listPairedDevices(...args),
   unpairDevice: (...args: unknown[]) => unpairDevice(...args),
+  takeWorkspacePairingCode: (...args: unknown[]) => takeWorkspacePairingCode(...args),
 }))
 
 import { AuthGate, AuthProvider, useAuth } from "./auth-provider"
@@ -29,6 +31,7 @@ beforeEach(() => {
   createPairingCode.mockReset()
   listPairedDevices.mockReset()
   unpairDevice.mockReset()
+  takeWorkspacePairingCode.mockReset()
   listPairedDevices.mockResolvedValue([])
   unpairDevice.mockResolvedValue(undefined)
 })
@@ -36,6 +39,7 @@ beforeEach(() => {
 describe("AuthProvider/AuthGate", () => {
   it("renders the app immediately when auth is not required", async () => {
     getAuthState.mockResolvedValue({ authRequired: false, authenticated: true })
+    takeWorkspacePairingCode.mockReturnValueOnce("UNNEEDED-CODE")
 
     render(
       <AuthProvider>
@@ -46,6 +50,8 @@ describe("AuthProvider/AuthGate", () => {
     )
 
     expect(await screen.findByText("Private App")).toBeTruthy()
+    expect(takeWorkspacePairingCode).toHaveBeenCalledTimes(1)
+    expect(pairBrowser).not.toHaveBeenCalled()
   })
 
   it("silently bootstraps a local browser before rendering the app", async () => {
@@ -74,6 +80,35 @@ describe("AuthProvider/AuthGate", () => {
 
     await waitFor(() => expect(bootstrapLocalAuth).toHaveBeenCalledTimes(1))
     expect(await screen.findByText("Private App")).toBeTruthy()
+  })
+
+  it("silently exchanges a one-time workspace pairing fragment before showing remote onboarding", async () => {
+    getAuthState
+      .mockResolvedValueOnce({
+        authRequired: true,
+        authenticated: false,
+        canBootstrapLocal: false,
+        networkExposed: true,
+      })
+      .mockResolvedValueOnce({
+        authRequired: true,
+        authenticated: true,
+        canBootstrapLocal: false,
+        networkExposed: true,
+      })
+    takeWorkspacePairingCode.mockReturnValueOnce("ABCD-EFGH-JKLM")
+    pairBrowser.mockResolvedValue(undefined)
+
+    render(
+      <AuthProvider>
+        <AuthGate>
+          <div>New workspace onboarding</div>
+        </AuthGate>
+      </AuthProvider>,
+    )
+
+    await waitFor(() => expect(pairBrowser).toHaveBeenCalledWith("ABCD-EFGH-JKLM", "code"))
+    expect(await screen.findByText("New workspace onboarding")).toBeTruthy()
   })
 
   it("shows the pairing screen instead of children for unpaired remote browsers", async () => {

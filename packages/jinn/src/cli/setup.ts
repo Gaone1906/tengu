@@ -447,9 +447,11 @@ export async function runSetup(opts?: { force?: boolean }): Promise<void> {
 
   // Derive default COO name from instance name if set, otherwise "Jinn"
   const instanceName = process.env.JINN_INSTANCE;
-  const defaultName = instanceName
-    ? instanceName.charAt(0).toUpperCase() + instanceName.slice(1)
-    : "Jinn";
+  const setupName = process.env.JINN_SETUP_NAME?.trim();
+  const instanceLabel = instanceName?.replace(/^jinn-/, "");
+  const defaultName = setupName || (instanceLabel
+    ? instanceLabel.charAt(0).toUpperCase() + instanceLabel.slice(1)
+    : "Jinn");
 
   let chosenName = defaultName;
   let chosenCompanyName = defaultName;

@@ -1,6 +1,6 @@
-import { useEffect, useState, type ComponentType, type MouseEvent as ReactMouseEvent, type ReactNode } from "react"
+import { useState, type ComponentType, type MouseEvent as ReactMouseEvent, type ReactNode } from "react"
 import { Link, useLocation } from "react-router-dom"
-import { Menu, Sun, Moon, Palette, ArrowLeftRight, PanelLeft } from "lucide-react"
+import { Menu, Sun, Moon, Palette, PanelLeft } from "lucide-react"
 import { useTheme } from "@/routes/providers"
 import { useSettings } from "@/routes/settings-provider"
 import { THEMES, type ThemeId } from "@/lib/themes"
@@ -8,6 +8,7 @@ import { navigationFor } from "@/lib/nav"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { cn } from "@/lib/utils"
 import { useFeatures } from "@/hooks/use-features"
+import { WorkspaceSwitcher } from "@/components/workspaces/workspace-menu"
 
 // ---------------------------------------------------------------------------
 // Frosted pill primitives (mockup _shared.css `.pill` recipe)
@@ -115,26 +116,10 @@ function ThemeIcon({ theme }: { theme: ThemeId }) {
   return <Palette size={18} />
 }
 
-interface InstanceInfo {
-  name: string
-  port: number
-  running: boolean
-  current: boolean
-}
-
-/** Footer for the nav surface — the theme toggle + (when >1) instance switcher.
- *  Re-homed verbatim from the retired rail so nothing is lost. Used by the
- *  popover and the chat in-surface nav swap. */
+/** Footer for compact nav surfaces. Workspace switching lives in the desktop
+ *  ribbon and in the mobile More screen, so this remains a focused theme row. */
 export function NavFooter() {
   const { theme, setTheme } = useTheme()
-  const [instances, setInstances] = useState<InstanceInfo[]>([])
-
-  useEffect(() => {
-    fetch("/api/instances")
-      .then((r) => r.json())
-      .then(setInstances)
-      .catch(() => {})
-  }, [])
 
   function cycleTheme() {
     const ids = THEMES.map((t) => t.id)
@@ -144,39 +129,6 @@ export function NavFooter() {
 
   return (
     <div className="flex flex-col gap-0.5 p-1.5 pt-0">
-      {instances.length > 1 && (
-        <>
-          <div className="flex items-center gap-1.5 px-3 pb-0.5 pt-1.5 text-[length:var(--text-caption2)] font-[var(--weight-bold)] uppercase tracking-[0.4px] text-[var(--text-quaternary)]">
-            <ArrowLeftRight size={11} className="shrink-0" />
-            Instances
-          </div>
-          {instances.map((inst) => (
-            <button
-              key={inst.port}
-              onClick={() => {
-                if (!inst.current && inst.running) {
-                  window.location.href = `http://localhost:${inst.port}/chat`
-                }
-              }}
-              className={cn(
-                "flex h-9 w-full items-center justify-between rounded-[10px] px-3 text-left text-[length:var(--text-footnote)] transition-colors",
-                inst.current
-                  ? "bg-[var(--fill-secondary)] font-[var(--weight-semibold)] text-[var(--text-primary)]"
-                  : inst.running
-                    ? "text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]"
-                    : "cursor-default text-[var(--text-quaternary)]",
-              )}
-            >
-              <span className="truncate">{inst.name}</span>
-              <span
-                className="size-2 shrink-0 rounded-full"
-                style={{ background: inst.running ? "var(--system-green)" : "var(--text-quaternary)" }}
-              />
-            </button>
-          ))}
-          <div className="mx-2 my-1 h-px bg-[var(--separator)]" />
-        </>
-      )}
       <button
         onClick={cycleTheme}
         aria-label={`Theme: ${theme}. Click to cycle.`}
@@ -383,6 +335,10 @@ export function NavRibbon({
             onClick={item.href === "/" ? onChatIconClick : undefined}
           />
         ))}
+
+        {/* One neutral launcher below the settings/nav stack. The menu carries
+            full names and status; the rail stays calm and company-agnostic. */}
+        <WorkspaceSwitcher />
 
         {/* Footer — theme toggle, pinned to the bottom. */}
         <div className="mt-auto pt-1">
