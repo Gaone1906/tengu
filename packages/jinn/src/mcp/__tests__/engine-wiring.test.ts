@@ -25,6 +25,7 @@ import path from "node:path";
 import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile, MCP_CAPABLE_ENGINES } from "../resolver.js";
 import { setJinnAttachGate } from "../attachment.js";
 import { JINN_SESSION_CAPABILITY_ENV, attachSessionIdentity } from "../identity.js";
+import { resolveMcpServerBootstrap } from "../server-bootstrap.js";
 import { codexMcpConfigArgs, prepareCodexSessionHome } from "../../engines/codex.js";
 import { prepareGrokProjectMcpConfig, cleanupGrokProjectMcpConfig, grokJinnSessionEnv, JINN_GROK_MCP_MARKER } from "../../engines/grok-mcp.js";
 import { buildAcpMcpServers } from "../../engines/hermes-mcp.js";
@@ -143,6 +144,13 @@ describe("per-engine jinn-server wiring (GRS-018 seam for GRS-017 default-on)", 
         const onDisk = JSON.parse(fs.readFileSync(p, "utf-8"));
         expect(onDisk.mcpServers.jinn.env.JINN_SESSION_ID).toBe(SID);
         expect(onDisk.mcpServers.jinn.env.JINN_SESSION_CAPABILITY).toBe(capability);
+        const bootstrap = resolveMcpServerBootstrap(onDisk.mcpServers.jinn.args);
+        expect(bootstrap).toMatchObject({
+          callerSessionId: SID,
+          sessionCapability: capability,
+          gatewayUrl: GATEWAY_URL,
+          jinnHome: expect.any(String),
+        });
       } finally {
         cleanupMcpConfigFile("wiring-claude-sid");
       }
