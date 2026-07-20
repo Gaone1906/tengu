@@ -3,16 +3,14 @@ import { assertBoundCaller, gatewayGet, JinnMcpToolError, type JinnMcpTool } fro
 /**
  * GRS-020b — the knowledge tool group of the `jinn` MCP server: agents search
  * the company's institutional knowledge (`~/.jinn/knowledge/*.md` +
- * `~/.jinn/docs/*.md`) and read ONE hit — replacing the ~100-file knowledge
+ * `~/.jinn/docs/*.md`) and read ONE instance file — replacing the ~100-file knowledge
  * index pasted into every MCP-attached bootstrap (the conditional diet in
  * sessions/context.ts).
  *
  * Domain rules this module owns:
- *   - SCOPED-ROOT INVARIANT (design §3, enforced in knowledge/store.ts behind
- *     the routes): only the two allowlisted roots are searchable/readable —
- *     paths are shape-gated AND realpath-contained, so `..`, absolute paths,
- *     and symlink escapes are refused by the substrate. The tools never build
- *     paths themselves; they pass the relative path a search hit returned.
+ *   - INSTANCE-ROOT INVARIANT (enforced in knowledge/store.ts behind the
+ *     routes): reads accept any relative instance file, while realpath
+ *     containment rejects `..`, absolute paths, and symlink escapes.
  *   - CONTEXT-BOMB GUARDS: search returns ≤20 {path,title,snippet,matchCount}
  *     hits (snippets ~12 words, never bodies); read returns ONE file capped at
  *     ~20 KB with the intentional-cap marker.
@@ -98,7 +96,7 @@ export function buildKnowledgeTools(): JinnMcpTool[] {
 
   const readKnowledge: JinnMcpTool = {
     name: "read_knowledge",
-    description: "Read one knowledge/docs file by relative path; long files are capped.",
+    description: "Read one instance file by relative path; long files are capped.",
     inputSchema: {
       type: "object",
       properties: {
@@ -110,24 +108,19 @@ export function buildKnowledgeTools(): JinnMcpTool[] {
       assertBoundCaller(ctx);
       if (typeof args.path === "string" && hasControlBytes(args.path)) {
         throw new JinnMcpToolError(
-          "path contains control bytes — pass the relative path exactly as a search_knowledge hit returned it",
+          "path contains control bytes — pass the instance-relative path exactly",
         );
       }
       const relPath = requireString(args, "path", KNOWLEDGE_PATH_CHAR_CAP);
-      if (!/^(knowledge|docs)\//.test(relPath)) {
-        throw new JinnMcpToolError(
-          `path must start with "knowledge/" or "docs/" (the two readable roots) — got ${JSON.stringify(relPath.slice(0, 120))}. Get paths from search_knowledge.`,
-        );
-      }
       const { status, body } = await gatewayGet(ctx, `/api/knowledge/read?path=${encodeURIComponent(relPath)}`);
-      if (status >= 400) throw gatewayFailure(`reading knowledge file "${relPath}"`, status, body);
+      if (status >= 400) throw gatewayFailure(`reading instance file "${relPath}"`, status, body);
       const rec = (body ?? {}) as { path?: string; title?: string; content?: string; truncated?: boolean; totalChars?: number };
       return {
         path: rec.path ?? relPath,
         title: rec.title ?? null,
         truncated: rec.truncated === true,
         content: typeof rec.content === "string" ? rec.content : "",
-        hint: "Cite path. Next: search_knowledge.",
+        hint: "Cite path when useful.",
       };
     },
   };

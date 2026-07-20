@@ -11,17 +11,18 @@ import {
 } from "../store.js";
 
 /**
- * GRS-020b — the scoped knowledge store: the FIRST filesystem-reading primitive
- * on the MCP belt, so the containment battery here is the slice's security
+ * GRS-020b — the knowledge store: the FIRST filesystem-reading primitive on
+ * the MCP belt, so the containment battery here is the slice's security
  * acceptance. Two tiers:
  *   1. SEARCH — deterministic token-AND matching over the two allowlisted
  *      roots, hardened query, snippets only (never bodies), caps.
- *   2. READ CONTAINMENT — every escape shape rejected: `..`, absolute paths,
- *      wrong roots, wrong extensions, NUL bytes, nested paths, and (the
- *      realpath case) a symlink INSIDE knowledge/ pointing OUTSIDE it.
+ *   2. READ CONTAINMENT — any regular file inside the instance is readable,
+ *      while `..`, absolute paths, NUL bytes, and symlinks outside the instance
+ *      remain rejected.
  */
 
 let home: string;
+let outsideFile: string;
 
 /** Seed a file under the temp home, creating parent dirs. */
 function seed(rel: string, content: string): string {
@@ -41,8 +42,11 @@ beforeAll(() => {
   seed("docs/architecture.md", "# Architecture\n\nThe gateway daemon spawns engines; the axolotl tier is billed there.\n");
   seed("docs/notes.txt", "axolotl axolotl axolotl — txt files are NOT searchable");
   seed("secrets/api-keys.json", JSON.stringify({ secret: "TOPSECRET-zq9" }));
-  // The realpath escape: a symlink inside an allowlisted root pointing outside it.
-  fs.symlinkSync(path.join(home, "secrets", "api-keys.json"), path.join(home, "knowledge", "escape.md"));
+  seed("config.yaml", "gateway:\n  port: 7777\n");
+  seed("knowledge/competitor-scout-2026-07/steal-these-playbook.md", "# Nested playbook\n\nShip the useful pattern.\n");
+  outsideFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "jinn-knowledge-outside-")), "outside.md");
+  fs.writeFileSync(outsideFile, "TOPSECRET-outside");
+  fs.symlinkSync(outsideFile, path.join(home, "knowledge", "escape.md"));
   // A benign symlink that stays inside the root.
   fs.symlinkSync(path.join(home, "knowledge", "pricing-strategy.md"), path.join(home, "knowledge", "alias.md"));
 });
@@ -131,6 +135,22 @@ describe("readKnowledgeFile — happy path", () => {
     if (r.ok) expect(r.content).toContain("gateway daemon");
   });
 
+  it("reads nested and non-Markdown files anywhere inside the instance", () => {
+    const nested = readKnowledgeFile("knowledge/competitor-scout-2026-07/steal-these-playbook.md", home);
+    expect(nested.ok).toBe(true);
+    if (nested.ok) expect(nested.content).toContain("useful pattern");
+
+    const config = readKnowledgeFile("config.yaml", home);
+    expect(config.ok).toBe(true);
+    if (config.ok) expect(config.content).toContain("port: 7777");
+  });
+
+  it("reads files in other instance directories", () => {
+    const r = readKnowledgeFile("secrets/api-keys.json", home);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.content).toContain("TOPSECRET-zq9");
+  });
+
   it("caps content at KNOWLEDGE_FILE_CHAR_CAP with the intentional-cap marker", () => {
     seed("knowledge/huge.md", `# Huge\n\n${"x".repeat(KNOWLEDGE_FILE_CHAR_CAP + 5_000)}`);
     const r = readKnowledgeFile("knowledge/huge.md", home);
@@ -170,21 +190,9 @@ describe("readKnowledgeFile — the containment battery (every escape rejected)"
     rejected(path.join(home, "knowledge", "pricing-strategy.md"), "invalid-path"); // even inside — only relative paths
   });
 
-  it("rejects roots that are not allowlisted", () => {
-    rejected("secrets/api-keys.json", "invalid-path");
-    rejected("config.yaml", "invalid-path");
-    rejected("sessions/registry.db", "invalid-path");
-    rejected("knowledgex/foo.md", "invalid-path");
-  });
-
-  it("rejects nested paths, backslashes, and non-.md extensions", () => {
-    rejected("knowledge/sub/foo.md", "invalid-path");
+  it("rejects backslashes and empty path segments", () => {
     rejected("knowledge\\..\\secrets\\api-keys.json", "invalid-path");
-    rejected("docs/notes.txt", "invalid-path");
-    rejected("knowledge/foo.MD", "invalid-path");
-    rejected("knowledge/.md", "invalid-path");
     rejected("knowledge/", "invalid-path");
-    rejected("knowledge", "invalid-path");
   });
 
   it("rejects NUL and control bytes outright", () => {
@@ -198,12 +206,11 @@ describe("readKnowledgeFile — the containment battery (every escape rejected)"
     rejected("   ", "invalid-path");
   });
 
-  it("REJECTS a symlink inside knowledge/ that resolves OUTSIDE it (realpath containment)", () => {
+  it("rejects a symlink inside the instance that resolves outside it", () => {
     const r = readKnowledgeFile("knowledge/escape.md", home);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe("forbidden");
-    // And the secret content is definitely not readable through any accepted shape.
-    expect(JSON.stringify(r)).not.toContain("TOPSECRET-zq9");
+    expect(JSON.stringify(r)).not.toContain("TOPSECRET-outside");
   });
 
   it("404s a missing file (valid shape, nothing there)", () => {

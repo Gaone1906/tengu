@@ -91,7 +91,12 @@ beforeAll(async () => {
   seed("knowledge/pricing-strategy.md", "# Pricing strategy\n\nThe axolotl tier was approved at 19 euro.\n");
   seed("docs/architecture.md", "# Architecture\n\nEngines are spawned by the gateway; axolotl billing lives here.\n");
   seed("secrets/api-keys.json", JSON.stringify({ secret: "TOPSECRET-route" }));
-  fs.symlinkSync(path.join(home, "secrets", "api-keys.json"), path.join(home, "knowledge", "escape.md"));
+  seed("config.yaml", "gateway:\n  port: 7777\n");
+  seed("knowledge/nested/playbook.md", "# Nested\n\nA nested playbook.\n");
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-knowledge-route-outside-"));
+  const outsideFile = path.join(outsideDir, "outside.md");
+  fs.writeFileSync(outsideFile, "TOPSECRET-outside-route");
+  fs.symlinkSync(outsideFile, path.join(home, "knowledge", "escape.md"));
   api = await import("../api.js");
 });
 
@@ -132,14 +137,21 @@ describe("GET /api/knowledge/read", () => {
     expect(body.truncated).toBe(false);
   });
 
-  it("400s the shape-gate rejections (traversal, absolute, wrong root, wrong ext, nested, NUL)", async () => {
+  it("reads nested and non-Markdown files anywhere inside the instance", async () => {
+    const nested = await get("/api/knowledge/read?path=knowledge%2Fnested%2Fplaybook.md");
+    expect(nested.status).toBe(200);
+    expect(nested.body.content).toContain("nested playbook");
+
+    const config = await get("/api/knowledge/read?path=config.yaml");
+    expect(config.status).toBe(200);
+    expect(config.body.content).toContain("port: 7777");
+  });
+
+  it("400s malformed paths (traversal, absolute, NUL)", async () => {
     for (const p of [
       "../../etc/passwd",
       "/etc/passwd",
       "knowledge/../secrets/api-keys.json",
-      "secrets/api-keys.json",
-      "docs/notes.txt",
-      "knowledge/sub/foo.md",
       "knowledge/foo%00bar.md",
     ]) {
       const { status, body } = await get(`/api/knowledge/read?path=${encodeURIComponent(p).replace(/%2500/g, "%00")}`);
