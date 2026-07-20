@@ -1,6 +1,6 @@
 
 import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useRef, useMemo } from 'react'
-import { api } from '@/lib/api'
+import { api, type DelegatedActivity } from '@/lib/api'
 import { useOrg } from '@/hooks/use-employees'
 import { ChatMessages } from '@/components/chat/chat-messages'
 import type { CommsPeekData } from '@/components/chat/thread-peek'
@@ -97,6 +97,9 @@ interface ChatPaneProps {
   onPeek?: (peek: CommsPeekData) => void
   /** First meaningful destination paint; used to release a preview handoff. */
   onContentReady?: (sessionId: string) => void
+  /** Live list-derived descendant activity. `null` is authoritative rest;
+   *  `undefined` falls back to the session detail payload. */
+  delegatedActivity?: DelegatedActivity | null
 }
 
 export function ChatPane({
@@ -119,6 +122,7 @@ export function ChatPane({
   initialEmployee,
   onPeek,
   onContentReady,
+  delegatedActivity,
 }: ChatPaneProps) {
   // If this pane was opened from the onboarding wizard, the wizard stored the
   // seed user message in sessionStorage so we can display it immediately
@@ -210,6 +214,10 @@ export function ChatPane({
         effortLevel: emp.effortLevel,
       }))
     : []
+  const employeeDisplayNames = useMemo(
+    () => Object.fromEntries((orgData?.employees ?? []).map((employee) => [employee.name, employee.displayName])),
+    [orgData],
+  )
   // Reset the employee picker when there is no session (the live read pipeline
   // clears its own state on a null sessionId; this is the pane-local part).
   // Falls back to initialEmployee so a preselected contact survives the reset.
@@ -601,7 +609,15 @@ export function ChatPane({
           // (input stays live); hidden while a foreground turn is streaming
           // (the "Thinking" indicator owns that) and in the CLI view.
           !(viewMode === 'cli' && sessionId) && !loading ? (
-            <BackgroundActivityStatus activity={backgroundActivity} />
+            <BackgroundActivityStatus
+              activity={backgroundActivity}
+              delegatedActivity={
+                delegatedActivity === undefined
+                  ? (currentSession?.delegatedActivity as DelegatedActivity | null | undefined) ?? null
+                  : delegatedActivity
+              }
+              employeeDisplayNames={employeeDisplayNames}
+            />
           ) : undefined
         }
         selectorSlot={

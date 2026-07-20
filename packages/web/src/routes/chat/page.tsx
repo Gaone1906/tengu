@@ -6,6 +6,7 @@ import {
   parseSelectedSession,
   parseThreadOrigin,
   resolveDeepLink,
+  selectedDelegatedActivityFromList,
   sessionPath,
   threadOriginLabel,
   type ThreadOrigin,
@@ -228,6 +229,10 @@ function ChatPage() {
   const unarchiveSessionMutation = useUnarchiveSession()
   const duplicateSessionMutation = useDuplicateSession()
   const sessionsQuery = useSessions()
+  const selectedDelegatedActivity = useMemo(
+    () => selectedDelegatedActivityFromList(sessionsQuery.data, selectedId),
+    [selectedId, sessionsQuery.data],
+  )
   const qc = useQueryClient()
   const [showShortcutOverlay, setShowShortcutOverlay] = useState(false)
   const sidebarOrderRef = useRef<SidebarOrder>({ sessionIds: [], employeeNames: [], employeeSessionMap: {} })
@@ -1172,6 +1177,7 @@ function ChatPage() {
                 }
                 onPeek={requestThreadPreview}
                 onContentReady={handlePaneContentReady}
+                delegatedActivity={selectedDelegatedActivity}
               />
             )}
           </div>

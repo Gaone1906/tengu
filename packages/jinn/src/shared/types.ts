@@ -383,9 +383,19 @@ export interface Session {
    *  work — the CLI still has upstream API requests in flight (background
    *  subagents/tasks) after the turn settled. Null when none. */
   backgroundActivity?: { activeStreams: number; lastActivityAt: string } | null;
+  /** Serialize-time only (derived, never persisted): active employee sessions
+   *  anywhere below this session in the parent/child tree. */
+  delegatedActivity?: DelegatedActivity | null;
   createdAt: string;
   lastActivity: string;
   lastError: string | null;
+}
+
+export interface DelegatedActivity {
+  /** Number of active descendant sessions (employees may own more than one). */
+  activeSessions: number;
+  /** Stable, de-duplicated employee slugs represented by those sessions. */
+  employees: string[];
 }
 
 export interface SessionDeliveryIdentity {

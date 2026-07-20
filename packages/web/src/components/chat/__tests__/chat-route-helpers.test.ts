@@ -10,6 +10,7 @@ import {
   sessionPath,
   parseThreadOrigin,
   threadOriginLabel,
+  selectedDelegatedActivityFromList,
 } from '../chat-route-helpers'
 
 describe('resolveDeepLink', () => {
@@ -44,6 +45,22 @@ describe('resolveDeepLink', () => {
 
   it('falls back to employee when session is empty but employee is set', () => {
     expect(link('session=&employee=support-lead')).toEqual({ kind: 'employee', name: 'support-lead' })
+  })
+})
+
+describe('selectedDelegatedActivityFromList', () => {
+  const activity = { activeSessions: 1, employees: ['platform-lead'] }
+
+  it('returns undefined when an older deep-linked session is absent from the bounded list', () => {
+    expect(selectedDelegatedActivityFromList([{ id: 'recent', delegatedActivity: null }], 'older')).toBeUndefined()
+  })
+
+  it('returns authoritative rest when the selected list row has no descendant activity', () => {
+    expect(selectedDelegatedActivityFromList([{ id: 'selected', delegatedActivity: null }], 'selected')).toBeNull()
+  })
+
+  it('returns the selected row activity when present', () => {
+    expect(selectedDelegatedActivityFromList([{ id: 'selected', delegatedActivity: activity }], 'selected')).toEqual(activity)
   })
 })
 

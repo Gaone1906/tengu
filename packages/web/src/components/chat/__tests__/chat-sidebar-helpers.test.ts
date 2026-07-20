@@ -67,6 +67,26 @@ describe('chat sidebar background activity', () => {
       }),
     ).toBe(true)
   })
+
+  it('keeps an idle parent visible while a descendant employee is active', () => {
+    expect(
+      hasBackgroundActivity({
+        status: 'idle',
+        backgroundActivity: null,
+        delegatedActivity: { activeSessions: 2, employees: ['researcher', 'writer'] },
+      }),
+    ).toBe(true)
+  })
+
+  it('lets foreground running state take precedence over delegated activity', () => {
+    expect(
+      hasBackgroundActivity({
+        status: 'running',
+        backgroundActivity: null,
+        delegatedActivity: { activeSessions: 1, employees: ['researcher'] },
+      }),
+    ).toBe(false)
+  })
 })
 
 describe('chat sidebar recent-error dot gating', () => {

@@ -46,6 +46,43 @@ describe('company + session:created invalidation', () => {
     expect(calledWithKey(invalidate, ['work-item-sessions'])).toBe(true)
   })
 
+  it('refreshes parent summaries when a delegated child changes runtime activity', async () => {
+    const { client, invalidate } = setup()
+    client.setQueryData(queryKeys.sessions.all, {
+      sessions: [
+        { id: 'parent', parentSessionId: null },
+        { id: 'child', parentSessionId: 'parent' },
+      ],
+      counts: { __direct__: 1, developer: 1 },
+      perGroup: 50,
+    })
+
+    act(() => listener?.('session:background', {
+      sessionId: 'child',
+      backgroundActivity: { activeStreams: 1, lastActivityAt: new Date().toISOString() },
+    }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+
+    expect(calledWithKey(invalidate, queryKeys.sessions.all)).toBe(true)
+  })
+
+  it('keeps top-level runtime activity on the surgical cache-patch path', async () => {
+    const { client, invalidate } = setup()
+    client.setQueryData(queryKeys.sessions.all, {
+      sessions: [{ id: 'parent', parentSessionId: null }],
+      counts: { __direct__: 1 },
+      perGroup: 50,
+    })
+
+    act(() => listener?.('session:background', {
+      sessionId: 'parent',
+      backgroundActivity: { activeStreams: 1, lastActivityAt: new Date().toISOString() },
+    }))
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+
+    expect(calledWithKey(invalidate, queryKeys.sessions.all)).toBe(false)
+  })
+
   it('patches a Todo cache by newer version and never regresses to an older one', async () => {
     const { client } = setup()
     client.setQueryData(['work-item', 'wi_release'], { id: 'wi_release', version: 5, status: 'executing' })

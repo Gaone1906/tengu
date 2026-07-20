@@ -61,6 +61,45 @@ describe('BackgroundActivityStatus', () => {
     expect(short.textContent).toBe('1 agent')
   })
 
+  it('names the one delegated employee still working', () => {
+    render(
+      <BackgroundActivityStatus
+        activity={null}
+        delegatedActivity={{ activeSessions: 1, employees: ['platform-lead'] }}
+        employeeDisplayNames={{ 'platform-lead': 'Platform Lead' }}
+      />,
+    )
+    const status = screen.getByRole('status')
+    const labels = Array.from(status.children).slice(-2)
+    expect(labels[0]?.textContent).toBe('Platform Lead working')
+    expect(labels[1]?.textContent).toBe('Working · Platform Lead')
+    expect(status.getAttribute('title')).toBe('1 delegated task still running')
+  })
+
+  it('summarizes multiple delegated employees with stable numerals', () => {
+    render(
+      <BackgroundActivityStatus
+        activity={null}
+        delegatedActivity={{ activeSessions: 3, employees: ['researcher', 'writer'] }}
+        employeeDisplayNames={{ researcher: 'Researcher', writer: 'Writer' }}
+      />,
+    )
+    const status = screen.getByRole('status')
+    expect(status.textContent).toContain('2 employees working')
+    expect(status.querySelector('[data-activity-count]')?.className).toContain('tabular-nums')
+    expect(status.getAttribute('title')).toBe('3 delegated tasks still running')
+  })
+
+  it('uses a generic delegated label when no employee identity is available', () => {
+    render(
+      <BackgroundActivityStatus
+        activity={null}
+        delegatedActivity={{ activeSessions: 1, employees: [] }}
+      />,
+    )
+    expect(screen.getByRole('status').textContent).toContain('Delegated work in progress')
+  })
+
   it('renders nothing when idle with no background work', () => {
     render(<BackgroundActivityStatus activity={null} />)
     expect(screen.queryByRole('status')).toBeNull()

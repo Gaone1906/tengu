@@ -44,6 +44,30 @@ export function parseSelectedSession(search: string | URLSearchParams): string |
   return sp.get('session')?.trim() || null
 }
 
+type SessionDelegatedActivity = {
+  activeSessions: number
+  employees: string[]
+}
+
+/** Resolve the list's live descendant summary without masking detail data for
+ * an older deep-linked session that is outside the bounded sidebar payload. */
+export function selectedDelegatedActivityFromList(
+  sessions: readonly { id?: unknown; delegatedActivity?: unknown }[] | undefined,
+  selectedId: string | null,
+): SessionDelegatedActivity | null | undefined {
+  if (!selectedId || !sessions) return undefined
+  const selected = sessions.find((session) => session.id === selectedId)
+  if (!selected) return undefined
+  const activity = selected.delegatedActivity
+  if (!activity || typeof activity !== 'object' || Array.isArray(activity)) return null
+  const candidate = activity as { activeSessions?: unknown; employees?: unknown }
+  if (typeof candidate.activeSessions !== 'number' || !Array.isArray(candidate.employees)) return null
+  return {
+    activeSessions: candidate.activeSessions,
+    employees: candidate.employees.filter((employee): employee is string => typeof employee === 'string'),
+  }
+}
+
 /** Canonical path for a selected session (chat lives at `/`). */
 export function sessionPath(id: string): string {
   return `/?session=${encodeURIComponent(id)}`

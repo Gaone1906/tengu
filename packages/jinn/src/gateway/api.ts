@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
-import type { ChatBlock, ChatBlockEnvelope, CronJob, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
+import type { ChatBlock, ChatBlockEnvelope, CronJob, DelegatedActivity, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
 import { isInterruptibleEngine, STRUCTURED_MESSAGE_BODY_MAX_CHARS } from "../shared/types.js";
 import { compactEmployeeRole } from "../shared/employee-role.js";
 export { compactEmployeeRole } from "../shared/employee-role.js";
@@ -23,6 +23,7 @@ import {
   engineUnavailableMessage,
 } from "../shared/models.js";
 import { validateNewSessionSelection, validateSessionPatch } from "../sessions/session-patch.js";
+import { buildDelegatedActivityIndex } from "../sessions/delegated-activity.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { MAX_WORKFLOW_DEFINITION_BYTES } from "../workflows/definition.js";
 import {
@@ -2891,7 +2892,25 @@ function nearestEmployee(name: string, names: string[]): string | undefined {
     .sort((a, b) => a.d - b.d || a.n.localeCompare(b.n))[0]?.n;
 }
 
-export function serializeSession(session: Session, context: ApiContext): Session {
+export function buildSessionDelegatedActivityIndex(
+  sessions: readonly Session[],
+  context: ApiContext,
+): Map<string, DelegatedActivity> {
+  const activeSessionIds = new Set<string>();
+  for (const session of sessions) {
+    const transport = getSessionTransportState(session, context);
+    if (transport === "running" || transport === "queued" || session.status === "waiting") {
+      activeSessionIds.add(session.id);
+    }
+  }
+  return buildDelegatedActivityIndex(sessions, activeSessionIds);
+}
+
+export function serializeSession(
+  session: Session,
+  context: ApiContext,
+  delegatedActivityIndex?: ReadonlyMap<string, DelegatedActivity>,
+): Session {
   const queue = context.sessionManager.getQueue();
   const queueDepth = queue.getPendingCount(session.sessionKey || session.sourceRef);
   const transportState = getSessionTransportState(session, context);
@@ -2905,7 +2924,18 @@ export function serializeSession(session: Session, context: ApiContext): Session
     backgroundActivity: bg && !bgIsStale
       ? { activeStreams: bg.activeStreams, lastActivityAt: new Date(bg.lastActivityAt).toISOString() }
       : null,
+    delegatedActivity: delegatedActivityIndex?.get(session.id) ?? null,
   };
+}
+
+function serializeSessionList(sessions: readonly Session[], context: ApiContext): Session[] {
+  const delegatedActivityIndex = buildSessionDelegatedActivityIndex(listSessions(), context);
+  return sessions.map((session) => serializeSession(session, context, delegatedActivityIndex));
+}
+
+function serializeSessionResponse(session: Session, context: ApiContext): Session {
+  const delegatedActivityIndex = buildSessionDelegatedActivityIndex(listSessions(), context);
+  return serializeSession(session, context, delegatedActivityIndex);
 }
 
 function withTransportMeta(session: Session, updates: JsonObject): JsonObject {
@@ -3751,7 +3781,7 @@ export async function handleApiRequest(
       const query = url.searchParams.get("q");
       if (query && query.trim()) {
         const matches = searchSessions(query.trim());
-        return json(res, matches.map((session) => serializeSession(session, context)));
+        return json(res, serializeSessionList(matches, context));
       }
       const group = url.searchParams.get("group");
       const rawLimit = url.searchParams.get("limit");
@@ -3762,15 +3792,15 @@ export async function handleApiRequest(
         const limit = Math.max(1, parseInt(rawLimit || "50", 10) || 50);
         const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10) || 0);
         const page = listSessionsForGroup(group, limit, offset, portalSlug);
-        return json(res, page.map((session) => serializeSession(session, context)));
+        return json(res, serializeSessionList(page, context));
       }
       if (rawLimit === "0") {
         const all = listSessions();
-        return json(res, all.map((session) => serializeSession(session, context)));
+        return json(res, serializeSessionList(all, context));
       }
       const sessions = listRecentPerGroup(SESSION_LIST_PER_GROUP, portalSlug);
       return json(res, {
-        sessions: sessions.map((session) => serializeSession(session, context)),
+        sessions: serializeSessionList(sessions, context),
         counts: getSessionGroupCounts(portalSlug),
         perGroup: SESSION_LIST_PER_GROUP,
       });
@@ -3780,7 +3810,7 @@ export async function handleApiRequest(
     if (method === "GET" && pathname === "/api/sessions/interrupted") {
       const { getInterruptedSessions } = await import("../sessions/registry.js");
       const interrupted = getInterruptedSessions();
-      return json(res, interrupted.map((session) => serializeSession(session, context)));
+      return json(res, serializeSessionList(interrupted, context));
     }
 
     // GET /api/sessions/:id/messages?before=<messageId>&limit=N
@@ -3827,7 +3857,7 @@ export async function handleApiRequest(
       }
 
       return json(res, {
-        ...serializeSession(session, context),
+        ...serializeSessionResponse(session, context),
         ...(includeMessages ? { messages } : {}),
         ...(page ? { messagesPage: { hasOlder: page.hasOlder } } : {}),
       });
@@ -3880,7 +3910,7 @@ export async function handleApiRequest(
           switched = updateSession(params.id, { title: updates.title }) ?? switched;
         }
         context.emit("session:updated", { sessionId: params.id });
-        return json(res, serializeSession(switched, context));
+        return json(res, serializeSessionResponse(switched, context));
       }
 
       // Mid-chat model / effort switch (applies from the next turn). Validated
@@ -3901,7 +3931,7 @@ export async function handleApiRequest(
       const updated = updateSession(params.id, updates);
       if (!updated) return notFound(res);
       context.emit("session:updated", { sessionId: params.id });
-      return json(res, serializeSession(updated, context));
+      return json(res, serializeSessionResponse(updated, context));
     }
 
     // DELETE /api/sessions/:id
@@ -3952,7 +3982,7 @@ export async function handleApiRequest(
       const archived = archiveSession(params.id);
       if (!archived) return notFound(res);
       context.emit("session:updated", { sessionId: params.id });
-      return json(res, serializeSession(archived, context));
+      return json(res, serializeSessionResponse(archived, context));
     }
 
     // POST /api/sessions/:id/unarchive — restore a retained chat to normal
@@ -3965,7 +3995,7 @@ export async function handleApiRequest(
       const restored = unarchiveSession(params.id);
       if (!restored) return notFound(res);
       context.emit("session:updated", { sessionId: params.id });
-      return json(res, serializeSession(restored, context));
+      return json(res, serializeSessionResponse(restored, context));
     }
 
     // POST /api/sessions/:id/stop
@@ -4074,7 +4104,7 @@ export async function handleApiRequest(
         const result = getSession(newSession.id)!;
         logger.info(`Session duplicated: ${params.id} → ${newSession.id} (engine: ${forkResult.engineSessionId}, ${messageCount} messages)`);
         context.emit("session:created", { sessionId: newSession.id });
-        return json(res, serializeSession(result, context));
+        return json(res, serializeSessionResponse(result, context));
       } catch (err: any) {
         // Clean up orphaned session if the engine fork failed after DB insert
         if (newSessionId) {
@@ -4205,7 +4235,7 @@ export async function handleApiRequest(
       const session = getSession(params.id);
       if (session && rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const children = listChildSessions(params.id);
-      return json(res, children.map((child) => serializeSession(child, context)));
+      return json(res, serializeSessionList(children, context));
     }
 
     // GET /api/sessions/:id/context?message=<id>&radius=<n> — GRS-020a: the
@@ -4610,7 +4640,7 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       if (!requireTodoRouteId(res, params.id)) return;
       const linked = listSessionsByWorkItem(params.id);
-      return json(res, linked.map((s) => serializeSession(s, context)));
+      return json(res, serializeSessionList(linked, context));
     }
 
     // POST /api/work-items/:id/approval/request — agent-legal request surface.
@@ -6161,7 +6191,7 @@ export async function handleApiRequest(
           status: "error",
           lastError: `Engine "${engineName}" not available`,
         });
-        return json(res, { ...serializeSession({ ...session, status: "error", lastError: `Engine "${engineName}" not available` }, context) }, 201);
+        return json(res, { ...serializeSessionResponse({ ...session, status: "error", lastError: `Engine "${engineName}" not available` }, context) }, 201);
       }
 
       // Set status to "running" synchronously BEFORE returning the response.
@@ -6189,7 +6219,7 @@ export async function handleApiRequest(
       );
       dispatchWebSessionRun(session, newSessionEnginePrompt, engine, config, context, { queueItemId, attachments: attachmentPaths.length > 0 ? attachmentPaths : undefined });
 
-      return json(res, serializeSession(session, context), 201);
+      return json(res, serializeSessionResponse(session, context), 201);
     }
 
     // POST /api/sessions/:id/message

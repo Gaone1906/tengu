@@ -265,6 +265,13 @@ export interface BackgroundActivity {
   lastActivityAt: string
 }
 
+/** Active employee sessions anywhere below a parent session. Derived by the
+ * gateway at read time; it is never part of the durable session status. */
+export interface DelegatedActivity {
+  activeSessions: number
+  employees: string[]
+}
+
 export interface SessionsResponse {
   /** Top-N most-recent sessions per group (employee / direct / cron). */
   sessions: Record<string, unknown>[]

@@ -5,7 +5,7 @@ import { useGateway } from '@/hooks/use-gateway'
 import { queryKeys } from '@/lib/query-keys'
 import { patchSessionBackgroundActivity, removeFromSessionsCache } from '@/hooks/use-sessions'
 import { mergeTodoIntoCaches } from '@/routes/todos/todo-edit-request'
-import type { BackgroundActivity } from '@/lib/api'
+import type { BackgroundActivity, SessionsResponse } from '@/lib/api'
 
 /** The one company mutation event (Todo, Workflow definition, run, trigger). */
 function handleCompanyChanged(
@@ -98,13 +98,23 @@ export function useQueryInvalidation() {
         case 'session:background':
           // Surgical cache patch only — no invalidation/refetch storm. These
           // fire on every background-activity change (including cleared=null).
+          // A delegated child is the exception: its runtime state contributes
+          // to transitive parent summaries, so refresh the session collection
+          // after the existing debounce. Top-level sessions stay patch-only.
           if (p?.sessionId) {
+            const cached = qc.getQueryData<SessionsResponse>(queryKeys.sessions.all)
+            const changedSession = cached?.sessions.find((session) => session.id === p.sessionId)
+            const hasParent = typeof changedSession?.parentSessionId === 'string' && changedSession.parentSessionId.length > 0
             patchSessionBackgroundActivity(
               qc,
               p.sessionId as string,
               (p.backgroundActivity as BackgroundActivity | null) ?? null,
               typeof p.transportState === 'string' ? p.transportState : undefined,
             )
+            if (hasParent) {
+              pendingRef.current.add('sessions')
+              break
+            }
           }
           return
         case 'session:completed':

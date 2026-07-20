@@ -10,7 +10,7 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock('@/lib/api', () => ({ api: apiMocks }))
 
 vi.mock('@/hooks/use-employees', () => ({
-  useOrg: () => ({ data: { employees: [] } }),
+  useOrg: () => ({ data: { employees: [{ name: 'platform-lead', displayName: 'Platform Lead' }] } }),
 }))
 
 interface LiveSessionMockState {
@@ -52,8 +52,8 @@ vi.mock('@/hooks/use-live-session', () => ({
 }))
 
 vi.mock('@/components/chat/chat-input', () => ({
-  ChatInput: ({ selectorSlot }: { selectorSlot?: React.ReactNode }) => (
-    <div data-testid="chat-input">{selectorSlot}</div>
+  ChatInput: ({ selectorSlot, statusSlot }: { selectorSlot?: React.ReactNode; statusSlot?: React.ReactNode }) => (
+    <div data-testid="chat-input">{selectorSlot}{statusSlot}</div>
   ),
 }))
 
@@ -81,7 +81,14 @@ vi.mock('@/components/chat/queue-panel', () => ({
 }))
 
 vi.mock('@/components/chat/background-activity-status', () => ({
-  BackgroundActivityStatus: () => null,
+  BackgroundActivityStatus: ({ delegatedActivity, employeeDisplayNames }: {
+    delegatedActivity?: { activeSessions: number; employees: string[] } | null
+    employeeDisplayNames?: Record<string, string>
+  }) => (
+    <div data-testid="background-status">
+      {delegatedActivity?.activeSessions ?? 0}:{employeeDisplayNames?.['platform-lead'] ?? ''}
+    </div>
+  ),
 }))
 
 vi.mock('@/components/chat/cli-keybar', () => ({
@@ -128,6 +135,14 @@ describe('ChatPane', () => {
 
     expect(screen.getByRole('status', { name: /loading chat/i })).toBeTruthy()
     expect(screen.queryByTestId('employee-picker')).toBeNull()
+  })
+
+  it('passes parent delegated activity and employee display names to the composer status', () => {
+    renderPane({
+      delegatedActivity: { activeSessions: 1, employees: ['platform-lead'] },
+    })
+
+    expect(screen.getByTestId('background-status').textContent).toBe('1:Platform Lead')
   })
 
   it('does not lose destination readiness when a prefetched pane rerenders before paint', () => {

@@ -3,7 +3,7 @@ import React, { useEffect, useState, useRef, useCallback, useMemo, startTransiti
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { useQueryClient } from "@tanstack/react-query"
 import { ChevronDown, Clock3, Copy, EllipsisVertical, Focus, Layers, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
-import { api, type BackgroundActivity, type Employee, type SessionsResponse } from "@/lib/api"
+import { api, type BackgroundActivity, type DelegatedActivity, type Employee, type SessionsResponse } from "@/lib/api"
 import { useOrg } from "@/hooks/use-employees"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { useSettings } from "@/routes/settings-provider"
@@ -56,6 +56,8 @@ interface Session {
    *  session is officially idle. null/absent = none. Kept live via the
    *  session:background WS event (cache patch in useQueryInvalidation). */
   backgroundActivity?: BackgroundActivity | null
+  /** Active descendant employee sessions; derived by the gateway. */
+  delegatedActivity?: DelegatedActivity | null
   [key: string]: unknown
 }
 
@@ -289,16 +291,21 @@ function sortSessionsByActivity(sessions: Session[]): Session[] {
 
 /** Idle-but-busy: the session's turn ended but subagents/background tasks are
  *  still making API calls. Running/error status always wins over this. */
-export function hasBackgroundActivity(session: Pick<Session, "status" | "backgroundActivity">): boolean {
+export function hasBackgroundActivity(session: Pick<Session, "status" | "backgroundActivity" | "delegatedActivity">): boolean {
   const activity = session.backgroundActivity
   const lastActivityAt = activity?.lastActivityAt ? new Date(activity.lastActivityAt).getTime() : 0
   const stale = lastActivityAt > 0 && Date.now() - lastActivityAt > BACKGROUND_ACTIVITY_STALE_MS
-  return (
+  const runtimeActive = (
     session.status !== "running" &&
     session.status !== "error" &&
     !stale &&
     (activity?.activeStreams ?? 0) > 0
   )
+  const delegatedActive =
+    session.status !== "running" &&
+    session.status !== "error" &&
+    (session.delegatedActivity?.activeSessions ?? 0) > 0
+  return runtimeActive || delegatedActive
 }
 
 interface StatusDotState {
