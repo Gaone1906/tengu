@@ -119,12 +119,14 @@ export function WorkspaceLauncher({
           Workspaces
         </DropdownMenuLabel>
         {workspaces.map((workspace) => (
+          // A gateway older than this launcher serves rows without an id, so
+          // every `=== workspace.id` must survive undefined on both sides.
           <WorkspaceRow
-            key={workspace.id}
+            key={workspace.id ?? workspace.name}
             workspace={workspace}
             onStart={onStart}
-            starting={startingId === workspace.id}
-            error={startError?.id === workspace.id ? startError.message : undefined}
+            starting={workspace.id !== undefined && startingId === workspace.id}
+            error={startError && startError.id === workspace.id ? startError.message : undefined}
           />
         ))}
         <DropdownMenuSeparator className="mx-2 my-1 bg-[var(--separator)]" />

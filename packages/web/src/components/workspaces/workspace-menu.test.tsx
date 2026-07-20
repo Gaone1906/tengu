@@ -27,4 +27,18 @@ describe("WorkspaceLauncher", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /add workspace/i }))
     expect(onAdd).toHaveBeenCalledTimes(1)
   })
+
+  // A gateway older than the launcher serves /api/instances rows without `id`.
+  // `startError?.id === workspace.id` then compared undefined to undefined and
+  // read `.message` off a null startError, blanking the whole page.
+  it("renders workspaces served without ids instead of crashing", async () => {
+    const legacy = workspaces.map(({ id: _id, ...rest }) => rest) as WorkspaceInfo[]
+    render(<WorkspaceLauncher workspaces={legacy} onAdd={vi.fn()} onStart={vi.fn()} startError={null} />)
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: /switch workspace/i }), { button: 0, ctrlKey: false })
+
+    expect(await screen.findByText("Main company")).toBeTruthy()
+    expect(screen.getByText("Offline company")).toBeTruthy()
+    expect(screen.getAllByText("Offline")).toHaveLength(1)
+  })
 })
