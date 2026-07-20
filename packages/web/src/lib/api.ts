@@ -51,6 +51,7 @@ export interface WorkspaceInfo {
   running: boolean
   current: boolean
   switchUrl: string
+  warning?: string
 }
 
 export interface CreateWorkspaceResult {
@@ -966,6 +967,7 @@ export interface CreateWorkflowTriggerResultWire {
 export const api = {
   listWorkspaces: () => get<WorkspaceInfo[]>('/api/instances'),
   createWorkspace: (input: { name: string }) => post<CreateWorkspaceResult>('/api/instances', input),
+  startWorkspace: (id: string) => post<WorkspaceInfo>(`/api/instances/${encodeURIComponent(id)}/start`),
   getInstanceMigration: () => get<InstanceMigration>('/api/instance-migration'),
   openInstanceMigration: (migrationKey: string) =>
     post<OpenInstanceMigrationResult>('/api/instance-migration/open', { migrationKey }),

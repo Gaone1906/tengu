@@ -9,6 +9,7 @@ import {
   resolveInstancesRegistryPath,
   saveInstances,
 } from "./directory.js";
+import { resolveInstanceHome } from "./create.js";
 
 const scratch: string[] = [];
 
@@ -50,6 +51,25 @@ describe("host workspace directory paths", () => {
 });
 
 describe("workspace directory persistence", () => {
+  it.each(["0.26", "0.27"])("imports the exact v%s array shape without changing legacy selectors or homes", (version) => {
+    const root = tempDir();
+    const registryPath = path.join(root, "host", "instances.json");
+    const legacyRegistryPath = path.join(root, ".jinn", "instances.json");
+    fs.mkdirSync(path.dirname(legacyRegistryPath), { recursive: true });
+    const legacy = [
+      { name: "jinn", port: 7777, home: path.join(root, ".jinn"), createdAt: `${version}-default` },
+      { name: "atlas", port: 7801, home: path.join(root, ".atlas"), createdAt: `${version}-secondary` },
+    ];
+    fs.writeFileSync(legacyRegistryPath, JSON.stringify(legacy));
+
+    const imported = loadInstances({ registryPath, legacyRegistryPath });
+
+    expect(imported).toHaveLength(2);
+    expect(imported[1]).toMatchObject({ ...legacy[1], kind: "workspace", pinned: true });
+    expect(resolveInstanceHome("atlas", imported, root)).toBe(path.join(root, ".atlas"));
+    expect(resolveInstanceHome("jinn-atlas", imported, root)).toBe(path.join(root, ".atlas"));
+  });
+
   it("imports the legacy array once, assigns immutable ids, and leaves the source intact", () => {
     const root = tempDir();
     const registryPath = path.join(root, "host", "instances.json");
@@ -104,5 +124,20 @@ describe("workspace directory persistence", () => {
     expect(() => loadInstances({ registryPath, legacyRegistryPath: path.join(root, "missing.json") })).toThrow(
       /invalid workspace directory/i,
     );
+  });
+
+  it("does not make an upgrade unbootable when the legacy v0.26/v0.27 file is malformed", () => {
+    const root = tempDir();
+    const registryPath = path.join(root, "host", "instances.json");
+    const legacyRegistryPath = path.join(root, ".jinn", "instances.json");
+    fs.mkdirSync(path.dirname(legacyRegistryPath), { recursive: true });
+    fs.writeFileSync(legacyRegistryPath, "{partial");
+
+    expect(loadInstances({ registryPath, legacyRegistryPath })).toEqual([]);
+    expect(fs.readFileSync(legacyRegistryPath, "utf8")).toBe("{partial");
+    expect(JSON.parse(fs.readFileSync(registryPath, "utf8"))).toEqual({
+      schemaVersion: INSTANCE_DIRECTORY_SCHEMA_VERSION,
+      instances: [],
+    });
   });
 });

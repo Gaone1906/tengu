@@ -287,6 +287,7 @@ import {
 } from "../workflows/schema.js";
 import { loadInstances, saveInstances, type Instance, type InstanceInput } from "../instances/directory.js";
 import { createInstance, type CreateInstanceInput, type CreateInstanceResult } from "../instances/create.js";
+import { startInstance, type StartInstanceInput, type StartInstanceResult } from "../instances/start.js";
 import {
   readTailscaleServeMappings,
   resolveInstanceSwitchUrl,
@@ -471,6 +472,7 @@ export interface ApiContext {
   checkWorkspaceRunning?: (instance: Instance, current: boolean) => Promise<boolean>;
   readWorkspaceAccessMappings?: () => Promise<TailscaleServeMapping[]>;
   createWorkspaceInstance?: (input: CreateInstanceInput) => Promise<CreateInstanceResult>;
+  startWorkspaceInstance?: (input: StartInstanceInput) => Promise<StartInstanceResult>;
   issueWorkspacePairingCode?: (home: string) => string;
 }
 
@@ -2562,6 +2564,7 @@ function operatorOnlyControlPlaneRoute(method: string, pathname: string): string
   if ((method === "PUT" || method === "PATCH") && pathname === "/api/config") return "config update";
   if (method === "POST" && pathname === "/api/onboarding") return "onboarding config update";
   if (method === "POST" && pathname === "/api/instances") return "workspace creation";
+  if (method === "POST" && matchRoute("/api/instances/:id/start", pathname)) return "workspace start";
   if (method === "DELETE" && pathname.startsWith("/api/auth/devices/")) return "auth device revoke";
   if (method === "POST" && pathname === "/api/engines/refresh") return "engine registry refresh";
   if (method === "POST" && pathname === "/api/engine-limits/refresh") return "engine limits refresh";
@@ -3450,6 +3453,43 @@ export async function handleApiRequest(
         launchUrl: launchUrl.toString(),
         ...(created.warning ? { warning: created.warning } : {}),
       }, 201);
+    }
+
+    // POST /api/instances/:id/start — start an existing offline workspace with
+    // its registered home/port, provision matching remote access when possible,
+    // and return a server-resolved URL for the browser to open.
+    const workspaceStartParams = matchRoute("/api/instances/:id/start", pathname);
+    if (method === "POST" && workspaceStartParams) {
+      const instances = (context.loadWorkspaceInstances ?? loadInstances)();
+      const instance = instances.find((candidate) => candidate.id === workspaceStartParams.id);
+      if (!instance) return json(res, { error: "Workspace not found" }, 404);
+
+      const currentHome = resolveHomeIdentity(context.jinnHome ?? JINN_HOME);
+      const current = resolveHomeIdentity(instance.home) === currentHome;
+      const runningCheck = context.checkWorkspaceRunning ?? defaultWorkspaceRunning;
+      let started: StartInstanceResult = { instance };
+      if (!await runningCheck(instance, current)) {
+        try {
+          started = await (context.startWorkspaceInstance ?? startInstance)({
+            instance,
+            currentPort: context.runtimePort ?? context.getConfig().gateway.port ?? 7777,
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return json(res, { error: message }, /already in use|already running/i.test(message) ? 409 : 500);
+        }
+      }
+
+      const currentOrigin = requestWorkspaceOrigin(req);
+      const mappings = await (context.readWorkspaceAccessMappings ?? readTailscaleServeMappings)();
+      return json(res, {
+        ...workspaceView(started.instance, {
+          running: true,
+          current,
+          switchUrl: resolveInstanceSwitchUrl({ instance: started.instance, currentOrigin, tailscaleMappings: mappings }),
+        }),
+        ...(started.warning ? { warning: started.warning } : {}),
+      });
     }
 
     // GET /api/search/messages — GRS-020a company-reference search: FTS5 over

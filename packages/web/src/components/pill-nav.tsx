@@ -336,12 +336,10 @@ export function NavRibbon({
           />
         ))}
 
-        {/* One neutral launcher below the settings/nav stack. The menu carries
-            full names and status; the rail stays calm and company-agnostic. */}
-        <WorkspaceSwitcher />
-
-        {/* Footer — theme toggle, pinned to the bottom. */}
-        <div className="mt-auto pt-1">
+        {/* Footer — the neutral workspace launcher sits immediately above the
+            theme toggle, with the pair pinned to the bottom of the rail. */}
+        <div className="mt-auto flex flex-col items-center gap-0.5 pt-1">
+          <WorkspaceSwitcher />
           <RibbonRow Icon={themeGlyph(theme)} label={`Theme: ${theme}`} onClick={cycleTheme} />
         </div>
       </nav>

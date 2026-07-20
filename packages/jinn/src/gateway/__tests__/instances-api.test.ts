@@ -131,4 +131,27 @@ describe("workspace instance API", () => {
       launchUrl: "https://machine.example.ts.net:7788/?onboarding=1#jinn-pair=ABCD-EFGH-JKLM",
     });
   });
+
+  it("keeps offline start operator-only and returns the started workspace URL", async () => {
+    const started = { ...stoppedLegacy, pinned: true, accessUrls: { remote: "https://machine.example.ts.net:7999" } };
+    const startWorkspaceInstance = vi.fn(async () => ({ instance: started }));
+    const ctx = context({ startWorkspaceInstance } as Partial<ApiContext>);
+
+    const denied = responseCapture();
+    await handleApiRequest(request("POST", `/api/instances/${stoppedLegacy.id}/start`), denied.res, ctx);
+    expect(denied.status()).toBe(403);
+    expect(startWorkspaceInstance).not.toHaveBeenCalled();
+
+    const capture = responseCapture();
+    await handleApiRequest(request("POST", `/api/instances/${stoppedLegacy.id}/start`, undefined, true), capture.res, ctx);
+
+    expect(capture.status()).toBe(200);
+    expect(startWorkspaceInstance).toHaveBeenCalledWith({ instance: stoppedLegacy, currentPort: 7801 });
+    expect(capture.body()).toMatchObject({
+      id: stoppedLegacy.id,
+      running: true,
+      current: false,
+      switchUrl: "https://machine.example.ts.net:7999/",
+    });
+  });
 });

@@ -70,7 +70,12 @@ export function normalizeWorkspaceName(input: string): NormalizedWorkspaceName {
 export function resolveInstanceHome(selector: string, instances: Instance[], homeDir = os.homedir()): string {
   if (selector === "jinn") return path.join(homeDir, ".jinn");
   const prefixed = selector.startsWith("jinn-") ? selector : `jinn-${selector}`;
-  const registered = instances.find((instance) => instance.name === selector || instance.name === prefixed);
+  const unprefixed = selector.replace(/^jinn-/, "");
+  const registered = instances.find((instance) => (
+    instance.name === selector
+    || instance.name === prefixed
+    || instance.name.replace(/^jinn-/, "") === unprefixed
+  ));
   if (registered) return registered.home;
   return path.join(homeDir, `.${prefixed}`);
 }

@@ -1,13 +1,13 @@
 import { useState } from "react"
 import { Link } from "react-router-dom"
-import { ChevronRight, Sun, Moon, Palette, Plus, type LucideIcon } from "lucide-react"
+import { ChevronRight, LoaderCircle, Sun, Moon, Palette, Plus, type LucideIcon } from "lucide-react"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { useTheme } from "@/routes/providers"
 import { THEMES, type ThemeId } from "@/lib/themes"
 import { NAV_ITEMS, OVERFLOW_ITEMS, type NavItem } from "@/lib/nav"
 import { cn } from "@/lib/utils"
-import { useWorkspaces } from "@/hooks/use-workspaces"
+import { useStartWorkspace, useWorkspaces } from "@/hooks/use-workspaces"
 import { CreateWorkspaceDialog } from "@/components/workspaces/create-workspace-dialog"
 import type { WorkspaceInfo } from "@/lib/api"
 
@@ -128,7 +128,19 @@ function AppearanceRow() {
   )
 }
 
-function WorkspaceRow({ workspace, first }: { workspace: WorkspaceInfo; first: boolean }) {
+function WorkspaceRow({
+  workspace,
+  first,
+  onStart,
+  starting,
+  error,
+}: {
+  workspace: WorkspaceInfo
+  first: boolean
+  onStart: (workspace: WorkspaceInfo) => void
+  starting: boolean
+  error?: string
+}) {
   const content = (
     <>
       <span
@@ -141,29 +153,41 @@ function WorkspaceRow({ workspace, first }: { workspace: WorkspaceInfo; first: b
           "flex-1 truncate text-[length:var(--text-body)] tracking-[-0.01em]",
           workspace.current
             ? "font-[var(--weight-semibold)] text-[var(--text-primary)]"
-            : workspace.running
-              ? "text-[var(--text-secondary)]"
-              : "text-[var(--text-quaternary)]",
+            : "text-[var(--text-secondary)]",
         )}
       >
         {workspace.displayName}
       </span>
       <span className="text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">
-        {workspace.current ? "Current" : workspace.running ? "Online" : "Offline"}
+        {workspace.current ? "Current" : workspace.running ? "Online" : starting ? "Starting…" : error ?? "Offline"}
       </span>
-      {!workspace.current && workspace.running && (
+      {!workspace.current && !starting && (
         <ChevronRight size={18} className="shrink-0 text-[var(--text-quaternary)]" aria-hidden />
       )}
+      {starting && <LoaderCircle size={18} className="shrink-0 animate-spin text-[var(--text-quaternary)]" aria-hidden />}
     </>
   )
 
   const className = cn(
     "flex h-[52px] w-full items-center gap-3 px-3.5 text-left transition-colors",
     !first && "border-t-[0.5px] border-[var(--separator)]",
-    !workspace.current && workspace.running && "active:bg-[var(--fill-secondary)]",
+    !workspace.current && "active:bg-[var(--fill-secondary)]",
   )
   if (!workspace.current && workspace.running) {
     return <a href={workspace.switchUrl} className={className}>{content}</a>
+  }
+  if (!workspace.current) {
+    return (
+      <button
+        type="button"
+        aria-label={`Start ${workspace.displayName}`}
+        className={className}
+        disabled={starting}
+        onClick={() => onStart(workspace)}
+      >
+        {content}
+      </button>
+    )
   }
   return <div className={className}>{content}</div>
 }
@@ -172,14 +196,33 @@ function WorkspaceRow({ workspace, first }: { workspace: WorkspaceInfo; first: b
  *  row, while switching uses the server-provided origin instead of localhost. */
 function WorkspacesGroup() {
   const { data: workspaces = [] } = useWorkspaces()
+  const startWorkspace = useStartWorkspace()
   const [creating, setCreating] = useState(false)
+  const [startError, setStartError] = useState<{ id: string; message: string } | null>(null)
+
+  async function handleStart(workspace: WorkspaceInfo) {
+    setStartError(null)
+    try {
+      const started = await startWorkspace.mutateAsync(workspace.id)
+      window.location.assign(started.switchUrl)
+    } catch (error) {
+      setStartError({ id: workspace.id, message: error instanceof Error ? error.message : "Could not start workspace" })
+    }
+  }
 
   return (
     <>
       <GroupLabel>Workspaces</GroupLabel>
       <Card>
         {workspaces.map((workspace, index) => (
-          <WorkspaceRow key={workspace.id} workspace={workspace} first={index === 0} />
+          <WorkspaceRow
+            key={workspace.id}
+            workspace={workspace}
+            first={index === 0}
+            onStart={(candidate) => void handleStart(candidate)}
+            starting={startWorkspace.isPending && startWorkspace.variables === workspace.id}
+            error={startError?.id === workspace.id ? startError.message : undefined}
+          />
         ))}
         <button
           type="button"

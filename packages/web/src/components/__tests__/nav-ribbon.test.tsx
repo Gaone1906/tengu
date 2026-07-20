@@ -6,6 +6,7 @@ import { NAV_ITEMS } from "@/lib/nav"
 
 vi.mock("@/hooks/use-workspaces", () => ({
   useWorkspaces: () => ({ data: [] }),
+  useStartWorkspace: () => ({ mutateAsync: vi.fn(), isPending: false, variables: undefined }),
 }))
 
 function renderRibbon(props: { listOpen: boolean; path?: string }) {
@@ -59,6 +60,16 @@ describe("NavRibbon", () => {
     expect(active.className).not.toContain("--accent")
     // A non-active item carries no aria-current.
     expect(screen.getByLabelText("Cron").getAttribute("aria-current")).toBeNull()
+  })
+
+  it("keeps the workspace launcher in the bottom cluster immediately above Theme", () => {
+    const { container } = renderRibbon({ listOpen: true })
+    const launcher = screen.getByLabelText("Switch workspace")
+    const theme = screen.getByLabelText(/Theme:/)
+    expect(launcher.parentElement).toBe(theme.parentElement)
+    expect(launcher.compareDocumentPosition(theme) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(launcher.parentElement?.className).toContain("mt-auto")
+    expect(container.querySelector("nav")?.lastElementChild).toBe(launcher.parentElement)
   })
 
   // Chat icon is OPEN-ONLY: reveals a collapsed list while already on /chat,

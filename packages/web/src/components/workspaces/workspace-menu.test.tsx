@@ -11,7 +11,8 @@ const workspaces: WorkspaceInfo[] = [
 describe("WorkspaceLauncher", () => {
   it("uses one neutral icon and opens a full-name workspace menu with real links", async () => {
     const onAdd = vi.fn()
-    render(<WorkspaceLauncher workspaces={workspaces} onAdd={onAdd} />)
+    const onStart = vi.fn()
+    render(<WorkspaceLauncher workspaces={workspaces} onAdd={onAdd} onStart={onStart} />)
 
     const trigger = screen.getByRole("button", { name: /switch workspace/i })
     expect(trigger.querySelectorAll("svg")).toHaveLength(1)
@@ -21,6 +22,8 @@ describe("WorkspaceLauncher", () => {
     expect(await screen.findByText("Main company")).toBeTruthy()
     expect(document.querySelector('a[aria-label="Open Team company"]')?.getAttribute("href")).toBe("https://machine.example.ts.net:7801/")
     expect(document.querySelector('a[aria-label="Open Offline company"]')).toBeNull()
+    fireEvent.click(screen.getByRole("menuitem", { name: /start offline company/i }))
+    expect(onStart).toHaveBeenCalledWith(workspaces[2])
     fireEvent.click(screen.getByRole("menuitem", { name: /add workspace/i }))
     expect(onAdd).toHaveBeenCalledTimes(1)
   })

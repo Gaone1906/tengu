@@ -111,6 +111,8 @@ function normalizeInstance(value: unknown): Instance {
   const kind = raw.kind;
   if (kind !== undefined && kind !== "workspace" && kind !== "sandbox") invalid("kind must be workspace or sandbox");
   if (raw.pinned !== undefined && typeof raw.pinned !== "boolean") invalid("pinned must be boolean");
+  const normalizedKind = kind ?? "workspace";
+  const pinned = typeof raw.pinned === "boolean" ? raw.pinned : normalizedKind === "workspace";
   return {
     id,
     name,
@@ -118,8 +120,8 @@ function normalizeInstance(value: unknown): Instance {
     port: raw.port as number,
     home,
     createdAt,
-    ...(kind ? { kind } : {}),
-    ...(typeof raw.pinned === "boolean" ? { pinned: raw.pinned } : {}),
+    kind: normalizedKind,
+    pinned,
     ...(raw.accessUrls === undefined ? {} : { accessUrls: normalizeAccessUrls(raw.accessUrls) }),
   };
 }
@@ -140,7 +142,9 @@ function parseDirectory(contents: string): { instances: Instance[]; needsWrite: 
   const instances = rawInstances.map(normalizeInstance);
   const needsWrite = instances.some((instance, index) => {
     const original = rawInstances[index] as Record<string, unknown>;
-    return original.id !== instance.id;
+    return original.id !== instance.id
+      || original.kind !== instance.kind
+      || original.pinned !== instance.pinned;
   });
   return { instances, needsWrite };
 }
@@ -166,7 +170,16 @@ export function loadInstances(options: DirectoryOptions = {}): Instance[] {
     if (!fs.existsSync(legacyRegistryPath) || path.resolve(legacyRegistryPath) === path.resolve(registryPath)) return [];
     source = legacyRegistryPath;
   }
-  const parsed = parseDirectory(fs.readFileSync(source, "utf8"));
+  let parsed: ReturnType<typeof parseDirectory>;
+  try {
+    parsed = parseDirectory(fs.readFileSync(source, "utf8"));
+  } catch (error) {
+    // v0.26/v0.27 treated a malformed ~/.jinn/instances.json as an empty
+    // directory. Preserve that upgrade behavior, keep the legacy file intact
+    // for recovery, and seed the new host-level registry with a valid schema.
+    if (source === registryPath) throw error;
+    parsed = { instances: [], needsWrite: true };
+  }
   if (source !== registryPath || parsed.needsWrite) writeDirectory(registryPath, parsed.instances);
   return parsed.instances;
 }

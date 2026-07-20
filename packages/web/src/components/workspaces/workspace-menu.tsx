@@ -1,7 +1,7 @@
 import { useState } from "react"
-import { Check, Layers3, Plus } from "lucide-react"
+import { Check, Layers3, LoaderCircle, Plus } from "lucide-react"
 import type { WorkspaceInfo } from "@/lib/api"
-import { useWorkspaces } from "@/hooks/use-workspaces"
+import { useStartWorkspace, useWorkspaces } from "@/hooks/use-workspaces"
 import { cn } from "@/lib/utils"
 import {
   DropdownMenu,
@@ -15,7 +15,17 @@ import { CreateWorkspaceDialog } from "./create-workspace-dialog"
 
 export type { WorkspaceInfo } from "@/lib/api"
 
-function WorkspaceRow({ workspace }: { workspace: WorkspaceInfo }) {
+function WorkspaceRow({
+  workspace,
+  onStart,
+  starting,
+  error,
+}: {
+  workspace: WorkspaceInfo
+  onStart: (workspace: WorkspaceInfo) => void
+  starting: boolean
+  error?: string
+}) {
   const content = (
     <>
       <span
@@ -28,7 +38,7 @@ function WorkspaceRow({ workspace }: { workspace: WorkspaceInfo }) {
           {workspace.displayName}
         </span>
         <span className="block truncate text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">
-          {workspace.current ? "Current workspace" : workspace.running ? "Online" : "Offline"}
+          {workspace.current ? "Current workspace" : workspace.running ? "Online" : starting ? "Starting…" : error ?? "Offline"}
         </span>
       </span>
       {workspace.current && <Check size={15} className="text-[var(--text-secondary)]" aria-hidden />}
@@ -38,6 +48,22 @@ function WorkspaceRow({ workspace }: { workspace: WorkspaceInfo }) {
     return (
       <DropdownMenuItem asChild className="min-h-12 rounded-[10px] p-2.5 focus:bg-[var(--fill-secondary)]">
         <a href={workspace.switchUrl} aria-label={`Open ${workspace.displayName}`}>{content}</a>
+      </DropdownMenuItem>
+    )
+  }
+  if (!workspace.current) {
+    return (
+      <DropdownMenuItem
+        aria-label={`Start ${workspace.displayName}`}
+        disabled={starting}
+        onSelect={(event) => {
+          event.preventDefault()
+          onStart(workspace)
+        }}
+        className="min-h-12 rounded-[10px] p-2.5 focus:bg-[var(--fill-secondary)] disabled:opacity-100"
+      >
+        {content}
+        {starting && <LoaderCircle size={15} className="animate-spin text-[var(--text-tertiary)]" aria-hidden />}
       </DropdownMenuItem>
     )
   }
@@ -51,10 +77,16 @@ function WorkspaceRow({ workspace }: { workspace: WorkspaceInfo }) {
 export function WorkspaceLauncher({
   workspaces,
   onAdd,
+  onStart,
+  startingId,
+  startError,
   className,
 }: {
   workspaces: WorkspaceInfo[]
   onAdd: () => void
+  onStart: (workspace: WorkspaceInfo) => void
+  startingId?: string
+  startError?: { id: string; message: string } | null
   className?: string
 }) {
   return (
@@ -86,7 +118,15 @@ export function WorkspaceLauncher({
         <DropdownMenuLabel className="px-2.5 pb-1 pt-2 text-[length:var(--text-caption2)] font-[var(--weight-bold)] uppercase tracking-[0.08em] text-[var(--text-tertiary)]">
           Workspaces
         </DropdownMenuLabel>
-        {workspaces.map((workspace) => <WorkspaceRow key={workspace.id} workspace={workspace} />)}
+        {workspaces.map((workspace) => (
+          <WorkspaceRow
+            key={workspace.id}
+            workspace={workspace}
+            onStart={onStart}
+            starting={startingId === workspace.id}
+            error={startError?.id === workspace.id ? startError.message : undefined}
+          />
+        ))}
         <DropdownMenuSeparator className="mx-2 my-1 bg-[var(--separator)]" />
         <DropdownMenuItem
           onSelect={onAdd}
@@ -102,10 +142,29 @@ export function WorkspaceLauncher({
 
 export function WorkspaceSwitcher() {
   const { data = [] } = useWorkspaces()
+  const startWorkspace = useStartWorkspace()
   const [creating, setCreating] = useState(false)
+  const [startError, setStartError] = useState<{ id: string; message: string } | null>(null)
+
+  async function handleStart(workspace: WorkspaceInfo) {
+    setStartError(null)
+    try {
+      const started = await startWorkspace.mutateAsync(workspace.id)
+      window.location.assign(started.switchUrl)
+    } catch (error) {
+      setStartError({ id: workspace.id, message: error instanceof Error ? error.message : "Could not start workspace" })
+    }
+  }
+
   return (
     <>
-      <WorkspaceLauncher workspaces={data} onAdd={() => setCreating(true)} />
+      <WorkspaceLauncher
+        workspaces={data}
+        onAdd={() => setCreating(true)}
+        onStart={(workspace) => void handleStart(workspace)}
+        startingId={startWorkspace.isPending ? startWorkspace.variables : undefined}
+        startError={startError}
+      />
       <CreateWorkspaceDialog open={creating} onOpenChange={setCreating} />
     </>
   )
