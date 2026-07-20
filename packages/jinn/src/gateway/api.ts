@@ -2373,6 +2373,11 @@ const FORWARDED_REQUEST_HEADERS = new Set([
   "x-real-ip",
 ]);
 
+export const PROXIED_OPERATOR_AUTH_ERROR =
+  "operator authentication failed: this request reached the gateway through a proxy " +
+  "(forwarded headers present) but the gateway has no auth configured, so it cannot be trusted as the operator. " +
+  "Enable gateway auth (gateway.authRequired: true) and pair your device; same-origin operator trust does not apply to proxied requests.";
+
 type RequestAuthority = { hostname: string; port: number };
 
 function requestHeaderValues(req: Pick<HttpRequest, "headers" | "rawHeaders">, name: string): string[] {
@@ -2540,7 +2545,10 @@ function rejectUnverifiedIdentifiedApiCaller(req: HttpRequest, res: ServerRespon
   } else if (identity.kind !== "unidentified-tool") {
     return false;
   }
-  json(res, { error: UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
+  const proxiedWithoutAuth = identity.kind === "unauthenticated"
+    && !shouldRequireGatewayAuth(context.getConfig())
+    && [...FORWARDED_REQUEST_HEADERS].some((name) => requestHeaderValues(req, name).length > 0);
+  json(res, { error: proxiedWithoutAuth ? PROXIED_OPERATOR_AUTH_ERROR : UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
   return true;
 }
 
