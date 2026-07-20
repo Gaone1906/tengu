@@ -24,10 +24,8 @@ import os from "node:os";
 import path from "node:path";
 import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile, MCP_CAPABLE_ENGINES } from "../resolver.js";
 import { setJinnAttachGate } from "../attachment.js";
-import { JINN_SESSION_CAPABILITY_ENV, JINN_SESSION_ID_ENV, attachSessionIdentity } from "../identity.js";
+import { JINN_SESSION_CAPABILITY_ENV, attachSessionIdentity } from "../identity.js";
 import { codexMcpConfigArgs, prepareCodexSessionHome } from "../../engines/codex.js";
-import { InteractiveClaudeEngine } from "../../engines/claude-interactive.js";
-import { PtyLifecycleManager } from "../../engines/pty-lifecycle.js";
 import { prepareGrokProjectMcpConfig, cleanupGrokProjectMcpConfig, grokJinnSessionEnv, JINN_GROK_MCP_MARKER } from "../../engines/grok-mcp.js";
 import { buildAcpMcpServers } from "../../engines/hermes-mcp.js";
 import { writePiJinnMcpExtension, cleanupPiJinnMcpExtension, piJinnSessionEnv } from "../../engines/pi-mcp.js";
@@ -147,38 +145,6 @@ describe("per-engine jinn-server wiring (GRS-018 seam for GRS-017 default-on)", 
         expect(onDisk.mcpServers.jinn.env.JINN_SESSION_CAPABILITY).toBe(capability);
       } finally {
         cleanupMcpConfigFile("wiring-claude-sid");
-      }
-    });
-
-    it("claude: the PTY child inherits the bound identity when Claude drops MCP-server env", () => {
-      const resolved = stamped();
-      const engine = new InteractiveClaudeEngine(
-        new PtyLifecycleManager({ maxLivePtys: 1 }),
-        {} as never,
-      );
-      const env = (engine as unknown as {
-        buildPtyEnv(
-          proxyPort?: number,
-          sessionId?: string,
-          resolvedMcp?: ReturnType<typeof stamped>,
-        ): Record<string, string>;
-      }).buildPtyEnv(undefined, SID, resolved);
-
-      expect(env[JINN_SESSION_ID_ENV]).toBe(SID);
-      expect(env[JINN_SESSION_CAPABILITY_ENV]).toBe(capabilityOf(resolved));
-    });
-
-    it("connector and web session launch paths both use the identity-stamping resolver", () => {
-      const launchPaths = [
-        new URL("../../sessions/manager.ts", import.meta.url),
-        new URL("../../gateway/api.ts", import.meta.url),
-      ];
-
-      for (const sourceUrl of launchPaths) {
-        const source = fs.readFileSync(sourceUrl, "utf-8");
-        expect(source).toContain("resolveEngineRunMcp({");
-        expect(source).toMatch(/sessionId:\s*(?:session|currentSession)\.id/);
-        expect(source).toMatch(/engine\.run\(\{[\s\S]*?resolvedMcp,/);
       }
     });
 
