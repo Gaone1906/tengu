@@ -234,6 +234,7 @@ const DEFAULT_CONFIG = `jinn:
 gateway:
   port: 7777
   host: "127.0.0.1"
+  authRequired: true
   notesEnabled: false
 engines:
   default: claude

@@ -79,6 +79,8 @@ describe("gateway auth", () => {
 
   it("refuses unauthenticated network binds unless the explicit insecure escape hatch is set", () => {
     expect(isNetworkHost("0.0.0.0")).toBe(true);
+    expect(validateGatewayExposure({ gateway: { host: "127.0.0.1", authRequired: true } } as any).ok).toBe(true);
+    expect(validateGatewayExposure({ gateway: { host: "0.0.0.0", authRequired: true } } as any).ok).toBe(true);
     expect(validateGatewayExposure({ gateway: { host: "0.0.0.0", authDisabled: true } } as any).ok).toBe(false);
     expect(validateGatewayExposure({ gateway: { host: "0.0.0.0", authDisabled: true, insecureAllowUnauthenticatedNetwork: true } } as any).ok).toBe(true);
   });

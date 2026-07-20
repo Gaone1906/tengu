@@ -107,6 +107,43 @@ describe("auth UX API routes", () => {
     expect(JSON.stringify(cap.body)).not.toContain("gateway-token");
   });
 
+  it("auto-pairs a local browser by exchanging the CLI launch grant for revocable cookies", async () => {
+    const context = ctx();
+    const bootstrapped = makeRes();
+    await handleApiRequest(
+      makeReq("POST", "/api/auth/bootstrap", {
+        bootstrapGrant: issueLocalBootstrapGrant(),
+        remoteAddress: "127.0.0.1",
+        host: "localhost:7777",
+        userAgent: "Mozilla/5.0 Macintosh",
+        body: {},
+      }),
+      bootstrapped.res,
+      context,
+    );
+
+    expect(bootstrapped.status).toBe(200);
+    expect(bootstrapped.body).toMatchObject({ status: "ok", authRequired: true });
+    const setCookies = bootstrapped.header("set-cookie") as string[];
+    expect(setCookies).toHaveLength(2);
+    expect(setCookies.every((cookie) => cookie.includes("HttpOnly"))).toBe(true);
+
+    const cookie = setCookies.map((part) => part.split(";", 1)[0]).join("; ");
+    const state = makeRes();
+    await handleApiRequest(
+      makeReq("GET", "/api/auth/state", {
+        cookie,
+        remoteAddress: "127.0.0.1",
+        host: "localhost:7777",
+      }),
+      state.res,
+      context,
+    );
+
+    expect(state.status).toBe(200);
+    expect(state.body).toMatchObject({ authRequired: true, authenticated: true });
+  });
+
   it("creates a loopback-only pairing code for an authenticated local browser", async () => {
     const context = ctx();
     const cap = makeRes();
