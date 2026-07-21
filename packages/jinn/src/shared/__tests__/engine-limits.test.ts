@@ -6,8 +6,9 @@
  * on — the fetched-at timestamp is the provider *capture* time (never
  * fabricated to "now"), staleness tracks the snapshot's real age, malformed or
  * unavailable providers degrade without leaking raw diagnostics, and a restart
- * (a fresh process re-reading the same disk) recovers identical data. Nothing
- * here drives a live provider: fake snapshot files + fs.utimes are the clock.
+ * (a fresh process re-reading the same disk) recovers identical data. Codex
+ * precedence tests drive a local app-server protocol stub; all other
+ * provider state comes from fake snapshot files + fs.utimes.
  */
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from "vitest";
 import fs from "node:fs";
@@ -18,6 +19,7 @@ import type { JinnConfig, EngineLimitsResponse } from "../types.js";
 let JINN_HOME_TMP: string;
 let CODEX_HOME_TMP: string;
 let CLAUDE_DIR: string;
+let TEST_ROOT_TMP: string;
 let collectEngineLimits: (c: JinnConfig, o?: { engine?: string }) => Promise<EngineLimitsResponse>;
 let invalidateModelRegistry: () => void;
 
@@ -60,10 +62,38 @@ function writeCodexRollout(timestampIso: string, usedPercent: number): void {
   fs.writeFileSync(path.join(day, "rollout-2026-07-13T00-00-00.jsonl"), `${line}\n`);
 }
 
+function writeCodexAppServerStub(
+  name: string,
+  result?: Record<string, unknown>,
+): { bin: string; startedFile: string } {
+  const bin = path.join(path.dirname(CODEX_HOME_TMP), name);
+  const startedFile = `${bin}.started`;
+  const behavior = result
+    ? [
+        'process.stdin.setEncoding("utf8");',
+        'let input = "";',
+        "let responded = false;",
+        'process.stdin.on("data", (chunk) => {',
+        "  input += chunk;",
+        '  if (!responded && input.includes(\'"id":2\')) {',
+        "    responded = true;",
+        `    process.stdout.write(JSON.stringify(${JSON.stringify({ id: 2, result })}) + "\\n");`,
+        "  }",
+        "});",
+      ].join("\n")
+    : "process.exit(1);";
+  fs.writeFileSync(
+    bin,
+    `#!/usr/bin/env node\nimport fs from "node:fs";\nfs.writeFileSync(${JSON.stringify(startedFile)}, "started");\n${behavior}\n`,
+  );
+  fs.chmodSync(bin, 0o755);
+  return { bin, startedFile };
+}
+
 beforeAll(async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-limits-"));
-  JINN_HOME_TMP = path.join(root, "home");
-  CODEX_HOME_TMP = path.join(root, "codex");
+  TEST_ROOT_TMP = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-limits-"));
+  JINN_HOME_TMP = path.join(TEST_ROOT_TMP, "home");
+  CODEX_HOME_TMP = path.join(TEST_ROOT_TMP, "codex");
   CLAUDE_DIR = path.join(JINN_HOME_TMP, "tmp", "engine-limits", "claude");
   fs.mkdirSync(CLAUDE_DIR, { recursive: true });
   process.env.JINN_HOME = JINN_HOME_TMP; // frozen into paths.ts at first import below
@@ -79,6 +109,7 @@ afterAll(() => {
   delete process.env.JINN_HOME;
   delete process.env.CODEX_HOME;
   delete process.env.JINN_CLAUDE_USAGE_API;
+  fs.rmSync(TEST_ROOT_TMP, { recursive: true, force: true });
 });
 
 beforeEach(() => {
@@ -139,11 +170,56 @@ describe("collectEngineLimits — claude statusline snapshot", () => {
 });
 
 describe("collectEngineLimits — codex session rollout", () => {
-  it("reads the rollout snapshot off disk with its capture timestamp", async () => {
+  it("prefers a successful live app-server response over an older rollout snapshot", async () => {
     const ts = new Date(Date.now() - 5 * 60_000).toISOString();
     writeCodexRollout(ts, 72);
-    const out = await collectEngineLimits(cfg(), { engine: "codex" });
+    const live = writeCodexAppServerStub("codex-live-stub", {
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: "codex",
+          planType: "pro",
+          primary: { usedPercent: 33, windowDurationMins: 300 },
+        },
+      },
+    });
+
+    const out = await collectEngineLimits(
+      cfg({ codex: { bin: live.bin, model: "gpt-5.5" } }),
+      { engine: "codex" },
+    );
     const codex = out.engines.codex;
+    expect(codex.status).toBe("live");
+    expect(codex.windows?.[0]?.usedPercent).toBe(33);
+    expect(fs.existsSync(live.startedFile)).toBe(true);
+  });
+
+  it("falls back to the rollout snapshot with its original timestamp when the live app-server fails", async () => {
+    const ts = new Date(Date.now() - 5 * 60_000).toISOString();
+    writeCodexRollout(ts, 72);
+    const failed = writeCodexAppServerStub("codex-failed-stub");
+
+    const out = await collectEngineLimits(
+      cfg({ codex: { bin: failed.bin, model: "gpt-5.5" } }),
+      { engine: "codex" },
+    );
+    const codex = out.engines.codex;
+    expect(fs.existsSync(failed.startedFile)).toBe(true);
+    expect(codex.status).toBe("snapshot");
+    expect(codex.refreshedAt).toBe(ts);
+    expect(codex.windows?.[0]?.usedPercent).toBe(72);
+  });
+
+  it("falls back to the rollout snapshot when the live app-server returns no buckets", async () => {
+    const ts = new Date(Date.now() - 5 * 60_000).toISOString();
+    writeCodexRollout(ts, 72);
+    const empty = writeCodexAppServerStub("codex-empty-stub", { rateLimitsByLimitId: {} });
+
+    const out = await collectEngineLimits(
+      cfg({ codex: { bin: empty.bin, model: "gpt-5.5" } }),
+      { engine: "codex" },
+    );
+    const codex = out.engines.codex;
+    expect(fs.existsSync(empty.startedFile)).toBe(true);
     expect(codex.status).toBe("snapshot");
     expect(codex.refreshedAt).toBe(ts);
     expect(codex.windows?.[0]?.usedPercent).toBe(72);

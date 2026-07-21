@@ -493,6 +493,61 @@ describe("CodexEngine — usage / context-token extraction", () => {
     );
     expect(result.contextTokens).toBe(58_463);
   });
+
+  it("backfills contextTokens from the active per-session CODEX_HOME rollout", async () => {
+    const previousCodexHome = process.env.CODEX_HOME;
+    const realHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-real-home-"));
+    const homesBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-homes-base-"));
+    const sessionId = "jinn-session-overlay";
+    const threadId = "thread-overlay";
+    const rolloutDir = path.join(homesBaseDir, sessionId, "sessions", "2026", "07", "20");
+    fs.mkdirSync(rolloutDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(rolloutDir, "rollout-2026-07-20T00-00-00-thread-overlay.jsonl"),
+      [
+        JSON.stringify({ type: "session_meta", payload: { id: threadId } }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: { last_token_usage: { input_tokens: 63_250, cached_input_tokens: 5_000 } },
+          },
+        }),
+        "",
+      ].join("\n"),
+    );
+    process.env.CODEX_HOME = realHome;
+
+    try {
+      const { result } = await runWith(
+        {
+          sessionId,
+          resolvedMcp: {
+            mcpServers: {
+              jinn: {
+                command: "/usr/bin/node",
+                args: ["/abs/server-entry.js"],
+                env: { JINN_SESSION_CAPABILITY: "cap-overlay" },
+              },
+            },
+          },
+        },
+        [
+          threadStarted(threadId),
+          agentMessage("ok"),
+          turnCompleted({ input_tokens: 494_290, output_tokens: 50 }),
+        ],
+        { engineOpts: { codexHomesBaseDir: homesBaseDir } },
+      );
+
+      expect(result.contextTokens).toBe(63_250);
+    } finally {
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      fs.rmSync(realHome, { recursive: true, force: true });
+      fs.rmSync(homesBaseDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("CodexEngine — error / failure handling", () => {
@@ -678,6 +733,72 @@ describe("CodexEngine — process lifecycle", () => {
     });
     expect(result.error).toBeUndefined();
     expect(engine.isAlive("codex-session-hang")).toBe(false);
+  });
+
+  it("backfills overlay contextTokens when settling without a process close", async () => {
+    const previousCodexHome = process.env.CODEX_HOME;
+    const realHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-real-home-"));
+    const homesBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-homes-base-"));
+    const sessionId = "jinn-session-terminal-overlay";
+    const threadId = "thread-terminal-overlay";
+    const rolloutDir = path.join(homesBaseDir, sessionId, "sessions", "2026", "07", "20");
+    fs.mkdirSync(rolloutDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(rolloutDir, "rollout-2026-07-20T00-00-00-thread-terminal-overlay.jsonl"),
+      [
+        JSON.stringify({ type: "session_meta", payload: { id: threadId } }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: { last_token_usage: { input_tokens: 71_000, cached_input_tokens: 4_000 } },
+          },
+        }),
+        "",
+      ].join("\n"),
+    );
+    process.env.CODEX_HOME = realHome;
+
+    try {
+      const engine = new CodexEngine({
+        codexSessionsDir: fs.mkdtempSync(path.join(os.tmpdir(), "codex-terminal-sessions-")),
+        codexHomesBaseDir: homesBaseDir,
+      });
+      const promise = engine.run({
+        prompt: "hello",
+        cwd: "/tmp",
+        sessionId,
+        resolvedMcp: {
+          mcpServers: {
+            jinn: {
+              command: "/usr/bin/node",
+              args: ["/abs/server-entry.js"],
+              env: { JINN_SESSION_CAPABILITY: "cap-terminal-overlay" },
+            },
+          },
+        },
+      } as any);
+
+      await flush();
+      const call = spawnCalls[spawnCalls.length - 1];
+      call.proc.emitStdout(
+        [
+          threadStarted(threadId),
+          agentMessage("ok"),
+          turnCompleted({ input_tokens: 494_290, output_tokens: 50 }),
+          "",
+        ].join("\n"),
+      );
+
+      const raced = await Promise.race([promise, sleep(1000).then(() => "TIMED_OUT" as const)]);
+      expect(raced).not.toBe("TIMED_OUT");
+      expect((raced as EngineResult).contextTokens).toBe(71_000);
+    } finally {
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      fs.rmSync(realHome, { recursive: true, force: true });
+      fs.rmSync(homesBaseDir, { recursive: true, force: true });
+    }
   });
 
   it("kill() sets the termination reason as the result error", async () => {

@@ -509,6 +509,9 @@ export class CodexEngine implements InterruptibleEngine {
     // finds the rollout. Session-end teardown removes it (manager.resetSession).
     const sessionHome = prepareCodexSessionHome(opts.resolvedMcp, sessionId, { baseDir: this.opts.codexHomesBaseDir });
     const homeActive = !!sessionHome;
+    const transcriptSessionsDir = sessionHome
+      ? path.join(sessionHome.home, "sessions")
+      : this.opts.codexSessionsDir ?? CODEX_SESSIONS_DIR;
     const isResume = !!opts.resumeSessionId;
     const args = isResume
       ? this.buildResumeArgs(opts, prompt, homeActive)
@@ -581,7 +584,7 @@ export class CodexEngine implements InterruptibleEngine {
         if (resolvedThreadId) {
           const transcriptCtx = lastCodexTranscriptContextTokens(
             resolvedThreadId,
-            this.opts.codexSessionsDir ?? CODEX_SESSIONS_DIR,
+            transcriptSessionsDir,
           );
           if (transcriptCtx) lastContextTokens = transcriptCtx;
         }
@@ -721,7 +724,7 @@ export class CodexEngine implements InterruptibleEngine {
         if (resolvedThreadId) {
           const transcriptCtx = lastCodexTranscriptContextTokens(
             resolvedThreadId,
-            this.opts.codexSessionsDir ?? CODEX_SESSIONS_DIR,
+            transcriptSessionsDir,
           );
           if (transcriptCtx) lastContextTokens = transcriptCtx;
         }

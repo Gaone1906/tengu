@@ -552,7 +552,25 @@ async function collectCodexLimits(config: JinnConfig): Promise<EngineLimitEngine
     return { ...snap, status: "unavailable", unsupportedReason: "Codex CLI is not installed." };
   }
 
-  // Primary: latest session rollout snapshot on disk (light, never races).
+  // Primary: live app-server query so Limits reflects the current account state.
+  try {
+    const result = await readCodexRateLimits(config);
+    const buckets = bucketsFromCodex(result);
+    if (buckets.length > 0) {
+      const main = buckets.find((b) => b.id === "codex") ?? buckets[0];
+      return {
+        ...snap,
+        status: "live",
+        source: "codex app-server account/rateLimits/read",
+        windows: [main?.primary, main?.secondary].filter(Boolean) as EngineLimitWindow[],
+        buckets,
+        credits: main?.credits,
+        accountPlan: main?.planType,
+      };
+    }
+  } catch { /* fall back to the latest rollout snapshot */ }
+
+  // Fallback: latest session rollout snapshot on disk.
   const rollup = readCodexRollupSnapshot();
   if (rollup) {
     const rl = rollup.rateLimits;
@@ -573,28 +591,12 @@ async function collectCodexLimits(config: JinnConfig): Promise<EngineLimitEngine
     }
   }
 
-  // Fallback: live app-server query, used only when no rollout snapshot exists yet.
-  try {
-    const result = await readCodexRateLimits(config);
-    const buckets = bucketsFromCodex(result);
-    const main = buckets.find((b) => b.id === "codex") ?? buckets[0];
-    return {
-      ...snap,
-      status: "live",
-      source: "codex app-server account/rateLimits/read",
-      windows: [main?.primary, main?.secondary].filter(Boolean) as EngineLimitWindow[],
-      buckets,
-      credits: main?.credits,
-      accountPlan: main?.planType,
-    };
-  } catch {
-    return {
-      ...snap,
-      status: "static",
-      source: "codex session rollout",
-      unsupportedReason: "No Codex session rollout with rate limits yet. Run a Codex session to populate live limits.",
-    };
-  }
+  return {
+    ...snap,
+    status: "static",
+    source: "codex session rollout",
+    unsupportedReason: "No Codex session rollout with rate limits yet. Run a Codex session to populate live limits.",
+  };
 }
 
 function collectUnsupported(config: JinnConfig, engine: string, reason: string): EngineLimitEngineSnapshot {
