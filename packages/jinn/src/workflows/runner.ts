@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { Employee, ModelRegistry, WorkflowAttemptCompletion } from "../shared/types.js";
 import { interpolateWorkflowPrompt, resolveBinding, WorkflowBindingError, type WorkflowBindingContext } from "./bindings.js";
+import { buildNodeContract } from "./contract.js";
 import type {
   ConditionNode,
   ConditionPredicate,
@@ -42,6 +43,28 @@ function bindingContext(run: WorkflowRunDetail): WorkflowBindingContext {
       status: node.status, output: node.output ?? null, error: node.error ?? null,
     }])),
   };
+}
+function upstreamSessions(run: WorkflowRunDetail, nodeId: string): Array<{ nodeId: string; sessionId?: string }> {
+  const ancestors = new Set<string>();
+  const pending = incoming(run, nodeId).map((edge) => edge.from.nodeId);
+  while (pending.length > 0) {
+    const upstreamId = pending.pop()!;
+    if (ancestors.has(upstreamId)) continue;
+    ancestors.add(upstreamId);
+    pending.push(...incoming(run, upstreamId).map((edge) => edge.from.nodeId));
+  }
+  return run.definition.nodes.flatMap((authored) => {
+    const runtime = nodeRun(run, authored.id);
+    if (!ancestors.has(authored.id) || runtime.status !== "completed") return [];
+    const attempt = run.attempts.filter((candidate) => candidate.nodeId === authored.id
+      && candidate.status === "completed" && candidate.sessionId).at(-1);
+    const sessionId = runtime.output?.sessionId ?? attempt?.sessionId;
+    return [{ nodeId: authored.id, ...(sessionId ? { sessionId } : {}) }];
+  });
+}
+function composeEmployeePrompt(run: WorkflowRunDetail, node: EmployeeNode): string {
+  const prompt = interpolateWorkflowPrompt(node.config.prompt, bindingContext(run));
+  return `${prompt}\n\n---\n${buildNodeContract(node, upstreamSessions(run, node.id))}`;
 }
 function resolveString(binding: Parameters<typeof resolveBinding<string>>[0], context: WorkflowBindingContext, label: string): string {
   const value = resolveBinding(binding, context);
@@ -326,7 +349,7 @@ export class WorkflowRunner {
     const attempt = run.attempts.find((item) => item.nodeId === nodeId && item.attempt === attemptNumber);
     const node = run.definition.nodes.find((item): item is EmployeeNode => item.id === nodeId && item.type === "employee");
     if (!attempt || attempt.status !== "dispatching" || !node) return false;
-    const prompt = interpolateWorkflowPrompt(node.config.prompt, bindingContext(run));
+    const prompt = composeEmployeePrompt(run, node);
     const config = attempt.resolvedConfig;
     const { sessionId } = await this.options.executor.startAttempt({ owner: { workflowId, runId, nodeId, attempt: attemptNumber },
       employeeId: config.employeeId, engine: config.engine, ...(config.model ? { model: config.model } : {}),

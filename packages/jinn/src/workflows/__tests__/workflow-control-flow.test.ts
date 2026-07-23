@@ -162,6 +162,8 @@ describe("Workflow durable control flow", () => {
     ]);
     const started = await service.startManual({ workflowId: definition.id, input: {} });
     expect(executor.commands.map((command) => command.owner.nodeId)).toEqual(["alpha", "beta"]);
+    expect(executor.commands[0]?.prompt).toContain("Run alpha.\n\n---\n");
+    expect(executor.commands[0]?.prompt).toContain("Calling `workflow_submit_output` is what completes this workflow step");
 
     await executor.succeed("alpha", { value: "A" });
     expect(service.getRun(definition.id, started.id)).toMatchObject({ status: "running" });
@@ -195,6 +197,8 @@ describe("Workflow durable control flow", () => {
     ]);
     const started = await service.startManual({ workflowId: definition.id, input: {} });
     await executor.succeed("alpha", { value: "A1" });
+    expect(executor.commands.find((item) => item.owner.nodeId === "alpha-two")?.prompt)
+      .toContain("`alpha: session:alpha:1`");
     await executor.succeed("alpha-two", { value: "A2" });
 
     const half = service.getRun(definition.id, started.id)!;
