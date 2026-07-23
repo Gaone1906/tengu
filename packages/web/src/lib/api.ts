@@ -458,6 +458,13 @@ export interface WorkflowAttemptV2Wire {
   attempt: number
   sessionId?: string
   status: WorkflowAttemptStatusV2
+  resolvedConfig?: {
+    employeeId: string
+    engine: string
+    model?: string
+    effort?: "low" | "medium" | "high" | "xhigh"
+  }
+  input?: unknown
   output?: WorkflowNodeOutputV2Wire
   error?: WorkflowRunErrorV2Wire
   startedAt: string
@@ -486,7 +493,9 @@ export interface WorkflowRunDetailV2Wire {
   workflowId: string
   workflowTitle: string
   definitionRevision: number
-  definition: Pick<WorkflowDefinitionV2Wire, "nodes" | "edges">
+  /** Definition snapshot at start time — the server sends the full stored
+   *  definition, including saved canvas positions when the workflow had them. */
+  definition: Pick<WorkflowDefinitionV2Wire, "nodes" | "edges"> & { ui?: WorkflowDefinitionV2Wire["ui"] }
   status: WorkflowRunStatusV2
   revision: number
   trigger: { nodeId: string; kind: WorkflowTriggerKindV2 }

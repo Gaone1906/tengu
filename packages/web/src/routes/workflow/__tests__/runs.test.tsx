@@ -137,34 +137,12 @@ describe("workflow runs lens", () => {
     expect(screen.queryByRole("button", { name: "Run" })).toBeNull()
   })
 
-  it("renders the run timeline with attempts, errors, and output", async () => {
+  it("renders the run page as a canvas with the definition's nodes", async () => {
     renderRoute("/workflow/morning-digest/runs/run-01HZX")
 
     expect(await screen.findByText("Manual run")).toBeTruthy()
     expect(screen.getByText("Writer")).toBeTruthy()
-    expect(screen.getByText("Attempt 1")).toBeTruthy()
-    expect(screen.getByText("Engine crashed mid-turn.")).toBeTruthy()
-    expect(screen.getByText("Digest drafted.")).toBeTruthy()
-    expect(screen.getByText(/Approval requested/)).toBeTruthy()
-  })
-
-  it("approves a pending approval with the run's revision", async () => {
-    const approvedDetail = {
-      ...runDetail,
-      status: "running",
-      approvals: [{ ...runDetail.approvals[0], status: "approved", decidedBy: "operator", decidedAt: "2026-07-22T08:05:00.000Z" }],
-    }
-    decideWorkflowApproval.mockImplementation(() => {
-      getWorkflowRun.mockResolvedValue(approvedDetail)
-      return Promise.resolve(approvedDetail)
-    })
-    renderRoute("/workflow/morning-digest/runs/run-01HZX")
-
-    await userEvent.click(await screen.findByRole("button", { name: "Approve" }))
-
-    await waitFor(() => expect(decideWorkflowApproval).toHaveBeenCalledWith(
-      "morning-digest", "run-01HZX", "gate", { decision: "approve", expectedRevision: 7 },
-    ))
-    expect(await screen.findByText(/Approved by operator/)).toBeTruthy()
+    expect(screen.getByText("Publish gate")).toBeTruthy()
+    expect(document.querySelector(".react-flow")).toBeTruthy()
   })
 })

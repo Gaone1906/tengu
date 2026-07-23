@@ -1,5 +1,11 @@
 import { AlertTriangle, Check } from "lucide-react"
-import type { WorkflowRunStatusV2, WorkflowTriggerKindV2 } from "@/lib/api"
+import type {
+  WorkflowAttemptV2Wire,
+  WorkflowNodeRunStatusV2,
+  WorkflowNodeRunV2Wire,
+  WorkflowRunStatusV2,
+  WorkflowTriggerKindV2,
+} from "@/lib/api"
 
 // One status grammar for runs, node runs, and attempts (their status unions
 // overlap): a glyph kind + color per status, rendered by StatusGlyph/StatusLine.
@@ -19,6 +25,7 @@ export const STATUS_META: Record<string, StatusMeta> = {
   dispatching: { label: "Dispatching", kind: "pulse", color: "var(--system-blue)", live: true },
   running: { label: "Running", kind: "pulse", color: "var(--system-blue)", live: true },
   waiting: { label: "Waiting", kind: "dot", color: "var(--system-orange)", live: true },
+  "waiting-submit": { label: "Awaiting submit", kind: "pulse", color: "var(--system-orange)", live: true },
   completed: { label: "Completed", kind: "check", color: "var(--system-green)" },
   failed: { label: "Failed", kind: "alert", color: "var(--system-red)" },
   "timed-out": { label: "Timed out", kind: "alert", color: "var(--system-red)" },
@@ -34,6 +41,32 @@ export function statusMeta(status: string): StatusMeta {
 
 export function isLiveRunStatus(status: WorkflowRunStatusV2 | undefined): boolean {
   return status !== undefined && Boolean(STATUS_META[status]?.live)
+}
+
+/** A node-run status refined for display: "waiting-submit" marks an employee
+ *  node whose session went idle without submitting — the reminder ladder is
+ *  armed (a reminder already sent or one scheduled) while the node stays
+ *  formally "running". */
+export type RunNodeVisualStatus = WorkflowNodeRunStatusV2 | "waiting-submit"
+
+export function latestAttempt(attempts: WorkflowAttemptV2Wire[]): WorkflowAttemptV2Wire | undefined {
+  return attempts.reduce<WorkflowAttemptV2Wire | undefined>(
+    (latest, attempt) => (latest === undefined || attempt.attempt > latest.attempt ? attempt : latest),
+    undefined,
+  )
+}
+
+export function deriveNodeStatus(
+  nodeRun: WorkflowNodeRunV2Wire | undefined,
+  attempts: WorkflowAttemptV2Wire[],
+): RunNodeVisualStatus {
+  const status = nodeRun?.status ?? "pending"
+  if (status !== "running") return status
+  const latest = latestAttempt(attempts)
+  if (latest?.status === "running" && ((latest.remindersSent ?? 0) > 0 || latest.nextReminderAt !== undefined)) {
+    return "waiting-submit"
+  }
+  return status
 }
 
 export const TRIGGER_KIND_LABEL: Record<WorkflowTriggerKindV2, string> = {
