@@ -64,6 +64,7 @@ describe("work-item tools — registry + schemas", () => {
       "search_work_items",
       "create_work_item",
       "update_work_item",
+      "edit_work_item",
       "assign_work_item",
       "archive_work_item",
       "comment_work_item",
@@ -83,7 +84,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("fire_workflow_event");
     expect(names).toContain("cancel_workflow_run");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(58);
+    expect(names).toHaveLength(59);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {
@@ -875,6 +876,88 @@ describe("work-item relation + label tools (Todos v2 slice 3)", () => {
     await expect(tool("label_work_item").handler({ id: "JIN-7", labels: ["  "] }, silent.ctx)).rejects.toThrow(/array/);
     await expect(tool("label_work_item").handler({ id: "JIN-7", labels: Array.from({ length: 101 }, (_, i) => `l${i}`) }, silent.ctx)).rejects.toThrow(/100/);
     expect(silent.calls).toEqual([]);
+  });
+
+  it("edit_work_item validates locally: at least one field, priority 0..3, no title/status, approval fields rejected", async () => {
+    const silent = stub(() => ({ status: 500, body: { error: "must not run" } }));
+    await expect(tool("edit_work_item").handler({ id: "JIN-1" }, silent.ctx)).rejects.toThrow(/at least one/i);
+    await expect(tool("edit_work_item").handler({ id: "JIN-1", priority: 9 }, silent.ctx)).rejects.toThrow(/priority/);
+    await expect(tool("edit_work_item").handler({ id: "nope", body: "x" }, silent.ctx)).rejects.toThrow(/canonical Todo ID/);
+    await expect(tool("edit_work_item").handler({ id: "JIN-1", approvalState: "approved", body: "x" }, silent.ctx)).rejects.toThrow(/approval/i);
+    await expect(tool("edit_work_item").handler({ id: "JIN-1", body: "a".repeat(64_001) }, silent.ctx)).rejects.toThrow(/too long/);
+    expect(silent.calls).toEqual([]);
+    const props = Object.keys(tool("edit_work_item").inputSchema.properties);
+    expect(props.sort()).toEqual(["acceptance", "body", "dueAt", "id", "priority"]);
+  });
+
+  it("edit_work_item reads a fresh version and PATCHes with it", async () => {
+    const { calls, ctx } = stub((call) => {
+      if (call.method === "GET") return { status: 200, body: { workItem: { id: "JIN-9", version: 7 } } };
+      return { status: 200, body: { workItem: { id: "JIN-9", version: 8, body: "edited" }, replayed: false } };
+    });
+    const out = (await tool("edit_work_item").handler({ id: "JIN-9", body: "edited", priority: 1 }, ctx)) as Record<string, unknown>;
+    expect(calls.map((c) => c.method)).toEqual(["GET", "PATCH"]);
+    expect(new URL(calls[1].url).pathname).toBe("/api/work-items/JIN-9");
+    expect(calls[1].body).toEqual({ body: "edited", priority: 1, expectedVersion: 7 });
+    expect((out.workItem as Record<string, unknown>).body).toBe("edited");
+  });
+
+  it("edit_work_item retries ONCE on a version conflict with a re-read version, then surfaces the second conflict", async () => {
+    let version = 3;
+    let patches = 0;
+    const { calls, ctx } = stub((call) => {
+      if (call.method === "GET") return { status: 200, body: { workItem: { id: "JIN-9", version } } };
+      patches += 1;
+      if (patches === 1) {
+        version = 5; // concurrent bump between the read and the write
+        return { status: 409, body: { error: "Todo changed since it was loaded.", code: "todo_version_conflict", currentVersion: 5 } };
+      }
+      return { status: 200, body: { workItem: { id: "JIN-9", version: 6 }, replayed: false } };
+    });
+    await tool("edit_work_item").handler({ id: "JIN-9", body: "retry me" }, ctx);
+    expect(calls.map((c) => c.method)).toEqual(["GET", "PATCH", "GET", "PATCH"]);
+    expect((calls[1].body as { expectedVersion: number }).expectedVersion).toBe(3);
+    expect((calls[3].body as { expectedVersion: number }).expectedVersion).toBe(5);
+
+    // a second consecutive conflict surfaces the route's 409
+    const stubborn = stub((call) => {
+      if (call.method === "GET") return { status: 200, body: { workItem: { id: "JIN-9", version: 1 } } };
+      return { status: 409, body: { error: "Todo changed since it was loaded.", code: "todo_version_conflict", currentVersion: 2 } };
+    });
+    await expect(tool("edit_work_item").handler({ id: "JIN-9", body: "never lands" }, stubborn.ctx)).rejects.toThrow(/conflicted \(409\)/);
+    expect(stubborn.calls.filter((c) => c.method === "PATCH")).toHaveLength(2);
+  });
+
+  it("edit_work_item surfaces the route's authority words verbatim", async () => {
+    const { ctx } = stub((call) => {
+      if (call.method === "GET") return { status: 200, body: { workItem: { id: "JIN-9", version: 1 } } };
+      return { status: 403, body: { error: 'field "title" is not editable by the assignee: title belongs to the Todo\'s creator or the operator; assignee, department, and rank are operator-only' } };
+    });
+    await expect(tool("edit_work_item").handler({ id: "JIN-9", body: "x" }, ctx)).rejects.toThrow(/refused \(403\).*"title"/);
+  });
+
+  it("edit_work_item round-trips through the real API as the assignee session", async () => {
+    const dev = registry.createSession({ engine: "codex", source: "web", sourceRef: "slice4-editor", title: "editor", employee: "platform-dev" });
+    const devCtx = ctxFor(dev.id);
+    const item = store.createWorkItem({ title: "slice4 editable", assignee: "platform-dev" });
+
+    const edited = (await tool("edit_work_item").handler(
+      { id: item.id, body: "refined over MCP", acceptance: "AC v2", priority: 1, dueAt: "2026-08-20" },
+      devCtx,
+    )) as { workItem: Record<string, unknown> };
+    expect(edited.workItem).toMatchObject({
+      body: "refined over MCP",
+      acceptance: "AC v2",
+      priority: 1,
+      dueAt: "2026-08-20T00:00:00.000Z",
+    });
+    const edit = store.listWorkItemEvents(item.id).filter((e) => e.kind === "metadata_edited").at(-1)!;
+    expect(edit.actor).toBe("platform-dev");
+
+    // the widened matrix still fences non-creator titles — the route's words surface
+    await expect(
+      tool("edit_work_item").handler({ id: item.id, body: "x", title: "hijack" } as Record<string, unknown>, devCtx),
+    ).rejects.toThrow(/title/);
   });
 
   it("link → label → list_labels → detail round-trips through the real API", async () => {
