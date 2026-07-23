@@ -623,6 +623,9 @@ export interface WorkItemEditPatch {
   department?: string | null
   priority?: number
   rank?: number
+  /** Todos v2 slice 4 (optional: older gateways reject unknown fields). */
+  acceptance?: string | null
+  dueAt?: string | null
 }
 
 export interface WorkItemEditRequest {
@@ -693,6 +696,24 @@ export interface WorkItemCommentPageWire {
   offset?: number
 }
 
+/** One approval history row (Todos v2 slice 4). The legacy approval* fields on
+ *  the work item mirror the CURRENT row (pending, else latest decided). */
+export interface WorkItemApprovalWire {
+  id: string
+  workItemId: string
+  state: ApprovalStateWire
+  request: string
+  ref: string | null
+  target: string | null
+  targetKind: string | null
+  requestedBy: string
+  requestedAt: string
+  escalatedAt: string | null
+  decidedBy: string | null
+  decidedAt: string | null
+  note: string | null
+}
+
 /** The GET /api/work-items/:id payload: full row + live-derived spend + audit. */
 export interface WorkItemDetailWire {
   workItem: WorkItemFullWire
@@ -704,6 +725,8 @@ export interface WorkItemDetailWire {
   relations?: WorkItemRelationWire[]
   /** The Todo's labels, ordered by name (optional: older gateways omit it). */
   labels?: WorkItemLabelWire[]
+  /** Approval history, oldest first (optional: older gateways omit it). */
+  approvals?: WorkItemApprovalWire[]
 }
 
 export interface ApprovalDecisionResultWire {

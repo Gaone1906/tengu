@@ -3,17 +3,16 @@ import crypto from "node:crypto";
 import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
-// Fixed provider budget. Rebased for Todos v2 slice 3 (link_work_items /
-// unlink_work_items / label_work_item / list_labels + the list label filter)
-// with the same ~zero headroom discipline as before: new tool prose must stay
-// concise rather than growing into this ceiling.
-const MAX_MANIFEST_TOKENS = 4529;
+// Fixed provider budget. Rebased for Todos v2 slice 4 (edit_work_item) with the
+// same ~zero headroom discipline as before: new tool prose must stay concise
+// rather than growing into this ceiling.
+const MAX_MANIFEST_TOKENS = 4649;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 4131, sha256: "920b88d8ea605d29087cb5a03921098cf9b65f09b54a906624df962b8c8906f3" },
-  pi: { tokens: 4527, sha256: "cf2b28a6a90ee51e5c9c5e9c84358a4237720e15ba9b8dccc1ee1ab404d5ce20" },
-  openai: { tokens: 4291, sha256: "eddec446af17c1730062c15b9f7575f46a398e8e1d82341021affb33c5a3fc98" },
+  rpc: { tokens: 4244, sha256: "454e0f2369f41f106741ae256e72d81fce66e8c8563a7b9cc2083745424c3be8" },
+  pi: { tokens: 4647, sha256: "70e1db0fba86f0f1919b263d3622372f2d93318087f6168c639e42a43c0d8831" },
+  openai: { tokens: 4407, sha256: "f8bacab3e70ef32a473b5023bf31a46b2885caf4aff8667d1900678e0ed9fe72" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -47,6 +46,7 @@ const EXPECTED_TOOL_NAMES = [
   "delegate_task",
   "disable_workflow",
   "duplicate_workflow",
+  "edit_work_item",
   "enable_workflow",
   "escalate_work_item_approval",
   "find_employees",
@@ -108,6 +108,7 @@ const EXPECTED_REQUIRED = {
   delegate_task: ["task"],
   disable_workflow: ["workflowId", "expectedRevision"],
   duplicate_workflow: ["sourceId", "id", "title"],
+  edit_work_item: ["id"],
   enable_workflow: ["workflowId", "expectedRevision"],
   escalate_work_item_approval: ["id"],
   find_employees: [],
@@ -160,6 +161,7 @@ const EXPECTED_ENUMS = {
   create_work_item: [["properties.priority", [0, 1, 2, 3]]],
   decide_workflow_approval: [["properties.decision", ["approve", "reject"]]],
   decide_work_item_approval: [["properties.decision", ["approve", "reject"]]],
+  edit_work_item: [["properties.priority", [0, 1, 2, 3]]],
   link_work_items: [["properties.kind", ["blocks", "relates", "duplicates"]]],
   list_sessions: [["properties.scope", ["children", "employee", "recent"]]],
   list_work_items: [
@@ -224,7 +226,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(58);
+    expect(tools).toHaveLength(59);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);

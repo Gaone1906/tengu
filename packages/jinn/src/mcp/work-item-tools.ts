@@ -389,6 +389,80 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     },
   };
 
+  const edit: JinnMcpTool = {
+    name: "edit_work_item",
+    description: "Edit a Todo's body/acceptance/priority/dueAt (creator, assignee, or their manager).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: TODO_ID_SCHEMA,
+        body: { type: "string" },
+        acceptance: { type: "string" },
+        priority: { type: "number", enum: [0, 1, 2, 3] },
+        dueAt: { type: "string" },
+      },
+      required: ["id"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      rejectApprovalFields(args, "edit_work_item");
+      const id = requireTodoId(args);
+      if (args.title !== undefined) {
+        throw new JinnMcpToolError("title is a human-surface edit (the Todo's creator or the operator, over the web/HTTP surface) — edit_work_item cannot change it");
+      }
+      if (args.status !== undefined) {
+        throw new JinnMcpToolError("status is not a metadata edit — use update_work_item for lifecycle changes");
+      }
+      // Refuse other non-editable fields LOUDLY too: silently dropping them
+      // would report success without the edit the caller asked for.
+      if (args.assignee !== undefined) {
+        throw new JinnMcpToolError("assignee is not editable here — use assign_work_item");
+      }
+      if (args.department !== undefined || args.rank !== undefined) {
+        throw new JinnMcpToolError("department and rank are operator-only edits (web/HTTP surface) — edit_work_item cannot change them");
+      }
+      const patch: Record<string, unknown> = {};
+      for (const key of ["body", "acceptance"] as const) {
+        const v = optionalString(args, key, WORK_ITEM_BODY_CHAR_CAP);
+        if (v !== undefined) patch[key] = v;
+      }
+      if (args.priority !== undefined) {
+        if (typeof args.priority !== "number" || !Number.isInteger(args.priority) || args.priority < 0 || args.priority > 3) {
+          throw new JinnMcpToolError("priority must be an integer 0..3");
+        }
+        patch.priority = args.priority;
+      }
+      const dueAt = optionalString(args, "dueAt", 64);
+      if (dueAt !== undefined) patch.dueAt = dueAt;
+      if (Object.keys(patch).length === 0) {
+        throw new JinnMcpToolError("pass at least one editable field (body, acceptance, priority, dueAt)");
+      }
+      // Agents should not have to run the optimistic-concurrency loop for a
+      // simple metadata edit: read a fresh version, PATCH with it, and retry
+      // ONCE on a concurrent bump. A second conflict surfaces the 409.
+      let conflict: JinnMcpToolError | undefined;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const read = await gatewayRequest(ctx, "GET", `/api/work-items/${encodeURIComponent(id)}`);
+        if (read.status >= 400) throw gatewayFailure(`editing work item "${id}"`, read.status, read.body);
+        const version = ((read.body ?? {}) as { workItem?: { version?: unknown } }).workItem?.version;
+        if (typeof version !== "number") {
+          throw new JinnMcpToolError(`editing work item "${id}" failed: the gateway detail payload carried no version`);
+        }
+        const { status, body } = await gatewayRequest(ctx, "PATCH", `/api/work-items/${encodeURIComponent(id)}`, {
+          ...patch,
+          expectedVersion: version,
+        });
+        if (status === 409 && ((body ?? {}) as { code?: unknown }).code === "todo_version_conflict") {
+          conflict = gatewayFailure(`editing work item "${id}"`, status, body);
+          continue;
+        }
+        if (status >= 400) throw gatewayFailure(`editing work item "${id}"`, status, body);
+        return mutationResult(body, "Todo metadata edited.");
+      }
+      throw conflict!;
+    },
+  };
+
   const assign: JinnMcpTool = {
     name: "assign_work_item",
     description: "Assign a Todo.",
@@ -572,5 +646,5 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     },
   };
 
-  return [list, get, tree, search, create, update, assign, archive, comment, listComments, link, unlink, label, labelsList];
+  return [list, get, tree, search, create, update, edit, assign, archive, comment, listComments, link, unlink, label, labelsList];
 }

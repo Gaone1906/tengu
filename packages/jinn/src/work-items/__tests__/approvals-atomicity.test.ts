@@ -66,6 +66,11 @@ describe("native approval decision atomicity (QA finding 2)", () => {
     const item = store.getWorkItem(id)!;
     expect(item.status).toBe("in_review");
     expect(item.approvalState).toBe("pending");
+    // slice 4: the work_item_approvals row itself rolled back to undecided
+    const row = approvals.currentApproval(id)!;
+    expect(row.state).toBe("pending");
+    expect(row.decidedBy).toBeNull();
+    expect(row.decidedAt).toBeNull();
     const kinds = store.listWorkItemEvents(id).map((e) => e.kind);
     expect(kinds).not.toContain("approval_decided");
     expect(kinds).not.toContain("status_change");

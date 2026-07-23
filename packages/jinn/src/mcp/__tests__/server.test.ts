@@ -101,6 +101,7 @@ describe("buildTools", () => {
       "delegate_task",
       "disable_workflow",
       "duplicate_workflow",
+      "edit_work_item",
       "enable_workflow",
       "escalate_work_item_approval",
       "find_employees",
@@ -237,7 +238,7 @@ describe("handleMcpRequest — tools/call", () => {
 
   it("compiles every advertised registry schema or supplies its shared runtime schema", () => {
     const tools = buildTools();
-    expect(tools).toHaveLength(58);
+    expect(tools).toHaveLength(59);
     for (const tool of tools) {
       expect(() => tool.runtimeSchema ?? z.fromJSONSchema({ ...tool.inputSchema, additionalProperties: false } as Parameters<typeof z.fromJSONSchema>[0]), tool.name).not.toThrow();
     }

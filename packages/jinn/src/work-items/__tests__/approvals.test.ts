@@ -199,6 +199,147 @@ describe("decideWorkItemApproval — native consequence rules", () => {
   });
 });
 
+/* ── approvals off-row (Todos v2 slice 4) — the work_item_approvals table ───── */
+
+describe("approvals off-row — writes land in work_item_approvals, columns stay frozen", () => {
+  function rawColumns(id: string): Record<string, unknown> {
+    return reg
+      .initDb()
+      .prepare(
+        `SELECT approval_state, approval_request, approval_ref, approval_target,
+                approval_target_kind, approval_escalated_at, approval_decided_by, approval_decided_at
+           FROM work_items WHERE id = ?`,
+      )
+      .get(id) as Record<string, unknown>;
+  }
+
+  function expectColumnsFrozenNull(id: string): void {
+    const cols = rawColumns(id);
+    for (const [column, value] of Object.entries(cols)) {
+      expect(value, `${column} must stay frozen (never written post-slice-4)`).toBeNull();
+    }
+  }
+
+  it("request writes ONLY the new table; the legacy approval_* columns never change", () => {
+    const item = store.createWorkItem({ title: "Off-row request", status: "in_review", source: "human" });
+    const out = approvals.requestApproval(item.id, { request: "gate?", ref: "opaque-ref", target: null, actor: "session:sX" });
+    // The returned WorkItem still reads as pending (dual-read), but the columns are untouched.
+    expect(out.approvalState).toBe("pending");
+    expect(out.approvalRef).toBe("opaque-ref");
+    expectColumnsFrozenNull(item.id);
+    const row = approvals.currentApproval(item.id)!;
+    expect(row.state).toBe("pending");
+    expect(row.request).toBe("gate?");
+    expect(row.ref).toBe("opaque-ref");
+    expect(row.target).toBeNull();
+    expect(row.targetKind).toBe("none");
+    expect(row.requestedBy).toBe("session:sX");
+    expect(row.requestedAt).toBeTruthy();
+    expect(row.decidedBy).toBeNull();
+    expect(row.decidedAt).toBeNull();
+    // version still advances exactly once per effective request
+    expect(out.version).toBe(item.version + 1);
+  });
+
+  it("decide + escalate write the pending row (note included); columns stay frozen", async () => {
+    const item = store.createWorkItem({ title: "Off-row decide", status: "backlog", source: "human" });
+    approvals.requestApproval(item.id, { request: "plan ok?", target: null });
+    const escalated = approvals.escalateApproval(item.id, "coo", "needs the operator");
+    expect(escalated.approvalEscalatedAt).toBeTruthy();
+    expect(approvals.currentApproval(item.id)!.escalatedAt).toBeTruthy();
+    const r = await approvals.decideWorkItemApproval({ id: item.id, decision: "approve", note: "fine", decidedBy: "coo" });
+    expect(r.ok).toBe(true);
+    const row = approvals.currentApproval(item.id)!;
+    expect(row.state).toBe("approved");
+    expect(row.decidedBy).toBe("coo");
+    expect(row.decidedAt).toBeTruthy();
+    expect(row.note).toBe("fine");
+    expectColumnsFrozenNull(item.id);
+  });
+
+  it("keeps approval history: a fresh request after a decision is a NEW row; current = pending else latest decided", async () => {
+    const item = store.createWorkItem({ title: "History", status: "backlog", source: "human" });
+    approvals.requestApproval(item.id, { request: "round one", target: null });
+    await approvals.decideWorkItemApproval({ id: item.id, decision: "reject", note: "no", decidedBy: "coo" });
+    approvals.requestApproval(item.id, { request: "round two", target: null });
+
+    const history = approvals.listApprovals(item.id);
+    expect(history.length).toBe(2);
+    expect(history[0].request).toBe("round one");
+    expect(history[0].state).toBe("rejected");
+    expect(history[1].request).toBe("round two");
+    expect(history[1].state).toBe("pending");
+
+    // current = the pending row while one exists
+    expect(approvals.currentApproval(item.id)!.request).toBe("round two");
+
+    // …and the latest DECIDED row once it is decided
+    await approvals.decideWorkItemApproval({ id: item.id, decision: "approve", decidedBy: "coo" });
+    const current = approvals.currentApproval(item.id)!;
+    expect(current.request).toBe("round two");
+    expect(current.state).toBe("approved");
+
+    // the dual-read WorkItem view tracks the current row
+    const roundTrip = store.getWorkItem(item.id)!;
+    expect(roundTrip.approvalState).toBe("approved");
+    expect(roundTrip.approvalRequest).toBe("round two");
+  });
+
+  it("re-request while pending overwrites the pending row in place — no second row", () => {
+    const item = store.createWorkItem({ title: "Overwrite pending", status: "assigned", source: "delegation" });
+    approvals.requestApproval(item.id, { request: "v1 text", target: null });
+    approvals.requestApproval(item.id, { request: "v2 text", target: null });
+    const history = approvals.listApprovals(item.id);
+    expect(history.length).toBe(1);
+    expect(history[0].request).toBe("v2 text");
+    expect(history[0].state).toBe("pending");
+  });
+
+  it("the DB refuses a second pending row per item (uq_wap_pending partial unique index)", () => {
+    const item = store.createWorkItem({ title: "Unique pending", status: "backlog", source: "human" });
+    approvals.requestApproval(item.id, { request: "first", target: null });
+    expect(() =>
+      reg
+        .initDb()
+        .prepare(
+          `INSERT INTO work_item_approvals (id, work_item_id, state, request, requested_by, requested_at)
+           VALUES ('wap_ffffffffffff', ?, 'pending', 'raced second request', 'test', '2026-07-23T00:00:00.000Z')`,
+        )
+        .run(item.id),
+    ).toThrow(/UNIQUE/);
+    expect(approvals.listApprovals(item.id).length).toBe(1);
+  });
+
+  it("an idempotent-hit create returns the overlaid approval state (review F1)", () => {
+    const item = store.createWorkItem({
+      title: "Idempotent overlay",
+      status: "executing",
+      source: "delegation",
+      sourceRef: "delegate:sess-f1:idempotency:1",
+    });
+    approvals.requestApproval(item.id, { request: "gate the retry", target: null });
+    // A retry with the same (source, sourceRef) returns the EXISTING row — and
+    // it must leave the module hydrated like every other WorkItem read.
+    const replay = store.createWorkItem({
+      title: "Idempotent overlay",
+      status: "executing",
+      source: "delegation",
+      sourceRef: "delegate:sess-f1:idempotency:1",
+    });
+    expect(replay.id).toBe(item.id);
+    expect(replay.approvalState).toBe("pending");
+    expect(replay.approvalRequest).toBe("gate the retry");
+  });
+
+  it("needsAttentionFor reads pending approvals from the new table", () => {
+    const item = store.createWorkItem({ title: "Attention via table", status: "assigned", source: "delegation" });
+    approvals.requestApproval(item.id, { request: "sign-off", target: "attention-target" });
+    const hits = store.listWorkItems({ needsAttentionFor: "attention-target" });
+    expect(hits.some((i) => i.id === item.id)).toBe(true);
+    expectColumnsFrozenNull(item.id);
+  });
+});
+
 describe("Todo approvals ignore historical Workflow-looking refs", () => {
   it("applies the native decision and archive rules without Workflow routing", async () => {
     const decidedItem = store.createWorkItem({ title: "Historical ref", status: "in_review", source: "workflow" });

@@ -6,6 +6,7 @@ import { CONFIG_PATH } from '../shared/paths.js';
 import { parseTodoId, resolveTodoIdPrefix } from './id.js';
 import { resolveDepartmentPrefix } from './departments.js';
 import { allocateWorkItemId, useWorkItemAllocationClaim } from './migrate.js';
+import { currentApproval, currentApprovalsByItem, type WorkItemApproval } from './approval-rows.js';
 
 /**
  * Work-item store — the substrate of the Todos ledger (GRS-002, elevated by
@@ -249,6 +250,36 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItem {
   };
 }
 
+/**
+ * Slice-4 dual-read seam: the legacy `approval_*` columns are FROZEN (never
+ * written after the backfill), so every WorkItem leaving this module overlays
+ * them from the item's current `work_item_approvals` row. `rowToWorkItem` itself
+ * still maps the raw columns — the overlay is applied explicitly at the read
+ * functions (single reads hydrate per item; page/tree reads batch), which keeps
+ * EVERY consumer (payloads, authority checks, activity cards, transitions'
+ * returns) byte-identical to the pre-slice column-backed values.
+ */
+function overlayApproval(item: WorkItem, row: WorkItemApproval | undefined): WorkItem {
+  if (!row) return item;
+  return {
+    ...item,
+    approvalState: row.state,
+    approvalRequest: row.request,
+    approvalRef: row.ref,
+    approvalTarget: row.target,
+    approvalTargetKind: row.targetKind,
+    approvalEscalatedAt: row.escalatedAt,
+    approvalDecidedBy: row.decidedBy,
+    approvalDecidedAt: row.decidedAt,
+  };
+}
+
+function hydrateApprovals(items: WorkItem[]): WorkItem[] {
+  if (items.length === 0) return items;
+  const currentByItem = currentApprovalsByItem(items.map((item) => item.id));
+  return items.map((item) => overlayApproval(item, currentByItem.get(item.id)));
+}
+
 /** True only for a UNIQUE-constraint violation — NOT a CHECK violation (those must
  *  still surface as errors, e.g. an invalid status). better-sqlite3 sets `.code`. */
 function isUniqueConstraintError(err: unknown): boolean {
@@ -266,6 +297,7 @@ export type WorkItemEventKind =
   | 'relation_added'
   | 'relation_removed'
   | 'label_changed'
+  | 'metadata_edited'
   | 'status_change'
   | 'note'
   | 'session_linked'
@@ -421,7 +453,9 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
     const row = db
       .prepare('SELECT * FROM work_items WHERE source = ? AND source_ref = ?')
       .get(source, sourceRef) as Record<string, unknown> | undefined;
-    return row ? rowToWorkItem(row) : undefined;
+    // Overlay like every other WorkItem-producing read: a retried machine mint
+    // can hit an item that has since gained an approval (dual-read seam).
+    return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string)) : undefined;
   };
 
   const txn = db.transaction((): WorkItem => {
@@ -494,8 +528,9 @@ export function resolveCompanyPrefix(): string {
 
 export function getWorkItem(id: string): WorkItem | undefined {
   const db = initDb();
-  const row = db.prepare('SELECT * FROM work_items WHERE id = ?').get(parseTodoId(id)) as Record<string, unknown> | undefined;
-  return row ? rowToWorkItem(row) : undefined;
+  const todoId = parseTodoId(id);
+  const row = db.prepare('SELECT * FROM work_items WHERE id = ?').get(todoId) as Record<string, unknown> | undefined;
+  return row ? overlayApproval(rowToWorkItem(row), currentApproval(todoId)) : undefined;
 }
 
 /** Look up a machine-minted item by its stable key — how the workflow bridge
@@ -505,7 +540,7 @@ export function getWorkItemBySourceRef(source: WorkItemSource, sourceRef: string
   const row = db
     .prepare('SELECT * FROM work_items WHERE source = ? AND source_ref = ?')
     .get(source, sourceRef) as Record<string, unknown> | undefined;
-  return row ? rowToWorkItem(row) : undefined;
+  return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string)) : undefined;
 }
 
 const WORK_ITEM_STATUS_VALUES: readonly WorkItemStatus[] = [
@@ -576,7 +611,11 @@ function workItemWhere(filter: ListWorkItemsFilter): { sql: string; values: unkn
     values.push(filter.label, filter.label);
   }
   if (filter.needsAttentionFor) {
-    conditions.push("((approval_state = 'pending' AND approval_target = ?) OR (assignee = ? AND status IN ('blocked', 'escalated')))");
+    // Pending approvals live in work_item_approvals (slice 4) — the frozen
+    // approval_* columns are no longer consulted anywhere.
+    conditions.push(
+      "(EXISTS (SELECT 1 FROM work_item_approvals wap WHERE wap.work_item_id = work_items.id AND wap.state = 'pending' AND wap.target = ?) OR (assignee = ? AND status IN ('blocked', 'escalated')))",
+    );
     values.push(filter.needsAttentionFor, filter.needsAttentionFor);
   }
   if (filter.since) {
@@ -614,7 +653,7 @@ export function queryWorkItems(filter: ListWorkItemsFilter = {}): WorkItemPage {
   const totals = Object.fromEntries(WORK_ITEM_STATUS_VALUES.map((status) => [status, 0])) as WorkItemTotals;
   for (const count of counts) totals[count.status] = count.total;
   const total = counts.reduce((sum, count) => sum + count.total, 0);
-  const workItems = rows.map(rowToWorkItem);
+  const workItems = hydrateApprovals(rows.map(rowToWorkItem));
   const consumed = offset + workItems.length;
   return {
     workItems,
@@ -657,8 +696,9 @@ export function getWorkItemTree(id: string): WorkItemTree | undefined {
   const db = initDb();
   const item = getWorkItem(id);
   if (!item) return undefined;
-  const family = (db.prepare('SELECT * FROM work_items WHERE root_id = ?').all(item.rootId) as Record<string, unknown>[])
-    .map(rowToWorkItem);
+  const family = hydrateApprovals(
+    (db.prepare('SELECT * FROM work_items WHERE root_id = ?').all(item.rootId) as Record<string, unknown>[]).map(rowToWorkItem),
+  );
   const childrenByParent = new Map<string, WorkItem[]>();
   for (const member of family) {
     if (!member.parentId) continue;
@@ -698,6 +738,9 @@ export interface UpdateWorkItemInput {
   department?: string | null;
   priority?: number;
   rank?: number | null;
+  /** Todos v2 slice 4 — the widened metadata pen also covers these. */
+  acceptance?: string | null;
+  dueAt?: string | null;
 }
 
 export interface ConditionalWorkItemUpdateOptions {
@@ -738,6 +781,10 @@ const UPDATE_FIELD_COLUMNS: Readonly<Record<keyof UpdateWorkItemInput, string>> 
   department: 'department',
   priority: 'priority',
   rank: 'rank',
+  // Appended AFTER the original six so pre-slice-4 idempotency-receipt
+  // fingerprints (key order feeds the canonical JSON) stay byte-stable.
+  acceptance: 'acceptance',
+  dueAt: 'due_at',
 };
 
 function canonicalUpdateFingerprint(id: string, input: UpdateWorkItemInput, expectedVersion: number): string {
@@ -805,7 +852,7 @@ export function updateWorkItemConditional(
       }
       appendWorkItemEvent({
         workItemId: id,
-        kind: 'note',
+        kind: 'metadata_edited',
         actor: opts.actor ?? null,
         detail: { updatedFields: fields.map((field) => field.name) },
         versionEffect: 'companion',
