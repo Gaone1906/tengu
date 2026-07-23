@@ -227,7 +227,9 @@ function WorkflowSurface({ store }: { store: EditorStoreApi }) {
         >
           <ArrowLeft className="size-4" aria-hidden />
         </Link>
-        <div className="min-w-0 flex-1">
+        {/* Basis keeps the title readable at 390px — trailing controls wrap
+            below instead of squeezing it to one glyph. */}
+        <div className="min-w-0 flex-[1_1_160px]">
           <h1 className="truncate text-[length:var(--text-headline)] font-[var(--weight-bold)] tracking-[var(--tracking-tight)]">
             {meta.title}
           </h1>

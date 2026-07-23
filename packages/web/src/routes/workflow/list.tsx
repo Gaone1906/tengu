@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowRight, Plus, Workflow } from "lucide-react"
 import { Link, useNavigate } from "react-router-dom"
 import { PageLayout } from "@/components/page-layout"
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import {
   api,
@@ -35,6 +35,7 @@ function NewWorkflowDialog({ open, onClose }: { open: boolean; onClose: () => vo
     <Dialog open={open} onOpenChange={(next) => { if (!next) onClose() }}>
       <DialogContent className="max-w-[380px]">
         <DialogTitle>New workflow</DialogTitle>
+        <DialogDescription>Name the procedure — its identifier is derived from the title.</DialogDescription>
         <form
           onSubmit={(event) => {
             event.preventDefault()
