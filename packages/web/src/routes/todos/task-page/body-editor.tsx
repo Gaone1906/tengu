@@ -54,7 +54,15 @@ export function BodyEditor({
   /** Test seam: receives the TipTap instance (jsdom cannot type into PM). */
   editorRef?: React.MutableRefObject<ReturnType<typeof useEditor> | null>
 }) {
-  const lastCommitted = useRef(body ?? "")
+  /** Last RAW body prop we seeded/committed — the remote re-seed comparator. */
+  const lastRaw = useRef(body ?? "")
+  /** The editor's OWN serialization of its current document — the commit
+   *  baseline. Seeded from `getMarkdown()` after mount and after every
+   *  re-seed, NEVER from the raw body: parse→serialize is not identity for
+   *  non-canonical grammar (tables, `- [x]`, literal HTML, setext headings),
+   *  and a zero-edit focus+blur must commit NOTHING (stage-B review F1 —
+   *  normalization may only accompany a genuine edit). */
+  const lastCommitted = useRef<string | null>(null)
   const editor = useEditor(
     {
       editable,
@@ -67,10 +75,14 @@ export function BodyEditor({
       editorProps: {
         attributes: { class: EDITOR_PROSE_CLASS, "data-testid": "task-body-editor" },
       },
+      onCreate: ({ editor: instance }) => {
+        lastCommitted.current = (instance.storage.markdown.getMarkdown() as string)
+      },
       onBlur: ({ editor: instance }) => {
         const markdown = (instance.storage.markdown.getMarkdown() as string).trim()
-        if (markdown !== lastCommitted.current.trim()) {
+        if (markdown !== (lastCommitted.current ?? "").trim()) {
           lastCommitted.current = markdown
+          lastRaw.current = markdown
           onCommit(markdown)
         }
       },
@@ -83,13 +95,15 @@ export function BodyEditor({
   }, [editor, editorRef])
 
   // A remote change (poll, another surface) re-seeds the editor only while the
-  // caret is elsewhere — never clobber in-progress typing.
+  // caret is elsewhere — never clobber in-progress typing. The commit baseline
+  // re-seeds from the editor's own serialization of the new document (F1).
   useEffect(() => {
     if (!editor || editor.isFocused) return
     const next = body ?? ""
-    if (next.trim() === lastCommitted.current.trim()) return
-    lastCommitted.current = next
+    if (next.trim() === lastRaw.current.trim()) return
+    lastRaw.current = next
     editor.commands.setContent(next)
+    lastCommitted.current = (editor.storage.markdown.getMarkdown() as string)
   }, [editor, body])
 
   if (!editable) {

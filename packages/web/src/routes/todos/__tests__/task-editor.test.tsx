@@ -155,6 +155,45 @@ describe("inline title + body editor on the page", () => {
     expect(body.textContent).not.toContain("##")
   })
 
+  it.each([
+    ["a table", "| a | b |\n| --- | --- |\n| 1 | 2 |"],
+    ["checklist grammar", "- [x] done thing\n- [ ] open thing"],
+    ["literal HTML", '<img src="x.png" alt="pic">'],
+    ["setext + star bullets + 1) markers", "Heading\n=======\n\n* star bullet\n\n1) ordered"],
+    ["canonical grammar", "## Scope\n\n- item\n\n`code`"],
+  ])("focus + blur with NO edit never commits — %s stays byte-identical (F1)", async (_label, storedBody) => {
+    const { BodyEditor } = await import("../task-page/body-editor")
+    const onCommit = vi.fn()
+    render(<BodyEditor body={storedBody} editable isDark onCommit={onCommit} />)
+    const prose = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>(".ProseMirror, [contenteditable=true]")
+      if (!el) throw new Error("editor not mounted")
+      return el
+    })
+    // The most innocent interaction on the page: focus arrives, focus leaves.
+    // (Synthetic events only — jsdom's caret machinery lacks getClientRects.)
+    fireEvent.focus(prose)
+    fireEvent.blur(prose)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it("a remote re-seed keeps the no-edit blur quiet too (baseline re-seeds from the editor's serialization)", async () => {
+    const { BodyEditor } = await import("../task-page/body-editor")
+    const onCommit = vi.fn()
+    const { rerender } = render(<BodyEditor body="First." editable isDark onCommit={onCommit} />)
+    await waitFor(() => {
+      if (!document.querySelector(".ProseMirror, [contenteditable=true]")) throw new Error("not mounted")
+    })
+    // A poll delivers a non-canonical body while the caret is elsewhere.
+    rerender(<BodyEditor body={"- [x] agent-authored line"} editable isDark onCommit={onCommit} />)
+    const prose = document.querySelector<HTMLElement>(".ProseMirror, [contenteditable=true]")!
+    fireEvent.focus(prose)
+    fireEvent.blur(prose)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
   it("blurring the editor after an edit commits plain markdown (heading grammar round-trips)", async () => {
     const { BodyEditor } = await import("../task-page/body-editor")
     const onCommit = vi.fn()
