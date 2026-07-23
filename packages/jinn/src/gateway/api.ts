@@ -1890,7 +1890,9 @@ function resolveTodoEditAuthority(caller: WorkItemCaller, item: WorkItem): TodoE
   if (caller.kind === 'operator') {
     return {
       ok: true,
-      fields: new Set<keyof UpdateWorkItemInput>(['title', 'body', 'assignee', 'department', 'priority', 'rank', 'acceptance', 'dueAt']),
+      // verifyPolicy (slice 6) is deliberately operator-only: review policy is
+      // a governance knob, not collaborative metadata.
+      fields: new Set<keyof UpdateWorkItemInput>(['title', 'body', 'assignee', 'department', 'priority', 'rank', 'acceptance', 'dueAt', 'verifyPolicy']),
       actor: 'operator',
       who: 'the operator',
     };
@@ -3436,7 +3438,7 @@ export async function handleApiRequest(
       if (Object.prototype.hasOwnProperty.call(body, "status")) {
         return todoEditValidationError(res, "Todo status must use the guarded status transition surface.");
       }
-      const metadataFields = ["title", "body", "assignee", "department", "priority", "rank", "acceptance", "dueAt"] as const;
+      const metadataFields = ["title", "body", "assignee", "department", "priority", "rank", "acceptance", "dueAt", "verifyPolicy"] as const;
       const allowed = new Set([...metadataFields, "expectedVersion", "idempotencyKey"]);
       const unsupported = Object.keys(body).filter((key) => !allowed.has(key));
       if (unsupported.length > 0) {
@@ -3522,6 +3524,11 @@ export async function handleApiRequest(
         } else {
           patch.dueAt = null;
         }
+      }
+      if (Object.prototype.hasOwnProperty.call(body, "verifyPolicy")) {
+        const verifyPolicy = validateVerifyPolicy(body.verifyPolicy);
+        if (!verifyPolicy.ok) return todoEditValidationError(res, verifyPolicy.error);
+        patch.verifyPolicy = verifyPolicy.value;
       }
 
       const item = getWorkItem(params.id);

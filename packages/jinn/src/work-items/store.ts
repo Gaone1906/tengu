@@ -752,6 +752,9 @@ export interface UpdateWorkItemInput {
   /** Todos v2 slice 4 — the widened metadata pen also covers these. */
   acceptance?: string | null;
   dueAt?: string | null;
+  /** Todos v2 slice 6 — the rail's verify picker (operator-only at the route).
+   *  null clears to the provenance default. */
+  verifyPolicy?: VerifyPolicy | null;
 }
 
 export interface ConditionalWorkItemUpdateOptions {
@@ -796,7 +799,15 @@ const UPDATE_FIELD_COLUMNS: Readonly<Record<keyof UpdateWorkItemInput, string>> 
   // fingerprints (key order feeds the canonical JSON) stay byte-stable.
   acceptance: 'acceptance',
   dueAt: 'due_at',
+  // Slice 6, appended for the same fingerprint-stability reason.
+  verifyPolicy: 'verify_policy',
 };
+
+/** SQL-storable value for one update field (verify_policy is a JSON column). */
+function updateFieldSqlValue(input: UpdateWorkItemInput, key: keyof UpdateWorkItemInput): unknown {
+  if (key === 'verifyPolicy') return input.verifyPolicy ? JSON.stringify(input.verifyPolicy) : null;
+  return input[key];
+}
 
 function canonicalUpdateFingerprint(id: string, input: UpdateWorkItemInput, expectedVersion: number): string {
   const patch: Record<string, unknown> = {};
@@ -812,7 +823,11 @@ function idempotencyKeyDigest(key: string): string {
 
 function updateChangesItem(item: WorkItem, input: UpdateWorkItemInput): boolean {
   return (Object.keys(UPDATE_FIELD_COLUMNS) as Array<keyof UpdateWorkItemInput>)
-    .some((key) => input[key] !== undefined && item[key] !== input[key]);
+    .some((key) => {
+      if (input[key] === undefined) return false;
+      if (key === 'verifyPolicy') return JSON.stringify(item.verifyPolicy) !== JSON.stringify(input.verifyPolicy);
+      return item[key] !== input[key];
+    });
 }
 
 /** Atomic row-level compare-and-update for the operator metadata surface.
@@ -851,7 +866,7 @@ export function updateWorkItemConditional(
     if (updateChangesItem(current, input)) {
       const fields = (Object.keys(UPDATE_FIELD_COLUMNS) as Array<keyof UpdateWorkItemInput>)
         .filter((key) => input[key] !== undefined)
-        .map((key) => ({ column: UPDATE_FIELD_COLUMNS[key], name: key, value: input[key] }));
+        .map((key) => ({ column: UPDATE_FIELD_COLUMNS[key], name: key, value: updateFieldSqlValue(input, key) }));
       if (typeof input.department === 'string') ensureDepartmentRegistered(input.department);
       const now = new Date().toISOString();
       const result = db

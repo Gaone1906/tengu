@@ -328,6 +328,64 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     };
   }
 
+  it("lets the operator PATCH the verify policy (set and clear) — the rail's verify picker lane", async () => {
+    const item = store.createWorkItem({ title: "Verify policy edit", status: "assigned" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}`, {
+        expectedVersion: item.version,
+        verifyPolicy: { mode: "thorough", maxRounds: 3 },
+      }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(200);
+    expect(cap.body.workItem.verifyPolicy).toEqual({ mode: "thorough", maxRounds: 3 });
+
+    const clear = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}`, {
+        expectedVersion: cap.body.workItem.version,
+        verifyPolicy: null,
+      }, operatorHeaders),
+      clear.res,
+      ctx,
+    );
+    expect(clear.status).toBe(200);
+    expect(clear.body.workItem.verifyPolicy).toBeNull();
+  })
+
+  it("refuses an invalid verify policy mode readably", async () => {
+    const item = store.createWorkItem({ title: "Verify policy invalid", status: "assigned" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}`, {
+        expectedVersion: item.version,
+        verifyPolicy: { mode: "paranoid" },
+      }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(400);
+    expect(cap.body.error).toMatch(/verifyPolicy\.mode/);
+  })
+
+  it("keeps verifyPolicy operator-only: the creator session's PATCH is refused for that field", async () => {
+    const caller = reg.createSession({ engine: "codex", source: "web", sourceRef: "vp-caller", employee: "platform-worker" });
+    const item = store.createWorkItem({ title: "Agent vp edit", status: "assigned", createdBy: "platform-worker" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}`, {
+        expectedVersion: item.version,
+        verifyPolicy: { mode: "trust" },
+      }, toolHeaders(caller.id)),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(403);
+    expect(store.getWorkItem(item.id)?.verifyPolicy).toBeNull();
+  })
+
   it("lets the authenticated operator edit metadata and manual rank without changing status", async () => {
     const item = store.createWorkItem({ title: "Before edit", body: "old body", status: "backlog" });
     const cap = makeRes();
