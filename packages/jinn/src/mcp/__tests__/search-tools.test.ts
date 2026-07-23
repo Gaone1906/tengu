@@ -101,7 +101,7 @@ describe("search tools — registry + schemas", () => {
     expect(names).toContain("search_sessions");
     expect(names).toContain("get_message_context");
     expect(names).toContain("cancel_workflow_run");
-    expect(names).toHaveLength(55);
+    expect(names).toHaveLength(57);
   });
 
   it("domain teaching lives on search_messages; the others stay short", () => {
