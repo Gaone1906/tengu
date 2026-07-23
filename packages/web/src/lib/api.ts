@@ -746,6 +746,21 @@ export interface WorkItemTreeWire {
   spendUsd: number
 }
 
+/** One attachment row (Todos v2 slice 5) — content-addressed; `commentId`
+ *  null = attached to the Todo, set = attached to that comment. */
+export interface WorkItemAttachmentWire {
+  id: string
+  workItemId: string
+  commentId: string | null
+  filename: string
+  mime: string
+  bytes: number
+  sha256: string
+  storagePath: string
+  uploadedBy: string
+  createdAt: string
+}
+
 /** One department row from GET /api/departments (Todos v2 slice 5). */
 export interface DepartmentSummaryWire {
   slug: string
@@ -1131,6 +1146,35 @@ export const api = {
     ),
   /** Todos v2 slice 3: the shared label registry (existing labels only). */
   listLabels: () => get<{ labels: WorkItemLabelWire[] }>("/api/labels"),
+  /** Todos v2 slice 5: attachment rows (item-level and per-comment). */
+  listWorkItemAttachments: (id: string) =>
+    get<{ attachments: WorkItemAttachmentWire[] }>(`/api/work-items/${encodeURIComponent(id)}/attachments`),
+  /** Multipart upload; `commentId` attaches to that comment instead of the item. */
+  uploadWorkItemAttachment: async (id: string, file: File, commentId?: string): Promise<WorkItemAttachmentWire> => {
+    const form = new FormData()
+    form.append("file", file)
+    if (commentId) form.append("commentId", commentId)
+    const res = await authFetch(`/api/work-items/${encodeURIComponent(id)}/attachments`, { method: "POST", body: form })
+    if (!res.ok) throw await responseError(res)
+    return (await res.json()).attachment as WorkItemAttachmentWire
+  },
+  deleteWorkItemAttachment: (id: string, attachmentId: string) =>
+    del<{ removed: boolean }>(`/api/work-items/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`),
+  /** Integrity-checked download path (cookie-authenticated, usable as img src). */
+  workItemAttachmentUrl: (id: string, attachmentId: string): string =>
+    `/api/work-items/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`,
+  /** Todos v2 slice 3: relations (blocks is cycle-checked server-side). */
+  addWorkItemRelation: (id: string, kind: WorkItemRelationKindWire, dstId: string) =>
+    post<{ relation: unknown }>(`/api/work-items/${encodeURIComponent(id)}/relations`, { kind, dstId }),
+  removeWorkItemRelation: async (id: string, kind: WorkItemRelationKindWire, dstId: string): Promise<{ removed: boolean }> => {
+    const res = await authFetch(`/api/work-items/${encodeURIComponent(id)}/relations`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, dstId }),
+    })
+    if (!res.ok) throw await responseError(res)
+    return res.json()
+  },
   /** Replace a Todo's label set (ids or names; nothing created implicitly). */
   setWorkItemLabels: (id: string, labels: string[]) =>
     put<{ labels: WorkItemLabelWire[] }>(`/api/work-items/${encodeURIComponent(id)}/labels`, { labels }),

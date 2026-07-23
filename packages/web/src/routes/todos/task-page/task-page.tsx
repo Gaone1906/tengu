@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useLocation, useNavigate, useParams } from "react-router-dom"
-import { useQuery } from "@tanstack/react-query"
-import { api, ApiError, type WorkItemDetailWire, type WorkItemStatusWire, type WorkItemTreeNodeWire } from "@/lib/api"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import {
+  api,
+  ApiError,
+  type WorkItemAttachmentWire,
+  type WorkItemDetailWire,
+  type WorkItemRelationKindWire,
+  type WorkItemRelationWire,
+  type WorkItemStatusWire,
+  type WorkItemTreeNodeWire,
+} from "@/lib/api"
 import { STATUS_LABEL, operatorSafeTodoError, publicWorkItemReference } from "@/lib/todos"
 import { isTodoId, todoPath } from "@/lib/todo-id"
 import { PageLayout } from "@/components/page-layout"
@@ -23,6 +32,10 @@ import { ChipCluster } from "./chip-cluster"
 import { useTaskPickers } from "./use-task-pickers"
 import { BodyEditor } from "./body-editor"
 import { AcceptanceChecklist } from "./acceptance"
+import { SubTasksSection } from "./subtasks"
+import { RelationsSection } from "./relations"
+import { AttachmentsSection } from "./attachments"
+import { ActivitySection } from "./activity"
 import { formatRelativeTime } from "../util"
 
 /* Todos v2 slice 6 stage B — the opened task as a full-page takeover of the
@@ -166,6 +179,73 @@ export default function TaskPage() {
     openChildren,
     mobile,
     announce,
+  })
+
+  // ── Section mutations (sub-tasks, relations, attachments) ────────────────
+  const qc = useQueryClient()
+  const invalidateTree = useCallback(() => {
+    void qc.invalidateQueries({ queryKey: ["work-item-tree"] })
+    void qc.invalidateQueries({ queryKey: ["work-items"] })
+    if (id) void qc.invalidateQueries({ queryKey: ["work-item", id] })
+  }, [qc, id])
+  const failWith = useCallback(
+    (fallback: string) => (error: unknown) =>
+      announce(operatorSafeTodoError(error, error instanceof ApiError ? error.message : fallback)),
+    [announce],
+  )
+  const childStatus = useMutation({
+    mutationFn: ({ childId, status }: { childId: string; status: WorkItemStatusWire }) =>
+      api.setWorkItemStatus(childId, status),
+    onError: failWith("The gateway refused the move"),
+    onSettled: invalidateTree,
+  })
+  const childAssign = useMutation({
+    mutationFn: ({ childId, assignee }: { childId: string; assignee: string }) => api.assignWorkItem(childId, assignee),
+    onError: failWith("Couldn't assign the sub-task"),
+    onSettled: invalidateTree,
+  })
+  const addSubTask = useMutation({
+    mutationFn: (title: string) => api.createWorkItem({ title, parentId: id! }),
+    onError: failWith("Failed to add the sub-task"),
+    onSettled: invalidateTree,
+  })
+  const addRelation = useMutation({
+    mutationFn: ({ srcId, kind, dstId }: { srcId: string; kind: WorkItemRelationKindWire; dstId: string }) =>
+      api.addWorkItemRelation(srcId, kind, dstId),
+    onError: failWith("Couldn't add the relation"),
+    onSettled: invalidateTree,
+  })
+  const removeRelation = useMutation({
+    mutationFn: (relation: WorkItemRelationWire) =>
+      relation.direction === "in"
+        ? api.removeWorkItemRelation(relation.other.id, relation.kind, id!)
+        : api.removeWorkItemRelation(id!, relation.kind, relation.other.id),
+    onError: failWith("Couldn't remove the relation"),
+    onSettled: invalidateTree,
+  })
+  const uploadAttachments = useMutation({
+    mutationFn: async (files: File[]) => {
+      for (const file of files) await api.uploadWorkItemAttachment(id!, file)
+    },
+    onError: failWith("Couldn't attach the file"),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ["work-item-attachments", id] })
+      if (id) void qc.invalidateQueries({ queryKey: ["work-item", id] })
+    },
+  })
+  const removeAttachment = useMutation({
+    mutationFn: (attachment: WorkItemAttachmentWire) => api.deleteWorkItemAttachment(id!, attachment.id),
+    onError: failWith("Couldn't remove the attachment"),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ["work-item-attachments", id] })
+      if (id) void qc.invalidateQueries({ queryKey: ["work-item", id] })
+    },
+  })
+  const attachmentsQuery = useQuery({
+    queryKey: ["work-item-attachments", id],
+    queryFn: async () => (await api.listWorkItemAttachments(id!)).attachments,
+    enabled: !!id && !!item,
+    staleTime: 10_000,
   })
 
   const commitBannerReason = useCallback(
@@ -346,6 +426,17 @@ export default function TaskPage() {
                 </div>
               )}
 
+              {/* Mobile property chip cluster — directly under the title (§8);
+                  every chip opens its picker as a bottom sheet. */}
+              {mobile && detail && (
+                <ChipCluster
+                  detail={detail}
+                  byName={byName}
+                  departments={departments.data}
+                  onOpenPicker={pickers.setOpenPicker}
+                />
+              )}
+
               {/* Body — the §7.4 live-markdown editor: rendered in place as you
                   type, stored body stays plain markdown. Wash on the block
                   container only (mock .body-text). */}
@@ -379,19 +470,42 @@ export default function TaskPage() {
                   />
                 </section>
               )}
+
+              {/* Sub-tasks · relations · attachments (§7.2.8–10). */}
+              {item && (
+                <>
+                  <SubTasksSection
+                    node={itemNode}
+                    parentDepth={item.depth ?? 0}
+                    employees={org.data?.employees ?? []}
+                    byName={byName}
+                    mobile={mobile}
+                    onOpenChild={openTodo}
+                    onChildStatus={(childId, status) => childStatus.mutate({ childId, status })}
+                    onChildAssign={(childId, assignee) => childAssign.mutate({ childId, assignee })}
+                    onAddSubTask={(title) => addSubTask.mutate(title)}
+                  />
+                  <RelationsSection
+                    id={item.id}
+                    relations={detail?.relations ?? []}
+                    onAdd={(srcId, kind, dstId) => addRelation.mutate({ srcId, kind, dstId })}
+                    onRemove={(relation) => removeRelation.mutate(relation)}
+                  />
+                  <AttachmentsSection
+                    attachments={attachmentsQuery.data ?? []}
+                    byName={byName}
+                    onUpload={(files) => uploadAttachments.mutate(files)}
+                    onRemove={(attachment) => removeAttachment.mutate(attachment)}
+                  />
+                </>
+              )}
+
+              {/* Activity — the ONE merged feed, composer at its end. */}
+              {detail && <ActivitySection detail={detail} byName={byName} mobile={mobile} announce={announce} />}
             </div>
 
-            {/* ── Properties rail (desktop) / chip cluster (mobile, §8) ── */}
-            {mobile ? (
-              detail && (
-                <ChipCluster
-                  detail={detail}
-                  byName={byName}
-                  departments={departments.data}
-                  onOpenPicker={pickers.setOpenPicker}
-                />
-              )
-            ) : (
+            {/* ── Properties rail (desktop only; mobile uses the chip cluster). ── */}
+            {!mobile && (
               <div className="row-span-2">
                 {detail && (
                   <PropsRail detail={detail} byName={byName} departments={departments.data} rowFor={pickers.rowFor} />
