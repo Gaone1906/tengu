@@ -137,6 +137,9 @@ export interface CreateWorkItemInput {
   assignee?: string | null;
   /** Creator identity; defaults to 'operator' for source=human, 'system' otherwise. */
   createdBy?: string;
+  /** Create as a sub-task of an existing Todo (depth ≤ 3). Department is
+   *  inherited from the parent when not given explicitly. */
+  parentId?: string | null;
   /** Optional ISO 8601 deadline. */
   dueAt?: string | null;
   priority?: number;
@@ -245,6 +248,7 @@ function isUniqueConstraintError(err: unknown): boolean {
 
 export type WorkItemEventKind =
   | 'created'
+  | 'child_created'
   | 'status_change'
   | 'note'
   | 'session_linked'
@@ -369,8 +373,16 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   // A configless disposable/test home retains the historical JIN default. Once a
   // real config exists, malformed configuration must still fail closed rather than
   // silently allocating from the wrong company namespace.
+  let parent: WorkItem | undefined;
+  if (input.parentId) {
+    parent = getWorkItem(input.parentId);
+    if (!parent) throw new Error(`parent Todo ${input.parentId} not found`);
+    if (parent.depth >= 3) {
+      throw new Error(`parent Todo ${parent.id} is at depth ${parent.depth} — the sub-task tree is capped at depth 3`);
+    }
+  }
   const companyPrefix = resolveCompanyPrefix();
-  const department = input.department ?? null;
+  const department = input.department !== undefined ? input.department : parent?.department ?? null;
   const prefix = department ? resolveDepartmentPrefix(db, department, companyPrefix) : companyPrefix;
   const claim = allocateWorkItemId(db, now, prefix);
   const id = claim.id;
@@ -398,7 +410,7 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
         `INSERT INTO work_items
            (id, title, body, status, department, assignee, created_by, parent_id, root_id, depth, due_at,
             priority, source, source_ref, acceptance, verify_policy, budget_usd, created_at, updated_at, closed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         input.title,
@@ -407,7 +419,9 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
         department,
         input.assignee ?? null,
         input.createdBy ?? (source === 'human' ? 'operator' : 'system'),
-        id,                      // root_id = own id for a root
+        parent?.id ?? null,                       // parent_id
+        parent ? parent.rootId : id,              // root_id
+        parent ? parent.depth + 1 : 0,            // depth
         input.dueAt ?? null,
         priority,
         source,
@@ -430,6 +444,18 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       throw err;
     }
     appendWorkItemEvent({ workItemId: id, kind: 'created', toStatus: status, actor: source, detail: sourceRef ? { sourceRef } : null });
+    if (parent) {
+      // Re-verify the parent under the write lock before auditing the link.
+      const liveParent = db.prepare('SELECT depth FROM work_items WHERE id = ?').get(parent.id) as { depth: number } | undefined;
+      if (!liveParent) throw new Error(`parent Todo ${parent.id} disappeared during create`);
+      appendWorkItemEvent({
+        workItemId: parent.id,
+        kind: 'child_created',
+        actor: input.createdBy ?? source,
+        detail: { childId: id },
+        versionEffect: 'state',   // bump the parent so tree views resort
+      });
+    }
     return getWorkItem(id)!;
   });
   return useWorkItemAllocationClaim(db, claim, () => txn());
