@@ -10,6 +10,9 @@ import {
   todoIdPrefix,
   TODO_ID_PREFIX_PATTERN,
 } from "./id.js";
+import { resolveDepartmentPrefix } from "./departments.js";
+import { loadConfig } from "../shared/config.js";
+import { CONFIG_PATH } from "../shared/paths.js";
 
 export const UNSUPPORTED_PRERELEASE_TODO_DATA =
   "Unsupported prerelease Todo data detected. This release cannot start or migrate it.\n" +
@@ -677,6 +680,29 @@ export function backfillWorkItemApprovals(db: DatabaseType): number {
     .run().changes;
 }
 
+/**
+ * Register any department that holds Todos but is missing from the registry
+ * (review F2). Department-changing writes now mint the row in their own
+ * transaction; this reconciles rows written BEFORE that fix (move-only
+ * departments). Idempotent — runs on every boot next to the approvals
+ * backfill.
+ */
+export function reconcileDepartmentRegistry(db: DatabaseType): number {
+  const missing = db
+    .prepare(
+      "SELECT DISTINCT department FROM work_items WHERE department IS NOT NULL AND department NOT IN (SELECT slug FROM departments) ORDER BY department",
+    )
+    .pluck()
+    .all() as string[];
+  if (missing.length === 0) return 0;
+  const portal = fs.existsSync(CONFIG_PATH) ? loadConfig().portal : undefined;
+  const companyPrefix = resolveTodoIdPrefix(portal?.companyName ?? "Jinn", portal?.companyPrefix);
+  for (const slug of missing) {
+    resolveDepartmentPrefix(db, slug, companyPrefix);
+  }
+  return missing.length;
+}
+
 const V1_REQUIRED_TABLE_SQL = new Map<string, string>([
   ["work_items", V1_WORK_ITEMS_TABLE_DDL],
   ["work_item_events", WORK_ITEM_EVENTS_TABLE_DDL],
@@ -980,6 +1006,9 @@ export function migrateWorkItemsSchema(
       // Slice-4 dual-read: any item still carrying approval state ONLY in the
       // frozen columns (a pre-slice-4 database) gains its history row here.
       backfillWorkItemApprovals(db);
+      // Slice-5 review F2: departments that gained Todos through pre-fix
+      // move-only writes get their registry rows.
+      reconcileDepartmentRegistry(db);
     }
     // The read-only preflight necessarily precedes the write lock. Reclassify after
     // BEGIN IMMEDIATE so a concurrent winner's committed schema is never dropped.
@@ -1053,6 +1082,7 @@ export function migrateWorkItemsSchema(
           created_at, updated_at, closed_at
         FROM work_items_v1_legacy`);
       backfillWorkItemApprovals(db);
+      reconcileDepartmentRegistry(db); // v1 rows carried departments with no registry
       const migratedRows = Number(db.prepare("SELECT COUNT(*) FROM work_items").pluck().get());
       db.exec("DROP TABLE work_items_v1_legacy");
       db.exec(WORK_ITEMS_INDEX_DDL);

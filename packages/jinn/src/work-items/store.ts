@@ -528,6 +528,15 @@ export function resolveCompanyPrefix(): string {
   return resolveTodoIdPrefix(portal?.companyName ?? 'Jinn', portal?.companyPrefix);
 }
 
+/** Register a department in the registry if it is not there yet (review F2):
+ *  EVERY write that lands a non-null department calls this inside its own
+ *  transaction, so /api/departments can never omit a department that holds
+ *  live Todos. Items keep their birth ID prefix — this only mints the row. */
+export function ensureDepartmentRegistered(slug: string | null | undefined): void {
+  if (typeof slug !== 'string' || !slug) return;
+  resolveDepartmentPrefix(initDb(), slug, resolveCompanyPrefix());
+}
+
 export function getWorkItem(id: string): WorkItem | undefined {
   const db = initDb();
   const todoId = parseTodoId(id);
@@ -843,6 +852,7 @@ export function updateWorkItemConditional(
       const fields = (Object.keys(UPDATE_FIELD_COLUMNS) as Array<keyof UpdateWorkItemInput>)
         .filter((key) => input[key] !== undefined)
         .map((key) => ({ column: UPDATE_FIELD_COLUMNS[key], name: key, value: input[key] }));
+      if (typeof input.department === 'string') ensureDepartmentRegistered(input.department);
       const now = new Date().toISOString();
       const result = db
         .prepare(`UPDATE work_items SET ${fields.map((field) => `${field.column} = ?`).join(', ')}, updated_at = ?, version = version + 1 WHERE id = ? AND version = ?`)
@@ -892,6 +902,9 @@ export function updateWorkItem(id: string, input: UpdateWorkItemInput, actor?: s
     if (!current) return undefined;
     const changedFields = fields.filter((field) => current[field.name] !== field.value);
     if (changedFields.length === 0) return current;
+    if (changedFields.some((field) => field.name === 'department' && typeof field.value === 'string')) {
+      ensureDepartmentRegistered(input.department as string);
+    }
     const now = new Date().toISOString();
     const result = db
       .prepare(`UPDATE work_items SET ${changedFields.map((field) => `${field.column} = ?`).join(', ')}, updated_at = ?, version = version + 1 WHERE id = ?`)
