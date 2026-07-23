@@ -485,8 +485,8 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     expect(store.getWorkItem(item.id)?.status).toBe("assigned");
   });
 
-  it.each(["done", "escalated"] as const)("keeps %s terminal cancellation rejected", async (status) => {
-    const item = store.createWorkItem({ title: `Already ${status}`, status });
+  it("keeps done → cancelled rejected (no declared edge, even for the operator)", async () => {
+    const item = store.createWorkItem({ title: "Already done", status: "done" });
     const cap = makeRes();
 
     await api.handleApiRequest(
@@ -497,7 +497,30 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
 
     expect([400, 403]).toContain(cap.status);
     expect(cap.body.error).toMatch(/illegal transition|human.*decision/i);
-    expect(store.getWorkItem(item.id)?.status).toBe(status);
+    expect(store.getWorkItem(item.id)?.status).toBe("done");
+  });
+
+  it("cancels an escalated item through the operator PUT lane (archive lane carries human authority)", async () => {
+    // legalTargets() mirrors transitions.ts and offers escalated → cancelled;
+    // the archive lane must honour the same human authority the PUT lane
+    // already carries for every other sticky exit (Stage-A review F2).
+    const item = store.createWorkItem({ title: "Escalated to cancel", status: "escalated" });
+    const cap = makeRes();
+
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${item.id}/status`, { status: "cancelled" }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+
+    expect(cap.status).toBe(200);
+    expect(cap.body.workItem.status).toBe("cancelled");
+    expect(store.listWorkItemEvents(item.id).at(-1)).toMatchObject({
+      kind: "status_change",
+      fromStatus: "escalated",
+      toStatus: "cancelled",
+      actor: "operator",
+    });
   });
 
   it.each([

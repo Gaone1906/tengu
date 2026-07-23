@@ -3615,7 +3615,10 @@ export async function handleApiRequest(
       try {
         const result = isOperatorPutCancellation
           ? {
-              item: archiveWorkItem(params.id, workItemActor(caller), note ? { note } : {}),
+              // The operator PUT lane is the human surface: the archive lane
+              // carries the same human authority as every other sticky exit,
+              // so escalated → cancelled (a declared edge) is reachable here.
+              item: archiveWorkItem(params.id, workItemActor(caller), { human: true, ...(note ? { note } : {}) }),
               escalated: false,
             }
           : transition(params.id, target as WorkItemStatus, workItemActor(caller), {
