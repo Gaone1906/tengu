@@ -423,6 +423,28 @@ function EmployeeForm({ node, update }: FormProps) {
         options={[{ value: CLEAR, label: "Default" }, ...EFFORTS.map((value) => ({ value, label: value }))]}
       />
       <OutputSchemaForm config={config} update={update} />
+      <section className="space-y-2 rounded-[var(--radius-lg)] border border-[var(--separator)] p-3">
+        <h3 className="text-[length:var(--text-footnote)] font-[var(--weight-semibold)] text-[var(--text-primary)]">Advanced</h3>
+        <Field label="Timeout (minutes)">
+          <TextInput
+            type="number"
+            min={1}
+            max={1440}
+            step={1}
+            value={typeof config.timeoutMinutes === "number" ? String(config.timeoutMinutes) : ""}
+            onChange={(event) => {
+              const next = { ...config }
+              if (event.target.value === "") {
+                delete next.timeoutMinutes
+              } else {
+                next.timeoutMinutes = Math.max(1, Math.min(1440, Math.round(Number(event.target.value))))
+              }
+              update(next)
+            }}
+            placeholder="No hard timeout"
+          />
+        </Field>
+      </section>
     </>
   )
 }

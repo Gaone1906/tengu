@@ -38,8 +38,10 @@ const definition: WorkflowDefinitionV2Wire = {
   ui: { positions: { writer: { x: 0, y: 0 } } },
 }
 
-function renderInspector() {
-  const store = createEditorStore(structuredClone(definition))
+function renderInspector(configPatch: Record<string, unknown> = {}) {
+  const initial = structuredClone(definition)
+  initial.nodes[0]!.config = { ...initial.nodes[0]!.config, ...configPatch }
+  const store = createEditorStore(initial)
   store.getState().selectNode("writer")
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
@@ -97,5 +99,26 @@ describe("employee inspector output schema", () => {
 
     expect(employeeConfig(store)).not.toHaveProperty("output")
     expect(screen.getByRole("button", { name: "Enable structured output" })).toBeTruthy()
+  })
+})
+
+describe("employee inspector timeout", () => {
+  it("round-trips a blank timeout to undefined", () => {
+    const store = renderInspector({ timeoutMinutes: 45 })
+    const input = screen.getByLabelText("Timeout (minutes)") as HTMLInputElement
+
+    expect(input.value).toBe("45")
+    fireEvent.change(input, { target: { value: "" } })
+
+    expect(input.value).toBe("")
+    expect(employeeConfig(store)).not.toHaveProperty("timeoutMinutes")
+  })
+
+  it("writes timeout minutes as an integer", () => {
+    const store = renderInspector()
+
+    fireEvent.change(screen.getByLabelText("Timeout (minutes)"), { target: { value: "30" } })
+
+    expect(employeeConfig(store).timeoutMinutes).toBe(30)
   })
 })
