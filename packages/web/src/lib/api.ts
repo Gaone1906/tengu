@@ -358,6 +358,103 @@ export interface WorkflowDefinitionV2Wire {
   ui: { positions: Record<string, { x: number; y: number }> }
 }
 
+/* ── Workflow runs (v2) ───────────────────────────────────────────────────── */
+
+export type WorkflowRunStatusV2 = "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled"
+export type WorkflowNodeRunStatusV2 =
+  | "pending" | "ready" | "dispatching" | "running" | "waiting"
+  | "completed" | "failed" | "skipped" | "cancelled"
+export type WorkflowAttemptStatusV2 = "dispatching" | "running" | "completed" | "failed" | "timed-out" | "cancelled"
+export type WorkflowTriggerKindV2 = "manual" | "schedule" | "event" | "todo-status" | "workflow-call"
+
+export interface WorkflowRunErrorV2Wire {
+  code: string
+  message: string
+  retryable: boolean
+  nodeId?: string
+  attempt?: number
+}
+
+export interface WorkflowNodeOutputV2Wire {
+  text: string
+  fields: Record<string, unknown>
+  employeeId?: string
+  engine?: string
+  model?: string
+  sessionId?: string
+}
+
+export interface WorkflowRunSummaryV2Wire {
+  id: string
+  workflowId: string
+  workflowTitle: string
+  definitionRevision: number
+  status: WorkflowRunStatusV2
+  trigger: { nodeId: string; kind: WorkflowTriggerKindV2 }
+  startedAt: string
+  endedAt: string | null
+  currentOrFailingNode: {
+    nodeId: string
+    label: string
+    employeeId: string | null
+    state: "current" | "failing"
+  } | null
+}
+
+export interface WorkflowNodeRunV2Wire {
+  runId: string
+  nodeId: string
+  nodeType: WorkflowDefinitionV2Wire["nodes"][number]["type"]
+  status: WorkflowNodeRunStatusV2
+  activated: boolean
+  output?: WorkflowNodeOutputV2Wire
+  error?: WorkflowRunErrorV2Wire
+  resumeAt?: string
+  startedAt?: string
+  endedAt?: string
+}
+
+export interface WorkflowAttemptV2Wire {
+  runId: string
+  nodeId: string
+  attempt: number
+  sessionId?: string
+  status: WorkflowAttemptStatusV2
+  output?: WorkflowNodeOutputV2Wire
+  error?: WorkflowRunErrorV2Wire
+  startedAt: string
+  endedAt?: string
+}
+
+export interface WorkflowApprovalV2Wire {
+  runId: string
+  nodeId: string
+  status: "pending" | "approved" | "rejected"
+  requestedAt: string
+  approverRef?: string
+  decidedAt?: string
+  decidedBy?: string
+  decision?: "approve" | "reject"
+  reason?: string
+}
+
+export interface WorkflowRunDetailV2Wire {
+  id: string
+  workflowId: string
+  workflowTitle: string
+  definitionRevision: number
+  definition: Pick<WorkflowDefinitionV2Wire, "nodes" | "edges">
+  status: WorkflowRunStatusV2
+  revision: number
+  trigger: { nodeId: string; kind: WorkflowTriggerKindV2 }
+  startedAt: string
+  endedAt?: string
+  error?: WorkflowRunErrorV2Wire
+  nodeRuns: WorkflowNodeRunV2Wire[]
+  attempts: WorkflowAttemptV2Wire[]
+  approvals: WorkflowApprovalV2Wire[]
+}
+
 export type WorkItemStatusWire =
   | "backlog" | "assigned" | "executing" | "in_review" | "done" | "blocked" | "escalated" | "cancelled"
 export type WorkItemSourceWire =
@@ -560,6 +657,26 @@ export const api = {
     get<{ items: WorkflowDefinitionSummaryV2Wire[]; nextCursor: string | null }>("/api/workflows"),
   getWorkflowDefinitionV2: (id: string) =>
     get<WorkflowDefinitionV2Wire>(`/api/workflows/${encodeURIComponent(id)}`),
+  listWorkflowRunsV2: (id: string, limit = 50) =>
+    get<{ items: WorkflowRunSummaryV2Wire[]; nextCursor: string | null }>(
+      `/api/workflows/${encodeURIComponent(id)}/runs?limit=${limit}`,
+    ),
+  getWorkflowRunV2: (id: string, runId: string) =>
+    get<WorkflowRunDetailV2Wire>(
+      `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`,
+    ),
+  startWorkflowRunV2: (id: string) =>
+    post<WorkflowRunDetailV2Wire>(`/api/workflows/${encodeURIComponent(id)}/runs`, { input: {} }),
+  decideWorkflowApprovalV2: (
+    id: string,
+    runId: string,
+    nodeId: string,
+    body: { decision: "approve" | "reject"; expectedRevision: number; reason?: string },
+  ) =>
+    post<WorkflowRunDetailV2Wire>(
+      `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/approval`,
+      body,
+    ),
   /** Resolved model + capability registry (engines, their models, effort levels). */
   getEngines: () => get<EnginesResponse>("/api/engines"),
   /** Force re-discovery of dynamic (pi) models, returning the rebuilt registry. */
