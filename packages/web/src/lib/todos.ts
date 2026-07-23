@@ -380,6 +380,10 @@ export function formatCost(spendUsd: number, budgetUsd: number | null | undefine
 
 export type StatusFilter = "open" | "all" | WorkItemStatusWire
 export type DateFilter = "today" | "week" | "month"
+/** Due-WINDOW filter (slice 6, board filter row). Deliberately client-side
+ *  over the loaded columns — the wire has no due param and must not grow one
+ *  (stage-A review F1 disposition). */
+export type DueFilter = "overdue" | "today" | "week" | "month"
 
 export interface TodoFilters {
   status: StatusFilter
@@ -387,6 +391,9 @@ export interface TodoFilters {
   department?: string
   source?: WorkItemSourceWire
   date?: DateFilter
+  /** Label name (or id) — the gateway's `label` list param accepts either. */
+  label?: string
+  due?: DueFilter
   q?: string
 }
 
@@ -400,7 +407,7 @@ export function publicWorkItemReference(value: string | null | undefined): strin
 }
 
 export function isDefaultFilters(f: TodoFilters): boolean {
-  return f.status === "open" && !f.assignee && !f.department && !f.source && !f.date && !f.q
+  return f.status === "open" && !f.assignee && !f.department && !f.source && !f.date && !f.label && !f.due && !f.q
 }
 
 /** How many filter chips are set away from their default. Search is separate. */
@@ -411,6 +418,8 @@ export function activeFilterCount(f: TodoFilters): number {
   if (f.department) n++
   if (f.source) n++
   if (f.date) n++
+  if (f.label) n++
+  if (f.due) n++
   return n
 }
 
@@ -446,10 +455,31 @@ export function dateBounds(date: DateFilter | undefined, now: number): { since?:
   return { since: d.toISOString(), until: new Date(now).toISOString() }
 }
 
-// NOTE: there is deliberately NO client-side re-filter of server results. The
-// gateway owns `q` (escaped-LIKE over title+body) and `since`/`until` on both
-// list and search endpoints — a title-only client pass would silently discard
-// body-only matches (shipped bug, QA 2026-07-10).
+// NOTE: there is deliberately NO client-side re-filter of server results for
+// dimensions the gateway owns. The gateway owns `q` (escaped-LIKE over
+// title+body), `since`/`until`, and `label` — a title-only client pass would
+// silently discard body-only matches (shipped bug, QA 2026-07-10). The ONE
+// sanctioned client-side dimension is the due WINDOW below: the wire has no
+// due param and must not grow one (stage-A review F1 disposition), so it
+// filters the loaded columns.
+
+/** Client-side due-window predicate. Windows run forward from the start of
+ *  today (a due date is a promise about the future); Overdue is strictly the
+ *  past. An item without a due date never matches a due filter. */
+export function matchesDueFilter(dueAt: string | null | undefined, due: DueFilter | undefined, now: number): boolean {
+  if (!due) return true
+  if (!dueAt) return false
+  const t = Date.parse(dueAt)
+  if (Number.isNaN(t)) return false
+  if (due === "overdue") return t < now
+  const start = new Date(now)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(start)
+  if (due === "today") end.setDate(end.getDate() + 1)
+  else if (due === "week") end.setDate(end.getDate() + 7)
+  else end.setMonth(end.getMonth() + 1)
+  return t >= start.getTime() && t < end.getTime()
+}
 
 /** URL ⇄ filter mapping, so a filtered view is shareable and survives refresh. */
 export function filtersToSearchParams(f: TodoFilters): URLSearchParams {
@@ -459,6 +489,8 @@ export function filtersToSearchParams(f: TodoFilters): URLSearchParams {
   if (f.department) p.set("department", f.department)
   if (f.source) p.set("source", f.source)
   if (f.date) p.set("date", f.date)
+  if (f.label) p.set("label", f.label)
+  if (f.due) p.set("due", f.due)
   const safeQuery = publicWorkItemReference(f.q)
   if (safeQuery) p.set("q", safeQuery)
   return p
@@ -469,6 +501,7 @@ const STATUS_FILTER_VALUES: ReadonlySet<string> = new Set([
 ])
 const SOURCE_VALUES: ReadonlySet<string> = new Set(["human", "delegation", "cron", "workflow", "session", "connector", "goal"])
 const DATE_VALUES: ReadonlySet<string> = new Set(["today", "week", "month"])
+const DUE_VALUES: ReadonlySet<string> = new Set(["overdue", "today", "week", "month"])
 
 export function filtersFromSearchParams(p: URLSearchParams): TodoFilters {
   const f: TodoFilters = { status: "open" }
@@ -482,6 +515,10 @@ export function filtersFromSearchParams(p: URLSearchParams): TodoFilters {
   if (source && SOURCE_VALUES.has(source)) f.source = source as WorkItemSourceWire
   const date = p.get("date")
   if (date && DATE_VALUES.has(date)) f.date = date as DateFilter
+  const label = p.get("label")
+  if (label) f.label = label
+  const due = p.get("due")
+  if (due && DUE_VALUES.has(due)) f.due = due as DueFilter
   const q = publicWorkItemReference(p.get("q"))
   if (q) f.q = q
   return f

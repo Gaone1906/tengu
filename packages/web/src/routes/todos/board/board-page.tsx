@@ -10,6 +10,7 @@ import {
   filtersFromSearchParams,
   filtersToSearchParams,
   groupHistory,
+  matchesDueFilter,
   operatorSafeTodoError,
   rankBetween,
   isPositiveTodoVersion,
@@ -110,7 +111,7 @@ export default function TodoBoardPage() {
     const f = filtersFromSearchParams(searchParams)
     return { ...f, status: "open" as const } // columns are the status dimension
   }, [searchParams])
-  const now = useMemo(() => Date.now(), [filters.date])
+  const now = useMemo(() => Date.now(), [filters.date, filters.due])
 
   const isAttention = board.kind === "attention"
   const mobile = useIsBoardMobile()
@@ -149,6 +150,9 @@ export default function TodoBoardPage() {
           const move = moves.get(item.id)
           return !move || move.status === status
         })
+        // The due window is the ONE client-side dimension (review F1: no
+        // server param) — it filters the loaded columns.
+        .filter((item) => matchesDueFilter(item.dueAt, filters.due, now))
         .map(withRank)
       base.sort(compareRank)
       out[status] = base
@@ -163,7 +167,7 @@ export default function TodoBoardPage() {
       out[move.status] = list
     }
     return out
-  }, [data.columns, moves, rankOverrides])
+  }, [data.columns, moves, rankOverrides, filters.due, now])
 
   // Drop an optimistic move once the server agrees (poll/refetch landed).
   useEffect(() => {
@@ -477,6 +481,9 @@ export default function TodoBoardPage() {
   const columnFor = (status: WorkItemStatusWire) => {
     const column = data.columns[status]
     const items = itemsByStatus[status] ?? []
+    // Under the client-side due window the server total no longer describes
+    // what's visible — the header count follows the filtered list.
+    const count = filters.due ? items.length : column?.total ?? 0
     const quickAdd =
       status === "backlog"
         ? () => setCreating({ department: board.kind === "department" ? board.slug : undefined })
@@ -487,7 +494,7 @@ export default function TodoBoardPage() {
       <BoardColumn
         key={status}
         status={status}
-        count={column?.total ?? 0}
+        count={count}
         orderKey={items.map((item) => item.id).join(",")}
         onQuickAdd={quickAdd}
         hasMore={column?.hasMore ?? false}
@@ -523,7 +530,11 @@ export default function TodoBoardPage() {
                   <span>{needsYou.length} waiting</span>
                 ) : (
                   <>
-                    <span>{data.openTotal} open</span>
+                    <span>
+                      {filters.due
+                        ? PIPELINE_STATUSES.reduce((sum, s) => sum + (itemsByStatus[s]?.length ?? 0), 0)
+                        : data.openTotal} open
+                    </span>
                     {blockedTotal > 0 && (
                       <>
                         <Dot />
@@ -564,6 +575,7 @@ export default function TodoBoardPage() {
                 byName={byName}
                 hideStatus
                 hideDepartment={board.kind === "department"}
+                board
               />
             </div>
           )}
@@ -811,6 +823,7 @@ export default function TodoBoardPage() {
           onClose={() => setMobileFilterOpen(false)}
           hideStatus
           hideDepartment={board.kind === "department"}
+          showLabelDue
         />
       )}
     </PageLayout>

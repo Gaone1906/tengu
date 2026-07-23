@@ -1,6 +1,24 @@
-import { act, fireEvent, render, screen } from "@testing-library/react"
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { act, fireEvent, render as rtlRender, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { FilterBar } from "../filter-bar"
+
+const listLabels = vi.fn()
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>()
+  return {
+    ...actual,
+    api: { ...actual.api, listLabels: (...args: unknown[]) => listLabels(...args) },
+  }
+})
+
+/** FilterBar reads the label registry (board mode) — render inside a client. */
+function render(ui: React.ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const wrap = (node: React.ReactElement) => <QueryClientProvider client={client}>{node}</QueryClientProvider>
+  const result = rtlRender(wrap(ui))
+  return { ...result, rerender: (next: React.ReactElement) => result.rerender(wrap(next)) }
+}
 
 const originalMatchMedia = window.matchMedia
 let mobileListener: ((event: MediaQueryListEvent) => void) | undefined
@@ -22,7 +40,88 @@ function setMobile(matches: boolean, reducedMotion = false) {
 
 afterEach(() => {
   mobileListener = undefined
+  vi.clearAllMocks()
   Object.defineProperty(window, "matchMedia", { configurable: true, value: originalMatchMedia })
+})
+
+describe("the board filter row (mock geometry — stage-A review F1)", () => {
+  it("renders value chips left (Assignee · Label · Due), the ⋯ menu, and the compact right search", () => {
+    setMobile(false)
+    listLabels.mockResolvedValue({ labels: [] })
+    render(
+      <FilterBar
+        filters={{ status: "open" }}
+        onChange={vi.fn()}
+        employees={[]}
+        departments={[]}
+        byName={new Map()}
+        hideStatus
+        board
+      />,
+    )
+    expect(screen.getByTestId("filter-chip-assignee").textContent).toContain("Assignee")
+    expect(screen.getByTestId("filter-chip-label").textContent).toContain("Label")
+    expect(screen.getByTestId("filter-chip-due").textContent).toContain("Due")
+    expect(screen.getByTestId("filter-chip-more")).toBeTruthy()
+    expect(screen.getByRole("searchbox", { name: "Search todos" })).toBeTruthy()
+    // The heavy legacy affordance is gone in board mode.
+    expect(screen.queryByRole("button", { name: "Filter todos" })).toBeNull()
+  })
+
+  it("the Due chip sets the due window and turns accent with its value", () => {
+    setMobile(false)
+    listLabels.mockResolvedValue({ labels: [] })
+    const onChange = vi.fn()
+    const { rerender } = render(
+      <FilterBar filters={{ status: "open" }} onChange={onChange} employees={[]} departments={[]} byName={new Map()} hideStatus board />,
+    )
+    const chip = screen.getByTestId("filter-chip-due")
+    fireEvent.pointerDown(chip, { button: 0, pointerType: "mouse" })
+    fireEvent.click(chip)
+    fireEvent.click(screen.getByText("Due this week"))
+    expect(onChange).toHaveBeenCalledWith({ status: "open", due: "week", q: undefined })
+    rerender(
+      <FilterBar filters={{ status: "open", due: "week" }} onChange={onChange} employees={[]} departments={[]} byName={new Map()} hideStatus board />,
+    )
+    expect(screen.getByTestId("filter-chip-due").textContent).toContain("Due this week")
+  })
+
+  it("the Label chip lists the registry and filters by label name", async () => {
+    setMobile(false)
+    listLabels.mockResolvedValue({
+      labels: [{ id: "lbl_1", name: "infra", color: "#5B9BD5", department: null, createdAt: "2026-07-01" }],
+    })
+    const onChange = vi.fn()
+    render(
+      <FilterBar filters={{ status: "open" }} onChange={onChange} employees={[]} departments={[]} byName={new Map()} hideStatus board />,
+    )
+    const chip = screen.getByTestId("filter-chip-label")
+    fireEvent.pointerDown(chip, { button: 0, pointerType: "mouse" })
+    fireEvent.click(chip)
+    fireEvent.click(await screen.findByText("infra"))
+    expect(onChange).toHaveBeenCalledWith({ status: "open", label: "infra", q: undefined })
+  })
+
+  it("hides Department behind ⋯ on a department board and surfaces set overflow dimensions as removable chips", () => {
+    setMobile(false)
+    listLabels.mockResolvedValue({ labels: [] })
+    const onChange = vi.fn()
+    render(
+      <FilterBar
+        filters={{ status: "open", source: "cron" }}
+        onChange={onChange}
+        employees={[]}
+        departments={[]}
+        byName={new Map()}
+        hideStatus
+        hideDepartment
+        board
+      />,
+    )
+    expect(screen.getByRole("button", { name: "Remove Cron" })).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: "Remove Cron" }))
+    expect(onChange).toHaveBeenCalledWith({ status: "open", source: undefined, q: undefined })
+  })
 })
 
 describe("Todo progressive filters", () => {

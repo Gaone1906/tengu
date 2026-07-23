@@ -67,6 +67,7 @@ async function fetchBoardPage(
     department: scope.department ?? filters.department,
     assignee: filters.assignee,
     source: filters.source,
+    label: filters.label,
     q: filters.q,
     since,
     until,
@@ -79,7 +80,8 @@ async function fetchBoardPage(
 export function boardColumnQueryKey(board: BoardId, status: WorkItemStatusWire, filters: TodoFilters): readonly unknown[] {
   return [
     "work-items", "board", boardKey(board), status,
-    filters.assignee ?? "", filters.department ?? "", filters.source ?? "", filters.date ?? "", filters.q ?? "",
+    filters.assignee ?? "", filters.department ?? "", filters.source ?? "", filters.date ?? "",
+    filters.label ?? "", filters.q ?? "",
   ]
 }
 

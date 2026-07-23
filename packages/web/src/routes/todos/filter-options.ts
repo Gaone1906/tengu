@@ -1,5 +1,5 @@
 import type { WorkItemSourceWire } from "@/lib/api"
-import type { DateFilter, StatusFilter } from "@/lib/todos"
+import type { DateFilter, DueFilter, StatusFilter } from "@/lib/todos"
 
 export const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
   { value: "all", label: "All" },
@@ -29,4 +29,13 @@ export const DATE_OPTIONS: { value: DateFilter | undefined; label: string }[] = 
   { value: "today", label: "Today" },
   { value: "week", label: "This week" },
   { value: "month", label: "This month" },
+]
+
+/** Due-window options (board filter row — client-side over loaded columns). */
+export const DUE_OPTIONS: { value: DueFilter | undefined; label: string }[] = [
+  { value: undefined, label: "Any due date" },
+  { value: "overdue", label: "Overdue" },
+  { value: "today", label: "Due today" },
+  { value: "week", label: "Due this week" },
+  { value: "month", label: "Due this month" },
 ]

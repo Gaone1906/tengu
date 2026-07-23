@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Check, Filter, Search, Users, X } from "lucide-react"
+import { Check, ChevronDown, Filter, MoreHorizontal, Search, Users, X } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,7 +13,8 @@ import {
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import type { Employee } from "@/lib/api"
 import { activeFilterCount, type TodoFilters } from "@/lib/todos"
-import { DATE_OPTIONS, SOURCE_OPTIONS, STATUS_OPTIONS } from "./filter-options"
+import { DATE_OPTIONS, DUE_OPTIONS, SOURCE_OPTIONS, STATUS_OPTIONS } from "./filter-options"
+import { useLabelRegistry } from "./use-todos"
 import { TodoFilterSheet } from "./todo-filter-sheet"
 
 const MENU_CLASS =
@@ -37,6 +38,69 @@ function ActiveChip({ label, onRemove }: { label: string; onRemove: () => void }
     >
       {label}
       <X size={12} strokeWidth={2.4} aria-hidden />
+    </button>
+  )
+}
+
+/* ── Board filter row (mock board.html .filters — stage-A review F1) ────────
+ * Quiet value-carrying chips left (Assignee · Label · Due), a ⋯ menu for the
+ * remaining grammar (Source, Date, Department where scoped in), compact
+ * right-aligned search. A SET chip turns accent (the mock's .chip.set) — the
+ * chip itself is the active state for its dimension. */
+
+function ValueChip({
+  label,
+  display,
+  set,
+  testId,
+  children,
+}: {
+  label: string
+  /** What the chip reads when set; falls back to the dimension name. */
+  display?: React.ReactNode
+  set: boolean
+  testId: string
+  children: React.ReactNode
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={label}
+          data-testid={testId}
+          className={`focus-ring flex h-[30px] flex-none items-center gap-1.5 rounded-[15px] px-3 text-[13px] font-medium outline-none transition-colors ${
+            set
+              ? "bg-[var(--accent-fill)] text-[var(--accent)]"
+              : "bg-[var(--fill-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"
+          }`}
+        >
+          {set && display != null ? display : label}
+          <ChevronDown
+            size={10}
+            strokeWidth={2.4}
+            className={set ? "opacity-70" : "text-[var(--text-quaternary)]"}
+            aria-hidden
+          />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className={SUBMENU_CLASS}>
+        {children}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+function BoardActiveChip({ label, onRemove }: { label: string; onRemove: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label={`Remove ${label}`}
+      onClick={onRemove}
+      className="focus-ring flex h-[30px] flex-none items-center gap-1.5 rounded-[15px] bg-[var(--accent-fill)] px-3 text-[13px] font-medium text-[var(--accent)] outline-none transition-colors hover:bg-[var(--fill-secondary)]"
+    >
+      {label}
+      <X size={11} strokeWidth={2.4} aria-hidden />
     </button>
   )
 }
@@ -65,6 +129,7 @@ export function FilterBar({
   onPeopleView,
   hideStatus,
   hideDepartment,
+  board,
 }: {
   filters: TodoFilters
   onChange: (next: TodoFilters) => void
@@ -77,8 +142,13 @@ export function FilterBar({
    *  = its department), so their chips leave the menu there (slice 6). */
   hideStatus?: boolean
   hideDepartment?: boolean
+  /** The board's filter row wears the mock geometry (chips left, compact
+   *  right search — stage-A review F1); the legacy list keeps the search-led
+   *  row until the stage-C cutover retires it. */
+  board?: boolean
 }) {
   const mobile = useIsTodoMobile()
+  const labelRegistry = useLabelRegistry(!!board)
   const [mobileOpen, setMobileOpen] = useState(false)
   const filterTriggerRef = useRef<HTMLButtonElement>(null)
   const wasMobileRef = useRef(mobile)
@@ -89,7 +159,7 @@ export function FilterBar({
   const searchChangeRef = useRef(onSearchChange)
   filtersRef.current = filters
   searchChangeRef.current = onSearchChange
-  const filterStateKey = [filters.status, filters.assignee, filters.department, filters.source, filters.date, filters.q].join("\u0000")
+  const filterStateKey = [filters.status, filters.assignee, filters.department, filters.source, filters.date, filters.label, filters.due, filters.q].join("\u0000")
   const cancelPendingSearch = () => {
     if (debounce.current != null) window.clearTimeout(debounce.current)
     debounce.current = null
@@ -154,6 +224,146 @@ export function FilterBar({
   const statusLabel = filters.status === "open" ? null : (STATUS_OPTIONS.find((s) => s.value === filters.status)?.label ?? filters.status)
   const sourceLabel = SOURCE_OPTIONS.find((s) => s.value === filters.source)?.label
   const dateLabel = DATE_OPTIONS.find((d) => d.value === filters.date)?.label
+  const dueLabel = DUE_OPTIONS.find((d) => d.value === filters.due)?.label
+  const setLabel = filters.label
+    ? (labelRegistry.data ?? []).find((l) => l.name === filters.label || l.id === filters.label) ?? { name: filters.label, color: null }
+    : null
+
+  if (board && !mobile) {
+    return (
+      <div className="flex flex-wrap items-center gap-2" data-testid="todos-filters">
+        <ValueChip label="Assignee" set={!!filters.assignee} display={personName} testId="filter-chip-assignee">
+          <DropdownMenuItem className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, assignee: undefined })}>
+            Anyone<MenuCheck on={!filters.assignee} />
+          </DropdownMenuItem>
+          {employees.map((employee) => (
+            <DropdownMenuItem key={employee.name} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, assignee: employee.name })}>
+              <EmployeeAvatar name={employee.name} size={20} fontSize={10} className="bg-[var(--fill-secondary)]" />
+              {employee.displayName}<MenuCheck on={filters.assignee === employee.name} />
+            </DropdownMenuItem>
+          ))}
+        </ValueChip>
+
+        <ValueChip
+          label="Label"
+          set={!!filters.label}
+          display={
+            setLabel && (
+              <span className="flex items-center gap-[5px]">
+                <span className="size-[5px] rounded-full" style={{ background: setLabel.color ?? "currentColor" }} />
+                {setLabel.name}
+              </span>
+            )
+          }
+          testId="filter-chip-label"
+        >
+          <DropdownMenuItem className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, label: undefined })}>
+            Any label<MenuCheck on={!filters.label} />
+          </DropdownMenuItem>
+          {(labelRegistry.data ?? []).map((label) => (
+            <DropdownMenuItem key={label.id} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, label: label.name })}>
+              <span className="size-[5px] rounded-full" style={{ background: label.color ?? "var(--text-quaternary)" }} />
+              {label.name}<MenuCheck on={filters.label === label.name || filters.label === label.id} />
+            </DropdownMenuItem>
+          ))}
+          {(labelRegistry.data ?? []).length === 0 && (
+            <div className="px-3 py-2 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">No labels yet.</div>
+          )}
+        </ValueChip>
+
+        <ValueChip label="Due" set={!!filters.due} display={dueLabel} testId="filter-chip-due">
+          {DUE_OPTIONS.map((option) => (
+            <DropdownMenuItem key={option.label} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, due: option.value })}>
+              {option.label}<MenuCheck on={filters.due === option.value} />
+            </DropdownMenuItem>
+          ))}
+        </ValueChip>
+
+        {/* The rest of the platform's filter grammar, kept reachable. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label="More filters"
+              data-testid="filter-chip-more"
+              className="focus-ring grid h-[30px] w-[34px] flex-none place-items-center rounded-[15px] bg-[var(--fill-tertiary)] text-[var(--text-tertiary)] outline-none transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-secondary)]"
+            >
+              <MoreHorizontal size={14} aria-hidden />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className={MENU_CLASS}>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger className={ITEM_CLASS}>Source</DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className={SUBMENU_CLASS}>
+                <DropdownMenuItem className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, source: undefined })}>
+                  Any source<MenuCheck on={!filters.source} />
+                </DropdownMenuItem>
+                {SOURCE_OPTIONS.map((option) => (
+                  <DropdownMenuItem key={option.value} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, source: option.value })}>
+                    {option.label}<MenuCheck on={filters.source === option.value} />
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger className={ITEM_CLASS}>Date</DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className={SUBMENU_CLASS}>
+                {DATE_OPTIONS.map((option) => (
+                  <DropdownMenuItem key={option.label} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, date: option.value })}>
+                    {option.label}<MenuCheck on={filters.date === option.value} />
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            {!hideDepartment && (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger className={ITEM_CLASS}>Department</DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className={SUBMENU_CLASS}>
+                  <DropdownMenuItem className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, department: undefined })}>
+                    Any department<MenuCheck on={!filters.department} />
+                  </DropdownMenuItem>
+                  {departments.map((department) => (
+                    <DropdownMenuItem key={department} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, department })}>
+                      {department.charAt(0).toUpperCase() + department.slice(1)}<MenuCheck on={filters.department === department} />
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
+            {active > 0 && (
+              <DropdownMenuItem className={`${ITEM_CLASS} mt-1 text-[var(--text-secondary)]`} onClick={() => changeFilters({ status: "open" })}>
+                Clear all filters
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {/* Dimensions living behind ⋯ surface their SET state inline. */}
+        {sourceLabel && <BoardActiveChip label={sourceLabel} onRemove={() => changeFilters({ ...filters, source: undefined })} />}
+        {filters.date && dateLabel && <BoardActiveChip label={dateLabel} onRemove={() => changeFilters({ ...filters, date: undefined })} />}
+        {filters.department && !hideDepartment && (
+          <BoardActiveChip
+            label={filters.department.charAt(0).toUpperCase() + filters.department.slice(1)}
+            onRemove={() => changeFilters({ ...filters, department: undefined })}
+          />
+        )}
+
+        <label className="ml-auto flex h-[30px] w-[190px] flex-none items-center gap-[7px] rounded-[15px] bg-[var(--fill-tertiary)] px-3 transition-colors focus-within:bg-[var(--fill-secondary)]">
+          <Search size={13} strokeWidth={2} className="flex-none text-[var(--text-quaternary)]" aria-hidden />
+          <input
+            type="search"
+            aria-label="Search todos"
+            data-testid="filter-search"
+            value={q}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search todos"
+            autoComplete="off"
+            className="min-w-0 flex-1 border-0 bg-transparent text-[13px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)]"
+          />
+        </label>
+      </div>
+    )
+  }
 
   return (
     <div className="mb-5" data-testid="todos-filters">
@@ -322,6 +532,9 @@ export function FilterBar({
           byName={byName}
           onPeopleView={onPeopleView}
           onClose={() => setMobileOpen(false)}
+          hideStatus={hideStatus}
+          hideDepartment={hideDepartment}
+          showLabelDue={board}
         />
       )}
     </div>

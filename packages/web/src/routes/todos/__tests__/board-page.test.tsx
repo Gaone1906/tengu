@@ -191,6 +191,24 @@ describe("the board surface", () => {
     }
   })
 
+  it("passes the label filter to the wire and applies the due window client-side (review F1)", async () => {
+    const soon = new Date(Date.now() + 2 * 24 * 3600 * 1000).toISOString()
+    rows.backlog = [
+      compact({ id: "PLA-1", status: "backlog", dueAt: soon }),
+      compact({ id: "PLA-2", status: "backlog", dueAt: null }),
+    ]
+    totals.backlog = 2
+    renderBoard("/todos/b/platform?label=infra&due=week")
+    await waitFor(() => expect(screen.getByTestId("board-card-PLA-1")).toBeTruthy())
+    // Label rides the server query (the gateway owns it)…
+    const statusCalls = listWorkItems.mock.calls.map(([params]) => params).filter((p) => p?.status)
+    for (const params of statusCalls) expect(params.label).toBe("infra")
+    // …the due window filters the loaded columns, and the column count
+    // follows what's visible, not the server total.
+    expect(screen.queryByTestId("board-card-PLA-2")).toBeNull()
+    expect(screen.getByTestId("board-column-backlog").textContent).toContain("1")
+  })
+
   it("queries with createdBy=operator on My requests", async () => {
     renderBoard("/todos/b/my")
     await waitFor(() => expect(listWorkItems).toHaveBeenCalled())

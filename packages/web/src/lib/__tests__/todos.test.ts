@@ -19,6 +19,7 @@ import {
   isHistoryView,
   isDefaultFilters,
   activeFilterCount,
+  matchesDueFilter,
   filtersToSearchParams,
   filtersFromSearchParams,
   dateBucketOf,
@@ -243,8 +244,9 @@ describe("filters (design-todos §4.3)", () => {
     expect(isHistoryView({ status: "executing" })).toBe(false)
   })
   it("round-trips through URL search params", () => {
-    const f: TodoFilters = { status: "done", assignee: "jinn-dev", department: "platform", source: "cron", date: "week", q: "digest" }
+    const f: TodoFilters = { status: "done", assignee: "jinn-dev", department: "platform", source: "cron", date: "week", label: "infra", due: "overdue", q: "digest" }
     expect(filtersFromSearchParams(filtersToSearchParams(f))).toEqual(f)
+    expect(filtersFromSearchParams(new URLSearchParams("due=nonsense"))).toEqual({ status: "open" })
     // Defaults serialize to an empty string (clean URLs).
     expect(filtersToSearchParams({ status: "open" }).toString()).toBe("")
     expect(filtersToSearchParams({ status: "open", q: "wi_private_42" }).toString()).toBe("")
@@ -257,6 +259,24 @@ describe("filters (design-todos §4.3)", () => {
     expect(activeFilterCount({ status: "open" })).toBe(0)
     expect(activeFilterCount({ status: "open", q: "roadmap" })).toBe(0)
     expect(activeFilterCount({ status: "done", assignee: "x", date: "today" })).toBe(3)
+    expect(activeFilterCount({ status: "open", label: "infra", due: "week" })).toBe(2)
+  })
+
+  it("due windows filter client-side: forward-looking windows from start of today, Overdue strictly past", () => {
+    // NOW = 2026-07-05T12:00Z (a Sunday); windows use local midnight.
+    expect(matchesDueFilter(null, "week", NOW)).toBe(false)
+    expect(matchesDueFilter("2026-07-06T00:00:00.000Z", undefined, NOW)).toBe(true)
+    expect(matchesDueFilter("2026-07-05T09:00:00.000Z", "overdue", NOW)).toBe(true)
+    expect(matchesDueFilter("2026-07-05T13:00:00.000Z", "overdue", NOW)).toBe(false)
+    expect(matchesDueFilter("2026-07-05T13:00:00.000Z", "today", NOW)).toBe(true)
+    expect(matchesDueFilter("2026-07-06T13:00:00.000Z", "today", NOW)).toBe(false)
+    expect(matchesDueFilter("2026-07-09T13:00:00.000Z", "week", NOW)).toBe(true)
+    expect(matchesDueFilter("2026-07-20T13:00:00.000Z", "week", NOW)).toBe(false)
+    expect(matchesDueFilter("2026-07-20T13:00:00.000Z", "month", NOW)).toBe(true)
+    expect(matchesDueFilter("2026-09-20T13:00:00.000Z", "month", NOW)).toBe(false)
+    // Yesterday's overdue item is NOT "due this week" — Overdue is its lens.
+    expect(matchesDueFilter("2026-07-04T09:00:00.000Z", "week", NOW)).toBe(false)
+    expect(matchesDueFilter("invalid", "week", NOW)).toBe(false)
   })
 })
 

@@ -4,9 +4,10 @@ import type { Employee } from "@/lib/api"
 import { activeFilterCount, type TodoFilters } from "@/lib/todos"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { TodoDialog } from "./todo-dialog"
-import { DATE_OPTIONS, SOURCE_OPTIONS, STATUS_OPTIONS } from "./filter-options"
+import { DATE_OPTIONS, DUE_OPTIONS, SOURCE_OPTIONS, STATUS_OPTIONS } from "./filter-options"
+import { useLabelRegistry } from "./use-todos"
 
-type FilterPanel = "root" | "status" | "person" | "department" | "source" | "date"
+type FilterPanel = "root" | "status" | "person" | "department" | "source" | "date" | "label" | "due"
 
 const ROW_CLASS =
   "flex min-h-11 w-full min-w-0 items-center gap-3 rounded-[12px] px-3 text-left text-[length:var(--text-subheadline)] text-[var(--text-primary)] transition-[background-color,transform] active:scale-[0.96] hover:bg-[var(--fill-tertiary)]"
@@ -25,6 +26,7 @@ export function TodoFilterSheet({
   onClose,
   hideStatus,
   hideDepartment,
+  showLabelDue,
 }: {
   filters: TodoFilters
   onChange: (next: TodoFilters) => void
@@ -37,8 +39,11 @@ export function TodoFilterSheet({
    *  department board = its department) — same scoping as FilterBar. */
   hideStatus?: boolean
   hideDepartment?: boolean
+  /** Board contexts add the Label + Due dimensions (stage-A review F1/F5). */
+  showLabelDue?: boolean
 }) {
   const [panel, setPanel] = useState<FilterPanel>("root")
+  const labelRegistry = useLabelRegistry(!!showLabelDue)
   const title = panel === "root" ? "Filter" : panel.charAt(0).toUpperCase() + panel.slice(1)
   const choose = (next: TodoFilters) => {
     onChange(next)
@@ -73,11 +78,15 @@ export function TodoFilterSheet({
             {([
               ["status", "Status", STATUS_OPTIONS.find((option) => option.value === filters.status)?.label ?? "Open"],
               ["person", "Person", filters.assignee ? (byName.get(filters.assignee)?.displayName ?? filters.assignee) : "Anyone"],
+              ["label", "Label", filters.label ?? "Any"],
+              ["due", "Due", DUE_OPTIONS.find((option) => option.value === filters.due)?.label ?? "Any"],
               ["department", "Department", filters.department ? filters.department.charAt(0).toUpperCase() + filters.department.slice(1) : "Any"],
               ["source", "Source", SOURCE_OPTIONS.find((option) => option.value === filters.source)?.label ?? "Any"],
               ["date", "Date", DATE_OPTIONS.find((option) => option.value === filters.date)?.label ?? "Any time"],
             ] as const).filter(([value]) =>
-              !(hideStatus && value === "status") && !(hideDepartment && value === "department"),
+              !(hideStatus && value === "status")
+              && !(hideDepartment && value === "department")
+              && !(!showLabelDue && (value === "label" || value === "due")),
             ).map(([value, label, current]) => (
               <button key={value} type="button" aria-label={label} onClick={() => setPanel(value)} className={ROW_CLASS}>
                 <span>{label}</span>
@@ -144,6 +153,24 @@ export function TodoFilterSheet({
         {panel === "date" && DATE_OPTIONS.map((option) => (
           <button key={option.label} type="button" onClick={() => choose({ ...filters, date: option.value })} className={ROW_CLASS}>
             {option.label}<Selection selected={filters.date === option.value} />
+          </button>
+        ))}
+        {panel === "label" && (
+          <>
+            <button type="button" onClick={() => choose({ ...filters, label: undefined })} className={ROW_CLASS}>
+              Any label<Selection selected={!filters.label} />
+            </button>
+            {(labelRegistry.data ?? []).map((label) => (
+              <button key={label.id} type="button" onClick={() => choose({ ...filters, label: label.name })} className={ROW_CLASS}>
+                <span className="size-[5px] flex-none rounded-full" style={{ background: label.color ?? "var(--text-quaternary)" }} />
+                {label.name}<Selection selected={filters.label === label.name || filters.label === label.id} />
+              </button>
+            ))}
+          </>
+        )}
+        {panel === "due" && DUE_OPTIONS.map((option) => (
+          <button key={option.label} type="button" onClick={() => choose({ ...filters, due: option.value })} className={ROW_CLASS}>
+            {option.label}<Selection selected={filters.due === option.value} />
           </button>
         ))}
       </div>

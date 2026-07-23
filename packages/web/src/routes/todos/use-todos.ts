@@ -5,6 +5,7 @@ import {
   type Employee,
   type WorkItemCompactWire,
   type WorkItemDetailWire,
+  type WorkItemLabelWire,
   type WorkItemStatusWire,
 } from "@/lib/api"
 import { dateBounds, statusesFor, type TodoFilters } from "@/lib/todos"
@@ -311,6 +312,16 @@ export function useNeedsAttentionItems() {
 
 export function useOrg() {
   return useQuery({ queryKey: queryKeys.org.all, queryFn: () => api.getOrg(), staleTime: 60_000 })
+}
+
+/** The shared label registry (slice 3) — same cache key the pickers use. */
+export function useLabelRegistry(enabled = true) {
+  return useQuery({
+    queryKey: ["labels"],
+    queryFn: async (): Promise<WorkItemLabelWire[]> => (await api.listLabels()).labels,
+    enabled,
+    staleTime: 60_000,
+  })
 }
 
 export function useEmployeesByName(employees: Employee[] | undefined): Map<string, Employee> {
