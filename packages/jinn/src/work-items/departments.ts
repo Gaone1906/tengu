@@ -70,3 +70,29 @@ export function listDepartments(db: DatabaseType): DepartmentRecord[] {
   return (db.prepare("SELECT slug, prefix, created_at FROM departments ORDER BY slug").all() as Array<Record<string, string>>)
     .map((row) => ({ slug: row.slug, prefix: row.prefix, createdAt: row.created_at }));
 }
+
+export interface DepartmentSummary extends DepartmentRecord {
+  /** Live count of Todos currently IN the department (items keep their birth
+   *  prefix when moved, so this counts membership, not the ID namespace). */
+  todoCount: number;
+}
+
+/** The `GET /api/departments` surface: registry rows + one GROUP BY count. */
+export function listDepartmentsWithCounts(db: DatabaseType): DepartmentSummary[] {
+  return (
+    db
+      .prepare(
+        `SELECT d.slug, d.prefix, d.created_at, COUNT(w.id) AS todo_count
+         FROM departments d
+         LEFT JOIN work_items w ON w.department = d.slug
+         GROUP BY d.slug
+         ORDER BY d.slug`,
+      )
+      .all() as Array<Record<string, unknown>>
+  ).map((row) => ({
+    slug: row.slug as string,
+    prefix: row.prefix as string,
+    createdAt: row.created_at as string,
+    todoCount: Number(row.todo_count),
+  }));
+}

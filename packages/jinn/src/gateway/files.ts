@@ -260,12 +260,12 @@ const MIME_MAP: Record<string, string> = {
   ".woff2": "font/woff2",
 };
 
-function mimeFromFilename(filename: string): string {
+export function mimeFromFilename(filename: string): string {
   const ext = path.extname(filename).toLowerCase();
   return MIME_MAP[ext] || "application/octet-stream";
 }
 
-function expandPath(p: string): string {
+export function expandPath(p: string): string {
   if (p.startsWith("~/") || p === "~") {
     return path.join(os.homedir(), p.slice(2));
   }
@@ -680,6 +680,38 @@ async function saveFile(result: UploadResult, context: ApiContext): Promise<File
   logger.info(`File uploaded: ${result.filename} (${result.id}, ${result.buffer.length} bytes)`);
 
   return meta;
+}
+
+export interface MultipartFileUpload {
+  filename: string;
+  buffer: Buffer;
+  fields: Record<string, string>;
+  /** True when the file hit the size limit and was cut off — reject the upload. */
+  truncated: boolean;
+}
+
+/** Parse a single-file multipart request into memory — the shared upload
+ *  machinery consumers outside this module (e.g. work-item attachments) reuse
+ *  instead of wiring Busboy themselves. */
+export function readMultipartFile(req: HttpRequest, maxFileSize: number): Promise<MultipartFileUpload> {
+  return new Promise((resolve, reject) => {
+    const busboy = Busboy({ headers: req.headers, limits: { fileSize: maxFileSize } });
+    let filename = "";
+    let buffer: Buffer | null = null;
+    const fields: Record<string, string> = {};
+    let truncated = false;
+    busboy.on("file", (_fieldname: string, file: NodeJS.ReadableStream, info: { filename: string }) => {
+      filename = info.filename;
+      const chunks: Buffer[] = [];
+      file.on("data", (chunk: Buffer) => chunks.push(chunk));
+      (file as NodeJS.EventEmitter).on("limit", () => { truncated = true; });
+      file.on("end", () => { buffer = Buffer.concat(chunks); });
+    });
+    busboy.on("field", (name: string, value: string) => { fields[name] = value; });
+    busboy.on("finish", () => resolve({ filename, buffer: buffer ?? Buffer.alloc(0), fields, truncated }));
+    busboy.on("error", reject);
+    req.pipe(busboy);
+  });
 }
 
 /** Handle POST /api/files — multipart upload */
