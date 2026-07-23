@@ -466,6 +466,13 @@ h1, h2, h3, h4, h5, h6 {
   to { opacity: 1; }
 }
 
+/* Board tree tray reveal (Todos v2 slice 6 §4): collapsed-hidden grow — the
+   expansion GROWS the card in one calm gesture; instant under reduced motion. */
+@keyframes treeGrow {
+  from { max-height: 0; opacity: 0.001; }
+  to { max-height: 480px; opacity: 1; }
+}
+
 /* Skeleton shimmer (Todos §4.8): opacity pulse on token-filled bars. */
 @keyframes skeletonPulse {
   0%, 100% { opacity: 0.55; }

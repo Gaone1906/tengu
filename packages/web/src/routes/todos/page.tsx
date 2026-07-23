@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useQueryClient } from "@tanstack/react-query"
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { ArrowLeft, Plus } from "lucide-react"
-import { api, type WorkItemCompactWire, type WorkItemStatusWire } from "@/lib/api"
+import { api, type Employee, type WorkItemCompactWire, type WorkItemStatusWire } from "@/lib/api"
 import { isTodoId, todoPath } from "@/lib/todo-id"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
@@ -187,24 +187,42 @@ function withTodoQuickHistoryState(
   return Object.keys(next).length > 0 ? next : null
 }
 
-export function NewTodoDialog({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+export function NewTodoDialog({
+  onClose,
+  onCreated,
+  defaults,
+}: {
+  onClose: () => void
+  onCreated: () => void
+  /** Board quick-adds carry their scope (slice 6): department presets the
+   *  birth department; askAssignee renders a roster select and creates-then-
+   *  assigns so the item lands in Assigned through the legal backlog→assigned
+   *  path. */
+  defaults?: { department?: string; askAssignee?: boolean; employees?: Employee[] }
+}) {
   const [title, setTitle] = useState("")
+  const [assignee, setAssignee] = useState("")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
   const create = useCallback(async () => {
     const t = title.trim()
     if (!t || busy) return
+    if (defaults?.askAssignee && !assignee) {
+      setError("Pick who this is assigned to")
+      return
+    }
     setBusy(true)
     setError(null)
     try {
-      await api.createWorkItem({ title: t })
+      const created = await api.createWorkItem({ title: t, department: defaults?.department })
+      if (defaults?.askAssignee && assignee) await api.assignWorkItem(created.workItem.id, assignee)
       onCreated()
     } catch (e) {
       setBusy(false)
       setError(operatorSafeTodoError(e, "Failed to create"))
     }
-  }, [title, busy, onCreated])
+  }, [title, busy, onCreated, defaults, assignee])
 
   return (
     <TodoDialog
@@ -227,6 +245,22 @@ export function NewTodoDialog({ onClose, onCreated }: { onClose: () => void; onC
           placeholder="e.g. Draft the launch note"
           className="apple-input mt-4 min-h-11 w-full"
         />
+        {defaults?.askAssignee && (
+          <select
+            aria-label="Assignee"
+            data-testid="todo-new-assignee"
+            value={assignee}
+            onChange={(e) => setAssignee(e.target.value)}
+            className="apple-input mt-2 min-h-11 w-full"
+          >
+            <option value="">Assign to…</option>
+            {(defaults.employees ?? []).map((employee) => (
+              <option key={employee.name} value={employee.name}>
+                {employee.displayName}
+              </option>
+            ))}
+          </select>
+        )}
         {error && <div className="mt-2 text-[length:var(--text-caption1)] text-[var(--system-red)]">{error}</div>}
         {confirmDiscard && (
           <div className="mt-3 rounded-[var(--radius-md)] bg-[var(--fill-tertiary)] p-3 text-[length:var(--text-footnote)] text-[var(--text-secondary)]">

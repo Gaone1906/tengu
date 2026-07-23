@@ -63,6 +63,8 @@ export function FilterBar({
   departments,
   byName,
   onPeopleView,
+  hideStatus,
+  hideDepartment,
 }: {
   filters: TodoFilters
   onChange: (next: TodoFilters) => void
@@ -71,6 +73,10 @@ export function FilterBar({
   departments: string[]
   byName: Map<string, Employee>
   onPeopleView?: () => void
+  /** Board scopes own these dimensions (columns = status, a department board
+   *  = its department), so their chips leave the menu there (slice 6). */
+  hideStatus?: boolean
+  hideDepartment?: boolean
 }) {
   const mobile = useIsTodoMobile()
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -207,16 +213,18 @@ export function FilterBar({
               Refine this view
             </DropdownMenuLabel>
 
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger className={ITEM_CLASS}>Status</DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className={SUBMENU_CLASS}>
-                {STATUS_OPTIONS.map((option) => (
-                  <DropdownMenuItem key={option.value} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, status: option.value })}>
-                    {option.label}<MenuCheck on={filters.status === option.value} />
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
+            {!hideStatus && (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger className={ITEM_CLASS}>Status</DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className={SUBMENU_CLASS}>
+                  {STATUS_OPTIONS.map((option) => (
+                    <DropdownMenuItem key={option.value} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, status: option.value })}>
+                      {option.label}<MenuCheck on={filters.status === option.value} />
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
 
             <DropdownMenuSub>
               <DropdownMenuSubTrigger className={ITEM_CLASS}>Person</DropdownMenuSubTrigger>
@@ -233,19 +241,21 @@ export function FilterBar({
               </DropdownMenuSubContent>
             </DropdownMenuSub>
 
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger className={ITEM_CLASS}>Department</DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className={SUBMENU_CLASS}>
-                <DropdownMenuItem className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, department: undefined })}>
-                  Any department<MenuCheck on={!filters.department} />
-                </DropdownMenuItem>
-                {departments.map((department) => (
-                  <DropdownMenuItem key={department} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, department })}>
-                    {department.charAt(0).toUpperCase() + department.slice(1)}<MenuCheck on={filters.department === department} />
+            {!hideDepartment && (
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger className={ITEM_CLASS}>Department</DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className={SUBMENU_CLASS}>
+                  <DropdownMenuItem className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, department: undefined })}>
+                    Any department<MenuCheck on={!filters.department} />
                   </DropdownMenuItem>
-                ))}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
+                  {departments.map((department) => (
+                    <DropdownMenuItem key={department} className={ITEM_CLASS} onClick={() => changeFilters({ ...filters, department })}>
+                      {department.charAt(0).toUpperCase() + department.slice(1)}<MenuCheck on={filters.department === department} />
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            )}
 
             <DropdownMenuSub>
               <DropdownMenuSubTrigger className={ITEM_CLASS}>Source</DropdownMenuSubTrigger>

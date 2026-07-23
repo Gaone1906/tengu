@@ -730,6 +730,27 @@ export interface WorkItemApprovalWire {
   note: string | null
 }
 
+/** One node of GET /api/work-items/:id/tree — a full row plus nested children
+ *  (rank-then-id ordered, depth-capped server-side). */
+export interface WorkItemTreeNodeWire extends WorkItemFullWire {
+  children: WorkItemTreeNodeWire[]
+}
+
+/** The tree payload: subtree + per-status totals + derived subtree spend. */
+export interface WorkItemTreeWire {
+  root: WorkItemTreeNodeWire
+  totals: Partial<Record<WorkItemStatusWire, number>>
+  spendUsd: number
+}
+
+/** One department row from GET /api/departments (Todos v2 slice 5). */
+export interface DepartmentSummaryWire {
+  slug: string
+  prefix: string
+  createdAt: string
+  todoCount: number
+}
+
 /** The GET /api/work-items/:id payload: full row + live-derived spend + audit. */
 export interface WorkItemDetailWire {
   workItem: WorkItemFullWire
@@ -967,6 +988,10 @@ export const api = {
     q?: string
     offset?: number
     limit?: number
+    /** Todos v2 slice 6 board scopes (server-side since slice 1/3). */
+    createdBy?: string
+    rootsOnly?: boolean
+    label?: string
   }, signal?: AbortSignal) => {
     const q = new URLSearchParams()
     if (params?.status) q.set("status", params.status)
@@ -977,6 +1002,9 @@ export const api = {
     if (params?.since) q.set("since", params.since)
     if (params?.until) q.set("until", params.until)
     if (params?.q) q.set("q", params.q)
+    if (params?.createdBy) q.set("createdBy", params.createdBy)
+    if (params?.rootsOnly) q.set("rootsOnly", "true")
+    if (params?.label) q.set("label", params.label)
     if (params?.offset) q.set("offset", String(params.offset))
     q.set("limit", String(params?.limit ?? 20))
     return get<WorkItemListWire>(`/api/work-items?${q.toString()}`, signal ? { signal } : undefined)
@@ -1039,8 +1067,25 @@ export const api = {
     ),
   /** GRS-021c: create a Todo (the "+ New Todo" affordance). The operator caller
    *  mints a `human`-source item; approvals structurally cannot be attached here. */
-  createWorkItem: (input: { title: string; body?: string }) =>
+  createWorkItem: (input: {
+    title: string
+    body?: string
+    /** Todos v2 slice 6: quick-adds carry the board scope / parent. */
+    parentId?: string
+    department?: string
+    assignee?: string
+    priority?: number
+    dueAt?: string
+  }) =>
     post<{ workItem: WorkItemFullWire }>("/api/work-items", input),
+  /** Todos v2 slice 6: roster-validated assignment (backlog → assigned). */
+  assignWorkItem: (id: string, assignee: string) =>
+    post<{ workItem: WorkItemFullWire }>(`/api/work-items/${encodeURIComponent(id)}/assign`, { assignee }),
+  /** Todos v2 slice 6: the board's lazy tree expansion (roll-ups + spend). */
+  getWorkItemTree: (id: string, signal?: AbortSignal) =>
+    get<{ tree: WorkItemTreeWire }>(`/api/work-items/${encodeURIComponent(id)}/tree`, signal ? { signal } : undefined),
+  /** Todos v2 slice 6: the switcher's department boards. */
+  getDepartments: () => get<{ departments: DepartmentSummaryWire[] }>("/api/departments"),
   /** GRS-021a: full Todo detail (property stack + live spend + audit). */
   getWorkItem: (id: string, signal?: AbortSignal) =>
     get<WorkItemDetailWire>(`/api/work-items/${encodeURIComponent(id)}`, signal ? { signal } : undefined),
