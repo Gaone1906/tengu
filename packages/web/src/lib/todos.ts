@@ -525,3 +525,12 @@ export function groupHistory(items: WorkItemCompactWire[], now: number): History
     return { bucket: b, label: DATE_BUCKET_LABEL[b], items: list }
   }).filter((g) => g.items.length > 0)
 }
+
+/** Human label for a comment author. Employee identities resolve through the
+ *  caller's display-name map at the component layer; this covers the fixed
+ *  kinds and passes raw identities (slug or `session:<uuid>`) through. */
+export function commentAuthorLabel(author: string, authorKind: string): string {
+  if (authorKind === "operator") return "Operator"
+  if (authorKind === "system") return "System"
+  return author
+}

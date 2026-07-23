@@ -877,11 +877,37 @@ export interface WorkItemEventWire {
   createdAt: string
 }
 
+export type WorkItemCommentAuthorKindWire = "operator" | "employee" | "system"
+
+/** One comment row (Todos v2 slice 2). A tombstoned comment keeps its row with
+ *  an empty body and a `deletedAt` stamp so the thread shape survives. */
+export interface WorkItemCommentWire {
+  id: string
+  workItemId: string
+  parentCommentId: string | null
+  authorKind: WorkItemCommentAuthorKindWire
+  author: string
+  body: string
+  createdAt: string
+  editedAt: string | null
+  deletedAt: string | null
+}
+
+/** A chronological comment page; `total` is the exact per-item count. */
+export interface WorkItemCommentPageWire {
+  comments: WorkItemCommentWire[]
+  total: number
+  limit?: number
+  offset?: number
+}
+
 /** The GET /api/work-items/:id payload: full row + live-derived spend + audit. */
 export interface WorkItemDetailWire {
   workItem: WorkItemFullWire
   spendUsd: number
   events: WorkItemEventWire[]
+  /** Last-10 comments tail + total (optional: older gateways omit it). */
+  comments?: WorkItemCommentPageWire
 }
 
 export interface ApprovalDecisionResultWire {
@@ -1412,6 +1438,31 @@ export const api = {
   /** GRS-002: execution attempts linked to a Todo (the sheet's session link). */
   listWorkItemSessions: (id: string) =>
     get<LinkedSessionWire[]>(`/api/work-items/${encodeURIComponent(id)}/sessions`),
+  /** Todos v2 slice 2: the comment thread, chronological with limit/offset. */
+  listWorkItemComments: (id: string, opts?: { limit?: number; offset?: number }) => {
+    const params = new URLSearchParams()
+    if (opts?.limit !== undefined) params.set("limit", String(opts.limit))
+    if (opts?.offset !== undefined) params.set("offset", String(opts.offset))
+    const query = params.toString()
+    return get<WorkItemCommentPageWire>(`/api/work-items/${encodeURIComponent(id)}/comments${query ? `?${query}` : ""}`)
+  },
+  /** Add a comment (or a single-level reply via parentCommentId). Author
+   *  identity is stamped server-side from the operator surface. */
+  addWorkItemComment: (id: string, body: string, parentCommentId?: string) =>
+    post<{ comment: WorkItemCommentWire }>(
+      `/api/work-items/${encodeURIComponent(id)}/comments`,
+      parentCommentId ? { body, parentCommentId } : { body },
+    ),
+  editWorkItemComment: (id: string, commentId: string, body: string) =>
+    patch<{ comment: WorkItemCommentWire }>(
+      `/api/work-items/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}`,
+      { body },
+    ),
+  /** Tombstone: the row survives with an empty body; the UI renders [deleted]. */
+  deleteWorkItemComment: (id: string, commentId: string) =>
+    del<{ comment: WorkItemCommentWire }>(
+      `/api/work-items/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}`,
+    ),
   uploadFile: async (file: File, sessionId?: string): Promise<UploadedFile> => {
     const form = new FormData()
     form.append('file', file)
