@@ -1,5 +1,5 @@
 import { useMemo } from "react"
-import { Bell, Calendar, ChevronRight } from "lucide-react"
+import { Bell, Calendar, ChevronRight, Pause, TriangleAlert } from "lucide-react"
 import type {
   Employee,
   WorkItemCompactWire,
@@ -247,13 +247,19 @@ export function BoardCard({
         </div>
       )}
 
-      {/* Blocked/escalated: the card carries WHY (the only tinted text). */}
+      {/* Blocked/escalated: the card carries WHY (the only tinted text).
+          The mock leads the line with a small bare status glyph (F4). */}
       {reason && (
         <div
           className={`mt-2 flex items-center gap-1.5 text-[12px] max-[700px]:hidden ${
             item.status === "escalated" ? "text-[var(--system-red)]" : "text-[var(--system-orange)]"
           }`}
         >
+          {item.status === "escalated" ? (
+            <TriangleAlert size={11} aria-hidden className="flex-none" />
+          ) : (
+            <Pause size={11} aria-hidden className="flex-none" />
+          )}
           {reason}
         </div>
       )}
