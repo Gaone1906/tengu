@@ -92,12 +92,12 @@ describe("tombstone semantics", () => {
   it("tombstones the body, keeps the row and thread shape, and allows replies to a tombstone", () => {
     const item = store.createWorkItem({ title: "tombstone item" });
     const root = comments.addComment({ workItemId: item.id, body: "delete me", author: "a-lead", authorKind: "employee" });
-    const gone = comments.tombstoneComment(root.id, { author: "a-lead", operator: false });
+    const gone = comments.tombstoneComment(root.id, { author: "a-lead", authorKind: "employee", operator: false });
     expect(gone.body).toBe("");
     expect(gone.deletedAt).not.toBeNull();
 
     // Edit after delete is refused.
-    expect(() => comments.editComment(root.id, "resurrect", { author: "a-lead", operator: false })).toThrow(/deleted/);
+    expect(() => comments.editComment(root.id, "resurrect", { author: "a-lead", authorKind: "employee", operator: false })).toThrow(/deleted/);
 
     // Replying to a tombstone keeps working — the thread shape survives.
     const reply = comments.addComment({
@@ -110,7 +110,7 @@ describe("tombstone semantics", () => {
     expect(reply.parentCommentId).toBe(root.id);
 
     // A second delete is an idempotent no-op (no double audit event).
-    const again = comments.tombstoneComment(root.id, { author: "a-lead", operator: false });
+    const again = comments.tombstoneComment(root.id, { author: "a-lead", authorKind: "employee", operator: false });
     expect(again.deletedAt).toBe(gone.deletedAt);
     const deleteEvents = store.listWorkItemEvents(item.id).filter((e) => e.kind === "comment_deleted" && e.detail?.commentId === root.id);
     expect(deleteEvents).toHaveLength(1);
@@ -122,21 +122,36 @@ describe("authority", () => {
     const item = store.createWorkItem({ title: "authority item" });
     const theirs = comments.addComment({ workItemId: item.id, body: "mine", author: "a-lead", authorKind: "employee" });
 
-    expect(() => comments.editComment(theirs.id, "hijack", { author: "b-lead", operator: false })).toThrow(/author|forbidden/);
-    expect(() => comments.tombstoneComment(theirs.id, { author: "b-lead", operator: false })).toThrow(/author|forbidden/);
+    expect(() => comments.editComment(theirs.id, "hijack", { author: "b-lead", authorKind: "employee", operator: false })).toThrow(/author|forbidden/);
+    expect(() => comments.tombstoneComment(theirs.id, { author: "b-lead", authorKind: "employee", operator: false })).toThrow(/author|forbidden/);
 
-    const edited = comments.editComment(theirs.id, "mine, refined", { author: "a-lead", operator: false });
+    const edited = comments.editComment(theirs.id, "mine, refined", { author: "a-lead", authorKind: "employee", operator: false });
     expect(edited.body).toBe("mine, refined");
     expect(edited.editedAt).not.toBeNull();
 
-    const operatorEdit = comments.editComment(theirs.id, "operator override", { author: "operator", operator: true });
+    const operatorEdit = comments.editComment(theirs.id, "operator override", { author: "operator", authorKind: "operator", operator: true });
     expect(operatorEdit.body).toBe("operator override");
-    const operatorDelete = comments.tombstoneComment(theirs.id, { author: "operator", operator: true });
+    const operatorDelete = comments.tombstoneComment(theirs.id, { author: "operator", authorKind: "operator", operator: true });
     expect(operatorDelete.deletedAt).not.toBeNull();
   });
 
   it("refuses editing an unknown comment", () => {
-    expect(() => comments.editComment("wic_ffffffffffff", "nope", { author: "operator", operator: true })).toThrow(/not found/);
+    expect(() => comments.editComment("wic_ffffffffffff", "nope", { author: "operator", authorKind: "operator", operator: true })).toThrow(/not found/);
+  });
+
+  it("discriminates on authorKind: an employee identity colliding with a sentinel author string is refused", () => {
+    const item = store.createWorkItem({ title: "sentinel collision item" });
+    const operatorComment = comments.addComment({ workItemId: item.id, body: "operator speaking", author: "operator", authorKind: "operator" });
+    // An employee slug literally named "operator" produces the same author STRING
+    // but a different kind — it must never match the operator's comments.
+    const impostor = { author: "operator", authorKind: "employee" as const, operator: false };
+    expect(() => comments.editComment(operatorComment.id, "impostor edit", impostor)).toThrow(/author|forbidden/);
+    expect(() => comments.tombstoneComment(operatorComment.id, impostor)).toThrow(/author|forbidden/);
+    expect(comments.getComment(operatorComment.id)!.body).toBe("operator speaking");
+
+    // Symmetric: the operator surface (operator: true) still overrides any comment.
+    const theirs = comments.addComment({ workItemId: item.id, body: "employee words", author: "operator-impostor", authorKind: "employee" });
+    expect(comments.tombstoneComment(theirs.id, { author: "operator", authorKind: "operator", operator: true }).deletedAt).not.toBeNull();
   });
 });
 
@@ -148,8 +163,8 @@ describe("audit + version effects", () => {
     const afterAdd = store.getWorkItem(item.id)!.version;
     expect(afterAdd).toBe(afterCreate + 1);
 
-    comments.editComment(comment.id, "v2", { author: "operator", operator: true });
-    comments.tombstoneComment(comment.id, { author: "operator", operator: true });
+    comments.editComment(comment.id, "v2", { author: "operator", authorKind: "operator", operator: true });
+    comments.tombstoneComment(comment.id, { author: "operator", authorKind: "operator", operator: true });
     expect(store.getWorkItem(item.id)!.version).toBe(afterAdd);
 
     const kinds = store.listWorkItemEvents(item.id).map((e) => e.kind);

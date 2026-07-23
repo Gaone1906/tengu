@@ -41,10 +41,14 @@ export interface AddCommentInput {
   parentCommentId?: string | null;
 }
 
-/** Who is attempting an edit/tombstone: the derived author identity, plus
- *  whether the call comes from the authenticated operator surface. */
+/** Who is attempting an edit/tombstone: the derived author identity (string AND
+ *  kind — the kind discriminates the operator/system sentinel namespace from
+ *  employee slugs, so a slug literally named "operator" never matches the
+ *  operator's comments), plus whether the call comes from the authenticated
+ *  operator surface. */
 export interface CommentEditor {
   author: string;
+  authorKind: WorkItemComment['authorKind'];
   operator: boolean;
 }
 
@@ -142,7 +146,10 @@ export function addComment(input: AddCommentInput): WorkItemComment {
 function requireEditable(db: ReturnType<typeof initDb>, id: string, editor: CommentEditor, action: string): WorkItemComment {
   const comment = getCommentRow(db, id);
   if (!comment) throw new WorkItemCommentError('comment-not-found', `comment ${id} not found`);
-  if (!editor.operator && editor.author !== comment.author) {
+  // Author identity is (author, authorKind) as a PAIR — the string alone would
+  // let an employee slug that collides with a sentinel ("operator"/"system")
+  // claim another principal's comments.
+  if (!editor.operator && (editor.author !== comment.author || editor.authorKind !== comment.authorKind)) {
     throw new WorkItemCommentError('comment-forbidden', `only the comment author (or the operator) may ${action} it`);
   }
   return comment;

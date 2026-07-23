@@ -4818,7 +4818,7 @@ export async function handleApiRequest(
       if (!existing || existing.workItemId !== params.id) return notFound(res);
       try {
         const comment = editComment(params.cid, text, {
-          author: workItemCommentAuthor(caller).author,
+          ...workItemCommentAuthor(caller),
           operator: caller.kind === "operator",
         });
         return json(res, { comment });
@@ -4838,7 +4838,7 @@ export async function handleApiRequest(
       if (!existing || existing.workItemId !== params.id) return notFound(res);
       try {
         const comment = tombstoneComment(params.cid, {
-          author: workItemCommentAuthor(caller).author,
+          ...workItemCommentAuthor(caller),
           operator: caller.kind === "operator",
         });
         return json(res, { comment });
