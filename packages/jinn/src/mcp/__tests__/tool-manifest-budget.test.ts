@@ -3,16 +3,17 @@ import crypto from "node:crypto";
 import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
-// Fixed provider budget. Rebased for Todos v2 slice 4 (edit_work_item) with the
-// same ~zero headroom discipline as before: new tool prose must stay concise
-// rather than growing into this ceiling.
-const MAX_MANIFEST_TOKENS = 4649;
+// Fixed provider budget. Rebased for Todos v2 slice 5 (attach_to_work_item,
+// list_work_item_attachments, list_departments) with the same ~zero headroom
+// discipline as before: new tool prose must stay concise rather than growing
+// into this ceiling.
+const MAX_MANIFEST_TOKENS = 4911;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 4244, sha256: "454e0f2369f41f106741ae256e72d81fce66e8c8563a7b9cc2083745424c3be8" },
-  pi: { tokens: 4647, sha256: "70e1db0fba86f0f1919b263d3622372f2d93318087f6168c639e42a43c0d8831" },
-  openai: { tokens: 4407, sha256: "f8bacab3e70ef32a473b5023bf31a46b2885caf4aff8667d1900678e0ed9fe72" },
+  rpc: { tokens: 4482, sha256: "e8c6fb5862a71902b66641a0e3e515d1199602c07bf22bb1ad0d85370571e449" },
+  pi: { tokens: 4909, sha256: "da38177f89d2ddc01c7b3454bd659b5da157d3326bf324e86ad5c7ab58f2371b" },
+  openai: { tokens: 4654, sha256: "c9d8605abc1e8567e4742138a1988f770c80110f33a8e96ca0e05d329d6de135" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -35,6 +36,7 @@ async function exactOrAttested(name: keyof typeof ATTESTED, payload: string, loa
 const EXPECTED_TOOL_NAMES = [
   "archive_work_item",
   "assign_work_item",
+  "attach_to_work_item",
   "cancel_workflow_run",
   "comment_work_item",
   "cost_report",
@@ -61,11 +63,13 @@ const EXPECTED_TOOL_NAMES = [
   "label_work_item",
   "link_work_items",
   "list_cron_jobs",
+  "list_departments",
   "list_employees",
   "list_files",
   "list_labels",
   "list_notes",
   "list_sessions",
+  "list_work_item_attachments",
   "list_work_item_comments",
   "list_work_items",
   "list_workflow_runs",
@@ -97,6 +101,7 @@ const EXPECTED_TOOL_NAMES = [
 const EXPECTED_REQUIRED = {
   archive_work_item: ["id"],
   assign_work_item: ["id", "assignee"],
+  attach_to_work_item: ["id", "path"],
   cancel_workflow_run: ["workflowId", "runId"],
   comment_work_item: ["id", "body"],
   cost_report: [],
@@ -123,11 +128,13 @@ const EXPECTED_REQUIRED = {
   label_work_item: ["id", "labels"],
   link_work_items: ["srcId", "dstId", "kind"],
   list_cron_jobs: [],
+  list_departments: [],
   list_employees: [],
   list_files: [],
   list_labels: [],
   list_notes: [],
   list_sessions: [],
+  list_work_item_attachments: ["id"],
   list_work_item_comments: ["id"],
   list_work_items: [],
   list_workflow_runs: ["workflowId"],
@@ -226,7 +233,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(59);
+    expect(tools).toHaveLength(62);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);
