@@ -1,10 +1,20 @@
 import fs from "node:fs";
+import type { ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { handleApiRequest, type ApiContext } from "../../gateway/api.js";
+import {
+  CALLER_SESSION_CAPABILITY_HEADER,
+  CALLER_SESSION_HEADER,
+  TOOL_CALL_HEADER,
+  TOOL_CALL_HEADER_VALUE,
+  ensureSessionCapability,
+} from "../../mcp/identity.js";
 import type { Employee, Engine, EngineResult, JinnConfig, ModelRegistry } from "../../shared/types.js";
-import { getMessages, getSession, listSessions } from "../../sessions/registry.js";
+import { createSession, getMessages, getSession, listSessions, updateSession } from "../../sessions/registry.js";
 import { SessionManager } from "../../sessions/manager.js";
 import type { Binding, JsonValue, WorkflowDefinition } from "../model.js";
 import { openWorkflowDatabase } from "../repository-migrations.js";
@@ -67,7 +77,7 @@ function binding(value: string | Binding<string>): Binding<string> {
 function definition(options: {
   id: string; trigger?: "manual" | "event"; eventName?: string;
   employee?: string | Binding<string>; engine?: Binding<string>; model?: Binding<string>; effort?: Binding<"low" | "medium" | "high">;
-  prompt?: string;
+  prompt?: string; errorRoute?: boolean;
 }): WorkflowDefinition {
   const created = repository.createDefinition({ id: options.id, title: `Flow ${options.id}` });
   const trigger = options.trigger === "event"
@@ -91,13 +101,73 @@ function definition(options: {
         output: { fields: { result: { type: "string", required: true } }, allowAdditionalFields: false },
       } },
       { id: "finish", type: "end", name: "Finish", config: { result: "success" } },
+      ...(options.errorRoute
+        ? [{ id: "handled", type: "end" as const, name: "Handled", config: { result: "success" as const } }]
+        : []),
     ],
     edges: [
       { id: "start-write", from: { nodeId: "start", port: "success" }, to: { nodeId: "write", port: "input" } },
       { id: "write-finish", from: { nodeId: "write", port: "success" }, to: { nodeId: "finish", port: "input" } },
+      ...(options.errorRoute
+        ? [{ id: "write-handled", from: { nodeId: "write", port: "error" as const }, to: { nodeId: "handled", port: "input" as const } }]
+        : []),
     ],
   }, created.revision);
   return repository.setEnabled(saved.id, true, saved.revision);
+}
+
+function request(pathname: string, sessionId: string, body: Record<string, unknown>) {
+  const req = Readable.from([Buffer.from(JSON.stringify(body))]);
+  Object.assign(req, {
+    method: "POST",
+    url: pathname,
+    headers: {
+      host: "localhost",
+      authorization: "Bearer test-token",
+      "content-type": "application/json",
+      [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+      [CALLER_SESSION_HEADER]: sessionId,
+      [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(sessionId),
+    },
+  });
+  return req as unknown as Parameters<typeof handleApiRequest>[0];
+}
+
+function response() {
+  let status = 200;
+  const chunks: Buffer[] = [];
+  const res = {
+    setHeader: vi.fn(),
+    writeHead(code: number) { status = code; return this; },
+    write(chunk?: string | Buffer) { if (chunk) chunks.push(Buffer.from(chunk)); return true; },
+    end(chunk?: string | Buffer) { if (chunk) chunks.push(Buffer.from(chunk)); },
+  } as unknown as ServerResponse;
+  return {
+    res,
+    read: () => ({
+      status,
+      body: chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown : undefined,
+    }),
+  };
+}
+
+async function postAttempt(
+  action: "submit" | "extend",
+  sessionId: string,
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: unknown }> {
+  const capture = response();
+  const context = {
+    gatewayAuthToken: "test-token",
+    workflowService: service,
+    getConfig: () => config,
+    connectors: new Map(),
+    sessionManager: manager,
+    emit: vi.fn(),
+    startTime: 1,
+  } as unknown as ApiContext;
+  await handleApiRequest(request(`/api/workflows/attempts/${action}`, sessionId, body), capture.res, context);
+  return capture.read();
 }
 
 function createService(): WorkflowService {
@@ -264,5 +334,136 @@ describe("first Workflow vertical", () => {
     engine.resolve({ sessionId: "native-event", result: "Event done.\n```jinn-output\n{\"result\":\"ok\"}\n```", durationMs: 1 });
     await vi.waitFor(() => expect(service.getRun(authored.id, runs[0]!.id)?.status).toBe("completed"));
     await expect(service.fireEvent({ eventName: "build.finished", fireId: "build-2", payload: { data: "x".repeat(70_000) } })).rejects.toThrow(/64 KiB/);
+  });
+
+  it("completes a full run when the active attempt submits through the route mid-turn", async () => {
+    const authored = definition({ id: "route-submit-flow" });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "route" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+    const sessionId = service.getRun(authored.id, started.id)!.attempts[0]!.sessionId!;
+
+    expect(await postAttempt("submit", sessionId, {
+      fields: { result: "published" },
+      summary: "Submitted while the turn was active.",
+    })).toEqual({ status: 200, body: { ok: true } });
+    expect(service.getRun(authored.id, started.id)).toMatchObject({
+      status: "completed",
+      attempts: [{
+        status: "completed",
+        sessionId,
+        output: {
+          text: "Submitted while the turn was active.",
+          fields: { result: "published" },
+        },
+      }],
+    });
+
+    engine.resolve({ sessionId: "native-route-submit", result: "Turn ended after submission.", durationMs: 1 });
+    await vi.waitFor(() => expect(getSession(sessionId)?.status).toBe("idle"));
+    expect(service.getRun(authored.id, started.id)?.attempts[0]?.output?.fields).toEqual({ result: "published" });
+  });
+
+  it("defers the reminder rung for a running child, then accepts the parent's route submission", async () => {
+    const authored = definition({ id: "delegated-route-submit-flow" });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "delegated" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+    const sessionId = service.getRun(authored.id, started.id)!.attempts[0]!.sessionId!;
+    const child = createSession({
+      engine: "claude",
+      source: "web",
+      sourceRef: `delegated:${started.id}`,
+      parentSessionId: sessionId,
+      employee: "writer",
+      title: "Delegated child",
+    });
+    updateSession(child.id, { status: "running" });
+
+    engine.resolve({ sessionId: "native-delegated-parent", result: "Waiting for delegated work.", durationMs: 1 });
+    await vi.waitFor(() => expect(service.getRun(authored.id, started.id)?.attempts[0]?.nextReminderAt).toBeDefined());
+    const firstDue = service.getRun(authored.id, started.id)!.attempts[0]!.nextReminderAt!;
+    expect(manager.workflowAttemptState(sessionId)).toMatchObject({ idle: true, runningChildren: 1 });
+
+    await service.recover(firstDue);
+
+    const deferred = service.getRun(authored.id, started.id)!.attempts[0]!;
+    expect(deferred).toMatchObject({
+      status: "running",
+      remindersSent: 0,
+      nextReminderAt: new Date(Date.parse(firstDue) + 5 * 60_000).toISOString(),
+    });
+    expect(engine.calls).toHaveLength(1);
+
+    updateSession(child.id, {
+      status: "idle",
+      attemptOutcome: "succeeded",
+      attemptTerminalVersion: 1,
+      attemptTurn: 1,
+    });
+    expect(manager.workflowAttemptState(sessionId)).toMatchObject({ idle: true, runningChildren: 0 });
+    expect(await postAttempt("submit", sessionId, {
+      fields: { result: "delegated result" },
+      summary: "Child completed; parent submitted.",
+    })).toEqual({ status: 200, body: { ok: true } });
+    expect(service.getRun(authored.id, started.id)).toMatchObject({
+      status: "completed",
+      attempts: [{ status: "completed", output: { fields: { result: "delegated result" } } }],
+    });
+  });
+
+  it("fails after reminder exhaustion with workflow-no-output and follows the error port", async () => {
+    const authored = definition({ id: "vertical-no-output-route", errorRoute: true });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "silent" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+
+    engine.resolve({ sessionId: "native-no-output-1", result: "Still working.", durationMs: 1 });
+    for (let rung = 1; rung <= 3; rung += 1) {
+      await vi.waitFor(() => expect(service.getRun(authored.id, started.id)?.attempts[0]?.nextReminderAt).toBeDefined());
+      const due = service.getRun(authored.id, started.id)!.attempts[0]!.nextReminderAt!;
+      await service.recover(due);
+      await vi.waitFor(() => expect(engine.calls).toHaveLength(rung + 1));
+      expect(service.getRun(authored.id, started.id)?.attempts[0]?.remindersSent).toBe(rung);
+      engine.resolve({ sessionId: `native-no-output-${rung + 1}`, result: "Still no submission.", durationMs: 1 });
+    }
+
+    await vi.waitFor(() => expect(service.getRun(authored.id, started.id)?.status).toBe("completed"));
+    const completed = service.getRun(authored.id, started.id)!;
+    expect(completed.attempts[0]).toMatchObject({
+      status: "failed",
+      error: { code: "workflow-no-output", retryable: true },
+    });
+    expect(completed.nodeRuns.find((node) => node.nodeId === "write")).toMatchObject({
+      status: "failed",
+      error: { code: "workflow-no-output" },
+    });
+    expect(completed.nodeRuns.find((node) => node.nodeId === "handled")?.status).toBe("completed");
+  });
+
+  it("resets the reminder ladder through the deadline-extension route", async () => {
+    const authored = definition({ id: "vertical-extend-route" });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "extension" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+    const sessionId = service.getRun(authored.id, started.id)!.attempts[0]!.sessionId!;
+
+    engine.resolve({ sessionId: "native-before-extension", result: "Need more time.", durationMs: 1 });
+    await vi.waitFor(() => expect(service.getRun(authored.id, started.id)?.attempts[0]?.nextReminderAt).toBeDefined());
+    const due = service.getRun(authored.id, started.id)!.attempts[0]!.nextReminderAt!;
+    await service.recover(due);
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(2));
+    expect(service.getRun(authored.id, started.id)?.attempts[0]?.remindersSent).toBe(1);
+
+    expect(await postAttempt("extend", sessionId, { reason: "Waiting for review." }))
+      .toEqual({ status: 200, body: { ok: true } });
+    expect(service.getRun(authored.id, started.id)?.attempts[0]).toMatchObject({
+      status: "running",
+      remindersSent: 0,
+      extensions: 1,
+      lastExtensionReason: "Waiting for review.",
+    });
+    expect(service.getRun(authored.id, started.id)?.attempts[0]?.nextReminderAt).toBeUndefined();
+
+    engine.resolve({ sessionId: "native-after-extension", result: "Continuing after extension.", durationMs: 1 });
+    await vi.waitFor(() => expect(service.getRun(authored.id, started.id)?.attempts[0]?.nextReminderAt).toBeDefined());
+    const resetDue = service.getRun(authored.id, started.id)!.attempts[0]!.nextReminderAt!;
+    expect(Date.parse(resetDue) - Date.parse(getSession(sessionId)!.lastActivity)).toBe(5 * 60_000);
   });
 });
