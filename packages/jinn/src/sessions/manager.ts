@@ -21,6 +21,10 @@ import {
   getSessionBySessionKey,
   getMessages,
   insertMessage,
+  insertMessageAfter,
+  getPartialMessages,
+  settlePartialMessages,
+  deletePartialMessages,
   recordEngineSessionId,
   updateSession,
   beginSessionAttempt, completeSessionAttempt, claimWorkflowAttemptDispatch, cancelWorkflowAttemptDispatch,
@@ -45,6 +49,12 @@ import { cleanupMcpConfigFile } from "../mcp/resolver.js";
 import { handleRateLimit } from "./rate-limit-handler.js";
 import { resolveEngineRunMcp } from "./engine-run-mcp.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
+import {
+  createPartialStreamWriter,
+  normalizeBlockDeltaForTurn,
+  type PartialStreamWriter,
+} from "./partial-stream.js";
+import { completedStreamedBlockIds } from "../gateway/streamed-blocks.js";
 
 export interface RouteOptions {
   employee?: Employee;
@@ -369,6 +379,7 @@ export class SessionManager {
     // Resolve MCP config before try block so it's accessible in catch for cleanup
     let mcpConfigPath: string | undefined;
     let resolvedMcp: import("../shared/types.js").ResolvedMcpConfig | undefined;
+    let partialStream: PartialStreamWriter | undefined;
 
     let hierarchy: import("../shared/types.js").OrgHierarchy | undefined;
     try {
@@ -521,6 +532,9 @@ export class SessionManager {
         }
       }
 
+      const turnStartedAt = Date.now();
+      let lastStreamHeartbeatAt = 0;
+      partialStream = createPartialStreamWriter(session.id);
       const result = await engine.run({
         prompt: promptToRun,
         resumeSessionId: resumeRefAtTurnStart.id ?? undefined,
@@ -536,6 +550,38 @@ export class SessionManager {
         attachments: attachments.length > 0 ? attachments : undefined,
         sessionId: session.id,
         source: session.source,
+        onStream: (delta) => {
+          if (!getSession(session.id)) return;
+          const normalized = normalizeBlockDeltaForTurn(delta, turnStartedAt);
+          if (!normalized.ok) {
+            logger.warn(`Dropped invalid block delta for session ${session.id}: ${normalized.error}`);
+            return;
+          }
+          const outgoingDelta = normalized.delta;
+          if (outgoingDelta.type === "context") {
+            const contextTokens = Number(outgoingDelta.content);
+            if (Number.isFinite(contextTokens) && contextTokens > 0) {
+              updateSessionForAttempt(session.id, attemptToken, {
+                lastContextTokens: contextTokens,
+              });
+            }
+          }
+          const now = Date.now();
+          if (now - lastStreamHeartbeatAt >= 2000) {
+            lastStreamHeartbeatAt = now;
+            updateSessionForAttempt(session.id, attemptToken, {
+              status: "running",
+              lastActivity: new Date(now).toISOString(),
+            });
+          }
+          try {
+            partialStream?.persist(outgoingDelta);
+          } catch (error) {
+            logger.warn(`Failed to persist partial block for session ${session.id}: ${
+              error instanceof Error ? error.message : String(error)
+            }`);
+          }
+        },
         onLateRecovery: ({ result: lateText, sessionId: engineSid }) => {
           const recovered = updateSessionForAttempt(session.id, attemptToken, {
             status: "idle",
@@ -560,14 +606,18 @@ export class SessionManager {
           void connector.replyMessage(target, labelled).catch(() => {});
           logger.info(`Session ${session.id} recovered by late Stop after a failed turn`);
         },
+      }).finally(() => {
+        partialStream?.finish();
       });
 
       const liveAfterRun = getSession(session.id);
       if (!liveAfterRun) {
+        deletePartialMessages(session.id);
         logger.warn(`Dropping engine result for deleted session ${session.id}`);
         return;
       }
       if (liveAfterRun.engine !== engineAtTurnStart) {
+        deletePartialMessages(session.id);
         logger.info(
           `Dropping stale ${engineAtTurnStart} result for session ${session.id}; session now uses ${liveAfterRun.engine}`,
         );
@@ -599,6 +649,19 @@ export class SessionManager {
       // Detect rate limit / usage limit errors and auto-retry.
       // Skip entirely for dead sessions — they are not rate limits.
       const rateLimit = (!wasInterrupted && !isDead) ? detectRateLimit(result) : { limited: false as const };
+      const streamedBlocks = getPartialMessages(session.id);
+      const preservedMessageIds = completedStreamedBlockIds({
+        quietPreempted: wasInterrupted,
+        rateLimited: rateLimit.limited,
+        result: result.result,
+        error: result.error,
+        streamedBlocks,
+      });
+      settlePartialMessages(session.id, preservedMessageIds);
+      const streamedThrough = streamedBlocks.reduce(
+        (latest, message) => Math.max(latest, message.timestamp),
+        0,
+      );
       if (rateLimit.limited) {
         const waitEmoji = "hourglass_flowing_sand";
 
@@ -814,7 +877,9 @@ export class SessionManager {
         ? result.result
         : result.error || "(No response from engine)";
 
-      if (!wasInterrupted) insertMessage(session.id, "assistant", responseText);
+      if (!wasInterrupted) {
+        insertMessageAfter(session.id, "assistant", responseText, streamedThrough);
+      }
       if (result.cost || result.numTurns) {
         accumulateSessionCost(session.id, result.cost ?? 0, result.numTurns ?? 1);
       }
@@ -869,6 +934,7 @@ export class SessionManager {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error(`Session ${session.id} error: ${errMsg}`);
+      deletePartialMessages(session.id);
 
       const live = getSession(session.id);
       if (!live) {
