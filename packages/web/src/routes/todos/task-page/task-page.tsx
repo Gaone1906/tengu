@@ -20,6 +20,8 @@ import { departmentTitle } from "../board/board-switcher"
 import { CrumbBar, type CrumbAncestor } from "./crumb-bar"
 import { TaskBanner } from "./banner"
 import { PropsRail } from "./props-rail"
+import { ChipCluster } from "./chip-cluster"
+import { useTaskPickers } from "./use-task-pickers"
 import { formatRelativeTime } from "../util"
 
 /* Todos v2 slice 6 stage B — the opened task as a full-page takeover of the
@@ -150,6 +152,21 @@ export default function TaskPage() {
   const setStatus = useSetWorkItemStatus()
   const decide = useDecideApproval()
 
+  // ── Pickers (one open at a time; §7.3) ────────────────────────────────────
+  const itemNode = useMemo(() => (id ? nodeOf(rootNode, id) : undefined), [rootNode, id])
+  const openChildren = useMemo(
+    () => (itemNode?.children ?? []).filter((child) => child.status !== "done" && child.status !== "cancelled").length,
+    [itemNode],
+  )
+  const pickers = useTaskPickers({
+    detail,
+    employees: org.data?.employees ?? [],
+    departments: departments.data ?? [],
+    openChildren,
+    mobile,
+    announce,
+  })
+
   const commitBannerReason = useCallback(
     (note: string) => {
       if (!item) return
@@ -250,6 +267,37 @@ export default function TaskPage() {
                   onApprove={() => runDecision("approve")}
                   onSendBack={(note) => runDecision("reject", note || undefined)}
                   onReject={() => runDecision("reject")}
+                  actions={
+                    detail.workItem.status === "blocked" ? (
+                      <button
+                        type="button"
+                        data-testid="task-banner-unblock"
+                        onClick={() => pickers.setOpenPicker("status")}
+                        className="focus-ring min-h-8 rounded-full bg-[var(--fill-tertiary)] px-3 text-[12.5px] font-semibold text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-secondary)]"
+                      >
+                        Unblock…
+                      </button>
+                    ) : detail.workItem.status === "escalated" ? (
+                      <>
+                        <button
+                          type="button"
+                          data-testid="task-banner-route"
+                          onClick={() => pickers.setOpenPicker("status")}
+                          className="focus-ring min-h-8 rounded-full bg-[var(--fill-tertiary)] px-3 text-[12.5px] font-semibold text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-secondary)]"
+                        >
+                          Route…
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="task-banner-reassign"
+                          onClick={() => pickers.setOpenPicker("assignee")}
+                          className="focus-ring min-h-8 rounded-full px-3 text-[12.5px] font-semibold text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-tertiary)]"
+                        >
+                          Reassign…
+                        </button>
+                      </>
+                    ) : undefined
+                  }
                 />
               )}
 
@@ -314,13 +362,28 @@ export default function TaskPage() {
               </div>
             </div>
 
-            {/* ── Properties rail (desktop; slots after the description on mobile) ── */}
-            <div className={mobile ? "mt-6" : "row-span-2"}>
-              {detail && <PropsRail detail={detail} byName={byName} departments={departments.data} />}
-            </div>
+            {/* ── Properties rail (desktop) / chip cluster (mobile, §8) ── */}
+            {mobile ? (
+              detail && (
+                <ChipCluster
+                  detail={detail}
+                  byName={byName}
+                  departments={departments.data}
+                  onOpenPicker={pickers.setOpenPicker}
+                />
+              )
+            ) : (
+              <div className="row-span-2">
+                {detail && (
+                  <PropsRail detail={detail} byName={byName} departments={departments.data} rowFor={pickers.rowFor} />
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
+
+      {pickers.mobileSheet}
 
       {callout && (
         <div

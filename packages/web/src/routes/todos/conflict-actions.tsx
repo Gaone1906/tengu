@@ -12,6 +12,7 @@ const FIELD_LABEL: Record<TodoConflictField, string> = {
   rank: "Order",
   acceptance: "Acceptance",
   dueAt: "Due date",
+  verifyPolicy: "Review policy",
 }
 
 function conflictLabel(fields: TodoConflictField[]): string {

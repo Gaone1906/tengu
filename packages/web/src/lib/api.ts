@@ -642,6 +642,9 @@ export interface WorkItemEditPatch {
   /** Todos v2 slice 4 (optional: older gateways reject unknown fields). */
   acceptance?: string | null
   dueAt?: string | null
+  /** Todos v2 slice 6 — the rail's verify picker (operator-only; null clears
+   *  to the provenance default). Older gateways reject the field. */
+  verifyPolicy?: VerifyPolicyWire | null
 }
 
 export interface WorkItemEditRequest {
@@ -1126,6 +1129,11 @@ export const api = {
     del<{ comment: WorkItemCommentWire }>(
       `/api/work-items/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}`,
     ),
+  /** Todos v2 slice 3: the shared label registry (existing labels only). */
+  listLabels: () => get<{ labels: WorkItemLabelWire[] }>("/api/labels"),
+  /** Replace a Todo's label set (ids or names; nothing created implicitly). */
+  setWorkItemLabels: (id: string, labels: string[]) =>
+    put<{ labels: WorkItemLabelWire[] }>(`/api/work-items/${encodeURIComponent(id)}/labels`, { labels }),
   uploadFile: async (file: File, sessionId?: string): Promise<UploadedFile> => {
     const form = new FormData()
     form.append('file', file)
