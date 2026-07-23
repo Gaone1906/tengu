@@ -217,11 +217,41 @@ export default function TodoBoardPage() {
 
   const commitTransition = useCallback(
     (item: WorkItemCompactWire, to: WorkItemStatusWire, index: number) => {
+      // The drop position is a promise: once the status PUT lands, write the
+      // rank at the landing slot too (Stage-A review F3) so the next refetch
+      // never reorders a drop the gateway accepted.
+      const siblings = (itemsByStatus[to] ?? []).filter((it) => it.id !== item.id)
+      const before = index > 0 ? siblings[Math.min(index, siblings.length) - 1] : null
+      const after = index < siblings.length ? siblings[index] : null
+      const rank = rankBetween(before?.rank ?? null, after?.rank ?? null)
       setMoves((prev) => new Map(prev).set(item.id, { status: to, index }))
+      setRankOverrides((prev) => new Map(prev).set(item.id, rank))
+      const clearRankOverride = () =>
+        setRankOverrides((prev) => {
+          const next = new Map(prev)
+          next.delete(item.id)
+          return next
+        })
       transition.mutate(
         { id: item.id, status: to },
         {
+          onSuccess: (result) => {
+            const version = result.workItem?.version
+            if (!isPositiveTodoVersion(version)) {
+              clearRankOverride()
+              return
+            }
+            rankEdit.mutate(
+              { id: item.id, rank, expectedVersion: version },
+              {
+                onSettled: clearRankOverride,
+                // A rank refusal only costs the position, never the accepted
+                // transition — stay quiet unless the operator would notice.
+              },
+            )
+          },
           onError: (error) => {
+            clearRankOverride()
             setMoves((prev) => {
               const next = new Map(prev)
               next.delete(item.id)
@@ -232,7 +262,7 @@ export default function TodoBoardPage() {
         },
       )
     },
-    [transition, announce],
+    [transition, rankEdit, announce, itemsByStatus],
   )
 
   const commitRank = useCallback(

@@ -164,6 +164,37 @@ describe("board drag legality", () => {
     await waitFor(() => expect(setWorkItemStatus).toHaveBeenCalledWith("PLA-3", "in_review"))
   })
 
+  it("writes the landing rank after an accepted cross-column drop (F3 — refetch never reorders it)", async () => {
+    rows.in_review = [{ ...compact("PLA-4", "in_review"), rank: 2048 }]
+    setWorkItemStatus.mockResolvedValue({ workItem: { ...compact("PLA-3", "in_review"), version: 4 }, escalated: false })
+    updateWorkItem.mockResolvedValue({ workItem: { ...compact("PLA-3", "in_review"), version: 5 } })
+    renderBoard()
+    const card = await screen.findByTestId("board-card-PLA-3")
+    const order = stubColumnGeometry()
+    const reviewX = order.indexOf("in_review") * 100 + 50
+
+    fireEvent.pointerDown(card, { button: 0, clientX: 210, clientY: 40, pointerType: "mouse" })
+    await act(async () => {
+      window.dispatchEvent(pointer("pointermove", 220, 50))
+    })
+    await act(async () => {
+      window.dispatchEvent(pointer("pointermove", reviewX, 50))
+    })
+    await act(async () => {
+      window.dispatchEvent(pointer("pointerup", reviewX, 50))
+    })
+
+    await waitFor(() => expect(setWorkItemStatus).toHaveBeenCalledWith("PLA-3", "in_review"))
+    // The rank PATCH uses the rankBetween neighbours at the landing slot
+    // (below PLA-4 @2048 → 2048+1024) and the version the transition returned.
+    await waitFor(() =>
+      expect(updateWorkItem).toHaveBeenCalledWith("PLA-3", expect.objectContaining({
+        patch: { rank: 3072 },
+        expectedVersion: 4,
+      })),
+    )
+  })
+
   it("does not commit anything when dropped over dead space", async () => {
     renderBoard()
     const card = await screen.findByTestId("board-card-PLA-3")
