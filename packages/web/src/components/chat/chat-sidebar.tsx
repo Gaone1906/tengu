@@ -2,6 +2,7 @@
 import React, { useEffect, useState, useRef, useCallback, useMemo, startTransition } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { useQueryClient } from "@tanstack/react-query"
+import { Link } from "react-router-dom"
 import { ChevronDown, Clock3, Copy, EllipsisVertical, Focus, Layers, Pencil, Pin, Plus, Search, SquarePen, Trash2, X } from "lucide-react"
 import { api, type BackgroundActivity, type DelegatedActivity, type Employee, type SessionsResponse } from "@/lib/api"
 import { useOrg } from "@/hooks/use-employees"
@@ -277,8 +278,41 @@ export function isDirectSession(
 }
 
 // Sources the sidebar renders (others, e.g. slack/telegram, are shown elsewhere).
-function isVisibleSource(s: Session): boolean {
-  return s.source === "web" || s.source === "cron" || s.source === "whatsapp" || s.source === "discord" || !s.source
+export function isVisibleSource(s: Pick<Session, "source">): boolean {
+  return s.source === "web" || s.source === "cron" || s.source === "workflow" || s.source === "whatsapp" || s.source === "discord" || !s.source
+}
+
+export function workflowRunPath(sourceRef: string | undefined): string | null {
+  if (!sourceRef) return null
+  const parts = sourceRef.split(":")
+  if (
+    parts.length !== 5 ||
+    parts[0] !== "workflow" ||
+    parts.slice(1).some((part) => part.length === 0) ||
+    !/^\d+$/.test(parts[4]!)
+  ) return null
+  return `/workflow/${encodeURIComponent(parts[1]!)}/runs/${encodeURIComponent(parts[2]!)}`
+}
+
+export function WorkflowSessionChip({
+  session,
+}: {
+  session: Pick<Session, "source" | "sourceRef">
+}) {
+  if (session.source !== "workflow") return null
+  const path = workflowRunPath(session.sourceRef)
+  const className = "shrink-0 rounded-full bg-[color-mix(in_srgb,var(--system-indigo)_12%,transparent)] px-1.5 py-0.5 text-[9px] font-[var(--weight-semibold)] text-[var(--system-indigo)]"
+  if (!path) return <span className={className}>Workflow</span>
+  return (
+    <Link
+      to={path}
+      onClick={(event) => event.stopPropagation()}
+      className={`${className} hover:bg-[color-mix(in_srgb,var(--system-indigo)_20%,transparent)]`}
+      title="Open workflow run"
+    >
+      Workflow
+    </Link>
+  )
 }
 
 function getSessionActivity(session: Session): string {
@@ -547,6 +581,7 @@ const SessionRow = React.memo(function SessionRow({
               {cleanPreview(sessionTitle) || "Untitled"}
             </span>
           )}
+          <WorkflowSessionChip session={session} />
           {isPinned ? (
             <Pin className="size-3 shrink-0 text-[var(--text-tertiary)] group-hover/session:lg:hidden group-has-[[data-state=open]]/session:lg:hidden" />
           ) : null}
@@ -755,6 +790,7 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
             </div>
           </button>
 
+          <WorkflowSessionChip session={session} />
           {isPinned && !hidePin ? (
             <Pin className="size-3 shrink-0 text-[var(--text-tertiary)] group-hover/flat:lg:hidden group-has-[[data-state=open]]/flat:lg:hidden" />
           ) : null}
@@ -949,6 +985,7 @@ const EmployeeRow = React.memo(function EmployeeRow({
                     {sessionCount} chats
                   </span>
                 ) : null}
+                <WorkflowSessionChip session={latestSession} />
                 {isPinned ? (
                   <Pin className="size-3 shrink-0 text-[var(--text-tertiary)]" />
                 ) : null}
