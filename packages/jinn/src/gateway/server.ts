@@ -9,6 +9,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { JinnConfig, Connector, Employee, Engine, JsonObject, Session } from "../shared/types.js";
 import { loadConfig, normalizeClaudeEngineConfig } from "../shared/config.js";
 import {
+  getModelRegistry,
   invalidateModelRegistry,
   refreshAntigravityModels,
   refreshClaudeModels,
@@ -18,7 +19,7 @@ import {
   refreshPiModels,
 } from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
-import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, isLegacyWorkflowRunSession, listSessions, updateSession, getSession, RESTART_ACK_META_KEY } from "../sessions/registry.js";
+import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, isLegacyWorkflowRunSession, listSessions, updateSession, getSession, getMessages, RESTART_ACK_META_KEY } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
 import { recoverSessionDeliveryStateOnStartup } from "../sessions/callbacks.js";
 import { recoverWorkflowRunReporting } from "../workflows/reporting.js";
@@ -57,6 +58,10 @@ import { armJinnAttachGate } from "../mcp/attachment.js";
 import { syncExternalTurn } from "./external-turns.js";
 import { pickEncoding, isCompressibleExt, compressStream } from "./compress.js";
 import { attachPtyWebSocket } from "./pty-ws.js";
+import { openWorkflowDatabase } from "../workflows/repository-migrations.js";
+import { WorkflowRepository } from "../workflows/repository.js";
+import { WorkflowSessionExecutor } from "../workflows/session-executor.js";
+import { WorkflowService } from "../workflows/service.js";
 
 function hasRestartAcknowledgement(session: Session): boolean {
   const meta = session.transportMeta;
@@ -533,12 +538,10 @@ export async function startGateway(
     connectorNames.push("whatsapp");
   }
 
-  // Session manager
-  const sessionManager = new SessionManager(config, engines, connectorNames, bootId);
-
   // Build employee registry
   let employeeRegistry = scanOrg();
   logger.info(`Loaded ${employeeRegistry.size} employee(s) from org directory`);
+  const sessionManager = new SessionManager(config, engines, connectorNames, bootId, (id) => employeeRegistry.get(id));
 
   // Start connectors
   const connectors: Connector[] = [];
@@ -918,6 +921,15 @@ export async function startGateway(
       }
     }
   };
+  const workflowDatabase = openWorkflowDatabase(); const workflowRepository = new WorkflowRepository(workflowDatabase);
+  const workflowService = new WorkflowService({ repository: workflowRepository,
+    executor: new WorkflowSessionExecutor(sessionManager, (id) => { const session = getSession(id); if (!session) return null;
+      const finalText = [...getMessages(id)].reverse().find((message) => message.role === "assistant")?.content; return { session, ...(finalText ? { finalText } : {}) }; }),
+    employees: () => employeeRegistry, models: () => getModelRegistry(currentConfig),
+    readTranscript: (id) => getMessages(id).map(({ id: messageId, role, content, timestamp }) => ({ id: messageId, role, content, timestamp })),
+    onChange: ({ workflowId, runId }) => emit("company:changed", { entity: "workflow", workflowId, runId }),
+    onDefinitionChange: ({ workflowId, revision }) => emit("company:changed", { entity: "workflow", workflowId, revision }) });
+  await workflowService.recover(new Date().toISOString());
 
   // Discover dynamic engine models in the background. Fire-and-forget: the
   // registry serves known/synthesized fallbacks until the snapshots land, then
@@ -1009,6 +1021,7 @@ export async function startGateway(
     reloadOrg,
     backgroundActivity,
     gatewayAuthToken,
+    workflowService,
   };
 
   // Re-read config.yaml into memory. Used by both the file-watcher (debounced)
@@ -1470,6 +1483,7 @@ export async function startGateway(
     // a step session into a dying gateway.
     stopWorkflowRunReconciler?.();
     await stopPollTriggerRunner?.();
+    workflowService.dispose(); workflowDatabase.close();
 
     // Stop caffeinate
     if (caffeinate && caffeinate.exitCode === null) {

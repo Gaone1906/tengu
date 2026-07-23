@@ -221,6 +221,7 @@ import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendant
 import {
   ACTIVITY_OPERATION_HEADER,
   ACTIVITY_TOOL_HEADER,
+  CALLER_SESSION_HEADER,
   TOOL_CALL_HEADER,
   TOOL_CALL_HEADER_VALUE,
   UNIDENTIFIED_TOOL_CALL_ERROR,
@@ -336,6 +337,8 @@ import { maybeEmitTalkGraph } from "../talk/graph.js";
 import { onboardingNeeded, applyEngineChoice } from "./onboarding-policy.js";
 import { restartDetached, type RestartDetachedOptions } from "./lifecycle.js";
 import { updateSkillContent } from "./skills.js";
+import type { WorkflowService } from "../workflows/service.js";
+import { handleWorkflowApi } from "./workflow-api.js";
 
 /** Max bytes accepted on /api/internal/hook (loopback-only relay payloads are tiny). */
 const HOOK_BODY_MAX_BYTES = 64 * 1024;
@@ -476,6 +479,7 @@ export interface ApiContext {
   createWorkspaceInstance?: (input: CreateInstanceInput) => Promise<CreateInstanceResult>;
   startWorkspaceInstance?: (input: StartInstanceInput) => Promise<StartInstanceResult>;
   issueWorkspacePairingCode?: (home: string) => string;
+  workflowService?: WorkflowService;
 }
 
 function pendingInstanceMigration(context: ApiContext): PendingInstanceMigration {
@@ -3127,9 +3131,13 @@ export async function handleApiRequest(
   try {
     const jinnHome = context.jinnHome ?? JINN_HOME;
 
-    if (rejectUnverifiedIdentifiedApiCaller(req, res, method, pathname, context)) {
+    const identifiedCaller = req.headers[TOOL_CALL_HEADER] !== undefined || req.headers[CALLER_SESSION_HEADER] !== undefined;
+    if (identifiedCaller && rejectUnverifiedIdentifiedApiCaller(req, res, method, pathname, context)) {
       return;
     }
+    if (context.workflowService && await handleWorkflowApi(req, res, { service: context.workflowService,
+      authenticated: authenticateGatewayRequest(req, context.gatewayAuthToken, jinnHome).ok })) return;
+    if (!identifiedCaller && rejectUnverifiedIdentifiedApiCaller(req, res, method, pathname, context)) return;
 
     if (method === "GET" && pathname === "/api/features") {
       return json(res, { notesEnabled: context.getConfig().gateway.notesEnabled === true });

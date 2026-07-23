@@ -54,9 +54,7 @@ export interface RouteOptions {
 }
 
 const WORKFLOW_CAPABILITIES = { threading: false, messageEdits: false, reactions: false, attachments: false };
-const WORKFLOW_CONNECTOR: Connector = { name: "workflow", async start() {}, async stop() {}, getCapabilities: () => WORKFLOW_CAPABILITIES,
-  getHealth: () => ({ status: "running", capabilities: WORKFLOW_CAPABILITIES }), reconstructTarget: () => ({ channel: "workflow" }), async sendMessage() {}, async replyMessage() {},
-  async addReaction() {}, async removeReaction() {}, async editMessage() {}, onMessage() {} };
+const WORKFLOW_CONNECTOR: Connector = { name: "workflow", async start() {}, async stop() {}, getCapabilities: () => WORKFLOW_CAPABILITIES, getHealth: () => ({ status: "running", capabilities: WORKFLOW_CAPABILITIES }), reconstructTarget: () => ({ channel: "workflow" }), async sendMessage() {}, async replyMessage() {}, async addReaction() {}, async removeReaction() {}, async editMessage() {}, onMessage() {} };
 function maybeRevertEngineOverride(session: Session): Session {
   const meta = (session.transportMeta || {}) as Record<string, unknown>;
   const override = meta["engineOverride"] as Record<string, unknown> | undefined;
@@ -155,10 +153,8 @@ export class SessionManager {
   }
 
   private recoverWorkflowAttemptDispatches(): void {
-    for (const item of listPendingWorkflowAttemptDispatches()) {
-      const session = getSession(item.sessionId); const employee = session?.employee ? this.employeeProvider(session.employee) : undefined;
-      if (session && employee) { const claim = claimWorkflowAttemptDispatch(session.id, session.sessionKey, item.prompt); if (claim) this.enqueueWorkflowAttempt(session, item.prompt, employee, claim); }
-    }
+    for (const item of listPendingWorkflowAttemptDispatches()) { const session = getSession(item.sessionId); const employee = session?.employee ? this.employeeProvider(session.employee) : undefined;
+      if (session && employee) { const claim = claimWorkflowAttemptDispatch(session.id, session.sessionKey, item.prompt); if (claim) this.enqueueWorkflowAttempt(session, item.prompt, employee, claim); } }
   }
   setConnectorProvider(provider: () => Map<string, Connector>): void {
     this.connectorProvider = provider;
@@ -181,39 +177,35 @@ export class SessionManager {
   }
 
   subscribeWorkflowAttemptCompletion(listener: WorkflowAttemptCompletionListener): () => void {
-    this.workflowAttemptCompletionListeners.add(listener); let active = true;
-    return () => { if (!active) return; active = false; this.workflowAttemptCompletionListeners.delete(listener); };
+    this.workflowAttemptCompletionListeners.add(listener); let active = true; return () => { if (!active) return; active = false; this.workflowAttemptCompletionListeners.delete(listener); };
   }
   async runWorkflowAttempt(command: WorkflowAttemptCommand): Promise<{ sessionId: string }> {
     const employee = this.employeeProvider(command.employeeId); if (!employee) throw new Error(`Workflow employee "${command.employeeId}" is not available.`);
     const key = `workflow:${command.owner.workflowId}:${command.owner.runId}:${command.owner.nodeId}:${command.owner.attempt}`;
-    const session = getOrCreateWorkflowAttemptSession({ engine: command.engine, source: "workflow", sourceRef: key, connector: "workflow",
-      sessionKey: key, employee: command.employeeId, model: command.model, effortLevel: command.effort, prompt: command.prompt,
-      workflowProvenance: { kind: "phase", workflowId: command.owner.workflowId, workflowName: command.owner.workflowId, runId: command.owner.runId,
-        triggerSource: "workflow", phase: { nodeId: command.owner.nodeId, name: command.owner.nodeId, index: 1, round: 1, attempt: command.owner.attempt } } });
+    const session = getOrCreateWorkflowAttemptSession({ engine: command.engine, source: "workflow", sourceRef: key, connector: "workflow", sessionKey: key, employee: command.employeeId, model: command.model,
+      effortLevel: command.effort, prompt: command.prompt, workflowProvenance: { kind: "phase", workflowId: command.owner.workflowId, workflowName: command.owner.workflowId,
+        runId: command.owner.runId, triggerSource: "workflow", phase: { nodeId: command.owner.nodeId, name: command.owner.nodeId, index: 1, round: 1, attempt: command.owner.attempt } } });
     const claim = claimWorkflowAttemptDispatch(session.id, session.sessionKey, command.prompt); if (claim) this.enqueueWorkflowAttempt(session, command.prompt, employee, claim);
     return { sessionId: session.id };
   }
   private enqueueWorkflowAttempt(session: Session, prompt: string, employee: Employee, claim: string): void {
-    const msg: IncomingMessage = { connector: "workflow", source: "workflow", sessionKey: session.sessionKey, replyContext: {},
-      channel: session.id, user: "workflow", userId: "workflow", text: prompt, attachments: [], raw: null };
-    setImmediate(() => { void this.queue.enqueue(session.sessionKey, async () => { await this.runSession(session, msg, [], WORKFLOW_CONNECTOR,
-      { channel: session.id }, employee); this.emitWorkflowAttemptCompletion(getSession(session.id)); }, claim, true)
-      .catch((error) => logger.error(`Workflow session ${session.id} dispatch failed: ${String(error)}`)); });
+    const msg: IncomingMessage = { connector: "workflow", source: "workflow", sessionKey: session.sessionKey, replyContext: {}, channel: session.id, user: "workflow", userId: "workflow", text: prompt, attachments: [], raw: null };
+    setImmediate(() => { void this.queue.enqueue(session.sessionKey, async () => { await this.runSession(session, msg, [], WORKFLOW_CONNECTOR, { channel: session.id }, employee);
+      this.emitWorkflowAttemptCompletion(getSession(session.id)); }, claim, true).catch((error) => logger.error(`Workflow session ${session.id} dispatch failed: ${String(error)}`)); });
   }
   async stopWorkflowAttempt(input: { sessionId: string; reason: string }): Promise<void> {
     const session = getSession(input.sessionId); if (!session || session.workflowProvenance?.kind !== "phase") return;
-    const stopped = interruptSessionAttempt(session.id, input.reason, new Date().toISOString()); if (!stopped) return;
-    cancelWorkflowAttemptDispatch(stopped.id); this.queue.clearQueue(stopped.sessionKey); const engine = this.engines.get(stopped.engine);
+    const stopped = interruptSessionAttempt(session.id, input.reason, new Date().toISOString()); if (!stopped) return; cancelWorkflowAttemptDispatch(stopped.id);
+    this.queue.clearQueue(stopped.sessionKey); const engine = this.engines.get(stopped.engine);
     if (engine && isInterruptibleEngine(engine)) engine.kill(stopped.id, input.reason); this.emitWorkflowAttemptCompletion(stopped);
   }
   private emitWorkflowAttemptCompletion(session?: Session): void {
-    const provenance = session?.workflowProvenance; if (!session?.attemptOutcome || provenance?.kind !== "phase" || !provenance.phase) return;
-    const terminalVersion = session.attemptTerminalVersion ?? 0; const key = `${session.id}:${terminalVersion}`;
+    const provenance = session?.workflowProvenance; if (!session?.attemptOutcome || provenance?.kind !== "phase" || !provenance.phase) return; const terminalVersion = session.attemptTerminalVersion ?? 0;
+    const key = `${session.id}:${terminalVersion}`;
     if (terminalVersion !== 1 || this.emittedWorkflowAttemptCompletions.has(key)) return;
     const finalText = [...getMessages(session.id)].reverse().find((message) => message.role === "assistant")?.content;
-    const event: WorkflowAttemptCompletion = { sessionId: session.id, owner: { workflowId: provenance.workflowId, runId: provenance.runId,
-      nodeId: provenance.phase.nodeId, attempt: provenance.phase.attempt }, terminalVersion, outcome: session.attemptOutcome, completedAt: session.lastActivity,
+    const event: WorkflowAttemptCompletion = { sessionId: session.id, owner: { workflowId: provenance.workflowId, runId: provenance.runId, nodeId: provenance.phase.nodeId,
+      attempt: provenance.phase.attempt }, terminalVersion, outcome: session.attemptOutcome, completedAt: session.lastActivity,
       ...(finalText ? { finalText } : {}), ...(session.lastError ? { error: session.lastError } : {}) };
     this.emittedWorkflowAttemptCompletions.add(key); for (const listener of this.workflowAttemptCompletionListeners)
       void Promise.resolve().then(() => listener(event)).catch((error) => logger.warn(`Workflow completion listener failed: ${String(error)}`));
