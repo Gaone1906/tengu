@@ -25,6 +25,14 @@ export class WorkflowSessionExecutor implements WorkflowSessionExecutorContract 
     return this.sessions.stopWorkflowAttempt(input);
   }
 
+  remind(input: { sessionId: string; text: string }): Promise<void> {
+    return this.sessions.remindWorkflowAttempt(input.sessionId, input.text);
+  }
+
+  attemptState(sessionId: string): { idle: boolean; runningChildren: number } | null {
+    return this.sessions.workflowAttemptState(sessionId);
+  }
+
   subscribe(listener: WorkflowAttemptCompletionListener): () => void {
     return this.sessions.subscribeWorkflowAttemptCompletion(listener);
   }
@@ -34,10 +42,11 @@ export class WorkflowSessionExecutor implements WorkflowSessionExecutorContract 
     const session = receipt?.session;
     const provenance = session?.workflowProvenance;
     if (!session?.attemptOutcome || provenance?.kind !== "phase" || !provenance.phase
-      || session.attemptTerminalVersion !== 1) return null;
+      || session.attemptTerminalVersion !== 1 || !session.attemptTurn) return null;
     return {
       sessionId,
       owner: { workflowId: provenance.workflowId, runId: provenance.runId, nodeId: provenance.phase.nodeId, attempt: provenance.phase.attempt },
+      turn: session.attemptTurn,
       terminalVersion: 1,
       outcome: session.attemptOutcome,
       completedAt: session.lastActivity,

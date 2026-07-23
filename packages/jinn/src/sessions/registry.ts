@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   attempt_outcome TEXT,
   attempt_token TEXT,
   attempt_terminal_version INTEGER NOT NULL DEFAULT 0,
+  attempt_turn INTEGER NOT NULL DEFAULT 0,
   archived_at TEXT,
   created_at TEXT NOT NULL,
   last_activity TEXT NOT NULL,
@@ -392,6 +393,7 @@ function rowToSession(row: Record<string, unknown>): Session {
     attemptOutcome: (row.attempt_outcome as SessionAttemptOutcome) ?? null,
     attemptToken: (row.attempt_token as string) ?? null,
     attemptTerminalVersion: (row.attempt_terminal_version as number) ?? 0,
+    attemptTurn: (row.attempt_turn as number) ?? 0,
     totalCost: (row.total_cost as number) ?? 0,
     totalTurns: (row.total_turns as number) ?? 0,
     lastContextTokens: (row.last_context_tokens as number) ?? null,
@@ -1345,6 +1347,7 @@ export function migrateSessionsSchema(database: Database.Database): void {
     // Per-dispatch generation used for compare-and-set terminal writes.
     ['attempt_token', 'TEXT'],
     ['attempt_terminal_version', 'INTEGER NOT NULL', '0'],
+    ['attempt_turn', 'INTEGER NOT NULL', '0'],
     // Archive is reversible: retain the durable chat and only hide it from
     // normal list queries. NULL keeps all pre-existing sessions visible.
     ['archived_at', 'TEXT'],
@@ -1502,6 +1505,8 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     status: 'idle',
     attemptOutcome: null,
     attemptToken: null,
+    attemptTerminalVersion: 0,
+    attemptTurn: 0,
     totalCost: 0,
     totalTurns: 0,
     lastContextTokens: null,
@@ -1553,6 +1558,7 @@ export interface UpdateSessionFields {
   attemptOutcome?: SessionAttemptOutcome | null;
   attemptToken?: string | null;
   attemptTerminalVersion?: number;
+  attemptTurn?: number;
   model?: string | null;
   effortLevel?: string | null;
   lastContextTokens?: number | null;
@@ -1615,6 +1621,15 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
     || (updates.attemptOutcome === undefined && (updates.status === 'error' || updates.status === 'interrupted'))
   ) {
     sets.push('attempt_terminal_version = attempt_terminal_version + 1');
+  }
+  if (updates.attemptTurn !== undefined) {
+    sets.push('attempt_turn = ?');
+    values.push(updates.attemptTurn);
+  } else if (
+    (updates.attemptOutcome !== undefined && updates.attemptOutcome !== null)
+    || (updates.attemptOutcome === undefined && (updates.status === 'error' || updates.status === 'interrupted'))
+  ) {
+    sets.push('attempt_turn = attempt_turn + 1');
   }
   if (updates.model !== undefined) {
     sets.push('model = ?');
@@ -1845,7 +1860,11 @@ export function completeSessionAttempt(
 }
 
 export function interruptSessionAttempt(id: string, reason: string, completedAt: string): Session | undefined {
-  const result = initDb().prepare(`UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted', attempt_terminal_version = 1, last_activity = ?, last_error = ? WHERE id = ? AND workflow_kind = 'phase' AND attempt_outcome IS NULL AND attempt_terminal_version = 0`).run(completedAt, reason, id); return result.changes === 1 ? getSession(id) : undefined;
+  const result = initDb().prepare(`UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted',
+    attempt_terminal_version = 1, attempt_turn = attempt_turn + 1, last_activity = ?, last_error = ?
+    WHERE id = ? AND workflow_kind = 'phase' AND attempt_outcome IS NULL AND attempt_terminal_version = 0`)
+    .run(completedAt, reason, id);
+  return result.changes === 1 ? getSession(id) : undefined;
 }
 /** Upgrade a legacy terminal row that predates attempt tokens. The outcome and
  * terminal version are compare predicates, so a stale callback can never borrow
@@ -3665,7 +3684,10 @@ export function listAllPendingQueueItems(): QueueItem[] {
 
 export function claimWorkflowAttemptDispatch(sessionId: string, sessionKey: string, prompt: string): string | null {
   const db = initDb(); return db.transaction(() => {
-    const session = db.prepare(`SELECT id FROM sessions WHERE id = ? AND session_key = ? AND workflow_kind = 'phase' AND status = 'idle' AND attempt_outcome IS NULL AND COALESCE(attempt_terminal_version, 0) = 0 AND attempt_token IS NULL`).get(sessionId, sessionKey); if (!session) return null;
+    const session = db.prepare(`SELECT id FROM sessions WHERE id = ? AND session_key = ?
+      AND workflow_kind = 'phase' AND status = 'idle'
+      AND (attempt_outcome IS NULL OR attempt_outcome = 'succeeded')`).get(sessionId, sessionKey);
+    if (!session) return null;
     const existing = db.prepare(`${QUEUE_ITEM_SELECT} WHERE session_id = ? AND internal = 1 AND status IN ('pending', 'running') ORDER BY created_at, position LIMIT 1`).get(sessionId) as QueueItemRow | undefined;
     if (existing && (existing.sessionKey !== sessionKey || existing.prompt !== prompt)) throw new Error(`Workflow session ${sessionId} dispatch claim does not match its immutable command.`);
     if (existing?.status === 'running') return null; const itemId = existing?.id ?? enqueueQueueItem(sessionId, sessionKey, prompt, { internal: true });
@@ -3673,7 +3695,11 @@ export function claimWorkflowAttemptDispatch(sessionId: string, sessionKey: stri
 }
 export function cancelWorkflowAttemptDispatch(sessionId: string): number { return initDb().prepare(`UPDATE queue_items SET status = 'cancelled' WHERE session_id = ? AND internal = 1 AND status IN ('pending', 'running')`).run(sessionId).changes; }
 export function listPendingWorkflowAttemptDispatches(): QueueItem[] {
-  return (initDb().prepare(`${QUEUE_ITEM_SELECT} WHERE status = 'pending' AND internal = 1 AND EXISTS (SELECT 1 FROM sessions WHERE sessions.id = queue_items.session_id AND sessions.workflow_kind = 'phase' AND sessions.status = 'idle' AND sessions.attempt_outcome IS NULL AND COALESCE(sessions.attempt_terminal_version, 0) = 0 AND sessions.attempt_token IS NULL) ORDER BY created_at, position`).all() as QueueItemRow[]).map(rowToQueueItem);
+  return (initDb().prepare(`${QUEUE_ITEM_SELECT} WHERE status = 'pending' AND internal = 1
+    AND EXISTS (SELECT 1 FROM sessions WHERE sessions.id = queue_items.session_id
+      AND sessions.workflow_kind = 'phase' AND sessions.status = 'idle'
+      AND (sessions.attempt_outcome IS NULL OR sessions.attempt_outcome = 'succeeded'))
+    ORDER BY created_at, position`).all() as QueueItemRow[]).map(rowToQueueItem);
 }
 // ── File management ──────────────────────────────────────────────────
 

@@ -305,9 +305,14 @@ export type EngineSessionRefs = Record<string, EngineSessionRef>;
 export type SessionAttemptOutcome = "succeeded" | "failed" | "interrupted";
 
 export interface WorkflowAttemptCommand { owner: { workflowId: string; runId: string; nodeId: string; attempt: number }; employeeId: string; engine: string; model?: string; effort?: "low" | "medium" | "high" | "xhigh"; prompt: string }
-export interface WorkflowAttemptCompletion { sessionId: string; owner: { workflowId: string; runId: string; nodeId: string; attempt: number }; terminalVersion: number; outcome: "succeeded" | "failed" | "interrupted"; finalText?: string; error?: string; completedAt: string }
+export interface WorkflowAttemptCompletion { sessionId: string; owner: { workflowId: string; runId: string; nodeId: string; attempt: number }; turn: number; terminalVersion: number; outcome: "succeeded" | "failed" | "interrupted"; finalText?: string; error?: string; completedAt: string }
 export type WorkflowAttemptCompletionListener = (event: WorkflowAttemptCompletion) => void | Promise<void>;
-export interface WorkflowSessionExecutor { startAttempt(command: WorkflowAttemptCommand): Promise<{ sessionId: string }>; stopAttempt(input: { sessionId: string; reason: string }): Promise<void> }
+export interface WorkflowSessionExecutor {
+  startAttempt(command: WorkflowAttemptCommand): Promise<{ sessionId: string }>;
+  stopAttempt(input: { sessionId: string; reason: string }): Promise<void>;
+  remind(input: { sessionId: string; text: string }): Promise<void>;
+  attemptState(sessionId: string): { idle: boolean; runningChildren: number } | null;
+}
 
 /** Durable attribution for a workflow-owned employee attempt session. */
 export interface WorkflowSessionProvenance {
@@ -368,6 +373,9 @@ export interface Session {
   /** Monotonic terminal-receipt version within the current attempt generation.
    * Reset to zero on dispatch and incremented for every accepted terminal state. */
   attemptTerminalVersion?: number;
+  /** Monotonic count of completed turns in a workflow attempt session. Unlike
+   * attemptTerminalVersion, this is not reset when the next turn begins. */
+  attemptTurn?: number;
   effortLevel: string | null;
   totalCost: number;
   totalTurns: number;

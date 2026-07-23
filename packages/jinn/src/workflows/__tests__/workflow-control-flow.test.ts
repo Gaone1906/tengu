@@ -45,7 +45,7 @@ class FakeExecutor {
   async succeed(nodeId: string, fields: Record<string, JsonValue>): Promise<void> {
     const command = this.commands.filter((item) => item.owner.nodeId === nodeId).at(-1)!;
     const event: WorkflowAttemptCompletion = {
-      sessionId: this.sessionId(nodeId, command.owner.attempt), owner: command.owner, terminalVersion: 1,
+      sessionId: this.sessionId(nodeId, command.owner.attempt), owner: command.owner, terminalVersion: 1, turn: 1,
       outcome: "succeeded", finalText: `Done.\n\`\`\`jinn-output\n${JSON.stringify(fields)}\n\`\`\``,
       completedAt: new Date().toISOString(),
     };
