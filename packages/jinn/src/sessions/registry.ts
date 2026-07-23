@@ -10,6 +10,7 @@ import {
   migrateWorkItemsSchema,
   preflightWorkItemsDatabase,
   UNSUPPORTED_PRERELEASE_TODO_DATA,
+  WORK_ITEMS_BACKUP_SUFFIX,
 } from '../work-items/migrate.js';
 import type { WorkItemSchemaPreflight } from '../work-items/migrate.js';
 import { parseTodoId } from '../work-items/id.js';
@@ -549,6 +550,17 @@ export function initDb(): Database.Database {
   // an existing file read-only and refuses unsupported prerelease data before
   // WAL mode, migrations, or any other schema write can occur.
   const todoPreflight = preflightWorkItemsToleratingConcurrentInit(SESSIONS_DB);
+  // A v1 ledger is about to be rebuilt in place — keep a one-time pristine file
+  // copy (plus WAL/SHM sidecars) beside it so the operator can always roll back.
+  if (todoPreflight === 'v1') {
+    const backup = `${SESSIONS_DB}${WORK_ITEMS_BACKUP_SUFFIX}`;
+    if (!existsSync(backup)) {
+      copyFileSync(SESSIONS_DB, backup);
+      for (const suffix of ['-wal', '-shm'] as const) {
+        if (existsSync(`${SESSIONS_DB}${suffix}`)) copyFileSync(`${SESSIONS_DB}${suffix}`, `${backup}${suffix}`);
+      }
+    }
+  }
   mkdirSync(path.dirname(SESSIONS_DB), { recursive: true });
   // Snapshot the existing DB before an upgrade migration mutates it (version-gated,
   // so this runs once per upgrade, never on a steady-state boot).

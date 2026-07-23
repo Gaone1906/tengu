@@ -303,12 +303,13 @@ describe("control-plane writes require operator authority", () => {
     writeConfig();
   });
 
-  it("reports the frozen Todo prefix, permits renames, and rejects a second prefix", async () => {
+  it("reports the effective Todo prefix, permits renames, and validates a malformed prefix", async () => {
     writeConfig();
 
     const before = await call("GET", "/api/onboarding");
     expect(before.status).toBe(200);
-    expect(JSON.parse(before.bodyText)).toMatchObject({ todoPrefix: "JIN", todoPrefixFrozen: true });
+    // Todos v2: allocation is per-prefix, so the company prefix never freezes.
+    expect(JSON.parse(before.bodyText)).toMatchObject({ todoPrefix: "JIN", todoPrefixFrozen: false });
 
     const valid = await call("POST", "/api/onboarding", { companyName: "IC-IDEV", companyPrefix: "JIN" }, {
       authorization: "Bearer test-token",
@@ -322,11 +323,17 @@ describe("control-plane writes require operator authority", () => {
     expect(renamed.status).toBe(200);
     expect(readConfig().portal.companyName).toBe("AI");
 
-    const conflicting = await call("POST", "/api/onboarding", { companyPrefix: "ACM" }, {
+    const reprefixed = await call("POST", "/api/onboarding", { companyPrefix: "ACM" }, {
       authorization: "Bearer test-token",
     });
-    expect(conflicting.status).toBe(409);
-    expect(readConfig().portal.companyPrefix).toBe("JIN");
+    expect(reprefixed.status).toBe(200);
+    expect(readConfig().portal.companyPrefix).toBe("ACM");
+
+    const malformed = await call("POST", "/api/onboarding", { companyPrefix: "nope" }, {
+      authorization: "Bearer test-token",
+    });
+    expect(malformed.status).toBe(400);
+    expect(readConfig().portal.companyPrefix).toBe("ACM");
     writeConfig();
   });
 

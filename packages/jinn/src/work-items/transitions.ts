@@ -45,6 +45,7 @@ export type TransitionErrorCode =
   | 'illegal-edge'
   | 'human-required'
   | 'self-review-banned'
+  | 'children-open'
   | 'conflict';
 
 export class TransitionError extends Error {
@@ -166,6 +167,24 @@ export function transition(id: string, to: WorkItemStatus, actor: string, opts: 
         throw new TransitionError(
           'self-review-banned',
           `session ${opts.callerSessionId} executed work item ${id} and cannot mark it done — a reviewer does (self-review ban)`,
+        );
+      }
+    }
+
+    // Roll-up gate (Todos v2): a container cannot be closed over open children.
+    // Deliberately stricter than spec §3.4's "non-terminal" wording: an
+    // `escalated` child also blocks the close — an escalation awaiting the
+    // operator must not be buried by closing its parent. (Human-authorized
+    // cascade-cancel still cancels escalated children via the declared
+    // escalated→cancelled edge.)
+    if (to === 'done' || to === 'cancelled') {
+      const openChild = db
+        .prepare("SELECT id FROM work_items WHERE parent_id = ? AND status NOT IN ('done', 'cancelled') LIMIT 1")
+        .get(id) as { id: string } | undefined;
+      if (openChild) {
+        throw new TransitionError(
+          'children-open',
+          `work item ${id} still has open children (e.g. ${openChild.id}) — close or cancel them first`,
         );
       }
     }

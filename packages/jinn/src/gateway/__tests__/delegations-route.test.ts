@@ -372,7 +372,9 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
     });
     expect(resp.status).toBe(201);
     const { workItemId, sessionId } = resp.body as { workItemId: string; sessionId: string };
-    expect(workItemId).toMatch(/^JIN-/);
+    // Todos v2: the delegation lands in qa-emp's department, so it mints under
+    // the department's own prefix ("qa" → QAX), not the company namespace.
+    expect(workItemId).toMatch(/^QAX-/);
     expect(sessionId).toBeTruthy();
 
     // The durable intent record, shaped from the delegation.

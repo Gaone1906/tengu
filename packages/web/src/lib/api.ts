@@ -758,6 +758,12 @@ export interface WorkItemCompactWire {
   approvalTarget: string | null
   approvalEscalatedAt: string | null
   sessionRef?: WorkItemSessionRefWire | null
+  /** Todos v2 (optional: older gateways omit them). */
+  createdBy?: string
+  parentId?: string | null
+  rootId?: string
+  depth?: number
+  dueAt?: string | null
   updatedAt: string
   /** Manual sort rank (design-todos §7.3). Null until the operator reorders. */
   rank?: number | null
@@ -807,6 +813,12 @@ export interface WorkItemFullWire {
   approvalEscalatedAt: string | null
   approvalDecidedBy: string | null
   approvalDecidedAt: string | null
+  /** Todos v2 (optional: older gateways omit them). */
+  createdBy?: string
+  parentId?: string | null
+  rootId?: string
+  depth?: number
+  dueAt?: string | null
   createdAt: string
   updatedAt: string
   closedAt: string | null

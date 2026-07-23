@@ -109,6 +109,7 @@ describe("buildTools", () => {
       "get_employee",
       "get_message_context",
       "get_work_item",
+      "get_work_item_tree",
       "get_workflow",
       "get_workflow_run",
       "list_cron_jobs",
@@ -233,7 +234,7 @@ describe("handleMcpRequest — tools/call", () => {
 
   it("compiles every advertised registry schema or supplies its shared runtime schema", () => {
     const tools = buildTools();
-    expect(tools).toHaveLength(54);
+    expect(tools).toHaveLength(55);
     for (const tool of tools) {
       expect(() => tool.runtimeSchema ?? z.fromJSONSchema({ ...tool.inputSchema, additionalProperties: false } as Parameters<typeof z.fromJSONSchema>[0]), tool.name).not.toThrow();
     }

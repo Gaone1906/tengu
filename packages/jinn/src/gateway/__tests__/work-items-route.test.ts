@@ -1109,3 +1109,209 @@ describe("POST /api/work-items — provenance and approval routing fields", () =
     expect(badCapability.status).toBe(403);
   });
 });
+
+describe("Todos v2 — sub-task create, tree route, new filters, cascade archive", () => {
+  const operatorHeaders = { authorization: "Bearer test-token" };
+
+  it("creates a sub-task with parentId/dueAt/priority and stamps createdBy from the caller", async () => {
+    const rootRes = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "v2 tree root" }, operatorHeaders),
+      rootRes.res,
+      ctx,
+    );
+    expect(rootRes.status).toBe(201);
+    const root = rootRes.body.workItem;
+    expect(root.createdBy).toBe("operator");
+    expect(root.parentId).toBeNull();
+    expect(root.rootId).toBe(root.id);
+    expect(root.depth).toBe(0);
+
+    const childRes = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", {
+        title: "v2 sub-task",
+        parentId: root.id,
+        dueAt: "2026-08-01T00:00:00.000Z",
+        priority: 1,
+      }, operatorHeaders),
+      childRes.res,
+      ctx,
+    );
+    expect(childRes.status).toBe(201);
+    expect(childRes.body.workItem).toMatchObject({
+      parentId: root.id,
+      rootId: root.id,
+      depth: 1,
+      dueAt: "2026-08-01T00:00:00.000Z",
+      priority: 1,
+      createdBy: "operator",
+    });
+  });
+
+  it("inherits the parent's department (and prefix) when the request body has no department key", async () => {
+    const root = store.createWorkItem({ title: "inherit root", department: "platform" });
+
+    const inherited = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "inherit child", parentId: root.id }, operatorHeaders),
+      inherited.res,
+      ctx,
+    );
+    expect(inherited.status).toBe(201);
+    expect(inherited.body.workItem.department).toBe("platform");
+    expect(inherited.body.workItem.id.slice(0, 3)).toBe(root.id.slice(0, 3));
+
+    const explicitNull = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "no-dept child", parentId: root.id, department: null }, operatorHeaders),
+      explicitNull.res,
+      ctx,
+    );
+    expect(explicitNull.status).toBe(201);
+    expect(explicitNull.body.workItem.department).toBeNull();
+    expect(explicitNull.body.workItem.id.slice(0, 3)).toBe("JIN"); // company prefix
+
+    const explicitString = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "marketing child", parentId: root.id, department: "marketing" }, operatorHeaders),
+      explicitString.res,
+      ctx,
+    );
+    expect(explicitString.status).toBe(201);
+    expect(explicitString.body.workItem.department).toBe("marketing");
+    expect(explicitString.body.workItem.id.slice(0, 3)).not.toBe(root.id.slice(0, 3));
+  });
+
+  it("normalizes dueAt to a canonical ISO instant", async () => {
+    const dateOnly = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "date-only due", dueAt: "2026-08-01" }, operatorHeaders),
+      dateOnly.res,
+      ctx,
+    );
+    expect(dateOnly.status).toBe(201);
+    expect(dateOnly.body.workItem.dueAt).toBe("2026-08-01T00:00:00.000Z");
+
+    const nonIso = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "sloppy due", dueAt: "Jan 1 2026" }, operatorHeaders),
+      nonIso.res,
+      ctx,
+    );
+    expect(nonIso.status).toBe(400);
+    expect(nonIso.body.error).toMatch(/ISO 8601/);
+  });
+
+  it("rejects a malformed dueAt, an out-of-range priority, and an unknown parent", async () => {
+    const badDue = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "bad due", dueAt: "not-a-date" }, operatorHeaders),
+      badDue.res,
+      ctx,
+    );
+    expect(badDue.status).toBe(400);
+    expect(badDue.body.error).toMatch(/ISO 8601/);
+
+    const badPriority = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "bad priority", priority: 9 }, operatorHeaders),
+      badPriority.res,
+      ctx,
+    );
+    expect(badPriority.status).toBe(400);
+    expect(badPriority.body.error).toMatch(/priority/);
+
+    const badParent = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "orphan", parentId: "ZZZ-999" }, operatorHeaders),
+      badParent.res,
+      ctx,
+    );
+    expect(badParent.status).toBe(400);
+    expect(badParent.body.error).toMatch(/not found/);
+  });
+
+  it("GET /api/work-items/:id/tree reaches the tree handler (no :id route collision) and nests children", async () => {
+    const root = store.createWorkItem({ title: "route tree root" });
+    const child = store.createWorkItem({ title: "route tree child", parentId: root.id });
+    store.createWorkItem({ title: "route tree grandchild", parentId: child.id });
+
+    const treeRes = makeRes();
+    await api.handleApiRequest(makeReq("GET", `/api/work-items/${root.id}/tree`), treeRes.res, ctx);
+    expect(treeRes.status).toBe(200);
+    const tree = treeRes.body.tree;
+    expect(tree.root.id).toBe(root.id);
+    expect(tree.root.children).toHaveLength(1);
+    expect(tree.root.children[0].id).toBe(child.id);
+    expect(tree.root.children[0].children).toHaveLength(1);
+    expect(tree.totals.backlog).toBe(3);
+    expect(tree.spendUsd).toBe(0);
+
+    const missing = makeRes();
+    await api.handleApiRequest(makeReq("GET", "/api/work-items/ZZZ-424242/tree"), missing.res, ctx);
+    expect(missing.status).toBe(404);
+  });
+
+  it("filters by createdBy/parent/root/rootsOnly and compact rows carry the five v2 fields", async () => {
+    const root = store.createWorkItem({ title: "filter fixture root v2", createdBy: "operator" });
+    const child = store.createWorkItem({ title: "filter fixture child v2", parentId: root.id, createdBy: "a-lead" });
+
+    const roots = makeRes();
+    await api.handleApiRequest(
+      makeReq("GET", "/api/work-items?rootsOnly=true&createdBy=operator&q=filter+fixture"),
+      roots.res,
+      ctx,
+    );
+    expect(roots.status).toBe(200);
+    expect(roots.body.workItems.map((w: { id: string }) => w.id)).toContain(root.id);
+    for (const row of roots.body.workItems) {
+      expect(row.parentId).toBeNull();
+      expect(row).toHaveProperty("createdBy");
+      expect(row).toHaveProperty("rootId");
+      expect(row).toHaveProperty("depth");
+      expect(row).toHaveProperty("dueAt");
+    }
+
+    const children = makeRes();
+    await api.handleApiRequest(makeReq("GET", `/api/work-items?parent=${root.id}`), children.res, ctx);
+    expect(children.status).toBe(200);
+    expect(children.body.workItems.map((w: { id: string }) => w.id)).toEqual([child.id]);
+
+    const family = makeRes();
+    await api.handleApiRequest(makeReq("GET", `/api/work-items?root=${root.id}`), family.res, ctx);
+    expect(family.status).toBe(200);
+    expect(family.body.workItems.map((w: { id: string }) => w.id).sort()).toEqual([root.id, child.id].sort());
+
+    const badParent = makeRes();
+    await api.handleApiRequest(makeReq("GET", "/api/work-items?parent=garbage"), badParent.res, ctx);
+    expect(badParent.status).toBe(400);
+    expect(badParent.body.error).toMatch(/parent must be a Todo ID/);
+  });
+
+  it("operator archive with cascade cancels open descendants; without it the gate refuses", async () => {
+    const parent = store.createWorkItem({ title: "cascade route parent" });
+    const mid = store.createWorkItem({ title: "cascade route mid", parentId: parent.id });
+    const leaf = store.createWorkItem({ title: "cascade route leaf", parentId: mid.id });
+
+    const refused = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", `/api/work-items/${parent.id}/archive`, {}, operatorHeaders),
+      refused.res,
+      ctx,
+    );
+    expect(refused.status).toBeGreaterThanOrEqual(400);
+    expect(store.getWorkItem(parent.id)!.status).not.toBe("cancelled");
+
+    const cascaded = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", `/api/work-items/${parent.id}/archive`, { cascade: true }, operatorHeaders),
+      cascaded.res,
+      ctx,
+    );
+    expect(cascaded.status).toBe(200);
+    expect(cascaded.body.workItem.status).toBe("cancelled");
+    expect(store.getWorkItem(mid.id)!.status).toBe("cancelled");
+    expect(store.getWorkItem(leaf.id)!.status).toBe("cancelled");
+  });
+});

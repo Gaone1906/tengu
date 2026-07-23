@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import { initDb } from '../sessions/registry.js';
 import { loadConfig } from '../shared/config.js';
 import { CONFIG_PATH } from '../shared/paths.js';
-import { parseTodoId } from './id.js';
+import { parseTodoId, resolveTodoIdPrefix } from './id.js';
+import { resolveDepartmentPrefix } from './departments.js';
 import { allocateWorkItemId, useWorkItemAllocationClaim } from './migrate.js';
 
 /**
@@ -94,6 +95,13 @@ export interface WorkItem {
   status: WorkItemStatus;
   department: string | null;
   assignee: string | null;
+  /** Who asked for this item: 'operator', an employee slug, or 'system'. */
+  createdBy: string;
+  /** Sub-task tree (Todos v2): parent link, denormalized root, and depth 0..3. */
+  parentId: string | null;
+  rootId: string;
+  depth: number;
+  dueAt: string | null;
   priority: number;
   /** Nullable manual order key. Lower ranked values render first. */
   rank: number | null;
@@ -127,6 +135,13 @@ export interface CreateWorkItemInput {
   status?: WorkItemStatus;
   department?: string | null;
   assignee?: string | null;
+  /** Creator identity; defaults to 'operator' for source=human, 'system' otherwise. */
+  createdBy?: string;
+  /** Create as a sub-task of an existing Todo (depth ≤ 3). Department is
+   *  inherited from the parent when not given explicitly. */
+  parentId?: string | null;
+  /** Optional ISO 8601 deadline. */
+  dueAt?: string | null;
   priority?: number;
   source?: WorkItemSource;
   /**
@@ -150,6 +165,14 @@ export interface ListWorkItemsFilter {
   assignee?: string;
   source?: WorkItemSource;
   needsAttentionFor?: string;
+  /** Exact creator identity (`created_by`). */
+  createdBy?: string;
+  /** Direct children of this Todo. */
+  parentId?: string;
+  /** Whole family sharing this root Todo. */
+  rootId?: string;
+  /** Only tree roots (parentless items). */
+  rootsOnly?: boolean;
   /** Escaped-LIKE substring over title + body (%/_/backslash are literal). */
   text?: string;
   /** Inclusive ISO timestamp bounds over `updated_at`. */
@@ -195,6 +218,11 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItem {
     status: row.status as WorkItemStatus,
     department: (row.department as string) ?? null,
     assignee: (row.assignee as string) ?? null,
+    createdBy: row.created_by as string,
+    parentId: (row.parent_id as string) ?? null,
+    rootId: row.root_id as string,
+    depth: (row.depth as number) ?? 0,
+    dueAt: (row.due_at as string) ?? null,
     priority: row.priority as number,
     rank: (row.rank as number) ?? null,
     version: row.version as number,
@@ -228,6 +256,7 @@ function isUniqueConstraintError(err: unknown): boolean {
 
 export type WorkItemEventKind =
   | 'created'
+  | 'child_created'
   | 'status_change'
   | 'note'
   | 'session_linked'
@@ -352,9 +381,25 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   // A configless disposable/test home retains the historical JIN default. Once a
   // real config exists, malformed configuration must still fail closed rather than
   // silently allocating from the wrong company namespace.
-  const portal = fs.existsSync(CONFIG_PATH) ? loadConfig().portal : undefined;
-  const companyName = portal?.companyName ?? 'Jinn';
-  const claim = allocateWorkItemId(db, now, companyName, portal?.companyPrefix);
+  let parent: WorkItem | undefined;
+  if (input.parentId) {
+    parent = getWorkItem(input.parentId);
+    if (!parent) throw new Error(`parent Todo ${input.parentId} not found`);
+    // Closed parents refuse new children (the roll-up gate would otherwise be
+    // violable by construction order). `escalated` deliberately stays creatable-
+    // under: escalation routes an item to the operator, and decomposing it into
+    // sub-tasks is a legitimate part of resolving it.
+    if (parent.status === 'done' || parent.status === 'cancelled') {
+      throw new Error(`parent Todo ${parent.id} is ${parent.status} — sub-tasks cannot be added under a closed Todo`);
+    }
+    if (parent.depth >= 3) {
+      throw new Error(`parent Todo ${parent.id} is at depth ${parent.depth} — the sub-task tree is capped at depth 3`);
+    }
+  }
+  const companyPrefix = resolveCompanyPrefix();
+  const department = input.department !== undefined ? input.department : parent?.department ?? null;
+  const prefix = department ? resolveDepartmentPrefix(db, department, companyPrefix) : companyPrefix;
+  const claim = allocateWorkItemId(db, now, prefix);
   const id = claim.id;
   const status: WorkItemStatus = input.status ?? 'backlog';
   const source: WorkItemSource = input.source ?? 'human';
@@ -378,16 +423,21 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
     try {
       db.prepare(
         `INSERT INTO work_items
-           (id, title, body, status, department, assignee, priority, source, source_ref,
-            acceptance, verify_policy, budget_usd, created_at, updated_at, closed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, title, body, status, department, assignee, created_by, parent_id, root_id, depth, due_at,
+            priority, source, source_ref, acceptance, verify_policy, budget_usd, created_at, updated_at, closed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         input.title,
         input.body ?? null,
         status,
-        input.department ?? null,
+        department,
         input.assignee ?? null,
+        input.createdBy ?? (source === 'human' ? 'operator' : 'system'),
+        parent?.id ?? null,                       // parent_id
+        parent ? parent.rootId : id,              // root_id
+        parent ? parent.depth + 1 : 0,            // depth
+        input.dueAt ?? null,
         priority,
         source,
         sourceRef,
@@ -409,9 +459,28 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
       throw err;
     }
     appendWorkItemEvent({ workItemId: id, kind: 'created', toStatus: status, actor: source, detail: sourceRef ? { sourceRef } : null });
+    if (parent) {
+      // Re-verify the parent under the write lock before auditing the link.
+      const liveParent = db.prepare('SELECT depth FROM work_items WHERE id = ?').get(parent.id) as { depth: number } | undefined;
+      if (!liveParent) throw new Error(`parent Todo ${parent.id} disappeared during create`);
+      appendWorkItemEvent({
+        workItemId: parent.id,
+        kind: 'child_created',
+        actor: input.createdBy ?? source,
+        detail: { childId: id },
+        versionEffect: 'state',   // bump the parent so tree views resort
+      });
+    }
     return getWorkItem(id)!;
   });
   return useWorkItemAllocationClaim(db, claim, () => txn());
+}
+
+/** The company Todo namespace: derived from configured company name, or the
+ *  explicit `portal.companyPrefix` override; configless homes keep `JIN`. */
+export function resolveCompanyPrefix(): string {
+  const portal = fs.existsSync(CONFIG_PATH) ? loadConfig().portal : undefined;
+  return resolveTodoIdPrefix(portal?.companyName ?? 'Jinn', portal?.companyPrefix);
 }
 
 export function getWorkItem(id: string): WorkItem | undefined {
@@ -476,6 +545,21 @@ function workItemWhere(filter: ListWorkItemsFilter): { sql: string; values: unkn
     conditions.push('source = ?');
     values.push(filter.source);
   }
+  if (filter.createdBy) {
+    conditions.push('created_by = ?');
+    values.push(filter.createdBy);
+  }
+  if (filter.parentId) {
+    conditions.push('parent_id = ?');
+    values.push(parseTodoId(filter.parentId));
+  }
+  if (filter.rootId) {
+    conditions.push('root_id = ?');
+    values.push(parseTodoId(filter.rootId));
+  }
+  if (filter.rootsOnly) {
+    conditions.push('parent_id IS NULL');
+  }
   if (filter.needsAttentionFor) {
     conditions.push("((approval_state = 'pending' AND approval_target = ?) OR (assignee = ? AND status IN ('blocked', 'escalated')))");
     values.push(filter.needsAttentionFor, filter.needsAttentionFor);
@@ -539,6 +623,57 @@ export function searchWorkItems(filter: SearchWorkItemsFilter, limit = 20): Work
     throw new Error('searchWorkItems requires at least one filter');
   }
   return queryWorkItems({ ...filter, limit }).workItems;
+}
+
+export type WorkItemTreeNode = WorkItem & { children: WorkItemTreeNode[] };
+
+export interface WorkItemTree {
+  root: WorkItemTreeNode;
+  /** Status counts over the returned subtree (root included). */
+  totals: WorkItemTotals;
+  /** Live derived spend over every session linked anywhere in the subtree. */
+  spendUsd: number;
+}
+
+/** Read a work item's subtree. One indexed query fetches the whole family via
+ *  root_id; the requested node's subtree is then assembled in memory (trees are
+ *  depth-capped at 3, so families stay small). */
+export function getWorkItemTree(id: string): WorkItemTree | undefined {
+  const db = initDb();
+  const item = getWorkItem(id);
+  if (!item) return undefined;
+  const family = (db.prepare('SELECT * FROM work_items WHERE root_id = ?').all(item.rootId) as Record<string, unknown>[])
+    .map(rowToWorkItem);
+  const childrenByParent = new Map<string, WorkItem[]>();
+  for (const member of family) {
+    if (!member.parentId) continue;
+    const siblings = childrenByParent.get(member.parentId) ?? [];
+    siblings.push(member);
+    childrenByParent.set(member.parentId, siblings);
+  }
+  const build = (node: WorkItem): WorkItemTreeNode => ({
+    ...node,
+    children: (childrenByParent.get(node.id) ?? [])
+      .sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.id.localeCompare(b.id))
+      .map(build),
+  });
+  const root = build(item);
+  const subtreeIds: string[] = [];
+  const walk = (node: WorkItemTreeNode): void => {
+    subtreeIds.push(node.id);
+    node.children.forEach(walk);
+  };
+  walk(root);
+  const totals = Object.fromEntries(WORK_ITEM_STATUS_VALUES.map((status) => [status, 0])) as WorkItemTotals;
+  for (const memberId of subtreeIds) {
+    const member = memberId === root.id ? root : family.find((f) => f.id === memberId)!;
+    totals[member.status] += 1;
+  }
+  const placeholders = subtreeIds.map(() => '?').join(', ');
+  const spend = db
+    .prepare(`SELECT COALESCE(SUM(total_cost), 0) AS spend FROM sessions WHERE work_item_id IN (${placeholders})`)
+    .get(...subtreeIds) as { spend: number };
+  return { root, totals, spendUsd: spend.spend };
 }
 
 export interface UpdateWorkItemInput {

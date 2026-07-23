@@ -3,15 +3,16 @@ import crypto from "node:crypto";
 import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
-// Fixed provider budget. The generic company Todo grammar consumes the former
-// headroom, so tool prose is kept concise instead of raising this ceiling.
-const MAX_MANIFEST_TOKENS = 7595;
+// Fixed provider budget. Rebased for Todos v2 slice 1 (get_work_item_tree +
+// sub-task/list inputs) with the same ~zero headroom discipline as before: new
+// tool prose must stay concise rather than growing into this ceiling.
+const MAX_MANIFEST_TOKENS = 7774;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 7228, sha256: "1988ca74514225dda0289b126550254d428b51d104615c5b3a482db720ce7f83" },
-  pi: { tokens: 7593, sha256: "3ddaf681a2b81d7e3e0bab455a13832951a7c556a13945e9216e4b3bae331555" },
-  openai: { tokens: 7376, sha256: "99b55075375cf8190760b0808ba13e780bc308673cd2dda31c0cb3d4b6ae82b9" },
+  rpc: { tokens: 7399, sha256: "734bb809bfddf14a6625df43653a9fe2adb638991262a2abd190e99862470d63" },
+  pi: { tokens: 7772, sha256: "d6435dc27db6aefb9d31be51dd8b0c27406a30195f3b5f7e697732350e98636e" },
+  openai: { tokens: 7550, sha256: "0c235490f2dd4dc785d91258947f108cd7fdd7549c7253bffa070dba2f688874" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -53,6 +54,7 @@ const EXPECTED_TOOL_NAMES = [
   "get_employee",
   "get_message_context",
   "get_work_item",
+  "get_work_item_tree",
   "get_workflow",
   "get_workflow_run",
   "list_cron_jobs",
@@ -110,6 +112,7 @@ const EXPECTED_REQUIRED = {
   get_employee: ["name"],
   get_message_context: ["sessionId", "messageId"],
   get_work_item: ["id"],
+  get_work_item_tree: ["id"],
   get_workflow: ["workflowId"],
   get_workflow_run: ["workflowId", "runId"],
   list_cron_jobs: [],
@@ -148,6 +151,7 @@ const EXPECTED_REQUIRED = {
 const EXPECTED_ENUMS = {
   cost_report: [["properties.groupBy", ["employee", "day"]]],
   create_trigger: [["properties.kind", ["webhook", "poll"]]],
+  create_work_item: [["properties.priority", [0, 1, 2, 3]]],
   decide_poll_activation: [["properties.decision", ["approve", "reject"]]],
   decide_work_item_approval: [["properties.decision", ["approve", "reject"]]],
   list_sessions: [["properties.scope", ["children", "employee", "recent"]]],
@@ -177,7 +181,7 @@ function collectEnums(value: unknown, path: string[] = []): Array<[string, strin
 }
 
 describe("tool manifest budget", () => {
-  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7595 o200k_base tokens", async () => {
+  it(`keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under ${MAX_MANIFEST_TOKENS} o200k_base tokens`, async () => {
     const tools = buildTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
     const wrappers = {
       rpc: { jsonrpc: "2.0", id: 1, result: { tools } },
@@ -216,7 +220,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(54);
+    expect(tools).toHaveLength(55);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);
