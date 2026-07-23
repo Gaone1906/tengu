@@ -174,8 +174,27 @@ function currentDatabase(name: string): string {
   return file;
 }
 
-function versionOneDatabase(name: string): string {
+function versionTwoDatabase(name: string): string {
   const file = currentDatabase(name);
+  withRawDatabase(file, (db) => {
+    const columns = tableInfo(db, 'workflow_attempts').map((entry) => entry.name);
+    if (columns.includes('reminders_sent')) {
+      db.exec(`
+        DROP INDEX workflow_attempts_due_reminder;
+        ALTER TABLE workflow_attempts DROP COLUMN reminders_sent;
+        ALTER TABLE workflow_attempts DROP COLUMN next_reminder_at;
+        ALTER TABLE workflow_attempts DROP COLUMN extensions;
+        ALTER TABLE workflow_attempts DROP COLUMN last_extension_reason;
+        ALTER TABLE workflow_attempts DROP COLUMN pending_output_error;
+        UPDATE workflow_schema SET version = 2;
+      `);
+    }
+  });
+  return file;
+}
+
+function versionOneDatabase(name: string): string {
+  const file = versionTwoDatabase(name);
   withRawDatabase(file, (db) => db.exec(`
     DROP INDEX workflow_attempts_retry_key;
     ALTER TABLE workflow_attempts DROP COLUMN retry_idempotency_key;
@@ -228,6 +247,7 @@ const tables = [
 const indexes = [
   'workflow_approvals_pending',
   'workflow_attempts_by_session',
+  'workflow_attempts_due_reminder',
   'workflow_attempts_retry_key',
   'workflow_node_runs_due',
   'workflow_runs_by_status_started',
@@ -311,7 +331,7 @@ describe('workflow database paths and connection', () => {
   });
 });
 
-describe('fresh version 2 schema', () => {
+describe('fresh version 3 schema', () => {
   it('creates the exact table set and definition/run column shapes', () => {
     withWorkflowDatabase(databasePath('columns'), (db) => {
       expect(tableNames(db)).toEqual(tables);
@@ -359,6 +379,9 @@ describe('fresh version 2 schema', () => {
         column('input_json', 'TEXT', 1, null, 0), column('output_json', 'TEXT', 0, null, 0),
         column('error_json', 'TEXT', 0, null, 0), column('started_at', 'TEXT', 1, null, 0),
         column('ended_at', 'TEXT', 0, null, 0), column('retry_idempotency_key', 'TEXT', 0, null, 0),
+        column('reminders_sent', 'INTEGER', 1, '0', 0), column('next_reminder_at', 'TEXT', 0, null, 0),
+        column('extensions', 'INTEGER', 1, '0', 0), column('last_extension_reason', 'TEXT', 0, null, 0),
+        column('pending_output_error', 'TEXT', 0, null, 0),
       ]));
       expect(tableInfo(db, 'workflow_approvals')).toEqual(expectedColumns([
         column('run_id', 'TEXT', 1, null, 1), column('node_id', 'TEXT', 1, null, 2),
@@ -371,8 +394,8 @@ describe('fresh version 2 schema', () => {
   });
 });
 
-describe('fresh version 2 schema metadata', () => {
-  it('creates exactly the six named indexes with locked columns and directions', () => {
+describe('fresh version 3 schema metadata', () => {
+  it('creates exactly the seven named indexes with locked columns and directions', () => {
     withWorkflowDatabase(databasePath('indexes'), (db) => {
       expect(namedIndexes(db)).toEqual(indexes);
       expect(indexColumns(db, 'workflow_runs_by_workflow_started')).toEqual([
@@ -382,6 +405,9 @@ describe('fresh version 2 schema metadata', () => {
         { name: 'status', desc: 0 }, { name: 'started_at', desc: 1 }, { name: 'id', desc: 1 },
       ]);
       expect(indexColumns(db, 'workflow_attempts_by_session')).toEqual([{ name: 'session_id', desc: 0 }]);
+      expect(indexColumns(db, 'workflow_attempts_due_reminder')).toEqual([
+        { name: 'status', desc: 0 }, { name: 'next_reminder_at', desc: 0 },
+      ]);
       expect(indexColumns(db, 'workflow_attempts_retry_key')).toEqual([
         { name: 'run_id', desc: 0 }, { name: 'retry_idempotency_key', desc: 0 },
       ]);
@@ -396,7 +422,7 @@ describe('fresh version 2 schema metadata', () => {
 
   it('stores exactly one schema version row equal to the exported version', () => {
     withWorkflowDatabase(databasePath('version'), (db) => {
-      expect(migrations.WORKFLOW_DB_SCHEMA_VERSION).toBe(2);
+      expect(migrations.WORKFLOW_DB_SCHEMA_VERSION).toBe(3);
       const inventory = migrations as unknown as Record<string, unknown>;
       const physicalVersions = Array.from(
         { length: migrations.WORKFLOW_DB_SCHEMA_VERSION }, (_, index) => index + 1,
@@ -404,7 +430,7 @@ describe('fresh version 2 schema metadata', () => {
       expect(inventory.WORKFLOW_DB_PHYSICAL_SCHEMA_VERSIONS).toEqual(physicalVersions);
       expect(inventory.WORKFLOW_DB_MIGRATION_SOURCE_VERSIONS)
         .toEqual(physicalVersions.map((version) => version - 1));
-      expect(db.prepare('SELECT version FROM workflow_schema').all()).toEqual([{ version: 2 }]);
+      expect(db.prepare('SELECT version FROM workflow_schema').all()).toEqual([{ version: 3 }]);
     });
   });
 
@@ -430,9 +456,33 @@ describe('migration safety and idempotency', () => {
   it('upgrades an exact v1 database in place while preserving data and adding retry claims', () => {
     const file = versionOneDatabase('v1-retry-migration');
     withWorkflowDatabase(file, (db) => {
-      expect(db.prepare('SELECT version FROM workflow_schema').pluck().get()).toBe(2);
+      expect(db.prepare('SELECT version FROM workflow_schema').pluck().get()).toBe(3);
       expect(tableInfo(db, 'workflow_attempts').map((entry) => entry.name)).toContain('retry_idempotency_key');
+      expect(tableInfo(db, 'workflow_attempts').map((entry) => entry.name)).toContain('reminders_sent');
       expect(db.prepare("SELECT title FROM workflow_definitions WHERE id = 'sentinel'").pluck().get()).toBe('Fixture');
+    });
+  });
+
+  it('upgrades an exact v2 database in place while preserving attempts and adding reminder state', () => {
+    const file = versionTwoDatabase('v2-reminder-migration');
+    withRawDatabase(file, (db) => {
+      insertRun(db, 'run', 'sentinel');
+      insertNode(db, 'run');
+      db.prepare(`INSERT INTO workflow_attempts
+        (run_id, node_id, attempt, session_id, status, resolved_config_json, input_json, started_at)
+        VALUES ('run', 'node', 1, 'session-1', 'running', '{}', '{}', '2026-07-20T00:00:00.000Z')`).run();
+    });
+    withWorkflowDatabase(file, (db) => {
+      expect(db.prepare('SELECT version FROM workflow_schema').pluck().get()).toBe(3);
+      expect(db.prepare(`SELECT session_id, reminders_sent, next_reminder_at, extensions,
+        last_extension_reason, pending_output_error FROM workflow_attempts`).get()).toEqual({
+        session_id: 'session-1',
+        reminders_sent: 0,
+        next_reminder_at: null,
+        extensions: 0,
+        last_extension_reason: null,
+        pending_output_error: null,
+      });
     });
   });
 
@@ -453,17 +503,17 @@ describe('migration safety and idempotency', () => {
     });
   });
 
-  it('rejects a DELETE-journal future v3 without changing bytes, schema, data, mode, or sidecars', () => {
+  it('rejects a DELETE-journal future v4 without changing bytes, schema, data, mode, or sidecars', () => {
     const file = databasePath('future');
     withRawDatabase(file, (db) => {
       expect(db.pragma('journal_mode = DELETE', { simple: true })).toBe('delete');
-      db.exec('CREATE TABLE workflow_schema (version INTEGER NOT NULL); INSERT INTO workflow_schema VALUES (3); CREATE TABLE marker (value TEXT)');
+      db.exec('CREATE TABLE workflow_schema (version INTEGER NOT NULL); INSERT INTO workflow_schema VALUES (4); CREATE TABLE marker (value TEXT)');
       db.prepare("INSERT INTO marker VALUES ('preserve-me')").run();
     });
     expectRejectedWithoutMutation(file, 'Unsupported workflow database schema version.');
   });
 
-  it('rejects a malformed DELETE-journal v2 without changing bytes, schema, data, mode, or sidecars', () => {
+  it('rejects a malformed DELETE-journal v3 without changing bytes, schema, data, mode, or sidecars', () => {
     const file = currentDatabase('malformed-v1-no-mutation');
     withRawDatabase(file, (db) => {
       expect(db.pragma('journal_mode = DELETE', { simple: true })).toBe('delete');
@@ -520,11 +570,11 @@ describe('schema structure classification', () => {
     `));
     withWorkflowDatabase(file, (db) => {
       expect(tableNames(db).map((name) => name.toLowerCase()).sort()).toEqual(tables);
-      expect(db.prepare('SELECT version FROM workflow_schema').pluck().get()).toBe(2);
+      expect(db.prepare('SELECT version FROM workflow_schema').pluck().get()).toBe(3);
     });
   });
 
-  it('accepts complete version 2 with uppercase keywords, types, and identifiers', () => {
+  it('accepts complete version 3 with uppercase keywords, types, and identifiers', () => {
     const file = uppercaseCurrentDatabase('uppercase-current');
     withWorkflowDatabase(file, (db) => {
       expect(db.prepare("SELECT definition_json FROM workflow_definitions WHERE id = 'sentinel'").pluck().get()).toBe('{}');
@@ -547,7 +597,7 @@ describe('schema structure classification', () => {
     expectMalformedWithoutMutation(file);
   });
 
-  it.each([0, 1, 2])('rejects and preserves an extra-column schema table at version %i', (version) => {
+  it.each([0, 1, 2, 3])('rejects and preserves an extra-column schema table at version %i', (version) => {
     const file = databasePath(`extra-schema-column-${version}`);
     withRawDatabase(file, (db) => db.exec(`
       CREATE TABLE workflow_schema (version INTEGER NOT NULL, rogue TEXT);
@@ -565,7 +615,7 @@ describe('schema structure classification', () => {
     expectMalformedWithoutMutation(file);
   });
 
-  it.each(v1SchemaMutations)('rejects and preserves version 2 with %s', (label, mutation) => {
+  it.each(v1SchemaMutations)('rejects and preserves version 3 with %s', (label, mutation) => {
     const file = currentDatabase(`forged-${label.replaceAll(' ', '-')}`);
     withRawDatabase(file, (db) => db.exec(mutation));
     expectMalformedWithoutMutation(file);
@@ -579,12 +629,12 @@ describe('schema structure classification', () => {
     `));
     withWorkflowDatabase(file, (db) => {
       expect(tableNames(db)).toEqual(tables);
-      expect(db.prepare('SELECT version FROM workflow_schema').pluck().all()).toEqual([2]);
+      expect(db.prepare('SELECT version FROM workflow_schema').pluck().all()).toEqual([3]);
       migrations.migrateWorkflowDatabase(db);
     });
   });
 
-  it('accepts an exact current version 2 on independent reopen without changing sentinel data', () => {
+  it('accepts an exact current version 3 on independent reopen without changing sentinel data', () => {
     const file = currentDatabase('exact-current-reopen');
     const before = databaseSnapshot(file);
     withWorkflowDatabase(file, (db) => migrations.migrateWorkflowDatabase(db));

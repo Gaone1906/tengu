@@ -182,6 +182,62 @@ export class RunMutation implements WorkflowRunTransaction {
     this.didChange = true;
     return readAttempt(this.db, this.runId, id, attempt)!;
   }
+  setAttemptReminder(
+    nodeId: string,
+    attempt: number,
+    patch: Parameters<WorkflowRunTransaction['setAttemptReminder']>[2],
+  ): WorkflowAttemptRecord {
+    this.assertOpen();
+    const id = parseNodeId(nodeId);
+    if (!Number.isInteger(attempt) || attempt < 1) repositoryError('bad-input', 'Workflow attempt number is invalid.');
+    const keys = ['remindersSent', 'nextReminderAt', 'extensions', 'lastExtensionReason', 'pendingOutputError'];
+    const values = normalizedRecord(patch, keys, 'Workflow attempt reminder patch is invalid.');
+    for (const key of ['remindersSent', 'extensions'] as const) {
+      if (values[key] !== undefined && (!Number.isInteger(values[key]) || (values[key] as number) < 0)) {
+        repositoryError('bad-input', 'Workflow attempt reminder patch is invalid.');
+      }
+    }
+    if (values.nextReminderAt !== undefined && values.nextReminderAt !== null) canonicalStamp(values.nextReminderAt);
+    for (const key of ['lastExtensionReason', 'pendingOutputError'] as const) {
+      if (values[key] !== undefined && values[key] !== null && typeof values[key] !== 'string') {
+        repositoryError('bad-input', 'Workflow attempt reminder patch is invalid.');
+      }
+    }
+    const current = readAttempt(this.db, this.runId, id, attempt);
+    if (!current) repositoryError('not-found', `Workflow attempt ${id}:${attempt} was not found.`);
+    if (current.status !== 'running') repositoryError('bad-input', 'Workflow attempt reminder state requires a running attempt.');
+    const next = { ...current } as WorkflowAttemptRecord;
+    if (values.remindersSent !== undefined) next.remindersSent = values.remindersSent as number;
+    if (Object.hasOwn(values, 'nextReminderAt')) {
+      if (values.nextReminderAt === null) delete next.nextReminderAt;
+      else next.nextReminderAt = values.nextReminderAt as string;
+    }
+    if (values.extensions !== undefined) next.extensions = values.extensions as number;
+    if (Object.hasOwn(values, 'lastExtensionReason')) {
+      if (values.lastExtensionReason === null) delete next.lastExtensionReason;
+      else next.lastExtensionReason = values.lastExtensionReason as string;
+    }
+    if (Object.hasOwn(values, 'pendingOutputError')) {
+      if (values.pendingOutputError === null) delete next.pendingOutputError;
+      else next.pendingOutputError = values.pendingOutputError as string;
+    }
+    if (!recordChanged(current, next)) return current;
+    this.db.prepare(`UPDATE workflow_attempts SET reminders_sent = @remindersSent,
+      next_reminder_at = @nextReminderAt, extensions = @extensions,
+      last_extension_reason = @lastExtensionReason, pending_output_error = @pendingOutputError
+      WHERE run_id = @runId AND node_id = @nodeId AND attempt = @attempt`).run({
+      runId: this.runId,
+      nodeId: id,
+      attempt,
+      remindersSent: next.remindersSent,
+      nextReminderAt: next.nextReminderAt ?? null,
+      extensions: next.extensions,
+      lastExtensionReason: next.lastExtensionReason ?? null,
+      pendingOutputError: next.pendingOutputError ?? null,
+    });
+    this.didChange = true;
+    return readAttempt(this.db, this.runId, id, attempt)!;
+  }
   putApproval(input: Omit<WorkflowApprovalRecord, 'runId'>): WorkflowApprovalRecord {
     this.assertOpen();
     const keys = ['nodeId', 'status', 'requestedAt', 'approverRef', 'decidedAt', 'decidedBy', 'decision', 'reason'];

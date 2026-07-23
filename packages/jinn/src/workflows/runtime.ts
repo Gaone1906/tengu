@@ -80,6 +80,11 @@ export interface WorkflowAttemptRecord {
   error?: WorkflowError;
   startedAt: string;
   endedAt?: string;
+  remindersSent: number;
+  nextReminderAt?: string;
+  extensions: number;
+  lastExtensionReason?: string;
+  pendingOutputError?: string;
 }
 
 export interface WorkflowApprovalRecord {

@@ -55,7 +55,7 @@ describe('canonical runtime and record types', () => {
     };
     const attempt: WorkflowAttemptRecord = {
       runId: run.id, nodeId: 'work', attempt: 1, status: 'running', resolvedConfig: resolved,
-      input: run.input, startedAt: run.startedAt,
+      input: run.input, startedAt: run.startedAt, remindersSent: 0, extensions: 0,
     };
     const approval: WorkflowApprovalRecord = {
       runId: run.id, nodeId: 'approve', status: 'approved', requestedAt: run.startedAt,

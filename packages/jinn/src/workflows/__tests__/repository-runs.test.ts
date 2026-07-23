@@ -133,6 +133,10 @@ describe('WorkflowRepository Task 11 contract', () => {
     expectTypeOf(repository.findAttemptBySessionId).returns.toEqualTypeOf<WorkflowAttemptRecord | null>();
     expectTypeOf(repository.listRecoverableRuns).returns.toEqualTypeOf<WorkflowRunRecord[]>();
     expectTypeOf(repository.listDueWaits).returns.toEqualTypeOf<WorkflowNodeRunRecord[]>();
+    expectTypeOf(repository.listDueReminders).returns.toEqualTypeOf<WorkflowAttemptRecord[]>();
+    expectTypeOf(repository.nextDueReminder).returns.toEqualTypeOf<{
+      runId: string; nodeId: string; attempt: number; nextReminderAt: string;
+    } | null>();
   });
 
   it('exports one public repository and the same error without exposing helpers', () => {
@@ -295,6 +299,43 @@ describe('atomic run mutations', () => {
       { attempt: 1, status: 'completed' },
       { attempt: 2, status: 'dispatching' },
     ]);
+  });
+
+  it('persists reminder state and reads due attempts in deterministic order', () => {
+    authoredDefinition();
+    const run = createRun();
+    repository.mutateRun(run.id, run.revision, (tx) => {
+      tx.setNodeStatus('draft', 'dispatching', { activated: true, startedAt: START });
+      tx.createAttempt({ nodeId: 'draft', resolvedConfig: resolved(), input: {} });
+    });
+    repository.mutateRun(run.id, 2, (tx) => {
+      tx.settleAttempt('draft', 1, { status: 'running', sessionId: 'session-reminder' });
+      tx.setAttemptReminder('draft', 1, {
+        remindersSent: 2,
+        nextReminderAt: '2026-07-21T10:15:00.000Z',
+        extensions: 1,
+        lastExtensionReason: 'Waiting for review.',
+        pendingOutputError: 'Field "score" must be a number.',
+      });
+    });
+
+    expect(repository.getAttempt(run.id, 'draft', 1)).toMatchObject({
+      remindersSent: 2,
+      nextReminderAt: '2026-07-21T10:15:00.000Z',
+      extensions: 1,
+      lastExtensionReason: 'Waiting for review.',
+      pendingOutputError: 'Field "score" must be a number.',
+    });
+    expect(repository.listDueReminders('2026-07-21T10:15:00.000Z', 100)).toEqual([
+      expect.objectContaining({ runId: run.id, nodeId: 'draft', attempt: 1 }),
+    ]);
+    expect(repository.listDueReminders('2026-07-21T10:14:59.999Z', 100)).toEqual([]);
+    expect(repository.nextDueReminder()).toEqual({
+      runId: run.id,
+      nodeId: 'draft',
+      attempt: 1,
+      nextReminderAt: '2026-07-21T10:15:00.000Z',
+    });
   });
 
   it('rolls back atomically, bumps once when changed, never bumps a no-op, and rejects stale revisions', () => {

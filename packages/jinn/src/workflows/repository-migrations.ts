@@ -3,9 +3,9 @@ import { dirname, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { WORKFLOWS_DB_PATH } from '../shared/paths.js';
 
-export const WORKFLOW_DB_SCHEMA_VERSION = 2;
-export const WORKFLOW_DB_PHYSICAL_SCHEMA_VERSIONS = [1, 2] as const;
-export const WORKFLOW_DB_MIGRATION_SOURCE_VERSIONS = [0, 1] as const;
+export const WORKFLOW_DB_SCHEMA_VERSION = 3;
+export const WORKFLOW_DB_PHYSICAL_SCHEMA_VERSIONS = [1, 2, 3] as const;
+export const WORKFLOW_DB_MIGRATION_SOURCE_VERSIONS = [0, 1, 2] as const;
 
 const UNSUPPORTED_SCHEMA_ERROR = 'Unsupported workflow database schema version.';
 const MALFORMED_SCHEMA_ERROR = 'Malformed workflow database schema version.';
@@ -109,6 +109,15 @@ CREATE UNIQUE INDEX workflow_attempts_retry_key
   WHERE retry_idempotency_key IS NOT NULL;
 `;
 
+const MIGRATE_V2_TO_V3_SQL = `
+ALTER TABLE workflow_attempts ADD COLUMN reminders_sent INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workflow_attempts ADD COLUMN next_reminder_at TEXT;
+ALTER TABLE workflow_attempts ADD COLUMN extensions INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workflow_attempts ADD COLUMN last_extension_reason TEXT;
+ALTER TABLE workflow_attempts ADD COLUMN pending_output_error TEXT;
+CREATE INDEX workflow_attempts_due_reminder ON workflow_attempts(status, next_reminder_at);
+`;
+
 const CREATE_DOMAIN_SCHEMA_V2_SQL = CREATE_DOMAIN_SCHEMA_V1_SQL
   .replace('  ended_at TEXT,\n  PRIMARY KEY(run_id, node_id, attempt),',
     '  ended_at TEXT,\n  retry_idempotency_key TEXT,\n  PRIMARY KEY(run_id, node_id, attempt),')
@@ -117,6 +126,19 @@ const CREATE_DOMAIN_SCHEMA_V2_SQL = CREATE_DOMAIN_SCHEMA_V1_SQL
 CREATE UNIQUE INDEX workflow_attempts_retry_key
   ON workflow_attempts(run_id, retry_idempotency_key)
   WHERE retry_idempotency_key IS NOT NULL;`);
+
+const CREATE_DOMAIN_SCHEMA_V3_SQL = CREATE_DOMAIN_SCHEMA_V2_SQL
+  .replace('  retry_idempotency_key TEXT,\n  PRIMARY KEY(run_id, node_id, attempt),',
+    `  retry_idempotency_key TEXT,
+  reminders_sent INTEGER NOT NULL DEFAULT 0,
+  next_reminder_at TEXT,
+  extensions INTEGER NOT NULL DEFAULT 0,
+  last_extension_reason TEXT,
+  pending_output_error TEXT,
+  PRIMARY KEY(run_id, node_id, attempt),`)
+  .replace('CREATE INDEX workflow_approvals_pending ON workflow_approvals(status, requested_at);',
+    `CREATE INDEX workflow_approvals_pending ON workflow_approvals(status, requested_at);
+CREATE INDEX workflow_attempts_due_reminder ON workflow_attempts(status, next_reminder_at);`);
 
 function normalizeSql(sql: string): string {
   return sql.toLowerCase().replace(/\s+/g, ' ').replace(/\s*([(),])\s*/g, '$1').trim().replace(/;$/, '');
@@ -130,6 +152,7 @@ const SCHEMA_TABLE_SQL = normalizeSql(CREATE_SCHEMA_TABLE_SQL);
 const VERSION_ZERO_SCHEMA = [SCHEMA_TABLE_SQL];
 const SCHEMA_V1 = schemaStatements(CREATE_SCHEMA_TABLE_SQL + CREATE_DOMAIN_SCHEMA_V1_SQL);
 const SCHEMA_V2 = schemaStatements(CREATE_SCHEMA_TABLE_SQL + CREATE_DOMAIN_SCHEMA_V2_SQL);
+const SCHEMA_V3 = schemaStatements(CREATE_SCHEMA_TABLE_SQL + CREATE_DOMAIN_SCHEMA_V3_SQL);
 
 interface SchemaState {
   exists: boolean;
@@ -161,7 +184,8 @@ function readSchemaState(db: Database.Database): SchemaState {
     throw new Error(MALFORMED_SCHEMA_ERROR);
   }
   if (version > WORKFLOW_DB_SCHEMA_VERSION) throw new Error(UNSUPPORTED_SCHEMA_ERROR);
-  const expected = version === 0 ? VERSION_ZERO_SCHEMA : version === 1 ? SCHEMA_V1 : version === 2 ? SCHEMA_V2 : undefined;
+  const expected = version === 0 ? VERSION_ZERO_SCHEMA : version === 1 ? SCHEMA_V1
+    : version === 2 ? SCHEMA_V2 : version === 3 ? SCHEMA_V3 : undefined;
   if (!expected) throw new Error(UNSUPPORTED_SCHEMA_ERROR);
   assertSchema(db, expected);
   return { exists: true, version };
@@ -232,6 +256,11 @@ export function migrateWorkflowDatabase(db: Database.Database): void {
     if (state.version === 1) {
       db.exec(MIGRATE_V1_TO_V2_SQL);
       db.prepare('UPDATE workflow_schema SET version = 2').run();
+      state = readSchemaState(db);
+    }
+    if (state.version === 2) {
+      db.exec(MIGRATE_V2_TO_V3_SQL);
+      db.prepare('UPDATE workflow_schema SET version = 3').run();
       state = readSchemaState(db);
     }
     if (state.version !== WORKFLOW_DB_SCHEMA_VERSION) throw new Error(UNSUPPORTED_SCHEMA_ERROR);

@@ -11,7 +11,8 @@ import {
 import { RunMutation } from './repository-run-transaction.js';
 import {
   equivalentRun, insertRun, listRunSummaries, readAttempt, readAttemptByRetryKey, readAttemptBySession,
-  readAttempts, readDueWaits, readNextDueWait, readRecoverableRuns, readRun, readRunByIdempotency,
+  readAttempts, readDueReminders, readDueWaits, readNextDueReminder, readNextDueWait, readRecoverableRuns,
+  readRun, readRunByIdempotency,
   readWorkflowCallByIdempotency, readRunDetail,
   type NormalizedRunListQuery,
 } from './repository-runs.js';
@@ -81,6 +82,13 @@ export interface WorkflowRunTransaction {
     | { status: 'completed'; sessionId?: string; output: WorkflowNodeOutput; endedAt: string }
     | { status: 'failed' | 'timed-out' | 'cancelled'; sessionId?: string; error: WorkflowError; endedAt: string }
   ): WorkflowAttemptRecord;
+  setAttemptReminder(nodeId: string, attempt: number, patch: {
+    remindersSent?: number;
+    nextReminderAt?: string | null;
+    extensions?: number;
+    lastExtensionReason?: string | null;
+    pendingOutputError?: string | null;
+  }): WorkflowAttemptRecord;
   putApproval(input: Omit<WorkflowApprovalRecord, 'runId'>): WorkflowApprovalRecord;
 }
 
@@ -351,4 +359,11 @@ export class WorkflowRepository {
     return readDueWaits(this.db, stamp, parsedLimit);
   }
   nextDueWait(): WorkflowNodeRunRecord | null { return readNextDueWait(this.db); }
+  listDueReminders(now: string, limit: number): WorkflowAttemptRecord[] {
+    const stamp = canonicalStamp(now); const parsedLimit = parseLimit(limit as unknown as JsonValue, 'Workflow due reminder');
+    return readDueReminders(this.db, stamp, parsedLimit);
+  }
+  nextDueReminder(): { runId: string; nodeId: string; attempt: number; nextReminderAt: string } | null {
+    return readNextDueReminder(this.db);
+  }
 }
