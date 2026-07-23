@@ -93,7 +93,10 @@ import {
   createPartialStreamWriter,
   normalizeBlockDeltaForTurn,
 } from "../sessions/partial-stream.js";
-import { USER_MESSAGE_INTERRUPTION_REASON } from "../sessions/workflow-interruptions.js";
+import {
+  isDurableWorkflowUserMessageInterruption,
+  USER_MESSAGE_INTERRUPTION_REASON,
+} from "../sessions/workflow-interruptions.js";
 export {
   foldPartialText,
   normalizeBlockDeltaForTurn,
@@ -1989,6 +1992,10 @@ function supersedeRunningTurn(session: Session): void {
     transportMeta: withTransportMeta(session, {
       [SUPERSEDED_TURN_META_KEY]: new Date().toISOString(),
     }),
+    ...(session.workflowProvenance?.kind === "phase" ? {
+      attemptInterruptionCause: "user-message",
+      attemptInterruptionTurn: (session.attemptTurn ?? 0) + 1,
+    } : {}),
   });
 }
 
@@ -6831,7 +6838,11 @@ async function runWebSession(
       return;
     }
 
-    const wasInterrupted = result.error?.startsWith("Interrupted");
+    const completionTurn = (liveAfterRun?.attemptTurn ?? currentSession.attemptTurn ?? 0) + 1;
+    const wasInterrupted = Boolean(
+      liveAfterRun
+      && isDurableWorkflowUserMessageInterruption(liveAfterRun, completionTurn),
+    ) || result.error?.startsWith("Interrupted");
     const wasSuperseded = !wasInterrupted && isTurnSuperseded(currentSession.id, turnStartedAt);
     const attemptStillRunning = liveAfterRun?.attemptToken === attemptToken && liveAfterRun.status === "running";
     const quietPreempted = wasInterrupted || wasSuperseded || !attemptStillRunning;

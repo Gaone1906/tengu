@@ -15,7 +15,14 @@ import {
   ensureSessionCapability,
 } from "../../mcp/identity.js";
 import { setJinnAttachGate } from "../../mcp/attachment.js";
-import type { Employee, Engine, EngineResult, JinnConfig, ModelRegistry } from "../../shared/types.js";
+import type {
+  Employee,
+  Engine,
+  EngineResult,
+  JinnConfig,
+  ModelRegistry,
+  WorkflowAttemptCompletion,
+} from "../../shared/types.js";
 import { createSession, getMessages, getSession, listSessions, updateSession } from "../../sessions/registry.js";
 import { SessionManager } from "../../sessions/manager.js";
 import type { Binding, JsonValue, WorkflowDefinition } from "../model.js";
@@ -441,6 +448,77 @@ describe("first Workflow vertical", () => {
         nextReminderAt: expect.any(String),
       }],
     });
+  });
+
+  it.each([
+    ["drops the kill reason", {
+      sessionId: "native-hermes-no-text",
+      result: "",
+      error: "hermes acp exited",
+      durationMs: 1,
+    }],
+    ["returns partial text without an error", {
+      sessionId: "native-hermes-partial",
+      result: "Partial draft retained by the engine.",
+      error: undefined,
+      durationMs: 1,
+    }],
+  ] as const)("classifies an operator interruption at the API boundary when the engine %s", async (_label, interruptedResult) => {
+    const authored = definition({ id: `boundary-interruption-${interruptedResult.sessionId}` });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "boundary" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+    const sessionId = service.getRun(authored.id, started.id)!.attempts[0]!.sessionId!;
+    const completions: WorkflowAttemptCompletion[] = [];
+    const unsubscribe = manager.subscribeWorkflowAttemptCompletion((event) => {
+      completions.push(event);
+    });
+
+    await postSessionMessage(sessionId, "Preserve this follow-up across the interruption.");
+    expect(getSession(sessionId)).toMatchObject({
+      attemptInterruptionCause: "user-message",
+      attemptInterruptionTurn: 1,
+    });
+
+    engine.resolve(interruptedResult);
+    await vi.waitFor(() => expect(completions).toHaveLength(1));
+    expect(completions[0]).toMatchObject({
+      sessionId,
+      turn: 1,
+      outcome: "interrupted",
+      interruptionCause: "user-message",
+    });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(2));
+    await vi.waitFor(() => {
+      expect(service.getRun(authored.id, started.id)?.attempts[0]?.lastProcessedTurn).toBe(1);
+    });
+    expect(service.getRun(authored.id, started.id)).toMatchObject({
+      status: "running",
+      attempts: [{
+        status: "running",
+        remindersSent: 0,
+        lastProcessedTurn: 1,
+        nextReminderAt: expect.any(String),
+      }],
+    });
+
+    expect(await postAttempt("submit", sessionId, {
+      fields: { result: "published" },
+      summary: "Submitted after the transformed interruption.",
+    })).toEqual({ status: 200, body: { ok: true } });
+    engine.resolve({ sessionId: "native-hermes-follow-up", result: "Submitted.", durationMs: 1 });
+    await vi.waitFor(() => expect(getSession(sessionId)?.status).toBe("idle"));
+    expect(service.getRun(authored.id, started.id)).toMatchObject({
+      status: "completed",
+      attempts: [{
+        status: "completed",
+        remindersSent: 0,
+        output: {
+          fields: { result: "published" },
+          text: "Submitted after the transformed interruption.",
+        },
+      }],
+    });
+    unsubscribe();
   });
 
   it("completes after an operator interruption and additional workflow-session turns", async () => {

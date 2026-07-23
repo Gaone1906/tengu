@@ -377,6 +377,10 @@ export interface Session {
   /** Monotonic count of completed turns in a workflow attempt session. Unlike
    * attemptTerminalVersion, this is not reset when the next turn begins. */
   attemptTurn?: number;
+  /** Durable interruption classification recorded before an engine is killed.
+   * The paired turn fence prevents an older cause from leaking into a later turn. */
+  attemptInterruptionCause?: WorkflowAttemptInterruptionCause | null;
+  attemptInterruptionTurn?: number | null;
   effortLevel: string | null;
   totalCost: number;
   totalTurns: number;

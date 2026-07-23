@@ -55,7 +55,10 @@ import {
   type PartialStreamWriter,
 } from "./partial-stream.js";
 import { completedStreamedBlockIds } from "../gateway/streamed-blocks.js";
-import { workflowAttemptInterruptionCause } from "./workflow-interruptions.js";
+import {
+  isDurableWorkflowUserMessageInterruption,
+  workflowAttemptInterruptionCause,
+} from "./workflow-interruptions.js";
 
 export interface RouteOptions {
   employee?: Employee;
@@ -248,7 +251,8 @@ export class SessionManager {
     const event: WorkflowAttemptCompletion = { sessionId: session.id, owner: { workflowId: provenance.workflowId, runId: provenance.runId, nodeId: provenance.phase.nodeId,
       attempt: provenance.phase.attempt }, turn, terminalVersion: 1, outcome: session.attemptOutcome, completedAt: session.lastActivity,
       ...(session.attemptOutcome === "interrupted" ? {
-        interruptionCause: interruptionCause ?? workflowAttemptInterruptionCause(session.lastError),
+        interruptionCause: interruptionCause
+          ?? workflowAttemptInterruptionCause(session.lastError, session, turn),
       } : {}),
       ...(finalText ? { finalText } : {}), ...(session.lastError ? { error: session.lastError } : {}) };
     this.emittedWorkflowAttemptCompletions.add(key); for (const listener of this.workflowAttemptCompletionListeners)
@@ -634,7 +638,9 @@ export class SessionManager {
         return;
       }
 
-      const wasInterrupted = result.error?.startsWith("Interrupted")
+      const completionTurn = (liveAfterRun.attemptTurn ?? 0) + 1;
+      const wasInterrupted = isDurableWorkflowUserMessageInterruption(liveAfterRun, completionTurn)
+        || result.error?.startsWith("Interrupted")
         || liveAfterRun.attemptToken !== attemptToken
         || liveAfterRun.status !== "running";
 

@@ -51,7 +51,11 @@ export class WorkflowSessionExecutor implements WorkflowSessionExecutorContract 
       terminalVersion: 1,
       outcome: session.attemptOutcome,
       ...(session.attemptOutcome === "interrupted" ? {
-        interruptionCause: workflowAttemptInterruptionCause(session.lastError),
+        interruptionCause: workflowAttemptInterruptionCause(
+          session.lastError,
+          session,
+          session.attemptTurn,
+        ),
       } : {}),
       completedAt: session.lastActivity,
       ...(receipt?.finalText ? { finalText: receipt.finalText } : {}),
