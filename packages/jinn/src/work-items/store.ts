@@ -385,6 +385,13 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   if (input.parentId) {
     parent = getWorkItem(input.parentId);
     if (!parent) throw new Error(`parent Todo ${input.parentId} not found`);
+    // Closed parents refuse new children (the roll-up gate would otherwise be
+    // violable by construction order). `escalated` deliberately stays creatable-
+    // under: escalation routes an item to the operator, and decomposing it into
+    // sub-tasks is a legitimate part of resolving it.
+    if (parent.status === 'done' || parent.status === 'cancelled') {
+      throw new Error(`parent Todo ${parent.id} is ${parent.status} — sub-tasks cannot be added under a closed Todo`);
+    }
     if (parent.depth >= 3) {
       throw new Error(`parent Todo ${parent.id} is at depth ${parent.depth} — the sub-task tree is capped at depth 3`);
     }

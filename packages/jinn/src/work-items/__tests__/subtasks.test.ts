@@ -7,10 +7,13 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-sub-"));
 process.env.JINN_HOME = tmp;
 
 type Store = typeof import("../store.js");
+type Transitions = typeof import("../transitions.js");
 let store: Store;
+let transitions: Transitions;
 
 beforeAll(async () => {
   store = await import("../store.js");
+  transitions = await import("../transitions.js");
   (await import("../../sessions/registry.js")).initDb();
 });
 
@@ -46,5 +49,23 @@ describe("sub-tasks", () => {
 
   it("rejects an unknown parent", () => {
     expect(() => store.createWorkItem({ title: "orphan", parentId: "ZZZ-999" })).toThrow(/not found/);
+  });
+
+  it("refuses to create a child under a closed (done/cancelled) parent", () => {
+    const doneParent = store.createWorkItem({ title: "done parent" });
+    transitions.transition(doneParent.id, "done", "operator", { human: true });
+    expect(() => store.createWorkItem({ title: "late child", parentId: doneParent.id })).toThrow(/closed/);
+
+    const cancelledParent = store.createWorkItem({ title: "cancelled parent" });
+    transitions.transition(cancelledParent.id, "cancelled", "operator", { human: true });
+    expect(() => store.createWorkItem({ title: "late child 2", parentId: cancelledParent.id })).toThrow(/closed/);
+  });
+
+  it("allows creating a child under an escalated parent (decomposition is part of resolving it)", () => {
+    const escalatedParent = store.createWorkItem({ title: "escalated parent" });
+    transitions.transition(escalatedParent.id, "escalated", "operator");
+    const child = store.createWorkItem({ title: "resolution step", parentId: escalatedParent.id });
+    expect(child.parentId).toBe(escalatedParent.id);
+    expect(child.depth).toBe(1);
   });
 });
