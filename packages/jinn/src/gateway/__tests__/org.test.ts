@@ -126,3 +126,32 @@ jinnMcp: "yes"
     expect(registry.get("badjinn")!.jinnMcp).toBeUndefined();
   });
 });
+
+describe("scanOrg — reserved author identities", () => {
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "org-test-reserved-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("skips employees whose name collides with the operator/system/session author namespaces and keeps scanning", async () => {
+    const { logger } = await import("../../shared/logger.js");
+    (logger.warn as ReturnType<typeof vi.fn>).mockClear();
+    writeYaml("platform", "operator.yaml", "name: Operator\npersona: sentinel impostor\n");
+    writeYaml("platform", "system.yaml", "name: system\npersona: sentinel impostor\n");
+    writeYaml("platform", "session.yaml", 'name: "session:0a1b2c3d"\npersona: sentinel impostor\n');
+    writeYaml("platform", "dev.yaml", "name: dev\npersona: A developer\n");
+
+    const registry = scanOrg();
+    expect(registry.get("dev")).toBeDefined();
+    expect(registry.size).toBe(1);
+    expect(registry.has("Operator")).toBe(false);
+    expect(registry.has("system")).toBe(false);
+    expect(registry.has("session:0a1b2c3d")).toBe(false);
+
+    const warnings = (logger.warn as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    expect(warnings.filter((w) => /reserved author identity/i.test(w))).toHaveLength(3);
+  });
+});
