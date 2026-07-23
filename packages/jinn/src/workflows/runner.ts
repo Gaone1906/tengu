@@ -436,11 +436,14 @@ export class WorkflowRunner {
   }
 
   private settleFailure(run: WorkflowRunDetail, attempt: typeof run.attempts[number], error: WorkflowError,
-    status: "failed" | "timed-out" | "cancelled", endedAt: string): boolean {
+    status: "failed" | "timed-out" | "cancelled", endedAt: string, processedTurn?: number): boolean {
     const retry = attempt.attempt < attempt.resolvedConfig.retry.attempts;
     const routed = !retry && run.definition.edges.some((edge) => edge.from.nodeId === attempt.nodeId && edge.from.port === "error");
     const failure = retry ? { ...error, retryable: true } : error;
     this.options.repository.mutateRun(run.id, run.revision, (tx) => {
+      if (processedTurn !== undefined) {
+        tx.setAttemptReminder(attempt.nodeId, attempt.attempt, { lastProcessedTurn: processedTurn });
+      }
       tx.settleAttempt(attempt.nodeId, attempt.attempt, { status,
         ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}), error: failure, endedAt });
       if (retry) {
@@ -584,7 +587,8 @@ export class WorkflowRunner {
 
   async complete(event: WorkflowAttemptCompletion): Promise<boolean> {
     const attempt = this.options.repository.findAttemptBySessionId(event.sessionId);
-    if (!attempt || attempt.status !== "running" || event.terminalVersion < 1) return false;
+    if (!attempt || attempt.status !== "running" || event.terminalVersion < 1
+      || !Number.isInteger(event.turn) || event.turn < 1 || event.turn <= attempt.lastProcessedTurn) return false;
     const run = this.detail(event.owner.workflowId, event.owner.runId);
     if (attempt.runId !== run.id || attempt.nodeId !== event.owner.nodeId || attempt.attempt !== event.owner.attempt) return false;
     const node = run.definition.nodes.find((candidate): candidate is EmployeeNode => candidate.id === attempt.nodeId && candidate.type === "employee");
@@ -615,6 +619,7 @@ export class WorkflowRunner {
           tx.setAttemptReminder(attempt.nodeId, attempt.attempt, {
             nextReminderAt: addMinutes(endedAt, REMINDER_RUNGS_MINUTES[attempt.remindersSent]!),
             ...(pendingOutputError ? { pendingOutputError } : {}),
+            lastProcessedTurn: event.turn,
           });
         });
         this.changed(run);
@@ -629,16 +634,18 @@ export class WorkflowRunner {
         nodeId: attempt.nodeId,
         attempt: attempt.attempt,
       };
-      const routed = this.settleFailure(run, attempt, noOutput, "failed", endedAt);
+      const routed = this.settleFailure(run, attempt, noOutput, "failed", endedAt, event.turn);
       if (routed) await this.advance(run.workflowId, run.id);
       return true;
     }
     if (!output && !cancellation) {
-      const routed = this.settleFailure(run, attempt, failure!, event.outcome === "interrupted" ? "cancelled" : "failed", endedAt);
+      const routed = this.settleFailure(run, attempt, failure!,
+        event.outcome === "interrupted" ? "cancelled" : "failed", endedAt, event.turn);
       if (routed) await this.advance(run.workflowId, run.id);
       return true;
     }
     this.options.repository.mutateRun(run.id, run.revision, (tx) => {
+      tx.setAttemptReminder(attempt.nodeId, attempt.attempt, { lastProcessedTurn: event.turn });
       if (cancellation) {
         tx.settleAttempt(attempt.nodeId, attempt.attempt, {
           status: "cancelled", sessionId: event.sessionId, error: cancellation, endedAt,

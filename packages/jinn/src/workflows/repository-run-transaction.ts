@@ -190,9 +190,9 @@ export class RunMutation implements WorkflowRunTransaction {
     this.assertOpen();
     const id = parseNodeId(nodeId);
     if (!Number.isInteger(attempt) || attempt < 1) repositoryError('bad-input', 'Workflow attempt number is invalid.');
-    const keys = ['remindersSent', 'nextReminderAt', 'extensions', 'lastExtensionReason', 'pendingOutputError'];
+    const keys = ['remindersSent', 'nextReminderAt', 'extensions', 'lastExtensionReason', 'pendingOutputError', 'lastProcessedTurn'];
     const values = normalizedRecord(patch, keys, 'Workflow attempt reminder patch is invalid.');
-    for (const key of ['remindersSent', 'extensions'] as const) {
+    for (const key of ['remindersSent', 'extensions', 'lastProcessedTurn'] as const) {
       if (values[key] !== undefined && (!Number.isInteger(values[key]) || (values[key] as number) < 0)) {
         repositoryError('bad-input', 'Workflow attempt reminder patch is invalid.');
       }
@@ -221,10 +221,12 @@ export class RunMutation implements WorkflowRunTransaction {
       if (values.pendingOutputError === null) delete next.pendingOutputError;
       else next.pendingOutputError = values.pendingOutputError as string;
     }
+    if (values.lastProcessedTurn !== undefined) next.lastProcessedTurn = values.lastProcessedTurn as number;
     if (!recordChanged(current, next)) return current;
     this.db.prepare(`UPDATE workflow_attempts SET reminders_sent = @remindersSent,
       next_reminder_at = @nextReminderAt, extensions = @extensions,
-      last_extension_reason = @lastExtensionReason, pending_output_error = @pendingOutputError
+      last_extension_reason = @lastExtensionReason, pending_output_error = @pendingOutputError,
+      last_processed_turn = @lastProcessedTurn
       WHERE run_id = @runId AND node_id = @nodeId AND attempt = @attempt`).run({
       runId: this.runId,
       nodeId: id,
@@ -234,6 +236,7 @@ export class RunMutation implements WorkflowRunTransaction {
       extensions: next.extensions,
       lastExtensionReason: next.lastExtensionReason ?? null,
       pendingOutputError: next.pendingOutputError ?? null,
+      lastProcessedTurn: next.lastProcessedTurn,
     });
     this.didChange = true;
     return readAttempt(this.db, this.runId, id, attempt)!;

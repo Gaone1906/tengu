@@ -85,6 +85,7 @@ export interface WorkflowAttemptRecord {
   extensions: number;
   lastExtensionReason?: string;
   pendingOutputError?: string;
+  lastProcessedTurn: number;
 }
 
 export interface WorkflowApprovalRecord {

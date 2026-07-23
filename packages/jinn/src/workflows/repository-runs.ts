@@ -47,7 +47,7 @@ const attemptRecordSchema = z.strictObject({
   output: outputSchema.optional(), error: errorSchema.optional(), startedAt: instantSchema, endedAt: instantSchema.optional(),
   remindersSent: z.number().int().nonnegative(), nextReminderAt: instantSchema.optional(),
   extensions: z.number().int().nonnegative(), lastExtensionReason: z.string().optional(),
-  pendingOutputError: z.string().optional(),
+  pendingOutputError: z.string().optional(), lastProcessedTurn: z.number().int().nonnegative(),
 });
 const approvalRecordSchema = z.strictObject({
   runId: z.string(), nodeId: z.string(), status: z.enum(['pending', 'approved', 'rejected']),
@@ -81,7 +81,7 @@ interface AttemptRow {
   run_id: unknown; node_id: unknown; attempt: unknown; session_id: unknown; status: unknown;
   resolved_config_json: unknown; input_json: unknown; output_json: unknown; error_json: unknown;
   started_at: unknown; ended_at: unknown; reminders_sent: unknown; next_reminder_at: unknown;
-  extensions: unknown; last_extension_reason: unknown; pending_output_error: unknown;
+  extensions: unknown; last_extension_reason: unknown; pending_output_error: unknown; last_processed_turn: unknown;
 }
 interface ApprovalRow {
   run_id: unknown; node_id: unknown; status: unknown; requested_at: unknown; approver_ref: unknown;
@@ -168,6 +168,7 @@ export function decodeAttempt(row: AttemptRow): WorkflowAttemptRecord {
     extensions: row.extensions,
     ...(row.last_extension_reason === null ? {} : { lastExtensionReason: row.last_extension_reason }),
     ...(row.pending_output_error === null ? {} : { pendingOutputError: row.pending_output_error }),
+    lastProcessedTurn: row.last_processed_turn,
   }, `Workflow attempt ${String(row.node_id)}:${String(row.attempt)}`);
   const terminal = ['completed', 'failed', 'timed-out', 'cancelled'].includes(record.status);
   if ((record.status === 'dispatching' && (record.sessionId || record.output || record.error || record.endedAt))

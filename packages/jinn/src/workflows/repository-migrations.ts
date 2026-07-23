@@ -115,6 +115,7 @@ ALTER TABLE workflow_attempts ADD COLUMN next_reminder_at TEXT;
 ALTER TABLE workflow_attempts ADD COLUMN extensions INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE workflow_attempts ADD COLUMN last_extension_reason TEXT;
 ALTER TABLE workflow_attempts ADD COLUMN pending_output_error TEXT;
+ALTER TABLE workflow_attempts ADD COLUMN last_processed_turn INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX workflow_attempts_due_reminder ON workflow_attempts(status, next_reminder_at);
 `;
 
@@ -135,6 +136,7 @@ const CREATE_DOMAIN_SCHEMA_V3_SQL = CREATE_DOMAIN_SCHEMA_V2_SQL
   extensions INTEGER NOT NULL DEFAULT 0,
   last_extension_reason TEXT,
   pending_output_error TEXT,
+  last_processed_turn INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(run_id, node_id, attempt),`)
   .replace('CREATE INDEX workflow_approvals_pending ON workflow_approvals(status, requested_at);',
     `CREATE INDEX workflow_approvals_pending ON workflow_approvals(status, requested_at);

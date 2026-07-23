@@ -43,6 +43,7 @@ class FakeExecutor {
   readonly states = new Map<string, { idle: boolean; runningChildren: number }>();
   private readonly listeners = new Set<WorkflowAttemptCompletionListener>();
   private readonly turns = new Map<string, number>();
+  private readonly receipts = new Map<string, WorkflowAttemptCompletion>();
 
   async startAttempt(command: WorkflowAttemptCommand): Promise<{ sessionId: string }> {
     this.commands.push(command);
@@ -61,7 +62,9 @@ class FakeExecutor {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
   }
-  readTerminalCompletion(): WorkflowAttemptCompletion | null { return null; }
+  readTerminalCompletion(sessionId: string): WorkflowAttemptCompletion | null {
+    return this.receipts.get(sessionId) ?? null;
+  }
   async turnEnd(finalText = "Still working.", outcome: WorkflowAttemptCompletion["outcome"] = "succeeded"): Promise<void> {
     const command = this.commands.at(-1)!;
     const sessionId = this.sessionId(command);
@@ -76,6 +79,7 @@ class FakeExecutor {
       ...(outcome === "succeeded" ? { finalText } : { error: finalText }),
       completedAt: now,
     };
+    this.receipts.set(sessionId, event);
     await Promise.all([...this.listeners].map((listener) => listener(event)));
   }
   sessionId(command = this.commands.at(-1)!): string {
@@ -137,6 +141,17 @@ async function start(input: Parameters<typeof saveDefinition>[0]) {
 async function recover(at: string): Promise<void> {
   now = at;
   await service.recover(now);
+}
+
+function rebuildService(): void {
+  service.dispose();
+  service = new WorkflowService({
+    repository,
+    executor: executor as unknown as WorkflowSessionExecutor,
+    employees: () => new Map([[employee.name, employee]]),
+    models: () => models,
+    now: () => now,
+  });
 }
 
 async function sendThreeReminders(): Promise<void> {
@@ -202,6 +217,45 @@ describe("workflow explicit completion and reminder ladder", () => {
     expect(executor.reminders).toHaveLength(3);
     expect(executor.reminders[2]?.text).toContain("final reminder");
     expect(executor.reminders[2]?.text).toContain("workflow_extend_deadline");
+  });
+
+  it("ignores the persisted prior turn after a reminder is delivered but before its turn runs", async () => {
+    const { definition, run } = await start({ id: "restart-before-reminder-turn" });
+    await executor.turnEnd();
+    await recover("2026-07-21T10:05:00.000Z");
+    expect(service.getRun(definition.id, run.id)?.attempts[0]).toMatchObject({
+      status: "running",
+      remindersSent: 1,
+      lastProcessedTurn: 1,
+    });
+
+    rebuildService();
+    const recovered = await service.recover(now);
+
+    expect(recovered.resumedRuns).toBe(0);
+    expect(service.getRun(definition.id, run.id)?.attempts[0]).toMatchObject({
+      status: "running",
+      remindersSent: 1,
+      lastProcessedTurn: 1,
+    });
+    expect(service.getRun(definition.id, run.id)?.attempts[0]?.nextReminderAt).toBeUndefined();
+  });
+
+  it("ignores duplicate stale receipts after a reminder rung is consumed", async () => {
+    const { definition, run } = await start({ id: "duplicate-stale-receipt" });
+    await executor.turnEnd();
+    await recover("2026-07-21T10:05:00.000Z");
+    rebuildService();
+    const revision = service.getRun(definition.id, run.id)!.revision;
+
+    expect(await service.recover(now)).toMatchObject({ resumedRuns: 0 });
+    expect(await service.recover(now)).toMatchObject({ resumedRuns: 0 });
+    expect(service.getRun(definition.id, run.id)).toMatchObject({ revision });
+    expect(service.getRun(definition.id, run.id)?.attempts[0]).toMatchObject({
+      remindersSent: 1,
+      lastProcessedTurn: 1,
+    });
+    expect(service.getRun(definition.id, run.id)?.attempts[0]?.nextReminderAt).toBeUndefined();
   });
 
   it("defers busy and child-active sessions five minutes without consuming a rung", async () => {

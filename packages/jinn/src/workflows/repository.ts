@@ -88,6 +88,7 @@ export interface WorkflowRunTransaction {
     extensions?: number;
     lastExtensionReason?: string | null;
     pendingOutputError?: string | null;
+    lastProcessedTurn?: number;
   }): WorkflowAttemptRecord;
   putApproval(input: Omit<WorkflowApprovalRecord, 'runId'>): WorkflowApprovalRecord;
 }
