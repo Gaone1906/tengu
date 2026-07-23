@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import { initDb } from '../sessions/registry.js';
 import { loadConfig } from '../shared/config.js';
 import { CONFIG_PATH } from '../shared/paths.js';
-import { parseTodoId } from './id.js';
+import { parseTodoId, resolveTodoIdPrefix } from './id.js';
+import { resolveDepartmentPrefix } from './departments.js';
 import { allocateWorkItemId, useWorkItemAllocationClaim } from './migrate.js';
 
 /**
@@ -94,6 +95,13 @@ export interface WorkItem {
   status: WorkItemStatus;
   department: string | null;
   assignee: string | null;
+  /** Who asked for this item: 'operator', an employee slug, or 'system'. */
+  createdBy: string;
+  /** Sub-task tree (Todos v2): parent link, denormalized root, and depth 0..3. */
+  parentId: string | null;
+  rootId: string;
+  depth: number;
+  dueAt: string | null;
   priority: number;
   /** Nullable manual order key. Lower ranked values render first. */
   rank: number | null;
@@ -127,6 +135,10 @@ export interface CreateWorkItemInput {
   status?: WorkItemStatus;
   department?: string | null;
   assignee?: string | null;
+  /** Creator identity; defaults to 'operator' for source=human, 'system' otherwise. */
+  createdBy?: string;
+  /** Optional ISO 8601 deadline. */
+  dueAt?: string | null;
   priority?: number;
   source?: WorkItemSource;
   /**
@@ -195,6 +207,11 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItem {
     status: row.status as WorkItemStatus,
     department: (row.department as string) ?? null,
     assignee: (row.assignee as string) ?? null,
+    createdBy: row.created_by as string,
+    parentId: (row.parent_id as string) ?? null,
+    rootId: row.root_id as string,
+    depth: (row.depth as number) ?? 0,
+    dueAt: (row.due_at as string) ?? null,
     priority: row.priority as number,
     rank: (row.rank as number) ?? null,
     version: row.version as number,
@@ -352,9 +369,10 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
   // A configless disposable/test home retains the historical JIN default. Once a
   // real config exists, malformed configuration must still fail closed rather than
   // silently allocating from the wrong company namespace.
-  const portal = fs.existsSync(CONFIG_PATH) ? loadConfig().portal : undefined;
-  const companyName = portal?.companyName ?? 'Jinn';
-  const claim = allocateWorkItemId(db, now, companyName, portal?.companyPrefix);
+  const companyPrefix = resolveCompanyPrefix();
+  const department = input.department ?? null;
+  const prefix = department ? resolveDepartmentPrefix(db, department, companyPrefix) : companyPrefix;
+  const claim = allocateWorkItemId(db, now, prefix);
   const id = claim.id;
   const status: WorkItemStatus = input.status ?? 'backlog';
   const source: WorkItemSource = input.source ?? 'human';
@@ -378,16 +396,19 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
     try {
       db.prepare(
         `INSERT INTO work_items
-           (id, title, body, status, department, assignee, priority, source, source_ref,
-            acceptance, verify_policy, budget_usd, created_at, updated_at, closed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, title, body, status, department, assignee, created_by, parent_id, root_id, depth, due_at,
+            priority, source, source_ref, acceptance, verify_policy, budget_usd, created_at, updated_at, closed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         input.title,
         input.body ?? null,
         status,
-        input.department ?? null,
+        department,
         input.assignee ?? null,
+        input.createdBy ?? (source === 'human' ? 'operator' : 'system'),
+        id,                      // root_id = own id for a root
+        input.dueAt ?? null,
         priority,
         source,
         sourceRef,
@@ -412,6 +433,13 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
     return getWorkItem(id)!;
   });
   return useWorkItemAllocationClaim(db, claim, () => txn());
+}
+
+/** The company Todo namespace: derived from configured company name, or the
+ *  explicit `portal.companyPrefix` override; configless homes keep `JIN`. */
+export function resolveCompanyPrefix(): string {
+  const portal = fs.existsSync(CONFIG_PATH) ? loadConfig().portal : undefined;
+  return resolveTodoIdPrefix(portal?.companyName ?? 'Jinn', portal?.companyPrefix);
 }
 
 export function getWorkItem(id: string): WorkItem | undefined {

@@ -76,7 +76,8 @@ describe("startup Todo preflight — classification", () => {
     migrateWorkItemsSchema(db, preflightWorkItemsDatabase(file));
 
     expect(() => verifyCurrentWorkItemSchema(db)).not.toThrow();
-    expect(db.prepare("SELECT high_water FROM work_item_id_allocator WHERE singleton = 1").pluck().get()).toBe(0);
+    // v2 allocator namespaces are created lazily per prefix — a fresh home has none.
+    expect(db.prepare("SELECT COUNT(*) FROM work_item_id_allocator").pluck().get()).toBe(0);
     db.close();
   });
 
@@ -119,9 +120,9 @@ describe("startup Todo preflight — classification", () => {
     migrateWorkItemsSchema(winner, stalePreflight);
     const claim = allocateWorkItemId(winner, "2026-07-14T00:00:00.000Z");
     useWorkItemAllocationClaim(winner, claim, () => winner.prepare(`
-      INSERT INTO work_items (id, title, created_at, updated_at)
-      VALUES (?, 'must survive stale startup', '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:00.000Z')
-    `).run(claim.id));
+      INSERT INTO work_items (id, title, created_by, root_id, depth, created_at, updated_at)
+      VALUES (?, 'must survive stale startup', 'system', ?, 0, '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:00.000Z')
+    `).run(claim.id, claim.id));
     winner.close();
 
     const staleStarter = new Database(file);
@@ -230,7 +231,7 @@ function runMigrationWave(
   file: string,
   round: number,
   type: "migrate" | "allocate" = "migrate",
-  companyNames?: string[],
+  prefixes?: string[],
 ): Promise<MigrationWorkerResult[]> {
   return Promise.all(children.map((child, worker) => new Promise<MigrationWorkerResult>((resolve, reject) => {
     const onError = (error: Error) => {
@@ -251,7 +252,7 @@ function runMigrationWave(
       path: file,
       round,
       worker,
-      companyName: companyNames?.[worker],
+      prefix: prefixes?.[worker],
       now: `2026-07-14T00:00:${String(worker).padStart(2, "0")}.000Z`,
     });
   })));
@@ -274,7 +275,7 @@ describe("startup Todo preflight — concurrent first boot", () => {
     }
 
     const db = new Database(file);
-    expect(db.prepare("SELECT COUNT(*) FROM work_item_id_allocator").pluck().get()).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) FROM work_item_id_allocator").pluck().get()).toBe(0);
     expect(() => verifyCurrentWorkItemSchema(db)).not.toThrow();
     db.close();
   }, 30_000);
@@ -285,22 +286,27 @@ describe("startup Todo preflight — concurrent first boot", () => {
     await Promise.all(workers.map((worker) => worker.ready));
 
     try {
-      const companyNames = Array.from({ length: 32 }, (_, index) => index % 2 === 0 ? "IC-IDEV" : "Acme Labs");
-      const results = await runMigrationWave(workers.map((worker) => worker.child), file, 2, "allocate", companyNames);
+      // v2 truth: two prefixes contend concurrently and each namespace stays
+      // independently monotonic without reuse.
+      const prefixArgs = Array.from({ length: 32 }, (_, index) => index % 2 === 0 ? "ICI" : "ACM");
+      const results = await runMigrationWave(workers.map((worker) => worker.child), file, 2, "allocate", prefixArgs);
       expect(results.filter((result) => !result.ok)).toEqual([]);
       expect(new Set(results.map((result) => result.id)).size).toBe(32);
-      const prefixes = new Set(results.map((result) => result.id?.slice(0, 3)));
-      expect(prefixes.size).toBe(1);
-      const [prefix] = [...prefixes];
-      expect(["ICI", "ACM"]).toContain(prefix);
-      expect(results.map((result) => result.id).sort((a, b) => Number(a?.slice(4)) - Number(b?.slice(4))))
-        .toEqual(Array.from({ length: 32 }, (_, index) => `${prefix}-${index + 1}`));
+      for (const prefix of ["ICI", "ACM"] as const) {
+        const ordinals = results
+          .map((result) => result.id)
+          .filter((id): id is string => !!id && id.startsWith(`${prefix}-`))
+          .map((id) => Number(id.slice(4)))
+          .sort((a, b) => a - b);
+        expect(ordinals).toEqual(Array.from({ length: 16 }, (_, index) => index + 1));
+      }
     } finally {
       for (const worker of workers) worker.child.disconnect();
     }
 
     const db = new Database(file);
-    expect(db.prepare("SELECT high_water FROM work_item_id_allocator WHERE singleton = 1").pluck().get()).toBe(32);
+    expect(db.prepare("SELECT prefix, high_water FROM work_item_id_allocator ORDER BY prefix").all())
+      .toEqual([{ prefix: "ACM", high_water: 16 }, { prefix: "ICI", high_water: 16 }]);
     expect(db.prepare("SELECT COUNT(*) FROM work_item_id_burns").pluck().get()).toBe(32);
     expect(db.prepare("SELECT COUNT(*) FROM work_item_id_issuances").pluck().get()).toBe(32);
     expect(db.prepare("SELECT COUNT(*) FROM work_items").pluck().get()).toBe(32);

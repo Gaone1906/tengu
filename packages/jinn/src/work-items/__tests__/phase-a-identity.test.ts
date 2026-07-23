@@ -26,7 +26,7 @@ describe("Phase A Todo identity", () => {
 
     expect(first.id).toBe("JIN-1");
     expect(second.id).toBe("JIN-2");
-    expect(db.prepare("SELECT high_water FROM work_item_id_allocator WHERE singleton = 1").pluck().get()).toBe(2);
+    expect(db.prepare("SELECT high_water FROM work_item_id_allocator WHERE prefix = 'JIN'").pluck().get()).toBe(2);
     expect(db.prepare("SELECT ordinal FROM work_item_id_burns ORDER BY ordinal").pluck().all()).toEqual([1, 2]);
     expect(db.prepare("SELECT ordinal FROM work_item_id_issuances ORDER BY ordinal").pluck().all()).toEqual([1, 2]);
   });

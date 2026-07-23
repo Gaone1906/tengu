@@ -17,16 +17,16 @@ process.on("message", (message) => {
     const result = migrateWorkItemsSchema(db);
     let id;
     if (message.type === "allocate") {
-      const claim = allocateWorkItemId(db, message.now, message.companyName ?? "Jinn");
+      const claim = allocateWorkItemId(db, message.now, message.prefix ?? "JIN");
       useWorkItemAllocationClaim(db, claim, () => db.prepare(`
-        INSERT INTO work_items (id, title, created_at, updated_at)
-        VALUES (?, ?, ?, ?)
-      `).run(claim.id, `worker-${message.worker}`, message.now, message.now));
+        INSERT INTO work_items (id, title, created_by, root_id, depth, created_at, updated_at)
+        VALUES (?, ?, 'system', ?, 0, ?, ?)
+      `).run(claim.id, `worker-${message.worker}`, claim.id, message.now, message.now));
       id = claim.id;
     }
     const integrity = db.pragma("integrity_check", { simple: true });
     const highWater = db
-      .prepare("SELECT high_water FROM work_item_id_allocator WHERE singleton = 1")
+      .prepare("SELECT COALESCE(MAX(high_water), 0) FROM work_item_id_allocator")
       .pluck()
       .get();
     process.send?.({ round: message.round, ok: true, result, integrity, highWater, id });

@@ -1,3 +1,4 @@
+import type { Database as DatabaseType } from "better-sqlite3";
 import { deriveTodoIdPrefix } from "./id.js";
 
 /**
@@ -31,4 +32,32 @@ export function pickFreePrefix(candidate: string, taken: ReadonlySet<string>): s
     }
   }
   throw new Error(`no free Todo ID prefix near ${candidate}`);
+}
+
+/** Resolve (lazily registering) the immutable ID prefix for a department slug.
+ *  `reservedCompanyPrefix` is the company namespace and can never be assigned
+ *  to a department. Registration races resolve via the UNIQUE constraint. */
+export function resolveDepartmentPrefix(db: DatabaseType, slug: string, reservedCompanyPrefix: string): string {
+  const existing = db.prepare("SELECT prefix FROM departments WHERE slug = ?").get(slug) as { prefix: string } | undefined;
+  if (existing) return existing.prefix;
+  const taken = new Set(db.prepare("SELECT prefix FROM departments").pluck().all() as string[]);
+  taken.add(reservedCompanyPrefix);
+  const prefix = pickFreePrefix(derivePrefixCandidate(slug), taken);
+  try {
+    db.prepare("INSERT INTO departments (slug, prefix, created_at) VALUES (?, ?, ?)")
+      .run(slug, prefix, new Date().toISOString());
+    return prefix;
+  } catch {
+    // Lost a registration race (slug or prefix landed concurrently) — re-read the winner.
+    const winner = db.prepare("SELECT prefix FROM departments WHERE slug = ?").get(slug) as { prefix: string } | undefined;
+    if (winner) return winner.prefix;
+    return resolveDepartmentPrefix(db, slug, reservedCompanyPrefix);
+  }
+}
+
+export interface DepartmentRecord { slug: string; prefix: string; createdAt: string }
+
+export function listDepartments(db: DatabaseType): DepartmentRecord[] {
+  return (db.prepare("SELECT slug, prefix, created_at FROM departments ORDER BY slug").all() as Array<Record<string, string>>)
+    .map((row) => ({ slug: row.slug, prefix: row.prefix, createdAt: row.created_at }));
 }

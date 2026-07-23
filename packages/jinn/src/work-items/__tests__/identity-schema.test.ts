@@ -10,35 +10,35 @@ import {
 
 function insertClaimedTodo(db: Database.Database, claim: ReturnType<typeof allocateWorkItemId>, title = "claimed"): void {
   useWorkItemAllocationClaim(db, claim, () => db.prepare(`
-    INSERT INTO work_items (id, title, created_at, updated_at)
-    VALUES (?, ?, '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:00.000Z')
-  `).run(claim.id, title));
+    INSERT INTO work_items (id, title, created_by, root_id, depth, created_at, updated_at)
+    VALUES (?, ?, 'system', ?, 0, '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:00.000Z')
+  `).run(claim.id, title, claim.id));
 }
 
 describe("the freshly created Todo schema", () => {
-  it("freezes the company-derived prefix on the first allocation", () => {
+  it("keeps each prefix namespace monotonic and refuses direct prefix rewrites", () => {
     const db = new Database(":memory:");
     migrateWorkItemsSchema(db, "absent");
 
-    const first = allocateWorkItemId(db, "2026-07-14T00:00:00.000Z", "IC-IDEV");
-    const second = allocateWorkItemId(db, "2026-07-14T00:00:01.000Z", "Acme Renamed");
-    const third = allocateWorkItemId(db, "2026-07-14T00:00:02.000Z", "AI");
+    const first = allocateWorkItemId(db, "2026-07-14T00:00:00.000Z", "ICI");
+    const second = allocateWorkItemId(db, "2026-07-14T00:00:01.000Z", "ICI");
+    const third = allocateWorkItemId(db, "2026-07-14T00:00:02.000Z", "ICI");
 
     expect(first.id).toBe("ICI-1");
     expect(second.id).toBe("ICI-2");
     expect(third.id).toBe("ICI-3");
-    expect(db.prepare("SELECT prefix FROM work_item_id_allocator WHERE singleton = 1").pluck().get()).toBe("ICI");
+    expect(db.prepare("SELECT prefix FROM work_item_id_allocator").pluck().all()).toEqual(["ICI"]);
     expect(() => db.prepare("UPDATE work_item_id_allocator SET prefix = 'ACM'").run()).toThrow(/allocator/i);
   });
 
-  it("rejects a claimed insert whose prefix differs from the frozen allocator", () => {
+  it("rejects a claimed insert whose prefix differs from the claimed namespace", () => {
     const db = new Database(":memory:");
     migrateWorkItemsSchema(db, "absent");
-    const claim = allocateWorkItemId(db, "2026-07-14T00:00:00.000Z", "IC-IDEV");
+    const claim = allocateWorkItemId(db, "2026-07-14T00:00:00.000Z", "ICI");
 
     expect(() => useWorkItemAllocationClaim(db, claim, () => db.prepare(`
-      INSERT INTO work_items (id, title, created_at, updated_at)
-      VALUES ('ACM-1', 'wrong company', '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:00.000Z')
+      INSERT INTO work_items (id, title, created_by, root_id, depth, created_at, updated_at)
+      VALUES ('ACM-1', 'wrong company', 'system', 'ACM-1', 0, '2026-07-14T00:00:00.000Z', '2026-07-14T00:00:00.000Z')
     `).run())).toThrow(/allocation claim/i);
   });
 
@@ -125,7 +125,7 @@ describe("the freshly created Todo schema", () => {
 
     expect(() => db.exec("UPDATE work_item_id_allocator SET high_water = 0")).toThrow(/allocator/i);
     expect(() => db.exec("DELETE FROM work_item_id_allocator")).toThrow(/allocator/i);
-    expect(() => db.exec("INSERT INTO work_item_id_allocator (singleton, high_water) VALUES (2, 2)")).toThrow();
+    expect(() => db.exec("INSERT INTO work_item_id_allocator (prefix, high_water) VALUES ('ZZZ', 2)")).toThrow();
     expect(() => db.exec("UPDATE work_item_id_burns SET burned_at = 'changed'")).toThrow(/append-only/i);
     expect(() => db.exec("DELETE FROM work_item_id_burns")).toThrow(/append-only/i);
     expect(() => db.exec("UPDATE work_item_id_issuances SET issued_at = 'changed'")).toThrow(/append-only/i);

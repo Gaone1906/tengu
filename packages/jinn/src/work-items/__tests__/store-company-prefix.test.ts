@@ -23,12 +23,20 @@ describe("Todo allocation from configured company name", () => {
     expect(store.createWorkItem({ title: "company identity" }).id).toBe("JNN-1");
   });
 
-  it("keeps the frozen prefix even if the configured company later becomes too short", () => {
+  it("mints under a newly configured prefix while preserving the prior namespace's sequence", () => {
     fs.writeFileSync(
       path.join(home, "config.yaml"),
       "engines:\n  default: claude\n  claude: {}\nportal:\n  companyName: AI\n  companyPrefix: ACM\n",
       "utf8",
     );
-    expect(store.createWorkItem({ title: "frozen identity" }).id).toBe("JNN-2");
+    // v2 allocator is per-prefix: a reconfigured company prefix opens its own
+    // namespace instead of being refused by a frozen singleton.
+    expect(store.createWorkItem({ title: "new namespace" }).id).toBe("ACM-1");
+    fs.writeFileSync(
+      path.join(home, "config.yaml"),
+      "engines:\n  default: claude\n  claude: {}\nportal:\n  companyName: IC-IDEV\n  companyPrefix: JNN\n",
+      "utf8",
+    );
+    expect(store.createWorkItem({ title: "continued identity" }).id).toBe("JNN-2");
   });
 });
