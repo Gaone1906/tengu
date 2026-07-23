@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
+import { useShallow } from "zustand/react/shallow"
 import { Plus, Trash2, X } from "lucide-react"
 import { api } from "@/lib/api"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -43,7 +44,9 @@ function PickerField({
 }) {
   return (
     <Field label={label}>
-      <Select value={value || undefined} onValueChange={onChange}>
+      {/* "" is a controlled empty selection — `|| undefined` would flip the
+          Select uncontrolled→controlled on first pick and warn. */}
+      <Select value={value} onValueChange={onChange}>
         <SelectTrigger aria-label={label}>
           <SelectValue placeholder={placeholder ?? "Choose…"} />
         </SelectTrigger>
@@ -272,7 +275,9 @@ function BindingEditor({
 }
 
 function ConditionForm({ node, update }: FormProps) {
-  const nodeIds = useEditor((state) => state.nodes.map((item) => item.id)).filter((id) => id !== node.id)
+  // useShallow keeps the snapshot stable — a fresh array per getSnapshot call
+  // loops useSyncExternalStore into React #185 and crashes the editor.
+  const nodeIds = useEditor(useShallow((state) => state.nodes.map((item) => item.id))).filter((id) => id !== node.id)
   const config = node.config as { cases?: CaseWire[]; defaultPort?: string }
   const cases = Array.isArray(config.cases) ? config.cases : []
 

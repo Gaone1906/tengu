@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { RouterProvider, createMemoryRouter } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -42,6 +42,7 @@ vi.mock("@/components/page-layout", () => ({
 vi.mock("@/context/breadcrumb-context", () => ({ useBreadcrumbs: () => undefined }))
 
 import { WorkflowValidationApiError } from "@/lib/api"
+import { DND_MIME } from "../editor/palette"
 import WorkflowListPage from "../list"
 import WorkflowPage from "../page"
 
@@ -106,6 +107,24 @@ describe("workflow editor surface", () => {
     expect(screen.getByText("Add step")).toBeTruthy()
     expect(screen.getByText("Saved")).toBeTruthy()
     expect(screen.getByRole("switch", { name: /enable workflow/i })).toBeTruthy()
+  })
+
+  it("creates a condition node without crashing the editor", async () => {
+    // Regression: the condition inspector's node-id selector returned a fresh
+    // array per snapshot, which loops useSyncExternalStore (React #185) and
+    // replaced the whole editor with the router error page.
+    renderRoute("/workflow/morning-digest")
+    await screen.findByText("Kickoff")
+
+    const canvas = document.querySelector(".react-flow")
+    if (!canvas) throw new Error("canvas not mounted")
+    fireEvent.drop(canvas, {
+      dataTransfer: { getData: (type: string) => (type === DND_MIME ? "condition" : "") },
+    })
+
+    // The new node mounts selected — its inspector must open, editor intact.
+    expect(await screen.findByRole("button", { name: /add route/i })).toBeTruthy()
+    expect(screen.getByText("Kickoff")).toBeTruthy()
   })
 
   it("switches to the runs lens without leaving the page", async () => {
