@@ -60,6 +60,6 @@ for (const fixture of [
     await expect(page.getByRole("button", { name: "Copy migration prompt" })).toBeVisible()
     await page.screenshot({ path: testInfo.outputPath(`${fixture.name}.png`), fullPage: true })
     await page.getByRole("button", { name: "Later" }).click()
-    await expect(page.getByRole("button", { name: "Finish v0.26.0 setup" })).toBeVisible()
+    await expect(page.getByRole("button", { name: "Finish v0.26.0 setup" })).toBeHidden()
   })
 }

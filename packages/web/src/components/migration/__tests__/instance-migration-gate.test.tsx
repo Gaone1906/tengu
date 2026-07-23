@@ -37,15 +37,23 @@ describe("InstanceMigrationGate", () => {
     expect(screen.queryByRole("dialog")).toBeNull()
   })
 
-  it("opens automatically; Later leaves a persistent banner that reopens it", async () => {
-    setup()
+  it("opens automatically; Later hides the reminder for the current migration", async () => {
+    const nextMigration = { ...pending, toVersion: "0.27.0", versions: ["0.27.0"], migrationKey: "key-2" }
+    const get = vi.fn()
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValue(nextMigration)
+    const { client } = setup({ get })
     expect(await screen.findByRole("dialog", { name: /v0\.26\.0 is installed/ })).not.toBeNull()
     await userEvent.click(screen.getByRole("button", { name: "Later" }))
     expect(screen.queryByRole("dialog")).toBeNull()
-    const banner = screen.getByRole("button", { name: /Finish v0\.26\.0 setup/ })
-    expect(banner).not.toBeNull()
-    await userEvent.click(banner)
-    expect(screen.getByRole("dialog")).not.toBeNull()
+    expect(screen.queryByRole("button", { name: /Finish v0\.26\.0 setup/ })).toBeNull()
+
+    await client.refetchQueries({ queryKey: ["instance-migration"] })
+    expect(screen.queryByRole("button", { name: /Finish v0\.26\.0 setup/ })).toBeNull()
+
+    await client.refetchQueries({ queryKey: ["instance-migration"] })
+    expect(await screen.findByRole("dialog", { name: /v0\.27\.0 is installed/ })).not.toBeNull()
   })
 
   it("copies exact prompt and opens one encoded COO session", async () => {
@@ -72,7 +80,8 @@ describe("InstanceMigrationGate", () => {
       .mockResolvedValue(pending)
     const { client } = setup({ get })
     await screen.findByRole("dialog")
-    await userEvent.click(screen.getByRole("button", { name: "Later" }))
+    fireEvent.keyDown(document, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     await client.refetchQueries({ queryKey: ["instance-migration"] })
     expect(screen.getByRole("button", { name: /Finish v0\.26\.0 setup/ })).not.toBeNull()
     const retry = await screen.findByRole("button", { name: "Retry migration check" })
@@ -95,7 +104,7 @@ describe("InstanceMigrationGate", () => {
 
     expect(await screen.findByRole("dialog", { name: /v0\.26\.0 is installed/ })).not.toBeNull()
     await userEvent.click(screen.getByRole("button", { name: "Later" }))
-    expect(screen.getByRole("button", { name: /Finish v0\.26\.0 setup/ })).not.toBeNull()
+    expect(screen.queryByRole("button", { name: /Finish v0\.26\.0 setup/ })).toBeNull()
   })
 
   it("removes banner and dialog after invalidation reports completion", async () => {

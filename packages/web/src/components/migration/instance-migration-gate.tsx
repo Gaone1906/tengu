@@ -32,6 +32,7 @@ export function InstanceMigrationGate({
 }) {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [dismissedKey, setDismissedKey] = useState<string | null>(null)
   const presentedKey = useRef<string | null>(null)
   const launching = useRef(false)
   const query = useQuery({
@@ -47,11 +48,13 @@ export function InstanceMigrationGate({
   useEffect(() => {
     if (!migration?.required || !migration.migrationKey) {
       setOpen(false)
+      setDismissedKey(null)
       presentedKey.current = null
       return
     }
     if (presentedKey.current !== migration.migrationKey) {
       presentedKey.current = migration.migrationKey
+      setDismissedKey(null)
       setOpen(true)
     }
   }, [migration])
@@ -76,6 +79,7 @@ export function InstanceMigrationGate({
   }
 
   if (!migration?.required || !migration.migrationKey || !migration.prompt) return null
+  if (dismissedKey === migration.migrationKey) return null
 
   const copyPrompt = async () => {
     await navigator.clipboard.writeText(migration.prompt!)
@@ -134,7 +138,16 @@ export function InstanceMigrationGate({
             )}
 
             <DialogFooter className="mt-7 flex-col-reverse sm:flex-row sm:items-center">
-              <Button className="min-h-11" variant="ghost" onClick={() => setOpen(false)}>Later</Button>
+              <Button
+                className="min-h-11"
+                variant="ghost"
+                onClick={() => {
+                  setOpen(false)
+                  setDismissedKey(migration.migrationKey)
+                }}
+              >
+                Later
+              </Button>
               <Button className="min-h-11" variant="outline" onClick={() => void copyPrompt()}>
                 {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
                 Copy migration prompt
