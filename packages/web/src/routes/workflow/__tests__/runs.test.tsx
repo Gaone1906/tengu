@@ -10,15 +10,29 @@ const getWorkflowRun = vi.fn()
 const startWorkflowRun = vi.fn()
 const decideWorkflowApproval = vi.fn()
 
-vi.mock("@/lib/api", () => ({
-  api: {
-    getWorkflowDefinitionV2: (...args: unknown[]) => getWorkflowDefinition(...args),
-    listWorkflowRunsV2: (...args: unknown[]) => listWorkflowRuns(...args),
-    getWorkflowRunV2: (...args: unknown[]) => getWorkflowRun(...args),
-    startWorkflowRunV2: (...args: unknown[]) => startWorkflowRun(...args),
-    decideWorkflowApprovalV2: (...args: unknown[]) => decideWorkflowApproval(...args),
-  },
-}))
+vi.mock("@/lib/api", () => {
+  class ApiError extends Error {
+    constructor(readonly status: number, message: string, readonly code?: string) {
+      super(message)
+    }
+  }
+  class WorkflowValidationApiError extends ApiError {
+    constructor(status: number, message: string, code: string | undefined, readonly issues: unknown[]) {
+      super(status, message, code)
+    }
+  }
+  return {
+    ApiError,
+    WorkflowValidationApiError,
+    api: {
+      getWorkflowDefinitionV2: (...args: unknown[]) => getWorkflowDefinition(...args),
+      listWorkflowRunsV2: (...args: unknown[]) => listWorkflowRuns(...args),
+      getWorkflowRunV2: (...args: unknown[]) => getWorkflowRun(...args),
+      startWorkflowRunV2: (...args: unknown[]) => startWorkflowRun(...args),
+      decideWorkflowApprovalV2: (...args: unknown[]) => decideWorkflowApproval(...args),
+    },
+  }
+})
 vi.mock("@/components/page-layout", () => ({
   PageLayout: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }))
@@ -96,7 +110,7 @@ beforeEach(() => {
 
 describe("workflow runs lens", () => {
   it("lists runs with status, trigger kind, and failing node", async () => {
-    renderRoute("/workflow/morning-digest")
+    renderRoute("/workflow/morning-digest?lens=runs")
 
     expect(await screen.findByText("Failed")).toBeTruthy()
     expect(screen.getByText("run-01HZX")).toBeTruthy()
@@ -108,7 +122,7 @@ describe("workflow runs lens", () => {
     startWorkflowRun.mockResolvedValue(runDetail)
     const router = renderRoute("/workflow/morning-digest")
 
-    await userEvent.click(await screen.findByRole("button", { name: /run/i }))
+    await userEvent.click(await screen.findByRole("button", { name: "Run" }))
 
     await waitFor(() => expect(startWorkflowRun).toHaveBeenCalledWith("morning-digest"))
     await waitFor(() =>
@@ -120,7 +134,7 @@ describe("workflow runs lens", () => {
     renderRoute("/workflow/morning-digest")
 
     await screen.findByText("Morning Digest")
-    expect(screen.queryByRole("button", { name: /run/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Run" })).toBeNull()
   })
 
   it("renders the run timeline with attempts, errors, and output", async () => {
