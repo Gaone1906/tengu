@@ -9,12 +9,6 @@ export interface WorkflowRunResult { runId: string; workflowId: string; status: 
 export interface WorkflowRequestOptions {
   baseUrl: string; token: string; method: Method; path: string; body?: unknown; fetchImpl?: typeof fetch;
 }
-export interface WorkflowRunRequestOptions {
-  baseUrl: string; token: string; name: string; input?: Record<string, unknown>; idempotencyKey?: string; fetchImpl?: typeof fetch;
-}
-export interface WorkflowRunCancellationRequestOptions {
-  baseUrl: string; token: string; workflowId: string; runId: string; reason?: string; fetchImpl?: typeof fetch;
-}
 
 export function parseWorkflowInput(raw: string): Record<string, unknown> {
   let parsed: unknown;
@@ -132,20 +126,4 @@ export async function retryWorkflowNode(workflowId: string, runId: string, nodeI
 }
 export async function fireWorkflowEvent(eventName: string, options: { fireId: string; payload: string } & JsonOptions): Promise<void> {
   return command("POST", `/api/workflows/events/${encodeURIComponent(eventName)}`, { fireId: options.fireId, payload: parseWorkflowInput(options.payload) }, options);
-}
-
-export async function requestWorkflowRunByName(options: WorkflowRunRequestOptions): Promise<WorkflowRunResult> {
-  const result = await requestWorkflow({ ...options, method: "POST", path: "/api/workflow-runs/by-name",
-    body: { name: options.name, ...(options.input ? { input: options.input } : {}), ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}) } });
-  return result as WorkflowRunResult;
-}
-export async function requestWorkflowRunCancellation(options: WorkflowRunCancellationRequestOptions): Promise<WorkflowRunResult> {
-  try { return await requestWorkflow({ ...options, method: "POST",
-    path: `/api/workflow-definitions/${encodeURIComponent(options.workflowId)}/runs/${encodeURIComponent(options.runId)}/cancel`,
-    body: options.reason ? { reason: options.reason } : {} }) as WorkflowRunResult;
-  } catch (error) { throw new Error(`workflow cancellation failed: ${error instanceof Error ? error.message : String(error)}`); }
-}
-export function formatWorkflowRunCancellationResult(run: WorkflowRunResult): string {
-  return run.status === "cancelled" ? `Cancelled ${run.runId} for ${run.workflowId} (${run.status}).`
-    : `Cancellation requested for ${run.runId} in ${run.workflowId} (${run.status}).`;
 }

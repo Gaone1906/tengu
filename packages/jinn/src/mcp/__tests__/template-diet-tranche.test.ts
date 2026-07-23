@@ -68,20 +68,16 @@ describe("the GRS-017e template diet tranche (MCP-first realized)", () => {
     const todoSkill = fs.readFileSync(path.join(templateRoot, "skills", "todo-handling", "SKILL.md"), "utf-8");
 
     expect(workflowSkill).toContain("activity receipts");
-    expect(workflowSkill).toContain("reportMode");
     expect(workflowSkill).toContain("cancel_workflow_run");
-    expect(workflowSkill).toContain("Workflow run approval");
-    expect(workflowSkill).toContain("escalate_workflow_gate");
-    expect(workflowSkill).toContain("browser, CLI, cron, webhook, poll, and Todo-status");
+    expect(workflowSkill).toContain("native pending approval");
+    expect(workflowSkill).toContain("decide_workflow_approval");
+    expect(workflowSkill).toContain("manual`, `schedule`, `event`, `todo-status`, and `workflow-call");
     expect(todoSkill).toContain("A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.");
     expect(todoSkill).toContain("Todo approvals affect only the Todo.");
     expect(todoSkill).toContain("Workflow operations never mutate Todos.");
     for (const workflowControl of [
       "Workflow gate",
-      "Workflow run approval",
-      "human Workflow",
       "cancel_workflow_run",
-      "escalate_workflow_gate",
       "todoTransition",
       "run's Todo",
     ]) {

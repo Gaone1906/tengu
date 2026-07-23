@@ -26,9 +26,7 @@ The same contract should hold everywhere: sources emit events, Workflow Triggers
 
 A Workflow invocation never creates, links, transitions, approves, or mutates a Todo. A Todo-status trigger is a one-way input; the resulting Workflow run is independent. Human gates use Workflow run approval, never Todo approval, and cancelling a Workflow run touches no Todo.
 
-Workflow runs are durable records, not Sessions. A verified Session invocation persists one `invocation: { sessionId, reportMode }` relation; a session-invoked Workflow reports to that same session unless reportMode is silent. Silent mode suppresses only Session resumption. Browser, CLI, cron, webhook, poll, and Todo-status starts are invocation-less unless a verified Session invokes them.
-
-Historical `engine: "workflow"` Sessions remain untouched, read-only evidence and redirect by their existing Workflow provenance. They are not live Workflow runs or live engine Sessions.
+Workflow runs are durable records, not Sessions. Manual, schedule, event, Todo-status, and Workflow-call starts all enter the same durable runner.
 
 ## 6. Lean Identity Context
 

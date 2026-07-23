@@ -56,7 +56,7 @@ Todos are deliberately authored work in the live ledger. Employees find and upda
 
 Workflows are reusable automations - the HOW. Use or propose one when the same job is repeatable, scheduled, event-driven, or multi-step. A Workflow invocation never creates, links, transitions, approves, or mutates a Todo. A Todo-status trigger is a one-way input; the resulting Workflow run is independent.
 
-Workflow runs are durable records, not Sessions. A verified Session invocation reports and resumes that same Session unless its `reportMode` is `silent`; silent mode suppresses only resumption. Other start surfaces are invocation-less. Human gates and cancellation belong to the Workflow run and never change a Todo.
+Workflow runs are durable records, not Sessions. Human approvals and cancellation belong to the Workflow run and never change a Todo.
 
 ## Ranks
 

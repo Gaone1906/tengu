@@ -23,10 +23,6 @@ let deletedCallerId: string;
 let deletedCapability: string;
 const fileId = "guarded-file";
 
-const PLAN_BODY = JSON.stringify({
-  sop: { id: "planned", title: "Planned", wakeUp: { kind: "manual" }, steps: [{ engine: "codex", instruction: "Plan." }] },
-});
-
 const READ_ROUTES = [
   { method: "GET", path: "/api/work-items", label: "work-items list" },
   { method: "GET", path: "/api/work-items/wi_missing", label: "work-item get" },
@@ -50,13 +46,8 @@ const READ_ROUTES = [
   { method: "GET", path: "/api/org/departments/platform/board", label: "legacy board read" },
   { method: "GET", path: "/api/workflows", label: "workflow visual list" },
   { method: "GET", path: "/api/workflows/demo", label: "workflow visual get" },
-  { method: "GET", path: "/api/workflow-triggers", label: "workflow trigger list" },
-  { method: "GET", path: "/api/workflow-definitions", label: "workflow definition list" },
-  { method: "GET", path: "/api/workflow-definitions/demo", label: "workflow definition get" },
-  { method: "GET", path: "/api/workflow-definitions/demo/plan", label: "workflow plan existing" },
-  { method: "POST", path: "/api/workflow-definitions/plan", label: "workflow plan new", body: PLAN_BODY },
-  { method: "GET", path: "/api/workflow-definitions/demo/runs", label: "workflow runs list" },
-  { method: "GET", path: "/api/workflow-definitions/demo/runs/run_1", label: "workflow run get" },
+  { method: "GET", path: "/api/workflows/demo/runs", label: "workflow runs list" },
+  { method: "GET", path: "/api/workflows/demo/runs/run_1", label: "workflow run get" },
 ] as const;
 
 type RouteSpec = {
@@ -253,13 +244,6 @@ describe("privileged read routes — uniform capability guard", () => {
     expect(res.status).toBe(200);
   });
 
-  it("allows a verified capability-bearing tool caller to plan/validate an unsaved workflow", async () => {
-    const route = READ_ROUTES.find((candidate) => candidate.path === "/api/workflow-definitions/plan")!;
-    const res = await call(route, validCapabilityHeaders());
-    expect(res.status).toBe(200);
-    expect(res.bodyText).toMatch(/"ok":true/);
-  });
-
   it("fails closed by default for adjacent and future API reads from tool-marked callers without a session capability", async () => {
     for (const route of stragglerReadRoutes()) {
       const res = await call(route, toolMarkedNoCapabilityHeaders());
@@ -303,14 +287,5 @@ describe("privileged read routes — uniform capability guard", () => {
 
   it("keeps the explicit public allowlist reachable without a session capability", async () => {
     expect((await read("/api/status", toolMarkedNoCapabilityHeaders())).status).toBe(200);
-
-    const webhook = await call({
-      method: "POST",
-      path: "/api/workflow-events",
-      label: "workflow webhook public auth surface",
-      body: JSON.stringify({ event: "missing.event", payload: {} }),
-    }, toolMarkedNoCapabilityHeaders());
-    expect(webhook.status).toBe(401);
-    expect(webhook.bodyText).toMatch(/workflow event authentication required/i);
   });
 });
