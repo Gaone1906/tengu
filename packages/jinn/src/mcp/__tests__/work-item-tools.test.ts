@@ -60,6 +60,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(buildWorkItemTools().map((t) => t.name)).toEqual([
       "list_work_items",
       "get_work_item",
+      "get_work_item_tree",
       "search_work_items",
       "create_work_item",
       "update_work_item",
@@ -76,7 +77,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("delete_trigger");
     expect(names).toContain("cancel_workflow_run");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(54);
+    expect(names).toHaveLength(55);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {
@@ -89,7 +90,7 @@ describe("work-item tools — registry + schemas", () => {
   it("create schema has no approval fields and update schema allows manual start but excludes cancelled", () => {
     const createProps = tool("create_work_item").inputSchema.properties;
     expect(Object.keys(createProps).sort()).toEqual(
-      ["acceptance", "assignee", "body", "department", "title", "verifyPolicy"].sort(),
+      ["acceptance", "assignee", "body", "department", "dueAt", "parentId", "priority", "title", "verifyPolicy"].sort(),
     );
     expect(JSON.stringify(createProps)).not.toMatch(/approval/i);
     const status = tool("update_work_item").inputSchema.properties.status as { enum: string[] };
@@ -152,7 +153,8 @@ describe("work-item tools — unit (stub gateway)", () => {
     expect(url.searchParams.get("status")).toBe("blocked");
     expect(url.searchParams.get("source")).toBe("session");
     expect(url.searchParams.get("assignee")).toBe("qa");
-    expect(url.searchParams.get("limit")).toBe("20");
+    // Raised caps (Todos v2): 99 is within the new max of 100, so it passes through unclamped.
+    expect(url.searchParams.get("limit")).toBe("99");
     expect(out.workItems[0]).toEqual({ id: "JIN-1", title: "T", status: "blocked", assignee: null, department: null, source: "session", version: 7, updatedAt: null });
   });
 
@@ -180,6 +182,30 @@ describe("work-item tools — unit (stub gateway)", () => {
     expect(out).toMatchObject({ spendUsd: 1.25 });
     expect(out).not.toHaveProperty("workflowRun");
     expect(out.workItem).toMatchObject({ acceptance: "- pass", approvalState: "pending", rounds: 1 });
+  });
+
+  it("get_work_item_tree hits the tree route and returns the subtree with a hint", async () => {
+    const { calls, ctx } = stub(() => ({
+      status: 200,
+      body: { tree: { root: { id: "JIN-5", children: [{ id: "JIN-6", children: [] }] }, totals: { backlog: 2 }, spendUsd: 0 } },
+    }));
+    const out = (await tool("get_work_item_tree").handler({ id: "JIN-5" }, ctx)) as Record<string, unknown>;
+    expect(calls[0].method).toBe("GET");
+    expect(new URL(calls[0].url).pathname).toBe("/api/work-items/JIN-5/tree");
+    expect(out.tree).toMatchObject({ spendUsd: 0 });
+    expect(out.hint).toMatch(/get_work_item/);
+    await expect(tool("get_work_item_tree").handler({ id: "wi_notatodo" }, ctx)).rejects.toThrow(/canonical Todo ID/);
+  });
+
+  it("create forwards parentId/priority/dueAt after local validation", async () => {
+    const { calls, ctx } = stub(() => ({ status: 201, body: { workItem: { id: "JIN-9" } } }), "sess-caller");
+    await tool("create_work_item").handler(
+      { title: "Sub", parentId: "JIN-5", priority: 1, dueAt: "2026-08-01T00:00:00.000Z" },
+      ctx,
+    );
+    expect(calls[0].body).toMatchObject({ title: "Sub", parentId: "JIN-5", priority: 1, dueAt: "2026-08-01T00:00:00.000Z" });
+    await expect(tool("create_work_item").handler({ title: "Bad", parentId: "nope" }, ctx)).rejects.toThrow(/parentId must be a canonical Todo ID/);
+    await expect(tool("create_work_item").handler({ title: "Bad", priority: 7 }, ctx)).rejects.toThrow(/priority must be an integer 0\.\.3/);
   });
 
   it("search uses the search route, caps hostile input locally, and returns no body dumps", async () => {

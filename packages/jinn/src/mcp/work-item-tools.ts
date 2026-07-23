@@ -2,10 +2,12 @@ import { assertBoundCaller, gatewayRequest, JinnMcpToolError, type JinnMcpTool }
 import type { JinnMcpContext } from "./toolkit.js";
 import { parseTodoId } from "../work-items/id.js";
 
-export const WORK_ITEM_SEARCH_LIMIT_MAX = 20;
-export const WORK_ITEM_SEARCH_LIMIT_DEFAULT = 10;
+export const WORK_ITEM_SEARCH_LIMIT_MAX = 100;
+export const WORK_ITEM_SEARCH_LIMIT_DEFAULT = 25;
 export const WORK_ITEM_QUERY_CHAR_CAP = 512;
 const FILTER_CHAR_CAP = 256;
+const WORK_ITEM_BODY_CHAR_CAP = 64_000;
+const WORK_ITEM_NOTE_CHAR_CAP = 8_000;
 
 const STATUSES = ["backlog", "assigned", "executing", "in_review", "done", "blocked", "escalated", "cancelled"] as const;
 const SOURCES = ["human", "delegation", "cron", "workflow", "session", "connector", "goal"] as const;
@@ -186,7 +188,13 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         assignee: { type: "string" },
         department: { type: "string" },
         needsAttentionFor: { type: "string" },
+        createdBy: { type: "string" },
+        rootsOnly: { type: "boolean" },
+        text: { type: "string" },
+        since: { type: "string" },
+        until: { type: "string" },
         limit: { type: "number" },
+        offset: { type: "number" },
       },
     },
     handler: async (args, ctx) => {
@@ -197,7 +205,13 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         assignee: optionalString(args, "assignee"),
         department: optionalString(args, "department"),
         needsAttentionFor: optionalString(args, "needsAttentionFor"),
+        createdBy: optionalString(args, "createdBy"),
+        rootsOnly: args.rootsOnly === true ? "true" : undefined,
+        text: optionalString(args, "text", WORK_ITEM_QUERY_CHAR_CAP),
+        since: optionalString(args, "since", 64),
+        until: optionalString(args, "until", 64),
         limit: clampInt(args.limit, WORK_ITEM_SEARCH_LIMIT_DEFAULT, 1, WORK_ITEM_SEARCH_LIMIT_MAX),
+        offset: clampInt(args.offset, 0, 0, 1_000_000),
       });
       const { status, body } = await gatewayRequest(ctx, "GET", `/api/work-items?${params}`);
       if (status >= 400) throw gatewayFailure("listing work items", status, body);
@@ -258,7 +272,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const create: JinnMcpTool = {
     name: "create_work_item",
-    description: "Create a Todo; approvals excluded.",
+    description: "Create a Todo (optionally as a sub-task via parentId); approvals excluded.",
     inputSchema: {
       type: "object",
       properties: {
@@ -268,6 +282,9 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         assignee: { type: "string" },
         department: { type: "string" },
         verifyPolicy: { type: "object" },
+        parentId: TODO_ID_SCHEMA,
+        priority: { type: "number", enum: [0, 1, 2, 3] },
+        dueAt: { type: "string" },
       },
       required: ["title"],
     },
@@ -277,14 +294,43 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       rejectProvenance(args);
       const body: Record<string, unknown> = { title: requireString(args, "title") };
       for (const key of ["body", "acceptance", "assignee", "department"] as const) {
-        const v = optionalString(args, key, key === "body" || key === "acceptance" ? 20_000 : FILTER_CHAR_CAP);
+        const v = optionalString(args, key, key === "body" || key === "acceptance" ? WORK_ITEM_BODY_CHAR_CAP : FILTER_CHAR_CAP);
         if (v !== undefined) body[key] = v;
       }
       const verifyPolicy = optionalObject(args, "verifyPolicy");
       if (verifyPolicy) body.verifyPolicy = validateVerifyPolicy(verifyPolicy);
+      if (args.parentId !== undefined) {
+        try { body.parentId = parseTodoId(args.parentId); }
+        catch { throw new JinnMcpToolError("parentId must be a canonical Todo ID such as ACM-42"); }
+      }
+      if (args.priority !== undefined) {
+        if (typeof args.priority !== "number" || !Number.isInteger(args.priority) || args.priority < 0 || args.priority > 3) {
+          throw new JinnMcpToolError("priority must be an integer 0..3");
+        }
+        body.priority = args.priority;
+      }
+      const dueAt = optionalString(args, "dueAt", 64);
+      if (dueAt !== undefined) body.dueAt = dueAt;
       const { status, body: resp } = await gatewayRequest(ctx, "POST", "/api/work-items", body);
       if (status >= 400) throw gatewayFailure("creating work item", status, resp);
       return mutationResult(resp, "Next: assign_work_item or update_work_item.");
+    },
+  };
+
+  const tree: JinnMcpTool = {
+    name: "get_work_item_tree",
+    description: "Get a Todo's sub-task tree with per-status totals and derived spend.",
+    inputSchema: {
+      type: "object",
+      properties: { id: TODO_ID_SCHEMA },
+      required: ["id"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      const id = requireTodoId(args);
+      const { status, body } = await gatewayRequest(ctx, "GET", `/api/work-items/${encodeURIComponent(id)}/tree`);
+      if (status >= 400) throw gatewayFailure(`getting work item tree "${id}"`, status, body);
+      return { ...(body as Record<string, unknown>), hint: "Next: get_work_item { id } on a child, or update_work_item." };
     },
   };
 
@@ -312,7 +358,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         throw new JinnMcpToolError(`status must be one of ${AGENT_UPDATE_STATUSES.join(", ")}; cancellation/other lifecycle edits are human surface decisions.`);
       }
       const payload: Record<string, unknown> = { status: rawStatus };
-      const note = optionalString(args, "note", 4000);
+      const note = optionalString(args, "note", WORK_ITEM_NOTE_CHAR_CAP);
       if (note !== undefined) payload.note = note;
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/status`, payload);
       if (status >= 400) throw gatewayFailure(`updating work item "${id}"`, status, body);
@@ -358,7 +404,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       rejectApprovalFields(args, "archive_work_item");
       const id = requireTodoId(args);
       const payload: Record<string, unknown> = {};
-      const note = optionalString(args, "note", 4000);
+      const note = optionalString(args, "note", WORK_ITEM_NOTE_CHAR_CAP);
       if (note !== undefined) payload.note = note;
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/archive`, payload);
       if (status >= 400) throw gatewayFailure(`archiving work item "${id}"`, status, body);
@@ -366,5 +412,5 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     },
   };
 
-  return [list, get, search, create, update, assign, archive];
+  return [list, get, tree, search, create, update, assign, archive];
 }
