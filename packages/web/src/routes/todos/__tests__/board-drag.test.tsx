@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { MemoryRouter, Route, Routes } from "react-router-dom"
+import { MemoryRouter, Route, Routes, useLocation, useParams } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkItemCompactWire, WorkItemListWire, WorkItemStatusWire } from "@/lib/api"
 import TodoBoardPage from "../board/board-page"
@@ -93,6 +93,14 @@ function pointer(type: string, x: number, y: number) {
   return event
 }
 
+function TaskProbe() {
+  const { todoId } = useParams()
+  const location = useLocation()
+  return (
+    <div data-testid="task-probe" data-todo={todoId} data-state={JSON.stringify(location.state ?? {})} />
+  )
+}
+
 function renderBoard() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
   return render(
@@ -100,6 +108,7 @@ function renderBoard() {
       <MemoryRouter initialEntries={["/todos/b/platform"]}>
         <Routes>
           <Route path="/todos/b/:board" element={<TodoBoardPage />} />
+          <Route path="/todos/:todoId" element={<TaskProbe />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -193,6 +202,32 @@ describe("board drag legality", () => {
         expectedVersion: 4,
       })),
     )
+  })
+
+  it("a drop into Blocked opens the task page with the banner reason focused (F6 hand-off)", async () => {
+    rows.blocked = [compact("PLA-9", "blocked")] // materialize the Blocked column
+    setWorkItemStatus.mockResolvedValue({ workItem: { ...compact("PLA-3", "blocked"), version: 4 }, escalated: false })
+    updateWorkItem.mockResolvedValue({ workItem: { ...compact("PLA-3", "blocked"), version: 5 } })
+    renderBoard()
+    const card = await screen.findByTestId("board-card-PLA-3")
+    const order = stubColumnGeometry()
+    const blockedX = order.indexOf("blocked") * 100 + 50
+
+    fireEvent.pointerDown(card, { button: 0, clientX: 210, clientY: 40, pointerType: "mouse" })
+    await act(async () => {
+      window.dispatchEvent(pointer("pointermove", 220, 50))
+    })
+    await act(async () => {
+      window.dispatchEvent(pointer("pointermove", blockedX, 50))
+    })
+    await act(async () => {
+      window.dispatchEvent(pointer("pointerup", blockedX, 50))
+    })
+
+    await waitFor(() => expect(setWorkItemStatus).toHaveBeenCalledWith("PLA-3", "blocked"))
+    const probe = await screen.findByTestId("task-probe")
+    expect(probe.dataset.todo).toBe("PLA-3")
+    expect(JSON.parse(probe.dataset.state!)).toMatchObject({ focusBannerReason: true, fromBoard: "platform" })
   })
 
   it("does not commit anything when dropped over dead space", async () => {

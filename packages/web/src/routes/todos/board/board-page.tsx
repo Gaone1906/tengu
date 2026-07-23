@@ -236,6 +236,13 @@ export default function TodoBoardPage() {
         { id: item.id, status: to },
         {
           onSuccess: (result) => {
+            // A drop into Blocked/Escalated commits immediately, then opens the
+            // task page with the banner's reason field focused (design-doc §5 —
+            // the reason is asked for, never demanded by a modal). Review F6:
+            // an exception item must never silently sit reason-less.
+            if (to === "blocked" || to === "escalated") {
+              navigate(todoPath(item.id), { state: { fromBoard: key, focusBannerReason: true } })
+            }
             const version = result.workItem?.version
             if (!isPositiveTodoVersion(version)) {
               clearRankOverride()
@@ -262,7 +269,7 @@ export default function TodoBoardPage() {
         },
       )
     },
-    [transition, rankEdit, announce, itemsByStatus],
+    [transition, rankEdit, announce, itemsByStatus, navigate, key],
   )
 
   const commitRank = useCallback(
@@ -362,7 +369,9 @@ export default function TodoBoardPage() {
     [filters, setSearchParams],
   )
 
-  const onOpen = useCallback((id: string) => navigate(todoPath(id)), [navigate])
+  // Opening a card carries the board context so the task page's crumb knows
+  // its way back (the board name is the back affordance).
+  const onOpen = useCallback((id: string) => navigate(todoPath(id), { state: { fromBoard: key } }), [navigate, key])
 
   // ── Attention board actions (reuses the shipped inbox) ─────────────────────
   const decide = useDecideApproval()

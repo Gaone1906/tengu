@@ -12,6 +12,7 @@ const CronPage = lazyRoute(() => import('./routes/cron/page'), 'cron')
 const CronDetailPage = lazyRoute(() => import('./routes/cron/detail'), 'cron-detail')
 const TodosPage = lazyRoute(() => import('./routes/todos/page'), 'todos')
 const TodoBoardPage = lazyRoute(() => import('./routes/todos/board/board-page'), 'todo-board')
+const TaskPage = lazyRoute(() => import('./routes/todos/task-page/task-page'), 'todo-task')
 const NotesPage = lazyRoute(() => import('./routes/notes/page'), 'notes')
 const LogsPage = lazyRoute(() => import('./routes/logs/page'), 'logs')
 const LimitsPage = lazyRoute(() => import('./routes/limits/page'), 'limits')
@@ -85,13 +86,13 @@ const router = createBrowserRouter([
       { path: '/chat', element: <Navigate to="/" replace /> },
       { path: '/cron', element: <CronPage /> },
       { path: '/cron/:id', element: <CronDetailPage /> },
-      // Todos v2 slice 6: the board is the front door; the legacy list stays
-      // reachable at /todos/list until the stage-C cutover. /todos/:todoId
-      // keeps serving the legacy list+sheet until stage B swaps in the task page.
+      // Todos v2 slice 6: the board is the front door and /todos/:todoId is the
+      // full task page (stage B). The legacy list stays reachable at
+      // /todos/list until the stage-C cutover.
       { path: '/todos', element: <TodosIndexRedirect /> },
       { path: '/todos/b/:board', element: <TodoBoardPage /> },
       { path: '/todos/list', element: <TodosPage /> },
-      { path: '/todos/:todoId', element: <TodosPage /> },
+      { path: '/todos/:todoId', element: <TaskPage /> },
       { path: '/notes', element: <NotesFeatureRoute /> },
       // Folder/note deep links: /notes/f/<folder>, /notes/n/<rel>, or both.
       { path: '/notes/*', element: <NotesFeatureRoute /> },
