@@ -330,7 +330,7 @@ BEFORE DELETE ON work_item_id_allocator
 BEGIN SELECT RAISE(ABORT, 'Todo allocator is immutable'); END`,
   `CREATE TRIGGER IF NOT EXISTS work_item_burn_guard_insert
 BEFORE INSERT ON work_item_id_burns
-WHEN NEW.ordinal != (SELECT high_water + 1 FROM work_item_id_allocator WHERE prefix = NEW.prefix)
+WHEN NEW.ordinal IS NOT (SELECT high_water + 1 FROM work_item_id_allocator WHERE prefix = NEW.prefix)
   OR jinn_work_item_claim_digest() IS NULL
   OR NEW.claim_digest != jinn_work_item_claim_digest()
   OR jinn_work_item_claim_prefix() IS NULL
@@ -702,7 +702,11 @@ export function migrateWorkItemsSchema(
     }
     if (liveShape === "v1") {
       const legacy = db.prepare("SELECT prefix, high_water FROM work_item_id_allocator WHERE singleton = 1")
-        .get() as { prefix: string | null; high_water: number };
+        .get() as { prefix: string | null; high_water: number } | undefined;
+      // A recognized-v1 schema whose seeded singleton row is missing is data
+      // corruption (v1 triggers forbid deleting it) — refuse with the curated
+      // message rather than crashing on the read below.
+      if (!legacy) throw new Error(CORRUPT_SESSIONS_DATABASE);
       const legacyBurns = db.prepare("SELECT ordinal, claim_digest, burned_at FROM work_item_id_burns ORDER BY ordinal")
         .all() as Array<{ ordinal: number; claim_digest: string; burned_at: string }>;
       const legacyIssuances = db.prepare("SELECT ordinal, issued_at FROM work_item_id_issuances ORDER BY ordinal")

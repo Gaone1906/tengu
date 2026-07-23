@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
@@ -73,6 +74,27 @@ describe("v1 → v2 migration", () => {
     expect(second.rebuilt).toBe(false);
     db.close();
     expect(migrate.preflightWorkItemsDatabase(file)).toBe("current");
+  });
+
+  it("refuses a claimed burn for an unregistered prefix (NULL-subquery bypass closed)", () => {
+    const file = path.join(tmp, "registry-burnguard.db");
+    const db = new Database(file);
+    migrate.registerWorkItemIdentityFunctions(db);
+    migrate.migrateWorkItemsSchema(db, "absent");
+    // An active, digest-valid claim for a prefix with NO allocator row: the
+    // ordinal-sequence subquery returns NULL, which must still refuse the burn.
+    const rawClaim = "ab".repeat(32);
+    const digest = createHash("sha256").update(rawClaim).digest("hex");
+    const forged = { id: "ZZZ-1", prefix: "ZZZ", ordinal: 1, rawClaim };
+    expect(() =>
+      migrate.useWorkItemAllocationClaim(db, forged, () =>
+        db.prepare(
+          "INSERT INTO work_item_id_burns (prefix, ordinal, claim_digest, burned_at) VALUES ('ZZZ', 1, ?, '2026-07-01T00:00:00.000Z')",
+        ).run(digest),
+      ),
+    ).toThrow(/burn claim refused/);
+    expect(db.prepare("SELECT COUNT(*) FROM work_item_id_burns").pluck().get()).toBe(0);
+    db.close();
   });
 
   it("allocates independent sequences per prefix", () => {
