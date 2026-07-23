@@ -131,6 +131,33 @@ describe("Workflow v2 canonical API", () => {
       runId: "run_11111111-1111-4111-8111-111111111111", nodeId: "write", idempotencyKey: "retry-1" });
   });
 
+  it("serializes reminder ladder state on every run-detail attempt", async () => {
+    const detail = {
+      id: "run_11111111-1111-4111-8111-111111111111",
+      workflowId: "release-flow",
+      attempts: [{
+        runId: "run_11111111-1111-4111-8111-111111111111",
+        nodeId: "write",
+        attempt: 1,
+        status: "running",
+        remindersSent: 2,
+        nextReminderAt: "2026-07-23T12:30:00.000Z",
+        extensions: 1,
+        lastExtensionReason: "Waiting on review",
+        pendingOutputError: "Required output field \"result\" is missing.",
+      }],
+    };
+    const service = { getRun: vi.fn(() => detail) };
+    const context = { gatewayAuthToken: "test-token", workflowService: service, getConfig: () => ({ gateway: {}, engines: {} }),
+      connectors: new Map(), sessionManager: { getQueue: () => ({}) }, emit: vi.fn(), startTime: 1 } as unknown as ApiContext;
+    const capture = response();
+
+    await handleApiRequest(request("GET",
+      "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111"), capture.res, context);
+
+    expect(capture.read()).toEqual({ status: 200, body: detail });
+  });
+
   it("authenticates retry and maps its authority, identity, conflict, and validation errors", async () => {
     const retryNode = vi.fn();
     const context = { gatewayAuthToken: "test-token", workflowService: { retryNode }, getConfig: () => ({ gateway: {}, engines: {} }),

@@ -462,6 +462,11 @@ export interface WorkflowAttemptV2Wire {
   error?: WorkflowRunErrorV2Wire
   startedAt: string
   endedAt?: string
+  remindersSent: number
+  nextReminderAt?: string
+  extensions: number
+  lastExtensionReason?: string
+  pendingOutputError?: string
 }
 
 export interface WorkflowApprovalV2Wire {
