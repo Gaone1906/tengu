@@ -190,6 +190,24 @@ async function put<T>(path: string, body: unknown): Promise<T> {
   return res.json();
 }
 
+/** Workflow writes keep the server's structured validation issues intact. */
+async function workflowWrite<T>(path: string, method: "POST" | "PUT", body: unknown): Promise<T> {
+  const res = await authFetch(path, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res.ok) return res.json();
+  let payload: Record<string, unknown> = {};
+  try { payload = await res.json() } catch { /* non-JSON error body */ }
+  const message = typeof payload.message === "string" ? payload.message : `API error: ${res.status}`;
+  const code = typeof payload.code === "string" ? payload.code : undefined;
+  if (Array.isArray(payload.issues)) {
+    throw new WorkflowValidationApiError(res.status, message, code, payload.issues as WorkflowIssueV2Wire[]);
+  }
+  throw new ApiError(res.status, message, code);
+}
+
 async function patch<T>(path: string, body: unknown): Promise<T> {
   const res = await authFetch(path, {
     method: "PATCH",
@@ -356,6 +374,26 @@ export interface WorkflowDefinitionV2Wire {
     to: { nodeId: string; port: "input" }
   }>
   ui: { positions: Record<string, { x: number; y: number }> }
+}
+
+/** One server validation verdict — the client renders these, never re-derives them. */
+export interface WorkflowIssueV2Wire {
+  code: string
+  message: string
+  nodeId?: string
+  edgeId?: string
+  path?: string
+}
+
+/** A 422 from the workflow API carrying structured validation issues. */
+export class WorkflowValidationApiError extends ApiError {
+  readonly issues: WorkflowIssueV2Wire[]
+
+  constructor(status: number, message: string, code: string | undefined, issues: WorkflowIssueV2Wire[]) {
+    super(status, message, code)
+    this.name = "WorkflowValidationApiError"
+    this.issues = issues
+  }
 }
 
 /* ── Workflow runs (v2) ───────────────────────────────────────────────────── */
@@ -664,6 +702,16 @@ export const api = {
   getWorkflowRunV2: (id: string, runId: string) =>
     get<WorkflowRunDetailV2Wire>(
       `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`,
+    ),
+  createWorkflowV2: (input: { id: string; title: string; description?: string }) =>
+    workflowWrite<WorkflowDefinitionV2Wire>("/api/workflows", "POST", input),
+  saveWorkflowDefinitionV2: (id: string, definition: WorkflowDefinitionV2Wire, expectedRevision: number) =>
+    workflowWrite<WorkflowDefinitionV2Wire>(
+      `/api/workflows/${encodeURIComponent(id)}`, "PUT", { definition, expectedRevision },
+    ),
+  setWorkflowEnabledV2: (id: string, enabled: boolean, expectedRevision: number) =>
+    workflowWrite<WorkflowDefinitionV2Wire>(
+      `/api/workflows/${encodeURIComponent(id)}/${enabled ? "enable" : "disable"}`, "POST", { expectedRevision },
     ),
   startWorkflowRunV2: (id: string) =>
     post<WorkflowRunDetailV2Wire>(`/api/workflows/${encodeURIComponent(id)}/runs`, { input: {} }),
