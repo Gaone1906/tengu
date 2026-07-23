@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useNavigationType, useParams, useSearchParams } from "react-router-dom"
-import { Plus } from "lucide-react"
+import { ListFilter, Plus } from "lucide-react"
 import { PageLayout } from "@/components/page-layout"
 import { ApiError, type WorkItemCompactWire, type WorkItemStatusWire } from "@/lib/api"
 import {
+  activeFilterCount,
   compareRank,
   deriveNeedsYou,
   filtersFromSearchParams,
   filtersToSearchParams,
+  groupHistory,
   operatorSafeTodoError,
   rankBetween,
   isPositiveTodoVersion,
@@ -23,6 +25,7 @@ import {
   useOrg,
 } from "../use-todos"
 import { FilterBar } from "../filter-bar"
+import { TodoFilterSheet } from "../todo-filter-sheet"
 import { NeedsYouView } from "../needs-you-view"
 import { GroupSkeleton } from "../group"
 import { NewTodoDialog } from "../page"
@@ -347,9 +350,11 @@ export default function TodoBoardPage() {
   const [creating, setCreating] = useState<null | { department?: string; askAssignee?: boolean }>(null)
   const [closedOpen, setClosedOpen] = useState(false)
   const [segment, setSegment] = useState<MobileSegment>("active")
+  const [mobileFilterOpen, setMobileFilterOpen] = useState(false)
   useEffect(() => {
     setClosedOpen(false)
     setSegment("active")
+    setMobileFilterOpen(false)
   }, [key])
 
   const setFilters = useCallback(
@@ -423,6 +428,13 @@ export default function TodoBoardPage() {
       [...(itemsByStatus.blocked ?? []), ...(itemsByStatus.escalated ?? []),
         ...PIPELINE_STATUSES.flatMap((s) => (itemsByStatus[s] ?? []).filter((item) => item.approvalState === "pending"))],
     [itemsByStatus],
+  )
+  // §8: the mobile Closed segment shows done/cancelled grouped by DATE (the
+  // rows' own discs carry which) — the desktop rail's status groups stay
+  // desktop-only.
+  const closedHistory = useMemo(
+    () => groupHistory([...(itemsByStatus.done ?? []), ...(itemsByStatus.cancelled ?? [])], now),
+    [itemsByStatus, now],
   )
 
   const visibleStatuses: WorkItemStatusWire[] = useMemo(() => {
@@ -556,25 +568,43 @@ export default function TodoBoardPage() {
             </div>
           )}
 
-          {/* Mobile segments (§8): Active · Attention · Closed. */}
+          {/* Mobile segments (§8): Active · Attention · Closed. The desktop
+              filter chips fold into the Active segment's filter glyph — the
+              raised Active pill carries it, and re-tapping the selected pill
+              opens the filter sheet (the mobile filtering entry point,
+              Stage-A review F5). */}
           {!isAttention && mobile && (
             <div className="mt-4 flex gap-2 overflow-x-auto" role="tablist" aria-label="Board segments">
               {(["active", "attention", "closed"] as const).map((seg) => {
                 const count = seg === "active" ? data.openTotal : seg === "attention" ? blockedTotal + escalatedTotal : data.closedTotal
                 const label = seg === "active" ? "Active" : seg === "attention" ? "Attention" : "Closed"
                 const on = segment === seg
+                const filtersOn = activeFilterCount(filters) > 0 || !!filters.q
                 return (
                   <button
                     key={seg}
                     type="button"
                     role="tab"
                     aria-selected={on}
-                    onClick={() => setSegment(seg)}
+                    data-testid={`board-segment-${seg}`}
+                    aria-label={seg === "active" ? `Active — tap again to filter` : undefined}
+                    onClick={() => {
+                      if (seg === "active" && segment === "active") setMobileFilterOpen(true)
+                      else setSegment(seg)
+                    }}
                     className={`flex h-[34px] flex-none items-center gap-[7px] rounded-[17px] px-3.5 text-[14px] font-semibold ${
                       on ? "bg-[var(--bg-secondary)] text-[var(--text-primary)]" : "text-[var(--text-tertiary)]"
                     }`}
                     style={on ? { boxShadow: "var(--shadow-ambient), var(--shadow-subtle), var(--inset-shine)" } : undefined}
                   >
+                    {seg === "active" && (
+                      <ListFilter
+                        size={13}
+                        strokeWidth={2.2}
+                        aria-hidden
+                        className={filtersOn ? "text-[var(--accent)]" : undefined}
+                      />
+                    )}
                     {label}
                     <span className="text-[12px] font-medium tabular-nums text-[var(--text-quaternary)]">{count}</span>
                   </button>
@@ -670,19 +700,53 @@ export default function TodoBoardPage() {
                   )}
                 </div>
               )}
-              {segment === "closed" &&
-                CLOSED_STATUSES.map((status) => (
-                  <ClosedColumnGroup
-                    key={status}
-                    status={status as "done" | "cancelled"}
-                    count={data.columns[status]?.total ?? 0}
-                    hasMore={data.columns[status]?.hasMore ?? false}
-                    loadMore={data.columns[status]?.loadMore ?? (() => {})}
-                    loadingMore={data.columns[status]?.loadingMore ?? false}
-                  >
-                    <div className="flex flex-col">{renderCards(status)}</div>
-                  </ClosedColumnGroup>
-                ))}
+              {segment === "closed" && (
+                closedHistory.length === 0 ? (
+                  <EmptyCaption text="Nothing closed yet." />
+                ) : (
+                  <>
+                    {closedHistory.map((group) => (
+                      <section key={group.bucket} data-testid={`board-closed-${group.bucket}`}>
+                        <div className="flex items-center gap-2 px-0.5 pb-0.5 text-[13px] font-semibold text-[var(--text-secondary)]">
+                          {group.label}
+                          <span className="text-[12px] font-normal tabular-nums text-[var(--text-quaternary)]">
+                            {group.items.length}
+                          </span>
+                        </div>
+                        <div className="flex flex-col">
+                          {group.items.map((item) => (
+                            <BoardCard
+                              key={item.id}
+                              item={item}
+                              enrichment={enrichmentOf(item.id)}
+                              byName={byName}
+                              expanded={false}
+                              onToggleTree={toggleTree}
+                              onOpen={onOpen}
+                              onOpenChild={onOpen}
+                              onAddSubTask={() => {}}
+                            />
+                          ))}
+                        </div>
+                      </section>
+                    ))}
+                    {CLOSED_STATUSES.filter((status) => data.columns[status]?.hasMore).map((status) => (
+                      <button
+                        key={status}
+                        type="button"
+                        data-testid={`board-show-more-${status}`}
+                        onClick={data.columns[status]?.loadMore ?? (() => {})}
+                        disabled={data.columns[status]?.loadingMore ?? false}
+                        className="focus-ring min-h-11 rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] px-3 text-left text-[12px] font-medium text-[var(--text-tertiary)] transition-colors hover:bg-[var(--fill-tertiary)]"
+                      >
+                        {(data.columns[status]?.loadingMore ?? false)
+                          ? "Loading…"
+                          : `Show more ${status === "done" ? "done" : "cancelled"}`}
+                      </button>
+                    ))}
+                  </>
+                )
+              )}
             </div>
             )}
           </div>
@@ -732,6 +796,21 @@ export default function TodoBoardPage() {
           onClose={() => setCreating(null)}
           onCreated={() => setCreating(null)}
           defaults={{ department: creating.department, askAssignee: creating.askAssignee, employees: org.data?.employees ?? [] }}
+        />
+      )}
+
+      {/* Mobile filtering entry (F5): the Active pill's glyph opens the same
+          filter grammar as the desktop chips, scoped like FilterBar. */}
+      {mobile && mobileFilterOpen && (
+        <TodoFilterSheet
+          filters={filters}
+          onChange={setFilters}
+          employees={org.data?.employees ?? []}
+          departments={board.kind === "everything" || board.kind === "my" ? org.data?.departments ?? [] : []}
+          byName={byName}
+          onClose={() => setMobileFilterOpen(false)}
+          hideStatus
+          hideDepartment={board.kind === "department"}
         />
       )}
     </PageLayout>

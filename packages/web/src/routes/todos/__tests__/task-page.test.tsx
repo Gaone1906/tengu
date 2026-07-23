@@ -1,16 +1,22 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkItemDetailWire, WorkItemFullWire, WorkItemStatusWire, WorkItemTreeNodeWire } from "@/lib/api"
 import TaskPage, { ancestorsOf, nodeOf } from "../task-page/task-page"
 
 /* Todos v2 slice 6 stage B — the task page (design-doc §7, task-detail.html).
  * Anatomy: breadcrumb trail from the root tree, banner precedence
  * (escalated > approval > blocked, ONE at a time), the banner's asked-for-after
- * reason field (review F6), and the chrome-free rail's read rows. */
+ * reason field (review F6), and the chrome-free rail's read rows. Stage C adds
+ * the §8 full-screen push: on mobile the tab bar yields the bottom edge to the
+ * fixed comment bar. */
 
-vi.mock("@/components/page-layout", () => ({ PageLayout: ({ children }: { children: React.ReactNode }) => <>{children}</> }))
+vi.mock("@/components/page-layout", () => ({
+  PageLayout: ({ children, hideMobileTabBar }: { children: React.ReactNode; hideMobileTabBar?: boolean }) => (
+    <div data-testid="page-layout" data-hide-mobile-tab-bar={hideMobileTabBar ? "true" : "false"}>{children}</div>
+  ),
+}))
 vi.mock("@/routes/settings-provider", () => ({ useSettings: () => ({ settings: { employeeOverrides: {} } }) }))
 vi.mock("@/routes/providers", () => ({ useTheme: () => ({ theme: "dark" }) }))
 
@@ -96,11 +102,30 @@ function renderTask(path = "/todos/PLA-12", state?: Record<string, unknown>) {
   )
 }
 
+/** jsdom has no matchMedia; the page's ONE mobile breakpoint is 700px. */
+function stubMobileViewport() {
+  const mql = (matches: boolean) => ({
+    matches,
+    media: "",
+    onchange: null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+    dispatchEvent: () => false,
+  })
+  window.matchMedia = ((query: string) => mql(query === "(max-width: 700px)")) as unknown as typeof window.matchMedia
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   getWorkItemTree.mockImplementation((id: string) =>
     Promise.resolve({ tree: { root: treeNode(full(id)), totals: {}, spendUsd: 0 } }),
   )
+})
+
+afterEach(() => {
+  delete (window as { matchMedia?: unknown }).matchMedia
 })
 
 describe("ancestor helpers", () => {
@@ -232,5 +257,30 @@ describe("the task page", () => {
     renderTask()
     const body = await screen.findByTestId("task-body")
     await waitFor(() => expect((body).textContent).toContain("complete"))
+  })
+
+  it("desktop keeps the tab bar; the in-flow composer is the one composer", async () => {
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    renderTask()
+    await screen.findByTestId("task-props-rail")
+    expect(screen.getByTestId("page-layout").dataset.hideMobileTabBar).toBe("false")
+    expect(screen.getByTestId("task-composer")).toBeTruthy()
+    expect(screen.queryByTestId("task-composer-mobile")).toBeNull()
+  })
+
+  it("mobile is a full-screen push (§8): the tab bar yields and the fixed comment bar owns the bottom edge", async () => {
+    stubMobileViewport()
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    renderTask()
+    await screen.findByTestId("task-chip-cluster")
+    expect(screen.getByTestId("page-layout").dataset.hideMobileTabBar).toBe("true")
+    const bar = screen.getByTestId("task-composer-mobile")
+    expect(bar).toBeTruthy()
+    // Mock anatomy: paperclip · "+ Comment" capsule · send, in that order.
+    const controls = bar.querySelectorAll("button, input")
+    expect((controls[0] as HTMLElement).getAttribute("aria-label")).toBe("Attach")
+    expect((controls[1] as HTMLInputElement).placeholder).toBe("Comment")
+    expect((controls[2] as HTMLElement).getAttribute("aria-label")).toBe("Send")
+    expect(screen.queryByTestId("task-composer")).toBeNull()
   })
 })

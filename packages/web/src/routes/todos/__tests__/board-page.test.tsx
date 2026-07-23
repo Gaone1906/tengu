@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkItemCompactWire, WorkItemListWire, WorkItemStatusWire, WorkItemTreeWire } from "@/lib/api"
 import TodoBoardPage from "../board/board-page"
 import { boardScopeParams } from "../board/use-board"
@@ -384,5 +384,76 @@ describe("quick add", () => {
       expect(createWorkItem).toHaveBeenCalledWith({ title: "Draft the launch note", department: "platform" }),
     )
     await waitFor(() => expect(assignWorkItem).toHaveBeenCalledWith("PLA-20", "scout"))
+  })
+})
+
+describe("the mobile board (§8 — stage C)", () => {
+  /** jsdom has no matchMedia; the board's ONE mobile breakpoint is 700px. */
+  function stubMobileViewport() {
+    const mql = (matches: boolean) => ({
+      matches,
+      media: "",
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })
+    window.matchMedia = ((query: string) => mql(query === "(max-width: 700px)")) as unknown as typeof window.matchMedia
+  }
+
+  afterEach(() => {
+    delete (window as { matchMedia?: unknown }).matchMedia
+  })
+
+  it("the Active pill carries the filter glyph and re-tapping it opens the filter sheet (review F5)", async () => {
+    stubMobileViewport()
+    rows.backlog = [compact({ id: "PLA-1", status: "backlog" })]
+    renderBoard("/todos/b/platform")
+    const active = await screen.findByTestId("board-segment-active")
+    expect(active.querySelector("svg")).toBeTruthy()
+    // First tap on the already-selected pill opens the sheet.
+    fireEvent.click(active)
+    await waitFor(() => expect(screen.getByTestId("todo-filter-sheet")).toBeTruthy())
+    // Board scoping: columns/segments own status; a department board owns its
+    // department — neither dimension appears in the sheet.
+    expect(screen.queryByLabelText("Status")).toBeNull()
+    expect(screen.queryByLabelText("Department")).toBeNull()
+    expect(screen.getByLabelText("Person")).toBeTruthy()
+  })
+
+  it("selecting another segment does NOT open the sheet; it switches the segment", async () => {
+    stubMobileViewport()
+    rows.done = [compact({ id: "PLA-2", status: "done" })]
+    renderBoard("/todos/b/platform")
+    const closed = await screen.findByTestId("board-segment-closed")
+    fireEvent.click(closed)
+    expect(screen.queryByTestId("todo-filter-sheet")).toBeNull()
+    await waitFor(() => expect(screen.getByTestId("board-card-PLA-2")).toBeTruthy())
+  })
+
+  it("the Closed segment groups done/cancelled by DATE, not by status (§8)", async () => {
+    stubMobileViewport()
+    const today = new Date().toISOString()
+    rows.done = [compact({ id: "PLA-2", status: "done", updatedAt: today })]
+    rows.cancelled = [compact({ id: "PLA-3", status: "cancelled", updatedAt: "2026-01-01T08:00:00.000Z" })]
+    renderBoard("/todos/b/platform")
+    fireEvent.click(await screen.findByTestId("board-segment-closed"))
+    await waitFor(() => expect(screen.getByTestId("board-closed-today")).toBeTruthy())
+    expect(screen.getByTestId("board-closed-today").textContent).toContain("Today")
+    expect(screen.getByTestId("board-closed-earlier").textContent).toContain("Earlier")
+    // Status groups don't exist on mobile — the rows' own discs carry which.
+    expect(screen.queryByTestId("board-closed-group-done")).toBeNull()
+  })
+
+  it("the Attention segment lists this board's blocked/escalated/approval items", async () => {
+    stubMobileViewport()
+    rows.blocked = [compact({ id: "PLA-9", status: "blocked" })]
+    rows.in_review = [compact({ id: "PLA-5", status: "in_review", approvalState: "pending" })]
+    renderBoard("/todos/b/platform")
+    fireEvent.click(await screen.findByTestId("board-segment-attention"))
+    await waitFor(() => expect(screen.getByTestId("board-card-PLA-9")).toBeTruthy())
+    expect(screen.getByTestId("board-card-PLA-5")).toBeTruthy()
   })
 })

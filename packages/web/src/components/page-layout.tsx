@@ -114,8 +114,13 @@ export function ToolbarActions({ children }: { children?: React.ReactNode }) {
  *
  * `headerActions` is retained on the signature for callers, but no page supplies
  * one today — pages own their actions inline via ToolbarActions.
+ *
+ * `hideMobileTabBar` is the full-screen-push escape (Todos v2 §8): a pushed
+ * detail page (the opened task) owns the bottom edge — its fixed comment bar
+ * replaces the tab bar, and back is the page's own affordance. Desktop chrome
+ * is untouched (the bar and its clearance are mobile-only anyway).
  */
-export function PageLayout({ children, headerActions: _headerActions, chromeless }: { children: React.ReactNode; headerActions?: React.ReactNode; chromeless?: boolean }) {
+export function PageLayout({ children, headerActions: _headerActions, chromeless, hideMobileTabBar }: { children: React.ReactNode; headerActions?: React.ReactNode; chromeless?: boolean; hideMobileTabBar?: boolean }) {
   return (
     <div className="flex h-dvh overflow-hidden bg-background">
       <DeferredGlobalSearch />
@@ -131,14 +136,14 @@ export function PageLayout({ children, headerActions: _headerActions, chromeless
             !chromeless && "pt-[var(--safe-top)] lg:pt-0",
             // Clear the mobile bottom tab bar (mobile only; the bar is the
             // persistent cross-route nav). Desktop has no bar.
-            !chromeless && "pb-[calc(49px+var(--safe-bottom))] lg:pb-0",
+            !chromeless && !hideMobileTabBar && "pb-[calc(49px+var(--safe-bottom))] lg:pb-0",
           )}
         >
           {children}
         </div>
         {/* Persistent mobile nav — same curated tab bar across every standard
             page so nav never disappears (Chat draws its own on the list screen). */}
-        {!chromeless && <MobileTabBar />}
+        {!chromeless && !hideMobileTabBar && <MobileTabBar />}
       </main>
       <DeferredLiveStreamWidget />
       <DeferredOnboardingWizard />

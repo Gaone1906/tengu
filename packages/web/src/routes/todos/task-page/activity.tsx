@@ -355,63 +355,71 @@ export function ActivitySection({
     ])
   }
 
-  const composerCore = (
-    <div className={pending.length > 0 ? "rounded-[18px] bg-[var(--fill-tertiary)] p-[10px_12px]" : ""}>
-      {pending.length > 0 && (
-        <div className="mb-[9px] flex flex-wrap gap-2" data-testid="composer-pending">
-          {pending.map((entry) => (
-            <span
-              key={entry.key}
-              className="relative flex h-10 items-center gap-2 rounded-[10px] bg-[var(--fill-secondary)] pl-2 pr-3 text-[12.5px] font-medium text-[var(--text-primary)] shadow-[var(--shadow-ambient)]"
-            >
-              <span className="grid size-6 place-items-center rounded-[7px] bg-[var(--fill-tertiary)] text-[var(--text-tertiary)]">
-                {entry.file.type.startsWith("image/") ? <ImageIcon size={12} aria-hidden /> : <FileText size={12} aria-hidden />}
-              </span>
-              <span className="max-w-40 truncate">{entry.file.name}</span>
-              <button
-                type="button"
-                aria-label={`Remove ${entry.file.name}`}
-                onClick={() => setPending((current) => current.filter((candidate) => candidate.key !== entry.key))}
-                className="absolute -right-1.5 -top-1.5 grid size-[18px] place-items-center rounded-full bg-[var(--bg-tertiary)] text-[var(--text-secondary)] shadow-[var(--shadow-subtle)]"
-              >
-                <X size={10} strokeWidth={2.4} aria-hidden />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      {replyTo && (
-        <div className="mb-1 flex items-center gap-1.5 text-[12px] text-[var(--text-tertiary)]">
-          Replying to {commentAuthor(replyTo, byName)}
+  const pendingChips = pending.length > 0 && (
+    <div className="flex flex-wrap gap-2" data-testid="composer-pending">
+      {pending.map((entry) => (
+        <span
+          key={entry.key}
+          className="relative flex h-10 items-center gap-2 rounded-[10px] bg-[var(--fill-secondary)] pl-2 pr-3 text-[12.5px] font-medium text-[var(--text-primary)] shadow-[var(--shadow-ambient)]"
+        >
+          <span className="grid size-6 place-items-center rounded-[7px] bg-[var(--fill-tertiary)] text-[var(--text-tertiary)]">
+            {entry.file.type.startsWith("image/") ? <ImageIcon size={12} aria-hidden /> : <FileText size={12} aria-hidden />}
+          </span>
+          <span className="max-w-40 truncate">{entry.file.name}</span>
           <button
             type="button"
-            onClick={() => setReplyTo(null)}
-            className="focus-ring rounded-full px-1.5 font-semibold text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-tertiary)]"
+            aria-label={`Remove ${entry.file.name}`}
+            onClick={() => setPending((current) => current.filter((candidate) => candidate.key !== entry.key))}
+            className="absolute -right-1.5 -top-1.5 grid size-[18px] place-items-center rounded-full bg-[var(--bg-tertiary)] text-[var(--text-secondary)] shadow-[var(--shadow-subtle)]"
           >
-            Cancel
+            <X size={10} strokeWidth={2.4} aria-hidden />
           </button>
-        </div>
-      )}
+        </span>
+      ))}
+    </div>
+  )
+
+  const replyRow = replyTo && (
+    <div className="mb-1 flex items-center gap-1.5 text-[12px] text-[var(--text-tertiary)]">
+      Replying to {commentAuthor(replyTo, byName)}
+      <button
+        type="button"
+        onClick={() => setReplyTo(null)}
+        className="focus-ring rounded-full px-1.5 font-semibold text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-tertiary)]"
+      >
+        Cancel
+      </button>
+    </div>
+  )
+
+  const inputProps = {
+    value: draft,
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => setDraft(e.target.value),
+    onKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault()
+        submit()
+      }
+    },
+    onPaste: (e: React.ClipboardEvent<HTMLInputElement>) => {
+      const files = [...e.clipboardData.files]
+      if (files.length > 0) {
+        e.preventDefault()
+        stageFiles(files)
+      }
+    },
+    "aria-label": replyTo ? "Reply" : "Add a comment",
+    "data-testid": "composer-input",
+  }
+
+  const composerCore = (
+    <div className={pending.length > 0 ? "rounded-[18px] bg-[var(--fill-tertiary)] p-[10px_12px]" : ""}>
+      {pendingChips && <div className="mb-[9px]">{pendingChips}</div>}
+      {replyRow}
       <div className="flex items-center gap-2">
         <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault()
-              submit()
-            }
-          }}
-          onPaste={(e) => {
-            const files = [...e.clipboardData.files]
-            if (files.length > 0) {
-              e.preventDefault()
-              stageFiles(files)
-            }
-          }}
+          {...inputProps}
           placeholder={replyTo ? "Reply…" : "Add a comment…"}
-          aria-label={replyTo ? "Reply" : "Add a comment"}
-          data-testid="composer-input"
           className={`min-w-0 flex-1 text-[14.5px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)] ${
             pending.length > 0 ? "bg-transparent px-1.5 py-1.5" : "rounded-[18px] bg-[var(--fill-tertiary)] px-4 py-2.5"
           }`}
@@ -432,6 +440,51 @@ export function ActivitySection({
           disabled={send.isPending || !draft.trim()}
           onClick={submit}
           className="focus-ring grid size-[34px] flex-none place-items-center rounded-full outline-none disabled:opacity-40"
+          style={{ background: "var(--accent-fill)", color: "var(--accent)", boxShadow: "var(--inset-shine)" }}
+        >
+          <ArrowUp size={15} strokeWidth={2.2} aria-hidden />
+        </button>
+      </div>
+    </div>
+  )
+
+  /* The §8 fixed bottom bar IS the mobile composer (mock task-detail.html
+   * .m-composer): paperclip · "+ Comment" capsule · accent send, material
+   * blur, safe-area padded. It owns the bottom edge — the tab bar yields on
+   * the pushed task page. Pending chips stack above the input row. */
+  const mobileBar = (
+    <div
+      data-testid="task-composer-mobile"
+      className="fixed inset-x-0 bottom-0 z-20 px-4 pb-[max(12px,env(safe-area-inset-bottom))] pt-2.5 backdrop-blur-[20px]"
+      style={{ background: "var(--material-thick)" }}
+    >
+      {pendingChips && <div className="mb-2.5">{pendingChips}</div>}
+      {replyRow}
+      <div className="flex items-center gap-2.5">
+        <button
+          type="button"
+          aria-label="Attach"
+          data-testid="composer-attach"
+          onClick={() => fileRef.current?.click()}
+          className="focus-ring grid size-[38px] flex-none place-items-center rounded-[12px] text-[var(--text-tertiary)] outline-none hover:bg-[var(--fill-secondary)]"
+        >
+          <Paperclip size={16} strokeWidth={2} aria-hidden />
+        </button>
+        <label className="flex min-h-[42px] min-w-0 flex-1 items-center gap-2 rounded-[21px] bg-[var(--fill-tertiary)] px-4">
+          <Plus size={13} strokeWidth={2.2} className="flex-none text-[var(--text-quaternary)]" aria-hidden />
+          <input
+            {...inputProps}
+            placeholder={replyTo ? "Reply…" : "Comment"}
+            className="min-w-0 flex-1 bg-transparent text-[14.5px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-quaternary)]"
+          />
+        </label>
+        <button
+          type="button"
+          aria-label="Send"
+          data-testid="composer-send"
+          disabled={send.isPending || !draft.trim()}
+          onClick={submit}
+          className="focus-ring grid size-[38px] flex-none place-items-center rounded-[19px] outline-none disabled:opacity-40"
           style={{ background: "var(--accent-fill)", color: "var(--accent)", boxShadow: "var(--inset-shine)" }}
         >
           <ArrowUp size={15} strokeWidth={2.2} aria-hidden />
@@ -527,13 +580,7 @@ export function ActivitySection({
           {composerCore}
         </div>
       ) : (
-        <div
-          data-testid="task-composer-mobile"
-          className="fixed inset-x-0 bottom-0 z-20 px-4 pb-[max(12px,env(safe-area-inset-bottom))] pt-2.5 backdrop-blur-[20px]"
-          style={{ background: "var(--material-thick)" }}
-        >
-          {composerCore}
-        </div>
+        mobileBar
       )}
     </div>
   )

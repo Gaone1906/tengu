@@ -321,7 +321,9 @@ export default function TaskPage() {
   }
 
   return (
-    <PageLayout>
+    // Mobile is a full-screen push (§8): the tab bar yields the bottom edge to
+    // the fixed comment bar; back is the condensed crumb's chevron.
+    <PageLayout hideMobileTabBar={mobile}>
       <div className="flex h-full min-h-0 flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto" data-scrollable data-testid="task-page-scroll">
           <CrumbBar

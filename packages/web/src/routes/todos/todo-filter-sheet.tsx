@@ -23,6 +23,8 @@ export function TodoFilterSheet({
   byName,
   onPeopleView,
   onClose,
+  hideStatus,
+  hideDepartment,
 }: {
   filters: TodoFilters
   onChange: (next: TodoFilters) => void
@@ -31,6 +33,10 @@ export function TodoFilterSheet({
   byName: Map<string, Employee>
   onPeopleView?: () => void
   onClose: () => void
+  /** Board scopes own these dimensions (columns/segments = status, a
+   *  department board = its department) — same scoping as FilterBar. */
+  hideStatus?: boolean
+  hideDepartment?: boolean
 }) {
   const [panel, setPanel] = useState<FilterPanel>("root")
   const title = panel === "root" ? "Filter" : panel.charAt(0).toUpperCase() + panel.slice(1)
@@ -70,7 +76,9 @@ export function TodoFilterSheet({
               ["department", "Department", filters.department ? filters.department.charAt(0).toUpperCase() + filters.department.slice(1) : "Any"],
               ["source", "Source", SOURCE_OPTIONS.find((option) => option.value === filters.source)?.label ?? "Any"],
               ["date", "Date", DATE_OPTIONS.find((option) => option.value === filters.date)?.label ?? "Any time"],
-            ] as const).map(([value, label, current]) => (
+            ] as const).filter(([value]) =>
+              !(hideStatus && value === "status") && !(hideDepartment && value === "department"),
+            ).map(([value, label, current]) => (
               <button key={value} type="button" aria-label={label} onClick={() => setPanel(value)} className={ROW_CLASS}>
                 <span>{label}</span>
                 <span className="ml-auto min-w-0 truncate text-[var(--text-tertiary)]">{current}</span>
