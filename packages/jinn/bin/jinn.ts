@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import os from "node:os";
+import { pathToFileURL } from "node:url";
 import pkg from "../package.json" with { type: "json" };
 import { assertNativeRuntime } from "../src/shared/runtime-guard.js";
 import { loadInstances } from "../src/instances/directory.js";
@@ -146,33 +147,29 @@ program
     await runMigrate(opts);
   });
 
-// Workflow subcommands (jinn workflow run <canonical-name>)
-{
-  const workflowCmd = program
-    .command("workflow")
-    .description("Operate workflow definitions and runs");
-
-  workflowCmd
-    .command("run <name>")
-    .description("Run a canonical workflow name")
-    .option("--input <json>", "Structured workflow input as a JSON object")
-    .option("--idempotency-key <key>", "Deduplicate repeated invocations")
-    .option("--json", "Print the full run record as JSON")
-    .action(async (name: string, opts: { input?: string; idempotencyKey?: string; json?: boolean }) => {
-      const { runWorkflowByName } = await import("../src/cli/workflow.js");
-      await runWorkflowByName(name, opts);
-    });
-
-  workflowCmd
-    .command("cancel <workflowId> <runId>")
-    .description("Cancel a Workflow run and stop its run-owned phase sessions")
-    .option("--reason <reason>", "Record why the run was cancelled")
-    .option("--json", "Print the full cancelled run record as JSON")
-    .action(async (workflowId: string, runId: string, opts: { reason?: string; json?: boolean }) => {
-      const { cancelWorkflowRunFromCli } = await import("../src/cli/workflow.js");
-      await cancelWorkflowRunFromCli(workflowId, runId, opts);
-    });
-}
+const workflowAction = (name: string) => async (...received: unknown[]) => {
+  const command = received.pop() as Command;
+  const handlers = await import("../src/cli/workflow.js") as unknown as Record<string, (...args: unknown[]) => Promise<void>>;
+  await handlers[name]!(...received, command.opts());
+};
+const withJson = (command: Command) => command.option("--json", "Print raw JSON");
+const workflow = program.command("workflow").description("Operate workflow definitions and runs");
+withJson(workflow.command("list").option("--cursor <cursor>").option("--limit <number>")).action(workflowAction("listWorkflows"));
+withJson(workflow.command("get <workflowId>")).action(workflowAction("getWorkflow"));
+withJson(workflow.command("create").requiredOption("--file <jsonFile>")).action(workflowAction("createWorkflow"));
+withJson(workflow.command("update <workflowId>").requiredOption("--file <jsonFile>").requiredOption("--expected-revision <number>")).action(workflowAction("updateWorkflow"));
+withJson(workflow.command("duplicate <sourceId>").requiredOption("--id <targetId>").requiredOption("--title <title>")).action(workflowAction("duplicateWorkflow"));
+for (const [name, handler] of [["retire", "retireWorkflow"], ["enable", "enableWorkflow"], ["disable", "disableWorkflow"]] as const)
+  withJson(workflow.command(`${name} <workflowId>`).requiredOption("--expected-revision <number>")).action(workflowAction(handler));
+withJson(workflow.command("run <workflowId>").option("--input <json>").option("--idempotency-key <key>")).action(workflowAction("startWorkflowRun"));
+withJson(workflow.command("runs <workflowId>").option("--cursor <cursor>").option("--limit <number>").option("--status <status>")).action(workflowAction("listWorkflowRuns"));
+withJson(workflow.command("show-run <workflowId> <runId>")).action(workflowAction("showWorkflowRun"));
+withJson(workflow.command("cancel <workflowId> <runId>").option("--reason <reason>")).action(workflowAction("cancelWorkflowRun"));
+withJson(workflow.command("rerun <workflowId> <runId>").requiredOption("--definition <original|current>").requiredOption("--idempotency-key <key>")).action(workflowAction("rerunWorkflowRun"));
+for (const [name, handler] of [["approve", "approveWorkflowApproval"], ["reject", "rejectWorkflowApproval"]] as const)
+  withJson(workflow.command(`${name} <workflowId> <runId> <nodeId>`).requiredOption("--expected-revision <number>").option("--reason <reason>")).action(workflowAction(handler));
+withJson(workflow.command("retry <workflowId> <runId> <nodeId>").requiredOption("--idempotency-key <key>")).action(workflowAction("retryWorkflowNode"));
+withJson(workflow.command("event <eventName>").requiredOption("--fire-id <id>").requiredOption("--payload <json>")).action(workflowAction("fireWorkflowEvent"));
 
 // Skills subcommands (jinn skills find|add|remove|list|update|restore)
 {
@@ -229,4 +226,5 @@ program
     });
 }
 
-program.parse();
+export function buildProgram(): Command { return program; }
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) program.parse();
