@@ -191,6 +191,24 @@ import {
   COMMENT_PAGE_DEFAULT_LIMIT,
   COMMENT_PAGE_MAX_LIMIT,
 } from "../work-items/comments.js";
+import {
+  addRelation,
+  blockedSet,
+  isBlocked,
+  listRelations,
+  removeRelation,
+  WorkItemRelationError,
+  type RelationKind,
+} from "../work-items/relations.js";
+import {
+  createLabel,
+  getWorkItemLabels,
+  labelSets,
+  listLabels,
+  normalizeLabelName,
+  setWorkItemLabels,
+  type Label,
+} from "../work-items/labels.js";
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import {
@@ -1008,7 +1026,14 @@ const AGENT_WORK_ITEM_TARGETS: readonly WorkItemStatus[] = ['executing', 'in_rev
 const VERIFY_MODES = ['trust', 'verify', 'thorough'] as const;
 const VERIFY_POLICY_KEYS = new Set(['mode', 'verifier', 'maxRounds']);
 
-function compactWorkItem(item: WorkItem): Record<string, unknown> {
+/** Compact wire summary (Todos v2 slice 3 adds `labels` + `blocked` — the
+ *  board's chip/indicator data). List callers pass the pre-batched `extras`
+ *  (ONE blockedSet + ONE labelSets query per page); single-item callers omit
+ *  them and pay two per-item lookups. */
+function compactWorkItem(
+  item: WorkItem,
+  extras?: { blocked: Set<string>; labels: Map<string, Label[]> },
+): Record<string, unknown> {
   return {
     id: item.id,
     title: item.title,
@@ -1024,6 +1049,8 @@ function compactWorkItem(item: WorkItem): Record<string, unknown> {
     source: item.source,
     sourceRef: item.sourceRef,
     rank: item.rank,
+    labels: extras ? extras.labels.get(item.id) ?? [] : getWorkItemLabels(item.id),
+    blocked: extras ? extras.blocked.has(item.id) : isBlocked(item.id),
     approvalState: item.approvalState,
     approvalRequest: item.approvalRequest,
     approvalRef: item.approvalRef,
@@ -1049,6 +1076,8 @@ function fullWorkItemPayload(item: WorkItem): Record<string, unknown> {
     spendUsd: getWorkItemSpend(item.id),
     events: listWorkItemEvents(item.id),
     comments: commentsTail(item.id),
+    relations: listRelations(item.id),
+    labels: getWorkItemLabels(item.id),
   };
 }
 
@@ -1206,6 +1235,19 @@ function readWorkItemQueryParams(url: URL): { ok: true; value: WorkItemQueryPara
     }
   }
   if (readCleanSearchParam(url, 'rootsOnly') === 'true') filter.rootsOnly = true;
+  const label = readCleanSearchParam(url, 'label');
+  if (label) {
+    // Ids pass through; display names are normalized to the stored kebab-case.
+    if (/^lbl_[0-9a-f]{12}$/.test(label)) {
+      filter.label = label;
+    } else {
+      try {
+        filter.label = normalizeLabelName(label);
+      } catch {
+        return { ok: false, error: 'label must be a label ID (lbl_…) or a name with at least one letter or digit' };
+      }
+    }
+  }
   const since = readWorkItemDateParam(url, 'since');
   if (!since.ok) return since;
   if (since.value) filter.since = since.value;
@@ -1223,8 +1265,11 @@ function readWorkItemQueryParams(url: URL): { ok: true; value: WorkItemQueryPara
 }
 
 function workItemPagePayload(page: ReturnType<typeof queryWorkItems>): Record<string, unknown> {
+  // Batch the board wire data across the page — ONE query each, never per item.
+  const ids = page.workItems.map((item) => item.id);
+  const extras = { blocked: blockedSet(ids), labels: labelSets(ids) };
   return {
-    workItems: page.workItems.map(compactWorkItem),
+    workItems: page.workItems.map((item) => compactWorkItem(item, extras)),
     total: page.total,
     totals: page.totals,
     limit: page.limit,
@@ -3701,6 +3746,161 @@ export async function handleApiRequest(
         return json(res, { comment });
       } catch (err) {
         return workItemCommentFailure(res, err);
+      }
+    }
+
+    // POST /api/work-items/:id/relations — link two Todos (any identified
+    // caller; createdBy stamped server-side; blocks edges are cycle-checked).
+    params = matchRoute("/api/work-items/:id/relations", pathname);
+    if (method === "POST" && params) {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      const kind = typeof body.kind === "string" ? body.kind : "";
+      if (!["blocks", "relates", "duplicates"].includes(kind)) {
+        return badRequest(res, "kind must be one of blocks, relates, duplicates");
+      }
+      const dstId = typeof body.dstId === "string" ? body.dstId.trim() : "";
+      if (!isTodoId(dstId)) {
+        return badRequest(res, "dstId must be a canonical Todo ID such as ACM-42");
+      }
+      if (!getWorkItem(params.id)) return notFound(res);
+      if (!getWorkItem(dstId)) return notFound(res);
+      try {
+        const relation = addRelation(params.id, dstId, kind as RelationKind, workItemActor(caller));
+        return json(res, { relation }, 201);
+      } catch (err) {
+        // relation-cycle carries the offending path in its message → 400.
+        return badRequest(res, err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    // DELETE /api/work-items/:id/relations — unlink (relation creator or the
+    // operator). `relates` accepts either endpoint order.
+    params = matchRoute("/api/work-items/:id/relations", pathname);
+    if (method === "DELETE" && params) {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      const kind = typeof body.kind === "string" ? body.kind : "";
+      if (!["blocks", "relates", "duplicates"].includes(kind)) {
+        return badRequest(res, "kind must be one of blocks, relates, duplicates");
+      }
+      const dstId = typeof body.dstId === "string" ? body.dstId.trim() : "";
+      if (!isTodoId(dstId)) {
+        return badRequest(res, "dstId must be a canonical Todo ID such as ACM-42");
+      }
+      if (!getWorkItem(params.id)) return notFound(res);
+      try {
+        const removed = removeRelation(params.id, dstId, kind as RelationKind, {
+          actor: workItemActor(caller),
+          operator: caller.kind === "operator",
+        });
+        if (!removed) return notFound(res);
+        return json(res, { removed: true });
+      } catch (err) {
+        if (err instanceof WorkItemRelationError && err.code === "relation-forbidden") {
+          return json(res, { error: err.message }, 403);
+        }
+        return badRequest(res, err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    // PUT /api/work-items/:id/labels — replace the label set (operator, item
+    // creator, or assignee — the pre-slice-4 subset of edit authority). Only
+    // EXISTING labels are accepted; nothing is created implicitly.
+    params = matchRoute("/api/work-items/:id/labels", pathname);
+    if (method === "PUT" && params) {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
+      const item = getWorkItem(params.id);
+      if (!item) return notFound(res);
+      const employee = caller.kind === "session" ? caller.session.employee ?? null : null;
+      const allowed =
+        caller.kind === "operator" ||
+        item.createdBy === workItemActor(caller) ||
+        (employee !== null && (item.assignee === employee || item.createdBy === employee));
+      if (!allowed) {
+        return json(res, { error: "replacing a Todo's labels requires the operator, the item creator, or the assignee" }, 403);
+      }
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      if (!Array.isArray(body.labels) || body.labels.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > 256)) {
+        return badRequest(res, "labels must be an array of label ids or names (non-empty strings)");
+      }
+      try {
+        const labels = setWorkItemLabels(params.id, (body.labels as string[]).map((entry) => entry.trim()), workItemActor(caller));
+        return json(res, { labels });
+      } catch (err) {
+        return badRequest(res, err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    // GET /api/labels — the shared label registry (any caller; agents discover
+    // valid labels here before label_work_item).
+    if (method === "GET" && pathname === "/api/labels") {
+      return json(res, { labels: listLabels() });
+    }
+
+    // POST /api/labels — create a label (operator or a manager: an employee
+    // with direct reports in the org hierarchy).
+    if (method === "POST" && pathname === "/api/labels") {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      if (caller.kind !== "operator") {
+        const employee = caller.session.employee;
+        let manager = false;
+        if (employee) {
+          const { scanOrg } = await import("./org.js");
+          const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
+          const node = resolveOrgHierarchy(scanOrg()).nodes[employee];
+          manager = (node?.directReports.length ?? 0) > 0;
+        }
+        if (!manager) {
+          return json(res, { error: "creating labels requires the operator or a manager (an employee with direct reports)" }, 403);
+        }
+      }
+      const parsed = await readJsonBody(req, res);
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      if (typeof body.name !== "string" || !body.name.trim() || body.name.length > 256) {
+        return badRequest(res, "name is required and must be a non-empty string");
+      }
+      if (body.color !== undefined && body.color !== null && typeof body.color !== "string") {
+        return badRequest(res, "color must be a 6-digit hex string such as #22cc88");
+      }
+      if (body.department !== undefined && body.department !== null && (typeof body.department !== "string" || body.department.length > 256)) {
+        return badRequest(res, "department must be a string");
+      }
+      try {
+        const label = createLabel({
+          name: body.name,
+          color: (body.color as string | null | undefined) ?? null,
+          department: (body.department as string | null | undefined) ?? null,
+        });
+        return json(res, { label }, 201);
+      } catch (err) {
+        return badRequest(res, err instanceof Error ? err.message : String(err));
       }
     }
 

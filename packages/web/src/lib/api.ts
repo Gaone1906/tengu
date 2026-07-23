@@ -509,6 +509,27 @@ export interface WorkItemSessionRefWire {
 }
 
 /** The compact row GET /api/work-items returns (list/board/people). */
+/** One label (Todos v2 slice 3). `department` null = company-wide. */
+export interface WorkItemLabelWire {
+  id: string
+  name: string
+  color: string | null
+  department: string | null
+  createdAt: string
+}
+
+export type WorkItemRelationKindWire = "blocks" | "relates" | "duplicates"
+
+/** One relation as seen from a Todo: the other endpoint resolved to a compact
+ *  ref. `relates` is symmetric and always reads as direction "out". */
+export interface WorkItemRelationWire {
+  kind: WorkItemRelationKindWire
+  direction: "out" | "in"
+  other: { id: string; title: string; status: WorkItemStatusWire }
+  createdBy: string
+  createdAt: string
+}
+
 export interface WorkItemCompactWire {
   id: string
   /** Positive monotonic whole-row revision on CAS-capable gateways. */
@@ -531,6 +552,10 @@ export interface WorkItemCompactWire {
   rootId?: string
   depth?: number
   dueAt?: string | null
+  /** Todos v2 slice 3 board wire data (optional: older gateways omit them). */
+  labels?: WorkItemLabelWire[]
+  /** True while an incoming `blocks` relation originates from an open Todo. */
+  blocked?: boolean
   updatedAt: string
   /** Manual sort rank (design-todos §7.3). Null until the operator reorders. */
   rank?: number | null
@@ -675,6 +700,10 @@ export interface WorkItemDetailWire {
   events: WorkItemEventWire[]
   /** Last-10 comments tail + total (optional: older gateways omit it). */
   comments?: WorkItemCommentPageWire
+  /** Both-direction relations (optional: older gateways omit it). */
+  relations?: WorkItemRelationWire[]
+  /** The Todo's labels, ordered by name (optional: older gateways omit it). */
+  labels?: WorkItemLabelWire[]
 }
 
 export interface ApprovalDecisionResultWire {
