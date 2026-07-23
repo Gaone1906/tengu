@@ -158,6 +158,7 @@ import {
   type ChatActivityContext,
 } from "./chat-activity.js";
 import {
+  appendWorkItemEvent,
   createWorkItem,
   getWorkItem,
   getWorkItemBySourceRef,
@@ -3612,6 +3613,23 @@ export async function handleApiRequest(
       if (!item) return notFound(res);
       const authorized = authorizeAgentWorkItemStatus(caller, item, target as WorkItemStatus);
       if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
+      // The banner's asked-for-after reason (design-doc §5): a same-status
+      // operator PUT with a note annotates the CURRENT exception state instead
+      // of vanishing in transition()'s same-status no-op. The note event
+      // carries toStatus so the reason surfaces read it like a transition note.
+      if (isOperatorPut && note && target === item.status && (target === "blocked" || target === "escalated")) {
+        appendWorkItemEvent({
+          workItemId: params.id,
+          kind: "note",
+          toStatus: target as WorkItemStatus,
+          actor: workItemActor(caller),
+          detail: { note },
+          versionEffect: "state",
+        });
+        const annotated = getWorkItem(params.id)!;
+        const activityReceiptId = persistTodoMutationActivity(req, context, annotated, "status-transitioned", true);
+        return json(res, withActivityReceipt({ workItem: annotated, escalated: false }, activityReceiptId));
+      }
       try {
         const result = isOperatorPutCancellation
           ? {

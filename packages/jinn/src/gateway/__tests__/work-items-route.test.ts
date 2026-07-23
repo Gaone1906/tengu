@@ -500,6 +500,52 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     expect(store.getWorkItem(item.id)?.status).toBe("done");
   });
 
+  it.each(["blocked", "escalated"] as const)(
+    "records a same-status %s note through the operator PUT lane (the banner's asked-for-after reason)",
+    async (status) => {
+      // Design-doc §5: a drop into Blocked/Escalated commits immediately and the
+      // reason is asked for AFTER, in the opened task page's banner. That write
+      // is a same-status PUT with a note — it must land as a reason-carrying
+      // event (toStatus = the current status so the reason line reads it), not
+      // vanish in the transition() same-status no-op.
+      const item = store.createWorkItem({ title: `Reasonless ${status}`, status });
+      const before = store.getWorkItem(item.id)!.version;
+      const cap = makeRes();
+
+      await api.handleApiRequest(
+        makeReq("PUT", `/api/work-items/${item.id}/status`, { status, note: "Waiting on vendor keys" }, operatorHeaders),
+        cap.res,
+        ctx,
+      );
+
+      expect(cap.status).toBe(200);
+      expect(cap.body.workItem.status).toBe(status);
+      const event = store.listWorkItemEvents(item.id).at(-1);
+      expect(event).toMatchObject({
+        kind: "note",
+        toStatus: status,
+        actor: "operator",
+      });
+      expect(event?.detail?.note).toBe("Waiting on vendor keys");
+      expect(store.getWorkItem(item.id)!.version).toBeGreaterThan(before);
+    },
+  );
+
+  it("keeps a same-status operator PUT WITHOUT a note a plain no-op", async () => {
+    const item = store.createWorkItem({ title: "No-op blocked", status: "blocked" });
+    const events = store.listWorkItemEvents(item.id).length;
+    const cap = makeRes();
+
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${item.id}/status`, { status: "blocked" }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+
+    expect(cap.status).toBe(200);
+    expect(store.listWorkItemEvents(item.id).length).toBe(events);
+  });
+
   it("cancels an escalated item through the operator PUT lane (archive lane carries human authority)", async () => {
     // legalTargets() mirrors transitions.ts and offers escalated → cancelled;
     // the archive lane must honour the same human authority the PUT lane
