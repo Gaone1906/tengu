@@ -55,6 +55,7 @@ import {
   type PartialStreamWriter,
 } from "./partial-stream.js";
 import { completedStreamedBlockIds } from "../gateway/streamed-blocks.js";
+import { workflowAttemptInterruptionCause } from "./workflow-interruptions.js";
 
 export interface RouteOptions {
   employee?: Employee;
@@ -202,7 +203,7 @@ export class SessionManager {
   private enqueueWorkflowAttempt(session: Session, prompt: string, employee: Employee, claim: string): void {
     const msg: IncomingMessage = { connector: "workflow", source: "workflow", sessionKey: session.sessionKey, replyContext: {}, channel: session.id, user: "workflow", userId: "workflow", text: prompt, attachments: [], raw: null };
     setImmediate(() => { void this.queue.enqueue(session.sessionKey, async () => { await this.runSession(session, msg, [], WORKFLOW_CONNECTOR, { channel: session.id }, employee);
-      this.emitWorkflowAttemptCompletion(getSession(session.id)); }, claim).catch((error) => logger.error(`Workflow session ${session.id} dispatch failed: ${String(error)}`)); });
+      this.emitWorkflowAttemptTurnCompletion(session.id); }, claim).catch((error) => logger.error(`Workflow session ${session.id} dispatch failed: ${String(error)}`)); });
   }
   async remindWorkflowAttempt(sessionId: string, text: string): Promise<void> {
     const session = getSession(sessionId);
@@ -231,15 +232,24 @@ export class SessionManager {
     const session = getSession(input.sessionId); if (!session || session.workflowProvenance?.kind !== "phase") return;
     const stopped = interruptSessionAttempt(session.id, input.reason, new Date().toISOString()); if (!stopped) return; cancelWorkflowAttemptDispatch(stopped.id);
     this.queue.clearQueue(stopped.sessionKey); const engine = this.engines.get(stopped.engine);
-    if (engine && isInterruptibleEngine(engine)) engine.kill(stopped.id, input.reason); this.emitWorkflowAttemptCompletion(stopped);
+    if (engine && isInterruptibleEngine(engine)) engine.kill(stopped.id, input.reason); this.emitWorkflowAttemptCompletion(stopped, "attempt-stop");
   }
-  private emitWorkflowAttemptCompletion(session?: Session): void {
+  emitWorkflowAttemptTurnCompletion(sessionId: string): void {
+    this.emitWorkflowAttemptCompletion(getSession(sessionId));
+  }
+  private emitWorkflowAttemptCompletion(
+    session?: Session,
+    interruptionCause?: import("../shared/types.js").WorkflowAttemptInterruptionCause,
+  ): void {
     const provenance = session?.workflowProvenance; if (!session?.attemptOutcome || provenance?.kind !== "phase" || !provenance.phase) return; const terminalVersion = session.attemptTerminalVersion ?? 0;
     const turn = session.attemptTurn ?? 0; const key = `${session.id}:${turn}`;
     if (terminalVersion < 1 || turn < 1 || this.emittedWorkflowAttemptCompletions.has(key)) return;
     const finalText = [...getMessages(session.id)].reverse().find((message) => message.role === "assistant")?.content;
     const event: WorkflowAttemptCompletion = { sessionId: session.id, owner: { workflowId: provenance.workflowId, runId: provenance.runId, nodeId: provenance.phase.nodeId,
       attempt: provenance.phase.attempt }, turn, terminalVersion: 1, outcome: session.attemptOutcome, completedAt: session.lastActivity,
+      ...(session.attemptOutcome === "interrupted" ? {
+        interruptionCause: interruptionCause ?? workflowAttemptInterruptionCause(session.lastError),
+      } : {}),
       ...(finalText ? { finalText } : {}), ...(session.lastError ? { error: session.lastError } : {}) };
     this.emittedWorkflowAttemptCompletions.add(key); for (const listener of this.workflowAttemptCompletionListeners)
       void Promise.resolve().then(() => listener(event)).catch((error) => logger.warn(`Workflow completion listener failed: ${String(error)}`));

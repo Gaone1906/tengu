@@ -93,6 +93,7 @@ import {
   createPartialStreamWriter,
   normalizeBlockDeltaForTurn,
 } from "../sessions/partial-stream.js";
+import { USER_MESSAGE_INTERRUPTION_REASON } from "../sessions/workflow-interruptions.js";
 export {
   foldPartialText,
   normalizeBlockDeltaForTurn,
@@ -654,6 +655,9 @@ function dispatchWebSessionRun(
         // Item moved pending → running: refresh the queue panel.
         if (opts?.queueItemId) context.emit("queue:updated", { sessionId: session.id, sessionKey });
         await runWebSession(startedAttempt, prompt, engine, config, context, startedAttempt.attemptToken, opts?.attachments);
+        if (startedAttempt.workflowProvenance?.kind === "phase") {
+          context.sessionManager.emitWorkflowAttemptTurnCompletion(session.id);
+        }
       }, opts?.queueItemId);
     } finally {
       // Item settled (completed/cancelled/errored): refresh so the "N queued"
@@ -675,6 +679,9 @@ function dispatchWebSessionRun(
           })
         : undefined;
       if (erroredOnDispatch) {
+        if (erroredOnDispatch.workflowProvenance?.kind === "phase") {
+          context.sessionManager.emitWorkflowAttemptTurnCompletion(session.id);
+        }
         context.emit("session:completed", {
           sessionId: session.id,
           result: null,
@@ -5196,7 +5203,7 @@ export async function handleApiRequest(
       if (session.status === "running") {
         if (shouldInterruptRunningTurn) {
           logger.info(`Interrupting running session ${session.id} for new message`);
-          engine.kill(session.id, "Interrupted: new message received");
+          engine.kill(session.id, USER_MESSAGE_INTERRUPTION_REASON);
           // SessionQueue serializes per-session; the new turn enqueued below will
           // wait for the killed run()'s promise to settle before starting.
           context.emit("session:interrupted", { sessionId: session.id, reason: "new message" });
@@ -6526,6 +6533,7 @@ async function runWebSession(
       employee,
       engine: currentSession.engine,
       sessionId: currentSession.id,
+      workflowAttempt: currentSession.workflowProvenance?.kind === "phase",
     }));
 
     // Per-engine config is keyed by engine name; unconfigured optional engines
