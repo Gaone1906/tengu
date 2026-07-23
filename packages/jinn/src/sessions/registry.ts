@@ -1878,8 +1878,12 @@ export function completeSessionAttempt(
 }
 
 export function interruptSessionAttempt(id: string, reason: string, completedAt: string): Session | undefined {
+  // The explicit stop owns this turn: clear any same-turn user-message marker in
+  // the same statement, or a crash before the completion listener would let
+  // recovery reclassify the stop as a user interruption.
   const result = initDb().prepare(`UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted',
-    attempt_terminal_version = 1, attempt_turn = attempt_turn + 1, last_activity = ?, last_error = ?
+    attempt_terminal_version = 1, attempt_turn = attempt_turn + 1, last_activity = ?, last_error = ?,
+    attempt_interruption_cause = NULL, attempt_interruption_turn = NULL
     WHERE id = ? AND workflow_kind = 'phase' AND attempt_outcome IS NULL AND attempt_terminal_version = 0`)
     .run(completedAt, reason, id);
   return result.changes === 1 ? getSession(id) : undefined;
