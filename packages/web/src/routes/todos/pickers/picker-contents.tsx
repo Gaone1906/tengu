@@ -33,6 +33,13 @@ const ALL_STATUSES: readonly WorkItemStatusWire[] = [
   "backlog", "assigned", "executing", "in_review", "done", "blocked", "escalated", "cancelled",
 ]
 
+/** The design's presentation order (§7.3 + the popover mock): pipeline first,
+ *  then Done, then the exception/closed states — regardless of legalTargets()
+ *  enumeration order. Mockup wins (stage-B review F2). */
+const STATUS_DISPLAY_ORDER: readonly WorkItemStatusWire[] = [
+  "backlog", "assigned", "executing", "in_review", "done", "blocked", "escalated", "cancelled",
+]
+
 export function StatusPickerContent({
   detail,
   openChildren,
@@ -41,7 +48,9 @@ export function StatusPickerContent({
   onDone,
 }: PickerContentProps & { openChildren: number; commit: (status: WorkItemStatusWire) => void }) {
   const from = detail.workItem.status
-  const targets = legalTargets(from, { openChildren }).filter((t) => t.status !== from)
+  const targets = legalTargets(from, { openChildren })
+    .filter((t) => t.status !== from)
+    .sort((a, b) => STATUS_DISPLAY_ORDER.indexOf(a.status) - STATUS_DISPLAY_ORDER.indexOf(b.status))
   const offered = new Set<WorkItemStatusWire>([from, ...targets.map((t) => t.status)])
   const omitted = ALL_STATUSES.filter((s) => !offered.has(s))
   return (

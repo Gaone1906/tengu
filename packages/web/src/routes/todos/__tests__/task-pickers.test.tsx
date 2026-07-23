@@ -104,10 +104,17 @@ describe("the status picker", () => {
     fireEvent.click(await screen.findByTestId("rail-status"))
 
     const picker = await screen.findByTestId("picker-status")
-    expect(screen.getByTestId("status-option-executing")).toBeTruthy() // current, checked, first
-    for (const legal of ["in_review", "done", "blocked", "escalated", "cancelled"]) {
-      expect(screen.getByTestId(`status-option-${legal}`)).toBeTruthy()
-    }
+    // Current first (checked), then the design's presentation order (F2):
+    // In review · Done · Blocked · Escalated · Cancelled.
+    const rows = [...picker.querySelectorAll<HTMLElement>('[data-testid^="status-option-"]')]
+    expect(rows.map((row) => row.dataset.testid)).toEqual([
+      "status-option-executing",
+      "status-option-in_review",
+      "status-option-done",
+      "status-option-blocked",
+      "status-option-escalated",
+      "status-option-cancelled",
+    ])
     expect(screen.queryByTestId("status-option-backlog")).toBeNull()
     expect(screen.queryByTestId("status-option-assigned")).toBeNull()
     expect(picker.textContent).toContain("Only legal moves are listed")
