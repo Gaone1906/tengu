@@ -1,7 +1,11 @@
+import { randomUUID } from 'node:crypto';
 import { initDb } from '../sessions/registry.js';
 import { resolveApprovalRouteTarget, resolveRootApprovalTarget } from '../gateway/approval-authority.js';
+import { currentApproval } from './approval-rows.js';
 import { appendWorkItemEvent, getWorkItem, type ApprovalTargetKind, type WorkItem } from './store.js';
 import { transition } from './transitions.js';
+
+export { currentApproval, listApprovals, type WorkItemApproval } from './approval-rows.js';
 
 /**
  * Todo approvals — the native write paths + the approval decision orchestrator
@@ -49,6 +53,11 @@ export class ApprovalNotPendingError extends Error {
   }
 }
 
+/** Mint a `wap_<12hex>` approval-row id (same shape family as comment ids). */
+function newApprovalRowId(): string {
+  return `wap_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+}
+
 function classifyApprovalTarget(item: WorkItem, inputTarget: string | null | undefined): { target: string | null; kind: ApprovalTargetKind } {
   if (inputTarget === null) return { target: null, kind: 'none' };
 
@@ -78,23 +87,32 @@ export function requestApproval(id: string, input: RequestApprovalInput): WorkIt
     const item = getWorkItem(id);
     if (!item) throw new Error(`requestApproval: work item ${id} not found`);
     const routed = classifyApprovalTarget(item, input.target);
+    const current = currentApproval(item.id);
     if (
-      item.approvalState === 'pending' &&
-      item.approvalRequest === input.request &&
-      item.approvalRef === ref &&
-      item.approvalTarget === routed.target &&
-      item.approvalTargetKind === routed.kind
+      current?.state === 'pending' &&
+      current.request === input.request &&
+      current.ref === ref &&
+      current.target === routed.target &&
+      current.targetKind === routed.kind
     ) {
       return item; // idempotent re-request (e.g. the parked-run sweep re-mirror)
     }
     const now = new Date().toISOString();
-    db.prepare(
-      `UPDATE work_items
-         SET approval_state = 'pending', approval_request = ?, approval_ref = ?,
-             approval_target = ?, approval_target_kind = ?, approval_escalated_at = NULL,
-             approval_decided_by = NULL, approval_decided_at = NULL, updated_at = ?, version = version + 1
-       WHERE id = ?`,
-    ).run(input.request, ref, routed.target, routed.kind, now, id);
+    if (current?.state === 'pending') {
+      // Overwrite the one pending gate in place (uq_wap_pending caps pending
+      // rows at one per item); a re-route also clears any prior escalation.
+      db.prepare(
+        `UPDATE work_item_approvals
+           SET request = ?, ref = ?, target = ?, target_kind = ?, escalated_at = NULL
+         WHERE id = ? AND state = 'pending'`,
+      ).run(input.request, ref, routed.target, routed.kind, current.id);
+    } else {
+      db.prepare(
+        `INSERT INTO work_item_approvals (id, work_item_id, state, request, ref, target, target_kind, requested_by, requested_at)
+         VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
+      ).run(newApprovalRowId(), item.id, input.request, ref, routed.target, routed.kind, input.actor ?? 'system', now);
+    }
+    db.prepare('UPDATE work_items SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, item.id);
     appendWorkItemEvent({
       workItemId: id,
       kind: 'approval_requested',
@@ -128,14 +146,16 @@ function decideApproval(id: string, decision: ApprovalDecision, decidedBy: strin
   const txn = db.transaction((): WorkItem => {
     const item = getWorkItem(id);
     if (!item) throw new Error(`decideApproval: work item ${id} not found`);
-    if (item.approvalState !== 'pending') throw new ApprovalNotPendingError(id);
+    const current = currentApproval(item.id);
+    if (current?.state !== 'pending') throw new ApprovalNotPendingError(id);
     const state = decision === 'approve' ? 'approved' : 'rejected';
     const now = new Date().toISOString();
     db.prepare(
-      `UPDATE work_items
-         SET approval_state = ?, approval_decided_by = ?, approval_decided_at = ?, updated_at = ?, version = version + 1
-       WHERE id = ?`,
-    ).run(state, decidedBy, now, now, id);
+      `UPDATE work_item_approvals
+         SET state = ?, decided_by = ?, decided_at = ?, note = ?
+       WHERE id = ? AND state = 'pending'`,
+    ).run(state, decidedBy, now, note ?? null, current.id);
+    db.prepare('UPDATE work_items SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, item.id);
     appendWorkItemEvent({
       workItemId: id,
       kind: 'approval_decided',
@@ -143,7 +163,7 @@ function decideApproval(id: string, decision: ApprovalDecision, decidedBy: strin
       detail: {
         decision,
         ...(note !== undefined ? { note } : {}),
-        ...(item.approvalRef ? { ref: item.approvalRef } : {}),
+        ...(current.ref ? { ref: current.ref } : {}),
       },
     });
     return getWorkItem(id)!;
@@ -175,7 +195,7 @@ export function archiveWorkItem(id: string, actor: string, opts: ArchiveWorkItem
   const txn = db.transaction((): WorkItem => {
     let item = getWorkItem(id);
     if (!item) throw new Error(`archiveWorkItem: work item ${id} not found`);
-    if (item.approvalState === 'pending') {
+    if (currentApproval(item.id)?.state === 'pending') {
       item = decideApproval(id, 'reject', actor, opts.note ?? 'Todo archived');
     }
     if (item.status === 'cancelled') return item;
@@ -209,14 +229,14 @@ export function escalateApproval(id: string, actor: string, reason?: string): Wo
   const txn = db.transaction((): WorkItem => {
     const item = getWorkItem(id);
     if (!item) throw new Error(`escalateApproval: work item ${id} not found`);
-    if (item.approvalState !== 'pending') throw new ApprovalNotPendingError(id);
-    if (item.approvalEscalatedAt) return item;
+    const current = currentApproval(item.id);
+    if (current?.state !== 'pending') throw new ApprovalNotPendingError(id);
+    if (current.escalatedAt) return item;
     const now = new Date().toISOString();
     db.prepare(
-      `UPDATE work_items
-         SET approval_escalated_at = ?, updated_at = ?, version = version + 1
-       WHERE id = ?`,
-    ).run(now, now, id);
+      `UPDATE work_item_approvals SET escalated_at = ? WHERE id = ? AND state = 'pending'`,
+    ).run(now, current.id);
+    db.prepare('UPDATE work_items SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, item.id);
     appendWorkItemEvent({
       workItemId: id,
       kind: 'note',
@@ -265,7 +285,7 @@ function applyNativeDecisionAtomic(
   const db = initDb();
   const txn = db.transaction((): { item: WorkItem; escalated: boolean } => {
     const item = getWorkItem(id);
-    if (!item || item.approvalState !== 'pending') throw new ApprovalNotPendingError(id);
+    if (!item || currentApproval(item.id)?.state !== 'pending') throw new ApprovalNotPendingError(id);
     // 1. Record the decision (approval fields + approval_decided event).
     decideApproval(id, decision, decidedBy, note);
     // 2. The fixed consequence, in the SAME transaction — a failure here rolls the
@@ -299,7 +319,7 @@ export async function decideWorkItemApproval(
   const decidedBy = input.decidedBy ?? 'operator';
   const item = getWorkItem(input.id);
   if (!item) return { ok: false, code: 'not-found', message: `work item ${input.id} not found` };
-  if (item.approvalState !== 'pending') {
+  if (currentApproval(item.id)?.state !== 'pending') {
     return { ok: false, code: 'no-pending', message: `work item ${input.id} has no pending approval to decide` };
   }
 

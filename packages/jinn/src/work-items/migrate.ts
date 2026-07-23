@@ -238,6 +238,36 @@ CREATE TABLE IF NOT EXISTS work_item_labels (
 
 export const WORK_ITEM_LABELS_DDL = `${WORK_ITEM_LABELS_TABLE_DDL};`;
 
+/** Todos v2 slice 4: approvals leave the fat work_items row. Full history —
+ *  one row per requested gate; the partial unique index makes "at most one
+ *  PENDING approval per item" a DB guarantee. The legacy `approval_*` columns
+ *  on work_items stay physically present but FROZEN (never written again after
+ *  the backfill); every read goes through this table. `ref` is the opaque
+ *  correlation reference the request contract has always carried (kept here so
+ *  the legacy `approvalRef` payload field stays byte-identical). */
+export const WORK_ITEM_APPROVALS_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_approvals (
+  id           TEXT PRIMARY KEY CHECK (id GLOB 'wap_[0-9a-f]*' AND length(id) = 16),
+  work_item_id TEXT NOT NULL REFERENCES work_items(id),
+  state        TEXT NOT NULL CHECK (state IN ('pending','approved','rejected')),
+  request      TEXT NOT NULL,
+  ref          TEXT,
+  target       TEXT,
+  target_kind  TEXT CHECK (target_kind IN ('employee','virtual','none')),
+  requested_by TEXT NOT NULL,
+  requested_at TEXT NOT NULL,
+  escalated_at TEXT,
+  decided_by   TEXT,
+  decided_at   TEXT,
+  note         TEXT
+)`;
+
+export const WORK_ITEM_APPROVALS_DDL = `
+${WORK_ITEM_APPROVALS_TABLE_DDL};
+CREATE UNIQUE INDEX IF NOT EXISTS uq_wap_pending ON work_item_approvals(work_item_id) WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS idx_wap_item ON work_item_approvals(work_item_id, requested_at);
+`;
+
 export const WORK_ITEM_EDIT_RECEIPTS_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
   key_digest          TEXT PRIMARY KEY CHECK (length(key_digest) = 64),
@@ -571,6 +601,7 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
   ["work_item_relations", WORK_ITEM_RELATIONS_TABLE_DDL],
   ["labels", LABELS_TABLE_DDL],
   ["work_item_labels", WORK_ITEM_LABELS_TABLE_DDL],
+  ["work_item_approvals", WORK_ITEM_APPROVALS_TABLE_DDL],
   ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
   ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
   ["work_item_id_burns", WORK_ITEM_ID_BURNS_TABLE_DDL],
@@ -589,7 +620,32 @@ const V2_ADDITIVE_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: "work_item_relations", ddl: WORK_ITEM_RELATIONS_DDL },
   { name: "labels", ddl: LABELS_DDL },
   { name: "work_item_labels", ddl: WORK_ITEM_LABELS_DDL },
+  { name: "work_item_approvals", ddl: WORK_ITEM_APPROVALS_DDL },
 ];
+
+/**
+ * Copy the frozen legacy `approval_*` column values into `work_item_approvals`
+ * (Todos v2 slice 4, dual-read window). Exactly one row per item whose columns
+ * carry a state; idempotent — an item that already has ANY approval row is
+ * skipped, so re-runs (every boot) and post-slice items are no-ops. The columns
+ * themselves are read, never written. `requested_by`/`requested_at` are not
+ * recoverable from the columns: `'legacy'` and the best column-derived bound
+ * (decided_at when decided, else the row's updated_at) stand in.
+ */
+export function backfillWorkItemApprovals(db: DatabaseType): number {
+  return db
+    .prepare(
+      `INSERT INTO work_item_approvals
+         (id, work_item_id, state, request, ref, target, target_kind, requested_by, requested_at, escalated_at, decided_by, decided_at, note)
+       SELECT 'wap_' || lower(hex(randomblob(6))), w.id, w.approval_state, COALESCE(w.approval_request, ''), w.approval_ref,
+              w.approval_target, w.approval_target_kind, 'legacy', COALESCE(w.approval_decided_at, w.updated_at),
+              w.approval_escalated_at, w.approval_decided_by, w.approval_decided_at, NULL
+       FROM work_items w
+       WHERE w.approval_state IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM work_item_approvals a WHERE a.work_item_id = w.id)`,
+    )
+    .run().changes;
+}
 
 const V1_REQUIRED_TABLE_SQL = new Map<string, string>([
   ["work_items", V1_WORK_ITEMS_TABLE_DDL],
@@ -784,6 +840,21 @@ export function verifyCurrentWorkItemSchema(db: DatabaseType): void {
   for (const pair of labelPairs) {
     if (!byId.has(pair.work_item_id) || !labelIds.has(pair.label_id)) refusal();
   }
+  // Approvals: every row references a live item, and at most one PENDING row per
+  // item. The partial unique index makes the latter unforgeable through SQL, but
+  // the data is re-proven here anyway (belt and suspenders, house style).
+  const approvalRows = db.prepare("SELECT work_item_id, state FROM work_item_approvals").all() as Array<{
+    work_item_id: string;
+    state: string;
+  }>;
+  const pendingSeen = new Set<string>();
+  for (const row of approvalRows) {
+    if (!byId.has(row.work_item_id)) refusal();
+    if (row.state === "pending") {
+      if (pendingSeen.has(row.work_item_id)) refusal();
+      pendingSeen.add(row.work_item_id);
+    }
+  }
 }
 
 function classifyOpenWorkItemsDatabase(db: DatabaseType): WorkItemSchemaPreflight {
@@ -857,6 +928,9 @@ export function migrateWorkItemsSchema(
     // matters: work_item_labels references labels.)
     if (tableExists(db, "work_items") && sqlShape(currentTableSql(db, "work_items")) === sqlShape(WORK_ITEMS_TABLE_DDL)) {
       for (const table of V2_ADDITIVE_TABLES) db.exec(table.ddl);
+      // Slice-4 dual-read: any item still carrying approval state ONLY in the
+      // frozen columns (a pre-slice-4 database) gains its history row here.
+      backfillWorkItemApprovals(db);
     }
     // The read-only preflight necessarily precedes the write lock. Reclassify after
     // BEGIN IMMEDIATE so a concurrent winner's committed schema is never dropped.
@@ -929,6 +1003,7 @@ export function migrateWorkItemsSchema(
           approval_escalated_at, approval_decided_by, approval_decided_at,
           created_at, updated_at, closed_at
         FROM work_items_v1_legacy`);
+      backfillWorkItemApprovals(db);
       const migratedRows = Number(db.prepare("SELECT COUNT(*) FROM work_items").pluck().get());
       db.exec("DROP TABLE work_items_v1_legacy");
       db.exec(WORK_ITEMS_INDEX_DDL);
