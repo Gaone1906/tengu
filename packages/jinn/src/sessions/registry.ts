@@ -1532,6 +1532,25 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
   };
 }
 
+type WorkflowAttemptSessionOpts = CreateSessionOpts & { prompt?: string; workflowProvenance: WorkflowSessionProvenance };
+function assertWorkflowAttemptSession(session: Session, opts: WorkflowAttemptSessionOpts, key: string): void {
+  const expected = opts.workflowProvenance; const actual = session.workflowProvenance;
+  const sameOwner = expected.kind === 'phase' && expected.phase && actual?.kind === 'phase' && actual.phase && actual.workflowId === expected.workflowId && actual.runId === expected.runId && actual.phase.nodeId === expected.phase.nodeId && actual.phase.attempt === expected.phase.attempt;
+  if (!sameOwner) throw new Error(`Workflow attempt session key collision for ${key}.`);
+  if (session.sessionKey !== key || session.sourceRef !== key) throw new Error(`Workflow attempt session key mismatch for ${key}.`);
+  if ([session.engine, session.employee, session.model, session.effortLevel].some((value, index) => value !== [opts.engine, opts.employee ?? null, opts.model ?? null, opts.effortLevel ?? null][index])) throw new Error(`Workflow attempt session configuration mismatch for ${key}.`);
+}
+export function getOrCreateWorkflowAttemptSession(opts: WorkflowAttemptSessionOpts): Session {
+  const database = initDb(); const workflow = opts.workflowProvenance; const phase = workflow.kind === 'phase' ? workflow.phase : undefined;
+  if (!phase) throw new Error('Workflow attempt sessions require phase provenance.'); const key = opts.sessionKey ?? opts.sourceRef;
+  const getOrCreate = database.transaction(() => {
+    const rows = database.prepare(`SELECT * FROM sessions WHERE session_key = ? OR (workflow_kind = 'phase' AND workflow_id = ? AND workflow_run_id = ? AND workflow_phase_node_id = ? AND workflow_phase_attempt = ?)`).all(key, workflow.workflowId, workflow.runId, phase.nodeId, phase.attempt) as Record<string, unknown>[];
+    if (rows.length > 1) throw new Error(`Workflow attempt session key collision for ${key}.`);
+    const existing = rows[0] ? rowToSession(rows[0]) : undefined; if (!existing) return createSession(opts);
+    assertWorkflowAttemptSession(existing, opts, key); return existing;
+  });
+  return getOrCreate.immediate();
+}
 export function getSession(id: string): Session | undefined {
   const db = initDb();
   const row = db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as Record<string, unknown> | undefined;
@@ -1848,6 +1867,10 @@ export function completeSessionAttempt(
   return updateSessionForAttempt(id, attemptToken, updates, ['running']);
 }
 
+export function interruptSessionAttempt(id: string, reason: string, completedAt: string): Session | undefined {
+  const result = initDb().prepare(`UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted', attempt_terminal_version = 1, last_activity = ?, last_error = ? WHERE id = ? AND workflow_kind = 'phase' AND attempt_outcome IS NULL AND attempt_terminal_version = 0`).run(completedAt, reason, id);
+  return result.changes === 1 ? getSession(id) : undefined;
+}
 /** Upgrade a legacy terminal row that predates attempt tokens. The outcome and
  * terminal version are compare predicates, so a stale callback can never borrow
  * the token of a newer resume generation. */
@@ -2015,7 +2038,7 @@ export interface ListSessionsFilter {
 
 export function listSessions(filter?: ListSessionsFilter): Session[] {
   const db = initDb();
-  const conditions: string[] = ['archived_at IS NULL'];
+  const conditions: string[] = ['archived_at IS NULL', "(workflow_kind IS NULL OR workflow_kind NOT IN ('phase','run'))"];
   const values: unknown[] = [];
 
   if (filter?.status) {
@@ -3597,10 +3620,10 @@ export function enqueueQueueItem(
   return id;
 }
 
-export function markQueueItemRunning(itemId: string): void {
+export function markQueueItemRunning(itemId: string): boolean {
   const db = initDb();
-  db.prepare("UPDATE queue_items SET status = 'running', started_at = ? WHERE id = ?")
-    .run(new Date().toISOString(), itemId);
+  return db.prepare("UPDATE queue_items SET status = 'running', started_at = ? WHERE id = ? AND status = 'pending'")
+    .run(new Date().toISOString(), itemId).changes === 1;
 }
 
 export function markQueueItemCompleted(itemId: string): void {
@@ -3672,6 +3695,25 @@ export function listAllPendingQueueItems(): QueueItem[] {
   return rows.map(rowToQueueItem);
 }
 
+export function claimWorkflowAttemptDispatch(sessionId: string, sessionKey: string, prompt: string): string | null {
+  const db = initDb();
+  return db.transaction(() => {
+    const session = db.prepare(`SELECT id FROM sessions WHERE id = ? AND session_key = ? AND workflow_kind = 'phase' AND status = 'idle' AND attempt_outcome IS NULL AND COALESCE(attempt_terminal_version, 0) = 0 AND attempt_token IS NULL`).get(sessionId, sessionKey);
+    if (!session) return null;
+    const existing = db.prepare(`${QUEUE_ITEM_SELECT} WHERE session_id = ? AND internal = 1 AND status IN ('pending', 'running') ORDER BY created_at, position LIMIT 1`).get(sessionId) as QueueItemRow | undefined;
+    if (existing && (existing.sessionKey !== sessionKey || existing.prompt !== prompt)) throw new Error(`Workflow session ${sessionId} dispatch claim does not match its immutable command.`);
+    if (existing?.status === 'running') return null;
+    const itemId = existing?.id ?? enqueueQueueItem(sessionId, sessionKey, prompt, { internal: true });
+    return markQueueItemRunning(itemId) ? itemId : null;
+  }).immediate();
+}
+export function cancelWorkflowAttemptDispatch(sessionId: string): number {
+  return initDb().prepare(`UPDATE queue_items SET status = 'cancelled' WHERE session_id = ? AND internal = 1 AND status IN ('pending', 'running')`).run(sessionId).changes;
+}
+export function listPendingWorkflowAttemptDispatches(): QueueItem[] {
+  const rows = initDb().prepare(`${QUEUE_ITEM_SELECT} WHERE status = 'pending' AND internal = 1 AND EXISTS (SELECT 1 FROM sessions WHERE sessions.id = queue_items.session_id AND sessions.workflow_kind = 'phase' AND sessions.status = 'idle' AND sessions.attempt_outcome IS NULL AND COALESCE(sessions.attempt_terminal_version, 0) = 0 AND sessions.attempt_token IS NULL) ORDER BY created_at, position`).all() as QueueItemRow[];
+  return rows.map(rowToQueueItem);
+}
 // ── File management ──────────────────────────────────────────────────
 
 export interface FileMeta {

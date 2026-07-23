@@ -70,7 +70,7 @@ export class SessionQueue {
   /**
    * Enqueue a task for a session. Tasks are serialized per session key.
    */
-  async enqueue(sessionKey: string, fn: () => Promise<void>, queueItemId?: string): Promise<void> {
+  async enqueue(sessionKey: string, fn: () => Promise<void>, queueItemId?: string, claimed = false): Promise<void> {
     this.pending.set(sessionKey, (this.pending.get(sessionKey) || 0) + 1);
     const prev = this.queues.get(sessionKey) || Promise.resolve();
     const runTask = async () => {
@@ -87,8 +87,8 @@ export class SessionQueue {
         }
         if (queueItemId) {
           const item = getQueueItem(queueItemId);
-          if (!item || item.status !== "pending") return;
-          markQueueItemRunning(queueItemId);
+          if (!item || (claimed ? item.status !== "running"
+            : item.status !== "pending" || !markQueueItemRunning(queueItemId))) return;
           queueItemStarted = true;
         }
         if (!this.cancelled.has(sessionKey)) {

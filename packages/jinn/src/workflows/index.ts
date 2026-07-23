@@ -19,16 +19,8 @@ export * from './poll-trigger.js';
 export * from './authoring.js';
 export * from './approval-authority.js';
 export { WorkflowRepository, WorkflowRepositoryError } from './repository.js';
-export type {
-  CreateRunInput,
-  CreateWorkflowInput,
-  CursorPage,
-  DefinitionListQuery,
-  RunListQuery,
-  WorkflowDefinitionSummary,
-  WorkflowRunSummary,
-  WorkflowRunTransaction,
-} from './repository.js';
+export type { CreateRunInput, CreateWorkflowInput, CursorPage, DefinitionListQuery, RunListQuery,
+  WorkflowDefinitionSummary, WorkflowRunSummary, WorkflowRunTransaction } from './repository.js';
 
 /** Default evidence root under JINN_HOME when no explicit override is set. */
 export function defaultWorkflowEvidenceRoot(): string {

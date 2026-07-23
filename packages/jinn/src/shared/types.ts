@@ -304,6 +304,16 @@ export interface EngineSessionRef {
 export type EngineSessionRefs = Record<string, EngineSessionRef>;
 export type SessionAttemptOutcome = "succeeded" | "failed" | "interrupted";
 
+export interface WorkflowAttemptCommand { owner: { workflowId: string; runId: string; nodeId: string; attempt: number };
+  employeeId: string; engine: string; model?: string; effort?: "low" | "medium" | "high" | "xhigh"; prompt: string }
+export interface WorkflowAttemptCompletion { sessionId: string;
+  owner: { workflowId: string; runId: string; nodeId: string; attempt: number };
+  terminalVersion: number; outcome: "succeeded" | "failed" | "interrupted";
+  finalText?: string; error?: string; completedAt: string }
+export type WorkflowAttemptCompletionListener = (event: WorkflowAttemptCompletion) => void | Promise<void>;
+export interface WorkflowSessionExecutor { startAttempt(command: WorkflowAttemptCommand): Promise<{ sessionId: string }>;
+  stopAttempt(input: { sessionId: string; reason: string }): Promise<void> }
+
 /** Durable attribution for sessions owned by a workflow run. Run parents omit
  * `phase`; workflow-owned phase sessions carry the exact frozen execution
  * identity the list UI needs without parsing sourceRef/sessionKey. */
