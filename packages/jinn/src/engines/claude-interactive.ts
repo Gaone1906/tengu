@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import * as pty from "node-pty";
-import type { InterruptibleEngine, EngineRunOpts, EngineResult, EngineRateLimitInfo, ResolvedMcpConfig, StreamDelta } from "../shared/types.js";
+import type { InterruptibleEngine, EngineRunOpts, EngineResult, EngineRateLimitInfo, StreamDelta } from "../shared/types.js";
 import { logger } from "../shared/logger.js";
 import { JINN_HOME, CLAUDE_SETTINGS_DIR, HOOK_RELAY_SCRIPT, CLAUDE_LIMITS_DIR } from "../shared/paths.js";
 import { cleanupSessionSettings, writeSessionSettings } from "../shared/claude-settings.js";
@@ -16,7 +16,6 @@ import { SsePtyProxy, MAIN_AGENT_SENTINEL, type SseDataEvent, type UpstreamActiv
 import { neutralizeForPaste } from "../shared/skill-commands.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
 import { extractActivityReceiptId } from "../shared/activity-receipts.js";
-import { JINN_SESSION_CAPABILITY_ENV, JINN_SESSION_ID_ENV, JINN_WORKFLOW_ATTEMPT_ENV } from "../mcp/identity.js";
 
 export type { PtyControlEvent } from "./pty-view-engine.js";
 
@@ -846,11 +845,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
    *  When `proxyPort` is given, points ANTHROPIC_BASE_URL at the per-PTY SSE
    *  forward proxy on 127.0.0.1 — subscription OAuth token is passed separately
    *  by claude, so this stays cc_entrypoint=cli / subsidy-safe (verified Item A). */
-  private buildPtyEnv(
-    proxyPort?: number,
-    sessionId?: string,
-    resolvedMcp?: ResolvedMcpConfig,
-  ): Record<string, string> {
+  private buildPtyEnv(proxyPort?: number, sessionId?: string): Record<string, string> {
     const env = buildEngineChildEnv(process.env, {
       scrubClaudeCode: true,
       // Belt-and-suspenders: a stray API key/token would flip the child to metered
@@ -864,21 +859,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
     // impossible while NO_FLICKER is on. Trading mild flicker for usable scroll.
     env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     env.CLAUDE_CODE_RESUME_TOKEN_THRESHOLD = "999999999"; // suppress "resume from summary?" picker — always full-resume
-    if (sessionId) env[JINN_SESSION_ID_ENV] = sessionId;
-    const jinn = resolvedMcp?.mcpServers.jinn;
-    if (sessionId && jinn && "command" in jinn) {
-      const boundSessionId = jinn.env?.[JINN_SESSION_ID_ENV];
-      const capability = jinn.env?.[JINN_SESSION_CAPABILITY_ENV];
-      // Claude can drop a configured MCP server's env on some launch paths.
-      // Its MCP children still inherit the PTY env, so preserve the same
-      // session-bound identity there as a narrow fallback.
-      if (boundSessionId === sessionId && capability) {
-        env[JINN_SESSION_CAPABILITY_ENV] = capability;
-        if (jinn.env?.[JINN_WORKFLOW_ATTEMPT_ENV] === "1") {
-          env[JINN_WORKFLOW_ATTEMPT_ENV] = "1";
-        }
-      }
-    }
+    if (sessionId) env.JINN_SESSION_ID = sessionId;
     if (proxyPort) env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
     return env;
   }
@@ -974,7 +955,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
         : MAIN_AGENT_SENTINEL,
     });
     const { proxy, port } = await this.startProxy(jinnSessionId);
-    const env = this.buildPtyEnv(port || undefined, jinnSessionId, opts.resolvedMcp);
+    const env = this.buildPtyEnv(port || undefined, jinnSessionId);
     const bin = resolveBin("claude", opts.bin);
     const geom = this.lastGeom.get(jinnSessionId);
     logger.info(`InteractiveClaudeEngine spawning ${bin} (resume: ${opts.resumeSessionId || "none"}, geom: ${geom ? `${geom.cols}×${geom.rows}` : "default"}, sseProxy: ${port || "off"})`);

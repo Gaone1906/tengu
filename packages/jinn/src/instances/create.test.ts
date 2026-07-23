@@ -97,6 +97,10 @@ describe("workspace creation", () => {
     expect(fs.readFileSync(path.join(root, ".jinn-john", "config.yaml"), "utf8")).toContain("port: 7778");
     expect(fs.readFileSync(path.join(root, ".jinn-john", "config.yaml"), "utf8")).toContain("host: 0.0.0.0");
     expect(fs.readFileSync(path.join(root, ".jinn-john", "config.yaml"), "utf8")).toContain("authRequired: true");
+    const gatewayPath = path.join(root, ".jinn-john", "gateway.json");
+    const gateway = JSON.parse(fs.readFileSync(gatewayPath, "utf8")) as { token?: string };
+    expect(gateway.token?.length).toBeGreaterThanOrEqual(32);
+    expect(fs.statSync(gatewayPath).mode & 0o777).toBe(0o600);
     expect(loadInstances({ registryPath, legacyRegistryPath })).toHaveLength(1);
   });
 

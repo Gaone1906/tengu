@@ -26,13 +26,11 @@ import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile, MCP_CAPABL
 import { setJinnAttachGate } from "../attachment.js";
 import {
   JINN_SESSION_CAPABILITY_ENV,
-  JINN_SESSION_ID_ENV,
   JINN_WORKFLOW_ATTEMPT_ENV,
   attachSessionIdentity,
 } from "../identity.js";
+import { resolveMcpServerBootstrap } from "../server-bootstrap.js";
 import { codexMcpConfigArgs, prepareCodexSessionHome } from "../../engines/codex.js";
-import { InteractiveClaudeEngine } from "../../engines/claude-interactive.js";
-import { PtyLifecycleManager } from "../../engines/pty-lifecycle.js";
 import { prepareGrokProjectMcpConfig, cleanupGrokProjectMcpConfig, grokJinnSessionEnv, JINN_GROK_MCP_MARKER } from "../../engines/grok-mcp.js";
 import { buildAcpMcpServers } from "../../engines/hermes-mcp.js";
 import { writePiJinnMcpExtension, cleanupPiJinnMcpExtension, piJinnSessionEnv } from "../../engines/pi-mcp.js";
@@ -150,27 +148,16 @@ describe("per-engine jinn-server wiring (GRS-018 seam for GRS-017 default-on)", 
         const onDisk = JSON.parse(fs.readFileSync(p, "utf-8"));
         expect(onDisk.mcpServers.jinn.env.JINN_SESSION_ID).toBe(SID);
         expect(onDisk.mcpServers.jinn.env.JINN_SESSION_CAPABILITY).toBe(capability);
+        const bootstrap = resolveMcpServerBootstrap(onDisk.mcpServers.jinn.args);
+        expect(bootstrap).toMatchObject({
+          callerSessionId: SID,
+          sessionCapability: capability,
+          gatewayUrl: GATEWAY_URL,
+          jinnHome: expect.any(String),
+        });
       } finally {
         cleanupMcpConfigFile("wiring-claude-sid");
       }
-    });
-
-    it("claude: the PTY child inherits the bound identity when Claude drops MCP-server env", () => {
-      const resolved = stamped();
-      const engine = new InteractiveClaudeEngine(
-        new PtyLifecycleManager({ maxLivePtys: 1 }),
-        {} as never,
-      );
-      const env = (engine as unknown as {
-        buildPtyEnv(
-          proxyPort?: number,
-          sessionId?: string,
-          resolvedMcp?: ReturnType<typeof stamped>,
-        ): Record<string, string>;
-      }).buildPtyEnv(undefined, SID, resolved);
-
-      expect(env[JINN_SESSION_ID_ENV]).toBe(SID);
-      expect(env[JINN_SESSION_CAPABILITY_ENV]).toBe(capabilityOf(resolved));
     });
 
     it("connector and web session launch paths both use the identity-stamping resolver", () => {
@@ -197,7 +184,6 @@ describe("per-engine jinn-server wiring (GRS-018 seam for GRS-017 default-on)", 
       expect(buildAcpMcpServers(resolved).find((server) => server.name === "jinn")?.env)
         .toContainEqual({ name: JINN_WORKFLOW_ATTEMPT_ENV, value: "1" });
     });
-
     it("codex: argv never carries the capability; the per-session CODEX_HOME config.toml (0600) carries the bound jinn env", () => {
       const resolved = stamped();
       const capability = capabilityOf(resolved);

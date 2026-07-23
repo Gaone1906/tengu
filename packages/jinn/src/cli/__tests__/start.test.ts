@@ -40,7 +40,7 @@ vi.mock("node:child_process", () => ({ spawn: childProcess.spawn }));
 vi.mock("../restart-request.js", () => restartRequest);
 vi.mock("../../migrations/service.js", () => migration);
 vi.mock("../../shared/config.js", () => ({
-  loadConfig: () => ({ gateway: { host: "127.0.0.1", port: 21877 }, engines: { default: "claude" } }),
+  loadConfig: () => ({ gateway: { host: "127.0.0.1", port: 21877, authRequired: true }, engines: { default: "claude" } }),
 }));
 vi.mock("../../shared/version.js", () => ({
   compareSemver: () => 0,
@@ -116,7 +116,7 @@ describe("runStart", () => {
     expect(lifecycle.restartDetached).toHaveBeenCalledWith({ takePort: true, port: 21877 });
   });
 
-  it("opens an interactive dashboard with a valid one-time bootstrap grant", async () => {
+  it("opens an auth-required local dashboard with a valid one-time bootstrap grant", async () => {
     lifecycle.getStatus.mockReturnValueOnce({ running: false, pid: 0 });
     lifecycle.startForeground.mockResolvedValueOnce(undefined);
     const originalTty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");

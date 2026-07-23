@@ -10,6 +10,11 @@ const TEMPLATE = join(PKG, "template");
 const SETUP = join(PKG, "src", "cli", "setup.ts");
 
 describe("fresh-install: talk seeding + config guidance", () => {
+  it("enables gateway authentication in the canonical fresh-install config", () => {
+    const source = readFileSync(SETUP, "utf-8");
+    expect(source).toMatch(/gateway:\n  port: 7777\n  host: "127\.0\.0\.1"\n  authRequired: true\n/);
+  });
+
   it("ships the AURA voice persona + card-reference sidecar in the template", () => {
     expect(existsSync(join(TEMPLATE, "talk", "orchestrator-persona.md"))).toBe(true);
     expect(existsSync(join(TEMPLATE, "talk", "card-reference.md"))).toBe(true);
