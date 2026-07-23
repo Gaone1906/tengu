@@ -1,7 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { describe, expect, it } from 'vitest';
 import type { WorkflowOutputSchema } from '../model.js';
-import { parseWorkflowOutput, WorkflowOutputError } from '../output.js';
+import { parseWorkflowOutput, validateSubmittedFields, WorkflowOutputError } from '../output.js';
 
 const LIMIT = 262_144;
 
@@ -182,7 +182,9 @@ describe('declared output fields', () => {
     ['tags', '{"title":"x","score":1,"approved":true,"tags":["a",1]}'],
   ])('rejects an exact type mismatch for %s without coercion', (field, json) => {
     const error = expectCode(() => parseWorkflowOutput(block(json), everyType), 'type-mismatch');
-    expect(error.message).toBe(`Output field "${field}" does not match its declared type.`);
+    expect(error.message).toBe(`Output field "${field}" does not match declared type "${
+      field === 'title' ? 'string' : field === 'score' ? 'number' : field === 'approved' ? 'boolean' : 'string[]'
+    }".`);
   });
 
   it('accepts an empty primitive-string array', () => {
@@ -207,6 +209,40 @@ describe('declared output fields', () => {
     expectCode(() => parseWorkflowOutput(block('{"second":1,"extra":true}'), schema), 'missing-field');
     expectCode(() => parseWorkflowOutput(block('{"first":"ok","second":1,"extra":true}'), schema), 'type-mismatch');
     expectCode(() => parseWorkflowOutput(block('{"first":"ok","second":true,"extra":true}'), schema), 'invalid-shape');
+  });
+});
+
+describe('submitted output field boundary', () => {
+  it('normalizes undefined to empty fields when no schema is declared', () => {
+    expect(validateSubmittedFields(undefined)).toEqual({});
+  });
+
+  it('rejects undefined when a declared required field is missing', () => {
+    const error = expectCode(
+      () => validateSubmittedFields(undefined, outputSchema({ result: { type: 'string', required: true } })),
+      'missing-field',
+    );
+    expect(error.message).toContain('"result"');
+  });
+
+  it('rejects the wrong field type with the field name and declared type', () => {
+    const error = expectCode(
+      () => validateSubmittedFields({ score: 'high' }, outputSchema({ score: { type: 'number', required: true } })),
+      'type-mismatch',
+    );
+    expect(error.message).toContain('"score"');
+    expect(error.message).toContain('number');
+  });
+
+  it('rejects an extra field when additional fields are disabled', () => {
+    const error = expectCode(
+      () => validateSubmittedFields(
+        { result: 'ok', extra: true },
+        outputSchema({ result: { type: 'string', required: true } }),
+      ),
+      'invalid-shape',
+    );
+    expect(error.message).toContain('"extra"');
   });
 });
 
