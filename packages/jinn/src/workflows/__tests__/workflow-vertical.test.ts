@@ -247,7 +247,7 @@ describe("first Workflow vertical", () => {
     await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
     expect({ model: engine.calls[0]!.model, ...(engine.calls[0]!.effortLevel ? { effortLevel: engine.calls[0]!.effortLevel } : {}) }).toStrictEqual({ model: expected.model, ...("effort" in expected ? { effortLevel: expected.effort } : {}) });
     expect(service.getRun(authored.id, started.id)?.attempts[0]?.resolvedConfig).toStrictEqual({ employeeId: "writer", ...expected,
-      retry: { attempts: 1, delaySeconds: 0, backoff: "fixed" }, timeoutMinutes: 60 });
+      retry: { attempts: 1, delaySeconds: 0, backoff: "fixed" } });
   });
 
   it("fails closed when a dynamic model is unavailable", async () => {

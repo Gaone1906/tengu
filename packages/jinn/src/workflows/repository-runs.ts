@@ -27,7 +27,7 @@ const resolvedSchema = z.strictObject({
   employeeId: z.string(), engine: z.string(), model: z.string().optional(),
   effort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
   retry: z.strictObject({ attempts: z.number().int().min(1), delaySeconds: z.number().int().nonnegative(), backoff: z.enum(['fixed', 'exponential']) }),
-  timeoutMinutes: z.number().int().positive(),
+  timeoutMinutes: z.number().int().positive().optional(),
 });
 const triggerSchema = z.strictObject({
   nodeId: z.string(), kind: z.enum(['manual', 'schedule', 'event', 'todo-status', 'workflow-call']),

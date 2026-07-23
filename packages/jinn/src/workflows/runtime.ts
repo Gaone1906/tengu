@@ -18,7 +18,7 @@ export interface ResolvedEmployeeConfig {
   model?: string;
   effort?: 'low' | 'medium' | 'high' | 'xhigh';
   retry: { attempts: number; delaySeconds: number; backoff: 'fixed' | 'exponential' };
-  timeoutMinutes: number;
+  timeoutMinutes?: number;
 }
 
 export interface WorkflowError {
