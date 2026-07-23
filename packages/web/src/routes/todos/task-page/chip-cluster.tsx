@@ -113,11 +113,11 @@ export function ChipCluster({
           </span>
         </span>
       )}
-      {labels.length === 0 && (
-        <Chip label="Add labels" testId="chip-add" ghost onOpen={() => onOpenPicker("labels")}>
-          +
-        </Chip>
-      )}
+      {/* The ghost + is part of the approved cluster anatomy — always present
+          (stage-B review F4), labels or not. */}
+      <Chip label="Add labels" testId="chip-add" ghost onOpen={() => onOpenPicker("labels")}>
+        +
+      </Chip>
     </div>
   )
 }
