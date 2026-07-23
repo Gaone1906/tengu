@@ -165,6 +165,14 @@ export interface ListWorkItemsFilter {
   assignee?: string;
   source?: WorkItemSource;
   needsAttentionFor?: string;
+  /** Exact creator identity (`created_by`). */
+  createdBy?: string;
+  /** Direct children of this Todo. */
+  parentId?: string;
+  /** Whole family sharing this root Todo. */
+  rootId?: string;
+  /** Only tree roots (parentless items). */
+  rootsOnly?: boolean;
   /** Escaped-LIKE substring over title + body (%/_/backslash are literal). */
   text?: string;
   /** Inclusive ISO timestamp bounds over `updated_at`. */
@@ -530,6 +538,21 @@ function workItemWhere(filter: ListWorkItemsFilter): { sql: string; values: unkn
     conditions.push('source = ?');
     values.push(filter.source);
   }
+  if (filter.createdBy) {
+    conditions.push('created_by = ?');
+    values.push(filter.createdBy);
+  }
+  if (filter.parentId) {
+    conditions.push('parent_id = ?');
+    values.push(parseTodoId(filter.parentId));
+  }
+  if (filter.rootId) {
+    conditions.push('root_id = ?');
+    values.push(parseTodoId(filter.rootId));
+  }
+  if (filter.rootsOnly) {
+    conditions.push('parent_id IS NULL');
+  }
   if (filter.needsAttentionFor) {
     conditions.push("((approval_state = 'pending' AND approval_target = ?) OR (assignee = ? AND status IN ('blocked', 'escalated')))");
     values.push(filter.needsAttentionFor, filter.needsAttentionFor);
@@ -593,6 +616,57 @@ export function searchWorkItems(filter: SearchWorkItemsFilter, limit = 20): Work
     throw new Error('searchWorkItems requires at least one filter');
   }
   return queryWorkItems({ ...filter, limit }).workItems;
+}
+
+export type WorkItemTreeNode = WorkItem & { children: WorkItemTreeNode[] };
+
+export interface WorkItemTree {
+  root: WorkItemTreeNode;
+  /** Status counts over the returned subtree (root included). */
+  totals: WorkItemTotals;
+  /** Live derived spend over every session linked anywhere in the subtree. */
+  spendUsd: number;
+}
+
+/** Read a work item's subtree. One indexed query fetches the whole family via
+ *  root_id; the requested node's subtree is then assembled in memory (trees are
+ *  depth-capped at 3, so families stay small). */
+export function getWorkItemTree(id: string): WorkItemTree | undefined {
+  const db = initDb();
+  const item = getWorkItem(id);
+  if (!item) return undefined;
+  const family = (db.prepare('SELECT * FROM work_items WHERE root_id = ?').all(item.rootId) as Record<string, unknown>[])
+    .map(rowToWorkItem);
+  const childrenByParent = new Map<string, WorkItem[]>();
+  for (const member of family) {
+    if (!member.parentId) continue;
+    const siblings = childrenByParent.get(member.parentId) ?? [];
+    siblings.push(member);
+    childrenByParent.set(member.parentId, siblings);
+  }
+  const build = (node: WorkItem): WorkItemTreeNode => ({
+    ...node,
+    children: (childrenByParent.get(node.id) ?? [])
+      .sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || a.id.localeCompare(b.id))
+      .map(build),
+  });
+  const root = build(item);
+  const subtreeIds: string[] = [];
+  const walk = (node: WorkItemTreeNode): void => {
+    subtreeIds.push(node.id);
+    node.children.forEach(walk);
+  };
+  walk(root);
+  const totals = Object.fromEntries(WORK_ITEM_STATUS_VALUES.map((status) => [status, 0])) as WorkItemTotals;
+  for (const memberId of subtreeIds) {
+    const member = memberId === root.id ? root : family.find((f) => f.id === memberId)!;
+    totals[member.status] += 1;
+  }
+  const placeholders = subtreeIds.map(() => '?').join(', ');
+  const spend = db
+    .prepare(`SELECT COALESCE(SUM(total_cost), 0) AS spend FROM sessions WHERE work_item_id IN (${placeholders})`)
+    .get(...subtreeIds) as { spend: number };
+  return { root, totals, spendUsd: spend.spend };
 }
 
 export interface UpdateWorkItemInput {
