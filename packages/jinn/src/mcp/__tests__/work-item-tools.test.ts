@@ -885,6 +885,11 @@ describe("work-item relation + label tools (Todos v2 slice 3)", () => {
     await expect(tool("edit_work_item").handler({ id: "nope", body: "x" }, silent.ctx)).rejects.toThrow(/canonical Todo ID/);
     await expect(tool("edit_work_item").handler({ id: "JIN-1", approvalState: "approved", body: "x" }, silent.ctx)).rejects.toThrow(/approval/i);
     await expect(tool("edit_work_item").handler({ id: "JIN-1", body: "a".repeat(64_001) }, silent.ctx)).rejects.toThrow(/too long/);
+    // Review F2: stray non-editable args refuse LOUDLY instead of silently
+    // succeeding without the edit the agent asked for.
+    await expect(tool("edit_work_item").handler({ id: "JIN-1", body: "x", assignee: "someone" }, silent.ctx)).rejects.toThrow(/assign_work_item/);
+    await expect(tool("edit_work_item").handler({ id: "JIN-1", body: "x", department: "platform" }, silent.ctx)).rejects.toThrow(/operator/);
+    await expect(tool("edit_work_item").handler({ id: "JIN-1", body: "x", rank: 3 }, silent.ctx)).rejects.toThrow(/operator/);
     expect(silent.calls).toEqual([]);
     const props = Object.keys(tool("edit_work_item").inputSchema.properties);
     expect(props.sort()).toEqual(["acceptance", "body", "dueAt", "id", "priority"]);

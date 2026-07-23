@@ -413,6 +413,14 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       if (args.status !== undefined) {
         throw new JinnMcpToolError("status is not a metadata edit — use update_work_item for lifecycle changes");
       }
+      // Refuse other non-editable fields LOUDLY too: silently dropping them
+      // would report success without the edit the caller asked for.
+      if (args.assignee !== undefined) {
+        throw new JinnMcpToolError("assignee is not editable here — use assign_work_item");
+      }
+      if (args.department !== undefined || args.rank !== undefined) {
+        throw new JinnMcpToolError("department and rank are operator-only edits (web/HTTP surface) — edit_work_item cannot change them");
+      }
       const patch: Record<string, unknown> = {};
       for (const key of ["body", "acceptance"] as const) {
         const v = optionalString(args, key, WORK_ITEM_BODY_CHAR_CAP);

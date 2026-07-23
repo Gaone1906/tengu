@@ -310,6 +310,27 @@ describe("approvals off-row — writes land in work_item_approvals, columns stay
     expect(approvals.listApprovals(item.id).length).toBe(1);
   });
 
+  it("an idempotent-hit create returns the overlaid approval state (review F1)", () => {
+    const item = store.createWorkItem({
+      title: "Idempotent overlay",
+      status: "executing",
+      source: "delegation",
+      sourceRef: "delegate:sess-f1:idempotency:1",
+    });
+    approvals.requestApproval(item.id, { request: "gate the retry", target: null });
+    // A retry with the same (source, sourceRef) returns the EXISTING row — and
+    // it must leave the module hydrated like every other WorkItem read.
+    const replay = store.createWorkItem({
+      title: "Idempotent overlay",
+      status: "executing",
+      source: "delegation",
+      sourceRef: "delegate:sess-f1:idempotency:1",
+    });
+    expect(replay.id).toBe(item.id);
+    expect(replay.approvalState).toBe("pending");
+    expect(replay.approvalRequest).toBe("gate the retry");
+  });
+
   it("needsAttentionFor reads pending approvals from the new table", () => {
     const item = store.createWorkItem({ title: "Attention via table", status: "assigned", source: "delegation" });
     approvals.requestApproval(item.id, { request: "sign-off", target: "attention-target" });

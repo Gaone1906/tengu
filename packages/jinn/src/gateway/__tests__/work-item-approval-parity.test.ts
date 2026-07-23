@@ -176,7 +176,26 @@ const FIXTURES: Array<{ name: string; legacy: LegacyApprovalColumns }> = [
       approvalDecidedBy: null, approvalDecidedAt: null,
     },
   },
+  {
+    // Review F4a: escalation and a decision COEXIST on the pre-slice columns
+    // (escalate → decide never cleared escalated_at) — the current row must
+    // reproduce both stamp families at once.
+    name: "escalated-then-decided",
+    legacy: {
+      approvalState: "approved", approvalRequest: "legacy escalated then decided", approvalRef: "esc-ref",
+      approvalTarget: "coo", approvalTargetKind: "employee", approvalEscalatedAt: "2026-07-13T08:00:00.000Z",
+      approvalDecidedBy: "operator", approvalDecidedAt: "2026-07-13T09:00:00.000Z",
+    },
+  },
 ];
+
+const LEGACY_DETAIL_KEYS = [
+  "approvalState", "approvalRequest", "approvalRef", "approvalTarget",
+  "approvalTargetKind", "approvalEscalatedAt", "approvalDecidedBy", "approvalDecidedAt",
+] as const;
+const LEGACY_COMPACT_KEYS = [
+  "approvalState", "approvalRequest", "approvalRef", "approvalTarget", "approvalEscalatedAt",
+] as const;
 
 const itemIds = new Map<string, string>();
 
@@ -203,17 +222,40 @@ describe("legacy approval-field byte-parity across the dual-read window", () => 
       await api.handleApiRequest(makeReq("GET", `/api/work-items/${itemIds.get(name)}`), cap.res, ctx);
       expect(cap.status).toBe(200);
       expect(legacySubset(cap.body.workItem)).toEqual(legacy);
+      // Review F4b: every legacy KEY is physically present even when null —
+      // no `?? null` coercion hiding an omitted field.
+      for (const key of LEGACY_DETAIL_KEYS) {
+        expect(Object.prototype.hasOwnProperty.call(cap.body.workItem, key), `${name}.${key} key present`).toBe(true);
+      }
     },
   );
 
-  it("compact list payload emits the exact pre-slice values for every fixture", async () => {
+  it("compact list payload emits the exact pre-slice values (keys always present) for every fixture", async () => {
     const cap = makeRes();
     await api.handleApiRequest(makeReq("GET", "/api/work-items?department=parity-fixture&limit=100"), cap.res, ctx);
     expect(cap.status).toBe(200);
     for (const fixture of FIXTURES) {
       const row = (cap.body.workItems as Array<Record<string, unknown>>).find((item) => item.id === itemIds.get(fixture.name))!;
       expect(compactLegacySubset(row), fixture.name).toEqual(compactLegacySubset(fixture.legacy as unknown as Record<string, unknown>));
+      for (const key of LEGACY_COMPACT_KEYS) {
+        expect(Object.prototype.hasOwnProperty.call(row, key), `${fixture.name}.${key} key present`).toBe(true);
+      }
     }
+  });
+
+  it("the LIVE escalate → decide path keeps escalatedAt and the decided stamps coexisting (review F4a)", async () => {
+    const item = store.createWorkItem({ title: "parity live escalation", department: "parity-live-esc" });
+    approvals.requestApproval(item.id, { request: "escalate me", target: null, actor: "operator" });
+    approvals.escalateApproval(item.id, "coo", "needs the top");
+    const decided = await approvals.decideWorkItemApproval({ id: item.id, decision: "approve", decidedBy: "operator" });
+    expect(decided.ok).toBe(true);
+    const cap = makeRes();
+    await api.handleApiRequest(makeReq("GET", `/api/work-items/${item.id}`), cap.res, ctx);
+    const subset = legacySubset(cap.body.workItem);
+    expect(subset.approvalState).toBe("approved");
+    expect(subset.approvalEscalatedAt).toBeTruthy();
+    expect(subset.approvalDecidedBy).toBe("operator");
+    expect(subset.approvalDecidedAt).toBeTruthy();
   });
 
   it("a post-slice request emits exactly what the pre-slice implementation would have", async () => {

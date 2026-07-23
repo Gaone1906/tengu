@@ -453,7 +453,9 @@ export function createWorkItem(input: CreateWorkItemInput): WorkItem {
     const row = db
       .prepare('SELECT * FROM work_items WHERE source = ? AND source_ref = ?')
       .get(source, sourceRef) as Record<string, unknown> | undefined;
-    return row ? rowToWorkItem(row) : undefined;
+    // Overlay like every other WorkItem-producing read: a retried machine mint
+    // can hit an item that has since gained an approval (dual-read seam).
+    return row ? overlayApproval(rowToWorkItem(row), currentApproval(row.id as string)) : undefined;
   };
 
   const txn = db.transaction((): WorkItem => {
