@@ -192,7 +192,7 @@ export class SessionManager {
   private enqueueWorkflowAttempt(session: Session, prompt: string, employee: Employee, claim: string): void {
     const msg: IncomingMessage = { connector: "workflow", source: "workflow", sessionKey: session.sessionKey, replyContext: {}, channel: session.id, user: "workflow", userId: "workflow", text: prompt, attachments: [], raw: null };
     setImmediate(() => { void this.queue.enqueue(session.sessionKey, async () => { await this.runSession(session, msg, [], WORKFLOW_CONNECTOR, { channel: session.id }, employee);
-      this.emitWorkflowAttemptCompletion(getSession(session.id)); }, claim, true).catch((error) => logger.error(`Workflow session ${session.id} dispatch failed: ${String(error)}`)); });
+      this.emitWorkflowAttemptCompletion(getSession(session.id)); }, claim).catch((error) => logger.error(`Workflow session ${session.id} dispatch failed: ${String(error)}`)); });
   }
   async remindWorkflowAttempt(sessionId: string, text: string): Promise<void> {
     const session = getSession(sessionId);

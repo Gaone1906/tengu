@@ -95,6 +95,39 @@ beforeEach(() => {
 });
 
 describe("workflow attempt per-turn completion", () => {
+  it("keeps a durable dispatch pending across a crash before in-memory queue attachment", async () => {
+    const runs: EngineRunOpts[] = [];
+    const manager = managerWith(runs);
+
+    const { sessionId } = await manager.runWorkflowAttempt(command);
+    const pendingBeforeAttachment = registry.listPendingWorkflowAttemptDispatches();
+    await waitFor(() => runs.length === 1);
+
+    expect(pendingBeforeAttachment).toEqual([
+      expect.objectContaining({ sessionId, status: "pending", prompt: command.prompt }),
+    ]);
+  });
+
+  it("recovers a claimed pending reminder exactly once across fresh managers", async () => {
+    const runs: EngineRunOpts[] = [];
+    const manager = managerWith(runs);
+    const { sessionId } = await manager.runWorkflowAttempt(command);
+    await waitFor(() => runs.length === 1 && registry.getSession(sessionId)?.attemptTurn === 1
+      && registry.getSession(sessionId)?.status === "idle");
+
+    const session = registry.getSession(sessionId)!;
+    const claim = registry.claimWorkflowAttemptDispatch(session.id, session.sessionKey, "Recovered reminder.");
+    expect(claim).not.toBeNull();
+
+    managerWith(runs);
+    managerWith(runs);
+    await waitFor(() => runs.length === 2);
+
+    expect(runs).toHaveLength(2);
+    expect(registry.getQueueItem(claim!)?.status).toBe("completed");
+    expect(registry.getSession(sessionId)).toMatchObject({ status: "idle", attemptTurn: 2 });
+  });
+
   it("emits one completion for every consecutive turn on the same attempt session", async () => {
     const runs: EngineRunOpts[] = [];
     const manager = managerWith(runs);
