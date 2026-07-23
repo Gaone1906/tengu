@@ -133,7 +133,7 @@ import { ActivityQueryError, getActivityStory, queryActivityPage } from "../acti
 import type { ActivityKind, ActivityOutcomeState } from "../activity/types.js";
 import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
-import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir, expandPath, mimeFromFilename, readMultipartFile, sanitizeUploadFilename } from "./files.js";
+import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir, mimeFromFilename, readLocalFileForIngestion, readMultipartFile, sanitizeUploadFilename } from "./files.js";
 import { readJsonBody, readBodyRaw } from "./http-helpers.js";
 import { resolveMessageAudiences, speechContextApplies } from "./speech-context.js";
 import { isJsonMediaType } from "./media-type.js";
@@ -3914,21 +3914,22 @@ export async function handleApiRequest(
         if (body.filename !== undefined && (typeof body.filename !== "string" || !body.filename.trim())) {
           return badRequest(res, "filename must be a non-empty string when provided");
         }
-        const source = expandPath(body.path.trim());
-        let sourceStat: fs.Stats;
-        try {
-          sourceStat = fs.statSync(source);
-        } catch {
-          return json(res, { error: `file not found: ${body.path}` }, 404);
+        // Review F1: the caller names an arbitrary local path, so the read is
+        // gated by the standing file-read policy (assessFileRead) against the
+        // canonical opened file, size-capped by fstat on the same descriptor,
+        // and copied from that descriptor (symlink-swap-proof).
+        const ingested = readLocalFileForIngestion(body.path.trim(), ATTACHMENT_MAX_BYTES);
+        if (!ingested.ok) {
+          return json(
+            res,
+            { error: ingested.error, ...(ingested.status === 413 ? { code: "attachment_too_large" } : {}) },
+            ingested.status,
+          );
         }
-        if (!sourceStat.isFile()) return badRequest(res, `not a file: ${body.path}`);
-        if (sourceStat.size > ATTACHMENT_MAX_BYTES) {
-          return json(res, { error: "attachment exceeds the 25 MB per-file limit", code: "attachment_too_large" }, 413);
-        }
-        filename = sanitizeUploadFilename(typeof body.filename === "string" ? body.filename : path.basename(source));
+        filename = sanitizeUploadFilename(typeof body.filename === "string" ? body.filename : path.basename(ingested.realPath));
         commentIdRaw = body.commentId;
         // Copy (never move) the caller's file into staging.
-        stagedPath = stageAttachmentBuffer(fs.readFileSync(source));
+        stagedPath = stageAttachmentBuffer(ingested.buffer);
       }
       let commentId: string | null = null;
       if (commentIdRaw !== undefined && commentIdRaw !== null && commentIdRaw !== "") {

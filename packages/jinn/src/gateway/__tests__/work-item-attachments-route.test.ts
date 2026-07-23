@@ -270,6 +270,36 @@ describe("POST /api/work-items/:id/attachments (JSON path)", () => {
     expect(fs.existsSync(source)).toBe(true);
   });
 
+  it("gates the source through assessFileRead: a benign file passes for a capability-bound session, secrets and symlinks-to-secrets are refused (review F1)", async () => {
+    const item = store.createWorkItem({ title: "policy gate" });
+    const worker = reg.createSession({ engine: "codex", source: "web", sourceRef: "f1-worker", employee: "platform-worker" });
+
+    // A benign local file is the locked MCP contract — allowed for a session.
+    const benign = path.join(tmp, "benign-note.txt");
+    fs.writeFileSync(benign, "benign bytes");
+    const ok = await call("POST", `/api/work-items/${item.id}/attachments`, { path: benign }, toolHeaders(worker.id));
+    expect(ok.status).toBe(201);
+    expect(ok.body.attachment.uploadedBy).toBe("platform-worker");
+
+    // A direct Jinn-secrets path is refused by the existing read policy.
+    const secretsDir = path.join(tmp, "secrets");
+    fs.mkdirSync(secretsDir, { recursive: true });
+    const secret = path.join(secretsDir, "api-keys.json");
+    fs.writeFileSync(secret, "{}");
+    const direct = await call("POST", `/api/work-items/${item.id}/attachments`, { path: secret }, toolHeaders(worker.id));
+    expect(direct.status).toBe(403);
+    expect(String(direct.body.error)).toMatch(/secret/i);
+
+    // A symlink pointing into secrets is canonicalized and refused too.
+    const link = path.join(tmp, "innocent-looking.json");
+    fs.symlinkSync(secret, link);
+    const viaLink = await call("POST", `/api/work-items/${item.id}/attachments`, { path: link }, toolHeaders(worker.id));
+    expect(viaLink.status).toBe(403);
+
+    // Nothing from the refused sources reached the store.
+    expect(attachments.listAttachments(item.id).map((a) => a.filename)).toEqual(["benign-note.txt"]);
+  });
+
   it("404s an unknown source path and 400s a missing one", async () => {
     const item = store.createWorkItem({ title: "json path bad" });
     const missing = await call("POST", `/api/work-items/${item.id}/attachments`, { path: path.join(tmp, "nope.txt") }, operatorHeaders);

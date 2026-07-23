@@ -682,6 +682,62 @@ async function saveFile(result: UploadResult, context: ApiContext): Promise<File
   return meta;
 }
 
+export type LocalFileIngestion =
+  | { ok: true; buffer: Buffer; realPath: string }
+  | { ok: false; status: 400 | 403 | 404 | 413; error: string };
+
+/**
+ * Read a caller-named local file for ingestion (e.g. JSON-path attachment
+ * uploads) under the standing file-read policy. Symlink-swap-proof: the source
+ * is canonicalized and opened ONCE (O_NOFOLLOW on the canonical path), the
+ * assessment runs against that opened real path, the size cap uses fstat on
+ * the SAME descriptor, and the bytes are read from that descriptor — a path
+ * swapped between checks is detected by inode comparison and refused.
+ */
+export function readLocalFileForIngestion(requestedPath: string, maxBytes: number): LocalFileIngestion {
+  const requested = path.resolve(expandPath(requestedPath));
+  let fd: number | null = null;
+  try {
+    const realPath = fs.realpathSync.native(requested);
+    fd = fs.openSync(realPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const openedStat = fs.fstatSync(fd);
+    if (!openedStat.isFile()) return { ok: false, status: 400, error: `not a file: ${requestedPath}` };
+    // The opened descriptor must still be what the canonical path names — a
+    // swap between realpath and open surfaces as an inode mismatch.
+    const currentStat = fs.statSync(realPath);
+    if (!sameInode(openedStat, currentStat)) {
+      return { ok: false, status: 403, error: `${requestedPath} changed during open and was refused` };
+    }
+    const assessment = assessFileRead(realPath, { authenticated: true });
+    if (!assessment.allowed) {
+      return { ok: false, status: 403, error: assessment.reason || "File read blocked by security policy" };
+    }
+    if (openedStat.size > maxBytes) {
+      return { ok: false, status: 413, error: `attachment exceeds the ${Math.floor(maxBytes / 1024 / 1024)} MB per-file limit` };
+    }
+    const buffer = Buffer.alloc(openedStat.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const read = fs.readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (read <= 0) break;
+      offset += read;
+    }
+    if (offset !== buffer.length) {
+      return { ok: false, status: 403, error: `${requestedPath} changed during read and was refused` };
+    }
+    return { ok: true, buffer, realPath };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { ok: false, status: 404, error: `file not found: ${requestedPath}` };
+    if (code === "ELOOP") return { ok: false, status: 403, error: `${requestedPath} changed during open and was refused` };
+    return { ok: false, status: 400, error: err instanceof Error ? err.message : "read failed" };
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
+
 export interface MultipartFileUpload {
   filename: string;
   buffer: Buffer;
