@@ -151,11 +151,12 @@ describe("the merged feed model", () => {
         event("e2", "metadata_edited", "2026-07-20T09:00:00.000Z"),
         event("e3", "label_changed", "2026-07-20T10:00:00.000Z"),
         event("e4", "relation_added", "2026-07-20T11:00:00.000Z"),
+        event("e5", "note", "2026-07-20T12:00:00.000Z"),
       ],
       [],
     )
-    expect(folded).toHaveLength(1)
-    expect(folded[0].kind).toBe("fold")
+    // The birth whisper never folds; the remaining run of 3 does.
+    expect(folded.map((b) => b.kind)).toEqual(["event", "fold"])
   })
 
   it("whispers read as actor + verb (bounce carries its round; approvals decide readably)", () => {
@@ -330,11 +331,12 @@ describe("attachments + activity", () => {
     expect(screen.getByTestId("activity-comment-wic_2").className).toContain("ml-[30px]")
     // The comment's attachment renders as a chip aligned with the rail indent.
     expect(await screen.findByTestId("comment-attachment-wia_9")).toBeTruthy()
-    // The 4-event run folded into quiet updates.
-    const fold = screen.getByTestId("activity-fold-0")
-    expect(fold.textContent).toContain("4 quiet updates")
-    fireEvent.click(fold)
+    // The birth whisper stays visible; the trailing 3-event run folds.
     expect(activity.textContent).toContain("created this todo")
+    const fold = screen.getByTestId("activity-fold-1")
+    expect(fold.textContent).toContain("3 quiet updates")
+    fireEvent.click(fold)
+    expect(activity.textContent).toContain("changed the labels")
 
     // Send with a staged file: the comment posts first, the file attaches to it.
     const staged = new File(["img"], "shot.png", { type: "image/png" })

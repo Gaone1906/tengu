@@ -69,8 +69,15 @@ export function buildFeed(events: WorkItemEventWire[], comments: WorkItemComment
     run = []
   }
   for (const item of items) {
-    if (item.kind === "event") run.push(item.event)
-    else {
+    if (item.kind === "event") {
+      // The birth whisper stays visible — the mock never folds "created".
+      if (item.event.kind === "created") {
+        flushRun()
+        blocks.push({ kind: "event", event: item.event })
+      } else {
+        run.push(item.event)
+      }
+    } else {
       flushRun()
       blocks.push({ kind: "comment", node: item.node })
     }

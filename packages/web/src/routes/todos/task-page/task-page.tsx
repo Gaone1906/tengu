@@ -295,7 +295,14 @@ export default function TaskPage() {
   )
 
   const working = detail ? workingElapsed(detail) : null
-  const sessionRefLabel = item ? publicWorkItemReference(item.sourceRef) : null
+  // The delegation grammar shows the human-readable ref SUFFIX of a
+  // session/delegate sourceRef (the gateway's sessionRef() parse), never the
+  // transport prefix.
+  const sessionRefLabel = useMemo(() => {
+    const raw = item?.sourceRef ?? null
+    const parsed = raw ? /^(?:session|delegate):[^:]+:(.+)$/.exec(raw) : null
+    return publicWorkItemReference(parsed ? parsed[1] : raw)
+  }, [item?.sourceRef])
 
   // ── Not found / loading ───────────────────────────────────────────────────
   if (!id) {

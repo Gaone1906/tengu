@@ -17,6 +17,21 @@ import { AssigneePickerContent } from "../pickers/picker-contents"
 
 const DEPTH_CAP = 3
 
+/** Closed/total over ALL descendants (self excluded) — the roll-up numbers. */
+function subtreeCounts(node: WorkItemTreeNodeWire | undefined): { total: number; done: number } {
+  let total = 0
+  let done = 0
+  const walk = (children: WorkItemTreeNodeWire[]) => {
+    for (const child of children) {
+      total += 1
+      if (child.status === "done" || child.status === "cancelled") done += 1
+      walk(child.children ?? [])
+    }
+  }
+  walk(node?.children ?? [])
+  return { total, done }
+}
+
 export function SubTasksSection({
   node,
   parentDepth,
@@ -39,7 +54,9 @@ export function SubTasksSection({
   onAddSubTask: (title: string) => void
 }) {
   const children = node?.children ?? []
-  const done = children.filter((child) => child.status === "done" || child.status === "cancelled").length
+  // Counts cover the whole SUBTREE (the board's 2/5 roll-up counts descendants
+  // too); the rows list direct children — deeper levels wear "N sub" badges.
+  const { total, done } = subtreeCounts(node)
   const atCap = parentDepth >= DEPTH_CAP
   const [adding, setAdding] = useState(false)
   const [title, setTitle] = useState("")
@@ -63,7 +80,7 @@ export function SubTasksSection({
         Sub-tasks
         {children.length > 0 && (
           <span className="text-[11px] font-normal normal-case tracking-[.02em] text-[var(--text-quaternary)]">
-            {done} of {children.length} done
+            {done} of {total} done
           </span>
         )}
       </div>
@@ -74,7 +91,7 @@ export function SubTasksSection({
             <span className="h-[3px] w-full max-w-[220px] overflow-hidden rounded-[2px] bg-[var(--fill-secondary)]" aria-hidden>
               <span
                 className="block h-full rounded-[2px] bg-[var(--system-green)] transition-[width] duration-300"
-                style={{ width: `${children.length > 0 ? Math.round((done / children.length) * 100) : 0}%` }}
+                style={{ width: `${total > 0 ? Math.round((done / total) * 100) : 0}%` }}
                 data-testid="subtasks-progress"
               />
             </span>
