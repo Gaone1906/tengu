@@ -1585,3 +1585,154 @@ describe("Todos v2 slice 2 — comment routes", () => {
     expect(missing.status).toBe(404);
   });
 });
+
+describe("PUT /api/work-items/:id/status — the operator human-surface lane (Todos v2 slice 6)", () => {
+  /* The board's design contract (design-doc §5/§6) requires the human-only
+   * edges transitions.ts already supports: reopening closed work, unblocking,
+   * routing escalated items. The operator PUT lane carries human authority —
+   * it passes human:true, accepts every declared status target, and treats the
+   * blocked/escalated note as asked-for-after (optional) rather than demanded
+   * up front. The agent POST lane is UNCHANGED: allowlisted targets, note
+   * required, sticky terminals locked. */
+  const operatorHeaders = { authorization: "Bearer test-token" };
+
+  function toolHeaders(sessionId: string): Record<string, string> {
+    return {
+      [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+      [CALLER_SESSION_HEADER]: sessionId,
+      [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(sessionId),
+    };
+  }
+
+  it.each(["done", "cancelled"] as const)("reopens %s → backlog via PUT (drag-to-Backlog reopen)", async (status) => {
+    const item = store.createWorkItem({ title: `Reopen ${status}`, status });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${item.id}/status`, { status: "backlog" }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(200);
+    expect(cap.body.workItem.status).toBe("backlog");
+    expect(cap.body.workItem.closedAt).toBeNull();
+  });
+
+  it.each(["backlog", "assigned", "in_review"] as const)("routes an escalated item to %s via PUT", async (target) => {
+    const item = store.createWorkItem({ title: `Escalated route ${target}`, status: "escalated" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${item.id}/status`, { status: target }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(200);
+    expect(cap.body.workItem.status).toBe(target);
+  });
+
+  it.each(["backlog", "assigned"] as const)("unblocks blocked → %s via PUT", async (target) => {
+    const item = store.createWorkItem({ title: `Unblock to ${target}`, status: "blocked" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${item.id}/status`, { status: target }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(200);
+    expect(cap.body.workItem.status).toBe(target);
+  });
+
+  it("accepts an operator PUT into blocked WITHOUT a note (the reason is asked for in the banner after)", async () => {
+    const item = store.createWorkItem({ title: "Block without note", status: "executing" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${item.id}/status`, { status: "blocked" }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(200);
+    expect(cap.body.workItem.status).toBe("blocked");
+  });
+
+  it("still records the note when the operator PUT provides one", async () => {
+    const item = store.createWorkItem({ title: "Block with note", status: "executing" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${item.id}/status`, { status: "escalated", note: "needs owner call" }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(200);
+    expect(store.listWorkItemEvents(item.id).at(-1)).toMatchObject({
+      toStatus: "escalated",
+      detail: { note: "needs owner call" },
+    });
+  });
+
+  it("still refuses an operator PUT along a truly illegal edge (executing → backlog)", async () => {
+    const item = store.createWorkItem({ title: "Illegal edge", status: "executing" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${item.id}/status`, { status: "backlog" }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(400);
+    expect(cap.body.error).toMatch(/illegal transition executing → backlog/);
+    expect(store.getWorkItem(item.id)?.status).toBe("executing");
+  });
+
+  it("rejects an unknown status on the operator PUT lane with the full status list", async () => {
+    const item = store.createWorkItem({ title: "Garbage target", status: "backlog" });
+    const cap = makeRes();
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${item.id}/status`, { status: "paused" }, operatorHeaders),
+      cap.res,
+      ctx,
+    );
+    expect(cap.status).toBe(400);
+    expect(cap.body.error).toMatch(/status must be one of/);
+    expect(cap.body.error).toContain("backlog");
+  });
+
+  it("keeps the agent POST lane unchanged: backlog target refused, note still required, sticky exits locked", async () => {
+    const caller = reg.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: "agent-lane-pin",
+      employee: "platform-worker",
+    });
+
+    // Target allowlist unchanged for agents.
+    const owned = store.createWorkItem({ title: "Agent backlog refused", status: "assigned", assignee: "platform-worker" });
+    const backlog = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", `/api/work-items/${owned.id}/status`, { status: "backlog" }, toolHeaders(caller.id)),
+      backlog.res,
+      ctx,
+    );
+    expect(backlog.status).toBe(400);
+    expect(backlog.body.error).toMatch(/for agent updates/);
+
+    // Note still demanded from agents entering blocked/escalated.
+    const noteLess = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", `/api/work-items/${owned.id}/status`, { status: "blocked" }, toolHeaders(caller.id)),
+      noteLess.res,
+      ctx,
+    );
+    expect(noteLess.status).toBe(400);
+    expect(noteLess.body.error).toMatch(/note is required/);
+
+    // Sticky terminals still locked to agents (human-required refusal).
+    const sticky = store.createWorkItem({ title: "Agent sticky locked", status: "done", assignee: "platform-worker" });
+    const exitTry = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", `/api/work-items/${sticky.id}/status`, { status: "in_review" }, toolHeaders(caller.id)),
+      exitTry.res,
+      ctx,
+    );
+    expect(exitTry.status).toBe(403);
+    expect(exitTry.body.error).toMatch(/human decision/);
+    expect(store.getWorkItem(sticky.id)?.status).toBe("done");
+  });
+});

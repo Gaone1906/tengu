@@ -3586,15 +3586,26 @@ export async function handleApiRequest(
         return badRequest(res, `approval fields (${approvalKeys.join(", ")}) cannot be attached through Todo status updates — approvals are requested/decided through the approval authority surface`);
       }
       const target = typeof body.status === "string" ? body.status : "";
-      const isOperatorPutCancellation = method === "PUT" && caller.kind === "operator" && target === "cancelled";
+      // The operator PUT lane IS the human surface (Todos v2 slice 6): it may
+      // walk every declared edge — reopening closed work, unblocking, routing
+      // escalated items — so it carries human authority into transition() and
+      // is not confined to the agent target allowlist. Cancellation keeps its
+      // dedicated archive path below.
+      const isOperatorPut = method === "PUT" && caller.kind === "operator";
+      const isOperatorPutCancellation = isOperatorPut && target === "cancelled";
       if (target === "cancelled" && !isOperatorPutCancellation) {
         return json(res, { error: "cancelling a Todo is a human surface decision; agents do not have a cancel tool" }, 403);
       }
-      if (!isOperatorPutCancellation && !(AGENT_WORK_ITEM_TARGETS as readonly string[]).includes(target)) {
+      if (isOperatorPut && !(WORK_ITEM_STATUSES as readonly string[]).includes(target)) {
+        return badRequest(res, `status must be one of ${WORK_ITEM_STATUSES.join(", ")}`);
+      }
+      if (!isOperatorPut && !(AGENT_WORK_ITEM_TARGETS as readonly string[]).includes(target)) {
         return badRequest(res, `status must be one of ${AGENT_WORK_ITEM_TARGETS.join(", ")} for agent updates; other lifecycle edits use the human surface`);
       }
       const note = typeof body.note === "string" ? body.note.trim() : "";
-      if ((target === "blocked" || target === "escalated") && !note) {
+      // Agents must say WHY up front; the operator surface asks for the reason
+      // in the opened item's banner instead (design-doc §5) — never a modal.
+      if ((target === "blocked" || target === "escalated") && !note && !isOperatorPut) {
         return badRequest(res, `note is required when moving a Todo to ${target}`);
       }
       const item = getWorkItem(params.id);
@@ -3609,6 +3620,7 @@ export async function handleApiRequest(
             }
           : transition(params.id, target as WorkItemStatus, workItemActor(caller), {
               manual: true,
+              human: isOperatorPut || undefined,
               callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
               detail: note ? { note } : undefined,
             });
