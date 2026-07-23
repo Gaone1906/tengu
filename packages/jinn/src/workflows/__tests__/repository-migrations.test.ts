@@ -187,6 +187,7 @@ function versionTwoDatabase(name: string): string {
         ALTER TABLE workflow_attempts DROP COLUMN last_extension_reason;
         ALTER TABLE workflow_attempts DROP COLUMN pending_output_error;
         ALTER TABLE workflow_attempts DROP COLUMN last_processed_turn;
+        ALTER TABLE workflow_attempts DROP COLUMN prompt_text;
         UPDATE workflow_schema SET version = 2;
       `);
     }
@@ -384,6 +385,7 @@ describe('fresh version 3 schema', () => {
         column('extensions', 'INTEGER', 1, '0', 0), column('last_extension_reason', 'TEXT', 0, null, 0),
         column('pending_output_error', 'TEXT', 0, null, 0),
         column('last_processed_turn', 'INTEGER', 1, '0', 0),
+        column('prompt_text', 'TEXT', 0, null, 0),
       ]));
       expect(tableInfo(db, 'workflow_approvals')).toEqual(expectedColumns([
         column('run_id', 'TEXT', 1, null, 1), column('node_id', 'TEXT', 1, null, 2),
@@ -477,7 +479,7 @@ describe('migration safety and idempotency', () => {
     withWorkflowDatabase(file, (db) => {
       expect(db.prepare('SELECT version FROM workflow_schema').pluck().get()).toBe(3);
       expect(db.prepare(`SELECT session_id, reminders_sent, next_reminder_at, extensions,
-        last_extension_reason, pending_output_error, last_processed_turn FROM workflow_attempts`).get()).toEqual({
+        last_extension_reason, pending_output_error, last_processed_turn, prompt_text FROM workflow_attempts`).get()).toEqual({
         session_id: 'session-1',
         reminders_sent: 0,
         next_reminder_at: null,
@@ -485,6 +487,7 @@ describe('migration safety and idempotency', () => {
         last_extension_reason: null,
         pending_output_error: null,
         last_processed_turn: 0,
+        prompt_text: null,
       });
     });
   });

@@ -76,7 +76,7 @@ export interface WorkflowRunTransaction {
     'activated' | 'resolvedConfig' | 'input' | 'output' | 'error' | 'resumeAt' | 'startedAt' | 'endedAt'
   >>): WorkflowNodeRunRecord;
   createAttempt(input: { nodeId: string; resolvedConfig: ResolvedEmployeeConfig; input: JsonValue;
-    retryIdempotencyKey?: string }): WorkflowAttemptRecord;
+    promptText?: string; retryIdempotencyKey?: string }): WorkflowAttemptRecord;
   settleAttempt(nodeId: string, attempt: number, patch:
     | { status: 'running'; sessionId: string }
     | { status: 'completed'; sessionId?: string; output: WorkflowNodeOutput; endedAt: string }

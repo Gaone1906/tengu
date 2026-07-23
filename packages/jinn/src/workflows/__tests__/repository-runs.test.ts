@@ -274,10 +274,12 @@ describe('atomic run mutations', () => {
         input: { topic: 'release' },
         startedAt: START,
       });
-      first = tx.createAttempt({ nodeId: 'draft', resolvedConfig: resolved(), input: { topic: 'release' } });
+      first = tx.createAttempt({ nodeId: 'draft', resolvedConfig: resolved(), input: { topic: 'release' },
+        promptText: 'Draft the release notes.\n\n---\nContract block.' });
     });
     expect(first).toMatchObject({
       runId: run.id, nodeId: 'draft', attempt: 1, status: 'dispatching', startedAt: START,
+      promptText: 'Draft the release notes.\n\n---\nContract block.',
     });
     expect(repository.getAttempt(run.id, 'draft', 1)).toEqual(first);
 
@@ -299,6 +301,8 @@ describe('atomic run mutations', () => {
       { attempt: 1, status: 'completed' },
       { attempt: 2, status: 'dispatching' },
     ]);
+    // promptText is optional: the second attempt was created without one.
+    expect(repository.getAttempt(run.id, 'draft', 2)?.promptText).toBeUndefined();
   });
 
   it('persists reminder state and reads due attempts in deterministic order', () => {

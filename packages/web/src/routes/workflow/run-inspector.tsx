@@ -1,6 +1,6 @@
-import { useMemo } from "react"
+import { useMemo, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { ChevronRight, MessageCircle, X } from "lucide-react"
+import { ChevronDown, ChevronRight, MessageCircle, X } from "lucide-react"
 import { Link } from "react-router-dom"
 import { MarkdownView } from "@/components/markdown-view"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
@@ -87,24 +87,73 @@ function StepSection({ node, attempt }: { node: WorkflowNodeWire; attempt: Workf
   const config = attempt?.resolvedConfig
   const employeeId = config?.employeeId ?? fixedEmployee(node)
   if (!employeeId) return null
-  const meta = config
-    ? [config.engine, config.model, config.effort].filter(Boolean).join(" · ")
-    : null
+  const rows: Array<{ label: string; value: string }> = config
+    ? [
+        { label: "Engine", value: config.engine },
+        ...(config.model ? [{ label: "Model", value: config.model }] : []),
+        ...(config.effort ? [{ label: "Effort", value: config.effort }] : []),
+      ]
+    : []
   return (
     <Section title="Step">
-      <div className="flex items-center gap-2.5 rounded-[10px] bg-[var(--fill-quaternary)] px-3 py-2.5">
-        <EmployeeAvatar name={employeeId} size={28} className="bg-[var(--fill-secondary)]" />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-[length:var(--text-footnote)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
+      <div className="overflow-hidden rounded-[10px] bg-[var(--fill-quaternary)]">
+        <div className="flex items-center gap-2.5 px-3 py-2.5">
+          <EmployeeAvatar name={employeeId} size={28} className="bg-[var(--fill-secondary)]" />
+          <span className="min-w-0 flex-1 truncate text-[length:var(--text-footnote)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
             {employeeId}
           </span>
-          {meta && (
-            <span className="block truncate text-[length:var(--text-caption2)] text-[var(--text-tertiary)]">{meta}</span>
-          )}
-        </span>
+        </div>
+        {rows.map((row) => (
+          <div key={row.label} className="flex gap-3 border-t border-[var(--separator)] px-3 py-2">
+            <span className="w-[92px] shrink-0 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
+              {row.label}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[length:var(--text-caption1)] text-[var(--text-primary)]">
+              {row.value}
+            </span>
+          </div>
+        ))}
       </div>
     </Section>
   )
+}
+
+/** The composed prompt handed to the session — monospace and scrollable,
+ *  collapsed behind a disclosure when it runs long. */
+function PromptSection({ text }: { text: string }) {
+  const lines = text.split("\n").length
+  const long = lines > 20
+  const [open, setOpen] = useState(!long)
+  return (
+    <Section title="Prompt">
+      {long && (
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+          className="mb-1.5 inline-flex items-center gap-1 text-[length:var(--text-caption1)] font-[var(--weight-medium)] text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)]"
+        >
+          {open
+            ? <ChevronDown size={12} strokeWidth={2.25} aria-hidden />
+            : <ChevronRight size={12} strokeWidth={2.25} aria-hidden />}
+          {open ? "Hide prompt" : `Show prompt · ${lines} lines`}
+        </button>
+      )}
+      {open && (
+        <pre
+          className="max-h-[260px] overflow-auto whitespace-pre-wrap break-words rounded-[10px] bg-[var(--fill-quaternary)] px-3 py-2.5 text-[length:var(--text-caption1)] leading-[1.55] text-[var(--text-secondary)]"
+          style={{ fontFamily: "var(--font-code)" }}
+          data-scrollable="true"
+        >
+          {text}
+        </pre>
+      )}
+    </Section>
+  )
+}
+
+function isEmptyRecord(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === 0
 }
 
 function OutputSection({ output, isDark }: {
@@ -379,9 +428,12 @@ export function RunInspector({ detail, nodeId, onClose, onDecide, deciding }: {
           {node.type === "employee" && (
             <>
               <StepSection node={node} attempt={latest} />
+              {latest?.promptText && <PromptSection text={latest.promptText} />}
               {latest?.input !== undefined && (
-                <Section title="Input">
-                  <JsonBlock value={latest.input} />
+                <Section title="Step input">
+                  {isEmptyRecord(latest.input)
+                    ? <Note>No input</Note>
+                    : <JsonBlock value={latest.input} />}
                 </Section>
               )}
               <OutputSection output={output} isDark={isDark} />

@@ -140,6 +140,7 @@ describe("Workflow v2 canonical API", () => {
         nodeId: "write",
         attempt: 1,
         status: "running",
+        promptText: "Write the notes.\n\n---\nContract block.",
         remindersSent: 2,
         nextReminderAt: "2026-07-23T12:30:00.000Z",
         extensions: 1,

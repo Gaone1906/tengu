@@ -292,10 +292,11 @@ export class WorkflowRunner {
 
   private async dispatch(run: WorkflowRunDetail, node: EmployeeNode, config: ResolvedEmployeeConfig): Promise<void> {
     const at = this.now();
+    const promptText = composeEmployeePrompt(run, node);
     const attempt = this.options.repository.mutateRun(run.id, run.revision, (tx) => {
       tx.setNodeStatus(node.id, "dispatching", { resolvedConfig: config as unknown as Record<string, JsonValue>,
         input: inputFor(run, node.id), startedAt: at });
-      return tx.createAttempt({ nodeId: node.id, resolvedConfig: config, input: inputFor(run, node.id) });
+      return tx.createAttempt({ nodeId: node.id, resolvedConfig: config, input: inputFor(run, node.id), promptText });
     });
     this.changed(run);
     try {
@@ -358,7 +359,10 @@ export class WorkflowRunner {
     const attempt = run.attempts.find((item) => item.nodeId === nodeId && item.attempt === attemptNumber);
     const node = run.definition.nodes.find((item): item is EmployeeNode => item.id === nodeId && item.type === "employee");
     if (!attempt || attempt.status !== "dispatching" || !node) return false;
-    const prompt = composeEmployeePrompt(run, node);
+    // Prefer the prompt persisted at attempt creation so the session receives
+    // exactly what the run detail shows; recompose only for attempts that
+    // predate the column.
+    const prompt = attempt.promptText ?? composeEmployeePrompt(run, node);
     const config = attempt.resolvedConfig;
     const { sessionId } = await this.options.executor.startAttempt({ owner: { workflowId, runId, nodeId, attempt: attemptNumber },
       employeeId: config.employeeId, engine: config.engine, ...(config.model ? { model: config.model } : {}),
@@ -388,12 +392,14 @@ export class WorkflowRunner {
     if (replay) return this.detail(workflowId, runId);
     const latest = run.attempts.filter((attempt) => attempt.nodeId === nodeId).at(-1);
     if (!latest) throw new Error(`Workflow Employee ${nodeId} has no retryable attempt.`);
+    const authored = run.definition.nodes.find((item): item is EmployeeNode => item.id === nodeId && item.type === "employee");
+    const promptText = authored ? composeEmployeePrompt(run, authored) : undefined;
     try {
       this.options.repository.mutateRun(run.id, run.revision, (tx) => {
         tx.setNodeStatus(nodeId, "dispatching", { activated: true });
         tx.setRunStatus("running");
         tx.createAttempt({ nodeId, resolvedConfig: latest.resolvedConfig,
-          input: latest.input, retryIdempotencyKey: idempotencyKey });
+          input: latest.input, ...(promptText === undefined ? {} : { promptText }), retryIdempotencyKey: idempotencyKey });
       });
     } catch (error) {
       const claimed = this.options.repository.findAttemptByRetryKey(run.id, idempotencyKey);

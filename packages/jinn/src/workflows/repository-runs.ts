@@ -44,6 +44,7 @@ const nodeRecordSchema = z.strictObject({
 const attemptRecordSchema = z.strictObject({
   runId: z.string(), nodeId: z.string(), attempt: z.number().int().positive(), sessionId: z.string().optional(),
   status: z.enum(WORKFLOW_ATTEMPT_STATUSES), resolvedConfig: resolvedSchema, input: jsonValueSchema,
+  promptText: z.string().optional(),
   output: outputSchema.optional(), error: errorSchema.optional(), startedAt: instantSchema, endedAt: instantSchema.optional(),
   remindersSent: z.number().int().nonnegative(), nextReminderAt: instantSchema.optional(),
   extensions: z.number().int().nonnegative(), lastExtensionReason: z.string().optional(),
@@ -82,6 +83,7 @@ interface AttemptRow {
   resolved_config_json: unknown; input_json: unknown; output_json: unknown; error_json: unknown;
   started_at: unknown; ended_at: unknown; reminders_sent: unknown; next_reminder_at: unknown;
   extensions: unknown; last_extension_reason: unknown; pending_output_error: unknown; last_processed_turn: unknown;
+  prompt_text: unknown;
 }
 interface ApprovalRow {
   run_id: unknown; node_id: unknown; status: unknown; requested_at: unknown; approver_ref: unknown;
@@ -160,6 +162,7 @@ export function decodeAttempt(row: AttemptRow): WorkflowAttemptRecord {
     ...(row.session_id === null ? {} : { sessionId: row.session_id }), status: row.status,
     resolvedConfig: parseStoredJson(row.resolved_config_json, 'Workflow attempt config'),
     input: parseStoredJson(row.input_json, 'Workflow attempt input'),
+    ...(row.prompt_text === null ? {} : { promptText: row.prompt_text }),
     ...(row.output_json === null ? {} : { output: optionalJson(row.output_json, 'Workflow attempt output') }),
     ...(row.error_json === null ? {} : { error: optionalJson(row.error_json, 'Workflow attempt error') }),
     startedAt: row.started_at, ...(row.ended_at === null ? {} : { endedAt: row.ended_at }),

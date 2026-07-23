@@ -465,6 +465,8 @@ export interface WorkflowAttemptV2Wire {
     effort?: "low" | "medium" | "high" | "xhigh"
   }
   input?: unknown
+  /** The final composed prompt handed to the session (interpolated + contract block). */
+  promptText?: string
   output?: WorkflowNodeOutputV2Wire
   error?: WorkflowRunErrorV2Wire
   startedAt: string

@@ -76,6 +76,8 @@ export interface WorkflowAttemptRecord {
   status: WorkflowAttemptStatus;
   resolvedConfig: ResolvedEmployeeConfig;
   input: JsonValue;
+  /** The final composed prompt handed to the session (interpolated + contract block). */
+  promptText?: string;
   output?: WorkflowNodeOutput;
   error?: WorkflowError;
   startedAt: string;

@@ -155,8 +155,9 @@ describe("workflow run canvas", () => {
       ],
       attempts: [{
         runId: "run-1", nodeId: "writer", attempt: 1, sessionId: "sess-1", status: "completed",
-        resolvedConfig: { employeeId: "blog-writer", engine: "claude", model: "opus" },
-        input: { topic: "release notes" },
+        resolvedConfig: { employeeId: "blog-writer", engine: "claude", model: "opus", effort: "high" },
+        input: {},
+        promptText: "Write the digest.\n\n---\nContract block.",
         output: { text: "Digest **drafted**.", fields: { summary: "Looks good", count: 2 } },
         startedAt: "2026-07-23T08:00:01.000Z", endedAt: "2026-07-23T08:03:00.000Z",
         remindersSent: 2, extensions: 1, lastExtensionReason: "Waiting on a child session.",
@@ -173,11 +174,36 @@ describe("workflow run canvas", () => {
     expect(inspector.getByText("Looks good")).toBeTruthy()
     expect(inspector.getByText("drafted")).toBeTruthy()
     expect(inspector.getByText("blog-writer")).toBeTruthy()
+    expect(inspector.getByText("Effort")).toBeTruthy()
+    expect(inspector.getByText("high")).toBeTruthy()
+    expect(inspector.getByText(/Write the digest\./)).toBeTruthy()
+    expect(inspector.getByText("No input")).toBeTruthy()
     expect(inspector.getByText(/2 reminders sent/)).toBeTruthy()
     expect(inspector.getByText(/1 extension/)).toBeTruthy()
     expect(inspector.getByText(/Waiting on a child session/)).toBeTruthy()
     const link = inspector.getByRole("link", { name: /open chat session/i })
     expect(link.getAttribute("href")).toBe("/?session=sess-1")
+  })
+
+  it("collapses a long prompt behind a disclosure", async () => {
+    const longPrompt = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join("\n")
+    getWorkflowRun.mockResolvedValue(baseDetail({
+      nodeRuns: [nodeRun("trigger", "completed"), nodeRun("writer", "running")],
+      attempts: [{
+        runId: "run-1", nodeId: "writer", attempt: 1, sessionId: "sess-1", status: "running",
+        resolvedConfig: { employeeId: "blog-writer", engine: "claude" },
+        promptText: longPrompt,
+        startedAt: "2026-07-23T08:00:01.000Z", remindersSent: 0, extensions: 0,
+      }],
+    }))
+    renderRun()
+
+    fireEvent.click(await screen.findByText("Writer"))
+
+    const inspector = within(await screen.findByTestId("run-inspector"))
+    expect(inspector.queryByText(/line 30/)).toBeNull()
+    await userEvent.click(inspector.getByRole("button", { name: /show prompt · 30 lines/i }))
+    expect(inspector.getByText(/line 30/)).toBeTruthy()
   })
 
   it("shows an approval node's decision in the inspector", async () => {

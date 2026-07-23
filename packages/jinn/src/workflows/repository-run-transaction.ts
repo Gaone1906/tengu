@@ -118,11 +118,15 @@ export class RunMutation implements WorkflowRunTransaction {
 
   createAttempt(input: Parameters<WorkflowRunTransaction['createAttempt']>[0]): WorkflowAttemptRecord {
     this.assertOpen();
-    const value = normalizedRecord(input, ['nodeId', 'resolvedConfig', 'input', 'retryIdempotencyKey'], 'Workflow attempt input is invalid.');
+    const value = normalizedRecord(input, ['nodeId', 'resolvedConfig', 'input', 'promptText', 'retryIdempotencyKey'], 'Workflow attempt input is invalid.');
     const nodeId = parseNodeId(value.nodeId);
     const retryKey = value.retryIdempotencyKey;
     if (retryKey !== undefined && (typeof retryKey !== 'string' || retryKey.length < 1 || retryKey.length > 128)) {
       repositoryError('bad-input', 'Workflow retry idempotency key is invalid.');
+    }
+    const promptText = value.promptText;
+    if (promptText !== undefined && (typeof promptText !== 'string' || promptText.length < 1)) {
+      repositoryError('bad-input', 'Workflow attempt prompt is invalid.');
     }
     validateMutationValue('resolved', value.resolvedConfig);
     const node = readNode(this.db, this.runId, nodeId);
@@ -131,9 +135,10 @@ export class RunMutation implements WorkflowRunTransaction {
     const attempt = (this.db.prepare(`SELECT COALESCE(MAX(attempt), 0) + 1 FROM workflow_attempts
       WHERE run_id = ? AND node_id = ?`).pluck().get(this.runId, nodeId) as number);
     this.db.prepare(`INSERT INTO workflow_attempts
-      (run_id, node_id, attempt, status, resolved_config_json, input_json, started_at, retry_idempotency_key)
-      VALUES (?, ?, ?, 'dispatching', ?, ?, ?, ?)`).run(
-      this.runId, nodeId, attempt, canonicalJson(value.resolvedConfig!), canonicalJson(value.input!), this.stamp, retryKey,
+      (run_id, node_id, attempt, status, resolved_config_json, input_json, prompt_text, started_at, retry_idempotency_key)
+      VALUES (?, ?, ?, 'dispatching', ?, ?, ?, ?, ?)`).run(
+      this.runId, nodeId, attempt, canonicalJson(value.resolvedConfig!), canonicalJson(value.input!),
+      promptText ?? null, this.stamp, retryKey,
     );
     this.didChange = true;
     return readAttempt(this.db, this.runId, nodeId, attempt)!;
