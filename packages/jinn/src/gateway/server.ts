@@ -59,6 +59,7 @@ import { syncExternalTurn } from "./external-turns.js";
 import { pickEncoding, isCompressibleExt, compressStream } from "./compress.js";
 import { attachPtyWebSocket } from "./pty-ws.js";
 import { openWorkflowDatabase } from "../workflows/repository-migrations.js";
+import { importLegacyWorkflowDefinitions } from "../workflows/import-v1.js";
 import { WorkflowRepository } from "../workflows/repository.js";
 import { WorkflowSessionExecutor } from "../workflows/session-executor.js";
 import { WorkflowService } from "../workflows/service.js";
@@ -921,7 +922,9 @@ export async function startGateway(
       }
     }
   };
-  const workflowDatabase = openWorkflowDatabase(); const workflowRepository = new WorkflowRepository(workflowDatabase);
+  const workflowDatabase = openWorkflowDatabase();
+  importLegacyWorkflowDefinitions(workflowDatabase);
+  const workflowRepository = new WorkflowRepository(workflowDatabase);
   const workflowService = new WorkflowService({ repository: workflowRepository,
     executor: new WorkflowSessionExecutor(sessionManager, (id) => { const session = getSession(id); if (!session) return null;
       const finalText = [...getMessages(id)].reverse().find((message) => message.role === "assistant")?.content; return { session, ...(finalText ? { finalText } : {}) }; }),
