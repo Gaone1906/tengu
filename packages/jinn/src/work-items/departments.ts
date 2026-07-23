@@ -41,14 +41,23 @@ export function resolveDepartmentPrefix(db: DatabaseType, slug: string, reserved
   const existing = db.prepare("SELECT prefix FROM departments WHERE slug = ?").get(slug) as { prefix: string } | undefined;
   if (existing) return existing.prefix;
   const taken = new Set(db.prepare("SELECT prefix FROM departments").pluck().all() as string[]);
+  // Every allocated namespace is reserved too — a retired company prefix keeps
+  // its history and must never be silently claimed by a department (two
+  // semantically different sequences would interleave under one prefix).
+  for (const allocated of db.prepare("SELECT prefix FROM work_item_id_allocator").pluck().all() as string[]) {
+    taken.add(allocated);
+  }
   taken.add(reservedCompanyPrefix);
   const prefix = pickFreePrefix(derivePrefixCandidate(slug), taken);
   try {
     db.prepare("INSERT INTO departments (slug, prefix, created_at) VALUES (?, ?, ?)")
       .run(slug, prefix, new Date().toISOString());
     return prefix;
-  } catch {
-    // Lost a registration race (slug or prefix landed concurrently) — re-read the winner.
+  } catch (err) {
+    // Only a constraint collision means we lost a registration race; anything
+    // else (I/O, readonly, …) must surface instead of recursing forever.
+    const code = (err as { code?: string } | null)?.code;
+    if (code !== "SQLITE_CONSTRAINT_UNIQUE" && code !== "SQLITE_CONSTRAINT_PRIMARYKEY") throw err;
     const winner = db.prepare("SELECT prefix FROM departments WHERE slug = ?").get(slug) as { prefix: string } | undefined;
     if (winner) return winner.prefix;
     return resolveDepartmentPrefix(db, slug, reservedCompanyPrefix);

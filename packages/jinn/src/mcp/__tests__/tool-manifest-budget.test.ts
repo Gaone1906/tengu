@@ -181,7 +181,7 @@ function collectEnums(value: unknown, path: string[] = []): Array<[string, strin
 }
 
 describe("tool manifest budget", () => {
-  it("keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under 7595 o200k_base tokens", async () => {
+  it(`keeps exact JSON-RPC, owned Pi, and pinned OpenAI wrapper manifests under ${MAX_MANIFEST_TOKENS} o200k_base tokens`, async () => {
     const tools = buildTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
     const wrappers = {
       rpc: { jsonrpc: "2.0", id: 1, result: { tools } },
