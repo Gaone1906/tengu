@@ -4325,9 +4325,12 @@ export async function handleApiRequest(
       const verifyPolicy = validateVerifyPolicy(body.verifyPolicy);
       if (!verifyPolicy.ok) return badRequest(res, verifyPolicy.error);
       const parentId = typeof body.parentId === 'string' && body.parentId.trim() ? body.parentId.trim() : null;
-      const dueAt = typeof body.dueAt === 'string' && body.dueAt.trim() ? body.dueAt.trim() : null;
-      if (dueAt !== null && Number.isNaN(Date.parse(dueAt))) {
-        return badRequest(res, 'dueAt must be an ISO 8601 timestamp');
+      let dueAt = typeof body.dueAt === 'string' && body.dueAt.trim() ? body.dueAt.trim() : null;
+      if (dueAt !== null) {
+        if (!ISO_DATE_OR_INSTANT.test(dueAt) || Number.isNaN(Date.parse(dueAt))) {
+          return badRequest(res, 'dueAt must be an ISO 8601 timestamp');
+        }
+        dueAt = new Date(dueAt).toISOString();
       }
       let priority: number | undefined;
       if (body.priority !== undefined) {
@@ -4342,7 +4345,11 @@ export async function handleApiRequest(
         body: typeof body.body === "string" ? body.body : null,
         acceptance: typeof body.acceptance === "string" ? body.acceptance : null,
         assignee: typeof body.assignee === "string" && body.assignee.trim() ? body.assignee.trim() : null,
-        department: typeof body.department === "string" && body.department.trim() ? body.department.trim() : null,
+        // The department key is included only when the request carries one, so a
+        // sub-task with no department inherits the parent's at the store layer.
+        ...(body.department !== undefined
+          ? { department: typeof body.department === "string" && body.department.trim() ? body.department.trim() : null }
+          : {}),
         source,
         sourceRef: source === "session" && caller.kind === "session" ? `session:${caller.callerId}:${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}` : null,
         verifyPolicy: verifyPolicy.value,

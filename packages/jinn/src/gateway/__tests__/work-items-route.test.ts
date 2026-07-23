@@ -1149,6 +1149,60 @@ describe("Todos v2 — sub-task create, tree route, new filters, cascade archive
     });
   });
 
+  it("inherits the parent's department (and prefix) when the request body has no department key", async () => {
+    const root = store.createWorkItem({ title: "inherit root", department: "platform" });
+
+    const inherited = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "inherit child", parentId: root.id }, operatorHeaders),
+      inherited.res,
+      ctx,
+    );
+    expect(inherited.status).toBe(201);
+    expect(inherited.body.workItem.department).toBe("platform");
+    expect(inherited.body.workItem.id.slice(0, 3)).toBe(root.id.slice(0, 3));
+
+    const explicitNull = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "no-dept child", parentId: root.id, department: null }, operatorHeaders),
+      explicitNull.res,
+      ctx,
+    );
+    expect(explicitNull.status).toBe(201);
+    expect(explicitNull.body.workItem.department).toBeNull();
+    expect(explicitNull.body.workItem.id.slice(0, 3)).toBe("JIN"); // company prefix
+
+    const explicitString = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "marketing child", parentId: root.id, department: "marketing" }, operatorHeaders),
+      explicitString.res,
+      ctx,
+    );
+    expect(explicitString.status).toBe(201);
+    expect(explicitString.body.workItem.department).toBe("marketing");
+    expect(explicitString.body.workItem.id.slice(0, 3)).not.toBe(root.id.slice(0, 3));
+  });
+
+  it("normalizes dueAt to a canonical ISO instant", async () => {
+    const dateOnly = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "date-only due", dueAt: "2026-08-01" }, operatorHeaders),
+      dateOnly.res,
+      ctx,
+    );
+    expect(dateOnly.status).toBe(201);
+    expect(dateOnly.body.workItem.dueAt).toBe("2026-08-01T00:00:00.000Z");
+
+    const nonIso = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "sloppy due", dueAt: "Jan 1 2026" }, operatorHeaders),
+      nonIso.res,
+      ctx,
+    );
+    expect(nonIso.status).toBe(400);
+    expect(nonIso.body.error).toMatch(/ISO 8601/);
+  });
+
   it("rejects a malformed dueAt, an out-of-range priority, and an unknown parent", async () => {
     const badDue = makeRes();
     await api.handleApiRequest(
