@@ -347,15 +347,6 @@ export function useDecideApproval() {
   })
 }
 
-export function useEscalateApproval() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (id: string) => api.escalateWorkItemApproval(id),
-    onSettled: () => {
-      void qc.invalidateQueries({ queryKey: ["work-items"] })
-    },
-  })
-}
 
 /** Guarded status transition — the sheet only offers legal edges; the gateway
  *  stays the authority and refuses anything else readably. */

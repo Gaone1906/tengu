@@ -475,3 +475,36 @@ describe("the mobile board (§8 — stage C)", () => {
     expect(screen.getByTestId("board-card-PLA-5")).toBeTruthy()
   })
 })
+
+describe("board states (states mock §6 — stage C)", () => {
+  it("filtered-empty offers the way back: No todos match + Clear filters", async () => {
+    rows = {}
+    renderBoard("/todos/b/platform?assignee=scout&due=week")
+    const empty = await screen.findByTestId("board-filtered-empty")
+    expect(empty.textContent).toContain("No todos match.")
+    expect(empty.textContent).toContain("Two filters are set on this board.")
+    fireEvent.click(screen.getByTestId("board-clear-filters"))
+    await waitFor(() => expect(screen.queryByTestId("board-filtered-empty")).toBeNull())
+    expect(screen.getByTestId("board-column-backlog")).toBeTruthy()
+  })
+
+  it("an unfiltered empty board celebrates quietly — the columns and quick-adds ARE the empty state", async () => {
+    rows = {}
+    renderBoard("/todos/b/platform")
+    await waitFor(() => expect(screen.getByTestId("board-column-backlog")).toBeTruthy())
+    expect(screen.queryByTestId("board-filtered-empty")).toBeNull()
+  })
+
+  it("loading keeps exact card geometry (the skeleton board)", async () => {
+    listWorkItems.mockImplementation(() => new Promise(() => {}))
+    renderBoard("/todos/b/platform")
+    await waitFor(() => expect(screen.getByTestId("board-skeleton")).toBeTruthy())
+  })
+
+  it("a board load failure surfaces the calm error card, not a blank surface", async () => {
+    listWorkItems.mockRejectedValue(Object.assign(new Error("boom"), { status: 500 }))
+    renderBoard("/todos/b/platform")
+    const error = await screen.findByTestId("board-error")
+    expect(error.textContent).toBeTruthy()
+  })
+})

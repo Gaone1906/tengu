@@ -16,7 +16,7 @@ const searchWorkItems = vi.fn()
 const getWorkItem = vi.fn()
 const getOrg = vi.fn()
 const decideWorkItemApproval = vi.fn()
-const escalateWorkItemApproval = vi.fn()
+const getWorkItemTree = vi.fn()
 const updateWorkItem = vi.fn()
 const setWorkItemStatus = vi.fn()
 
@@ -27,7 +27,7 @@ vi.mock("@/lib/api", () => ({
     getWorkItem: (...a: unknown[]) => getWorkItem(...a),
     getOrg: (...a: unknown[]) => getOrg(...a),
     decideWorkItemApproval: (...a: unknown[]) => decideWorkItemApproval(...a),
-    escalateWorkItemApproval: (...a: unknown[]) => escalateWorkItemApproval(...a),
+    getWorkItemTree: (...a: unknown[]) => getWorkItemTree(...a),
     updateWorkItem: (...a: unknown[]) => updateWorkItem(...a),
     setWorkItemStatus: (...a: unknown[]) => setWorkItemStatus(...a),
   },
@@ -76,7 +76,8 @@ describe("TodosPage Needs You inbox", () => {
     getWorkItem.mockReset()
     getOrg.mockReset().mockResolvedValue(org)
     decideWorkItemApproval.mockReset().mockResolvedValue({ workItem: {}, escalated: false })
-    escalateWorkItemApproval.mockReset().mockResolvedValue({ workItem: {} })
+    getWorkItemTree.mockReset().mockRejectedValue(Object.assign(new Error("nf"), { status: 404 }))
+    getWorkItem.mockImplementation(() => Promise.reject(Object.assign(new Error("nf"), { status: 404 })))
     listWorkItems.mockImplementation((params?: { needsAttentionFor?: string }) => {
       if (params?.needsAttentionFor) {
         return Promise.resolve({
@@ -92,7 +93,7 @@ describe("TodosPage Needs You inbox", () => {
     })
   })
 
-  it("loads Needs You from the server-derived attention endpoint without detail fanout", async () => {
+  it("loads Needs You from the server-derived attention endpoint, grouped Approvals-first oldest-first (stage C restyle)", async () => {
     renderPage()
     expect(await screen.findByTestId("needs-preview")).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "View all" }))
@@ -100,16 +101,17 @@ describe("TodosPage Needs You inbox", () => {
     await waitFor(() => expect(screen.getByText("Approve the plan?")).toBeTruthy())
 
     expect(listWorkItems).toHaveBeenCalledWith(expect.objectContaining({ needsAttentionFor: "me", limit: 100 }))
-    expect(getWorkItem).not.toHaveBeenCalled()
+    // The states-mock inbox: Approvals kicker first (oldest ask wins), then
+    // Blocked; the voice needs bounded detail enrichment, no longer fan-out-free.
     expect(screen.getAllByTestId("needs-item").map((el) => el.querySelector("button")?.textContent)).toEqual([
-      expect.stringContaining("Blocked latest"),
-      expect.stringContaining("Approve middle"),
-      expect.stringContaining("Send back older"),
       expect.stringContaining("Escalate oldest"),
+      expect.stringContaining("Send back older"),
+      expect.stringContaining("Approve middle"),
+      expect.stringContaining("Blocked latest"),
     ])
   })
 
-  it("wires approve, send-back, and escalation actions to the approval routes", async () => {
+  it("wires approve, send-back, and reject actions to the approval decision surface", async () => {
     renderPage()
     expect(await screen.findByTestId("needs-preview")).toBeTruthy()
     fireEvent.click(screen.getByRole("button", { name: "View all" }))
@@ -124,9 +126,9 @@ describe("TodosPage Needs You inbox", () => {
     fireEvent.click(within(sendBackCard).getByTestId("needs-sendback-confirm"))
     await waitFor(() => expect(decideWorkItemApproval).toHaveBeenCalledWith("wi_private_sendback", "reject", "needs evidence"))
 
-    const escalateCard = screen.getByText("Escalate oldest").closest<HTMLElement>('[data-testid="needs-item"]')!
-    fireEvent.click(within(escalateCard).getByTestId("needs-escalate"))
-    await waitFor(() => expect(escalateWorkItemApproval).toHaveBeenCalledWith("wi_private_escalate"))
+    const rejectCard = screen.getByText("Escalate oldest").closest<HTMLElement>('[data-testid="needs-item"]')!
+    fireEvent.click(within(rejectCard).getByTestId("needs-reject"))
+    await waitFor(() => expect(decideWorkItemApproval).toHaveBeenCalledWith("wi_private_escalate", "reject", undefined))
   })
 })
 

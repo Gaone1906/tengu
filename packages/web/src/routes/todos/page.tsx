@@ -33,7 +33,6 @@ import {
   useEmployeesByName,
   useDecideApproval,
   useNeedsAttentionItems,
-  useEscalateApproval,
   useTodoById,
   type LedgerPageDepth,
 } from "./use-todos"
@@ -436,7 +435,6 @@ export default function TodosPage() {
   const org = useOrg()
   const byName = useEmployeesByName(org.data?.employees)
   const decide = useDecideApproval()
-  const escalate = useEscalateApproval()
   const quickEdit = useTodoQuickEdit()
 
   // People needs the FULL open set (true per-person counts), not a capped page.
@@ -719,20 +717,7 @@ export default function TodosPage() {
   )
   const onApprove = useCallback((id: string) => runDecision(id, "approve"), [runDecision])
   const onSendBack = useCallback((id: string, note: string) => runDecision(id, "reject", note || undefined), [runDecision])
-  const onEscalate = useCallback(
-    (id: string) => {
-      setResolving((prev) => new Set(prev).add(id))
-      escalate.mutate(id, {
-        onSettled: () =>
-          setResolving((prev) => {
-            const next = new Set(prev)
-            next.delete(id)
-            return next
-          }),
-      })
-    },
-    [escalate],
-  )
+  const onReject = useCallback((id: string) => runDecision(id, "reject"), [runDecision])
 
   const sheetInitial = openId ? detailById.get(openId) : undefined
   // A 404 from the canonical JIN-N endpoint is the only missing signal. Transport
@@ -972,7 +957,7 @@ export default function TodosPage() {
                   {operatorSafeTodoError(needs.error, "Failed to load your inbox")}
                 </div>
               ) : (
-                <NeedsYouView items={needsYou} byName={byName} resolvingIds={resolving} onApprove={onApprove} onSendBack={onSendBack} onEscalate={onEscalate} onOpen={onOpen} />
+                <NeedsYouView items={needsYou} byName={byName} resolvingIds={resolving} onApprove={onApprove} onSendBack={onSendBack} onReject={onReject} onOpen={onOpen} />
               )}
               </>
             )}

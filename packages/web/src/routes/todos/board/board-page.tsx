@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useNavigationType, useParams, useSearchParams } from "react-router-dom"
-import { ListFilter, Plus } from "lucide-react"
+import { ListFilter, Plus, Search } from "lucide-react"
 import { PageLayout } from "@/components/page-layout"
 import { ApiError, type WorkItemCompactWire, type WorkItemStatusWire } from "@/lib/api"
 import {
@@ -19,7 +19,6 @@ import {
 import { todoPath } from "@/lib/todo-id"
 import {
   useDecideApproval,
-  useEscalateApproval,
   useEmployeesByName,
   useNeedsAttentionItems,
   useOpenDetails,
@@ -382,9 +381,10 @@ export default function TodoBoardPage() {
   // its way back (the board name is the back affordance).
   const onOpen = useCallback((id: string) => navigate(todoPath(id), { state: { fromBoard: key } }), [navigate, key])
 
-  // ── Attention board actions (reuses the shipped inbox) ─────────────────────
+  // ── Attention board actions (reuses the shipped decision surface). The
+  // states mock's approval cluster is Approve · Send back · Reject; approval
+  // escalation stays an agent/MCP affordance, not an inbox button. ──────────
   const decide = useDecideApproval()
-  const escalate = useEscalateApproval()
   const [resolving, setResolving] = useState<Set<string>>(new Set())
   const runDecision = useCallback(
     (id: string, decision: "approve" | "reject", note?: string) => {
@@ -402,20 +402,6 @@ export default function TodoBoardPage() {
       )
     },
     [decide],
-  )
-  const onEscalate = useCallback(
-    (id: string) => {
-      setResolving((prev) => new Set(prev).add(id))
-      escalate.mutate(id, {
-        onSettled: () =>
-          setResolving((prev) => {
-            const next = new Set(prev)
-            next.delete(id)
-            return next
-          }),
-      })
-    },
-    [escalate],
   )
 
   // ── Derived chrome ──────────────────────────────────────────────────────────
@@ -443,10 +429,29 @@ export default function TodoBoardPage() {
 
   const visibleStatuses: WorkItemStatusWire[] = useMemo(() => {
     const exceptions = EXCEPTION_STATUSES.filter(
-      (status) => (data.columns[status]?.total ?? 0) > 0 || (itemsByStatus[status]?.length ?? 0) > 0,
+      (status) =>
+        (data.columns[status]?.total ?? 0) > 0
+        || (itemsByStatus[status]?.length ?? 0) > 0
+        // States mock §6: an empty column doesn't render — EXCEPT the column
+        // a drag could legally land in, which materializes for the drop.
+        || (drag !== null && drag.legal.has(status)),
     )
     return [...PIPELINE_STATUSES, ...exceptions]
-  }, [data.columns, itemsByStatus])
+  }, [data.columns, itemsByStatus, drag])
+
+  // Filtered-empty (states mock §6): zero visible items with filters/search
+  // set always offers the way back. An unfiltered empty board celebrates
+  // quietly — the columns and their quick-adds ARE the empty state.
+  const visibleOpenCount = useMemo(
+    () => visibleStatuses.reduce((sum, status) => sum + (itemsByStatus[status]?.length ?? 0), 0),
+    [visibleStatuses, itemsByStatus],
+  )
+  const filterCount = activeFilterCount(filters) + (filters.q ? 1 : 0)
+  const filteredEmpty = !data.isLoading && visibleOpenCount === 0 && filterCount > 0
+  const clearAllFilters = useCallback(() => {
+    const params = new URLSearchParams()
+    setSearchParams(params, { replace: false })
+  }, [setSearchParams])
 
   const renderCards = (status: WorkItemStatusWire) => {
     const items = (itemsByStatus[status] ?? []).filter((item) => item.id !== drag?.id)
@@ -649,7 +654,7 @@ export default function TodoBoardPage() {
                   resolvingIds={resolving}
                   onApprove={(id) => runDecision(id, "approve")}
                   onSendBack={(id, note) => runDecision(id, "reject", note || undefined)}
-                  onEscalate={onEscalate}
+                  onReject={(id) => runDecision(id, "reject")}
                   onOpen={onOpen}
                 />
               )}
@@ -664,6 +669,13 @@ export default function TodoBoardPage() {
             className="min-h-0 flex-1 overflow-auto"
           >
             {!mobile ? (
+            data.isError ? (
+              <BoardErrorCard error={data.error} />
+            ) : data.isLoading ? (
+              <BoardSkeleton />
+            ) : filteredEmpty ? (
+              <FilteredEmptyCard count={filterCount} onClear={clearAllFilters} />
+            ) : (
             <div className="flex min-h-full items-start gap-3 px-10 pb-8 pt-5">
               {visibleStatuses.map((status) => columnFor(status))}
               {closedOpen ? (
@@ -688,9 +700,20 @@ export default function TodoBoardPage() {
                 <ClosedRail count={data.closedTotal} onExpand={() => setClosedOpen(true)} />
               )}
             </div>
+            )
             ) : (
             <div className="flex flex-col gap-[18px] px-4 pb-24 pt-2">
-              {segment === "active" && visibleStatuses.map((status) => columnFor(status))}
+              {segment === "active" && (
+                data.isError ? (
+                  <BoardErrorCard error={data.error} />
+                ) : data.isLoading ? (
+                  <GroupSkeleton />
+                ) : filteredEmpty ? (
+                  <FilteredEmptyCard count={filterCount} onClear={clearAllFilters} />
+                ) : (
+                  visibleStatuses.map((status) => columnFor(status))
+                )
+              )}
               {segment === "attention" && (
                 <div className="flex flex-col">
                   {attentionSegmentItems.length === 0 ? (
@@ -836,4 +859,89 @@ function Dot() {
 
 function EmptyCaption({ text }: { text: string }) {
   return <div className="px-2 py-6 text-[13px] text-[var(--text-tertiary)]">{text}</div>
+}
+
+function BoardErrorCard({ error }: { error: unknown }) {
+  return (
+    <div className="px-10 pt-5 max-[700px]:px-0 max-[700px]:pt-2">
+      <div
+        data-testid="board-error"
+        className="max-w-[560px] rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]"
+      >
+        {operatorSafeTodoError(error, "Couldn't load this board")}
+      </div>
+    </div>
+  )
+}
+
+/** Filtered-empty always offers the way back (states mock §6). */
+function FilteredEmptyCard({ count, onClear }: { count: number; onClear: () => void }) {
+  const caption =
+    count === 1 ? "One filter is set on this board."
+    : count === 2 ? "Two filters are set on this board."
+    : `${count} filters are set on this board.`
+  return (
+    <div className="flex justify-center px-6 pb-10 pt-14" data-testid="board-filtered-empty">
+      <div className="flex w-[330px] flex-col items-center rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-[36px_24px] text-center shadow-[var(--shadow-card)]">
+        <div
+          className="grid size-16 place-items-center rounded-[22px] bg-[var(--fill-tertiary)] text-[var(--text-tertiary)]"
+          style={{ boxShadow: "var(--inset-shine)" }}
+          aria-hidden
+        >
+          <Search size={24} strokeWidth={2} />
+        </div>
+        <div className="mt-4 text-[20px] font-bold tracking-[-0.41px] text-[var(--text-primary)]">No todos match.</div>
+        <p className="mt-1.5 text-[14px] leading-[1.5] text-[var(--text-tertiary)]">{caption}</p>
+        <button
+          type="button"
+          data-testid="board-clear-filters"
+          onClick={onClear}
+          className="focus-ring mt-3 rounded-full px-2.5 py-1 text-[13px] font-semibold text-[var(--accent)] outline-none hover:bg-[var(--accent-fill)]"
+        >
+          Clear filters
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** Loading keeps exact card geometry so nothing shifts when data lands
+ *  (states mock §6 .skel-col: 56px overline bar, 85%/55% title bars). */
+function BoardSkeleton() {
+  const cardsPerColumn = [3, 2, 3, 2]
+  return (
+    <div className="flex min-h-full items-start gap-3 px-10 pb-8 pt-5" data-testid="board-skeleton" aria-hidden>
+      {cardsPerColumn.map((cards, column) => (
+        <div key={column} className="flex min-w-0 flex-1 flex-col">
+          <div className="flex items-center gap-2 px-[13px] pb-2.5 pt-0.5">
+            <span className="size-5 rounded-full bg-[var(--fill-tertiary)] motion-safe:animate-[skeletonPulse_1.6s_var(--ease-smooth)_infinite]" />
+            <span className="h-3 w-[74px] rounded-[6px] bg-[var(--fill-tertiary)] motion-safe:animate-[skeletonPulse_1.6s_var(--ease-smooth)_infinite]" />
+          </div>
+          <div className="flex flex-col gap-2">
+            {Array.from({ length: cards }, (_, i) => (
+              <div
+                key={i}
+                className="rounded-[var(--radius-lg)] bg-[var(--bg-secondary)] px-[13px] py-3 shadow-[var(--shadow-ambient),var(--shadow-subtle)]"
+              >
+                <div
+                  className="h-2.5 w-14 rounded-[5px] bg-[var(--fill-tertiary)] motion-safe:animate-[skeletonPulse_1.6s_var(--ease-smooth)_infinite]"
+                  style={{ animationDelay: `${(column * 2 + i) * 120}ms` }}
+                />
+                <div
+                  className="mt-[9px] h-[13px] w-[85%] rounded-[6px] bg-[var(--fill-tertiary)] motion-safe:animate-[skeletonPulse_1.6s_var(--ease-smooth)_infinite]"
+                  style={{ animationDelay: `${(column * 2 + i) * 120}ms` }}
+                />
+                {i % 3 !== 2 && (
+                  <div
+                    className="mt-[5px] h-[13px] w-[55%] rounded-[6px] bg-[var(--fill-tertiary)] motion-safe:animate-[skeletonPulse_1.6s_var(--ease-smooth)_infinite]"
+                    style={{ animationDelay: `${(column * 2 + i) * 120}ms` }}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
 }

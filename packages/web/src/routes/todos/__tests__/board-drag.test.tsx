@@ -249,6 +249,29 @@ describe("board drag legality", () => {
     expect(updateWorkItem).not.toHaveBeenCalled()
   })
 
+  it("a legal-but-empty exception column materializes on lift (states mock §6) and folds back after", async () => {
+    renderBoard() // no blocked/escalated rows anywhere
+    const card = await screen.findByTestId("board-card-PLA-3") // executing
+    stubColumnGeometry()
+    expect(screen.queryByTestId("board-column-blocked")).toBeNull()
+
+    fireEvent.pointerDown(card, { button: 0, clientX: 210, clientY: 40, pointerType: "mouse" })
+    await act(async () => {
+      window.dispatchEvent(pointer("pointermove", 220, 50)) // lift
+    })
+    // Blocked and Escalated are legal drops from executing — they appear.
+    expect(screen.getByTestId("board-column-blocked")).toBeTruthy()
+    expect(screen.getByTestId("board-column-escalated")).toBeTruthy()
+
+    await act(async () => {
+      window.dispatchEvent(pointer("pointermove", 5000, 50))
+    })
+    await act(async () => {
+      window.dispatchEvent(pointer("pointerup", 5000, 50)) // dropped nowhere
+    })
+    expect(screen.queryByTestId("board-column-blocked")).toBeNull()
+  })
+
   it("a plain click never lifts — it opens the card", async () => {
     renderBoard()
     const card = await screen.findByTestId("board-card-PLA-3")
