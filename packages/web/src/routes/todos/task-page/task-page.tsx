@@ -5,7 +5,6 @@ import { api, ApiError, type WorkItemDetailWire, type WorkItemStatusWire, type W
 import { STATUS_LABEL, operatorSafeTodoError, publicWorkItemReference } from "@/lib/todos"
 import { isTodoId, todoPath } from "@/lib/todo-id"
 import { PageLayout } from "@/components/page-layout"
-import { MarkdownView } from "@/components/markdown-view"
 import { useTheme } from "@/routes/providers"
 import {
   useDecideApproval,
@@ -22,6 +21,8 @@ import { TaskBanner } from "./banner"
 import { PropsRail } from "./props-rail"
 import { ChipCluster } from "./chip-cluster"
 import { useTaskPickers } from "./use-task-pickers"
+import { BodyEditor } from "./body-editor"
+import { AcceptanceChecklist } from "./acceptance"
 import { formatRelativeTime } from "../util"
 
 /* Todos v2 slice 6 stage B — the opened task as a full-page takeover of the
@@ -310,17 +311,13 @@ export default function TaskPage() {
                 </div>
               )}
 
-              {/* Title on the spine (text at 96px; the block bleeds -8px). */}
-              <h1
-                data-testid="task-title"
-                className={
-                  mobile
-                    ? "text-[26px] font-bold leading-[1.2] tracking-[-0.41px] text-[var(--text-primary)]"
-                    : "-mx-2 rounded-[10px] px-2 py-0.5 text-[28px] font-bold leading-[1.2] tracking-[-0.41px] text-[var(--text-primary)]"
-                }
-              >
-                {item?.title ?? "…"}
-              </h1>
+              {/* Title on the spine (text at 96px; the block bleeds -8px) —
+                  inline-edit on tap, borderless (Notes pattern). */}
+              <TaskTitle
+                title={item?.title ?? null}
+                mobile={mobile}
+                onCommit={(title) => pickers.patchField({ title })}
+              />
 
               {!mobile && item && (
                 <div className="ml-px mt-2 flex items-center gap-2 text-[13px] text-[var(--text-tertiary)]" data-testid="task-meta-line">
@@ -349,17 +346,39 @@ export default function TaskPage() {
                 </div>
               )}
 
-              {/* Body — live-markdown editing lands with the body editor task;
-                  reading renders through the shared MarkdownView. */}
-              <div className="-mx-2 mt-6 rounded-[10px] px-2 py-1.5" data-testid="task-body">
-                {item?.body ? (
-                  <MarkdownView content={item.body} isDark={isDark} />
-                ) : (
-                  <p className="text-[16px] leading-[1.6] text-[var(--text-quaternary)]">
-                    Describe the work — type ## for a heading, - for a list
-                  </p>
+              {/* Body — the §7.4 live-markdown editor: rendered in place as you
+                  type, stored body stays plain markdown. Wash on the block
+                  container only (mock .body-text). */}
+              <div
+                className="-mx-2 mt-6 rounded-[10px] px-2 py-1.5 transition-colors hover:bg-[var(--fill-quaternary)] focus-within:bg-[var(--fill-quaternary)]"
+                data-testid="task-body"
+              >
+                {item && (
+                  <BodyEditor
+                    body={item.body}
+                    editable
+                    isDark={isDark}
+                    onCommit={(markdown) => pickers.patchField({ body: markdown })}
+                  />
                 )}
               </div>
+
+              {/* Acceptance — first-class checklist; checks are audited edits. */}
+              {item && (
+                <section className="mt-2">
+                  <div
+                    className="mb-3 mt-8 text-[11px] font-semibold uppercase tracking-[.15em] text-[var(--text-secondary)]"
+                    style={{ fontFamily: "var(--font-code)" }}
+                  >
+                    Acceptance
+                  </div>
+                  <AcceptanceChecklist
+                    acceptance={item.acceptance}
+                    editable
+                    onCommit={(next) => pickers.patchField({ acceptance: next })}
+                  />
+                </section>
+              )}
             </div>
 
             {/* ── Properties rail (desktop) / chip cluster (mobile, §8) ── */}
@@ -400,6 +419,68 @@ export default function TaskPage() {
 
 function MetaDot() {
   return <span aria-hidden className="size-[2.5px] rounded-full bg-[var(--text-quaternary)]" />
+}
+
+/** Inline title edit — borderless, Notes pattern: tap to edit, Enter commits,
+ *  Esc reverts. An emptied title reverts rather than committing. */
+function TaskTitle({
+  title,
+  mobile,
+  onCommit,
+}: {
+  title: string | null
+  mobile: boolean
+  onCommit: (title: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState("")
+  const sizing = mobile
+    ? "text-[26px] font-bold leading-[1.2] tracking-[-0.41px]"
+    : "text-[28px] font-bold leading-[1.2] tracking-[-0.41px]"
+  const bleed = mobile ? "" : "-mx-2 rounded-[10px] px-2 py-0.5"
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        data-testid="task-title-edit"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => {
+          setEditing(false)
+          const next = draft.trim()
+          if (next && next !== title) onCommit(next)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur()
+          if (e.key === "Escape") {
+            e.preventDefault()
+            setDraft(title ?? "")
+            setEditing(false)
+          }
+        }}
+        aria-label="Todo title"
+        className={`${sizing} ${bleed} w-full border-0 bg-[var(--fill-quaternary)] text-[var(--text-primary)] outline-none`}
+      />
+    )
+  }
+  return (
+    <h1 className={mobile ? "" : "min-w-0"}>
+      <button
+        type="button"
+        data-testid="task-title"
+        aria-label="Edit title"
+        onClick={() => {
+          if (title === null) return
+          setDraft(title)
+          setEditing(true)
+        }}
+        className={`${sizing} ${bleed} w-full cursor-text text-left text-[var(--text-primary)] outline-none transition-colors hover:bg-[var(--fill-quaternary)]`}
+      >
+        {title ?? "…"}
+      </button>
+    </h1>
+  )
 }
 
 function TaskEmpty({ message, onBack }: { message: string; onBack: () => void }) {
