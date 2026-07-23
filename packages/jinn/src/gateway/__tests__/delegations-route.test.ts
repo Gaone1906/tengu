@@ -284,6 +284,9 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
         employee: "qa-emp",
         parentSessionId: rootSessionId,
       });
+      // Todos v2 slice 5 (decision 7): a session delegator stamps its RESOLVED
+      // employee slug, not session:<uuid>.
+      expect(store.getWorkItem(first.body.workItemId)!.createdBy).toBe("org-root");
       expect(engineRuns.slice(beforeRuns)).toContainEqual(expect.objectContaining({
         sessionId: first.body.sessionId,
       }));
@@ -385,6 +388,8 @@ describe("POST /api/delegations — the transaction (happy paths)", () => {
     expect(item.sourceRef).toMatch(/^delegate:operator:/);
     expect(item.assignee).toBe("qa-emp");
     expect(item.department).toBe("qa");
+    // Todos v2 slice 5 (decision 7): the DELEGATING caller is the creator.
+    expect(item.createdBy).toBe("operator");
     // Reconciled AFTER the link: the running linked session derives `active`.
     expect(item.status).toBe("executing");
 

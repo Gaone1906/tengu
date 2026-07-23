@@ -31,6 +31,7 @@ function repairCronWorkItemBridge(job: CronJob, sessionKey: string): void {
       status: "backlog",
       source: "cron",
       sourceRef: sessionKey,
+      createdBy: `cron:${job.id}`,
     });
     linkSession(workItem.id, session.id);
     reconcileWorkItem(workItem.id);
@@ -151,6 +152,8 @@ export async function runCronJob(
       status: "backlog",
       source: "cron",
       sourceRef: sessionKey,
+      // Slice-5 decision 7: cron-created items stamp the creating job.
+      createdBy: `cron:${job.id}`,
     });
   } catch (wiErr) {
     logger.warn(

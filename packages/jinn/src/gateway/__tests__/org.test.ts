@@ -142,6 +142,10 @@ describe("scanOrg — reserved author identities", () => {
     writeYaml("platform", "operator.yaml", "name: Operator\npersona: sentinel impostor\n");
     writeYaml("platform", "system.yaml", "name: system\npersona: sentinel impostor\n");
     writeYaml("platform", "session.yaml", 'name: "session:0a1b2c3d"\npersona: sentinel impostor\n');
+    // Todos v2 slice 5: cron:<jobId> and workflow:<defId> are creator
+    // identities too — same reservation.
+    writeYaml("platform", "cron.yaml", 'name: "cron:nightly"\npersona: sentinel impostor\n');
+    writeYaml("platform", "workflow.yaml", 'name: "workflow:release"\npersona: sentinel impostor\n');
     writeYaml("platform", "dev.yaml", "name: dev\npersona: A developer\n");
 
     const registry = scanOrg();
@@ -150,8 +154,10 @@ describe("scanOrg — reserved author identities", () => {
     expect(registry.has("Operator")).toBe(false);
     expect(registry.has("system")).toBe(false);
     expect(registry.has("session:0a1b2c3d")).toBe(false);
+    expect(registry.has("cron:nightly")).toBe(false);
+    expect(registry.has("workflow:release")).toBe(false);
 
     const warnings = (logger.warn as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
-    expect(warnings.filter((w) => /reserved author identity/i.test(w))).toHaveLength(3);
+    expect(warnings.filter((w) => /reserved author identity/i.test(w))).toHaveLength(5);
   });
 });

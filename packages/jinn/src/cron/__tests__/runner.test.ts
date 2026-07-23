@@ -188,7 +188,8 @@ describe("runCronJob — work-item dogfood (GRS-002)", () => {
     const arg = (createWorkItem as any).mock.calls[0][0];
     // GRS-003b-2b: minted `open` (durable intent, zero sessions yet) — NOT hardcoded
     // `active`. The live status is derived by the reconciler after link.
-    expect(arg).toMatchObject({ title: "WI Job", source: "cron", status: "backlog", body: "do work" });
+    // Todos v2 slice 5 (decision 7): cron-created items stamp `cron:<jobId>`.
+    expect(arg).toMatchObject({ title: "WI Job", source: "cron", status: "backlog", body: "do work", createdBy: "cron:wi-job" });
     // GRS-003b-1: the source_ref is a deterministic per-fire id (ISO), not Date.now().
     expect(arg.sourceRef).toMatch(/^cron:wi-job:\d{4}-\d{2}-\d{2}T[0-9:.]+Z$/);
     expect(linkSession).toHaveBeenCalledWith("wi_test", "sess-123");

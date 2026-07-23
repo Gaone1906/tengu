@@ -1153,6 +1153,34 @@ describe("Todos v2 — sub-task create, tree route, new filters, cascade archive
     });
   });
 
+  it("stamps the resolved employee SLUG as createdBy; session:<uuid> only for employee-less sessions (slice-5 decision 7)", async () => {
+    const employeeSession = reg.createSession({ engine: "codex", source: "web", sourceRef: "createdby-emp", employee: "platform-worker" });
+    const bareSession = reg.createSession({ engine: "codex", source: "web", sourceRef: "createdby-bare" });
+    const headersFor = (sessionId: string): Record<string, string> => ({
+      [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+      [CALLER_SESSION_HEADER]: sessionId,
+      [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(sessionId),
+    });
+
+    const bySlug = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "slug-created" }, headersFor(employeeSession.id)),
+      bySlug.res,
+      ctx,
+    );
+    expect(bySlug.status).toBe(201);
+    expect(bySlug.body.workItem.createdBy).toBe("platform-worker");
+
+    const bySession = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", "/api/work-items", { title: "bare-created" }, headersFor(bareSession.id)),
+      bySession.res,
+      ctx,
+    );
+    expect(bySession.status).toBe(201);
+    expect(bySession.body.workItem.createdBy).toBe(`session:${bareSession.id}`);
+  });
+
   it("inherits the parent's department (and prefix) when the request body has no department key", async () => {
     const root = store.createWorkItem({ title: "inherit root", department: "platform" });
 

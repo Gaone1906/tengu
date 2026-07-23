@@ -3372,7 +3372,10 @@ export async function handleApiRequest(
         parentId,
         dueAt,
         ...(priority !== undefined ? { priority } : {}),
-        createdBy: workItemActor(caller),
+        // Slice-5 decision 7: a session with a resolved employee creates AS
+        // that employee (the comments identity model); `session:<uuid>` remains
+        // only for employee-less raw sessions.
+        createdBy: workItemCommentAuthor(caller).author,
       };
       try {
         const item = createWorkItem(input);
@@ -4526,6 +4529,12 @@ export async function handleApiRequest(
               : `delegate:${callerRef}:${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
             assignee: employeeName ?? null,
             department: delegateEmployee?.department ?? null,
+            // Slice-5 decision 7: the DELEGATING caller is the creator — the
+            // operator, or the delegating session's resolved employee slug
+            // (`session:<uuid>` only when that session carries no employee).
+            createdBy: delegationCaller.kind === "session"
+              ? getSession(delegationCaller.callerId)?.employee ?? `session:${delegationCaller.callerId}`
+              : "operator",
           });
         } catch (mintErr) {
           logger.warn(`Delegation work-item mint failed: ${mintErr instanceof Error ? mintErr.message : mintErr}`);
