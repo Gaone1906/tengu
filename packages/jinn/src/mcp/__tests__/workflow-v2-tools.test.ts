@@ -2,17 +2,24 @@ import { describe, expect, it, vi } from "vitest";
 import { buildWorkflowTools } from "../workflow-tools.js";
 import type { JinnMcpContext } from "../toolkit.js";
 
+const attemptTools = () => buildWorkflowTools({ attemptCompletion: true });
+
 const NAMES = [
   "list_workflows", "get_workflow", "create_workflow", "update_workflow", "duplicate_workflow",
   "retire_workflow", "enable_workflow", "disable_workflow", "start_workflow_run",
   "list_workflow_runs", "get_workflow_run", "cancel_workflow_run", "rerun_workflow_run",
   "decide_workflow_approval", "retry_workflow_node",
   "fire_workflow_event",
+  "workflow_submit_output", "workflow_extend_deadline",
 ];
 
 describe("Workflow v2 MCP tools", () => {
   it("exposes the Task13 operations plus Task14 durable control flow", () => {
-    expect(buildWorkflowTools().map((tool) => tool.name)).toEqual(NAMES);
+    expect(attemptTools().map((tool) => tool.name)).toEqual(NAMES);
+  });
+
+  it("advertises completion controls only inside workflow attempt sessions", () => {
+    expect(buildWorkflowTools().map((tool) => tool.name)).toEqual(NAMES.slice(0, -2));
   });
 
   it("keeps duplicate identity explicit", () => {
@@ -49,11 +56,29 @@ describe("Workflow v2 MCP tools", () => {
       ["retry_workflow_node", { workflowId: "release-flow", runId: "run-1", nodeId: "write", idempotencyKey: "retry-1" },
         "POST", "/api/workflows/release-flow/runs/run-1/nodes/write/retry", { idempotencyKey: "retry-1" }],
       ["fire_workflow_event", { eventName: "build.finished", fireId: "build-1", payload: { ok: true } }, "POST", "/api/workflows/events/build.finished", { fireId: "build-1", payload: { ok: true } }],
+      ["workflow_submit_output", { outcome: "success", fields: { result: "done" }, summary: "Finished" },
+        "POST", "/api/workflows/attempts/submit", { outcome: "success", fields: { result: "done" }, summary: "Finished" }],
+      ["workflow_extend_deadline", { reason: "Waiting on review" },
+        "POST", "/api/workflows/attempts/extend", { reason: "Waiting on review" }],
     ];
     for (const [name, args, method, route, payload] of cases) {
-      const candidate = buildWorkflowTools().find((tool) => tool.name === name)!; await candidate.handler(args, context);
+      const candidate = attemptTools().find((tool) => tool.name === name)!; await candidate.handler(args, context);
       expect(calls.at(-1)).toEqual({ url: `http://127.0.0.1:7811${route}`, method, ...(payload === undefined ? {} : { body: payload }) });
     }
+  });
+
+  it("keeps both attempt-session tools optional and schema constrained", () => {
+    const submit = attemptTools().find((tool) => tool.name === "workflow_submit_output")!;
+    const extend = attemptTools().find((tool) => tool.name === "workflow_extend_deadline")!;
+
+    expect(submit.inputSchema.required).toBeUndefined();
+    expect(submit.inputSchema.properties).toEqual({
+      outcome: { type: "string", enum: ["success", "failure"] },
+      fields: { type: "object" },
+      summary: { type: "string" },
+    });
+    expect(extend.inputSchema.required).toBeUndefined();
+    expect(extend.inputSchema.properties).toEqual({ reason: { type: "string" } });
   });
 
   it("preserves REST code and message in MCP errors", async () => {

@@ -24,7 +24,12 @@ import os from "node:os";
 import path from "node:path";
 import { resolveMcpServers, writeMcpConfigFile, cleanupMcpConfigFile, MCP_CAPABLE_ENGINES } from "../resolver.js";
 import { setJinnAttachGate } from "../attachment.js";
-import { JINN_SESSION_CAPABILITY_ENV, JINN_SESSION_ID_ENV, attachSessionIdentity } from "../identity.js";
+import {
+  JINN_SESSION_CAPABILITY_ENV,
+  JINN_SESSION_ID_ENV,
+  JINN_WORKFLOW_ATTEMPT_ENV,
+  attachSessionIdentity,
+} from "../identity.js";
 import { codexMcpConfigArgs, prepareCodexSessionHome } from "../../engines/codex.js";
 import { InteractiveClaudeEngine } from "../../engines/claude-interactive.js";
 import { PtyLifecycleManager } from "../../engines/pty-lifecycle.js";
@@ -180,6 +185,17 @@ describe("per-engine jinn-server wiring (GRS-018 seam for GRS-017 default-on)", 
         expect(source).toMatch(/sessionId:\s*(?:session|currentSession)\.id/);
         expect(source).toMatch(/engine\.run\(\{[\s\S]*?resolvedMcp,/);
       }
+    });
+
+    it("carries the workflow-attempt tool hint through per-session engine channels", () => {
+      const resolved = attachSessionIdentity(resolveMcpServers(ON, undefined), SID, { workflowAttempt: true });
+      const spec = resolved.mcpServers.jinn as { env?: Record<string, string> };
+      expect(spec.env?.[JINN_WORKFLOW_ATTEMPT_ENV]).toBe("1");
+      expect(grokJinnSessionEnv(resolved)[JINN_WORKFLOW_ATTEMPT_ENV]).toBe("1");
+      expect(piJinnSessionEnv(resolved)[JINN_WORKFLOW_ATTEMPT_ENV]).toBe("1");
+      expect(antigravityJinnSessionEnv(resolved)[JINN_WORKFLOW_ATTEMPT_ENV]).toBe("1");
+      expect(buildAcpMcpServers(resolved).find((server) => server.name === "jinn")?.env)
+        .toContainEqual({ name: JINN_WORKFLOW_ATTEMPT_ENV, value: "1" });
     });
 
     it("codex: argv never carries the capability; the per-session CODEX_HOME config.toml (0600) carries the bound jinn env", () => {

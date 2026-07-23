@@ -145,7 +145,36 @@ const specs: ToolSpec[] = [
     properties: { eventName: string, fireId: string, payload: object }, required: ["eventName", "fireId", "payload"],
     path: (args) => `/api/workflows/events/${path(value(args, "eventName"))}`, body: ({ fireId, payload }) => ({ fireId, payload }),
   },
+  {
+    name: "workflow_submit_output",
+    description: "Complete the current Workflow step with your result. Only valid inside a workflow attempt session; fields are validated against the step's output schema.",
+    method: "POST",
+    properties: {
+      outcome: { type: "string", enum: ["success", "failure"] },
+      fields: object,
+      summary: string,
+    },
+    path: () => "/api/workflows/attempts/submit",
+    body: ({ outcome, fields, summary }) => ({
+      ...(outcome === undefined ? {} : { outcome }),
+      ...(fields === undefined ? {} : { fields }),
+      ...(summary === undefined ? {} : { summary }),
+    }),
+  },
+  {
+    name: "workflow_extend_deadline",
+    description: "Request more time for the current Workflow step (resets the reminder ladder). Only valid inside a workflow attempt session.",
+    method: "POST",
+    properties: { reason: string },
+    path: () => "/api/workflows/attempts/extend",
+    body: ({ reason }) => ({ ...(reason === undefined ? {} : { reason }) }),
+  },
 ];
 
 export const workflowAdvertisedComponentSchemas: Record<string, Record<string, unknown>> = {};
-export function buildWorkflowTools(): JinnMcpTool[] { return specs.map(tool); }
+export function buildWorkflowTools(options?: { attemptCompletion?: boolean }): JinnMcpTool[] {
+  const visible = options?.attemptCompletion
+    ? specs
+    : specs.filter((spec) => spec.name !== "workflow_submit_output" && spec.name !== "workflow_extend_deadline");
+  return visible.map(tool);
+}

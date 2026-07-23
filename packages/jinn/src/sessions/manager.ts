@@ -387,6 +387,7 @@ export class SessionManager {
         employee,
         engine: session.engine,
         sessionId: session.id,
+        workflowAttempt: session.workflowProvenance?.kind === "phase",
       }));
 
       // Per-engine config keyed by engine name; unconfigured optional engines
