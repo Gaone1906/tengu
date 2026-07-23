@@ -23,15 +23,6 @@ const READ_TOOL_CASES: Array<{ name: string; args: Record<string, unknown> }> = 
   { name: "get_workflow", args: { workflowId: "wf_test" } },
   { name: "list_workflow_runs", args: { workflowId: "wf_test" } },
   { name: "get_workflow_run", args: { workflowId: "wf_test", runId: "run_test" } },
-  {
-    name: "plan_workflow",
-    args: { sop: { id: "wf_test", title: "Test", wakeUp: { kind: "manual" }, steps: [{ engine: "codex", instruction: "Do it." }] } },
-  },
-  {
-    name: "validate_workflow",
-    args: { sop: { id: "wf_test", title: "Test", wakeUp: { kind: "manual" }, steps: [{ engine: "codex", instruction: "Do it." }] } },
-  },
-  { name: "list_triggers", args: {} },
   { name: "list_files", args: {} },
   { name: "read_file", args: { path: "files/demo.txt" } },
 ];

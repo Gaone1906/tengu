@@ -1,4 +1,4 @@
-import { isLegacyWorkflowRunSession, searchSessionsFiltered } from "../sessions/registry.js";
+import { searchSessionsFiltered } from "../sessions/registry.js";
 import {
   notifyManagerVisibility,
   type ManagerVisibilityDetails,
@@ -36,8 +36,7 @@ export interface ManagerVisibilityDeps {
 /** Passive visibility may join a conversation already in flight, but must not
  * start a new turn on a completed, stopped, or otherwise idle manager thread. */
 export function isEligibleManagerVisibilitySession(session: Session): boolean {
-  return !isLegacyWorkflowRunSession(session)
-    && (session.status === "running" || session.status === "waiting");
+  return session.status === "running" || session.status === "waiting";
 }
 
 const defaultDeps: ManagerVisibilityDeps = {

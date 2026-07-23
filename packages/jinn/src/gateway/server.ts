@@ -9,6 +9,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { JinnConfig, Connector, Employee, Engine, JsonObject, Session } from "../shared/types.js";
 import { loadConfig, normalizeClaudeEngineConfig } from "../shared/config.js";
 import {
+  getModelRegistry,
   invalidateModelRegistry,
   refreshAntigravityModels,
   refreshClaudeModels,
@@ -18,10 +19,9 @@ import {
   refreshPiModels,
 } from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
-import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, isLegacyWorkflowRunSession, listSessions, updateSession, getSession, RESTART_ACK_META_KEY } from "../sessions/registry.js";
+import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, getMessages, RESTART_ACK_META_KEY } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
 import { recoverSessionDeliveryStateOnStartup } from "../sessions/callbacks.js";
-import { recoverWorkflowRunReporting } from "../workflows/reporting.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
 import { enforcePtyIdleCap, PtyLifecycleManager, type PtyLifecycleOpts } from "../engines/pty-lifecycle.js";
 import { CodexEngine, sweepOrphanCodexSessionHomes } from "../engines/codex.js";
@@ -40,34 +40,28 @@ import { reconcileWorkItemsOnStartup, startWorkItemReconciler } from "../work-it
 import { setTodoStatusChangeListener } from "../work-items/transitions.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
-import { handleApiRequest, isSameOriginBrowserRequest, resumePendingWebQueueItems, workflowRunDriverDeps, workflowCronFireHandler, type ApiContext } from "./api.js";
+import { handleApiRequest, isSameOriginBrowserRequest, resumePendingWebQueueItems, type ApiContext } from "./api.js";
 import { resolveCallerIdentity, sessionCommGuards, LATERAL_MAX_HOPS, type CallerIdentityOptions } from "./session-comm-guards.js";
 import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
-import {
-  applyWorkflowCronSync,
-  fireTodoStatusChangeWorkflows,
-  migrateWorkflowTriggerStore,
-  replayMissedTodoStatusChangeWorkflowFires,
-  resolveWorkflowEvidence,
-  startPollTriggerRunner,
-  startWorkflowRunReconciler,
-} from "../workflows/index.js";
 import { startStatusReconciler } from "./status-reconciler.js";
 import { armJinnAttachGate } from "../mcp/attachment.js";
 import { syncExternalTurn } from "./external-turns.js";
 import { pickEncoding, isCompressibleExt, compressStream } from "./compress.js";
 import { attachPtyWebSocket } from "./pty-ws.js";
+import { openWorkflowDatabase } from "../workflows/repository-migrations.js";
+import { importLegacyWorkflowDefinitions } from "../workflows/import-v1.js";
+import { WorkflowRepository } from "../workflows/repository.js";
+import { WorkflowSessionExecutor } from "../workflows/session-executor.js";
+import { WorkflowService } from "../workflows/service.js";
 
 function hasRestartAcknowledgement(session: Session): boolean {
   const meta = session.transportMeta;
   return Boolean(meta && typeof meta === "object" && !Array.isArray(meta) && typeof meta[RESTART_ACK_META_KEY] === "string");
 }
 
-/** Preserve running conversational Sessions for resume while leaving historical
- * Workflow run projections byte-identical. Exported as a shutdown test seam. */
+/** Preserve running conversational Sessions for resume. Exported as a shutdown test seam. */
 export function interruptRunningSessionsForShutdown(): void {
   for (const session of listSessions({ status: "running" })) {
-    if (isLegacyWorkflowRunSession(session)) continue;
     if (hasRestartAcknowledgement(session)) {
       updateSession(session.id, {
         status: "idle",
@@ -97,7 +91,7 @@ import { RemoteDiscordConnector } from "../connectors/discord/remote.js";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
 import { TelegramConnector } from "../connectors/telegram/index.js";
 import { loadJobs } from "../cron/jobs.js";
-import { startScheduler, reloadScheduler, stopScheduler, setWorkflowCronFire } from "../cron/scheduler.js";
+import { startScheduler, reloadScheduler, stopScheduler } from "../cron/scheduler.js";
 import { scanOrg } from "./org.js";
 
 
@@ -200,7 +194,7 @@ function setCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): bo
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Credentials", "true");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Jinn-Bootstrap-Grant, X-Jinn-Workflow-Event-Token");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Jinn-Bootstrap-Grant");
   }
   return allowed;
 }
@@ -533,12 +527,10 @@ export async function startGateway(
     connectorNames.push("whatsapp");
   }
 
-  // Session manager
-  const sessionManager = new SessionManager(config, engines, connectorNames, bootId);
-
   // Build employee registry
   let employeeRegistry = scanOrg();
   logger.info(`Loaded ${employeeRegistry.size} employee(s) from org directory`);
+  const sessionManager = new SessionManager(config, engines, connectorNames, bootId, (id) => employeeRegistry.get(id));
 
   // Start connectors
   const connectors: Connector[] = [];
@@ -879,25 +871,6 @@ export async function startGateway(
     return { started, stopped, errors };
   }
 
-  // NOTE: the cron scheduler is started LATER in boot (after the ApiContext exists),
-  // so the managed-workflow fire handler and the jobs.json drift heal are both in
-  // place before the first possible tick (GRS-014d-fix, Codex finding 3). Nothing in
-  // between serves cron: the HTTP server, watchers, and connector routes all come up
-  // after that point.
-  // Workflows are on by default now: the evidence root defaults to
-  // <JINN_HOME>/workflow-evidence (created here at boot) unless an explicit
-  // JINN_WORKFLOW_EVIDENCE_ROOT override is set. A config error (bad override,
-  // or an uncreatable default on a read-only JINN_HOME) fails LOUD and leaves
-  // every workflow route/tool reporting evidenceConfigured:false with a reason —
-  // it never silently falls back to a second root.
-  const workflowEvidence = resolveWorkflowEvidence();
-  const workflowEvidenceRoot = workflowEvidence.root;
-  if (!workflowEvidence.configured) {
-    logger.error(`Workflow evidence root is misconfigured — workflows are DISABLED: ${workflowEvidence.reason}`);
-  } else {
-    logger.info(`Workflow evidence root: ${workflowEvidenceRoot}`);
-  }
-
   // Mutable config reference for hot-reload
   let currentConfig = config;
 
@@ -918,6 +891,17 @@ export async function startGateway(
       }
     }
   };
+  const workflowDatabase = openWorkflowDatabase();
+  importLegacyWorkflowDefinitions(workflowDatabase);
+  const workflowRepository = new WorkflowRepository(workflowDatabase);
+  const workflowService = new WorkflowService({ repository: workflowRepository,
+    executor: new WorkflowSessionExecutor(sessionManager, (id) => { const session = getSession(id); if (!session) return null;
+      const finalText = [...getMessages(id)].reverse().find((message) => message.role === "assistant")?.content; return { session, ...(finalText ? { finalText } : {}) }; }),
+    employees: () => employeeRegistry, models: () => getModelRegistry(currentConfig),
+    readTranscript: (id) => getMessages(id).map(({ id: messageId, role, content, timestamp }) => ({ id: messageId, role, content, timestamp })),
+    onChange: ({ workflowId, runId }) => emit("company:changed", { entity: "workflow", workflowId, runId }),
+    onDefinitionChange: ({ workflowId, revision }) => emit("company:changed", { entity: "workflow", workflowId, revision }) });
+  await workflowService.recover(new Date().toISOString());
 
   // Discover dynamic engine models in the background. Fire-and-forget: the
   // registry serves known/synthesized fallbacks until the snapshots land, then
@@ -1009,6 +993,7 @@ export async function startGateway(
     reloadOrg,
     backgroundActivity,
     gatewayAuthToken,
+    workflowService,
   };
 
   // Re-read config.yaml into memory. Used by both the file-watcher (debounced)
@@ -1059,68 +1044,15 @@ export async function startGateway(
   // its item to in_review/done (trust) without waiting for the next boot.
   const stopWorkItemReconciler = startWorkItemReconciler();
 
-  // ── Cron boot (GRS-014d-fix ordering, Codex finding 3) ────────────────────
-  // Strictly BEFORE startScheduler: (1) heal the managed workflow cron jobs from the
-  // definition store (drift heal — a hand-deleted/edited managed `workflow:<id>` job
-  // is re-derived, the reconcile-at-boot pattern), and (2) wire the managed-fire
-  // handler (it closes over the ApiContext, which now exists). This closes the boot
-  // window where a managed job due exactly at startup would fire with no handler,
-  // append a terminal error row, and permanently miss that scheduled run. No
-  // evidence root → neither runs; managed residue stays untouched and fires no-op
-  // honestly in the runner (inert, same guard as the workflow routes).
-  const workflowRunDeps = workflowEvidenceRoot ? workflowRunDriverDeps(workflowEvidenceRoot, apiContext) : undefined;
-  if (workflowEvidenceRoot && workflowRunDeps) {
-    try {
-      await migrateWorkflowTriggerStore(workflowEvidenceRoot);
-    } catch (err) {
-      logger.warn(`Workflow trigger store migration failed at boot: ${err instanceof Error ? err.message : err}`);
-    }
-    try {
-      applyWorkflowCronSync(workflowEvidenceRoot, {
-        log: (level, message) => logger[level](message),
-      });
-    } catch (err) {
-      logger.warn(`Workflow cron sync failed at boot: ${err instanceof Error ? err.message : err}`);
-    }
-    setWorkflowCronFire(workflowCronFireHandler(apiContext));
-    setTodoStatusChangeListener((event) => {
-      void fireTodoStatusChangeWorkflows(workflowRunDeps, {
-        id: event.id,
-        workItemId: event.workItemId,
-        fromStatus: event.fromStatus,
-        toStatus: event.toStatus,
-        item: {
-          source: event.item.source,
-          department: event.item.department,
-          assignee: event.item.assignee,
-        },
-      }).catch((err) => {
-        logger.warn(`Todo status workflow trigger failed for event ${event.id}: ${err instanceof Error ? err.message : err}`);
-      });
+  setTodoStatusChangeListener(() => {
+    void workflowService.recover(new Date().toISOString()).catch((error) => {
+      logger.warn(`Workflow Todo trigger recovery failed: ${error instanceof Error ? error.message : String(error)}`);
     });
-    void replayMissedTodoStatusChangeWorkflowFires(workflowRunDeps, { limit: 500 }).catch((err) => {
-      logger.warn(`Todo status workflow trigger replay failed at boot: ${err instanceof Error ? err.message : err}`);
-    });
-  }
+  });
 
-  // Start cron scheduler — jobs.json is already healed and the workflow fire handler
-  // is already wired, so the first tick can never land in a half-wired gateway.
   const cronJobs = loadJobs();
   startScheduler(cronJobs, sessionManager, config, connectorMap);
   logger.info(`Loaded ${cronJobs.length} cron job(s)`);
-
-  // Workflow RUN reconciler (GRS-014b): advances sequential workflow runs as their
-  // step sessions settle — 15s sweep + one immediate startup sweep. Boot ordering:
-  // recoverStaleSessions() already stamped dead sessions `interrupted` earlier in this
-  // boot, so the startup sweep re-derives every running run from truthful session
-  // evidence (the respawn-once recovery path). Inert when no evidence root is
-  // configured — the same guard the workflow routes use.
-  const stopWorkflowRunReconciler = workflowRunDeps ? startWorkflowRunReconciler(workflowRunDeps) : undefined;
-  const stopPollTriggerRunner = workflowRunDeps ? startPollTriggerRunner(workflowRunDeps) : undefined;
-  if (workflowEvidenceRoot) {
-    logger.info(`Workflow run reconciler started (evidence root: ${workflowEvidenceRoot})`);
-    logger.info(`Workflow poll trigger runner started (evidence root: ${workflowEvidenceRoot})`);
-  }
 
   // Resolve web UI directory — bundled into dist/web/ by postbuild script
   // At runtime __dirname is dist/src/gateway/, so ../../web resolves to dist/web/
@@ -1364,8 +1296,6 @@ export async function startGateway(
   //   • recoverStaleSessions / getInterruptedSessions — must stamp dead sessions
   //     `interrupted` BEFORE we serve /api/status|/api/sessions, or we'd report
   //     previous-process sessions as still "running".
-  //   • applyWorkflowCronSync + fire-handler wiring — must precede startScheduler
-  //     (GRS-014d boot-ordering invariant), which itself is pre-listen.
   setImmediate(() => {
     // Drop any mid-turn streaming blocks stranded by a restart — their turn's final
     // message was never written, so the partials have nothing to consolidate into.
@@ -1404,15 +1334,6 @@ export async function startGateway(
   // resolved builtin-jinn server as normal web/connector turns so their rollout
   // is written under the per-session CODEX_HOME that later resumes will use.
   resumePendingWebQueueItems(apiContext);
-
-  if (workflowEvidenceRoot && workflowRunDeps?.reporting) {
-    const workflowReportingRecovery = recoverWorkflowRunReporting(workflowEvidenceRoot, workflowRunDeps.reporting);
-    if (workflowReportingRecovery.runs > 0) {
-      logger.info(
-        `Reconstructed ${workflowReportingRecovery.runs} Workflow run report block(s) and ${workflowReportingRecovery.claims} missing delivery claim(s)`,
-      );
-    }
-  }
 
   // Pending callback receipts must recover before orphan completion guards are
   // inspected. Otherwise a durable-but-unaccepted child nudge can race a
@@ -1466,10 +1387,7 @@ export async function startGateway(
     // interrupted below — a mid-shutdown sweep must not race the teardown.
     stopStatusReconciler();
     stopWorkItemReconciler();
-    // Same for the workflow run reconciler — a mid-shutdown sweep must not spawn
-    // a step session into a dying gateway.
-    stopWorkflowRunReconciler?.();
-    await stopPollTriggerRunner?.();
+    workflowService.dispose(); workflowDatabase.close();
 
     // Stop caffeinate
     if (caffeinate && caffeinate.exitCode === null) {
@@ -1517,9 +1435,6 @@ export async function startGateway(
 
     // Stop cron scheduler
     stopScheduler();
-    // Clear the managed-workflow fire handler so nothing fires into a torn-down
-    // ApiContext (GRS-014d-fix; module-level state must not outlive the gateway).
-    setWorkflowCronFire(undefined);
     setTodoStatusChangeListener(null);
 
     // Stop connectors

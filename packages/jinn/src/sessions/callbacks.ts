@@ -1,6 +1,5 @@
 import {
   getSession,
-  isLegacyWorkflowRunSession,
   getSessionDelivery,
   claimSessionDelivery,
   claimSessionDeliveryAttempt,
@@ -135,7 +134,7 @@ export async function recoverOrphanedDelegationCompletionClaims(): Promise<numbe
   for (const child of listDelegationCompletionNudgedSessions()) {
     if (!child.parentSessionId || !child.workItemId) continue;
     const parent = getSession(child.parentSessionId);
-    if (!parent || parent.status === "error" || isLegacyWorkflowRunSession(parent)) continue;
+    if (!parent || parent.status === "error") continue;
     try {
       await _sendNotification(child, {
         error:
@@ -163,9 +162,8 @@ export async function recoverPendingSessionDeliveries(): Promise<number> {
   if (callbackRetrySweepRunning) return callbackRetrySweepRunning;
   callbackRetrySweepRunning = (async () => {
     const now = Date.now();
-    const due = listPendingSessionDeliveries().filter((delivery) =>
-      !isHistoricalWorkflowDelivery(delivery)
-      && (delivery.nextAttemptAt === null || delivery.nextAttemptAt <= now),
+    const due = listPendingSessionDeliveries().filter(
+      (delivery) => delivery.nextAttemptAt === null || delivery.nextAttemptAt <= now,
     );
     const results = await Promise.allSettled(due.map((delivery) => deliverClaimedSessionDelivery(delivery.id)));
     armCallbackRetrySweep();
@@ -320,7 +318,6 @@ export function notifyRateLimitResumed(
   if (!childSession.parentSessionId) return;
 
   const parent = getSession(childSession.parentSessionId);
-  if (parent && isLegacyWorkflowRunSession(parent)) return;
   const isTalkParent = parent?.source === "talk";
 
   let message: string;
@@ -370,10 +367,6 @@ async function _sendNotification(
   const parent = getSession(childSession.parentSessionId!);
   if (!parent) return; // Parent gone or expired
   if (parent.status === "error") return; // Parent already in error — skip
-  // Historical Workflow run projections are never callback destinations. Phase
-  // completion is consumed by the Workflow reconciler instead.
-  if (isLegacyWorkflowRunSession(parent)) return;
-
   const isTerminal = options?.semantics !== "nonterminal-lifecycle";
 
   // Delegation completion contract: a narrowly-qualified progress-only idle
@@ -603,14 +596,9 @@ async function _sendRaw(
 
 type SessionDeliveryAttemptResult = "accepted" | "scheduled" | "deferred";
 
-function isHistoricalWorkflowDelivery(delivery: SessionDelivery): boolean {
-  const target = getSession(delivery.targetSessionId);
-  return Boolean(target && isLegacyWorkflowRunSession(target));
-}
-
 export async function deliverClaimedSessionDelivery(deliveryId: string): Promise<SessionDeliveryAttemptResult> {
   const delivery = getSessionDelivery(deliveryId);
-  if (!delivery || isHistoricalWorkflowDelivery(delivery)) return "deferred";
+  if (!delivery) return "deferred";
   const attempt = claimSessionDeliveryAttempt(deliveryId, Date.now(), CALLBACK_DELIVERY_ATTEMPT_LEASE_MS);
   if (!attempt) {
     armCallbackRetrySweep();
@@ -644,7 +632,7 @@ export async function deliverClaimedSessionDelivery(deliveryId: string): Promise
 }
 
 function armCallbackRetrySweep(): void {
-  const pending = listPendingSessionDeliveries().filter((delivery) => !isHistoricalWorkflowDelivery(delivery));
+  const pending = listPendingSessionDeliveries();
   if (callbackRetryTimer) {
     clearTimeout(callbackRetryTimer);
     callbackRetryTimer = undefined;

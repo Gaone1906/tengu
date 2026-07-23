@@ -3,6 +3,14 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const WORKFLOWS_DIR = path.resolve(import.meta.dirname, '..');
+const SQLITE_OWNERS = new Set([
+  'import-v1.ts',
+  'repository-migrations.ts',
+  'repository-run-transaction.ts',
+  'repository-runs.ts',
+  'repository-support.ts',
+  'repository.ts',
+]);
 
 function productionWorkflowSources(): Array<{ file: string; source: string }> {
   return fs.readdirSync(WORKFLOWS_DIR, { withFileTypes: true })
@@ -25,7 +33,9 @@ describe('Workflow/Todo capability boundary', () => {
     ];
     const violations = productionWorkflowSources().flatMap(({ file, source }) =>
       forbidden
-        .filter(({ pattern }) => pattern.test(source))
+        .filter(({ label, pattern }) =>
+          pattern.test(source) && (label !== 'raw database type' || !SQLITE_OWNERS.has(file)),
+        )
         .map(({ label }) => `${file}: ${label}`),
     );
 

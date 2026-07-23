@@ -20,9 +20,9 @@ const SkillDetailPage = lazyRoute(() => import('./routes/skills/detail'), 'skill
 const FilePage = lazyRoute(() => import('./routes/file/page'), 'file')
 const MorePage = lazyRoute(() => import('./routes/more/page'), 'more')
 const RedesignPage = lazyRoute(() => import('./routes/redesign/page'), 'redesign')
-const WorkflowPreviewPage = lazyRoute(() => import('./routes/workflow/preview'), 'workflow-preview')
 const WorkflowListPage = lazyRoute(() => import('./routes/workflow/list'), 'workflow-list')
 const WorkflowPage = lazyRoute(() => import('./routes/workflow/page'), 'workflow')
+const WorkflowRunPage = lazyRoute(() => import('./routes/workflow/run'), 'workflow-run')
 
 function RouteLoading() {
   return (
@@ -100,10 +100,10 @@ const router = createBrowserRouter([
       { path: '/more', element: <MorePage /> },
       { path: '/workflow', element: <WorkflowListPage /> },
       { path: '/workflow/:id', element: <WorkflowPage /> },
+      { path: '/workflow/:id/runs/:runId', element: <WorkflowRunPage /> },
       ...(import.meta.env.DEV
         ? [
             { path: '/redesign', element: <RedesignPage /> },
-            { path: '/workflow-preview', element: <WorkflowPreviewPage /> },
           ]
         : []),
     ],

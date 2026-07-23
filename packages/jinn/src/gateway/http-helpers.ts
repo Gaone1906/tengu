@@ -24,6 +24,7 @@ export interface ReadJsonBodyOpts extends ReadBodyOpts {
   allowEmpty?: boolean;
   /** Route-specific fixed body for JSON syntax/duplicate-key rejection. */
   invalidJsonResponse?: unknown;
+  invalidJsonStatus?: number;
   /** Reject ambiguous duplicate top-level object members. */
   rejectDuplicateTopLevelKeys?: boolean;
   /** Route-specific fixed body for an exceeded maxBytes limit. */
@@ -137,12 +138,12 @@ export async function readJsonBody(
   try {
     const body: unknown = JSON.parse(raw);
     if (opts.rejectDuplicateTopLevelKeys && hasDuplicateTopLevelObjectKeys(raw)) {
-      errorJson(res, opts.invalidJsonResponse ?? { error: "Invalid JSON in request body" }, 400);
+      errorJson(res, opts.invalidJsonResponse ?? { error: "Invalid JSON in request body" }, opts.invalidJsonStatus ?? 400);
       return { ok: false };
     }
     return { ok: true, body };
   } catch {
-    errorJson(res, opts.invalidJsonResponse ?? { error: "Invalid JSON in request body" }, 400);
+    errorJson(res, opts.invalidJsonResponse ?? { error: "Invalid JSON in request body" }, opts.invalidJsonStatus ?? 400);
     return { ok: false };
   }
 }
