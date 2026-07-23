@@ -15,7 +15,7 @@ export function ClosedRail({ count, onExpand }: { count: number; onExpand: () =>
       data-testid="board-closed-rail"
       aria-label={`Closed, ${count} items — expand`}
       onClick={onExpand}
-      className="flex min-h-[220px] w-11 flex-none cursor-pointer flex-col items-center gap-2.5 rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] px-0 pb-3.5 pt-2 transition-colors hover:bg-[var(--fill-tertiary)] max-[700px]:hidden"
+      className="focus-ring flex min-h-[220px] w-11 flex-none cursor-pointer flex-col items-center gap-2.5 rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] px-0 pb-3.5 pt-2 transition-colors hover:bg-[var(--fill-tertiary)] max-[700px]:hidden"
     >
       <Check size={13} strokeWidth={2.4} aria-hidden className="text-[var(--system-green)]" />
       <span className="text-[12px] font-semibold tracking-[.02em] text-[var(--text-tertiary)]" style={{ writingMode: "vertical-rl" }}>
@@ -69,7 +69,7 @@ export function ClosedColumnHeader({ count, onCollapse }: { count: number; onCol
       data-testid="board-closed-collapse"
       aria-label="Collapse the closed column"
       onClick={onCollapse}
-      className="sticky top-0 z-[2] flex items-center gap-2 bg-[var(--bg)] px-[13px] pb-2.5 pt-0.5 text-left"
+      className="focus-ring sticky top-0 z-[2] flex items-center gap-2 bg-[var(--bg)] px-[13px] pb-2.5 pt-0.5 text-left"
     >
       <Check size={13} strokeWidth={2.4} aria-hidden className="text-[var(--system-green)]" />
       <span className="text-[13px] font-semibold text-[var(--text-secondary)]">Closed</span>

@@ -58,9 +58,12 @@ export function reasonOf(item: WorkItemCompactWire, detail: WorkItemDetailWire |
   return null
 }
 
-/** Elapsed label for the executing StateLine ("Working · 21m"). */
+/** Elapsed label for the executing StateLine ("Working · 21m"). Only cards
+ *  with a live session ref carry the line (the mock: PLA-18/ACM-41, not
+ *  PLA-12) — the StateLine is delegation grammar about a session, not a
+ *  generic "this column is executing" repeat. */
 export function workingSince(item: WorkItemCompactWire, detail: WorkItemDetailWire | undefined): string | null {
-  if (item.status !== "executing") return null
+  if (item.status !== "executing" || !item.sessionRef) return null
   const events = detail?.events ?? []
   let startedAt: string | undefined
   for (let i = events.length - 1; i >= 0; i--) {
@@ -165,14 +168,15 @@ export function BoardCard({
       }}
       onPointerDown={(e) => onLiftPointerDown?.(e, item.id)}
       className={[
-        "group cursor-pointer rounded-[var(--radius-lg)] px-[13px] py-3 outline-none transition-colors duration-150",
-        ghost ? "bg-[var(--bg-tertiary)]" : "bg-[var(--bg-secondary)] hover:bg-[var(--bg-tertiary)]",
+        "group focus-ring cursor-pointer select-none rounded-[var(--radius-lg)] px-[13px] py-3 outline-none transition-colors duration-150",
+        ghost
+          ? "bg-[var(--bg-tertiary)] shadow-[var(--shadow-overlay)]"
+          : "bg-[var(--bg-secondary)] shadow-[var(--shadow-ambient),var(--shadow-subtle),var(--inset-shine)] hover:bg-[var(--bg-tertiary)]",
         ghost
           ? ""
           : "max-[700px]:flex max-[700px]:flex-wrap max-[700px]:items-center max-[700px]:gap-2.5 max-[700px]:rounded-xl max-[700px]:bg-transparent max-[700px]:px-1.5 max-[700px]:py-3 max-[700px]:shadow-none max-[700px]:hover:bg-[var(--fill-quaternary)]",
         dragging ? "opacity-0" : "",
       ].join(" ")}
-      style={{ boxShadow: ghost ? "var(--shadow-overlay)" : "var(--shadow-ambient), var(--shadow-subtle), var(--inset-shine)" }}
     >
       {/* Mobile lead: priority bars (always, muted at Medium) + status disc. */}
       <span className="hidden max-[700px]:flex max-[700px]:items-center max-[700px]:gap-2.5">
@@ -233,8 +237,8 @@ export function BoardCard({
       {/* Executing StateLine — delegation grammar verbatim. */}
       {working && (
         <div className="mt-2 flex items-center gap-1.5 text-[12px] font-medium text-[var(--system-blue)] max-[700px]:hidden">
-          <span className="size-1.5 rounded-full bg-[var(--system-blue)] motion-safe:animate-[jinn-pulse_1.4s_ease-in-out_infinite]" aria-hidden />
-          Working · {working}
+          <span className="size-1.5 flex-none rounded-full bg-[var(--system-blue)] motion-safe:animate-[jinn-pulse_1.4s_ease-in-out_infinite]" aria-hidden />
+          <span className="whitespace-nowrap">Working · {working}</span>
           {sessionRefLabel && (
             <span className="truncate text-[11px] font-normal text-[var(--text-tertiary)]" style={{ fontFamily: "var(--font-code)" }}>
               {sessionRefLabel}
@@ -274,7 +278,7 @@ export function BoardCard({
                 onToggleTree(item.id)
               }}
               onPointerDown={(e) => e.stopPropagation()}
-              className="flex h-5 items-center gap-1 rounded-[10px] bg-[var(--fill-tertiary)] py-0 pl-[5px] pr-2 text-[11px] font-medium tabular-nums text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)]"
+              className="focus-ring flex h-5 items-center gap-1 rounded-[10px] bg-[var(--fill-tertiary)] py-0 pl-[5px] pr-2 text-[11px] font-medium tabular-nums text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)]"
             >
               <ChevronRight
                 size={10}

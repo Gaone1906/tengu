@@ -73,7 +73,7 @@ export function CardTree({
             onKeyDown={(e) => {
               if (e.key === "Enter") onOpenChild(node.id)
             }}
-            className="flex min-h-[34px] cursor-pointer items-center gap-2 rounded-lg px-2 py-1 outline-none hover:bg-[var(--fill-tertiary)]"
+            className="focus-ring flex min-h-[34px] cursor-pointer items-center gap-2 rounded-lg px-2 py-1 outline-none hover:bg-[var(--fill-tertiary)]"
             style={level > 0 ? { marginLeft: level * 22 } : undefined}
           >
             <StateCircle keyOf={stateKeyOf(node.status)} size={16} />
@@ -124,7 +124,7 @@ export function CardTree({
             type="button"
             data-testid="tree-add-subtask"
             onClick={() => setAdding(true)}
-            className="flex min-h-8 items-center gap-[7px] rounded-lg px-2 py-1 text-left text-[12px] font-medium text-[var(--text-quaternary)] transition-colors hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)]"
+            className="focus-ring flex min-h-8 items-center gap-[7px] rounded-lg px-2 py-1 text-left text-[12px] font-medium text-[var(--text-quaternary)] transition-colors hover:bg-[var(--fill-tertiary)] hover:text-[var(--text-secondary)]"
           >
             <Plus size={12} aria-hidden />
             Add sub-task

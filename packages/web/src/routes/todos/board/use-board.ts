@@ -102,7 +102,8 @@ export interface BoardData {
   isLoading: boolean
   isError: boolean
   error: unknown
-  /** Sum of the six open-status totals (the header's "N open"). */
+  /** Sum of the four PIPELINE totals — the header's "N open". Blocked and
+   *  escalated read out separately (the mock's "11 open · 1 blocked"). */
   openTotal: number
   closedTotal: number
 }
@@ -135,7 +136,7 @@ export function useBoardData(board: BoardId, filters: TodoFilters, now: number, 
         loadingMore: q.isFetchingNextPage,
       }
     })
-    const openTotal = OPEN_STATUSES.reduce((sum, s) => sum + columns[s].total, 0)
+    const openTotal = PIPELINE_STATUSES.reduce((sum, s) => sum + columns[s].total, 0)
     const closedTotal = CLOSED_STATUSES.reduce((sum, s) => sum + columns[s].total, 0)
     const firstError = queries.find((q) => q.isError)
     return {

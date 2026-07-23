@@ -49,7 +49,7 @@ export function BoardSwitcher({ board, title, departments, attentionCount }: Boa
           type="button"
           data-testid="board-switcher"
           aria-label={`Board: ${title} — switch board`}
-          className="-ml-0.5 flex items-center gap-2 rounded-xl py-0.5 pl-0.5 pr-2.5 transition-colors duration-150 hover:bg-[var(--fill-quaternary)]"
+          className="focus-ring -ml-0.5 flex items-center gap-2 rounded-xl py-0.5 pl-0.5 pr-2.5 transition-colors duration-150 hover:bg-[var(--fill-quaternary)]"
         >
           <h1 className="font-[var(--font-display)] text-[length:var(--text-title1)] font-bold leading-[1.15] tracking-[var(--tracking-tight)] text-[var(--text-primary)] md:text-[length:var(--text-large-title)]">
             {title}
