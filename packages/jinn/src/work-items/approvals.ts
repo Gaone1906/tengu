@@ -112,6 +112,9 @@ export interface ArchiveWorkItemOptions {
   human?: boolean;
   callerSessionId?: string;
   note?: string;
+  /** Cancel every open descendant first (depth-first), each with its own audited
+   *  transition. Honored only together with `human: true` (operator authority). */
+  cascade?: boolean;
 }
 
 /**
@@ -148,10 +151,24 @@ function decideApproval(id: string, decision: ApprovalDecision, decidedBy: strin
   return txn();
 }
 
+/** True when candidate sits under ancestorId following parent links. */
+function isDescendantOf(candidateId: string, ancestorId: string): boolean {
+  const db = initDb();
+  let cursor: string | null = candidateId;
+  for (let hops = 0; cursor && hops <= 3; hops++) {
+    const row = db.prepare('SELECT parent_id FROM work_items WHERE id = ?').get(cursor) as { parent_id: string | null } | undefined;
+    if (!row) return false;
+    if (row.parent_id === ancestorId) return true;
+    cursor = row.parent_id;
+  }
+  return false;
+}
+
 /**
  * Cancel a Todo while closing any outstanding approval record in the same SQLite
  * transaction. Callers are authority-checked by the gateway before reaching this
- * persistence primitive.
+ * persistence primitive. With `cascade` (human authority only), open descendants
+ * are cancelled first, deepest first, so the roll-up gate stays satisfied.
  */
 export function archiveWorkItem(id: string, actor: string, opts: ArchiveWorkItemOptions = {}): WorkItem {
   const db = initDb();
@@ -162,6 +179,19 @@ export function archiveWorkItem(id: string, actor: string, opts: ArchiveWorkItem
       item = decideApproval(id, 'reject', actor, opts.note ?? 'Todo archived');
     }
     if (item.status === 'cancelled') return item;
+    if (opts.cascade && opts.human) {
+      const descendants = (db
+        .prepare("SELECT id, depth FROM work_items WHERE root_id = ? AND id != ? AND status NOT IN ('done', 'cancelled')")
+        .all(item.rootId, item.id) as Array<{ id: string; depth: number }>)
+        .filter((row) => isDescendantOf(row.id, item.id))
+        .sort((a, b) => b.depth - a.depth);
+      for (const descendant of descendants) {
+        transition(descendant.id, 'cancelled', actor, {
+          human: true,
+          detail: { ...(opts.note ? { note: opts.note } : {}), cascadeFrom: item.id },
+        });
+      }
+    }
     return transition(id, 'cancelled', actor, {
       ...(opts.human ? { human: true } : {}),
       ...(opts.callerSessionId ? { callerSessionId: opts.callerSessionId } : {}),
