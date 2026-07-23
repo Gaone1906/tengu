@@ -297,6 +297,8 @@ export type WorkItemEventKind =
   | 'relation_added'
   | 'relation_removed'
   | 'label_changed'
+  | 'attachment_added'
+  | 'attachment_removed'
   | 'metadata_edited'
   | 'status_change'
   | 'note'

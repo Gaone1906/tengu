@@ -238,6 +238,33 @@ CREATE TABLE IF NOT EXISTS work_item_labels (
 
 export const WORK_ITEM_LABELS_DDL = `${WORK_ITEM_LABELS_TABLE_DDL};`;
 
+/** Todos v2 slice 5: content-addressed file attachments on Todos and comments.
+ *  Bytes live at `<instance>/attachments/<sha256[0:2]>/<sha256>` (dedup by
+ *  content); `storage_path` stores the RELATIVE form. `comment_id` NULL =
+ *  attached to the Todo itself; set = attached to that comment (which must
+ *  belong to the same item — enforced in the store write and re-proven by the
+ *  verifier). The sha256 hex shape is a verifier concern (the DDL pins only the
+ *  length, matching spec §3.2). */
+export const WORK_ITEM_ATTACHMENTS_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_attachments (
+  id           TEXT PRIMARY KEY CHECK (id GLOB 'wia_[0-9a-f]*' AND length(id) = 16),
+  work_item_id TEXT NOT NULL REFERENCES work_items(id),
+  comment_id   TEXT REFERENCES work_item_comments(id),
+  filename     TEXT NOT NULL,
+  mime         TEXT NOT NULL,
+  bytes        INTEGER NOT NULL CHECK (bytes > 0),
+  sha256       TEXT NOT NULL CHECK (length(sha256) = 64),
+  storage_path TEXT NOT NULL,
+  uploaded_by  TEXT NOT NULL,
+  created_at   TEXT NOT NULL
+)`;
+
+export const WORK_ITEM_ATTACHMENTS_DDL = `
+${WORK_ITEM_ATTACHMENTS_TABLE_DDL};
+CREATE INDEX IF NOT EXISTS idx_wia_item ON work_item_attachments(work_item_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_wia_comment ON work_item_attachments(comment_id) WHERE comment_id IS NOT NULL;
+`;
+
 /** Todos v2 slice 4: approvals leave the fat work_items row. Full history —
  *  one row per requested gate; the partial unique index makes "at most one
  *  PENDING approval per item" a DB guarantee. The legacy `approval_*` columns
@@ -602,6 +629,7 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
   ["labels", LABELS_TABLE_DDL],
   ["work_item_labels", WORK_ITEM_LABELS_TABLE_DDL],
   ["work_item_approvals", WORK_ITEM_APPROVALS_TABLE_DDL],
+  ["work_item_attachments", WORK_ITEM_ATTACHMENTS_TABLE_DDL],
   ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
   ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
   ["work_item_id_burns", WORK_ITEM_ID_BURNS_TABLE_DDL],
@@ -610,7 +638,8 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
 ]);
 
 /** Tables added additively AFTER the v2 rebuild first shipped, in ship order
- *  (comments = slice 2; relations/labels = slice 3; slice 5 appends here). A v2
+ *  (comments = slice 2; relations/labels = slice 3; approvals = slice 4;
+ *  attachments = slice 5). A v2
  *  database whose only defect is that some of these are absent is "current":
  *  `migrateWorkItemsSchema` creates whatever is missing under the write lock and
  *  the FULL exact-shape verify still gates the boot. A present-but-wrong-shape
@@ -621,6 +650,7 @@ const V2_ADDITIVE_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: "labels", ddl: LABELS_DDL },
   { name: "work_item_labels", ddl: WORK_ITEM_LABELS_DDL },
   { name: "work_item_approvals", ddl: WORK_ITEM_APPROVALS_DDL },
+  { name: "work_item_attachments", ddl: WORK_ITEM_ATTACHMENTS_DDL },
 ];
 
 /**
@@ -853,6 +883,25 @@ export function verifyCurrentWorkItemSchema(db: DatabaseType): void {
     if (row.state === "pending") {
       if (pendingSeen.has(row.work_item_id)) refusal();
       pendingSeen.add(row.work_item_id);
+    }
+  }
+  // Attachments: every row references a live item; a comment-scoped row's
+  // comment must belong to the SAME item; bytes and the sha256 hex shape are
+  // re-proven data-level. Deliberately NO file-existence check at boot — files
+  // can be large/many, and content integrity is verified on every download.
+  const attachmentRows = db.prepare("SELECT work_item_id, comment_id, bytes, sha256 FROM work_item_attachments").all() as Array<{
+    work_item_id: string;
+    comment_id: string | null;
+    bytes: number;
+    sha256: string;
+  }>;
+  for (const row of attachmentRows) {
+    if (!byId.has(row.work_item_id)) refusal();
+    if (!Number.isSafeInteger(row.bytes) || row.bytes <= 0) refusal();
+    if (!/^[0-9a-f]{64}$/.test(row.sha256)) refusal();
+    if (row.comment_id !== null) {
+      const comment = commentById.get(row.comment_id);
+      if (!comment || comment.work_item_id !== row.work_item_id) refusal();
     }
   }
 }
