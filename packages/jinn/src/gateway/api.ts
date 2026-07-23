@@ -64,9 +64,6 @@ import {
   duplicateSession,
   insertMessage,
   insertMessageAfter,
-  insertPartialMessage,
-  updatePartialMessage,
-  settlePartialToolMessage,
   applyBlockEnvelope,
   deletePartialMessages,
   settlePartialMessages,
@@ -92,7 +89,18 @@ import {
   RESTART_ACK_META_KEY,
 } from "../sessions/registry.js";
 import { blockFallbackText, validateBlockEnvelope } from "../shared/blocks.js";
-import { extractActivityReceiptId } from "../shared/activity-receipts.js";
+import {
+  createPartialStreamWriter,
+  normalizeBlockDeltaForTurn,
+} from "../sessions/partial-stream.js";
+import {
+  isDurableWorkflowUserMessageInterruption,
+  USER_MESSAGE_INTERRUPTION_REASON,
+} from "../sessions/workflow-interruptions.js";
+export {
+  foldPartialText,
+  normalizeBlockDeltaForTurn,
+} from "../sessions/partial-stream.js";
 import { forkEngineSession } from "../sessions/fork.js";
 import { removeCodexSessionHome } from "../engines/codex.js";
 import { ptySnapshotStore } from "../engines/pty-snapshot.js";
@@ -316,55 +324,6 @@ function parseMessageLimit(value: string | null, fallback: number): number {
   const parsed = Number.parseInt(value || "", 10);
   if (!Number.isFinite(parsed) || parsed < 1) return fallback;
   return Math.min(500, parsed);
-}
-
-function scopeBlockEnvelopeForTurn(envelope: ChatBlockEnvelope, turnStartedAt: number): ChatBlockEnvelope {
-  const suffix = `t${turnStartedAt.toString(36)}`;
-  if (envelope.block.id.endsWith(`:${suffix}`)) return envelope;
-  const maxBaseLength = Math.max(1, 96 - suffix.length - 1);
-  const baseId = envelope.block.id.slice(0, maxBaseLength);
-  return {
-    ...envelope,
-    block: {
-      ...envelope.block,
-      id: `${baseId}:${suffix}`,
-    },
-  };
-}
-
-export function normalizeBlockDeltaForTurn(delta: StreamDelta, turnStartedAt: number): { ok: true; delta: StreamDelta } | { ok: false; error: string } {
-  if (delta.type !== "block") return { ok: true, delta };
-  const initial = validateBlockEnvelope(delta.block);
-  if (!initial.ok) return initial;
-  const scoped = scopeBlockEnvelopeForTurn(initial.envelope, turnStartedAt);
-  const validated = validateBlockEnvelope(scoped);
-  if (!validated.ok) return validated;
-  return {
-    ok: true,
-    delta: {
-      ...delta,
-      content: delta.content || blockFallbackText(validated.envelope.block),
-      block: validated.envelope,
-    },
-  };
-}
-
-/**
- * Fold a streamed text/text_snapshot delta into the accumulated partial text.
- *
- * `text` appends the incremental chunk. `text_snapshot` REPLACES the whole
- * accumulation UNCONDITIONALLY — a snapshot is the authoritative current text,
- * so a shorter/rewritten one (e.g. a hermes redaction transform whose final
- * frame is shorter than the streamed increments) must win, not just a longer
- * one. The old length gate here leaked the pre-replace text via a mid-turn
- * GET/refresh until the turn completed. Monotonic snapshot emitters (grok /
- * antigravity, which only ever grow) are unaffected — replace equals their old
- * "if longer" for a non-shrinking sequence.
- */
-export function foldPartialText(curText: string, delta: StreamDelta): string {
-  if (delta.type === "text_snapshot") return typeof delta.content === "string" ? delta.content : curText;
-  if (delta.type === "text") return curText + (typeof delta.content === "string" ? delta.content : "");
-  return curText;
 }
 
 export function shouldPersistFinalAssistantMessage(options: {
@@ -699,6 +658,9 @@ function dispatchWebSessionRun(
         // Item moved pending → running: refresh the queue panel.
         if (opts?.queueItemId) context.emit("queue:updated", { sessionId: session.id, sessionKey });
         await runWebSession(startedAttempt, prompt, engine, config, context, startedAttempt.attemptToken, opts?.attachments);
+        if (startedAttempt.workflowProvenance?.kind === "phase") {
+          context.sessionManager.emitWorkflowAttemptTurnCompletion(session.id);
+        }
       }, opts?.queueItemId);
     } finally {
       // Item settled (completed/cancelled/errored): refresh so the "N queued"
@@ -720,6 +682,9 @@ function dispatchWebSessionRun(
           })
         : undefined;
       if (erroredOnDispatch) {
+        if (erroredOnDispatch.workflowProvenance?.kind === "phase") {
+          context.sessionManager.emitWorkflowAttemptTurnCompletion(session.id);
+        }
         context.emit("session:completed", {
           sessionId: session.id,
           result: null,
@@ -2027,6 +1992,10 @@ function supersedeRunningTurn(session: Session): void {
     transportMeta: withTransportMeta(session, {
       [SUPERSEDED_TURN_META_KEY]: new Date().toISOString(),
     }),
+    ...(session.workflowProvenance?.kind === "phase" ? {
+      attemptInterruptionCause: "user-message",
+      attemptInterruptionTurn: (session.attemptTurn ?? 0) + 1,
+    } : {}),
   });
 }
 
@@ -5241,7 +5210,7 @@ export async function handleApiRequest(
       if (session.status === "running") {
         if (shouldInterruptRunningTurn) {
           logger.info(`Interrupting running session ${session.id} for new message`);
-          engine.kill(session.id, "Interrupted: new message received");
+          engine.kill(session.id, USER_MESSAGE_INTERRUPTION_REASON);
           // SessionQueue serializes per-session; the new turn enqueued below will
           // wait for the killed run()'s promise to settle before starting.
           context.emit("session:interrupted", { sessionId: session.id, reason: "new message" });
@@ -6571,6 +6540,7 @@ async function runWebSession(
       employee,
       engine: currentSession.engine,
       sessionId: currentSession.id,
+      workflowAttempt: currentSession.workflowProvenance?.kind === "phase",
     }));
 
     // Per-engine config is keyed by engine name; unconfigured optional engines
@@ -6652,70 +6622,7 @@ async function runWebSession(
     // its own row. All wiped + replaced by the single final message at turn end
     // (deletePartialMessages below). Only the primary engine stream is mirrored;
     // the rate-limit fallback stream stays WS-only (rare path).
-    let partialSeq = 0;
-    let curTextId: string | null = null; // the growing text-block row, null between blocks
-    let curText = "";
-    const openPartialTools: Array<{ messageId: string; toolName: string; toolId?: string }> = [];
-    let partialFlushTimer: ReturnType<typeof setTimeout> | null = null;
-    const flushPartialText = () => {
-      partialFlushTimer = null;
-      if (!curText.trim()) return;
-      if (curTextId) updatePartialMessage(curTextId, curText);
-      else curTextId = insertPartialMessage(currentSession.id, "assistant", curText, partialSeq++);
-    };
-    const persistPartialDelta = (delta: StreamDelta) => {
-      if (delta.type === "text" || delta.type === "text_snapshot") {
-        if (typeof delta.content !== "string") return;
-        curText = foldPartialText(curText, delta);
-        if (delta.type === "text_snapshot") {
-          // A snapshot is authoritative and typically terminal (e.g. a hermes
-          // final/redaction frame). Flush the replacement to the partial row NOW
-          // — don't leave the pre-replace text readable via a mid-turn GET while
-          // the debounce is pending.
-          if (partialFlushTimer) { clearTimeout(partialFlushTimer); partialFlushTimer = null; }
-          flushPartialText();
-        } else if (!partialFlushTimer) {
-          partialFlushTimer = setTimeout(flushPartialText, 600);
-        }
-      } else if (delta.type === "tool_use") {
-        flushPartialText(); // finalize the text block before the tool
-        if (partialFlushTimer) { clearTimeout(partialFlushTimer); partialFlushTimer = null; }
-        const tool = delta.toolName || String(delta.content ?? "");
-        const messageId = insertPartialMessage(
-          currentSession.id,
-          "assistant",
-          `Using ${tool}`,
-          partialSeq++,
-          tool,
-          delta.toolId,
-        );
-        openPartialTools.push({ messageId, toolName: tool, ...(delta.toolId ? { toolId: delta.toolId } : {}) });
-        curTextId = null; curText = ""; // a fresh text block begins after the tool
-      } else if (delta.type === "tool_result") {
-        const matchIndex = delta.toolId
-          ? openPartialTools.findIndex((entry) => entry.toolId === delta.toolId)
-          : (() => {
-              if (!delta.toolName) return -1;
-              for (let index = openPartialTools.length - 1; index >= 0; index--) {
-                if (openPartialTools[index].toolName === delta.toolName) return index;
-              }
-              return -1;
-            })();
-        if (matchIndex >= 0) {
-          const [match] = openPartialTools.splice(matchIndex, 1);
-          const activityReceiptId = extractActivityReceiptId({ activityReceiptId: delta.activityReceiptId });
-          settlePartialToolMessage(match.messageId, `Used ${match.toolName}`, activityReceiptId);
-        }
-      } else if (delta.type === "block" && delta.block) {
-        flushPartialText();
-        if (partialFlushTimer) { clearTimeout(partialFlushTimer); partialFlushTimer = null; }
-        applyBlockEnvelope(currentSession.id, delta.block, delta.content, {
-          partial: true,
-          seq: partialSeq++,
-        });
-        curTextId = null; curText = "";
-      }
-    };
+    const partialStream = createPartialStreamWriter(currentSession.id);
 
     const syncMeta = (currentSession.transportMeta || {}) as Record<string, unknown>;
     const switchSyncTarget = typeof syncMeta.engineSyncTarget === "string" ? syncMeta.engineSyncTarget : null;
@@ -6823,7 +6730,7 @@ async function runWebSession(
         // Mirror the block into a persisted partial row (refresh survival). Guarded
         // so a DB hiccup never breaks the live stream above.
         try {
-          persistPartialDelta(outgoingDelta);
+          partialStream.persist(outgoingDelta);
         } catch (err) {
           logger.warn(`Failed to persist partial block for session ${currentSession.id}: ${err instanceof Error ? err.message : err}`);
         }
@@ -6880,8 +6787,7 @@ async function runWebSession(
       }).finally(() => {
       // Stop any pending debounced text flush so it can't re-insert a partial row
       // after the turn-end cleanup below deletes them.
-      if (partialFlushTimer) { clearTimeout(partialFlushTimer); partialFlushTimer = null; }
-      flushPartialText();
+      partialStream.finish();
       });
     };
     let result = await runAttempt(modelForTurn);
@@ -6932,7 +6838,11 @@ async function runWebSession(
       return;
     }
 
-    const wasInterrupted = result.error?.startsWith("Interrupted");
+    const completionTurn = (liveAfterRun?.attemptTurn ?? currentSession.attemptTurn ?? 0) + 1;
+    const wasInterrupted = Boolean(
+      liveAfterRun
+      && isDurableWorkflowUserMessageInterruption(liveAfterRun, completionTurn),
+    ) || result.error?.startsWith("Interrupted");
     const wasSuperseded = !wasInterrupted && isTurnSuperseded(currentSession.id, turnStartedAt);
     const attemptStillRunning = liveAfterRun?.attemptToken === attemptToken && liveAfterRun.status === "running";
     const quietPreempted = wasInterrupted || wasSuperseded || !attemptStillRunning;

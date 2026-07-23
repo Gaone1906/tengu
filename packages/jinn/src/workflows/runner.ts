@@ -603,6 +603,10 @@ export class WorkflowRunner {
       ? { code: "workflow-cancelled", message: event.error ?? "Workflow run cancelled.", retryable: false,
           nodeId: attempt.nodeId, attempt: attempt.attempt } satisfies WorkflowError
       : undefined;
+    const userMessageTurnEnd = event.outcome === "interrupted"
+      && event.interruptionCause === "user-message"
+      && !run.cancelRequestedAt;
+    const cleanTurnEnd = event.outcome === "succeeded" || userMessageTurnEnd;
     let output: WorkflowNodeOutput | undefined;
     let failure: WorkflowError | undefined;
     let pendingOutputError: string | undefined;
@@ -617,9 +621,11 @@ export class WorkflowRunner {
           else failure = workflowError(error, attempt.nodeId, attempt.attempt);
         }
       }
-    } else failure = workflowError(event.error ?? `Workflow attempt was ${event.outcome}.`, attempt.nodeId, attempt.attempt);
+    } else if (!userMessageTurnEnd) {
+      failure = workflowError(event.error ?? `Workflow attempt was ${event.outcome}.`, attempt.nodeId, attempt.attempt);
+    }
     const endedAt = event.completedAt;
-    if (event.outcome === "succeeded" && !output && !failure) {
+    if (cleanTurnEnd && !output && !failure) {
       if (attempt.remindersSent < REMINDER_RUNGS_MINUTES.length) {
         this.options.repository.mutateRun(run.id, run.revision, (tx) => {
           tx.setAttemptReminder(attempt.nodeId, attempt.attempt, {
