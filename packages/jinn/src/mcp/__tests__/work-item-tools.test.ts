@@ -68,6 +68,10 @@ describe("work-item tools — registry + schemas", () => {
       "archive_work_item",
       "comment_work_item",
       "list_work_item_comments",
+      "link_work_items",
+      "unlink_work_items",
+      "label_work_item",
+      "list_labels",
     ]);
     const names = buildTools().map((t) => t.name).sort();
     expect(names).toContain("create_work_item");
@@ -79,7 +83,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("fire_workflow_event");
     expect(names).toContain("cancel_workflow_run");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(54);
+    expect(names).toHaveLength(58);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {
@@ -832,5 +836,98 @@ describe("work-item comment tools (Todos v2 slice 2)", () => {
     };
     expect(full.total).toBe(2);
     expect(full.comments.map((c) => c.body)).toEqual(["threaded reply"]);
+  });
+});
+
+describe("work-item relation + label tools (Todos v2 slice 3)", () => {
+  it("link_work_items posts to the relations route after local validation", async () => {
+    const { calls, ctx } = stub(() => ({ status: 201, body: { relation: { srcId: "JIN-1", dstId: "JIN-2", kind: "blocks" } } }));
+    const out = (await tool("link_work_items").handler({ srcId: "JIN-1", dstId: "JIN-2", kind: "blocks" }, ctx)) as Record<string, unknown>;
+    expect(calls[0].method).toBe("POST");
+    expect(new URL(calls[0].url).pathname).toBe("/api/work-items/JIN-1/relations");
+    expect(calls[0].body).toEqual({ dstId: "JIN-2", kind: "blocks" });
+    expect((out.relation as Record<string, unknown>).kind).toBe("blocks");
+
+    const silent = stub(() => ({ status: 500, body: { error: "must not run" } }));
+    await expect(tool("link_work_items").handler({ srcId: "nope", dstId: "JIN-2", kind: "blocks" }, silent.ctx)).rejects.toThrow(/srcId/);
+    await expect(tool("link_work_items").handler({ srcId: "JIN-1", dstId: "nope", kind: "blocks" }, silent.ctx)).rejects.toThrow(/dstId/);
+    await expect(tool("link_work_items").handler({ srcId: "JIN-1", dstId: "JIN-2", kind: "meta" }, silent.ctx)).rejects.toThrow(/kind/);
+    expect(silent.calls).toEqual([]);
+  });
+
+  it("unlink_work_items issues a DELETE with the same shape", async () => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: { removed: true } }));
+    await tool("unlink_work_items").handler({ srcId: "JIN-1", dstId: "JIN-2", kind: "relates" }, ctx);
+    expect(calls[0].method).toBe("DELETE");
+    expect(new URL(calls[0].url).pathname).toBe("/api/work-items/JIN-1/relations");
+    expect(calls[0].body).toEqual({ dstId: "JIN-2", kind: "relates" });
+  });
+
+  it("label_work_item validates the array locally and PUTs the label set", async () => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: { labels: [{ id: "lbl_0a1b2c3d4e5f", name: "bug" }] } }));
+    await tool("label_work_item").handler({ id: "JIN-7", labels: [" bug "] }, ctx);
+    expect(calls[0].method).toBe("PUT");
+    expect(new URL(calls[0].url).pathname).toBe("/api/work-items/JIN-7/labels");
+    expect(calls[0].body).toEqual({ labels: ["bug"] });
+
+    const silent = stub(() => ({ status: 500, body: { error: "must not run" } }));
+    await expect(tool("label_work_item").handler({ id: "JIN-7", labels: "bug" }, silent.ctx)).rejects.toThrow(/array/);
+    await expect(tool("label_work_item").handler({ id: "JIN-7", labels: ["  "] }, silent.ctx)).rejects.toThrow(/array/);
+    await expect(tool("label_work_item").handler({ id: "JIN-7", labels: Array.from({ length: 101 }, (_, i) => `l${i}`) }, silent.ctx)).rejects.toThrow(/100/);
+    expect(silent.calls).toEqual([]);
+  });
+
+  it("link → label → list_labels → detail round-trips through the real API", async () => {
+    // Label creation is manager-gated; platform-manager has a direct report.
+    const manager = registry.createSession({ engine: "codex", source: "web", sourceRef: "slice3-mgr", title: "mgr", employee: "platform-manager" });
+    const managerCtx = ctxFor(manager.id);
+    const dev = registry.createSession({ engine: "codex", source: "web", sourceRef: "slice3-dev", title: "dev", employee: "platform-dev" });
+    const devCtx = ctxFor(dev.id);
+
+    const gate = store.createWorkItem({ title: "slice3 gate" });
+    const waiting = store.createWorkItem({ title: "slice3 waiting", assignee: "platform-dev" });
+
+    const linked = (await tool("link_work_items").handler({ srcId: gate.id, dstId: waiting.id, kind: "blocks" }, devCtx)) as {
+      relation: { createdBy: string };
+    };
+    expect(linked.relation.createdBy).toBe(`session:${dev.id}`);
+    await expect(
+      tool("link_work_items").handler({ srcId: waiting.id, dstId: gate.id, kind: "blocks" }, devCtx),
+    ).rejects.toThrow(/cycle/);
+
+    // Label creation is route-gated: the IC session is refused, the manager
+    // session (has a direct report) succeeds.
+    const { gatewayRequest } = await import("../toolkit.js");
+    const deniedCreate = await gatewayRequest(devCtx, "POST", "/api/labels", { name: "slice3-tag" });
+    expect(deniedCreate.status).toBe(403);
+    const managerCreate = await gatewayRequest(managerCtx, "POST", "/api/labels", { name: "slice3-tag" });
+    expect(managerCreate.status).toBe(201);
+
+    const labelled = (await tool("label_work_item").handler({ id: waiting.id, labels: ["slice3-tag"] }, devCtx)) as {
+      labels: Array<{ name: string }>;
+    };
+    expect(labelled.labels.map((l) => l.name)).toEqual(["slice3-tag"]);
+    await expect(tool("label_work_item").handler({ id: waiting.id, labels: ["ghost-label"] }, devCtx)).rejects.toThrow(/valid labels/);
+
+    const listed = (await tool("list_labels").handler({}, devCtx)) as { labels: Array<{ name: string }> };
+    expect(listed.labels.some((l) => l.name === "slice3-tag")).toBe(true);
+
+    const detail = (await tool("get_work_item").handler({ id: waiting.id }, devCtx)) as {
+      relations: Array<{ kind: string; direction: string; other: { id: string } }>;
+      labels: Array<{ name: string }>;
+    };
+    expect(detail.relations).toHaveLength(1);
+    expect(detail.relations[0]).toMatchObject({ kind: "blocks", direction: "in", other: { id: gate.id } });
+    expect(detail.labels.map((l) => l.name)).toEqual(["slice3-tag"]);
+
+    const filtered = (await tool("list_work_items").handler({ label: "slice3-tag" }, devCtx)) as {
+      workItems: Array<{ id: string }>;
+    };
+    expect(filtered.workItems.map((w) => w.id)).toEqual([waiting.id]);
+
+    const unlinked = (await tool("unlink_work_items").handler({ srcId: gate.id, dstId: waiting.id, kind: "blocks" }, devCtx)) as {
+      removed: boolean;
+    };
+    expect(unlinked.removed).toBe(true);
   });
 });

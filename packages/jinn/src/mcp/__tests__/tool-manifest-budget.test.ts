@@ -3,17 +3,17 @@ import crypto from "node:crypto";
 import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
-// Fixed provider budget. Rebased for the workflows-v2 salvage + Todos v2
-// slice 2 union (lean workflow surface + comment_work_item/list_work_item_comments)
+// Fixed provider budget. Rebased for Todos v2 slice 3 (link_work_items /
+// unlink_work_items / label_work_item / list_labels + the list label filter)
 // with the same ~zero headroom discipline as before: new tool prose must stay
 // concise rather than growing into this ceiling.
-const MAX_MANIFEST_TOKENS = 4161;
+const MAX_MANIFEST_TOKENS = 4529;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 3790, sha256: "166c50165daa7f77e40b2bfaeef8dd84f98d06740e9d02c32bd4ba10d4af1609" },
-  pi: { tokens: 4159, sha256: "7c4a58af7a7060a37bed7bbdb28546da58a56c43beddd886abc0044d5bec00d7" },
-  openai: { tokens: 3938, sha256: "0efde495bf01fe865ca00d5cb25a9e6f649c9c6b4d29410b2786705cb18aaeea" },
+  rpc: { tokens: 4131, sha256: "920b88d8ea605d29087cb5a03921098cf9b65f09b54a906624df962b8c8906f3" },
+  pi: { tokens: 4527, sha256: "cf2b28a6a90ee51e5c9c5e9c84358a4237720e15ba9b8dccc1ee1ab404d5ce20" },
+  openai: { tokens: 4291, sha256: "eddec446af17c1730062c15b9f7575f46a398e8e1d82341021affb33c5a3fc98" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -58,9 +58,12 @@ const EXPECTED_TOOL_NAMES = [
   "get_work_item_tree",
   "get_workflow",
   "get_workflow_run",
+  "label_work_item",
+  "link_work_items",
   "list_cron_jobs",
   "list_employees",
   "list_files",
+  "list_labels",
   "list_notes",
   "list_sessions",
   "list_work_item_comments",
@@ -85,6 +88,7 @@ const EXPECTED_TOOL_NAMES = [
   "spawn_session",
   "start_workflow_run",
   "stop_session",
+  "unlink_work_items",
   "update_note",
   "update_work_item",
   "update_workflow",
@@ -115,9 +119,12 @@ const EXPECTED_REQUIRED = {
   get_work_item_tree: ["id"],
   get_workflow: ["workflowId"],
   get_workflow_run: ["workflowId", "runId"],
+  label_work_item: ["id", "labels"],
+  link_work_items: ["srcId", "dstId", "kind"],
   list_cron_jobs: [],
   list_employees: [],
   list_files: [],
+  list_labels: [],
   list_notes: [],
   list_sessions: [],
   list_work_item_comments: ["id"],
@@ -142,6 +149,7 @@ const EXPECTED_REQUIRED = {
   spawn_session: ["prompt"],
   start_workflow_run: ["workflowId"],
   stop_session: ["sessionId"],
+  unlink_work_items: ["srcId", "dstId", "kind"],
   update_note: ["path", "expectedRevision"],
   update_work_item: ["id", "status"],
   update_workflow: ["workflowId", "definition", "expectedRevision"],
@@ -152,6 +160,7 @@ const EXPECTED_ENUMS = {
   create_work_item: [["properties.priority", [0, 1, 2, 3]]],
   decide_workflow_approval: [["properties.decision", ["approve", "reject"]]],
   decide_work_item_approval: [["properties.decision", ["approve", "reject"]]],
+  link_work_items: [["properties.kind", ["blocks", "relates", "duplicates"]]],
   list_sessions: [["properties.scope", ["children", "employee", "recent"]]],
   list_work_items: [
     ["properties.status", ["backlog", "assigned", "executing", "in_review", "done", "blocked", "escalated", "cancelled"]],
@@ -164,6 +173,7 @@ const EXPECTED_ENUMS = {
     ["properties.status", ["backlog", "assigned", "executing", "in_review", "done", "blocked", "escalated", "cancelled"]],
     ["properties.source", ["human", "delegation", "cron", "workflow", "session", "connector", "goal"]],
   ],
+  unlink_work_items: [["properties.kind", ["blocks", "relates", "duplicates"]]],
   update_work_item: [["properties.status", ["executing", "in_review", "blocked", "escalated", "done"]]],
 } as const;
 
@@ -214,7 +224,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(54);
+    expect(tools).toHaveLength(58);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);

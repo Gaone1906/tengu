@@ -112,9 +112,12 @@ describe("buildTools", () => {
       "get_work_item_tree",
       "get_workflow",
       "get_workflow_run",
+      "label_work_item",
+      "link_work_items",
       "list_cron_jobs",
       "list_employees",
       "list_files",
+      "list_labels",
       "list_notes",
       "list_sessions",
       "list_work_item_comments",
@@ -139,6 +142,7 @@ describe("buildTools", () => {
       "spawn_session",
       "start_workflow_run",
       "stop_session",
+      "unlink_work_items",
       "update_note",
       "update_work_item",
       "update_workflow",
@@ -233,7 +237,7 @@ describe("handleMcpRequest — tools/call", () => {
 
   it("compiles every advertised registry schema or supplies its shared runtime schema", () => {
     const tools = buildTools();
-    expect(tools).toHaveLength(54);
+    expect(tools).toHaveLength(58);
     for (const tool of tools) {
       expect(() => tool.runtimeSchema ?? z.fromJSONSchema({ ...tool.inputSchema, additionalProperties: false } as Parameters<typeof z.fromJSONSchema>[0]), tool.name).not.toThrow();
     }

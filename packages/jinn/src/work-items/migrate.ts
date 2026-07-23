@@ -195,6 +195,49 @@ ${WORK_ITEM_COMMENTS_TABLE_DDL};
 CREATE INDEX IF NOT EXISTS idx_wi_comments_item ON work_item_comments(work_item_id, created_at);
 `;
 
+/** Todos v2 slice 3: typed item-to-item relations. `blocks`/`duplicates` are
+ *  directional; `relates` is symmetric and stored ONCE in canonical order
+ *  (lexicographically smaller Todo id as src_id). The DAG guarantee on `blocks`
+ *  is enforced by the write path's in-transaction cycle check and re-verified
+ *  at boot. */
+export const WORK_ITEM_RELATIONS_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_relations (
+  src_id     TEXT NOT NULL REFERENCES work_items(id),
+  dst_id     TEXT NOT NULL REFERENCES work_items(id),
+  kind       TEXT NOT NULL CHECK (kind IN ('blocks','relates','duplicates')),
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (src_id, dst_id, kind),
+  CHECK (src_id <> dst_id)
+)`;
+
+export const WORK_ITEM_RELATIONS_DDL = `
+${WORK_ITEM_RELATIONS_TABLE_DDL};
+CREATE INDEX IF NOT EXISTS idx_wi_relations_dst ON work_item_relations(dst_id, kind);
+`;
+
+/** Todos v2 slice 3: shared label registry. `name` is normalized lowercase
+ *  kebab-case; `department` NULL = company-wide. */
+export const LABELS_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS labels (
+  id         TEXT PRIMARY KEY CHECK (id GLOB 'lbl_[0-9a-f]*' AND length(id) = 16),
+  name       TEXT NOT NULL UNIQUE,
+  color      TEXT CHECK (color IS NULL OR color GLOB '#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]'),
+  department TEXT,
+  created_at TEXT NOT NULL
+)`;
+
+export const LABELS_DDL = `${LABELS_TABLE_DDL};`;
+
+export const WORK_ITEM_LABELS_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_labels (
+  work_item_id TEXT NOT NULL REFERENCES work_items(id),
+  label_id     TEXT NOT NULL REFERENCES labels(id),
+  PRIMARY KEY (work_item_id, label_id)
+)`;
+
+export const WORK_ITEM_LABELS_DDL = `${WORK_ITEM_LABELS_TABLE_DDL};`;
+
 export const WORK_ITEM_EDIT_RECEIPTS_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
   key_digest          TEXT PRIMARY KEY CHECK (length(key_digest) = 64),
@@ -525,12 +568,28 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
   ["work_items", WORK_ITEMS_TABLE_DDL],
   ["work_item_events", WORK_ITEM_EVENTS_TABLE_DDL],
   ["work_item_comments", WORK_ITEM_COMMENTS_TABLE_DDL],
+  ["work_item_relations", WORK_ITEM_RELATIONS_TABLE_DDL],
+  ["labels", LABELS_TABLE_DDL],
+  ["work_item_labels", WORK_ITEM_LABELS_TABLE_DDL],
   ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
   ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
   ["work_item_id_burns", WORK_ITEM_ID_BURNS_TABLE_DDL],
   ["work_item_id_issuances", WORK_ITEM_ID_ISSUANCES_TABLE_DDL],
   ["departments", DEPARTMENTS_TABLE_DDL],
 ]);
+
+/** Tables added additively AFTER the v2 rebuild first shipped, in ship order
+ *  (comments = slice 2; relations/labels = slice 3; slice 5 appends here). A v2
+ *  database whose only defect is that some of these are absent is "current":
+ *  `migrateWorkItemsSchema` creates whatever is missing under the write lock and
+ *  the FULL exact-shape verify still gates the boot. A present-but-wrong-shape
+ *  additive table is NOT recognized and refuses at preflight. */
+const V2_ADDITIVE_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
+  { name: "work_item_comments", ddl: WORK_ITEM_COMMENTS_DDL },
+  { name: "work_item_relations", ddl: WORK_ITEM_RELATIONS_DDL },
+  { name: "labels", ddl: LABELS_DDL },
+  { name: "work_item_labels", ddl: WORK_ITEM_LABELS_DDL },
+];
 
 const V1_REQUIRED_TABLE_SQL = new Map<string, string>([
   ["work_items", V1_WORK_ITEMS_TABLE_DDL],
@@ -588,12 +647,16 @@ function recognizedEmptyPrerelease(db: DatabaseType): boolean {
   return true;
 }
 
-/** A v2 database created before slice 2 added the comments table. Not a refusal
- *  and never a rebuild: `migrateWorkItemsSchema` adds the table additively. */
-function recognizedV2MissingComments(db: DatabaseType): boolean {
-  if (tableExists(db, "work_item_comments")) return false;
+/** A v2 database created before some additive tables shipped (e.g. slice-1
+ *  pre-comments, slice-2 pre-relations/labels). Not a refusal and never a
+ *  rebuild: `migrateWorkItemsSchema` creates the missing tables additively.
+ *  Every table that IS present — additive or not — must shape-match exactly. */
+function recognizedV2MissingAdditiveTables(db: DatabaseType): boolean {
+  const additiveNames = new Set(V2_ADDITIVE_TABLES.map((table) => table.name));
+  const missing = V2_ADDITIVE_TABLES.filter((table) => !tableExists(db, table.name));
+  if (missing.length === 0) return false; // nothing to heal — not this recognizer's case
   for (const [name, expected] of REQUIRED_TABLE_SQL) {
-    if (name === "work_item_comments") continue;
+    if (additiveNames.has(name) && !tableExists(db, name)) continue;
     if (sqlShape(currentTableSql(db, name)) !== sqlShape(expected)) return false;
   }
   return true;
@@ -673,6 +736,54 @@ export function verifyCurrentWorkItemSchema(db: DatabaseType): void {
       if (!parent || parent.parent_comment_id !== null || parent.work_item_id !== row.work_item_id) refusal();
     }
   }
+  const relationRows = db.prepare("SELECT src_id, dst_id, kind FROM work_item_relations").all() as Array<{
+    src_id: string;
+    dst_id: string;
+    kind: string;
+  }>;
+  const blocksOut = new Map<string, string[]>();
+  for (const row of relationRows) {
+    if (!byId.has(row.src_id) || !byId.has(row.dst_id)) refusal();
+    // `relates` is symmetric and stored ONCE in canonical order.
+    if (row.kind === "relates" && !(row.src_id < row.dst_id)) refusal();
+    if (row.kind === "blocks") {
+      const targets = blocksOut.get(row.src_id) ?? [];
+      targets.push(row.dst_id);
+      blocksOut.set(row.src_id, targets);
+    }
+  }
+  // The `blocks` graph must be a DAG (write-path invariant, re-proven at boot —
+  // row counts are small). Iterative coloring DFS: 1 = on stack, 2 = done.
+  const relationColor = new Map<string, 1 | 2>();
+  for (const start of blocksOut.keys()) {
+    if (relationColor.has(start)) continue;
+    const stack: Array<{ node: string; nextIndex: number }> = [{ node: start, nextIndex: 0 }];
+    relationColor.set(start, 1);
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      const targets = blocksOut.get(frame.node) ?? [];
+      if (frame.nextIndex >= targets.length) {
+        relationColor.set(frame.node, 2);
+        stack.pop();
+        continue;
+      }
+      const next = targets[frame.nextIndex++];
+      const seen = relationColor.get(next);
+      if (seen === 1) refusal();
+      if (seen === undefined) {
+        relationColor.set(next, 1);
+        stack.push({ node: next, nextIndex: 0 });
+      }
+    }
+  }
+  const labelIds = new Set(db.prepare("SELECT id FROM labels").pluck().all() as string[]);
+  const labelPairs = db.prepare("SELECT work_item_id, label_id FROM work_item_labels").all() as Array<{
+    work_item_id: string;
+    label_id: string;
+  }>;
+  for (const pair of labelPairs) {
+    if (!byId.has(pair.work_item_id) || !labelIds.has(pair.label_id)) refusal();
+  }
 }
 
 function classifyOpenWorkItemsDatabase(db: DatabaseType): WorkItemSchemaPreflight {
@@ -691,9 +802,9 @@ function classifyOpenWorkItemsDatabase(db: DatabaseType): WorkItemSchemaPrefligh
     verifyCurrentWorkItemSchema(db);
     return "current";
   } catch {
-    // A comments-less v2 database (created between slice 1 and slice 2) is
-    // "current": the migration adds the missing table additively at boot.
-    if (recognizedV2MissingComments(db)) return "current";
+    // A v2 database missing additive tables (created before a later slice
+    // shipped them) is "current": the migration creates them at boot.
+    if (recognizedV2MissingAdditiveTables(db)) return "current";
     if (recognizedV1(db)) return "v1";
     if (todoTables.some((name) => name.startsWith("work_item_id_"))) refusal();
     if (recognizedEmptyPrerelease(db)) return "empty-prerelease";
@@ -738,13 +849,14 @@ export function migrateWorkItemsSchema(
 ): WorkItemsMigrationResult {
   registerWorkItemIdentityFunctions(db);
   const migrate = db.transaction((): WorkItemsMigrationResult => {
-    // Slice-2 additive self-heal, BEFORE classification: a v2 database created
-    // without the comments table gains it here so the exact-shape verifier below
-    // sees the complete v2 schema. IF NOT EXISTS makes this a no-op everywhere
-    // else, and a refused classification rolls the create back with the
-    // transaction. Never a rebuild, never a refusal.
+    // Additive self-heal, BEFORE classification: a v2 database created before a
+    // later slice shipped its additive tables gains them here so the exact-shape
+    // verifier below sees the complete v2 schema. IF NOT EXISTS makes this a
+    // no-op everywhere else, and a refused classification rolls the creates back
+    // with the transaction. Never a rebuild, never a refusal. (List order
+    // matters: work_item_labels references labels.)
     if (tableExists(db, "work_items") && sqlShape(currentTableSql(db, "work_items")) === sqlShape(WORK_ITEMS_TABLE_DDL)) {
-      db.exec(WORK_ITEM_COMMENTS_DDL);
+      for (const table of V2_ADDITIVE_TABLES) db.exec(table.ddl);
     }
     // The read-only preflight necessarily precedes the write lock. Reclassify after
     // BEGIN IMMEDIATE so a concurrent winner's committed schema is never dropped.
@@ -800,7 +912,7 @@ export function migrateWorkItemsSchema(
       db.exec("DROP TRIGGER IF EXISTS work_items_id_immutable");
       db.exec("ALTER TABLE work_items RENAME TO work_items_v1_legacy");
       db.exec(WORK_ITEMS_TABLE_DDL);
-      db.exec(WORK_ITEM_COMMENTS_DDL);
+      for (const table of V2_ADDITIVE_TABLES) db.exec(table.ddl);
       db.exec(`INSERT INTO work_items (
           id, title, body, status, department, assignee,
           created_by, parent_id, root_id, depth, due_at,
@@ -828,7 +940,7 @@ export function migrateWorkItemsSchema(
     db.exec(WORK_ITEMS_TABLE_DDL);
     db.exec(WORK_ITEMS_INDEX_DDL);
     db.exec(WORK_ITEM_EVENTS_DDL);
-    db.exec(WORK_ITEM_COMMENTS_DDL);
+    for (const table of V2_ADDITIVE_TABLES) db.exec(table.ddl);
     db.exec(WORK_ITEM_EDIT_RECEIPTS_DDL);
     db.exec(WORK_ITEM_IDENTITY_TRIGGERS_DDL);
     verifyCurrentWorkItemSchema(db);

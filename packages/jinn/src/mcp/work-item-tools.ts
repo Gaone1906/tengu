@@ -18,6 +18,8 @@ const TODO_ID_SCHEMA = { type: "string", pattern: "^[A-Z]{3}-[1-9][0-9]*$" } as 
 const COMMENT_ID_SCHEMA = { type: "string", pattern: "^wic_[0-9a-f]{12}$" } as const;
 const COMMENT_ID_PATTERN = /^wic_[0-9a-f]{12}$/;
 const COMMENT_LIST_LIMIT_MAX = 500;
+const RELATION_KINDS = ["blocks", "relates", "duplicates"] as const;
+const WORK_ITEM_LABELS_MAX = 100;
 
 function mutationResult(body: unknown, hint: string): Record<string, unknown> {
   const value = body && typeof body === "object" && !Array.isArray(body)
@@ -50,6 +52,22 @@ function requireTodoId(args: Record<string, unknown>): string {
   } catch {
     throw new JinnMcpToolError("id must be a canonical Todo ID such as ACM-42");
   }
+}
+
+function requireTodoIdField(args: Record<string, unknown>, name: string): string {
+  try {
+    return parseTodoId(args[name]);
+  } catch {
+    throw new JinnMcpToolError(`${name} must be a canonical Todo ID such as ACM-42`);
+  }
+}
+
+function requireRelationKind(args: Record<string, unknown>): (typeof RELATION_KINDS)[number] {
+  const kind = typeof args.kind === "string" ? args.kind : "";
+  if (!(RELATION_KINDS as readonly string[]).includes(kind)) {
+    throw new JinnMcpToolError(`kind must be one of ${RELATION_KINDS.join(", ")}`);
+  }
+  return kind as (typeof RELATION_KINDS)[number];
 }
 
 function optionalString(args: Record<string, unknown>, name: string, max = FILTER_CHAR_CAP): string | undefined {
@@ -193,6 +211,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         needsAttentionFor: { type: "string" },
         createdBy: { type: "string" },
         rootsOnly: { type: "boolean" },
+        label: { type: "string" },
         text: { type: "string" },
         since: { type: "string" },
         until: { type: "string" },
@@ -210,6 +229,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         needsAttentionFor: optionalString(args, "needsAttentionFor"),
         createdBy: optionalString(args, "createdBy"),
         rootsOnly: args.rootsOnly === true ? "true" : undefined,
+        label: optionalString(args, "label"),
         text: optionalString(args, "text", WORK_ITEM_QUERY_CHAR_CAP),
         since: optionalString(args, "since", 64),
         until: optionalString(args, "until", 64),
@@ -469,5 +489,88 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     },
   };
 
-  return [list, get, tree, search, create, update, assign, archive, comment, listComments];
+  const link: JinnMcpTool = {
+    name: "link_work_items",
+    description: "Link two Todos: src blocks/relates/duplicates dst; blocks is cycle-checked.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        srcId: TODO_ID_SCHEMA,
+        dstId: TODO_ID_SCHEMA,
+        kind: { type: "string", enum: [...RELATION_KINDS] },
+      },
+      required: ["srcId", "dstId", "kind"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      const srcId = requireTodoIdField(args, "srcId");
+      const dstId = requireTodoIdField(args, "dstId");
+      const kind = requireRelationKind(args);
+      const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(srcId)}/relations`, { dstId, kind });
+      if (status >= 400) throw gatewayFailure(`linking "${srcId}" ${kind} "${dstId}"`, status, body);
+      return mutationResult(body, "Todos linked.");
+    },
+  };
+
+  const unlink: JinnMcpTool = {
+    name: "unlink_work_items",
+    description: "Remove a Todo relation (its creator or the operator).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        srcId: TODO_ID_SCHEMA,
+        dstId: TODO_ID_SCHEMA,
+        kind: { type: "string", enum: [...RELATION_KINDS] },
+      },
+      required: ["srcId", "dstId", "kind"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      const srcId = requireTodoIdField(args, "srcId");
+      const dstId = requireTodoIdField(args, "dstId");
+      const kind = requireRelationKind(args);
+      const { status, body } = await gatewayRequest(ctx, "DELETE", `/api/work-items/${encodeURIComponent(srcId)}/relations`, { dstId, kind });
+      if (status >= 400) throw gatewayFailure(`unlinking "${srcId}" ${kind} "${dstId}"`, status, body);
+      return mutationResult(body, "Relation removed.");
+    },
+  };
+
+  const label: JinnMcpTool = {
+    name: "label_work_item",
+    description: "Replace a Todo's label set; existing label names/ids only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: TODO_ID_SCHEMA,
+        labels: { type: "array", items: { type: "string" } },
+      },
+      required: ["id", "labels"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      const id = requireTodoId(args);
+      if (!Array.isArray(args.labels) || args.labels.length > WORK_ITEM_LABELS_MAX
+        || args.labels.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > FILTER_CHAR_CAP)) {
+        throw new JinnMcpToolError(`labels must be an array of up to ${WORK_ITEM_LABELS_MAX} label names or ids (non-empty strings) — list_labels shows valid labels`);
+      }
+      const labels = (args.labels as string[]).map((entry) => entry.trim());
+      const { status, body } = await gatewayRequest(ctx, "PUT", `/api/work-items/${encodeURIComponent(id)}/labels`, { labels });
+      if (status >= 400) throw gatewayFailure(`labelling work item "${id}"`, status, body);
+      return mutationResult(body, "Todo labels replaced.");
+    },
+  };
+
+  const labelsList: JinnMcpTool = {
+    name: "list_labels",
+    description: "List the valid Todo labels.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async (_args, ctx) => {
+      assertIdentity(ctx);
+      const { status, body } = await gatewayRequest(ctx, "GET", "/api/labels");
+      if (status >= 400) throw gatewayFailure("listing labels", status, body);
+      return body;
+    },
+  };
+
+  return [list, get, tree, search, create, update, assign, archive, comment, listComments, link, unlink, label, labelsList];
 }
