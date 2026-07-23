@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { EditorContent, useEditor } from "@tiptap/react"
 import StarterKit from "@tiptap/starter-kit"
 import Placeholder from "@tiptap/extension-placeholder"
@@ -18,7 +18,21 @@ import { MarkdownView } from "@/components/markdown-view"
  * States: empty → quiet placeholder; reading (non-editors) → plain rendered
  * markdown via the shared MarkdownView, no hover wash; editing → rendered
  * grammar with a caret, hover wash on the block container only. Commit on
- * blur; the page's PATCH lane owns optimism + refusal snapback. */
+ * blur; the page's PATCH lane owns optimism + refusal snapback.
+ *
+ * LOSSY-GRAMMAR STORY (stage-B review F1 residual, stage-C decision): the
+ * live editor only edits bodies its parse→serialize round-trip preserves
+ * BYTE-FAITHFULLY (modulo trim). When the mount/re-seed round-trip is not
+ * identity — tables (StarterKit has no table node), `- [x]` checklist
+ * grammar, literal HTML, setext headings, `*` bullets, `1)` markers — the
+ * body renders through the shared MarkdownView (which DOES render tables and
+ * HTML) and tap-to-edit opens a RAW markdown textarea instead, so a genuine
+ * edit never normalizes regions the operator didn't touch and agent-authored
+ * grammar survives verbatim. This is deterministic and total: no grammar
+ * classification, just "did the round-trip change anything?". The chosen
+ * option is the review's read-only-fallback strengthened to keep the edit
+ * affordance (byte-faithful raw editing), rather than the table extension or
+ * `html: true` — neither covers every destructive grammar. */
 
 const EDITOR_PROSE_CLASS = [
   "outline-none min-h-[24px] text-[16px] leading-[1.6] text-[var(--text-secondary)]",
@@ -63,6 +77,8 @@ export function BodyEditor({
    *  and a zero-edit focus+blur must commit NOTHING (stage-B review F1 —
    *  normalization may only accompany a genuine edit). */
   const lastCommitted = useRef<string | null>(null)
+  /** Round-trip faithfulness: false routes editing to the raw fallback. */
+  const [faithful, setFaithful] = useState(true)
   const editor = useEditor(
     {
       editable,
@@ -76,7 +92,9 @@ export function BodyEditor({
         attributes: { class: EDITOR_PROSE_CLASS, "data-testid": "task-body-editor" },
       },
       onCreate: ({ editor: instance }) => {
-        lastCommitted.current = (instance.storage.markdown.getMarkdown() as string)
+        const serialized = instance.storage.markdown.getMarkdown() as string
+        lastCommitted.current = serialized
+        setFaithful(serialized.trim() === (lastRaw.current ?? "").trim())
       },
       onBlur: ({ editor: instance }) => {
         const markdown = (instance.storage.markdown.getMarkdown() as string).trim()
@@ -96,15 +114,32 @@ export function BodyEditor({
 
   // A remote change (poll, another surface) re-seeds the editor only while the
   // caret is elsewhere — never clobber in-progress typing. The commit baseline
-  // re-seeds from the editor's own serialization of the new document (F1).
+  // re-seeds from the editor's own serialization of the new document (F1), and
+  // faithfulness is re-judged for the new body.
   useEffect(() => {
     if (!editor || editor.isFocused) return
     const next = body ?? ""
     if (next.trim() === lastRaw.current.trim()) return
     lastRaw.current = next
     editor.commands.setContent(next)
-    lastCommitted.current = (editor.storage.markdown.getMarkdown() as string)
+    const serialized = editor.storage.markdown.getMarkdown() as string
+    lastCommitted.current = serialized
+    setFaithful(serialized.trim() === next.trim())
   }, [editor, body])
+
+  // A raw commit keeps the (unrendered) live document in sync and re-judges
+  // faithfulness — a body edited back into canonical grammar returns to the
+  // live editor without a remount.
+  const commitRaw = (next: string) => {
+    lastRaw.current = next
+    onCommit(next)
+    if (editor) {
+      editor.commands.setContent(next)
+      const serialized = editor.storage.markdown.getMarkdown() as string
+      lastCommitted.current = serialized
+      setFaithful(serialized.trim() === next.trim())
+    }
+  }
 
   if (!editable) {
     return body ? (
@@ -114,5 +149,80 @@ export function BodyEditor({
     )
   }
 
+  if (!faithful) {
+    return <RawMarkdownBody body={body} isDark={isDark} onCommit={commitRaw} />
+  }
+
   return <EditorContent editor={editor} />
+}
+
+/** Byte-faithful editing for bodies the live round-trip cannot preserve:
+ *  MarkdownView at rest (it renders tables/HTML correctly), tap-to-edit opens
+ *  a raw markdown textarea. Esc reverts; blur commits only a genuine change. */
+function RawMarkdownBody({
+  body,
+  isDark,
+  onCommit,
+}: {
+  body: string | null
+  isDark: boolean
+  onCommit: (markdown: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState("")
+
+  if (editing) {
+    return (
+      <div>
+        <textarea
+          autoFocus
+          data-testid="task-body-raw-edit"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => {
+            setEditing(false)
+            const next = draft.trim()
+            if (next !== (body ?? "").trim()) onCommit(next)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault()
+              e.stopPropagation()
+              setDraft(body ?? "")
+              setEditing(false)
+            }
+          }}
+          rows={Math.max(4, draft.split("\n").length + 1)}
+          className="w-full resize-none bg-transparent text-[14px] leading-[1.6] text-[var(--text-secondary)] outline-none"
+          style={{ fontFamily: "var(--font-code)" }}
+          aria-label="Edit description as markdown"
+        />
+        <p className="mt-1.5 text-[12px] text-[var(--text-quaternary)]">
+          Editing raw markdown — this description uses formatting the live editor can&rsquo;t preserve, so it edits byte-faithfully.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      data-testid="task-body-raw"
+      aria-label="Edit description"
+      onClick={() => {
+        setDraft(body ?? "")
+        setEditing(true)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          setDraft(body ?? "")
+          setEditing(true)
+        }
+      }}
+      className="w-full cursor-text text-left outline-none"
+    >
+      <MarkdownView content={body ?? ""} isDark={isDark} />
+    </div>
+  )
 }

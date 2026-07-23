@@ -161,37 +161,87 @@ describe("inline title + body editor on the page", () => {
     ["literal HTML", '<img src="x.png" alt="pic">'],
     ["setext + star bullets + 1) markers", "Heading\n=======\n\n* star bullet\n\n1) ordered"],
     ["canonical grammar", "## Scope\n\n- item\n\n`code`"],
-  ])("focus + blur with NO edit never commits — %s stays byte-identical (F1)", async (_label, storedBody) => {
+  ])("the innocent interaction never commits — %s stays byte-identical (F1)", async (_label, storedBody) => {
     const { BodyEditor } = await import("../task-page/body-editor")
     const onCommit = vi.fn()
     render(<BodyEditor body={storedBody} editable isDark onCommit={onCommit} />)
-    const prose = await waitFor(() => {
-      const el = document.querySelector<HTMLElement>(".ProseMirror, [contenteditable=true]")
-      if (!el) throw new Error("editor not mounted")
+    // Non-round-trippable grammars route to the raw fallback (stage-C lossy
+    // story); canonical grammar keeps the live editor. Either way, focus
+    // arriving and leaving with no edit commits NOTHING.
+    const surface = await waitFor(() => {
+      const el = document.querySelector<HTMLElement>("[data-testid=task-body-raw], .ProseMirror, [contenteditable=true]")
+      if (!el) throw new Error("no edit surface mounted")
       return el
     })
-    // The most innocent interaction on the page: focus arrives, focus leaves.
-    // (Synthetic events only — jsdom's caret machinery lacks getClientRects.)
-    fireEvent.focus(prose)
-    fireEvent.blur(prose)
+    if (surface.dataset.testid === "task-body-raw") {
+      fireEvent.click(surface)
+      const textarea = screen.getByTestId("task-body-raw-edit")
+      fireEvent.blur(textarea)
+    } else {
+      fireEvent.focus(surface)
+      fireEvent.blur(surface)
+    }
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(onCommit).not.toHaveBeenCalled()
   })
 
-  it("a remote re-seed keeps the no-edit blur quiet too (baseline re-seeds from the editor's serialization)", async () => {
+  it("a remote re-seed keeps the no-edit interaction quiet too (baseline re-seeds from the editor's serialization)", async () => {
     const { BodyEditor } = await import("../task-page/body-editor")
     const onCommit = vi.fn()
     const { rerender } = render(<BodyEditor body="First." editable isDark onCommit={onCommit} />)
     await waitFor(() => {
       if (!document.querySelector(".ProseMirror, [contenteditable=true]")) throw new Error("not mounted")
     })
-    // A poll delivers a non-canonical body while the caret is elsewhere.
+    // A poll delivers a non-canonical body while the caret is elsewhere — the
+    // editor re-judges faithfulness and routes to the raw fallback.
     rerender(<BodyEditor body={"- [x] agent-authored line"} editable isDark onCommit={onCommit} />)
-    const prose = document.querySelector<HTMLElement>(".ProseMirror, [contenteditable=true]")!
-    fireEvent.focus(prose)
-    fireEvent.blur(prose)
+    const raw = await screen.findByTestId("task-body-raw")
+    fireEvent.click(raw)
+    fireEvent.blur(screen.getByTestId("task-body-raw-edit"))
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it("a canonical body keeps the LIVE editor — no raw fallback in the normal path (§7.4)", async () => {
+    const { BodyEditor } = await import("../task-page/body-editor")
+    render(<BodyEditor body={"## Scope\n\n- item"} editable isDark onCommit={vi.fn()} />)
+    await waitFor(() => {
+      if (!document.querySelector(".ProseMirror, [contenteditable=true]")) throw new Error("not mounted")
+    })
+    expect(screen.queryByTestId("task-body-raw")).toBeNull()
+  })
+
+  it("a table body reads through MarkdownView (a real <table>) and edits byte-faithfully in raw markdown", async () => {
+    const { BodyEditor } = await import("../task-page/body-editor")
+    const onCommit = vi.fn()
+    const table = "| a | b |\n| --- | --- |\n| 1 | 2 |"
+    render(<BodyEditor body={table} editable isDark onCommit={onCommit} />)
+    const raw = await screen.findByTestId("task-body-raw")
+    // The fallback read view renders the table the live editor would destroy.
+    await waitFor(() => expect(raw.querySelector("table")).toBeTruthy())
+    // A genuine edit commits the FULL body unnormalized — the table survives.
+    fireEvent.click(raw)
+    const textarea = screen.getByTestId("task-body-raw-edit") as HTMLTextAreaElement
+    expect(textarea.value).toBe(table)
+    fireEvent.change(textarea, { target: { value: `${table}\n\nA new closing line.` } })
+    fireEvent.blur(textarea)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    const committed = onCommit.mock.calls[0][0] as string
+    expect(committed).toContain("| a | b |")
+    expect(committed).toContain("A new closing line.")
+  })
+
+  it("Escape reverts a raw edit without committing", async () => {
+    const { BodyEditor } = await import("../task-page/body-editor")
+    const onCommit = vi.fn()
+    render(<BodyEditor body={'<img src="x.png" alt="pic">'} editable isDark onCommit={onCommit} />)
+    fireEvent.click(await screen.findByTestId("task-body-raw"))
+    const textarea = screen.getByTestId("task-body-raw-edit")
+    fireEvent.change(textarea, { target: { value: "replaced entirely" } })
+    fireEvent.keyDown(textarea, { key: "Escape" })
+    expect(screen.queryByTestId("task-body-raw-edit")).toBeNull()
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(screen.getByTestId("task-body-raw")).toBeTruthy()
   })
 
   it("blurring the editor after an edit commits plain markdown (heading grammar round-trips)", async () => {
