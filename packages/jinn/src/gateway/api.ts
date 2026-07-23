@@ -215,6 +215,7 @@ import {
   archiveWorkItem,
   decideWorkItemApproval,
   escalateApproval,
+  listApprovals,
   requestApproval,
 } from "../work-items/approvals.js";
 import { resolveApprovalDecisionAuthority, resolveApprovalRouteTarget, resolveRootApprovalTarget } from "./approval-authority.js";
@@ -1078,6 +1079,9 @@ function fullWorkItemPayload(item: WorkItem): Record<string, unknown> {
     comments: commentsTail(item.id),
     relations: listRelations(item.id),
     labels: getWorkItemLabels(item.id),
+    // Slice 4 (additive): the full approval history, oldest request first. The
+    // legacy approval* fields on `workItem` remain the current row's values.
+    approvals: listApprovals(item.id),
   };
 }
 
