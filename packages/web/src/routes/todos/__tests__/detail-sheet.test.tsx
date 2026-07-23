@@ -124,6 +124,7 @@ describe("Todo detail transition footer", () => {
   beforeEach(() => {
     authFetch.mockReset().mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       const status = JSON.parse(String(init?.body)).status as WorkItemStatusWire
       return new Response(JSON.stringify({ workItem: workItem(status), escalated: false }), {
         status: 200,
@@ -159,6 +160,7 @@ describe("Todo detail transition footer", () => {
     let persisted: WorkItemStatusWire = "backlog"
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PUT") {
         persisted = JSON.parse(String(init.body)).status as WorkItemStatusWire
         return new Response(JSON.stringify({ workItem: workItem(persisted), escalated: false }), {
@@ -240,6 +242,7 @@ describe("Todo detail editing and dialog behavior", () => {
     sessionStorage.clear()
     authFetch.mockReset().mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       return new Response(JSON.stringify({ workItem: workItem("backlog") }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -362,6 +365,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const onClose = vi.fn()
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         await pending
         return new Response(JSON.stringify(editResult(value.workItem, JSON.parse(String(init.body)), 8)), { status: 200, headers: { "Content-Type": "application/json" } })
@@ -392,6 +396,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const patches: Array<Record<string, unknown>> = []
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         const patch = JSON.parse(String(init.body)) as Record<string, unknown>
         patches.push(patch)
@@ -425,6 +430,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const onClose = vi.fn()
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") return new Response(JSON.stringify({ error: "Save failed" }), { status: 500, headers: { "Content-Type": "application/json" } })
       return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
     })
@@ -458,6 +464,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const onClose = vi.fn()
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
     })
     renderSheetWithDetail(remote, onClose)
@@ -492,6 +499,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const calls: string[] = []
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         calls.push("patch")
         const patch = JSON.parse(String(init.body)) as Record<string, unknown>
@@ -521,6 +529,7 @@ describe("Todo detail editing and dialog behavior", () => {
     value.workItem.updatedAt = "2099-12-31T23:59:59.999Z"
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         const patch = JSON.parse(String(init.body)) as Record<string, unknown>
         return new Response(JSON.stringify(editResult(value.workItem, patch, 42)), { status: 200, headers: { "Content-Type": "application/json" } })
@@ -550,6 +559,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let attempts = 0
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         attempts += 1
         if (attempts === 1) throw new TypeError("network response was lost")
@@ -581,6 +591,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let detailReads = 0
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         return new Response(JSON.stringify({ code: "todo_version_conflict", currentVersion: 8, error: "private wi_hidden" }), {
           status: 409,
@@ -616,6 +627,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let detailReads = 0
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         return new Response(JSON.stringify({ code: "todo_version_conflict", currentVersion: 8, error: "private" }), {
           status: 409,
@@ -652,6 +664,7 @@ describe("Todo detail editing and dialog behavior", () => {
     }
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
     })
 
@@ -680,6 +693,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let patchAttempt = 0
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         patchAttempt += 1
         if (patchAttempt === 1) {
@@ -720,6 +734,7 @@ describe("Todo detail editing and dialog behavior", () => {
     remote.workItem.title = "Remote title"
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         return new Response(JSON.stringify({ code: "todo_version_conflict", currentVersion: 8, error: "hidden" }), {
           status: 409,
@@ -749,6 +764,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let conflicted = false
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH" && !conflicted) {
         conflicted = true
         return new Response(JSON.stringify({ code: "todo_version_conflict", currentVersion: 8, error: "hidden" }), {
@@ -778,6 +794,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let detailReads = 0
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       detailReads += 1
       return read.promise
     })
@@ -802,6 +819,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let detailReads = 0
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       detailReads += 1
       return read.promise
     })
@@ -824,6 +842,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let detailReads = 0
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") return patchResponse.promise
       detailReads += 1
       return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
@@ -852,6 +871,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const read = deferred<Response>()
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       return read.promise
     })
     const first = renderSheetWithDetail(value)
@@ -882,6 +902,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const read = deferred<Response>()
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       return read.promise
     })
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
@@ -918,6 +939,7 @@ describe("Todo detail editing and dialog behavior", () => {
     stale.workItem.version = 8
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       return new Response(JSON.stringify(stale), { status: 200, headers: { "Content-Type": "application/json" } })
     })
     const { client } = renderSheetWithDetail(value)
@@ -936,6 +958,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let detailReads = 0
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") return patch.promise
       detailReads += 1
       if (detailReads === 1) return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
@@ -967,6 +990,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let detailReads = 0
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       detailReads += 1
       if (detailReads === 1) return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
       return read.promise
@@ -1001,6 +1025,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const patch = deferred<Response>()
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") return patch.promise
       return new Response(JSON.stringify({ ...value, workItem: { ...value.workItem, version: 8 } }), {
         status: 200,
@@ -1033,6 +1058,7 @@ describe("Todo detail editing and dialog behavior", () => {
     persistTypedConflict(value)
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") throw new Error("A stale action must not PATCH")
       return new Response(JSON.stringify({ ...value, workItem: { ...value.workItem, version: 8 } }), {
         status: 200,
@@ -1072,6 +1098,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const patch = deferred<Response>()
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") return patch.promise
       return new Response(JSON.stringify({ ...value, workItem: { ...value.workItem, version: 8 } }), {
         status: 200,
@@ -1106,6 +1133,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const patchResponse = deferred<Response>()
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") return patchResponse.promise
       return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
     })
@@ -1138,6 +1166,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const patchResponse = deferred<Response>()
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") return patchResponse.promise
       return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
     })
@@ -1171,6 +1200,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let patched = false
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         patched = true
         return new Response(JSON.stringify(editResult(value.workItem, { title: "Local title" }, 8)), {
@@ -1205,6 +1235,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let reconciliationRead = false
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         conflictReturned = true
         return new Response(JSON.stringify({
@@ -1264,6 +1295,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let patchCompleted = false
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         patchCompleted = true
         return new Response(JSON.stringify({ workItem: authoritative, replayed: false }), {
@@ -1312,6 +1344,7 @@ describe("Todo detail editing and dialog behavior", () => {
     }
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       return new Response(JSON.stringify(newer), { status: 200, headers: { "Content-Type": "application/json" } })
     })
     const { client } = renderSheetWithDetail(value)
@@ -1332,6 +1365,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const equal = { ...value, spendUsd: 9, events: [{ id: "event-safe" }] } as unknown as WorkItemDetailWire
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       return new Response(JSON.stringify(equal), { status: 200, headers: { "Content-Type": "application/json" } })
     })
     const { client } = renderSheetWithDetail(value)
@@ -1349,6 +1383,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const value = detail("escalated")
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PUT") {
         return new Response(JSON.stringify({ error: "Operator cannot cancel work item wi_private_forbidden while approval is pending" }), {
           status: 403,
@@ -1374,6 +1409,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const value = detail("escalated")
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PUT") {
         return new Response(JSON.stringify({ error: diagnostic }), {
           status: 500,
@@ -1399,6 +1435,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const value = detail("backlog")
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         return new Response(JSON.stringify({ error: diagnostic }), {
           status: 500,
@@ -1424,6 +1461,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const value = detail("backlog")
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         return new Response(JSON.stringify({
           code: "WORK_ITEM_APPROVAL_PENDING",
@@ -1448,6 +1486,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const value = detail("backlog")
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         return new Response(JSON.stringify({
           code: status === 409 ? "todo_version_conflict" : "WORK_ITEM_VERSION_CONFLICT",
@@ -1481,6 +1520,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let patchAttempt = 0
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         patchAttempt += 1
         if (patchAttempt === 1) {
@@ -1539,6 +1579,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let remoteVersion = 8
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         patchAttempt += 1
         if (patchAttempt === 1) {
@@ -1598,6 +1639,7 @@ describe("Todo detail editing and dialog behavior", () => {
     persistTypedConflict(value)
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         return new Response(JSON.stringify({
           code: "todo_idempotency_conflict",
@@ -1642,6 +1684,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const user = userEvent.setup()
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         return new Response(JSON.stringify({
           code: "todo_idempotency_conflict",
@@ -1668,6 +1711,7 @@ describe("Todo detail editing and dialog behavior", () => {
     persistTypedConflict(value)
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       throw new TypeError("offline")
     })
     renderSheetWithDetail(value)
@@ -1687,6 +1731,7 @@ describe("Todo detail editing and dialog behavior", () => {
     let patchAttempt = 0
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         patchAttempt += 1
         return new Response(JSON.stringify({
@@ -1721,6 +1766,7 @@ describe("Todo detail editing and dialog behavior", () => {
     const value = detail("backlog")
     authFetch.mockImplementation(async (path: string, init?: RequestInit) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       if (init?.method === "PATCH") {
         return new Response(JSON.stringify({
           code,
@@ -1755,6 +1801,7 @@ describe("Todo detail editing and dialog behavior", () => {
     })
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       return new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } })
     })
     renderSheetWithDetail(value)
@@ -1788,6 +1835,7 @@ describe("Todo detail editing and dialog behavior", () => {
     })
     authFetch.mockImplementation(async (path: string) => {
       if (path.endsWith("/sessions")) return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+      if (path.includes("/comments")) return new Response(JSON.stringify({ comments: [], total: 0, limit: 500, offset: 0 }), { status: 200, headers: { "Content-Type": "application/json" } })
       return new Response(JSON.stringify(remote), { status: 200, headers: { "Content-Type": "application/json" } })
     })
     renderSheetWithDetail(value)

@@ -36,6 +36,7 @@ import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { StateLine } from "@/components/ui/state-line"
 import { todoPath } from "@/lib/todo-id"
 import { StatusCircle } from "./state-glyph"
+import { CommentThread } from "./comment-thread"
 import { displayNameOf, formatRelativeTime } from "./util"
 import { useSetWorkItemStatus } from "./use-todos"
 import { TodoDialog } from "./todo-dialog"
@@ -1161,7 +1162,10 @@ export function DetailSheet({
             </div>
           )}
           {displayDetail ? (
-            <SheetBody detail={displayDetail} byName={byName} employees={employees} departments={departments} onEdit={edit} />
+            <>
+              <SheetBody detail={displayDetail} byName={byName} employees={employees} departments={departments} onEdit={edit} />
+              <CommentThread workItemId={id} tail={displayDetail.comments} byName={byName} />
+            </>
           ) : (
             <div className="flex h-32 items-center justify-center text-[var(--text-tertiary)]">Loading…</div>
           )}

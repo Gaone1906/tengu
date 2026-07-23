@@ -180,6 +180,17 @@ import {
   type WorkItemStatus,
 } from "../work-items/store.js";
 import { isTodoId, parseTodoId, resolveTodoIdPrefix } from "../work-items/id.js";
+import {
+  addComment,
+  commentsTail,
+  editComment,
+  getComment,
+  listComments,
+  tombstoneComment,
+  WorkItemCommentError,
+  COMMENT_PAGE_DEFAULT_LIMIT,
+  COMMENT_PAGE_MAX_LIMIT,
+} from "../work-items/comments.js";
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import {
@@ -1037,6 +1048,7 @@ function fullWorkItemPayload(item: WorkItem): Record<string, unknown> {
     workItem: item,
     spendUsd: getWorkItemSpend(item.id),
     events: listWorkItemEvents(item.id),
+    comments: commentsTail(item.id),
   };
 }
 
@@ -1662,6 +1674,25 @@ function rejectScopedIdentityGrant(req: HttpRequest, res: ServerResponse, action
 
 function workItemActor(caller: WorkItemCaller): string {
   return caller.kind === 'session' ? `session:${caller.callerId}` : 'operator';
+}
+
+/** Comment identity is stamped server-side, never taken from the request body:
+ *  operator surface → 'operator'; a session with a resolved employee comments
+ *  as that employee (stable across their sessions); a bare session keeps the
+ *  `session:<uuid>` identity workItemActor established. */
+function workItemCommentAuthor(caller: WorkItemCaller): { author: string; authorKind: 'operator' | 'employee' } {
+  if (caller.kind === 'operator') return { author: 'operator', authorKind: 'operator' };
+  return { author: caller.session.employee ?? workItemActor(caller), authorKind: 'employee' };
+}
+
+function workItemCommentFailure(res: ServerResponse, err: unknown): void {
+  if (err instanceof WorkItemCommentError) {
+    if (err.code === 'comment-not-found') return notFound(res);
+    if (err.code === 'comment-forbidden') return json(res, { error: err.message }, 403);
+    return json(res, { error: err.message }, 409); // comment-deleted
+  }
+  if (err instanceof Error) return badRequest(res, err.message);
+  return badRequest(res, String(err));
 }
 
 function findApprovalKeysDeep(value: unknown, path = 'body', found: string[] = []): string[] {
@@ -3554,6 +3585,123 @@ export async function handleApiRequest(
       const tree = getWorkItemTree(params.id);
       if (!tree) return notFound(res);
       return json(res, { tree });
+    }
+
+    // GET /api/work-items/:id/comments — chronological thread page (any caller).
+    params = matchRoute("/api/work-items/:id/comments", pathname);
+    if (method === "GET" && params) {
+      if (!requireTodoRouteId(res, params.id)) return;
+      if (!getWorkItem(params.id)) return notFound(res);
+      let limit = COMMENT_PAGE_DEFAULT_LIMIT;
+      let offset = 0;
+      for (const name of ["limit", "offset"] as const) {
+        const raw = url.searchParams.get(name);
+        if (raw === null) continue;
+        if (!/^\d+$/.test(raw.trim()) || !Number.isSafeInteger(Number(raw.trim()))) {
+          return badRequest(res, `${name} must be a non-negative integer`);
+        }
+        const value = Number(raw.trim());
+        if (name === "limit") limit = Math.min(Math.max(value, 1), COMMENT_PAGE_MAX_LIMIT);
+        else offset = value;
+      }
+      const page = listComments(params.id, { limit, offset });
+      return json(res, { ...page, limit, offset });
+    }
+
+    // POST /api/work-items/:id/comments — add a comment (single-level threading).
+    // Author identity is stamped server-side from the caller; the body cannot
+    // carry author fields, and the whole request is byte-capped like Todo edits.
+    params = matchRoute("/api/work-items/:id/comments", pathname);
+    if (method === "POST" && params) {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
+      const tooLargeResponse = { error: "Comment request exceeds the 64 KiB limit.", code: "comment_too_large" } as const;
+      const contentLength = todoEditContentLength(req.headers["content-length"]);
+      if (contentLength === null) return badRequest(res, "request body must be valid JSON");
+      if (contentLength !== undefined && contentLength > TODO_EDIT_BODY_MAX_BYTES) {
+        return json(res, tooLargeResponse, 413);
+      }
+      const parsed = await readJsonBody(req, res, { maxBytes: TODO_EDIT_BODY_MAX_BYTES, tooLargeResponse });
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      if (body.author !== undefined || body.authorKind !== undefined) {
+        return badRequest(res, "author fields cannot be supplied — comment identity is stamped from the authenticated caller");
+      }
+      const text = typeof body.body === "string" ? body.body : "";
+      if (!text.trim()) return badRequest(res, "body is required and must be a non-empty string");
+      let parentCommentId: string | null = null;
+      if (body.parentCommentId !== undefined && body.parentCommentId !== null) {
+        if (typeof body.parentCommentId !== "string" || !/^wic_[0-9a-f]{12}$/.test(body.parentCommentId)) {
+          return badRequest(res, "parentCommentId must be a comment ID such as wic_0a1b2c3d4e5f");
+        }
+        parentCommentId = body.parentCommentId;
+      }
+      if (!getWorkItem(params.id)) return notFound(res);
+      try {
+        const comment = addComment({
+          workItemId: params.id,
+          body: text,
+          ...workItemCommentAuthor(caller),
+          parentCommentId,
+        });
+        return json(res, { comment }, 201);
+      } catch (err) {
+        return workItemCommentFailure(res, err);
+      }
+    }
+
+    // PATCH /api/work-items/:id/comments/:cid — edit own comment (author or operator).
+    params = matchRoute("/api/work-items/:id/comments/:cid", pathname);
+    if (method === "PATCH" && params) {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
+      const tooLargeResponse = { error: "Comment request exceeds the 64 KiB limit.", code: "comment_too_large" } as const;
+      const parsed = await readJsonBody(req, res, { maxBytes: TODO_EDIT_BODY_MAX_BYTES, tooLargeResponse });
+      if (!parsed.ok) return;
+      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+        return badRequest(res, "request body must be a JSON object");
+      }
+      const body = parsed.body as Record<string, unknown>;
+      const text = typeof body.body === "string" ? body.body : "";
+      if (!text.trim()) return badRequest(res, "body is required and must be a non-empty string");
+      // Resolve BEFORE mutating so a comment reached under the wrong Todo path
+      // 404s without side effects.
+      const existing = getComment(params.cid);
+      if (!existing || existing.workItemId !== params.id) return notFound(res);
+      try {
+        const comment = editComment(params.cid, text, {
+          ...workItemCommentAuthor(caller),
+          operator: caller.kind === "operator",
+        });
+        return json(res, { comment });
+      } catch (err) {
+        return workItemCommentFailure(res, err);
+      }
+    }
+
+    // DELETE /api/work-items/:id/comments/:cid — tombstone own comment (author or
+    // operator): body cleared, row and thread shape retained.
+    params = matchRoute("/api/work-items/:id/comments/:cid", pathname);
+    if (method === "DELETE" && params) {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
+      const existing = getComment(params.cid);
+      if (!existing || existing.workItemId !== params.id) return notFound(res);
+      try {
+        const comment = tombstoneComment(params.cid, {
+          ...workItemCommentAuthor(caller),
+          operator: caller.kind === "operator",
+        });
+        return json(res, { comment });
+      } catch (err) {
+        return workItemCommentFailure(res, err);
+      }
     }
 
     // POST /api/work-items/:id/approval/request — agent-legal request surface.

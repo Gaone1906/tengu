@@ -52,6 +52,18 @@ export function scanOrg(): Map<string, Employee> {
       const raw = fs.readFileSync(fullPath, "utf-8");
       const data = yaml.load(raw) as any;
       if (data && data.name && data.persona) {
+        // The operator/system sentinels and the session:<uuid> namespace are
+        // author identities on Todo surfaces (comments, created_by). An
+        // employee slug claiming one could impersonate — or act with the
+        // authority of — another principal, so those names can never be
+        // registered. Skip the file (the rest of the org keeps loading).
+        const name = String(data.name);
+        if (/^(operator|system)$/i.test(name) || /^session:/i.test(name)) {
+          logger.warn(
+            `Skipping employee file ${fullPath}: the name "${name}" collides with a reserved author identity (operator, system, or session:*)`,
+          );
+          return undefined;
+        }
         const employee: Employee = {
           name: data.name,
           displayName: data.displayName || data.name,

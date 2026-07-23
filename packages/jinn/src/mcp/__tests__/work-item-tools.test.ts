@@ -66,6 +66,8 @@ describe("work-item tools — registry + schemas", () => {
       "update_work_item",
       "assign_work_item",
       "archive_work_item",
+      "comment_work_item",
+      "list_work_item_comments",
     ]);
     const names = buildTools().map((t) => t.name).sort();
     expect(names).toContain("create_work_item");
@@ -77,7 +79,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("fire_workflow_event");
     expect(names).toContain("cancel_workflow_run");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(52);
+    expect(names).toHaveLength(54);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {
@@ -762,5 +764,73 @@ describe("work-item tools — integration against the real API + store", () => {
     })();
     expect(status).toBe(400);
     expect(body.error).toMatch(/approval.*authority surface/i);
+  });
+});
+
+describe("work-item comment tools (Todos v2 slice 2)", () => {
+  it("comment_work_item posts to the comments route after local validation and caps the body at 64k chars", async () => {
+    const { calls, ctx } = stub(() => ({ status: 201, body: { comment: { id: "wic_0a1b2c3d4e5f", body: "hello" } } }));
+    const out = (await tool("comment_work_item").handler({ id: "JIN-7", body: "hello" }, ctx)) as Record<string, unknown>;
+    expect(calls[0].method).toBe("POST");
+    expect(new URL(calls[0].url).pathname).toBe("/api/work-items/JIN-7/comments");
+    expect(calls[0].body).toEqual({ body: "hello" });
+    expect((out.comment as Record<string, unknown>).id).toBe("wic_0a1b2c3d4e5f");
+    expect(out.hint).toMatch(/get_work_item/);
+
+    const threaded = stub(() => ({ status: 201, body: { comment: { id: "wic_ffffffffffff" } } }));
+    await tool("comment_work_item").handler({ id: "JIN-7", body: "reply", parentCommentId: "wic_0a1b2c3d4e5f" }, threaded.ctx);
+    expect(threaded.calls[0].body).toEqual({ body: "reply", parentCommentId: "wic_0a1b2c3d4e5f" });
+
+    const silent = stub(() => ({ status: 500, body: { error: "must not run" } }));
+    await expect(tool("comment_work_item").handler({ id: "JIN-7", body: "x".repeat(64_001) }, silent.ctx)).rejects.toThrow(/too long/);
+    await expect(tool("comment_work_item").handler({ id: "JIN-7", body: "  " }, silent.ctx)).rejects.toThrow(/body/);
+    await expect(tool("comment_work_item").handler({ id: "JIN-7", body: "x", parentCommentId: "not-a-comment" }, silent.ctx)).rejects.toThrow(/parentCommentId/);
+    await expect(tool("comment_work_item").handler({ id: "nope", body: "x" }, silent.ctx)).rejects.toThrow(/canonical Todo ID/);
+    expect(silent.calls).toEqual([]);
+  });
+
+  it("list_work_item_comments proxies the GET route with limit/offset", async () => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: { comments: [{ id: "wic_0a1b2c3d4e5f", body: "c1" }], total: 1, limit: 50, offset: 0 } }));
+    const out = (await tool("list_work_item_comments").handler({ id: "JIN-7" }, ctx)) as Record<string, unknown>;
+    expect(new URL(calls[0].url).pathname).toBe("/api/work-items/JIN-7/comments");
+    expect(out.total).toBe(1);
+
+    const paged = stub(() => ({ status: 200, body: { comments: [], total: 0, limit: 5, offset: 10 } }));
+    await tool("list_work_item_comments").handler({ id: "JIN-7", limit: 5, offset: 10 }, paged.ctx);
+    const url = new URL(paged.calls[0].url);
+    expect(url.searchParams.get("limit")).toBe("5");
+    expect(url.searchParams.get("offset")).toBe("10");
+  });
+
+  it("comment → get_work_item tail → full list round-trips through the real API", async () => {
+    const commenter = registry.createSession({ engine: "codex", source: "web", sourceRef: "comment-roundtrip", title: "commenter", employee: "platform-dev" });
+    const ctx = ctxFor(commenter.id);
+
+    const item = store.createWorkItem({ title: "Comment round-trip" });
+    const posted = (await tool("comment_work_item").handler({ id: item.id, body: "status update from MCP" }, ctx)) as {
+      comment: { id: string; author: string; authorKind: string };
+    };
+    expect(posted.comment.author).toBe("platform-dev");
+    expect(posted.comment.authorKind).toBe("employee");
+
+    const reply = (await tool("comment_work_item").handler(
+      { id: item.id, body: "threaded reply", parentCommentId: posted.comment.id },
+      ctx,
+    )) as { comment: { parentCommentId: string } };
+    expect(reply.comment.parentCommentId).toBe(posted.comment.id);
+
+    // get_work_item carries the tail via the route payload — no duplication needed.
+    const detail = (await tool("get_work_item").handler({ id: item.id }, ctx)) as {
+      comments: { total: number; comments: Array<{ body: string }> };
+    };
+    expect(detail.comments.total).toBe(2);
+    expect(detail.comments.comments.map((c) => c.body)).toEqual(["status update from MCP", "threaded reply"]);
+
+    const full = (await tool("list_work_item_comments").handler({ id: item.id, limit: 1, offset: 1 }, ctx)) as {
+      comments: Array<{ body: string }>;
+      total: number;
+    };
+    expect(full.total).toBe(2);
+    expect(full.comments.map((c) => c.body)).toEqual(["threaded reply"]);
   });
 });

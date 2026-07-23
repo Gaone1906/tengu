@@ -3,16 +3,17 @@ import crypto from "node:crypto";
 import { buildTools } from "../server.js";
 import { projectPiToolManifest } from "../../engines/pi-mcp.js";
 
-// Fixed provider budget. Rebased for Todos v2 slice 1 (get_work_item_tree +
-// sub-task/list inputs) with the same ~zero headroom discipline as before: new
-// tool prose must stay concise rather than growing into this ceiling.
-const MAX_MANIFEST_TOKENS = 4000;
+// Fixed provider budget. Rebased for the workflows-v2 salvage + Todos v2
+// slice 2 union (lean workflow surface + comment_work_item/list_work_item_comments)
+// with the same ~zero headroom discipline as before: new tool prose must stay
+// concise rather than growing into this ceiling.
+const MAX_MANIFEST_TOKENS = 4161;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  rpc: { tokens: 3623, sha256: "9dfc8a1a2dafb5c91102df264f0ba089134a334e90ead450abc3582080020dc6" },
-  pi: { tokens: 3977, sha256: "ca629b42df4d5719ffd44272f950aef9753b0e75a80f6d12dd16c19dfc5c8356" },
-  openai: { tokens: 3765, sha256: "fd2f911c4ce04392ab55f84f6965166f55d9dd82ec0f2f114a86d88772d437af" },
+  rpc: { tokens: 3790, sha256: "166c50165daa7f77e40b2bfaeef8dd84f98d06740e9d02c32bd4ba10d4af1609" },
+  pi: { tokens: 4159, sha256: "7c4a58af7a7060a37bed7bbdb28546da58a56c43beddd886abc0044d5bec00d7" },
+  openai: { tokens: 3938, sha256: "0efde495bf01fe865ca00d5cb25a9e6f649c9c6b4d29410b2786705cb18aaeea" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -36,6 +37,7 @@ const EXPECTED_TOOL_NAMES = [
   "archive_work_item",
   "assign_work_item",
   "cancel_workflow_run",
+  "comment_work_item",
   "cost_report",
   "create_note",
   "create_work_item",
@@ -61,6 +63,7 @@ const EXPECTED_TOOL_NAMES = [
   "list_files",
   "list_notes",
   "list_sessions",
+  "list_work_item_comments",
   "list_work_items",
   "list_workflow_runs",
   "list_workflows",
@@ -91,6 +94,7 @@ const EXPECTED_REQUIRED = {
   archive_work_item: ["id"],
   assign_work_item: ["id", "assignee"],
   cancel_workflow_run: ["workflowId", "runId"],
+  comment_work_item: ["id", "body"],
   cost_report: [],
   create_note: ["title"],
   create_work_item: ["title"],
@@ -116,6 +120,7 @@ const EXPECTED_REQUIRED = {
   list_files: [],
   list_notes: [],
   list_sessions: [],
+  list_work_item_comments: ["id"],
   list_work_items: [],
   list_workflow_runs: ["workflowId"],
   list_workflows: [],
@@ -209,7 +214,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(52);
+    expect(tools).toHaveLength(54);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);

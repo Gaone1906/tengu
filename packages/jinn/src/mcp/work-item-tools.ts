@@ -15,6 +15,9 @@ const AGENT_UPDATE_STATUSES = ["executing", "in_review", "blocked", "escalated",
 const VERIFY_MODES = ["trust", "verify", "thorough"] as const;
 const ACTIVITY_RECEIPT_HINT = "Preview or Open the persisted activity receipt in this chat.";
 const TODO_ID_SCHEMA = { type: "string", pattern: "^[A-Z]{3}-[1-9][0-9]*$" } as const;
+const COMMENT_ID_SCHEMA = { type: "string", pattern: "^wic_[0-9a-f]{12}$" } as const;
+const COMMENT_ID_PATTERN = /^wic_[0-9a-f]{12}$/;
+const COMMENT_LIST_LIMIT_MAX = 500;
 
 function mutationResult(body: unknown, hint: string): Record<string, unknown> {
   const value = body && typeof body === "object" && !Array.isArray(body)
@@ -412,5 +415,59 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     },
   };
 
-  return [list, get, tree, search, create, update, assign, archive];
+  const comment: JinnMcpTool = {
+    name: "comment_work_item",
+    description: "Comment on a Todo; parentCommentId replies in its thread.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: TODO_ID_SCHEMA,
+        body: { type: "string" },
+        parentCommentId: COMMENT_ID_SCHEMA,
+      },
+      required: ["id", "body"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      const id = requireTodoId(args);
+      const body = requireString(args, "body", WORK_ITEM_BODY_CHAR_CAP);
+      const payload: Record<string, unknown> = { body };
+      if (args.parentCommentId !== undefined) {
+        if (typeof args.parentCommentId !== "string" || !COMMENT_ID_PATTERN.test(args.parentCommentId)) {
+          throw new JinnMcpToolError("parentCommentId must be a comment ID such as wic_0a1b2c3d4e5f");
+        }
+        payload.parentCommentId = args.parentCommentId;
+      }
+      const { status, body: resp } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/comments`, payload);
+      if (status >= 400) throw gatewayFailure(`commenting on work item "${id}"`, status, resp);
+      return { ...(resp as Record<string, unknown>), hint: "Next: get_work_item { id }." };
+    },
+  };
+
+  const listComments: JinnMcpTool = {
+    name: "list_work_item_comments",
+    description: "List a Todo's comment thread chronologically.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: TODO_ID_SCHEMA,
+        limit: { type: "number" },
+        offset: { type: "number" },
+      },
+      required: ["id"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      const id = requireTodoId(args);
+      const params = qs({
+        limit: args.limit !== undefined ? clampInt(args.limit, 50, 1, COMMENT_LIST_LIMIT_MAX) : undefined,
+        offset: args.offset !== undefined ? clampInt(args.offset, 0, 0, 1_000_000) : undefined,
+      });
+      const { status, body } = await gatewayRequest(ctx, "GET", `/api/work-items/${encodeURIComponent(id)}/comments${params ? `?${params}` : ""}`);
+      if (status >= 400) throw gatewayFailure(`listing comments on work item "${id}"`, status, body);
+      return body;
+    },
+  };
+
+  return [list, get, tree, search, create, update, assign, archive, comment, listComments];
 }
