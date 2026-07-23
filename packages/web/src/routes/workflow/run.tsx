@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowLeft } from "lucide-react"
 import { Link, useParams } from "react-router-dom"
 import { PageLayout } from "@/components/page-layout"
@@ -7,6 +7,7 @@ import { useBreadcrumbs } from "@/context/breadcrumb-context"
 import { api } from "@/lib/api"
 import { queryKeys } from "@/lib/query-keys"
 import { RunCanvas } from "./run-canvas"
+import { RunInspector } from "./run-inspector"
 import { StatusLine, TRIGGER_KIND_LABEL, formatDuration, formatStarted, isLiveRunStatus } from "./run-support"
 
 /** The run detail page IS the canvas: the editor graph read-only, painted with
@@ -14,6 +15,7 @@ import { StatusLine, TRIGGER_KIND_LABEL, formatDuration, formatStarted, isLiveRu
 export default function WorkflowRunPage() {
   const { id = "", runId = "" } = useParams<{ id: string; runId: string }>()
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const queryClient = useQueryClient()
   const query = useQuery({
     queryKey: queryKeys.workflows.run(id, runId),
     queryFn: () => api.getWorkflowRunV2(id, runId),
@@ -25,6 +27,15 @@ export default function WorkflowRunPage() {
     { label: query.data?.workflowTitle ?? id, href: `/workflow/${encodeURIComponent(id)}` },
     { label: "Run" },
   ])
+
+  const decide = useMutation({
+    mutationFn: ({ nodeId, decision }: { nodeId: string; decision: "approve" | "reject" }) =>
+      api.decideWorkflowApprovalV2(id, runId, nodeId, { decision, expectedRevision: query.data?.revision ?? 0 }),
+    onSuccess: (detail) => {
+      queryClient.setQueryData(queryKeys.workflows.run(id, runId), detail)
+      void queryClient.invalidateQueries({ queryKey: queryKeys.workflows.runs(id) })
+    },
+  })
 
   const detail = query.data
   return (
@@ -64,6 +75,11 @@ export default function WorkflowRunPage() {
             {detail.error.message}
           </p>
         )}
+        {decide.isError && (
+          <p className="mx-4 mb-2 rounded-[var(--radius-lg)] bg-[var(--fill-tertiary)] px-4 py-3 text-[length:var(--text-footnote)] text-[var(--system-red)] md:mx-5">
+            {decide.error instanceof Error ? decide.error.message : "Failed to record the decision."}
+          </p>
+        )}
         {query.isPending && <p className="py-12 text-center text-[var(--text-secondary)]">Loading run…</p>}
         {query.isError && (
           <p className="mx-auto mt-6 max-w-[560px] rounded-[var(--radius-lg)] bg-[var(--fill-tertiary)] p-4 text-[var(--system-red)]">
@@ -73,6 +89,15 @@ export default function WorkflowRunPage() {
         {detail && (
           <div className="relative min-h-0 flex-1">
             <RunCanvas detail={detail} selectedNodeId={selectedNodeId} onSelectNode={setSelectedNodeId} />
+            {selectedNodeId && (
+              <RunInspector
+                detail={detail}
+                nodeId={selectedNodeId}
+                onClose={() => setSelectedNodeId(null)}
+                onDecide={(nodeId, decision) => decide.mutate({ nodeId, decision })}
+                deciding={decide.isPending}
+              />
+            )}
           </div>
         )}
       </div>

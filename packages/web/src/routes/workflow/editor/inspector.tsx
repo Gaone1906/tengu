@@ -807,18 +807,14 @@ function useIsNarrow(): boolean {
   return narrow
 }
 
-/** Properties live in a right rail on desktop and a bottom sheet on mobile —
- *  ONE mounted body writing straight into the store node; there is no draft copy. */
-export function Inspector() {
-  const selected = useEditor((state) => state.nodes.find((node) => node.selected))
-  const selectNode = useEditor((state) => state.selectNode)
+/** The inspector chrome shared by the editor properties panel and the run
+ *  inspector: a right rail on desktop, a bottom sheet on mobile. */
+export function InspectorShell({ onDismiss, children }: { onDismiss: () => void; children: React.ReactNode }) {
   const narrow = useIsNarrow()
-  if (!selected) return null
-  const node = selected.data.node
   if (!narrow) {
     return (
       <aside className="absolute bottom-3 right-3 top-3 z-40 w-[324px] rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)]">
-        <InspectorBody node={node} />
+        {children}
       </aside>
     )
   }
@@ -827,17 +823,28 @@ export function Inspector() {
       <button
         type="button"
         aria-label="Dismiss properties"
-        onClick={() => selectNode(null)}
+        onClick={onDismiss}
         className="absolute inset-x-0 -top-24 h-24"
       />
       <div
         className="max-h-[62vh] overflow-hidden rounded-t-[var(--radius-2xl)] bg-[var(--bg-secondary)] pb-2.5 shadow-[var(--shadow-overlay)]"
       >
         <div className="mx-auto mt-2 h-[5px] w-9 rounded-full bg-[var(--fill-secondary)]" aria-hidden />
-        <div className="h-[min(56vh,480px)]">
-          <InspectorBody node={node} />
-        </div>
+        <div className="h-[min(56vh,480px)]">{children}</div>
       </div>
     </div>
+  )
+}
+
+/** Properties live in a right rail on desktop and a bottom sheet on mobile —
+ *  ONE mounted body writing straight into the store node; there is no draft copy. */
+export function Inspector() {
+  const selected = useEditor((state) => state.nodes.find((node) => node.selected))
+  const selectNode = useEditor((state) => state.selectNode)
+  if (!selected) return null
+  return (
+    <InspectorShell onDismiss={() => selectNode(null)}>
+      <InspectorBody node={selected.data.node} />
+    </InspectorShell>
   )
 }

@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { render, screen } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { RouterProvider, createMemoryRouter } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -141,6 +142,85 @@ describe("workflow run canvas", () => {
     expect(await screen.findByText("Writer")).toBeTruthy()
     expect(statusOf("Writer")).toBe("failed")
     expect(statusOf("Quality gate")).toBe("skipped")
+  })
+
+  it("opens the run inspector with output fields, attempts, and the session link", async () => {
+    getWorkflowRun.mockResolvedValue(baseDetail({
+      nodeRuns: [
+        nodeRun("trigger", "completed"),
+        nodeRun("writer", "completed", {
+          endedAt: "2026-07-23T08:03:00.000Z",
+          output: { text: "Digest **drafted**.", fields: { summary: "Looks good", count: 2 }, sessionId: "sess-1" },
+        }),
+      ],
+      attempts: [{
+        runId: "run-1", nodeId: "writer", attempt: 1, sessionId: "sess-1", status: "completed",
+        resolvedConfig: { employeeId: "blog-writer", engine: "claude", model: "opus" },
+        input: { topic: "release notes" },
+        output: { text: "Digest **drafted**.", fields: { summary: "Looks good", count: 2 } },
+        startedAt: "2026-07-23T08:00:01.000Z", endedAt: "2026-07-23T08:03:00.000Z",
+        remindersSent: 2, extensions: 1, lastExtensionReason: "Waiting on a child session.",
+      }],
+    }))
+    renderRun()
+
+    // fireEvent.click, not userEvent: userEvent also dispatches mousedown into
+    // the canvas pane, which trips d3-zoom on jsdom (event.view is null there).
+    fireEvent.click(await screen.findByText("Writer"))
+
+    const inspector = within(await screen.findByTestId("run-inspector"))
+    expect(inspector.getByText("summary")).toBeTruthy()
+    expect(inspector.getByText("Looks good")).toBeTruthy()
+    expect(inspector.getByText("drafted")).toBeTruthy()
+    expect(inspector.getByText("blog-writer")).toBeTruthy()
+    expect(inspector.getByText(/2 reminders sent/)).toBeTruthy()
+    expect(inspector.getByText(/1 extension/)).toBeTruthy()
+    expect(inspector.getByText(/Waiting on a child session/)).toBeTruthy()
+    const link = inspector.getByRole("link", { name: /open chat session/i })
+    expect(link.getAttribute("href")).toBe("/?session=sess-1")
+  })
+
+  it("shows an approval node's decision in the inspector", async () => {
+    getWorkflowRun.mockResolvedValue(baseDetail({
+      nodeRuns: [nodeRun("trigger", "completed"), nodeRun("gate", "completed", { output: { text: "", fields: { port: "approved" } } })],
+      approvals: [{
+        runId: "run-1", nodeId: "gate", status: "approved", requestedAt: "2026-07-23T08:01:00.000Z",
+        decidedAt: "2026-07-23T08:02:00.000Z", decidedBy: "operator", decision: "approve",
+      }],
+    }))
+    renderRun()
+
+    fireEvent.click(await screen.findByText("Publish gate"))
+
+    const inspector = within(await screen.findByTestId("run-inspector"))
+    expect(inspector.getByText(/Approved by operator/)).toBeTruthy()
+  })
+
+  it("approves a pending approval from the inspector with the run's revision", async () => {
+    const pending = baseDetail({
+      status: "waiting",
+      nodeRuns: [nodeRun("trigger", "completed"), nodeRun("gate", "waiting")],
+      approvals: [{ runId: "run-1", nodeId: "gate", status: "pending", requestedAt: "2026-07-23T08:01:00.000Z" }],
+    })
+    getWorkflowRun.mockResolvedValue(pending)
+    const approved = {
+      ...pending,
+      status: "running",
+      approvals: [{ ...pending.approvals[0] as object, status: "approved", decidedBy: "operator", decidedAt: "2026-07-23T08:05:00.000Z" }],
+    }
+    decideWorkflowApproval.mockImplementation(() => {
+      getWorkflowRun.mockResolvedValue(approved)
+      return Promise.resolve(approved)
+    })
+    renderRun()
+
+    fireEvent.click(await screen.findByText("Publish gate"))
+    await userEvent.click(await screen.findByRole("button", { name: "Approve" }))
+
+    await waitFor(() => expect(decideWorkflowApproval).toHaveBeenCalledWith(
+      "morning-digest", "run-1", "gate", { decision: "approve", expectedRevision: 7 },
+    ))
+    expect(await screen.findByText(/Approved by operator/)).toBeTruthy()
   })
 
   it("renders the run header without any editing affordances", async () => {
