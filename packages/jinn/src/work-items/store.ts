@@ -736,6 +736,9 @@ export interface UpdateWorkItemInput {
   department?: string | null;
   priority?: number;
   rank?: number | null;
+  /** Todos v2 slice 4 — the widened metadata pen also covers these. */
+  acceptance?: string | null;
+  dueAt?: string | null;
 }
 
 export interface ConditionalWorkItemUpdateOptions {
@@ -776,6 +779,10 @@ const UPDATE_FIELD_COLUMNS: Readonly<Record<keyof UpdateWorkItemInput, string>> 
   department: 'department',
   priority: 'priority',
   rank: 'rank',
+  // Appended AFTER the original six so pre-slice-4 idempotency-receipt
+  // fingerprints (key order feeds the canonical JSON) stay byte-stable.
+  acceptance: 'acceptance',
+  dueAt: 'due_at',
 };
 
 function canonicalUpdateFingerprint(id: string, input: UpdateWorkItemInput, expectedVersion: number): string {
@@ -843,7 +850,7 @@ export function updateWorkItemConditional(
       }
       appendWorkItemEvent({
         workItemId: id,
-        kind: 'note',
+        kind: 'metadata_edited',
         actor: opts.actor ?? null,
         detail: { updatedFields: fields.map((field) => field.name) },
         versionEffect: 'companion',

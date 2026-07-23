@@ -623,6 +623,9 @@ export interface WorkItemEditPatch {
   department?: string | null
   priority?: number
   rank?: number
+  /** Todos v2 slice 4 (optional: older gateways reject unknown fields). */
+  acceptance?: string | null
+  dueAt?: string | null
 }
 
 export interface WorkItemEditRequest {

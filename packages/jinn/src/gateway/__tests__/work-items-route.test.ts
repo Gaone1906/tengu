@@ -361,7 +361,7 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     expect(store.getWorkItem(item.id)).toMatchObject({ title: "After edit", body: "new body", status: "backlog" });
   });
 
-  it("rejects unauthenticated and capability-scoped session callers, even when assigned", async () => {
+  it("rejects unauthenticated callers, bad capabilities, and title edits by a mere assignee (slice-4 widened matrix)", async () => {
     const caller = reg.createSession({ engine: "codex", source: "web", sourceRef: "patch-caller", employee: "platform-worker" });
     const item = store.createWorkItem({ title: "Protected edit", assignee: "platform-worker", department: "platform" });
 
@@ -369,13 +369,17 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     await api.handleApiRequest(makeReq("PATCH", `/api/work-items/${item.id}`, { title: "Spoofed" }), unauthenticated.res, ctx);
     expect(unauthenticated.status).toBe(403);
 
+    // Slice 4: an assignee session passes the caller gate (the widened matrix)
+    // but the title stays creator/operator-only — 403 naming the field once the
+    // ordinary precondition is supplied.
     const session = makeRes();
     await api.handleApiRequest(
-      makeReq("PATCH", `/api/work-items/${item.id}`, { title: "Session edit" }, toolHeaders(caller.id)),
+      makeReq("PATCH", `/api/work-items/${item.id}`, { title: "Session edit", expectedVersion: item.version }, toolHeaders(caller.id)),
       session.res,
       ctx,
     );
     expect(session.status).toBe(403);
+    expect(session.body.error).toContain('"title"');
     expect(session.body.error).toMatch(/operator/i);
 
     const badCapability = makeRes();

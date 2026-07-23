@@ -1840,6 +1840,55 @@ function authorizeWorkItemOwnerManagerOrRoot(
   };
 }
 
+/** The metadata fields a non-operator relation may edit (spec §3.4). */
+const TODO_EDIT_SHARED_FIELDS: ReadonlyArray<keyof UpdateWorkItemInput> = ['body', 'acceptance', 'priority', 'dueAt'];
+
+type TodoEditAuthority =
+  | { ok: true; fields: ReadonlySet<keyof UpdateWorkItemInput>; actor: string; who: string }
+  | { ok: false; error: string };
+
+/**
+ * Resolve the per-field edit authority matrix (Todos v2 slice 4, spec §3.4).
+ * Session identity resolves through the session's employee slug (the comments
+ * author pattern); `created_by` matches either that slug or the caller's exact
+ * `session:<uuid>` form — a session-form creator is only ever the one session
+ * that created the item. The assignee's manager is the DIRECT reporting-line
+ * parent (the same org resolution manager-visibility uses).
+ */
+function resolveTodoEditAuthority(caller: WorkItemCaller, item: WorkItem): TodoEditAuthority {
+  if (caller.kind === 'operator') {
+    return {
+      ok: true,
+      fields: new Set<keyof UpdateWorkItemInput>(['title', 'body', 'assignee', 'department', 'priority', 'rank', 'acceptance', 'dueAt']),
+      actor: 'operator',
+      who: 'the operator',
+    };
+  }
+  const employee = caller.session.employee ?? null;
+  const sessionActor = workItemActor(caller);
+  const isCreator = item.createdBy === sessionActor || (employee !== null && item.createdBy === employee);
+  const isAssignee = employee !== null && item.assignee !== null && item.assignee === employee;
+  const isAssigneeManager =
+    !isAssignee &&
+    employee !== null &&
+    item.assignee !== null &&
+    resolveOrgHierarchy(scanOrg()).nodes[item.assignee]?.parentName === employee;
+  if (!isCreator && !isAssignee && !isAssigneeManager) {
+    return {
+      ok: false,
+      error: `${employee ? `employee "${employee}"` : `session ${caller.callerId}`} is neither the creator, the assignee, nor the assignee's manager of Todo ${item.id}; cannot edit its metadata`,
+    };
+  }
+  const fields = new Set<keyof UpdateWorkItemInput>(TODO_EDIT_SHARED_FIELDS);
+  if (isCreator) fields.add('title');
+  return {
+    ok: true,
+    fields,
+    actor: employee ?? sessionActor,
+    who: isCreator ? 'the Todo creator' : isAssignee ? 'the assignee' : "the assignee's manager",
+  };
+}
+
 function canReviewWorkItemDone(session: Session, item: WorkItem, linked: Session[]): { ok: true } | { ok: false; error: string } {
   if (item.status !== 'in_review') {
     return { ok: false, error: `marking a Todo done through MCP requires an authorized reviewer and an item already in_review; use the human review surface for ${item.status} → done` };
@@ -3313,16 +3362,16 @@ export async function handleApiRequest(
       return json(res, fullWorkItemPayload(item));
     }
 
-    // PATCH /api/work-items/:id — the operator's metadata pen + manual rank.
-    // Status is intentionally excluded: lifecycle changes remain behind the
-    // guarded transition/archive/approval surfaces below.
+    // PATCH /api/work-items/:id — the metadata pen. Authority is per-field
+    // (Todos v2 slice 4, spec §3.4): body/acceptance/priority/dueAt for the
+    // operator, the item creator, the assignee, or the assignee's manager;
+    // title for operator/creator only; assignee/department/rank stay
+    // operator-only. Status is intentionally excluded: lifecycle changes
+    // remain behind the guarded transition/archive/approval surfaces below.
     params = matchRoute("/api/work-items/:id", pathname);
     if (method === "PATCH" && params) {
       const caller = resolveWorkItemCaller(req, res, context);
       if (!caller) return;
-      if (caller.kind !== "operator") {
-        return json(res, { error: "editing Todo metadata and manual rank requires the authenticated operator surface" }, 403);
-      }
       if (!requireTodoRouteId(res, params.id)) return;
       const invalidJsonResponse = { error: "Todo edit request must be valid JSON.", code: "todo_invalid_patch" } as const;
       const tooLargeResponse = { error: "Todo edit request exceeds the 64 KiB limit.", code: "todo_edit_too_large" } as const;
@@ -3353,7 +3402,7 @@ export async function handleApiRequest(
       if (Object.prototype.hasOwnProperty.call(body, "status")) {
         return todoEditValidationError(res, "Todo status must use the guarded status transition surface.");
       }
-      const metadataFields = ["title", "body", "assignee", "department", "priority", "rank"] as const;
+      const metadataFields = ["title", "body", "assignee", "department", "priority", "rank", "acceptance", "dueAt"] as const;
       const allowed = new Set([...metadataFields, "expectedVersion", "idempotencyKey"]);
       const unsupported = Object.keys(body).filter((key) => !allowed.has(key));
       if (unsupported.length > 0) {
@@ -3420,12 +3469,45 @@ export async function handleApiRequest(
         }
         patch.rank = body.rank as number | null;
       }
+      if (Object.prototype.hasOwnProperty.call(body, "acceptance")) {
+        if (body.acceptance !== null && typeof body.acceptance !== "string") {
+          return todoEditValidationError(res, "acceptance must be a string or null");
+        }
+        patch.acceptance = body.acceptance as string | null;
+      }
+      if (Object.prototype.hasOwnProperty.call(body, "dueAt")) {
+        if (body.dueAt !== null && typeof body.dueAt !== "string") {
+          return todoEditValidationError(res, "dueAt must be an ISO 8601 timestamp or null");
+        }
+        if (typeof body.dueAt === "string") {
+          const dueAt = body.dueAt.trim();
+          if (!ISO_DATE_OR_INSTANT.test(dueAt) || Number.isNaN(Date.parse(dueAt))) {
+            return todoEditValidationError(res, "dueAt must be an ISO 8601 timestamp or null");
+          }
+          patch.dueAt = new Date(dueAt).toISOString(); // normalized like the create route
+        } else {
+          patch.dueAt = null;
+        }
+      }
+
+      const item = getWorkItem(params.id);
+      if (!item) return notFound(res);
+      const authority = resolveTodoEditAuthority(caller, item);
+      if (!authority.ok) return json(res, { error: authority.error }, 403);
+      const patchedFields = (Object.keys(patch) as Array<keyof UpdateWorkItemInput>);
+      for (const field of patchedFields) {
+        if (!authority.fields.has(field)) {
+          return json(res, {
+            error: `field "${field}" is not editable by ${authority.who}: title belongs to the Todo's creator or the operator; assignee, department, and rank are operator-only`,
+          }, 403);
+        }
+      }
 
       try {
         const result = updateWorkItemConditional(params.id, patch, {
           expectedVersion: precondition.expectedVersion,
           ...(idempotencyKey ? { idempotencyKey } : {}),
-          actor: "operator",
+          actor: authority.actor,
         });
         if (!result) return notFound(res);
         const activityReceiptId = persistTodoMutationActivity(req, context, result.item, "metadata-updated", !result.replayed);
