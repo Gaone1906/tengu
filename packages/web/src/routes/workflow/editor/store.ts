@@ -14,7 +14,7 @@ import {
   type EditorMeta,
   type EditorNode,
 } from "./graph"
-import { tidyLayout } from "./layout"
+import { freeCenter, tidyLayout } from "./layout"
 import { acceptsInput, nodeBox, outputPorts, type WorkflowNodeTypeV2, type WorkflowNodeWire } from "./ports"
 
 export type SaveState =
@@ -133,7 +133,9 @@ export function createEditorStore(definition: WorkflowDefinitionV2Wire) {
     insertOnEdge: (type, edgeId, center) => {
       const edge = get().edges.find((item) => item.id === edgeId)
       if (!edge || type === "trigger") return
-      const id = get().addNodeAt(type, center)
+      // The wire midpoint usually sits inside a neighbor — nudge clear first.
+      const box = nodeBox(createWorkflowNode(type, "probe"))
+      const id = get().addNodeAt(type, freeCenter(get().nodes, center, box))
       const inserted = get().nodes.find((node) => node.id === id)
       if (!inserted) return
       const firstOut = outputPorts(inserted.data.node)[0]
