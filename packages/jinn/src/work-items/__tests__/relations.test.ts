@@ -68,7 +68,7 @@ describe("addRelation", () => {
     const b = store.createWorkItem({ title: "cycle b" });
     relations.addRelation(a.id, b.id, "blocks", "operator");
     expect(() => relations.addRelation(b.id, a.id, "blocks", "operator")).toThrow(
-      new RegExp(`${b.id}.*${a.id}.*${b.id}`),
+      `${b.id} blocks ${a.id} would create a cycle: ${b.id} → ${a.id} → ${b.id}`,
     );
     try {
       relations.addRelation(b.id, a.id, "blocks", "operator");

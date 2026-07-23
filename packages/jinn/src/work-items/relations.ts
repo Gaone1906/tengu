@@ -134,11 +134,12 @@ export function addRelation(srcId: string, dstId: string, kind: RelationKind, cr
     if (existing) return existing;
     if (kind === 'blocks') {
       // src → dst must not close a loop: refuse when dst already reaches src.
+      // The path reads src → dst → … → src (the new edge + the existing chain).
       const path = blocksPath(db, dst, src);
       if (path) {
         throw new WorkItemRelationError(
           'relation-cycle',
-          `${src} blocks ${dst} would create a cycle: ${[src, ...path, dst].join(' → ')}`,
+          `${src} blocks ${dst} would create a cycle: ${[src, ...path].join(' → ')}`,
         );
       }
     }

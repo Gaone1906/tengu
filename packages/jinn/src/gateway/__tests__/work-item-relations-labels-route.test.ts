@@ -131,7 +131,7 @@ describe("POST/DELETE /api/work-items/:id/relations", () => {
 
     const cycle = await call("POST", `/api/work-items/${b.id}/relations`, { dstId: a.id, kind: "blocks" }, operatorHeaders);
     expect(cycle.status).toBe(400);
-    expect(cycle.body.error).toContain(`${b.id} → ${a.id} → ${b.id}`);
+    expect(cycle.body.error).toBe(`${b.id} blocks ${a.id} would create a cycle: ${b.id} → ${a.id} → ${b.id}`);
 
     const missing = await call("POST", `/api/work-items/${a.id}/relations`, { dstId: "ZZZ-424242", kind: "blocks" }, operatorHeaders);
     expect(missing.status).toBe(404);
