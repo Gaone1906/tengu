@@ -309,18 +309,16 @@ export interface WorkflowAttemptCompletion { sessionId: string; owner: { workflo
 export type WorkflowAttemptCompletionListener = (event: WorkflowAttemptCompletion) => void | Promise<void>;
 export interface WorkflowSessionExecutor { startAttempt(command: WorkflowAttemptCommand): Promise<{ sessionId: string }>; stopAttempt(input: { sessionId: string; reason: string }): Promise<void> }
 
-/** Durable attribution for sessions owned by a workflow run. Run parents omit
- * `phase`; workflow-owned phase sessions carry the exact frozen execution
- * identity the list UI needs without parsing sourceRef/sessionKey. */
+/** Durable attribution for a workflow-owned employee attempt session. */
 export interface WorkflowSessionProvenance {
-  kind: "run" | "phase";
+  kind: "phase";
   workflowId: string;
   /** Canonical agent-facing workflow name (definition.name, falling back to id). */
   workflowName: string;
   runId: string;
   /** Uniform workflow trigger source: manual, schedule, event-webhook, etc. */
   triggerSource: string;
-  phase?: {
+  phase: {
     nodeId: string;
     name: string;
     /** One-based position in the run's frozen execution order. */
@@ -328,13 +326,6 @@ export interface WorkflowSessionProvenance {
     round: number;
     attempt: number;
   };
-}
-
-/** Navigation target for a historical synthetic Workflow run projection. */
-export interface LegacyWorkflowRunLocation {
-  workflowId: string;
-  runId: string;
-  openPath: string;
 }
 
 export interface Session {
@@ -452,25 +443,9 @@ export interface CronJob {
   model?: string;
   effortLevel?: string;
   employee?: string;
-  /**
-   * The prompt a fire routes to an engine session. Required for user-authored jobs;
-   * optional ONLY for managed workflow jobs (`managedBy: 'workflow'`), whose fires
-   * start a typed workflow run instead of a prompt session (GRS-014d — no LLM in the
-   * trigger path).
-   */
-  prompt?: string;
+  /** The prompt a fire routes to an engine session. */
+  prompt: string;
   delivery?: CronDelivery;
-  /**
-   * 'workflow' marks a job OWNED by the workflow cron sync (GRS-014d): it is
-   * created/updated/removed by desired-state reconciliation from workflow
-   * definitions (`workflows/cron-sync.ts`, job id `workflow:<workflowId>`), and a
-   * manual edit is simply re-synced away on the next definition save — the
-   * definition is the source of truth. Absent = user-authored job; the sync never
-   * touches those.
-   */
-  managedBy?: "workflow";
-  /** The workflow definition a managed job fires (required when managedBy==='workflow'). */
-  workflowId?: string;
 }
 
 export interface CronDelivery {

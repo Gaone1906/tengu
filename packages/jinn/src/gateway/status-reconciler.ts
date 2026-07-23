@@ -1,5 +1,5 @@
 import type { Engine } from "../shared/types.js";
-import { isLegacyWorkflowRunSession, listSessions, updateSession } from "../sessions/registry.js";
+import { listSessions, updateSession } from "../sessions/registry.js";
 import { logger } from "../shared/logger.js";
 
 const DEFAULT_INTERVAL_MS = 15_000;
@@ -36,10 +36,6 @@ export function sweepOnce(deps: StatusReconcilerDeps): number {
   const staleMs = deps.staleMs ?? DEFAULT_STALE_MS;
   let fixed = 0;
   for (const session of listSessions({ status: "running" })) {
-    if (isLegacyWorkflowRunSession(session)) {
-      deps.pendingStuck?.delete(session.id);
-      continue;
-    }
     const last = session.lastActivity ? new Date(session.lastActivity).getTime() : 0;
     const staleFor = now - last;
     if (staleFor < staleMs) {

@@ -92,11 +92,4 @@ describe("scheduler — manual vs scheduled fire identity (GRS-003b-2a / GRS-003
     expect(scheduledTasks).toHaveLength(1);
   });
 
-  it("isolates a bad persisted managed-workflow job at boot and still schedules valid siblings", () => {
-    const bad = { ...job, id: "workflow:bad-def", name: "Bad persisted definition", timezone: "Mars/Olympus", managedBy: "workflow" as const, workflowId: "bad-def" };
-    const good = { ...job, id: "good", name: "Good", schedule: "15 * * * *" };
-
-    expect(() => startScheduler([bad, good], sessionManager, config, connectors)).not.toThrow();
-    expect(scheduledTasks.map((task) => task.expression)).toEqual([good.schedule]);
-  });
 });

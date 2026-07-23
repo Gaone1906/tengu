@@ -25,11 +25,6 @@ import {
 import { validateNewSessionSelection, validateSessionPatch } from "../sessions/session-patch.js";
 import { buildDelegatedActivityIndex } from "../sessions/delegated-activity.js";
 import type { SessionManager } from "../sessions/manager.js";
-import { MAX_WORKFLOW_DEFINITION_BYTES } from "../workflows/definition.js";
-import {
-  WorkflowRunIdempotencyConflict,
-  WORKFLOW_RUN_IDEMPOTENCY_CONFLICT,
-} from "../workflows/run-idempotency.js";
 import { buildContext, buildPlatformContextSnapshot, type BuildContextOptions } from "../sessions/context.js";
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import {
@@ -92,8 +87,6 @@ import {
   claimSessionDelivery,
   getFile,
   getSessionBySessionKey,
-  isLegacyWorkflowRunSession,
-  legacyWorkflowRunLocation,
   initDb,
   recordChildReportedToParent,
   RESTART_ACK_META_KEY,
@@ -103,74 +96,6 @@ import { extractActivityReceiptId } from "../shared/activity-receipts.js";
 import { forkEngineSession } from "../sessions/fork.js";
 import { removeCodexSessionHome } from "../engines/codex.js";
 import { ptySnapshotStore } from "../engines/pty-snapshot.js";
-import {
-  deriveRunState,
-  resolveWorkflowEvidence,
-  resolveWorkflowEvidenceRoot,
-  listWorkflowIds,
-  listDefinitions,
-  getDefinition,
-  getDefinitionByName,
-  createDefinition,
-  updateDefinition,
-  captureDefinitionState,
-  restoreDefinitionState,
-  duplicateDefinition,
-  retireDefinition,
-  resolveExecutionPlan,
-  startWorkflowRun,
-  startWorkflowRunFromTrigger,
-  stepSessionKey,
-  listRuns,
-  getRun,
-  applyWorkflowCronSync,
-  fireWorkflowCronJob,
-  resolveWorkflowRunGate,
-  cancelWorkflowRun,
-  adoptLegacyParkedWorkflowApproval,
-  escalateWorkflowRunGateApproval,
-  editPendingWorkflowStepPrompt,
-  MAX_WORKFLOW_STEP_PROMPT_CHARS,
-  MAX_WORKFLOW_RUN_CANCELLATION_REASON_CHARS,
-  artifactGatePasses,
-  stateFlagPasses,
-  checkWorkflowEventRateLimit,
-  createWorkflowTriggerBinding,
-  deleteWorkflowTriggerBinding,
-  captureWorkflowTriggerBindingsState,
-  restoreWorkflowTriggerBindingsState,
-  createWorkflowTriggerMutationEffects,
-  commitWorkflowTriggerMutationEffects,
-  discardWorkflowTriggerMutationEffects,
-  fireWorkflowEvent,
-  decidePollActivationApproval,
-  escalatePollActivationApproval,
-  getWorkflowTriggerBinding,
-  listWorkflowTriggerBindings,
-  listPublicWorkflowTriggerBindings,
-  publicWorkflowTriggerBinding,
-  sanitizeWorkflowTriggerPayload,
-  updateWorkflowTriggerBinding,
-  verifyAnyWorkflowTriggerBindingToken,
-  withWorkflowMutationLock,
-  workflowEventRateLimitKeyFromToken,
-  WorkflowStoreError,
-  WorkflowRunStoreError,
-  WorkflowTriggerStoreError,
-  correlateSessionTurn,
-  type EditableWorkflowDefinition,
-  type CreateWorkflowTriggerBindingInput,
-  type FollowUpContext,
-  type FollowUpPostResult,
-  type RunDriverDeps,
-  type WorkflowRun,
-  type WorkflowReportMode,
-  type WorkflowTriggerBinding,
-  workflowTriggerBindingRevision,
-  resolveWorkflowApprovalDecisionAuthority,
-  type SpawnContext,
-  type SpawnResult,
-} from "../workflows/index.js";
 import {
   CONFIG_PATH,
   CRON_JOBS,
@@ -203,7 +128,7 @@ import { canonicalCronJobId, loadJobs, saveJobs } from "../cron/jobs.js";
 import { summarizeCronRun } from "../cron/run-summary.js";
 import { reloadScheduler } from "../cron/scheduler.js";
 import { validateCronSchedule } from "../cron/validation.js";
-import { runCronJob, type WorkflowCronFire } from "../cron/runner.js";
+import { runCronJob } from "../cron/runner.js";
 import { ActivityQueryError, getActivityStory, queryActivityPage } from "../activity/query.js";
 import type { ActivityKind, ActivityOutcomeState } from "../activity/types.js";
 import QRCode from "qrcode";
@@ -215,7 +140,6 @@ import { isJsonMediaType } from "./media-type.js";
 import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
 import { deliverClaimedSessionDelivery, notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions, recoverPendingSessionDeliveries } from "../sessions/callbacks.js";
-import { projectWorkflowRunActivity, workflowRunActivityEnvelope, type WorkflowReportingContext } from "../workflows/reporting.js";
 import { clearDelegationCompletionContract, DELEGATION_COMPLETION_TRACKED_META_KEY } from "../sessions/delegation-completion-contract.js";
 import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
 import {
@@ -230,7 +154,6 @@ import {
 import {
   persistAndEmitActivityBlock,
   todoActivityBlock,
-  workflowDefinitionActivityBlock,
   type ActivityOperation,
   type ChatActivityContext,
 } from "./chat-activity.js";
@@ -259,7 +182,6 @@ import {
 import { isTodoId, parseTodoId, resolveTodoIdPrefix } from "../work-items/id.js";
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
-import { createWorkflowTodoEventFeed } from "../work-items/workflow-event-feed.js";
 import {
   archiveWorkItem,
   decideWorkItemApproval,
@@ -279,15 +201,6 @@ import {
   updateNote,
   type NoteStoreResult,
 } from "../notes/store.js";
-import { planWorkflowAuthoringInput } from "../workflows/authoring.js";
-import {
-  WORKFLOW_AUTHORITY_FIELDS,
-  parseWorkflowDirectCreateTransport,
-  parseWorkflowDirectUpdateTransport,
-  parseWorkflowMutateCreateTransport,
-  parseWorkflowMutateUpdateTransport,
-  parseWorkflowPlanTransport,
-} from "../workflows/schema.js";
 import { loadInstances, saveInstances, type Instance, type InstanceInput } from "../instances/directory.js";
 import { createInstance, type CreateInstanceInput, type CreateInstanceResult } from "../instances/create.js";
 import { startInstance, type StartInstanceInput, type StartInstanceResult } from "../instances/start.js";
@@ -346,10 +259,6 @@ const HOOK_BODY_MAX_BYTES = 64 * 1024;
 const AUTH_BODY_MAX_BYTES = 16 * 1024;
 /** Operator Todo PATCH cap, measured as raw UTF-8 request bytes including JSON overhead. */
 export const TODO_EDIT_BODY_MAX_BYTES = 64 * 1024;
-/** Cap for workflow-definition CRUD bodies (GRS-011b). A large graph is still KB-scale. */
-const WORKFLOW_DEFINITION_BODY_MAX_BYTES = MAX_WORKFLOW_DEFINITION_BYTES;
-/** Cap for inbound workflow events. Payloads become prompt context, so keep them small. */
-const WORKFLOW_EVENT_BODY_MAX_BYTES = 64 * 1024;
 /** Cap for editable SKILL.md bodies. */
 const SKILL_CONTENT_BODY_MAX_BYTES = 2 * 1024 * 1024;
 const SESSION_LIST_PER_GROUP = 50;
@@ -635,23 +544,10 @@ export function resumePendingWebQueueItems(context: ApiContext): void {
   if (pending.length === 0) return;
 
   let resumed = 0;
-  let ceded = 0;
   for (const item of pending) {
     let session = getSession(item.sessionId);
     if (!session) {
       cancelQueueItem(item.id);
-      continue;
-    }
-    if (isLegacyWorkflowRunSession(session)) continue;
-    // Workflow step sessions have exactly ONE recovery owner: the run RECONCILER
-    // (GRS-014b-fix, Codex finding 1). Their durable intent lives in the run record,
-    // not in this queue row — replaying the row here would resume the interrupted
-    // attempt under its OLD sessionKey and defeat the respawn-once accounting
-    // (attempt 2 under a new key). Cancel the stale row so it can never replay, and
-    // leave the session `interrupted` for the reconciler's startup sweep to re-derive.
-    if (session.sourceRef?.startsWith("workflow-run:") || session.sessionKey?.startsWith("workflow-run:")) {
-      cancelQueueItem(item.id);
-      ceded++;
       continue;
     }
     // Ordinary non-web queue ownership remains connector-specific. Callback
@@ -688,9 +584,6 @@ export function resumePendingWebQueueItems(context: ApiContext): void {
 
   if (resumed > 0) {
     logger.info(`Re-dispatched ${resumed} pending web queue item(s) after gateway restart`);
-  }
-  if (ceded > 0) {
-    logger.info(`Ceded ${ceded} workflow step queue item(s) to the run reconciler (single recovery owner)`);
   }
 }
 
@@ -805,699 +698,6 @@ function dispatchWebSessionRun(
   } else {
     launch();
   }
-}
-
-/**
- * Spawn the real session a workflow-run step maps to (GRS-011d-2c; attempt-keyed and
- * driven by the sequential engine since GRS-014b).
- *
- * This is the gateway-side `spawnStep` the run driver calls for a step with a spawn
- * spec. It maps the plan's actor (employee → its org engine/model, or a bare engine) onto a
- * REAL linked session via the SAME createSession + dispatch path POST /api/sessions uses, so
- * a workflow run genuinely spawns work — no shadow runtime. The session is linked to the run
- * by its sourceRef/sessionKey (`workflow-run:<runId>:<nodeId>:<attempt>` — the deterministic
- * identity the driver's mint-before-spawn probe reads back) and dispatched fire-and-forget;
- * the RUN RECONCILER then observes the session's status to advance the run step-by-step.
- *
- * Exported for the gateway boot wiring (server.ts starts the run reconciler with this
- * as its injected spawner).
- *
- * This spawns on WHICHEVER gateway serves the /run request — a configured evidence root only
- * proves where definition/run files live, not that the target is isolated (see the /run route's
- * honest sandbox note). Point an evidence root only at the isolated instance.
- */
-export async function spawnWorkflowStepSession(ctx: SpawnContext, context: ApiContext): Promise<SpawnResult> {
-  const config = context.getConfig();
-  const { actorKind, actorRef } = ctx.spec;
-  let engineName: string;
-  let model: string | undefined;
-  let employee: string | null = null;
-  if (actorKind === "employee") {
-    const { scanOrg } = await import("./org.js");
-    const emp = scanOrg().get(actorRef);
-    if (!emp) throw new Error(`employee "${actorRef}" not found`);
-    engineName = emp.engine;
-    model = emp.model;
-    employee = actorRef;
-  } else {
-    engineName = actorRef;
-  }
-  // Per-node overrides (GRS-016b options.model/effort): the model override WINS over
-  // an employee's default model; effort becomes the session's effortLevel (the same
-  // per-task slot the sessions API uses — the engine resolves it via resolveEffort).
-  if (ctx.spec.model) model = ctx.spec.model;
-  const effortLevel = ctx.spec.effort;
-  // The RESOLVED model/effort is validated against the SAME model registry the
-  // sessions and delegations routes use (GRS-016b-fix, Codex finding 2) —
-  // spawn-time, not compile-time (model availability is config-dependent, so a
-  // spawn-time check is load-bearing). Invalid → throw HERE, before
-  // createSession: the driver records an honest, fast `spawn-failed` instead of
-  // minting a doomed real session that burns a turn and step-errors (or, worse,
-  // gets retried under retry.on:['error'] against a permanently invalid model).
-  //
-  // GRS-017f: this now validates an employee's CONFIGURED default model too, not
-  // just an explicit per-node override — passing the employee slug so an
-  // unregistered configured model fails with the SAME clear, employee-named
-  // error the sessions/delegations routes emit. v2 validated overrides only and
-  // let an employee's own model pass untouched; that silent path was the
-  // GRS-017f divergence (delegate 400'd, workflow spawned an unknown model).
-  {
-    const selection = validateNewSessionSelection(
-      config,
-      {
-        ...(ctx.spec.model !== undefined ? { model: ctx.spec.model } : {}),
-        ...(ctx.spec.effort !== undefined ? { effortLevel: ctx.spec.effort } : {}),
-      },
-      {
-        engine: engineName,
-        ...(model !== undefined ? { model } : {}),
-        ...(employee ? { employee } : {}),
-      },
-    );
-    if (!selection.ok) {
-      throw new Error(`step options rejected by the model registry: ${selection.error}`);
-    }
-  }
-  const engine = context.sessionManager.getEngine(engineName);
-  if (!engine) throw new Error(`engine "${engineName}" not available`);
-
-  // GRS-016e: the shared-session creation spawn overrides the key
-  // (`workflow-run:<runId>:shared`); absent = the ordinary attempt key (v2).
-  const sessionKey = ctx.sessionKey ?? stepSessionKey(ctx.runId, ctx.nodeId, ctx.attempt, ctx.round);
-  // The driver builds the full step prompt (GRS-014c: instructions + predecessor
-  // handoffs + acceptance criteria) from the run's frozen snapshot; the fallback only
-  // guards a hand-rolled caller.
-  const prompt = ctx.prompt ||
-    (`You are executing workflow step "${ctx.label}" (node ${ctx.nodeId}) of workflow ` +
-    `"${ctx.workflowId}", run ${ctx.runId}. Perform this step's work and report a concise result.`);
-  const session = createSession({
-    engine: engineName,
-    source: "web",
-    sourceRef: sessionKey,
-    connector: "web",
-    sessionKey,
-    replyContext: { source: "web" },
-    title: `[Workflow] ${ctx.workflowName} / ${ctx.label}${ctx.round > 1 ? ` / r${ctx.round}` : ''}`,
-    workflowProvenance: {
-      kind: 'phase',
-      workflowId: ctx.workflowId,
-      workflowName: ctx.workflowName,
-      runId: ctx.runId,
-      triggerSource: ctx.triggerSource,
-      phase: {
-        nodeId: ctx.nodeId,
-        name: ctx.label,
-        index: ctx.phaseIndex,
-        round: ctx.round,
-        attempt: ctx.attempt,
-      },
-    },
-    employee,
-    ...(model ? { model } : {}),
-    ...(effortLevel ? { effortLevel } : {}),
-    prompt,
-    portalName: config.portal?.portalName,
-  });
-  // DISPATCH-STARTED evidence, BEFORE the insert (GRS-016e-fix4, Codex round-4
-  // finding 5) — the same status-before-insert invariant postWorkflowStepFollowUp
-  // holds (fix3), applied to session CREATION: createSession persists 'idle', so
-  // mark the new session `running` durably FIRST, then insert the anchored row.
-  // A process death anywhere from the insert to (and through) the engine turn
-  // leaves a dead `running` row that boot's recoverStaleSessions stamps
-  // `interrupted`, so recovery RETRIES instead of mis-settling `step-no-output`.
-  // Ordering is load-bearing: status BEFORE insert means an anchored row can
-  // never exist without the dispatch-started mark — idle+anchored+no-reply is
-  // therefore always a turn the ENGINE completed empty (the honest no-output
-  // terminal), never a crash artifact. A crash between createSession and the
-  // status write leaves an idle row-less session: recovery by row-id absence
-  // (re-post the same attempt), unchanged.
-  updateSession(session.id, { status: "running", lastActivity: new Date().toISOString() });
-  session.status = "running";
-  // The shared-session creation spawn inserts the prompt row with the driver's
-  // PRE-MINTED anchor id (GRS-016e-fix2) — already persisted on the receipt.
-  insertMessage(session.id, "user", prompt, undefined, undefined, ctx.anchorMessageId);
-  const queueSessionKey = session.sessionKey || session.sourceRef || session.id;
-  const queueItemId = enqueueQueueItem(session.id, queueSessionKey, prompt);
-  context.emit("queue:updated", { sessionId: session.id, sessionKey: queueSessionKey });
-  dispatchWebSessionRun(session, prompt, engine, config, context, { queueItemId });
-  return { sessionId: session.id, detail: `spawned ${actorKind} "${actorRef}" (engine ${engineName})` };
-}
-
-/**
- * Post a workflow step's FOLLOW-UP turn into an EXISTING gateway session
- * (GRS-016e session modes 'workflow'/'existing') — the driver's injected
- * `postStepFollowUp`. Mirrors the POST /api/sessions/:id/message core (insert the
- * user message, enqueue, dispatch) with two deliberate differences:
- *
- *   - it NEVER interrupts a running turn (the planner only dispatches into idle
- *     targets, and the per-session queue serializes any race) — a workflow must
- *     not kill an operator's live turn;
- *   - the step's declared actor is ASSERTED against the target session before
- *     anything is posted: an engine actor must match the session's engine, an
- *     employee actor the session's employee. A mismatch throws — an honest
- *     spawn-failure for the step's policy chain — because a silently-ignored
- *     actor declaration is the misplaced-config failure mode.
- *
- * TRUST PATH (vs the GRS-017c lateral-send guards): those guards bound
- * AGENT-initiated sends — an engine choosing targets at runtime, unboundedly.
- * A workflow follow-up is OPERATOR-AUTHORED: the target is frozen in the
- * definition snapshot at run start, every send is one per node dispatch,
- * serialized per target, stamped on a durable receipt, and bounded by the run
- * machinery (maxNodes × retry cap). It is the operator posting through a
- * machine, not a session messaging a session — so it takes the internal-callback
- * path (no caller header), like parent notifications do. The prompt's marker
- * line names the workflow/run/step, so the receiving conversation always shows
- * WHO is speaking.
- *
- * ATOMIC BUSY-RESERVE (GRS-016e-fix, Codex finding 2): the planner's busy probe
- * runs BEFORE the dispatch reaches here, so an operator message can land in
- * between (TOCTOU). The authoritative check is therefore INSIDE this function,
- * and the segment from the busy check through insertMessage is AWAIT-FREE — the
- * single-process event loop cannot interleave another route's insert between our
- * check and our insert (the GRS-017c synchronous-guard invariant; do NOT
- * introduce an await inside this segment). Busy — or became busy — returns a
- * typed DEFER: the driver hands the attempt back and the next sweep retries.
- * The inserted user row's durable id is returned as the settle ANCHOR.
- */
-export async function postWorkflowStepFollowUp(ctx: FollowUpContext, context: ApiContext): Promise<FollowUpPostResult> {
-  const session = getSession(ctx.sessionId);
-  if (!session) throw new Error(`target session "${ctx.sessionId}" not found`);
-  // Actor assertion — the declaration must be true of the target, or the author
-  // learns immediately (via the step's honest spawn-failure) instead of silently
-  // running their step on whatever the session happens to be.
-  if (ctx.spec.actorKind === 'engine' && session.engine !== ctx.spec.actorRef) {
-    throw new Error(`target session "${ctx.sessionId}" runs engine "${session.engine}", not the declared engine "${ctx.spec.actorRef}"`);
-  }
-  if (ctx.spec.actorKind === 'employee' && session.employee !== ctx.spec.actorRef) {
-    throw new Error(`target session "${ctx.sessionId}" belongs to employee "${session.employee ?? 'none'}", not the declared employee "${ctx.spec.actorRef}"`);
-  }
-  const engine = context.sessionManager.getEngine(session.engine);
-  if (!engine) throw new Error(`engine "${session.engine}" not available`);
-  const config = context.getConfig();
-
-  // ── ATOMIC SEGMENT: busy check → dispatch-started mark → insert. No await
-  // between here and insertMessage. A running/waiting status, a live queue lane,
-  // or ANY pending queue item (an operator message that landed after the
-  // planner's probe) defers the post — the marker row is never inserted into a
-  // target that is not verified-idle within this same synchronous segment.
-  const queueSessionKey = session.sessionKey || session.sourceRef || session.id;
-  const queue = context.sessionManager.getQueue();
-  const busy =
-    session.status === "running" ||
-    session.status === "waiting" ||
-    queue.isRunning(queueSessionKey) ||
-    queue.getPendingCount(queueSessionKey) > 0;
-  if (busy) {
-    return { outcome: "deferred", reason: `target session ${session.id} is busy (status ${session.status})` };
-  }
-  // DISPATCH-STARTED evidence, BEFORE the insert (GRS-016e-fix3, Codex round-3
-  // finding 4): mark the target session `running` durably — exactly what
-  // spawnWorkflowStepSession does before its own enqueue+dispatch. A process
-  // death anywhere from this write to (and through) the engine turn leaves a
-  // dead `running` row that boot's recoverStaleSessions stamps `interrupted`,
-  // so recovery RETRIES instead of mis-settling `step-no-output`. Ordering is
-  // load-bearing: status BEFORE insert means an anchored row can never exist
-  // without the dispatch-started mark — idle+anchored+no-reply is therefore
-  // always a turn the ENGINE completed empty (the honest no-output terminal),
-  // never a crash artifact. A crash between the status write and the insert
-  // recovers by row-id absence (re-post the same attempt), unchanged.
-  const wasInterrupted = session.status === "interrupted";
-  updateSession(session.id, { status: "running", lastActivity: new Date().toISOString(), lastError: null });
-  session.status = "running";
-  insertMessage(session.id, "user", ctx.prompt, undefined, undefined, ctx.anchorMessageId);
-  // ── end atomic segment. The row now exists under the driver's PRE-MINTED
-  // anchor id (GRS-016e-fix2), already persisted on the receipt.
-  if (wasInterrupted) {
-    // A restart-interrupted target resumes on the new turn, the message route's rule.
-    context.emit("session:resumed", { sessionId: session.id });
-  }
-  const queueItemId = enqueueQueueItem(session.id, queueSessionKey, ctx.prompt);
-  context.emit("queue:updated", { sessionId: session.id, sessionKey: queueSessionKey });
-  dispatchWebSessionRun(session, ctx.prompt, engine, config, context, { queueItemId });
-  return { outcome: "posted", sessionId: session.id, detail: `follow-up turn posted into session ${session.id} (${ctx.turnMarker})` };
-}
-
-/**
- * Build the run-driver dependency set (GRS-014b) shared by the POST …/run route and
- * the gateway-boot run reconciler: real definition store, real session probe
- * (registry by deterministic sessionKey), real spawner. Injected — the driver module
- * itself stays gateway-free.
- */
-export function workflowRunDriverDeps(
-  root: string,
-  context: ApiContext,
-  options: { activitySessionId?: string } = {},
-): RunDriverDeps {
-  return {
-    root,
-    reporting: workflowReportingContext(context),
-    onRunStarted: (run) => emitWorkflowRunCompanyChanged(context, run, "started", options.activitySessionId),
-    todoEventFeed: createWorkflowTodoEventFeed(),
-    getDefinition,
-    probeStepSession: (sessionKey) => {
-      const session = getSessionBySessionKey(sessionKey);
-      if (!session) return { found: false };
-      // For a SETTLED session, also surface the final assistant message — the raw
-      // material of the step's outcome (GRS-014c). Fetched only on idle (once per
-      // settle, not per sweep tick). An idle session with no assistant output is an
-      // honest step failure ("settled with no output"), so null is meaningful.
-      let finalAssistantText: string | null | undefined;
-      if (session.status === "idle") {
-        const messages = getMessages(session.id);
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (messages[i].role === "assistant" && !messages[i].partial) {
-            finalAssistantText = messages[i].content;
-            break;
-          }
-        }
-        finalAssistantText ??= null;
-      }
-      return {
-        found: true,
-        sessionId: session.id,
-        status: session.status,
-        ...(finalAssistantText !== undefined ? { finalAssistantText } : {}),
-      };
-    },
-    spawnStep: (ctx) => spawnWorkflowStepSession(ctx, context),
-    // ROW-ANCHORED turn probe (GRS-016e-fix, identity-only since fix2): correlation
-    // runs through the shared `correlateSessionTurn` — the anchor is the workflow's
-    // own inserted USER row, matched ONLY by its persisted pre-minted row id (no
-    // content/marker-prefix fallback exists), and the reply is the first non-partial
-    // ASSISTANT row strictly AFTER it. Marker TEXT is human attribution only. A
-    // session with queued or running work reports busy ('running') even when its
-    // status record says idle, closing the settled-turn/queued-turn gap.
-    probeSessionTurn: ({ sessionId, marker, anchor }) => {
-      const session = getSession(sessionId);
-      if (!session) return { found: false };
-      const queue = context.sessionManager.getQueue();
-      const queueKey = session.sessionKey || session.sourceRef || session.id;
-      const busy = queue.isRunning(queueKey) || queue.getPendingCount(queueKey) > 0;
-      const status = busy && session.status === "idle" ? "running" : session.status;
-      const c = correlateSessionTurn(getMessages(session.id), { marker, ...(anchor ? { anchor } : {}) });
-      return {
-        found: true,
-        status,
-        markerPosted: c.markerPosted,
-        ...(c.superseded ? { superseded: true } : {}),
-        ...(status === "idle" && c.markerPosted ? { replyText: c.replyText } : {}),
-      };
-    },
-    postStepFollowUp: (ctx) => postWorkflowStepFollowUp(ctx, context),
-    // Run-START existence check for 'existing' targets. LOCAL REGISTRY ONLY — a
-    // sandbox gateway can never see (let alone message) another instance's
-    // sessions: there is no cross-gateway path here, the evidence-root isolation
-    // argument for mode 'existing' (GRS-016e safety note c).
-    sessionExists: (sessionId) => !!getSession(sessionId),
-    // Workflow phase stop (timeouts and native cancellation): kill the live engine
-    // turn, drain the session's queue lane, interrupt the record — the same sequence
-    // POST /api/sessions/:id/stop performs, keyed by the phase's deterministic
-    // sessionKey. Best-effort by contract; durable cancellation records a bounded
-    // stop failure while the run remains in its honest stopping state.
-    stopStepSession: async (stop) => {
-      const session = getSessionBySessionKey(stop.sessionKey);
-      if (!session) return; // already gone — the settle stands, nothing burns
-      const interruption = `Interrupted: workflow phase stopped (${stop.reason})`;
-      killSessionEngines(context, session, interruption);
-      context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
-      updateSession(session.id, {
-        status: "interrupted",
-        attemptOutcome: "interrupted",
-        lastActivity: new Date().toISOString(),
-        lastError: interruption,
-      });
-      context.emit("session:stopped", { sessionId: session.id });
-    },
-    // Deterministic loop exit-gate evaluation (GRS-014e): the same evidence checks
-    // the derive path uses — artifact glob under the evidence root, flag from
-    // state.json. Approval never reaches here (the validator refuses it on loop edges).
-    evaluateGate: (gate) => {
-      if (gate.evaluator === "artifact-glob" && gate.ref) {
-        return artifactGatePasses(root, gate.ref, null, 0) !== null;
-      }
-      if (gate.evaluator === "state-flag" && gate.ref) {
-        return stateFlagPasses(root, gate.ref);
-      }
-      return false;
-    },
-    log: (level, message) => logger[level](message),
-  };
-}
-
-export function workflowReportingContext(context: ApiContext): WorkflowReportingContext {
-  return {
-    sessionExists: isActivityProjectionEligibleSession,
-    applyBlock: (sessionId, envelope, fallback) => applyBlockEnvelope(sessionId, envelope, fallback),
-    emitBlock: (sessionId, envelope, fallback) => {
-      context.emit("session:delta", {
-        sessionId,
-        type: "block",
-        content: fallback,
-        block: envelope,
-      });
-    },
-    claimDelivery: claimSessionDelivery,
-    deliverClaimed: deliverClaimedSessionDelivery,
-    log: (level, message) => logger[level](message),
-  };
-}
-
-function projectWorkflowOperationActivity(
-  run: WorkflowRun,
-  headers: HttpRequest["headers"],
-  context: ApiContext,
-  action: string,
-  changed = true,
-): string | undefined {
-  const target = verifiedActivityTarget(headers, context, RUN_ACTIVITY_TOOLS[action] ?? []);
-  return persistAndEmitActivityBlock({
-    context: chatActivityContext(context),
-    ...target,
-    envelope: workflowRunActivityEnvelope(run, action),
-    ...(changed ? {
-      companyEvent: {
-        entity: "workflow-run" as const,
-        action,
-        id: run.runId,
-        workflowId: run.workflowId,
-        runId: run.runId,
-        version: Math.max(1, run.revision ?? 1),
-        ...(target.sessionId ? { sessionId: target.sessionId } : {}),
-      },
-    } : {}),
-  });
-}
-
-function emitWorkflowRunCompanyChanged(
-  context: ApiContext,
-  run: WorkflowRun,
-  action: string,
-  sessionId?: string,
-): void {
-  persistAndEmitActivityBlock({
-    context: chatActivityContext(context),
-    companyEvent: {
-      entity: "workflow-run",
-      action,
-      id: run.runId,
-      workflowId: run.workflowId,
-      runId: run.runId,
-      version: Math.max(1, run.revision ?? 1),
-      ...(sessionId && isActivityProjectionEligibleSession(sessionId) ? { sessionId } : {}),
-    },
-  });
-}
-
-interface WorkflowRunRequestBody {
-  trigger?: "manual" | "schedule";
-  input?: unknown;
-  stepOverrides?: unknown;
-  idempotencyKey?: unknown;
-  reportMode?: unknown;
-}
-
-function projectWorkflowRunApprovalCapability(
-  run: WorkflowRun,
-  requestOrHeaders: HttpRequest | HttpRequest["headers"],
-  context: ApiContext,
-): WorkflowRun & {
-  approvalCapability: { canDecide: boolean; target: string | null; needsYou: boolean; escalated: boolean } | null;
-} {
-  if (run.status !== "parked" || !run.parked) return { ...run, approvalCapability: null };
-  const approval = run.parked.approval;
-  if (!approval) {
-    return {
-      ...run,
-      approvalCapability: { canDecide: false, target: null, needsYou: false, escalated: false },
-    };
-  }
-  const headers = scopedCallerHeaders(requestOrHeaders);
-  const authority = resolveWorkflowApprovalDecisionAuthority(headers, approval, {
-    allowOperator: true,
-    operatorAuthenticated: scopedOperatorAuthenticated(requestOrHeaders, context),
-  });
-  const needsYou = authority.ok && approval.state === "pending" && (
-    (authority.authority.kind === "employee" && approval.target === authority.authority.employee) ||
-    (authority.authority.kind === "operator" && (approval.targetKind === "virtual" || !!approval.escalatedAt))
-  );
-  return {
-    ...run,
-    approvalCapability: {
-      canDecide: authority.ok,
-      target: approval.target,
-      needsYou,
-      escalated: approval.escalatedAt !== null,
-    },
-  };
-}
-
-function projectWorkflowTriggerApprovalCapability(
-  binding: ReturnType<typeof publicWorkflowTriggerBinding>,
-  requestOrHeaders: HttpRequest | HttpRequest["headers"],
-  context: ApiContext,
-): ReturnType<typeof publicWorkflowTriggerBinding> & {
-  approvalCapability?: {
-    canDecide: boolean;
-    canEscalate: boolean;
-    needsYou: boolean;
-    target: string | null;
-    escalated: boolean;
-  };
-} {
-  if (binding.kind !== "poll") return binding;
-  const approval = binding.approval;
-  const headers = scopedCallerHeaders(requestOrHeaders);
-  const authority = resolveWorkflowApprovalDecisionAuthority(headers, approval, {
-    allowOperator: true,
-    operatorAuthenticated: scopedOperatorAuthenticated(requestOrHeaders, context),
-  });
-  const pending = approval.state === "pending";
-  const canDecide = pending && authority.ok;
-  return {
-    ...binding,
-    approvalCapability: {
-      canDecide,
-      canEscalate: canDecide && authority.ok && authority.authority.kind === "employee"
-        && approval.operatorEntitled !== true,
-      needsYou: canDecide,
-      target: approval.target,
-      escalated: approval.escalation?.target === "operator" && approval.operatorEntitled === true,
-    },
-  };
-}
-
-function validateWorkflowStepPrompt(value: unknown, field: string): { ok: true; prompt: string } | { ok: false; error: string } {
-  if (typeof value !== "string" || !value.trim()) {
-    return { ok: false, error: `${field} must be a non-empty string` };
-  }
-  const prompt = value.trim();
-  if (prompt.length > MAX_WORKFLOW_STEP_PROMPT_CHARS) {
-    return { ok: false, error: `${field} is too long (max ${MAX_WORKFLOW_STEP_PROMPT_CHARS} characters)` };
-  }
-  if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(prompt)) {
-    return { ok: false, error: `${field} must not contain control characters other than tabs or newlines` };
-  }
-  return { ok: true, prompt };
-}
-
-function validateWorkflowRunRequestBody(
-  body: WorkflowRunRequestBody,
-  def: EditableWorkflowDefinition,
-): {
-  ok: true;
-  input?: Record<string, unknown>;
-  stepOverrides?: Record<string, { prompt: string }>;
-  idempotencyKey?: string;
-  reportMode: WorkflowReportMode;
-} | { ok: false; error: string } {
-  if (body.input !== undefined && (!body.input || typeof body.input !== "object" || Array.isArray(body.input))) {
-    return { ok: false, error: "input must be a JSON object" };
-  }
-  let stepOverrides: Record<string, { prompt: string }> | undefined;
-  if (body.stepOverrides !== undefined) {
-    if (!body.stepOverrides || typeof body.stepOverrides !== "object" || Array.isArray(body.stepOverrides)) {
-      return { ok: false, error: "stepOverrides must be a JSON object keyed by step node id" };
-    }
-    stepOverrides = Object.create(null) as Record<string, { prompt: string }>;
-    for (const [nodeId, rawOverride] of Object.entries(body.stepOverrides as Record<string, unknown>)) {
-      if (!rawOverride || typeof rawOverride !== "object" || Array.isArray(rawOverride)) {
-        return { ok: false, error: `stepOverrides.${nodeId} must be an object with exactly one prompt field` };
-      }
-      const override = rawOverride as Record<string, unknown>;
-      const extraKeys = Object.keys(override).filter((key) => key !== "prompt");
-      if (extraKeys.length > 0) {
-        return { ok: false, error: `stepOverrides.${nodeId} has unknown field(s): ${extraKeys.join(", ")}; only prompt is allowed` };
-      }
-      const checked = validateWorkflowStepPrompt(override.prompt, `stepOverrides.${nodeId}.prompt`);
-      if (!checked.ok) return checked;
-      const node = def.nodes.find((candidate) => candidate.id === nodeId);
-      if (!node || node.type !== "step" || !node.actor) {
-        return { ok: false, error: `stepOverrides references unknown actor-backed step "${nodeId}"` };
-      }
-      stepOverrides[nodeId] = { prompt: checked.prompt };
-    }
-  }
-  let idempotencyKey: string | undefined;
-  if (body.idempotencyKey !== undefined) {
-    if (typeof body.idempotencyKey !== "string" || !body.idempotencyKey.trim()) {
-      return { ok: false, error: "idempotencyKey must be a non-empty string" };
-    }
-    idempotencyKey = body.idempotencyKey.trim();
-    if (idempotencyKey.length > 256) {
-      return { ok: false, error: "idempotencyKey is too long (max 256 characters)" };
-    }
-    if (/[\x00-\x1f\x7f]/.test(idempotencyKey)) {
-      return { ok: false, error: "idempotencyKey must not contain control characters" };
-    }
-  }
-  let reportMode: WorkflowReportMode = "resume";
-  if (body.reportMode !== undefined) {
-    if (body.reportMode !== "resume" && body.reportMode !== "silent") {
-      return { ok: false, error: 'reportMode must be exactly "resume" or "silent"' };
-    }
-    reportMode = body.reportMode;
-  }
-  return {
-    ok: true,
-    ...(body.input !== undefined ? { input: body.input as Record<string, unknown> } : {}),
-    ...(stepOverrides ? { stepOverrides } : {}),
-    ...(idempotencyKey ? { idempotencyKey } : {}),
-    reportMode,
-  };
-}
-
-async function runWorkflowDefinitionFromHttp(
-  req: HttpRequest,
-  res: ServerResponse,
-  context: ApiContext,
-  root: string,
-  def: EditableWorkflowDefinition,
-  body: WorkflowRunRequestBody,
-  expectedId?: string,
-): Promise<void> {
-  const authority = authorizeWorkflowOperation(req, def, "run", context);
-  if (!authority.ok) return json(res, { error: authority.error }, authority.status);
-  const validated = validateWorkflowRunRequestBody(body, def);
-  if (!validated.ok) return badRequest(res, validated.error);
-  if (expectedId !== undefined && def.id !== expectedId) {
-    return badRequest(res, `definition file "${expectedId}" has mismatched id "${def.id}"`);
-  }
-  const identity = resolveScopedWriteCallerIdentity(req, context);
-  const invocationSessionId = identity.kind === "session" && isActivityProjectionEligibleSession(identity.callerId)
-    ? identity.callerId
-    : undefined;
-  const activitySessionId = verifiedActivityTarget(
-    req.headers,
-    context,
-    ["start_workflow_run", "run_workflow_by_name"],
-  ).sessionId;
-  const invocation = invocationSessionId
-    ? { sessionId: invocationSessionId, reportMode: validated.reportMode }
-    : undefined;
-  const { scanOrg } = await import("./org.js");
-  const knownEmployees = [...scanOrg().keys()];
-  const knownEngines = [...context.sessionManager.getEngines().keys()];
-  const trigger = body.trigger === "schedule"
-    ? {
-        source: "schedule" as const,
-        event: "schedule.fire",
-        payload: { workflowId: def.id, requestedBy: "api" },
-        ...(validated.idempotencyKey ? { fireRef: validated.idempotencyKey } : {}),
-      }
-    : {
-        source: "manual" as const,
-        event: "workflow.manual_started",
-        payload: { workflowId: def.id, requestedBy: "api" },
-        ...(validated.idempotencyKey ? { fireRef: validated.idempotencyKey } : {}),
-      };
-  const parameters = validated.input !== undefined || validated.idempotencyKey !== undefined
-    ? {
-        input: validated.input ?? {},
-        ...(validated.idempotencyKey ? { idempotencyKey: validated.idempotencyKey } : {}),
-      }
-    : undefined;
-  let replayed = false;
-  try {
-    const run = await startWorkflowRunFromTrigger(workflowRunDriverDeps(root, context, {
-      ...(activitySessionId ? { activitySessionId } : {}),
-    }), def, trigger, {
-      knownEmployees,
-      knownEngines,
-      principal: authority.actor === "operator" ? "operator" : `employee:${authority.actor}`,
-      onIdempotencyReplay: () => { replayed = true; },
-      ...(parameters ? { parameters } : {}),
-      ...(invocation ? { invocation } : {}),
-      ...(validated.stepOverrides ? { stepOverrides: validated.stepOverrides } : {}),
-    });
-    const activityReceiptId = projectWorkflowOperationActivity(
-      run,
-      req.headers,
-      context,
-      replayed ? "replayed" : "started",
-      false,
-    );
-    const status = replayed ? 200 : run.status === "failed" ? 422 : 201;
-    const response = projectWorkflowRunApprovalCapability(run, req, context) as unknown as Record<string, unknown>;
-    return json(res, status >= 400 ? response : withActivityReceipt(response, activityReceiptId), status);
-  } catch (err) {
-    if (err instanceof WorkflowRunIdempotencyConflict) {
-      return json(res, {
-        error: err.message,
-        code: WORKFLOW_RUN_IDEMPOTENCY_CONFLICT,
-        ...(err.runId ? { runId: err.runId } : {}),
-      }, 409);
-    }
-    throw err;
-  }
-}
-
-/**
- * Re-derive the managed workflow cron jobs from the definition store and reload the
- * scheduler when jobs.json changed (GRS-014d). Called after every definition
- * mutation (create/update/duplicate/retire) and once at gateway boot. BEST-EFFORT
- * from the routes: the definition save already succeeded, so a sync hiccup must not
- * fail the response — drift heals on the next save or boot.
- */
-export function syncWorkflowCronJobsForRoot(root: string): void {
-  try {
-    applyWorkflowCronSync(root, {
-      onChanged: (jobs) => reloadScheduler(jobs),
-      log: (level, message) => logger[level](message),
-    });
-  } catch (err) {
-    logger.warn(`Workflow cron sync failed: ${err instanceof Error ? err.message : err}`);
-  }
-}
-
-/**
- * The managed-workflow cron fire handler (GRS-014d): what the scheduler's tick (and
- * the manual trigger paths) call for a `managedBy:'workflow'` job. Resolves the
- * evidence root PER FIRE (same guard the workflow routes use — a production-shaped
- * home without one keeps managed jobs inert), starts the typed run, and re-syncs the
- * managed job set when the fire proves the job expired or stale (self-cleaning:
- * expired → disabled, stale → removed).
- */
-export function workflowCronFireHandler(context: ApiContext): WorkflowCronFire {
-  return async (job, fireIso) => {
-    const root = resolveWorkflowEvidenceRoot();
-    if (!root) {
-      return { ok: false, note: "workflow evidence root is not configured — managed cron job is inert on this gateway" };
-    }
-    const result = await fireWorkflowCronJob(workflowRunDriverDeps(root, context), job, fireIso);
-    if (result.outcome === "expired" || result.outcome === "stale") {
-      syncWorkflowCronJobsForRoot(root);
-    }
-    switch (result.outcome) {
-      case "started":
-        return { ok: true, note: result.detail, runId: result.run.runId };
-      case "duplicate":
-        return { ok: true, note: result.detail, runId: result.runId };
-      case "expired":
-        return { ok: true, note: `${result.detail} — managed job disabled by sync` };
-      case "stale":
-        return { ok: false, note: `${result.detail} — managed job removed by sync` };
-    }
-  };
 }
 
 /**
@@ -1622,131 +822,6 @@ function serverError(res: ServerResponse, message: string): void {
   json(res, { error: message }, 500);
 }
 
-/** Map a WorkflowStoreError (GRS-011b CRUD) to an HTTP status; unknown errors → 500. */
-function workflowStoreErrorResponse(res: ServerResponse, err: unknown): void {
-  if (err instanceof WorkflowStoreError) {
-    switch (err.code) {
-      case "not-found":
-        return notFound(res);
-      case "conflict":
-        return json(res, { error: err.message }, 409);
-      case "validation":
-        return json(res, { error: err.message, errors: err.errors ?? [] }, 400);
-      default: // invalid-id | bad-input
-        return badRequest(res, err.message);
-    }
-  }
-  logger.error(`workflow-definition route error: ${(err as Error).message}`);
-  return serverError(res, "workflow definition operation failed");
-}
-
-function workflowTriggerStoreErrorResponse(res: ServerResponse, err: unknown): void {
-  if (err instanceof WorkflowTriggerStoreError) {
-    switch (err.code) {
-      case "not-found":
-        return notFound(res);
-      case "conflict":
-        return json(res, { error: err.message }, 409);
-      default:
-        return badRequest(res, err.message);
-    }
-  }
-  logger.error(`workflow-trigger route error: ${(err as Error).message}`);
-  return serverError(res, "workflow trigger operation failed");
-}
-
-async function createWorkflowTriggerForActor(
-  root: string,
-  body: Record<string, unknown>,
-  actor: string,
-  effects?: ReturnType<typeof createWorkflowTriggerMutationEffects>,
-): Promise<Record<string, unknown>> {
-  const input: Record<string, unknown> = { ...body, createdBy: actor };
-  const created = createWorkflowTriggerBinding(
-    root,
-    input as unknown as Parameters<typeof createWorkflowTriggerBinding>[1],
-  );
-  return {
-    trigger: listPublicWorkflowTriggerBindings(root).find((trigger) => trigger.name === created.binding.name) ?? created.binding,
-    ...(created.secretToken ? { secretToken: created.secretToken } : {}),
-  };
-}
-
-async function reconcileOwnedSopTriggers(
-  root: string,
-  workflowId: string,
-  nextPlan: CreateWorkflowTriggerBindingInput | undefined,
-  actor: string,
-  effects: ReturnType<typeof createWorkflowTriggerMutationEffects>,
-  touchedNames: Set<string>,
-): Promise<Record<string, unknown> | undefined> {
-  const all = listWorkflowTriggerBindings(root);
-  const owned = all.filter((trigger) => trigger.sopOwnerWorkflowId === workflowId);
-  if (nextPlan) {
-    const collision = all.find(
-      (trigger) => trigger.name === nextPlan.name && trigger.sopOwnerWorkflowId !== workflowId,
-    );
-    if (collision) {
-      throw new WorkflowTriggerStoreError("conflict", `workflow trigger "${nextPlan.name}" already exists`);
-    }
-  }
-  for (const trigger of owned) {
-    touchedNames.add(trigger.name);
-    await deleteWorkflowTriggerBinding(root, trigger.name, { effects });
-  }
-  if (!nextPlan) return undefined;
-  touchedNames.add(nextPlan.name);
-  const created = await createWorkflowTriggerForActor(
-    root,
-    nextPlan as unknown as Record<string, unknown>,
-    actor,
-    effects,
-  );
-  return created.trigger as Record<string, unknown>;
-}
-
-function restoreWorkflowMutationState(
-  root: string,
-  workflowId: string,
-  definitionState: ReturnType<typeof captureDefinitionState>,
-  triggerState: ReturnType<typeof captureWorkflowTriggerBindingsState>,
-  touchedTriggerNames: Set<string>,
-): void {
-  const failures: string[] = [];
-  try {
-    restoreDefinitionState(root, workflowId, definitionState);
-  } catch (err) {
-    failures.push(`definition rollback failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  try {
-    restoreWorkflowTriggerBindingsState(root, triggerState, touchedTriggerNames);
-  } catch (err) {
-    failures.push(`trigger rollback failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  if (failures.length > 0) throw new Error(failures.join("; "));
-}
-
-function workflowMutationErrorResponse(res: ServerResponse, err: unknown): void {
-  if (err instanceof WorkflowTriggerStoreError) return workflowTriggerStoreErrorResponse(res, err);
-  return workflowStoreErrorResponse(res, err);
-}
-
-function bearerToken(headers: HttpRequest["headers"]): string | undefined {
-  const raw = headers.authorization;
-  const header = Array.isArray(raw) ? raw[0] : raw;
-  if (typeof header !== "string") return undefined;
-  const [scheme, ...rest] = header.trim().split(/\s+/);
-  if (scheme?.toLowerCase() !== "bearer") return undefined;
-  const token = rest.join(" ").trim();
-  return token || undefined;
-}
-
-function workflowEventToken(headers: HttpRequest["headers"]): string | undefined {
-  const header = headers["x-jinn-workflow-event-token"];
-  const explicit = Array.isArray(header) ? header[0] : header;
-  return typeof explicit === "string" && explicit.trim() ? explicit.trim() : bearerToken(headers);
-}
-
 const REDACTED_SECRET = "***";
 
 export function isSensitiveConfigKey(key: string): boolean {
@@ -1858,7 +933,6 @@ function sessionHasRuntimeActivity(session: Session, context: ApiContext): boole
 }
 
 function getSessionTransportState(session: Session, context: ApiContext): "idle" | "queued" | "running" | "error" | "interrupted" {
-  if (isLegacyWorkflowRunSession(session)) return "idle";
   const queue = context.sessionManager.getQueue();
   const base = queue.getTransportState(session.sessionKey || session.sourceRef, session.status);
   if (sessionHasRuntimeActivity(session, context) && base !== "error" && base !== "interrupted") return "running";
@@ -2247,7 +1321,7 @@ function singleHeader(headers: HttpRequest["headers"], name: string): string | u
 
 function isActivityProjectionEligibleSession(sessionId: string): boolean {
   const session = getSession(sessionId);
-  return Boolean(session && !isLegacyWorkflowRunSession(session));
+  return Boolean(session);
 }
 
 function hasActivityBlock(sessionId: string, blockId: string): boolean {
@@ -2309,27 +1383,6 @@ const TODO_ACTIVITY_TOOLS: Record<string, string> = {
   "approval-escalated": "escalate_work_item_approval",
 };
 
-const WORKFLOW_DEFINITION_ACTIVITY_TOOLS: Record<string, string> = {
-  created: "create_workflow",
-  updated: "update_workflow",
-  retired: "retire_workflow",
-};
-
-const WORKFLOW_TRIGGER_ACTIVITY_TOOLS: Record<string, string> = {
-  "trigger-created": "create_trigger",
-  "trigger-deleted": "delete_trigger",
-  "trigger-approval-decided": "decide_poll_activation",
-  "trigger-approval-escalated": "escalate_poll_activation",
-};
-
-const RUN_ACTIVITY_TOOLS: Record<string, readonly string[]> = {
-  started: ["start_workflow_run", "run_workflow_by_name"],
-  replayed: ["start_workflow_run", "run_workflow_by_name"],
-  "step-prompt-edited": ["edit_workflow_run_step_prompt"],
-  cancelled: ["cancel_workflow_run"],
-  "gate-approval-escalated": ["escalate_workflow_gate"],
-};
-
 function persistTodoMutationActivity(
   req: HttpRequest,
   context: ApiContext,
@@ -2353,55 +1406,6 @@ function persistTodoMutationActivity(
         ...(target.sessionId ? { sessionId: target.sessionId } : {}),
       },
     } : {}),
-  });
-}
-
-function persistWorkflowDefinitionMutationActivity(
-  req: HttpRequest,
-  context: ApiContext,
-  definition: EditableWorkflowDefinition,
-  action: string,
-  changed = true,
-): string | undefined {
-  const target = verifiedActivityTarget(req.headers, context, WORKFLOW_DEFINITION_ACTIVITY_TOOLS[action] ?? []);
-  return persistAndEmitActivityBlock({
-    context: chatActivityContext(context),
-    ...target,
-    envelope: workflowDefinitionActivityBlock(definition, action),
-    ...(changed ? {
-      companyEvent: {
-        entity: "workflow-definition" as const,
-        action,
-        id: definition.id,
-        version: definition.version,
-        ...(target.sessionId ? { sessionId: target.sessionId } : {}),
-      },
-    } : {}),
-  });
-}
-
-function persistWorkflowTriggerMutationActivity(
-  req: HttpRequest,
-  context: ApiContext,
-  binding: WorkflowTriggerBinding,
-  definition: EditableWorkflowDefinition | null,
-  action: string,
-  changed = true,
-): string | undefined {
-  if (!changed) return undefined;
-  const target = verifiedActivityTarget(req.headers, context, WORKFLOW_TRIGGER_ACTIVITY_TOOLS[action] ?? []);
-  return persistAndEmitActivityBlock({
-    context: chatActivityContext(context),
-    ...target,
-    ...(definition ? { envelope: workflowDefinitionActivityBlock(definition, action) } : {}),
-    companyEvent: {
-      entity: "workflow-trigger",
-      action,
-      id: binding.name,
-      workflowId: binding.targetWorkflowId,
-      revision: workflowTriggerBindingRevision(binding),
-      ...(target.sessionId ? { sessionId: target.sessionId } : {}),
-    },
   });
 }
 
@@ -2561,8 +1565,6 @@ export function isSameOriginBrowserRequest(
 function isPublicIdentifiedCallerRoute(method: string, pathname: string): boolean {
   // Public liveness/bootstrap: safe summary used to discover whether the gateway is up.
   if (method === "GET" && pathname === "/api/status") return true;
-  // Public webhook ingress: this route enforces its own gateway-token or binding-token auth.
-  if (method === "POST" && pathname === "/api/workflow-events") return true;
   return false;
 }
 
@@ -2573,8 +1575,7 @@ function allowsUnauthenticatedMutation(method: string, pathname: string): boolea
     || pathname === "/api/auth/pairing-codes"
     || pathname === "/api/auth/pair"
     || pathname === "/api/auth/logout"
-    || pathname === "/api/internal/hook"
-    || pathname === "/api/workflow-events";
+    || pathname === "/api/internal/hook";
 }
 
 function rejectUnverifiedIdentifiedApiCaller(req: HttpRequest, res: ServerResponse, method: string, pathname: string, context: ApiContext): boolean {
@@ -2657,119 +1658,6 @@ function rejectScopedIdentityGrant(req: HttpRequest, res: ServerResponse, action
   }
   json(res, { error: `${action} cannot mint broader browser/operator identity for a capability-bound employee session` }, 403);
   return true;
-}
-
-type WorkflowOperation = "create" | "update" | "duplicate" | "retire" | "run" | "bind-trigger";
-
-type WorkflowOperationAuthority =
-  | { ok: true; actor: string; employee?: Employee; canSetWorkflowAuthority: boolean }
-  | { ok: false; status: 403; error: string };
-
-function readWorkflowAuthorityString(def: EditableWorkflowDefinition, keys: string[]): string | null {
-  const rec = def as unknown as Record<string, unknown>;
-  for (const key of keys) {
-    const value = rec[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return null;
-}
-
-function workflowAuthorityEmployee(principal: string | null, registry: Map<string, Employee>): string | null {
-  if (!principal) return null;
-  const sessionMatch = /^session:([^:]+)$/.exec(principal);
-  if (sessionMatch) {
-    const session = getSession(sessionMatch[1]);
-    return session?.employee && registry.has(session.employee) ? session.employee : null;
-  }
-  return registry.has(principal) ? principal : null;
-}
-
-function workflowAuthorityCritical(def: EditableWorkflowDefinition): boolean {
-  const rec = def as unknown as Record<string, unknown>;
-  if (rec.critical === true || rec.cooOwned === true || rec.requiresCooApproval === true) return true;
-  const classification = typeof rec.classification === "string" ? rec.classification.toLowerCase() : "";
-  const authority = typeof rec.authority === "string" ? rec.authority.toLowerCase() : "";
-  return classification === "critical" || authority === "coo" || authority === "operator";
-}
-
-function hasDepartmentWorkflowAuthority(employee: Employee, workflowDepartment: string | null): boolean {
-  if (!workflowDepartment || employee.department !== workflowDepartment) return false;
-  return employee.rank === "manager" || employee.rank === "executive";
-}
-
-function authorizeWorkflowOperation(
-  requestOrHeaders: HttpRequest | HttpRequest["headers"],
-  def: EditableWorkflowDefinition | null,
-  op: WorkflowOperation,
-  context: ApiContext,
-): WorkflowOperationAuthority {
-  const identity = resolveScopedWriteCallerIdentity(requestOrHeaders, context);
-  if (identity.kind === "unidentified-tool" || identity.kind === "unauthenticated") {
-    return { ok: false, status: 403, error: UNIDENTIFIED_TOOL_CALL_ERROR };
-  }
-  if (identity.kind === "operator") {
-    return { ok: true, actor: "operator", canSetWorkflowAuthority: true };
-  }
-
-  const session = getSession(identity.callerId);
-  if (!session?.employee) {
-    return { ok: false, status: 403, error: `workflow ${op} requires a session with an employee identity` };
-  }
-  const registry = scanOrg();
-  const employee = registry.get(session.employee);
-  if (!employee) {
-    return { ok: false, status: 403, error: `employee "${session.employee}" is not in the org roster; workflow ${op} requires workflow authority` };
-  }
-
-  const root = resolveRootApprovalTarget();
-  if (root?.kind === "employee" && employee.name === root.name) {
-    return { ok: true, actor: employee.name, employee, canSetWorkflowAuthority: true };
-  }
-
-  if (op === "create") {
-    return { ok: true, actor: employee.name, employee, canSetWorkflowAuthority: false };
-  }
-
-  if (!def) {
-    return { ok: false, status: 403, error: `workflow ${op} requires a persisted workflow authority record` };
-  }
-
-  const ownerPrincipal = readWorkflowAuthorityString(def, ["owner", "ownerEmployee", "workflowOwner", "createdBy", "creator", "author"]);
-  const owner = workflowAuthorityEmployee(ownerPrincipal, registry);
-  const department = readWorkflowAuthorityString(def, ["department", "ownerDepartment", "workflowDepartment"]);
-  const critical = workflowAuthorityCritical(def);
-
-  if (!owner && !department) {
-    return { ok: false, status: 403, error: `workflow "${def.id}" does not declare owner/department authority; workflow ${op} defaults to COO/operator` };
-  }
-  if (owner && owner === employee.name) {
-    return { ok: true, actor: employee.name, employee, canSetWorkflowAuthority: false };
-  }
-  if (owner && (critical || owner === root?.name)) {
-    return { ok: false, status: 403, error: `employee "${employee.name}" cannot ${op} workflow "${def.id}" owned by "${owner}"` };
-  }
-  if (hasDepartmentWorkflowAuthority(employee, department)) {
-    return { ok: true, actor: employee.name, employee, canSetWorkflowAuthority: false };
-  }
-  return { ok: false, status: 403, error: `employee "${employee.name}" cannot ${op} workflow "${def.id}"` };
-}
-
-function stripWorkflowAuthorityFields(patch: Partial<EditableWorkflowDefinition>): Partial<EditableWorkflowDefinition> {
-  const safePatch = { ...patch } as Record<string, unknown>;
-  for (const field of WORKFLOW_AUTHORITY_FIELDS) delete safePatch[field];
-  return safePatch as Partial<EditableWorkflowDefinition>;
-}
-
-function workflowDefinitionAuthorPatch(authority: WorkflowOperationAuthority): Record<string, string> {
-  if (!authority.ok) return {};
-  if (!authority.employee) return authority.actor === "operator" ? { createdBy: "operator" } : {};
-  return { owner: authority.employee.name, department: authority.employee.department, createdBy: authority.employee.name };
-}
-
-function workflowDefinitionAuthorityResetPatch(authority: WorkflowOperationAuthority): Partial<EditableWorkflowDefinition> & Record<string, unknown> {
-  const reset: Record<string, unknown> = {};
-  for (const field of WORKFLOW_AUTHORITY_FIELDS) reset[field] = undefined;
-  return { ...reset, ...workflowDefinitionAuthorPatch(authority) } as Partial<EditableWorkflowDefinition> & Record<string, unknown>;
 }
 
 function workItemActor(caller: WorkItemCaller): string {
@@ -3000,27 +1888,11 @@ function isTurnSuperseded(sessionId: string, turnStartedAt: number): boolean {
 }
 
 function isSessionLiveRunning(session: Session, context: ApiContext): boolean {
-  if (isLegacyWorkflowRunSession(session)) return false;
   if (session.status !== "running") return false;
   const engine = context.sessionManager.getEngine(session.engine);
   if (!engine || !isInterruptibleEngine(engine)) return true;
   if ("isTurnRunning" in engine) return Boolean((engine as any).isTurnRunning(session.id));
   return engine.isAlive(session.id);
-}
-
-function rejectLegacyWorkflowSessionAccess(
-  res: ServerResponse,
-  session: Session,
-  access: "read" | "mutation",
-): boolean {
-  if (!isLegacyWorkflowRunSession(session)) return false;
-  json(res, {
-    error: access === "read"
-      ? "Workflow runs are no longer sessions."
-      : "Historical Workflow session is read-only.",
-    legacyWorkflowRun: legacyWorkflowRunLocation(session),
-  }, access === "read" ? 410 : 409);
-  return true;
 }
 
 function checkInstanceHealth(port: number): Promise<boolean> {
@@ -3164,10 +2036,6 @@ export async function handleApiRequest(
       if (!requireCallbackRecoveryAuthority(req, res, context)) return;
       try {
         const existing = getSessionDelivery(callbackRequeueParams.id);
-        const target = existing ? getSession(existing.targetSessionId) : undefined;
-        if (existing && target && isLegacyWorkflowRunSession(target)) {
-          return json(res, { error: "historical workflow delivery is read-only" }, 409);
-        }
         const delivery = requeueDeadLetterSessionDelivery(callbackRequeueParams.id);
         void recoverPendingSessionDeliveries().catch((error) => {
           logger.error(`[callbacks] Requeued delivery ${delivery.id} could not start recovery: ${error instanceof Error ? error.message : String(error)}`);
@@ -3402,7 +2270,6 @@ export async function handleApiRequest(
       const requestingSessionId = headerValue(req, "x-jinn-session-id")?.trim();
       if (requestingSessionId) {
         const requestingSession = getSession(requestingSessionId);
-        if (requestingSession && rejectLegacyWorkflowSessionAccess(res, requestingSession, "mutation")) return;
         const completed = markRunningQueueItemsCompletedForSession(requestingSessionId);
         if (completed > 0) {
           logger.info(`Completed ${completed} active queue item(s) for restart-requesting session ${requestingSessionId}`);
@@ -3850,7 +2717,6 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const limit = parseMessageLimit(url.searchParams.get("limit"), 100);
       const before = url.searchParams.get("before") || undefined;
       const page = getMessagePage(params.id, { before, limit });
@@ -3862,7 +2728,6 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const includeMessages = url.searchParams.get("messages") !== "0";
       const lastN = parseMessageLimit(url.searchParams.get("last"), 0);
       const page = includeMessages && lastN > 0
@@ -3899,7 +2764,6 @@ export async function handleApiRequest(
     if ((method === "PUT" || method === "PATCH") && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       const _parsed = await readJsonBody(req, res);
       if (!_parsed.ok) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3970,7 +2834,6 @@ export async function handleApiRequest(
     if (method === "DELETE" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
 
       if (session.workItemId) {
         preserveLinkedAttempt(context, session, "Interrupted: deletion refused for linked execution attempt");
@@ -4006,7 +2869,6 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       if (session.status === "running" || session.status === "waiting") {
         return json(res, { error: "Cannot archive a chat while it is running or waiting" }, 409);
       }
@@ -4022,7 +2884,6 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       const restored = unarchiveSession(params.id);
       if (!restored) return notFound(res);
       context.emit("session:updated", { sessionId: params.id });
@@ -4034,7 +2895,6 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       // GRS-017a — an agent-initiated stop (declared caller identity) is scoped
       // to the caller's OWN DESCENDANTS: cross-tree stops are a lateral
       // authority grab, so peers and ancestors are refused. Operator/UI calls
@@ -4069,7 +2929,6 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       killSessionEngines(context, session, "Interrupted: session reset");
       context.sessionManager.getQueue().clearQueue(session.sessionKey || session.sourceRef || session.id);
       const meta = { ...(session.transportMeta || {}) } as Record<string, unknown>;
@@ -4094,7 +2953,6 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const source = getSession(params.id);
       if (!source) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, source, "mutation")) return;
       if (!source.engineSessionId) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Session has no engine session ID — cannot duplicate" }));
@@ -4153,7 +3011,6 @@ export async function handleApiRequest(
     if (method === "DELETE" && queueItemParams) {
       const session = getSession(queueItemParams.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       const cancelled = cancelQueueItem(queueItemParams.itemId);
       if (!cancelled) {
         res.writeHead(409, { "Content-Type": "application/json" });
@@ -4169,7 +3026,6 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const items = getQueueItems(session.sessionKey || session.sourceRef || session.id);
       return json(res, items);
     }
@@ -4179,7 +3035,6 @@ export async function handleApiRequest(
     if (method === "DELETE" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       const sessionKey = session.sessionKey || session.sourceRef || session.id;
       // Cancel only operator-visible rows. SessionQueue checks each durable row
       // before execution, so no coarse in-memory cancellation is needed here;
@@ -4194,7 +3049,6 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       const sessionKey = session.sessionKey || session.sourceRef || session.id;
       context.sessionManager.getQueue().pauseQueue(sessionKey);
       context.emit("queue:updated", { sessionId: params.id, sessionKey, paused: true });
@@ -4206,7 +3060,6 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       const sessionKey = session.sessionKey || session.sourceRef || session.id;
       context.sessionManager.getQueue().resumeQueue(sessionKey);
       context.emit("queue:updated", { sessionId: params.id, sessionKey, paused: false });
@@ -4226,8 +3079,6 @@ export async function handleApiRequest(
         const session = getSession(id);
         return session ? [session] : [];
       });
-      const historical = sessions.find(isLegacyWorkflowRunSession);
-      if (historical && rejectLegacyWorkflowSessionAccess(res, historical, "mutation")) return;
       const preserved = sessions.filter((session) => session.workItemId);
       const deletable = sessions.filter((session) => !session.workItemId);
 
@@ -4264,7 +3115,6 @@ export async function handleApiRequest(
     params = matchRoute("/api/sessions/:id/children", pathname);
     if (method === "GET" && params) {
       const session = getSession(params.id);
-      if (session && rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const children = listChildSessions(params.id);
       return json(res, serializeSessionList(children, context));
     }
@@ -4278,7 +3128,6 @@ export async function handleApiRequest(
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const messageId = readCleanSearchParam(url, "message");
       if (!messageId) return badRequest(res, "message (the anchor message id, from a search hit) is required");
       const radius = Math.max(
@@ -4833,903 +3682,11 @@ export async function handleApiRequest(
       }
     }
 
-    // GET /api/workflows — list workflow ids (GRS-009 read-only visualization).
-    // Workflow run state is a DERIVED VIEW over shipped primitives (GRS-007 §5);
-    // this endpoint reads definition + evidence files under JINN_WORKFLOW_EVIDENCE_ROOT
-    // and computes state. It writes nothing.
-    if (method === "GET" && pathname === "/api/workflows") {
-      const ev = resolveWorkflowEvidence();
-      if (!ev.root) return json(res, { workflows: [], evidenceConfigured: false, ...(ev.reason ? { evidenceReason: ev.reason } : {}) });
-      return json(res, { workflows: listWorkflowIds(ev.root), evidenceConfigured: true });
-    }
-
-    // GET /api/workflows/:id — one workflow's definition + derived run state.
-    params = matchRoute("/api/workflows/:id", pathname);
-    if (method === "GET" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return notFound(res);
-      try {
-        return json(res, deriveRunState(root, params.id));
-      } catch (err) {
-        // Missing/invalid definition → 404, not a 500 (KISS: one hardcoded example today).
-        logger.warn(`workflow derive failed for ${params.id}: ${(err as Error).message}`);
-        return notFound(res);
-      }
-    }
-
-    // ── Workflow CUSTOM TRIGGERS (GRS-027 S5/S6) ─────────────────────────────
-    // Custom sources persist as bindings outside the workflow definition schema and
-    // emit the same uniform trigger envelope into startWorkflowRunFromTrigger.
-    if (pathname === "/api/workflow-events" && method === "POST") {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-
-      const gatewayAuthorized = hasGatewayBearerAuth(req.headers, context.gatewayAuthToken);
-      const token = workflowEventToken(req.headers);
-      const bindingAuthorized = !gatewayAuthorized && verifyAnyWorkflowTriggerBindingToken(root, token);
-      if (!gatewayAuthorized && !bindingAuthorized) {
-        return json(res, { error: "Workflow event authentication required" }, 401);
-      }
-      const rateKey = gatewayAuthorized
-        ? workflowEventRateLimitKeyFromToken("gateway", context.gatewayAuthToken ?? token ?? "gateway")
-        : workflowEventRateLimitKeyFromToken("binding", token!);
-      const rate = checkWorkflowEventRateLimit(rateKey);
-      if (!rate.ok) {
-        return json(res, { error: "Workflow event rate limit exceeded", resetAt: rate.resetAt }, 429);
-      }
-
-      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_EVENT_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
-        return badRequest(res, "Request body must be a JSON object");
-      }
-      const body = parsed.body as Record<string, unknown>;
-      if (typeof body.event !== "string" || !body.event.trim()) return badRequest(res, "event is required");
-      let payload: Record<string, unknown>;
-      try {
-        payload = sanitizeWorkflowTriggerPayload(body.payload);
-      } catch (err) {
-        return badRequest(res, err instanceof Error ? err.message : "payload must be a JSON object");
-      }
-      const fireRef = typeof body.fireRef === "string" && body.fireRef.trim() ? body.fireRef.trim() : undefined;
-      const result = await fireWorkflowEvent(
-        workflowRunDriverDeps(root, context),
-        { event: body.event, payload, ...(fireRef ? { fireRef } : {}) },
-        { gatewayAuthorized, ...(bindingAuthorized && token ? { authorizedSecretToken: token } : {}) },
-      );
-      if (result.rejected === "no-matching-binding") {
-        return json(res, { error: "No matching workflow trigger binding", outcomes: [] }, 404);
-      }
-      if (result.rejected) {
-        return badRequest(res, `Workflow event rejected: ${result.rejected}`);
-      }
-      return json(res, { outcomes: result.outcomes }, 202);
-    }
-
-    if (pathname === "/api/workflow-triggers") {
-      const ev = resolveWorkflowEvidence();
-      const root = ev.root;
-      if (method === "GET") {
-        if (!root) return json(res, { triggers: [], evidenceConfigured: false, ...(ev.reason ? { evidenceReason: ev.reason } : {}) });
-        try {
-          return json(res, {
-            triggers: listPublicWorkflowTriggerBindings(root)
-              .map((binding) => projectWorkflowTriggerApprovalCapability(binding, req, context)),
-            evidenceConfigured: true,
-          });
-        } catch (err) {
-          return workflowTriggerStoreErrorResponse(res, err);
-        }
-      }
-      if (method === "POST") {
-        if (!root) return json(res, { error: ev.reason ?? "Workflow evidence root is not configured" }, 503);
-        const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-        if (!parsed.ok) return;
-        if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
-          return badRequest(res, "Request body must be a JSON object");
-        }
-        const body = parsed.body as Record<string, unknown>;
-        const targetWorkflowId = typeof body.targetWorkflowId === "string" ? body.targetWorkflowId : "";
-        const targetWorkflow = targetWorkflowId ? getDefinition(root, targetWorkflowId) : null;
-        if (!targetWorkflow) {
-          return json(res, { error: "target workflow not found" }, 404);
-        }
-        const authority = authorizeWorkflowOperation(req, targetWorkflow, "bind-trigger", context);
-        if (!authority.ok) {
-          return json(res, { error: authority.error }, authority.status);
-        }
-        const actor = authority.actor;
-        try {
-          return await withWorkflowMutationLock(root, async () => {
-            const response = await createWorkflowTriggerForActor(root, body, actor);
-            const binding = getWorkflowTriggerBinding(root, String((response.trigger as Record<string, unknown>).name));
-            if (!binding) throw new WorkflowTriggerStoreError("not-found", "created workflow trigger was not readable");
-            const activityReceiptId = persistWorkflowTriggerMutationActivity(
-              req,
-              context,
-              binding,
-              targetWorkflow,
-              "trigger-created",
-            );
-            return json(res, withActivityReceipt(response, activityReceiptId), 201);
-          });
-        } catch (err) {
-          return workflowTriggerStoreErrorResponse(res, err);
-        }
-      }
-    }
-
-    params = matchRoute("/api/workflow-triggers/:name/activation-approval", pathname);
-    if (method === "POST" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      const decision = (parsed.body as { decision?: unknown } | null)?.decision;
-      if (decision !== "approve" && decision !== "reject") {
-        return badRequest(res, 'decision must be "approve" or "reject"');
-      }
-      try {
-        return await withWorkflowMutationLock(root, async () => {
-          const binding = getWorkflowTriggerBinding(root, params!.name);
-          if (!binding || binding.kind !== "poll") return notFound(res);
-          const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, binding.approval, {
-            allowOperator: true,
-            operatorAuthenticated: scopedOperatorAuthenticated(req, context),
-          });
-          if (!authority.ok) return json(res, { error: authority.error }, authority.status);
-          const updated = await decidePollActivationApproval(root, binding.name, decision, authority.authority.actor);
-          const activityReceiptId = persistWorkflowTriggerMutationActivity(
-            req,
-            context,
-            updated,
-            getDefinition(root, updated.targetWorkflowId),
-            "trigger-approval-decided",
-          );
-          return json(res, withActivityReceipt({
-            trigger: projectWorkflowTriggerApprovalCapability(publicWorkflowTriggerBinding(updated), req, context),
-          }, activityReceiptId));
-        });
-      } catch (err) {
-        return workflowTriggerStoreErrorResponse(res, err);
-      }
-    }
-
-    params = matchRoute("/api/workflow-triggers/:name/activation-approval/escalate", pathname);
-    if (method === "POST" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      try {
-        return await withWorkflowMutationLock(root, async () => {
-          const binding = getWorkflowTriggerBinding(root, params!.name);
-          if (!binding || binding.kind !== "poll") return notFound(res);
-          const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, binding.approval, {
-            allowOperator: false,
-            operatorAuthenticated: scopedOperatorAuthenticated(req, context),
-          });
-          if (!authority.ok) return json(res, { error: authority.error }, authority.status);
-          const updated = await escalatePollActivationApproval(root, binding.name);
-          const activityReceiptId = persistWorkflowTriggerMutationActivity(
-            req,
-            context,
-            updated,
-            getDefinition(root, updated.targetWorkflowId),
-            "trigger-approval-escalated",
-            JSON.stringify(updated) !== JSON.stringify(binding),
-          );
-          return json(res, withActivityReceipt({
-            trigger: projectWorkflowTriggerApprovalCapability(publicWorkflowTriggerBinding(updated), req, context),
-          }, activityReceiptId));
-        });
-      } catch (err) {
-        return workflowTriggerStoreErrorResponse(res, err);
-      }
-    }
-
-    params = matchRoute("/api/workflow-triggers/:name", pathname);
-    if (method === "DELETE" && params) {
-      const triggerName = params.name;
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      try {
-        return await withWorkflowMutationLock(root, async () => {
-          const binding = getWorkflowTriggerBinding(root, triggerName);
-          if (!binding) return notFound(res);
-          const targetWorkflow = getDefinition(root, binding.targetWorkflowId);
-          if (!targetWorkflow) {
-            const authority = authorizeWorkflowOperation(req, null, "bind-trigger", context);
-            if (!authority.ok) {
-              return json(res, { error: authority.error }, authority.status);
-            }
-            const deleted = await deleteWorkflowTriggerBinding(root, triggerName);
-            if (!deleted) return notFound(res);
-            const activityReceiptId = persistWorkflowTriggerMutationActivity(
-              req,
-              context,
-              binding,
-              null,
-              "trigger-deleted",
-            );
-            return json(res, withActivityReceipt({ deleted: true, name: triggerName, orphaned: true }, activityReceiptId));
-          }
-          const authority = authorizeWorkflowOperation(req, targetWorkflow, "bind-trigger", context);
-          if (!authority.ok) {
-            return json(res, { error: authority.error }, authority.status);
-          }
-          const deleted = await deleteWorkflowTriggerBinding(root, triggerName);
-          if (!deleted) return notFound(res);
-          const activityReceiptId = persistWorkflowTriggerMutationActivity(
-            req,
-            context,
-            binding,
-            targetWorkflow,
-            "trigger-deleted",
-          );
-          return json(res, withActivityReceipt({ deleted: true, name: triggerName }, activityReceiptId));
-        });
-      } catch (err) {
-        return workflowTriggerStoreErrorResponse(res, err);
-      }
-    }
-
-    // ── Workflow DEFINITION CRUD (GRS-011b) ──────────────────────────────────
-    // Editable workflow definitions live at <evidenceRoot>/workflows/<id>.definition.json,
-    // a SEPARATE artifact from the read-only run-state surface above (Edit view vs Run
-    // view). Every write validates the graph (validateDefinition) and bumps version/
-    // updatedAt in the store; editing a definition never mutates historical run receipts.
-    // Namespaced under /api/workflow-definitions to avoid colliding with /api/workflows.
-    if (method === "POST" && pathname === "/api/workflow-definitions/plan") {
-      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
-        return badRequest(res, "Request body must be a JSON object");
-      }
-      try {
-        return json(res, planWorkflowAuthoringInput(parseWorkflowPlanTransport(parsed.body)));
-      } catch (err) {
-        return badRequest(res, err instanceof Error ? err.message : String(err));
-      }
-    }
-
-    // One durable outcome for MCP authoring: definition + SOP-owned trigger bindings
-    // commit together, or both exact pre-call file states are restored before failure.
-    if (method === "POST" && pathname === "/api/workflow-definitions/mutate") {
-      const ev = resolveWorkflowEvidence();
-      const root = ev.root;
-      if (!root) return json(res, { error: ev.reason ?? "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
-        return badRequest(res, "Request body must be a JSON object");
-      }
-      const operation = (parsed.body as Record<string, unknown>).operation;
-      if (operation !== "create" && operation !== "update") {
-        return badRequest(res, "operation must be create or update");
-      }
-      let body;
-      try {
-        body = operation === "create"
-          ? parseWorkflowMutateCreateTransport(parsed.body)
-          : parseWorkflowMutateUpdateTransport(parsed.body);
-      } catch (err) {
-        return badRequest(res, err instanceof Error ? err.message : String(err));
-      }
-      const reconcileSopTriggers = body.reconcileSopTriggers === true;
-      const requestedLayoutIntent = body.layoutIntent;
-      const rawTriggerPlan = body.triggerBindingPlan;
-      if (rawTriggerPlan !== undefined && !reconcileSopTriggers) {
-        return badRequest(res, "triggerBindingPlan requires reconcileSopTriggers");
-      }
-      const triggerPlan = rawTriggerPlan as CreateWorkflowTriggerBindingInput | undefined;
-
-      return withWorkflowMutationLock(root, async () => {
-        let workflowId: string;
-        let definitionInput: EditableWorkflowDefinition | undefined;
-        let patch: Partial<EditableWorkflowDefinition> | undefined;
-        let expectedVersion: number | undefined;
-        let actor: string;
-
-        if (body.operation === "create") {
-          const rawDefinition = body.definition as Record<string, unknown>;
-          workflowId = body.definition.id;
-          const authority = authorizeWorkflowOperation(req, null, "create", context);
-          if (!authority.ok) return json(res, { error: authority.error }, authority.status);
-          if (requestedLayoutIntent === "manual" && authority.actor !== "operator") {
-            return json(res, { error: "manual layout intent is operator-only" }, 403);
-          }
-          actor = authority.actor;
-          const safeBody = actor === "operator"
-            ? rawDefinition
-            : stripWorkflowAuthorityFields(rawDefinition as Partial<EditableWorkflowDefinition>);
-          definitionInput = {
-            ...safeBody,
-            ...workflowDefinitionAuthorPatch(authority),
-          } as unknown as EditableWorkflowDefinition;
-          if (reconcileSopTriggers) {
-            const bindingAuthority = authorizeWorkflowOperation(req, definitionInput, "bind-trigger", context);
-            if (!bindingAuthority.ok) return json(res, { error: bindingAuthority.error }, bindingAuthority.status);
-          }
-        } else {
-          workflowId = body.workflowId;
-          const existing = getDefinition(root, workflowId);
-          if (!existing) return notFound(res);
-          const authority = authorizeWorkflowOperation(req, existing, "update", context);
-          if (!authority.ok) return json(res, { error: authority.error }, authority.status);
-          if (requestedLayoutIntent === "manual" && authority.actor !== "operator") {
-            return json(res, { error: "manual layout intent is operator-only" }, 403);
-          }
-          actor = authority.actor;
-          patch = authority.canSetWorkflowAuthority
-            ? body.patch as Partial<EditableWorkflowDefinition>
-            : stripWorkflowAuthorityFields(body.patch as Partial<EditableWorkflowDefinition>);
-          expectedVersion = body.expectedVersion;
-          if (reconcileSopTriggers) {
-            const bindingAuthority = authorizeWorkflowOperation(req, existing, "bind-trigger", context);
-            if (!bindingAuthority.ok) return json(res, { error: bindingAuthority.error }, bindingAuthority.status);
-          }
-        }
-
-        if (triggerPlan && (triggerPlan.targetWorkflowId !== workflowId || triggerPlan.sopOwnerWorkflowId !== workflowId)) {
-          return badRequest(res, "triggerBindingPlan must target and be owned by the mutated workflow");
-        }
-
-        let definitionState: ReturnType<typeof captureDefinitionState>;
-        let triggerState: ReturnType<typeof captureWorkflowTriggerBindingsState>;
-        try {
-          definitionState = captureDefinitionState(root, workflowId);
-          triggerState = captureWorkflowTriggerBindingsState(root);
-        } catch (err) {
-          return workflowMutationErrorResponse(res, err);
-        }
-
-        const triggerEffects = createWorkflowTriggerMutationEffects();
-        const touchedTriggerNames = new Set<string>();
-        let committed: {
-          definition: EditableWorkflowDefinition;
-          trigger: Record<string, unknown> | undefined;
-        };
-        try {
-          const definition = body.operation === "create"
-            ? createDefinition(root, definitionInput!, { layoutIntent: requestedLayoutIntent ?? "generated" })
-            : updateDefinition(root, workflowId, patch!, {
-                expectedVersion,
-                ...(requestedLayoutIntent ? { layoutIntent: requestedLayoutIntent } : {}),
-              });
-          const trigger = reconcileSopTriggers
-            ? await reconcileOwnedSopTriggers(
-                root,
-                workflowId,
-                triggerPlan,
-                actor,
-                triggerEffects,
-                touchedTriggerNames,
-              )
-            : undefined;
-          syncWorkflowCronJobsForRoot(root);
-          committed = { definition, trigger };
-        } catch (err) {
-          try {
-            restoreWorkflowMutationState(
-              root,
-              workflowId,
-              definitionState,
-              triggerState,
-              touchedTriggerNames,
-            );
-          } catch (rollbackErr) {
-            logger.error(
-              `workflow mutation rollback failed after ${err instanceof Error ? err.message : String(err)}: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
-            );
-            return serverError(res, "workflow mutation failed and rollback could not be completed");
-          }
-          try {
-            discardWorkflowTriggerMutationEffects(root);
-          } catch (cleanupErr) {
-            logger.warn(`workflow mutation rollback artifact cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
-          }
-          return workflowMutationErrorResponse(res, err);
-        }
-        try {
-          await commitWorkflowTriggerMutationEffects(root, triggerEffects);
-        } catch (cleanupErr) {
-          logger.warn(`workflow mutation post-commit trigger cleanup failed: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
-        }
-        const action = body.operation === "create" ? "created" : "updated";
-        const activityReceiptId = persistWorkflowDefinitionMutationActivity(req, context, committed.definition, action);
-        return json(res, withActivityReceipt(committed, activityReceiptId), body.operation === "create" ? 201 : 200);
-      });
-    }
-
-    if (pathname === "/api/workflow-definitions") {
-      const ev = resolveWorkflowEvidence();
-      const root = ev.root;
-      if (method === "GET") {
-        if (!root) return json(res, { definitions: [], evidenceConfigured: false, ...(ev.reason ? { evidenceReason: ev.reason } : {}) });
-        return json(res, { definitions: listDefinitions(root), evidenceConfigured: true });
-      }
-      if (method === "POST") {
-        // Resolve the root BEFORE reading the body so an unconfigured gateway 503s
-        // without buffering a (capped) request body.
-        if (!root) return json(res, { error: ev.reason ?? "Workflow evidence root is not configured" }, 503);
-        const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-        if (!parsed.ok) return;
-        if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
-          return badRequest(res, "Request body must be a JSON object");
-        }
-        let body;
-        try {
-          body = parseWorkflowDirectCreateTransport(parsed.body);
-        } catch (err) {
-          const issues = (err as { issues?: unknown[] } | null)?.issues;
-          return json(res, {
-            error: err instanceof Error ? err.message : String(err),
-            ...(Array.isArray(issues) ? { errors: issues } : {}),
-          }, 400);
-        }
-        try {
-          const requestedLayoutIntent = body.layoutIntent;
-          const { layoutIntent: _layoutIntent, ...definitionBody } = body;
-          const authority = authorizeWorkflowOperation(req, null, "create", context);
-          if (!authority.ok) {
-            return json(res, { error: authority.error }, authority.status);
-          }
-          if (requestedLayoutIntent === "manual" && authority.actor !== "operator") {
-            return json(res, { error: "manual layout intent is operator-only" }, 403);
-          }
-          const safeBody = authority.actor === "operator" ? definitionBody : stripWorkflowAuthorityFields(definitionBody as Partial<EditableWorkflowDefinition>);
-          const created = createDefinition(
-            root,
-            { ...safeBody, ...workflowDefinitionAuthorPatch(authority) } as unknown as EditableWorkflowDefinition,
-            { layoutIntent: requestedLayoutIntent === "manual" || requestedLayoutIntent === "normalize" ? requestedLayoutIntent : "generated" },
-          );
-          syncWorkflowCronJobsForRoot(root); // GRS-014d: schedule triggers become managed cron jobs
-          const activityReceiptId = persistWorkflowDefinitionMutationActivity(req, context, created, "created");
-          return json(res, withActivityReceipt(created as unknown as Record<string, unknown>, activityReceiptId), 201);
-        } catch (err) {
-          return workflowStoreErrorResponse(res, err);
-        }
-      }
-    }
-
-    // POST /api/workflow-definitions/:id/duplicate — copy a definition to a new id.
-    params = matchRoute("/api/workflow-definitions/:id/duplicate", pathname);
-    if (method === "POST" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      const body = (parsed.body ?? {}) as { newId?: string; title?: string };
-      try {
-        const existing = getDefinition(root, params.id);
-        if (!existing) return notFound(res);
-        const authority = authorizeWorkflowOperation(req, existing, "duplicate", context);
-        if (!authority.ok) {
-          return json(res, { error: authority.error }, authority.status);
-        }
-        const dup = duplicateDefinition(root, params.id, {
-          newId: body.newId,
-          title: body.title,
-          definitionPatch: workflowDefinitionAuthorityResetPatch(authority),
-        });
-        syncWorkflowCronJobsForRoot(root); // a duplicate is a create — its schedule syncs too
-        const activityReceiptId = persistWorkflowDefinitionMutationActivity(req, context, dup, "duplicated");
-        return json(res, withActivityReceipt(dup as unknown as Record<string, unknown>, activityReceiptId), 201);
-      } catch (err) {
-        return workflowStoreErrorResponse(res, err);
-      }
-    }
-
-    // POST /api/workflow-definitions/:id/retire — soft-delete (status=retired).
-    params = matchRoute("/api/workflow-definitions/:id/retire", pathname);
-    if (method === "POST" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      try {
-        const existing = getDefinition(root, params.id);
-        if (!existing) return notFound(res);
-        const authority = authorizeWorkflowOperation(req, existing, "retire", context);
-        if (!authority.ok) {
-          return json(res, { error: authority.error }, authority.status);
-        }
-        const retired = retireDefinition(root, params.id);
-        syncWorkflowCronJobsForRoot(root); // GRS-014d: retiring removes the managed cron job
-        const activityReceiptId = persistWorkflowDefinitionMutationActivity(req, context, retired, "retired");
-        return json(res, withActivityReceipt(retired as unknown as Record<string, unknown>, activityReceiptId));
-      } catch (err) {
-        return workflowStoreErrorResponse(res, err);
-      }
-    }
-
-    // GET /api/workflow-definitions/:id/plan — DRY-RUN compile (GRS-011d-1). Resolves the
-    // editable definition into a concrete execution plan (trigger→cron shape, step→session
-    // spawn spec, gate→evaluator kind, approval gate→run-parking) OR structured execution
-    // errors, WITHOUT running anything. Read-only + pure: it never spawns a session or mutates
-    // a run receipt. This is the dry-run the Edit view calls to surface "this definition cannot
-    // execute because…" the same way it surfaces validation errors. (Live roster injection +
-    // actually driving a sandbox run from a plan is GRS-011d-2.)
-    params = matchRoute("/api/workflow-definitions/:id/plan", pathname);
-    if (method === "GET" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return notFound(res);
-      try {
-        const def = getDefinition(root, params.id);
-        if (!def) return notFound(res);
-        return json(res, resolveExecutionPlan(def));
-      } catch (err) {
-        return workflowStoreErrorResponse(res, err);
-      }
-    }
-
-    // POST /api/workflow-runs/by-name — agent/operator manual invocation using the
-    // canonical kebab-case registry name. External/webhook and schedule paths remain
-    // independent typed trigger paths; this one is always a manual invocation.
-    if (method === "POST" && pathname === "/api/workflow-runs/by-name") {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_EVENT_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
-        return badRequest(res, "workflow run body must be a JSON object");
-      }
-      const raw = parsed.body as Record<string, unknown>;
-      const name = typeof raw.name === "string" ? raw.name.trim() : "";
-      if (!name) return badRequest(res, "name is required and must be a non-empty string");
-      try {
-        const def = getDefinitionByName(root, name);
-        if (!def) return json(res, { error: `workflow name "${name}" not found` }, 404);
-        return await runWorkflowDefinitionFromHttp(req, res, context, root, def, {
-          input: raw.input,
-          stepOverrides: raw.stepOverrides,
-          idempotencyKey: raw.idempotencyKey,
-          reportMode: raw.reportMode,
-          trigger: "manual",
-        });
-      } catch (err) {
-        if (err instanceof WorkflowRunStoreError) {
-          return json(res, { error: err.message, code: err.code }, err.code === "not-found" ? 404 : 400);
-        }
-        return workflowStoreErrorResponse(res, err);
-      }
-    }
-
-    // POST /api/workflow-definitions/:id/run — START a run of the definition (GRS-014b).
-    // Sequential engine: mint the durable pending-receipts record (edge-implied topo order,
-    // declaration tiebreak) BEFORE any spawn, then drive the first advancement — pass-through
-    // nodes settle, the FIRST actor step spawns through the SAME createSession+dispatch path
-    // the UI uses, mid-graph approval gates PARK the run with downstream steps still pending.
-    // Subsequent steps are dispatched by the run reconciler as each session settles; the
-    // response is the run's current snapshot (usually status:"running" with one step in
-    // flight, or parked/completed/failed). Cyclic graphs are refused (unsupported-cycle)
-    // until GRS-014e's bounded loops.
-    //
-    // HONEST SANDBOX SCOPE: running a workflow spawns REAL sessions on whichever
-    // gateway serves this request. The evidence root only says where definition/run
-    // files live, not that the target is isolated; by default it is created beneath
-    // JINN_HOME. Use a separate gateway instance for experimental runs.
-    // Sessions it spawns are linked/tagged (sourceRef `workflow-run:<runId>:<nodeId>:<attempt>`).
-    params = matchRoute("/api/workflow-definitions/:id/run", pathname);
-    if (method === "POST" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_EVENT_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      const rawBody = parsed.body ?? {};
-      if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
-        return badRequest(res, "workflow run body must be a JSON object");
-      }
-      const body = rawBody as WorkflowRunRequestBody;
-      try {
-        const def = getDefinition(root, params.id);
-        if (!def) return notFound(res);
-        return await runWorkflowDefinitionFromHttp(req, res, context, root, def, body, params.id);
-      } catch (err) {
-        if (err instanceof WorkflowRunStoreError) {
-          return json(res, { error: err.message, code: err.code }, err.code === "not-found" ? 404 : 400);
-        }
-        return workflowStoreErrorResponse(res, err);
-      }
-    }
-
-    // PATCH /api/workflow-definitions/:id/runs/:runId/pending-steps/:nodeId —
-    // replace one run-local phase prompt before that phase starts. The run driver
-    // serializes this with dispatch and appends actor/time/before/after evidence;
-    // parameters.input and the frozen definition snapshot remain untouched.
-    params = matchRoute("/api/workflow-definitions/:id/runs/:runId/pending-steps/:nodeId", pathname);
-    if (method === "PATCH" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const existingRun = getRun(root, params.id, params.runId);
-      if (!existingRun) return notFound(res);
-      const authorityDef = existingRun.definitionSnapshot ?? getDefinition(root, params.id);
-      const authority = authorizeWorkflowOperation(req, authorityDef, "run", context);
-      if (!authority.ok) return json(res, { error: authority.error }, authority.status);
-      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_EVENT_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
-        return badRequest(res, "pending step prompt edit body must be a JSON object");
-      }
-      const raw = parsed.body as Record<string, unknown>;
-      const extraKeys = Object.keys(raw).filter((key) => key !== "prompt");
-      if (extraKeys.length > 0) return badRequest(res, `prompt edit has unknown field(s): ${extraKeys.join(", ")}; only prompt is allowed`);
-      const checked = validateWorkflowStepPrompt(raw.prompt, "prompt");
-      if (!checked.ok) return badRequest(res, checked.error);
-      const outcome = await editPendingWorkflowStepPrompt(
-        workflowRunDriverDeps(root, context),
-        params.id,
-        params.runId,
-        params.nodeId,
-        checked.prompt,
-        { actor: authority.actor },
-      );
-      if (outcome.outcome === "not-found") return notFound(res);
-      if (outcome.outcome === "step-not-found") {
-        return json(res, { error: `workflow run has no actor-backed step "${params.nodeId}"` }, 404);
-      }
-      if (outcome.outcome === "not-pending") {
-        return json(res, {
-          error: `step "${params.nodeId}" is ${outcome.status}; only pending phase prompts can be edited`,
-          status: outcome.status,
-        }, 409);
-      }
-      const activityReceiptId = projectWorkflowOperationActivity(outcome.run, req.headers, context, "step-prompt-edited");
-      return json(res, withActivityReceipt(
-        projectWorkflowRunApprovalCapability(outcome.run, req, context) as unknown as Record<string, unknown>,
-        activityReceiptId,
-      ));
-    }
-
-    // POST /api/workflow-definitions/:id/runs/:runId/cancel — request the real
-    // stop/drain lifecycle; this never projects into or mutates a Todo.
-    params = matchRoute("/api/workflow-definitions/:id/runs/:runId/cancel", pathname);
-    if (method === "POST" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      if (parsed.body !== null && (typeof parsed.body !== "object" || Array.isArray(parsed.body))) {
-        return badRequest(res, "cancellation body must be a JSON object");
-      }
-      const body = (parsed.body ?? {}) as Record<string, unknown>;
-      const extraKeys = Object.keys(body).filter((key) => key !== "reason");
-      if (extraKeys.length > 0) {
-        return badRequest(res, `cancellation has unknown field(s): ${extraKeys.join(", ")}; only reason is allowed`);
-      }
-      if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.trim().length === 0)) {
-        return badRequest(res, "reason must be a non-empty string when provided");
-      }
-      if (typeof body.reason === "string" && body.reason.trim().length > MAX_WORKFLOW_RUN_CANCELLATION_REASON_CHARS) {
-        return badRequest(res, `reason is too long (max ${MAX_WORKFLOW_RUN_CANCELLATION_REASON_CHARS} characters)`);
-      }
-      const run = getRun(root, params.id, params.runId);
-      if (!run) return notFound(res);
-      const definition = run.definitionSnapshot ?? getDefinition(root, params.id);
-      const authority = authorizeWorkflowOperation(req, definition, "run", context);
-      if (!authority.ok) return json(res, { error: authority.error }, authority.status);
-      const outcome = await cancelWorkflowRun(workflowRunDriverDeps(root, context), params.id, params.runId, {
-        actor: authority.actor,
-        ...(typeof body.reason === "string" ? { reason: body.reason.trim() } : {}),
-      });
-      if (outcome.outcome === "not-found") return notFound(res);
-      if (outcome.outcome === "already-terminal") {
-        return json(res, { error: `run is already ${outcome.run.status}`, status: outcome.run.status }, 409);
-      }
-      if (outcome.outcome === "conflict") {
-        return json(res, {
-          error: "run cancellation intent conflicts with the persisted request",
-          code: "workflow-run-cancellation-conflict",
-          runId: outcome.run.runId,
-          status: outcome.run.status,
-        }, 409);
-      }
-      const activityReceiptId = outcome.run.revision !== run.revision
-        ? projectWorkflowOperationActivity(outcome.run, req.headers, context, "cancelled")
-        : undefined;
-      return json(res, withActivityReceipt(
-        projectWorkflowRunApprovalCapability(outcome.run, req, context) as unknown as Record<string, unknown>,
-        activityReceiptId,
-      ));
-    }
-
-    // POST /api/workflow-definitions/:id/runs/:runId/gate-approval/adopt —
-    // explicitly creates fresh native authority for a legacy parked episode.
-    params = matchRoute("/api/workflow-definitions/:id/runs/:runId/gate-approval/adopt", pathname);
-    if (method === "POST" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { allowEmpty: true, maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      if (!verifyGatewayAuth(req.headers, context.gatewayAuthToken, context.jinnHome ?? JINN_HOME)) {
-        return json(res, { error: "authenticated operator required for legacy Workflow approval adoption" }, 403);
-      }
-      const outcome = await adoptLegacyParkedWorkflowApproval(workflowRunDriverDeps(root, context), params.id, params.runId);
-      if (outcome.outcome === "not-found") return notFound(res);
-      if (outcome.outcome === "not-parked") {
-        return json(res, { error: `run is ${outcome.run.status}, not parked`, status: outcome.run.status }, 409);
-      }
-      const activityReceiptId = projectWorkflowOperationActivity(outcome.run, req.headers, context, "gate-approval-adopted");
-      return json(res, withActivityReceipt(
-        projectWorkflowRunApprovalCapability(outcome.run, req, context) as unknown as Record<string, unknown>,
-        activityReceiptId,
-      ));
-    }
-
-    // POST /api/workflow-definitions/:id/runs/:runId/gate-approval/escalate —
-    // escalate the frozen native approval route without touching a Todo.
-    params = matchRoute("/api/workflow-definitions/:id/runs/:runId/gate-approval/escalate", pathname);
-    if (method === "POST" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      const body = parsed.body && typeof parsed.body === "object" && !Array.isArray(parsed.body)
-        ? parsed.body as Record<string, unknown>
-        : {};
-      if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.trim().length === 0)) {
-        return badRequest(res, "reason must be a non-empty string when provided");
-      }
-      const run = getRun(root, params.id, params.runId);
-      if (!run) return notFound(res);
-      if (run.status === "parked" && run.parked && !run.parked.approval) {
-        return json(res, { error: "legacy parked approval requires explicit native adoption before escalation" }, 409);
-      }
-      if (run.status !== "parked" || !run.parked?.approval || run.parked.approval.state !== "pending") {
-        return json(res, { error: `run is ${run.status}, not parked with a pending native approval`, status: run.status }, 409);
-      }
-      const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, run.parked.approval, {
-        allowOperator: false,
-        operatorAuthenticated: scopedOperatorAuthenticated(req, context),
-      });
-      if (!authority.ok) return json(res, { error: authority.error }, authority.status);
-      const outcome = await escalateWorkflowRunGateApproval(workflowRunDriverDeps(root, context), params.id, params.runId);
-      if (outcome.outcome === "not-found") return notFound(res);
-      if (outcome.outcome === "not-parked") {
-        return json(res, { error: `run is ${outcome.run.status}, not parked with a pending native approval`, status: outcome.run.status }, 409);
-      }
-      const activityReceiptId = outcome.run.revision !== run.revision
-        ? projectWorkflowOperationActivity(outcome.run, req.headers, context, "gate-approval-escalated")
-        : undefined;
-      return json(res, withActivityReceipt(
-        projectWorkflowRunApprovalCapability(outcome.run, req, context) as unknown as Record<string, unknown>,
-        activityReceiptId,
-      ));
-    }
-
-    // POST /api/workflow-definitions/:id/runs/:runId/resolve-gate — resolve a PARKED
-    // run's human-approval gate (GRS-014e): {decision:"approve"} unparks and drives the
-    // run forward through the same driver path the sweep uses; {decision:"reject"}
-    // fails it with an operator-rejection receipt. Parked runs are never swept —
-    // this route is the ONLY unpark. 404 unknown run; 409 when the run is not parked.
-    params = matchRoute("/api/workflow-definitions/:id/runs/:runId/resolve-gate", pathname);
-    if (method === "POST" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      const decision = (parsed.body as { decision?: unknown } | null)?.decision;
-      if (decision !== "approve" && decision !== "reject") {
-        return badRequest(res, 'decision must be "approve" or "reject"');
-      }
-      const run = getRun(root, params.id, params.runId);
-      if (!run) return notFound(res);
-      if (run.status === "parked" && run.parked && !run.parked.approval) {
-        return json(res, { error: "legacy parked approval requires explicit native adoption before a decision" }, 409);
-      }
-      if (run.status !== "parked" || !run.parked?.approval || run.parked.approval.state !== "pending") {
-        return json(res, { error: `run is ${run.status}, not parked with a pending native approval`, status: run.status }, 409);
-      }
-      const authority = resolveWorkflowApprovalDecisionAuthority(req.headers, run.parked.approval, {
-        allowOperator: true,
-        operatorAuthenticated: scopedOperatorAuthenticated(req, context),
-      });
-      if (!authority.ok) return json(res, { error: authority.error }, authority.status);
-      try {
-        const result = await resolveWorkflowRunGate(workflowRunDriverDeps(root, context), params.id, params.runId, decision, { decidedBy: authority.authority.actor });
-        if (result.outcome === "not-found") return notFound(res);
-        if (result.outcome === "not-parked") {
-          return json(res, { error: `run is ${result.run.status}, not parked`, status: result.run.status }, 409);
-        }
-        const activityReceiptId = projectWorkflowOperationActivity(result.run, req.headers, context, "gate-approval-decided");
-        return json(res, withActivityReceipt(
-          projectWorkflowRunApprovalCapability(result.run, req, context) as unknown as Record<string, unknown>,
-          activityReceiptId,
-        ));
-      } catch (err) {
-        if (err instanceof WorkflowRunStoreError) {
-          return json(res, { error: err.message, code: err.code }, err.code === "not-found" ? 404 : 400);
-        }
-        return workflowStoreErrorResponse(res, err);
-      }
-    }
-
-    // GET /api/workflow-definitions/:id/runs — list runs of a definition (newest first).
-    params = matchRoute("/api/workflow-definitions/:id/runs", pathname);
-    if (method === "GET" && params) {
-      const ev = resolveWorkflowEvidence();
-      const root = ev.root;
-      if (!root) return json(res, { runs: [], evidenceConfigured: false, ...(ev.reason ? { evidenceReason: ev.reason } : {}) });
-      try {
-        return json(res, { runs: listRuns(root, params.id), evidenceConfigured: true });
-      } catch (err) {
-        if (err instanceof WorkflowRunStoreError) return json(res, { error: err.message, code: err.code }, 400);
-        return workflowStoreErrorResponse(res, err);
-      }
-    }
-
-    // GET /api/workflow-definitions/:id/runs/:runId — one run record.
-    params = matchRoute("/api/workflow-definitions/:id/runs/:runId", pathname);
-    if (method === "GET" && params) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (!root) return notFound(res);
-      try {
-        const run = getRun(root, params.id, params.runId);
-        if (!run) return notFound(res);
-        return json(res, projectWorkflowRunApprovalCapability(run, req, context));
-      } catch (err) {
-        if (err instanceof WorkflowRunStoreError) return json(res, { error: err.message, code: err.code }, 400);
-        return workflowStoreErrorResponse(res, err);
-      }
-    }
-
-    // GET /api/workflow-definitions/:id — full editable definition.
-    // PUT /api/workflow-definitions/:id — update (shallow patch; version bump; optimistic lock).
-    params = matchRoute("/api/workflow-definitions/:id", pathname);
-    if (params && (method === "GET" || method === "PUT")) {
-      const root = resolveWorkflowEvidenceRoot();
-      if (method === "GET") {
-        if (!root) return notFound(res);
-        try {
-          const def = getDefinition(root, params.id);
-          if (!def) return notFound(res);
-          return json(res, def);
-        } catch (err) {
-          return workflowStoreErrorResponse(res, err);
-        }
-      }
-      // PUT
-      if (!root) return json(res, { error: "Workflow evidence root is not configured" }, 503);
-      const parsed = await readJsonBody(req, res, { maxBytes: WORKFLOW_DEFINITION_BODY_MAX_BYTES });
-      if (!parsed.ok) return;
-      if (parsed.body !== null && (typeof parsed.body !== "object" || Array.isArray(parsed.body))) {
-        return badRequest(res, "Request body must be a JSON object");
-      }
-      let body;
-      try {
-        body = parseWorkflowDirectUpdateTransport(parsed.body ?? {});
-      } catch (err) {
-        return badRequest(res, err instanceof Error ? err.message : String(err));
-      }
-      const { expectedVersion, layoutIntent, ...patch } = body;
-      try {
-        const existing = getDefinition(root, params.id);
-        if (!existing) return notFound(res);
-        const authority = authorizeWorkflowOperation(req, existing, "update", context);
-        if (!authority.ok) {
-          return json(res, { error: authority.error }, authority.status);
-        }
-        if (layoutIntent === "manual" && authority.actor !== "operator") {
-          return json(res, { error: "manual layout intent is operator-only" }, 403);
-        }
-        const typedPatch = patch as unknown as Partial<EditableWorkflowDefinition>;
-        const safePatch = authority.canSetWorkflowAuthority ? typedPatch : stripWorkflowAuthorityFields(typedPatch);
-        const updated = updateDefinition(root, params.id, safePatch, { expectedVersion, ...(layoutIntent ? { layoutIntent } : {}) });
-        syncWorkflowCronJobsForRoot(root); // GRS-014d: schedule/status edits re-derive the managed cron job
-        const activityReceiptId = persistWorkflowDefinitionMutationActivity(req, context, updated, "updated");
-        return json(res, withActivityReceipt(updated as unknown as Record<string, unknown>, activityReceiptId));
-      } catch (err) {
-        return workflowStoreErrorResponse(res, err);
-      }
-    }
-
     // GET /api/sessions/:id/transcript — return raw Claude Code session transcript
     params = matchRoute("/api/sessions/:id/transcript", pathname);
     if (method === "GET" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "read")) return;
       const claudeSessionId = getEngineSessionRef(session, "claude").id;
       if (!claudeSessionId) return json(res, []);
       const entries = loadRawTranscript(claudeSessionId);
@@ -5813,8 +3770,6 @@ export async function handleApiRequest(
           logger.warn(`Ignoring unknown x-jinn-caller-session "${delegationCaller.callerId}" on delegation`);
         }
       }
-      if (delegatorSession && rejectLegacyWorkflowSessionAccess(res, delegatorSession, "mutation")) return;
-
       // A completed first call is the durable idempotency receipt. Resolve it
       // before re-validating the remaining mutable request context: the caller-
       // chosen key owns the result, and an ordinary retry returns the original
@@ -6170,7 +4125,6 @@ export async function handleApiRequest(
         }
       }
       const parentSession = typeof body.parentSessionId === "string" ? getSession(body.parentSessionId) : undefined;
-      if (parentSession && rejectLegacyWorkflowSessionAccess(res, parentSession, "mutation")) return;
       const config = context.getConfig();
       const employeeName = coercePortalEmployee(body.employee, config.portal?.portalName);
       let employeeDefaults: { engine: string; model: string; effortLevel?: string; employee?: string } | undefined;
@@ -6291,7 +4245,6 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       let session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       session = maybeRevertEngineOverride(session);
       const _parsed = await readJsonBody(req, res);
       if (!_parsed.ok) return;
@@ -6720,7 +4673,6 @@ export async function handleApiRequest(
     if (method === "POST" && params) {
       const session = getSession(params.id);
       if (!session) return notFound(res);
-      if (rejectLegacyWorkflowSessionAccess(res, session, "mutation")) return;
       await handleSessionAttachment(req, res, params.id, context);
       return;
     }
@@ -6756,20 +4708,13 @@ export async function handleApiRequest(
       if (!_parsed.ok) return;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
-      // GRS-014d: managed workflow jobs are normally CREATED BY THE SYNC, but a
-      // hand-authored one must at least be well-formed (managed ⇒ workflowId) —
-      // note the sync owns every managedBy:'workflow' job and will reconcile it
-      // against the definition store on the next definition save or boot.
-      if (body.managedBy === "workflow" && !(typeof body.workflowId === "string" && body.workflowId.trim())) {
-        return badRequest(res, "managed workflow cron jobs require workflowId");
-      }
       const jobs = loadJobs();
-      // Job ids are identity (run-log files, sync ownership, PUT/DELETE routing) —
+      // Job ids are identity (run-log files and PUT/DELETE routing) —
       // a duplicate would double-schedule one id and collide two run histories in
       // one jsonl (Codex GRS-014d finding 2). Identity is CANONICAL (trim+lowercase,
       // GRS-014d-fix2): run-log files `<id>.jsonl` collide case-insensitively on the
-      // default macOS volume, so "Workflow:wf-a" and "workflow:wf-a" are the same
-      // job history. Stored ids stay as authored; only the collision check (and a
+      // default macOS volume, so differently-cased ids share the same job history.
+      // Stored ids stay as authored; only the collision check (and a
       // padded-id rejection — whitespace ids break addressing) canonicalizes.
       if (typeof body.id === "string" && body.id !== body.id.trim()) {
         return badRequest(res, "cron job id must not have leading/trailing whitespace");
@@ -6788,7 +4733,6 @@ export async function handleApiRequest(
         employee: body.employee,
         prompt: body.prompt || "",
         delivery: body.delivery,
-        ...(body.managedBy === "workflow" ? { managedBy: "workflow" as const, workflowId: body.workflowId } : {}),
       };
       const scheduleErrors = validateCronSchedule({ schedule: newJob.schedule, ...(newJob.timezone !== undefined ? { timezone: newJob.timezone } : {}) });
       if (scheduleErrors.length > 0) return badRequest(res, scheduleErrors.map((entry) => entry.message).join("; "));
@@ -6809,12 +4753,6 @@ export async function handleApiRequest(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
       const merged = { ...jobs[idx], ...body, id: params.id } as CronJob;
-      // GRS-014d: a job cannot end up managed without a workflow to fire. (Edits to a
-      // managed job persist but are re-synced away on the next definition save/boot —
-      // the definition is the source of truth.)
-      if (merged.managedBy === "workflow" && !(typeof merged.workflowId === "string" && merged.workflowId.trim())) {
-        return badRequest(res, "managed workflow cron jobs require workflowId");
-      }
       const scheduleErrors = validateCronSchedule({ schedule: merged.schedule, ...(merged.timezone !== undefined ? { timezone: merged.timezone } : {}) });
       if (scheduleErrors.length > 0) return badRequest(res, scheduleErrors.map((entry) => entry.message).join("; "));
       jobs[idx] = merged;
@@ -6844,12 +4782,8 @@ export async function handleApiRequest(
 
       logger.info(`Manual trigger for cron job "${job.name}" (${job.id})`);
 
-      // Fire and forget — respond immediately, run in background. A managed workflow
-      // job triggered manually starts a fresh workflow run (fresh fireIso — never
-      // deduped, same manual semantics as prompt jobs).
-      runCronJob(job, context.sessionManager, context.getConfig(), context.connectors, {
-        workflowFire: workflowCronFireHandler(context),
-      }).catch(
+      // Fire and forget — respond immediately, run in background.
+      runCronJob(job, context.sessionManager, context.getConfig(), context.connectors).catch(
         (err) => logger.error(`Manual cron trigger failed for "${job.name}": ${err}`)
       );
 
@@ -7663,8 +5597,6 @@ export async function handleApiRequest(
       if (rejected) return json(res, { message: rejected.body }, rejected.status);
       const jinnSessionId = hookBody.jinnSessionId!;
       const hook = hookBody.hook!;
-      const target = getSession(jinnSessionId);
-      if (target && rejectLegacyWorkflowSessionAccess(res, target, "mutation")) return;
       context.hookRegistry.deliver(jinnSessionId, hook);
       // Central engineSessionId capture: persist claude's OWN session id the moment
       // it reports one (SessionStart, or Stop as backup), independent of turn state.

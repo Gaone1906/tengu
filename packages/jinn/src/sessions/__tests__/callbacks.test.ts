@@ -70,7 +70,6 @@ const callbackDeliveryMockState = vi.hoisted(() => {
 // Mock dependencies before importing the module under test
 vi.mock("../registry.js", () => ({
   getSession: vi.fn(),
-  isLegacyWorkflowRunSession: vi.fn((session: Session) => session.workflowProvenance?.kind === "run"),
   getSessionDelivery: callbackDeliveryMockState.get,
   listSessionsBySource: vi.fn(() => []),
   updateSession: vi.fn((id: string, updates: Partial<Session>) => ({ ...makeSession({ id }), ...updates })),
@@ -296,28 +295,6 @@ describe("notifyParentSession", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     globalThis.fetch = originalFetch as typeof fetch;
-  });
-
-  it("never uses a legacy Workflow run projection as a callback destination", async () => {
-    vi.mocked(getSession).mockReturnValue(
-      makeSession({
-        id: "parent-001",
-        parentSessionId: null,
-        engine: "workflow",
-        workflowProvenance: {
-          kind: "run",
-          workflowId: "wf-release",
-          workflowName: "release-check",
-          runId: "run-1",
-          triggerSource: "manual",
-        },
-      }),
-    );
-
-    notifyParentSession(makeSession(), { result: "phase complete" });
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it.each([

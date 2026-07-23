@@ -1,12 +1,10 @@
 import type { WorkItem } from "../work-items/store.js";
-import type { EditableWorkflowDefinition } from "../workflows/definition.js";
 import type {
   ActivityReceipt,
   ChatBlockEnvelope,
   CompanyChangedEvent,
 } from "../shared/types.js";
 import { blockFallbackText } from "../shared/blocks.js";
-import { workflowDefinitionActivityBlockId } from "../shared/activity-receipts.js";
 
 export interface ActivityOperation {
   id: string;
@@ -47,30 +45,6 @@ export function todoActivityBlock(item: WorkItem, action: string): ChatBlockEnve
         assignee: item.assignee,
         approvalState: item.approvalState,
         updatedAt: item.updatedAt,
-      },
-    },
-  };
-}
-
-export function workflowDefinitionActivityBlock(
-  definition: EditableWorkflowDefinition,
-  action: string,
-): ChatBlockEnvelope {
-  return {
-    op: "put",
-    block: {
-      id: workflowDefinitionActivityBlockId(definition.id),
-      type: "workflow-definition",
-      version: definition.version,
-      status: definition.status === "retired" ? "completed" : "done",
-      title: definition.title,
-      summary: action.replace(/-/g, " "),
-      payload: {
-        workflowId: definition.id,
-        action,
-        definitionStatus: definition.status,
-        ...(definition.updatedAt ? { updatedAt: definition.updatedAt } : {}),
-        openPath: `/workflow/${encodeURIComponent(definition.id)}?mode=edit`,
       },
     },
   };

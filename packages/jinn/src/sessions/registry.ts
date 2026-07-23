@@ -14,7 +14,7 @@ import {
 } from '../work-items/migrate.js';
 import type { WorkItemSchemaPreflight } from '../work-items/migrate.js';
 import { parseTodoId } from '../work-items/id.js';
-import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, LegacyWorkflowRunLocation, ReplyContext, Session, SessionAttemptOutcome, SessionDelivery, SessionDeliveryIdentity, SessionDeliveryPayload, WorkflowSessionProvenance } from '../shared/types.js';
+import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome, SessionDelivery, SessionDeliveryIdentity, SessionDeliveryPayload, WorkflowSessionProvenance } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
 import { ptySnapshotStore } from '../engines/pty-snapshot.js';
 import { migrateActivitySchema } from '../activity/migrate.js';
@@ -327,7 +327,7 @@ function workflowProvenanceFromRow(row: Record<string, unknown>): WorkflowSessio
   const runId = row.workflow_run_id;
   const triggerSource = row.workflow_trigger_source;
   if (
-    (kind !== 'run' && kind !== 'phase') ||
+    kind !== 'phase' ||
     typeof workflowId !== 'string' || !workflowId ||
     typeof workflowName !== 'string' || !workflowName ||
     typeof runId !== 'string' || !runId ||
@@ -335,15 +335,6 @@ function workflowProvenanceFromRow(row: Record<string, unknown>): WorkflowSessio
   ) {
     return null;
   }
-  const provenance: WorkflowSessionProvenance = {
-    kind,
-    workflowId,
-    workflowName,
-    runId,
-    triggerSource,
-  };
-  if (kind === 'run') return provenance;
-
   const nodeId = row.workflow_phase_node_id;
   const name = row.workflow_phase_name;
   const index = row.workflow_phase_index;
@@ -359,8 +350,14 @@ function workflowProvenanceFromRow(row: Record<string, unknown>): WorkflowSessio
     logger.warn(`registry: dropped incomplete workflow phase provenance for session ${String(row.id ?? '')}`);
     return null;
   }
-  provenance.phase = { nodeId, name, index, round, attempt };
-  return provenance;
+  return {
+    kind,
+    workflowId,
+    workflowName,
+    runId,
+    triggerSource,
+    phase: { nodeId, name, index, round, attempt },
+  };
 }
 
 function rowToSession(row: Record<string, unknown>): Session {
@@ -401,24 +398,6 @@ function rowToSession(row: Record<string, unknown>): Session {
     createdAt: row.created_at as string,
     lastActivity: row.last_activity as string,
     lastError: (row.last_error as string) ?? null,
-  };
-}
-
-/** True only for the historical synthetic Session projection of a Workflow run. */
-export function isLegacyWorkflowRunSession(session: Session): boolean {
-  return session.workflowProvenance?.kind === 'run';
-}
-
-/** Resolve a historical run projection directly from its persisted provenance. */
-export function legacyWorkflowRunLocation(session: Session): LegacyWorkflowRunLocation {
-  const provenance = session.workflowProvenance;
-  if (provenance?.kind !== 'run') {
-    throw new Error(`Session ${session.id} is not a historical Workflow run projection`);
-  }
-  return {
-    workflowId: provenance.workflowId,
-    runId: provenance.runId,
-    openPath: `/workflow/${encodeURIComponent(provenance.workflowId)}?mode=runs&run=${encodeURIComponent(provenance.runId)}`,
   };
 }
 
@@ -2035,7 +2014,7 @@ export interface ListSessionsFilter {
 
 export function listSessions(filter?: ListSessionsFilter): Session[] {
   const db = initDb();
-  const conditions: string[] = ['archived_at IS NULL', "(workflow_kind IS NULL OR workflow_kind NOT IN ('phase','run'))"];
+  const conditions: string[] = ['archived_at IS NULL', 'workflow_kind IS NULL'];
   const values: unknown[] = [];
 
   if (filter?.status) {
@@ -2329,7 +2308,7 @@ export function recoverStaleSessions(): number {
   const db = initDb();
   const now = new Date().toISOString();
   const result = db.prepare(
-    "UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted', attempt_terminal_version = attempt_terminal_version + 1, last_activity = ?, last_error = 'Interrupted: gateway restarted while session was running' WHERE status = 'running' AND (workflow_kind IS NULL OR workflow_kind <> 'run')",
+    "UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted', attempt_terminal_version = attempt_terminal_version + 1, last_activity = ?, last_error = 'Interrupted: gateway restarted while session was running' WHERE status = 'running' AND workflow_kind IS NULL",
   ).run(now);
   return result.changes;
 }
@@ -2344,7 +2323,7 @@ export function consumeRestartAcknowledgements(): number {
   const database = initDb();
   const jsonPath = `$.${RESTART_ACK_META_KEY}`;
   const rows = database
-    .prepare("SELECT id FROM sessions WHERE json_type(transport_meta, ?) = 'text' AND (workflow_kind IS NULL OR workflow_kind <> 'run')")
+    .prepare("SELECT id FROM sessions WHERE json_type(transport_meta, ?) = 'text' AND workflow_kind IS NULL")
     .all(jsonPath) as Array<{ id: string }>;
   if (rows.length === 0) return 0;
 
@@ -2371,7 +2350,7 @@ export function consumeRestartAcknowledgements(): number {
 export function getInterruptedSessions(): Session[] {
   const db = initDb();
   const rows = db.prepare(
-    "SELECT * FROM sessions WHERE status = 'interrupted' AND engine_session_id IS NOT NULL AND (workflow_kind IS NULL OR workflow_kind <> 'run') ORDER BY last_activity DESC",
+    "SELECT * FROM sessions WHERE status = 'interrupted' AND engine_session_id IS NOT NULL AND workflow_kind IS NULL ORDER BY last_activity DESC",
   ).all() as Record<string, unknown>[];
   return rows.map(rowToSession);
 }
@@ -3080,15 +3059,7 @@ export function settlePartialMessages(sessionId: string, preserveMessageIds: Rea
 /** Boot sweep: drop any partial blocks stranded by a mid-turn gateway restart. */
 export function clearAllPartialMessages(): number {
   const db = initDb();
-  return db.prepare(`
-    DELETE FROM messages
-    WHERE partial = 1
-      AND NOT EXISTS (
-        SELECT 1 FROM sessions
-        WHERE sessions.id = messages.session_id
-          AND sessions.workflow_kind = 'run'
-      )
-  `).run().changes;
+  return db.prepare('DELETE FROM messages WHERE partial = 1').run().changes;
 }
 
 interface SessionDeliveryRow {
@@ -3678,7 +3649,7 @@ export function recoverStaleQueueItems(): number {
        AND NOT EXISTS (
          SELECT 1 FROM sessions
          WHERE sessions.id = queue_items.session_id
-           AND sessions.workflow_kind = 'run'
+           AND sessions.workflow_kind IS NOT NULL
        )`
   ).run();
   return result.changes;
