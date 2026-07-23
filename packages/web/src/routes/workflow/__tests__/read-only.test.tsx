@@ -5,11 +5,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const listWorkflowDefinitions = vi.fn()
 const getWorkflowDefinition = vi.fn()
+const listWorkflowRuns = vi.fn()
 
 vi.mock("@/lib/api", () => ({
   api: {
     listWorkflowDefinitionsV2: (...args: unknown[]) => listWorkflowDefinitions(...args),
     getWorkflowDefinitionV2: (...args: unknown[]) => getWorkflowDefinition(...args),
+    listWorkflowRunsV2: (...args: unknown[]) => listWorkflowRuns(...args),
   },
 }))
 vi.mock("@/components/page-layout", () => ({
@@ -36,6 +38,8 @@ function renderRoute(path: string) {
 beforeEach(() => {
   listWorkflowDefinitions.mockReset()
   getWorkflowDefinition.mockReset()
+  listWorkflowRuns.mockReset()
+  listWorkflowRuns.mockResolvedValue({ items: [], nextCursor: null })
 })
 
 describe("read-only Workflows", () => {
@@ -84,10 +88,11 @@ describe("read-only Workflows", () => {
 
     renderRoute("/workflow/morning-digest")
 
-    expect(await screen.findByText("Read only")).toBeTruthy()
-    expect(screen.getByText("Manual")).toBeTruthy()
+    expect(await screen.findByText("Manual")).toBeTruthy()
     expect(screen.getByText("Writer")).toBeTruthy()
     expect(screen.getByText("Manual → Writer")).toBeTruthy()
+    expect(await screen.findByText("No runs yet.")).toBeTruthy()
     expect(screen.queryByText("Editor")).toBeNull()
+    expect(screen.queryByRole("button", { name: /run/i })).toBeNull()
   })
 })
