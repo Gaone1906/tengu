@@ -173,6 +173,9 @@ export interface ListWorkItemsFilter {
   rootId?: string;
   /** Only tree roots (parentless items). */
   rootsOnly?: boolean;
+  /** Items carrying this label, matched by exact label id (`lbl_…`) or stored
+   *  (normalized kebab-case) name — callers normalize display names first. */
+  label?: string;
   /** Escaped-LIKE substring over title + body (%/_/backslash are literal). */
   text?: string;
   /** Inclusive ISO timestamp bounds over `updated_at`. */
@@ -565,6 +568,12 @@ function workItemWhere(filter: ListWorkItemsFilter): { sql: string; values: unkn
   }
   if (filter.rootsOnly) {
     conditions.push('parent_id IS NULL');
+  }
+  if (filter.label) {
+    conditions.push(
+      'EXISTS (SELECT 1 FROM work_item_labels wil JOIN labels l ON l.id = wil.label_id WHERE wil.work_item_id = work_items.id AND (l.id = ? OR l.name = ?))',
+    );
+    values.push(filter.label, filter.label);
   }
   if (filter.needsAttentionFor) {
     conditions.push("((approval_state = 'pending' AND approval_target = ?) OR (assignee = ? AND status IN ('blocked', 'escalated')))");
