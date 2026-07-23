@@ -95,20 +95,23 @@ beforeEach(() => {
 });
 
 describe("workflow attempt per-turn completion", () => {
-  it("keeps a durable dispatch pending across a crash before in-memory queue attachment", async () => {
+  it("keeps a durable reminder pending across a crash before in-memory queue attachment", async () => {
     const runs: EngineRunOpts[] = [];
     const manager = managerWith(runs);
-
     const { sessionId } = await manager.runWorkflowAttempt(command);
+    await waitFor(() => runs.length === 1 && registry.getSession(sessionId)?.attemptTurn === 1
+      && registry.getSession(sessionId)?.status === "idle");
+
+    await manager.remindWorkflowAttempt(sessionId, "Durable reminder.");
     const pendingBeforeAttachment = registry.listPendingWorkflowAttemptDispatches();
-    await waitFor(() => runs.length === 1);
+    await waitFor(() => runs.length === 2);
 
     expect(pendingBeforeAttachment).toEqual([
-      expect.objectContaining({ sessionId, status: "pending", prompt: command.prompt }),
+      expect.objectContaining({ sessionId, status: "pending", prompt: "Durable reminder." }),
     ]);
   });
 
-  it("recovers a claimed pending reminder exactly once across fresh managers", async () => {
+  it("recovers a pending reminder once after a crash following its durable claim", async () => {
     const runs: EngineRunOpts[] = [];
     const manager = managerWith(runs);
     const { sessionId } = await manager.runWorkflowAttempt(command);

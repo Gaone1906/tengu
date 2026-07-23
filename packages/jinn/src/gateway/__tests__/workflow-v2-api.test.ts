@@ -394,7 +394,7 @@ describe("Workflow v2 canonical API", () => {
       await handleApiRequest(request("POST", "/api/workflows/events/build.finished", { fireId: "build-123", payload: { status: "passed" } }), first.res, context);
       const started = first.read().body as Array<{ id: string }>;
       expect(first.read().status).toBe(202); expect(commands).toHaveLength(1);
-      await listener!({ sessionId: "session-1", owner: commands[0]!.owner, terminalVersion: 1, outcome: "succeeded",
+      await listener!({ sessionId: "session-1", owner: commands[0]!.owner, turn: 1, terminalVersion: 1, outcome: "succeeded",
         finalText: "Done.\n```jinn-output\n{\"result\":\"ok\"}\n```", completedAt: new Date().toISOString() } as WorkflowAttemptCompletion);
       expect(service.getRun("event-flow", started[0]!.id)?.status).toBe("completed");
       const replay = response();

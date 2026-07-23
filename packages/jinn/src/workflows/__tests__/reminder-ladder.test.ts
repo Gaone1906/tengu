@@ -103,6 +103,7 @@ function saveDefinition(input: {
   output?: WorkflowOutputSchema;
   retries?: number;
   errorRoute?: boolean;
+  timeoutMinutes?: number;
 }): WorkflowDefinition {
   const created = repository.createDefinition({ id: input.id, title: input.id });
   const nodes: WorkflowDefinition["nodes"] = [
@@ -116,6 +117,7 @@ function saveDefinition(input: {
         prompt: "Complete the work.",
         ...(input.output ? { output: input.output } : {}),
         retry: { attempts: input.retries ?? 1, delaySeconds: 0, backoff: "fixed" },
+        ...(input.timeoutMinutes ? { timeoutMinutes: input.timeoutMinutes } : {}),
       },
     },
     { id: "finish", type: "end", name: "Finish", config: { result: "success" } },
@@ -344,6 +346,74 @@ describe("workflow explicit completion and reminder ladder", () => {
     });
     expect(detail.nodeRuns.find((node) => node.nodeId === "handled")?.status).toBe("completed");
     expect(service.getRun(definition.id, run.id)).toEqual(detail);
+  });
+
+  it("rejects a duplicate explicit failure without replacing the first settlement", async () => {
+    const { definition, run, sessionId } = await start({ id: "double-failure" });
+    await service.submitAttemptOutput({ sessionId, outcome: "failure", summary: "First failure." });
+
+    await expect(service.submitAttemptOutput({ sessionId, outcome: "failure", summary: "Second failure." }))
+      .rejects.toMatchObject({ code: "already-submitted" } satisfies Partial<WorkflowRepositoryError>);
+    expect(service.getRun(definition.id, run.id)?.attempts[0]).toMatchObject({
+      status: "failed",
+      error: { code: "workflow-submitted-failure", message: "First failure." },
+    });
+  });
+
+  it("does not let a concurrent deadline extension resurrect a settled attempt", async () => {
+    const { definition, run, sessionId } = await start({ id: "settle-extend-conflict" });
+
+    const [settlement, extension] = await Promise.allSettled([
+      service.submitAttemptOutput({ sessionId, summary: "Finished." }),
+      service.extendAttemptDeadline({ sessionId, reason: "Too late." }),
+    ]);
+
+    expect(settlement.status).toBe("fulfilled");
+    expect(extension).toMatchObject({
+      status: "rejected",
+      reason: { code: "already-submitted" },
+    });
+    expect(service.getRun(definition.id, run.id)?.attempts[0]).toMatchObject({
+      status: "completed",
+      extensions: 0,
+    });
+  });
+
+  it("rejects submission after failure, timeout, and cancellation", async () => {
+    const failed = await start({ id: "submit-after-failure" });
+    await service.submitAttemptOutput({ sessionId: failed.sessionId, outcome: "failure" });
+    await expect(service.submitAttemptOutput({ sessionId: failed.sessionId }))
+      .rejects.toMatchObject({ code: "already-submitted" } satisfies Partial<WorkflowRepositoryError>);
+
+    const timedOut = await start({ id: "submit-after-timeout", timeoutMinutes: 1 });
+    now = "2026-07-21T10:01:00.000Z";
+    await service.recover(now);
+    expect(service.getRun(timedOut.definition.id, timedOut.run.id)?.attempts[0]?.status).toBe("timed-out");
+    await expect(service.submitAttemptOutput({ sessionId: timedOut.sessionId }))
+      .rejects.toMatchObject({ code: "already-submitted" } satisfies Partial<WorkflowRepositoryError>);
+
+    const cancelled = await start({ id: "submit-after-cancel" });
+    await service.cancelRun({
+      workflowId: cancelled.definition.id,
+      runId: cancelled.run.id,
+      reason: "Cancelled for test.",
+    });
+    await expect(service.submitAttemptOutput({ sessionId: cancelled.sessionId }))
+      .rejects.toMatchObject({ code: "already-submitted" } satisfies Partial<WorkflowRepositoryError>);
+  });
+
+  it("scopes submission to the calling live workflow session", async () => {
+    const first = await start({ id: "submission-owner-a" });
+    const second = await start({ id: "submission-owner-b" });
+
+    await service.submitAttemptOutput({ sessionId: second.sessionId, summary: "Second is done." });
+
+    expect(service.getRun(first.definition.id, first.run.id)?.attempts[0]?.status).toBe("running");
+    expect(service.getRun(second.definition.id, second.run.id)?.attempts[0]).toMatchObject({
+      status: "completed",
+      sessionId: second.sessionId,
+      output: { text: "Second is done." },
+    });
   });
 
   it("resets the ladder on extension, records the reason, and starts a fresh five-minute cycle", async () => {
