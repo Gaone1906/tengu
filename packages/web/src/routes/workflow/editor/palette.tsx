@@ -85,8 +85,8 @@ export function MobileAddNode() {
             style={{ background: "color-mix(in srgb, var(--bg) 55%, transparent)" }}
           />
           <div
-            className="absolute inset-x-0 bottom-0 rounded-t-[var(--radius-2xl)] bg-[var(--bg-secondary)] px-4 pt-3 shadow-[var(--shadow-overlay)]"
-            style={{ paddingBottom: "max(16px, env(safe-area-inset-bottom))" }}
+            className="absolute inset-x-0 rounded-t-[var(--radius-2xl)] bg-[var(--bg-secondary)] px-4 pb-4 pt-3 shadow-[var(--shadow-overlay)]"
+            style={{ bottom: "calc(49px + var(--safe-bottom))" }}
           >
             <div className="mx-auto mb-3 h-[5px] w-9 rounded-full bg-[var(--fill-secondary)]" aria-hidden />
             <div className="mb-2 flex items-center justify-between">

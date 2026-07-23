@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react"
 import { useQuery } from "@tanstack/react-query"
 import { Plus, Trash2, X } from "lucide-react"
 import { api } from "@/lib/api"
@@ -541,35 +542,51 @@ function InspectorBody({ node }: { node: WorkflowNodeWire }) {
   )
 }
 
+function useIsNarrow(): boolean {
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== "undefined" && window.matchMedia?.("(max-width: 767px)")?.matches === true,
+  )
+  useEffect(() => {
+    const query = window.matchMedia?.("(max-width: 767px)")
+    if (!query) return
+    const onChange = () => setNarrow(query.matches)
+    query.addEventListener("change", onChange)
+    return () => query.removeEventListener("change", onChange)
+  }, [])
+  return narrow
+}
+
 /** Properties live in a right rail on desktop and a bottom sheet on mobile —
- *  both write straight into the store node; there is no draft copy. */
+ *  ONE mounted body writing straight into the store node; there is no draft copy. */
 export function Inspector() {
   const selected = useEditor((state) => state.nodes.find((node) => node.selected))
   const selectNode = useEditor((state) => state.selectNode)
+  const narrow = useIsNarrow()
   if (!selected) return null
   const node = selected.data.node
-  return (
-    <>
-      <aside className="absolute bottom-3 right-3 top-3 z-40 hidden w-[324px] rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)] md:block">
+  if (!narrow) {
+    return (
+      <aside className="absolute bottom-3 right-3 top-3 z-40 w-[324px] rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)]">
         <InspectorBody node={node} />
       </aside>
-      <div className="fixed inset-x-0 bottom-0 z-40 md:hidden">
-        <button
-          type="button"
-          aria-label="Close properties"
-          onClick={() => selectNode(null)}
-          className="absolute inset-x-0 -top-24 h-24"
-        />
-        <div
-          className="max-h-[62vh] overflow-hidden rounded-t-[var(--radius-2xl)] bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)]"
-          style={{ paddingBottom: "max(10px, env(safe-area-inset-bottom))" }}
-        >
-          <div className="mx-auto mt-2 h-[5px] w-9 rounded-full bg-[var(--fill-secondary)]" aria-hidden />
-          <div className="h-[min(56vh,480px)]">
-            <InspectorBody node={node} />
-          </div>
+    )
+  }
+  return (
+    <div className="fixed inset-x-0 z-40" style={{ bottom: "calc(49px + var(--safe-bottom))" }}>
+      <button
+        type="button"
+        aria-label="Dismiss properties"
+        onClick={() => selectNode(null)}
+        className="absolute inset-x-0 -top-24 h-24"
+      />
+      <div
+        className="max-h-[62vh] overflow-hidden rounded-t-[var(--radius-2xl)] bg-[var(--bg-secondary)] pb-2.5 shadow-[var(--shadow-overlay)]"
+      >
+        <div className="mx-auto mt-2 h-[5px] w-9 rounded-full bg-[var(--fill-secondary)]" aria-hidden />
+        <div className="h-[min(56vh,480px)]">
+          <InspectorBody node={node} />
         </div>
       </div>
-    </>
+    </div>
   )
 }
