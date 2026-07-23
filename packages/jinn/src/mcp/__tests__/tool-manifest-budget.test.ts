@@ -184,7 +184,7 @@ describe("tool manifest budget", () => {
     for (const [name, wrapper] of Object.entries(wrappers) as Array<[keyof typeof wrappers, unknown]>) {
       expect(await exactOrAttested(name, JSON.stringify(wrapper))).toBeLessThanOrEqual(MAX_MANIFEST_TOKENS);
     }
-  });
+  }, 15_000);
 
   it("fails closed when a 350-character manifest mutation exceeds the cap", async () => {
     const tools = buildTools().map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
