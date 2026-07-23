@@ -746,26 +746,118 @@ export interface MultipartFileUpload {
   truncated: boolean;
 }
 
-/** Parse a single-file multipart request into memory — the shared upload
- *  machinery consumers outside this module (e.g. work-item attachments) reuse
- *  instead of wiring Busboy themselves. */
+/** A refused multipart request — carries the HTTP status the route should emit. */
+export class MultipartUploadError extends Error {
+  readonly status: 400 | 413;
+
+  constructor(status: 400 | 413, message: string) {
+    super(message);
+    this.name = "MultipartUploadError";
+    this.status = status;
+  }
+}
+
+/** Small metadata fields (e.g. commentId) only — anything larger is refused. */
+const MULTIPART_FIELD_MAX_BYTES = 1024;
+const MULTIPART_MAX_FIELDS = 4;
+const MULTIPART_MAX_PARTS = 6;
+/** Boundary/header overhead allowance on top of the single permitted file. */
+const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
+
+/**
+ * Parse a single-file multipart request into memory — the shared upload
+ * machinery consumers outside this module (e.g. work-item attachments) reuse
+ * instead of wiring Busboy themselves. Hardened (Todos v2 slice-5 review F3):
+ * exactly ONE file part, and it must be named "file"; strict Busboy
+ * files/fields/parts/fieldSize limits; every limit event and unexpected part
+ * is a refusal; and an aggregate request-byte ceiling
+ * (maxFileSize + overhead) is enforced up front from Content-Length AND while
+ * streaming, so many individually-valid parts cannot accumulate memory. On
+ * refusal all buffered chunks are dropped immediately.
+ */
 export function readMultipartFile(req: HttpRequest, maxFileSize: number): Promise<MultipartFileUpload> {
   return new Promise((resolve, reject) => {
-    const busboy = Busboy({ headers: req.headers, limits: { fileSize: maxFileSize } });
+    const aggregateCeiling = maxFileSize + MULTIPART_OVERHEAD_BYTES;
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > aggregateCeiling) {
+      reject(new MultipartUploadError(413, `multipart request exceeds the ${Math.floor(maxFileSize / 1024 / 1024)} MB upload ceiling`));
+      return;
+    }
+    const busboy = Busboy({
+      headers: req.headers,
+      limits: {
+        fileSize: maxFileSize,
+        files: 1,
+        fields: MULTIPART_MAX_FIELDS,
+        parts: MULTIPART_MAX_PARTS,
+        fieldSize: MULTIPART_FIELD_MAX_BYTES,
+      },
+    });
     let filename = "";
     let buffer: Buffer | null = null;
+    let chunks: Buffer[] = [];
     const fields: Record<string, string> = {};
     let truncated = false;
-    busboy.on("file", (_fieldname: string, file: NodeJS.ReadableStream, info: { filename: string }) => {
-      filename = info.filename;
-      const chunks: Buffer[] = [];
-      file.on("data", (chunk: Buffer) => chunks.push(chunk));
-      (file as NodeJS.EventEmitter).on("limit", () => { truncated = true; });
-      file.on("end", () => { buffer = Buffer.concat(chunks); });
+    let sawFile = false;
+    let settled = false;
+    let aggregate = 0;
+
+    const finish = (value: MultipartFileUpload | MultipartUploadError | Error): void => {
+      if (settled) return;
+      settled = true;
+      // Drop everything buffered so a refusal retains nothing.
+      chunks = [];
+      buffer = null;
+      if (value instanceof Error) {
+        try { req.unpipe(busboy); } catch { /* already detached */ }
+        try { (req as unknown as { resume?: () => void }).resume?.(); } catch { /* best effort */ }
+        reject(value);
+      } else {
+        resolve(value);
+      }
+    };
+
+    // Streaming belt for chunked/omitted Content-Length: count every request
+    // byte and refuse past the same ceiling.
+    req.on("data", (chunk: Buffer) => {
+      aggregate += chunk.length;
+      if (aggregate > aggregateCeiling) {
+        finish(new MultipartUploadError(413, `multipart request exceeds the ${Math.floor(maxFileSize / 1024 / 1024)} MB upload ceiling`));
+      }
     });
-    busboy.on("field", (name: string, value: string) => { fields[name] = value; });
-    busboy.on("finish", () => resolve({ filename, buffer: buffer ?? Buffer.alloc(0), fields, truncated }));
-    busboy.on("error", reject);
+
+    busboy.on("file", (fieldname: string, file: NodeJS.ReadableStream, info: { filename: string }) => {
+      if (settled) { (file as unknown as { resume: () => void }).resume(); return; }
+      if (fieldname !== "file") {
+        (file as unknown as { resume: () => void }).resume();
+        finish(new MultipartUploadError(400, `unexpected file field "${fieldname}" — send exactly one file field named "file"`));
+        return;
+      }
+      if (sawFile) {
+        (file as unknown as { resume: () => void }).resume();
+        finish(new MultipartUploadError(400, 'multiple file parts — send exactly one file field named "file"'));
+        return;
+      }
+      sawFile = true;
+      filename = info.filename;
+      file.on("data", (chunk: Buffer) => { if (!settled) chunks.push(chunk); });
+      (file as NodeJS.EventEmitter).on("limit", () => { truncated = true; });
+      file.on("end", () => { if (!settled) buffer = Buffer.concat(chunks); });
+    });
+    busboy.on("field", (name: string, value: string, info?: { valueTruncated?: boolean; nameTruncated?: boolean }) => {
+      if (settled) return;
+      if (info?.valueTruncated || info?.nameTruncated) {
+        finish(new MultipartUploadError(400, `multipart field "${name}" exceeds the ${MULTIPART_FIELD_MAX_BYTES}-byte field limit`));
+        return;
+      }
+      fields[name] = value;
+    });
+    // Busboy stops COUNTING at the limits; treat hitting any of them as a refusal.
+    busboy.on("filesLimit", () => finish(new MultipartUploadError(400, 'multiple file parts — send exactly one file field named "file"')));
+    busboy.on("fieldsLimit", () => finish(new MultipartUploadError(400, `too many multipart fields (max ${MULTIPART_MAX_FIELDS})`)));
+    busboy.on("partsLimit", () => finish(new MultipartUploadError(400, `too many multipart parts (max ${MULTIPART_MAX_PARTS})`)));
+    busboy.on("finish", () => finish({ filename, buffer: buffer ?? Buffer.alloc(0), fields, truncated }));
+    busboy.on("error", (err: Error) => finish(err));
     req.pipe(busboy);
   });
 }

@@ -133,7 +133,7 @@ import { ActivityQueryError, getActivityStory, queryActivityPage } from "../acti
 import type { ActivityKind, ActivityOutcomeState } from "../activity/types.js";
 import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
-import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir, mimeFromFilename, readLocalFileForIngestion, readMultipartFile, sanitizeUploadFilename } from "./files.js";
+import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir, mimeFromFilename, MultipartUploadError, readLocalFileForIngestion, readMultipartFile, sanitizeUploadFilename } from "./files.js";
 import { readJsonBody, readBodyRaw } from "./http-helpers.js";
 import { resolveMessageAudiences, speechContextApplies } from "./speech-context.js";
 import { isJsonMediaType } from "./media-type.js";
@@ -3889,6 +3889,9 @@ export async function handleApiRequest(
         try {
           uploadedFile = await readMultipartFile(req, ATTACHMENT_MAX_BYTES);
         } catch (err) {
+          if (err instanceof MultipartUploadError) {
+            return json(res, { error: err.message, ...(err.status === 413 ? { code: "attachment_too_large" } : {}) }, err.status);
+          }
           return badRequest(res, err instanceof Error ? err.message : String(err));
         }
         if (uploadedFile.truncated) {

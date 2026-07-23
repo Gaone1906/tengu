@@ -256,6 +256,81 @@ describe("POST /api/work-items/:id/attachments (multipart)", () => {
   });
 });
 
+describe("POST /api/work-items/:id/attachments — multipart hardening (review F3)", () => {
+  const boundary = "----jinnHardeningBoundary";
+
+  function rawPart(name: string, filename: string | null, content: Buffer | string): Buffer {
+    const disposition = filename === null
+      ? `Content-Disposition: form-data; name="${name}"\r\n\r\n`
+      : `Content-Disposition: form-data; name="${name}"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`;
+    return Buffer.concat([Buffer.from(`--${boundary}\r\n${disposition}`), Buffer.isBuffer(content) ? content : Buffer.from(content), Buffer.from("\r\n")]);
+  }
+
+  async function rawUpload(urlPath: string, parts: Buffer[], headers: Record<string, string> = {}, contentLength?: number) {
+    const body = Buffer.concat([...parts, Buffer.from(`--${boundary}--\r\n`)]);
+    const req = Object.assign(Readable.from([body]), {
+      method: "POST",
+      url: urlPath,
+      headers: {
+        host: "localhost",
+        "content-type": `multipart/form-data; boundary=${boundary}`,
+        "content-length": String(contentLength ?? body.length),
+        ...headers,
+      },
+    }) as unknown as Parameters<Api["handleApiRequest"]>[0];
+    const cap = makeRes();
+    await api.handleApiRequest(req, cap.res, ctx);
+    return cap;
+  }
+
+  it("refuses a second file part early — exactly one file field, nothing stored (multi-file regression)", async () => {
+    const item = store.createWorkItem({ title: "multi-file" });
+    const got = await rawUpload(`/api/work-items/${item.id}/attachments`, [
+      rawPart("file", "one.bin", Buffer.alloc(1024 * 1024, 1)),
+      rawPart("file", "two.bin", "second part"),
+    ], operatorHeaders);
+    expect(got.status).toBe(400);
+    expect(String(got.body.error)).toMatch(/one file/i);
+    expect(attachments.listAttachments(item.id)).toHaveLength(0);
+  });
+
+  it('refuses a file part not named "file"', async () => {
+    const item = store.createWorkItem({ title: "wrong field" });
+    const got = await rawUpload(`/api/work-items/${item.id}/attachments`, [
+      rawPart("payload", "sneaky.bin", "x"),
+    ], operatorHeaders);
+    expect(got.status).toBe(400);
+    expect(String(got.body.error)).toMatch(/"file"/);
+    expect(attachments.listAttachments(item.id)).toHaveLength(0);
+  });
+
+  it("refuses excess non-file fields and oversized field values", async () => {
+    const item = store.createWorkItem({ title: "field limits" });
+    const many = Array.from({ length: 8 }, (_, i) => rawPart(`field-${i}`, null, "v"));
+    const excess = await rawUpload(`/api/work-items/${item.id}/attachments`, [...many, rawPart("file", "a.txt", "a")], operatorHeaders);
+    expect(excess.status).toBe(400);
+
+    const fat = await rawUpload(`/api/work-items/${item.id}/attachments`, [
+      rawPart("commentId", null, "x".repeat(64 * 1024)),
+      rawPart("file", "a.txt", "a"),
+    ], operatorHeaders);
+    expect(fat.status).toBe(400);
+    expect(attachments.listAttachments(item.id)).toHaveLength(0);
+  });
+
+  it("enforces an aggregate request-byte ceiling up front", async () => {
+    const item = store.createWorkItem({ title: "aggregate ceiling" });
+    const got = await rawUpload(
+      `/api/work-items/${item.id}/attachments`,
+      [rawPart("file", "small.txt", "tiny")],
+      operatorHeaders,
+      attachments.ATTACHMENT_MAX_BYTES + 10 * 1024 * 1024, // declared way beyond the ceiling
+    );
+    expect(got.status).toBe(413);
+    expect(attachments.listAttachments(item.id)).toHaveLength(0);
+  });
+});
+
 describe("POST /api/work-items/:id/attachments (JSON path)", () => {
   it("ingests a local file by path — filename defaults to the basename, mime sniffed", async () => {
     const item = store.createWorkItem({ title: "json path" });
