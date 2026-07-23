@@ -13,8 +13,7 @@ import {
   type WorkItemStatusWire,
 } from "@/lib/api"
 import { operatorSafeTodoError } from "@/lib/todos"
-import { saveTodoDetailRemote } from "../detail-sheet"
-import { newTodoEditRequest, invalidateTodoCaches } from "../todo-edit-request"
+import { newTodoEditRequest, invalidateTodoCaches, saveTodoDetailRemote } from "../todo-edit-request"
 import { useSetWorkItemStatus } from "../use-todos"
 import { PickerPopover, PickerSheet } from "../pickers/picker-shell"
 import {

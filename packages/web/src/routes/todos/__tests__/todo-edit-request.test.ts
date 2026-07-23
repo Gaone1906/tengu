@@ -6,7 +6,6 @@ import {
   mergeTodoIntoCaches,
   newTodoEditRequest,
 } from "../todo-edit-request"
-import { loadTodoJournal, persistTodoJournal } from "../todo-private-state"
 
 describe("Todo conditional edit requests", () => {
   beforeEach(() => {
@@ -35,17 +34,8 @@ describe("Todo conditional edit requests", () => {
     patch.title = "Mutated after mint"
     patch.priority = 3
 
-    persistTodoJournal("JIN-42", {
-      revision: 1,
-      patch: request.patch,
-      baseline: { title: "Original", priority: 0 },
-      baselineVersion: 7,
-      request: { ...request, revision: 1, state: "prepared" },
-    })
-
     expect(request.patch).toEqual({ title: "Sent title", priority: 1 })
     expect(request.patch).not.toBe(patch)
-    expect(loadTodoJournal("JIN-42")?.request?.patch).toEqual({ title: "Sent title", priority: 1 })
   })
 
   it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(

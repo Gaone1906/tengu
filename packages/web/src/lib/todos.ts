@@ -13,53 +13,6 @@ import type {
 import { ApiError } from "./api"
 export { isPositiveTodoVersion } from "./api"
 
-// ── Display groups (the 5 board columns / mobile sections) ──────────────────
-// The DB carries 8 statuses; the board shows 5 groups. `blocked` and `escalated`
-// are attention states with no stored "base" status, so they fold into a fixed
-// group and wear an in-place badge — the flow reads true and the badge tells the
-// truth. `cancelled` is terminal-not-done and never shown on the board.
-export type DisplayGroup = "backlog" | "assigned" | "executing" | "review" | "done"
-
-// Ledger order (design-todos §4.2): in a vertical scan, what's moving right now
-// comes first, what waits on a person beats what's merely queued, done trails.
-export const DISPLAY_GROUPS: readonly DisplayGroup[] = [
-  "executing",
-  "review",
-  "assigned",
-  "backlog",
-  "done",
-]
-
-export const DISPLAY_GROUP_LABEL: Record<DisplayGroup, string> = {
-  backlog: "Backlog",
-  assigned: "Assigned",
-  executing: "Executing",
-  review: "In review",
-  done: "Done",
-}
-
-/** Which board group a status renders in (null = not shown on the board). */
-export function displayGroupOf(status: WorkItemStatusWire): DisplayGroup | null {
-  switch (status) {
-    case "backlog":
-      return "backlog"
-    case "assigned":
-      return "assigned"
-    case "executing":
-      return "executing"
-    case "blocked":
-      return "executing" // stuck work-in-progress, badged in place
-    case "in_review":
-      return "review"
-    case "escalated":
-      return "review" // awaiting the operator, badged in place
-    case "done":
-      return "done"
-    case "cancelled":
-      return null
-  }
-}
-
 /** Human label for a raw status (sheet, people queue, sub-lines). */
 export const STATUS_LABEL: Record<WorkItemStatusWire, string> = {
   backlog: "Backlog",
@@ -70,14 +23,6 @@ export const STATUS_LABEL: Record<WorkItemStatusWire, string> = {
   blocked: "Blocked",
   escalated: "Escalated",
   cancelled: "Cancelled",
-}
-
-/** The attention overlay a status carries, if any. */
-export type Attention = "blocked" | "escalated"
-export function attentionOf(status: WorkItemStatusWire): Attention | null {
-  if (status === "blocked") return "blocked"
-  if (status === "escalated") return "escalated"
-  return null
 }
 
 /** The glyph/colour key for a status circle. Distinct from the display group:
@@ -142,43 +87,6 @@ export function operatorSafeTodoError(error: unknown, fallback: string): string 
   return fallback
 }
 
-// ── Board grouping ──────────────────────────────────────────────────────────
-export interface BoardGroup {
-  group: DisplayGroup
-  label: string
-  items: WorkItemCompactWire[]
-}
-
-// Within a group, the group's "native" statuses sort before the folded-in
-// attention statuses, so Executing reads executing→blocked and In review reads
-// in_review→escalated (matching the approved mocks). Order is otherwise stable.
-const WITHIN_GROUP_RANK: Record<WorkItemStatusWire, number> = {
-  backlog: 0,
-  assigned: 0,
-  executing: 0,
-  in_review: 0,
-  done: 0,
-  blocked: 1,
-  escalated: 1,
-  cancelled: 0,
-}
-
-/** Group a flat set of items into the 5 ledger sections. Cancelled is dropped. */
-export function groupBoard(items: WorkItemCompactWire[]): BoardGroup[] {
-  const buckets = new Map<DisplayGroup, WorkItemCompactWire[]>()
-  for (const g of DISPLAY_GROUPS) buckets.set(g, [])
-  for (const it of items) {
-    const g = displayGroupOf(it.status)
-    if (g) buckets.get(g)!.push(it)
-  }
-  return DISPLAY_GROUPS.map((g) => {
-    const list = buckets.get(g)!.slice()
-    // Stable sort: native status first, attention folded after, then manual rank.
-    list.sort((a, b) => WITHIN_GROUP_RANK[a.status] - WITHIN_GROUP_RANK[b.status] || compareRank(a, b))
-    return { group: g, label: DISPLAY_GROUP_LABEL[g], items: list }
-  })
-}
-
 // ── Manual rank ordering (design-todos §4.5 / §7.3) ─────────────────────────
 // Default sort IS manual: rank ascending when present, then updatedAt desc for
 // never-ranked items. Ranked items always lead unranked ones.
@@ -203,20 +111,6 @@ export function rankBetween(before: number | null | undefined, after: number | n
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
-const OPEN_STATUS_LIST: readonly WorkItemStatusWire[] = [
-  "backlog", "assigned", "executing", "blocked", "in_review", "escalated",
-]
-
-/** Header counts from the gateway's TRUE per-status totals — never from a
- *  capped page of rows. The open-lens Done query is server-scoped to the
- *  recent window, so its total already means "done this week". */
-export function headerCountsFromTotals(
-  totals: Partial<Record<WorkItemStatusWire, number>>,
-): { open: number; doneRecent: number } {
-  const open = OPEN_STATUS_LIST.reduce((sum, s) => sum + (totals[s] ?? 0), 0)
-  return { open, doneRecent: totals.done ?? 0 }
-}
-
 // ── Needs-you inbox ─────────────────────────────────────────────────────────
 // The gateway owns attention routing. GET /api/work-items?needsAttentionFor=me
 // returns the caller-scoped queue newest-first; this helper only keeps the
@@ -229,66 +123,6 @@ export function needsAttention(item: WorkItemCompactWire): boolean {
 
 export function deriveNeedsYou(items: WorkItemCompactWire[]): NeedsYouSet {
   return items.filter(needsAttention)
-}
-
-export function needsYouCount(set: NeedsYouSet): number {
-  return set.length
-}
-
-// ── People grouping ─────────────────────────────────────────────────────────
-export interface PersonQueue {
-  employee: Employee
-  items: WorkItemCompactWire[]
-  /** Distinct open statuses present, in a canonical order (for the dot row). */
-  dist: WorkItemStatusWire[]
-  openCount: number
-}
-
-const PEOPLE_STATUS_ORDER: readonly WorkItemStatusWire[] = [
-  "executing",
-  "in_review",
-  "escalated",
-  "assigned",
-  "blocked",
-  "backlog",
-]
-const PRIORITY_RANK: Record<WorkItemStatusWire, number> = {
-  escalated: 0,
-  blocked: 1,
-  executing: 2,
-  in_review: 3,
-  assigned: 4,
-  backlog: 5,
-  done: 6,
-  cancelled: 7,
-}
-
-/**
- * One queue per employee, open items only (done/cancelled excluded), sorted so
- * employees with work lead (by open count, then name) and idle employees ("All
- * clear") trail. Every roster employee gets a row so "what is everyone doing"
- * is answerable, but the caller may cap the idle tail for calm.
- */
-export function groupPeople(items: WorkItemCompactWire[], employees: Employee[]): PersonQueue[] {
-  const byAssignee = new Map<string, WorkItemCompactWire[]>()
-  for (const it of items) {
-    if (!isOpen(it.status) || !it.assignee) continue
-    const list = byAssignee.get(it.assignee) ?? []
-    list.push(it)
-    byAssignee.set(it.assignee, list)
-  }
-  const queues = employees.map((employee): PersonQueue => {
-    const list = (byAssignee.get(employee.name) ?? [])
-      .slice()
-      .sort((a, b) => PRIORITY_RANK[a.status] - PRIORITY_RANK[b.status])
-    const present = new Set(list.map((i) => i.status))
-    const dist = PEOPLE_STATUS_ORDER.filter((s) => present.has(s))
-    return { employee, items: list, dist, openCount: list.length }
-  })
-  return queues.sort((a, b) => {
-    if (b.openCount !== a.openCount) return b.openCount - a.openCount
-    return a.employee.displayName.localeCompare(b.employee.displayName)
-  })
 }
 
 // ── Provenance whisper ──────────────────────────────────────────────────────

@@ -252,6 +252,16 @@ describe("the task page", () => {
     expect(await screen.findByText(/doesn't exist/)).toBeTruthy()
   })
 
+  it("a transport failure shows a visible Retry — never the missing state — and resolves on retry (cutover migration)", async () => {
+    getWorkItem.mockRejectedValueOnce(Object.assign(new Error("socket hang up"), { status: 502 }))
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12", { title: "Recovered title" })))
+    renderTask()
+    const error = await screen.findByTestId("task-load-error")
+    expect(error.textContent).not.toContain("doesn't exist")
+    fireEvent.click(screen.getByTestId("task-load-retry"))
+    await waitFor(() => expect(screen.getByTestId("task-title").textContent).toContain("Recovered title"))
+  })
+
   it("the body renders through MarkdownView when present and the quiet placeholder when empty", async () => {
     getWorkItem.mockResolvedValue(detailOf(full("PLA-12", { body: "Let a buyer **complete** a purchase." })))
     renderTask()

@@ -227,6 +227,9 @@ function CommentBlock({
   workItemId,
   reply,
   onReply,
+  onEdit,
+  onDelete,
+  busy,
 }: {
   comment: WorkItemCommentWire
   byName: Map<string, Employee>
@@ -234,8 +237,15 @@ function CommentBlock({
   workItemId: string
   reply?: boolean
   onReply?: () => void
+  /** Operator-authored comments edit in place (gateway-enforced authority). */
+  onEdit?: (body: string) => void
+  /** The operator's surface deletes anything; tombstones keep shape. */
+  onDelete?: () => void
+  busy?: boolean
 }) {
   const tombstoned = comment.deletedAt !== null
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState("")
   return (
     <div className={`pb-1 pt-3 ${reply ? "ml-[30px]" : ""}`} data-testid={`activity-comment-${comment.id}`}>
       <div className="flex items-center gap-2">
@@ -248,18 +258,79 @@ function CommentBlock({
         <span className="text-[11px] text-[var(--text-quaternary)]">{formatRelativeTime(comment.createdAt)}</span>
         {comment.editedAt && !tombstoned && <span className="text-[11px] text-[var(--text-quaternary)]">(edited)</span>}
       </div>
-      <div className="relative ml-[30px] mt-[7px] py-0.5 pl-3 text-[15px] leading-[1.55]">
-        <span aria-hidden className="absolute bottom-[3px] left-0 top-[3px] w-[2px] rounded-[1px] bg-[var(--fill-primary)]" />
-        <span className={tombstoned ? "italic text-[var(--text-quaternary)]" : "whitespace-pre-wrap break-words text-[var(--text-secondary)]"}>
-          {tombstoned ? "[deleted]" : comment.body}
-        </span>
-      </div>
+      {editing ? (
+        <div className="ml-[42px] mt-[7px]">
+          <textarea
+            autoFocus
+            data-testid={`activity-edit-${comment.id}`}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={2}
+            className="w-full min-w-0 resize-y rounded-[10px] bg-[var(--fill-quaternary)] p-2.5 text-[14.5px] text-[var(--text-primary)] outline-none"
+          />
+          <div className="mt-1 flex gap-3.5 text-[12px] font-medium text-[var(--text-quaternary)]">
+            <button
+              type="button"
+              data-testid={`activity-edit-save-${comment.id}`}
+              disabled={busy || !draft.trim()}
+              onClick={() => {
+                setEditing(false)
+                if (draft.trim() && draft !== comment.body) onEdit?.(draft)
+              }}
+              className="focus-ring rounded outline-none hover:text-[var(--text-secondary)] disabled:opacity-50"
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditing(false)}
+              className="focus-ring rounded outline-none hover:text-[var(--text-secondary)]"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="relative ml-[30px] mt-[7px] py-0.5 pl-3 text-[15px] leading-[1.55]">
+          <span aria-hidden className="absolute bottom-[3px] left-0 top-[3px] w-[2px] rounded-[1px] bg-[var(--fill-primary)]" />
+          <span className={tombstoned ? "italic text-[var(--text-quaternary)]" : "whitespace-pre-wrap break-words text-[var(--text-secondary)]"}>
+            {tombstoned ? "[deleted]" : comment.body}
+          </span>
+        </div>
+      )}
       <AttachmentChips attachments={attachments} workItemId={workItemId} />
-      {!tombstoned && onReply && (
+      {!tombstoned && !editing && (
         <div className="ml-[42px] mt-1.5 flex gap-3.5 text-[12px] font-medium text-[var(--text-quaternary)]">
-          <button type="button" data-testid={`activity-reply-${comment.id}`} onClick={onReply} className="focus-ring rounded outline-none hover:text-[var(--text-secondary)]">
-            Reply
-          </button>
+          {onReply && (
+            <button type="button" data-testid={`activity-reply-${comment.id}`} onClick={onReply} className="focus-ring rounded outline-none hover:text-[var(--text-secondary)]">
+              Reply
+            </button>
+          )}
+          {onEdit && (
+            <button
+              type="button"
+              data-testid={`activity-edit-start-${comment.id}`}
+              disabled={busy}
+              onClick={() => {
+                setDraft(comment.body)
+                setEditing(true)
+              }}
+              className="focus-ring rounded outline-none hover:text-[var(--text-secondary)] disabled:opacity-50"
+            >
+              Edit
+            </button>
+          )}
+          {onDelete && (
+            <button
+              type="button"
+              data-testid={`activity-delete-${comment.id}`}
+              disabled={busy}
+              onClick={onDelete}
+              className="focus-ring rounded outline-none hover:text-[var(--text-secondary)] disabled:opacity-50"
+            >
+              Delete
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -341,6 +412,30 @@ export function ActivitySection({
     },
     onError: (error) => announce(operatorSafeTodoError(error, "Couldn't post the comment")),
     onSettled: invalidate,
+  })
+
+  // Comment edit/delete carried over from the retired sheet (stage-B review
+  // disposition b): edit only what the operator authored, delete anything —
+  // the gateway enforces the same authority server-side.
+  const editComment = useMutation({
+    mutationFn: ({ commentId, body }: { commentId: string; body: string }) =>
+      api.editWorkItemComment(id, commentId, body),
+    onError: (error) => announce(operatorSafeTodoError(error, "Couldn't save the comment")),
+    onSettled: invalidate,
+  })
+  const removeComment = useMutation({
+    mutationFn: (commentId: string) => api.deleteWorkItemComment(id, commentId),
+    onError: (error) => announce(operatorSafeTodoError(error, "Couldn't delete the comment")),
+    onSettled: invalidate,
+  })
+  const commentBusy = editComment.isPending || removeComment.isPending
+  const commentActions = (comment: WorkItemCommentWire) => ({
+    onEdit:
+      comment.authorKind === "operator"
+        ? (body: string) => editComment.mutate({ commentId: comment.id, body })
+        : undefined,
+    onDelete: () => removeComment.mutate(comment.id),
+    busy: commentBusy,
   })
 
   const submit = () => {
@@ -513,6 +608,7 @@ export function ActivitySection({
                   attachments={attachmentsByComment.get(block.node.comment.id) ?? []}
                   workItemId={id}
                   onReply={() => setReplyTo(block.node.comment)}
+                  {...commentActions(block.node.comment)}
                 />
                 {block.node.replies.map((replyComment) => (
                   <CommentBlock
@@ -522,6 +618,7 @@ export function ActivitySection({
                     attachments={attachmentsByComment.get(replyComment.id) ?? []}
                     workItemId={id}
                     reply
+                    {...commentActions(replyComment)}
                   />
                 ))}
               </div>

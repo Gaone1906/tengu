@@ -319,6 +319,30 @@ export default function TaskPage() {
       </PageLayout>
     )
   }
+  // A transport/server failure is retryable — never masquerade as deletion
+  // (only a canonical 404 means missing; useTodoById maps that to null).
+  if (detailQuery.isError) {
+    return (
+      <PageLayout>
+        <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center" data-testid="task-load-error">
+          <div className="text-[20px] font-bold tracking-[-0.41px] text-[var(--text-primary)]">
+            Couldn&rsquo;t load {id}.
+          </div>
+          <p className="max-w-[340px] text-[14px] leading-[1.5] text-[var(--text-tertiary)]">
+            {operatorSafeTodoError(detailQuery.error, "The gateway didn't answer. It may be restarting.")}
+          </p>
+          <button
+            type="button"
+            data-testid="task-load-retry"
+            onClick={() => void detailQuery.refetch()}
+            className="focus-ring rounded-full px-4 py-2 text-[13px] font-semibold text-[var(--accent)] outline-none hover:bg-[var(--accent-fill)]"
+          >
+            Retry
+          </button>
+        </div>
+      </PageLayout>
+    )
+  }
 
   return (
     // Mobile is a full-screen push (§8): the tab bar yields the bottom edge to

@@ -16,17 +16,6 @@ export function formatRelativeTime(iso: string, now = Date.now()): string {
   return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric" })
 }
 
-/** A short role line for a person row, e.g. "Platform · Senior". */
-export function roleLabel(e: Employee): string {
-  const dept = e.department ? cap(e.department) : ""
-  const rank = e.rank ? cap(e.rank) : ""
-  return [dept, rank].filter(Boolean).join(" · ")
-}
-
-function cap(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1)
-}
-
 /** Resolve a display name for an assignee employee key, falling back to the key. */
 export function displayNameOf(assignee: string | null, byName: Map<string, Employee>): string {
   if (!assignee) return ""

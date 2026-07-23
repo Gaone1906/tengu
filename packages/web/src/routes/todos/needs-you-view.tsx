@@ -8,10 +8,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { EmployeeChip } from "@/components/ui/employee-chip"
-import { STATUS_LABEL, effectiveMaxRounds, operatorSafeTodoError, publicWorkItemReference } from "@/lib/todos"
+import { STATUS_LABEL, effectiveMaxRounds, operatorSafeTodoError, provenanceLabel, publicWorkItemReference } from "@/lib/todos"
 import { legalTargets } from "@/lib/legal-targets"
-import { StateCircle, StatusCircle, type StateGlyphKey } from "./state-glyph"
-import { ProvChip } from "./row"
+import { ProvenanceIcon, StateCircle, StatusCircle, type StateGlyphKey } from "./state-glyph"
 import { reasonOf, rollupOf } from "./board/card"
 import { useBoardTrees } from "./board/use-board"
 import { useOpenDetails, useSetWorkItemStatus } from "./use-todos"
@@ -41,6 +40,17 @@ function stateKey(kind: AttentionKind): StateGlyphKey {
 
 function shortRef(id: string): string {
   return id.length > 18 ? `${id.slice(0, 17)}…` : id
+}
+
+/** Provenance attribution for unassigned items (moved here from the retired
+ *  legacy row at the stage-C cutover — this inbox is its one consumer). */
+function ProvChip({ source, sourceRef }: { source: WorkItemCompactWire["source"]; sourceRef?: string | null }) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1.5 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
+      <ProvenanceIcon source={source} className="flex-none opacity-85" />
+      <span className="truncate">{provenanceLabel(source, sourceRef)}</span>
+    </span>
+  )
 }
 
 function WorkRef({ item }: { item: WorkItemCompactWire }) {

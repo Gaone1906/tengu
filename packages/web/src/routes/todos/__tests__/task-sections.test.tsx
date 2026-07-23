@@ -36,6 +36,8 @@ const listWorkItemAttachments = vi.fn()
 const uploadWorkItemAttachment = vi.fn()
 const deleteWorkItemAttachment = vi.fn()
 const addWorkItemComment = vi.fn()
+const editWorkItemComment = vi.fn()
+const deleteWorkItemComment = vi.fn()
 const listWorkItemComments = vi.fn()
 const searchWorkItems = vi.fn()
 
@@ -55,6 +57,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
       uploadWorkItemAttachment: (...args: unknown[]) => uploadWorkItemAttachment(...args),
       deleteWorkItemAttachment: (...args: unknown[]) => deleteWorkItemAttachment(...args),
       addWorkItemComment: (...args: unknown[]) => addWorkItemComment(...args),
+      editWorkItemComment: (...args: unknown[]) => editWorkItemComment(...args),
+      deleteWorkItemComment: (...args: unknown[]) => deleteWorkItemComment(...args),
       listWorkItemComments: (...args: unknown[]) => listWorkItemComments(...args),
       searchWorkItems: (...args: unknown[]) => searchWorkItems(...args),
       workItemAttachmentUrl: (id: string, aid: string) => `/api/work-items/${id}/attachments/${aid}`,
@@ -346,5 +350,34 @@ describe("attachments + activity", () => {
     fireEvent.click(screen.getByTestId("composer-send"))
     await waitFor(() => expect(addWorkItemComment).toHaveBeenCalledWith("PLA-12", "New note", undefined))
     await waitFor(() => expect(uploadWorkItemAttachment).toHaveBeenCalledWith("PLA-12", staged, "wic_3"))
+  })
+
+  it("carries comment edit/delete from the retired sheet: Edit only on operator-authored, Delete on any, wire round-trips (cutover)", async () => {
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    listWorkItemComments.mockResolvedValue({
+      comments: [
+        comment("wic_mine", "operator words", "2026-07-22T08:00:00.000Z", { authorKind: "operator", author: "operator" }),
+        comment("wic_theirs", "agent words", "2026-07-22T09:00:00.000Z"),
+      ],
+      total: 2,
+    })
+    editWorkItemComment.mockResolvedValue({ comment: comment("wic_mine", "operator words v2", "2026-07-22T08:00:00.000Z", { authorKind: "operator", author: "operator", editedAt: "2026-07-23T09:00:00.000Z" }) })
+    deleteWorkItemComment.mockResolvedValue({ comment: comment("wic_theirs", "", "2026-07-22T09:00:00.000Z", { deletedAt: "2026-07-23T09:00:00.000Z" }) })
+    renderTask()
+
+    await screen.findByTestId("activity-comment-wic_mine")
+    // Edit authority: only the operator's own words edit here.
+    expect(screen.getByTestId("activity-edit-start-wic_mine")).toBeTruthy()
+    expect(screen.queryByTestId("activity-edit-start-wic_theirs")).toBeNull()
+    expect(screen.getByTestId("activity-delete-wic_theirs")).toBeTruthy()
+
+    fireEvent.click(screen.getByTestId("activity-edit-start-wic_mine"))
+    const editBox = screen.getByTestId("activity-edit-wic_mine")
+    fireEvent.change(editBox, { target: { value: "operator words v2" } })
+    fireEvent.click(screen.getByTestId("activity-edit-save-wic_mine"))
+    await waitFor(() => expect(editWorkItemComment).toHaveBeenCalledWith("PLA-12", "wic_mine", "operator words v2"))
+
+    fireEvent.click(screen.getByTestId("activity-delete-wic_theirs"))
+    await waitFor(() => expect(deleteWorkItemComment).toHaveBeenCalledWith("PLA-12", "wic_theirs"))
   })
 })

@@ -3,9 +3,10 @@ import { render, screen } from "@testing-library/react"
 import { MemoryRouter, Routes, Route, useParams } from "react-router-dom"
 import { TodosIndexRedirect, legacyTodosRedirectTarget } from "../board/todos-index-redirect"
 
-/* Slice 6 stage A — /todos redirects into the board surface (My requests) while
- * the legacy list stays reachable at /todos/list until the stage-C cutover.
- * The route arrangement mirrors main.tsx; the components are stand-ins. */
+/* Slice 6 stage C — /todos IS the board surface (the index redirects into
+ * My requests) and /todos/:todoId is the task page. The legacy list route is
+ * gone; its lenses map onto the boards that superseded them. The route
+ * arrangement mirrors main.tsx; the components are stand-ins. */
 
 function BoardStub() {
   const { board } = useParams()
@@ -18,8 +19,7 @@ function Shell({ start }: { start: string }) {
       <Routes>
         <Route path="/todos" element={<TodosIndexRedirect />} />
         <Route path="/todos/b/:board" element={<BoardStub />} />
-        <Route path="/todos/list" element={<div data-testid="legacy-list">Legacy</div>} />
-        <Route path="/todos/:todoId" element={<div data-testid="legacy-detail">Legacy detail</div>} />
+        <Route path="/todos/:todoId" element={<div data-testid="task-page">Task</div>} />
       </Routes>
     </MemoryRouter>
   )
@@ -32,8 +32,8 @@ describe("legacyTodosRedirectTarget", () => {
   it("maps the needs lens to the Attention board", () => {
     expect(legacyTodosRedirectTarget("?view=needs")).toBe("/todos/b/attention")
   })
-  it("keeps the people lens on the legacy list", () => {
-    expect(legacyTodosRedirectTarget("?view=people")).toBe("/todos/list?view=people")
+  it("maps the retired people lens to Everything (superseded by department boards)", () => {
+    expect(legacyTodosRedirectTarget("?view=people")).toBe("/todos/b/everything")
   })
   it("carries filter params through", () => {
     expect(legacyTodosRedirectTarget("?assignee=scout&view=needs")).toBe("/todos/b/attention?assignee=scout")
@@ -52,18 +52,13 @@ describe("/todos route arrangement", () => {
     expect(screen.getByTestId("board-page").textContent).toBe("platform")
   })
 
-  it("keeps the legacy list reachable at /todos/list", () => {
-    render(<Shell start="/todos/list" />)
-    expect(screen.getByTestId("legacy-list")).toBeTruthy()
-  })
-
-  it("keeps the legacy detail route working (stage-B swaps its element)", () => {
+  it("serves the task page at /todos/:todoId", () => {
     render(<Shell start="/todos/PLA-12" />)
-    expect(screen.getByTestId("legacy-detail")).toBeTruthy()
+    expect(screen.getByTestId("task-page")).toBeTruthy()
   })
 
-  it("static /todos/list is not shadowed by the :todoId param route", () => {
-    render(<Shell start="/todos/list" />)
-    expect(screen.queryByTestId("legacy-detail")).toBeNull()
+  it("a legacy people-lens deep link lands on the Everything board, never a dead route", () => {
+    render(<Shell start="/todos?view=people" />)
+    expect(screen.getByTestId("board-page").textContent).toBe("everything")
   })
 })

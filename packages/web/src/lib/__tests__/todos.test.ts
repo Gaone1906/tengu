@@ -1,14 +1,8 @@
 import { describe, it, expect } from "vitest"
 import { ApiError, TodoApiError, type Employee, type WorkItemCompactWire, type WorkItemStatusWire } from "../api"
 import {
-  displayGroupOf,
-  attentionOf,
   stateKeyOf,
-  groupBoard,
-  headerCountsFromTotals,
   deriveNeedsYou,
-  needsYouCount,
-  groupPeople,
   provenanceSuffix,
   provenanceLabel,
   monogram,
@@ -53,23 +47,12 @@ function emp(name: string, displayName = name): Employee {
   return { name, displayName, department: "platform", rank: "senior", engine: "claude", model: "opus", persona: "" }
 }
 
-describe("displayGroupOf / attention / stateKey", () => {
-  it("maps each status to its board group; blocked→executing, escalated→review, cancelled hidden", () => {
-    expect(displayGroupOf("backlog")).toBe("backlog")
-    expect(displayGroupOf("assigned")).toBe("assigned")
-    expect(displayGroupOf("executing")).toBe("executing")
-    expect(displayGroupOf("blocked")).toBe("executing")
-    expect(displayGroupOf("in_review")).toBe("review")
-    expect(displayGroupOf("escalated")).toBe("review")
-    expect(displayGroupOf("done")).toBe("done")
-    expect(displayGroupOf("cancelled")).toBeNull()
-  })
-  it("keeps the attention overlay and the true glyph key", () => {
-    expect(attentionOf("blocked")).toBe("blocked")
-    expect(attentionOf("escalated")).toBe("escalated")
-    expect(attentionOf("executing")).toBeNull()
+describe("stateKeyOf", () => {
+  it("keeps the true glyph key — blocked/escalated stay themselves, in_review maps to review", () => {
     expect(stateKeyOf("in_review")).toBe("review")
-    expect(stateKeyOf("blocked")).toBe("blocked") // sits in Executing but stays blocked
+    expect(stateKeyOf("blocked")).toBe("blocked")
+    expect(stateKeyOf("escalated")).toBe("escalated")
+    expect(stateKeyOf("executing")).toBe("executing")
   })
 })
 
@@ -115,37 +98,7 @@ describe("conditional edit errors", () => {
   })
 })
 
-describe("groupBoard", () => {
-  it("drops cancelled and folds blocked/escalated into their groups, native-first", () => {
-    const groups = groupBoard([
-      compact({ id: "exec", status: "executing" }),
-      compact({ id: "blk", status: "blocked" }),
-      compact({ id: "rev", status: "in_review" }),
-      compact({ id: "esc", status: "escalated" }),
-      compact({ id: "cancel", status: "cancelled" }),
-    ])
-    const byGroup = Object.fromEntries(groups.map((g) => [g.group, g.items.map((i) => i.id)]))
-    expect(byGroup.executing).toEqual(["exec", "blk"]) // native before attention
-    expect(byGroup.review).toEqual(["rev", "esc"])
-    // cancelled appears in no group
-    expect(groups.flatMap((g) => g.items.map((i) => i.id))).not.toContain("cancel")
-  })
-  it("always returns the five groups in ledger order (moving work first)", () => {
-    expect(groupBoard([]).map((g) => g.group)).toEqual(["executing", "review", "assigned", "backlog", "done"])
-  })
-})
 
-describe("header counts (from gateway totals — never capped rows)", () => {
-  it("sums the open-status totals and passes the recent-done total through", () => {
-    expect(
-      headerCountsFromTotals({ backlog: 27, assigned: 4, executing: 3, blocked: 1, in_review: 2, escalated: 1, done: 12 }),
-    ).toEqual({ open: 38, doneRecent: 12 })
-  })
-  it("treats missing totals as zero (loading / cancelled excluded)", () => {
-    expect(headerCountsFromTotals({})).toEqual({ open: 0, doneRecent: 0 })
-    expect(headerCountsFromTotals({ cancelled: 9, done: 2 })).toEqual({ open: 0, doneRecent: 2 })
-  })
-})
 
 describe("deriveNeedsYou", () => {
   it("preserves the server's updated-first order and only keeps attention items", () => {
@@ -158,33 +111,13 @@ describe("deriveNeedsYou", () => {
     ]
     const set = deriveNeedsYou(items)
     expect(set.map((item) => item.id)).toEqual(["blk1", "ap1", "esc1", "both"])
-    expect(needsYouCount(set)).toBe(4)
+    expect(set).toHaveLength(4)
   })
   it("is empty when nothing is pending/escalated/blocked", () => {
-    expect(needsYouCount(deriveNeedsYou([compact({ id: "x", status: "executing" })]))).toBe(0)
+    expect(deriveNeedsYou([compact({ id: "x", status: "executing" })])).toHaveLength(0)
   })
 })
 
-describe("groupPeople", () => {
-  it("open-only queues, sorted by count then name, with a canonical dist order", () => {
-    const items = [
-      compact({ id: "1", status: "executing", assignee: "jinn-dev" }),
-      compact({ id: "2", status: "escalated", assignee: "jinn-dev" }),
-      compact({ id: "3", status: "assigned", assignee: "jinn-dev" }),
-      compact({ id: "4", status: "done", assignee: "jinn-dev" }), // excluded (terminal)
-      compact({ id: "5", status: "in_review", assignee: "support-bot" }),
-    ]
-    const people = groupPeople(items, [emp("growth-eng", "Growth Eng"), emp("support-bot", "Support Bot"), emp("jinn-dev", "Jinn Dev")])
-    expect(people.map((p) => p.employee.name)).toEqual(["jinn-dev", "support-bot", "growth-eng"]) // 3,1,0 open
-    expect(people[0].openCount).toBe(3)
-    // dist canonical order: executing, escalated, assigned (in_review/blocked/backlog absent)
-    expect(people[0].dist).toEqual(["executing", "escalated", "assigned"])
-    // idle employee reads all-clear (empty queue)
-    expect(people[2].items).toEqual([])
-    // queue sorted by priority: escalated first
-    expect(people[0].items[0].status).toBe("escalated")
-  })
-})
 
 describe("provenance / monogram / cost", () => {
   it("parses the sourceRef suffix for machine-minted items", () => {
