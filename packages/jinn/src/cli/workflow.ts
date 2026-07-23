@@ -1,185 +1,129 @@
-import fs from 'node:fs';
-import { gatewayBaseUrl, readGatewayInfo } from '../gateway/gateway-info.js';
-import { loadConfig } from '../shared/config.js';
-import { GATEWAY_INFO_FILE, JINN_HOME } from '../shared/paths.js';
+import fs from "node:fs";
+import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
+import { loadConfig } from "../shared/config.js";
+import { GATEWAY_INFO_FILE, JINN_HOME } from "../shared/paths.js";
 
-export interface WorkflowRunResult {
-  runId: string;
-  workflowId: string;
-  status: string;
-  [key: string]: unknown;
-}
-
-export interface WorkflowRunRequestOptions {
-  baseUrl: string;
-  token: string;
-  name: string;
-  input?: Record<string, unknown>;
-  idempotencyKey?: string;
-  fetchImpl?: typeof fetch;
-}
-
-export interface WorkflowRunCancellationRequestOptions {
-  baseUrl: string;
-  token: string;
-  workflowId: string;
-  runId: string;
-  reason?: string;
-  fetchImpl?: typeof fetch;
-}
-
-export interface RunWorkflowByNameOptions {
-  input?: string;
-  idempotencyKey?: string;
-  json?: boolean;
-}
-
-export interface CancelWorkflowRunOptions {
-  reason?: string;
-  json?: boolean;
-}
-
-export function formatWorkflowRunCancellationResult(run: WorkflowRunResult): string {
-  return run.status === 'cancelled'
-    ? `Cancelled ${run.runId} for ${run.workflowId} (${run.status}).`
-    : `Cancellation requested for ${run.runId} in ${run.workflowId} (${run.status}).`;
+type JsonOptions = { json?: boolean };
+type Method = "GET" | "POST" | "PUT";
+export interface WorkflowRunResult { runId: string; workflowId: string; status: string; [key: string]: unknown }
+export interface WorkflowRequestOptions {
+  baseUrl: string; token: string; method: Method; path: string; body?: unknown; fetchImpl?: typeof fetch;
 }
 
 export function parseWorkflowInput(raw: string): Record<string, unknown> {
   let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`workflow input must be valid JSON: ${err instanceof Error ? err.message : String(err)}`);
+  try { parsed = JSON.parse(raw); } catch (error) {
+    throw new Error(`workflow input must be valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('workflow input must be a JSON object');
-  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("workflow input must be a JSON object");
   return parsed as Record<string, unknown>;
 }
 
-async function responseJson(res: Response): Promise<unknown> {
-  try {
-    return await res.json();
-  } catch {
-    return null;
-  }
+async function responseJson(response: Response): Promise<unknown> {
+  try { return await response.json(); } catch { return null; }
 }
 
-export async function requestWorkflowRunByName(opts: WorkflowRunRequestOptions): Promise<WorkflowRunResult> {
-  const fetchImpl = opts.fetchImpl ?? fetch;
-  const payload = {
-    name: opts.name,
-    ...(opts.input ? { input: opts.input } : {}),
-    ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
-  };
-  const res = await fetchImpl(`${opts.baseUrl}/api/workflow-runs/by-name`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${opts.token}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-  const body = await responseJson(res);
-  if (!res.ok) {
-    const detail = body && typeof body === 'object' && typeof (body as { error?: unknown }).error === 'string'
-      ? (body as { error: string }).error
-      : `gateway returned HTTP ${res.status}`;
-    throw new Error(`workflow run failed: ${detail}`);
+export async function requestWorkflow(options: WorkflowRequestOptions): Promise<unknown> {
+  const headers: Record<string, string> = { authorization: `Bearer ${options.token}`, accept: "application/json" };
+  const init: RequestInit = { method: options.method, headers };
+  if (options.body !== undefined) { headers["content-type"] = "application/json"; init.body = JSON.stringify(options.body); }
+  const response = await (options.fetchImpl ?? fetch)(`${options.baseUrl}${options.path}`, init);
+  const result = await responseJson(response);
+  if (!response.ok) {
+    const envelope = result && typeof result === "object" ? result as { code?: unknown; message?: unknown; error?: unknown } : {};
+    const code = typeof envelope.code === "string" ? `${envelope.code}: ` : "";
+    const message = typeof envelope.message === "string" ? envelope.message
+      : typeof envelope.error === "string" ? envelope.error : `gateway returned HTTP ${response.status}`;
+    throw new Error(`${code}${message}`);
   }
-  return body as WorkflowRunResult;
+  return result;
 }
 
-export async function requestWorkflowRunCancellation(
-  opts: WorkflowRunCancellationRequestOptions,
-): Promise<WorkflowRunResult> {
-  const fetchImpl = opts.fetchImpl ?? fetch;
-  const res = await fetchImpl(
-    `${opts.baseUrl}/api/workflow-definitions/${encodeURIComponent(opts.workflowId)}/runs/${encodeURIComponent(opts.runId)}/cancel`,
-    {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${opts.token}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(opts.reason ? { reason: opts.reason } : {}),
-    },
-  );
-  const body = await responseJson(res);
-  if (!res.ok) {
-    const detail = body && typeof body === 'object' && typeof (body as { error?: unknown }).error === 'string'
-      ? (body as { error: string }).error
-      : `gateway returned HTTP ${res.status}`;
-    throw new Error(`workflow cancellation failed: ${detail}`);
-  }
-  return body as WorkflowRunResult;
-}
-
-function gatewayConnection(): { baseUrl: string; token: string } | null {
-  if (!fs.existsSync(JINN_HOME)) return null;
+function connection(): { baseUrl: string; token: string } {
   const info = readGatewayInfo(GATEWAY_INFO_FILE);
-  let port: number | undefined;
-  let host: string | undefined;
-  try {
-    const config = loadConfig();
-    port = config.gateway.port;
-    host = config.gateway.host;
-  } catch {
-    // gateway.json is enough while config.yaml is temporarily unreadable.
-  }
-  if (!info?.token) return null;
-  return {
-    baseUrl: gatewayBaseUrl({ port: info.port ?? port ?? 7777, host: info.host ?? host }),
-    token: info.token,
-  };
+  let port = info?.port ?? 7777; let host = info?.host;
+  try { const config = loadConfig(); port = info?.port ?? config.gateway.port; host = info?.host ?? config.gateway.host; } catch { /* gateway info is sufficient */ }
+  if (!info?.token) throw new Error("Gateway auth token was not found. Start Jinn first, then retry.");
+  return { baseUrl: gatewayBaseUrl({ port, host }), token: info.token };
 }
 
-export async function runWorkflowByName(name: string, opts: RunWorkflowByNameOptions = {}): Promise<void> {
-  const connection = gatewayConnection();
-  if (!connection) {
-    console.error('Gateway auth token was not found. Start Jinn first, then run the workflow.');
-    process.exitCode = 1;
-    return;
-  }
-  try {
-    const input = opts.input === undefined ? undefined : parseWorkflowInput(opts.input);
-    const run = await requestWorkflowRunByName({
-      ...connection,
-      name,
-      ...(input ? { input } : {}),
-      ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
-    });
-    if (opts.json) console.log(JSON.stringify(run, null, 2));
-    else console.log(`Started ${run.runId} for ${run.workflowId} (${run.status}).`);
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exitCode = 1;
-  }
+function fileObject(file: string): Record<string, unknown> {
+  return parseWorkflowInput(fs.readFileSync(file, "utf8"));
 }
+function revision(value: string): number {
+  const parsed = Number(value); if (!Number.isInteger(parsed) || parsed < 1) throw new Error("expected revision must be a positive integer"); return parsed;
+}
+function query(values: Record<string, unknown>): string {
+  const params = new URLSearchParams(); for (const [key, value] of Object.entries(values)) if (value !== undefined) params.set(key, String(value));
+  const encoded = params.toString(); return encoded ? `?${encoded}` : "";
+}
+function print(result: unknown, json = false): void {
+  if (json) console.log(JSON.stringify(result, null, 2));
+  else if (Array.isArray(result)) console.log(`${result.length} Workflow result(s).`);
+  else console.log(JSON.stringify(result, null, 2));
+}
+async function command(method: Method, path: string, body: unknown, options: JsonOptions): Promise<void> {
+  try { print(await requestWorkflow({ ...connection(), method, path, ...(body === undefined ? {} : { body }) }), options.json); }
+  catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
+}
+const wf = (id: string) => `/api/workflows/${encodeURIComponent(id)}`;
+const run = (workflowId: string, runId: string) => `${wf(workflowId)}/runs/${encodeURIComponent(runId)}`;
 
-export async function cancelWorkflowRunFromCli(
-  workflowId: string,
-  runId: string,
-  opts: CancelWorkflowRunOptions = {},
-): Promise<void> {
-  const connection = gatewayConnection();
-  if (!connection) {
-    console.error('Gateway auth token was not found. Start Jinn first, then cancel the workflow run.');
-    process.exitCode = 1;
-    return;
-  }
-  try {
-    const run = await requestWorkflowRunCancellation({
-      ...connection,
-      workflowId,
-      runId,
-      ...(opts.reason ? { reason: opts.reason } : {}),
-    });
-    if (opts.json) console.log(JSON.stringify(run, null, 2));
-    else console.log(formatWorkflowRunCancellationResult(run));
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exitCode = 1;
-  }
+export async function listWorkflows(options: { cursor?: string; limit?: string } & JsonOptions = {}): Promise<void> {
+  return command("GET", `/api/workflows${query({ cursor: options.cursor, limit: options.limit })}`, undefined, options);
+}
+export async function getWorkflow(workflowId: string, options: JsonOptions = {}): Promise<void> { return command("GET", wf(workflowId), undefined, options); }
+export async function createWorkflow(options: { file: string } & JsonOptions): Promise<void> { return command("POST", "/api/workflows", fileObject(options.file), options); }
+export async function updateWorkflow(workflowId: string, options: { file: string; expectedRevision: string } & JsonOptions): Promise<void> {
+  return command("PUT", wf(workflowId), { definition: fileObject(options.file), expectedRevision: revision(options.expectedRevision) }, options);
+}
+export async function duplicateWorkflow(sourceId: string, options: { id: string; title: string } & JsonOptions): Promise<void> {
+  return command("POST", `${wf(sourceId)}/duplicate`, { id: options.id, title: options.title }, options);
+}
+export async function retireWorkflow(workflowId: string, options: { expectedRevision: string } & JsonOptions): Promise<void> {
+  return command("POST", `${wf(workflowId)}/retire`, { expectedRevision: revision(options.expectedRevision) }, options);
+}
+export async function enableWorkflow(workflowId: string, options: { expectedRevision: string } & JsonOptions): Promise<void> {
+  return command("POST", `${wf(workflowId)}/enable`, { expectedRevision: revision(options.expectedRevision) }, options);
+}
+export async function disableWorkflow(workflowId: string, options: { expectedRevision: string } & JsonOptions): Promise<void> {
+  return command("POST", `${wf(workflowId)}/disable`, { expectedRevision: revision(options.expectedRevision) }, options);
+}
+export async function startWorkflowRun(workflowId: string, options: { input?: string; idempotencyKey?: string } & JsonOptions = {}): Promise<void> {
+  return command("POST", `${wf(workflowId)}/runs`, { input: options.input ? parseWorkflowInput(options.input) : {},
+    ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}) }, options);
+}
+export async function listWorkflowRuns(workflowId: string, options: { cursor?: string; limit?: string; status?: string } & JsonOptions = {}): Promise<void> {
+  return command("GET", `${wf(workflowId)}/runs${query({ cursor: options.cursor, limit: options.limit, status: options.status })}`, undefined, options);
+}
+export async function showWorkflowRun(workflowId: string, runId: string, options: JsonOptions = {}): Promise<void> {
+  return command("GET", run(workflowId, runId), undefined, options);
+}
+export async function cancelWorkflowRun(workflowId: string, runId: string, options: { reason?: string } & JsonOptions = {}): Promise<void> {
+  return command("POST", `${run(workflowId, runId)}/cancel`, options.reason ? { reason: options.reason } : {}, options);
+}
+export async function rerunWorkflowRun(workflowId: string, runId: string, options: { definition: "original" | "current"; idempotencyKey: string } & JsonOptions): Promise<void> {
+  return command("POST", `${run(workflowId, runId)}/rerun`, { definition: options.definition, idempotencyKey: options.idempotencyKey }, options);
+}
+async function decideWorkflowApproval(decision: "approve" | "reject", workflowId: string, runId: string, nodeId: string,
+  options: { expectedRevision: string; reason?: string } & JsonOptions): Promise<void> {
+  return command("POST", `${run(workflowId, runId)}/nodes/${encodeURIComponent(nodeId)}/approval`, {
+    decision, expectedRevision: revision(options.expectedRevision), ...(options.reason === undefined ? {} : { reason: options.reason }),
+  }, options);
+}
+export async function approveWorkflowApproval(workflowId: string, runId: string, nodeId: string,
+  options: { expectedRevision: string; reason?: string } & JsonOptions): Promise<void> {
+  return decideWorkflowApproval("approve", workflowId, runId, nodeId, options);
+}
+export async function rejectWorkflowApproval(workflowId: string, runId: string, nodeId: string,
+  options: { expectedRevision: string; reason?: string } & JsonOptions): Promise<void> {
+  return decideWorkflowApproval("reject", workflowId, runId, nodeId, options);
+}
+export async function retryWorkflowNode(workflowId: string, runId: string, nodeId: string,
+  options: { idempotencyKey: string } & JsonOptions): Promise<void> {
+  return command("POST", `${run(workflowId, runId)}/nodes/${encodeURIComponent(nodeId)}/retry`,
+    { idempotencyKey: options.idempotencyKey }, options);
+}
+export async function fireWorkflowEvent(eventName: string, options: { fireId: string; payload: string } & JsonOptions): Promise<void> {
+  return command("POST", `/api/workflows/events/${encodeURIComponent(eventName)}`, { fireId: options.fireId, payload: parseWorkflowInput(options.payload) }, options);
 }

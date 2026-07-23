@@ -1,301 +1,285 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { useBlocker, useNavigate, useParams, useSearchParams } from "react-router-dom"
-import { useQuery } from "@tanstack/react-query"
-import { ChevronLeft } from "lucide-react"
-import { api, type EditableWorkflowDefinitionWire } from "@/lib/api"
+import { useCallback, useState } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { ArrowLeft, Play } from "lucide-react"
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
+import {
+  ApiError,
+  WorkflowValidationApiError,
+  api,
+  type WorkflowDefinitionV2Wire,
+  type WorkflowRunSummaryV2Wire,
+} from "@/lib/api"
 import { queryKeys } from "@/lib/query-keys"
-import { WorkflowEditView } from "./edit"
-import { DefinitionRunView } from "./run-view"
-import { WorkflowLeaveDialog } from "./workflow-leave-dialog"
+import { EditorCanvas, SaveChip, useAutosave } from "./editor/editor"
+import { createEditorStore, EditorStoreContext, useEditor, useEditorApi, type EditorStoreApi } from "./editor/store"
+import {
+  StatusGlyph,
+  TRIGGER_KIND_LABEL,
+  formatDuration,
+  formatStarted,
+  isLiveRunStatus,
+  statusMeta,
+} from "./run-support"
 
-/** A workflow-run deep link encodes a run id; keep only safe id characters. */
-const RUN_ID_RE = /^[A-Za-z0-9._-]{1,128}$/
-
-/* GRS-019 / canvas-spec §6 — ONE workflow's surface, opened from the /workflow
- * list.
- *
- * Exactly TWO lenses over one spatial truth (n8n's model): "Editor" = the
- * durable definition (arrange, connect, configure); "Executions" = the run
- * list replayed onto the identical canvas geometry. The derived dogfood "Live"
- * projection is not a third mode — it folds into Executions as a pinned first
- * chip when the gateway serves one for this id. Both lenses render the same
- * canvas component with the same positions, so switching moves zero geometry. */
-
-type Mode = "runs" | "edit"
-export interface WorkflowLeaveActions {
-  save: () => Promise<boolean>
-  discard: () => void
-}
-const MODE_LABEL: Record<Mode, string> = { edit: "Editor", runs: "Executions" }
-const MODES: Mode[] = ["edit", "runs"]
-
-function modeFromParam(p: string | null): Mode | null {
-  if (p === "edit") return "edit"
-  if (p === "runs" || p === "live" || p === "run") return "runs"
-  return null
-}
-
-function currentFocusReturnTarget(): HTMLElement | null {
-  const active = document.activeElement instanceof HTMLElement ? document.activeElement : null
-  if (!active) return null
-  const menu = active.closest<HTMLElement>("[role=menu]")
-  const triggerId = menu?.getAttribute("aria-labelledby")
-  const menuTrigger = triggerId ? document.getElementById(triggerId) : null
-  return menuTrigger instanceof HTMLElement ? menuTrigger : active
-}
-
-/* Editor ↔ Executions as a quiet segmented control (HIG): soft fill container,
- * elevated active segment — no loud accent buttons, no border. */
-function ModeToggle({ mode, onChange }: { mode: Mode; onChange: (m: Mode) => void }) {
+function RunRow({ run }: { run: WorkflowRunSummaryV2Wire }) {
+  const meta = statusMeta(run.status)
+  const nodeHint = run.currentOrFailingNode
   return (
-    <div className="flex items-center rounded-[10px] bg-[var(--fill-tertiary)] p-0.5">
-      {MODES.map((m) => (
+    <Link
+      to={`/workflow/${encodeURIComponent(run.workflowId)}/runs/${encodeURIComponent(run.id)}`}
+      className="flex items-center gap-3 rounded-[13px] px-3.5 py-3 hover:bg-[var(--fill-quaternary)]"
+    >
+      <StatusGlyph status={run.status} />
+      <span className="min-w-0 flex-1">
+        <span className="flex items-baseline gap-2">
+          <span className="text-[length:var(--text-subheadline)] font-[var(--weight-medium)] text-[var(--text-primary)]">
+            {meta.label}
+          </span>
+          <span
+            className="truncate text-[length:var(--text-caption1)] text-[var(--text-quaternary)]"
+            style={{ fontFamily: "var(--font-code)" }}
+          >
+            {run.id}
+          </span>
+        </span>
+        <span className="block truncate text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
+          {TRIGGER_KIND_LABEL[run.trigger.kind]}
+          {nodeHint ? ` · ${nodeHint.state === "failing" ? "failed at" : "at"} ${nodeHint.label}` : ""}
+        </span>
+      </span>
+      <span
+        className="shrink-0 text-right text-[length:var(--text-caption1)] text-[var(--text-tertiary)] [font-variant-numeric:tabular-nums]"
+        style={{ fontFamily: "var(--font-code)" }}
+      >
+        <span className="block">{formatStarted(run.startedAt)}</span>
+        <span className="block text-[var(--text-quaternary)]">{formatDuration(run.startedAt, run.endedAt)}</span>
+      </span>
+    </Link>
+  )
+}
+
+function RunsSection({ workflowId }: { workflowId: string }) {
+  const query = useQuery({
+    queryKey: queryKeys.workflows.runs(workflowId),
+    queryFn: () => api.listWorkflowRunsV2(workflowId),
+    enabled: Boolean(workflowId),
+    refetchInterval: (current) =>
+      current.state.data?.items.some((run) => isLiveRunStatus(run.status)) ? 2500 : false,
+  })
+
+  return (
+    <section className="mx-auto max-w-[860px] px-5 pb-16 pt-6">
+      {query.isPending && <p className="text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">Loading runs…</p>}
+      {query.isError && (
+        <p className="rounded-[var(--radius-lg)] bg-[var(--fill-tertiary)] p-4 text-[length:var(--text-subheadline)] text-[var(--system-red)]">
+          {query.error instanceof Error ? query.error.message : "Failed to load runs."}
+        </p>
+      )}
+      {query.data && query.data.items.length === 0 && (
+        <p className="text-[length:var(--text-subheadline)] text-[var(--text-secondary)]">No runs yet.</p>
+      )}
+      {query.data && query.data.items.length > 0 && (
+        <div className="rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-[5px] shadow-[var(--shadow-card)]">
+          {query.data.items.map((run) => (
+            <RunRow key={run.id} run={run} />
+          ))}
+          {query.data.nextCursor && (
+            <p className="px-3.5 py-2.5 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
+              Showing the latest {query.data.items.length} runs.
+            </p>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function RunButton({ workflowId }: { workflowId: string }) {
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
+  const start = useMutation({
+    mutationFn: () => api.startWorkflowRunV2(workflowId),
+    onSuccess: (detail) => {
+      queryClient.setQueryData(queryKeys.workflows.run(workflowId, detail.id), detail)
+      void queryClient.invalidateQueries({ queryKey: queryKeys.workflows.runs(workflowId) })
+      navigate(`/workflow/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(detail.id)}`)
+    },
+  })
+
+  return (
+    <button
+      type="button"
+      onClick={() => start.mutate()}
+      disabled={start.isPending}
+      title={start.isError ? (start.error instanceof Error ? start.error.message : "Failed to start run.") : undefined}
+      className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-[var(--accent)] px-3.5 text-[length:var(--text-footnote)] font-[var(--weight-semibold)] text-[var(--accent-contrast)] transition-opacity hover:opacity-90 disabled:opacity-50"
+    >
+      <Play className="size-3.5" aria-hidden />
+      {start.isPending ? "Starting…" : "Run"}
+    </button>
+  )
+}
+
+function EnableSwitch({ flushNow }: { flushNow: () => Promise<void> }) {
+  const store = useEditorApi()
+  const enabled = useEditor((state) => state.meta.enabled)
+  const [busy, setBusy] = useState(false)
+  const queryClient = useQueryClient()
+
+  const toggle = useCallback(async () => {
+    setBusy(true)
+    try {
+      await flushNow()
+      const state = store.getState()
+      if (state.save.state !== "saved") return
+      const saved = await api.setWorkflowEnabledV2(state.meta.id, !state.meta.enabled, state.meta.revision)
+      store.getState().acknowledge(saved)
+      store.getState().setIssues(null)
+      queryClient.setQueryData(queryKeys.workflows.definition(saved.id), saved)
+    } catch (error) {
+      if (error instanceof WorkflowValidationApiError) store.getState().setIssues(error.issues)
+      else if (error instanceof ApiError && error.status === 409) store.getState().setSave({ state: "conflict" })
+      else store.getState().setSave({ state: "error", message: error instanceof Error ? error.message : "Request failed." })
+    } finally {
+      setBusy(false)
+    }
+  }, [flushNow, queryClient, store])
+
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      aria-label={enabled ? "Disable workflow" : "Enable workflow"}
+      disabled={busy}
+      onClick={() => void toggle()}
+      className="inline-flex h-8 shrink-0 items-center gap-2 rounded-full px-1 disabled:opacity-50"
+    >
+      <span
+        className="relative inline-flex h-[22px] w-[38px] items-center rounded-full transition-colors"
+        style={{ background: enabled ? "var(--system-green)" : "var(--fill-secondary)" }}
+      >
+        <span
+          className="absolute size-[18px] rounded-full bg-white shadow-[var(--shadow-subtle)] transition-transform"
+          style={{ transform: enabled ? "translateX(18px)" : "translateX(2px)" }}
+        />
+      </span>
+      <span className="text-[length:var(--text-footnote)] font-[var(--weight-medium)] text-[var(--text-secondary)]">
+        {enabled ? "Enabled" : "Disabled"}
+      </span>
+    </button>
+  )
+}
+
+type Lens = "editor" | "runs"
+
+function LensControl({ lens, setLens }: { lens: Lens; setLens: (lens: Lens) => void }) {
+  return (
+    <div className="flex h-8 shrink-0 items-center gap-0.5 rounded-full bg-[var(--fill-tertiary)] p-0.5">
+      {(["editor", "runs"] as const).map((value) => (
         <button
-          key={m}
+          key={value}
           type="button"
-          onClick={() => onChange(m)}
-          data-testid={`wf-mode-${m}`}
-          aria-pressed={mode === m}
-          className="h-[30px] rounded-lg px-3.5 text-[length:var(--text-footnote)] font-[var(--weight-medium)] transition-colors"
-          style={
-            mode === m
-              ? { background: "var(--bg-tertiary)", color: "var(--text-primary)", boxShadow: "var(--shadow-subtle), var(--inset-shine)" }
-              : { color: "var(--text-secondary)" }
-          }
+          aria-pressed={lens === value}
+          onClick={() => setLens(value)}
+          className={`h-7 rounded-full px-3 text-[length:var(--text-footnote)] font-[var(--weight-medium)] transition-colors ${
+            lens === value
+              ? "bg-[var(--bg-secondary)] text-[var(--text-primary)] shadow-[var(--shadow-subtle)]"
+              : "text-[var(--text-secondary)]"
+          }`}
         >
-          {MODE_LABEL[m]}
+          {value === "editor" ? "Editor" : "Runs"}
         </button>
       ))}
     </div>
   )
 }
 
+function WorkflowSurface({ store }: { store: EditorStoreApi }) {
+  const { flushNow } = useAutosave(store)
+  const meta = useEditor((state) => state.meta)
+  const hasManualTrigger = useEditor((state) =>
+    state.nodes.some((node) => node.data.node.type === "trigger" && node.data.node.config["kind"] === "manual"))
+  const [params, setParams] = useSearchParams()
+  const lens: Lens = params.get("lens") === "runs" ? "runs" : "editor"
+  const setLens = useCallback(
+    (next: Lens) => setParams(next === "runs" ? { lens: "runs" } : {}, { replace: true }),
+    [setParams],
+  )
+  const queryClient = useQueryClient()
+  useBreadcrumbs([{ label: "Workflows", href: "/workflow" }, { label: meta.title }])
+
+  const reload = useCallback(async () => {
+    const fresh = await api.getWorkflowDefinitionV2(meta.id)
+    store.getState().applyDefinition(fresh)
+    queryClient.setQueryData(queryKeys.workflows.definition(fresh.id), fresh)
+  }, [meta.id, queryClient, store])
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 pb-3 pt-4 md:px-5">
+        <Link
+          to="/workflow"
+          aria-label="Back to workflows"
+          className="grid size-8 shrink-0 place-items-center rounded-full text-[var(--text-secondary)] hover:bg-[var(--fill-tertiary)]"
+        >
+          <ArrowLeft className="size-4" aria-hidden />
+        </Link>
+        {/* Basis keeps the title readable at 390px — trailing controls wrap
+            below instead of squeezing it to one glyph. */}
+        <div className="min-w-0 flex-[1_1_160px]">
+          <h1 className="truncate text-[length:var(--text-headline)] font-[var(--weight-bold)] tracking-[var(--tracking-tight)]">
+            {meta.title}
+          </h1>
+        </div>
+        <SaveChip onReload={() => void reload()} />
+        <EnableSwitch flushNow={flushNow} />
+        {meta.enabled && hasManualTrigger && <RunButton workflowId={meta.id} />}
+        <LensControl lens={lens} setLens={setLens} />
+      </header>
+      <div className="min-h-0 flex-1">
+        {lens === "editor" ? (
+          <EditorCanvas />
+        ) : (
+          <div className="h-full overflow-y-auto" data-scrollable="true">
+            <RunsSection workflowId={meta.id} />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function WorkflowEditorProvider({ definition }: { definition: WorkflowDefinitionV2Wire }) {
+  const [store] = useState(() => createEditorStore(definition))
+  return (
+    <EditorStoreContext value={store}>
+      <WorkflowSurface store={store} />
+    </EditorStoreContext>
+  )
+}
+
 export default function WorkflowPage() {
-  const { id } = useParams<{ id: string }>()
-  const workflowId = id ?? ""
-  const navigate = useNavigate()
-  const [searchParams, setSearchParams] = useSearchParams()
-  const requestedModeParam = searchParams.get("mode")
-  const requestedMode = modeFromParam(requestedModeParam) ?? "runs"
-  const initialLive = requestedModeParam === "live"
-
-  const [hasDerived, setHasDerived] = useState(false)
-  const [mode, setMode] = useState<Mode>(requestedMode)
-  // A run deep link is only meaningful in the Executions lens; validate its id.
-  const runParamRaw = searchParams.get("run")
-  const runParam = mode === "runs" && runParamRaw && RUN_ID_RE.test(runParamRaw) ? runParamRaw : null
-  const [editDirty, setEditDirty] = useState(false)
-  const [leaveActions, setLeaveActions] = useState<WorkflowLeaveActions | null>(null)
-  const [pendingMode, setPendingMode] = useState<Mode | null>(null)
-  const [resolvingLeave, setResolvingLeave] = useState(false)
-  const returnFocusRef = useRef<HTMLElement | null>(null)
-  const blocker = useBlocker(mode === "edit" && editDirty)
-  const leaveDialogOpen = blocker.state === "blocked" || pendingMode !== null
-  if (blocker.state === "blocked" && !returnFocusRef.current) {
-    // Capture before the modal's mount autofocus runs. A passive effect would
-    // observe the Stay button instead of the control that initiated navigation.
-    returnFocusRef.current = currentFocusReturnTarget()
-  }
-
-  useEffect(() => {
-    if (!editDirty || leaveDialogOpen) return
-    const rememberStableFocus = () => {
-      const target = currentFocusReturnTarget()
-      if (target && target !== document.body) returnFocusRef.current = target
-    }
-    document.addEventListener("focusin", rememberStableFocus)
-    return () => document.removeEventListener("focusin", rememberStableFocus)
-  }, [editDirty, leaveDialogOpen])
-
-  useEffect(() => {
-    if (!editDirty) return
-    const guard = (event: BeforeUnloadEvent) => {
-      event.preventDefault()
-      event.returnValue = ""
-    }
-    window.addEventListener("beforeunload", guard)
-    return () => window.removeEventListener("beforeunload", guard)
-  }, [editDirty])
-
-  // The definition names the surface (title + status dot). It is a React Query so
-  // WebSocket `company:changed` invalidation of queryKeys.workflows.definition
-  // refreshes the header live after an edit elsewhere.
-  const definitionQuery = useQuery({
-    queryKey: queryKeys.workflows.definition(workflowId),
-    queryFn: () => api.getWorkflowDefinition(workflowId),
-    enabled: Boolean(workflowId),
+  const { id = "" } = useParams<{ id: string }>()
+  const query = useQuery({
+    queryKey: queryKeys.workflows.definition(id),
+    queryFn: () => api.getWorkflowDefinitionV2(id),
+    enabled: Boolean(id),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
   })
-  const definition: EditableWorkflowDefinitionWire | null = definitionQuery.data ?? null
-
-  useBreadcrumbs(useMemo(
-    () => [{ label: "Workflows", href: "/workflow" }, { label: definition?.title ?? workflowId }],
-    [definition?.title, workflowId],
-  ))
-
-  // The derived Live projection is only offered when the gateway serves one for
-  // this id — the pinned "Live" chip inside Executions, never a third lens. It is
-  // a separate derived store, not part of the definition/run key space.
-  useEffect(() => {
-    let cancelled = false
-    api.listWorkflows()
-      .then((w) => { if (!cancelled) setHasDerived(w.workflows.includes(workflowId)) })
-      .catch(() => { /* no derived store — the Live chip stays hidden */ })
-    return () => { cancelled = true }
-  }, [workflowId])
-
-  useEffect(() => {
-    setMode(requestedMode)
-  }, [requestedMode, workflowId])
-
-  const rememberFocus = useCallback(() => {
-    returnFocusRef.current = currentFocusReturnTarget()
-  }, [])
-
-  // Local lens changes do not enter router history, so they share the same
-  // explicit leave decision while router transitions are handled by useBlocker.
-  const changeMode = useCallback((next: Mode) => {
-    if (mode === "edit" && next !== "edit" && editDirty) {
-      rememberFocus()
-      setPendingMode(next)
-      return
-    }
-    setMode(next)
-  }, [editDirty, mode, rememberFocus])
-
-  const goBack = useCallback(() => {
-    navigate("/workflow")
-  }, [navigate])
-
-  // Selecting a run writes it into the URL as a real history entry (replace:false)
-  // so browser back restores the prior run; a fresh run and refresh both persist.
-  const handleSelectRun = useCallback((runId: string) => {
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
-      next.set("mode", "runs")
-      next.set("run", runId)
-      return next
-    }, { replace: false })
-  }, [setSearchParams])
-
-  // Editing has no run selection — drop a stale ?run= so the Edit URL stays clean.
-  useEffect(() => {
-    if (mode !== "edit" || !searchParams.has("run")) return
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
-      next.delete("run")
-      return next
-    }, { replace: true })
-  }, [mode, searchParams, setSearchParams])
-
-  const finishLeave = useCallback(() => {
-    const nextMode = pendingMode
-    setPendingMode(null)
-    if (blocker.state === "blocked") blocker.proceed()
-    else if (nextMode) setMode(nextMode)
-    returnFocusRef.current = null
-  }, [blocker, pendingMode])
-
-  const stay = useCallback(() => {
-    setPendingMode(null)
-    if (blocker.state === "blocked") blocker.reset()
-    const target = returnFocusRef.current
-    if (!leaveDialogOpen) {
-      returnFocusRef.current = null
-      requestAnimationFrame(() => target?.focus())
-    }
-  }, [blocker, leaveDialogOpen])
-
-  const discardAndLeave = useCallback(() => {
-    leaveActions?.discard()
-    setEditDirty(false)
-    finishLeave()
-  }, [finishLeave, leaveActions])
-
-  const saveAndLeave = useCallback(async () => {
-    if (!leaveActions || resolvingLeave) return
-    setResolvingLeave(true)
-    const saved = await leaveActions.save()
-    setResolvingLeave(false)
-    if (saved) {
-      setEditDirty(false)
-      finishLeave()
-    }
-  }, [finishLeave, leaveActions, resolvingLeave])
-
-  const registerLeaveActions = useCallback((actions: WorkflowLeaveActions | null) => {
-    setLeaveActions(actions)
-  }, [])
-
-  const paused = definition ? definition.status !== "active" : false
 
   return (
     <PageLayout>
-      <div className="flex h-full flex-col">
-        {/* Quiet top bar: back to the list · name + status dot · the two lenses. */}
-        <div className="px-4 pb-2 pt-3 md:px-5">
-          <div className="mx-auto flex max-w-[1200px] items-center gap-2.5">
-            <button
-              type="button"
-              onClick={goBack}
-              data-testid="wf-back"
-              aria-label="Back to workflows"
-              className="grid size-9 shrink-0 place-items-center rounded-full text-[var(--text-secondary)] transition-colors hover:bg-[var(--fill-secondary)] hover:text-[var(--text-primary)]"
-            >
-              <ChevronLeft className="size-[18px]" />
-            </button>
-            <div className="flex min-w-0 flex-1 items-center gap-2">
-              <h1 className="truncate text-[length:var(--text-body)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
-                {definition?.title ?? workflowId}
-              </h1>
-              <span
-                aria-hidden
-                className="size-[7px] shrink-0 rounded-full"
-                style={{ background: paused ? "var(--text-quaternary)" : "var(--system-green)" }}
-                title={paused ? "Paused" : "Active"}
-              />
-            </div>
-            <div className="max-md:hidden">
-              <ModeToggle mode={mode} onChange={changeMode} />
-            </div>
-          </div>
-          {/* Mobile: the segmented control gets its own centered row (390px-safe). */}
-          <div className="mt-2 flex justify-center md:hidden">
-            <ModeToggle mode={mode} onChange={changeMode} />
-          </div>
-        </div>
-
-        <div className="min-h-0 flex-1">
-          {mode === "edit" ? (
-            <WorkflowEditView
-              key={`edit:${workflowId}`}
-              workflowId={workflowId}
-              onDirtyChange={setEditDirty}
-              onLeaveActionsChange={registerLeaveActions}
-            />
-          ) : (
-            <DefinitionRunView
-              key={`runs:${workflowId}:${initialLive ? "live" : "runs"}`}
-              workflowId={workflowId}
-              liveAvailable={hasDerived}
-              initialLive={initialLive}
-              initialRunId={runParam}
-              onSelectRun={handleSelectRun}
-            />
-          )}
-        </div>
-
-        <WorkflowLeaveDialog
-          open={leaveDialogOpen}
-          resolving={resolvingLeave}
-          canSave={Boolean(leaveActions)}
-          returnFocusRef={returnFocusRef}
-          onStay={stay}
-          onDiscard={discardAndLeave}
-          onSave={() => void saveAndLeave()}
-        />
-      </div>
+      {query.isPending && <p className="py-12 text-center text-[var(--text-secondary)]">Loading workflow…</p>}
+      {query.isError && (
+        <p className="mx-auto mt-6 max-w-[560px] rounded-[var(--radius-lg)] bg-[var(--fill-tertiary)] p-4 text-[var(--system-red)]">
+          {query.error instanceof Error ? query.error.message : "Failed to load workflow."}
+        </p>
+      )}
+      {query.data && <WorkflowEditorProvider key={query.data.id} definition={query.data} />}
     </PageLayout>
   )
 }

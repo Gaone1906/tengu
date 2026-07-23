@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo, Suspense, lazy } from 'react'
 import { useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom'
-import { api, LegacyWorkflowSessionError } from '@/lib/api'
+import { api } from '@/lib/api'
 import {
   initialMobileView,
   parseSelectedSession,
@@ -90,27 +90,6 @@ function historyRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {}
-}
-
-export function LegacyWorkflowSessionPreflight({ sessionId }: { sessionId: string | null }) {
-  const navigate = useNavigate()
-
-  useEffect(() => {
-    if (!sessionId) return
-    const controller = new AbortController()
-    let active = true
-    void api.getSession(sessionId, { messages: false, signal: controller.signal }).catch((error) => {
-      if (active && error instanceof LegacyWorkflowSessionError) {
-        navigate(error.legacyWorkflowRun.openPath, { replace: true })
-      }
-    })
-    return () => {
-      active = false
-      controller.abort()
-    }
-  }, [navigate, sessionId])
-
-  return null
 }
 
 export default function ChatPageWrapper() {
@@ -1050,7 +1029,6 @@ function ChatPage() {
   return (
     <FileOpenContext.Provider value={openFile}>
     <PageLayout chromeless>
-      <LegacyWorkflowSessionPreflight sessionId={selectedId} />
       <div className="flex overflow-hidden h-full">
         {/* Left region (desktop): the permanent slim nav ribbon + the foldable
             280px chat list. The ribbon's top toggle folds the list to 0; the

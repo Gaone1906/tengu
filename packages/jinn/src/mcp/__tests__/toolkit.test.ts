@@ -51,12 +51,12 @@ describe("gatewayRequest — transport failure modes", () => {
   it("times out a wedged gateway with a structured error naming route, budget, and gateway URL", async () => {
     const never = (() => new Promise<never>(() => {})) as unknown as typeof fetch;
     const ctx: JinnMcpContext = { gatewayUrl: "http://127.0.0.1:7797", fetchFn: never, timeoutMs: 50 };
-    const err = await gatewayRequest(ctx, "GET", "/api/workflow-definitions").then(
+    const err = await gatewayRequest(ctx, "GET", "/api/workflows").then(
       () => null,
       (e: unknown) => e,
     );
     expect(err).toBeInstanceOf(JinnMcpToolError);
-    expect((err as Error).message).toMatch(/GET \/api\/workflow-definitions timed out after 50ms/);
+    expect((err as Error).message).toMatch(/GET \/api\/workflows timed out after 50ms/);
     expect((err as Error).message).toContain("http://127.0.0.1:7797");
     expect((err as Error).message).toMatch(/retry/i);
   });
@@ -78,7 +78,7 @@ describe("gatewayRequest — transport failure modes", () => {
       text: () => new Promise<never>(() => {}),
     })) as unknown as typeof fetch;
     const ctx: JinnMcpContext = { gatewayUrl: "http://x", fetchFn: stalledBody, timeoutMs: 50 };
-    await expect(gatewayRequest(ctx, "POST", "/api/workflow-definitions", {})).rejects.toThrow(/timed out after 50ms/);
+    await expect(gatewayRequest(ctx, "POST", "/api/workflows", {})).rejects.toThrow(/timed out after 50ms/);
   });
 
   it("wraps fetch rejections with method/route/gateway context — never a bare 'fetch failed'", async () => {
@@ -86,13 +86,13 @@ describe("gatewayRequest — transport failure modes", () => {
       throw new TypeError("fetch failed");
     }) as unknown as typeof fetch;
     const ctx: JinnMcpContext = { gatewayUrl: "http://127.0.0.1:1", fetchFn: refused };
-    const err = await gatewayRequest(ctx, "POST", "/api/workflow-definitions", { id: "x" }).then(
+    const err = await gatewayRequest(ctx, "POST", "/api/workflows", { id: "x" }).then(
       () => null,
       (e: unknown) => e,
     );
     expect(err).toBeInstanceOf(JinnMcpToolError);
     const msg = (err as Error).message;
-    expect(msg).toContain("POST /api/workflow-definitions");
+    expect(msg).toContain("POST /api/workflows");
     expect(msg).toContain("http://127.0.0.1:1");
     expect(msg).toMatch(/could not reach|check that it is running/i);
     expect(msg).toContain("fetch failed"); // the cause is preserved, with context around it

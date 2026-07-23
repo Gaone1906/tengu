@@ -94,18 +94,17 @@ describe("buildTools", () => {
       "comment_work_item",
       "cost_report",
       "create_note",
-      "create_trigger",
       "create_work_item",
       "create_workflow",
-      "decide_poll_activation",
       "decide_work_item_approval",
+      "decide_workflow_approval",
       "delegate_task",
-      "delete_trigger",
-      "edit_workflow_run_step_prompt",
-      "escalate_poll_activation",
+      "disable_workflow",
+      "duplicate_workflow",
+      "enable_workflow",
       "escalate_work_item_approval",
-      "escalate_workflow_gate",
       "find_employees",
+      "fire_workflow_event",
       "get_cron_run_history",
       "get_employee",
       "get_message_context",
@@ -118,20 +117,19 @@ describe("buildTools", () => {
       "list_files",
       "list_notes",
       "list_sessions",
-      "list_triggers",
       "list_work_item_comments",
       "list_work_items",
       "list_workflow_runs",
       "list_workflows",
-      "plan_workflow",
       "publish_attachment",
       "read_file",
       "read_knowledge",
       "read_note",
       "read_session",
       "request_work_item_approval",
+      "rerun_workflow_run",
       "retire_workflow",
-      "run_workflow_by_name",
+      "retry_workflow_node",
       "search_knowledge",
       "search_messages",
       "search_sessions",
@@ -144,7 +142,6 @@ describe("buildTools", () => {
       "update_note",
       "update_work_item",
       "update_workflow",
-      "validate_workflow",
     ]);
     expect(names.some((name) => name.startsWith("jinn_"))).toBe(false);
   });
@@ -236,7 +233,7 @@ describe("handleMcpRequest — tools/call", () => {
 
   it("compiles every advertised registry schema or supplies its shared runtime schema", () => {
     const tools = buildTools();
-    expect(tools).toHaveLength(57);
+    expect(tools).toHaveLength(54);
     for (const tool of tools) {
       expect(() => tool.runtimeSchema ?? z.fromJSONSchema({ ...tool.inputSchema, additionalProperties: false } as Parameters<typeof z.fromJSONSchema>[0]), tool.name).not.toThrow();
     }
@@ -274,25 +271,6 @@ describe("handleMcpRequest — tools/call", () => {
     expect(calls).toBe(0);
   });
 
-  it('accepts only resume|silent for workflow reportMode at the MCP boundary', async () => {
-    const tools = buildTools();
-    const invalid = await handleMcpRequest(
-      { id: 31, method: 'tools/call', params: { name: 'start_workflow_run', arguments: { workflowId: 'wf', reportMode: 'notify' } } },
-      tools,
-      stubCtx(() => ({ status: 201, body: { runId: 'must-not-run', status: 'completed', steps: [] } })),
-    );
-    expect((invalid!.result as { isError?: boolean }).isError).toBe(true);
-
-    const valid = await handleMcpRequest(
-      { id: 32, method: 'tools/call', params: { name: 'run_workflow_by_name', arguments: { name: 'wf', reportMode: 'silent' } } },
-      tools,
-      stubCtx(() => ({ status: 201, body: { runId: 'run-silent', status: 'completed', steps: [] } })),
-    );
-    const result = valid!.result as { isError?: boolean; content: Array<{ text: string }> };
-    expect(result.isError).toBeUndefined();
-    expect(result.content[0].text).toContain('Silent mode');
-  });
-
   it("list_employees returns real gateway data as text content", async () => {
     const org = { employees: [{ name: "chief-of-staff", rank: "manager" }] };
     const ctx = stubCtx((url) => {
@@ -310,10 +288,10 @@ describe("handleMcpRequest — tools/call", () => {
     expect(JSON.parse(result.content[0].text)).toEqual(org);
   });
 
-  it("get_workflow encodes the id into the definitions path and returns the editable definition (GRS-015 semantics)", async () => {
+  it("get_workflow encodes the id into the canonical v2 path", async () => {
     const def = { id: "sample-autonomy", title: "Sample Autonomy", version: 3, nodes: [], edges: [] };
     const ctx = stubCtx((url) => {
-      expect(url).toBe("http://127.0.0.1:7777/api/workflow-definitions/sample-autonomy");
+      expect(url).toBe("http://127.0.0.1:7777/api/workflows/sample-autonomy");
       return { status: 200, body: def };
     });
     const resp = await handleMcpRequest(
@@ -357,7 +335,7 @@ describe("handleMcpRequest — tools/call", () => {
   });
 
   it("a gateway 404 becomes a readable isError tool result", async () => {
-    const ctx = stubCtx(() => ({ status: 404, body: { error: "not found" } }));
+    const ctx = stubCtx(() => ({ status: 404, body: { code: "not-found", message: "not found" } }));
     const resp = await handleMcpRequest(
       { id: 6, method: "tools/call", params: { name: "get_workflow", arguments: { workflowId: "nope" } } },
       buildTools(),
@@ -372,9 +350,8 @@ describe("handleMcpRequest — tools/call", () => {
     const ctx = stubCtx(() => ({
       status: 409,
       body: {
-        error: "This idempotency key is already bound to a different workflow run request.",
         code: "workflow-run-idempotency-conflict",
-        runId: "run-existing",
+        message: "This idempotency key is already bound to a different workflow run request.",
       },
     }));
     const resp = await handleMcpRequest(
@@ -387,7 +364,6 @@ describe("handleMcpRequest — tools/call", () => {
     const result = resp!.result as { content: Array<{ text: string }>; isError?: boolean };
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("workflow-run-idempotency-conflict");
-    expect(result.content[0].text).toContain("run-existing");
     expect(result.content[0].text).not.toContain("must-not-leak");
     expect(result.content[0].text).not.toContain("secret-key");
   });

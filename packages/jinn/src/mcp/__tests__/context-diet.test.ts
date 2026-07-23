@@ -239,15 +239,13 @@ describe("the measured context diet", () => {
     expect(measurement.ledgers.costCronCheckpoint_cooSavingMinusCostCronSchemas).toBeGreaterThan(0);
   });
 
-  it("keeps the invocation ownership contract discoverable in the lean shipped template", () => {
+  it("keeps the canonical Workflow start surfaces discoverable in the lean shipped template", () => {
     const template = fs.readFileSync(path.join(process.cwd(), "template", "CLAUDE.md"), "utf-8");
 
     expect(template).toContain("Workflow runs are durable records, not Sessions.");
-    expect(template).toContain("verified Session invocation");
-    expect(template).toContain("invocation: { sessionId, reportMode }");
-    expect(template).toContain("reportMode is silent");
-    expect(template).toContain("suppresses only resumption");
-    expect(template).toContain("browser, CLI, cron, webhook, poll, and Todo-status");
-    expect(template).toContain("invocation-less");
+    expect(template).toContain("start_workflow_run");
+    expect(template).toContain("schedule, event, and Todo-status starts");
+    expect(template).toContain("trigger nodes in the same canonical definition");
+    expect(template).toContain("decide_workflow_approval");
   });
 });

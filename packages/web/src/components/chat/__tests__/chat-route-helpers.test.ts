@@ -279,14 +279,6 @@ describe('isFocusedSession', () => {
     expect(isFocusedSession({ source: 'web', sourceRef: 'cron:daily-report' })).toBe(false)
   })
 
-  it('hides historical Workflow run projections from Focused', () => {
-    expect(isFocusedSession({
-      source: 'web',
-      parentSessionId: null,
-      workflowProvenance: { kind: 'run' },
-    })).toBe(false)
-  })
-
   it('hides unknown / internal sources (allowlist)', () => {
     expect(isFocusedSession({ source: 'discord' })).toBe(false)
     expect(isFocusedSession({ source: 'whatsapp' })).toBe(false)

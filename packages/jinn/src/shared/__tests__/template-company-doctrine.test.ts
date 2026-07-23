@@ -38,7 +38,6 @@ describe("template company doctrine", () => {
         required: [
           "A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.",
           "A Todo-status trigger is a one-way input; the resulting Workflow run is independent.",
-          "A session-invoked Workflow reports to that same session unless reportMode is silent.",
           "Workflow runs are durable records, not Sessions.",
         ],
       },
@@ -71,9 +70,8 @@ describe("template company doctrine", () => {
         required: [
           "A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.",
           "Workflow runs are durable records, not Sessions.",
-          "reportMode: \"silent\"",
           "cancel_workflow_run",
-          "Workflow run approval",
+          "decide_workflow_approval",
         ],
       },
     ];
@@ -162,8 +160,8 @@ describe("template company doctrine", () => {
     expect(template).toContain("### Workflows");
     expect(template).toContain("#### Triggers");
     expect(template).toContain("### Notes");
-    expect(template).toContain("list_triggers");
-    expect(template).toContain("create_trigger");
+    expect(template).toContain("fire_workflow_event");
+    expect(template).toContain("decide_workflow_approval");
     expect(template).toContain("list_notes");
     expect(template).toContain("read_note");
     expect(template).toContain("create_note");
@@ -238,15 +236,14 @@ describe("template company doctrine", () => {
         tools: [
           "list_workflows",
           "get_workflow",
-          "plan_workflow",
-          "validate_workflow",
           "create_workflow",
-          "run_workflow_by_name",
+          "update_workflow",
+          "enable_workflow",
+          "start_workflow_run",
           "list_workflow_runs",
           "get_workflow_run",
-          "escalate_workflow_gate",
-          "human Workflow approval surface",
-          "jinn workflow run <name>",
+          "decide_workflow_approval",
+          "fire_workflow_event",
           "idempotencyKey",
           "PLAN",
           "IMPLEMENT",
@@ -305,11 +302,8 @@ describe("template company doctrine", () => {
     }
 
     const workflowSkill = readTemplate("skills/workflow/SKILL.md");
-    expect(workflowSkill).not.toContain("Approval gates are human-only");
-    expect(workflowSkill).not.toContain("must route the decision to the operator");
-    expect(workflowSkill).toContain("routed manager/COO");
+    expect(workflowSkill).toContain("Route unclear authority to the manager/COO");
     expect(workflowSkill).toContain("native pending approval on the run");
-    expect(workflowSkill).toContain("escalate_workflow_gate");
 
     const todoSkill = readTemplate("skills/todo-handling/SKILL.md");
     expect(todoSkill).toContain("identical pending request");

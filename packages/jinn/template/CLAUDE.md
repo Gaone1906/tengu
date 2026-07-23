@@ -163,13 +163,11 @@ Workflows are reusable automations - the HOW. Use or propose one when a job is r
 
 Triggers are a Workflow detail: durable bindings that wake a Workflow when supported events or polls match.
 
-A verified Session invocation through `start_workflow_run` or `run_workflow_by_name` persists exactly one `invocation: { sessionId, reportMode }` relation. A session-invoked Workflow reports to that same session unless reportMode is silent. That relation owns reporting and resumption for the same Session; `reportMode` is `resume` by default, while `reportMode` is `silent` suppresses only resumption. All other start surfaces - browser, CLI, cron, webhook, poll, and Todo-status - are invocation-less unless a verified Session invokes them.
-
-Human gate decisions use the Workflow run approval surface, never Todo approval tools. `cancel_workflow_run` cancels the run and its run-owned phase sessions without touching a Todo. Historical `engine: "workflow"` Sessions remain read-only historical evidence; open the Workflow run identified by their existing provenance instead of treating them as live engine Sessions.
+Start a manual run with `start_workflow_run`; schedule, event, and Todo-status starts use trigger nodes in the same canonical definition. Human decisions use `decide_workflow_approval`, never Todo approval tools. `cancel_workflow_run` cancels the run and its run-owned phase sessions without touching a Todo.
 
 #### Triggers
 
-Triggers are durable bindings that wake Workflows when supported events or polls match. A Todo-status trigger is a one-way input; the resulting Workflow run is independent. Keep the wake-up binding separate from both the Workflow procedure and independently authored Todos. Inspect bindings with `list_triggers`; use `create_trigger` only for supported webhook or poll bindings. Configure schedule and `todo-status` wake-ups through the Workflow definition, and avoid duplicate bindings.
+Triggers are nodes in the Workflow definition. Supported kinds are `manual`, `schedule`, `event`, `todo-status`, and `workflow-call`; authenticated event producers use `fire_workflow_event`. A Todo-status trigger is a one-way input; the resulting Workflow run is independent. Keep the wake-up binding separate from independently authored Todos and avoid duplicate bindings.
 
 ### Notes
 

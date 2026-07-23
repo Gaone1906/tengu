@@ -45,14 +45,14 @@ export function saveJobs(jobs: CronJob[]): void {
 }
 
 /**
- * Canonical cron-job IDENTITY for collision/ownership checks (GRS-014d-fix2,
- * Codex round-2). Run-log files are `<id>.jsonl` under CRON_RUNS and the default
+ * Canonical cron-job identity for collision checks. Run-log files are
+ * `<id>.jsonl` under CRON_RUNS and the default
  * macOS volume is case-insensitive, so ids differing only by case (or by
  * leading/trailing whitespace) share ONE run-history file — a filesystem
  * constraint the code cannot otherwise show. Identity therefore compares
- * trimmed + lowercased. STORAGE is untouched: jobs keep their authored id
- * everywhere; only collision/ownership comparisons canonicalize. Unicode is
- * NFC-normalized first (Codex round-3): macOS additionally treats NFC/NFD
+ * trimmed + lowercased. Storage is untouched: jobs keep their authored id
+ * everywhere; only collision comparisons canonicalize. Unicode is
+ * NFC-normalized first: macOS additionally treats NFC/NFD
  * variants of one name as the same file, so composed vs decomposed ids would
  * also share a run history.
  */

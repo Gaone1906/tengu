@@ -41,18 +41,6 @@ function repairCronWorkItemBridge(job: CronJob, sessionKey: string): void {
   }
 }
 
-/**
- * Fires a MANAGED workflow cron job (GRS-014d): starts a typed workflow run for
- * `job.workflowId` with this fire's identity — no prompt session, no LLM in the
- * trigger path. Injected by the gateway (the handler closes over the ApiContext the
- * step spawner needs); the runner stays free of workflow imports. `ok:false` means
- * the fire did NOT start or no-op cleanly (recorded as an error run-log row).
- */
-export type WorkflowCronFire = (
-  job: CronJob,
-  fireIso: string,
-) => Promise<{ ok: boolean; note: string; runId?: string }>;
-
 export interface RunCronJobOptions {
   /**
    * Deterministic identity of *this logical fire*, owned by the caller (the
@@ -73,65 +61,8 @@ export interface RunCronJobOptions {
    * Defaults to a fresh `new Date().toISOString()` when absent, preserving legacy
    * per-call uniqueness for ad-hoc callers (manual `/cron run`, HTTP run-now), which
    * are therefore never deduped — every ad-hoc call is a new fire by definition.
-   */
+  */
   fireIso?: string;
-  /**
-   * GRS-014d — the managed-workflow fire handler. Absent (an unwired boot, tests, or
-   * a production-shaped home whose gateway has no workflow evidence root) → a managed
-   * job's fire is INERT: a logged warning + an honest error run-log row, no session,
-   * no crash. Unmanaged jobs never consult it.
-   */
-  workflowFire?: WorkflowCronFire;
-}
-
-/**
- * The managed-job fire wrapper (GRS-014d): delegate to the injected handler and
- * record ONE honest terminal run-log row for the fire — `success` rows carry the
- * handler's note (run started / duplicate no-op / expired no-op) in resultPreview so
- * the cron UI's run history stays meaningful for managed jobs; failures (no handler
- * wired, stale job, handler crash) are `error` rows. The row also arms the
- * `hasRunLogEntry` fast-guard for a re-invocation of the same fireIso (the run-dir
- * scan inside the workflow store stays the authoritative dedupe).
- */
-async function runManagedWorkflowFire(
-  job: CronJob,
-  fireIso: string,
-  sessionKey: string,
-  startedAt: string,
-  startTime: number,
-  fire: WorkflowCronFire | undefined,
-): Promise<void> {
-  const logRow = (status: "success" | "error", note: string, runId?: string): void => {
-    appendRunLog(job.id, {
-      timestamp: startedAt,
-      sessionKey,
-      sessionId: null,
-      ...(runId ? { workflowRunId: runId } : {}),
-      status,
-      durationMs: Date.now() - startTime,
-      error: status === "error" ? note : null,
-      resultPreview: status === "success" ? note : null,
-    });
-  };
-  if (!fire) {
-    const msg =
-      "managed workflow job fired but no workflow fire handler is wired " +
-      "(no workflow evidence root on this gateway?) — fire skipped";
-    logger.warn(`Cron job "${job.name}" (${job.id}): ${msg}`);
-    logRow("error", msg);
-    return;
-  }
-  try {
-    const result = await fire(job, fireIso);
-    logRow(result.ok ? "success" : "error", result.note, result.runId);
-    logger[result.ok ? "info" : "warn"](
-      `Cron job "${job.name}" (${job.id}) workflow fire: ${result.note}`,
-    );
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logRow("error", message);
-    logger.error(`Cron job "${job.name}" (${job.id}) workflow fire crashed: ${message}`);
-  }
 }
 
 export async function runCronJob(
@@ -183,17 +114,7 @@ export async function runCronJob(
     // may have spawned the session yet failed its best-effort link/reconcile/mint,
     // which startup reconcile can't repair. This is idempotent and a no-op on the
     // happy path (item already linked → reconcile derives the same status).
-    // Managed workflow jobs have no session/work-item bridge — nothing to repair.
-    if (job.managedBy !== "workflow") repairCronWorkItemBridge(job, sessionKey);
-    return;
-  }
-
-  // GRS-014d — MANAGED WORKFLOW JOBS fire a typed workflow run, never a prompt
-  // session: no work-item mint, no org scan, no route(), no LLM in the trigger path.
-  // The injected handler owns the run start (fireIso-idempotent inside the run
-  // store); this branch owns the honest cron run-log row either way.
-  if (job.managedBy === "workflow") {
-    await runManagedWorkflowFire(job, fireIso, sessionKey, startedAt, startTime, opts?.workflowFire);
+    repairCronWorkItemBridge(job, sessionKey);
     return;
   }
 
