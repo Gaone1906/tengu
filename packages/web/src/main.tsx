@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { Navigate, Outlet, RouterProvider, createBrowserRouter } from 'react-router-dom'
 import { ClientProviders } from './routes/client-providers'
 import { lazyRoute } from './lib/lazy-route'
+import { TodosIndexRedirect } from './routes/todos/board/todos-index-redirect'
 import { useFeatures } from './hooks/use-features'
 import './routes/globals.css'
 
@@ -10,6 +11,7 @@ const ChatPage = lazyRoute(() => import('./routes/chat/page'), 'chat')
 const CronPage = lazyRoute(() => import('./routes/cron/page'), 'cron')
 const CronDetailPage = lazyRoute(() => import('./routes/cron/detail'), 'cron-detail')
 const TodosPage = lazyRoute(() => import('./routes/todos/page'), 'todos')
+const TodoBoardPage = lazyRoute(() => import('./routes/todos/board/board-page'), 'todo-board')
 const NotesPage = lazyRoute(() => import('./routes/notes/page'), 'notes')
 const LogsPage = lazyRoute(() => import('./routes/logs/page'), 'logs')
 const LimitsPage = lazyRoute(() => import('./routes/limits/page'), 'limits')
@@ -83,7 +85,12 @@ const router = createBrowserRouter([
       { path: '/chat', element: <Navigate to="/" replace /> },
       { path: '/cron', element: <CronPage /> },
       { path: '/cron/:id', element: <CronDetailPage /> },
-      { path: '/todos', element: <TodosPage /> },
+      // Todos v2 slice 6: the board is the front door; the legacy list stays
+      // reachable at /todos/list until the stage-C cutover. /todos/:todoId
+      // keeps serving the legacy list+sheet until stage B swaps in the task page.
+      { path: '/todos', element: <TodosIndexRedirect /> },
+      { path: '/todos/b/:board', element: <TodoBoardPage /> },
+      { path: '/todos/list', element: <TodosPage /> },
       { path: '/todos/:todoId', element: <TodosPage /> },
       { path: '/notes', element: <NotesFeatureRoute /> },
       // Folder/note deep links: /notes/f/<folder>, /notes/n/<rel>, or both.
