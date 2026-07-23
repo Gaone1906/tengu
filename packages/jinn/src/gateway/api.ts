@@ -238,6 +238,7 @@ import {
   getWorkItem,
   getWorkItemBySourceRef,
   getWorkItemSpend,
+  getWorkItemTree,
   linkSession,
   listWorkItemEvents,
   listWorkItems,
@@ -254,7 +255,7 @@ import {
   type WorkItemSource,
   type WorkItemStatus,
 } from "../work-items/store.js";
-import { isTodoId, resolveTodoIdPrefix } from "../work-items/id.js";
+import { isTodoId, parseTodoId, resolveTodoIdPrefix } from "../work-items/id.js";
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import { createWorkflowTodoEventFeed } from "../work-items/workflow-event-feed.js";
@@ -1926,6 +1927,11 @@ function compactWorkItem(item: WorkItem): Record<string, unknown> {
     version: item.version,
     assignee: item.assignee,
     department: item.department,
+    createdBy: item.createdBy,
+    parentId: item.parentId,
+    rootId: item.rootId,
+    depth: item.depth,
+    dueAt: item.dueAt,
     source: item.source,
     sourceRef: item.sourceRef,
     rank: item.rank,
@@ -2091,6 +2097,25 @@ function readWorkItemQueryParams(url: URL): { ok: true; value: WorkItemQueryPara
     }
     filter.text = text;
   }
+  const createdBy = readCleanSearchParam(url, 'createdBy');
+  if (createdBy) filter.createdBy = createdBy;
+  const parent = readCleanSearchParam(url, 'parent');
+  if (parent) {
+    try {
+      filter.parentId = parseTodoId(parent);
+    } catch {
+      return { ok: false, error: 'parent must be a Todo ID' };
+    }
+  }
+  const root = readCleanSearchParam(url, 'root');
+  if (root) {
+    try {
+      filter.rootId = parseTodoId(root);
+    } catch {
+      return { ok: false, error: 'root must be a Todo ID' };
+    }
+  }
+  if (readCleanSearchParam(url, 'rootsOnly') === 'true') filter.rootsOnly = true;
   const since = readWorkItemDateParam(url, 'since');
   if (!since.ok) return since;
   if (since.value) filter.since = since.value;
@@ -4299,6 +4324,18 @@ export async function handleApiRequest(
       if (!title) return badRequest(res, "title is required");
       const verifyPolicy = validateVerifyPolicy(body.verifyPolicy);
       if (!verifyPolicy.ok) return badRequest(res, verifyPolicy.error);
+      const parentId = typeof body.parentId === 'string' && body.parentId.trim() ? body.parentId.trim() : null;
+      const dueAt = typeof body.dueAt === 'string' && body.dueAt.trim() ? body.dueAt.trim() : null;
+      if (dueAt !== null && Number.isNaN(Date.parse(dueAt))) {
+        return badRequest(res, 'dueAt must be an ISO 8601 timestamp');
+      }
+      let priority: number | undefined;
+      if (body.priority !== undefined) {
+        if (typeof body.priority !== 'number' || !Number.isInteger(body.priority) || body.priority < 0 || body.priority > 3) {
+          return badRequest(res, 'priority must be an integer 0..3');
+        }
+        priority = body.priority;
+      }
       const source: WorkItemSource = caller.kind === "session" ? "session" : "human";
       const input: CreateWorkItemInput = {
         title: title.slice(0, 200),
@@ -4309,6 +4346,10 @@ export async function handleApiRequest(
         source,
         sourceRef: source === "session" && caller.kind === "session" ? `session:${caller.callerId}:${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}` : null,
         verifyPolicy: verifyPolicy.value,
+        parentId,
+        dueAt,
+        ...(priority !== undefined ? { priority } : {}),
+        createdBy: workItemActor(caller),
       };
       try {
         const item = createWorkItem(input);
@@ -4610,13 +4651,14 @@ export async function handleApiRequest(
         return badRequest(res, `approval fields (${approvalKeys.join(", ")}) cannot be attached through Todo archive — approvals are requested/decided through the approval authority surface`);
       }
       const note = typeof body.note === "string" ? body.note.trim() : "";
+      const cascade = body.cascade === true;
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
       const authorized = authorizeWorkItemOwnerManagerOrRoot(caller, item, "archive");
       if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
       try {
         const archived = archiveWorkItem(params.id, workItemActor(caller), {
-          ...(caller.kind === "operator" ? { human: true } : {}),
+          ...(caller.kind === "operator" ? { human: true, ...(cascade ? { cascade: true } : {}) } : {}),
           ...(caller.kind === "session" ? { callerSessionId: caller.callerId } : {}),
           ...(note ? { note } : {}),
         });
@@ -4639,6 +4681,15 @@ export async function handleApiRequest(
       if (!requireTodoRouteId(res, params.id)) return;
       const linked = listSessionsByWorkItem(params.id);
       return json(res, serializeSessionList(linked, context));
+    }
+
+    // GET /api/work-items/:id/tree — subtree with status totals + derived spend.
+    params = matchRoute("/api/work-items/:id/tree", pathname);
+    if (method === "GET" && params) {
+      if (!requireTodoRouteId(res, params.id)) return;
+      const tree = getWorkItemTree(params.id);
+      if (!tree) return notFound(res);
+      return json(res, { tree });
     }
 
     // POST /api/work-items/:id/approval/request — agent-legal request surface.
