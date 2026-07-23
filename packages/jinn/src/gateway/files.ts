@@ -260,12 +260,12 @@ const MIME_MAP: Record<string, string> = {
   ".woff2": "font/woff2",
 };
 
-function mimeFromFilename(filename: string): string {
+export function mimeFromFilename(filename: string): string {
   const ext = path.extname(filename).toLowerCase();
   return MIME_MAP[ext] || "application/octet-stream";
 }
 
-function expandPath(p: string): string {
+export function expandPath(p: string): string {
   if (p.startsWith("~/") || p === "~") {
     return path.join(os.homedir(), p.slice(2));
   }
@@ -680,6 +680,186 @@ async function saveFile(result: UploadResult, context: ApiContext): Promise<File
   logger.info(`File uploaded: ${result.filename} (${result.id}, ${result.buffer.length} bytes)`);
 
   return meta;
+}
+
+export type LocalFileIngestion =
+  | { ok: true; buffer: Buffer; realPath: string }
+  | { ok: false; status: 400 | 403 | 404 | 413; error: string };
+
+/**
+ * Read a caller-named local file for ingestion (e.g. JSON-path attachment
+ * uploads) under the standing file-read policy. Symlink-swap-proof: the source
+ * is canonicalized and opened ONCE (O_NOFOLLOW on the canonical path), the
+ * assessment runs against that opened real path, the size cap uses fstat on
+ * the SAME descriptor, and the bytes are read from that descriptor — a path
+ * swapped between checks is detected by inode comparison and refused.
+ */
+export function readLocalFileForIngestion(requestedPath: string, maxBytes: number): LocalFileIngestion {
+  const requested = path.resolve(expandPath(requestedPath));
+  let fd: number | null = null;
+  try {
+    const realPath = fs.realpathSync.native(requested);
+    fd = fs.openSync(realPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const openedStat = fs.fstatSync(fd);
+    if (!openedStat.isFile()) return { ok: false, status: 400, error: `not a file: ${requestedPath}` };
+    // The opened descriptor must still be what the canonical path names — a
+    // swap between realpath and open surfaces as an inode mismatch.
+    const currentStat = fs.statSync(realPath);
+    if (!sameInode(openedStat, currentStat)) {
+      return { ok: false, status: 403, error: `${requestedPath} changed during open and was refused` };
+    }
+    const assessment = assessFileRead(realPath, { authenticated: true });
+    if (!assessment.allowed) {
+      return { ok: false, status: 403, error: assessment.reason || "File read blocked by security policy" };
+    }
+    if (openedStat.size > maxBytes) {
+      return { ok: false, status: 413, error: `attachment exceeds the ${Math.floor(maxBytes / 1024 / 1024)} MB per-file limit` };
+    }
+    const buffer = Buffer.alloc(openedStat.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const read = fs.readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (read <= 0) break;
+      offset += read;
+    }
+    if (offset !== buffer.length) {
+      return { ok: false, status: 403, error: `${requestedPath} changed during read and was refused` };
+    }
+    return { ok: true, buffer, realPath };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { ok: false, status: 404, error: `file not found: ${requestedPath}` };
+    if (code === "ELOOP") return { ok: false, status: 403, error: `${requestedPath} changed during open and was refused` };
+    return { ok: false, status: 400, error: err instanceof Error ? err.message : "read failed" };
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
+
+export interface MultipartFileUpload {
+  filename: string;
+  buffer: Buffer;
+  fields: Record<string, string>;
+  /** True when the file hit the size limit and was cut off — reject the upload. */
+  truncated: boolean;
+}
+
+/** A refused multipart request — carries the HTTP status the route should emit. */
+export class MultipartUploadError extends Error {
+  readonly status: 400 | 413;
+
+  constructor(status: 400 | 413, message: string) {
+    super(message);
+    this.name = "MultipartUploadError";
+    this.status = status;
+  }
+}
+
+/** Small metadata fields (e.g. commentId) only — anything larger is refused. */
+const MULTIPART_FIELD_MAX_BYTES = 1024;
+const MULTIPART_MAX_FIELDS = 4;
+const MULTIPART_MAX_PARTS = 6;
+/** Boundary/header overhead allowance on top of the single permitted file. */
+const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
+
+/**
+ * Parse a single-file multipart request into memory — the shared upload
+ * machinery consumers outside this module (e.g. work-item attachments) reuse
+ * instead of wiring Busboy themselves. Hardened (Todos v2 slice-5 review F3):
+ * exactly ONE file part, and it must be named "file"; strict Busboy
+ * files/fields/parts/fieldSize limits; every limit event and unexpected part
+ * is a refusal; and an aggregate request-byte ceiling
+ * (maxFileSize + overhead) is enforced up front from Content-Length AND while
+ * streaming, so many individually-valid parts cannot accumulate memory. On
+ * refusal all buffered chunks are dropped immediately.
+ */
+export function readMultipartFile(req: HttpRequest, maxFileSize: number): Promise<MultipartFileUpload> {
+  return new Promise((resolve, reject) => {
+    const aggregateCeiling = maxFileSize + MULTIPART_OVERHEAD_BYTES;
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > aggregateCeiling) {
+      reject(new MultipartUploadError(413, `multipart request exceeds the ${Math.floor(maxFileSize / 1024 / 1024)} MB upload ceiling`));
+      return;
+    }
+    const busboy = Busboy({
+      headers: req.headers,
+      limits: {
+        fileSize: maxFileSize,
+        files: 1,
+        fields: MULTIPART_MAX_FIELDS,
+        parts: MULTIPART_MAX_PARTS,
+        fieldSize: MULTIPART_FIELD_MAX_BYTES,
+      },
+    });
+    let filename = "";
+    let buffer: Buffer | null = null;
+    let chunks: Buffer[] = [];
+    const fields: Record<string, string> = {};
+    let truncated = false;
+    let sawFile = false;
+    let settled = false;
+    let aggregate = 0;
+
+    const finish = (value: MultipartFileUpload | MultipartUploadError | Error): void => {
+      if (settled) return;
+      settled = true;
+      // Drop everything buffered so a refusal retains nothing.
+      chunks = [];
+      buffer = null;
+      if (value instanceof Error) {
+        try { req.unpipe(busboy); } catch { /* already detached */ }
+        try { (req as unknown as { resume?: () => void }).resume?.(); } catch { /* best effort */ }
+        reject(value);
+      } else {
+        resolve(value);
+      }
+    };
+
+    // Streaming belt for chunked/omitted Content-Length: count every request
+    // byte and refuse past the same ceiling.
+    req.on("data", (chunk: Buffer) => {
+      aggregate += chunk.length;
+      if (aggregate > aggregateCeiling) {
+        finish(new MultipartUploadError(413, `multipart request exceeds the ${Math.floor(maxFileSize / 1024 / 1024)} MB upload ceiling`));
+      }
+    });
+
+    busboy.on("file", (fieldname: string, file: NodeJS.ReadableStream, info: { filename: string }) => {
+      if (settled) { (file as unknown as { resume: () => void }).resume(); return; }
+      if (fieldname !== "file") {
+        (file as unknown as { resume: () => void }).resume();
+        finish(new MultipartUploadError(400, `unexpected file field "${fieldname}" — send exactly one file field named "file"`));
+        return;
+      }
+      if (sawFile) {
+        (file as unknown as { resume: () => void }).resume();
+        finish(new MultipartUploadError(400, 'multiple file parts — send exactly one file field named "file"'));
+        return;
+      }
+      sawFile = true;
+      filename = info.filename;
+      file.on("data", (chunk: Buffer) => { if (!settled) chunks.push(chunk); });
+      (file as NodeJS.EventEmitter).on("limit", () => { truncated = true; });
+      file.on("end", () => { if (!settled) buffer = Buffer.concat(chunks); });
+    });
+    busboy.on("field", (name: string, value: string, info?: { valueTruncated?: boolean; nameTruncated?: boolean }) => {
+      if (settled) return;
+      if (info?.valueTruncated || info?.nameTruncated) {
+        finish(new MultipartUploadError(400, `multipart field "${name}" exceeds the ${MULTIPART_FIELD_MAX_BYTES}-byte field limit`));
+        return;
+      }
+      fields[name] = value;
+    });
+    // Busboy stops COUNTING at the limits; treat hitting any of them as a refusal.
+    busboy.on("filesLimit", () => finish(new MultipartUploadError(400, 'multiple file parts — send exactly one file field named "file"')));
+    busboy.on("fieldsLimit", () => finish(new MultipartUploadError(400, `too many multipart fields (max ${MULTIPART_MAX_FIELDS})`)));
+    busboy.on("partsLimit", () => finish(new MultipartUploadError(400, `too many multipart parts (max ${MULTIPART_MAX_PARTS})`)));
+    busboy.on("finish", () => finish({ filename, buffer: buffer ?? Buffer.alloc(0), fields, truncated }));
+    busboy.on("error", (err: Error) => finish(err));
+    req.pipe(busboy);
+  });
 }
 
 /** Handle POST /api/files — multipart upload */

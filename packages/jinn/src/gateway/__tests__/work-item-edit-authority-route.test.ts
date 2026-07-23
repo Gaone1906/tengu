@@ -203,39 +203,53 @@ describe("PATCH /api/work-items/:id — widened edit authority (spec §3.4)", ()
     expect(cap.body.workItem.title).toBe("creator retitled");
   });
 
-  it("a session:<uuid> creator matches only that exact session", async () => {
+  it("an employee session stamps its SLUG as creator, so a sibling session of the same employee holds creator authority too (slice-5 decision 7)", async () => {
     const creatorSession = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-creator-session", employee: "platform-worker" });
-    // Assigned to the same employee so a sibling session still holds ASSIGNEE
-    // authority — the title distinction below is purely the creator match.
-    const created = await call("POST", "/api/work-items", { title: "session-created", assignee: "platform-worker" }, toolHeaders(creatorSession.id));
+    const created = await call("POST", "/api/work-items", { title: "slug-created", assignee: "platform-worker" }, toolHeaders(creatorSession.id));
+    expect(created.status).toBe(201);
+    const id = created.body.workItem.id as string;
+    const version = created.body.workItem.version as number;
+    expect(created.body.workItem.createdBy).toBe("platform-worker");
+
+    // the creating session may edit the title…
+    const ok = await call("PATCH", `/api/work-items/${id}`, patchBody(version, { title: "creator session retitle" }), toolHeaders(creatorSession.id));
+    expect(ok.status).toBe(200);
+
+    // …and so may a DIFFERENT session of the same employee — the creator is the
+    // employee (comments identity model), not one ephemeral session.
+    const sibling = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-creator-sibling", employee: "platform-worker" });
+    const siblingOk = await call(
+      "PATCH",
+      `/api/work-items/${id}`,
+      patchBody(ok.body.workItem.version, { title: "sibling retitle" }),
+      toolHeaders(sibling.id),
+    );
+    expect(siblingOk.status).toBe(200);
+    expect(store.getWorkItem(id)!.title).toBe("sibling retitle");
+  });
+
+  it("a session:<uuid> creator (employee-less session) matches only that exact session", async () => {
+    const creatorSession = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-creator-bare" });
+    const created = await call("POST", "/api/work-items", { title: "bare-session-created" }, toolHeaders(creatorSession.id));
     expect(created.status).toBe(201);
     const id = created.body.workItem.id as string;
     const version = created.body.workItem.version as number;
     expect(created.body.workItem.createdBy).toBe(`session:${creatorSession.id}`);
 
     // the exact creator session may edit the title…
-    const ok = await call("PATCH", `/api/work-items/${id}`, patchBody(version, { title: "creator session retitle" }), toolHeaders(creatorSession.id));
+    const ok = await call("PATCH", `/api/work-items/${id}`, patchBody(version, { title: "bare creator retitle" }), toolHeaders(creatorSession.id));
     expect(ok.status).toBe(200);
 
-    // …a DIFFERENT session of the same employee is assignee, NOT creator:
-    // body edits pass, the title is refused naming the field.
-    const sibling = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-creator-sibling", employee: "platform-worker" });
-    const bodyOk = await call(
-      "PATCH",
-      `/api/work-items/${id}`,
-      patchBody(ok.body.workItem.version, { body: "sibling refinement" }),
-      toolHeaders(sibling.id),
-    );
-    expect(bodyOk.status).toBe(200);
+    // …a DIFFERENT bare session is neither creator, assignee, nor manager.
+    const other = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-creator-other-bare" });
     const denied = await call(
       "PATCH",
       `/api/work-items/${id}`,
-      patchBody(bodyOk.body.workItem.version, { title: "sibling hijack" }),
-      toolHeaders(sibling.id),
+      patchBody(ok.body.workItem.version, { title: "bare hijack" }),
+      toolHeaders(other.id),
     );
     expect(denied.status).toBe(403);
-    expect(denied.body.error).toContain('"title"');
-    expect(store.getWorkItem(id)!.title).toBe("creator session retitle");
+    expect(store.getWorkItem(id)!.title).toBe("bare creator retitle");
   });
 
   it("an unrelated employee gets 403 outright; an anonymous tool call stays 403", async () => {

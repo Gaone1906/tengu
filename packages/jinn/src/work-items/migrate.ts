@@ -10,6 +10,9 @@ import {
   todoIdPrefix,
   TODO_ID_PREFIX_PATTERN,
 } from "./id.js";
+import { resolveDepartmentPrefix } from "./departments.js";
+import { loadConfig } from "../shared/config.js";
+import { CONFIG_PATH } from "../shared/paths.js";
 
 export const UNSUPPORTED_PRERELEASE_TODO_DATA =
   "Unsupported prerelease Todo data detected. This release cannot start or migrate it.\n" +
@@ -237,6 +240,33 @@ CREATE TABLE IF NOT EXISTS work_item_labels (
 )`;
 
 export const WORK_ITEM_LABELS_DDL = `${WORK_ITEM_LABELS_TABLE_DDL};`;
+
+/** Todos v2 slice 5: content-addressed file attachments on Todos and comments.
+ *  Bytes live at `<instance>/attachments/<sha256[0:2]>/<sha256>` (dedup by
+ *  content); `storage_path` stores the RELATIVE form. `comment_id` NULL =
+ *  attached to the Todo itself; set = attached to that comment (which must
+ *  belong to the same item — enforced in the store write and re-proven by the
+ *  verifier). The sha256 hex shape is a verifier concern (the DDL pins only the
+ *  length, matching spec §3.2). */
+export const WORK_ITEM_ATTACHMENTS_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_attachments (
+  id           TEXT PRIMARY KEY CHECK (id GLOB 'wia_[0-9a-f]*' AND length(id) = 16),
+  work_item_id TEXT NOT NULL REFERENCES work_items(id),
+  comment_id   TEXT REFERENCES work_item_comments(id),
+  filename     TEXT NOT NULL,
+  mime         TEXT NOT NULL,
+  bytes        INTEGER NOT NULL CHECK (bytes > 0),
+  sha256       TEXT NOT NULL CHECK (length(sha256) = 64),
+  storage_path TEXT NOT NULL,
+  uploaded_by  TEXT NOT NULL,
+  created_at   TEXT NOT NULL
+)`;
+
+export const WORK_ITEM_ATTACHMENTS_DDL = `
+${WORK_ITEM_ATTACHMENTS_TABLE_DDL};
+CREATE INDEX IF NOT EXISTS idx_wia_item ON work_item_attachments(work_item_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_wia_comment ON work_item_attachments(comment_id) WHERE comment_id IS NOT NULL;
+`;
 
 /** Todos v2 slice 4: approvals leave the fat work_items row. Full history —
  *  one row per requested gate; the partial unique index makes "at most one
@@ -602,6 +632,7 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
   ["labels", LABELS_TABLE_DDL],
   ["work_item_labels", WORK_ITEM_LABELS_TABLE_DDL],
   ["work_item_approvals", WORK_ITEM_APPROVALS_TABLE_DDL],
+  ["work_item_attachments", WORK_ITEM_ATTACHMENTS_TABLE_DDL],
   ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
   ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
   ["work_item_id_burns", WORK_ITEM_ID_BURNS_TABLE_DDL],
@@ -610,7 +641,8 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
 ]);
 
 /** Tables added additively AFTER the v2 rebuild first shipped, in ship order
- *  (comments = slice 2; relations/labels = slice 3; slice 5 appends here). A v2
+ *  (comments = slice 2; relations/labels = slice 3; approvals = slice 4;
+ *  attachments = slice 5). A v2
  *  database whose only defect is that some of these are absent is "current":
  *  `migrateWorkItemsSchema` creates whatever is missing under the write lock and
  *  the FULL exact-shape verify still gates the boot. A present-but-wrong-shape
@@ -621,6 +653,7 @@ const V2_ADDITIVE_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: "labels", ddl: LABELS_DDL },
   { name: "work_item_labels", ddl: WORK_ITEM_LABELS_DDL },
   { name: "work_item_approvals", ddl: WORK_ITEM_APPROVALS_DDL },
+  { name: "work_item_attachments", ddl: WORK_ITEM_ATTACHMENTS_DDL },
 ];
 
 /**
@@ -645,6 +678,29 @@ export function backfillWorkItemApprovals(db: DatabaseType): number {
          AND NOT EXISTS (SELECT 1 FROM work_item_approvals a WHERE a.work_item_id = w.id)`,
     )
     .run().changes;
+}
+
+/**
+ * Register any department that holds Todos but is missing from the registry
+ * (review F2). Department-changing writes now mint the row in their own
+ * transaction; this reconciles rows written BEFORE that fix (move-only
+ * departments). Idempotent — runs on every boot next to the approvals
+ * backfill.
+ */
+export function reconcileDepartmentRegistry(db: DatabaseType): number {
+  const missing = db
+    .prepare(
+      "SELECT DISTINCT department FROM work_items WHERE department IS NOT NULL AND department NOT IN (SELECT slug FROM departments) ORDER BY department",
+    )
+    .pluck()
+    .all() as string[];
+  if (missing.length === 0) return 0;
+  const portal = fs.existsSync(CONFIG_PATH) ? loadConfig().portal : undefined;
+  const companyPrefix = resolveTodoIdPrefix(portal?.companyName ?? "Jinn", portal?.companyPrefix);
+  for (const slug of missing) {
+    resolveDepartmentPrefix(db, slug, companyPrefix);
+  }
+  return missing.length;
 }
 
 const V1_REQUIRED_TABLE_SQL = new Map<string, string>([
@@ -855,6 +911,25 @@ export function verifyCurrentWorkItemSchema(db: DatabaseType): void {
       pendingSeen.add(row.work_item_id);
     }
   }
+  // Attachments: every row references a live item; a comment-scoped row's
+  // comment must belong to the SAME item; bytes and the sha256 hex shape are
+  // re-proven data-level. Deliberately NO file-existence check at boot — files
+  // can be large/many, and content integrity is verified on every download.
+  const attachmentRows = db.prepare("SELECT work_item_id, comment_id, bytes, sha256 FROM work_item_attachments").all() as Array<{
+    work_item_id: string;
+    comment_id: string | null;
+    bytes: number;
+    sha256: string;
+  }>;
+  for (const row of attachmentRows) {
+    if (!byId.has(row.work_item_id)) refusal();
+    if (!Number.isSafeInteger(row.bytes) || row.bytes <= 0) refusal();
+    if (!/^[0-9a-f]{64}$/.test(row.sha256)) refusal();
+    if (row.comment_id !== null) {
+      const comment = commentById.get(row.comment_id);
+      if (!comment || comment.work_item_id !== row.work_item_id) refusal();
+    }
+  }
 }
 
 function classifyOpenWorkItemsDatabase(db: DatabaseType): WorkItemSchemaPreflight {
@@ -931,6 +1006,9 @@ export function migrateWorkItemsSchema(
       // Slice-4 dual-read: any item still carrying approval state ONLY in the
       // frozen columns (a pre-slice-4 database) gains its history row here.
       backfillWorkItemApprovals(db);
+      // Slice-5 review F2: departments that gained Todos through pre-fix
+      // move-only writes get their registry rows.
+      reconcileDepartmentRegistry(db);
     }
     // The read-only preflight necessarily precedes the write lock. Reclassify after
     // BEGIN IMMEDIATE so a concurrent winner's committed schema is never dropped.
@@ -1004,6 +1082,7 @@ export function migrateWorkItemsSchema(
           created_at, updated_at, closed_at
         FROM work_items_v1_legacy`);
       backfillWorkItemApprovals(db);
+      reconcileDepartmentRegistry(db); // v1 rows carried departments with no registry
       const migratedRows = Number(db.prepare("SELECT COUNT(*) FROM work_items").pluck().get());
       db.exec("DROP TABLE work_items_v1_legacy");
       db.exec(WORK_ITEMS_INDEX_DDL);

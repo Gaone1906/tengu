@@ -20,6 +20,8 @@ const COMMENT_ID_PATTERN = /^wic_[0-9a-f]{12}$/;
 const COMMENT_LIST_LIMIT_MAX = 500;
 const RELATION_KINDS = ["blocks", "relates", "duplicates"] as const;
 const WORK_ITEM_LABELS_MAX = 100;
+const COMMENT_ATTACHMENTS_MAX = 10;
+const ATTACHMENT_PATH_CHAR_CAP = 1024;
 
 function mutationResult(body: unknown, hint: string): Record<string, unknown> {
   const value = body && typeof body === "object" && !Array.isArray(body)
@@ -397,9 +399,9 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       properties: {
         id: TODO_ID_SCHEMA,
         body: { type: "string" },
-        acceptance: { type: "string" },
+        acceptance: { type: ["string", "null"] },
         priority: { type: "number", enum: [0, 1, 2, 3] },
-        dueAt: { type: "string" },
+        dueAt: { type: ["string", "null"] },
       },
       required: ["id"],
     },
@@ -422,9 +424,17 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         throw new JinnMcpToolError("department and rank are operator-only edits (web/HTTP surface) — edit_work_item cannot change them");
       }
       const patch: Record<string, unknown> = {};
-      for (const key of ["body", "acceptance"] as const) {
-        const v = optionalString(args, key, WORK_ITEM_BODY_CHAR_CAP);
-        if (v !== undefined) patch[key] = v;
+      {
+        const v = optionalString(args, "body", WORK_ITEM_BODY_CHAR_CAP);
+        if (v !== undefined) patch.body = v;
+      }
+      // Explicit null CLEARS acceptance/dueAt (slice-4 review F3), passing
+      // through to the route's existing null support.
+      if (args.acceptance === null) {
+        patch.acceptance = null;
+      } else {
+        const v = optionalString(args, "acceptance", WORK_ITEM_BODY_CHAR_CAP);
+        if (v !== undefined) patch.acceptance = v;
       }
       if (args.priority !== undefined) {
         if (typeof args.priority !== "number" || !Number.isInteger(args.priority) || args.priority < 0 || args.priority > 3) {
@@ -432,8 +442,12 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         }
         patch.priority = args.priority;
       }
-      const dueAt = optionalString(args, "dueAt", 64);
-      if (dueAt !== undefined) patch.dueAt = dueAt;
+      if (args.dueAt === null) {
+        patch.dueAt = null;
+      } else {
+        const dueAt = optionalString(args, "dueAt", 64);
+        if (dueAt !== undefined) patch.dueAt = dueAt;
+      }
       if (Object.keys(patch).length === 0) {
         throw new JinnMcpToolError("pass at least one editable field (body, acceptance, priority, dueAt)");
       }
@@ -511,13 +525,14 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const comment: JinnMcpTool = {
     name: "comment_work_item",
-    description: "Comment on a Todo; parentCommentId replies in its thread.",
+    description: "Comment on a Todo; parentCommentId replies in its thread; attachments = local file paths to attach to the comment.",
     inputSchema: {
       type: "object",
       properties: {
         id: TODO_ID_SCHEMA,
         body: { type: "string" },
         parentCommentId: COMMENT_ID_SCHEMA,
+        attachments: { type: "array", items: { type: "string" } },
       },
       required: ["id", "body"],
     },
@@ -532,9 +547,38 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         }
         payload.parentCommentId = args.parentCommentId;
       }
+      let attachmentPaths: string[] = [];
+      if (args.attachments !== undefined) {
+        if (!Array.isArray(args.attachments) || args.attachments.length > COMMENT_ATTACHMENTS_MAX
+          || args.attachments.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > ATTACHMENT_PATH_CHAR_CAP)) {
+          throw new JinnMcpToolError(`attachments must be an array of up to ${COMMENT_ATTACHMENTS_MAX} local file paths (non-empty strings)`);
+        }
+        attachmentPaths = (args.attachments as string[]).map((entry) => entry.trim());
+      }
       const { status, body: resp } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/comments`, payload);
       if (status >= 400) throw gatewayFailure(`commenting on work item "${id}"`, status, resp);
-      return { ...(resp as Record<string, unknown>), hint: "Next: get_work_item { id }." };
+      const created = resp as Record<string, unknown>;
+      if (attachmentPaths.length === 0) return { ...created, hint: "Next: get_work_item { id }." };
+      const commentId = (created.comment as { id?: unknown } | undefined)?.id;
+      if (typeof commentId !== "string") {
+        throw new JinnMcpToolError(`the comment was created but the gateway response carried no comment id — attachments were NOT uploaded`);
+      }
+      const uploaded: unknown[] = [];
+      for (const filePath of attachmentPaths) {
+        const attach = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/attachments`, {
+          path: filePath,
+          commentId,
+        });
+        if (attach.status >= 400) {
+          throw gatewayFailure(
+            `comment ${commentId} was created, but attaching "${filePath}" (${uploaded.length}/${attachmentPaths.length} uploaded)`,
+            attach.status,
+            attach.body,
+          );
+        }
+        uploaded.push((attach.body as { attachment?: unknown } | null)?.attachment ?? attach.body);
+      }
+      return { ...created, attachments: uploaded, hint: "Next: get_work_item { id }." };
     },
   };
 
@@ -559,6 +603,55 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       });
       const { status, body } = await gatewayRequest(ctx, "GET", `/api/work-items/${encodeURIComponent(id)}/comments${params ? `?${params}` : ""}`);
       if (status >= 400) throw gatewayFailure(`listing comments on work item "${id}"`, status, body);
+      return body;
+    },
+  };
+
+  const attach: JinnMcpTool = {
+    name: "attach_to_work_item",
+    description: "Attach a LOCAL file (by path) to a Todo, or to one of its comments via commentId.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: TODO_ID_SCHEMA,
+        path: { type: "string" },
+        commentId: COMMENT_ID_SCHEMA,
+        filename: { type: "string" },
+      },
+      required: ["id", "path"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      const id = requireTodoId(args);
+      const filePath = requireString(args, "path", ATTACHMENT_PATH_CHAR_CAP);
+      const payload: Record<string, unknown> = { path: filePath };
+      if (args.commentId !== undefined) {
+        if (typeof args.commentId !== "string" || !COMMENT_ID_PATTERN.test(args.commentId)) {
+          throw new JinnMcpToolError("commentId must be a comment ID such as wic_0a1b2c3d4e5f");
+        }
+        payload.commentId = args.commentId;
+      }
+      const filename = optionalString(args, "filename");
+      if (filename !== undefined) payload.filename = filename;
+      const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/attachments`, payload);
+      if (status >= 400) throw gatewayFailure(`attaching to work item "${id}"`, status, body);
+      return { ...(body as Record<string, unknown>), hint: "Next: list_work_item_attachments { id }." };
+    },
+  };
+
+  const listAttachments: JinnMcpTool = {
+    name: "list_work_item_attachments",
+    description: "List a Todo's attachments; Read each file directly from its storagePath.",
+    inputSchema: {
+      type: "object",
+      properties: { id: TODO_ID_SCHEMA },
+      required: ["id"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      const id = requireTodoId(args);
+      const { status, body } = await gatewayRequest(ctx, "GET", `/api/work-items/${encodeURIComponent(id)}/attachments`);
+      if (status >= 400) throw gatewayFailure(`listing attachments on work item "${id}"`, status, body);
       return body;
     },
   };
@@ -646,5 +739,17 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     },
   };
 
-  return [list, get, tree, search, create, update, edit, assign, archive, comment, listComments, link, unlink, label, labelsList];
+  const departments: JinnMcpTool = {
+    name: "list_departments",
+    description: "List departments: slug, Todo ID prefix, and Todo count.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async (_args, ctx) => {
+      assertIdentity(ctx);
+      const { status, body } = await gatewayRequest(ctx, "GET", "/api/departments");
+      if (status >= 400) throw gatewayFailure("listing departments", status, body);
+      return body;
+    },
+  };
+
+  return [list, get, tree, search, create, update, edit, assign, archive, comment, listComments, attach, listAttachments, link, unlink, label, labelsList, departments];
 }

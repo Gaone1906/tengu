@@ -133,7 +133,7 @@ import { ActivityQueryError, getActivityStory, queryActivityPage } from "../acti
 import type { ActivityKind, ActivityOutcomeState } from "../activity/types.js";
 import QRCode from "qrcode";
 import { WhatsAppConnector } from "../connectors/whatsapp/index.js";
-import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir } from "./files.js";
+import { handleFilesRequest, handleSessionAttachment, fileIdsToMedia, rehomeAttachmentsToSession, ensureFilesDir, mimeFromFilename, MultipartUploadError, readLocalFileForIngestion, readMultipartFile, sanitizeUploadFilename } from "./files.js";
 import { readJsonBody, readBodyRaw } from "./http-helpers.js";
 import { resolveMessageAudiences, speechContextApplies } from "./speech-context.js";
 import { isJsonMediaType } from "./media-type.js";
@@ -209,6 +209,17 @@ import {
   setWorkItemLabels,
   type Label,
 } from "../work-items/labels.js";
+import {
+  addAttachment,
+  ATTACHMENT_MAX_BYTES,
+  getAttachment,
+  listAttachments,
+  removeAttachment,
+  stageAttachmentBuffer,
+  WorkItemAttachmentError,
+  type AttachmentActor,
+} from "../work-items/attachments.js";
+import { listDepartmentsWithCounts } from "../work-items/departments.js";
 import { assignWorkItem, transition, TransitionError } from "../work-items/transitions.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import {
@@ -289,6 +300,8 @@ const HOOK_BODY_MAX_BYTES = 64 * 1024;
 const AUTH_BODY_MAX_BYTES = 16 * 1024;
 /** Operator Todo PATCH cap, measured as raw UTF-8 request bytes including JSON overhead. */
 export const TODO_EDIT_BODY_MAX_BYTES = 64 * 1024;
+/** HTTP parity with the MCP label_work_item cap (slice-3 review N1). */
+export const TODO_LABELS_MAX = 100;
 /** Cap for editable SKILL.md bodies. */
 const SKILL_CONTENT_BODY_MAX_BYTES = 2 * 1024 * 1024;
 const SESSION_LIST_PER_GROUP = 50;
@@ -1732,6 +1745,23 @@ function workItemActor(caller: WorkItemCaller): string {
 function workItemCommentAuthor(caller: WorkItemCaller): { author: string; authorKind: 'operator' | 'employee' } {
   if (caller.kind === 'operator') return { author: 'operator', authorKind: 'operator' };
   return { author: caller.session.employee ?? workItemActor(caller), authorKind: 'employee' };
+}
+
+/** Attachment identity mirrors the comments model: server-stamped, pair-safe. */
+function workItemAttachmentActor(caller: WorkItemCaller): AttachmentActor {
+  return { ...workItemCommentAuthor(caller), operator: caller.kind === 'operator' };
+}
+
+function workItemAttachmentFailure(res: ServerResponse, err: unknown): void {
+  if (err instanceof WorkItemAttachmentError) {
+    if (err.code === 'comment-not-found' || err.code === 'attachment-not-found') return notFound(res);
+    if (err.code === 'attachment-forbidden') return json(res, { error: err.message }, 403);
+    if (err.code === 'comment-deleted') return json(res, { error: err.message }, 409);
+    // attachment-too-large / attachment-item-budget
+    return json(res, { error: err.message, code: 'attachment_too_large' }, 413);
+  }
+  if (err instanceof Error) return badRequest(res, err.message);
+  return badRequest(res, String(err));
 }
 
 function workItemCommentFailure(res: ServerResponse, err: unknown): void {
@@ -3342,7 +3372,10 @@ export async function handleApiRequest(
         parentId,
         dueAt,
         ...(priority !== undefined ? { priority } : {}),
-        createdBy: workItemActor(caller),
+        // Slice-5 decision 7: a session with a resolved employee creates AS
+        // that employee (the comments identity model); `session:<uuid>` remains
+        // only for employee-less raw sessions.
+        createdBy: workItemCommentAuthor(caller).author,
       };
       try {
         const item = createWorkItem(input);
@@ -3835,6 +3868,154 @@ export async function handleApiRequest(
       }
     }
 
+    // POST /api/work-items/:id/attachments — upload a file onto a Todo or one
+    // of its live comments (any identified caller; comment targets are
+    // author-or-operator). Accepts multipart form-data (field `file`, optional
+    // `commentId`) — the shared upload machinery — OR JSON `{ path, commentId?,
+    // filename? }` where the GATEWAY reads the local file (the MCP surface:
+    // gateway and agents share a filesystem by architecture, decision 4).
+    params = matchRoute("/api/work-items/:id/attachments", pathname);
+    if (method === "POST" && params) {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
+      if (!getWorkItem(params.id)) return notFound(res);
+      const contentType = (req.headers["content-type"] || "").toLowerCase();
+      let filename: string;
+      let commentIdRaw: unknown;
+      let stagedPath: string;
+      if (contentType.includes("multipart/form-data")) {
+        let uploadedFile: Awaited<ReturnType<typeof readMultipartFile>>;
+        try {
+          uploadedFile = await readMultipartFile(req, ATTACHMENT_MAX_BYTES);
+        } catch (err) {
+          if (err instanceof MultipartUploadError) {
+            return json(res, { error: err.message, ...(err.status === 413 ? { code: "attachment_too_large" } : {}) }, err.status);
+          }
+          return badRequest(res, err instanceof Error ? err.message : String(err));
+        }
+        if (uploadedFile.truncated) {
+          return json(res, { error: "attachment exceeds the 25 MB per-file limit", code: "attachment_too_large" }, 413);
+        }
+        if (!uploadedFile.filename || uploadedFile.buffer.length === 0) {
+          return badRequest(res, "no file provided — send a multipart 'file' field with content");
+        }
+        filename = sanitizeUploadFilename(uploadedFile.filename);
+        commentIdRaw = uploadedFile.fields.commentId || undefined;
+        stagedPath = stageAttachmentBuffer(uploadedFile.buffer);
+      } else {
+        const tooLargeResponse = { error: "Attachment request exceeds the 64 KiB limit.", code: "attachment_request_too_large" } as const;
+        const parsed = await readJsonBody(req, res, { maxBytes: TODO_EDIT_BODY_MAX_BYTES, tooLargeResponse });
+        if (!parsed.ok) return;
+        if (!parsed.body || typeof parsed.body !== "object" || Array.isArray(parsed.body)) {
+          return badRequest(res, "request body must be a JSON object");
+        }
+        const body = parsed.body as Record<string, unknown>;
+        if (typeof body.path !== "string" || !body.path.trim()) {
+          return badRequest(res, "path is required — the local file to attach (or send multipart form-data)");
+        }
+        if (body.filename !== undefined && (typeof body.filename !== "string" || !body.filename.trim())) {
+          return badRequest(res, "filename must be a non-empty string when provided");
+        }
+        // Review F1: the caller names an arbitrary local path, so the read is
+        // gated by the standing file-read policy (assessFileRead) against the
+        // canonical opened file, size-capped by fstat on the same descriptor,
+        // and copied from that descriptor (symlink-swap-proof).
+        const ingested = readLocalFileForIngestion(body.path.trim(), ATTACHMENT_MAX_BYTES);
+        if (!ingested.ok) {
+          return json(
+            res,
+            { error: ingested.error, ...(ingested.status === 413 ? { code: "attachment_too_large" } : {}) },
+            ingested.status,
+          );
+        }
+        filename = sanitizeUploadFilename(typeof body.filename === "string" ? body.filename : path.basename(ingested.realPath));
+        commentIdRaw = body.commentId;
+        // Copy (never move) the caller's file into staging.
+        stagedPath = stageAttachmentBuffer(ingested.buffer);
+      }
+      let commentId: string | null = null;
+      if (commentIdRaw !== undefined && commentIdRaw !== null && commentIdRaw !== "") {
+        if (typeof commentIdRaw !== "string" || !/^wic_[0-9a-f]{12}$/.test(commentIdRaw)) {
+          fs.rmSync(stagedPath, { force: true });
+          return badRequest(res, "commentId must be a comment ID such as wic_0a1b2c3d4e5f");
+        }
+        commentId = commentIdRaw;
+      }
+      try {
+        const attachment = addAttachment({
+          workItemId: params.id,
+          commentId,
+          filename,
+          mime: mimeFromFilename(filename),
+          stagedPath,
+          uploader: workItemAttachmentActor(caller),
+        });
+        return json(res, { attachment }, 201);
+      } catch (err) {
+        return workItemAttachmentFailure(res, err);
+      }
+    }
+
+    // GET /api/work-items/:id/attachments — list rows (item-level and
+    // per-comment) with ABSOLUTE storagePath: agents read the file directly
+    // from disk; no content flows over this surface.
+    params = matchRoute("/api/work-items/:id/attachments", pathname);
+    if (method === "GET" && params) {
+      if (!requireTodoRouteId(res, params.id)) return;
+      if (!getWorkItem(params.id)) return notFound(res);
+      return json(res, { attachments: listAttachments(params.id) });
+    }
+
+    // GET /api/work-items/:id/attachments/:aid — download. The stored bytes are
+    // re-hashed before the response: a sha256 mismatch is data corruption and
+    // fails loudly instead of serving tampered content (the integrity belt).
+    params = matchRoute("/api/work-items/:id/attachments/:aid", pathname);
+    if (method === "GET" && params) {
+      if (!requireTodoRouteId(res, params.id)) return;
+      const attachment = getAttachment(params.aid);
+      if (!attachment || attachment.workItemId !== params.id) return notFound(res);
+      let content: Buffer;
+      try {
+        content = fs.readFileSync(attachment.storagePath);
+      } catch {
+        logger.error(`Attachment ${attachment.id} content missing on disk: ${attachment.storagePath}`);
+        return serverError(res, "attachment content is missing from storage");
+      }
+      const digest = crypto.createHash("sha256").update(content).digest("hex");
+      if (digest !== attachment.sha256) {
+        logger.error(
+          `Attachment ${attachment.id} failed integrity verification: stored ${attachment.storagePath} hashes to ${digest}, row says ${attachment.sha256}`,
+        );
+        return serverError(res, "attachment content failed integrity verification — the stored file does not match its recorded hash");
+      }
+      res.writeHead(200, {
+        "Content-Type": attachment.mime,
+        "Content-Length": String(content.length),
+        // The filename was sanitized at upload; strip quotes/control bytes anyway.
+        "Content-Disposition": `attachment; filename="${attachment.filename.replace(/["\\\r\n]/g, "")}"`,
+      });
+      res.end(content);
+      return;
+    }
+
+    // DELETE /api/work-items/:id/attachments/:aid — remove a row (uploader or
+    // operator). The stored file survives while any other row shares its hash.
+    params = matchRoute("/api/work-items/:id/attachments/:aid", pathname);
+    if (method === "DELETE" && params) {
+      const caller = resolveWorkItemCaller(req, res, context);
+      if (!caller) return;
+      if (!requireTodoRouteId(res, params.id)) return;
+      const attachment = getAttachment(params.aid);
+      if (!attachment || attachment.workItemId !== params.id) return notFound(res);
+      try {
+        if (!removeAttachment(params.aid, workItemAttachmentActor(caller))) return notFound(res);
+        return json(res, { removed: true });
+      } catch (err) {
+        return workItemAttachmentFailure(res, err);
+      }
+    }
+
     // POST /api/work-items/:id/relations — link two Todos (any identified
     // caller; createdBy stamped server-side; blocks edges are cycle-checked).
     params = matchRoute("/api/work-items/:id/relations", pathname);
@@ -3931,6 +4112,9 @@ export async function handleApiRequest(
       if (!Array.isArray(body.labels) || body.labels.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > 256)) {
         return badRequest(res, "labels must be an array of label ids or names (non-empty strings)");
       }
+      if (body.labels.length > TODO_LABELS_MAX) {
+        return badRequest(res, `labels accepts at most ${TODO_LABELS_MAX} entries per Todo (got ${body.labels.length})`);
+      }
       try {
         const labels = setWorkItemLabels(params.id, (body.labels as string[]).map((entry) => entry.trim()), workItemActor(caller));
         return json(res, { labels });
@@ -3943,6 +4127,13 @@ export async function handleApiRequest(
     // valid labels here before label_work_item).
     if (method === "GET" && pathname === "/api/labels") {
       return json(res, { labels: listLabels() });
+    }
+
+    // GET /api/departments — the department registry (any caller): slug,
+    // immutable ID prefix, and a live Todo count per department. Prefixes mint
+    // lazily on first departmental create; there are no create/rename routes.
+    if (method === "GET" && pathname === "/api/departments") {
+      return json(res, { departments: listDepartmentsWithCounts(initDb()) });
     }
 
     // POST /api/labels — create a label (operator or a manager: an employee
@@ -4342,6 +4533,12 @@ export async function handleApiRequest(
               : `delegate:${callerRef}:${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
             assignee: employeeName ?? null,
             department: delegateEmployee?.department ?? null,
+            // Slice-5 decision 7: the DELEGATING caller is the creator — the
+            // operator, or the delegating session's resolved employee slug
+            // (`session:<uuid>` only when that session carries no employee).
+            createdBy: delegationCaller.kind === "session"
+              ? getSession(delegationCaller.callerId)?.employee ?? `session:${delegationCaller.callerId}`
+              : "operator",
           });
         } catch (mintErr) {
           logger.warn(`Delegation work-item mint failed: ${mintErr instanceof Error ? mintErr.message : mintErr}`);

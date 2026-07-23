@@ -2,6 +2,7 @@ import { initDb, listSessionsByWorkItem } from '../sessions/registry.js';
 import {
   appendWorkItemEvent,
   effectiveMaxRounds,
+  ensureDepartmentRegistered,
   getWorkItem,
   STICKY_STATUSES,
   type WorkItem,
@@ -258,6 +259,7 @@ export function assignWorkItem(
     if (item.assignee === assignee && item.department === department && item.status === target) {
       return { item, escalated: false };
     }
+    if (department !== null) ensureDepartmentRegistered(department); // review F2: same-transaction registry mint
     const now = new Date().toISOString();
     const result = db
       .prepare('UPDATE work_items SET assignee = ?, department = ?, status = ?, updated_at = ?, version = version + 1 WHERE id = ? AND status = ?')

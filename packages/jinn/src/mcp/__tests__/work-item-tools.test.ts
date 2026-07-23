@@ -69,10 +69,13 @@ describe("work-item tools — registry + schemas", () => {
       "archive_work_item",
       "comment_work_item",
       "list_work_item_comments",
+      "attach_to_work_item",
+      "list_work_item_attachments",
       "link_work_items",
       "unlink_work_items",
       "label_work_item",
       "list_labels",
+      "list_departments",
     ]);
     const names = buildTools().map((t) => t.name).sort();
     expect(names).toContain("create_work_item");
@@ -84,7 +87,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("fire_workflow_event");
     expect(names).toContain("cancel_workflow_run");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(59);
+    expect(names).toHaveLength(62);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {
@@ -1017,5 +1020,133 @@ describe("work-item relation + label tools (Todos v2 slice 3)", () => {
       removed: boolean;
     };
     expect(unlinked.removed).toBe(true);
+  });
+});
+
+describe("work-item attachment + department tools (Todos v2 slice 5)", () => {
+  it("attach_to_work_item posts the local path to the attachments route after local validation", async () => {
+    const { calls, ctx } = stub(() => ({ status: 201, body: { attachment: { id: "wia_0a1b2c3d4e5f", filename: "shot.png" } } }));
+    const out = (await tool("attach_to_work_item").handler({ id: "JIN-7", path: "/somewhere/shot.png" }, ctx)) as Record<string, unknown>;
+    expect(calls[0].method).toBe("POST");
+    expect(new URL(calls[0].url).pathname).toBe("/api/work-items/JIN-7/attachments");
+    expect(calls[0].body).toEqual({ path: "/somewhere/shot.png" });
+    expect((out.attachment as Record<string, unknown>).id).toBe("wia_0a1b2c3d4e5f");
+
+    const withMeta = stub(() => ({ status: 201, body: { attachment: { id: "wia_ffffffffffff" } } }));
+    await tool("attach_to_work_item").handler(
+      { id: "JIN-7", path: "/tmp-x/a.bin", commentId: "wic_0a1b2c3d4e5f", filename: "renamed.bin" },
+      withMeta.ctx,
+    );
+    expect(withMeta.calls[0].body).toEqual({ path: "/tmp-x/a.bin", commentId: "wic_0a1b2c3d4e5f", filename: "renamed.bin" });
+
+    const silent = stub(() => ({ status: 500, body: { error: "must not run" } }));
+    await expect(tool("attach_to_work_item").handler({ id: "JIN-7", path: "  " }, silent.ctx)).rejects.toThrow(/path/);
+    await expect(tool("attach_to_work_item").handler({ id: "JIN-7", path: "/x", commentId: "bogus" }, silent.ctx)).rejects.toThrow(/commentId/);
+    await expect(tool("attach_to_work_item").handler({ id: "nope", path: "/x" }, silent.ctx)).rejects.toThrow(/canonical Todo ID/);
+    expect(silent.calls).toEqual([]);
+  });
+
+  it("list_work_item_attachments proxies the GET route", async () => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: { attachments: [{ id: "wia_0a1b2c3d4e5f", storagePath: "/inst/attachments/ab/abc" }] } }));
+    const out = (await tool("list_work_item_attachments").handler({ id: "JIN-7" }, ctx)) as { attachments: Array<{ id: string }> };
+    expect(calls[0].method).toBe("GET");
+    expect(new URL(calls[0].url).pathname).toBe("/api/work-items/JIN-7/attachments");
+    expect(out.attachments[0].id).toBe("wia_0a1b2c3d4e5f");
+  });
+
+  it("list_departments proxies the departments surface", async () => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: { departments: [{ slug: "platform", prefix: "PLA", todoCount: 3 }] } }));
+    const out = (await tool("list_departments").handler({}, ctx)) as { departments: Array<{ slug: string }> };
+    expect(calls[0].method).toBe("GET");
+    expect(new URL(calls[0].url).pathname).toBe("/api/departments");
+    expect(out.departments[0].slug).toBe("platform");
+  });
+
+  it("comment_work_item with attachments posts the comment, then attaches each path to it (max 10, validated locally)", async () => {
+    const { calls, ctx } = stub((call) =>
+      call.url.includes("/comments")
+        ? { status: 201, body: { comment: { id: "wic_0a1b2c3d4e5f", body: "with files" } } }
+        : { status: 201, body: { attachment: { id: "wia_0a1b2c3d4e5f" } } },
+    );
+    const out = (await tool("comment_work_item").handler(
+      { id: "JIN-7", body: "with files", attachments: ["/shots/a.png", "/shots/b.png"] },
+      ctx,
+    )) as { comment: Record<string, unknown>; attachments: Array<Record<string, unknown>> };
+    expect(calls.map((c) => new URL(c.url).pathname)).toEqual([
+      "/api/work-items/JIN-7/comments",
+      "/api/work-items/JIN-7/attachments",
+      "/api/work-items/JIN-7/attachments",
+    ]);
+    expect(calls[1].body).toEqual({ path: "/shots/a.png", commentId: "wic_0a1b2c3d4e5f" });
+    expect(calls[2].body).toEqual({ path: "/shots/b.png", commentId: "wic_0a1b2c3d4e5f" });
+    expect(out.attachments).toHaveLength(2);
+
+    const silent = stub(() => ({ status: 500, body: { error: "must not run" } }));
+    await expect(
+      tool("comment_work_item").handler({ id: "JIN-7", body: "x", attachments: Array.from({ length: 11 }, (_, i) => `/f/${i}`) }, silent.ctx),
+    ).rejects.toThrow(/10/);
+    await expect(
+      tool("comment_work_item").handler({ id: "JIN-7", body: "x", attachments: ["  "] }, silent.ctx),
+    ).rejects.toThrow(/attachments/);
+    expect(silent.calls).toEqual([]);
+  });
+
+  it("edit_work_item accepts explicit null to CLEAR acceptance and dueAt (slice-4 review F3)", async () => {
+    const { calls, ctx } = stub((call) =>
+      call.method === "GET"
+        ? { status: 200, body: { workItem: { id: "JIN-7", version: 4 } } }
+        : { status: 200, body: { workItem: { id: "JIN-7", acceptance: null, dueAt: null, version: 5 } } },
+    );
+    await tool("edit_work_item").handler({ id: "JIN-7", acceptance: null, dueAt: null }, ctx);
+    const patch = calls.find((c) => c.method === "PATCH")!;
+    expect(patch.body).toEqual({ acceptance: null, dueAt: null, expectedVersion: 4 });
+  });
+
+  it("attach → list → Read storagePath byte-compare, comment attachments, and the null-clear edit round-trip through the real API", async () => {
+    const dev = registry.createSession({ engine: "codex", source: "web", sourceRef: "slice5-attacher", title: "attacher", employee: "platform-dev" });
+    const ctx = ctxFor(dev.id);
+    const item = store.createWorkItem({ title: "slice5 attachments", assignee: "platform-dev" });
+
+    // The agent-consumption proof: attach a local file, list, then READ the
+    // storagePath from disk and byte-compare to the source.
+    const source = path.join(process.env.JINN_HOME!, "agent-screenshot.png");
+    const sourceBytes = Buffer.from("pretend-png-bytes- ");
+    fs.writeFileSync(source, sourceBytes);
+
+    const attached = (await tool("attach_to_work_item").handler({ id: item.id, path: source }, ctx)) as {
+      attachment: { id: string; filename: string; mime: string; uploadedBy: string; storagePath: string };
+    };
+    expect(attached.attachment.filename).toBe("agent-screenshot.png");
+    expect(attached.attachment.mime).toBe("image/png");
+    expect(attached.attachment.uploadedBy).toBe("platform-dev");
+
+    const listed = (await tool("list_work_item_attachments").handler({ id: item.id }, ctx)) as {
+      attachments: Array<{ id: string; storagePath: string; commentId: string | null }>;
+    };
+    expect(listed.attachments.map((a) => a.id)).toEqual([attached.attachment.id]);
+    expect(fs.readFileSync(listed.attachments[0].storagePath)).toEqual(sourceBytes);
+
+    // Comment-level: the tool creates the comment, then binds the file to it.
+    const withFile = (await tool("comment_work_item").handler(
+      { id: item.id, body: "see attached", attachments: [source] },
+      ctx,
+    )) as { comment: { id: string }; attachments: Array<{ commentId: string | null }> };
+    expect(withFile.attachments).toHaveLength(1);
+    expect(withFile.attachments[0].commentId).toBe(withFile.comment.id);
+
+    // Null-clear round trip (F3): set, then clear, acceptance + dueAt.
+    await tool("edit_work_item").handler({ id: item.id, acceptance: "AC", dueAt: "2026-09-01" }, ctx);
+    expect(store.getWorkItem(item.id)).toMatchObject({ acceptance: "AC", dueAt: "2026-09-01T00:00:00.000Z" });
+    await tool("edit_work_item").handler({ id: item.id, acceptance: null, dueAt: null }, ctx);
+    expect(store.getWorkItem(item.id)).toMatchObject({ acceptance: null, dueAt: null });
+
+    // Departments surface reflects the registered department + count.
+    store.createWorkItem({ title: "dept item", department: "platform" });
+    const departments = (await tool("list_departments").handler({}, ctx)) as {
+      departments: Array<{ slug: string; prefix: string; todoCount: number }>;
+    };
+    const platform = departments.departments.find((d) => d.slug === "platform");
+    expect(platform).toBeDefined();
+    expect(platform!.todoCount).toBeGreaterThanOrEqual(1);
   });
 });

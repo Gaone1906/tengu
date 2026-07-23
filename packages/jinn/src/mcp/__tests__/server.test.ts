@@ -90,6 +90,7 @@ describe("buildTools", () => {
     expect(names).toEqual([
       "archive_work_item",
       "assign_work_item",
+      "attach_to_work_item",
       "cancel_workflow_run",
       "comment_work_item",
       "cost_report",
@@ -116,11 +117,13 @@ describe("buildTools", () => {
       "label_work_item",
       "link_work_items",
       "list_cron_jobs",
+      "list_departments",
       "list_employees",
       "list_files",
       "list_labels",
       "list_notes",
       "list_sessions",
+      "list_work_item_attachments",
       "list_work_item_comments",
       "list_work_items",
       "list_workflow_runs",
@@ -245,7 +248,7 @@ describe("handleMcpRequest — tools/call", () => {
 
   it("compiles every advertised registry schema or supplies its shared runtime schema", () => {
     const tools = buildTools();
-    expect(tools).toHaveLength(59);
+    expect(tools).toHaveLength(62);
     for (const tool of tools) {
       expect(() => tool.runtimeSchema ?? z.fromJSONSchema({ ...tool.inputSchema, additionalProperties: false } as Parameters<typeof z.fromJSONSchema>[0]), tool.name).not.toThrow();
     }

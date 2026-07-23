@@ -58,9 +58,9 @@ export function scanOrg(): Map<string, Employee> {
         // authority of — another principal, so those names can never be
         // registered. Skip the file (the rest of the org keeps loading).
         const name = String(data.name);
-        if (/^(operator|system)$/i.test(name) || /^session:/i.test(name)) {
+        if (/^(operator|system)$/i.test(name) || /^(session|cron|workflow):/i.test(name)) {
           logger.warn(
-            `Skipping employee file ${fullPath}: the name "${name}" collides with a reserved author identity (operator, system, or session:*)`,
+            `Skipping employee file ${fullPath}: the name "${name}" collides with a reserved author identity (operator, system, session:*, cron:*, or workflow:*)`,
           );
           return undefined;
         }
