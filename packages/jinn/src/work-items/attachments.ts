@@ -164,12 +164,9 @@ function fsyncBestEffort(target: string): void {
   }
 }
 
-/** Move staged content into the content-addressed location: hash → rename into
- *  `<sha[0:2]>/<sha>` (or drop the staged copy when the content already
- *  exists), fsync'd best-effort. Returns the hash and size. */
-function storeStagedContent(stagedPath: string): { sha256: string; bytes: number } {
+function hashAndSize(target: string): { sha256: string; bytes: number } {
   const digest = createHash('sha256');
-  const fd = fs.openSync(stagedPath, 'r');
+  const fd = fs.openSync(target, 'r');
   let bytes = 0;
   try {
     const chunk = Buffer.alloc(1024 * 1024);
@@ -181,14 +178,33 @@ function storeStagedContent(stagedPath: string): { sha256: string; bytes: number
   } finally {
     fs.closeSync(fd);
   }
-  const sha256 = digest.digest('hex');
+  return { sha256: digest.digest('hex'), bytes };
+}
+
+/** Move staged content into the content-addressed location: hash → rename into
+ *  `<sha[0:2]>/<sha>`, fsync'd best-effort. When the destination already
+ *  exists it is VERIFIED against the expected size/hash before the staged copy
+ *  is discarded (review F4): a corrupted blob is atomically replaced by the
+ *  known-good staged file, so a valid re-upload restores availability instead
+ *  of pointing new rows at bad bytes. Returns the hash and size. */
+function storeStagedContent(stagedPath: string): { sha256: string; bytes: number } {
+  const { sha256, bytes } = hashAndSize(stagedPath);
   const destination = attachmentPath(sha256);
-  if (fs.existsSync(destination)) {
-    fs.unlinkSync(stagedPath); // dedup — the content is already stored
+  const existingHealthy = ((): boolean => {
+    try {
+      const stat = fs.statSync(destination);
+      if (!stat.isFile() || stat.size !== bytes) return false;
+      return hashAndSize(destination).sha256 === sha256;
+    } catch {
+      return false; // absent or unreadable — (re)write from staged
+    }
+  })();
+  if (existingHealthy) {
+    fs.unlinkSync(stagedPath); // dedup — the content is already stored intact
   } else {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fsyncBestEffort(stagedPath);
-    fs.renameSync(stagedPath, destination);
+    fs.renameSync(stagedPath, destination); // atomic create-or-replace
     fsyncBestEffort(path.dirname(destination));
   }
   return { sha256, bytes };

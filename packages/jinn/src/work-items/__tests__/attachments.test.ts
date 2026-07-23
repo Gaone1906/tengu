@@ -201,6 +201,21 @@ describe("dedup + removal refcounting", () => {
     expect(versionEvents).toHaveLength(1);
   });
 
+  it("a same-content re-upload repairs a corrupted content-addressed blob (review F4)", () => {
+    const a = store.createWorkItem({ title: "repair a" });
+    const content = Buffer.from("repairable bytes");
+    const first = attachments.addAttachment({ workItemId: a.id, filename: "r1.txt", stagedPath: stage(content), uploader: OPERATOR });
+    fs.writeFileSync(first.storagePath, "corrupted-on-disk");
+
+    const b = store.createWorkItem({ title: "repair b" });
+    const second = attachments.addAttachment({ workItemId: b.id, filename: "r2.txt", stagedPath: stage(content), uploader: OPERATOR });
+    expect(second.sha256).toBe(first.sha256);
+    // The dedup path verified the existing blob, found it wrong, and atomically
+    // replaced it with the known-good staged copy.
+    expect(fs.readFileSync(second.storagePath)).toEqual(content);
+    expect(fs.readFileSync(first.storagePath)).toEqual(content);
+  });
+
   it("removal is uploader-or-operator", () => {
     const item = store.createWorkItem({ title: "remove authority" });
     const row = attachments.addAttachment({ workItemId: item.id, filename: "mine.txt", stagedPath: stage("lead's"), uploader: LEAD });

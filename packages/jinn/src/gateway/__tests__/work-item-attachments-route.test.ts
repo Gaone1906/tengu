@@ -407,6 +407,21 @@ describe("GET /api/work-items/:id/attachments/:aid (download)", () => {
     expect(got.body.error).toMatch(/integrity/);
   });
 
+  it("a same-content re-upload restores availability after blob corruption — download succeeds again (review F4)", async () => {
+    const item = store.createWorkItem({ title: "repair download" });
+    const content = Buffer.from("blob to break and repair");
+    const first = await upload(`/api/work-items/${item.id}/attachments`, { file: { name: "heal.txt", content } }, operatorHeaders);
+    fs.writeFileSync(first.body.attachment.storagePath, "broken");
+    const broken = await call("GET", `/api/work-items/${item.id}/attachments/${first.body.attachment.id}`, undefined, operatorHeaders);
+    expect(broken.status).toBe(500);
+
+    const again = await upload(`/api/work-items/${item.id}/attachments`, { file: { name: "heal2.txt", content } }, operatorHeaders);
+    expect(again.status).toBe(201);
+    const restored = await call("GET", `/api/work-items/${item.id}/attachments/${first.body.attachment.id}`, undefined, operatorHeaders);
+    expect(restored.status).toBe(200);
+    expect(restored.raw).toEqual(content);
+  });
+
   it("404s a wrong-item path and an unknown id", async () => {
     const a = store.createWorkItem({ title: "wrong path a" });
     const b = store.createWorkItem({ title: "wrong path b" });
