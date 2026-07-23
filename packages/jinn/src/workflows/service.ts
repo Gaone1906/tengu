@@ -139,8 +139,10 @@ export class WorkflowService {
     this.wakeTimer = null;
     if (this.disposed) return;
     const wait = this.options.repository.nextDueWait();
-    if (!wait?.resumeAt) return;
-    const delay = Math.min(2_147_483_647, Math.max(0, Date.parse(wait.resumeAt) - Date.parse(this.now())));
+    const reminder = this.options.repository.nextDueReminder();
+    const nextAt = [wait?.resumeAt, reminder?.nextReminderAt].filter((value): value is string => Boolean(value)).sort()[0];
+    if (!nextAt) return;
+    const delay = Math.min(2_147_483_647, Math.max(0, Date.parse(nextAt) - Date.parse(this.now())));
     this.wakeTimer = setTimeout(() => {
       this.wakeTimer = null;
       void this.recover(this.now()).catch(() => { this.armWakeTimer(); });
@@ -183,6 +185,17 @@ export class WorkflowService {
   getDefinition(id: string): WorkflowDefinition | null { return this.options.repository.getDefinition(id); }
   getRun(workflowId: string, runId: string): WorkflowRunDetail | null { return this.options.repository.getRun(workflowId, runId); }
   listRuns(workflowId: string, query: RunListQuery): CursorPage<WorkflowRunSummary> { return this.options.repository.listRuns(workflowId, query); }
+  submitAttemptOutput(input: {
+    sessionId: string;
+    outcome?: "success" | "failure";
+    fields?: unknown;
+    summary?: string;
+  }): Promise<WorkflowRunDetail> {
+    return this.runner.submit(input);
+  }
+  extendAttemptDeadline(input: { sessionId: string; reason?: string }): Promise<void> {
+    return this.runner.extend(input);
+  }
 
   createDefinition(input: CreateWorkflowInput): WorkflowDefinition {
     const value = this.options.repository.createDefinition(input); this.definitionChanged(value); return value;
@@ -356,7 +369,8 @@ export class WorkflowService {
       for (const attempt of run.attempts.filter((item) => item.status === "running" && item.sessionId)) {
         const completion = this.options.executor.readTerminalCompletion(attempt.sessionId!);
         if (completion && await this.runner.complete(completion)) { resumedRuns += 1; continue; }
-        if (Date.parse(attempt.startedAt) + attempt.resolvedConfig.timeoutMinutes * 60_000 <= Date.parse(now)) {
+        if (attempt.resolvedConfig.timeoutMinutes !== undefined
+          && Date.parse(attempt.startedAt) + attempt.resolvedConfig.timeoutMinutes * 60_000 <= Date.parse(now)) {
           await this.options.executor.stopAttempt({ sessionId: attempt.sessionId!, reason: "Workflow attempt timed out." }).catch(() => undefined);
           if (await this.runner.timeoutAttempt(run.workflowId, run.id, attempt.nodeId, attempt.attempt, now)) resumedRuns += 1;
         }
@@ -367,6 +381,7 @@ export class WorkflowService {
       const run = this.options.repository.listRecoverableRuns().find((candidate) => candidate.id === wait.runId);
       if (run && await this.runner.resumeWait(run.workflowId, run.id, wait.nodeId, now)) resumedWaits += 1;
     }
+    await this.runner.remindDueAttempts(now);
     await this.triggers.recoverTodoEvents();
     this.armWakeTimer();
     return { resumedRuns, resumedWaits };

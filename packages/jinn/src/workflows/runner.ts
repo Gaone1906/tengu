@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { Employee, ModelRegistry, WorkflowAttemptCompletion } from "../shared/types.js";
 import { interpolateWorkflowPrompt, resolveBinding, WorkflowBindingError, type WorkflowBindingContext } from "./bindings.js";
+import { buildNodeContract } from "./contract.js";
 import type {
   ConditionNode,
   ConditionPredicate,
@@ -11,7 +12,7 @@ import type {
   WorkflowNode,
   WorkflowNodeOutput,
 } from "./model.js";
-import { parseWorkflowOutput } from "./output.js";
+import { parseWorkflowOutput, validateSubmittedFields, WorkflowOutputError } from "./output.js";
 import { WorkflowRepositoryError, type WorkflowRepository } from "./repository.js";
 import type { ResolvedEmployeeConfig, WorkflowError, WorkflowNodeRunRecord, WorkflowRunDetail } from "./runtime.js";
 import type { WorkflowSessionExecutor } from "./session-executor.js";
@@ -29,6 +30,15 @@ export interface WorkflowRunnerOptions {
 type NodeAction =
   | { kind: "activate" | "skip" | "condition" | "merge" | "approval" | "wait" | "end"; node: WorkflowNode }
   | { kind: "dispatch"; node: EmployeeNode; config: ResolvedEmployeeConfig };
+const REMINDER_RUNGS_MINUTES = [5, 15, 30] as const;
+const REMINDER_TEXT = "Workflow reminder: if you have finished this step, call `workflow_submit_output` now. If you are still working or waiting on delegated work, continue.";
+const FINAL_REMINDER_TEXT = `${REMINDER_TEXT} This is the final reminder. If you genuinely need more time, call \`workflow_extend_deadline\`.`;
+function addMinutes(at: string, minutes: number): string {
+  return new Date(Date.parse(at) + minutes * 60_000).toISOString();
+}
+function hasWorkflowOutputBlock(text: string): boolean {
+  return /(?:^|\n)```jinn-output[ \t]*(?:\r?\n|$)/.test(text);
+}
 function workflowError(error: unknown, nodeId: string, attempt?: number): WorkflowError {
   const value = error instanceof Error ? error : new Error(String(error));
   return { code: "workflow-step-failed", message: value.message, retryable: false, nodeId, ...(attempt ? { attempt } : {}) };
@@ -42,6 +52,28 @@ function bindingContext(run: WorkflowRunDetail): WorkflowBindingContext {
       status: node.status, output: node.output ?? null, error: node.error ?? null,
     }])),
   };
+}
+function upstreamSessions(run: WorkflowRunDetail, nodeId: string): Array<{ nodeId: string; sessionId?: string }> {
+  const ancestors = new Set<string>();
+  const pending = incoming(run, nodeId).map((edge) => edge.from.nodeId);
+  while (pending.length > 0) {
+    const upstreamId = pending.pop()!;
+    if (ancestors.has(upstreamId)) continue;
+    ancestors.add(upstreamId);
+    pending.push(...incoming(run, upstreamId).map((edge) => edge.from.nodeId));
+  }
+  return run.definition.nodes.flatMap((authored) => {
+    const runtime = nodeRun(run, authored.id);
+    if (!ancestors.has(authored.id) || runtime.status !== "completed") return [];
+    const attempt = run.attempts.filter((candidate) => candidate.nodeId === authored.id
+      && candidate.status === "completed" && candidate.sessionId).at(-1);
+    const sessionId = runtime.output?.sessionId ?? attempt?.sessionId;
+    return [{ nodeId: authored.id, ...(sessionId ? { sessionId } : {}) }];
+  });
+}
+function composeEmployeePrompt(run: WorkflowRunDetail, node: EmployeeNode): string {
+  const prompt = interpolateWorkflowPrompt(node.config.prompt, bindingContext(run));
+  return `${prompt}\n\n---\n${buildNodeContract(node, upstreamSessions(run, node.id))}`;
 }
 function resolveString(binding: Parameters<typeof resolveBinding<string>>[0], context: WorkflowBindingContext, label: string): string {
   const value = resolveBinding(binding, context);
@@ -68,7 +100,7 @@ function resolveDispatch(run: WorkflowRunDetail, node: EmployeeNode, options: Wo
   const config: ResolvedEmployeeConfig = {
     employeeId, engine, model, ...(effort ? { effort } : {}),
     retry: node.config.retry ?? { attempts: 1, delaySeconds: 0, backoff: "fixed" },
-    timeoutMinutes: node.config.timeoutMinutes ?? 60,
+    ...(node.config.timeoutMinutes === undefined ? {} : { timeoutMinutes: node.config.timeoutMinutes }),
   };
   return config;
 }
@@ -260,10 +292,11 @@ export class WorkflowRunner {
 
   private async dispatch(run: WorkflowRunDetail, node: EmployeeNode, config: ResolvedEmployeeConfig): Promise<void> {
     const at = this.now();
+    const promptText = composeEmployeePrompt(run, node);
     const attempt = this.options.repository.mutateRun(run.id, run.revision, (tx) => {
       tx.setNodeStatus(node.id, "dispatching", { resolvedConfig: config as unknown as Record<string, JsonValue>,
         input: inputFor(run, node.id), startedAt: at });
-      return tx.createAttempt({ nodeId: node.id, resolvedConfig: config, input: inputFor(run, node.id) });
+      return tx.createAttempt({ nodeId: node.id, resolvedConfig: config, input: inputFor(run, node.id), promptText });
     });
     this.changed(run);
     try {
@@ -326,7 +359,10 @@ export class WorkflowRunner {
     const attempt = run.attempts.find((item) => item.nodeId === nodeId && item.attempt === attemptNumber);
     const node = run.definition.nodes.find((item): item is EmployeeNode => item.id === nodeId && item.type === "employee");
     if (!attempt || attempt.status !== "dispatching" || !node) return false;
-    const prompt = interpolateWorkflowPrompt(node.config.prompt, bindingContext(run));
+    // Prefer the prompt persisted at attempt creation so the session receives
+    // exactly what the run detail shows; recompose only for attempts that
+    // predate the column.
+    const prompt = attempt.promptText ?? composeEmployeePrompt(run, node);
     const config = attempt.resolvedConfig;
     const { sessionId } = await this.options.executor.startAttempt({ owner: { workflowId, runId, nodeId, attempt: attemptNumber },
       employeeId: config.employeeId, engine: config.engine, ...(config.model ? { model: config.model } : {}),
@@ -356,12 +392,14 @@ export class WorkflowRunner {
     if (replay) return this.detail(workflowId, runId);
     const latest = run.attempts.filter((attempt) => attempt.nodeId === nodeId).at(-1);
     if (!latest) throw new Error(`Workflow Employee ${nodeId} has no retryable attempt.`);
+    const authored = run.definition.nodes.find((item): item is EmployeeNode => item.id === nodeId && item.type === "employee");
+    const promptText = authored ? composeEmployeePrompt(run, authored) : undefined;
     try {
       this.options.repository.mutateRun(run.id, run.revision, (tx) => {
         tx.setNodeStatus(nodeId, "dispatching", { activated: true });
         tx.setRunStatus("running");
         tx.createAttempt({ nodeId, resolvedConfig: latest.resolvedConfig,
-          input: latest.input, retryIdempotencyKey: idempotencyKey });
+          input: latest.input, ...(promptText === undefined ? {} : { promptText }), retryIdempotencyKey: idempotencyKey });
       });
     } catch (error) {
       const claimed = this.options.repository.findAttemptByRetryKey(run.id, idempotencyKey);
@@ -404,11 +442,14 @@ export class WorkflowRunner {
   }
 
   private settleFailure(run: WorkflowRunDetail, attempt: typeof run.attempts[number], error: WorkflowError,
-    status: "failed" | "timed-out" | "cancelled", endedAt: string): boolean {
+    status: "failed" | "timed-out" | "cancelled", endedAt: string, processedTurn?: number): boolean {
     const retry = attempt.attempt < attempt.resolvedConfig.retry.attempts;
     const routed = !retry && run.definition.edges.some((edge) => edge.from.nodeId === attempt.nodeId && edge.from.port === "error");
     const failure = retry ? { ...error, retryable: true } : error;
     this.options.repository.mutateRun(run.id, run.revision, (tx) => {
+      if (processedTurn !== undefined) {
+        tx.setAttemptReminder(attempt.nodeId, attempt.attempt, { lastProcessedTurn: processedTurn });
+      }
       tx.settleAttempt(attempt.nodeId, attempt.attempt, { status,
         ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}), error: failure, endedAt });
       if (retry) {
@@ -428,9 +469,132 @@ export class WorkflowRunner {
     return routed;
   }
 
+  private activeRunForAttempt(attempt: WorkflowRunDetail["attempts"][number]): WorkflowRunDetail {
+    const record = this.options.repository.listRecoverableRuns().find((candidate) => candidate.id === attempt.runId);
+    if (!record) {
+      throw new WorkflowRepositoryError("corrupt-record", `Workflow attempt ${attempt.nodeId}:${attempt.attempt} has no active run.`);
+    }
+    return this.detail(record.workflowId, record.id);
+  }
+
+  private alreadySubmitted(sessionId: string): never {
+    throw new WorkflowRepositoryError("already-submitted", `Workflow attempt session ${sessionId} already submitted.`);
+  }
+
+  async remindDueAttempts(now: string): Promise<void> {
+    for (const due of this.options.repository.listDueReminders(now, 100)) {
+      const current = this.options.repository.getAttempt(due.runId, due.nodeId, due.attempt);
+      if (!current || current.status !== "running" || !current.sessionId
+        || !current.nextReminderAt || current.nextReminderAt > now) continue;
+      const run = this.activeRunForAttempt(current);
+      const state = this.options.executor.attemptState(current.sessionId);
+      if (!state?.idle || state.runningChildren > 0) {
+        this.options.repository.mutateRun(run.id, run.revision, (tx) => {
+          tx.setAttemptReminder(current.nodeId, current.attempt, { nextReminderAt: addMinutes(now, 5) });
+        });
+        this.changed(run);
+        continue;
+      }
+      const rung = current.remindersSent + 1;
+      const reminder = rung === 3 ? FINAL_REMINDER_TEXT : REMINDER_TEXT;
+      const text = current.pendingOutputError
+        ? `Your previous output block was invalid: ${current.pendingOutputError}\n\n${reminder}`
+        : reminder;
+      await this.options.executor.remind({ sessionId: current.sessionId, text });
+      const refreshed = this.activeRunForAttempt(current);
+      const latest = refreshed.attempts.find((candidate) => candidate.nodeId === current.nodeId
+        && candidate.attempt === current.attempt);
+      if (!latest || latest.status !== "running") continue;
+      this.options.repository.mutateRun(refreshed.id, refreshed.revision, (tx) => {
+        tx.setAttemptReminder(latest.nodeId, latest.attempt, {
+          remindersSent: rung,
+          nextReminderAt: null,
+          pendingOutputError: null,
+        });
+      });
+      this.changed(refreshed);
+    }
+  }
+
+  async submit(input: {
+    sessionId: string;
+    outcome?: "success" | "failure";
+    fields?: unknown;
+    summary?: string;
+  }): Promise<WorkflowRunDetail> {
+    const attempt = this.options.repository.findAttemptBySessionId(input.sessionId);
+    if (!attempt) {
+      throw new WorkflowRepositoryError("not-found", `Workflow attempt session ${input.sessionId} was not found.`);
+    }
+    if (attempt.status !== "running") this.alreadySubmitted(input.sessionId);
+    const run = this.activeRunForAttempt(attempt);
+    const node = run.definition.nodes.find((candidate): candidate is EmployeeNode =>
+      candidate.id === attempt.nodeId && candidate.type === "employee");
+    if (!node) throw new WorkflowRepositoryError("corrupt-record", `Workflow attempt ${attempt.nodeId} has no Employee node.`);
+    if (input.outcome === "failure") {
+      const error: WorkflowError = {
+        code: "workflow-submitted-failure",
+        message: input.summary ?? "Step reported failure.",
+        retryable: true,
+        nodeId: attempt.nodeId,
+        attempt: attempt.attempt,
+      };
+      const routed = this.settleFailure(run, attempt, error, "failed", this.now());
+      return routed ? this.advance(run.workflowId, run.id) : this.detail(run.workflowId, run.id);
+    }
+    const fields = validateSubmittedFields(input.fields, node.config.output);
+    const output: WorkflowNodeOutput = {
+      text: input.summary ?? "",
+      fields,
+      employeeId: attempt.resolvedConfig.employeeId,
+      engine: attempt.resolvedConfig.engine,
+      ...(attempt.resolvedConfig.model ? { model: attempt.resolvedConfig.model } : {}),
+      sessionId: input.sessionId,
+    };
+    try {
+      this.options.repository.mutateRun(run.id, run.revision, (tx) => {
+        tx.settleAttempt(attempt.nodeId, attempt.attempt, {
+          status: "completed",
+          sessionId: input.sessionId,
+          output,
+          endedAt: this.now(),
+        });
+        tx.setNodeStatus(attempt.nodeId, "completed", { output, endedAt: this.now() });
+      });
+    } catch (error) {
+      if (error instanceof WorkflowRepositoryError && error.code === "revision-conflict"
+        && this.options.repository.findAttemptBySessionId(input.sessionId)?.status !== "running") {
+        this.alreadySubmitted(input.sessionId);
+      }
+      throw error;
+    }
+    this.changed(run);
+    return this.advance(run.workflowId, run.id);
+  }
+
+  async extend(input: { sessionId: string; reason?: string }): Promise<void> {
+    const attempt = this.options.repository.findAttemptBySessionId(input.sessionId);
+    if (!attempt) {
+      throw new WorkflowRepositoryError("not-found", `Workflow attempt session ${input.sessionId} was not found.`);
+    }
+    if (attempt.status !== "running") this.alreadySubmitted(input.sessionId);
+    const run = this.activeRunForAttempt(attempt);
+    this.options.repository.mutateRun(run.id, run.revision, (tx) => {
+      tx.setAttemptReminder(attempt.nodeId, attempt.attempt, {
+        remindersSent: 0,
+        nextReminderAt: null,
+        extensions: attempt.extensions + 1,
+        lastExtensionReason: input.reason ?? null,
+        pendingOutputError: null,
+      });
+    });
+    this.changed(run);
+  }
+
   async complete(event: WorkflowAttemptCompletion): Promise<boolean> {
     const attempt = this.options.repository.findAttemptBySessionId(event.sessionId);
-    if (!attempt || attempt.status !== "running" || event.terminalVersion !== 1) return false;
+    if (!attempt || attempt.status !== "running" || event.terminalVersion < 1
+      || !Number.isInteger(event.turn) || event.turn < 1 || event.turn <= attempt.lastProcessedTurn) return false;
     const run = this.detail(event.owner.workflowId, event.owner.runId);
     if (attempt.runId !== run.id || attempt.nodeId !== event.owner.nodeId || attempt.attempt !== event.owner.attempt) return false;
     const node = run.definition.nodes.find((candidate): candidate is EmployeeNode => candidate.id === attempt.nodeId && candidate.type === "employee");
@@ -441,19 +605,53 @@ export class WorkflowRunner {
       : undefined;
     let output: WorkflowNodeOutput | undefined;
     let failure: WorkflowError | undefined;
+    let pendingOutputError: string | undefined;
     if (event.outcome === "succeeded") {
-      try {
-        output = { ...parseWorkflowOutput(event.finalText ?? "", node.config.output), employeeId: attempt.resolvedConfig.employeeId,
-          engine: attempt.resolvedConfig.engine, ...(attempt.resolvedConfig.model ? { model: attempt.resolvedConfig.model } : {}), sessionId: event.sessionId };
-      } catch (error) { failure = workflowError(error, attempt.nodeId, attempt.attempt); }
+      const finalText = event.finalText ?? "";
+      if (hasWorkflowOutputBlock(finalText)) {
+        try {
+          output = { ...parseWorkflowOutput(finalText, node.config.output), employeeId: attempt.resolvedConfig.employeeId,
+            engine: attempt.resolvedConfig.engine, ...(attempt.resolvedConfig.model ? { model: attempt.resolvedConfig.model } : {}), sessionId: event.sessionId };
+        } catch (error) {
+          if (error instanceof WorkflowOutputError) pendingOutputError = error.message;
+          else failure = workflowError(error, attempt.nodeId, attempt.attempt);
+        }
+      }
     } else failure = workflowError(event.error ?? `Workflow attempt was ${event.outcome}.`, attempt.nodeId, attempt.attempt);
     const endedAt = event.completedAt;
+    if (event.outcome === "succeeded" && !output && !failure) {
+      if (attempt.remindersSent < REMINDER_RUNGS_MINUTES.length) {
+        this.options.repository.mutateRun(run.id, run.revision, (tx) => {
+          tx.setAttemptReminder(attempt.nodeId, attempt.attempt, {
+            nextReminderAt: addMinutes(endedAt, REMINDER_RUNGS_MINUTES[attempt.remindersSent]!),
+            ...(pendingOutputError ? { pendingOutputError } : {}),
+            lastProcessedTurn: event.turn,
+          });
+        });
+        this.changed(run);
+        return true;
+      }
+      const state = this.options.executor.attemptState(event.sessionId);
+      if ((state?.runningChildren ?? 0) > 0) return true;
+      const noOutput: WorkflowError = {
+        code: "workflow-no-output",
+        message: "Workflow attempt ended without submitting output.",
+        retryable: true,
+        nodeId: attempt.nodeId,
+        attempt: attempt.attempt,
+      };
+      const routed = this.settleFailure(run, attempt, noOutput, "failed", endedAt, event.turn);
+      if (routed) await this.advance(run.workflowId, run.id);
+      return true;
+    }
     if (!output && !cancellation) {
-      const routed = this.settleFailure(run, attempt, failure!, event.outcome === "interrupted" ? "cancelled" : "failed", endedAt);
+      const routed = this.settleFailure(run, attempt, failure!,
+        event.outcome === "interrupted" ? "cancelled" : "failed", endedAt, event.turn);
       if (routed) await this.advance(run.workflowId, run.id);
       return true;
     }
     this.options.repository.mutateRun(run.id, run.revision, (tx) => {
+      tx.setAttemptReminder(attempt.nodeId, attempt.attempt, { lastProcessedTurn: event.turn });
       if (cancellation) {
         tx.settleAttempt(attempt.nodeId, attempt.attempt, {
           status: "cancelled", sessionId: event.sessionId, error: cancellation, endedAt,

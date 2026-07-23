@@ -46,8 +46,10 @@ class DurableExecutor {
   async settle(nodeId: string, outcome: "succeeded" | "failed", at: string): Promise<void> {
     const command = this.commands.filter((item) => item.owner.nodeId === nodeId).at(-1)!;
     const key = `${command.owner.runId}:${nodeId}:${command.owner.attempt}`;
-    const event: WorkflowAttemptCompletion = { sessionId: this.sessions.get(key)!, owner: command.owner, terminalVersion: 1,
-      outcome, ...(outcome === "succeeded" ? { finalText: "Done." } : { error: "provider failed" }), completedAt: at };
+    const event: WorkflowAttemptCompletion = { sessionId: this.sessions.get(key)!, owner: command.owner, turn: 1, terminalVersion: 1,
+      outcome, ...(outcome === "succeeded"
+        ? { finalText: "Done.\n```jinn-output\n{}\n```" }
+        : { error: "provider failed" }), completedAt: at };
     this.receipts.set(event.sessionId, event);
     await Promise.all([...this.listeners].map((listener) => listener(event)));
   }

@@ -11,6 +11,7 @@ export type WorkflowRepositoryErrorCode =
   | 'retired'
   | 'bad-cursor'
   | 'bad-input'
+  | 'already-submitted'
   | 'corrupt-record';
 
 export class WorkflowRepositoryError extends Error {

@@ -165,12 +165,12 @@ function validateFields(fields: Record<string, JsonValue>, schema: ParsedSchema)
   }
   for (const [name, field] of Object.entries(schema.fields)) {
     if (Object.hasOwn(fields, name) && !matchesType(fields[name]!, field.type)) {
-      fail('type-mismatch', `Output field "${name}" does not match its declared type.`);
+      fail('type-mismatch', `Output field "${name}" does not match declared type "${field.type}".`);
     }
   }
   if (!schema.allowAdditionalFields) {
     for (const name of Object.keys(fields)) {
-      if (!Object.hasOwn(schema.fields, name)) fail('invalid-shape');
+      if (!Object.hasOwn(schema.fields, name)) fail('invalid-shape', `Output field "${name}" is not declared.`);
     }
   }
   if (schema.allowAdditionalFields) return fields;
@@ -181,6 +181,17 @@ function validateFields(fields: Record<string, JsonValue>, schema: ParsedSchema)
     });
   }
   return selected;
+}
+
+export function validateSubmittedFields(
+  fields: unknown,
+  schema?: WorkflowOutputSchema,
+): Record<string, JsonValue> {
+  const normalized = fields === undefined ? emptyFields() : normalizeFields(fields);
+  if (schema === undefined) return normalized;
+  const parsedSchema = parseSchema(schema);
+  if (!parsedSchema) fail('invalid-shape');
+  return validateFields(normalized, parsedSchema);
 }
 
 export function parseWorkflowOutput(finalText: string, schema?: WorkflowOutputSchema): WorkflowNodeOutput {
@@ -202,8 +213,5 @@ export function parseWorkflowOutput(finalText: string, schema?: WorkflowOutputSc
     fields = normalizeFields(parsed);
     text = finalText.slice(0, scan.blockStart) + finalText.slice(scan.blockEnd);
   }
-  if (schema === undefined) return { text, fields };
-  const parsedSchema = parseSchema(schema);
-  if (!parsedSchema) fail('invalid-shape');
-  return { text, fields: validateFields(fields, parsedSchema) };
+  return { text, fields: validateSubmittedFields(fields, schema) };
 }

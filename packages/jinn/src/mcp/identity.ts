@@ -58,6 +58,9 @@ export const JINN_SESSION_ID_ENV = "JINN_SESSION_ID";
 /** Env var carrying the per-session capability into that session's jinn MCP server. */
 export const JINN_SESSION_CAPABILITY_ENV = "JINN_SESSION_CAPABILITY";
 
+/** Non-authoritative visibility hint for attempt-only tools; routes still verify the caller session. */
+export const JINN_WORKFLOW_ATTEMPT_ENV = "JINN_WORKFLOW_ATTEMPT";
+
 /** Header carrying the calling session's id on gateway requests. */
 export const CALLER_SESSION_HEADER = "x-jinn-caller-session";
 
@@ -176,7 +179,11 @@ export function verifySessionCapability(sessionId: string, capability: string, k
  * has no stdio `jinn` server (gateway MCP disabled, or a URL-based custom
  * server shadowing is impossible — the name is reserved).
  */
-export function attachSessionIdentity(resolved: ResolvedMcpConfig, sessionId: string): ResolvedMcpConfig {
+export function attachSessionIdentity(
+  resolved: ResolvedMcpConfig,
+  sessionId: string,
+  options?: { workflowAttempt?: boolean },
+): ResolvedMcpConfig {
   const jinn = resolved.mcpServers["jinn"];
   if (!jinn || !("command" in jinn)) return resolved;
   const stdio = jinn as McpServerStdioConfig;
@@ -194,7 +201,12 @@ export function attachSessionIdentity(resolved: ResolvedMcpConfig, sessionId: st
           MCP_HOME_ARG, resolveJinnHome(),
           ...(gatewayUrl ? [MCP_GATEWAY_URL_ARG, gatewayUrl] : []),
         ],
-        env: { ...(stdio.env ?? {}), [JINN_SESSION_ID_ENV]: sessionId, [JINN_SESSION_CAPABILITY_ENV]: capability },
+        env: {
+          ...(stdio.env ?? {}),
+          [JINN_SESSION_ID_ENV]: sessionId,
+          [JINN_SESSION_CAPABILITY_ENV]: capability,
+          ...(options?.workflowAttempt ? { [JINN_WORKFLOW_ATTEMPT_ENV]: "1" } : {}),
+        },
       },
     },
   };

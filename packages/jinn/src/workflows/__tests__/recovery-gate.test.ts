@@ -108,7 +108,8 @@ describe('workflow recovery gate', () => {
 
     const db = migrations.openWorkflowDatabase(file);
     try {
-      expect(db.prepare('SELECT version FROM workflow_schema').pluck().get()).toBe(2);
+      expect(db.prepare('SELECT version FROM workflow_schema').pluck().get())
+        .toBe(migrations.WORKFLOW_DB_SCHEMA_VERSION);
       expect(db.prepare('SELECT title FROM workflow_definitions WHERE id = ?').pluck().get('physical-v1'))
         .toBe('Fixture');
     } finally {

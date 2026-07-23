@@ -27,7 +27,7 @@ const resolvedSchema = z.strictObject({
   employeeId: z.string(), engine: z.string(), model: z.string().optional(),
   effort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
   retry: z.strictObject({ attempts: z.number().int().min(1), delaySeconds: z.number().int().nonnegative(), backoff: z.enum(['fixed', 'exponential']) }),
-  timeoutMinutes: z.number().int().positive(),
+  timeoutMinutes: z.number().int().positive().optional(),
 });
 const triggerSchema = z.strictObject({
   nodeId: z.string(), kind: z.enum(['manual', 'schedule', 'event', 'todo-status', 'workflow-call']),
@@ -44,7 +44,11 @@ const nodeRecordSchema = z.strictObject({
 const attemptRecordSchema = z.strictObject({
   runId: z.string(), nodeId: z.string(), attempt: z.number().int().positive(), sessionId: z.string().optional(),
   status: z.enum(WORKFLOW_ATTEMPT_STATUSES), resolvedConfig: resolvedSchema, input: jsonValueSchema,
+  promptText: z.string().optional(),
   output: outputSchema.optional(), error: errorSchema.optional(), startedAt: instantSchema, endedAt: instantSchema.optional(),
+  remindersSent: z.number().int().nonnegative(), nextReminderAt: instantSchema.optional(),
+  extensions: z.number().int().nonnegative(), lastExtensionReason: z.string().optional(),
+  pendingOutputError: z.string().optional(), lastProcessedTurn: z.number().int().nonnegative(),
 });
 const approvalRecordSchema = z.strictObject({
   runId: z.string(), nodeId: z.string(), status: z.enum(['pending', 'approved', 'rejected']),
@@ -77,7 +81,9 @@ interface NodeRow {
 interface AttemptRow {
   run_id: unknown; node_id: unknown; attempt: unknown; session_id: unknown; status: unknown;
   resolved_config_json: unknown; input_json: unknown; output_json: unknown; error_json: unknown;
-  started_at: unknown; ended_at: unknown;
+  started_at: unknown; ended_at: unknown; reminders_sent: unknown; next_reminder_at: unknown;
+  extensions: unknown; last_extension_reason: unknown; pending_output_error: unknown; last_processed_turn: unknown;
+  prompt_text: unknown;
 }
 interface ApprovalRow {
   run_id: unknown; node_id: unknown; status: unknown; requested_at: unknown; approver_ref: unknown;
@@ -156,9 +162,16 @@ export function decodeAttempt(row: AttemptRow): WorkflowAttemptRecord {
     ...(row.session_id === null ? {} : { sessionId: row.session_id }), status: row.status,
     resolvedConfig: parseStoredJson(row.resolved_config_json, 'Workflow attempt config'),
     input: parseStoredJson(row.input_json, 'Workflow attempt input'),
+    ...(row.prompt_text === null ? {} : { promptText: row.prompt_text }),
     ...(row.output_json === null ? {} : { output: optionalJson(row.output_json, 'Workflow attempt output') }),
     ...(row.error_json === null ? {} : { error: optionalJson(row.error_json, 'Workflow attempt error') }),
     startedAt: row.started_at, ...(row.ended_at === null ? {} : { endedAt: row.ended_at }),
+    remindersSent: row.reminders_sent,
+    ...(row.next_reminder_at === null ? {} : { nextReminderAt: row.next_reminder_at }),
+    extensions: row.extensions,
+    ...(row.last_extension_reason === null ? {} : { lastExtensionReason: row.last_extension_reason }),
+    ...(row.pending_output_error === null ? {} : { pendingOutputError: row.pending_output_error }),
+    lastProcessedTurn: row.last_processed_turn,
   }, `Workflow attempt ${String(row.node_id)}:${String(row.attempt)}`);
   const terminal = ['completed', 'failed', 'timed-out', 'cancelled'].includes(record.status);
   if ((record.status === 'dispatching' && (record.sessionId || record.output || record.error || record.endedAt))
@@ -357,6 +370,26 @@ export function readAttemptByRetryKey(db: WorkflowSqliteConnection, runId: strin
     .all(runId, key) as AttemptRow[];
   if (rows.length > 1) repositoryError('corrupt-record', `Workflow retry key ${key} owns multiple attempts.`);
   return rows[0] ? decodeAttempt(rows[0]) : null;
+}
+
+export function readDueReminders(db: WorkflowSqliteConnection, now: string, limit: number): WorkflowAttemptRecord[] {
+  return (db.prepare(`SELECT * FROM workflow_attempts WHERE status = 'running' AND next_reminder_at <= ?
+    ORDER BY next_reminder_at, run_id, node_id, attempt LIMIT ?`).all(now, limit) as AttemptRow[]).map(decodeAttempt);
+}
+
+export function readNextDueReminder(db: WorkflowSqliteConnection): {
+  runId: string; nodeId: string; attempt: number; nextReminderAt: string;
+} | null {
+  const row = db.prepare(`SELECT * FROM workflow_attempts WHERE status = 'running' AND next_reminder_at IS NOT NULL
+    ORDER BY next_reminder_at, run_id, node_id, attempt LIMIT 1`).get() as AttemptRow | undefined;
+  if (!row) return null;
+  const attempt = decodeAttempt(row);
+  return {
+    runId: attempt.runId,
+    nodeId: attempt.nodeId,
+    attempt: attempt.attempt,
+    nextReminderAt: attempt.nextReminderAt!,
+  };
 }
 
 export function readRecoverableRuns(db: WorkflowSqliteConnection): WorkflowRunRecord[] {

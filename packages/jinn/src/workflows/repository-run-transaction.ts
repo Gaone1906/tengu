@@ -118,11 +118,15 @@ export class RunMutation implements WorkflowRunTransaction {
 
   createAttempt(input: Parameters<WorkflowRunTransaction['createAttempt']>[0]): WorkflowAttemptRecord {
     this.assertOpen();
-    const value = normalizedRecord(input, ['nodeId', 'resolvedConfig', 'input', 'retryIdempotencyKey'], 'Workflow attempt input is invalid.');
+    const value = normalizedRecord(input, ['nodeId', 'resolvedConfig', 'input', 'promptText', 'retryIdempotencyKey'], 'Workflow attempt input is invalid.');
     const nodeId = parseNodeId(value.nodeId);
     const retryKey = value.retryIdempotencyKey;
     if (retryKey !== undefined && (typeof retryKey !== 'string' || retryKey.length < 1 || retryKey.length > 128)) {
       repositoryError('bad-input', 'Workflow retry idempotency key is invalid.');
+    }
+    const promptText = value.promptText;
+    if (promptText !== undefined && (typeof promptText !== 'string' || promptText.length < 1)) {
+      repositoryError('bad-input', 'Workflow attempt prompt is invalid.');
     }
     validateMutationValue('resolved', value.resolvedConfig);
     const node = readNode(this.db, this.runId, nodeId);
@@ -131,9 +135,10 @@ export class RunMutation implements WorkflowRunTransaction {
     const attempt = (this.db.prepare(`SELECT COALESCE(MAX(attempt), 0) + 1 FROM workflow_attempts
       WHERE run_id = ? AND node_id = ?`).pluck().get(this.runId, nodeId) as number);
     this.db.prepare(`INSERT INTO workflow_attempts
-      (run_id, node_id, attempt, status, resolved_config_json, input_json, started_at, retry_idempotency_key)
-      VALUES (?, ?, ?, 'dispatching', ?, ?, ?, ?)`).run(
-      this.runId, nodeId, attempt, canonicalJson(value.resolvedConfig!), canonicalJson(value.input!), this.stamp, retryKey,
+      (run_id, node_id, attempt, status, resolved_config_json, input_json, prompt_text, started_at, retry_idempotency_key)
+      VALUES (?, ?, ?, 'dispatching', ?, ?, ?, ?, ?)`).run(
+      this.runId, nodeId, attempt, canonicalJson(value.resolvedConfig!), canonicalJson(value.input!),
+      promptText ?? null, this.stamp, retryKey,
     );
     this.didChange = true;
     return readAttempt(this.db, this.runId, nodeId, attempt)!;
@@ -178,6 +183,65 @@ export class RunMutation implements WorkflowRunTransaction {
       WHERE run_id = @runId AND node_id = @nodeId AND attempt = @attempt`).run({
       runId: this.runId, nodeId: id, attempt, sessionId: next.sessionId ?? null, status: next.status,
       output: jsonColumn(next.output), error: jsonColumn(next.error), ended: next.endedAt ?? null,
+    });
+    this.didChange = true;
+    return readAttempt(this.db, this.runId, id, attempt)!;
+  }
+  setAttemptReminder(
+    nodeId: string,
+    attempt: number,
+    patch: Parameters<WorkflowRunTransaction['setAttemptReminder']>[2],
+  ): WorkflowAttemptRecord {
+    this.assertOpen();
+    const id = parseNodeId(nodeId);
+    if (!Number.isInteger(attempt) || attempt < 1) repositoryError('bad-input', 'Workflow attempt number is invalid.');
+    const keys = ['remindersSent', 'nextReminderAt', 'extensions', 'lastExtensionReason', 'pendingOutputError', 'lastProcessedTurn'];
+    const values = normalizedRecord(patch, keys, 'Workflow attempt reminder patch is invalid.');
+    for (const key of ['remindersSent', 'extensions', 'lastProcessedTurn'] as const) {
+      if (values[key] !== undefined && (!Number.isInteger(values[key]) || (values[key] as number) < 0)) {
+        repositoryError('bad-input', 'Workflow attempt reminder patch is invalid.');
+      }
+    }
+    if (values.nextReminderAt !== undefined && values.nextReminderAt !== null) canonicalStamp(values.nextReminderAt);
+    for (const key of ['lastExtensionReason', 'pendingOutputError'] as const) {
+      if (values[key] !== undefined && values[key] !== null && typeof values[key] !== 'string') {
+        repositoryError('bad-input', 'Workflow attempt reminder patch is invalid.');
+      }
+    }
+    const current = readAttempt(this.db, this.runId, id, attempt);
+    if (!current) repositoryError('not-found', `Workflow attempt ${id}:${attempt} was not found.`);
+    if (current.status !== 'running') repositoryError('bad-input', 'Workflow attempt reminder state requires a running attempt.');
+    const next = { ...current } as WorkflowAttemptRecord;
+    if (values.remindersSent !== undefined) next.remindersSent = values.remindersSent as number;
+    if (Object.hasOwn(values, 'nextReminderAt')) {
+      if (values.nextReminderAt === null) delete next.nextReminderAt;
+      else next.nextReminderAt = values.nextReminderAt as string;
+    }
+    if (values.extensions !== undefined) next.extensions = values.extensions as number;
+    if (Object.hasOwn(values, 'lastExtensionReason')) {
+      if (values.lastExtensionReason === null) delete next.lastExtensionReason;
+      else next.lastExtensionReason = values.lastExtensionReason as string;
+    }
+    if (Object.hasOwn(values, 'pendingOutputError')) {
+      if (values.pendingOutputError === null) delete next.pendingOutputError;
+      else next.pendingOutputError = values.pendingOutputError as string;
+    }
+    if (values.lastProcessedTurn !== undefined) next.lastProcessedTurn = values.lastProcessedTurn as number;
+    if (!recordChanged(current, next)) return current;
+    this.db.prepare(`UPDATE workflow_attempts SET reminders_sent = @remindersSent,
+      next_reminder_at = @nextReminderAt, extensions = @extensions,
+      last_extension_reason = @lastExtensionReason, pending_output_error = @pendingOutputError,
+      last_processed_turn = @lastProcessedTurn
+      WHERE run_id = @runId AND node_id = @nodeId AND attempt = @attempt`).run({
+      runId: this.runId,
+      nodeId: id,
+      attempt,
+      remindersSent: next.remindersSent,
+      nextReminderAt: next.nextReminderAt ?? null,
+      extensions: next.extensions,
+      lastExtensionReason: next.lastExtensionReason ?? null,
+      pendingOutputError: next.pendingOutputError ?? null,
+      lastProcessedTurn: next.lastProcessedTurn,
     });
     this.didChange = true;
     return readAttempt(this.db, this.runId, id, attempt)!;

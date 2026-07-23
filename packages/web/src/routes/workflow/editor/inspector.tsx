@@ -170,6 +170,229 @@ function TriggerForm({ node, update }: FormProps) {
 
 const EFFORTS = ["low", "medium", "high", "xhigh"]
 const CLEAR = "__none__"
+const OUTPUT_FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_-]*$/
+const OUTPUT_FIELD_TYPES = ["string", "number", "boolean", "string[]"] as const
+
+type OutputFieldType = typeof OUTPUT_FIELD_TYPES[number]
+type OutputFieldConfig = {
+  type: OutputFieldType
+  required: boolean
+  description?: string
+}
+type OutputSchemaConfig = {
+  fields: Record<string, OutputFieldConfig>
+  allowAdditionalFields: boolean
+}
+
+function OutputFieldRow({
+  index,
+  name,
+  field,
+  existingNames,
+  onRename,
+  onChange,
+  onRemove,
+}: {
+  index: number
+  name: string
+  field: OutputFieldConfig
+  existingNames: string[]
+  onRename: (name: string) => void
+  onChange: (field: OutputFieldConfig) => void
+  onRemove: () => void
+}) {
+  const [draftName, setDraftName] = useState(name)
+  const [nameError, setNameError] = useState<string | null>(null)
+
+  useEffect(() => setDraftName(name), [name])
+
+  const changeName = (next: string) => {
+    setDraftName(next)
+    if (!OUTPUT_FIELD_NAME.test(next)) {
+      setNameError("Use letters, numbers, underscores, or hyphens; start with a letter or underscore.")
+      return
+    }
+    if (next !== name && existingNames.includes(next)) {
+      setNameError("Use a unique field name.")
+      return
+    }
+    setNameError(null)
+    if (next !== name) onRename(next)
+  }
+
+  return (
+    <div className="space-y-2 rounded-[var(--radius-lg)] bg-[var(--fill-tertiary)] p-2.5">
+      <div className="flex items-start gap-1.5">
+        <div className="min-w-0 flex-1">
+          <TextInput
+            aria-label={`Output field ${index + 1} name`}
+            value={draftName}
+            onChange={(event) => changeName(event.target.value)}
+            placeholder="result"
+            aria-invalid={nameError ? true : undefined}
+            aria-describedby={nameError ? `output-field-${index}-error` : undefined}
+            style={{ fontFamily: "var(--font-code)" }}
+          />
+          {nameError && (
+            <p id={`output-field-${index}-error`} className="mt-1 text-[length:var(--text-caption2)] text-[var(--system-red)]">
+              {nameError}
+            </p>
+          )}
+        </div>
+        <button
+          type="button"
+          aria-label={`Remove output field ${name}`}
+          onClick={onRemove}
+          className="grid size-8 shrink-0 place-items-center rounded-[9px] text-[var(--text-tertiary)] hover:bg-[var(--fill-secondary)] hover:text-[var(--system-red)]"
+        >
+          <Trash2 size={14} aria-hidden />
+        </button>
+      </div>
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+        <PickerField
+          label="Type"
+          value={field.type}
+          onChange={(type) => onChange({ ...field, type: type as OutputFieldType })}
+          options={OUTPUT_FIELD_TYPES.map((type) => ({ value: type, label: type }))}
+        />
+        <label className="flex h-8 items-center gap-1.5 px-1 text-[length:var(--text-caption1)] text-[var(--text-secondary)]">
+          <input
+            type="checkbox"
+            aria-label={`Output field ${index + 1} required`}
+            checked={field.required}
+            onChange={(event) => onChange({ ...field, required: event.target.checked })}
+            className="size-4 accent-[var(--accent)]"
+          />
+          Required
+        </label>
+      </div>
+      <Field label="Description">
+        <TextInput
+          aria-label={`Output field ${index + 1} description`}
+          value={field.description ?? ""}
+          onChange={(event) => {
+            const description = event.target.value
+            const next = { ...field }
+            if (description) next.description = description
+            else delete next.description
+            onChange(next)
+          }}
+          placeholder="What this field contains"
+        />
+      </Field>
+    </div>
+  )
+}
+
+function OutputSchemaForm({
+  config,
+  update,
+}: {
+  config: Record<string, unknown>
+  update: (config: Record<string, unknown>) => void
+}) {
+  const output = config.output as OutputSchemaConfig | undefined
+
+  const disable = () => {
+    const next = { ...config }
+    delete next.output
+    update(next)
+  }
+
+  if (!output) {
+    return (
+      <section className="rounded-[var(--radius-lg)] border border-[var(--separator)] p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-[length:var(--text-footnote)] font-[var(--weight-semibold)] text-[var(--text-primary)]">Output</h3>
+            <p className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">No structured output</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => update({
+              ...config,
+              output: {
+                fields: { result: { type: "string", required: false } },
+                allowAdditionalFields: false,
+              },
+            })}
+            className="h-8 rounded-[9px] bg-[var(--fill-tertiary)] px-2.5 text-[length:var(--text-caption1)] font-[var(--weight-medium)] text-[var(--text-secondary)] hover:bg-[var(--fill-secondary)]"
+          >
+            Enable structured output
+          </button>
+        </div>
+      </section>
+    )
+  }
+
+  const entries = Object.entries(output.fields)
+  const setOutput = (next: OutputSchemaConfig) => update({ ...config, output: next })
+  const setField = (name: string, field: OutputFieldConfig) =>
+    setOutput({ ...output, fields: { ...output.fields, [name]: field } })
+  const renameField = (name: string, nextName: string) => {
+    const fields = Object.fromEntries(entries.map(([key, field]) => [key === name ? nextName : key, field]))
+    setOutput({ ...output, fields })
+  }
+  const removeField = (name: string) => {
+    const fields = Object.fromEntries(entries.filter(([key]) => key !== name))
+    if (Object.keys(fields).length === 0) disable()
+    else setOutput({ ...output, fields })
+  }
+  const addField = () => {
+    let name = "field"
+    let suffix = 2
+    while (Object.hasOwn(output.fields, name)) {
+      name = `field_${suffix}`
+      suffix += 1
+    }
+    setOutput({ ...output, fields: { ...output.fields, [name]: { type: "string", required: false } } })
+  }
+
+  return (
+    <section className="space-y-2.5 rounded-[var(--radius-lg)] border border-[var(--separator)] p-3">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-[length:var(--text-footnote)] font-[var(--weight-semibold)] text-[var(--text-primary)]">Output</h3>
+        <button
+          type="button"
+          onClick={disable}
+          className="text-[length:var(--text-caption1)] font-[var(--weight-medium)] text-[var(--text-tertiary)] hover:text-[var(--system-red)]"
+        >
+          Disable structured output
+        </button>
+      </div>
+      {entries.map(([name, field], index) => (
+        <OutputFieldRow
+          key={name}
+          index={index}
+          name={name}
+          field={field}
+          existingNames={entries.map(([key]) => key)}
+          onRename={(nextName) => renameField(name, nextName)}
+          onChange={(nextField) => setField(name, nextField)}
+          onRemove={() => removeField(name)}
+        />
+      ))}
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={addField}
+          className="flex h-8 items-center gap-1.5 rounded-[9px] px-2 text-[length:var(--text-footnote)] font-[var(--weight-medium)] text-[var(--text-secondary)] hover:bg-[var(--fill-tertiary)]"
+        >
+          <Plus size={13} aria-hidden /> Add field
+        </button>
+        <label className="flex items-center gap-1.5 text-[length:var(--text-caption1)] text-[var(--text-secondary)]">
+          <input
+            type="checkbox"
+            checked={output.allowAdditionalFields}
+            onChange={(event) => setOutput({ ...output, allowAdditionalFields: event.target.checked })}
+            className="size-4 accent-[var(--accent)]"
+          />
+          Allow additional fields
+        </label>
+      </div>
+    </section>
+  )
+}
 
 function EmployeeForm({ node, update }: FormProps) {
   const org = useQuery({ queryKey: ["org"], queryFn: api.getOrg, staleTime: 60_000 })
@@ -199,6 +422,29 @@ function EmployeeForm({ node, update }: FormProps) {
         onChange={(next) => update(withFixed(config, "effort", next === CLEAR ? "" : next))}
         options={[{ value: CLEAR, label: "Default" }, ...EFFORTS.map((value) => ({ value, label: value }))]}
       />
+      <OutputSchemaForm config={config} update={update} />
+      <section className="space-y-2 rounded-[var(--radius-lg)] border border-[var(--separator)] p-3">
+        <h3 className="text-[length:var(--text-footnote)] font-[var(--weight-semibold)] text-[var(--text-primary)]">Advanced</h3>
+        <Field label="Timeout (minutes)">
+          <TextInput
+            type="number"
+            min={1}
+            max={1440}
+            step={1}
+            value={typeof config.timeoutMinutes === "number" ? String(config.timeoutMinutes) : ""}
+            onChange={(event) => {
+              const next = { ...config }
+              if (event.target.value === "") {
+                delete next.timeoutMinutes
+              } else {
+                next.timeoutMinutes = Math.max(1, Math.min(1440, Math.round(Number(event.target.value))))
+              }
+              update(next)
+            }}
+            placeholder="No hard timeout"
+          />
+        </Field>
+      </section>
     </>
   )
 }
@@ -561,18 +807,14 @@ function useIsNarrow(): boolean {
   return narrow
 }
 
-/** Properties live in a right rail on desktop and a bottom sheet on mobile —
- *  ONE mounted body writing straight into the store node; there is no draft copy. */
-export function Inspector() {
-  const selected = useEditor((state) => state.nodes.find((node) => node.selected))
-  const selectNode = useEditor((state) => state.selectNode)
+/** The inspector chrome shared by the editor properties panel and the run
+ *  inspector: a right rail on desktop, a bottom sheet on mobile. */
+export function InspectorShell({ onDismiss, children }: { onDismiss: () => void; children: React.ReactNode }) {
   const narrow = useIsNarrow()
-  if (!selected) return null
-  const node = selected.data.node
   if (!narrow) {
     return (
       <aside className="absolute bottom-3 right-3 top-3 z-40 w-[324px] rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] shadow-[var(--shadow-overlay)]">
-        <InspectorBody node={node} />
+        {children}
       </aside>
     )
   }
@@ -581,17 +823,28 @@ export function Inspector() {
       <button
         type="button"
         aria-label="Dismiss properties"
-        onClick={() => selectNode(null)}
+        onClick={onDismiss}
         className="absolute inset-x-0 -top-24 h-24"
       />
       <div
         className="max-h-[62vh] overflow-hidden rounded-t-[var(--radius-2xl)] bg-[var(--bg-secondary)] pb-2.5 shadow-[var(--shadow-overlay)]"
       >
         <div className="mx-auto mt-2 h-[5px] w-9 rounded-full bg-[var(--fill-secondary)]" aria-hidden />
-        <div className="h-[min(56vh,480px)]">
-          <InspectorBody node={node} />
-        </div>
+        <div className="h-[min(56vh,480px)]">{children}</div>
       </div>
     </div>
+  )
+}
+
+/** Properties live in a right rail on desktop and a bottom sheet on mobile —
+ *  ONE mounted body writing straight into the store node; there is no draft copy. */
+export function Inspector() {
+  const selected = useEditor((state) => state.nodes.find((node) => node.selected))
+  const selectNode = useEditor((state) => state.selectNode)
+  if (!selected) return null
+  return (
+    <InspectorShell onDismiss={() => selectNode(null)}>
+      <InspectorBody node={selected.data.node} />
+    </InspectorShell>
   )
 }

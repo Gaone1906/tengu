@@ -156,7 +156,7 @@ describe('WorkflowRepository public definition contract', () => {
   it('exposes every locked repository error code including the Task 11 reservation', () => {
     expectTypeOf<WorkflowRepositoryError['code']>().toEqualTypeOf<
       'not-found' | 'id-conflict' | 'revision-conflict' | 'idempotency-conflict'
-      | 'retired' | 'bad-cursor' | 'bad-input' | 'corrupt-record'
+      | 'retired' | 'bad-cursor' | 'bad-input' | 'corrupt-record' | 'already-submitted'
     >();
   });
 });

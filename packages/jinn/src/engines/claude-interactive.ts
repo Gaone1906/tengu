@@ -16,7 +16,7 @@ import { SsePtyProxy, MAIN_AGENT_SENTINEL, type SseDataEvent, type UpstreamActiv
 import { neutralizeForPaste } from "../shared/skill-commands.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
 import { extractActivityReceiptId } from "../shared/activity-receipts.js";
-import { JINN_SESSION_CAPABILITY_ENV, JINN_SESSION_ID_ENV } from "../mcp/identity.js";
+import { JINN_SESSION_CAPABILITY_ENV, JINN_SESSION_ID_ENV, JINN_WORKFLOW_ATTEMPT_ENV } from "../mcp/identity.js";
 
 export type { PtyControlEvent } from "./pty-view-engine.js";
 
@@ -874,6 +874,9 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
       // session-bound identity there as a narrow fallback.
       if (boundSessionId === sessionId && capability) {
         env[JINN_SESSION_CAPABILITY_ENV] = capability;
+        if (jinn.env?.[JINN_WORKFLOW_ATTEMPT_ENV] === "1") {
+          env[JINN_WORKFLOW_ATTEMPT_ENV] = "1";
+        }
       }
     }
     if (proxyPort) env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;

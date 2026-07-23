@@ -15,7 +15,9 @@ import {
   CALLER_SESSION_HEADER,
   TOOL_CALL_HEADER,
   TOOL_CALL_HEADER_VALUE,
+  ensureSessionCapability,
 } from "../../mcp/identity.js";
+import { createSession } from "../../sessions/registry.js";
 import { handleApiRequest, type ApiContext } from "../api.js";
 import { readJsonBody } from "../http-helpers.js";
 
@@ -49,6 +51,14 @@ function response() {
   return { res, read: () => ({ status, body: chunks.length
     ? JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown
     : undefined }) };
+}
+
+function workflowToolHeaders(sessionId: string): Record<string, string> {
+  return {
+    [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+    [CALLER_SESSION_HEADER]: sessionId,
+    [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(sessionId),
+  };
 }
 
 describe("Workflow v2 canonical API", () => {
@@ -119,6 +129,34 @@ describe("Workflow v2 canonical API", () => {
       reason: "Reviewed", expectedRevision: 4, decidedBy: "operator" });
     expect(service.retryNode).toHaveBeenCalledWith({ workflowId: "release-flow",
       runId: "run_11111111-1111-4111-8111-111111111111", nodeId: "write", idempotencyKey: "retry-1" });
+  });
+
+  it("serializes reminder ladder state on every run-detail attempt", async () => {
+    const detail = {
+      id: "run_11111111-1111-4111-8111-111111111111",
+      workflowId: "release-flow",
+      attempts: [{
+        runId: "run_11111111-1111-4111-8111-111111111111",
+        nodeId: "write",
+        attempt: 1,
+        status: "running",
+        promptText: "Write the notes.\n\n---\nContract block.",
+        remindersSent: 2,
+        nextReminderAt: "2026-07-23T12:30:00.000Z",
+        extensions: 1,
+        lastExtensionReason: "Waiting on review",
+        pendingOutputError: "Required output field \"result\" is missing.",
+      }],
+    };
+    const service = { getRun: vi.fn(() => detail) };
+    const context = { gatewayAuthToken: "test-token", workflowService: service, getConfig: () => ({ gateway: {}, engines: {} }),
+      connectors: new Map(), sessionManager: { getQueue: () => ({}) }, emit: vi.fn(), startTime: 1 } as unknown as ApiContext;
+    const capture = response();
+
+    await handleApiRequest(request("GET",
+      "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111"), capture.res, context);
+
+    expect(capture.read()).toEqual({ status: 200, body: detail });
   });
 
   it("authenticates retry and maps its authority, identity, conflict, and validation errors", async () => {
@@ -357,7 +395,7 @@ describe("Workflow v2 canonical API", () => {
       await handleApiRequest(request("POST", "/api/workflows/events/build.finished", { fireId: "build-123", payload: { status: "passed" } }), first.res, context);
       const started = first.read().body as Array<{ id: string }>;
       expect(first.read().status).toBe(202); expect(commands).toHaveLength(1);
-      await listener!({ sessionId: "session-1", owner: commands[0]!.owner, terminalVersion: 1, outcome: "succeeded",
+      await listener!({ sessionId: "session-1", owner: commands[0]!.owner, turn: 1, terminalVersion: 1, outcome: "succeeded",
         finalText: "Done.\n```jinn-output\n{\"result\":\"ok\"}\n```", completedAt: new Date().toISOString() } as WorkflowAttemptCompletion);
       expect(service.getRun("event-flow", started[0]!.id)?.status).toBe("completed");
       const replay = response();
@@ -385,5 +423,119 @@ describe("Workflow v2 canonical API", () => {
       expect(definitionNotifications).toContainEqual({ workflowId: "event-flow", revision: revised.revision });
       expect(runNotifications.some((change) => change.runId === started[0]!.id)).toBe(true);
     } finally { service.dispose(); database.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("settles and extends a live attempt through its verified caller session", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-workflow-attempt-api-"));
+    const database = openWorkflowDatabase(path.join(root, "workflows.db"));
+    const repository = new WorkflowRepository(database);
+    const employee: Employee = { name: "worker", displayName: "Worker", department: "platform", rank: "employee",
+      engine: "test-engine", model: "model-a", effortLevel: "high", persona: "Executes work." };
+    const models: ModelRegistry = { "test-engine": { name: "test-engine", available: true, defaultModel: "model-a", effortMechanism: "codex-config",
+      models: [{ id: "model-a", label: "Model A", supportsEffort: true, effortLevels: ["high"] }] } };
+    let attemptSessionId = "";
+    const executor = {
+      subscribe: () => () => undefined,
+      async startAttempt(command: WorkflowAttemptCommand) {
+        const session = createSession({
+          engine: command.engine,
+          source: "web",
+          sourceRef: `workflow:${command.owner.runId}:${command.owner.nodeId}`,
+          title: "Workflow attempt",
+        });
+        attemptSessionId = session.id;
+        return { sessionId: session.id };
+      },
+      async stopAttempt() {},
+      readTerminalCompletion: () => null,
+      attemptState: () => ({ idle: true, runningChildren: 0 }),
+      async remind() {},
+    } as unknown as WorkflowSessionExecutor;
+    const service = new WorkflowService({
+      repository,
+      executor,
+      employees: () => new Map([[employee.name, employee]]),
+      models: () => models,
+    });
+    const context = { gatewayAuthToken: "test-token", workflowService: service, getConfig: () => ({ gateway: {}, engines: {} }),
+      connectors: new Map(), sessionManager: { getQueue: () => ({}) }, emit: vi.fn(), startTime: 1 } as unknown as ApiContext;
+    try {
+      const missingCaller = response();
+      await handleApiRequest(request("POST", "/api/workflows/attempts/submit", {}), missingCaller.res, context);
+      expect(missingCaller.read()).toEqual({
+        status: 409,
+        body: { code: "not-a-workflow-attempt", message: "The caller is not a running Workflow attempt." },
+      });
+
+      const outsider = createSession({ engine: "test-engine", source: "web", sourceRef: "outsider", title: "Outsider" });
+      const rejected = response();
+      await handleApiRequest(request("POST", "/api/workflows/attempts/submit", {}, true, "application/json",
+        workflowToolHeaders(outsider.id)), rejected.res, context);
+      expect(rejected.read()).toEqual({
+        status: 409,
+        body: { code: "not-a-workflow-attempt", message: "The caller is not a running Workflow attempt." },
+      });
+
+      const created = service.createDefinition({ id: "submit-flow", title: "Submit flow" });
+      const saved = service.saveDefinition({ ...created, nodes: [
+        { id: "start", type: "trigger", name: "Start", config: { kind: "manual" } },
+        { id: "work", type: "employee", name: "Work", config: {
+          employee: { source: "fixed", value: "worker" },
+          prompt: "Report status.",
+          output: { fields: { result: { type: "string", required: true } }, allowAdditionalFields: false },
+        } },
+        { id: "finish", type: "end", name: "Finish", config: { result: "success" } },
+      ], edges: [
+        { id: "start-work", from: { nodeId: "start", port: "success" }, to: { nodeId: "work", port: "input" } },
+        { id: "work-finish", from: { nodeId: "work", port: "success" }, to: { nodeId: "finish", port: "input" } },
+      ] }, created.revision);
+      const enabled = service.setEnabled({ id: saved.id, enabled: true, expectedRevision: saved.revision });
+      const run = await service.startManual({ workflowId: enabled.id, input: {} });
+      const attempt = repository.findAttemptBySessionId(attemptSessionId)!;
+      repository.mutateRun(run.id, service.getRun(saved.id, run.id)!.revision, (tx) => {
+        tx.setAttemptReminder(attempt.nodeId, attempt.attempt, {
+          remindersSent: 2,
+          nextReminderAt: "2026-07-23T12:00:00.000Z",
+          pendingOutputError: "result is required",
+        });
+      });
+
+      const invalid = response();
+      await handleApiRequest(request("POST", "/api/workflows/attempts/submit",
+        { fields: {} }, true, "application/json", workflowToolHeaders(attemptSessionId)), invalid.res, context);
+      expect(invalid.read()).toEqual({
+        status: 422,
+        body: { code: "missing-field", message: "Required output field \"result\" is missing." },
+      });
+
+      const extended = response();
+      await handleApiRequest(request("POST", "/api/workflows/attempts/extend",
+        { reason: "Waiting on review" }, true, "application/json", workflowToolHeaders(attemptSessionId)), extended.res, context);
+      expect(extended.read()).toEqual({ status: 200, body: { ok: true } });
+      expect(repository.findAttemptBySessionId(attemptSessionId)).toMatchObject({
+        remindersSent: 0,
+        extensions: 1,
+        lastExtensionReason: "Waiting on review",
+      });
+      expect(repository.findAttemptBySessionId(attemptSessionId)?.nextReminderAt).toBeUndefined();
+      expect(repository.findAttemptBySessionId(attemptSessionId)?.pendingOutputError).toBeUndefined();
+
+      const submitted = response();
+      await handleApiRequest(request("POST", "/api/workflows/attempts/submit",
+        { fields: { result: "published" }, summary: "Done." }, true, "application/json",
+        workflowToolHeaders(attemptSessionId)), submitted.res, context);
+      expect(submitted.read()).toEqual({ status: 200, body: { ok: true } });
+      expect(service.getRun(saved.id, run.id)).toMatchObject({ status: "completed" });
+
+      const duplicate = response();
+      await handleApiRequest(request("POST", "/api/workflows/attempts/submit",
+        { fields: { result: "again" } }, true, "application/json",
+        workflowToolHeaders(attemptSessionId)), duplicate.res, context);
+      expect(duplicate.read()).toMatchObject({ status: 409, body: { code: "already-submitted" } });
+    } finally {
+      service.dispose();
+      database.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

@@ -70,7 +70,12 @@ export function antigravityJinnSessionEnv(resolvedMcp: ResolvedMcpConfig | undef
   const spec = jinnServer(resolvedMcp);
   const sessionId = spec?.env?.JINN_SESSION_ID;
   const capability = spec?.env?.JINN_SESSION_CAPABILITY;
-  return sessionId && capability ? { JINN_SESSION_ID: sessionId, JINN_SESSION_CAPABILITY: capability } : {};
+  const workflowAttempt = spec?.env?.JINN_WORKFLOW_ATTEMPT;
+  return sessionId && capability ? {
+    JINN_SESSION_ID: sessionId,
+    JINN_SESSION_CAPABILITY: capability,
+    ...(workflowAttempt === "1" ? { JINN_WORKFLOW_ATTEMPT: workflowAttempt } : {}),
+  } : {};
 }
 
 export function ensureAntigravityJinnMcpConfig(

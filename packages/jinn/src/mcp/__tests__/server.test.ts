@@ -151,6 +151,13 @@ describe("buildTools", () => {
     expect(names.some((name) => name.startsWith("jinn_"))).toBe(false);
   });
 
+  it("adds attempt completion controls only to the workflow-attempt belt", () => {
+    const names = buildTools({ workflowAttempt: true }).map((tool) => tool.name);
+    expect(names).toContain("workflow_submit_output");
+    expect(names).toContain("workflow_extend_deadline");
+    expect(buildTools().map((tool) => tool.name)).not.toContain("workflow_submit_output");
+  });
+
   it("get_workflow declares workflowId as required", () => {
     const wf = buildTools().find((t) => t.name === "get_workflow")!;
     expect(wf.inputSchema.required).toEqual(["workflowId"]);

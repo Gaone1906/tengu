@@ -25,6 +25,7 @@ import {
   updateSession,
   beginSessionAttempt, completeSessionAttempt, claimWorkflowAttemptDispatch, cancelWorkflowAttemptDispatch,
   listPendingWorkflowAttemptDispatches, interruptSessionAttempt,
+  listChildSessions,
   updateSessionForAttempt,
 } from "./registry.js";
 import { notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel } from "./callbacks.js";
@@ -191,7 +192,30 @@ export class SessionManager {
   private enqueueWorkflowAttempt(session: Session, prompt: string, employee: Employee, claim: string): void {
     const msg: IncomingMessage = { connector: "workflow", source: "workflow", sessionKey: session.sessionKey, replyContext: {}, channel: session.id, user: "workflow", userId: "workflow", text: prompt, attachments: [], raw: null };
     setImmediate(() => { void this.queue.enqueue(session.sessionKey, async () => { await this.runSession(session, msg, [], WORKFLOW_CONNECTOR, { channel: session.id }, employee);
-      this.emitWorkflowAttemptCompletion(getSession(session.id)); }, claim, true).catch((error) => logger.error(`Workflow session ${session.id} dispatch failed: ${String(error)}`)); });
+      this.emitWorkflowAttemptCompletion(getSession(session.id)); }, claim).catch((error) => logger.error(`Workflow session ${session.id} dispatch failed: ${String(error)}`)); });
+  }
+  async remindWorkflowAttempt(sessionId: string, text: string): Promise<void> {
+    const session = getSession(sessionId);
+    if (!session || session.workflowProvenance?.kind !== "phase" || !session.employee) {
+      throw new Error(`Workflow attempt session "${sessionId}" is not available.`);
+    }
+    const employee = this.employeeProvider(session.employee);
+    if (!employee) throw new Error(`Workflow employee "${session.employee}" is not available.`);
+    const claim = claimWorkflowAttemptDispatch(session.id, session.sessionKey, text);
+    if (!claim) throw new Error(`Workflow attempt session "${sessionId}" is not idle.`);
+    this.enqueueWorkflowAttempt(session, text, employee, claim);
+  }
+  workflowAttemptState(sessionId: string): { idle: boolean; runningChildren: number } | null {
+    const session = getSession(sessionId);
+    if (!session || session.workflowProvenance?.kind !== "phase") return null;
+    const idle = session.status === "idle"
+      && !this.queue.isRunning(session.sessionKey)
+      && this.queue.getPendingCount(session.sessionKey) === 0;
+    const runningChildren = listChildSessions(sessionId).filter((child) => {
+      const transport = this.queue.getTransportState(child.sessionKey, child.status);
+      return child.status === "running" || transport === "running" || transport === "queued";
+    }).length;
+    return { idle, runningChildren };
   }
   async stopWorkflowAttempt(input: { sessionId: string; reason: string }): Promise<void> {
     const session = getSession(input.sessionId); if (!session || session.workflowProvenance?.kind !== "phase") return;
@@ -201,11 +225,11 @@ export class SessionManager {
   }
   private emitWorkflowAttemptCompletion(session?: Session): void {
     const provenance = session?.workflowProvenance; if (!session?.attemptOutcome || provenance?.kind !== "phase" || !provenance.phase) return; const terminalVersion = session.attemptTerminalVersion ?? 0;
-    const key = `${session.id}:${terminalVersion}`;
-    if (terminalVersion !== 1 || this.emittedWorkflowAttemptCompletions.has(key)) return;
+    const turn = session.attemptTurn ?? 0; const key = `${session.id}:${turn}`;
+    if (terminalVersion < 1 || turn < 1 || this.emittedWorkflowAttemptCompletions.has(key)) return;
     const finalText = [...getMessages(session.id)].reverse().find((message) => message.role === "assistant")?.content;
     const event: WorkflowAttemptCompletion = { sessionId: session.id, owner: { workflowId: provenance.workflowId, runId: provenance.runId, nodeId: provenance.phase.nodeId,
-      attempt: provenance.phase.attempt }, terminalVersion, outcome: session.attemptOutcome, completedAt: session.lastActivity,
+      attempt: provenance.phase.attempt }, turn, terminalVersion: 1, outcome: session.attemptOutcome, completedAt: session.lastActivity,
       ...(finalText ? { finalText } : {}), ...(session.lastError ? { error: session.lastError } : {}) };
     this.emittedWorkflowAttemptCompletions.add(key); for (const listener of this.workflowAttemptCompletionListeners)
       void Promise.resolve().then(() => listener(event)).catch((error) => logger.warn(`Workflow completion listener failed: ${String(error)}`));
@@ -363,6 +387,7 @@ export class SessionManager {
         employee,
         engine: session.engine,
         sessionId: session.id,
+        workflowAttempt: session.workflowProvenance?.kind === "phase",
       }));
 
       // Per-engine config keyed by engine name; unconfigured optional engines

@@ -2,9 +2,30 @@ import type { Edge, Node } from "@xyflow/react"
 import type { WorkflowDefinitionV2Wire } from "@/lib/api"
 import { NODE_TYPE_LABEL, type WorkflowNodeTypeV2, type WorkflowNodeWire, nodeBox } from "./ports"
 
-export type EditorNodeData = { node: WorkflowNodeWire }
+/** Live run state painted onto a card when the canvas renders a run. Its
+ *  presence flips the card into read-only mode: no add affordances, handles
+ *  not connectable, status badge + tinted ring instead. */
+export interface NodeRunView {
+  status: string
+  dimmed: boolean
+}
+
+/** Run state for one wire: `taken` marks the traversed path. Its presence
+ *  hides the edge's insert affordance. */
+export interface EdgeRunView {
+  taken: boolean
+}
+
+export type EditorNodeData = { node: WorkflowNodeWire; run?: NodeRunView }
 export type EditorNode = Node<EditorNodeData>
-export type EditorEdge = Edge
+export type EditorEdgeData = { run?: EdgeRunView }
+export type EditorEdge = Edge<EditorEdgeData>
+
+/** The subset of a definition the canvas can draw — run detail carries this
+ *  snapshot shape; the editor passes the full definition. */
+export type GraphSnapshot = Pick<WorkflowDefinitionV2Wire, "nodes" | "edges"> & {
+  ui?: WorkflowDefinitionV2Wire["ui"]
+}
 
 /** Everything about the definition that is not the graph itself, echoed back on save. */
 export interface EditorMeta {
@@ -31,7 +52,7 @@ export function toEditorMeta(definition: WorkflowDefinitionV2Wire): EditorMeta {
   }
 }
 
-export function toFlowNodes(definition: WorkflowDefinitionV2Wire): EditorNode[] {
+export function toFlowNodes(definition: GraphSnapshot): EditorNode[] {
   const positions = definition.ui?.positions ?? {}
   return definition.nodes.map((node) => ({
     id: node.id,
@@ -42,7 +63,7 @@ export function toFlowNodes(definition: WorkflowDefinitionV2Wire): EditorNode[] 
   }))
 }
 
-export function toFlowEdges(definition: WorkflowDefinitionV2Wire): EditorEdge[] {
+export function toFlowEdges(definition: GraphSnapshot): EditorEdge[] {
   return definition.edges.map((edge) => ({
     id: edge.id,
     source: edge.from.nodeId,
@@ -53,7 +74,7 @@ export function toFlowEdges(definition: WorkflowDefinitionV2Wire): EditorEdge[] 
   }))
 }
 
-export function hasStoredPositions(definition: WorkflowDefinitionV2Wire): boolean {
+export function hasStoredPositions(definition: GraphSnapshot): boolean {
   const positions = definition.ui?.positions ?? {}
   return definition.nodes.length > 0 && definition.nodes.every((node) => positions[node.id] !== undefined)
 }

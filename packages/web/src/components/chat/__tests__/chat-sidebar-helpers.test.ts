@@ -1,5 +1,9 @@
+import { render, screen } from '@testing-library/react'
+import { createElement } from 'react'
+import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { hasBackgroundActivity, isArchivedSession, isDirectSession, isRecentError, pickDeleteFallbackId, pickNeighborSessionId, resolveRowIdentity, shouldFloatPinned } from '../chat-sidebar'
+import { isFocusedSession } from '../chat-route-helpers'
+import { hasBackgroundActivity, isArchivedSession, isDirectSession, isRecentError, isVisibleSource, pickDeleteFallbackId, pickNeighborSessionId, resolveRowIdentity, shouldFloatPinned, WorkflowSessionChip } from '../chat-sidebar'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -23,6 +27,51 @@ describe('chat sidebar grouping helpers', () => {
     expect(isDirectSession({ source: 'web', sourceRef: 'web:5', employee: 'jinn' }, 'jimbo')).toBe(false)
     // a portal-slug row is still a separate group when no slug is supplied
     expect(isDirectSession({ source: 'web', sourceRef: 'web:6', employee: 'jimbo' })).toBe(false)
+  })
+})
+
+describe('workflow sessions in the chat sidebar', () => {
+  it('keeps workflow sessions visible under their employee group and out of direct/focused lanes', () => {
+    const session = {
+      source: 'workflow',
+      sourceRef: 'workflow:daily-report:run-42:writer:1',
+      employee: 'writer',
+    }
+
+    expect(isVisibleSource(session)).toBe(true)
+    expect(isDirectSession(session, 'jimbo')).toBe(false)
+    expect(isFocusedSession(session)).toBe(false)
+  })
+
+  it('links a workflow chip to the owning run parsed from sourceRef', () => {
+    render(
+      createElement(
+        MemoryRouter,
+        null,
+        createElement(WorkflowSessionChip, { session: {
+          source: 'workflow',
+          sourceRef: 'workflow:daily-report:run-42:writer:1',
+        } }),
+      ),
+    )
+
+    expect(screen.getByRole('link', { name: 'Workflow' }).getAttribute('href'))
+      .toBe('/workflow/daily-report/runs/run-42')
+  })
+
+  it('degrades a malformed workflow sourceRef to a non-link chip', () => {
+    render(
+      createElement(
+        MemoryRouter,
+        null,
+        createElement(WorkflowSessionChip, {
+          session: { source: 'workflow', sourceRef: 'workflow:incomplete' },
+        }),
+      ),
+    )
+
+    expect(screen.getByText('Workflow')).toBeTruthy()
+    expect(screen.queryByRole('link')).toBeNull()
   })
 })
 

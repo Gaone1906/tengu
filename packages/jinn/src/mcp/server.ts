@@ -18,7 +18,7 @@ import { buildCostTools } from "./cost-tools.js";
 import { buildCronTools } from "./cron-tools.js";
 import { buildFileTools } from "./file-tools.js";
 import { buildConnectorTools } from "./connector-tools.js";
-import { JINN_SESSION_CAPABILITY_ENV, JINN_SESSION_ID_ENV } from "./identity.js";
+import { JINN_SESSION_CAPABILITY_ENV, JINN_SESSION_ID_ENV, JINN_WORKFLOW_ATTEMPT_ENV } from "./identity.js";
 import { loadConfig } from "../shared/config.js";
 
 /**
@@ -114,7 +114,7 @@ export { gatewayGet, gatewayRequest, JinnMcpToolError, type JinnMcpContext, type
  * revisit the SDK question only if a future group needs capabilities beyond
  * tools/list + tools/call (resources, prompts, progress).
  */
-export function buildTools(opts?: { notesEnabled?: boolean }): JinnMcpTool[] {
+export function buildTools(opts?: { notesEnabled?: boolean; workflowAttempt?: boolean }): JinnMcpTool[] {
   const notesEnabled = opts?.notesEnabled ?? true;
   return [
     ...buildOrgTools(),
@@ -129,7 +129,7 @@ export function buildTools(opts?: { notesEnabled?: boolean }): JinnMcpTool[] {
     ...buildApprovalTools(),
     ...buildFileTools(),
     ...buildConnectorTools(),
-    ...buildWorkflowTools(),
+    ...buildWorkflowTools({ attemptCompletion: opts?.workflowAttempt === true }),
   ];
 }
 
@@ -273,6 +273,7 @@ export function runJinnMcpServer(opts?: {
   token?: string;
   callerSessionId?: string;
   sessionCapability?: string;
+  workflowAttempt?: boolean;
   input?: NodeJS.ReadableStream;
   output?: NodeJS.WritableStream;
 }): void {
@@ -285,7 +286,10 @@ export function runJinnMcpServer(opts?: {
     callerSessionId: opts?.callerSessionId ?? process.env[JINN_SESSION_ID_ENV] ?? undefined,
     sessionCapability: opts?.sessionCapability ?? process.env[JINN_SESSION_CAPABILITY_ENV] ?? undefined,
   };
-  const tools = buildTools({ notesEnabled: notesEnabledFromConfig() });
+  const tools = buildTools({
+    notesEnabled: notesEnabledFromConfig(),
+    workflowAttempt: opts?.workflowAttempt ?? process.env[JINN_WORKFLOW_ATTEMPT_ENV] === "1",
+  });
   const input = opts?.input ?? process.stdin;
   const output = opts?.output ?? process.stdout;
   const rl = readline.createInterface({ input, crlfDelay: Infinity });

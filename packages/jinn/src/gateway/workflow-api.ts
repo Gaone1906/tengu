@@ -7,6 +7,7 @@ import {
 import { CALLER_SESSION_HEADER } from "../mcp/identity.js";
 import { getSession } from "../sessions/registry.js";
 import type { DefinitionListQuery, RunListQuery } from "../workflows/repository.js";
+import { WorkflowOutputError } from "../workflows/output.js";
 import { readJsonBody } from "./http-helpers.js";
 import { isJsonMediaType } from "./media-type.js";
 
@@ -175,12 +176,84 @@ async function event(req: IncomingMessage, res: ServerResponse, parts: string[],
   return true;
 }
 
+function callerSessionId(req: IncomingMessage): string | undefined {
+  const value = req.headers[CALLER_SESSION_HEADER];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function attemptFailure(res: ServerResponse, error: unknown): void {
+  if (error instanceof WorkflowOutputError) {
+    send(res, 422, { code: error.code, message: error.message });
+    return;
+  }
+  if (error instanceof WorkflowRepositoryError) {
+    if (error.code === "not-found") {
+      send(res, 409, {
+        code: "not-a-workflow-attempt",
+        message: "The caller is not a running Workflow attempt.",
+      });
+      return;
+    }
+    if (error.code === "already-submitted") {
+      send(res, 409, { code: error.code, message: error.message });
+      return;
+    }
+  }
+  failure(res, error);
+}
+
+async function attempts(req: IncomingMessage, res: ServerResponse, parts: string[], service: WorkflowService): Promise<boolean> {
+  if (parts.length !== 4 || parts[2] !== "attempts" || req.method !== "POST"
+    || !["submit", "extend"].includes(parts[3]!)) return false;
+  const sessionId = callerSessionId(req);
+  if (!sessionId) {
+    send(res, 409, {
+      code: "not-a-workflow-attempt",
+      message: "The caller is not a running Workflow attempt.",
+    });
+    return true;
+  }
+  const parsed = await body(req, res);
+  if (parsed === undefined) return true;
+  try {
+    if (parts[3] === "submit") {
+      const value = record(parsed, ["outcome", "fields", "summary"]);
+      if (value.outcome !== undefined && value.outcome !== "success" && value.outcome !== "failure") {
+        throw new WorkflowRepositoryError("bad-input", "Workflow attempt outcome must be success or failure.");
+      }
+      if (value.summary !== undefined && typeof value.summary !== "string") {
+        throw new WorkflowRepositoryError("bad-input", "Workflow attempt summary must be a string.");
+      }
+      await service.submitAttemptOutput({
+        sessionId,
+        ...(value.outcome === undefined ? {} : { outcome: value.outcome }),
+        ...(value.fields === undefined ? {} : { fields: value.fields }),
+        ...(value.summary === undefined ? {} : { summary: value.summary }),
+      });
+    } else {
+      const value = record(parsed, ["reason"]);
+      if (value.reason !== undefined && typeof value.reason !== "string") {
+        throw new WorkflowRepositoryError("bad-input", "Workflow attempt extension reason must be a string.");
+      }
+      await service.extendAttemptDeadline({
+        sessionId,
+        ...(value.reason === undefined ? {} : { reason: value.reason }),
+      });
+    }
+    send(res, 200, { ok: true });
+  } catch (error) {
+    attemptFailure(res, error);
+  }
+  return true;
+}
+
 export async function handleWorkflowApi(req: IncomingMessage, res: ServerResponse, options: WorkflowApiOptions): Promise<boolean> {
   const url = new URL(req.url ?? "/", "http://localhost"); const parts = segments(url.pathname);
   if (!parts || parts[0] !== "api" || parts[1] !== "workflows") return false;
   const writing = ["POST", "PUT", "PATCH", "DELETE"].includes(req.method ?? "GET");
   if (writing && !options.authenticated) { send(res, 401, { code: "unauthorized", message: "Workflow authentication required." }); return true; }
   try {
+    if (await attempts(req, res, parts, options.service)) return true;
     if (await event(req, res, parts, options.service)) return true;
     if (await runs(req, res, url, parts, options.service)) return true;
     return await definitions(req, res, url, parts, options);
