@@ -257,6 +257,9 @@ function isUniqueConstraintError(err: unknown): boolean {
 export type WorkItemEventKind =
   | 'created'
   | 'child_created'
+  | 'comment_added'
+  | 'comment_edited'
+  | 'comment_deleted'
   | 'status_change'
   | 'note'
   | 'session_linked'

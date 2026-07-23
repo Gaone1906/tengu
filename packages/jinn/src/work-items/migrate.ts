@@ -174,6 +174,27 @@ ${WORK_ITEM_EVENTS_TABLE_DDL};
 CREATE INDEX IF NOT EXISTS idx_wi_events_item ON work_item_events(work_item_id, created_at);
 `;
 
+/** Todos v2 slice 2: threaded, mutable discussion layer. Delete = tombstone
+ *  (body cleared, row retained) so thread shape survives; `work_item_events`
+ *  stays the pure machine audit and records comment activity separately. */
+export const WORK_ITEM_COMMENTS_TABLE_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_comments (
+  id                TEXT PRIMARY KEY CHECK (id GLOB 'wic_[0-9a-f]*' AND length(id) = 16),
+  work_item_id      TEXT NOT NULL REFERENCES work_items(id),
+  parent_comment_id TEXT REFERENCES work_item_comments(id),
+  author_kind       TEXT NOT NULL CHECK (author_kind IN ('operator','employee','system')),
+  author            TEXT NOT NULL,
+  body              TEXT NOT NULL,
+  created_at        TEXT NOT NULL,
+  edited_at         TEXT,
+  deleted_at        TEXT
+)`;
+
+export const WORK_ITEM_COMMENTS_DDL = `
+${WORK_ITEM_COMMENTS_TABLE_DDL};
+CREATE INDEX IF NOT EXISTS idx_wi_comments_item ON work_item_comments(work_item_id, created_at);
+`;
+
 export const WORK_ITEM_EDIT_RECEIPTS_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
   key_digest          TEXT PRIMARY KEY CHECK (length(key_digest) = 64),
@@ -503,6 +524,7 @@ function sqlShape(sql: string | null | undefined): string {
 const REQUIRED_TABLE_SQL = new Map<string, string>([
   ["work_items", WORK_ITEMS_TABLE_DDL],
   ["work_item_events", WORK_ITEM_EVENTS_TABLE_DDL],
+  ["work_item_comments", WORK_ITEM_COMMENTS_TABLE_DDL],
   ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
   ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
   ["work_item_id_burns", WORK_ITEM_ID_BURNS_TABLE_DDL],
@@ -566,6 +588,17 @@ function recognizedEmptyPrerelease(db: DatabaseType): boolean {
   return true;
 }
 
+/** A v2 database created before slice 2 added the comments table. Not a refusal
+ *  and never a rebuild: `migrateWorkItemsSchema` adds the table additively. */
+function recognizedV2MissingComments(db: DatabaseType): boolean {
+  if (tableExists(db, "work_item_comments")) return false;
+  for (const [name, expected] of REQUIRED_TABLE_SQL) {
+    if (name === "work_item_comments") continue;
+    if (sqlShape(currentTableSql(db, name)) !== sqlShape(expected)) return false;
+  }
+  return true;
+}
+
 function recognizedV1(db: DatabaseType): boolean {
   for (const [name, expected] of V1_REQUIRED_TABLE_SQL) {
     if (sqlShape(currentTableSql(db, name)) !== sqlShape(expected)) return false;
@@ -625,6 +658,21 @@ export function verifyCurrentWorkItemSchema(db: DatabaseType): void {
     const refs = db.prepare(`SELECT DISTINCT ${column} FROM ${table} WHERE ${column} IS NOT NULL`).pluck().all() as string[];
     if (refs.some((id) => !isTodoId(id) || !byId.has(id))) refusal();
   }
+  const commentRows = db.prepare("SELECT id, work_item_id, parent_comment_id FROM work_item_comments").all() as Array<{
+    id: string;
+    work_item_id: string;
+    parent_comment_id: string | null;
+  }>;
+  const commentById = new Map(commentRows.map((row) => [row.id, row]));
+  for (const row of commentRows) {
+    if (!byId.has(row.work_item_id)) refusal();
+    if (row.parent_comment_id !== null) {
+      // Threading is single-level: a parent must be a TOP-LEVEL comment on the
+      // same work item (the write path re-parents replies-to-replies).
+      const parent = commentById.get(row.parent_comment_id);
+      if (!parent || parent.parent_comment_id !== null || parent.work_item_id !== row.work_item_id) refusal();
+    }
+  }
 }
 
 function classifyOpenWorkItemsDatabase(db: DatabaseType): WorkItemSchemaPreflight {
@@ -643,6 +691,9 @@ function classifyOpenWorkItemsDatabase(db: DatabaseType): WorkItemSchemaPrefligh
     verifyCurrentWorkItemSchema(db);
     return "current";
   } catch {
+    // A comments-less v2 database (created between slice 1 and slice 2) is
+    // "current": the migration adds the missing table additively at boot.
+    if (recognizedV2MissingComments(db)) return "current";
     if (recognizedV1(db)) return "v1";
     if (todoTables.some((name) => name.startsWith("work_item_id_"))) refusal();
     if (recognizedEmptyPrerelease(db)) return "empty-prerelease";
@@ -687,6 +738,14 @@ export function migrateWorkItemsSchema(
 ): WorkItemsMigrationResult {
   registerWorkItemIdentityFunctions(db);
   const migrate = db.transaction((): WorkItemsMigrationResult => {
+    // Slice-2 additive self-heal, BEFORE classification: a v2 database created
+    // without the comments table gains it here so the exact-shape verifier below
+    // sees the complete v2 schema. IF NOT EXISTS makes this a no-op everywhere
+    // else, and a refused classification rolls the create back with the
+    // transaction. Never a rebuild, never a refusal.
+    if (tableExists(db, "work_items") && sqlShape(currentTableSql(db, "work_items")) === sqlShape(WORK_ITEMS_TABLE_DDL)) {
+      db.exec(WORK_ITEM_COMMENTS_DDL);
+    }
     // The read-only preflight necessarily precedes the write lock. Reclassify after
     // BEGIN IMMEDIATE so a concurrent winner's committed schema is never dropped.
     const liveShape = classifyOpenWorkItemsDatabase(db);
@@ -741,6 +800,7 @@ export function migrateWorkItemsSchema(
       db.exec("DROP TRIGGER IF EXISTS work_items_id_immutable");
       db.exec("ALTER TABLE work_items RENAME TO work_items_v1_legacy");
       db.exec(WORK_ITEMS_TABLE_DDL);
+      db.exec(WORK_ITEM_COMMENTS_DDL);
       db.exec(`INSERT INTO work_items (
           id, title, body, status, department, assignee,
           created_by, parent_id, root_id, depth, due_at,
@@ -768,6 +828,7 @@ export function migrateWorkItemsSchema(
     db.exec(WORK_ITEMS_TABLE_DDL);
     db.exec(WORK_ITEMS_INDEX_DDL);
     db.exec(WORK_ITEM_EVENTS_DDL);
+    db.exec(WORK_ITEM_COMMENTS_DDL);
     db.exec(WORK_ITEM_EDIT_RECEIPTS_DDL);
     db.exec(WORK_ITEM_IDENTITY_TRIGGERS_DDL);
     verifyCurrentWorkItemSchema(db);
