@@ -79,11 +79,14 @@ function makeReq(method: string, urlPath: string, body?: unknown, headers: Recor
   }) as unknown as Parameters<Api["handleApiRequest"]>[0];
 }
 
+const emittedEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
+
 const ctx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
   connectors: new Map(),
   startTime: Date.now(),
   gatewayAuthToken: "test-token",
+  emit: (event: string, payload: Record<string, unknown>) => emittedEvents.push({ event, payload }),
   sessionManager: {
     getQueue: () => ({
       getPendingCount: () => 0,
@@ -295,5 +298,55 @@ describe("list wire data — labels, blocked flag, label filter", () => {
 
     const badLabel = await call("GET", "/api/work-items?label=!!!");
     expect(badLabel.status).toBe(400);
+  });
+});
+
+describe("ICI-570 — relation and label writes emit company:changed", () => {
+  it("linking emits one entity=todo event per endpoint; unlinking too", async () => {
+    const a = store.createWorkItem({ title: "live rel a" });
+    const b = store.createWorkItem({ title: "live rel b" });
+
+    emittedEvents.length = 0;
+    const linked = await call("POST", `/api/work-items/${a.id}/relations`, { dstId: b.id, kind: "relates" }, operatorHeaders);
+    expect(linked.status).toBe(201);
+    for (const id of [a.id, b.id]) {
+      expect(emittedEvents).toContainEqual(expect.objectContaining({
+        event: "company:changed",
+        payload: expect.objectContaining({ entity: "todo", action: "relation-added", id }),
+      }));
+    }
+
+    emittedEvents.length = 0;
+    const unlinked = await call("DELETE", `/api/work-items/${a.id}/relations`, { dstId: b.id, kind: "relates" }, operatorHeaders);
+    expect(unlinked.status).toBe(200);
+    for (const id of [a.id, b.id]) {
+      expect(emittedEvents).toContainEqual(expect.objectContaining({
+        event: "company:changed",
+        payload: expect.objectContaining({ entity: "todo", action: "relation-removed", id }),
+      }));
+    }
+  });
+
+  it("replacing the label set emits one entity=todo event with the bumped version", async () => {
+    const item = store.createWorkItem({ title: "live label item" });
+    const created = await call("POST", "/api/labels", { name: `live-label-${Date.now()}` }, operatorHeaders);
+    expect(created.status).toBe(201);
+
+    emittedEvents.length = 0;
+    const put = await call("PUT", `/api/work-items/${item.id}/labels`, { labels: [created.body.label.id] }, operatorHeaders);
+    expect(put.status).toBe(200);
+    const event = emittedEvents.find((entry) =>
+      entry.event === "company:changed" && entry.payload.action === "labels-updated" && entry.payload.id === item.id,
+    );
+    expect(event).toBeDefined();
+    expect(event?.payload.version).toBe(store.getWorkItem(item.id)!.version);
+  });
+
+  it("a refused relation write emits nothing", async () => {
+    const a = store.createWorkItem({ title: "no event rel" });
+    emittedEvents.length = 0;
+    const refused = await call("POST", `/api/work-items/${a.id}/relations`, { dstId: a.id, kind: "nonsense" }, operatorHeaders);
+    expect(refused.status).toBe(400);
+    expect(emittedEvents).toEqual([]);
   });
 });

@@ -1449,6 +1449,19 @@ function persistTodoMutationActivity(
   });
 }
 
+/** ICI-570 — projection lanes (comments, attachments, relations, labels) don't
+ * always rewrite the Todo row itself, but the web surfaces still need a change
+ * signal to refetch live. One valueless event per affected item; the client
+ * responds by invalidating that item's cached projections. */
+function emitTodoProjectionEvent(context: ApiContext, id: string, action: string): void {
+  const item = getWorkItem(id);
+  if (!item) return;
+  persistAndEmitActivityBlock({
+    context: chatActivityContext(context),
+    companyEvent: { entity: "todo", action, id, version: item.version },
+  });
+}
+
 function withActivityReceipt<T extends Record<string, unknown>>(body: T, activityReceiptId: string | undefined): T & { activityReceiptId?: string } {
   return activityReceiptId ? { ...body, activityReceiptId } : body;
 }
@@ -3829,6 +3842,7 @@ export async function handleApiRequest(
           ...workItemCommentAuthor(caller),
           parentCommentId,
         });
+        emitTodoProjectionEvent(context, params.id, "commented");
         return json(res, { comment }, 201);
       } catch (err) {
         return workItemCommentFailure(res, err);
@@ -3859,6 +3873,7 @@ export async function handleApiRequest(
           ...workItemCommentAuthor(caller),
           operator: caller.kind === "operator",
         });
+        emitTodoProjectionEvent(context, params.id, "comment-edited");
         return json(res, { comment });
       } catch (err) {
         return workItemCommentFailure(res, err);
@@ -3879,6 +3894,7 @@ export async function handleApiRequest(
           ...workItemCommentAuthor(caller),
           operator: caller.kind === "operator",
         });
+        emitTodoProjectionEvent(context, params.id, "comment-deleted");
         return json(res, { comment });
       } catch (err) {
         return workItemCommentFailure(res, err);
@@ -3968,6 +3984,7 @@ export async function handleApiRequest(
           stagedPath,
           uploader: workItemAttachmentActor(caller),
         });
+        emitTodoProjectionEvent(context, params.id, "attachment-added");
         return json(res, { attachment }, 201);
       } catch (err) {
         return workItemAttachmentFailure(res, err);
@@ -4027,6 +4044,7 @@ export async function handleApiRequest(
       if (!attachment || attachment.workItemId !== params.id) return notFound(res);
       try {
         if (!removeAttachment(params.aid, workItemAttachmentActor(caller))) return notFound(res);
+        emitTodoProjectionEvent(context, params.id, "attachment-removed");
         return json(res, { removed: true });
       } catch (err) {
         return workItemAttachmentFailure(res, err);
@@ -4058,6 +4076,8 @@ export async function handleApiRequest(
       if (!getWorkItem(dstId)) return notFound(res);
       try {
         const relation = addRelation(params.id, dstId, kind as RelationKind, workItemActor(caller));
+        emitTodoProjectionEvent(context, params.id, "relation-added");
+        emitTodoProjectionEvent(context, dstId, "relation-added");
         return json(res, { relation }, 201);
       } catch (err) {
         // relation-cycle carries the offending path in its message → 400.
@@ -4093,6 +4113,8 @@ export async function handleApiRequest(
           operator: caller.kind === "operator",
         });
         if (!removed) return notFound(res);
+        emitTodoProjectionEvent(context, params.id, "relation-removed");
+        emitTodoProjectionEvent(context, dstId, "relation-removed");
         return json(res, { removed: true });
       } catch (err) {
         if (err instanceof WorkItemRelationError && err.code === "relation-forbidden") {
@@ -4134,6 +4156,7 @@ export async function handleApiRequest(
       }
       try {
         const labels = setWorkItemLabels(params.id, (body.labels as string[]).map((entry) => entry.trim()), workItemActor(caller));
+        emitTodoProjectionEvent(context, params.id, "labels-updated");
         return json(res, { labels });
       } catch (err) {
         return badRequest(res, err instanceof Error ? err.message : String(err));

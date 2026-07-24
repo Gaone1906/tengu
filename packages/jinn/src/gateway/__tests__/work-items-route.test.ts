@@ -118,11 +118,14 @@ function sizedTodoPatch(expectedVersion: number, byteLength: number, multibyte: 
 }
 
 // serializeSession only reaches sessionManager.getQueue() + (absent) backgroundActivity.
+const emittedEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
+
 const ctx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
   connectors: new Map(),
   startTime: Date.now(),
   gatewayAuthToken: "test-token",
+  emit: (event: string, payload: Record<string, unknown>) => emittedEvents.push({ event, payload }),
   sessionManager: {
     getQueue: () => ({
       getPendingCount: () => 0,
@@ -1861,5 +1864,66 @@ describe("PUT /api/work-items/:id/status — the operator human-surface lane (To
     expect(exitTry.status).toBe(403);
     expect(exitTry.body.error).toMatch(/human decision/);
     expect(store.getWorkItem(sticky.id)?.status).toBe("done");
+  });
+});
+
+describe("ICI-570 — comment writes emit company:changed for the parent Todo", () => {
+  const operatorHeaders = { authorization: "Bearer test-token" };
+
+  it("POST, PATCH, and DELETE each emit one entity=todo event", async () => {
+    const item = store.createWorkItem({ title: "live comment item" });
+
+    emittedEvents.length = 0;
+    const posted = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", `/api/work-items/${item.id}/comments`, { body: "hello" }, operatorHeaders),
+      posted.res,
+      ctx,
+    );
+    expect(posted.status).toBe(201);
+    expect(emittedEvents).toContainEqual(expect.objectContaining({
+      event: "company:changed",
+      payload: expect.objectContaining({ entity: "todo", action: "commented", id: item.id }),
+    }));
+
+    const commentId = posted.body.comment.id;
+    emittedEvents.length = 0;
+    const edited = makeRes();
+    await api.handleApiRequest(
+      makeReq("PATCH", `/api/work-items/${item.id}/comments/${commentId}`, { body: "hello again" }, operatorHeaders),
+      edited.res,
+      ctx,
+    );
+    expect(edited.status).toBe(200);
+    expect(emittedEvents).toContainEqual(expect.objectContaining({
+      event: "company:changed",
+      payload: expect.objectContaining({ entity: "todo", action: "comment-edited", id: item.id }),
+    }));
+
+    emittedEvents.length = 0;
+    const removed = makeRes();
+    await api.handleApiRequest(
+      makeReq("DELETE", `/api/work-items/${item.id}/comments/${commentId}`, undefined, operatorHeaders),
+      removed.res,
+      ctx,
+    );
+    expect(removed.status).toBe(200);
+    expect(emittedEvents).toContainEqual(expect.objectContaining({
+      event: "company:changed",
+      payload: expect.objectContaining({ entity: "todo", action: "comment-deleted", id: item.id }),
+    }));
+  });
+
+  it("a refused comment write emits nothing", async () => {
+    const item = store.createWorkItem({ title: "no event on refusal" });
+    emittedEvents.length = 0;
+    const refused = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", `/api/work-items/${item.id}/comments`, { body: "   " }, operatorHeaders),
+      refused.res,
+      ctx,
+    );
+    expect(refused.status).toBe(400);
+    expect(emittedEvents).toEqual([]);
   });
 });

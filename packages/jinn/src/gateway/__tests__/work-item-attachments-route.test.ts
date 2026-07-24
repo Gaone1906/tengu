@@ -119,11 +119,14 @@ function makeMultipartReq(
   }) as unknown as Parameters<Api["handleApiRequest"]>[0];
 }
 
+const emittedEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
+
 const ctx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
   connectors: new Map(),
   startTime: Date.now(),
   gatewayAuthToken: "test-token",
+  emit: (event: string, payload: Record<string, unknown>) => emittedEvents.push({ event, payload }),
   sessionManager: {
     getQueue: () => ({
       getPendingCount: () => 0,
@@ -476,5 +479,41 @@ describe("PUT /api/work-items/:id/labels — array cap (HTTP parity with MCP)", 
     const got = await call("PUT", `/api/work-items/${item.id}/labels`, { labels }, operatorHeaders);
     expect(got.status).toBe(400);
     expect(got.body.error).toMatch(/100/);
+  });
+});
+
+describe("ICI-570 — attachment writes emit company:changed for the parent Todo", () => {
+  it("upload and delete each emit one entity=todo event; a refused upload emits nothing", async () => {
+    const item = store.createWorkItem({ title: "live attachment item" });
+
+    emittedEvents.length = 0;
+    const posted = await upload(
+      `/api/work-items/${item.id}/attachments`,
+      { file: { name: "live.txt", content: Buffer.from("live bytes") } },
+      operatorHeaders,
+    );
+    expect(posted.status).toBe(201);
+    expect(emittedEvents).toContainEqual(expect.objectContaining({
+      event: "company:changed",
+      payload: expect.objectContaining({ entity: "todo", action: "attachment-added", id: item.id }),
+    }));
+
+    emittedEvents.length = 0;
+    const removed = await call(
+      "DELETE",
+      `/api/work-items/${item.id}/attachments/${posted.body.attachment.id}`,
+      undefined,
+      operatorHeaders,
+    );
+    expect(removed.status).toBe(200);
+    expect(emittedEvents).toContainEqual(expect.objectContaining({
+      event: "company:changed",
+      payload: expect.objectContaining({ entity: "todo", action: "attachment-removed", id: item.id }),
+    }));
+
+    emittedEvents.length = 0;
+    const refused = await upload(`/api/work-items/${item.id}/attachments`, {}, operatorHeaders);
+    expect(refused.status).toBe(400);
+    expect(emittedEvents).toEqual([]);
   });
 });
