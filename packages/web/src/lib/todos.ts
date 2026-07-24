@@ -1,6 +1,6 @@
 // The Todos display model (GRS-021d). Pure, framework-free view logic over the
 // work-item wire types: the status→group mapping, the "Needs you" derivation,
-// the per-person grouping, and the small provenance / monogram / cost helpers.
+// the attention derivation, filters, and the small provenance helpers.
 // The gateway owns the truth (status is derived server-side, spawn ≠ done); this
 // module only *arranges* what it returns — it never invents a status.
 
@@ -188,25 +188,6 @@ export function priorityLabel(priority: number): string {
   return priority >= 3 ? "High" : priority === 2 ? "Medium" : priority === 1 ? "Low" : "None"
 }
 
-// ── Monogram + cost ─────────────────────────────────────────────────────────
-/** Two-letter monogram from a display name (falls back to the first two chars). */
-export function monogram(name: string): string {
-  const words = name.trim().split(/\s+/).filter(Boolean)
-  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase()
-  return (words[0] ?? name).slice(0, 2).toUpperCase()
-}
-
-function trimNum(n: number): string {
-  // Whole dollars render without cents ("$10"); fractional keep two ("$2.10").
-  return Number.isInteger(n) ? String(n) : n.toFixed(2)
-}
-
-/** The cost pill text, only when a budget is set (null → render nothing). */
-export function formatCost(spendUsd: number, budgetUsd: number | null | undefined): string | null {
-  if (budgetUsd == null) return null
-  return `$${spendUsd.toFixed(2)} / $${trimNum(budgetUsd)}`
-}
-
 // ── Filters (design-todos §4.3) ─────────────────────────────────────────────
 // The chips choose WHAT; the grouping adapts. Filters map 1:1 to server query
 // params and persist in the URL. `status: "open"` is the default lens (the 6
@@ -240,10 +221,6 @@ export function publicWorkItemReference(value: string | null | undefined): strin
   return reference
 }
 
-export function isDefaultFilters(f: TodoFilters): boolean {
-  return f.status === "open" && !f.assignee && !f.department && !f.source && !f.date && !f.label && !f.due && !f.q
-}
-
 /** How many filter chips are set away from their default. Search is separate. */
 export function activeFilterCount(f: TodoFilters): number {
   let n = 0
@@ -255,20 +232,6 @@ export function activeFilterCount(f: TodoFilters): number {
   if (f.label) n++
   if (f.due) n++
   return n
-}
-
-/** Closed-status views (Done, Cancelled, All) regroup the list by date. */
-export function isHistoryView(f: TodoFilters): boolean {
-  return f.status === "done" || f.status === "cancelled" || f.status === "all"
-}
-
-/** The statuses the ledger must fetch for a given filter (server takes one
- *  status per query, so the data layer fans out and merges). */
-export function statusesFor(f: TodoFilters): WorkItemStatusWire[] {
-  if (f.status === "open") return ["backlog", "assigned", "executing", "blocked", "in_review", "escalated", "done"]
-  if (f.status === "all")
-    return ["backlog", "assigned", "executing", "blocked", "in_review", "escalated", "done", "cancelled"]
-  return [f.status]
 }
 
 /** since/until ISO bounds for a date filter. `until` pins the window's upper

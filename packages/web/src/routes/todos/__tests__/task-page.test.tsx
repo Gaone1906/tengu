@@ -246,6 +246,12 @@ describe("the task page", () => {
     expect(screen.queryByTestId("task-banner-reason")).toBeNull()
   })
 
+  it("rejects a malformed route identifier before any item lookup (isTodoId guard)", async () => {
+    renderTask("/todos/not-a-todo")
+    expect(await screen.findByText("That's not a Todo ID.")).toBeTruthy()
+    expect(getWorkItem).not.toHaveBeenCalled()
+  })
+
   it("unknown ids land on the not-found state, not a crash", async () => {
     getWorkItem.mockRejectedValue(Object.assign(new Error("nf"), { status: 404 }))
     renderTask("/todos/ZZZ-99")

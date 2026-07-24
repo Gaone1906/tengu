@@ -134,7 +134,6 @@ describe("Todo progressive filters", () => {
         employees={[]}
         departments={["platform"]}
         byName={new Map()}
-        onPeopleView={vi.fn()}
       />,
     )
 
@@ -148,7 +147,6 @@ describe("Todo progressive filters", () => {
     expect(screen.getByText("Department")).toBeTruthy()
     expect(screen.getByText("Source")).toBeTruthy()
     expect(screen.getByText("Date")).toBeTruthy()
-    expect(screen.getByText("View by person")).toBeTruthy()
     expect(screen.queryByRole("dialog", { name: "Filter todos" })).toBeNull()
   })
 
@@ -161,7 +159,6 @@ describe("Todo progressive filters", () => {
         employees={[]}
         departments={["platform"]}
         byName={new Map()}
-        onPeopleView={vi.fn()}
       />,
     )
 

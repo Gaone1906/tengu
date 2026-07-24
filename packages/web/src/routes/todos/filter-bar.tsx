@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Check, ChevronDown, Filter, MoreHorizontal, Search, Users, X } from "lucide-react"
+import { Check, ChevronDown, Filter, MoreHorizontal, Search, X } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -126,7 +126,6 @@ export function FilterBar({
   employees,
   departments,
   byName,
-  onPeopleView,
   hideStatus,
   hideDepartment,
   board,
@@ -137,7 +136,6 @@ export function FilterBar({
   employees: Employee[]
   departments: string[]
   byName: Map<string, Employee>
-  onPeopleView?: () => void
   /** Board scopes own these dimensions (columns = status, a department board
    *  = its department), so their chips leave the menu there (slice 6). */
   hideStatus?: boolean
@@ -492,12 +490,6 @@ export function FilterBar({
               </DropdownMenuSubContent>
             </DropdownMenuSub>
 
-            {onPeopleView && (
-              <DropdownMenuItem className={`${ITEM_CLASS} mt-1 bg-[var(--fill-quaternary)]`} onClick={onPeopleView}>
-                <Users size={16} strokeWidth={1.9} aria-hidden />
-                View by person
-              </DropdownMenuItem>
-            )}
             {active > 0 && (
               <DropdownMenuItem className={`${ITEM_CLASS} mt-1 text-[var(--text-secondary)]`} onClick={() => changeFilters({ status: "open" })}>
                 Clear all filters
@@ -530,7 +522,6 @@ export function FilterBar({
           employees={employees}
           departments={departments}
           byName={byName}
-          onPeopleView={onPeopleView}
           onClose={() => setMobileOpen(false)}
           hideStatus={hideStatus}
           hideDepartment={hideDepartment}

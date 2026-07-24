@@ -1,17 +1,12 @@
 import { describe, it, expect } from "vitest"
-import { ApiError, TodoApiError, type Employee, type WorkItemCompactWire, type WorkItemStatusWire } from "../api"
+import { ApiError, TodoApiError, type WorkItemCompactWire, type WorkItemStatusWire } from "../api"
 import {
   stateKeyOf,
   deriveNeedsYou,
   provenanceSuffix,
   provenanceLabel,
-  monogram,
-  formatCost,
   compareRank,
   rankBetween,
-  statusesFor,
-  isHistoryView,
-  isDefaultFilters,
   activeFilterCount,
   matchesDueFilter,
   filtersToSearchParams,
@@ -41,10 +36,6 @@ function compact(over: Partial<WorkItemCompactWire> & { id: string; status: Work
     approvalTarget: over.approvalTarget ?? null,
     approvalEscalatedAt: over.approvalEscalatedAt ?? null,
   }
-}
-
-function emp(name: string, displayName = name): Employee {
-  return { name, displayName, department: "platform", rank: "senior", engine: "claude", model: "opus", persona: "" }
 }
 
 describe("stateKeyOf", () => {
@@ -119,28 +110,18 @@ describe("deriveNeedsYou", () => {
 })
 
 
-describe("provenance / monogram / cost", () => {
-  it("parses the sourceRef suffix for machine-minted items", () => {
-    expect(provenanceSuffix("cron", "cron:nightly-verify:2026-07-05T00:00:00Z")).toBe("nightly-verify")
-    expect(provenanceSuffix("workflow", "workflow:release:run-42")).toBe("release")
-    expect(provenanceSuffix("delegation", "session:abc:123")).toBeNull()
+
+describe("provenance whisper", () => {
+  it("parses the machine-minted sourceRef suffix for cron and workflow", () => {
+    expect(provenanceSuffix("cron", "cron:daily-digest:2026-07-05T09:00:00Z")).toBe("daily-digest")
+    expect(provenanceSuffix("workflow", "workflow:release-train:run_9")).toBe("release-train")
+    expect(provenanceSuffix("human", "anything")).toBeNull()
     expect(provenanceSuffix("cron", null)).toBeNull()
   })
-  it("labels provenance with the word and optional suffix", () => {
-    expect(provenanceLabel("human")).toBe("You")
-    expect(provenanceLabel("delegation")).toBe("Delegation")
-    expect(provenanceLabel("cron", "cron:release-watch:2026-07-04T00:00:00Z")).toBe("Cron · release-watch")
-  })
-  it("builds monograms", () => {
-    expect(monogram("Jinn Dev")).toBe("JD")
-    expect(monogram("Chief of Staff")).toBe("CO") // first two words
-    expect(monogram("growth")).toBe("GR")
-  })
-  it("formats cost only when a budget is set", () => {
-    expect(formatCost(2.1, 10)).toBe("$2.10 / $10")
-    expect(formatCost(4.6, 10)).toBe("$4.60 / $10")
-    expect(formatCost(0, null)).toBeNull()
-    expect(formatCost(1.5, 7.5)).toBe("$1.50 / $7.50")
+  it("labels provenance with the suffix when present and never leaks transport ids", () => {
+    expect(provenanceLabel("cron", "cron:daily-digest:2026-07-05T09:00:00Z")).toBe("Cron · daily-digest")
+    expect(provenanceLabel("human", null)).toBe("You")
+    expect(provenanceLabel("workflow", "workflow:wi_private_def:run")).toBe("Workflow")
   })
 })
 
@@ -162,20 +143,6 @@ describe("manual rank (design-todos §4.5/§7.3)", () => {
 })
 
 describe("filters (design-todos §4.3)", () => {
-  it("expands the open/all lenses into their status fan-out", () => {
-    expect(statusesFor({ status: "open" })).toEqual([
-      "backlog", "assigned", "executing", "blocked", "in_review", "escalated", "done",
-    ])
-    expect(statusesFor({ status: "all" })).toContain("cancelled")
-    expect(statusesFor({ status: "done" })).toEqual(["done"])
-  })
-  it("marks closed-status lenses as history views", () => {
-    expect(isHistoryView({ status: "done" })).toBe(true)
-    expect(isHistoryView({ status: "cancelled" })).toBe(true)
-    expect(isHistoryView({ status: "all" })).toBe(true)
-    expect(isHistoryView({ status: "open" })).toBe(false)
-    expect(isHistoryView({ status: "executing" })).toBe(false)
-  })
   it("round-trips through URL search params", () => {
     const f: TodoFilters = { status: "done", assignee: "jinn-dev", department: "platform", source: "cron", date: "week", label: "infra", due: "overdue", q: "digest" }
     expect(filtersFromSearchParams(filtersToSearchParams(f))).toEqual(f)
@@ -184,7 +151,7 @@ describe("filters (design-todos §4.3)", () => {
     expect(filtersToSearchParams({ status: "open" }).toString()).toBe("")
     expect(filtersToSearchParams({ status: "open", q: "wi_private_42" }).toString()).toBe("")
     expect(filtersFromSearchParams(new URLSearchParams("q=wi_private_42"))).toEqual({ status: "open" })
-    expect(isDefaultFilters(filtersFromSearchParams(new URLSearchParams()))).toBe(true)
+    expect(filtersFromSearchParams(new URLSearchParams())).toEqual({ status: "open" })
     // Garbage params are ignored, not thrown.
     expect(filtersFromSearchParams(new URLSearchParams("status=nope&source=bad&date=huh"))).toEqual({ status: "open" })
   })

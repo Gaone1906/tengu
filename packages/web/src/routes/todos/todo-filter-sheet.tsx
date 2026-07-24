@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { ArrowLeft, Check, ChevronRight, Users, X } from "lucide-react"
+import { ArrowLeft, Check, ChevronRight, X } from "lucide-react"
 import type { Employee } from "@/lib/api"
 import { activeFilterCount, type TodoFilters } from "@/lib/todos"
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
@@ -22,7 +22,6 @@ export function TodoFilterSheet({
   employees,
   departments,
   byName,
-  onPeopleView,
   onClose,
   hideStatus,
   hideDepartment,
@@ -33,7 +32,6 @@ export function TodoFilterSheet({
   employees: Employee[]
   departments: string[]
   byName: Map<string, Employee>
-  onPeopleView?: () => void
   onClose: () => void
   /** Board scopes own these dimensions (columns/segments = status, a
    *  department board = its department) — same scoping as FilterBar. */
@@ -94,12 +92,6 @@ export function TodoFilterSheet({
                 <ChevronRight size={15} className="flex-none text-[var(--text-quaternary)]" aria-hidden />
               </button>
             ))}
-            {onPeopleView && (
-              <button type="button" onClick={() => { onClose(); onPeopleView() }} className={`${ROW_CLASS} mt-1 bg-[var(--fill-quaternary)]`}>
-                <Users size={17} strokeWidth={1.9} className="text-[var(--text-tertiary)]" aria-hidden />
-                View by person
-              </button>
-            )}
             {activeFilterCount(filters) > 0 && (
               <button type="button" onClick={() => choose({ status: "open" })} className={`${ROW_CLASS} mt-1 justify-center text-[var(--text-secondary)]`}>
                 Clear all filters
