@@ -158,6 +158,18 @@ async function stopViaViteProxy(sessionId: string, headers: Record<string, strin
   });
 }
 
+async function createSessionViaHttp(headers: Record<string, string>): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await fetch(`${baseUrl}/api/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify({ prompt: "Verify scoped-write authorization" }),
+  });
+  return {
+    status: response.status,
+    body: await response.json() as Record<string, unknown>,
+  };
+}
+
 beforeAll(async () => {
   api = await import("../api.js");
   registry = await import("../../sessions/registry.js");
@@ -243,6 +255,37 @@ describe("browser operator authorization", () => {
     });
 
     expect(result.status).toBe(403);
+  });
+
+  it("diagnoses a proxied scoped write when gateway auth is not configured", async () => {
+    const result = await createSessionViaHttp({
+      ...sameOriginFetchHeaders(),
+      "x-forwarded-for": "198.51.100.20",
+      "x-forwarded-host": "portal.example",
+      "x-forwarded-proto": "https",
+    });
+
+    expect(result.status).toBe(403);
+    expect(result.body.error).toMatch(/operator authentication failed/i);
+    expect(result.body.error).toMatch(/forwarded headers present/i);
+    expect(result.body.error).toMatch(/gateway has no auth configured/i);
+    expect(result.body.error).toMatch(/gateway\.authRequired: true/i);
+    expect(result.body.error).toMatch(/pair your device/i);
+    expect(result.body.error).not.toMatch(/JINN_SESSION_ID|JINN_SESSION_CAPABILITY/);
+  });
+
+  it("keeps the MCP identity-loss diagnosis for a forwarded tool-marked scoped write", async () => {
+    const result = await createSessionViaHttp({
+      ...sameOriginFetchHeaders(),
+      "x-forwarded-for": "198.51.100.20",
+      "x-jinn-tool-call": "jinn-mcp",
+    });
+
+    expect(result.status).toBe(403);
+    expect(result.body.error).toMatch(/caller identity unavailable/i);
+    expect(result.body.error).toMatch(/JINN_SESSION_ID/);
+    expect(result.body.error).toMatch(/JINN_SESSION_CAPABILITY/);
+    expect(result.body.error).not.toMatch(/gateway has no auth configured/i);
   });
 
   it.each([

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import YAML from "yaml";
 import { cloneCurrentTailscaleServe, type AccessProvisionResult, type ExecFileFn } from "./access.js";
+import { ensureGatewayAuthToken } from "../gateway/auth.js";
 import {
   loadInstances,
   saveInstances,
@@ -139,6 +140,7 @@ function patchWorkspaceConfig(
   if (network.authRequired === true) document.setIn(["gateway", "authRequired"], true);
   document.setIn(["portal", "companyName"], displayName);
   fs.writeFileSync(configPath, document.toString({ lineWidth: 0 }), "utf8");
+  ensureGatewayAuthToken(home);
 }
 
 function defaultWaitForHealth(port: number, host = "127.0.0.1", timeoutMs = 12_000): Promise<boolean> {

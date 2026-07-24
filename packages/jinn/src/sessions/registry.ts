@@ -14,7 +14,7 @@ import {
 } from '../work-items/migrate.js';
 import type { WorkItemSchemaPreflight } from '../work-items/migrate.js';
 import { parseTodoId } from '../work-items/id.js';
-import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome, SessionDelivery, SessionDeliveryIdentity, SessionDeliveryPayload, WorkflowSessionProvenance } from '../shared/types.js';
+import type { ChatBlock, ChatBlockEnvelope, EngineSessionRef, EngineSessionRefs, JsonObject, ReplyContext, Session, SessionAttemptOutcome, SessionDelivery, SessionDeliveryIdentity, SessionDeliveryPayload, WorkflowAttemptInterruptionCause, WorkflowSessionProvenance } from '../shared/types.js';
 import { blockFallbackText, mergeBlock, validateBlockEnvelope } from '../shared/blocks.js';
 import { ptySnapshotStore } from '../engines/pty-snapshot.js';
 import { migrateActivitySchema } from '../activity/migrate.js';
@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   attempt_token TEXT,
   attempt_terminal_version INTEGER NOT NULL DEFAULT 0,
   attempt_turn INTEGER NOT NULL DEFAULT 0,
+  attempt_interruption_cause TEXT,
+  attempt_interruption_turn INTEGER,
   archived_at TEXT,
   created_at TEXT NOT NULL,
   last_activity TEXT NOT NULL,
@@ -394,6 +396,8 @@ function rowToSession(row: Record<string, unknown>): Session {
     attemptToken: (row.attempt_token as string) ?? null,
     attemptTerminalVersion: (row.attempt_terminal_version as number) ?? 0,
     attemptTurn: (row.attempt_turn as number) ?? 0,
+    attemptInterruptionCause: (row.attempt_interruption_cause as WorkflowAttemptInterruptionCause) ?? null,
+    attemptInterruptionTurn: (row.attempt_interruption_turn as number) ?? null,
     totalCost: (row.total_cost as number) ?? 0,
     totalTurns: (row.total_turns as number) ?? 0,
     lastContextTokens: (row.last_context_tokens as number) ?? null,
@@ -1348,6 +1352,8 @@ export function migrateSessionsSchema(database: Database.Database): void {
     ['attempt_token', 'TEXT'],
     ['attempt_terminal_version', 'INTEGER NOT NULL', '0'],
     ['attempt_turn', 'INTEGER NOT NULL', '0'],
+    ['attempt_interruption_cause', 'TEXT'],
+    ['attempt_interruption_turn', 'INTEGER'],
     // Archive is reversible: retain the durable chat and only hide it from
     // normal list queries. NULL keeps all pre-existing sessions visible.
     ['archived_at', 'TEXT'],
@@ -1507,6 +1513,8 @@ export function createSession(opts: CreateSessionOpts & { prompt?: string; porta
     attemptToken: null,
     attemptTerminalVersion: 0,
     attemptTurn: 0,
+    attemptInterruptionCause: null,
+    attemptInterruptionTurn: null,
     totalCost: 0,
     totalTurns: 0,
     lastContextTokens: null,
@@ -1559,6 +1567,8 @@ export interface UpdateSessionFields {
   attemptToken?: string | null;
   attemptTerminalVersion?: number;
   attemptTurn?: number;
+  attemptInterruptionCause?: WorkflowAttemptInterruptionCause | null;
+  attemptInterruptionTurn?: number | null;
   model?: string | null;
   effortLevel?: string | null;
   lastContextTokens?: number | null;
@@ -1630,6 +1640,14 @@ export function updateSession(id: string, updates: UpdateSessionFields): Session
     || (updates.attemptOutcome === undefined && (updates.status === 'error' || updates.status === 'interrupted'))
   ) {
     sets.push('attempt_turn = attempt_turn + 1');
+  }
+  if (updates.attemptInterruptionCause !== undefined) {
+    sets.push('attempt_interruption_cause = ?');
+    values.push(updates.attemptInterruptionCause);
+  }
+  if (updates.attemptInterruptionTurn !== undefined) {
+    sets.push('attempt_interruption_turn = ?');
+    values.push(updates.attemptInterruptionTurn);
   }
   if (updates.model !== undefined) {
     sets.push('model = ?');
@@ -1860,8 +1878,12 @@ export function completeSessionAttempt(
 }
 
 export function interruptSessionAttempt(id: string, reason: string, completedAt: string): Session | undefined {
+  // The explicit stop owns this turn: clear any same-turn user-message marker in
+  // the same statement, or a crash before the completion listener would let
+  // recovery reclassify the stop as a user interruption.
   const result = initDb().prepare(`UPDATE sessions SET status = 'interrupted', attempt_outcome = 'interrupted',
-    attempt_terminal_version = 1, attempt_turn = attempt_turn + 1, last_activity = ?, last_error = ?
+    attempt_terminal_version = 1, attempt_turn = attempt_turn + 1, last_activity = ?, last_error = ?,
+    attempt_interruption_cause = NULL, attempt_interruption_turn = NULL
     WHERE id = ? AND workflow_kind = 'phase' AND attempt_outcome IS NULL AND attempt_terminal_version = 0`)
     .run(completedAt, reason, id);
   return result.changes === 1 ? getSession(id) : undefined;

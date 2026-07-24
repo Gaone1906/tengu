@@ -132,6 +132,29 @@ export function readTranscriptTail(transcriptPath: string, sinceMs: number): Tra
   return entries;
 }
 
+/**
+ * Collapse runs of byte-identical adjacent entries (same role + same content)
+ * down to their first occurrence. A genuine conversation never contains two
+ * identical adjacent turns with no differing turn between them; this shape is
+ * produced only by the usage-limit wait-and-retry loop, which re-sends the
+ * SAME prompt to the CLI on every probe (rate-limit-handler.ts) — each probe
+ * appends another copy of the user turn to the transcript while the assistant
+ * turn never lands, so the tail arrives here as N identical user entries.
+ * Without this, the tail sync mirrors all N into the messages table in one
+ * burst (observed: 355 identical rows). The kept entry retains the FIRST
+ * timestamp; the anchor still advances to the last entry's timestamp via the
+ * caller, so nothing is re-read on the next sync.
+ */
+function collapseAdjacentDuplicates(entries: TranscriptTailEntry[]): TranscriptTailEntry[] {
+  const out: TranscriptTailEntry[] = [];
+  for (const e of entries) {
+    const prev = out[out.length - 1];
+    if (prev && prev.role === e.role && prev.content === e.content) continue;
+    out.push(e);
+  }
+  return out;
+}
+
 function anchorMsFor(session: { transportMeta: unknown }, sessionId: string): number {
   const meta = (session.transportMeta || {}) as Record<string, unknown>;
   const anchorIso = meta[TRANSCRIPT_SYNC_META_KEY];
@@ -279,6 +302,13 @@ export function syncExternalTurn(
   }
   if (entries.length === 0) return 0; // tail already synced — dedup no-op
 
+  // The newest transcript entry is the anchor target regardless of the collapse
+  // below: advancing the anchor to a dropped duplicate's (earlier) timestamp
+  // would let the next sync re-read the very copies we just discarded.
+  const tailAnchorIso = entries[entries.length - 1].timestampIso;
+  // Collapse usage-limit retry storms — N byte-identical adjacent turns — to one.
+  const tail = collapseAdjacentDuplicates(entries);
+
   // Reconcile against the trailing DB rows before inserting. The chat run()
   // completion path (manager.ts user prompt + settled assistant) may have
   // ALREADY persisted this exact turn — and, because the Claude harness keeps
@@ -292,12 +322,12 @@ export function syncExternalTurn(
   // genuine CLI-native turn run() never saw — insert as before.
   const db = initDb();
   const existing = getMessages(sessionId);
-  const matchedPersistedTurn = findPersistedSequence(existing, entries);
+  const matchedPersistedTurn = findPersistedSequence(existing, tail);
   if (matchedPersistedTurn) {
     // run() already stored this turn — overwrite any truncated row with the
     // complete transcript text, write no new rows.
     const txn = db.transaction(() => {
-      entries.forEach((e, i) => {
+      tail.forEach((e, i) => {
         const persisted = matchedPersistedTurn[i];
         if (persisted.role === e.role && e.content.length > persisted.content.length) {
           updateMessageContent(persisted.id, e.content);
@@ -305,11 +335,10 @@ export function syncExternalTurn(
       });
     });
     txn();
-    const newAnchor = entries[entries.length - 1].timestampIso;
-    setAnchor(sessionId, newAnchor);
+    setAnchor(sessionId, tailAnchorIso);
     emit("session:external-turn", { sessionId });
     logger.info(
-      `Reconciled ${entries.length} already-persisted turn message(s) in place for session ${sessionId} (anchor → ${newAnchor}, no duplicates inserted)`,
+      `Reconciled ${tail.length} already-persisted turn message(s) in place for session ${sessionId} (anchor → ${tailAnchorIso}, no duplicates inserted)`,
     );
     return 0;
   }
@@ -317,19 +346,18 @@ export function syncExternalTurn(
   const txn = db.transaction((items: TranscriptTailEntry[]) => {
     for (const e of items) insertMessage(sessionId, e.role, e.content);
   });
-  txn(entries);
+  txn(tail);
   // A PTY-native first turn means the DB may not know the engine session yet —
   // adopt it so future resumes/backfills/syncs target the right transcript.
   if (!session.engineSessionId && engineSessionId) {
     updateSession(sessionId, { engineSessionId });
   }
-  const newAnchor = entries[entries.length - 1].timestampIso;
-  setAnchor(sessionId, newAnchor);
+  setAnchor(sessionId, tailAnchorIso);
   emit("session:external-turn", { sessionId });
   logger.info(
-    `Synced ${entries.length} external (CLI-native) message(s) for session ${sessionId} (anchor → ${newAnchor})`,
+    `Synced ${tail.length} external (CLI-native) message(s) for session ${sessionId} (anchor → ${tailAnchorIso})`,
   );
-  return entries.length;
+  return tail.length;
 }
 
 /** Sessions with an in-flight on-load tail sync (mirrors backfillInProgress). */

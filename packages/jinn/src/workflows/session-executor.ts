@@ -6,6 +6,7 @@ import type {
   Session,
 } from "../shared/types.js";
 import type { SessionManager } from "../sessions/manager.js";
+import { workflowAttemptInterruptionCause } from "../sessions/workflow-interruptions.js";
 
 export type WorkflowSessionReceiptReader =
   (sessionId: string) => { session: Session; finalText?: string } | null;
@@ -49,6 +50,13 @@ export class WorkflowSessionExecutor implements WorkflowSessionExecutorContract 
       turn: session.attemptTurn,
       terminalVersion: 1,
       outcome: session.attemptOutcome,
+      ...(session.attemptOutcome === "interrupted" ? {
+        interruptionCause: workflowAttemptInterruptionCause(
+          session.lastError,
+          session,
+          session.attemptTurn,
+        ),
+      } : {}),
       completedAt: session.lastActivity,
       ...(receipt?.finalText ? { finalText: receipt.finalText } : {}),
       ...(session.lastError ? { error: session.lastError } : {}),

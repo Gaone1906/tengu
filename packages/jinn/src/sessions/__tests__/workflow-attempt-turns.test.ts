@@ -5,6 +5,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type {
   Employee,
   Engine,
+  EngineResult,
   EngineRunOpts,
   JinnConfig,
   WorkflowAttemptCommand,
@@ -95,6 +96,61 @@ beforeEach(() => {
 });
 
 describe("workflow attempt per-turn completion", () => {
+  it("persists workflow-dispatched streaming activity while the turn is running", async () => {
+    const runs: EngineRunOpts[] = [];
+    let resolveTurn!: (result: EngineResult) => void;
+    const turn = new Promise<EngineResult>((resolve) => { resolveTurn = resolve; });
+    const engine: Engine = {
+      name: "test-engine",
+      async run(options) {
+        runs.push(options);
+        options.onStream?.({ type: "text", content: "Inspecting the workspace." });
+        options.onStream?.({ type: "tool_use", content: "Search", toolName: "Search", toolId: "search-1" });
+        options.onStream?.({ type: "tool_result", content: "Found it.", toolName: "Search", toolId: "search-1" });
+        return turn;
+      },
+    };
+    const manager = new managerModule.SessionManager(
+      config(),
+      new Map([[engine.name, engine]]),
+      [],
+      "test-boot",
+      (id) => id === employee.name ? employee : undefined,
+    );
+
+    const { sessionId } = await manager.runWorkflowAttempt(command);
+    await waitFor(() => runs.length === 1);
+    const liveRows = registry.getPartialMessages(sessionId);
+
+    resolveTurn({ sessionId: "engine-session", result: "Turn complete." });
+    await waitFor(() => registry.getSession(sessionId)?.status === "idle");
+
+    expect(liveRows).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: "Inspecting the workspace.",
+        partial: true,
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        content: "Used Search",
+        partial: true,
+        toolCall: "Search",
+        toolId: "search-1",
+      }),
+    ]);
+    expect(registry.getMessages(sessionId).map((message) => ({
+      content: message.content,
+      partial: message.partial === true,
+      toolCall: message.toolCall,
+    }))).toEqual([
+      { content: "Draft the release.", partial: false, toolCall: undefined },
+      { content: "Inspecting the workspace.", partial: false, toolCall: undefined },
+      { content: "Used Search", partial: false, toolCall: "Search" },
+      { content: "Turn complete.", partial: false, toolCall: undefined },
+    ]);
+  });
+
   it("keeps a durable reminder pending across a crash before in-memory queue attachment", async () => {
     const runs: EngineRunOpts[] = [];
     const manager = managerWith(runs);
@@ -152,6 +208,56 @@ describe("workflow attempt per-turn completion", () => {
       attemptTerminalVersion: 1,
     });
     expect(runs).toHaveLength(2);
+  });
+
+  it("recovers a same-turn explicit stop as attempt-stop even when a user marker was written first", async () => {
+    const runs: EngineRunOpts[] = [];
+    let resolveTurn!: (result: EngineResult) => void;
+    const turn = new Promise<EngineResult>((resolve) => { resolveTurn = resolve; });
+    const engine: Engine = {
+      name: "test-engine",
+      async run(options) {
+        runs.push(options);
+        return turn;
+      },
+    };
+    const manager = new managerModule.SessionManager(
+      config(),
+      new Map([[engine.name, engine]]),
+      [],
+      "test-boot",
+      (id) => id === employee.name ? employee : undefined,
+    );
+
+    const { sessionId } = await manager.runWorkflowAttempt(command);
+    await waitFor(() => runs.length === 1);
+
+    // The API marks the in-flight turn as user-interrupted, then an explicit
+    // stop takes ownership of the SAME turn before the killed engine settles.
+    const live = registry.getSession(sessionId)!;
+    registry.updateSession(sessionId, {
+      attemptInterruptionCause: "user-message",
+      attemptInterruptionTurn: (live.attemptTurn ?? 0) + 1,
+    });
+    const stopped = registry.interruptSessionAttempt(sessionId, "Workflow run cancelled.", new Date().toISOString());
+    expect(stopped).toBeDefined();
+
+    // Crash before the completion listener ran: recovery must classify the
+    // durable receipt as attempt-stop, not the stale same-turn user marker.
+    const { WorkflowSessionExecutor } = await import("../../workflows/session-executor.js");
+    const executor = new WorkflowSessionExecutor(
+      manager,
+      (id) => { const session = registry.getSession(id); return session ? { session } : null; },
+    );
+    const completion = executor.readTerminalCompletion(sessionId);
+    expect(completion).toMatchObject({ outcome: "interrupted", interruptionCause: "attempt-stop" });
+    expect(registry.getSession(sessionId)).toMatchObject({
+      attemptInterruptionCause: null,
+      attemptInterruptionTurn: null,
+    });
+
+    resolveTurn({ sessionId: "engine-session", result: "Late success must not settle." });
+    expect(registry.getSession(sessionId)?.attemptOutcome).toBe("interrupted");
   });
 
   it("reports queue-idle state and counts only active child sessions", async () => {

@@ -9,11 +9,20 @@ import { handleApiRequest, type ApiContext } from "../../gateway/api.js";
 import {
   CALLER_SESSION_CAPABILITY_HEADER,
   CALLER_SESSION_HEADER,
+  JINN_WORKFLOW_ATTEMPT_ENV,
   TOOL_CALL_HEADER,
   TOOL_CALL_HEADER_VALUE,
   ensureSessionCapability,
 } from "../../mcp/identity.js";
-import type { Employee, Engine, EngineResult, JinnConfig, ModelRegistry } from "../../shared/types.js";
+import { setJinnAttachGate } from "../../mcp/attachment.js";
+import type {
+  Employee,
+  Engine,
+  EngineResult,
+  JinnConfig,
+  ModelRegistry,
+  WorkflowAttemptCompletion,
+} from "../../shared/types.js";
 import { createSession, getMessages, getSession, listSessions, updateSession } from "../../sessions/registry.js";
 import { SessionManager } from "../../sessions/manager.js";
 import type { Binding, JsonValue, WorkflowDefinition } from "../model.js";
@@ -33,6 +42,7 @@ const config = {
   gateway: { port: 0, host: "127.0.0.1" },
   engines: { default: "codex", claude: { bin: "", model: "opus" }, codex: { bin: "", model: "gpt" } },
   connectors: {}, logging: { file: false, stdout: false, level: "error" },
+  mcp: { gateway: { enabled: true }, browser: { enabled: false } },
 } as unknown as JinnConfig;
 const models: ModelRegistry = {
   claude: {
@@ -133,6 +143,20 @@ function request(pathname: string, sessionId: string, body: Record<string, unkno
   return req as unknown as Parameters<typeof handleApiRequest>[0];
 }
 
+function operatorRequest(pathname: string, body: Record<string, unknown>) {
+  const req = Readable.from([Buffer.from(JSON.stringify(body))]);
+  Object.assign(req, {
+    method: "POST",
+    url: pathname,
+    headers: {
+      host: "localhost",
+      authorization: "Bearer test-token",
+      "content-type": "application/json",
+    },
+  });
+  return req as unknown as Parameters<typeof handleApiRequest>[0];
+}
+
 function response() {
   let status = 200;
   const chunks: Buffer[] = [];
@@ -170,6 +194,28 @@ async function postAttempt(
   return capture.read();
 }
 
+async function postSessionMessage(
+  sessionId: string,
+  message: string,
+): Promise<{ status: number; body: unknown }> {
+  const capture = response();
+  const context = {
+    gatewayAuthToken: "test-token",
+    workflowService: service,
+    getConfig: () => config,
+    connectors: new Map(),
+    sessionManager: manager,
+    emit: vi.fn(),
+    startTime: 1,
+  } as unknown as ApiContext;
+  await handleApiRequest(
+    operatorRequest(`/api/sessions/${sessionId}/message`, { message }),
+    capture.res,
+    context,
+  );
+  return capture.read();
+}
+
 function createService(): WorkflowService {
   return new WorkflowService({
     repository,
@@ -186,6 +232,7 @@ function createService(): WorkflowService {
 }
 
 beforeEach(() => {
+  setJinnAttachGate({ ok: true });
   root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-workflow-vertical-"));
   database = openWorkflowDatabase(path.join(root, "workflows.db"));
   repository = new WorkflowRepository(database);
@@ -199,6 +246,7 @@ afterEach(() => {
   service.dispose();
   database.close();
   fs.rmSync(root, { recursive: true, force: true });
+  setJinnAttachGate(null);
 });
 
 describe("first Workflow vertical", () => {
@@ -361,6 +409,242 @@ describe("first Workflow vertical", () => {
     engine.resolve({ sessionId: "native-route-submit", result: "Turn ended after submission.", durationMs: 1 });
     await vi.waitFor(() => expect(getSession(sessionId)?.status).toBe("idle"));
     expect(service.getRun(authored.id, started.id)?.attempts[0]?.output?.fields).toEqual({ result: "published" });
+  });
+
+  it("keeps the attempt and run active when an operator message interrupts the current turn", async () => {
+    const authored = definition({ id: "operator-interruption-turn-end" });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "interrupt" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+    const sessionId = service.getRun(authored.id, started.id)!.attempts[0]!.sessionId!;
+
+    expect(await postSessionMessage(sessionId, "Please also verify the release notes."))
+      .toEqual({ status: 200, body: { status: "queued", sessionId } });
+    expect(engine.kills).toEqual([{
+      sessionId,
+      reason: "Interrupted: new message received",
+    }]);
+
+    engine.resolve({
+      sessionId: "native-interrupted",
+      result: "",
+      error: "Interrupted: new message received",
+      durationMs: 1,
+    });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(2));
+    await vi.waitFor(() => {
+      expect(service.getRun(authored.id, started.id)?.attempts[0]?.lastProcessedTurn).toBe(1);
+    });
+    const afterInterruption = service.getRun(authored.id, started.id)!;
+
+    engine.resolve({ sessionId: "native-follow-up", result: "Still working.", durationMs: 1 });
+    await vi.waitFor(() => expect(getSession(sessionId)?.status).toBe("idle"));
+
+    expect(afterInterruption).toMatchObject({
+      status: "running",
+      attempts: [{
+        status: "running",
+        remindersSent: 0,
+        lastProcessedTurn: 1,
+        nextReminderAt: expect.any(String),
+      }],
+    });
+  });
+
+  it.each([
+    ["drops the kill reason", {
+      sessionId: "native-hermes-no-text",
+      result: "",
+      error: "hermes acp exited",
+      durationMs: 1,
+    }],
+    ["returns partial text without an error", {
+      sessionId: "native-hermes-partial",
+      result: "Partial draft retained by the engine.",
+      error: undefined,
+      durationMs: 1,
+    }],
+  ] as const)("classifies an operator interruption at the API boundary when the engine %s", async (_label, interruptedResult) => {
+    const authored = definition({ id: `boundary-interruption-${interruptedResult.sessionId}` });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "boundary" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+    const sessionId = service.getRun(authored.id, started.id)!.attempts[0]!.sessionId!;
+    const completions: WorkflowAttemptCompletion[] = [];
+    const unsubscribe = manager.subscribeWorkflowAttemptCompletion((event) => {
+      completions.push(event);
+    });
+
+    await postSessionMessage(sessionId, "Preserve this follow-up across the interruption.");
+    expect(getSession(sessionId)).toMatchObject({
+      attemptInterruptionCause: "user-message",
+      attemptInterruptionTurn: 1,
+    });
+
+    engine.resolve(interruptedResult);
+    await vi.waitFor(() => expect(completions).toHaveLength(1));
+    expect(completions[0]).toMatchObject({
+      sessionId,
+      turn: 1,
+      outcome: "interrupted",
+      interruptionCause: "user-message",
+    });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(2));
+    await vi.waitFor(() => {
+      expect(service.getRun(authored.id, started.id)?.attempts[0]?.lastProcessedTurn).toBe(1);
+    });
+    expect(service.getRun(authored.id, started.id)).toMatchObject({
+      status: "running",
+      attempts: [{
+        status: "running",
+        remindersSent: 0,
+        lastProcessedTurn: 1,
+        nextReminderAt: expect.any(String),
+      }],
+    });
+
+    expect(await postAttempt("submit", sessionId, {
+      fields: { result: "published" },
+      summary: "Submitted after the transformed interruption.",
+    })).toEqual({ status: 200, body: { ok: true } });
+    engine.resolve({ sessionId: "native-hermes-follow-up", result: "Submitted.", durationMs: 1 });
+    await vi.waitFor(() => expect(getSession(sessionId)?.status).toBe("idle"));
+    expect(service.getRun(authored.id, started.id)).toMatchObject({
+      status: "completed",
+      attempts: [{
+        status: "completed",
+        remindersSent: 0,
+        output: {
+          fields: { result: "published" },
+          text: "Submitted after the transformed interruption.",
+        },
+      }],
+    });
+    unsubscribe();
+  });
+
+  it("completes after an operator interruption and additional workflow-session turns", async () => {
+    const authored = definition({ id: "submit-after-operator-turns" });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "continue" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+    const sessionId = service.getRun(authored.id, started.id)!.attempts[0]!.sessionId!;
+
+    await postSessionMessage(sessionId, "Add one more verification.");
+    engine.resolve({
+      sessionId: "native-interrupted-before-submit",
+      result: "",
+      error: "Interrupted: new message received",
+      durationMs: 1,
+    });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(2));
+    engine.resolve({ sessionId: "native-extra-turn", result: "Verification added.", durationMs: 1 });
+    await vi.waitFor(() => expect(getSession(sessionId)?.status).toBe("idle"));
+
+    await postSessionMessage(sessionId, "Submit once the summary is ready.");
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(3));
+    const followUpJinnServer = engine.calls[2]?.resolvedMcp?.mcpServers.jinn;
+    const submission = await postAttempt("submit", sessionId, {
+      fields: { result: "published" },
+      summary: "Submitted after the operator follow-ups.",
+    });
+
+    engine.resolve({ sessionId: "native-submit-turn", result: "Submitted.", durationMs: 1 });
+    await vi.waitFor(() => expect(getSession(sessionId)?.status).toBe("idle"));
+
+    expect(followUpJinnServer).toMatchObject({
+      env: expect.objectContaining({ [JINN_WORKFLOW_ATTEMPT_ENV]: "1" }),
+    });
+    expect(submission).toEqual({ status: 200, body: { ok: true } });
+    expect(service.getRun(authored.id, started.id)).toMatchObject({
+      status: "completed",
+      attempts: [{
+        status: "completed",
+        output: {
+          fields: { result: "published" },
+          text: "Submitted after the operator follow-ups.",
+        },
+      }],
+    });
+  });
+
+  it("advances the turn fence without consuming reminder rungs across operator follow-ups", async () => {
+    const authored = definition({ id: "operator-turn-fence" });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "fence" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+    const sessionId = service.getRun(authored.id, started.id)!.attempts[0]!.sessionId!;
+
+    await postSessionMessage(sessionId, "First follow-up.");
+    engine.resolve({
+      sessionId: "native-fence-interrupted",
+      result: "",
+      error: "Interrupted: new message received",
+      durationMs: 1,
+    });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(2));
+    engine.resolve({ sessionId: "native-fence-two", result: "Continuing.", durationMs: 1 });
+    await vi.waitFor(() => {
+      expect(service.getRun(authored.id, started.id)?.attempts[0]?.lastProcessedTurn).toBe(2);
+    });
+
+    await postSessionMessage(sessionId, "Second follow-up.");
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(3));
+    engine.resolve({ sessionId: "native-fence-three", result: "Continuing again.", durationMs: 1 });
+    await vi.waitFor(() => {
+      expect(service.getRun(authored.id, started.id)?.attempts[0]?.lastProcessedTurn).toBe(3);
+    });
+
+    expect(service.getRun(authored.id, started.id)).toMatchObject({
+      status: "running",
+      attempts: [{
+        status: "running",
+        remindersSent: 0,
+        lastProcessedTurn: 3,
+        nextReminderAt: expect.any(String),
+      }],
+    });
+  });
+
+  it("keeps run cancellation terminal while its interrupted engine turn settles", async () => {
+    const authored = definition({ id: "run-cancel-remains-terminal" });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "cancel" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+
+    const cancelled = await service.cancelRun({
+      workflowId: authored.id,
+      runId: started.id,
+      reason: "Run cancelled by operator.",
+    });
+    engine.resolve({
+      sessionId: "native-cancelled",
+      result: "",
+      error: "Run cancelled by operator.",
+      durationMs: 1,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(cancelled).toMatchObject({
+      status: "cancelled",
+      attempts: [{ status: "cancelled" }],
+    });
+    expect(service.getRun(authored.id, started.id)).toEqual(cancelled);
+  });
+
+  it("keeps an explicit stopWorkflowAttempt interruption on the cancellation path", async () => {
+    const authored = definition({ id: "explicit-attempt-stop" });
+    const started = await service.startManual({ workflowId: authored.id, input: { topic: "stop" } });
+    await vi.waitFor(() => expect(engine.calls).toHaveLength(1));
+    const sessionId = service.getRun(authored.id, started.id)!.attempts[0]!.sessionId!;
+
+    await manager.stopWorkflowAttempt({ sessionId, reason: "Attempt stopped explicitly." });
+    await vi.waitFor(() => {
+      expect(service.getRun(authored.id, started.id)?.attempts[0]?.status).toBe("cancelled");
+    });
+    const stopped = service.getRun(authored.id, started.id)!;
+
+    engine.resolve({ sessionId: "native-stopped-late", result: "Too late.", durationMs: 1 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(stopped.attempts[0]).toMatchObject({ status: "cancelled" });
+    expect(service.getRun(authored.id, started.id)?.attempts[0]).toMatchObject({ status: "cancelled" });
+    expect(engine.kills).toEqual([{ sessionId, reason: "Attempt stopped explicitly." }]);
   });
 
   it("defers the reminder rung for a running child, then accepts the parent's route submission", async () => {

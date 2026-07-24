@@ -145,6 +145,67 @@ describe("syncExternalTurn", () => {
     expect(events).toEqual([{ event: "session:external-turn", payload: { sessionId: id } }]);
   });
 
+  it("collapses a usage-limit retry storm — N identical adjacent user turns become one row, anchor still advances to the newest entry", () => {
+    const id = makeSession();
+    // The wait-and-retry loop re-sends the SAME prompt on every probe while the
+    // limit never clears: the transcript accumulates identical user turns with
+    // no assistant turn between them (the newest is the most recent probe).
+    const file = writeTranscript([
+      { type: "user", text: "BOUNDED review prompt", ts: iso(50_000) },
+      { type: "user", text: "BOUNDED review prompt", ts: iso(40_000) },
+      { type: "user", text: "BOUNDED review prompt", ts: iso(30_000) },
+      { type: "user", text: "BOUNDED review prompt", ts: iso(20_000) },
+      { type: "user", text: "BOUNDED review prompt", ts: iso(10_000) },
+    ]);
+    const newest = iso(10_000);
+    const n = ext.syncExternalTurn(id, emit, {
+      hook_event_name: "Stop",
+      session_id: "eng-storm",
+      transcript_path: file,
+      last_assistant_message: "",
+    });
+    // One row, not five.
+    expect(n).toBe(1);
+    expect(reg.getMessages(id).map((m) => [m.role, m.content])).toEqual([
+      ["user", "BOUNDED review prompt"],
+    ]);
+    // Anchor advanced to the NEWEST transcript entry (not the kept copy's older
+    // timestamp) so the dropped duplicates are never re-read on the next sync.
+    expect((reg.getSession(id)!.transportMeta as any)?.[ext.TRANSCRIPT_SYNC_META_KEY]).toBe(newest);
+    // Re-running the same Stop inserts nothing.
+    expect(ext.syncExternalTurn(id, emit, {
+      hook_event_name: "Stop",
+      session_id: "eng-storm",
+      transcript_path: file,
+      last_assistant_message: "",
+    })).toBe(0);
+    expect(reg.getMessages(id)).toHaveLength(1);
+  });
+
+  it("keeps distinct adjacent turns and a legitimately repeated question separated by a reply", () => {
+    const id = makeSession();
+    const file = writeTranscript([
+      { type: "user", text: "what time is it?", ts: iso(40_000) },
+      { type: "assistant", text: "3pm", ts: iso(35_000) },
+      { type: "user", text: "what time is it?", ts: iso(30_000) },
+      { type: "assistant", text: "3:01pm", ts: iso(25_000) },
+    ]);
+    const n = ext.syncExternalTurn(id, emit, {
+      hook_event_name: "Stop",
+      session_id: "eng-repeat",
+      transcript_path: file,
+      last_assistant_message: "3:01pm",
+    });
+    // The repeat is NOT collapsed — an assistant turn sits between the two.
+    expect(n).toBe(4);
+    expect(reg.getMessages(id).map((m) => [m.role, m.content])).toEqual([
+      ["user", "what time is it?"],
+      ["assistant", "3pm"],
+      ["user", "what time is it?"],
+      ["assistant", "3:01pm"],
+    ]);
+  });
+
   it("does not persist an unclaimed Claude transcript tail after the logical session switches engines", () => {
     const id = makeSession({ engineSessionId: "claude-old" });
     reg.switchSessionEngine(id, "codex", {
