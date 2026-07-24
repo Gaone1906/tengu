@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "version": "0.28.0",
+  "baseVersion": "0.27.0",
+  "generatedFrom": {
+    "baseRef": "v0.27.0",
+    "headRef": "WORKTREE"
+  },
+  "files": [
+    {
+      "path": "CLAUDE.md",
+      "operation": "modify",
+      "baseSha256": "a56ae11887cb142d64613ae9a8430c38bc485ee89eedb33bac699fd0179ef02c",
+      "targetSha256": "3f25499b1b8fca337034e181f7248e594cda1b8435f180a79309a56d842b6cf3",
+      "basePayload": "files/base/CLAUDE.md",
+      "targetPayload": "files/target/CLAUDE.md"
+    },
+    {
+      "path": "docs/company-doctrine.md",
+      "operation": "modify",
+      "baseSha256": "6f8be3128a2e153acc1dbf07dc822301d6a09854d9cacde75b9c06185c070cb1",
+      "targetSha256": "4556ecd815959726e5b0a02a1961a5a7b8e906642c415e8c9b7e3484caba50fb",
+      "basePayload": "files/base/docs/company-doctrine.md",
+      "targetPayload": "files/target/docs/company-doctrine.md"
+    },
+    {
+      "path": "docs/org.md",
+      "operation": "modify",
+      "baseSha256": "18977740bb4b0a80f87f00dd4992d9477f6934a76945600aaebbbb14cd0dbfe5",
+      "targetSha256": "862c4f9682f09c98a49741ae0cf4e45d41e18187afff7c049498ca609a8fbf1b",
+      "basePayload": "files/base/docs/org.md",
+      "targetPayload": "files/target/docs/org.md"
+    },
+    {
+      "path": "skills/workflow/SKILL.md",
+      "operation": "modify",
+      "baseSha256": "f5feaed210e3fe61b4471ae658525a665235c72f9e647bbc34f14b6e0f400ea8",
+      "targetSha256": "a7ec13e7113d35cf1ded951c37cb14381d7d88f868cfcac8145b6e18d3ab7630",
+      "basePayload": "files/base/skills/workflow/SKILL.md",
+      "targetPayload": "files/target/skills/workflow/SKILL.md"
+    }
+  ]
+}

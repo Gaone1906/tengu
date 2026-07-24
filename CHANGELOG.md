@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.28.0] - 2026-07-24
+
+> Workflows become an explicit, observable execution contract; Todos grow into a collaborative hierarchy; and one Jinn installation can now launch and manage multiple isolated workspaces.
+
+### ✨ Features
+- **Workflows v2 with explicit completion.** The Workflow engine and editor were rebuilt around a durable node contract: employee nodes finish only by submitting schema-validated output, can request bounded deadline extensions, and receive escalating reminders that account for active child work. The read-only run canvas, inspector, live activity stream, workflow-session sidebar entries, and safe mid-run operator messages make long executions understandable and steerable without accidentally cancelling them.
+- **Collaborative Todo hierarchy.** Todos now support department-scoped identifiers, three-level sub-tasks with roll-up gates, threaded comments, typed blocking/related links, labels, content-addressed attachments, richer provenance, manager-aware field authority, and approval history independent of a row's current state. The web ledger and MCP company surface expose the same durable model, including conflict-safe edits and bounded list operations.
+- **Multiple isolated Jinn workspaces.** A workspace directory and launcher can discover, create, start, and open separate Jinn instances with their own homes, ports, access settings, and authentication. Offline workspaces can be started from the launcher, and workspace rows tolerate older registry entries that do not yet have ids.
+- **Instance-wide file reads through MCP.** Authorized company tools can read files across the active Jinn instance instead of being limited to the knowledge directory, while preserving the existing path and authority checks.
+- **Delegated work stays visible.** Parent chats now surface tracked work delegated into child sessions, keeping the operator's conversation connected to the underlying Todo.
+
+### ⚡ Performance / Reliability
+- **Deterministic release test execution.** Package test suites now run sequentially at the monorepo gate, avoiding machine-contention timeouts while retaining the full CLI and web test coverage.
+- **Safer fresh installs and workspaces.** New configurations require gateway authentication by default, workspace creation writes an owner-only token before startup, local browser bootstrap still pairs automatically, and proxied unauthenticated writes return an actionable pairing diagnosis.
+- **Reliable macOS terminal startup after npm install.** The published package repairs executable permissions on node-pty's Darwin spawn helpers during postinstall, preventing terminals from failing because registry tarballs lost helper modes.
+- **Workflow interaction survives active turns.** Operator messages sent while a workflow node is running are fenced as workflow interaction rather than generic interruption, so they stream into the attempt without cancelling it and remain restart-safe.
+
+### 🐛 Fixes
+- **Codex restores context and live usage limits.** Resumed Codex sessions recover their expected context while the UI continues receiving current limit telemetry.
+- **Claude MCP identity remains narrowly scoped.** Claude's MCP bootstrap carries the bound session capability directly; the capability is no longer copied into the entire PTY child environment as a fallback.
+- **Legacy Workflow upgrades fail safe instead of changing behavior.** Compatible v1 definitions import once as disabled v2 drafts, while scheduled, conditional, looping, gated, or otherwise non-equivalent definitions remain untouched. A durable import report records source hashes, outcomes, legacy run evidence, and active runs requiring review.
+- **Migration reminders stay acknowledged.** Dismissing, copying, or successfully opening the instance-migration prompt now records the migration key in browser storage, so the dialog and mobile reminder pill stay hidden after a refresh while a newer migration still resurfaces normally.
+- **v0.27 upgrades follow the complete migration chain.** An explicit empty v0.27 bridge preserves strict chain validation and lets both v0.26 and v0.27 installations apply every structured migration bundle through v0.28 without inventing user-file changes.
+
+### 🛠️ Upgrade notes
+- Drain active v1 Workflow runs before upgrading. v0.28 does not resume the retired v1 runtime.
+- Review `<JINN_HOME>/workflows/legacy-v1-import-report.json` before enabling imported drafts. Legacy definition and run JSON remains under `<JINN_HOME>/workflow-evidence`; unsupported definitions and historical runs are preserved there rather than silently rewritten into v2 semantics.
+
 ## [0.27.0] - 2026-07-19
 
 ### ✨ Features
