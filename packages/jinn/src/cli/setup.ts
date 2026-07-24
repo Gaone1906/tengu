@@ -657,8 +657,19 @@ export async function runSetup(opts?: { force?: boolean }): Promise<void> {
     created.push(settingsPath);
   }
 
-  // Pre-cache skills CLI for instant searches later
-  spawn('npx', ['skills', '--version'], { stdio: 'ignore', detached: true }).unref();
+  // Pre-cache skills CLI for instant searches later. Best-effort: npx may be
+  // missing, and on Windows npx.cmd needs a shell (args here are constants).
+  try {
+    const precache = spawn('npx', ['skills', '--version'], {
+      stdio: 'ignore',
+      detached: true,
+      shell: process.platform === 'win32',
+    });
+    precache.on('error', () => {}); // never crash setup if npx is unavailable
+    precache.unref();
+  } catch {
+    // ignore
+  }
 
   // Detect project context and suggest relevant skills
   detectProjectContext(portalSlug);

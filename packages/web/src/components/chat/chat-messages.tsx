@@ -779,6 +779,38 @@ function CodeBlock({ code, lang, keyProp }: { code: string; lang?: string; keyPr
   )
 }
 
+/* ── Reasoning trace tags ───────────────────────────────── */
+
+// Some engines leak their scratchpad tags into the visible answer. Rendering the
+// raw `<analysis>` line is worse than useless, and dropping the content would lose
+// real text — so fold it into a collapsed disclosure instead.
+const TRACE_TAGS = new Set(['analysis', 'thinking', 'reasoning', 'reflection', 'scratchpad'])
+const TRACE_OPEN_RE = /^<([a-z_]+)>$/i
+const TRACE_CLOSE_RE = /^<\/([a-z_]+)>$/i
+
+function TraceBlock({ tag, body }: { tag: string; body: string }) {
+  const [open, setOpen] = useState(false)
+  const label = tag.charAt(0).toUpperCase() + tag.slice(1)
+  if (!body.trim()) return null
+  return (
+    <div className="my-[var(--space-2)]">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="inline-flex items-center gap-[var(--space-1)] rounded-[var(--radius-sm)] border-none bg-transparent px-0 py-px text-[length:var(--text-caption1)] text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)] cursor-pointer"
+      >
+        <ChevronDown size={12} className={`transition-transform ${open ? '' : '-rotate-90'}`} />
+        {label}
+      </button>
+      {open && (
+        <div className="mt-[var(--space-1)] border-l-2 border-[var(--fill-tertiary)] pl-[var(--space-3)] text-[var(--text-secondary)]">
+          {formatMessage(body)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function isTableSeparator(line: string): boolean {
   return /^\|[\s:|-]+\|$/.test(line.trim())
 }
@@ -841,6 +873,25 @@ export function formatMessage(content: string): React.ReactNode {
       continue
     }
     if (inCodeBlock) { codeLines.push(line); continue }
+
+    // Reasoning trace tag on its own line: fold everything up to the closing tag
+    // (or to the end of the message, so a mid-stream block folds too).
+    const traceOpen = line.trim().match(TRACE_OPEN_RE)
+    if (traceOpen && TRACE_TAGS.has(traceOpen[1].toLowerCase())) {
+      const tag = traceOpen[1].toLowerCase()
+      const traceLines: string[] = []
+      let j = i + 1
+      while (j < lines.length && lines[j].trim().toLowerCase() !== `</${tag}>`) {
+        traceLines.push(lines[j])
+        j++
+      }
+      result.push(<TraceBlock key={`trace-${i}`} tag={tag} body={traceLines.join('\n')} />)
+      i = j // land on the closing tag (or end); the loop's i++ moves past it
+      continue
+    }
+    // Stray closing tag with no opener — swallow it rather than print it raw.
+    const traceClose = line.trim().match(TRACE_CLOSE_RE)
+    if (traceClose && TRACE_TAGS.has(traceClose[1].toLowerCase())) continue
 
     // Table detection: header row | separator row | body rows
     if (line.trim().startsWith('|') && line.trim().endsWith('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {

@@ -126,7 +126,6 @@ import { selectClaudeModelFallback } from "../shared/model-fallback.js";
 import { detectRateLimit, rateLimitEngineLabel } from "../shared/rateLimit.js";
 import { collectEngineLimits } from "../shared/engine-limits.js";
 import { handleRateLimit } from "../sessions/rate-limit-handler.js";
-import { cleanupMcpConfigFile } from "../mcp/resolver.js";
 import { resolveEngineRunMcp } from "../sessions/engine-run-mcp.js";
 import { getPendingInstanceMigration, type PendingInstanceMigration } from "../migrations/service.js";
 import { createMigrationSnapshot } from "../migrations/snapshot.js";
@@ -6597,9 +6596,9 @@ async function runWebSession(
   const { resolveOrgHierarchy } = await import("./org-hierarchy.js");
   const orgHierarchy = resolveOrgHierarchy(scanOrgForHierarchy());
 
-  // Declared in the function scope so the OUTER finally can clean up the Claude MCP
-  // temp file only AFTER the full turn lifecycle — including any rate-limit
-  // retry/fallback that reuses mcpConfigPath (parity with manager.ts runSession).
+  // Declared in the function scope so the whole turn lifecycle — including any
+  // rate-limit retry/fallback — reuses the same mcpConfigPath (parity with
+  // manager.ts runSession). Deletion is owned by the PTY lifecycle, not this turn.
   let mcpConfigPath: string | undefined;
   let runHeartbeat: ReturnType<typeof setInterval> | undefined;
 
@@ -7284,10 +7283,12 @@ async function runWebSession(
       clearInterval(runHeartbeat);
       runHeartbeat = undefined;
     }
-    // Clean up the per-session Claude MCP temp file AFTER the full turn lifecycle
-    // (including any rate-limit retry/fallback that reused mcpConfigPath). Mirrors
-    // the connector path's outer-finally cleanup (manager.ts runSession). Idempotent
-    // and a no-op for engines that never wrote one.
-    if (mcpConfigPath) cleanupMcpConfigFile(currentSession.id);
+    // NOTE: the per-session Claude --mcp-config file is deliberately NOT deleted
+    // here. Only the interactive (PTY) engine writes one, and a warm PTY keeps that
+    // path on its command line across turns — a cold respawn (model/effort change)
+    // re-reads it, so deleting it per turn silently strips the jinn MCP server and
+    // every tool call fails with "caller identity unavailable". Its lifetime is owned
+    // by PtyLifecycleManager (onCleanup → cleanupMcpConfigFile), mirroring the
+    // per-session --settings file.
   }
 }

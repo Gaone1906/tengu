@@ -44,6 +44,7 @@ import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } 
 import { handleApiRequest, isSameOriginBrowserRequest, resumePendingWebQueueItems, type ApiContext } from "./api.js";
 import { resolveCallerIdentity, sessionCommGuards, LATERAL_MAX_HOPS, type CallerIdentityOptions } from "./session-comm-guards.js";
 import { UNIDENTIFIED_TOOL_CALL_ERROR, verifySessionCapability } from "../mcp/identity.js";
+import { cleanupMcpConfigFile, sweepOrphanMcpConfigFiles } from "../mcp/resolver.js";
 import { startStatusReconciler } from "./status-reconciler.js";
 import { armJinnAttachGate } from "../mcp/attachment.js";
 import { syncExternalTurn } from "./external-turns.js";
@@ -324,6 +325,12 @@ export async function startGateway(
     const swept = sweepOrphanCodexSessionHomes(listSessions().map((s) => s.id));
     if (swept > 0) logger.info(`Swept ${swept} orphaned Codex session home(s)`);
   } catch { /* best-effort */ }
+  // Same for per-session --mcp-config temp files: they live as long as the PTY, so
+  // a hard kill can orphan them. Keep one for every session the registry still lists.
+  try {
+    const swept = sweepOrphanMcpConfigFiles(listSessions().map((s) => s.id));
+    if (swept > 0) logger.info(`Swept ${swept} orphaned MCP config file(s)`);
+  } catch { /* best-effort */ }
   const recovered = recoverStaleSessions();
   if (recovered > 0) {
     logger.info(`Recovered ${recovered} stale session(s) — marked as "interrupted" for resume`);
@@ -462,6 +469,9 @@ export async function startGateway(
     onAdopt: () => refreshPtyPids(),
     onCleanup: (id) => {
       cleanupSessionSettings(CLAUDE_SETTINGS_DIR, id);
+      // The --mcp-config temp file stays on the PTY's command line for its whole
+      // life (a cold respawn re-reads it), so it dies with the PTY, not the turn.
+      cleanupMcpConfigFile(id);
       hookRegistry.unregister(id);
       refreshPtyPids();
     },

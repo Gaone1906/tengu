@@ -250,6 +250,28 @@ export function cleanupMcpConfigFile(sessionId: string): void {
 }
 
 /**
+ * Sweep temp MCP config dirs left behind by sessions the gateway no longer knows
+ * about. Their lifetime is owned by the PTY, so a hard kill can orphan them.
+ * Returns the number of directories removed.
+ */
+export function sweepOrphanMcpConfigFiles(liveSessionIds: string[]): number {
+  const root = path.join(JINN_HOME, "tmp", "mcp");
+  if (!fs.existsSync(root)) return 0;
+  const keep = new Set(liveSessionIds.map((id) => id.replace(/[^A-Za-z0-9_.-]/g, "_")));
+  let removed = 0;
+  for (const entry of fs.readdirSync(root)) {
+    if (keep.has(entry)) continue;
+    try {
+      fs.rmSync(path.join(root, entry), { recursive: true, force: true });
+      removed++;
+    } catch {
+      // Ignore — best effort
+    }
+  }
+  return removed;
+}
+
+/**
  * Resolve a value that may reference an environment variable.
  * Supports ${VAR_NAME} syntax.
  */

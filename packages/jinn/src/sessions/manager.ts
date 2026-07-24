@@ -45,7 +45,6 @@ import { loadJobs } from "../cron/jobs.js";
 import { setCronJobEnabled, triggerCronJob } from "../cron/scheduler.js";
 import { checkBudget } from "../gateway/budgets.js";
 import { markTranscriptSyncedThrough } from "../gateway/external-turns.js";
-import { cleanupMcpConfigFile } from "../mcp/resolver.js";
 import { handleRateLimit } from "./rate-limit-handler.js";
 import { resolveEngineRunMcp } from "./engine-run-mcp.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
@@ -994,11 +993,11 @@ export class SessionManager {
         }
       }
 
-      if (mcpConfigPath) cleanupMcpConfigFile(session.id);
-      // NOTE: the interactive engine's per-session --settings file is intentionally
-      // NOT cleaned up here. A warm PTY survives across turns and re-reads that file
-      // on every hook invocation — its lifetime is owned by PtyLifecycleManager
-      // (onCleanup → cleanupSessionSettings), not the per-turn runSession lifecycle.
+      // NOTE: neither the interactive engine's per-session --settings file NOR its
+      // --mcp-config file is cleaned up here. A warm PTY survives across turns and
+      // keeps both paths on its command line for its entire life (a cold respawn on
+      // model/effort change re-reads --mcp-config). Their lifetime is owned by
+      // PtyLifecycleManager (onCleanup), not the per-turn runSession lifecycle.
     }
   }
 

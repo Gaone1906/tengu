@@ -118,7 +118,21 @@ export function findExistingSkill(name: string): { name: string; dir: string } |
   return null;
 }
 
-export function runNpxSkills(args: string[], stdio: "inherit" | "pipe" = "inherit"): ReturnType<typeof spawnSync> {
+/** Characters that could break out of a cmd.exe command line. */
+const WINDOWS_UNSAFE_ARG = /["&|<>^%`\r\n]/;
+
+export function runNpxSkills(args: string[], stdio: "inherit" | "pipe" = "inherit"): { status: number | null } {
+  if (process.platform === "win32") {
+    // Windows ships npx as npx.cmd, which Node refuses to spawn without a shell
+    // (EINVAL since Node 18.20.2). Args are user-controlled, so reject anything
+    // that could escape the quoting below instead of trusting the shell.
+    const unsafe = args.find((a) => WINDOWS_UNSAFE_ARG.test(a));
+    if (unsafe !== undefined) {
+      console.error(`${RED}Refusing to run: argument contains shell metacharacters: ${unsafe}${RESET}`);
+      return { status: 1 };
+    }
+    return spawnSync("npx", ["skills", ...args].map((a) => `"${a}"`), { stdio, shell: true });
+  }
   return spawnSync("npx", ["skills", ...args], {
     stdio,
     shell: false,
