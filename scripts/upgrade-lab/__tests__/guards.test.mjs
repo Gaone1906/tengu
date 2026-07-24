@@ -393,6 +393,28 @@ test("accepts pnpm's argument separator for the documented dry-run command", () 
   assert.match(result.stdout, /"isolation": "PASS"/)
 })
 
+test("derives baseline and candidate versions instead of hard-coding an obsolete release pair", () => {
+  assert.equal(typeof upgradeLab.readInstalledPackageVersion, "function")
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-upgrade-version-"))
+  try {
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "jinn-cli", version: "0.28.0" }))
+    assert.equal(upgradeLab.readInstalledPackageVersion(root), "0.28.0")
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+  const runner = fs.readFileSync(path.resolve("scripts/upgrade-lab/run.mjs"), "utf8")
+  assert.doesNotMatch(runner, /jinn-cli@0\.25\.0/)
+  assert.doesNotMatch(runner, /packageVersion:\s*"0\.26\.0"/)
+  assert.doesNotMatch(runner, /migrations",\s*"0\.26\.0"/)
+})
+
+test("candidate state probing uses the v2 Workflow repository and import report", () => {
+  const probe = fs.readFileSync(path.resolve("scripts/upgrade-lab/state-probe.mjs"), "utf8")
+  assert.match(probe, /query-candidate/)
+  assert.match(probe, /workflows\/repository-migrations\.js/)
+  assert.match(probe, /legacy-v1-import-report\.json/)
+})
+
 test("three-way merge preserves a non-conflicting user append and target changes", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-merge-file-"))
   try {
@@ -532,14 +554,33 @@ test("representative state comparison requires real semantic identities and cont
   const before = {
     session: { count: 1, id: "session-id", sessionKey: "upgrade-lab:state", title: "Lab state" },
     todo: { count: 1, id: "todo-id", sourceRef: "upgrade-lab:todo", title: "Lab Todo", status: "backlog" },
-    workflow: { count: 1, id: "workflow-id", name: "upgrade-lab-workflow", status: "active" },
+    workflow: {
+      count: 1,
+      id: "workflow-id",
+      title: "Upgrade lab Workflow",
+      status: "active",
+      sourceSha256: "abc123",
+    },
     cron: { count: 1, id: "upgrade-lab-cron", prompt: "fixture" },
     org: { count: 1, name: "lab-operator", persona: "Disposable fixture." },
   }
-  assert.doesNotThrow(() => assertRepresentativeStateSurvived(before, structuredClone(before)))
+  const after = structuredClone(before)
+  after.workflow = {
+    count: 1,
+    id: "workflow-id",
+    title: "Upgrade lab Workflow",
+    enabled: false,
+    sourceSha256: "abc123",
+    legacySourcePreserved: true,
+    importOutcome: "imported",
+  }
+  assert.doesNotThrow(() => assertRepresentativeStateSurvived(before, after))
   const changed = structuredClone(before)
   changed.todo.status = "done"
   assert.throws(() => assertRepresentativeStateSurvived(before, changed), /todo.*changed/i)
+  const unsafeWorkflow = structuredClone(after)
+  unsafeWorkflow.workflow.legacySourcePreserved = false
+  assert.throws(() => assertRepresentativeStateSurvived(before, unsafeWorkflow), /workflow.*changed/i)
 })
 
 test("cleanup waits for a lab-home descendant that recreates .hermes before removing the nonce root", async () => {

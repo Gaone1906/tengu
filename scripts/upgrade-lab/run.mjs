@@ -13,6 +13,7 @@ const PROTECTED_GATEWAY_PORTS = new Set([7777, 7801])
 const LAB_PORT_MIN = 20_000
 const LAB_PORT_SPAN = 20_000
 const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex")
+const STRICT_VERSION = /^\d+\.\d+\.\d+$/
 const inside = (root, value) => value === root || value.startsWith(`${root}${path.sep}`)
 const resolvedIdentity = (value) => {
   const absolute = path.resolve(value)
@@ -24,6 +25,14 @@ export const MIGRATION_SCREENSHOT_CASES = [
   { name: "desktop-dark", width: 1440, height: 900, theme: "dark" },
   { name: "mobile-light", width: 390, height: 844, theme: "light" },
 ]
+
+export function readInstalledPackageVersion(packageRoot) {
+  const value = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")).version
+  if (typeof value !== "string" || !STRICT_VERSION.test(value)) {
+    throw new Error(`Installed package has an invalid release version: ${String(value)}`)
+  }
+  return value
+}
 
 export function createLabRoot(explicitRoot) {
   let root
@@ -352,10 +361,24 @@ export function removeLabRoot(rootInput) {
 }
 
 export function assertRepresentativeStateSurvived(before, after) {
-  for (const kind of ["session", "todo", "workflow", "cron", "org"]) {
+  for (const kind of ["session", "todo", "cron", "org"]) {
     if (JSON.stringify(before?.[kind]) !== JSON.stringify(after?.[kind])) {
       throw new Error(`Representative ${kind} state changed across the package swap`)
     }
+  }
+  const oldWorkflow = before?.workflow
+  const newWorkflow = after?.workflow
+  if (
+    oldWorkflow?.count !== 1
+    || newWorkflow?.count !== 1
+    || oldWorkflow.id !== newWorkflow.id
+    || oldWorkflow.title !== newWorkflow.title
+    || oldWorkflow.sourceSha256 !== newWorkflow.sourceSha256
+    || newWorkflow.enabled !== false
+    || newWorkflow.legacySourcePreserved !== true
+    || newWorkflow.importOutcome !== "imported"
+  ) {
+    throw new Error("Representative workflow state changed across the package swap")
   }
 }
 
@@ -468,6 +491,21 @@ function packCandidate(repo, cache, env) {
   const created = fs.readdirSync(cache).filter((name) => !before.has(name) && name.endsWith(".tgz"))
   if (created.length !== 1) throw new Error(`Candidate pack produced ${created.length} tarballs`)
   return path.join(cache, created[0])
+}
+
+function previousReleaseVersion(repo, env) {
+  const tag = run("git", ["describe", "--tags", "--abbrev=0", "HEAD^"], { cwd: repo, env })
+  const version = tag.replace(/^v/, "")
+  if (!STRICT_VERSION.test(version)) throw new Error(`Previous release tag is not a plain version: ${tag}`)
+  return version
+}
+
+function packPublicBaseline(repo, cache, env) {
+  const version = previousReleaseVersion(repo, env)
+  run("npm", ["pack", `jinn-cli@${version}`, "--pack-destination", cache], { env })
+  const name = fs.readdirSync(cache).find((entry) => entry === `jinn-cli-${version}.tgz`)
+  if (!name) throw new Error(`npm did not produce the v${version} baseline tarball`)
+  return path.join(cache, name)
 }
 
 function installTarball(tarball, prefix, env) {
@@ -702,7 +740,7 @@ function hashTree(root, excluded = new Set()) {
 
 async function loadFixture(name) {
   const fixture = name === "stock" || name === "no-instance-change" ? "stock" : name === "interrupted" ? "customized" : name
-  return import(`./fixtures/${fixture}-v025.mjs`)
+  return import(`./fixtures/${fixture}.mjs`)
 }
 
 function seedRepresentativeState(home) {
@@ -813,14 +851,16 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
       oldTarball = path.join(cache, path.basename(baselineTarball))
       if (path.resolve(baselineTarball) !== path.resolve(oldTarball)) fs.copyFileSync(baselineTarball, oldTarball)
     } else {
-      run("npm", ["pack", "jinn-cli@0.25.0", "--pack-destination", cache], { env })
-      const oldName = fs.readdirSync(cache).find((name) => /jinn-cli-0\.25\.0.*\.tgz$/.test(name))
-      if (!oldName) throw new Error("npm did not produce the v0.25.0 baseline tarball")
-      oldTarball = path.join(cache, oldName)
+      oldTarball = packPublicBaseline(repo, cache, env)
     }
     summary.baselineSha256 = sha256(fs.readFileSync(oldTarball))
-    const old = installTarball(oldTarball, path.join(root, "prefix-v025"), env)
+    const old = installTarball(oldTarball, path.join(root, "prefix-baseline"), env)
     const candidateInstall = installTarball(exactCandidate, path.join(root, "prefix-candidate"), env)
+    const baselineVersion = readInstalledPackageVersion(old.packageRoot)
+    const candidateVersion = readInstalledPackageVersion(candidateInstall.packageRoot)
+    if (baselineVersion === candidateVersion) throw new Error("Baseline and candidate package versions must differ")
+    summary.baselineVersion = baselineVersion
+    summary.candidateVersion = candidateVersion
     run(process.execPath, [old.cli, "setup"], { env })
     persistLabGatewayPort(layout.home, allocation.port)
     summary.checks.configuredPortPersisted = "PASS"
@@ -834,19 +874,21 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
 
     await allocation.release()
     allocationReleased = true
-    const oldGateway = await startGateway(old.cli, allocation.port, env, path.join(layout.logs, "v025-gateway.log"), summary.contactedPorts)
-    summary.checks.v025GatewayReady = "PASS"
+    const oldGateway = await startGateway(old.cli, allocation.port, env, path.join(layout.logs, `v${baselineVersion}-gateway.log`), summary.contactedPorts)
+    summary.checks.baselineGatewayReady = "PASS"
     const oldPid = oldGateway.child.pid
     await stopGateway(oldGateway)
-    if (oldGateway.child.exitCode === null && oldGateway.child.signalCode === null) throw new Error("v0.25 lab PID survived shutdown")
-    summary.checks.v025StoppedBeforeCandidate = "PASS"
-    const representativeBefore = runStateProbe("seed-candidate", candidateInstall.packageRoot, layout, env)
+    if (oldGateway.child.exitCode === null && oldGateway.child.signalCode === null) throw new Error(`v${baselineVersion} lab PID survived shutdown`)
+    summary.checks.baselineStoppedBeforeCandidate = "PASS"
+    const representativeBefore = runStateProbe("query-old", old.packageRoot, layout, env)
     summary.representativeState = { before: representativeBefore }
 
     if (scenario === "no-instance-change") {
       const config = path.join(layout.home, "config.yaml")
-      const raw = fs.readFileSync(config, "utf8").replace(/version:\s*["']?0\.25\.0["']?/, 'version: "0.26.0"')
-      fs.writeFileSync(config, raw)
+      const raw = fs.readFileSync(config, "utf8")
+      const updated = raw.replace(/^(\s*version:\s*)["']?[^"'\s]+["']?\s*$/m, `$1"${candidateVersion}"`)
+      if (updated === raw) throw new Error("no-instance-change could not advance the disposable marker")
+      fs.writeFileSync(config, updated)
     }
 
     let candidateGateway = await startGateway(candidateInstall.cli, allocation.port, env, path.join(layout.logs, "candidate-gateway.log"), summary.contactedPorts)
@@ -921,7 +963,7 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
     const snapshot = await import(pathToFileURL(path.join(candidateInstall.packageRoot, "dist", "src", "migrations", "snapshot.js")))
     const completion = await import(pathToFileURL(path.join(candidateInstall.packageRoot, "dist", "src", "migrations", "completion.js")))
     const migrationsDir = path.join(candidateInstall.packageRoot, "template", "migrations")
-    let pending = service.getPendingInstanceMigration({ instanceHome: layout.home, packageVersion: "0.26.0", migrationsDir })
+    let pending = service.getPendingInstanceMigration({ instanceHome: layout.home, packageVersion: candidateVersion, migrationsDir })
     if (scenario === "no-instance-change") {
       if (pending.required) throw new Error("no-instance-change unexpectedly produced a migration")
       summary.checks.noPromptOrSnapshot = "PASS"
@@ -930,12 +972,12 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
     } else {
       const snap = snapshot.createMigrationSnapshot({ instanceHome: layout.home, migrationKey: pending.migrationKey, fromVersion: pending.fromVersion, toVersion: pending.toVersion, changedFiles: pending.changedFiles, materialization: pending.materialization })
       if (!snap.reused) throw new Error("direct migration phase did not reuse the gateway-created snapshot")
-      const bundleDir = path.join(migrationsDir, "0.26.0")
+      const bundleDir = path.join(migrationsDir, candidateVersion)
       const manifest = JSON.parse(fs.readFileSync(path.join(bundleDir, "manifest.json"), "utf8"))
-      const materializedBundleDir = path.join(snap.path, "materialized", "0.26.0")
+      const materializedBundleDir = path.join(snap.path, "materialized", candidateVersion)
       const materializationAudit = JSON.parse(fs.readFileSync(path.join(snap.path, "materialization.json"), "utf8"))
       const preMergeTree = hashTree(layout.home, new Set([".migration-snapshots", "logs", "tmp"]))
-      const receipt = mergeBundle(layout.home, materializedBundleDir, manifest, materializationAudit, "0.26.0")
+      const receipt = mergeBundle(layout.home, materializedBundleDir, manifest, materializationAudit, candidateVersion)
       if (scenario === "customized") {
         summary.checks.customizedConservativeMerge = receipt.skippedItems.length > 0
           ? "PASS_WITH_REVIEWED_SKIPS"
@@ -943,14 +985,14 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
       }
       if (scenario === "heavily-customized") {
         let refused = false
-        try { completion.completeInstanceMigration({ instanceHome: layout.home, installedPackageVersion: "0.26.0", targetVersion: "0.26.0", expectedMigrationKey: pending.migrationKey, pending }) } catch { refused = true }
+        try { completion.completeInstanceMigration({ instanceHome: layout.home, installedPackageVersion: candidateVersion, targetVersion: candidateVersion, expectedMigrationKey: pending.migrationKey, pending }) } catch { refused = true }
         if (!refused) throw new Error("completion advanced without a receipt")
         if (receipt.skippedItems.length === 0) throw new Error("heavily-customized fixture did not report conservative skips")
         summary.checks.reminderUntilReceipt = "PASS"
       }
       fs.writeFileSync(path.join(snap.path, "completion-receipt.json"), `${JSON.stringify({ schemaVersion: 1, migrationKey: pending.migrationKey, reviewedFiles: receipt.reviewedFiles, skippedItems: receipt.skippedItems, verifiedAt: new Date().toISOString() }, null, 2)}\n`)
-      completion.completeInstanceMigration({ instanceHome: layout.home, installedPackageVersion: "0.26.0", targetVersion: "0.26.0", expectedMigrationKey: pending.migrationKey, pending })
-      pending = service.getPendingInstanceMigration({ instanceHome: layout.home, packageVersion: "0.26.0", migrationsDir })
+      completion.completeInstanceMigration({ instanceHome: layout.home, installedPackageVersion: candidateVersion, targetVersion: candidateVersion, expectedMigrationKey: pending.migrationKey, pending })
+      pending = service.getPendingInstanceMigration({ instanceHome: layout.home, packageVersion: candidateVersion, migrationsDir })
       if (pending.required) throw new Error("completion left the migration pending")
       summary.checks.markerAdvanced = "PASS"
 
@@ -961,7 +1003,7 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
     }
     const finalTree = hashTree(layout.home, new Set([".migration-snapshots", "logs", "tmp"]))
     for (const key of ["org/lab/operator.yaml", "docs/lab-state.md"]) if (baseline[key] !== finalTree[key]) throw new Error(`state did not survive package swap: ${key}`)
-    const representativeAfter = runStateProbe("query", candidateInstall.packageRoot, layout, env)
+    const representativeAfter = runStateProbe("query-candidate", candidateInstall.packageRoot, layout, env)
     assertRepresentativeStateSurvived(representativeBefore, representativeAfter)
     summary.representativeState.after = representativeAfter
     summary.checks.registryBackedStateSurvived = "PASS"
@@ -986,7 +1028,7 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
     if (liveBefore.digest !== liveAfter.digest) throw new Error("live instance sentinel metadata changed during the lab")
     summary.liveSentinels = { before: liveBefore.digest, after: liveAfter.digest, unchanged: true }
     summary.checks.liveInstanceSentinelsUnchanged = "PASS"
-    fs.copyFileSync(path.join(candidateInstall.packageRoot, "template", "migrations", "0.26.0", "manifest.json"), path.join(layout.artifacts, "manifest.json"))
+    fs.copyFileSync(path.join(candidateInstall.packageRoot, "template", "migrations", candidateVersion, "manifest.json"), path.join(layout.artifacts, "manifest.json"))
     fs.writeFileSync(path.join(layout.artifacts, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`)
     console.log(JSON.stringify(summary, null, 2))
     return summary
@@ -1022,10 +1064,7 @@ async function main() {
       const candidateTarball = options.candidateTarball ?? packCandidate(repo, cache, env)
       let baselineTarball = options.baselineTarball
       if (!baselineTarball) {
-        run("npm", ["pack", "jinn-cli@0.25.0", "--pack-destination", cache], { env })
-        const oldName = fs.readdirSync(cache).find((name) => /jinn-cli-0\.25\.0.*\.tgz$/.test(name))
-        if (!oldName) throw new Error("npm did not produce the v0.25.0 baseline tarball for Docker")
-        baselineTarball = path.join(cache, oldName)
+        baselineTarball = packPublicBaseline(repo, cache, env)
       }
       await executeDockerLab({ ...options, repo, root, candidateTarball, baselineTarball })
     }, () => quiesceAndRemoveLabRoot(root, { keep: options.keep }))

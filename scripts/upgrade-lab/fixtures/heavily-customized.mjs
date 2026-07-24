@@ -1,6 +1,6 @@
 import fs from "node:fs"
 import path from "node:path"
-import { seed as seedCustomized } from "./customized-v025.mjs"
+import { seed as seedCustomized } from "./customized.mjs"
 
 export const name = "heavily-customized"
 export function seed(home) {
@@ -14,5 +14,5 @@ export function seed(home) {
   fs.mkdirSync(path.join(home, "cron"), { recursive: true })
   fs.writeFileSync(path.join(home, "cron", "jobs.json"), "[{\"id\":\"local-lab-job\",\"enabled\":false}]\n")
   const config = path.join(home, "config.yaml")
-  fs.writeFileSync(config, fs.readFileSync(config, "utf8").replace(/^\s*version:\s*["']?0\.25\.0["']?\s*$/m, ""))
+  fs.writeFileSync(config, fs.readFileSync(config, "utf8").replace(/^\s*version:\s*["']?\d+\.\d+\.\d+["']?\s*$/m, ""))
 }

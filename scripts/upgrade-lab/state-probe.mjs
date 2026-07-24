@@ -1,10 +1,12 @@
 #!/usr/bin/env node
+import crypto from "node:crypto"
+import fs from "node:fs"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 
 const [mode, packageRoot, evidenceRoot] = process.argv.slice(2)
-if (!new Set(["seed-old", "seed-candidate", "query"]).has(mode) || !packageRoot || !evidenceRoot) {
-  throw new Error("usage: state-probe.mjs <seed-old|seed-candidate|query> <package-root> <evidence-root>")
+if (!new Set(["seed-old", "query-old", "query-candidate"]).has(mode) || !packageRoot || !evidenceRoot) {
+  throw new Error("usage: state-probe.mjs <seed-old|query-old|query-candidate> <package-root> <evidence-root>")
 }
 
 const load = (relative) => import(pathToFileURL(path.join(packageRoot, "dist", "src", relative)).href)
@@ -13,6 +15,9 @@ const todoSourceRef = "upgrade-lab:representative-todo"
 const workflowId = "upgrade-lab-workflow"
 const cronId = "upgrade-lab-cron"
 const employeeName = "lab-operator"
+const workflowTitle = "Upgrade lab representative workflow"
+const legacyDefinitionFile = path.join(evidenceRoot, "workflows", `${workflowId}.definition.json`)
+const sha256File = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")
 
 const sessions = await load("sessions/registry.js")
 const cron = await load("cron/jobs.js")
@@ -39,24 +44,23 @@ if (mode === "seed-old") {
     schedule: "0 0 * * *",
     prompt: "fixture",
   }])
-}
-
-if (mode === "seed-candidate") {
   const todos = await load("work-items/store.js")
   const workflows = await load("workflows/definition-store.js")
-  todos.createWorkItem({
-    title: "Upgrade lab representative Todo",
-    body: "Disposable representative state.",
-    status: "backlog",
-    source: "session",
-    sourceRef: todoSourceRef,
-  })
+  if (!todos.getWorkItemBySourceRef("session", todoSourceRef)) {
+    todos.createWorkItem({
+      title: "Upgrade lab representative Todo",
+      body: "Disposable representative state.",
+      status: "backlog",
+      source: "session",
+      sourceRef: todoSourceRef,
+    })
+  }
   if (!workflows.getDefinition(evidenceRoot, workflowId)) {
     workflows.createDefinition(evidenceRoot, {
       schemaVersion: 1,
       id: workflowId,
       name: workflowId,
-      title: "Upgrade lab representative workflow",
+      title: workflowTitle,
       version: 1,
       status: "active",
       nodes: [
@@ -69,6 +73,7 @@ if (mode === "seed-candidate") {
 }
 
 async function snapshot() {
+  sessions.initDb()
   const session = sessions.getSessionBySessionKey(sessionKey)
   const jobs = cron.loadJobs().filter((job) => job.id === cronId)
   const employees = [...org.scanOrg().values()].filter((employee) => employee.name === employeeName)
@@ -103,17 +108,36 @@ async function snapshot() {
   } catch {
     result.todo = { count: 0 }
   }
-  try {
+  if (mode === "seed-old" || mode === "query-old") {
     const workflows = await load("workflows/definition-store.js")
     const definitions = workflows.listDefinitions(evidenceRoot).filter((definition) => definition.id === workflowId)
     result.workflow = definitions.length === 1 ? {
       count: 1,
       id: definitions[0].id,
-      name: definitions[0].name,
+      title: definitions[0].title,
       status: definitions[0].status,
+      sourceSha256: sha256File(legacyDefinitionFile),
     } : { count: definitions.length }
-  } catch {
-    result.workflow = { count: 0 }
+  } else {
+    const workflows = await load("workflows/repository-migrations.js")
+    const database = workflows.openWorkflowDatabase()
+    try {
+      const row = database.prepare("SELECT id, title, enabled FROM workflow_definitions WHERE id = ?").get(workflowId)
+      const reportPath = path.join(path.dirname(evidenceRoot), "workflows", "legacy-v1-import-report.json")
+      const report = fs.existsSync(reportPath) ? JSON.parse(fs.readFileSync(reportPath, "utf8")) : null
+      const imported = report?.definitions?.find((entry) => entry.id === workflowId)
+      result.workflow = row ? {
+        count: 1,
+        id: row.id,
+        title: row.title,
+        enabled: Boolean(row.enabled),
+        sourceSha256: fs.existsSync(legacyDefinitionFile) ? sha256File(legacyDefinitionFile) : null,
+        legacySourcePreserved: fs.existsSync(legacyDefinitionFile),
+        importOutcome: imported?.outcome ?? null,
+      } : { count: 0 }
+    } finally {
+      database.close()
+    }
   }
   return result
 }
