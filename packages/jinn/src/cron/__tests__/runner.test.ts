@@ -529,3 +529,22 @@ describe("runCronJob — engine selection", () => {
     expect(routeOpts.employee).toBeUndefined();
   });
 });
+
+describe("ICI-570 — cron mints emit a live todo event", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("emits entity=todo action=created for the minted work item", async () => {
+    const live = await import("../../work-items/live-events.js");
+    const events: Array<Record<string, unknown>> = [];
+    live.setTodoLiveEmitter((event) => events.push(event as unknown as Record<string, unknown>));
+    try {
+      const connectors = new Map<string, Connector>([["slack", makeMockConnector()]]);
+      await runCronJob(makeJob(), makeMockSessionManager(0), makeConfig(), connectors);
+      expect(events).toContainEqual(expect.objectContaining({ entity: "todo", action: "created", id: "wi_test" }));
+    } finally {
+      live.setTodoLiveEmitter(null);
+    }
+  });
+});

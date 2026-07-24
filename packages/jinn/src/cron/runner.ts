@@ -6,6 +6,7 @@ import { CronConnector } from "../connectors/cron/index.js";
 import type { SessionManager } from "../sessions/manager.js";
 import { createWorkItem, linkSession, type WorkItem } from "../work-items/store.js";
 import { reconcileWorkItem } from "../work-items/reconcile.js";
+import { notifyTodoChanged } from "../work-items/live-events.js";
 import { getSessionBySessionKey } from "../sessions/registry.js";
 
 /**
@@ -33,6 +34,7 @@ function repairCronWorkItemBridge(job: CronJob, sessionKey: string): void {
       sourceRef: sessionKey,
       createdBy: `cron:${job.id}`,
     });
+    notifyTodoChanged(workItem, "created");
     linkSession(workItem.id, session.id);
     reconcileWorkItem(workItem.id);
   } catch (err) {
@@ -155,6 +157,9 @@ export async function runCronJob(
       // Slice-5 decision 7: cron-created items stamp the creating job.
       createdBy: `cron:${job.id}`,
     });
+    // ICI-570: the mint happens in-process (no route emit) — signal the web now,
+    // so the item appears even if the spawn below fails and no reconcile runs.
+    notifyTodoChanged(workItem, "created");
   } catch (wiErr) {
     logger.warn(
       `Cron job "${job.name}" work-item mint skipped: ${wiErr instanceof Error ? wiErr.message : wiErr}`,

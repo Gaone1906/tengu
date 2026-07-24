@@ -37,6 +37,7 @@ import { HookRegistry } from "./hook-registry.js";
 import { writeGatewayInfo, readGatewayInfo, updateGatewayPtyPids, staleGatewayPids, gatewayBaseUrl } from "./gateway-info.js";
 import { authenticateGatewayRequest, authRequiredForRequest, ensureGatewayAuthToken, shouldRequireGatewayAuth, validateGatewayExposure, verifyGatewayAuth } from "./auth.js";
 import { reconcileWorkItemsOnStartup, startWorkItemReconciler } from "../work-items/reconcile.js";
+import { setTodoLiveEmitter } from "../work-items/live-events.js";
 import { setTodoStatusChangeListener } from "../work-items/transitions.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
@@ -891,6 +892,9 @@ export async function startGateway(
       }
     }
   };
+  // ICI-570: in-process Todo writes (cron mints, session-lifecycle reconciles)
+  // reach the dashboard through the same company:changed lane the routes use.
+  setTodoLiveEmitter((event) => emit("company:changed", event));
   const workflowDatabase = openWorkflowDatabase();
   importLegacyWorkflowDefinitions(workflowDatabase);
   const workflowRepository = new WorkflowRepository(workflowDatabase);

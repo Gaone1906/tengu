@@ -336,3 +336,26 @@ describe("reconcileActiveWorkItems / startup sweep — the recoverStaleSessions 
     expect(store.listWorkItemEvents(wi.id).filter((event) => event.actor === "reconciler" || event.actor === "policy:trust")).toHaveLength(0);
   });
 });
+
+describe("ICI-570 — live todo events from the reconciler", () => {
+  it("emits one event when reconcile changes status, none when it no-ops", async () => {
+    const live = await import("../live-events.js");
+    const events: Array<Record<string, unknown>> = [];
+    live.setTodoLiveEmitter((event) => events.push(event as unknown as Record<string, unknown>));
+    try {
+      const item = store.createWorkItem({ title: "live reconcile item" });
+      linkedSession("live-rec-1", item.id, "running", "2026-07-24T10:00:00.000Z");
+      const first = reconcile.reconcileWorkItem(item.id);
+      expect(first?.changed).toBe(true);
+      expect(events).toContainEqual(expect.objectContaining({ entity: "todo", action: "reconciled", id: item.id }));
+      expect(events).toHaveLength(1);
+
+      events.length = 0;
+      const second = reconcile.reconcileWorkItem(item.id);
+      expect(second?.changed).toBe(false);
+      expect(events).toEqual([]);
+    } finally {
+      live.setTodoLiveEmitter(null);
+    }
+  });
+});

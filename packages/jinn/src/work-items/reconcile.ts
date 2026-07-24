@@ -8,6 +8,7 @@ import {
   type WorkItemStatus,
 } from './store.js';
 import { transitionDerived } from './transitions.js';
+import { notifyTodoChanged } from './live-events.js';
 import { listSessionsByWorkItem } from '../sessions/registry.js';
 import { logger } from '../shared/logger.js';
 import type { SessionAttemptOutcome } from '../shared/types.js';
@@ -126,6 +127,10 @@ export function reconcileWorkItem(id: string): ReconcileResult | undefined {
       changed = true;
     }
   }
+
+  // ICI-570: reconciles run from session lifecycle and cron — in-process lanes
+  // with no route-level event. One live signal per actual change.
+  if (changed) notifyTodoChanged(current, 'reconciled');
 
   return { item: current, changed };
 }
