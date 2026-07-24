@@ -1,9 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import { InstanceMigrationGate } from "../instance-migration-gate"
 import type { InstanceMigration } from "@/lib/api"
+
+const dismissedStorageKey = "jinn.instance-migration.dismissed-key"
 
 const pending: InstanceMigration = {
   required: true,
@@ -26,11 +28,15 @@ function setup(overrides: Partial<{
     open: overrides.open ?? vi.fn().mockResolvedValue({ sessionId: "session one", reused: false, migrationKey: "key-1" }),
   }
   const navigate = overrides.navigate ?? vi.fn()
-  render(<QueryClientProvider client={client}><InstanceMigrationGate service={service} navigate={navigate} /></QueryClientProvider>)
-  return { client, service, navigate }
+  const view = render(<QueryClientProvider client={client}><InstanceMigrationGate service={service} navigate={navigate} /></QueryClientProvider>)
+  return { client, service, navigate, view }
 }
 
 describe("InstanceMigrationGate", () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+  })
+
   it("renders nothing when the instance is current", async () => {
     setup({ get: vi.fn().mockResolvedValue({ ...pending, required: false, prompt: null, migrationKey: null }) })
     await waitFor(() => expect(screen.queryByText(/Finish v0\.26\.0 setup/)).toBeNull())
@@ -55,6 +61,39 @@ describe("InstanceMigrationGate", () => {
     await client.refetchQueries({ queryKey: ["instance-migration"] })
     expect(await screen.findByRole("dialog", { name: /v0\.27\.0 is installed/ })).not.toBeNull()
   })
+
+  it("keeps Later acknowledged across a full page remount but presents a new migration key", async () => {
+    const get = vi.fn().mockResolvedValue(pending)
+    const first = setup({ get })
+    await screen.findByRole("dialog")
+    await userEvent.click(screen.getByRole("button", { name: "Later" }))
+    expect(window.localStorage.getItem(dismissedStorageKey)).toBe("key-1")
+    first.view.unmount()
+
+    const second = setup({ get })
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    expect(screen.queryByRole("dialog")).toBeNull()
+    expect(screen.queryByRole("button", { name: /Finish v0\.26\.0 setup/ })).toBeNull()
+    second.view.unmount()
+
+    setup({ get: vi.fn().mockResolvedValue({ ...pending, toVersion: "0.27.0", migrationKey: "key-2" }) })
+    expect(await screen.findByRole("dialog", { name: /v0\.27\.0 is installed/ })).not.toBeNull()
+  })
+
+  it.each(["Copy migration prompt", "Open with COO"])(
+    "persists acknowledgement after the %s action",
+    async (action) => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: vi.fn().mockResolvedValue(undefined) },
+      })
+      setup()
+      await screen.findByRole("dialog")
+      await userEvent.click(screen.getByRole("button", { name: action }))
+      await waitFor(() => expect(window.localStorage.getItem(dismissedStorageKey)).toBe("key-1"))
+    },
+  )
 
   it("copies exact prompt and opens one encoded COO session", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)

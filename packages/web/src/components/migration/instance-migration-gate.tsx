@@ -23,6 +23,24 @@ const defaultService: InstanceMigrationService = {
   open: api.openInstanceMigration,
 }
 
+const dismissedStorageKey = "jinn.instance-migration.dismissed-key"
+
+function readDismissedKey(): string | null {
+  try {
+    return window.localStorage.getItem(dismissedStorageKey)
+  } catch {
+    return null
+  }
+}
+
+function writeDismissedKey(migrationKey: string): void {
+  try {
+    window.localStorage.setItem(dismissedStorageKey, migrationKey)
+  } catch {
+    // The in-memory dismissal below still works when storage is unavailable.
+  }
+}
+
 export function InstanceMigrationGate({
   service = defaultService,
   navigate = (url) => window.location.assign(url),
@@ -32,7 +50,7 @@ export function InstanceMigrationGate({
 }) {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
-  const [dismissedKey, setDismissedKey] = useState<string | null>(null)
+  const [dismissedKey, setDismissedKey] = useState<string | null>(() => readDismissedKey())
   const presentedKey = useRef<string | null>(null)
   const launching = useRef(false)
   const titleRef = useRef<HTMLHeadingElement>(null)
@@ -55,14 +73,28 @@ export function InstanceMigrationGate({
     }
     if (presentedKey.current !== migration.migrationKey) {
       presentedKey.current = migration.migrationKey
-      setDismissedKey(null)
-      setOpen(true)
+      const wasDismissed = readDismissedKey() === migration.migrationKey
+      setDismissedKey(wasDismissed ? migration.migrationKey : null)
+      setOpen(!wasDismissed)
     }
   }, [migration])
 
+  const rememberAcknowledged = (migrationKey: string) => {
+    writeDismissedKey(migrationKey)
+  }
+
+  const dismiss = (migrationKey: string) => {
+    rememberAcknowledged(migrationKey)
+    setOpen(false)
+    setDismissedKey(migrationKey)
+  }
+
   const launch = useMutation({
     mutationFn: () => service.open(migration!.migrationKey!),
-    onSuccess: ({ sessionId }) => navigate(`/?session=${encodeURIComponent(sessionId)}`),
+    onSuccess: ({ sessionId }) => {
+      rememberAcknowledged(migration!.migrationKey!)
+      navigate(`/?session=${encodeURIComponent(sessionId)}`)
+    },
     onError: () => { launching.current = false },
   })
 
@@ -87,6 +119,7 @@ export function InstanceMigrationGate({
 
   const copyPrompt = async () => {
     await navigator.clipboard.writeText(migration.prompt!)
+    rememberAcknowledged(migration.migrationKey!)
     setCopied(true)
   }
 
@@ -165,10 +198,7 @@ export function InstanceMigrationGate({
               <Button
                 className="w-full min-h-11 text-[var(--text-secondary)] sm:mr-auto sm:w-auto"
                 variant="ghost"
-                onClick={() => {
-                  setOpen(false)
-                  setDismissedKey(migration.migrationKey)
-                }}
+                onClick={() => dismiss(migration.migrationKey!)}
               >
                 Later
               </Button>

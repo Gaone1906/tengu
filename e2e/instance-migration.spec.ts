@@ -2,10 +2,22 @@ import { expect, test } from "@playwright/test"
 import fs from "node:fs"
 import http from "node:http"
 import path from "node:path"
-import { allocateSafeEphemeralServer } from "../scripts/upgrade-lab/run.mjs"
 
 let server: http.Server
 let baseUrl: string
+
+async function listenOnEphemeralPort(candidate: http.Server): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
+    candidate.once("error", reject)
+    candidate.listen(0, "127.0.0.1", () => {
+      candidate.off("error", reject)
+      resolve()
+    })
+  })
+  const address = candidate.address()
+  if (!address || typeof address === "string") throw new Error("Fixture server has no TCP port")
+  return address.port
+}
 
 test.beforeAll(async () => {
   const webRoot = path.resolve("packages/web/out")
@@ -22,9 +34,9 @@ test.beforeAll(async () => {
     response.writeHead(200, { "Content-Type": type })
     fs.createReadStream(file).pipe(response)
   })
-  const allocated = await allocateSafeEphemeralServer(createServer)
-  server = allocated.server
-  baseUrl = `http://127.0.0.1:${allocated.port}`
+  server = createServer()
+  const port = await listenOnEphemeralPort(server)
+  baseUrl = `http://127.0.0.1:${port}`
 })
 
 test.afterAll(async () => {
@@ -60,6 +72,9 @@ for (const fixture of [
     await expect(page.getByRole("button", { name: "Copy migration prompt" })).toBeVisible()
     await page.screenshot({ path: testInfo.outputPath(`${fixture.name}.png`), fullPage: true })
     await page.getByRole("button", { name: "Later" }).click()
+    await expect(page.getByRole("button", { name: "Finish v0.26.0 setup" })).toBeHidden()
+    await page.reload()
+    await expect(dialog).toBeHidden()
     await expect(page.getByRole("button", { name: "Finish v0.26.0 setup" })).toBeHidden()
   })
 }
