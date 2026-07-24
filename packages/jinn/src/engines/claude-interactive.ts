@@ -269,6 +269,62 @@ export function sseEventToDeltas(e: SseDataEvent): StreamDelta[] {
   }
 }
 
+/** Claude Code runs auto-compaction (and `/compact`) as an ordinary API call through
+ *  this same proxy — same tools, same sentinel system prompt — so it passes every
+ *  tee gate and its summarizer output used to stream into the chat as one enormous
+ *  `<analysis>…</analysis><summary>This session is being continued…</summary>`
+ *  bubble. The reliable marker is that this is the one assistant message that OPENS
+ *  with `<analysis>`, so hold each message's first characters until that is decided
+ *  and drop the whole message when it matches. */
+const COMPACTION_OPENER = "<analysis>";
+
+/** Per-message gate: buffers the opening text of an assistant message just long
+ *  enough to tell a real reply from a compaction summary. Exported for tests. */
+export class CompactionStreamGate {
+  private held: StreamDelta[] = [];
+  private opening = "";
+  private verdict: "undecided" | "pass" | "drop" = "undecided";
+
+  /** A new assistant message started — decide again from scratch. */
+  reset(): void {
+    this.held = [];
+    this.opening = "";
+    this.verdict = "undecided";
+  }
+
+  /** Deltas safe to forward now. Text is briefly held while the opener is undecided. */
+  accept(deltas: StreamDelta[]): StreamDelta[] {
+    const out: StreamDelta[] = [];
+    for (const d of deltas) {
+      if (this.verdict === "drop") continue;
+      if (this.verdict === "pass") { out.push(d); continue; }
+      // A non-text delta (tool call, context) can never be a compaction summary.
+      if (d.type !== "text") { this.verdict = "pass"; out.push(...this.flush(), d); continue; }
+      this.opening += String(d.content ?? "");
+      this.held.push(d);
+      const trimmed = this.opening.trimStart();
+      if (trimmed.startsWith(COMPACTION_OPENER)) { this.verdict = "drop"; this.held = []; continue; }
+      if (!trimmed || COMPACTION_OPENER.startsWith(trimmed)) continue; // still could be it
+      this.verdict = "pass";
+      out.push(...this.flush());
+    }
+    return out;
+  }
+
+  /** Message finished — release anything still held (messages shorter than the opener). */
+  end(): StreamDelta[] {
+    const out = this.verdict === "drop" ? [] : this.flush();
+    this.reset();
+    return out;
+  }
+
+  private flush(): StreamDelta[] {
+    const h = this.held;
+    this.held = [];
+    return h;
+  }
+}
+
 const STOP_FAILURE_GRACE_MS = 20_000;
 /** StopFailure errors that must settle immediately. Rate-limit/billing/auth
  *  need the manager fallback machinery right away; everything else gets a grace
@@ -491,7 +547,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
    *  released by a kill->respawn race can't poison the freshly-started turn.
    *  `onStream` is the current turn's delta callback; the per-PTY SSE proxy routes
    *  parsed events here (a PTY outlives its turn, so the proxy looks this up live). */
-  private active = new Map<string, { resolver: TurnResolver; onStream?: (d: StreamDelta) => void; boundProc?: pty.IPty }>();
+  private active = new Map<string, { resolver: TurnResolver; onStream?: (d: StreamDelta) => void; boundProc?: pty.IPty; gate?: CompactionStreamGate }>();
   /** Sessions with an in-flight async idle-spawn (proxy.start awaited) — prevents
    *  a second ensureIdleSpawn from racing in a duplicate PTY during that gap. */
   private idleSpawning = new Set<string>();
@@ -874,8 +930,12 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
     entry.resolver.noteActivity();
     if (!entry.onStream) return;
     // Only the main agent's events reach here (the proxy suppresses sub-agent and
-    // auxiliary streams), so deltas go straight to the transcript.
-    for (const d of sseEventToDeltas(e)) entry.onStream(d);
+    // auxiliary streams) — but compaction shares those credentials, so deltas pass
+    // through the gate before reaching the transcript.
+    const gate = entry.gate ?? (entry.gate = new CompactionStreamGate());
+    if (e.type === "message_start") gate.reset();
+    for (const d of gate.accept(sseEventToDeltas(e))) entry.onStream(d);
+    if (e.type === "message_stop") for (const d of gate.end()) entry.onStream(d);
   }
 
   /** Allocate + start a per-PTY SSE forward proxy. Returns the proxy and its port,
