@@ -12,6 +12,7 @@
 - **Delegated work stays visible.** Parent chats now surface tracked work delegated into child sessions, keeping the operator's conversation connected to the underlying Todo.
 
 ### ⚡ Performance / Reliability
+- **Secure, current connector and database dependencies.** The release updates the WhatsApp and Telegram connector stacks to patched releases and moves SQLite onto a Node 26-compatible native build, keeping fresh installs aligned with the advertised Node support.
 - **Deterministic release test execution.** Package test suites now run sequentially at the monorepo gate, avoiding machine-contention timeouts while retaining the full CLI and web test coverage.
 - **Safer fresh installs and workspaces.** New configurations require gateway authentication by default, workspace creation writes an owner-only token before startup, local browser bootstrap still pairs automatically, and proxied unauthenticated writes return an actionable pairing diagnosis.
 - **Reliable macOS terminal startup after npm install.** The published package repairs executable permissions on node-pty's Darwin spawn helpers during postinstall, preventing terminals from failing because registry tarballs lost helper modes.

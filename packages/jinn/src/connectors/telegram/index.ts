@@ -1,4 +1,4 @@
-import TelegramBot from "node-telegram-bot-api";
+import TelegramBot, { type SendMessageParams } from "node-telegram-bot-api";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -22,6 +22,8 @@ import {
   resolveLanguages,
   getModelPath,
 } from "../../stt/stt.js";
+
+type SendMessageOptions = Omit<SendMessageParams, "chat_id" | "text">;
 
 export class TelegramConnector implements Connector {
   name = "telegram";
@@ -353,7 +355,7 @@ export class TelegramConnector implements Connector {
   private async safeSend(
     chatId: string,
     text: string,
-    opts: TelegramBot.SendMessageOptions = {},
+    opts: SendMessageOptions = {},
   ): Promise<string | undefined> {
     try {
       const result = await this.bot.sendMessage(chatId, text, {
@@ -393,9 +395,9 @@ export class TelegramConnector implements Connector {
       target.replyContext?.messageId != null
         ? Number(target.replyContext.messageId)
         : undefined;
-    const opts: TelegramBot.SendMessageOptions = {};
+    const opts: SendMessageOptions = {};
     if (replyToId) {
-      opts.reply_to_message_id = replyToId;
+      opts.reply_parameters = { message_id: replyToId };
     }
     const chunks = formatResponse(text);
     let lastMessageId: string | undefined;
