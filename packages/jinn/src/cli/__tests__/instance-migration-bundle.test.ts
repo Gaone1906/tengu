@@ -127,6 +127,19 @@ describe("instance migration bundle generator", () => {
     expect(checked.stderr).toContain("out of date")
   })
 
+  it("keeps the default rationale idempotent after the bundle is committed", () => {
+    const root = fixture()
+    const args = ["--base-ref", "v0.25.0", "--version", "0.26.0"]
+    expect(run(root, "generate", ...args).status).toBe(0)
+    git(root, "add", "packages/jinn/template/migrations/0.26.0")
+    git(root, "commit", "-qm", "commit migration bundle")
+
+    const checked = run(root, "check", ...args)
+
+    expect(checked.status).toBe(0)
+    expect(checked.stderr).toBe("")
+  })
+
   it("preserves reviewed rationale but rejects unresolved release placeholders", () => {
     const root = fixture()
     const args = ["generate", "--base-ref", "v0.25.0", "--version", "0.26.0"]

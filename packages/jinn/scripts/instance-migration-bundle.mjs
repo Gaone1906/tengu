@@ -113,15 +113,20 @@ function assertReleaseReadyRationale(rationale) {
   }
 }
 
-function readRationale(outputDir, committedFallback) {
-  const file = path.join(outputDir, "MIGRATION.md")
-  if (!fs.existsSync(file)) return committedFallback || DEFAULT_RATIONALE
-  const source = fs.readFileSync(file, "utf8")
+function rationaleFromSource(source, fallback = "") {
   const start = source.indexOf(RATIONALE_START)
   const end = source.indexOf(RATIONALE_END)
-  if (start < 0 || end < start) return source.trim() || committedFallback || DEFAULT_RATIONALE
-  const current = source.slice(start + RATIONALE_START.length, end).trim()
-  return current === DEFAULT_RATIONALE && committedFallback ? committedFallback : current
+  if (start < 0 || end < start) return source.trim() || fallback
+  return source.slice(start + RATIONALE_START.length, end).trim() || fallback
+}
+
+function readRationale(outputDir, committedFallback) {
+  const file = path.join(outputDir, "MIGRATION.md")
+  const committedRationale = rationaleFromSource(committedFallback)
+  if (!fs.existsSync(file)) return committedRationale || DEFAULT_RATIONALE
+  const source = fs.readFileSync(file, "utf8")
+  const current = rationaleFromSource(source, committedRationale || DEFAULT_RATIONALE)
+  return current === DEFAULT_RATIONALE && committedRationale ? committedRationale : current
 }
 
 function markdown(manifest, rationale) {
