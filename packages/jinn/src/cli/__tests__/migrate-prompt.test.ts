@@ -324,9 +324,24 @@ describe("composeMigrationPrompt: against the REAL shipped template migrations",
     expect(migration).not.toContain("rewrite historical Workflow-source Todos");
   });
 
-  it("does not defer already-shipped Workflow/Todo semantics to 0.27.0", () => {
+  it("keeps 0.27.0 as an empty chain bridge without deferred Workflow/Todo semantics", () => {
     const versions = scanMigrationPrompts(templateMigrationsDir, "0.26.0", "0.27.0");
-    expect(versions).toEqual([]);
+    expect(versions).toEqual(["0.27.0"]);
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(templateMigrationsDir, "0.27.0", "manifest.json"), "utf-8"),
+    ) as { baseVersion: string; version: string; files: unknown[] };
+    expect(manifest).toMatchObject({
+      baseVersion: "0.26.0",
+      version: "0.27.0",
+      files: [],
+    });
+    const migration = fs.readFileSync(
+      path.join(templateMigrationsDir, "0.27.0", "MIGRATION.md"),
+      "utf-8",
+    );
+    expect(migration).toContain("changed no user-owned instance-template files");
+    expect(migration).not.toContain("historical Workflow-source Todos");
+    expect(migration).not.toContain("callback_deliveries");
   });
 
   it("composes the current release prompt without mutating a personalized instance fixture", () => {
