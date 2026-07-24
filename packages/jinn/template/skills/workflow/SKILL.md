@@ -7,6 +7,12 @@ description: Create, invoke, and track reusable Jinn Workflows with typed MCP to
 
 Use this skill for repeatable, scheduled, event-driven, or multi-step automation. A Workflow is the reusable HOW. Workflow runs are durable records, not Sessions. A Workflow invocation never creates, links, transitions, approves, or mutates a Todo.
 
+## Upgrading legacy Workflows
+
+On the first v0.28 boot, behavior-equivalent v1 definitions are imported once as disabled drafts. Never enable an imported draft until its graph and prompts have been reviewed against the preserved source definition. Definitions with legacy behavior that cannot be represented exactly are not converted; their source JSON remains untouched.
+
+Review `<JINN_HOME>/workflows/legacy-v1-import-report.json` after upgrading. It records every imported or preserved definition, source hashes, legacy run evidence, and any active v1 runs found at cutover. Legacy run files remain under `<JINN_HOME>/workflow-evidence/reports/runs` as read-only history and are not rewritten into v2 run history. Drain active v1 runs before upgrading whenever possible.
+
 ## Discover and author
 
 - Use `list_workflows` and `get_workflow` to inspect canonical definitions.
