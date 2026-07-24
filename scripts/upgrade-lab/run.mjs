@@ -800,6 +800,40 @@ export function mergeBundle(home, materializedBundleDir, manifest, materializati
   return { reviewedFiles, skippedItems }
 }
 
+export function mergeMigrationChain({
+  home,
+  snapshotPath,
+  migrationsDir,
+  manifests,
+  materializationAudit,
+  verifyStock = false,
+}) {
+  const reviewedFiles = new Set()
+  const skippedItems = new Map()
+  const appliedVersions = []
+  for (const { version } of manifests) {
+    const manifest = JSON.parse(fs.readFileSync(path.join(migrationsDir, version, "manifest.json"), "utf8"))
+    const materializedBundleDir = path.join(snapshotPath, "materialized", version)
+    const preMergeTree = hashTree(home, new Set([".migration-snapshots", "logs", "tmp"]))
+    const bundleReceipt = mergeBundle(home, materializedBundleDir, manifest, materializationAudit, version)
+    for (const reviewed of bundleReceipt.reviewedFiles) reviewedFiles.add(reviewed)
+    for (const skipped of bundleReceipt.skippedItems) {
+      skippedItems.set(`${version}:${skipped.path}:${skipped.reason}`, skipped)
+    }
+    if (verifyStock) {
+      assertStockBundleApplied({ home, materializedBundleDir, manifest, receipt: bundleReceipt, preMergeTree })
+    }
+    appliedVersions.push(version)
+  }
+  return {
+    appliedVersions,
+    receipt: {
+      reviewedFiles: [...reviewedFiles],
+      skippedItems: [...skippedItems.values()],
+    },
+  }
+}
+
 export function assertStockBundleApplied({ home, materializedBundleDir, manifest, receipt, preMergeTree }) {
   if (receipt.skippedItems.length > 0) throw new Error(`stock migration skipped manifest paths: ${JSON.stringify(receipt.skippedItems)}`)
   const reviewed = new Set(receipt.reviewedFiles)
@@ -972,12 +1006,17 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
     } else {
       const snap = snapshot.createMigrationSnapshot({ instanceHome: layout.home, migrationKey: pending.migrationKey, fromVersion: pending.fromVersion, toVersion: pending.toVersion, changedFiles: pending.changedFiles, materialization: pending.materialization })
       if (!snap.reused) throw new Error("direct migration phase did not reuse the gateway-created snapshot")
-      const bundleDir = path.join(migrationsDir, candidateVersion)
-      const manifest = JSON.parse(fs.readFileSync(path.join(bundleDir, "manifest.json"), "utf8"))
-      const materializedBundleDir = path.join(snap.path, "materialized", candidateVersion)
       const materializationAudit = JSON.parse(fs.readFileSync(path.join(snap.path, "materialization.json"), "utf8"))
-      const preMergeTree = hashTree(layout.home, new Set([".migration-snapshots", "logs", "tmp"]))
-      const receipt = mergeBundle(layout.home, materializedBundleDir, manifest, materializationAudit, candidateVersion)
+      const chain = mergeMigrationChain({
+        home: layout.home,
+        snapshotPath: snap.path,
+        migrationsDir,
+        manifests: pending.materialization.manifests,
+        materializationAudit,
+        verifyStock: scenario === "stock",
+      })
+      const { receipt } = chain
+      summary.structuredBundlesApplied = chain.appliedVersions
       if (scenario === "customized") {
         summary.checks.customizedConservativeMerge = receipt.skippedItems.length > 0
           ? "PASS_WITH_REVIEWED_SKIPS"
@@ -997,7 +1036,6 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
       summary.checks.markerAdvanced = "PASS"
 
       if (scenario === "stock") {
-        assertStockBundleApplied({ home: layout.home, materializedBundleDir, manifest, receipt, preMergeTree })
         summary.checks.allStockTargetsApplied = "PASS"
       }
     }

@@ -487,6 +487,58 @@ test("materialized three-way merge preserves a genuine edit on top of personaliz
   }
 })
 
+test("materialized migration chains apply every structured bundle in version order", () => {
+  assert.equal(typeof upgradeLab.mergeMigrationChain, "function")
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-materialized-chain-"))
+  try {
+    const migrations = path.join(root, "migrations")
+    const snapshot = path.join(root, "snapshot")
+    const versions = [
+      { version: "0.26.0", base: "old\n", target: "middle\n" },
+      { version: "0.28.0", base: "middle\n", target: "new\n" },
+    ]
+    const audit = { files: [] }
+    for (const entry of versions) {
+      const manifestDir = path.join(migrations, entry.version)
+      const materializedDir = path.join(snapshot, "materialized", entry.version, "files")
+      fs.mkdirSync(manifestDir, { recursive: true })
+      fs.mkdirSync(path.join(materializedDir, "base"), { recursive: true })
+      fs.mkdirSync(path.join(materializedDir, "target"), { recursive: true })
+      fs.writeFileSync(path.join(materializedDir, "base/CLAUDE.md"), entry.base)
+      fs.writeFileSync(path.join(materializedDir, "target/CLAUDE.md"), entry.target)
+      fs.writeFileSync(path.join(manifestDir, "manifest.json"), JSON.stringify({
+        files: [{
+          path: "CLAUDE.md",
+          operation: "modify",
+          basePayload: "files/base/CLAUDE.md",
+          targetPayload: "files/target/CLAUDE.md",
+        }],
+      }))
+      audit.files.push({
+        version: entry.version,
+        path: "CLAUDE.md",
+        base: { unresolvedPlaceholders: [] },
+        target: { unresolvedPlaceholders: [] },
+      })
+    }
+    fs.writeFileSync(path.join(root, "CLAUDE.md"), "old\n")
+
+    const result = upgradeLab.mergeMigrationChain({
+      home: root,
+      snapshotPath: snapshot,
+      migrationsDir: migrations,
+      manifests: versions.map(({ version }) => ({ version })),
+      materializationAudit: audit,
+    })
+
+    assert.equal(fs.readFileSync(path.join(root, "CLAUDE.md"), "utf8"), "new\n")
+    assert.deepEqual(result.appliedVersions, ["0.26.0", "0.28.0"])
+    assert.deepEqual(result.receipt, { reviewedFiles: ["CLAUDE.md"], skippedItems: [] })
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test("materialized merge refuses unresolved placeholders", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-unresolved-merge-"))
   try {
