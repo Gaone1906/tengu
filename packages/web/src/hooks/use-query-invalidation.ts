@@ -11,19 +11,21 @@ import type { BackgroundActivity, SessionsResponse } from '@/lib/api'
 function handleCompanyChanged(
   qc: ReturnType<typeof useQueryClient>,
   p: Record<string, unknown>,
+  pending: Set<string>,
 ): void {
   const entity = typeof p.entity === 'string' ? p.entity : ''
   const id = typeof p.id === 'string' ? p.id : ''
   if (entity === 'todo') {
     // Apply the safe version-aware patch synchronously; an older event can never
-    // overwrite a newer cached revision. Absent value → refetch the smallest keys.
+    // overwrite a newer cached revision. The patch alone cannot insert a created
+    // Todo or move one between the board's per-status column queries, so every
+    // todo event ALSO schedules the debounced reconciliation pass (ICI-570).
     const value = p.value
     if (value && typeof value === 'object' && !Array.isArray(value) && typeof (value as { id?: unknown }).id === 'string') {
       mergeTodoIntoCaches(qc, value as { id: string; version?: number })
-    } else if (id) {
-      qc.invalidateQueries({ queryKey: ['work-items'] })
-      qc.invalidateQueries({ queryKey: ['work-item', id] })
     }
+    pending.add('todos')
+    if (id) pending.add(`todo:${id}`)
   } else if (entity === 'workflow-definition') {
     qc.invalidateQueries({ queryKey: queryKeys.workflows.all })
     if (id) qc.invalidateQueries({ queryKey: queryKeys.workflows.definition(id) })
@@ -76,7 +78,7 @@ export function useQueryInvalidation() {
           pendingRef.current.add('work-item-sessions')
           break
         case 'company:changed':
-          if (p) handleCompanyChanged(qc, p)
+          if (p) handleCompanyChanged(qc, p, pendingRef.current)
           break
         case 'session:updated':
           pendingRef.current.add('sessions')
@@ -153,8 +155,30 @@ export function useQueryInvalidation() {
 
       // Debounce: flush pending invalidations after 1000ms of quiet
       if (timerRef.current) clearTimeout(timerRef.current)
-      timerRef.current = setTimeout(() => {
+      const flush = () => {
+        timerRef.current = null
+        // A live mutation (drag commit, editor save, approval decision) holds an
+        // optimistic view of the todo caches — a refetch landing mid-flight could
+        // clobber it. Defer ONLY the todo keys and retry after the next quiet
+        // window; every other category flushes now.
+        const deferTodos = qc.isMutating() > 0
+        const kept = new Set<string>()
         for (const key of pendingRef.current) {
+          if (key === 'todos' || key.startsWith('todo:')) {
+            if (deferTodos) {
+              kept.add(key)
+            } else if (key === 'todos') {
+              qc.invalidateQueries({ queryKey: ['work-items'] })
+              qc.invalidateQueries({ queryKey: ['work-item-tree'] })
+              qc.invalidateQueries({ queryKey: ['departments'] })
+            } else {
+              const id = key.slice('todo:'.length)
+              qc.invalidateQueries({ queryKey: ['work-item', id] })
+              qc.invalidateQueries({ queryKey: ['work-item-comments', id] })
+              qc.invalidateQueries({ queryKey: ['work-item-attachments', id] })
+            }
+            continue
+          }
           switch (key) {
             case 'sessions':
               qc.invalidateQueries({ queryKey: queryKeys.sessions.all })
@@ -185,8 +209,10 @@ export function useQueryInvalidation() {
               break
           }
         }
-        pendingRef.current.clear()
-      }, 1000)
+        pendingRef.current = kept
+        if (kept.size > 0) timerRef.current = setTimeout(flush, 1000)
+      }
+      timerRef.current = setTimeout(flush, 1000)
     })
 
     return () => {
