@@ -137,6 +137,28 @@ describe("getPendingInstanceMigration", () => {
     expect(result.fromVersion).toBe("0.0.0")
   })
 
+  it("composes the shipped chain through releases with no instance-surface changes when the marker is missing", () => {
+    const { home } = fixture(null)
+    const migrationsDir = path.resolve("template/migrations")
+
+    const result = getPendingInstanceMigration({ instanceHome: home, packageVersion: "0.28.0", migrationsDir })
+
+    expect(result.required).toBe(true)
+    expect(result.fromVersion).toBe("0.0.0")
+    expect(result.versions).toEqual([
+      "0.1.0",
+      "0.2.0",
+      "0.3.0",
+      "0.7.3",
+      "0.7.5",
+      "0.8.0",
+      "0.9.0",
+      "0.26.0",
+      "0.27.0",
+      "0.28.0",
+    ])
+  })
+
   it("bridges real shipped Markdown-only migrations into the first structured bundle with instance materialization", () => {
     const { home } = fixture("0.8.0")
     fs.writeFileSync(path.join(home, "config.yaml"), 'jinn:\n  version: "0.8.0"\nportal:\n  portalName: "My Mixed CASE Portal"\n')

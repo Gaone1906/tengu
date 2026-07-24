@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "version": "0.27.0",
+  "baseVersion": "0.26.0",
+  "generatedFrom": {
+    "baseRef": "v0.26.0",
+    "headRef": "v0.27.0"
+  },
+  "files": []
+}
