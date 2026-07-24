@@ -147,17 +147,19 @@ describe("syncExternalTurn", () => {
 
   it("collapses a usage-limit retry storm — N identical adjacent user turns become one row, anchor still advances to the newest entry", () => {
     const id = makeSession();
+    const now = Date.now();
+    const at = (msAgo: number) => new Date(now - msAgo).toISOString();
     // The wait-and-retry loop re-sends the SAME prompt on every probe while the
     // limit never clears: the transcript accumulates identical user turns with
     // no assistant turn between them (the newest is the most recent probe).
     const file = writeTranscript([
-      { type: "user", text: "BOUNDED review prompt", ts: iso(50_000) },
-      { type: "user", text: "BOUNDED review prompt", ts: iso(40_000) },
-      { type: "user", text: "BOUNDED review prompt", ts: iso(30_000) },
-      { type: "user", text: "BOUNDED review prompt", ts: iso(20_000) },
-      { type: "user", text: "BOUNDED review prompt", ts: iso(10_000) },
+      { type: "user", text: "BOUNDED review prompt", ts: at(50_000) },
+      { type: "user", text: "BOUNDED review prompt", ts: at(40_000) },
+      { type: "user", text: "BOUNDED review prompt", ts: at(30_000) },
+      { type: "user", text: "BOUNDED review prompt", ts: at(20_000) },
+      { type: "user", text: "BOUNDED review prompt", ts: at(10_000) },
     ]);
-    const newest = iso(10_000);
+    const newest = at(10_000);
     const n = ext.syncExternalTurn(id, emit, {
       hook_event_name: "Stop",
       session_id: "eng-storm",
