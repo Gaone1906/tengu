@@ -200,6 +200,15 @@ function setCorsHeaders(req: http.IncomingMessage, res: http.ServerResponse): bo
   return allowed;
 }
 
+/**
+ * How often to re-run dynamic engine model discovery while the gateway is up.
+ * Discovery otherwise only runs on boot, on config reload, and as a post-failure
+ * fallback — so a gateway with multi-day uptime keeps serving a stale catalog and
+ * never sees a model published after it booted. Six hours is cheap (a handful of
+ * short-lived CLI spawns plus one Anthropic catalog GET) and bounds that staleness.
+ */
+export const MODEL_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html",
   ".js": "application/javascript",
@@ -922,6 +931,13 @@ export async function startGateway(
       .finally(() => emit("engines:updated", {}));
   };
   refreshDynamicModels(currentConfig);
+  // Re-discover periodically so a long-lived gateway picks up models published
+  // after boot. Reads `currentConfig` at fire time (not the boot snapshot) so a
+  // config reload between ticks is respected. unref'd: never holds the process open.
+  const modelRefreshTimer = setInterval(() => {
+    refreshDynamicModels(currentConfig);
+  }, MODEL_REFRESH_INTERVAL_MS);
+  modelRefreshTimer.unref?.();
 
   // Synchronously re-scan org/ into the in-memory registry. Shared by the API
   // employee-update handler (immediate refresh, no watcher lag) and the chokidar
@@ -1391,6 +1407,7 @@ export async function startGateway(
     // interrupted below — a mid-shutdown sweep must not race the teardown.
     stopStatusReconciler();
     stopWorkItemReconciler();
+    clearInterval(modelRefreshTimer);
     workflowService.dispose(); workflowDatabase.close();
 
     // Stop caffeinate
