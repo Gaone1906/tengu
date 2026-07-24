@@ -268,6 +268,7 @@ function composePrompt(options: {
   materialization: MigrationMaterializationPlan
 }): string {
   const snapshotRoot = path.join(options.instanceHome, ".migration-snapshots", options.migrationKey)
+  const receiptPath = path.join(snapshotRoot, "completion-receipt.json")
   const lines = [
     `# Jinn instance migration: ${options.fromVersion} → ${options.toVersion}`,
     "",
@@ -305,7 +306,19 @@ function composePrompt(options: {
     }
   }
   lines.push(
-    "After verification, write a completion receipt in the snapshot directory containing the migration key, every reviewed file, and all skipped/conflicted items.",
+    `After verification, write the completion receipt exactly to \`${receiptPath}\` using this contract:`,
+    "",
+    "```json",
+    JSON.stringify({
+      schemaVersion: 1,
+      migrationKey: options.migrationKey,
+      reviewedFiles: ["<every reviewed manifest path>"],
+      skippedItems: [{ path: "<skipped/conflicted path>", reason: "<why>" }],
+      verifiedAt: "<ISO-8601 timestamp>",
+    }, null, 2),
+    "```",
+    "",
+    "Replace the example entries with the real reviewed and skipped/conflicted paths. Keep either array empty when it has no entries; every manifest path must appear in one of them.",
     `Only then run \`jinn migrate --mark-done ${options.toVersion} --migration-key ${options.migrationKey}\`. Completion is receipt- and snapshot-gated; an engine exit or interrupted session never advances the marker.`,
     "Report changed, preserved, skipped, and conflicted paths.",
   )

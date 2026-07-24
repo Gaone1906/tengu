@@ -118,6 +118,12 @@ describe("getPendingInstanceMigration", () => {
     expect(first.prompt).toMatch(/unresolved placeholders?.*conflict/i)
     expect(first.prompt).toContain("snapshot")
     expect(first.prompt).toContain("completion receipt")
+    expect(first.prompt).toContain(path.join(snapshotRoot, "completion-receipt.json"))
+    expect(first.prompt).toContain('"schemaVersion": 1')
+    expect(first.prompt).toContain(`"migrationKey": "${first.migrationKey}"`)
+    expect(first.prompt).toContain('"reviewedFiles"')
+    expect(first.prompt).toContain('"skippedItems"')
+    expect(first.prompt).toContain('"verifiedAt"')
     expect(first.prompt).toMatch(/engine exit or interrupted session never advances/i)
   })
 
