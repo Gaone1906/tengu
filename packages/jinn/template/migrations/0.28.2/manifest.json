@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "version": "0.28.2",
+  "baseVersion": "0.28.1",
+  "generatedFrom": {
+    "baseRef": "v0.28.1",
+    "headRef": "WORKTREE"
+  },
+  "files": []
+}

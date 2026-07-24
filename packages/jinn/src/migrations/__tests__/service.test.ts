@@ -159,6 +159,24 @@ describe("getPendingInstanceMigration", () => {
     ])
   })
 
+  it("keeps the shipped migration chain aligned with the installed package version", () => {
+    const { home } = fixture("0.27.0")
+    const migrationsDir = path.resolve("template/migrations")
+    const packageVersion = (
+      JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")) as {
+        version: string
+      }
+    ).version
+
+    const result = getPendingInstanceMigration({
+      instanceHome: home,
+      packageVersion,
+      migrationsDir,
+    })
+
+    expect(result.toVersion).toBe(packageVersion)
+  })
+
   it("bridges real shipped Markdown-only migrations into the first structured bundle with instance materialization", () => {
     const { home } = fixture("0.8.0")
     fs.writeFileSync(path.join(home, "config.yaml"), 'jinn:\n  version: "0.8.0"\nportal:\n  portalName: "My Mixed CASE Portal"\n')

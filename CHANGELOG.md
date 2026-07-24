@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.28.2] - 2026-07-24
+
+### 🐛 Fixes
+- **Migration checks stay available after patch upgrades.** Explicit empty v0.28.1 and v0.28.2 migration bridges keep the strict instance-migration chain aligned with the installed package, preventing the dashboard from repeatedly reporting that the migration service is unavailable.
+- **Release CI no longer depends on a globally installed engine CLI.** The Workflow vertical test now uses the running Node executable for its injected fake engines' availability check, so clean GitHub runners exercise the fake engine instead of failing before dispatch.
+
 ## [0.28.1] - 2026-07-24
 
 ### 🐛 Fixes

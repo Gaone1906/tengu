@@ -40,7 +40,11 @@ const employee: Employee = {
 };
 const config = {
   gateway: { port: 0, host: "127.0.0.1" },
-  engines: { default: "codex", claude: { bin: "", model: "opus" }, codex: { bin: "", model: "gpt" } },
+  engines: {
+    default: "codex",
+    claude: { bin: process.execPath, model: "opus" },
+    codex: { bin: process.execPath, model: "gpt" },
+  },
   connectors: {}, logging: { file: false, stdout: false, level: "error" },
   mcp: { gateway: { enabled: true }, browser: { enabled: false } },
 } as unknown as JinnConfig;
