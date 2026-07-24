@@ -434,16 +434,6 @@ h1, h2, h3, h4, h5, h6 {
 /* Selection */
 ::selection { background: var(--accent-fill); color: var(--text-primary); }
 
-@keyframes migration-reminder-glow {
-  0%, 100% { box-shadow: 0 12px 36px color-mix(in srgb, var(--system-purple) 22%, transparent); }
-  50% { box-shadow: 0 12px 42px color-mix(in srgb, var(--system-blue) 34%, transparent); }
-}
-
-.migration-reminder-glow { animation: migration-reminder-glow 1.8s ease-out 1; }
-@media (prefers-reduced-motion: reduce) {
-  .migration-reminder-glow { animation: none; }
-}
-
 /* ============================================
    Keyframe Animations
    ============================================ */

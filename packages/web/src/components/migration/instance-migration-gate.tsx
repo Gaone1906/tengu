@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
-import { Check, Copy, Sparkles } from "lucide-react"
+import { Check, ChevronRight, Copy } from "lucide-react"
 import { api, type InstanceMigration, type OpenInstanceMigrationResult } from "@/lib/api"
 import { queryKeys } from "@/lib/query-keys"
 import { Button } from "@/components/ui/button"
@@ -35,6 +35,7 @@ export function InstanceMigrationGate({
   const [dismissedKey, setDismissedKey] = useState<string | null>(null)
   const presentedKey = useRef<string | null>(null)
   const launching = useRef(false)
+  const titleRef = useRef<HTMLHeadingElement>(null)
   const query = useQuery({
     queryKey: queryKeys.instanceMigration,
     queryFn: service.get,
@@ -67,10 +68,13 @@ export function InstanceMigrationGate({
 
   if (!migration && query.isError) {
     return (
-      <div className="fixed inset-x-3 bottom-3 z-40 flex justify-center sm:inset-x-auto sm:right-5 sm:bottom-5">
-        <div className="flex w-full max-w-md flex-col gap-3 rounded-2xl bg-[var(--accent-fill)] p-4 text-sm text-foreground shadow-xl" role="alert">
+      <div className="fixed inset-x-3 bottom-[calc(49px+var(--safe-bottom)+0.75rem)] z-40 flex justify-center sm:inset-x-auto sm:right-5 lg:bottom-5">
+        <div
+          className="flex w-full max-w-md flex-col gap-3 rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-4 text-sm text-[var(--text-secondary)] shadow-[var(--shadow-overlay)]"
+          role="alert"
+        >
           <span>The migration service is temporarily unavailable. Your setup has not been changed.</span>
-          <Button className="min-h-10 self-end" size="sm" variant="outline" onClick={() => void query.refetch()}>
+          <Button className="min-h-10 self-end" size="sm" variant="ghost" onClick={() => void query.refetch()}>
             Retry migration check
           </Button>
         </div>
@@ -88,58 +92,78 @@ export function InstanceMigrationGate({
 
   return (
     <>
-      <div className="fixed inset-x-3 bottom-3 z-40 flex justify-center sm:inset-x-auto sm:right-5 sm:bottom-5">
-        <div className="flex w-full max-w-md flex-col items-stretch gap-2 sm:w-auto sm:items-end">
+      <div className="fixed inset-x-3 bottom-[calc(49px+var(--safe-bottom)+0.75rem)] z-40 flex justify-center sm:inset-x-auto sm:right-5 lg:bottom-5">
+        <div className="flex w-full max-w-sm flex-col items-stretch gap-2 sm:w-auto sm:items-end">
           {(query.isError || query.isRefetchError) && (
-            <Button className="min-h-10 self-end" size="sm" variant="outline" onClick={() => void query.refetch()}>
+            <Button className="min-h-10 self-end" size="sm" variant="ghost" onClick={() => void query.refetch()}>
               Retry migration check
             </Button>
           )}
           <button
-          type="button"
-          onClick={() => setOpen(true)}
-          aria-label={`Finish v${migration.toVersion} setup`}
-          className="migration-reminder-glow flex min-h-11 w-full max-w-md items-center gap-3 rounded-2xl px-4 py-3 text-left text-white shadow-xl transition-[transform,box-shadow] duration-150 ease-out active:scale-[0.96] motion-reduce:transition-none sm:w-auto"
-          style={{ background: "linear-gradient(120deg, var(--system-purple), var(--system-blue))" }}
-        >
-          <Sparkles className="size-5 shrink-0" aria-hidden="true" />
-          <span className="min-w-0 flex-1 text-sm font-semibold text-pretty">Finish v{migration.toVersion} setup</span>
-          <span className="rounded-full bg-[var(--accent)] px-2 py-1 text-xs font-semibold text-[var(--accent-contrast)]">Action</span>
+            type="button"
+            onClick={() => setOpen(true)}
+            aria-label={`Finish v${migration.toVersion} setup`}
+            className="group flex min-h-11 w-full items-center gap-2.5 rounded-full bg-[var(--pill-bg)] px-4 py-2.5 text-left shadow-[var(--shadow-overlay)] backdrop-blur-xl transition-transform duration-150 ease-out active:scale-[0.97] motion-reduce:transition-none sm:w-auto"
+          >
+            <span className="relative flex size-2 shrink-0" aria-hidden="true">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-60 motion-reduce:hidden" />
+              <span className="relative inline-flex size-2 rounded-full bg-[var(--accent)]" />
+            </span>
+            <span className="min-w-0 flex-1 text-sm font-medium text-[var(--text-primary)]">Finish v{migration.toVersion} setup</span>
+            <ChevronRight className="size-4 shrink-0 text-[var(--text-tertiary)] transition-transform duration-150 ease-out group-active:translate-x-0.5" aria-hidden="true" />
           </button>
         </div>
       </div>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[calc(100dvh-2rem)] max-w-[calc(100%-1.5rem)] overflow-y-auto rounded-3xl p-2 shadow-2xl motion-reduce:duration-0 sm:max-w-xl">
-          <div className="rounded-[22px] bg-[linear-gradient(145deg,color-mix(in_srgb,var(--system-purple)_16%,var(--bg)),color-mix(in_srgb,var(--system-blue)_10%,var(--bg)))] p-5 sm:p-7">
-            <DialogHeader className="gap-4 pr-5 text-left">
-              <div className="flex size-11 items-center justify-center rounded-xl text-white shadow-md" style={{ background: "linear-gradient(135deg, var(--system-purple), var(--system-blue))" }}>
-                <Sparkles className="size-5" aria-hidden="true" />
+        <DialogContent
+          className="max-h-[calc(100dvh-2rem)] max-w-[calc(100%-1.5rem)] rounded-[var(--radius-2xl)] border-0 bg-transparent p-0 shadow-[var(--shadow-overlay)] motion-reduce:duration-0 sm:max-w-md"
+          onOpenAutoFocus={(event) => {
+            // This is an informational modal — Radix would auto-focus the first
+            // action (Later), lighting the loud focus ring on the quiet dismiss.
+            // Anchor focus on the title instead; Tab then flows into the actions.
+            event.preventDefault()
+            titleRef.current?.focus()
+          }}
+        >
+          <div className="max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-[var(--radius-2xl)] bg-[var(--bg-secondary)] p-6 sm:p-7">
+            <DialogHeader className="gap-4 pr-8 text-left">
+              <div
+                className="flex size-11 items-center justify-center rounded-[var(--radius-lg)] bg-[var(--fill-secondary)] text-[22px] leading-none [font-variant-emoji:emoji]"
+                aria-hidden="true"
+              >
+                {"\u{1F9DE}\u{FE0F}"}
               </div>
               <div className="space-y-2">
-                <DialogTitle className="text-balance text-2xl leading-tight">v{migration.toVersion} is installed. Your custom setup is safe.</DialogTitle>
-                <DialogDescription className="text-pretty text-base leading-6 text-foreground/75">
-                  One guided merge will bring your instance up to date. A verified snapshot is created before the COO session starts.
+                <DialogTitle
+                  ref={titleRef}
+                  tabIndex={-1}
+                  className="text-balance text-[length:var(--text-title2)] font-semibold leading-snug text-[var(--text-primary)] outline-none"
+                >
+                  v{migration.toVersion} is installed. Your custom setup is safe.
+                </DialogTitle>
+                <DialogDescription className="text-pretty text-[length:var(--text-subheadline)] leading-6 text-[var(--text-secondary)]">
+                  One guided merge brings your instance up to date. A verified snapshot is created before the COO session starts.
                 </DialogDescription>
               </div>
             </DialogHeader>
 
-            <div className="mt-5 flex flex-wrap items-center gap-2 text-sm">
-              <span className="rounded-full bg-[var(--accent)] px-3 py-1.5 font-semibold text-[var(--accent-contrast)]">Setup needed</span>
-              <span className="text-foreground/70">v{migration.fromVersion} → v{migration.toVersion}</span>
-              <span className="text-foreground/55">{migration.changedFiles.length} files to review</span>
+            <div className="mt-5 flex flex-wrap items-center gap-2 text-[length:var(--text-footnote)] text-[var(--text-tertiary)]">
+              <span>v{migration.fromVersion} → v{migration.toVersion}</span>
+              <span className="size-1 shrink-0 rounded-full bg-[var(--text-quaternary)]" aria-hidden="true" />
+              <span>{migration.changedFiles.length} {migration.changedFiles.length === 1 ? "file" : "files"} to review</span>
             </div>
 
             {(query.isError || launch.isError) && (
-              <div className="mt-4 rounded-xl bg-[var(--accent-fill)] p-3 text-sm text-foreground" role="alert">
+              <div className="mt-5 rounded-[var(--radius-lg)] bg-[var(--fill-secondary)] p-3 text-[length:var(--text-footnote)] text-[var(--text-secondary)]" role="alert">
                 The migration service is temporarily unavailable. Your reminder remains here.
-                <Button className="ml-2 min-h-10" size="sm" variant="outline" onClick={() => void query.refetch()}>Retry migration check</Button>
+                <Button className="ml-2 min-h-10" size="sm" variant="ghost" onClick={() => void query.refetch()}>Retry migration check</Button>
               </div>
             )}
 
-            <DialogFooter className="mt-7 flex-col-reverse sm:flex-row sm:items-center">
+            <DialogFooter className="mt-7 gap-2 sm:items-center">
               <Button
-                className="min-h-11"
+                className="w-full min-h-11 text-[var(--text-secondary)] sm:mr-auto sm:w-auto"
                 variant="ghost"
                 onClick={() => {
                   setOpen(false)
@@ -148,12 +172,16 @@ export function InstanceMigrationGate({
               >
                 Later
               </Button>
-              <Button className="min-h-11" variant="outline" onClick={() => void copyPrompt()}>
+              <Button
+                className="w-full min-h-11 bg-[var(--fill-secondary)] text-[var(--text-primary)] hover:bg-[var(--fill-primary)] sm:w-auto"
+                variant="ghost"
+                onClick={() => void copyPrompt()}
+              >
                 {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
                 Copy migration prompt
               </Button>
               <Button
-                className="min-h-11 bg-[var(--system-purple)] text-white hover:opacity-90"
+                className="w-full min-h-11 bg-[var(--accent)] text-[var(--accent-contrast)] hover:opacity-90 sm:w-auto"
                 disabled={launch.isPending}
                 onClick={() => {
                   if (launching.current) return
@@ -161,7 +189,6 @@ export function InstanceMigrationGate({
                   launch.mutate()
                 }}
               >
-                <Sparkles aria-hidden="true" />
                 {launch.isPending ? "Opening…" : "Open with COO"}
               </Button>
             </DialogFooter>

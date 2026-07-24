@@ -121,10 +121,100 @@ describe("InstanceMigrationGate", () => {
     const dialog = await screen.findByRole("dialog")
     expect(dialog.className).toContain("max-w")
     expect(dialog.className).toContain("motion-reduce")
-    expect(dialog.innerHTML).toContain("var(--bg)")
+    expect(dialog.innerHTML).toContain("var(--bg-secondary)")
     expect(dialog.innerHTML).not.toContain("var(--background)")
     fireEvent.keyDown(document, { key: "Escape" })
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
     expect(screen.getByRole("button", { name: /Finish v0\.26\.0 setup/ })).not.toBeNull()
+  })
+
+  it("keeps the reminder pill above the mobile tab bar + safe area (no bottom-tab collision)", async () => {
+    setup()
+    // Escape un-inerts the banner from the modal's aria-hidden subtree without dismissing it.
+    await screen.findByRole("dialog")
+    fireEvent.keyDown(document, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    const wrapper = screen.getByRole("button", { name: /Finish v0\.26\.0 setup/ }).closest("div.fixed")
+    expect(wrapper).not.toBeNull()
+    // Mobile bottom reserves the 49px tab bar + safe-area inset (the tab bar is
+    // lg:hidden, so it occupies the bottom on every width below lg) — not the old
+    // bottom-3 that parked the pill under the bar.
+    expect(wrapper!.className).toContain("49px")
+    expect(wrapper!.className).toContain("var(--safe-bottom)")
+    expect(wrapper!.className).not.toContain("bottom-3")
+    // Desktop (lg: the tab bar is gone) drops back to the resting bottom-5.
+    expect(wrapper!.className).toContain("lg:bottom-5")
+    expect(wrapper!.className).not.toContain("sm:bottom-5")
+  })
+
+  it("keeps the initial-service-error alert above the mobile tab bar + safe area", async () => {
+    const get = vi.fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockRejectedValue(new Error("offline"))
+    setup({ get })
+    const alert = await screen.findByRole("alert")
+    const wrapper = alert.closest("div.fixed")
+    expect(wrapper).not.toBeNull()
+    expect(wrapper!.className).toContain("49px")
+    expect(wrapper!.className).toContain("var(--safe-bottom)")
+    expect(wrapper!.className).not.toContain("bottom-3")
+    expect(wrapper!.className).toContain("lg:bottom-5")
+    expect(wrapper!.className).not.toContain("sm:bottom-5")
+  })
+
+  it("focuses the informational title on open, not the Later dismiss action, and keeps Later keyboard-reachable", async () => {
+    setup()
+    const dialog = await screen.findByRole("dialog")
+    const title = screen.getByRole("heading", { name: /v0\.26\.0 is installed/ })
+    const later = screen.getByRole("button", { name: "Later" })
+
+    // Radix default auto-focuses the first tabbable (Later), which lights the loud
+    // amber focus ring on the quiet dismiss action. We intentionally focus the
+    // informational title instead so no action carries a focus ring at rest.
+    await waitFor(() => expect(document.activeElement).toBe(title))
+    expect(document.activeElement).not.toBe(later)
+
+    // The title receives focus only as an informational anchor — programmatic, via
+    // tabIndex -1, and never part of the Tab sequence.
+    expect(title.getAttribute("tabindex")).toBe("-1")
+
+    // Later stays a real, enabled control in the tab order (focus was redirected,
+    // not suppressed): Tab from the title moves keyboard focus onto it.
+    expect(later.hasAttribute("disabled")).toBe(false)
+    expect(later.getAttribute("tabindex")).not.toBe("-1")
+    await userEvent.tab()
+    expect(document.activeElement).toBe(later)
+  })
+
+  it("renders the Quiet Notice family: calm neutral material, amber only on the primary action, no purple gradient", async () => {
+    setup()
+    const dialog = await screen.findByRole("dialog")
+
+    // Calm neutral Ledger material replaces the retired purple→blue gradient
+    expect(dialog.innerHTML).toContain("var(--bg-secondary)")
+    expect(dialog.innerHTML).not.toContain("linear-gradient")
+    expect(dialog.innerHTML).not.toContain("var(--system-purple)")
+    expect(dialog.innerHTML).not.toContain("var(--system-blue)")
+
+    // Amber (accent) is spent ONLY on the primary "Open with COO" action
+    const open = screen.getByRole("button", { name: "Open with COO" })
+    expect(open.outerHTML).toContain("var(--accent)")
+    const copy = screen.getByRole("button", { name: "Copy migration prompt" })
+    expect(copy.outerHTML).not.toContain("var(--accent)")
+
+    // Escape closes the dialog but keeps the reminder (no dismissal), exposing
+    // the banner to the accessibility tree that the modal otherwise inerts.
+    fireEvent.keyDown(document, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+
+    // Banner is one quiet pill in the same family: a Finish action, no loud
+    // "Action" badge and no gradient treatment.
+    const banner = screen.getByRole("button", { name: /Finish v0\.26\.0 setup/ })
+    expect(banner.outerHTML).not.toContain("linear-gradient")
+    expect(banner.outerHTML).not.toContain("var(--system-purple)")
+    expect(banner.outerHTML).not.toContain("var(--system-blue)")
+    expect(banner.textContent).not.toContain("Action")
   })
 })
