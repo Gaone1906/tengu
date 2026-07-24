@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { realpathSync } from "node:fs";
 import os from "node:os";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import pkg from "../package.json" with { type: "json" };
 import { assertNativeRuntime } from "../src/shared/runtime-guard.js";
 import { loadInstances } from "../src/instances/directory.js";
@@ -222,4 +223,13 @@ withJson(workflow.command("retry <workflowId> <runId> <nodeId>").requiredOption(
 }
 
 export function buildProgram(): Command { return program; }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) program.parse();
+export function isDirectExecution(moduleUrl: string, argvPath: string | undefined): boolean {
+  if (!argvPath) return false;
+  try {
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(argvPath);
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectExecution(import.meta.url, process.argv[1])) program.parse();

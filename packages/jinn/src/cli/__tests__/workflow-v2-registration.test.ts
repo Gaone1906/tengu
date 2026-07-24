@@ -1,7 +1,12 @@
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
-import { buildProgram } from "../../../bin/jinn.js";
+import * as cliEntry from "../../../bin/jinn.js";
+
+const { buildProgram } = cliEntry;
 
 const EXPECTED: Record<string, string[]> = {
   list: ["--cursor", "--limit", "--json"], get: ["--json"], create: ["--file", "--json"],
@@ -16,6 +21,24 @@ const EXPECTED: Record<string, string[]> = {
 };
 
 describe("Workflow v2 Commander registration", () => {
+  it("recognizes an npm-style symlink as direct CLI execution", () => {
+    const isDirectExecution = (cliEntry as unknown as {
+      isDirectExecution?: (moduleUrl: string, argvPath: string) => boolean;
+    }).isDirectExecution;
+    expect(typeof isDirectExecution).toBe("function");
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-cli-entry-"));
+    try {
+      const target = path.join(dir, "jinn.js");
+      const shim = path.join(dir, "jinn");
+      fs.writeFileSync(target, "");
+      fs.symlinkSync(target, shim);
+      expect(isDirectExecution?.(pathToFileURL(target).href, shim)).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps every CLI FunctionLike within the Task14 KISS caps", () => {
     const file = new URL("../../../bin/jinn.ts", import.meta.url);
     const sourceText = fs.readFileSync(file, "utf8");

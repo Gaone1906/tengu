@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.28.1] - 2026-07-24
+
+### 🐛 Fixes
+- **The npm-installed `jinn` command starts normally.** The v0.28 CLI registration guard now resolves npm's executable symlink before deciding whether to parse arguments, preventing `jinn --help`, `jinn --version`, and every operational command from exiting silently.
+
 ## [0.28.0] - 2026-07-24
 
 > Workflows become an explicit, observable execution contract; Todos grow into a collaborative hierarchy; and one Jinn installation can now launch and manage multiple isolated workspaces.
