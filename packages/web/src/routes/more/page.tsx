@@ -199,6 +199,7 @@ function WorkspacesGroup() {
   const startWorkspace = useStartWorkspace()
   const [creating, setCreating] = useState(false)
   const [startError, setStartError] = useState<{ id: string; message: string } | null>(null)
+  const [showOffline, setShowOffline] = useState(false)
 
   async function handleStart(workspace: WorkspaceInfo) {
     setStartError(null)
@@ -210,11 +211,23 @@ function WorkspacesGroup() {
     }
   }
 
+  // Mirrors the desktop launcher: offline workspaces are tucked behind a
+  // disclosure so the ones you can actually switch to aren't buried. A
+  // workspace mid-start (or showing a start error) stays visible regardless.
+  const isVisible = (workspace: WorkspaceInfo) =>
+    workspace.running ||
+    workspace.current ||
+    (startWorkspace.isPending && startWorkspace.variables === workspace.id) ||
+    startError?.id === workspace.id
+  const online = workspaces.filter(isVisible)
+  const offline = workspaces.filter((workspace) => !isVisible(workspace))
+  const visible = showOffline ? [...online, ...offline] : online
+
   return (
     <>
       <GroupLabel>Workspaces</GroupLabel>
       <Card>
-        {workspaces.map((workspace, index) => (
+        {visible.map((workspace, index) => (
           <WorkspaceRow
             key={workspace.id}
             workspace={workspace}
@@ -224,6 +237,28 @@ function WorkspacesGroup() {
             error={startError?.id === workspace.id ? startError.message : undefined}
           />
         ))}
+        {offline.length > 0 && (
+          <button
+            type="button"
+            aria-expanded={showOffline}
+            onClick={() => setShowOffline((value) => !value)}
+            className={cn(
+              "flex h-[52px] w-full items-center gap-3 px-3.5 text-left text-[var(--text-secondary)] transition-colors active:bg-[var(--fill-secondary)]",
+              visible.length > 0 && "border-t-[0.5px] border-[var(--separator)]",
+            )}
+          >
+            <span className="flex size-[29px] shrink-0 items-center justify-center rounded-[8px] bg-[var(--fill-tertiary)] text-[var(--text-tertiary)]">
+              <ChevronRight
+                size={17}
+                aria-hidden
+                className={cn("transition-transform duration-150", showOffline && "rotate-90")}
+              />
+            </span>
+            <span className="flex-1 text-[length:var(--text-body)] font-[var(--weight-medium)] tracking-[-0.01em]">
+              {showOffline ? "Hide offline" : `${offline.length} offline`}
+            </span>
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setCreating(true)}

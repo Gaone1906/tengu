@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Check, Layers3, LoaderCircle, Plus } from "lucide-react"
+import { Check, ChevronRight, Layers3, LoaderCircle, Plus } from "lucide-react"
 import type { WorkspaceInfo } from "@/lib/api"
 import { useStartWorkspace, useWorkspaces } from "@/hooks/use-workspaces"
 import { cn } from "@/lib/utils"
@@ -89,6 +89,30 @@ export function WorkspaceLauncher({
   startError?: { id: string; message: string } | null
   className?: string
 }) {
+  const [showOffline, setShowOffline] = useState(false)
+
+  // A workspace stays in the always-visible group while it is starting or is
+  // showing a start error, so its row never vanishes mid-action when the
+  // offline section happens to be collapsed.
+  const isVisible = (workspace: WorkspaceInfo) =>
+    workspace.running ||
+    workspace.current ||
+    (workspace.id !== undefined && (startingId === workspace.id || startError?.id === workspace.id))
+  const online = workspaces.filter(isVisible)
+  const offline = workspaces.filter((workspace) => !isVisible(workspace))
+
+  // A gateway older than this launcher serves rows without an id, so every
+  // `=== workspace.id` must survive undefined on both sides.
+  const renderRow = (workspace: WorkspaceInfo) => (
+    <WorkspaceRow
+      key={workspace.id ?? workspace.name}
+      workspace={workspace}
+      onStart={onStart}
+      starting={workspace.id !== undefined && startingId === workspace.id}
+      error={startError && startError.id === workspace.id ? startError.message : undefined}
+    />
+  )
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -118,17 +142,31 @@ export function WorkspaceLauncher({
         <DropdownMenuLabel className="px-2.5 pb-1 pt-2 text-[length:var(--text-caption2)] font-[var(--weight-bold)] uppercase tracking-[0.08em] text-[var(--text-tertiary)]">
           Workspaces
         </DropdownMenuLabel>
-        {workspaces.map((workspace) => (
-          // A gateway older than this launcher serves rows without an id, so
-          // every `=== workspace.id` must survive undefined on both sides.
-          <WorkspaceRow
-            key={workspace.id ?? workspace.name}
-            workspace={workspace}
-            onStart={onStart}
-            starting={workspace.id !== undefined && startingId === workspace.id}
-            error={startError && startError.id === workspace.id ? startError.message : undefined}
-          />
-        ))}
+        {online.map(renderRow)}
+        {offline.length > 0 && (
+          // Kept as a DropdownMenuItem (not a Collapsible) so Radix's roving
+          // tabindex and typeahead still work; preventDefault keeps the menu
+          // open on select, matching the model picker's "More models" toggle.
+          <DropdownMenuItem
+            aria-expanded={showOffline}
+            onSelect={(event) => {
+              event.preventDefault()
+              setShowOffline((value) => !value)
+            }}
+            className="min-h-9 rounded-[10px] px-2.5 text-[length:var(--text-caption1)] text-[var(--text-tertiary)] focus:bg-[var(--fill-secondary)] focus:text-[var(--text-secondary)]"
+          >
+            <ChevronRight
+              size={13}
+              aria-hidden
+              className={cn(
+                "shrink-0 text-[var(--text-quaternary)] transition-transform duration-150",
+                showOffline && "rotate-90",
+              )}
+            />
+            {showOffline ? "Hide offline" : `${offline.length} offline`}
+          </DropdownMenuItem>
+        )}
+        {showOffline && offline.map(renderRow)}
         <DropdownMenuSeparator className="mx-2 my-1 bg-[var(--separator)]" />
         <DropdownMenuItem
           onSelect={onAdd}
