@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.28.5] - 2026-07-25
+
+### ⚡ Performance
+- **Claude sessions really do run to the model's full context window now.** Every Claude session is routed through a per-session loopback proxy that forwards requests to the Anthropic API unchanged, which means `ANTHROPIC_BASE_URL` points at `127.0.0.1`. Claude Code decides whether a session is first-party by matching that host name, so the loopback address failed the check and the session silently fell back to a 200K context window even on a model whose real window is 1M. Because the auto-compact budget is clamped to the model window, this also neutralized the 1M request added in 0.28.4 — that change could never take effect. The engine now asserts first-party for its own proxy, restoring the true ceiling: a verified session reached 323K tokens in a single request with no compaction, where the same session previously compacted at 170K.
+
+### 🐛 Fixes
+- **A gateway launched from inside another Claude session no longer inherits a dead API endpoint.** `ANTHROPIC_BASE_URL` is now stripped from the environment handed to Claude processes, so a nested launch cannot point a new session at the parent's proxy port.
+
 ## [0.28.4] - 2026-07-25
 
 ### ⚡ Performance
