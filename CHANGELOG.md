@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.28.6] - 2026-07-25
+
+### 🐛 Fixes
+- **Claude models show their real names again.** Claude Code stores its credentials in the macOS login Keychain and writes no `~/.claude/.credentials.json`, but model discovery only read the file and the environment variable. On a stock macOS install it therefore found no token, returned zero models, and silently fell back to the hardcoded offline catalog — so the picker offered "Opus (Latest)" instead of "Opus 5". Discovery now reads the Keychain, using the same reader as the usage screen rather than a second copy that had drifted. A discovery that yields no models is also logged as a warning instead of passing for a healthy catalog.
+- **The engine menu shows the context meter again.** The offline fallback models carry no context window, and merging discarded the configured value along with the stale label, so a failed discovery left the meter with no denominator and it disappeared entirely. A configured context window now fills that gap while live discovery still wins on names and effort levels.
+- **Attaching an image no longer hangs the turn.** Claude Code's terminal UI auto-attaches any pasted path that resolves to a real image file and discards keystrokes while it encodes the file — including the Enter that submits the message, which was sent on a fixed 150 ms delay. Any real screenshot takes longer than that to encode, so the message sat in the input box with no response and no error. Attachment paths are now passed in a form the UI does not try to auto-attach, removing the race rather than waiting on it.
+- **A turn that loses its completion signal now ends instead of hanging forever.** Recovering a turn whose completion hook was lost requires the engine's session id to locate its transcript. On a session's first turn that id can be missing too, leaving no way to recover and nothing to end the turn — the session stayed "thinking" indefinitely and every message queued behind it was never delivered. Such a turn now settles with a clear error once it has been idle long enough that recovery has demonstrably failed.
+- **Compaction summaries are dropped before they are stored.** The gate meant to discard them decided on the first piece of each message, which is always usage metadata, so it passed every message through and never dropped anything. The summary was still streamed and saved, leaving a phantom message in the transcript that only the interface hid.
+- **Sessions started from the web record their turns and cost.** The web session runner never accumulated either, so those sessions always reported zero. Because employee budgets are enforced from total spend and most turns are web-sourced, budget caps were effectively unenforced. Both runners now share one accounting path. Claude turn cost is also measured per turn rather than from the start of the session, which previously counted long conversations several times over.
+- **A gateway started in the foreground can be stopped and restarted.** Ownership was determined by reading the running process's environment, which only a background daemon carries, so `jinn stop` and `jinn restart` refused to manage a foreground gateway and reported that the port belonged to another instance. Ownership now also accepts the gateway record written inside the instance's own home, while still refusing a genuinely foreign instance.
+- **The workspace switcher leads with the workspaces you can use.** Every entry ever registered was listed, so on a machine with many past sandboxes the running workspaces were buried among dozens of offline ones. Offline workspaces are now collapsed behind a count you can expand, on both desktop and mobile; starting one still works as before.
+
+### 🪄 Docs
+- Added a testing guide for the gateway package covering the isolated-home invariant, so a test run cannot write into a live instance's data.
+
 ## [0.28.5] - 2026-07-25
 
 ### ⚡ Performance
