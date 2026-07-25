@@ -142,6 +142,55 @@ describe("migration snapshots", () => {
     })
   })
 
+  it("materializes nothing for an empty bundle, so a no-op migration needs no symlink privilege", () => {
+    // Patch upgrades routinely ship empty bridges (0.28.3 and 0.28.4 both have
+    // "files": []). The snapshot used to copy config.yaml/CLAUDE.md/AGENTS.md
+    // regardless, and AGENTS.md is a symlink in the layout `jinn setup` creates —
+    // so on Windows without SeCreateSymbolicLinkPrivilege the snapshot threw
+    // EPERM and the migration could never complete.
+    const home = fixture()
+    const options = {
+      instanceHome: home,
+      migrationKey: "c".repeat(64),
+      fromVersion: "0.28.2",
+      toVersion: "0.28.4",
+      changedFiles: [],
+    }
+    const snapshot = createMigrationSnapshot(options)
+
+    // No entries copied at all — in particular no symlink was created.
+    expect(fs.existsSync(path.join(snapshot.path, "AGENTS.md"))).toBe(false)
+    expect(fs.existsSync(path.join(snapshot.path, "CLAUDE.md"))).toBe(false)
+    expect(fs.existsSync(path.join(snapshot.path, "config.yaml"))).toBe(false)
+    expect(JSON.parse(fs.readFileSync(path.join(snapshot.path, "snapshot.json"), "utf8")).files).toEqual([])
+
+    // The directory and receipt still exist and verify, which is what the
+    // completion gate requires before it will advance the version marker.
+    expect(verifyMigrationSnapshot(options)).toBe(true)
+    expect(createMigrationSnapshot(options)).toEqual({ path: snapshot.path, reused: true })
+
+    // The instance itself is untouched.
+    expect(fs.lstatSync(path.join(home, "AGENTS.md")).isSymbolicLink()).toBe(true)
+  })
+
+  it("still snapshots the context files when the bundle has records to compare", () => {
+    // Guard the narrow scope of the fix above: a real migration must keep its
+    // three-way comparison material.
+    const home = fixture()
+    const options = {
+      instanceHome: home,
+      migrationKey: "d".repeat(64),
+      fromVersion: "0.25.0",
+      toVersion: "0.26.0",
+      changedFiles: [{ path: "skills/stock/SKILL.md", operation: "modify" as const }],
+    }
+    const snapshot = createMigrationSnapshot(options)
+    expect(fs.lstatSync(path.join(snapshot.path, "AGENTS.md")).isSymbolicLink()).toBe(true)
+    expect(fs.existsSync(path.join(snapshot.path, "CLAUDE.md"))).toBe(true)
+    expect(fs.existsSync(path.join(snapshot.path, "config.yaml"))).toBe(true)
+    expect(verifyMigrationSnapshot(options)).toBe(true)
+  })
+
   it("refuses unsafe, excluded, and escaping paths", () => {
     const home = fixture()
     for (const changedPath of ["../outside", "secrets/token", "sessions/registry.db", "/tmp/outside"]) {

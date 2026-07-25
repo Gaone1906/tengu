@@ -77,6 +77,19 @@ function safePath(instanceHome: string, relative: string): string {
 }
 
 function selectedPaths(options: MigrationSnapshotOptions): string[] {
+  // No changed records means no three-way comparison to perform, so the context
+  // files below have nothing to support. Materializing them anyway is not merely
+  // wasted work: an instance whose AGENTS.md is a symlink (the layout `jinn setup`
+  // creates) forces fs.symlinkSync, which Windows refuses without
+  // SeCreateSymbolicLinkPrivilege — so a no-op patch migration became impossible
+  // to complete there, surfacing only as "the migration service is temporarily
+  // unavailable". Empty bundles are the common case for patch upgrades.
+  //
+  // Both createMigrationSnapshot and verifyMigrationSnapshot derive their file
+  // set from here, so the snapshot and its verification stay consistent; the
+  // snapshot directory and snapshot.json are still written, which is what the
+  // completion receipt needs.
+  if (options.changedFiles.length === 0) return []
   const paths = new Set(options.changedFiles.map((file) => file.path))
   paths.add("config.yaml")
   paths.add("CLAUDE.md")

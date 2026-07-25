@@ -199,4 +199,24 @@ describe("instance migration API", () => {
     expect((await request("GET", "/api/instance-migration")).status).toBe(500)
     expect(registry.listSessions()).toHaveLength(0)
   })
+
+  it("classifies a refused symlink so the operator is told which knob to turn", () => {
+    // Windows without SeCreateSymbolicLinkPrivilege reports EPERM from
+    // fs.symlinkSync. Collapsing that into a bare "service unavailable" hid a
+    // fixable local condition behind a message that reads as a transient outage.
+    const denied = Object.assign(new Error("EPERM: operation not permitted, symlink 'CLAUDE.md' -> '/snap/AGENTS.md'"), {
+      code: "EPERM",
+      syscall: "symlink",
+    })
+    expect(api.isSymlinkPrivilegeError(denied)).toBe(true)
+    expect(api.isSymlinkPrivilegeError(Object.assign(new Error("nope"), { code: "EACCES", syscall: "symlink" }))).toBe(true)
+    // Message-only fallback, for errors that lost their syscall metadata.
+    expect(api.isSymlinkPrivilegeError(new Error("EPERM: operation not permitted, symlink 'a' -> 'b'"))).toBe(true)
+
+    // Unrelated failures must NOT claim a symlink remedy.
+    expect(api.isSymlinkPrivilegeError(Object.assign(new Error("ENOSPC: no space"), { code: "ENOSPC", syscall: "write" }))).toBe(false)
+    expect(api.isSymlinkPrivilegeError(new Error("existing migration snapshot failed verification"))).toBe(false)
+    expect(api.isSymlinkPrivilegeError("EPERM symlink")).toBe(false)
+    expect(api.isSymlinkPrivilegeError(undefined)).toBe(false)
+  })
 })

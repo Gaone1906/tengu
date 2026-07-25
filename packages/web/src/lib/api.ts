@@ -117,13 +117,17 @@ export class ApiError extends Error {
   readonly status: number
   readonly code?: string
   readonly currentVersion?: number
+  /** Operator-actionable guidance from the server, when the failure is one the
+   *  operator can fix locally (e.g. a missing OS privilege). Shown verbatim. */
+  readonly remedy?: string
 
-  constructor(status: number, message: string, code?: string, currentVersion?: number) {
+  constructor(status: number, message: string, code?: string, currentVersion?: number, remedy?: string) {
     super(message)
     this.name = "ApiError"
     this.status = status
     this.code = code
     this.currentVersion = currentVersion
+    this.remedy = remedy
   }
 }
 
@@ -144,6 +148,7 @@ async function responseError(res: Response): Promise<ApiError> {
   let message = `API error: ${res.status}`
   let code: string | undefined
   let currentVersion: number | undefined
+  let remedy: string | undefined
   try {
     const body = await res.json();
     if (body.error) message = String(body.error)
@@ -152,10 +157,11 @@ async function responseError(res: Response): Promise<ApiError> {
     if (typeof body.currentVersion === "number" && Number.isSafeInteger(body.currentVersion) && body.currentVersion >= 0) {
       currentVersion = body.currentVersion
     }
+    if (typeof body.remedy === "string" && body.remedy.trim()) remedy = body.remedy.trim()
   } catch {
     // Response wasn't JSON; status remains the typed UI-safe discriminator.
   }
-  return new ApiError(res.status, message, code, currentVersion)
+  return new ApiError(res.status, message, code, currentVersion, remedy)
 }
 
 async function get<T>(path: string, init?: RequestInit): Promise<T> {
