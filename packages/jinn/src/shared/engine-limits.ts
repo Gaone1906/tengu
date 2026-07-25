@@ -12,6 +12,7 @@ import type {
 } from "./types.js";
 import { CLAUDE_LIMITS_DIR } from "./paths.js";
 import { getModelRegistry } from "./models.js";
+import { readClaudeOAuthToken } from "./claude-models.js";
 import { resolveBin } from "./resolve-bin.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -106,38 +107,9 @@ function claudeSnapshotFile(dir: string): string | null {
 const CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_OAUTH_TIMEOUT_MS = 3500;
 
-function accessTokenFromCredentialsJson(raw: string): string | undefined {
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!isRecord(parsed)) return undefined;
-    const oauth = isRecord(parsed.claudeAiOauth) ? parsed.claudeAiOauth : undefined;
-    return oauth ? str(oauth.accessToken) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-async function readClaudeOAuthToken(): Promise<string | undefined> {
-  // macOS: Claude Code stores credentials in the login Keychain.
-  if (process.platform === "darwin") {
-    const fromKeychain = await new Promise<string | undefined>((resolve) => {
-      execFile(
-        "security",
-        ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
-        { timeout: 3000 },
-        (err, stdout) => resolve(err ? undefined : accessTokenFromCredentialsJson(stdout.trim())),
-      );
-    });
-    if (fromKeychain) return fromKeychain;
-  }
-  // Linux / fallback: plaintext credentials file.
-  try {
-    const file = path.join(os.homedir(), ".claude", ".credentials.json");
-    return accessTokenFromCredentialsJson(fs.readFileSync(file, "utf-8"));
-  } catch {
-    return undefined;
-  }
-}
+// The token reader lives in claude-models.ts and is shared. This file used to
+// keep a private copy; the two drifted (only this one learned to read the macOS
+// Keychain), which broke Claude model discovery. One reader, no drift.
 
 /**
  * Map an OAuth usage-API response to display windows, generically: every entry

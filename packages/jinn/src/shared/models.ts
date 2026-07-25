@@ -154,7 +154,18 @@ export async function refreshClaudeModels(config: JinnConfig): Promise<void> {
     discoveredClaudeModels = await discoverClaudeModels({
       effortLevels: discoveredClaudeEffortLevels.length > 0 ? discoveredClaudeEffortLevels : undefined,
     });
-    logger.info(`Claude model discovery: ${discoveredClaudeModels.models.length} model(s)`);
+    // Zero models means no usable OAuth token (or an empty catalog), and the
+    // registry then silently falls back to the hardcoded "<Name> (Latest)"
+    // labels. Warn so that degradation is diagnosable instead of looking like a
+    // real catalog — this failure went unnoticed precisely because it was INFO.
+    if (discoveredClaudeModels.models.length === 0) {
+      logger.warn(
+        "Claude model discovery returned 0 models — no usable OAuth token; " +
+          "falling back to the offline alias catalog. Run `claude login` to restore real model names.",
+      );
+    } else {
+      logger.info(`Claude model discovery: ${discoveredClaudeModels.models.length} model(s)`);
+    }
   } catch (err) {
     logger.warn(`Claude model discovery failed: ${err instanceof Error ? err.message : err}`);
     discoveredClaudeModels = null;
@@ -599,7 +610,18 @@ function mergeDiscoveredModels(
     seen.add(model.id);
     const configuredModel = configured.get(model.id);
     if (!configuredModel) return model;
-    if (!opts.configuredOverridesDiscovered) return model;
+    if (!opts.configuredOverridesDiscovered) {
+      // Discovery stays authoritative for label/effort (a stale configured label
+      // must not mask the live one). A contextWindow is different: it is purely
+      // additive when the entry has none. The offline Claude alias fallback ships
+      // without one, so without this the operator's configured window was dropped
+      // and the engine menu lost its context meter entirely whenever discovery
+      // failed. Fill the gap; never overwrite a discovered value.
+      if (typeof model.contextWindow !== "number" && typeof configuredModel.contextWindow === "number") {
+        return { ...model, contextWindow: configuredModel.contextWindow };
+      }
+      return model;
+    }
 
     const supportsEffort = configuredModel.supportsEffort ?? model.supportsEffort;
     return {

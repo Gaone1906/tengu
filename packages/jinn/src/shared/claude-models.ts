@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import type { ModelInfo } from "./types.js";
 
 export const CLAUDE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
@@ -232,11 +232,15 @@ export async function discoverClaudeEffortLevels(bin: string): Promise<string[]>
   return parseClaudeEffortLevels(output);
 }
 
-function tokenFromCredentialsFile(home: string): string | undefined {
+/**
+ * Parse an unexpired access token out of a Claude Code credentials blob. The
+ * same JSON shape is stored in the macOS Keychain and in the plaintext
+ * credentials file, so both sources share this parser.
+ */
+export function claudeTokenFromCredentialsJson(raw: string): string | undefined {
   try {
-    const credentialsPath = path.join(home, ".claude", ".credentials.json");
-    const raw = JSON.parse(fs.readFileSync(credentialsPath, "utf-8")) as Record<string, unknown>;
-    const oauth = raw.claudeAiOauth as Record<string, unknown> | undefined;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const oauth = parsed.claudeAiOauth as Record<string, unknown> | undefined;
     const token = typeof oauth?.accessToken === "string" ? oauth.accessToken.trim() : "";
     if (!token) return undefined;
     const expiresAt = oauth?.expiresAt;
@@ -251,10 +255,61 @@ function tokenFromCredentialsFile(home: string): string | undefined {
   }
 }
 
-export function readClaudeOAuthToken(home: string = os.homedir()): string | undefined {
+function tokenFromCredentialsFile(home: string): string | undefined {
+  try {
+    return claudeTokenFromCredentialsJson(
+      fs.readFileSync(path.join(home, ".claude", ".credentials.json"), "utf-8"),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function readMacosKeychainCredentials(): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile(
+      "security",
+      ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
+      { timeout: 3_000 },
+      (err, stdout) => resolve(err ? undefined : stdout.trim() || undefined),
+    );
+  });
+}
+
+export interface ReadClaudeOAuthTokenOptions {
+  home?: string;
+  /** Overridable so tests can exercise the darwin branch on any host. */
+  platform?: NodeJS.Platform;
+  /** Overridable so tests never shell out to the real Keychain. */
+  readKeychain?: () => Promise<string | undefined>;
+}
+
+/**
+ * Resolve the Claude Code OAuth token, in precedence order:
+ *   1. $CLAUDE_CODE_OAUTH_TOKEN
+ *   2. the macOS login Keychain (where Claude Code stores credentials on darwin)
+ *   3. the plaintext ~/.claude/.credentials.json (Linux, and older installs)
+ *
+ * Step 2 is why this is async. Omitting it made every Claude model discovery
+ * return zero models on a stock macOS install — Claude Code does not write the
+ * credentials file there — which silently degraded the model catalog to the
+ * hardcoded "<Name> (Latest)" offline labels. This is the single reader for
+ * the whole codebase; engine-limits.ts previously kept a second, divergent copy.
+ */
+export async function readClaudeOAuthToken(
+  options: ReadClaudeOAuthTokenOptions = {},
+): Promise<string | undefined> {
   const envToken = process.env.CLAUDE_CODE_OAUTH_TOKEN?.trim();
   if (envToken) return envToken;
-  return tokenFromCredentialsFile(home);
+
+  const platform = options.platform ?? process.platform;
+  if (platform === "darwin") {
+    const raw = await (options.readKeychain ?? readMacosKeychainCredentials)();
+    const token = raw ? claudeTokenFromCredentialsJson(raw) : undefined;
+    if (token) return token;
+  }
+
+  return tokenFromCredentialsFile(options.home ?? os.homedir());
 }
 
 export async function discoverClaudeModels(options: {
@@ -263,7 +318,7 @@ export async function discoverClaudeModels(options: {
   endpoint?: string;
   effortLevels?: readonly string[];
 } = {}): Promise<ClaudeModelDiscovery> {
-  const token = options.token ?? readClaudeOAuthToken();
+  const token = options.token ?? (await readClaudeOAuthToken());
   if (!token) return { models: [] };
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike | undefined);
   if (!fetchImpl) return { models: [] };

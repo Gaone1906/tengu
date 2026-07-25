@@ -99,6 +99,28 @@ describe("getModelRegistry with a models: block", () => {
     expect(reg.claude.models.find((m) => m.id === "opus")?.effortLevels).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
 
+  /**
+   * Regression guard for the vanished engine-menu context meter: when Claude
+   * model discovery fails (no OAuth token), the registry falls back to the
+   * offline alias catalog, whose entries carry no contextWindow. The configured
+   * window used to be discarded along with the stale label, so the UI had no
+   * denominator and hid the meter. The label must still stay fallback-owned.
+   */
+  it("keeps a configured contextWindow on fallback aliases while still ignoring the stale label", () => {
+    const reg = getModelRegistry(cfg({}, {
+      claude: {
+        default: "opus",
+        models: [
+          { id: "opus", label: "Opus 4.6", supportsEffort: true, effortLevels: ["low"], contextWindow: 1_000_000 },
+        ],
+      },
+    }));
+
+    const opus = reg.claude.models.find((m) => m.id === "opus");
+    expect(opus?.contextWindow).toBe(1_000_000);
+    expect(opus?.label).toBe("Opus (Latest)");
+  });
+
   it("resolves defaultModel from block.default, else the first model", () => {
     const reg = getModelRegistry(cfg({}, models));
     expect(reg.claude.defaultModel).toBe("opus");
