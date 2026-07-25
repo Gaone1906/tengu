@@ -10,6 +10,7 @@ import fs from "node:fs";
 
 // Records, per pty.spawn() call, whether the --settings file existed at that instant.
 const settingsExistedAtSpawn: boolean[] = [];
+const mcpConfigExistedAtSpawn: boolean[] = [];
 const spawnArgs: string[][] = [];
 
 interface FakePty {
@@ -46,6 +47,9 @@ vi.mock("node-pty", () => ({
     const i = args.indexOf("--settings");
     const settingsPath = i >= 0 ? args[i + 1] : "";
     settingsExistedAtSpawn.push(settingsPath ? fs.existsSync(settingsPath) : false);
+    const mcpIndex = args.indexOf("--mcp-config");
+    const mcpConfigPath = mcpIndex >= 0 ? args[mcpIndex + 1] : "";
+    mcpConfigExistedAtSpawn.push(mcpConfigPath ? fs.existsSync(mcpConfigPath) : false);
     const p = makeFakePty();
     ptys.push(p);
     return p;
@@ -67,6 +71,7 @@ import { InteractiveClaudeEngine } from "../claude-interactive.js";
 import { PtyLifecycleManager } from "../pty-lifecycle.js";
 import { cleanupSessionSettings, sessionSettingsPath } from "../../shared/claude-settings.js";
 import { CLAUDE_SETTINGS_DIR } from "../../shared/paths.js";
+import { cleanupMcpConfigFile, writeMcpConfigFile } from "../../mcp/resolver.js";
 
 const flush = () => new Promise((r) => setTimeout(r, 15));
 const SID = "test-settings-file-regression";
@@ -79,12 +84,16 @@ describe("InteractiveClaudeEngine — settings file survives model-switch cold r
   beforeEach(() => {
     ptys.length = 0;
     settingsExistedAtSpawn.length = 0;
+    mcpConfigExistedAtSpawn.length = 0;
     spawnArgs.length = 0;
     hookCb = undefined;
-    // Mirror the gateway wiring: onCleanup deletes the per-session --settings file.
+    // Mirror the gateway wiring: onCleanup deletes both per-session CLI files.
     lifecycle = new PtyLifecycleManager({
       maxLivePtys: 10,
-      onCleanup: (id) => cleanupSessionSettings(CLAUDE_SETTINGS_DIR, id),
+      onCleanup: (id) => {
+        cleanupSessionSettings(CLAUDE_SETTINGS_DIR, id);
+        cleanupMcpConfigFile(id);
+      },
     });
     const hookRegistry = {
       register: (_id: string, cb: (h: any) => void) => { hookCb = cb; },
@@ -96,6 +105,7 @@ describe("InteractiveClaudeEngine — settings file survives model-switch cold r
   afterEach(() => {
     lifecycle.killAll();
     cleanupSessionSettings(CLAUDE_SETTINGS_DIR, SID);
+    cleanupMcpConfigFile(SID);
   });
 
   it("the cold-respawned PTY is spawned against an EXISTING settings file", async () => {
@@ -118,6 +128,44 @@ describe("InteractiveClaudeEngine — settings file survives model-switch cold r
     expect(fs.existsSync(sessionSettingsPath(CLAUDE_SETTINGS_DIR, SID))).toBe(true);
 
     // Settle turn 2 so nothing dangles.
+    hookCb!({ hook_event_name: "SessionStart", session_id: "c2" });
+    hookCb!({ hook_event_name: "Stop", last_assistant_message: "done2" });
+    await flush();
+  });
+
+  it("the cold-respawned PTY is spawned against an EXISTING MCP config file", async () => {
+    const resolvedMcp = {
+      mcpServers: {
+        jinn: { command: "node", args: ["server.js"] },
+      },
+    } as any;
+
+    const first = engine.run({
+      sessionId: SID,
+      prompt: "a",
+      cwd: "/tmp",
+      model: "opus",
+      resolvedMcp,
+      mcpConfigPath: writeMcpConfigFile(resolvedMcp, SID),
+    } as any);
+    await flush();
+    hookCb!({ hook_event_name: "SessionStart", session_id: "c1" });
+    hookCb!({ hook_event_name: "Stop", last_assistant_message: "done1" });
+    await first;
+    expect(mcpConfigExistedAtSpawn[0]).toBe(true);
+
+    void engine.run({
+      sessionId: SID,
+      prompt: "b",
+      cwd: "/tmp",
+      model: "sonnet",
+      resolvedMcp,
+      mcpConfigPath: writeMcpConfigFile(resolvedMcp, SID),
+    } as any);
+    await flush();
+    expect(ptys.length).toBe(2);
+    expect(mcpConfigExistedAtSpawn[1]).toBe(true);
+
     hookCb!({ hook_event_name: "SessionStart", session_id: "c2" });
     hookCb!({ hook_event_name: "Stop", last_assistant_message: "done2" });
     await flush();

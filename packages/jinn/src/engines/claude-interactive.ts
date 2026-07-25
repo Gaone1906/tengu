@@ -16,6 +16,7 @@ import { SsePtyProxy, MAIN_AGENT_SENTINEL, type SseDataEvent, type UpstreamActiv
 import { neutralizeForPaste } from "../shared/skill-commands.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
 import { extractActivityReceiptId } from "../shared/activity-receipts.js";
+import { writeMcpConfigFile } from "../mcp/resolver.js";
 
 export type { PtyControlEvent } from "./pty-view-engine.js";
 
@@ -730,6 +731,11 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
       relayScript: HOOK_RELAY_SCRIPT,
       statusLineDir: CLAUDE_LIMITS_DIR,
     });
+    // A cold-respawn release cleans the per-session MCP file. Materialize the
+    // already-resolved config again at the boundary where Claude will read it.
+    if (!warm && opts.resolvedMcp) {
+      opts.mcpConfigPath = writeMcpConfigFile(opts.resolvedMcp, jinnSessionId);
+    }
     const nativeCommand = isNativeClaudeCommand(opts.prompt);
     const resolver = new TurnResolver({
       fallbackSessionId: opts.resumeSessionId,
