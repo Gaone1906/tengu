@@ -3,12 +3,12 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONFIG_PATH, PID_FILE, JINN_HOME, JINN_HOME_IDENTITY, resolveHomeIdentity } from "../shared/paths.js";
+import { CONFIG_PATH, PID_FILE, GATEWAY_INFO_FILE, JINN_HOME, JINN_HOME_IDENTITY, resolveHomeIdentity } from "../shared/paths.js";
 import { logger } from "../shared/logger.js";
 import type { JinnConfig } from "../shared/types.js";
 import { startGateway } from "./server.js";
 import { loadConfig } from "../shared/config.js";
-import { gatewayBaseUrl } from "./gateway-info.js";
+import { gatewayBaseUrl, readGatewayInfo } from "./gateway-info.js";
 import { ensureGatewayAuthToken } from "./auth.js";
 import { buildRestartEntryArgv } from "./restart-entry-options.js";
 
@@ -263,6 +263,22 @@ function assertPidBelongsToThisInstance(
 
   const owner = readProcessJinnHome(pid);
   if (owner.status === "found" && owner.identity === JINN_HOME_IDENTITY) return;
+
+  // A foreground gateway (`jinn start` without --daemon) IS the CLI process, so
+  // it inherits the user's shell env and carries no JINN_HOME — only a spawned
+  // daemon gets one injected. The env lookup therefore reports "unknown" and we
+  // would refuse to stop/restart our own gateway.
+  //
+  // gateway.json lives inside THIS home and records the running gateway's own
+  // pid, so a match is proof of ownership. Note gateway.pid is NOT usable here:
+  // only startDaemon() writes it, so it is absent in exactly the broken case.
+  //
+  // Consulted only when the env did NOT name a different home, so a genuinely
+  // foreign instance is still refused; the port check kills the recycled-pid case.
+  if (owner.status !== "found") {
+    const info = readGatewayInfo(GATEWAY_INFO_FILE);
+    if (info && info.pid === pid && info.port === port) return;
+  }
 
   if (!pidIsAlive(pid)) return;
   throw new PortOwnershipError(port, owner.status === "found" ? owner.jinnHome : "unknown");

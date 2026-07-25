@@ -19,7 +19,7 @@ engines:
 `);
 
 const { buildGatewayChildEnv, lookupPidOnPort, selectPortOwnerPid, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
-const { CONFIG_PATH, PID_FILE } = await import("../../shared/paths.js");
+const { CONFIG_PATH, PID_FILE, GATEWAY_INFO_FILE } = await import("../../shared/paths.js");
 const tmpHomeIdentity = fs.realpathSync.native(tmpHome);
 
 /** Pick a free ephemeral port (nothing will be listening on it afterwards). */
@@ -290,6 +290,94 @@ describe("stop / stopAndWait PID-file race", () => {
     await waitForListening(port);
 
     expect(lookupPidOnPort(port)).toEqual({ status: "found", pid: server.pid });
+  });
+});
+
+/**
+ * A foreground gateway (`jinn start`, no --daemon) is the CLI process itself, so
+ * it inherits the shell env and carries NO JINN_HOME — only a spawned daemon has
+ * one injected. Ownership used to be decided solely by reading the target
+ * process's env, so `stop`/`start`/`restart` all refused to manage a foreground
+ * gateway ("owned by another jinn instance (JINN_HOME=unknown)").
+ *
+ * These tests deliberately spawn WITHOUT JINN_HOME. Every other test in this file
+ * spawns in daemon shape, because the helper merges process.env (which the
+ * harness sets) — which is exactly why the gap went uncovered.
+ */
+describe("foreground gateway ownership (no JINN_HOME in env)", () => {
+  const children: ChildProcess[] = [];
+
+  afterEach(async () => {
+    for (const child of children.splice(0)) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      await waitForExit(child);
+    }
+    fs.rmSync(GATEWAY_INFO_FILE, { force: true });
+    fs.rmSync(PID_FILE, { force: true });
+  });
+
+  /** Spawn a listener whose env has NO JINN_HOME, i.e. the foreground shape. */
+  function spawnForegroundGatewayChild(port: number): ChildProcess {
+    const script = `
+      const net = require("node:net");
+      net.createServer().listen(${port}, "127.0.0.1");
+      process.on("SIGTERM", () => process.exit(0));
+      setInterval(() => {}, 1000);
+    `;
+    const env = { ...process.env };
+    delete env.JINN_HOME;
+    delete env.JINN_HOME_IDENTITY;
+    return spawn(process.execPath, ["-e", script], { stdio: "ignore", env });
+  }
+
+  function writeGatewayJson(port: number, pid: number): void {
+    fs.writeFileSync(GATEWAY_INFO_FILE, JSON.stringify({ port, host: "127.0.0.1", pid, secret: "s" }), { mode: 0o600 });
+  }
+
+  it("stops a foreground gateway whose pid is recorded in gateway.json", async () => {
+    const port = await freePort();
+    const child = spawnForegroundGatewayChild(port);
+    children.push(child);
+    await waitForSpawn(child);
+    await waitForListening(port);
+    writeGatewayJson(port, child.pid!);
+
+    // Before the fix this threw PortOwnershipError.
+    expect(() => stop(port)).not.toThrow();
+    await waitForExit(child);
+  });
+
+  it("still refuses a foreign instance even when a stale gateway.json names its pid", async () => {
+    const foreignHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-foreign-"));
+    try {
+      const port = await freePort();
+      // Spawned WITH a different JINN_HOME → the env lookup resolves to another
+      // home, so the gateway.json fallback must not be consulted at all.
+      const child = spawnListeningGatewayChild(port, { jinnHome: foreignHome });
+      children.push(child);
+      await waitForSpawn(child);
+      await waitForListening(port);
+      writeGatewayJson(port, child.pid!);
+
+      expect(() => stop(port)).toThrow(/owned by another jinn instance/i);
+    } finally {
+      fs.rmSync(foreignHome, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses when gateway.json names the pid but a different port (recycled pid)", async () => {
+    const port = await freePort();
+    const child = spawnForegroundGatewayChild(port);
+    children.push(child);
+    await waitForSpawn(child);
+    await waitForListening(port);
+    writeGatewayJson(port + 1, child.pid!);
+
+    expect(() => stop(port)).toThrow(/owned by another jinn instance/i);
   });
 });
 
