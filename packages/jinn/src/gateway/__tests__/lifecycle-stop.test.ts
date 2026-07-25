@@ -9,6 +9,14 @@ import path from "node:path";
 // PID_FILE resolves inside it.
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-lifecycle-stop-"));
 process.env.JINN_HOME = tmpHome;
+fs.writeFileSync(path.join(tmpHome, "config.yaml"), `
+gateway:
+  host: 127.0.0.1
+  port: 7777
+engines:
+  default: claude
+  claude: {}
+`);
 
 const { buildGatewayChildEnv, lookupPidOnPort, selectPortOwnerPid, shouldSignalPidFileProcess, stop, stopAndWait } = await import("../lifecycle.js");
 const { CONFIG_PATH, PID_FILE } = await import("../../shared/paths.js");
@@ -41,7 +49,7 @@ function spawnIgnoringSigtermChild(): ChildProcess {
 
 function spawnListeningGatewayChild(
   port: number,
-  opts: { sigtermDelayMs?: number; ignoreSigterm?: boolean; jinnHome?: string },
+  opts: { host?: string; sigtermDelayMs?: number; ignoreSigterm?: boolean; jinnHome?: string },
 ): ChildProcess {
   const sigtermHandler = opts.ignoreSigterm
     ? `process.on("SIGTERM", () => {});`
@@ -49,7 +57,7 @@ function spawnListeningGatewayChild(
   const script = `
     const net = require("node:net");
     const server = net.createServer();
-    server.listen(${port}, "127.0.0.1");
+    server.listen(${port}, ${JSON.stringify(opts.host ?? "127.0.0.1")});
     ${sigtermHandler}
     setInterval(() => {}, 1000);
   `;
@@ -81,11 +89,11 @@ function waitForExit(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => child.once("exit", () => resolve()));
 }
 
-async function waitForListening(port: number): Promise<void> {
+async function waitForListening(port: number, host = "127.0.0.1"): Promise<void> {
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
     const ok = await new Promise<boolean>((resolve) => {
-      const socket = net.connect({ port, host: "127.0.0.1" }, () => {
+      const socket = net.connect({ port, host }, () => {
         socket.destroy();
         resolve(true);
       });
@@ -260,6 +268,26 @@ describe("stop / stopAndWait PID-file race", () => {
     children.push(client);
     await waitForSpawn(client);
     await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(lookupPidOnPort(port)).toEqual({ status: "found", pid: server.pid });
+  });
+
+  it("lookupPidOnPort() ignores a proxy listening on the same port at another address", async () => {
+    const port = await freePort();
+    const proxy = spawnListeningGatewayChild(port, { host: "::1", ignoreSigterm: true });
+    children.push(proxy);
+    await waitForSpawn(proxy);
+    await waitForListening(port, "::1");
+
+    expect(lookupPidOnPort(port)).toEqual({ status: "none" });
+  });
+
+  it("lookupPidOnPort() keeps detecting a wildcard listener that overlaps the configured address", async () => {
+    const port = await freePort();
+    const server = spawnListeningGatewayChild(port, { host: "::", ignoreSigterm: true });
+    children.push(server);
+    await waitForSpawn(server);
+    await waitForListening(port);
 
     expect(lookupPidOnPort(port)).toEqual({ status: "found", pid: server.pid });
   });

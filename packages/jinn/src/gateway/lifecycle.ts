@@ -432,6 +432,56 @@ function resolvePort(): number {
   }
 }
 
+function resolveHost(): string {
+  try {
+    const config = loadConfig();
+    return config.gateway?.host || "127.0.0.1";
+  } catch {
+    return "127.0.0.1";
+  }
+}
+
+function lsofListenerHost(name: string): string {
+  const ipv6 = name.match(/^\[([^\]]+)\]:\d+$/);
+  if (ipv6) return ipv6[1];
+  const portSeparator = name.lastIndexOf(":");
+  return portSeparator === -1 ? name : name.slice(0, portSeparator);
+}
+
+function listenerOverlapsHost(listenerHost: string, configuredHost: string): boolean {
+  if (
+    listenerHost === "*" ||
+    configuredHost === "0.0.0.0" ||
+    configuredHost === "::"
+  ) {
+    return true;
+  }
+  if (configuredHost === "localhost") {
+    return listenerHost === "127.0.0.1" || listenerHost === "::1";
+  }
+  // lsof -n reports numeric addresses. Stay conservative for configured
+  // hostnames that cannot be compared without DNS resolution.
+  return net.isIP(configuredHost) === 0 || listenerHost === configuredHost;
+}
+
+function selectLsofPortOwnerPid(output: string, host: string): number | undefined {
+  let pid: number | undefined;
+  const matchingPids = new Set<number>();
+  for (const line of output.split("\n")) {
+    if (line.startsWith("p")) {
+      const parsed = parseInt(line.slice(1), 10);
+      pid = isNaN(parsed) ? undefined : parsed;
+    } else if (
+      pid !== undefined &&
+      line.startsWith("n") &&
+      listenerOverlapsHost(lsofListenerHost(line.slice(1)), host)
+    ) {
+      matchingPids.add(pid);
+    }
+  }
+  return selectPortOwnerPid([...matchingPids]);
+}
+
 export function lookupPidOnPort(port: number): PortOwnerLookup {
   try {
     if (process.platform === "win32") {
@@ -442,19 +492,15 @@ export function lookupPidOnPort(port: number): PortOwnerLookup {
       const pid = parseInt(parts[parts.length - 1], 10);
       return isNaN(pid) ? { status: "unknown" } : { status: "found", pid };
     } else {
-      const output = execSync(
-        process.platform === "darwin"
-          ? `/usr/sbin/lsof -nP -iTCP:${port} -sTCP:LISTEN -t`
-          : `lsof -nP -iTCP:${port} -sTCP:LISTEN -t`,
+      const host = resolveHost();
+      const output = execFileSync(
+        process.platform === "darwin" ? "/usr/sbin/lsof" : "lsof",
+        ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpn"],
         { encoding: "utf-8" },
       ).trim();
       if (!output) return { status: "none" };
-      const pids = output
-        .split("\n")
-        .map((line) => parseInt(line, 10))
-        .filter((pid) => !isNaN(pid));
-      const pid = selectPortOwnerPid(pids);
-      return pid === undefined ? { status: "unknown" } : { status: "found", pid };
+      const pid = selectLsofPortOwnerPid(output, host);
+      return pid === undefined ? { status: "none" } : { status: "found", pid };
     }
   } catch (err: unknown) {
     const status = (err as { status?: number | null }).status;
