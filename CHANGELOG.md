@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.28.3] - 2026-07-25
+
+### 🐛 Fixes
+- **Windows installs no longer crash during setup.** The optional `skills` availability probe ran through a bare `npx`, which cannot be spawned on Windows without a shell and threw an unhandled `ENOENT`/`EINVAL` that took the whole process down. The probe now resolves the platform's executable and fails quietly when it is absent.
+- **MCP servers survive a model or effort change.** Switching model or effort cold-respawns the Claude engine, and the per-session MCP config file had already been cleaned by the previous turn, so the new process started with no servers attached. The config is now re-materialized at the respawn boundary.
+- **Compaction summaries stay out of the chat.** Claude Code runs auto-compaction as an ordinary API call with the main agent's tools and system prompt, so its summarizer output passed every stream gate and landed in the transcript as a huge `<analysis>…<summary>…` message. That one message is now dropped before it is persisted, and any already-stored `<analysis>` or `<summary>` block folds into a collapsed disclosure instead of rendering raw.
+- **Gateway restarts stop claiming a free port is taken.** Port-ownership detection compared listeners without regard for the bind host, so an unrelated listener on another interface could make a cold start reject a genuinely free loopback port.
+- **Long-lived gateways discover newly published models.** Engine model discovery ran only at boot, on config reload, and after a failed turn, so a gateway with multi-day uptime kept serving its boot-time catalog. It now refreshes periodically.
+
 ## [0.28.2] - 2026-07-24
 
 ### 🐛 Fixes
