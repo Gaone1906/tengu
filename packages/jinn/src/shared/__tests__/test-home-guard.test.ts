@@ -10,7 +10,7 @@ import {
 } from '../../../vitest.test-home.js';
 import vitestConfig from '../../../vitest.config.js';
 import setupVitest from '../../../vitest.global-setup.js';
-import { JINN_HOME, SESSIONS_DB } from '../paths.js';
+import { JINN_HOME, SESSIONS_DB, assertTestRunIsIsolated } from '../paths.js';
 import { initDb } from '../../sessions/registry.js';
 import { createWorkItem } from '../../work-items/store.js';
 
@@ -118,5 +118,71 @@ describe('Vitest JINN_HOME guard', () => {
 
     expect(row).toEqual({ title: 'test-home guard integration' });
     expect(fs.existsSync(SESSIONS_DB)).toBe(true);
+  });
+});
+
+/**
+ * The layer-1 guard above (globalSetup + setupFiles) only arms when Vitest
+ * loads packages/jinn/vitest.config.ts. Running `npx vitest` from the repo ROOT
+ * finds no config, so Vitest uses defaults and NONE of it runs — an ambient
+ * JINN_HOME=~/.jinn then reaches every suite and the tests write into the live
+ * gateway registry. That happened 2026-07-06, and again 4x larger on
+ * 2026-07-25, burning Todo IDs ICI-580…595 out of an append-only allocator.
+ *
+ * paths.ts therefore re-asserts at the boundary that every registry-touching
+ * module imports, so no cwd/config/runner choice can bypass it.
+ */
+describe('paths.ts boundary guard (layer 2, config-independent)', () => {
+  const PROD = path.join(os.homedir(), '.jinn');
+  const underVitest = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv =>
+    ({ VITEST: 'true', ...over });
+
+  it('refuses the production home', () => {
+    expect(() => assertTestRunIsIsolated(PROD, underVitest()))
+      .toThrow(/Refusing to run tests against a non-temp JINN_HOME/);
+  });
+
+  it('names the correct command in the error, so the next person does not repeat it', () => {
+    expect(() => assertTestRunIsIsolated(PROD, underVitest())).toThrow(/pnpm/);
+  });
+
+  it('refuses any non-temp home, not just ~/.jinn', () => {
+    expect(() => assertTestRunIsIsolated(path.join(os.homedir(), '.jinn-elsewhere'), underVitest()))
+      .toThrow(/Refusing to run tests against a non-temp JINN_HOME/);
+  });
+
+  it('allows a temp home', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'jinn-guard-ok-'));
+    createdHomes.push(home);
+    expect(() => assertTestRunIsIsolated(home, underVitest())).not.toThrow();
+  });
+
+  it('honours JINN_VITEST_SYSTEM_TEMP_ROOT when global setup has repointed temp', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jinn-guard-root-'));
+    const home = path.join(root, 'worker-home');
+    fs.mkdirSync(home);
+    createdHomes.push(root);
+    expect(() => assertTestRunIsIsolated(home, underVitest({ JINN_VITEST_SYSTEM_TEMP_ROOT: root })))
+      .not.toThrow();
+  });
+
+  it('fires for a worker that only has VITEST_WORKER_ID', () => {
+    expect(() => assertTestRunIsIsolated(PROD, { VITEST_WORKER_ID: '3' }))
+      .toThrow(/Refusing to run tests/);
+  });
+
+  it('stays inert outside Vitest so the gateway resolves its real home', () => {
+    // The single most important negative case: production must be unaffected.
+    expect(() => assertTestRunIsIsolated(PROD, {})).not.toThrow();
+  });
+
+  it('guards the home this very suite resolved', () => {
+    // End-to-end, with the REAL worker env. Global setup repoints os.tmpdir()
+    // beneath JINN_HOME and records the pre-redirect OS root in
+    // JINN_VITEST_SYSTEM_TEMP_ROOT, so the guard must read that rather than
+    // calling os.tmpdir() blind — otherwise it would reject its own safe home.
+    expect(process.env.JINN_VITEST_SYSTEM_TEMP_ROOT).toBeTruthy();
+    expect(() => assertTestRunIsIsolated(JINN_HOME, process.env)).not.toThrow();
+    expect(isTempPath(JINN_HOME)).toBe(true);
   });
 });

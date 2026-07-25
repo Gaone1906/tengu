@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { resolveJinnHome, resolveMcpSessionCapabilityKeyFile } from "./home.js";
 import { resolveInstancesRegistryPath, resolveLegacyInstancesRegistryPath } from "../instances/directory.js";
@@ -23,7 +24,54 @@ export function resolveHomeIdentity(home: string): string {
   }
 }
 
+/**
+ * Fail closed if a test run resolves to a real, non-temp JINN_HOME.
+ *
+ * There is a Vitest guard (vitest.global-setup.ts redirects JINN_HOME, and
+ * vitest.setup.ts asserts it per worker), but it is registered in
+ * packages/jinn/vitest.config.ts — so it only arms when Vitest actually LOADS
+ * that config. Run `npx vitest run packages/jinn/src` from the repo ROOT (which
+ * has no Vitest config) and Vitest falls back to defaults: no globalSetup, no
+ * setupFiles, no guard. An ambient JINN_HOME=~/.jinn then flows straight into
+ * every suite, and the tests write fixtures into the LIVE gateway registry.
+ *
+ * That happened on 2026-07-06 and again, 4x larger, on 2026-07-25 — the second
+ * run burned 16 Todo IDs out of the append-only allocator, a permanent hole in
+ * the live ledger caused by a test. Cleanup after the fact is not a fix.
+ *
+ * This assertion lives at the boundary instead of in test config, because
+ * EVERY module that can touch the registry imports JINN_HOME from here. It
+ * cannot be bypassed by choosing a different cwd, config, or runner. The
+ * sanctioned `pnpm test` path is unaffected: global setup has already pointed
+ * JINN_HOME at a temp dir before any worker imports this module.
+ */
+export function assertTestRunIsIsolated(home: string, env: NodeJS.ProcessEnv = process.env): void {
+  // Vitest sets both in every worker; VITEST_WORKER_ID is absent in the main
+  // process, so check either. Nothing else in the app sets these.
+  if (!env.VITEST && !env.VITEST_WORKER_ID) return;
+
+  const canonical = (p: string): string => {
+    try { return fs.realpathSync.native(path.resolve(p)); } catch { return path.resolve(p); }
+  };
+  const resolved = canonical(home);
+  const tempRoot = canonical(env.JINN_VITEST_SYSTEM_TEMP_ROOT || os.tmpdir());
+  const relative = path.relative(tempRoot, resolved);
+  const underTemp = relative === ""
+    || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  if (underTemp) return;
+
+  throw new Error(
+    `Refusing to run tests against a non-temp JINN_HOME=${home}.\n` +
+    `Tests must never touch the live gateway registry (${path.join(home, "sessions", "registry.db")}).\n` +
+    `Run the suite with the repo's own script — \`pnpm test\`, or \`pnpm --filter jinn-cli test\` — ` +
+    `which loads packages/jinn/vitest.config.ts and redirects JINN_HOME to a temp dir.\n` +
+    `Running \`npx vitest\` from the repo root bypasses that config and is what caused ` +
+    `fixture data to be written into ~/.jinn on 2026-07-06 and 2026-07-25.`,
+  );
+}
+
 export const JINN_HOME = resolveJinnHome();
+assertTestRunIsIsolated(JINN_HOME);
 export const JINN_HOME_IDENTITY = resolveHomeIdentity(JINN_HOME);
 export const CONFIG_PATH = path.join(JINN_HOME, "config.yaml");
 export const SESSIONS_DB = path.join(JINN_HOME, "sessions", "registry.db");
