@@ -47,6 +47,61 @@ function copyWebExceptIndex(fromDir, toDir) {
   }
 }
 
+function listFilesRelative(dir) {
+  const files = new Set();
+  if (!fs.existsSync(dir)) {
+    return files;
+  }
+  const walk = (current, prefix) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const relative = prefix ? path.join(prefix, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        walk(path.join(current, entry.name), relative);
+      } else {
+        files.add(relative);
+      }
+    }
+  };
+  walk(dir, "");
+  return files;
+}
+
+function removeEmptyDirs(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const child = path.join(dir, entry.name);
+    removeEmptyDirs(child);
+    if (fs.readdirSync(child).length === 0) {
+      fs.rmdirSync(child);
+    }
+  }
+}
+
+/**
+ * Vite hashes chunk names, so every build writes new filenames instead of
+ * overwriting the old ones. Without a prune the target only ever grows, and a
+ * browser that revalidates index.html but still holds an older entry chunk can
+ * keep booting a months-old bundle from the same directory. Prune runs *after*
+ * the index swap so the copy-then-swap ordering above still holds: at this
+ * point the new index.html is live and verified, and everything not in the
+ * fresh build is unreachable from it.
+ */
+function pruneStale(fromDir, toDir) {
+  const keep = listFilesRelative(fromDir);
+  let removed = 0;
+  for (const relative of listFilesRelative(toDir)) {
+    if (keep.has(relative)) {
+      continue;
+    }
+    fs.rmSync(path.join(toDir, relative), { force: true });
+    removed += 1;
+  }
+  removeEmptyDirs(toDir);
+  return removed;
+}
+
 assertBuiltWeb(source);
 copyWebExceptIndex(source, target);
 const sourceIndexHtml = fs.readFileSync(path.join(source, "index.html"), "utf8");
@@ -54,5 +109,10 @@ assertAssetRefsAvailable(sourceIndexHtml, target);
 fs.writeFileSync(nextIndex, sourceIndexHtml);
 fs.renameSync(nextIndex, path.join(target, "index.html"));
 assertBuiltWeb(target);
+const pruned = pruneStale(source, target);
+assertBuiltWeb(target);
 
-console.log(`synced ${path.relative(repoRoot, source)} -> ${path.relative(repoRoot, target)}`);
+console.log(
+  `synced ${path.relative(repoRoot, source)} -> ${path.relative(repoRoot, target)}` +
+    (pruned > 0 ? ` (pruned ${pruned} stale file${pruned === 1 ? "" : "s"})` : ""),
+);

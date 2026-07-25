@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.28.4] - 2026-07-25
+
+### ⚡ Performance
+- **Claude sessions run to the model's real context ceiling before compacting.** Claude Code decides when to auto-compact using a budget that is separate from the model's context window, resolved from an env var, a user setting, server-supplied client data, and finally a per-model default. Nothing set any of them, so long sessions on a 1M-window model such as Opus 5 compacted around 166K tokens — roughly five times more often than the model requires. The engine now asks for the 1M ceiling; Claude clamps the request down to whatever the active model actually supports, so smaller-window models are unaffected, and `CLAUDE_CODE_AUTO_COMPACT_WINDOW` still overrides it.
+
+### 🐛 Fixes
+- **A stale web bundle can no longer resurface after an upgrade.** Asset filenames are content-hashed, so each build wrote new files alongside the old ones instead of replacing them and the bundled web directory only ever grew. A browser that revalidated `index.html` but still held an older entry chunk could keep booting a months-old build out of the same directory. Files left over from previous builds are now pruned once the new index is in place and verified.
+
 ## [0.28.3] - 2026-07-25
 
 ### 🐛 Fixes

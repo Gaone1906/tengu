@@ -921,6 +921,16 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
     // impossible while NO_FLICKER is on. Trading mild flicker for usable scroll.
     env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     env.CLAUDE_CODE_RESUME_TOKEN_THRESHOLD = "999999999"; // suppress "resume from summary?" picker — always full-resume
+    // Auto-compact at the model's real ceiling instead of claude's default budget.
+    // The auto-compact trigger is a SEPARATE budget from the model's context window:
+    // it resolves from env > settings > server client-data > per-model default, and
+    // that default sits near 200K even on models whose window is 1M (opus-5 declares
+    // `native_1m`). Left alone, long sessions compact ~5x more often than the model
+    // requires. claude clamps this to the model's own max (`min(modelWindow, value)`)
+    // and only accepts 100_000..1_000_000, so asking for 1M is safe for every model:
+    // a haiku-4-5 turn silently clamps back to its real 200K window. scrubClaudeCode
+    // strips any inherited value, so read the operator's override off process.env.
+    env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || "1000000";
     if (sessionId) env.JINN_SESSION_ID = sessionId;
     if (proxyPort) env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
     return env;
