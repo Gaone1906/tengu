@@ -913,7 +913,11 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
       // Belt-and-suspenders: a stray API key/token would flip the child to metered
       // API billing instead of the Max subscription. Strip both so the PTY session
       // always resolves to subscription auth (cc_entrypoint=cli).
-      denyExact: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+      // ANTHROPIC_BASE_URL is set below from our own proxy port. An inherited one
+      // (gateway launched from inside another jinn claude PTY) would point the
+      // child at a dead loopback proxy and, worse, fail claude's first-party host
+      // check without the assertion below — silently halving its context window.
+      denyExact: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"],
     });
     // Use claude's main-screen renderer (NOT the alt-screen fullscreen one).
     // xterm.js's `scrollback` ring only applies to the main buffer — the alt
@@ -932,7 +936,20 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
     // strips any inherited value, so read the operator's override off process.env.
     env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || "1000000";
     if (sessionId) env.JINN_SESSION_ID = sessionId;
-    if (proxyPort) env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
+    if (proxyPort) {
+      env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
+      // The proxy forwards every request UNCHANGED to api.anthropic.com, so this
+      // still IS a first-party session. But claude decides "first party" by
+      // string-matching the base-URL host: `Yd()` -> `T1e()` accepts only
+      // `api.anthropic.com`. A 127.0.0.1 host fails that test, which makes the
+      // 1M-context gate `OH()` return false and drops the model's context ceiling
+      // to claude's 200K fallback -- even on models declaring `native_1m`. Since
+      // `aY()` clamps with `min(modelWindow, requested)`, that also silently
+      // neuters CLAUDE_CODE_AUTO_COMPACT_WINDOW above, so long sessions compact
+      // ~5x more often than the model requires. This flag re-asserts what is
+      // already true and restores the real 1M ceiling.
+      env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL = "1";
+    }
     return env;
   }
 

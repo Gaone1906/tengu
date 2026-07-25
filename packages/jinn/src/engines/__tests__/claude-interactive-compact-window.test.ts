@@ -10,11 +10,11 @@ import { InteractiveClaudeEngine } from "../claude-interactive.js";
 
 /** buildPtyEnv is private and touches no instance state — reach it off the
  *  prototype so this stays a pure env test with no PTY/proxy setup. */
-function buildPtyEnv(): Record<string, string> {
+function buildPtyEnv(proxyPort?: number): Record<string, string> {
   const engine = Object.create(InteractiveClaudeEngine.prototype) as {
     buildPtyEnv(proxyPort?: number, sessionId?: string): Record<string, string>;
   };
-  return engine.buildPtyEnv();
+  return engine.buildPtyEnv(proxyPort);
 }
 
 const ORIGINAL = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
@@ -43,5 +43,24 @@ describe("claude PTY auto-compact window", () => {
     expect(Number.isInteger(value)).toBe(true);
     expect(value).toBeGreaterThanOrEqual(100_000);
     expect(value).toBeLessThanOrEqual(1_000_000);
+  });
+});
+
+// The window pin above is inert on its own: claude resolves the auto-compact
+// budget as min(modelContextWindow, requested). Pointing ANTHROPIC_BASE_URL at
+// our loopback SSE proxy fails claude's first-party host check (only literal
+// api.anthropic.com passes), which collapses the model window to the 200K
+// fallback even for native-1M models — so the clamp silently undid the pin.
+describe("claude PTY first-party assertion", () => {
+  it("asserts first-party whenever the loopback proxy is in use", () => {
+    const env = buildPtyEnv(51234);
+    expect(env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:51234");
+    expect(env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL).toBe("1");
+  });
+
+  it("does not assert first-party when no proxy rewrites the base URL", () => {
+    const env = buildPtyEnv();
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(env._CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL).toBeUndefined();
   });
 });
