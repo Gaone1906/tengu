@@ -2397,6 +2397,27 @@ export function getInterruptedSessions(): Session[] {
 }
 
 /**
+ * Record one completed turn's cost and turn count against a session.
+ *
+ * The single accounting entry point for EVERY turn-completion site, in both
+ * manager.ts and the gateway's runWebSession. It exists because those two
+ * runners drifted: runWebSession had three structurally identical completion
+ * sites and none of them accumulated, so every web- and talk-sourced session
+ * recorded total_turns = 0 and total_cost = 0. That silently disabled employee
+ * budget caps, which are enforced from SUM(total_cost), since the overwhelming
+ * majority of turns are web-sourced.
+ *
+ * `result.cost` MUST be a per-turn delta, not a session-to-date total — see the
+ * note on sumTranscriptUsage in claude-interactive.ts.
+ */
+export function recordTurnAccounting(
+  sessionId: string,
+  result: { cost?: number; numTurns?: number },
+): void {
+  accumulateSessionCost(sessionId, result.cost ?? 0, result.numTurns ?? 1);
+}
+
+/**
  * Accumulate cost and turns for a session (called after each engine run).
  */
 export function accumulateSessionCost(id: string, cost: number, turns: number): void {

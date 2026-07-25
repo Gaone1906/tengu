@@ -13,7 +13,7 @@ import { removeCodexSessionHome } from "../engines/codex.js";
 import { ptySnapshotStore } from "../engines/pty-snapshot.js";
 import { buildPlatformContextRefresh, fingerprintPlatformContext } from "../engines/platform-context.js";
 import {
-  accumulateSessionCost, createSession, getOrCreateWorkflowAttemptSession,
+  recordTurnAccounting, createSession, getOrCreateWorkflowAttemptSession,
   deleteSession,
   clearEngineSessionRefs,
   getEngineSessionRef,
@@ -726,7 +726,7 @@ export class SessionManager {
 
               insertMessage(session.id, "assistant", fallbackText);
               if (fallbackResult.cost || fallbackResult.numTurns) {
-                accumulateSessionCost(session.id, fallbackResult.cost ?? 0, fallbackResult.numTurns ?? 1);
+                recordTurnAccounting(session.id, fallbackResult);
               }
 
               if (decorateMessages && connector.setTypingStatus) {
@@ -822,7 +822,7 @@ export class SessionManager {
 
               insertMessage(session.id, "assistant", retryText);
               if (retryResult.cost || retryResult.numTurns) {
-                accumulateSessionCost(session.id, retryResult.cost ?? 0, retryResult.numTurns ?? 1);
+                recordTurnAccounting(session.id, retryResult);
               }
 
               // Clear typing indicator & reactions
@@ -896,7 +896,7 @@ export class SessionManager {
         insertMessageAfter(session.id, "assistant", responseText, streamedThrough);
       }
       if (result.cost || result.numTurns) {
-        accumulateSessionCost(session.id, result.cost ?? 0, result.numTurns ?? 1);
+        recordTurnAccounting(session.id, result);
       }
       if (decorateMessages && connector.setTypingStatus) {
         await connector.setTypingStatus(target.channel, threadTs, "").catch(() => {});

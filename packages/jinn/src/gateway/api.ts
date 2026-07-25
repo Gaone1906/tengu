@@ -86,6 +86,7 @@ import {
   getSessionBySessionKey,
   initDb,
   recordChildReportedToParent,
+  recordTurnAccounting,
   RESTART_ACK_META_KEY,
 } from "../sessions/registry.js";
 import { blockFallbackText, validateBlockEnvelope } from "../shared/blocks.js";
@@ -7014,6 +7015,9 @@ async function runWebSession(
                 lastSyncedAt: fallbackCompletedAt,
               });
             }
+            // Same accounting as manager.ts — this runner used to skip it, so
+            // every web/talk session recorded zero turns and zero cost.
+            recordTurnAccounting(currentSession.id, fallbackResult);
             const completedFallback = completeSessionAttempt(currentSession.id, attemptToken, {
               status: fallbackResult.error ? "error" : "idle",
               attemptOutcome: fallbackResult.error ? "failed" : "succeeded",
@@ -7087,6 +7091,7 @@ async function runWebSession(
                 platformContextFingerprint,
               });
             }
+            recordTurnAccounting(currentSession.id, retryResult);
             const completedAfterRetry = completeSessionAttempt(currentSession.id, attemptToken, {
               status: retryResult.error ? "error" : "idle",
               attemptOutcome: retryResult.error ? "failed" : "succeeded",
@@ -7186,6 +7191,7 @@ async function runWebSession(
         platformContextFingerprint,
       });
     }
+    recordTurnAccounting(currentSession.id, result);
     const completedSession = completeSessionAttempt(currentSession.id, attemptToken, {
       ...(typeof result.contextTokens === "number" ? { lastContextTokens: result.contextTokens } : {}),
       // Preserve interruption as an explicit terminal receipt. Conversational
