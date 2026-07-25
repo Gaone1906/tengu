@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CompactionStreamGate } from "../claude-interactive.js";
+import { CompactionStreamGate, sseEventToDeltas } from "../claude-interactive.js";
 import type { StreamDelta } from "../../shared/types.js";
 
 const text = (content: string): StreamDelta[] => [{ type: "text", content }];
@@ -46,6 +46,47 @@ describe("CompactionStreamGate", () => {
       { type: "tool_use", content: "Bash", toolName: "Bash" },
     ]);
     expect(out.map((d) => d.type)).toEqual(["text", "tool_use"]);
+  });
+
+  /**
+   * Regression guard: every real message opens with message_start, which
+   * sseEventToDeltas turns into a `context` delta. The gate used to treat any
+   * non-text delta as proof of a real reply, so that first `context` latched
+   * `pass` and the gate dropped nothing in production — while these tests
+   * passed, because they fed it text directly and never replayed the real seam.
+   * Drive the actual event through sseEventToDeltas so the seam is covered.
+   */
+  it("still drops a compaction summary that opens with a real message_start context delta", () => {
+    const gate = new CompactionStreamGate();
+    const startDeltas = sseEventToDeltas({
+      type: "message_start",
+      message: { usage: { input_tokens: 152340 } },
+    } as never);
+    expect(startDeltas.map((d) => d.type)).toEqual(["context"]);
+
+    gate.reset();
+    const out = [
+      ...gate.accept(startDeltas),
+      ...gate.accept(text("<analysis>\nLet me work through")),
+      ...gate.accept(text("</analysis>\n<summary>continued</summary>")),
+      ...gate.end(),
+    ];
+    // The context delta is metadata and must survive; the summary text must not.
+    expect(out.map((d) => d.type)).toEqual(["context"]);
+    expect(joined(out.filter((d) => d.type === "text"))).toBe("");
+  });
+
+  it("forwards the context delta and still passes a normal reply after it", () => {
+    const gate = new CompactionStreamGate();
+    const startDeltas = sseEventToDeltas({
+      type: "message_start",
+      message: { usage: { input_tokens: 900, cache_read_input_tokens: 100 } },
+    } as never);
+    gate.reset();
+    const out = [...gate.accept(startDeltas), ...gate.accept(text("Here is the answer.")), ...gate.end()];
+    expect(out.map((d) => d.type)).toEqual(["context", "text"]);
+    expect(joined(out.filter((d) => d.type === "context"))).toBe("1000");
+    expect(joined(out.filter((d) => d.type === "text"))).toBe("Here is the answer.");
   });
 
   it("re-decides per message after reset", () => {

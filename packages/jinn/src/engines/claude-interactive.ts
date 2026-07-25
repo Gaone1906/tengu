@@ -47,7 +47,17 @@ const MODEL_PRICES: Record<string, { in: number; out: number }> = {
 };
 const DEFAULT_PRICE = { in: 15, out: 75 };
 
-function sumTranscriptUsage(content: string): TranscriptUsage {
+/**
+ * Sum assistant-message usage from a Claude transcript.
+ *
+ * `afterMs` scopes the sum to ONE turn. A Claude transcript is cumulative — it
+ * holds every turn of the session — so an unscoped sum returns session-to-date
+ * totals. Callers that ADD the result to a running total (accumulateSessionCost)
+ * must pass the turn's start time, or an N-turn session is counted
+ * quadratically. Codex reports a per-run delta already; this is what makes the
+ * two engines agree.
+ */
+export function sumTranscriptUsage(content: string, afterMs?: number): TranscriptUsage {
   const u: TranscriptUsage = { inputTokens: 0, outputTokens: 0, cacheTokens: 0, assistantTurns: 0 };
   const seen = new Set<string>();
   for (const line of content.split("\n")) {
@@ -56,6 +66,12 @@ function sumTranscriptUsage(content: string): TranscriptUsage {
     let msg: any;
     try { msg = JSON.parse(t); } catch { continue; }
     if (msg.type !== "assistant") continue;
+    if (afterMs !== undefined) {
+      const ts = transcriptLineTimestampMs(msg);
+      // An untimestamped line can't be placed in a turn. Skip it rather than
+      // attribute another turn's tokens to this one.
+      if (ts === undefined || ts < afterMs) continue;
+    }
     const usage = msg?.message?.usage;
     if (!usage) continue;
     // Phase 0 finding: --effort high emits two assistant lines per response
@@ -159,10 +175,12 @@ export function stripReasoningBlocks(text: string): string {
     .trim();
 }
 
-function computeInteractiveCost(transcriptPath: string, model?: string): { cost: number; turns: number } | null {
+/** Cost for ONE turn. `afterMs` (the turn's start) scopes the cumulative
+ *  transcript to this turn — see sumTranscriptUsage. */
+function computeInteractiveCost(transcriptPath: string, model?: string, afterMs?: number): { cost: number; turns: number } | null {
   let content: string;
   try { content = fs.readFileSync(transcriptPath, "utf-8"); } catch { return null; }
-  const u = sumTranscriptUsage(content);
+  const u = sumTranscriptUsage(content, afterMs);
   if (u.assistantTurns === 0) return null;
   const price = (model && MODEL_PRICES[model]) || DEFAULT_PRICE;
   const cost = (u.inputTokens / 1_000_000) * price.in + (u.outputTokens / 1_000_000) * price.out;
@@ -189,7 +207,7 @@ export function buildInteractiveArgs(o: InteractiveArgsOpts): string[] {
 
   let prompt = o.prompt;
   if (o.attachments?.length) {
-    prompt += "\n\nAttached files:\n" + o.attachments.map((a) => `- ${a}`).join("\n");
+    prompt += buildAttachmentSuffix(o.attachments);
   }
   args.push(prompt); // positional — MUST precede variadic --mcp-config
 
@@ -299,7 +317,12 @@ export class CompactionStreamGate {
     for (const d of deltas) {
       if (this.verdict === "drop") continue;
       if (this.verdict === "pass") { out.push(d); continue; }
-      // A non-text delta (tool call, context) can never be a compaction summary.
+      // `context` is the FIRST delta of every message (message_start carries
+      // usage), so deciding the verdict on it would latch `pass` before any
+      // text arrives and the gate would never drop anything. Forward it and
+      // keep deciding.
+      if (d.type === "context") { out.push(d); continue; }
+      // Any other non-text delta (a tool call) can never be a compaction summary.
       if (d.type !== "text") { this.verdict = "pass"; out.push(...this.flush(), d); continue; }
       this.opening += String(d.content ?? "");
       this.held.push(d);
@@ -502,6 +525,25 @@ const NATIVE_COMMAND_MAX_MS = 90_000;
 const LOST_STOP_RECOVERY_QUIET_MS = 60_000;
 const LOST_STOP_RECOVERY_MIN_MS = 5 * 60_000;
 const LATE_RECOVERY_WINDOW_MS = 10 * 60 * 1000;
+/**
+ * Terminal backstop for a turn that produced no Stop hook AND cannot be
+ * recovered from a transcript. Transcript recovery needs a Claude session id
+ * (`resolver.sessionId ?? opts.resumeSessionId`); on a FRESH spawn ("resume:
+ * none") whose SessionStart hook was also lost, both are undefined, so the
+ * recovery interval can only ever return early. Without this the turn never
+ * settles: the session is pinned at "running" forever and its queued messages
+ * never dispatch. Deliberately far above the recovery thresholds so genuine
+ * recovery always gets first refusal.
+ */
+const TURN_STALL_TIMEOUT_MS = 15 * 60_000;
+const TURN_STALL_QUIET_MS = 5 * 60_000;
+
+/** Stall predicate, split out so it is testable without a live PTY. Both bounds
+ *  must hold: a long turn that is still streaming is healthy, and a brief quiet
+ *  gap early in a turn is normal. Exported for tests. */
+export function shouldSettleStalledTurn(elapsedMs: number, quietMs: number): boolean {
+  return elapsedMs >= TURN_STALL_TIMEOUT_MS && quietMs >= TURN_STALL_QUIET_MS;
+}
 
 /** Claude Code built-in slash commands that run locally and never produce a new
  *  assistant API turn. Two behaviours, both handled by the native-command path:
@@ -534,6 +576,32 @@ export function isNativeClaudeCommand(prompt: string): boolean {
  *  bash-mode, and jinn-skill slash commands, while letting engine-native commands
  *  (/compact, /clear, /model, …) pass through raw so the TUI actually runs them.
  *  Shared by injectPrompt() (warm-PTY first turn) and writeStdin() (raw WS input). */
+/**
+ * Compose the "Attached files:" suffix, with every path wrapped in backticks.
+ *
+ * The backticks are load-bearing, not cosmetic. Claude Code's TUI scans
+ * bracketed-paste text for tokens resolving to an existing IMAGE file and, on a
+ * hit, enters an async "Pasting…" state while it reads and base64-encodes the
+ * file into an `[Image #N]` chip. Keypresses are discarded while that state is
+ * active — including pasteAndSubmit's submit CR, which fires on a fixed 150ms
+ * timer. Any real screenshot takes longer than 150ms to encode, so the CR is
+ * swallowed and the turn hangs forever: text sits in the input box, no spinner,
+ * no error, no Stop hook.
+ *
+ * Verified against a live PTY (claude 2.1.220): a 5.8MB PNG hangs at 150ms and
+ * submits at 400ms; the same path in backticks submits at 150ms every time.
+ * Newlines are irrelevant — a zero-newline prompt with a real image path hangs,
+ * and a three-newline prompt with a non-existent path submits.
+ *
+ * Backticks stop the path from being auto-attached, so there is no async state
+ * to race. The model resolves the path with Read (which renders images), which
+ * is already how the cold/argv path behaves — argv prompts never traverse the
+ * TUI paste handler, so warm and cold now agree.
+ */
+export function buildAttachmentSuffix(attachments: readonly string[]): string {
+  return "\n\nAttached files:\n" + attachments.map((a) => `- \`${a}\``).join("\n");
+}
+
 export function pasteAndSubmit(proc: Pick<pty.IPty, "write">, text: string): void {
   const payload = neutralizeForPaste(text);
   proc.write(`\x1b[200~${payload}\x1b[201~`);
@@ -832,17 +900,33 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
           const quietFor = now - (this.lastOutputAt.get(jinnSessionId) ?? startedAt);
           if (elapsed < LOST_STOP_RECOVERY_MIN_MS || quietFor < LOST_STOP_RECOVERY_QUIET_MS) return;
           const sid = resolver.sessionId ?? opts.resumeSessionId;
+          // Only attempt recovery when we can identify THIS turn's transcript.
+          // Transcripts share one project dir keyed by Claude session id, so
+          // guessing by mtime could attach another session's answer.
           const transcript = sid ? findTranscriptForSession(sid) : undefined;
-          if (!transcript) return;
-          try {
-            if (fs.statSync(transcript).mtimeMs < startedAt - 1000) return;
-          } catch {
-            return;
+          let transcriptIsFresh = false;
+          if (transcript) {
+            try { transcriptIsFresh = fs.statSync(transcript).mtimeMs >= startedAt - 1000; } catch { /* unreadable */ }
           }
-          const recovered = lastAssistantTextFromTranscript(transcript, startedAt);
-          if (recovered?.trim()) {
-            logger.warn(`InteractiveClaudeEngine: recovered completed turn for ${jinnSessionId} after missing Stop hook`);
-            resolver.completeRecovered(recovered, sid);
+          if (transcript && transcriptIsFresh) {
+            const recovered = lastAssistantTextFromTranscript(transcript, startedAt);
+            if (recovered?.trim()) {
+              logger.warn(`InteractiveClaudeEngine: recovered completed turn for ${jinnSessionId} after missing Stop hook`);
+              resolver.completeRecovered(recovered, sid);
+              return;
+            }
+          }
+          // Nothing recoverable. Settle rather than hang: an unsettled turn pins
+          // the session at "running" forever and blocks its message queue. Not
+          // prefixed "Interrupted:" on purpose — that triggers quiet-preempt
+          // handling downstream, and a stall must surface as a real error.
+          if (shouldSettleStalledTurn(elapsed, quietFor)) {
+            logger.warn(
+              `InteractiveClaudeEngine: turn for ${jinnSessionId} stalled — no Stop hook and no recoverable ` +
+              `transcript (claudeSessionId=${sid ?? "unknown"}) after ${Math.round(elapsed / 60_000)}m, ` +
+              `${Math.round(quietFor / 60_000)}m quiet. Settling so the session unsticks.`,
+            );
+            resolver.interrupt("Turn stalled: the engine produced no completion signal and no recoverable transcript");
           }
         }, 2000);
         lostStopRecoveryTimer.unref?.();
@@ -866,7 +950,9 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
     // Reconstruct cost from the transcript (the Stop hook carries no cost).
     const transcriptPath = resolver.transcriptPath;
     if (transcriptPath && !result.error) {
-      const cost = computeInteractiveCost(transcriptPath, opts.model);
+      // Scope to THIS turn: the transcript is cumulative and the caller adds
+      // result.cost to the session total, so an unscoped sum over-counts.
+      const cost = computeInteractiveCost(transcriptPath, opts.model, turnStartedAt);
       if (cost) { result.cost = cost.cost; result.numTurns = cost.turns; }
       // Context-meter: most recent turn's input context (input + cache), mirroring
       // headless claude.ts so interactive/CLI-view turns also populate the meter.
@@ -1135,7 +1221,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
     if (!proc) return;
     let text = buildPromptWithPlatformContext(opts);
     if (opts.attachments?.length) {
-      text += "\n\nAttached files:\n" + opts.attachments.map((a) => `- ${a}`).join("\n");
+      text += buildAttachmentSuffix(opts.attachments);
     }
     pasteAndSubmit(proc, text);
   }
