@@ -784,7 +784,10 @@ function CodeBlock({ code, lang, keyProp }: { code: string; lang?: string; keyPr
 // Some engines leak their scratchpad tags into the visible answer. Rendering the
 // raw `<analysis>` line is worse than useless, and dropping the content would lose
 // real text — so fold it into a collapsed disclosure instead.
-const TRACE_TAGS = new Set(['analysis', 'thinking', 'reasoning', 'reflection', 'scratchpad'])
+// `summary` is here because a leaked compaction message is `<analysis>…</analysis>`
+// followed by `<summary>…</summary>` — folding only the first half still dumps the
+// whole recap into the chat.
+const TRACE_TAGS = new Set(['analysis', 'thinking', 'reasoning', 'reflection', 'scratchpad', 'summary'])
 const TRACE_OPEN_RE = /^<([a-z_]+)>$/i
 const TRACE_CLOSE_RE = /^<\/([a-z_]+)>$/i
 

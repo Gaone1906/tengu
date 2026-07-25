@@ -33,8 +33,27 @@ describe('formatMessage reasoning trace tags', () => {
   })
 
   it('leaves non-trace tags alone', () => {
-    render(<div>{formatMessage('<summary>')}</div>)
+    render(<div>{formatMessage('<details>')}</div>)
 
-    expect(screen.getByText('<summary>')).toBeTruthy()
+    expect(screen.getByText('<details>')).toBeTruthy()
+  })
+
+  /** A leaked compaction message is `<analysis>…</analysis>` then
+   *  `<summary>…</summary>` — folding only the first half still dumps the recap. */
+  it('folds the summary half of a leaked compaction message', () => {
+    render(
+      <div>
+        {formatMessage(
+          '<analysis>\nWeighing the options.\n</analysis>\n<summary>\nThis session is being continued.\n</summary>',
+        )}
+      </div>,
+    )
+
+    expect(screen.queryByText('<summary>')).toBeNull()
+    expect(screen.queryByText('</summary>')).toBeNull()
+    expect(screen.queryByText('This session is being continued.')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /Summary/ }))
+    expect(screen.getByText('This session is being continued.')).toBeTruthy()
   })
 })
