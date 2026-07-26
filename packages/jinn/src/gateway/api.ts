@@ -2381,18 +2381,17 @@ export async function handleApiRequest(
         const opened = await openInstanceMigration(pending, req, context);
         return json(res, opened, opened.reused ? 200 : 201);
       } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        logger.error(`Instance migration session could not open: ${detail}`);
-        // Carry the cause to the operator. Collapsing every failure into one
-        // opaque sentence turned a fixable local problem (a missing Windows
-        // symlink privilege) into an apparent outage of the migration service,
-        // with nothing in the UI pointing at the real fix.
+        logger.error(`Instance migration session could not open: ${error instanceof Error ? error.message : String(error)}`);
+        // Name the one cause the operator can actually act on. Collapsing every
+        // failure into one opaque sentence turned a fixable local problem (a
+        // missing Windows symlink privilege) into an apparent outage of the
+        // migration service, with nothing in the UI pointing at the real fix.
+        // The raw message stays in the log: it carries absolute instance paths.
         return json(res, {
           error: "Could not create the migration snapshot and COO handoff",
           code: "MIGRATION_OPEN_FAILED",
-          detail,
-          ...(isSymlinkPrivilegeError(error)
-            ? { remedy: "Creating the migration snapshot needs symlink permission. On Windows, enable Developer Mode (Settings > System > For developers) or run the gateway elevated, then restart Jinn and retry." }
+          ...(process.platform === "win32" && isSymlinkPrivilegeError(error)
+            ? { remedy: "Creating the migration snapshot needs symlink permission. Enable Developer Mode (Settings > System > For developers) or run the gateway elevated, then restart Jinn and retry." }
             : {}),
         }, 500);
       }

@@ -44,6 +44,24 @@ function seedBundle() {
   fs.writeFileSync(path.join(dir, "MIGRATION.md"), "# migration\n")
 }
 
+/** The shape every patch release actually ships: a required chain bridge that
+ *  changes no files. `AGENTS.md` is a symlink here because that is what
+ *  `jinn setup` creates, and it used to drag the snapshot through
+ *  fs.symlinkSync. */
+function seedEmptyBundle() {
+  seedBundle()
+  fs.symlinkSync("CLAUDE.md", path.join(home, "AGENTS.md"))
+  const dir = path.join(migrationsDir, "0.26.0")
+  fs.rmSync(path.join(dir, "files"), { recursive: true, force: true })
+  fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify({
+    schemaVersion: 1,
+    version: "0.26.0",
+    baseVersion: "0.25.0",
+    generatedFrom: { baseRef: "v0.25.0", headRef: "WORKTREE" },
+    files: [],
+  }, null, 2) + "\n")
+}
+
 function responseCapture() {
   let status = 200
   const chunks: Buffer[] = []
@@ -198,6 +216,32 @@ describe("instance migration API", () => {
     fs.writeFileSync(path.join(migrationsDir, "0.26.0/files/target/CLAUDE.md"), "tampered")
     expect((await request("GET", "/api/instance-migration")).status).toBe(500)
     expect(registry.listSessions()).toHaveLength(0)
+  })
+
+  it("opens an empty required bundle end to end, over a symlinked AGENTS.md", async () => {
+    // The case that was dead on Windows: 0.27.0 and every 0.28.x ship
+    // "files": [], and the snapshot dragged AGENTS.md through fs.symlinkSync
+    // regardless, so the open route 500'd as "temporarily unavailable" and the
+    // instance could never leave the migration gate.
+    seedEmptyBundle()
+    const pending = await request("GET", "/api/instance-migration")
+    expect(pending.body).toMatchObject({ required: true, fromVersion: "0.25.0", toVersion: "0.26.0" })
+    expect(pending.body.changedFiles ?? []).toEqual([])
+
+    const opened = await request("POST", "/api/instance-migration/open", { migrationKey: pending.body.migrationKey })
+
+    expect(opened.status).toBe(201)
+    expect(opened.body).toMatchObject({ reused: false, migrationKey: pending.body.migrationKey })
+    expect(opened.body).not.toHaveProperty("remedy")
+    expect(dispatched).toHaveLength(1)
+
+    // The snapshot still exists and holds the receipt the completion gate reads,
+    // and nothing was materialized under it.
+    const snapshotDir = path.join(home, ".migration-snapshots", pending.body.migrationKey)
+    expect(JSON.parse(fs.readFileSync(path.join(snapshotDir, "snapshot.json"), "utf8")).files).toEqual([])
+    expect(fs.existsSync(path.join(snapshotDir, "AGENTS.md"))).toBe(false)
+    // The instance's own symlink is untouched.
+    expect(fs.lstatSync(path.join(home, "AGENTS.md")).isSymbolicLink()).toBe(true)
   })
 
   it("classifies a refused symlink so the operator is told which knob to turn", () => {

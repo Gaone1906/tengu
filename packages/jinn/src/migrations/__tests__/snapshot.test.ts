@@ -132,7 +132,8 @@ describe("migration snapshots", () => {
     expect(second).toEqual({ path: first.path, reused: true })
     expect(verifyMigrationSnapshot(options)).toBe(true)
     expect(fs.readFileSync(path.join(first.path, "skills/stock/SKILL.md"), "utf8")).toBe("custom skill\n")
-    expect(fs.lstatSync(path.join(first.path, "AGENTS.md")).isSymbolicLink()).toBe(true)
+    // AGENTS.md is a symlink: carried in the receipt, not recreated on disk.
+    expect(fs.existsSync(path.join(first.path, "AGENTS.md"))).toBe(false)
     expect(fs.statSync(path.join(first.path, "CLAUDE.md")).mode & 0o777).toBe(0o640)
     expect(fs.existsSync(path.join(first.path, "secrets"))).toBe(false)
     expect(JSON.parse(fs.readFileSync(path.join(first.path, "snapshot.json"), "utf8"))).toMatchObject({
@@ -185,10 +186,42 @@ describe("migration snapshots", () => {
       changedFiles: [{ path: "skills/stock/SKILL.md", operation: "modify" as const }],
     }
     const snapshot = createMigrationSnapshot(options)
-    expect(fs.lstatSync(path.join(snapshot.path, "AGENTS.md")).isSymbolicLink()).toBe(true)
     expect(fs.existsSync(path.join(snapshot.path, "CLAUDE.md"))).toBe(true)
     expect(fs.existsSync(path.join(snapshot.path, "config.yaml"))).toBe(true)
+    expect(fs.existsSync(path.join(snapshot.path, "skills/stock/SKILL.md"))).toBe(true)
     expect(verifyMigrationSnapshot(options)).toBe(true)
+  })
+
+  it("records a symlink in the receipt without recreating one on disk", () => {
+    // A symlink's whole content is its target, which the receipt already holds
+    // with its hash, so materializing one adds nothing and costs a privilege
+    // Windows withholds by default. A non-empty bundle would otherwise hit the
+    // same EPERM the empty-bundle case above avoids.
+    const home = fixture()
+    const options = {
+      instanceHome: home,
+      migrationKey: "e".repeat(64),
+      fromVersion: "0.25.0",
+      toVersion: "0.26.0",
+      changedFiles: [{ path: "skills/stock/SKILL.md", operation: "modify" as const }],
+    }
+    const snapshot = createMigrationSnapshot(options)
+
+    expect(fs.existsSync(path.join(snapshot.path, "AGENTS.md"))).toBe(false)
+    const entry = JSON.parse(fs.readFileSync(path.join(snapshot.path, "snapshot.json"), "utf8"))
+      .files.find((file: { path: string }) => file.path === "AGENTS.md")
+    expect(entry).toMatchObject({ state: "symlink", linkTarget: "CLAUDE.md", sha256: hash("CLAUDE.md") })
+    expect(verifyMigrationSnapshot(options)).toBe(true)
+
+    // A snapshot written by an older build still has the link on disk. It is
+    // sound, so it must keep verifying rather than throw on the next open.
+    fs.symlinkSync("CLAUDE.md", path.join(snapshot.path, "AGENTS.md"))
+    expect(verifyMigrationSnapshot(options)).toBe(true)
+
+    // ...but a link that disagrees with the receipt is still a corrupt snapshot.
+    fs.unlinkSync(path.join(snapshot.path, "AGENTS.md"))
+    fs.symlinkSync("elsewhere.md", path.join(snapshot.path, "AGENTS.md"))
+    expect(verifyMigrationSnapshot(options)).toBe(false)
   })
 
   it("refuses unsafe, excluded, and escaping paths", () => {
