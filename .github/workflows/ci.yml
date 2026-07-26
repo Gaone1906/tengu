@@ -1,17 +1,77 @@
 name: CI
+
 on:
   push:
     branches: [main, feature/project-phoenix]
   pull_request:
     branches: [main]
+    # `labeled` is here so a maintainer can add the `windows-ci` label to an
+    # existing PR and get the Windows leg on that PR's head commit. See `plan`.
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+# Contributors push several times in a row while iterating. Without this, every
+# intermediate commit occupied a runner to produce a result nobody reads.
+# Keyed per PR (or per ref on push); pushes to main are never cancelled, because
+# main's result is the one that has to be trustworthy.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Fork PRs run under the `pull_request` trigger, which checks out the fork's
+# code but grants it NO repository secrets and a read-only GITHUB_TOKEN.
+# Declared explicitly so a future default change cannot widen it silently.
+# DO NOT switch to `pull_request_target`: that runs with the base repo's
+# secrets and a writable token in the context of untrusted fork code.
+permissions:
+  contents: read
 
 jobs:
+  # Decides which operating systems the test matrix covers.
+  #
+  # Windows is not in the default set yet. `main` cannot be built on Windows at
+  # all today: `packages/jinn` builds with `rm -rf ... && tsc ... && mkdir -p ... && cp ...`,
+  # and pnpm runs package scripts through cmd.exe on Windows, where none of those
+  # exist. The repo root's `postinstall` (`chmod ... 2>/dev/null || true`) fails for
+  # the same reason, so `pnpm install` does not even reach the build. An
+  # always-on Windows leg would therefore be red on every PR for reasons no PR
+  # author can fix, and would be ignored within a day.
+  #
+  # So the leg is opt-in, and it is a real, blocking, honest red when requested:
+  #   * add the `windows-ci` label to a PR, or
+  #   * run this workflow manually (Actions -> CI -> Run workflow).
+  # That is enough to VERIFY the in-flight Windows fixes (#97, #101) actually go
+  # green before they are merged, which is the thing that currently cannot be done.
+  #
+  # TO MAKE WINDOWS PERMANENT once #97 and #101 have landed and the root
+  # `postinstall` is cross-platform: replace this job's conditional output with a
+  # hardcoded `os=["ubuntu-latest","windows-latest"]`, or drop `plan` entirely and
+  # inline the matrix on `unit-tests`.
+  plan:
+    name: plan matrix
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.pick.outputs.os }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          WINDOWS_LABELLED: ${{ contains(github.event.pull_request.labels.*.name, 'windows-ci') }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$WINDOWS_LABELLED" = "true" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo 'os=["ubuntu-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'os=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          fi
+          cat "$GITHUB_OUTPUT"
+
   typecheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -19,11 +79,22 @@ jobs:
       - run: pnpm typecheck
 
   unit-tests:
-    runs-on: ubuntu-latest
+    needs: [plan]
+    name: unit-tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # A hung node-pty/PTY test on Windows would otherwise hold a runner for the
+    # 6-hour default. Ubuntu currently finishes well inside this.
+    timeout-minutes: 30
+    strategy:
+      # One OS failing must not cancel the other's logs - the whole point of the
+      # Windows leg is reading its output.
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -35,9 +106,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [typecheck]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: pnpm
