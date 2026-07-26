@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
 import { Check, ChevronRight, Copy } from "lucide-react"
-import { api, type InstanceMigration, type OpenInstanceMigrationResult } from "@/lib/api"
+import { ApiError, api, type InstanceMigration, type OpenInstanceMigrationResult } from "@/lib/api"
 import { queryKeys } from "@/lib/query-keys"
 import { Button } from "@/components/ui/button"
 import {
@@ -97,6 +97,7 @@ export function InstanceMigrationGate({
     },
     onError: () => { launching.current = false },
   })
+  const launchRemedy = launch.error instanceof ApiError ? launch.error.remedy : undefined
 
   if (!migration && query.isError) {
     return (
@@ -189,7 +190,14 @@ export function InstanceMigrationGate({
 
             {(query.isError || launch.isError) && (
               <div className="mt-5 rounded-[var(--radius-lg)] bg-[var(--fill-secondary)] p-3 text-[length:var(--text-footnote)] text-[var(--text-secondary)]" role="alert">
-                The migration service is temporarily unavailable. Your reminder remains here.
+                {launchRemedy ? (
+                  // A cause the operator can actually act on beats a generic
+                  // "temporarily unavailable", which reads as "wait and retry"
+                  // for a condition that will never clear on its own.
+                  <span>{launchRemedy}</span>
+                ) : (
+                  <span>The migration service is temporarily unavailable. Your reminder remains here.</span>
+                )}
                 <Button className="ml-2 min-h-10" size="sm" variant="ghost" onClick={() => void query.refetch()}>Retry migration check</Button>
               </div>
             )}

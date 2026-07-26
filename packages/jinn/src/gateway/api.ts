@@ -427,6 +427,17 @@ function retireUnacceptedInstanceMigrationSession(sessionKey: string): void {
   });
 }
 
+/** A snapshot failure caused by the platform refusing symlink creation. Windows
+ *  needs SeCreateSymbolicLinkPrivilege (Developer Mode or elevation) and reports
+ *  EPERM; the operator can fix it, but only if told which knob to turn. */
+export function isSymlinkPrivilegeError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as NodeJS.ErrnoException).code;
+  const syscall = (error as NodeJS.ErrnoException).syscall;
+  if (syscall === "symlink" && (code === "EPERM" || code === "EACCES")) return true;
+  return /symlink/i.test(error.message) && /EPERM|EACCES|operation not permitted|denied/i.test(error.message);
+}
+
 async function openInstanceMigration(
   pending: PendingInstanceMigration,
   req: HttpRequest,
@@ -2371,7 +2382,18 @@ export async function handleApiRequest(
         return json(res, opened, opened.reused ? 200 : 201);
       } catch (error) {
         logger.error(`Instance migration session could not open: ${error instanceof Error ? error.message : String(error)}`);
-        return json(res, { error: "Could not create the migration snapshot and COO handoff", code: "MIGRATION_OPEN_FAILED" }, 500);
+        // Name the one cause the operator can actually act on. Collapsing every
+        // failure into one opaque sentence turned a fixable local problem (a
+        // missing Windows symlink privilege) into an apparent outage of the
+        // migration service, with nothing in the UI pointing at the real fix.
+        // The raw message stays in the log: it carries absolute instance paths.
+        return json(res, {
+          error: "Could not create the migration snapshot and COO handoff",
+          code: "MIGRATION_OPEN_FAILED",
+          ...(process.platform === "win32" && isSymlinkPrivilegeError(error)
+            ? { remedy: "Creating the migration snapshot needs symlink permission. Enable Developer Mode (Settings > System > For developers) or run the gateway elevated, then restart Jinn and retry." }
+            : {}),
+        }, 500);
       }
     }
 

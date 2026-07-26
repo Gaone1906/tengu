@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { InstanceMigrationGate } from "../instance-migration-gate"
-import type { InstanceMigration } from "@/lib/api"
+import { ApiError, type InstanceMigration } from "@/lib/api"
 
 const dismissedStorageKey = "jinn.instance-migration.dismissed-key"
 
@@ -255,5 +255,39 @@ describe("InstanceMigrationGate", () => {
     expect(banner.outerHTML).not.toContain("var(--system-purple)")
     expect(banner.outerHTML).not.toContain("var(--system-blue)")
     expect(banner.textContent).not.toContain("Action")
+  })
+})
+
+describe("InstanceMigrationGate: actionable open failures", () => {
+  beforeEach(() => {
+    window.localStorage.clear()
+  })
+
+  it("shows the server's remedy instead of the generic unavailable message", async () => {
+    // A refused symlink is a local, fixable condition. "Temporarily unavailable"
+    // reads as "wait and retry" for something that never clears on its own.
+    const remedy = "Creating the migration snapshot needs symlink permission. On Windows, enable Developer Mode (Settings > System > For developers) or run the gateway elevated, then restart Jinn and retry."
+    const open = vi.fn().mockRejectedValue(
+      new ApiError(500, "Could not create the migration snapshot and COO handoff", "MIGRATION_OPEN_FAILED", undefined, remedy),
+    )
+    setup({ open })
+
+    await userEvent.click(await screen.findByRole("button", { name: /open with coo/i }))
+
+    const alert = await screen.findByRole("alert")
+    expect(alert.textContent).toContain("Developer Mode")
+    expect(alert.textContent).not.toMatch(/temporarily unavailable/i)
+  })
+
+  it("falls back to the generic message when the server offers no remedy", async () => {
+    const open = vi.fn().mockRejectedValue(
+      new ApiError(500, "Could not create the migration snapshot and COO handoff", "MIGRATION_OPEN_FAILED"),
+    )
+    setup({ open })
+
+    await userEvent.click(await screen.findByRole("button", { name: /open with coo/i }))
+
+    const alert = await screen.findByRole("alert")
+    expect(alert.textContent).toMatch(/temporarily unavailable/i)
   })
 })

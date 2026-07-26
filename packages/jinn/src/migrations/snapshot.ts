@@ -77,6 +77,19 @@ function safePath(instanceHome: string, relative: string): string {
 }
 
 function selectedPaths(options: MigrationSnapshotOptions): string[] {
+  // No changed records means no three-way comparison to perform, so the context
+  // files below have nothing to support. Materializing them anyway is not merely
+  // wasted work: an instance whose AGENTS.md is a symlink (the layout `jinn setup`
+  // creates) forces fs.symlinkSync, which Windows refuses without
+  // SeCreateSymbolicLinkPrivilege — so a no-op patch migration became impossible
+  // to complete there, surfacing only as "the migration service is temporarily
+  // unavailable". Empty bundles are the common case for patch upgrades.
+  //
+  // Both createMigrationSnapshot and verifyMigrationSnapshot derive their file
+  // set from here, so the snapshot and its verification stay consistent; the
+  // snapshot directory and snapshot.json are still written, which is what the
+  // completion receipt needs.
+  if (options.changedFiles.length === 0) return []
   const paths = new Set(options.changedFiles.map((file) => file.path))
   paths.add("config.yaml")
   paths.add("CLAUDE.md")
@@ -98,12 +111,19 @@ function inspectSource(instanceHome: string, relative: string): SnapshotEntry {
 
 function copyEntry(instanceHome: string, snapshotRoot: string, entry: SnapshotEntry): void {
   if (entry.state === "missing") return
+  // A symlink's entire content is its target, and the receipt already records the
+  // target and its sha256, so a link on disk preserves nothing the receipt does
+  // not. Recreating one costs SeCreateSymbolicLinkPrivilege, which Windows
+  // withholds unless Developer Mode is on or the process is elevated: an instance
+  // whose AGENTS.md is a symlink (the layout `jinn setup` creates when the
+  // privilege IS available) could not snapshot at all afterwards, and the failure
+  // surfaced only as "the migration service is temporarily unavailable".
+  if (entry.state === "symlink") return
   const source = safePath(instanceHome, entry.path)
   const destination = path.join(snapshotRoot, entry.path)
   fs.mkdirSync(path.dirname(destination), { recursive: true })
-  if (entry.state === "symlink") fs.symlinkSync(entry.linkTarget!, destination)
-  else fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL)
-  if (entry.mode !== undefined && entry.state === "file") fs.chmodSync(destination, entry.mode)
+  fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL)
+  if (entry.mode !== undefined) fs.chmodSync(destination, entry.mode)
 }
 
 function snapshotPath(options: MigrationSnapshotOptions): string {
@@ -255,10 +275,18 @@ export function verifyMigrationSnapshot(options: MigrationSnapshotOptions): bool
         }
         continue
       }
-      const stat = fs.lstatSync(saved)
       if (entry.state === "symlink") {
-        if (!stat.isSymbolicLink() || fs.readlinkSync(saved) !== entry.linkTarget || sha(fs.readlinkSync(saved)) !== entry.sha256) return false
-      } else if (!stat.isFile() || sha(fs.readFileSync(saved)) !== entry.sha256 || (stat.mode & 0o777) !== entry.mode) return false
+        // Verified from the receipt, which holds the whole of a symlink's content.
+        // The link is no longer materialized (see copyEntry), so accept its absence
+        // — and equally accept a snapshot written before that change, which still
+        // has one on disk, rather than failing an otherwise sound snapshot.
+        if (typeof entry.linkTarget !== "string" || sha(entry.linkTarget) !== entry.sha256) return false
+        const existing = fs.lstatSync(saved, { throwIfNoEntry: false })
+        if (existing && (!existing.isSymbolicLink() || fs.readlinkSync(saved) !== entry.linkTarget)) return false
+        continue
+      }
+      const stat = fs.lstatSync(saved)
+      if (!stat.isFile() || sha(fs.readFileSync(saved)) !== entry.sha256 || (stat.mode & 0o777) !== entry.mode) return false
     }
     if (options.materialization && !verifyMaterializedPayloads(root, options.materialization)) return false
     return true
