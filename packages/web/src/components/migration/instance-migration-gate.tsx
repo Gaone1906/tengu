@@ -57,9 +57,7 @@ export function InstanceMigrationGate({
   const query = useQuery({
     queryKey: queryKeys.instanceMigration,
     queryFn: service.get,
-    retry: 2,
-    retryDelay: 10,
-    refetchInterval: 10_000,
+    retry: false,
     placeholderData: (previous) => previous,
   })
   const migration = query.data
@@ -98,22 +96,6 @@ export function InstanceMigrationGate({
     onError: () => { launching.current = false },
   })
   const launchRemedy = launch.error instanceof ApiError ? launch.error.remedy : undefined
-
-  if (!migration && query.isError) {
-    return (
-      <div className="fixed inset-x-3 bottom-[calc(49px+var(--safe-bottom)+0.75rem)] z-40 flex justify-center sm:inset-x-auto sm:right-5 lg:bottom-5">
-        <div
-          className="flex w-full max-w-md flex-col gap-3 rounded-[var(--radius-xl)] bg-[var(--bg-secondary)] p-4 text-sm text-[var(--text-secondary)] shadow-[var(--shadow-overlay)]"
-          role="alert"
-        >
-          <span>The migration service is temporarily unavailable. Your setup has not been changed.</span>
-          <Button className="min-h-10 self-end" size="sm" variant="ghost" onClick={() => void query.refetch()}>
-            Retry migration check
-          </Button>
-        </div>
-      </div>
-    )
-  }
 
   if (!migration?.required || !migration.migrationKey || !migration.prompt) return null
   if (dismissedKey === migration.migrationKey) return null

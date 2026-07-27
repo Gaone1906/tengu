@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { InstanceMigrationGate } from "../instance-migration-gate"
@@ -114,8 +114,6 @@ describe("InstanceMigrationGate", () => {
     const get = vi.fn()
       .mockResolvedValueOnce(pending)
       .mockRejectedValueOnce(new Error("offline"))
-      .mockRejectedValueOnce(new Error("offline"))
-      .mockRejectedValueOnce(new Error("offline"))
       .mockResolvedValue(pending)
     const { client } = setup({ get })
     await screen.findByRole("dialog")
@@ -129,21 +127,22 @@ describe("InstanceMigrationGate", () => {
     await waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(callsBeforeRetry))
   })
 
-  it("renders an accessible retry state after an initial failure, then opens when retry succeeds", async () => {
-    const get = vi.fn()
-      .mockRejectedValueOnce(new Error("offline"))
-      .mockRejectedValueOnce(new Error("offline"))
-      .mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValue(pending)
-    setup({ get })
+  it("keeps an initial background-check failure silent and does not poll forever", async () => {
+    vi.useFakeTimers()
+    try {
+      const get = vi.fn().mockRejectedValue(new Error("offline"))
+      setup({ get })
 
-    const alert = await screen.findByRole("alert")
-    expect(alert.textContent).toMatch(/temporarily unavailable/i)
-    await userEvent.click(screen.getByRole("button", { name: "Retry migration check" }))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000)
+      })
 
-    expect(await screen.findByRole("dialog", { name: /v0\.26\.0 is installed/ })).not.toBeNull()
-    await userEvent.click(screen.getByRole("button", { name: "Later" }))
-    expect(screen.queryByRole("button", { name: /Finish v0\.26\.0 setup/ })).toBeNull()
+      expect(get).toHaveBeenCalledTimes(1)
+      expect(screen.queryByText(/migration service is temporarily unavailable/i)).toBeNull()
+      expect(screen.queryByRole("alert")).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("removes banner and dialog after invalidation reports completion", async () => {
@@ -182,23 +181,6 @@ describe("InstanceMigrationGate", () => {
     expect(wrapper!.className).toContain("var(--safe-bottom)")
     expect(wrapper!.className).not.toContain("bottom-3")
     // Desktop (lg: the tab bar is gone) drops back to the resting bottom-5.
-    expect(wrapper!.className).toContain("lg:bottom-5")
-    expect(wrapper!.className).not.toContain("sm:bottom-5")
-  })
-
-  it("keeps the initial-service-error alert above the mobile tab bar + safe area", async () => {
-    const get = vi.fn()
-      .mockRejectedValueOnce(new Error("offline"))
-      .mockRejectedValueOnce(new Error("offline"))
-      .mockRejectedValueOnce(new Error("offline"))
-      .mockRejectedValue(new Error("offline"))
-    setup({ get })
-    const alert = await screen.findByRole("alert")
-    const wrapper = alert.closest("div.fixed")
-    expect(wrapper).not.toBeNull()
-    expect(wrapper!.className).toContain("49px")
-    expect(wrapper!.className).toContain("var(--safe-bottom)")
-    expect(wrapper!.className).not.toContain("bottom-3")
     expect(wrapper!.className).toContain("lg:bottom-5")
     expect(wrapper!.className).not.toContain("sm:bottom-5")
   })

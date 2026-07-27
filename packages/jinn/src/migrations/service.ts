@@ -206,7 +206,13 @@ function validateBundle(dir: string, version: string): ValidatedBundle {
   try { manifest = JSON.parse(bytes.toString("utf8")) as InstanceMigrationManifest } catch {
     throw new Error(`migration ${version} manifest is malformed JSON`)
   }
-  if (manifest.schemaVersion !== 1 || manifest.version !== version || !isStrictSemver(manifest.baseVersion) || !Array.isArray(manifest.files)) {
+  if (
+    manifest.schemaVersion !== 1
+    || manifest.version !== version
+    || !isStrictSemver(manifest.baseVersion)
+    || compareSemver(manifest.baseVersion, manifest.version) >= 0
+    || !Array.isArray(manifest.files)
+  ) {
     throw new Error(`migration ${version} manifest has an invalid contract`)
   }
   const seen = new Set<string>()
@@ -346,19 +352,12 @@ export function getPendingInstanceMigration(options: {
     compareSemver(legacy.version, marker.version) > 0
       && compareSemver(legacy.version, firstStructuredVersion) < 0
   ))
-  let expectedBase = selected[0].manifest.baseVersion
-  for (const [index, bundle] of selected.entries()) {
-    if (index === 0) {
-      expectedBase = bundle.manifest.version
-      continue
+  let previousVersion: string | null = null
+  for (const bundle of selected) {
+    if (previousVersion && compareSemver(bundle.manifest.baseVersion, previousVersion) < 0) {
+      throw new Error(`migration chain is broken at ${bundle.manifest.version}: expected base ${previousVersion} or newer, got ${bundle.manifest.baseVersion}`)
     }
-    if (bundle.manifest.baseVersion !== expectedBase) {
-      throw new Error(`migration chain is broken at ${bundle.manifest.version}: expected base ${expectedBase}, got ${bundle.manifest.baseVersion}`)
-    }
-    expectedBase = bundle.manifest.version
-  }
-  if (expectedBase !== options.packageVersion) {
-    throw new Error(`migration chain ends at ${expectedBase}, not installed package ${options.packageVersion}`)
+    previousVersion = bundle.manifest.version
   }
   const materialization = buildMaterializationPlan(deriveTemplateMaterializationInputs(marker.config), selected, selectedLegacy)
   const migrationKey = sha256(JSON.stringify({

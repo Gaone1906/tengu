@@ -127,6 +127,40 @@ describe("getPendingInstanceMigration", () => {
     expect(first.prompt).toMatch(/engine exit or interrupted session never advances/i)
   })
 
+  it("allows intentional releases without bundles before and after changed releases", () => {
+    const trailingGap = fixture("0.25.0")
+    bundle(trailingGap.migrationsDir, "0.26.0", "0.25.0", [
+      { path: "CLAUDE.md", operation: "modify", base: "old", target: "new" },
+    ])
+
+    const throughNoOpRelease = getPendingInstanceMigration({
+      instanceHome: trailingGap.home,
+      packageVersion: "0.27.0",
+      migrationsDir: trailingGap.migrationsDir,
+    })
+
+    expect(throughNoOpRelease.required).toBe(true)
+    expect(throughNoOpRelease.toVersion).toBe("0.27.0")
+    expect(throughNoOpRelease.versions).toEqual(["0.26.0"])
+
+    const internalGap = fixture("0.25.0")
+    bundle(internalGap.migrationsDir, "0.26.0", "0.25.0", [
+      { path: "CLAUDE.md", operation: "modify", base: "old", target: "new" },
+    ])
+    bundle(internalGap.migrationsDir, "0.28.0", "0.27.0", [
+      { path: "skills/new/SKILL.md", operation: "add", target: "new skill" },
+    ])
+
+    const afterNoOpRelease = getPendingInstanceMigration({
+      instanceHome: internalGap.home,
+      packageVersion: "0.28.0",
+      migrationsDir: internalGap.migrationsDir,
+    })
+
+    expect(afterNoOpRelease.required).toBe(true)
+    expect(afterNoOpRelease.versions).toEqual(["0.26.0", "0.28.0"])
+  })
+
   it("infers a missing marker from the earliest structured bundle base", () => {
     const { home, migrationsDir } = fixture(null)
     bundle(migrationsDir, "0.26.0", "0.25.0", [
