@@ -476,30 +476,20 @@ test("lab API requests always carry the disposable gateway bearer token", () => 
   )
 })
 
-test("a candidate without a migration bundle requires no migration handoff", () => {
+test("migration handoff follows the candidate service result, except for the explicit no-change fixture", () => {
   assert.equal(typeof upgradeLab.candidateNeedsMigrationHandoff, "function")
-  const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-no-bundle-candidate-"))
-  try {
-    assert.equal(upgradeLab.candidateNeedsMigrationHandoff({
-      scenario: "stock",
-      packageRoot,
-      version: "0.28.7",
-    }), false)
-    fs.mkdirSync(path.join(packageRoot, "template", "migrations", "0.28.7"), { recursive: true })
-    fs.writeFileSync(path.join(packageRoot, "template", "migrations", "0.28.7", "manifest.json"), "{}\n")
-    assert.equal(upgradeLab.candidateNeedsMigrationHandoff({
-      scenario: "stock",
-      packageRoot,
-      version: "0.28.7",
-    }), true)
-    assert.equal(upgradeLab.candidateNeedsMigrationHandoff({
-      scenario: "no-instance-change",
-      packageRoot,
-      version: "0.28.7",
-    }), false)
-  } finally {
-    fs.rmSync(packageRoot, { recursive: true, force: true })
-  }
+  assert.equal(upgradeLab.candidateNeedsMigrationHandoff({
+    scenario: "stock",
+    pending: { required: false },
+  }), false)
+  assert.equal(upgradeLab.candidateNeedsMigrationHandoff({
+    scenario: "heavily-customized",
+    pending: { required: true },
+  }), true)
+  assert.equal(upgradeLab.candidateNeedsMigrationHandoff({
+    scenario: "no-instance-change",
+    pending: { required: true },
+  }), false)
 })
 
 test("three-way merge preserves a non-conflicting user append and target changes", () => {

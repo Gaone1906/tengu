@@ -34,9 +34,9 @@ export function readInstalledPackageVersion(packageRoot) {
   return value
 }
 
-export function candidateNeedsMigrationHandoff({ scenario, packageRoot, version }) {
+export function candidateNeedsMigrationHandoff({ scenario, pending }) {
   if (scenario === "no-instance-change") return false
-  return fs.existsSync(path.join(packageRoot, "template", "migrations", version, "manifest.json"))
+  return Boolean(pending?.required)
 }
 
 export function createLabRoot(explicitRoot) {
@@ -992,10 +992,15 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
       fs.writeFileSync(config, updated)
     }
 
+    const service = await import(pathToFileURL(path.join(candidateInstall.packageRoot, "dist", "src", "migrations", "service.js")))
+    const migrationsDir = path.join(candidateInstall.packageRoot, "template", "migrations")
     const expectedPending = candidateNeedsMigrationHandoff({
       scenario,
-      packageRoot: candidateInstall.packageRoot,
-      version: candidateVersion,
+      pending: service.getPendingInstanceMigration({
+        instanceHome: layout.home,
+        packageVersion: candidateVersion,
+        migrationsDir,
+      }),
     })
     summary.candidateMigrationBundlePresent = fs.existsSync(
       path.join(candidateInstall.packageRoot, "template", "migrations", candidateVersion, "manifest.json"),
@@ -1068,10 +1073,8 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
       summary.checks.noMigrationHandoffRequired = "PASS"
     }
 
-    const service = await import(pathToFileURL(path.join(candidateInstall.packageRoot, "dist", "src", "migrations", "service.js")))
     const snapshot = await import(pathToFileURL(path.join(candidateInstall.packageRoot, "dist", "src", "migrations", "snapshot.js")))
     const completion = await import(pathToFileURL(path.join(candidateInstall.packageRoot, "dist", "src", "migrations", "completion.js")))
-    const migrationsDir = path.join(candidateInstall.packageRoot, "template", "migrations")
     let pending = service.getPendingInstanceMigration({ instanceHome: layout.home, packageVersion: candidateVersion, migrationsDir })
     if (!expectedPending) {
       if (pending.required) throw new Error("no-handoff candidate unexpectedly produced a migration")

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.28.7] - 2026-07-27
+
+### 🐛 Fixes
+- **No-op upgrades stay quiet.** A release that intentionally has no instance migration bundle is now treated as already complete instead of making the dashboard repeatedly show and hide “The migration service is temporarily unavailable.” The check is also one-shot, so a transient failure cannot become a polling loop.
+- **No-op migrations work on filesystems without symlink support.** Completing an upgrade no longer requires materializing snapshot symlinks, keeping Windows and restricted filesystems on the supported migration path.
+- **The upgrade lab handles no-bundle releases without overflowing its process check.** Release verification now recognizes when no migration handoff is required, uses authenticated lab probes, and filters temporary process candidates before Node buffers the result instead of reading every AI process's full command line.
+- **Windows source builds and port checks are reliable.** POSIX-only assertions are scoped to POSIX systems, and gateway ownership checks respect the configured bind address rather than confusing a listener on another interface for the Jinn instance.
+- **Windows skill commands preserve trailing backslashes.** Command-line quoting no longer lets a final backslash escape the closing quote and corrupt the argument.
+
 ## [0.28.6] - 2026-07-25
 
 ### 🐛 Fixes
