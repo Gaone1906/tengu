@@ -394,4 +394,83 @@ describe('ChatMessages tool groups', () => {
     expect(screen.getByText('Prepare release')).toBeTruthy()
     expect(screen.queryByText('update_work_item')).toBeNull()
   })
+
+  it('presents a burst of same-root Todo creation receipts as one hierarchy collection', () => {
+    const messages: Message[] = [
+      {
+        id: 'root',
+        role: 'assistant',
+        content: 'Todo “Prepare release” · assigned',
+        timestamp: 100,
+        blocks: [{
+          id: 'todo:JIN-1',
+          type: 'todo-activity',
+          version: 1,
+          status: 'queued',
+          title: 'Prepare release',
+          payload: {
+            todoId: 'JIN-1',
+            action: 'created',
+            status: 'assigned',
+            parentId: null,
+            rootId: 'JIN-1',
+            depth: 0,
+          },
+        }],
+      },
+      {
+        id: 'child-1',
+        role: 'assistant',
+        content: 'Todo “Build artifacts” · assigned',
+        timestamp: 101,
+        blocks: [{
+          id: 'todo:JIN-2',
+          type: 'todo-activity',
+          version: 1,
+          status: 'queued',
+          title: 'Build artifacts',
+          payload: {
+            todoId: 'JIN-2',
+            action: 'created',
+            status: 'assigned',
+            parentId: 'JIN-1',
+            rootId: 'JIN-1',
+            depth: 1,
+          },
+        }],
+      },
+      {
+        id: 'child-2',
+        role: 'assistant',
+        content: 'Todo “Verify artifacts” · assigned',
+        timestamp: 102,
+        blocks: [{
+          id: 'todo:JIN-3',
+          type: 'todo-activity',
+          version: 1,
+          status: 'queued',
+          title: 'Verify artifacts',
+          payload: {
+            todoId: 'JIN-3',
+            action: 'created',
+            status: 'assigned',
+            parentId: 'JIN-1',
+            rootId: 'JIN-1',
+            depth: 1,
+          },
+        }],
+      },
+    ]
+
+    renderRouted(messages)
+
+    const collection = screen.getByTestId('todo-activity-burst')
+    expect(within(collection).getByText('Prepare release')).toBeTruthy()
+    expect(within(collection).getByText('Build artifacts')).toBeTruthy()
+    expect(within(collection).getByText('Verify artifacts')).toBeTruthy()
+    expect(within(collection).getByText('2 sub-tasks')).toBeTruthy()
+    expect(within(collection).getByText('Todo · JIN-1')).toBeTruthy()
+    expect(screen.queryByText('Todo · JIN-2')).toBeNull()
+    expect(screen.queryByText('Todo · JIN-3')).toBeNull()
+  })
 })

@@ -10,10 +10,29 @@ Use this skill for deliberately authored, durable work ownership and status trac
 ## Find the right Todo
 
 - Use `list_work_items` for recent work or structured filters such as `status`, `source`, `assignee`, `department`, and `needsAttentionFor`.
+- Use `list_work_items` with `rootsOnly: true` for an objective-level view, `parentId` for one Todo's direct children, or `rootId` for a whole Todo family.
 - Use `search_work_items` when you have text or several filters. It requires at least one real filter.
 - Use `get_work_item` before changing a Todo so you understand its acceptance criteria, assignee, source/provenance, verification policy, and current status.
+- Use `get_work_item_tree` when the work has child Todos; it returns the nested breakdown and roll-up.
 
 The statuses are `backlog`, `assigned`, `executing`, `in_review`, `done`, `blocked`, `escalated`, and `cancelled`. Agent updates intentionally expose only `in_review`, `blocked`, `escalated`, and `done`; other lifecycle decisions stay on their owning surface.
+
+## Shape the hierarchy
+
+One operator outcome should normally map to one root Todo. A checklist does not imply one Todo per item. Keep procedural steps, commands, and release checklists in the root Todo body, comments, or session activity.
+
+Only independently assignable or independently reviewable deliverables become child Todos. Create child Todos with `parentId`:
+
+```json
+{
+  "title": "Verify release artifacts",
+  "parentId": "ACM-42",
+  "assignee": "a-reviewer",
+  "acceptance": "Checks pass and evidence is attached."
+}
+```
+
+If another skill asks for one Todo per checklist step, use engine-local progress tracking unless each step passes this durable-work boundary. This Jinn Todo doctrine governs the company ledger. Keep trees shallow and outcome-shaped; do not turn implementation procedures into ledger clutter.
 
 ## Create and assign
 

@@ -41,7 +41,11 @@ interface KindMeta {
 }
 
 function kindMeta(block: ChatBlock): KindMeta {
-  if (block.type === 'todo-activity') return { noun: 'todo', label: 'Todo', Icon: ListChecks }
+  if (block.type === 'todo-activity') {
+    return text(block.payload.parentId)
+      ? { noun: 'sub-task', label: 'Sub-task', Icon: ListChecks }
+      : { noun: 'todo', label: 'Todo', Icon: ListChecks }
+  }
   if (block.type === 'workflow-definition') return { noun: 'workflow', label: 'Workflow', Icon: Workflow }
   return { noun: 'workflow run', label: 'Workflow run', Icon: Play }
 }
@@ -123,6 +127,7 @@ function factsFor(block: ChatBlock): Fact[] {
     if (value && value.trim()) facts.push({ label, value, emphasis })
   }
   if (block.type === 'todo-activity') {
+    push('Parent', text(p.parentId))
     push('Assignee', text(p.assignee))
     push('By', text(p.actor))
     push('Approval', p.approvalState ? humanize(text(p.approvalState)) : undefined)

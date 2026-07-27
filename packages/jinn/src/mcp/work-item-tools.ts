@@ -64,6 +64,11 @@ function requireTodoIdField(args: Record<string, unknown>, name: string): string
   }
 }
 
+function optionalTodoIdField(args: Record<string, unknown>, name: string): string | undefined {
+  if (args[name] === undefined || args[name] === null) return undefined;
+  return requireTodoIdField(args, name);
+}
+
 function requireRelationKind(args: Record<string, unknown>): (typeof RELATION_KINDS)[number] {
   const kind = typeof args.kind === "string" ? args.kind : "";
   if (!(RELATION_KINDS as readonly string[]).includes(kind)) {
@@ -126,6 +131,9 @@ function summarize(item: Record<string, unknown>): Record<string, unknown> {
     assignee: item.assignee ?? null,
     department: item.department ?? null,
     source: item.source,
+    parentId: item.parentId ?? null,
+    rootId: item.rootId ?? item.id ?? null,
+    depth: item.depth ?? 0,
     version: item.version,
     updatedAt: item.updatedAt ?? null,
   };
@@ -202,7 +210,7 @@ function rejectProvenance(args: Record<string, unknown>): void {
 export function buildWorkItemTools(): JinnMcpTool[] {
   const list: JinnMcpTool = {
     name: "list_work_items",
-    description: "List recent or filtered Todos as compact summaries.",
+    description: "List recent or filtered Todo roots and sub-tasks; compact summaries.",
     inputSchema: {
       type: "object",
       properties: {
@@ -212,6 +220,8 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         department: { type: "string" },
         needsAttentionFor: { type: "string" },
         createdBy: { type: "string" },
+        parentId: TODO_ID_SCHEMA,
+        rootId: TODO_ID_SCHEMA,
         rootsOnly: { type: "boolean" },
         label: { type: "string" },
         text: { type: "string" },
@@ -230,6 +240,8 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         department: optionalString(args, "department"),
         needsAttentionFor: optionalString(args, "needsAttentionFor"),
         createdBy: optionalString(args, "createdBy"),
+        parent: optionalTodoIdField(args, "parentId"),
+        root: optionalTodoIdField(args, "rootId"),
         rootsOnly: args.rootsOnly === true ? "true" : undefined,
         label: optionalString(args, "label"),
         text: optionalString(args, "text", WORK_ITEM_QUERY_CHAR_CAP),
@@ -247,7 +259,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const get: JinnMcpTool = {
     name: "get_work_item",
-    description: "Get one Todo full detail.",
+    description: "Get full Todo detail.",
     inputSchema: {
       type: "object",
       properties: { id: TODO_ID_SCHEMA },
@@ -297,7 +309,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const create: JinnMcpTool = {
     name: "create_work_item",
-    description: "Create a Todo (optionally as a sub-task via parentId); approvals excluded.",
+    description: "Create a Todo or parentId sub-task; no approvals.",
     inputSchema: {
       type: "object",
       properties: {
@@ -393,7 +405,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const edit: JinnMcpTool = {
     name: "edit_work_item",
-    description: "Edit a Todo's body/acceptance/priority/dueAt (creator, assignee, or their manager).",
+    description: "Edit Todo body, acceptance, priority, or dueAt.",
     inputSchema: {
       type: "object",
       properties: {
@@ -525,7 +537,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const comment: JinnMcpTool = {
     name: "comment_work_item",
-    description: "Comment on a Todo; parentCommentId replies in its thread; attachments = local file paths to attach to the comment.",
+    description: "Comment on a Todo; supports threaded replies and local attachments.",
     inputSchema: {
       type: "object",
       properties: {
@@ -584,7 +596,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const listComments: JinnMcpTool = {
     name: "list_work_item_comments",
-    description: "List a Todo's comment thread chronologically.",
+    description: "List Todo comments chronologically.",
     inputSchema: {
       type: "object",
       properties: {
@@ -609,7 +621,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const attach: JinnMcpTool = {
     name: "attach_to_work_item",
-    description: "Attach a LOCAL file (by path) to a Todo, or to one of its comments via commentId.",
+    description: "Attach a local file to a Todo or comment.",
     inputSchema: {
       type: "object",
       properties: {
@@ -641,7 +653,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const listAttachments: JinnMcpTool = {
     name: "list_work_item_attachments",
-    description: "List a Todo's attachments; Read each file directly from its storagePath.",
+    description: "List Todo attachments and storage paths.",
     inputSchema: {
       type: "object",
       properties: { id: TODO_ID_SCHEMA },
@@ -658,7 +670,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const link: JinnMcpTool = {
     name: "link_work_items",
-    description: "Link two Todos: src blocks/relates/duplicates dst; blocks is cycle-checked.",
+    description: "Link Todos; blocks is cycle-checked.",
     inputSchema: {
       type: "object",
       properties: {
@@ -681,7 +693,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const unlink: JinnMcpTool = {
     name: "unlink_work_items",
-    description: "Remove a Todo relation (its creator or the operator).",
+    description: "Remove a Todo relation.",
     inputSchema: {
       type: "object",
       properties: {
@@ -704,7 +716,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const label: JinnMcpTool = {
     name: "label_work_item",
-    description: "Replace a Todo's label set; existing label names/ids only.",
+    description: "Set existing Todo labels.",
     inputSchema: {
       type: "object",
       properties: {
@@ -729,7 +741,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const labelsList: JinnMcpTool = {
     name: "list_labels",
-    description: "List the valid Todo labels.",
+    description: "List Todo labels.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args, ctx) => {
       assertIdentity(ctx);
@@ -741,7 +753,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const departments: JinnMcpTool = {
     name: "list_departments",
-    description: "List departments: slug, Todo ID prefix, and Todo count.",
+    description: "List departments with Todo prefixes and counts.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args, ctx) => {
       assertIdentity(ctx);

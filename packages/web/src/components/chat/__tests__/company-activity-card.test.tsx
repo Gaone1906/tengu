@@ -198,6 +198,28 @@ describe('CompanyActivityCard', () => {
     expect(router.state.location.state).toBeNull()
   })
 
+  it('identifies a child Todo as a sub-task and exposes its parent', async () => {
+    const user = userEvent.setup()
+    const { router } = renderCard(todoBlock({
+      payload: {
+        ...todoBlock().payload,
+        parentId: 'JIN-1',
+        rootId: 'JIN-1',
+        depth: 1,
+      },
+    }))
+
+    expect(screen.getByText('Sub-task · JIN-7')).toBeTruthy()
+    const preview = screen.getByRole('button', { name: 'Preview Prepare release sub-task' })
+    await user.click(preview)
+    const region = screen.getByRole('region', { name: 'Prepare release sub-task details' })
+    expect(region.textContent).toContain('Parent')
+    expect(region.textContent).toContain('JIN-1')
+
+    await user.click(screen.getByRole('button', { name: 'Open Prepare release sub-task' }))
+    expect(router.state.location.pathname).toBe('/todos/JIN-7')
+  })
+
   it('renders the canonical Todo id as public object metadata', () => {
     const { container } = render(
       <MemoryRouter><CompanyActivityCard block={probeTodoBlock()} /></MemoryRouter>,

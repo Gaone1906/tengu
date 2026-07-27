@@ -306,6 +306,12 @@ describe("template company doctrine", () => {
     expect(workflowSkill).toContain("native pending approval on the run");
 
     const todoSkill = readTemplate("skills/todo-handling/SKILL.md");
+    expect(todoSkill).toContain("One operator outcome should normally map to one root Todo.");
+    expect(todoSkill).toContain("A checklist does not imply one Todo per item.");
+    expect(todoSkill).toContain("Only independently assignable or independently reviewable deliverables become child Todos.");
+    expect(todoSkill).toContain('"parentId": "ACM-42"');
+    expect(todoSkill).toContain("get_work_item_tree");
+    expect(todoSkill).toContain("rootsOnly");
     expect(todoSkill).toContain("identical pending request");
     expect(todoSkill).toContain("does not perform approval decisions");
     expect(todoSkill).toContain("Todo approvals affect only the Todo");

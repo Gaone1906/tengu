@@ -15,6 +15,7 @@ import { DispatchRow } from './dispatch-row'
 import { BURST_WINDOW_MS, CallbackBurst, type BurstEntry } from './callback-burst'
 import { FoldRegion, type FoldSummaryData } from './fold-region'
 import type { CommsPeekData } from './thread-peek'
+import { TodoActivityBurst } from './todo-activity-burst'
 
 /* ── Tool grouping ──────────────────────────────────────── */
 
@@ -23,6 +24,7 @@ type MessageItem =
   | { kind: 'tool-group'; msgs: Message[]; startIndex: number }
   | { kind: 'dispatch-call'; msg: Message; index: number }
   | { kind: 'callback-burst'; entries: BurstEntry[]; startIndex: number }
+  | { kind: 'todo-burst'; msgs: Message[]; startIndex: number; endIndex: number }
 
 // A finished tool call lands in the transcript as "Used <tool>". While it's
 // still running the content carries the live tool name instead.
@@ -119,6 +121,50 @@ function suppressedActivityToolIds(messages: Message[]): Set<string> {
   return suppressed
 }
 
+function createdTodoRootId(item: MessageItem): string | null {
+  if (item.kind !== 'message' || item.msg.role !== 'assistant' || item.msg.toolCall) return null
+  const blocks = item.msg.blocks ?? []
+  if (blocks.length !== 1 || blocks[0].type !== 'todo-activity') return null
+  const block = blocks[0]
+  return block.payload.action === 'created' && typeof block.payload.rootId === 'string' && block.payload.rootId
+    ? block.payload.rootId
+    : null
+}
+
+function groupTodoCreationBursts(items: MessageItem[]): MessageItem[] {
+  const grouped: MessageItem[] = []
+  let i = 0
+  while (i < items.length) {
+    const rootId = createdTodoRootId(items[i])
+    if (!rootId) {
+      grouped.push(items[i])
+      i++
+      continue
+    }
+    const start = i
+    const msgs: Message[] = []
+    while (i < items.length && createdTodoRootId(items[i]) === rootId) {
+      const item = items[i]
+      if (item.kind !== 'message') break
+      msgs.push(item.msg)
+      i++
+    }
+    if (msgs.length >= 2) {
+      const first = items[start]
+      const last = items[i - 1]
+      grouped.push({
+        kind: 'todo-burst',
+        msgs,
+        startIndex: first.kind === 'message' ? first.index : start,
+        endIndex: last.kind === 'message' ? last.index : i - 1,
+      })
+    } else {
+      grouped.push(items[start])
+    }
+  }
+  return grouped
+}
+
 function groupMessages(messages: Message[]): MessageItem[] {
   const items: MessageItem[] = []
   const suppressedToolIds = suppressedActivityToolIds(messages)
@@ -180,7 +226,7 @@ function groupMessages(messages: Message[]): MessageItem[] {
       i++
     }
   }
-  return items
+  return groupTodoCreationBursts(items)
 }
 
 /* ── The post-turn fold — partitioning ──────────────────── */
@@ -260,30 +306,31 @@ export function finalAnswerIndices(messages: Message[]): number[] {
 }
 
 function itemFirstMsg(item: MessageItem): Message {
-  if (item.kind === 'tool-group') return item.msgs[0]
+  if (item.kind === 'tool-group' || item.kind === 'todo-burst') return item.msgs[0]
   if (item.kind === 'callback-burst') return item.entries[0].msg
   return item.msg
 }
 
 function itemLastMsg(item: MessageItem): Message {
-  if (item.kind === 'tool-group') return item.msgs[item.msgs.length - 1]
+  if (item.kind === 'tool-group' || item.kind === 'todo-burst') return item.msgs[item.msgs.length - 1]
   if (item.kind === 'callback-burst') return item.entries[item.entries.length - 1].msg
   return item.msg
 }
 
 function itemFirstRawIndex(item: MessageItem): number {
-  if (item.kind === 'tool-group' || item.kind === 'callback-burst') return item.startIndex
+  if (item.kind === 'tool-group' || item.kind === 'callback-burst' || item.kind === 'todo-burst') return item.startIndex
   return item.index
 }
 
 function itemLastRawIndex(item: MessageItem): number {
   if (item.kind === 'tool-group') return item.startIndex + item.msgs.length - 1
+  if (item.kind === 'todo-burst') return item.endIndex
   if (item.kind === 'callback-burst') return item.startIndex + item.entries.length - 1
   return item.index
 }
 
 function itemHasActiveDelegation(item: MessageItem): boolean {
-  const rows = item.kind === 'tool-group'
+  const rows = item.kind === 'tool-group' || item.kind === 'todo-burst'
     ? item.msgs
     : item.kind === 'callback-burst'
       ? item.entries.map((entry) => entry.msg)
@@ -383,6 +430,7 @@ function buildFoldSummary(run: MessageItem[], messages: Message[], answerIndex: 
       }
       continue
     }
+    if (item.kind === 'todo-burst') continue
     const msg = item.msg
     if (msg.role === 'notification') {
       const callback = parseTeammateReply(msg)
@@ -488,7 +536,7 @@ function partitionForFold(
       items: run,
       answered,
       liveCompletion: messages[answer]?.id === liveFinalResponseId || run.some((item) => {
-        const rows = item.kind === 'tool-group'
+        const rows = item.kind === 'tool-group' || item.kind === 'todo-burst'
           ? item.msgs
           : item.kind === 'callback-burst'
             ? item.entries.map((entry) => entry.msg)
@@ -1768,7 +1816,7 @@ export function ChatMessages({
           )}
           {renderGroups.map((group) => {
             const renderItem = (item: MessageItem) => {
-              if (item.kind === 'tool-group' || item.kind === 'dispatch-call' || item.kind === 'callback-burst') {
+              if (item.kind === 'tool-group' || item.kind === 'dispatch-call' || item.kind === 'callback-burst' || item.kind === 'todo-burst') {
                 const firstMsg = itemFirstMsg(item)
                 const startIndex = item.kind === 'dispatch-call' ? item.index : item.startIndex
                 const showTimestamp = shouldShowTimestamp(messages, startIndex)
@@ -1793,6 +1841,13 @@ export function ChatMessages({
                           entries={item.entries}
                           onPeek={onPeek}
                           arrivals={arrivalsRef.current}
+                        />
+                      </div>
+                    )}
+                    {item.kind === 'todo-burst' && (
+                      <div className="assistant-msg-row mb-[var(--space-1)] min-w-0">
+                        <TodoActivityBurst
+                          blocks={item.msgs.flatMap((message) => message.blocks ?? [])}
                         />
                       </div>
                     )}

@@ -97,6 +97,13 @@ describe("work-item tools — registry + schemas", () => {
     expect(tool("search_work_items").description).toMatch(/structured filters/i);
   });
 
+  it("makes Todo hierarchy explicit on the list surface", () => {
+    const properties = tool("list_work_items").inputSchema.properties;
+    expect(properties.parentId).toMatchObject({ pattern: "^[A-Z]{3}-[1-9][0-9]*$" });
+    expect(properties.rootId).toMatchObject({ pattern: "^[A-Z]{3}-[1-9][0-9]*$" });
+    expect(tool("list_work_items").description).toMatch(/roots and sub-tasks/i);
+  });
+
   it("create schema has no approval fields and update schema allows manual start but excludes cancelled", () => {
     const createProps = tool("create_work_item").inputSchema.properties;
     expect(Object.keys(createProps).sort()).toEqual(
@@ -115,6 +122,9 @@ describe("work-item tools — registry + schemas", () => {
     const template = fs.readFileSync(path.join(process.cwd(), "template", "CLAUDE.md"), "utf-8");
     expect(template).toContain("Todos are the company's task ledger");
     expect(template).toContain("create_work_item");
+    expect(template).toContain("One operator outcome should normally map to one root Todo.");
+    expect(template).toContain("A checklist does not imply one Todo per item.");
+    expect(template).toContain("Only independently assignable or independently reviewable deliverables become child Todos.");
     expect(template).toContain("Never mark your own item `done`");
     expect(template).not.toContain(["", "Users", ""].join("/"));
   });
@@ -153,9 +163,31 @@ describe("work-item tools — unit (stub gateway)", () => {
     expect(out.hint).toMatch(/Preview or Open the persisted activity receipt in this chat\./);
   });
 
-  it("list passes status/source/assignee filters and returns compact summaries", async () => {
-    const { calls, ctx } = stub(() => ({ status: 200, body: { workItems: [{ id: "JIN-1", title: "T", body: "MUST NOT LEAK", status: "blocked", source: "session", version: 7 }] } }));
-    const out = (await tool("list_work_items").handler({ status: "blocked", source: "session", assignee: "qa", limit: 99 }, ctx)) as {
+  it("list passes filters and returns hierarchy-aware compact summaries", async () => {
+    const { calls, ctx } = stub(() => ({
+      status: 200,
+      body: {
+        workItems: [{
+          id: "JIN-2",
+          title: "T",
+          body: "MUST NOT LEAK",
+          status: "blocked",
+          source: "session",
+          version: 7,
+          parentId: "JIN-1",
+          rootId: "JIN-1",
+          depth: 1,
+        }],
+      },
+    }));
+    const out = (await tool("list_work_items").handler({
+      status: "blocked",
+      source: "session",
+      assignee: "qa",
+      parentId: "JIN-1",
+      rootId: "JIN-1",
+      limit: 99,
+    }, ctx)) as {
       workItems: Array<Record<string, unknown>>;
     };
     const url = new URL(calls[0].url);
@@ -163,9 +195,23 @@ describe("work-item tools — unit (stub gateway)", () => {
     expect(url.searchParams.get("status")).toBe("blocked");
     expect(url.searchParams.get("source")).toBe("session");
     expect(url.searchParams.get("assignee")).toBe("qa");
+    expect(url.searchParams.get("parent")).toBe("JIN-1");
+    expect(url.searchParams.get("root")).toBe("JIN-1");
     // Raised caps (Todos v2): 99 is within the new max of 100, so it passes through unclamped.
     expect(url.searchParams.get("limit")).toBe("99");
-    expect(out.workItems[0]).toEqual({ id: "JIN-1", title: "T", status: "blocked", assignee: null, department: null, source: "session", version: 7, updatedAt: null });
+    expect(out.workItems[0]).toEqual({
+      id: "JIN-2",
+      title: "T",
+      status: "blocked",
+      assignee: null,
+      department: null,
+      source: "session",
+      parentId: "JIN-1",
+      rootId: "JIN-1",
+      depth: 1,
+      version: 7,
+      updatedAt: null,
+    });
   });
 
   it("get returns full Todo detail without projecting Workflow run state", async () => {

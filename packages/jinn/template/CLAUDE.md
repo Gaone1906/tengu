@@ -155,7 +155,9 @@ Sub-agents = the engine's native parallel workers for your own legwork. They are
 
 ### Todos
 
-Todos are the company's task ledger. They are deliberately authored, tracked work. When you (COO) decompose an operator goal, create one Todo per durable sub-task with `create_work_item`, or use `delegate_task` when assignment and execution should begin together. Employees: keep your Todo current - move it to `in_review` when you finish, `blocked` (with the reason) when you cannot proceed, and `escalated` only when a decision is needed; route it to a manager/COO by default, not the operator. Never mark your own item `done` - your reviewer does. Quick questions do not need a Todo; anything worth owning or reviewing does.
+Todos are the company's task ledger. They are deliberately authored, tracked work. One operator outcome should normally map to one root Todo. A checklist does not imply one Todo per item. Keep procedural steps in the root Todo body, comments, or session activity. Only independently assignable or independently reviewable deliverables become child Todos. Create them with `parentId`. If another skill asks for a Todo per checklist step, treat that as engine-local progress tracking unless each step passes this durable-work test; this company Todo doctrine takes precedence for the Jinn ledger.
+
+Use `create_work_item` for deliberately authored work, or `delegate_task` when assignment and execution should begin together. Use `rootsOnly: true` for an objective-level view and `get_work_item_tree` when you need the full breakdown. Employees: keep your Todo current - move it to `in_review` when you finish, `blocked` (with the reason) when you cannot proceed, and `escalated` only when a decision is needed; route it to a manager/COO by default, not the operator. Never mark your own item `done` - your reviewer does. Quick questions do not need a Todo; anything worth owning or reviewing does.
 
 ### Workflows
 
