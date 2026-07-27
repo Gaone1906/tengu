@@ -17,6 +17,8 @@ const cronId = "upgrade-lab-cron"
 const employeeName = "lab-operator"
 const workflowTitle = "Upgrade lab representative workflow"
 const legacyDefinitionFile = path.join(evidenceRoot, "workflows", `${workflowId}.definition.json`)
+const legacyDefinitionStore = path.join(packageRoot, "dist", "src", "workflows", "definition-store.js")
+const usesLegacyWorkflowStore = fs.existsSync(legacyDefinitionStore)
 const sha256File = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")
 
 const sessions = await load("sessions/registry.js")
@@ -45,7 +47,6 @@ if (mode === "seed-old") {
     prompt: "fixture",
   }])
   const todos = await load("work-items/store.js")
-  const workflows = await load("workflows/definition-store.js")
   if (!todos.getWorkItemBySourceRef("session", todoSourceRef)) {
     todos.createWorkItem({
       title: "Upgrade lab representative Todo",
@@ -55,20 +56,33 @@ if (mode === "seed-old") {
       sourceRef: todoSourceRef,
     })
   }
-  if (!workflows.getDefinition(evidenceRoot, workflowId)) {
-    workflows.createDefinition(evidenceRoot, {
-      schemaVersion: 1,
-      id: workflowId,
-      name: workflowId,
-      title: workflowTitle,
-      version: 1,
-      status: "active",
-      nodes: [
-        { id: "trigger", type: "trigger", label: "Manual", position: { x: 0, y: 0 }, trigger: { kind: "manual" } },
-        { id: "step", type: "step", label: "Step", position: { x: 0, y: 140 }, actor: { kind: "engine", ref: "codex" } },
-      ],
-      edges: [{ id: "edge", from: "trigger", to: "step", kind: "sequence" }],
-    })
+  if (usesLegacyWorkflowStore) {
+    const workflows = await load("workflows/definition-store.js")
+    if (!workflows.getDefinition(evidenceRoot, workflowId)) {
+      workflows.createDefinition(evidenceRoot, {
+        schemaVersion: 1,
+        id: workflowId,
+        name: workflowId,
+        title: workflowTitle,
+        version: 1,
+        status: "active",
+        nodes: [
+          { id: "trigger", type: "trigger", label: "Manual", position: { x: 0, y: 0 }, trigger: { kind: "manual" } },
+          { id: "step", type: "step", label: "Step", position: { x: 0, y: 140 }, actor: { kind: "engine", ref: "codex" } },
+        ],
+        edges: [{ id: "edge", from: "trigger", to: "step", kind: "sequence" }],
+      })
+    }
+  } else {
+    const workflows = await load("workflows/repository.js")
+    const migrations = await load("workflows/repository-migrations.js")
+    const database = migrations.openWorkflowDatabase()
+    try {
+      const repository = new workflows.WorkflowRepository(database)
+      if (!repository.getDefinition(workflowId)) repository.createDefinition({ id: workflowId, title: workflowTitle })
+    } finally {
+      database.close()
+    }
   }
 }
 
@@ -108,7 +122,7 @@ async function snapshot() {
   } catch {
     result.todo = { count: 0 }
   }
-  if (mode === "seed-old" || mode === "query-old") {
+  if ((mode === "seed-old" || mode === "query-old") && usesLegacyWorkflowStore) {
     const workflows = await load("workflows/definition-store.js")
     const definitions = workflows.listDefinitions(evidenceRoot).filter((definition) => definition.id === workflowId)
     result.workflow = definitions.length === 1 ? {
@@ -122,19 +136,27 @@ async function snapshot() {
     const workflows = await load("workflows/repository-migrations.js")
     const database = workflows.openWorkflowDatabase()
     try {
-      const row = database.prepare("SELECT id, title, enabled FROM workflow_definitions WHERE id = ?").get(workflowId)
+      const row = database.prepare("SELECT id, title, revision, enabled FROM workflow_definitions WHERE id = ?").get(workflowId)
       const reportPath = path.join(path.dirname(evidenceRoot), "workflows", "legacy-v1-import-report.json")
       const report = fs.existsSync(reportPath) ? JSON.parse(fs.readFileSync(reportPath, "utf8")) : null
       const imported = report?.definitions?.find((entry) => entry.id === workflowId)
-      result.workflow = row ? {
-        count: 1,
-        id: row.id,
-        title: row.title,
-        enabled: Boolean(row.enabled),
-        sourceSha256: fs.existsSync(legacyDefinitionFile) ? sha256File(legacyDefinitionFile) : null,
-        legacySourcePreserved: fs.existsSync(legacyDefinitionFile),
-        importOutcome: imported?.outcome ?? null,
-      } : { count: 0 }
+      const legacySourcePreserved = fs.existsSync(legacyDefinitionFile)
+      result.workflow = !row ? { count: 0 } : legacySourcePreserved ? {
+          count: 1,
+          id: row.id,
+          title: row.title,
+          enabled: Boolean(row.enabled),
+          sourceSha256: sha256File(legacyDefinitionFile),
+          legacySourcePreserved,
+          importOutcome: imported?.outcome ?? null,
+        } : {
+          count: 1,
+          id: row.id,
+          title: row.title,
+          revision: row.revision,
+          enabled: Boolean(row.enabled),
+          storage: "v2",
+        }
     } finally {
       database.close()
     }

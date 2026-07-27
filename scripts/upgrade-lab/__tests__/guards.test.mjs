@@ -17,10 +17,12 @@ import {
   buildNativeDependencyRebuild,
   buildDockerInvocation,
   buildMinimalEnvironment,
+  buildLabProcessScanPipeline,
   createLabRoot,
   MIGRATION_SCREENSHOT_CASES,
   loadPlaywrightChromium,
   liveSentinelMetadata,
+  listLabHomeProcessIds,
   migrationSurfaceLocator,
   mergeFileThreeWay,
   persistLabGatewayPort,
@@ -415,6 +417,91 @@ test("candidate state probing uses the v2 Workflow repository and import report"
   assert.match(probe, /legacy-v1-import-report\.json/)
 })
 
+test("state probing seeds and reads a v2 Workflow baseline", () => {
+  const root = createLabRoot()
+  try {
+    const layout = assertIsolatedLayout(root)
+    fs.mkdirSync(path.join(layout.home, "org", "lab"), { recursive: true })
+    fs.writeFileSync(
+      path.join(layout.home, "org", "lab", "operator.yaml"),
+      "name: lab-operator\ndisplayName: Lab Operator\ndepartment: lab\nrank: employee\nengine: codex\npersona: Disposable fixture.\n",
+    )
+    const env = buildMinimalEnvironment(layout, { PATH: process.env.PATH ?? "" })
+    const probe = path.resolve("scripts/upgrade-lab/state-probe.mjs")
+    const packageRoot = path.resolve("packages/jinn")
+    const evidenceRoot = path.join(layout.home, "workflow-evidence")
+    const seeded = spawnSync(process.execPath, [probe, "seed-old", packageRoot, evidenceRoot], {
+      env,
+      encoding: "utf8",
+    })
+    assert.equal(seeded.status, 0, seeded.stderr)
+    const before = JSON.parse(seeded.stdout)
+    assert.deepEqual(before.workflow, {
+      count: 1,
+      id: "upgrade-lab-workflow",
+      title: "Upgrade lab representative workflow",
+      revision: 1,
+      enabled: false,
+      storage: "v2",
+    })
+
+    const queried = spawnSync(process.execPath, [probe, "query-candidate", packageRoot, evidenceRoot], {
+      env,
+      encoding: "utf8",
+    })
+    assert.equal(queried.status, 0, queried.stderr)
+    assert.deepEqual(JSON.parse(queried.stdout).workflow, before.workflow)
+    assert.doesNotThrow(() => assertRepresentativeStateSurvived(before, JSON.parse(queried.stdout)))
+  } finally {
+    removeLabRoot(root)
+  }
+})
+
+test("lab API requests always carry the disposable gateway bearer token", () => {
+  assert.equal(typeof upgradeLab.buildLabRequestOptions, "function")
+  assert.deepEqual(
+    upgradeLab.buildLabRequestOptions("lab-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }),
+    {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer lab-token",
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    },
+  )
+})
+
+test("a candidate without a migration bundle requires no migration handoff", () => {
+  assert.equal(typeof upgradeLab.candidateNeedsMigrationHandoff, "function")
+  const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-no-bundle-candidate-"))
+  try {
+    assert.equal(upgradeLab.candidateNeedsMigrationHandoff({
+      scenario: "stock",
+      packageRoot,
+      version: "0.28.7",
+    }), false)
+    fs.mkdirSync(path.join(packageRoot, "template", "migrations", "0.28.7"), { recursive: true })
+    fs.writeFileSync(path.join(packageRoot, "template", "migrations", "0.28.7", "manifest.json"), "{}\n")
+    assert.equal(upgradeLab.candidateNeedsMigrationHandoff({
+      scenario: "stock",
+      packageRoot,
+      version: "0.28.7",
+    }), true)
+    assert.equal(upgradeLab.candidateNeedsMigrationHandoff({
+      scenario: "no-instance-change",
+      packageRoot,
+      version: "0.28.7",
+    }), false)
+  } finally {
+    fs.rmSync(packageRoot, { recursive: true, force: true })
+  }
+})
+
 test("three-way merge preserves a non-conflicting user append and target changes", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-merge-file-"))
   try {
@@ -662,6 +749,34 @@ setInterval(() => {}, 1000)
 
   assert.equal(child.exitCode, 0)
   assert.equal(fs.existsSync(root), false)
+})
+
+test("process cleanup filters to lab-owned PIDs before Node receives the process table", () => {
+  const root = createLabRoot()
+  try {
+    const layout = assertIsolatedLayout(root)
+    const pipeline = buildLabProcessScanPipeline(layout.home)
+
+    assert.deepEqual(pipeline.source, {
+      command: "ps",
+      args: ["eww", "-axo", "pid=,command="],
+    })
+    assert.equal(pipeline.filter.command, "awk")
+    assert.ok(pipeline.filter.args.includes(`needle=JINN_HOME=${layout.home}`))
+    assert.match(pipeline.filter.args.at(-1), /print \$1/)
+  } finally {
+    removeLabRoot(root)
+  }
+})
+
+test("process cleanup does not classify its short-lived scanner helpers as lab processes", async () => {
+  const root = createLabRoot()
+  try {
+    const layout = assertIsolatedLayout(root)
+    assert.deepEqual(await listLabHomeProcessIds(layout.home), [])
+  } finally {
+    removeLabRoot(root)
+  }
 })
 
 test("primary scenario failure wins when cleanup also fails", async () => {

@@ -34,6 +34,11 @@ export function readInstalledPackageVersion(packageRoot) {
   return value
 }
 
+export function candidateNeedsMigrationHandoff({ scenario, packageRoot, version }) {
+  if (scenario === "no-instance-change") return false
+  return fs.existsSync(path.join(packageRoot, "template", "migrations", version, "manifest.json"))
+}
+
 export function createLabRoot(explicitRoot) {
   let root
   if (explicitRoot) {
@@ -368,6 +373,12 @@ export function assertRepresentativeStateSurvived(before, after) {
   }
   const oldWorkflow = before?.workflow
   const newWorkflow = after?.workflow
+  if (oldWorkflow?.storage === "v2") {
+    if (JSON.stringify(oldWorkflow) !== JSON.stringify(newWorkflow)) {
+      throw new Error("Representative workflow state changed across the package swap")
+    }
+    return
+  }
   if (
     oldWorkflow?.count !== 1
     || newWorkflow?.count !== 1
@@ -382,29 +393,75 @@ export function assertRepresentativeStateSurvived(before, after) {
   }
 }
 
-export function listLabHomeProcessIds(labHome) {
+export function buildLabProcessScanPipeline(labHome) {
   const expected = resolvedIdentity(labHome)
-  const result = spawnSync("ps", ["eww", "-axo", "pid=,command="], { encoding: "utf8" })
-  if (result.error || result.status !== 0) throw result.error ?? new Error(`Unable to inspect lab processes: ${result.stderr?.trim() || result.status}`)
-  const pids = []
-  for (const line of result.stdout.split("\n")) {
-    const match = line.match(/^\s*(\d+)\s+(.*)$/)
-    if (!match) continue
-    const pid = Number(match[1])
-    if (pid === process.pid) continue
-    const home = match[2].match(/(?:^|\s)JINN_HOME=([^\s]+)/)?.[1]
-    if (home && resolvedIdentity(home) === expected) pids.push(pid)
+  return {
+    source: {
+      command: "ps",
+      args: ["eww", "-axo", "pid=,command="],
+    },
+    filter: {
+      command: "awk",
+      args: [
+        "-v",
+        `needle=JINN_HOME=${expected}`,
+        '{ for (i = 2; i <= NF; i++) if ($i == needle) { print $1; break } }',
+      ],
+    },
   }
+}
+
+async function runLabProcessScanPipeline(pipeline, spawnProcess = spawn) {
+  const source = spawnProcess(pipeline.source.command, pipeline.source.args, { stdio: ["ignore", "pipe", "pipe"] })
+  const filter = spawnProcess(pipeline.filter.command, pipeline.filter.args, { stdio: ["pipe", "pipe", "pipe"] })
+  source.stdout.pipe(filter.stdin)
+
+  const settle = (child) => {
+    let stderr = ""
+    child.stderr.setEncoding("utf8")
+    child.stderr.on("data", (chunk) => { stderr += chunk })
+    return new Promise((resolve, reject) => {
+      child.once("error", reject)
+      child.once("close", (code, signal) => resolve({ code, signal, stderr }))
+    })
+  }
+  let stdout = ""
+  filter.stdout.setEncoding("utf8")
+  filter.stdout.on("data", (chunk) => { stdout += chunk })
+  const [sourceResult, filterResult] = await Promise.all([settle(source), settle(filter)])
+  if (sourceResult.code !== 0) {
+    throw new Error(`Unable to inspect lab processes: ${sourceResult.stderr.trim() || sourceResult.signal || sourceResult.code}`)
+  }
+  if (filterResult.code !== 0) {
+    throw new Error(`Unable to filter lab processes: ${filterResult.stderr.trim() || filterResult.signal || filterResult.code}`)
+  }
+  return {
+    stdout,
+    scannerPids: [source.pid, filter.pid].filter(Number.isInteger),
+  }
+}
+
+export async function listLabHomeProcessIds(labHome, dependencies = {}) {
+  const pipeline = buildLabProcessScanPipeline(labHome)
+  const run = dependencies.runLabProcessScanPipeline ?? runLabProcessScanPipeline
+  const result = await run(pipeline)
+  const output = typeof result === "string" ? result : result.stdout
+  const scannerPids = new Set(typeof result === "string" ? [] : result.scannerPids)
+  const pids = output
+    .split(/\s+/)
+    .filter((value) => /^\d+$/.test(value))
+    .map(Number)
+    .filter((pid) => pid !== process.pid && !scannerPids.has(pid))
   return [...new Set(pids)]
 }
 
 async function waitForNoLabHomeProcesses(labHome, timeoutMs, dependencies = {}) {
   const list = dependencies.listLabHomeProcessIds ?? listLabHomeProcessIds
   const deadline = Date.now() + timeoutMs
-  let remaining = list(labHome)
+  let remaining = await list(labHome)
   while (remaining.length > 0 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 50))
-    remaining = list(labHome)
+    remaining = await list(labHome)
   }
   return remaining
 }
@@ -416,7 +473,7 @@ export async function quiesceLabProcesses(rootInput, dependencies = {}) {
   const send = (pid, kind) => {
     try { signal(pid, kind) } catch (error) { if (error?.code !== "ESRCH") throw error }
   }
-  for (const pid of list(layout.home)) send(pid, "SIGTERM")
+  for (const pid of await list(layout.home)) send(pid, "SIGTERM")
   let remaining = await waitForNoLabHomeProcesses(layout.home, 2_000, dependencies)
   for (const pid of remaining) send(pid, "SIGKILL")
   remaining = await waitForNoLabHomeProcesses(layout.home, 3_000, dependencies)
@@ -595,10 +652,20 @@ function gatewayToken(home) {
   return parsed.token
 }
 
-async function labRequest(port, route, contactedPorts, options = {}) {
+export function buildLabRequestOptions(token, options = {}) {
+  return {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(options.headers ?? {}),
+    },
+  }
+}
+
+async function labRequest(port, route, contactedPorts, token, options = {}) {
   assertSafeLabPort(port)
   contactedPorts.push(port)
-  const response = await fetch(`http://127.0.0.1:${port}${route}`, options)
+  const response = await fetch(`http://127.0.0.1:${port}${route}`, buildLabRequestOptions(token, options))
   const text = await response.text()
   let body = null
   try { body = text ? JSON.parse(text) : null } catch { body = text }
@@ -925,14 +992,21 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
       fs.writeFileSync(config, updated)
     }
 
+    const expectedPending = candidateNeedsMigrationHandoff({
+      scenario,
+      packageRoot: candidateInstall.packageRoot,
+      version: candidateVersion,
+    })
+    summary.candidateMigrationBundlePresent = fs.existsSync(
+      path.join(candidateInstall.packageRoot, "template", "migrations", candidateVersion, "manifest.json"),
+    )
     let candidateGateway = await startGateway(candidateInstall.cli, allocation.port, env, path.join(layout.logs, "candidate-gateway.log"), summary.contactedPorts)
     let openedSessionId = null
     try {
       if (candidateGateway.child.pid === oldPid) throw new Error("candidate unexpectedly reused the old process identity")
       const token = gatewayToken(layout.home)
-      const migrationResponse = await labRequest(allocation.port, "/api/instance-migration", summary.contactedPorts)
+      const migrationResponse = await labRequest(allocation.port, "/api/instance-migration", summary.contactedPorts, token)
       if (!migrationResponse.ok) throw new Error(`candidate migration API failed: ${migrationResponse.status}`)
-      const expectedPending = scenario !== "no-instance-change"
       if (Boolean(migrationResponse.body?.required) !== expectedPending) throw new Error(`candidate pending state was ${migrationResponse.body?.required}, expected ${expectedPending}`)
       summary.checks.candidateGatewayReady = "PASS"
       summary.checks.migrationApiReachable = "PASS"
@@ -940,11 +1014,10 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
       summary.checks.playwrightScreenshots = "PASS"
 
       if (expectedPending) {
-        const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
         const body = JSON.stringify({ migrationKey: migrationResponse.body.migrationKey })
         const [first, duplicate] = await Promise.all([
-          labRequest(allocation.port, "/api/instance-migration/open", summary.contactedPorts, { method: "POST", headers, body }),
-          labRequest(allocation.port, "/api/instance-migration/open", summary.contactedPorts, { method: "POST", headers, body }),
+          labRequest(allocation.port, "/api/instance-migration/open", summary.contactedPorts, token, { method: "POST", headers: { "Content-Type": "application/json" }, body }),
+          labRequest(allocation.port, "/api/instance-migration/open", summary.contactedPorts, token, { method: "POST", headers: { "Content-Type": "application/json" }, body }),
         ])
         if (!first.ok || !duplicate.ok || first.body.sessionId !== duplicate.body.sessionId) throw new Error("gateway did not reuse one concurrent migration handoff")
         openedSessionId = first.body.sessionId
@@ -964,23 +1037,23 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
           summary.checks.stubRecordedCanonicalPrompt = "PASS"
         }
       } else {
-        if (fs.existsSync(path.join(layout.home, ".migration-snapshots"))) throw new Error("no-instance-change created a snapshot")
-        if (fs.readFileSync(path.join(layout.logs, "candidate-gateway.log"), "utf8").includes("Jinn update installed")) throw new Error("no-instance-change printed a migration banner")
+        if (fs.existsSync(path.join(layout.home, ".migration-snapshots"))) throw new Error("no-handoff candidate created a snapshot")
+        if (fs.readFileSync(path.join(layout.logs, "candidate-gateway.log"), "utf8").includes("Jinn update installed")) throw new Error("no-handoff candidate printed a migration banner")
         summary.checks.noPromptBannerSnapshotOrSession = "PASS"
       }
     } finally {
       await stopGateway(candidateGateway)
     }
 
-    if (scenario === "interrupted") {
+    if (scenario === "interrupted" && expectedPending) {
       const markerBeforeRetry = fs.readFileSync(path.join(layout.home, "config.yaml"), "utf8")
       candidateGateway = await startGateway(candidateInstall.cli, allocation.port, env, path.join(layout.logs, "candidate-retry-gateway.log"), summary.contactedPorts)
       try {
         const token = gatewayToken(layout.home)
-        const pendingRetry = await labRequest(allocation.port, "/api/instance-migration", summary.contactedPorts)
-        const retry = await labRequest(allocation.port, "/api/instance-migration/open", summary.contactedPorts, {
+        const pendingRetry = await labRequest(allocation.port, "/api/instance-migration", summary.contactedPorts, token)
+        const retry = await labRequest(allocation.port, "/api/instance-migration/open", summary.contactedPorts, token, {
           method: "POST",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ migrationKey: pendingRetry.body.migrationKey }),
         })
         if (!retry.ok || retry.body.sessionId !== openedSessionId || retry.body.reused !== true) throw new Error("interrupted retry did not reuse the durable migration session")
@@ -991,6 +1064,8 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
       if (markerBeforeRetry !== markerAfterRetry) throw new Error("interrupted handoff advanced the version marker")
       summary.checks.interruptionPreservedMarker = "PASS"
       summary.checks.retryReusedSession = "PASS"
+    } else if (scenario === "interrupted") {
+      summary.checks.noMigrationHandoffRequired = "PASS"
     }
 
     const service = await import(pathToFileURL(path.join(candidateInstall.packageRoot, "dist", "src", "migrations", "service.js")))
@@ -998,8 +1073,8 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
     const completion = await import(pathToFileURL(path.join(candidateInstall.packageRoot, "dist", "src", "migrations", "completion.js")))
     const migrationsDir = path.join(candidateInstall.packageRoot, "template", "migrations")
     let pending = service.getPendingInstanceMigration({ instanceHome: layout.home, packageVersion: candidateVersion, migrationsDir })
-    if (scenario === "no-instance-change") {
-      if (pending.required) throw new Error("no-instance-change unexpectedly produced a migration")
+    if (!expectedPending) {
+      if (pending.required) throw new Error("no-handoff candidate unexpectedly produced a migration")
       summary.checks.noPromptOrSnapshot = "PASS"
     } else if (scenario === "interrupted") {
       if (!pending.required) throw new Error("interrupted flow suppressed the pending migration")
@@ -1066,7 +1141,8 @@ async function executeScenario({ scenario, candidateTarball, baselineTarball, ro
     if (liveBefore.digest !== liveAfter.digest) throw new Error("live instance sentinel metadata changed during the lab")
     summary.liveSentinels = { before: liveBefore.digest, after: liveAfter.digest, unchanged: true }
     summary.checks.liveInstanceSentinelsUnchanged = "PASS"
-    fs.copyFileSync(path.join(candidateInstall.packageRoot, "template", "migrations", candidateVersion, "manifest.json"), path.join(layout.artifacts, "manifest.json"))
+    const candidateManifest = path.join(candidateInstall.packageRoot, "template", "migrations", candidateVersion, "manifest.json")
+    if (fs.existsSync(candidateManifest)) fs.copyFileSync(candidateManifest, path.join(layout.artifacts, "manifest.json"))
     fs.writeFileSync(path.join(layout.artifacts, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`)
     console.log(JSON.stringify(summary, null, 2))
     return summary
