@@ -1,8 +1,8 @@
 class Jinn < Formula
   desc "Lightweight AI gateway daemon orchestrating Claude Code and Codex"
   homepage "https://github.com/hristo2612/jinn"
-  url "https://registry.npmjs.org/jinn-cli/-/jinn-cli-0.28.7.tgz"
-  sha256 "e262f5fb18827e8d4c05491396e2ccd45e9d320e03ff86e90c29aaeb1719d7d2"
+  url "https://registry.npmjs.org/jinn-cli/-/jinn-cli-0.29.0.tgz"
+  sha256 "b668c805179d31936c81a765d817705c5339e3f4f8706d1a5dd8bb57671ac094"
   license "MIT"
 
   livecheck do
