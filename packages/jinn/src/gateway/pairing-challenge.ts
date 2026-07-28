@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { pathIsOwnerOnly } from "../shared/owner-only.js";
 
 export const PAIRING_CHALLENGE_TTL_MS = 10_000;
 export const PAIRING_CHALLENGE_FILE_PREFIX = "pair-challenge-";
@@ -42,14 +43,35 @@ function unlinkProof(file: string): void {
   }
 }
 
+/** The proof file must be reachable only by the operator running the gateway.
+ *
+ *  POSIX states that as mode 0o600 plus a uid matching both JINN_HOME and this
+ *  process. Windows has neither concept — every uid is 0 and mode is synthetic —
+ *  so the 0o600 test could never pass there and local pairing was impossible.
+ *  Ask the ACL instead, which is what actually governs access on that platform.
+ *  Both paths fail closed.
+ *
+ *  The checks are not symmetric: POSIX also pins the uid triple, while Windows
+ *  verifies the DACL only, because `icacls /save` emits the DACL and not the
+ *  owner. Planting a proof file still requires write access to a home that this
+ *  same call asserts is owner-only, so the gap is not reachable on its own — but
+ *  it is a gap, and an owner check belongs here if one becomes available. */
+function proofOwnershipIsExclusive(jinnHome: string, file: string, proofStat: fs.Stats): boolean {
+  if (process.platform === "win32") {
+    return pathIsOwnerOnly(file) && pathIsOwnerOnly(jinnHome);
+  }
+  const homeStat = fs.statSync(jinnHome);
+  if ((proofStat.mode & 0o777) !== 0o600) return false;
+  if (proofStat.uid !== homeStat.uid) return false;
+  if (typeof process.getuid === "function" && homeStat.uid !== process.getuid()) return false;
+  return true;
+}
+
 function proofMatches(jinnHome: string, file: string, nonce: string): boolean {
   try {
-    const homeStat = fs.statSync(jinnHome);
     const proofStat = fs.lstatSync(file);
     if (!proofStat.isFile() || proofStat.isSymbolicLink()) return false;
-    if ((proofStat.mode & 0o777) !== 0o600) return false;
-    if (proofStat.uid !== homeStat.uid) return false;
-    if (typeof process.getuid === "function" && homeStat.uid !== process.getuid()) return false;
+    if (!proofOwnershipIsExclusive(jinnHome, file, proofStat)) return false;
 
     const expected = Buffer.from(nonce, "utf-8");
     if (proofStat.size !== expected.length) return false;
