@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "version": "0.29.0",
+  "baseVersion": "0.28.7",
+  "generatedFrom": {
+    "baseRef": "v0.28.7",
+    "headRef": "WORKTREE"
+  },
+  "files": [
+    {
+      "path": "CLAUDE.md",
+      "operation": "modify",
+      "baseSha256": "3f25499b1b8fca337034e181f7248e594cda1b8435f180a79309a56d842b6cf3",
+      "targetSha256": "b992b8be3e44e23d3ac2841ab185fb0450e71b38aa662fc64ab7e0ea2f4f4641",
+      "basePayload": "files/base/CLAUDE.md",
+      "targetPayload": "files/target/CLAUDE.md"
+    },
+    {
+      "path": "skills/todo-handling/SKILL.md",
+      "operation": "modify",
+      "baseSha256": "89c0796ad9544c7d76bf8b13b6a449940401ba795b573fa7adceee759ac4f100",
+      "targetSha256": "5b8cbccd95da89818117690fc3044acae477ab1413bfaca839f21306ca4bf2f3",
+      "basePayload": "files/base/skills/todo-handling/SKILL.md",
+      "targetPayload": "files/target/skills/todo-handling/SKILL.md"
+    }
+  ]
+}

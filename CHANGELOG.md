@@ -1,6 +1,12 @@
 # Changelog
 
-## [0.28.8]
+## [0.29.0] - 2026-07-28
+
+### ✨ Features
+- **Todo hierarchies read like one piece of work.** Consecutive creation receipts for the same root Todo are now grouped into one compact work breakdown in chat, while standalone children identify themselves as sub-tasks and show their parent. MCP Todo summaries now preserve `parentId`, `rootId`, and `depth`, list calls can filter by parent or root, and the shipped operating doctrine teaches agents to create one root per durable outcome instead of turning every checklist step into a separate top-level Todo.
+
+### 🐛 Fixes
+- **Claude turns confirm that a prompt was actually submitted.** A warm terminal could accept pasted text without submitting it, silently wedging the turn. Jinn now retries the submit until Claude's hook acknowledges it, stops retrying once the turn settles, and surfaces the stalled state in the chat sidebar when progress has stopped.
 
 ### 🔒 Security
 - **The instance directory is restricted to you, and says so when it is not.** `~/.jinn` holds the gateway token, connector secrets and every session transcript, and was protected with a `0600` file mode. Windows has no such mode — `chmod` there only toggles the read-only flag — so the protection was a no-op and the directory kept whatever access it inherited from the user profile; on one machine that meant every file readable by an unrelated account group. Permissions are now expressed in each platform's own model, identified by security identifier rather than by name so that a non-English Windows is handled correctly, and `jinn setup` restricts the directory once so everything written later inherits it. Local device pairing also worked again on Windows, where it had required a file mode no Windows file can report.
