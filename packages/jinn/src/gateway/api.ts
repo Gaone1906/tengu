@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
 import type { ChatBlock, ChatBlockEnvelope, CronJob, DelegatedActivity, Employee, Engine, IncomingMessage, JinnConfig, JsonObject, Session, StreamDelta, Target } from "../shared/types.js";
-import { isInterruptibleEngine, STRUCTURED_MESSAGE_BODY_MAX_CHARS } from "../shared/types.js";
+import { isInterruptibleEngine, reportsTurnProgress, STRUCTURED_MESSAGE_BODY_MAX_CHARS } from "../shared/types.js";
 import { compactEmployeeRole } from "../shared/employee-role.js";
 export { compactEmployeeRole } from "../shared/employee-role.js";
 import {
@@ -1982,6 +1982,31 @@ export function buildSessionDelegatedActivityIndex(
   return buildDelegatedActivityIndex(sessions, activeSessionIds);
 }
 
+/** The in-flight turn's progress instant, for the UI to age itself.
+ *
+ *  Deliberately carries no staleness verdict. A stalled session emits no events —
+ *  that is what stalled means — so nothing invalidates the sessions query, and a
+ *  server-side "is it stale yet?" would only reach the client if something else
+ *  happened to trigger a refetch. The feature exists to surface a silent failure,
+ *  so it must not depend on activity to be delivered.
+ *
+ *  Instead this reports the instant for any live turn. The client already receives
+ *  a serialize at turn start, so it holds the value while the session is healthy
+ *  and its own clock decides when the silence has gone on too long.
+ *
+ *  Null while a tool or upstream request explains the quiet — that is state rather
+ *  than time, so the server is the right place to judge it — and both transitions
+ *  emit hooks, hence events, hence a refetch. */
+function computeLiveTurnProgress(session: Session, context: ApiContext): Session["turnProgress"] {
+  if (session.status !== "running") return null;
+  const engine = context.sessionManager.getEngine(session.engine);
+  if (!engine || !reportsTurnProgress(engine)) return null;
+  const progress = engine.turnProgress(session.id);
+  if (!progress) return null;
+  if (progress.activeTools > 0 || progress.activeUpstream) return null;
+  return { lastProgressAt: progress.lastProgressAt, awaitingSubmit: progress.awaitingSubmit };
+}
+
 export function serializeSession(
   session: Session,
   context: ApiContext,
@@ -1997,6 +2022,7 @@ export function serializeSession(
     ...session,
     queueDepth,
     transportState,
+    turnProgress: computeLiveTurnProgress(session, context),
     backgroundActivity: bg && !bgIsStale
       ? { activeStreams: bg.activeStreams, lastActivityAt: new Date(bg.lastActivityAt).toISOString() }
       : null,

@@ -1,5 +1,5 @@
 
-import React, { useEffect, useState, useRef, useCallback, useMemo, startTransition } from "react"
+import React, { useEffect, useState, useRef, useCallback, useMemo, useSyncExternalStore, startTransition } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { useQueryClient } from "@tanstack/react-query"
 import { Link } from "react-router-dom"
@@ -59,6 +59,9 @@ interface Session {
   backgroundActivity?: BackgroundActivity | null
   /** Active descendant employee sessions; derived by the gateway. */
   delegatedActivity?: DelegatedActivity | null
+  /** The in-flight turn has produced nothing for a while; derived by the gateway.
+   *  A running session and a wedged one are otherwise indistinguishable. */
+  turnProgress?: { lastProgressAt: number; awaitingSubmit: boolean } | null
   [key: string]: unknown
 }
 
@@ -396,16 +399,112 @@ export function isRecentError(
   return nowMs - ts < RECENT_ERROR_WINDOW_MS
 }
 
+/** How long a live turn may produce nothing before the row says so. Well below the
+ *  gateway reconciler's kill threshold on purpose: the operator should see a session
+ *  go amber — and get the chance to interrupt or resend it themselves — long before
+ *  anything is reclaimed automatically. */
+export const TURN_STALL_VISIBLE_MS = 90_000
+
+/** Read stall state off a session, tolerating older payloads (a gateway that
+ *  predates the field simply never reports progress).
+ *
+ *  The staleness verdict lives HERE, not on the server. A stalled session emits no
+ *  events, so nothing invalidates the sessions query — a server-side verdict would
+ *  only arrive if something unrelated triggered a refetch, and the whole point is
+ *  to surface a session that generates no signals. The client receives the progress
+ *  instant at turn start, while the session is still healthy, and `useStallClock`
+ *  re-renders on a timer so this crosses the threshold with no network round-trip. */
+export function getTurnStall(
+  session: Session,
+  now: number = Date.now(),
+): { stalledForMs: number; awaitingSubmit: boolean } | null {
+  const progress = session.turnProgress
+  const at = progress?.lastProgressAt
+  if (!progress || typeof at !== "number" || !Number.isFinite(at) || at <= 0) return null
+  const stalledForMs = now - at
+  if (stalledForMs < TURN_STALL_VISIBLE_MS) return null
+  return { stalledForMs, awaitingSubmit: !!progress.awaitingSubmit }
+}
+
+/** One interval for the whole sidebar, shared via an external store.
+ *
+ *  A per-row timer would mean one interval per session; this keeps a single timer
+ *  that only runs while something is subscribed, and only exists to re-render so
+ *  getTurnStall can re-evaluate its own clock. */
+const stallClock = (() => {
+  const listeners = new Set<() => void>()
+  let now = Date.now()
+  let timer: ReturnType<typeof setInterval> | undefined
+  return {
+    subscribe(listener: () => void) {
+      listeners.add(listener)
+      if (!timer) {
+        // The clock stops with the last listener, so the cached value can be
+        // arbitrarily old by the time the sidebar mounts again. React re-reads the
+        // snapshot right after subscribing, so refreshing here is picked up.
+        now = Date.now()
+        timer = setInterval(() => {
+          now = Date.now()
+          for (const l of listeners) l()
+        }, 15_000)
+      }
+      return () => {
+        listeners.delete(listener)
+        if (listeners.size === 0 && timer) {
+          clearInterval(timer)
+          timer = undefined
+        }
+      }
+    },
+    get: () => now,
+  }
+})()
+
+/** Ticks only for rows that could actually stall. A row with nothing in flight has
+ *  no age to advance, so it stays out of the listener set entirely and the interval
+ *  does not exist at all while the list is quiet. */
+const noStallClock = () => () => {}
+export function useStallClock(active = true): number {
+  return useSyncExternalStore(active ? stallClock.subscribe : noStallClock, stallClock.get, stallClock.get)
+}
+
+/** Coarse elapsed label — "2m", "51m", "1h 4m". Deliberately low-precision: the
+ *  operator needs to know it has been too long, not the exact second. */
+export function formatStallAge(ms: number): string {
+  const totalMinutes = Math.floor(ms / 60_000)
+  if (totalMinutes < 1) return "under a minute"
+  if (totalMinutes < 60) return `${totalMinutes}m`
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`
+}
+
 // Resolve the attention-state dot for a session. Returns null for the resting
 // "read" state so no dot is painted (quiet at rest). Optionally treat the row
 // as unread even when this session is read (e.g. a grouped employee row whose
 // other chats are unread).
-function getStatusDot(
+export function getStatusDot(
   session: Session,
   readSet: Set<string>,
   forceUnread = false,
+  now: number = Date.now(),
 ): StatusDotState | null {
-  if (session.status === "running") return { color: "var(--system-blue)", label: "running", pulse: true }
+  if (session.status === "running") {
+    // A stalled turn must not look like a working one. Same blue-dot spinner for
+    // both is exactly why a 51-minute hang can sit unnoticed: amber + an elapsed
+    // count is the difference between "thinking" and "go look at this".
+    const stall = getTurnStall(session, now)
+    if (stall) {
+      return {
+        color: "var(--system-orange)",
+        label: stall.awaitingSubmit
+          ? `prompt not accepted by the engine (stuck ${formatStallAge(stall.stalledForMs)})`
+          : `no output for ${formatStallAge(stall.stalledForMs)}`,
+        pulse: false, // a still dot reads as stuck; pulsing reads as working
+      }
+    }
+    return { color: "var(--system-blue)", label: "running", pulse: true }
+  }
   if (isRecentError(session.status, getSessionActivity(session), Date.now())) {
     return { color: "var(--system-red)", label: "error", pulse: false }
   }
@@ -414,6 +513,42 @@ function getStatusDot(
   // which would read like an error. Calm grey stays visible without alarming.
   if (forceUnread || !readSet.has(session.id)) return { color: "var(--text-secondary)", label: "unread", pulse: false }
   return null
+}
+
+/** Row-level "this needs a look" chips.
+ *
+ *  Both facts here were previously unobservable: a wedged session rendered exactly
+ *  like a working one indefinitely, and the queue piling up behind it was not shown
+ *  at all — so the only way to find a stuck employee was to go looking for one. */
+function SessionAttentionChips({ session }: { session: Session }) {
+  const stall = session.status === "running" ? getTurnStall(session) : null
+  const queued = typeof session.queueDepth === "number" ? session.queueDepth : 0
+  if (!stall && queued <= 0) return null
+  return (
+    <span className="flex shrink-0 items-center gap-1.5">
+      {stall ? (
+        <span
+          title={
+            stall.awaitingSubmit
+              ? "The engine never accepted this prompt. Open the CLI view to resend it, or interrupt the session."
+              : `The turn is still in flight but has produced no output for ${formatStallAge(stall.stalledForMs)}.`
+          }
+          style={{ background: "color-mix(in srgb, var(--system-orange) 14%, transparent)" }}
+          className="shrink-0 rounded-sm px-1 text-[10px] font-medium tabular-nums text-[var(--system-orange)]"
+        >
+          {stall.awaitingSubmit ? "not accepted" : `stalled ${formatStallAge(stall.stalledForMs)}`}
+        </span>
+      ) : null}
+      {queued > 0 ? (
+        <span
+          title={`${queued} queued message${queued === 1 ? "" : "s"} waiting on this session`}
+          className="shrink-0 rounded-sm bg-[var(--fill-secondary)] px-1 text-[10px] font-medium tabular-nums text-[var(--text-secondary)]"
+        >
+          {queued} queued
+        </span>
+      ) : null}
+    </span>
+  )
 }
 
 function StatusDot({
@@ -505,7 +640,8 @@ const SessionRow = React.memo(function SessionRow({
   updateSessionTitle,
 }: SessionRowProps) {
   const sessionIsActive = session.id === selectedId
-  const sessionDot = getStatusDot(session, readSessions)
+  const stallNow = useStallClock(session.status === "running")
+  const sessionDot = getStatusDot(session, readSessions, false, stallNow)
   const sessionTitle = fixTitle(session.title, session.employee)
   const displayTitle = cleanPreview(sessionTitle) || sessionTitle
   const sessionTime = formatTime(getSessionActivity(session))
@@ -689,7 +825,8 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
   updateSessionTitle,
 }: FlatSessionRowProps) {
   const isActive = session.id === selectedId
-  const dot = getStatusDot(session, readSessions)
+  const stallNow = useStallClock(session.status === "running")
+  const dot = getStatusDot(session, readSessions, false, stallNow)
   const rawTitle = fixTitle(session.title, session.employee)
   const displayTitle = cleanPreview(rawTitle) || "Untitled"
   const time = formatTime(getSessionActivity(session))
@@ -785,7 +922,10 @@ const FlatSessionRow = React.memo(function FlatSessionRow({
                   }}
                 />
               ) : (
-                <div className="truncate text-[11px] text-[var(--text-tertiary)]">{displayTitle}</div>
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="min-w-0 truncate text-[11px] text-[var(--text-tertiary)]">{displayTitle}</span>
+                  <SessionAttentionChips session={session} />
+                </div>
               )}
             </div>
           </button>
@@ -896,7 +1036,8 @@ const EmployeeRow = React.memo(function EmployeeRow({
   )
   // The group dot reflects the latest session's live state, but escalates to an
   // "unread" accent dot when any chat in the group is unread.
-  const empDot = getStatusDot(latestSession, readSessions, hasUnread)
+  const stallNow = useStallClock(latestSession?.status === "running")
+  const empDot = getStatusDot(latestSession, readSessions, hasUnread, stallNow)
 
   const sessionRowProps = {
     selectedId,

@@ -7,7 +7,7 @@ import { afterEach, describe, it, expect, vi } from "vitest";
 // focused and CI-portable.
 vi.mock("node-pty", () => ({ spawn: vi.fn() }));
 
-import { TurnResolver, buildAttachmentSuffix, buildInteractiveArgs, claudeHookToDeltas, pasteAndSubmit, shouldSettleStalledTurn, sumTranscriptUsage } from "../claude-interactive.js";
+import { SUBMIT_ACK_HOOKS, TurnResolver, buildAttachmentSuffix, buildInteractiveArgs, claudeHookToDeltas, pasteAndSubmit, shouldSettleStalledTurn, sumTranscriptUsage } from "../claude-interactive.js";
 import { MAIN_AGENT_SENTINEL } from "../sse-pty-proxy.js";
 import { buildPromptWithPlatformContext } from "../platform-context.js";
 
@@ -204,6 +204,173 @@ describe("pasteAndSubmit", () => {
     vi.advanceTimersByTime(1);
     expect(writes).toEqual([`\x1b[200~${text}\x1b[201~`, "\r"]);
   });
+
+  it("stops after one CR when no confirmation is requested", () => {
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    pasteAndSubmit({ write: (d: string) => writes.push(d) } as any, "hello");
+    vi.advanceTimersByTime(60_000);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(1);
+  });
+
+  it("re-sends CR until the engine acknowledges the prompt", () => {
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const retries: number[] = [];
+    let submitted = false;
+    pasteAndSubmit({ write: (d: string) => writes.push(d) } as any, "queued work", {
+      submitted: () => submitted,
+      onRetry: (n) => retries.push(n),
+      onUnconfirmed: () => { throw new Error("must not give up — the prompt was acknowledged"); },
+      intervalMs: 1000,
+      attempts: 3,
+    });
+    vi.advanceTimersByTime(150);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(1); // the optimistic CR
+
+    // The swallowed-CR case: nothing acknowledges, so the loop retries.
+    vi.advanceTimersByTime(1000);
+    expect(retries).toEqual([1]);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(2);
+
+    // The CLI finally takes it — retries must stop immediately, and no further CR
+    // may be written (an extra CR would submit an empty prompt on the next turn).
+    submitted = true;
+    vi.advanceTimersByTime(10_000);
+    expect(retries).toEqual([1]);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(2);
+  });
+
+  it("gives up after the retry budget so the turn can be failed instead of hanging", () => {
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const gaveUp: number[] = [];
+    pasteAndSubmit({ write: (d: string) => writes.push(d) } as any, "queued work", {
+      submitted: () => false,
+      onUnconfirmed: (n) => gaveUp.push(n),
+      intervalMs: 1000,
+      attempts: 3,
+    });
+    vi.advanceTimersByTime(150 + 3 * 1000);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(4); // initial + 3 retries
+    expect(gaveUp).toEqual([]);
+    vi.advanceTimersByTime(1000); // the sweep after the budget is spent
+    expect(gaveUp).toEqual([3]);
+    // And it must stop writing — not spin CRs into the PTY forever.
+    vi.advanceTimersByTime(60_000);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(4);
+  });
+
+  it("cancel() stops the retry loop, so a settled turn cannot type into the next one", () => {
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const cancel = pasteAndSubmit({ write: (d: string) => writes.push(d) } as any, "queued work", {
+      submitted: () => false,
+      onUnconfirmed: () => { throw new Error("cancelled loops must not report"); },
+      intervalMs: 1000,
+      attempts: 5,
+    });
+    vi.advanceTimersByTime(150);
+    cancel();
+    vi.advanceTimersByTime(60_000);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(1);
+  });
+
+  it("treats a settled turn as no longer needing submission", () => {
+    // run() wires `submitted` to include resolver.isSettled, so an early interrupt
+    // stops the retry loop immediately rather than typing into a dead turn.
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    let settled = false;
+    pasteAndSubmit({ write: (d: string) => writes.push(d) } as any, "queued work", {
+      submitted: () => settled, // stands in for `promptSubmitted || resolver.isSettled`
+      onUnconfirmed: () => { throw new Error("a settled turn must not be reported unconfirmed"); },
+      intervalMs: 1000,
+      attempts: 3,
+    });
+    vi.advanceTimersByTime(150);
+    settled = true;
+    vi.advanceTimersByTime(60_000);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(1);
+  });
+
+  it("does not retry or report while the CLI is busy", () => {
+    // Claude Code queues a pasted prompt behind a turn already running and fires
+    // no UserPromptSubmit until it dequeues, so a queued prompt looks exactly
+    // like a swallowed CR. Spraying CRs at a busy TUI, then declaring a live
+    // turn lost, is the failure mode this gate exists to prevent.
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const retries: number[] = [];
+    let busy = true;
+    pasteAndSubmit({ write: (d: string) => writes.push(d) } as any, "queued work", {
+      submitted: () => false,
+      busy: () => busy,
+      onRetry: (n) => retries.push(n),
+      onUnconfirmed: () => { throw new Error("must not report while the CLI is busy"); },
+      intervalMs: 1000,
+      attempts: 2,
+    });
+    vi.advanceTimersByTime(150);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(1); // the optimistic CR
+
+    // Long enough to burn the whole budget if the gate were not honoured.
+    vi.advanceTimersByTime(60_000);
+    expect(retries).toEqual([]);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(1);
+
+    // Work finishes without an acknowledgement: now retrying is correct.
+    busy = false;
+    vi.advanceTimersByTime(1000);
+    expect(retries).toEqual([1]);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(2);
+  });
+
+  it("reports rather than settling, leaving the verdict to the stall backstop", () => {
+    // pasteAndSubmit must never decide a turn is dead: it has only the absence of
+    // a signal to go on, and that signal is legitimately absent for live work.
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const reported: number[] = [];
+    const cancel = pasteAndSubmit({ write: (d: string) => writes.push(d) } as any, "queued work", {
+      submitted: () => false,
+      onUnconfirmed: (n) => reported.push(n),
+      intervalMs: 1000,
+      attempts: 2,
+    });
+    vi.advanceTimersByTime(150 + 3 * 1000);
+    expect(reported).toEqual([2]);
+    // Reporting is terminal for the loop — no further CRs, and no side effect
+    // beyond the callback.
+    vi.advanceTimersByTime(60_000);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(3); // initial + 2 retries
+    expect(reported).toEqual([2]);
+    cancel();
+  });
+
+  it("cancel() before the initial CR suppresses the submit entirely", () => {
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const cancel = pasteAndSubmit({ write: (d: string) => writes.push(d) } as any, "queued work", {
+      submitted: () => false,
+    });
+    cancel(); // turn died inside the 150ms paste-settle beat
+    vi.advanceTimersByTime(60_000);
+    expect(writes.filter((w) => w === "\r")).toHaveLength(0);
+  });
+
+  it("accepts only hooks that prove THIS prompt is running", () => {
+    // What run() feeds the confirmation: any of these arriving means the pasted
+    // prompt reached the CLI. SessionStart must NOT count — the idle spawn that
+    // warmed this PTY fires it before the paste, so accepting it would confirm a
+    // submit that never happened and strand the text in the composer, which is
+    // the exact failure this whole path exists to catch.
+    for (const hook of ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "StopFailure"]) {
+      expect(SUBMIT_ACK_HOOKS.has(hook)).toBe(true);
+    }
+    expect(SUBMIT_ACK_HOOKS.has("SessionStart")).toBe(false);
+    expect(SUBMIT_ACK_HOOKS.has("Notification")).toBe(false);
+  });
 });
 
 /**
@@ -350,4 +517,5 @@ describe("shouldSettleStalledTurn", () => {
     expect(shouldSettleStalledTurn(5 * MIN, 60_000)).toBe(false);
     expect(shouldSettleStalledTurn(15 * MIN, 5 * MIN)).toBe(true);
   });
+
 });
