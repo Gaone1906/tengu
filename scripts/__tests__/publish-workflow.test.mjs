@@ -16,6 +16,7 @@ test("publishes jinn-cli from an exact version tag through npm Trusted Publishin
   assert.match(workflow, /permissions:\s*\n\s+contents: read\s*\n\s+id-token: write/)
   assert.match(workflow, /fetch-depth: 0/)
   assert.match(workflow, /persist-credentials: false/)
+  assert.match(workflow, /uses: pnpm\/action-setup@v6/)
   assert.match(workflow, /node-version-file: \.nvmrc/)
   assert.match(workflow, /registry-url: ["']https:\/\/registry\.npmjs\.org["']/)
   assert.match(workflow, /pnpm install --frozen-lockfile/)
