@@ -33,6 +33,18 @@ function linkedSession(id: string, workItemId: string, status: SessionStatus, at
   ).run(id, `cron:${id}`, status, outcome, workItemId, at, at);
 }
 
+/** A Workflow phase session linked to the run's bound Todo, carrying what it cost. */
+function phaseSession(id: string, workItemId: string, status: SessionStatus, at: string, cost: number): void {
+  db.prepare(
+    `INSERT INTO sessions (id, engine, source, source_ref, status, attempt_outcome, work_item_id, total_cost,
+       workflow_kind, workflow_id, workflow_name, workflow_run_id, workflow_trigger_source,
+       workflow_phase_node_id, workflow_phase_name, workflow_phase_index, workflow_phase_round, workflow_phase_attempt,
+       created_at, last_activity)
+     VALUES (?, 'claude', 'workflow', ?, ?, ?, ?, ?, 'phase', 'pipeline', 'Pipeline', 'run-1', 'workflow',
+       'plan', 'Plan', 1, 1, 1, ?, ?)`,
+  ).run(id, `workflow:pipeline:run-1:plan:1`, status, evidence(status).outcome, workItemId, cost, at, at);
+}
+
 beforeAll(async () => {
   store = await import("../store.js");
   reconcile = await import("../reconcile.js");
@@ -309,6 +321,30 @@ describe("reconcileWorkItem — integration against real store + registry", () =
     const wi = store.createWorkItem({ title: "unlinked", status: "assigned", source: "human" });
     expect(reconcile.reconcileWorkItem(wi.id)?.changed).toBe(false);
     expect(store.getWorkItem(wi.id)?.status).toBe("assigned");
+  });
+
+  it("counts a linked Workflow phase session's spend without deriving the Todo from it", () => {
+    const wi = store.createWorkItem({ title: "workflow-bound", status: "executing", source: "human" });
+    phaseSession("s-phase-1", wi.id, "idle", "2026-07-01T00:00:00.000Z", 4.5);
+
+    // Spend rolls up: that is the whole point of linking the phase session.
+    expect(store.getWorkItemSpend(wi.id)).toBeCloseTo(4.5);
+    // Status does not: the RUN decides when the pipeline is finished, so one
+    // settled phase must not move the Todo to in_review with phases still to go.
+    expect(reconcile.reconcileWorkItem(wi.id)?.changed).toBe(false);
+    expect(store.getWorkItem(wi.id)?.status).toBe("executing");
+  });
+
+  it("still derives from a delegation session that shares the Todo with a phase session", () => {
+    const wi = store.createWorkItem({ title: "mixed evidence", status: "executing", source: "delegation", sourceRef: "delegate:m1:1" });
+    phaseSession("s-phase-2", wi.id, "idle", "2026-07-01T02:00:00.000Z", 2);
+    linkedSession("s-delegated-2", wi.id, "interrupted", "2026-07-01T01:00:00.000Z");
+
+    // Newest-first ordering puts the phase session at index 0; ignoring it must
+    // leave the delegated attempt as the authority, not silence the evidence.
+    expect(reconcile.reconcileWorkItem(wi.id)?.changed).toBe(true);
+    expect(store.getWorkItem(wi.id)?.status).toBe("blocked");
+    expect(store.getWorkItemSpend(wi.id)).toBeCloseTo(2);
   });
 
 });

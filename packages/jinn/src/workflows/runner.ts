@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { logger } from "../shared/logger.js";
 import type { Employee, ModelRegistry, WorkflowAttemptCompletion } from "../shared/types.js";
 import { interpolateWorkflowPrompt, resolveBinding, WorkflowBindingError, type WorkflowBindingContext } from "./bindings.js";
 import { buildNodeContract } from "./contract.js";
@@ -29,10 +30,17 @@ export interface WorkflowRunnerOptions {
    *  decides it from Todos, not from Workflows. Absent = no Todo surface (the
    *  gate still parks the run and is decidable through the workflow API). */
   todoApprovals?: WorkflowTodoApprovalMirror;
+  /** Links each phase session to the run's bound Todo so the run's spend rolls
+   *  up on that Todo. Absent = no attribution (the run still executes). */
+  todoSessions?: WorkflowTodoSessionLink;
 }
 
 export interface WorkflowTodoApprovalMirror {
   request(input: { todoId: string; request: string; ref: string; options?: string[]; approver?: string }): void;
+}
+
+export interface WorkflowTodoSessionLink {
+  link(input: { todoId: string; sessionId: string }): void;
 }
 
 type NodeAction =
@@ -320,6 +328,22 @@ export class WorkflowRunner {
     } catch { /* the workflow-side gate stands on its own */ }
   }
 
+  /** Attribute a phase session to the run's bound Todo, so the Todo's derived
+   *  spend covers what the pipeline cost — it sums `total_cost` over its linked
+   *  sessions, and until now a run's phases were linked to nothing. Best-effort:
+   *  the attempt is already dispatched and the Todo may have been deleted since
+   *  the run started, so a failure is logged rather than failing the run. */
+  private attributeSession(run: WorkflowRunDetail, sessionId: string): void {
+    const todoId = run.trigger.todoId;
+    if (!todoId || !this.options.todoSessions) return;
+    try {
+      this.options.todoSessions.link({ todoId, sessionId });
+    } catch (error) {
+      logger.warn(`Workflow run ${run.id} could not attribute session ${sessionId} to Todo ${todoId}: `
+        + `${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private async dispatch(run: WorkflowRunDetail, node: EmployeeNode, config: ResolvedEmployeeConfig): Promise<void> {
     const at = this.now();
     const promptText = composeEmployeePrompt(run, node);
@@ -402,6 +426,7 @@ export class WorkflowRunner {
       tx.settleAttempt(nodeId, attemptNumber, { status: "running", sessionId });
       tx.setNodeStatus(nodeId, "running");
     });
+    this.attributeSession(current, sessionId);
     this.changed(current);
     return true;
   }

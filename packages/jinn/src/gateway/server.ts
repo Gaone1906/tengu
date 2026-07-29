@@ -40,6 +40,7 @@ import { reconcileWorkItemsOnStartup, startWorkItemReconciler } from "../work-it
 import { setTodoLiveEmitter } from "../work-items/live-events.js";
 import { setTodoStatusChangeListener } from "../work-items/transitions.js";
 import { requestApproval, setTodoApprovalDecisionListener } from "../work-items/approvals.js";
+import { linkSession } from "../work-items/store.js";
 import { parseTodoApprovalRef } from "../workflows/runner.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
@@ -975,6 +976,9 @@ export async function startGateway(
     todoApprovals: { request: ({ todoId, request, ref, options, approver }) => {
       requestApproval(todoId, { request, ref, ...(options ? { options } : {}), ...(approver ? { target: approver } : {}), actor: "workflow" });
     } },
+    // A Todo-bound run's phases are execution attempts on that Todo, so its
+    // derived spend covers the whole pipeline.
+    todoSessions: { link: ({ todoId, sessionId }) => linkSession(todoId, sessionId) },
     readTranscript: (id) => getMessages(id).map(({ id: messageId, role, content, timestamp }) => ({ id: messageId, role, content, timestamp })),
     onChange: ({ workflowId, runId }) => emit("company:changed", { entity: "workflow", workflowId, runId }),
     onDefinitionChange: ({ workflowId, revision }) => emit("company:changed", { entity: "workflow", workflowId, revision }) });

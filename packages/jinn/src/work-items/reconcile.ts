@@ -110,10 +110,19 @@ export function reconcileWorkItem(id: string): ReconcileResult | undefined {
   // TRUST-close, or otherwise rewrite them. Explicit guarded Todo actions remain
   // available through the normal operator surfaces.
   if (item.source === 'workflow') return { item, changed: false };
-  const attempts = listSessionsByWorkItem(id).map((s) => ({
-    status: s.status as SessionStatus,
-    outcome: s.attemptOutcome ?? null,
-  }));
+  // A Workflow phase session is linked to the run's bound Todo so the run's
+  // spend rolls up there, but the RUN owns its own lifecycle: it retries,
+  // parks on gates, and decides when the pipeline is finished. Deriving the
+  // Todo from phase receipts would settle it on the first phase that finished —
+  // `in_review` (and TRUST-closed to `done`) with four phases still to run, and
+  // `in_review` is not re-derivable, so it would stay wrong for the rest of the
+  // run. Same rule the `source === 'workflow'` guard above states for items.
+  const attempts = listSessionsByWorkItem(id)
+    .filter((s) => s.workflowProvenance?.kind !== 'phase')
+    .map((s) => ({
+      status: s.status as SessionStatus,
+      outcome: s.attemptOutcome ?? null,
+    }));
   let derived = deriveWorkItemStatus(item.status, attempts, item.source);
   // Provenance is only needed when receipt derivation would overwrite the
   // current state. Since a Todo cannot be blocked and executing simultaneously,
