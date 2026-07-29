@@ -1858,7 +1858,7 @@ describe("PUT /api/work-items/:id/status — the operator human-surface lane (To
     expect(cap.body.error).toContain("backlog");
   });
 
-  it("keeps the agent POST lane unchanged: backlog target refused, note still required, sticky exits locked", async () => {
+  it("keeps the agent POST lane bounded: backlog is settable, note still required, sticky exits locked", async () => {
     const caller = reg.createSession({
       engine: "codex",
       source: "web",
@@ -1866,16 +1866,26 @@ describe("PUT /api/work-items/:id/status — the operator human-surface lane (To
       employee: "platform-worker",
     });
 
-    // Target allowlist unchanged for agents.
-    const owned = store.createWorkItem({ title: "Agent backlog refused", status: "assigned", assignee: "platform-worker" });
+    // "Not now" is a legitimate agent move: a picked-up Todo goes back down.
+    const owned = store.createWorkItem({ title: "Agent backlog allowed", status: "assigned", assignee: "platform-worker" });
     const backlog = makeRes();
     await api.handleApiRequest(
       makeReq("POST", `/api/work-items/${owned.id}/status`, { status: "backlog" }, toolHeaders(caller.id)),
       backlog.res,
       ctx,
     );
-    expect(backlog.status).toBe(400);
-    expect(backlog.body.error).toMatch(/for agent updates/);
+    expect(backlog.status).toBe(200);
+    expect(store.getWorkItem(owned.id)?.status).toBe("backlog");
+
+    // …but cancelled is still not an agent target at all.
+    const cancel = makeRes();
+    await api.handleApiRequest(
+      makeReq("POST", `/api/work-items/${owned.id}/status`, { status: "cancelled" }, toolHeaders(caller.id)),
+      cancel.res,
+      ctx,
+    );
+    expect(cancel.status).toBe(403);
+    expect(cancel.body.error).toMatch(/human surface decision/);
 
     // Note still demanded from agents entering blocked/escalated.
     const noteLess = makeRes();

@@ -1016,7 +1016,11 @@ function cronJobSummary(job: Record<string, unknown>, lastRun: unknown): Record<
 
 const WORK_ITEM_STATUSES: readonly WorkItemStatus[] = ['backlog', 'assigned', 'executing', 'in_review', 'done', 'blocked', 'escalated', 'cancelled'];
 const WORK_ITEM_SOURCES: readonly WorkItemSource[] = ['human', 'delegation', 'cron', 'workflow', 'session', 'connector', 'goal'];
-const AGENT_WORK_ITEM_TARGETS: readonly WorkItemStatus[] = ['assigned', 'executing', 'in_review', 'blocked', 'escalated', 'done'];
+/** `backlog` is here because "not now" is a legitimate move: an agent that
+ *  picked a Todo up and found it premature can put it back down. The sticky
+ *  terminals are unreachable from here anyway — leaving `done`, `cancelled` or
+ *  `escalated` still needs the human surface. */
+const AGENT_WORK_ITEM_TARGETS: readonly WorkItemStatus[] = ['backlog', 'assigned', 'executing', 'in_review', 'blocked', 'escalated', 'done'];
 const VERIFY_MODES = ['trust', 'verify', 'thorough'] as const;
 const VERIFY_POLICY_KEYS = new Set(['mode', 'verifier', 'maxRounds']);
 

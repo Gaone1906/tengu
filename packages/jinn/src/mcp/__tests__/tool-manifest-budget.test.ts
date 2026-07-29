@@ -44,9 +44,11 @@ const ATTESTED = {
   // every session. It costs 9 tokens; the tool's own description bought 10 back
   // by dropping the field list ("Edit Todo title, body, acceptance, priority, or
   // dueAt.") that its schema properties already enumerate.
-  rpc: { tokens: 4472, sha256: "60a4bde9331be7d14bbbde0c4fe49f534ec99e665adb3a22d36d2ce1ba9858c6" },
-  pi: { tokens: 4905, sha256: "73c7d4ed05bc89eea645ce87bc02271f1ff5cb9b04562d8a069c4785999bc2d9" },
-  openai: { tokens: 4647, sha256: "823724ea9e67c8fe331d5074cd3750ef3412baed23e448f0d212a2845ceeff13" },
+  // Rebased for `backlog` on update_work_item's status enum: "not now" is a
+  // legitimate agent move. It costs 3 tokens and leaves Pi 3 under the ceiling.
+  rpc: { tokens: 4475, sha256: "cecf528d523d087dfd9ba50e684c3f841e514e4bd79129e254d7e36345a69719" },
+  pi: { tokens: 4908, sha256: "6fcdbbd4725032c42bb5697ec0f022f7a7d7da03ac165cb14854491e2cb3eedd" },
+  openai: { tokens: 4650, sha256: "d2336f97d7d7397a593ec23bd8df76fe961d1e64fa56e8af3ce82b3041d8fac4" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -219,7 +221,7 @@ const EXPECTED_ENUMS = {
     ["properties.source", ["human", "delegation", "cron", "workflow", "session", "connector", "goal"]],
   ],
   unlink_work_items: [["properties.kind", ["blocks", "relates", "duplicates"]]],
-  update_work_item: [["properties.status", ["assigned", "executing", "in_review", "blocked", "escalated", "done"]]],
+  update_work_item: [["properties.status", ["backlog", "assigned", "executing", "in_review", "blocked", "escalated", "done"]]],
 } as const;
 
 function collectEnums(value: unknown, path: string[] = []): Array<[string, string[]]> {
