@@ -17,8 +17,10 @@ import {
  * transition as the operator's so an operator-filtered `todo-status` trigger
  * fires for work the operator asked for.
  *
- * Its own org home, because the claim is decided by the employee-hierarchy root
- * and this fixture needs an executive at the top of it.
+ * The COO is not an org employee, so the claim is decided by session SHAPE —
+ * top-level, employee-less, no workflow provenance — and not by any employee
+ * name. The fixture keeps an executive precisely to prove that rank buys
+ * nothing here.
  */
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-as-operator-"));
@@ -113,6 +115,11 @@ function session(employee: string, ref: string): string {
   return reg.createSession({ engine: "codex", source: "web", sourceRef: ref, employee }).id;
 }
 
+/** The gateway's own top-level agent session: the COO the operator talks to. */
+function portalSession(ref: string): string {
+  return reg.createSession({ engine: "codex", source: "web", sourceRef: ref }).id;
+}
+
 beforeAll(async () => {
   api = await import("../api.js");
   reg = await import("../../sessions/registry.js");
@@ -122,9 +129,9 @@ beforeAll(async () => {
 });
 
 describe("POST /api/work-items/:id/status — asOperator", () => {
-  it("lets the COO arm a Todo as the operator while the event still names the COO", async () => {
+  it("lets the top-level COO session arm a Todo as the operator while the event still names the session", async () => {
     const item = store.createWorkItem({ title: "Arm the pipeline", status: "backlog" });
-    const coo = session("company-coo", "web:coo-arms");
+    const coo = portalSession("web:coo-arms");
 
     const cap = await setStatus(item.id, { status: "assigned", asOperator: true }, toolHeaders(coo));
 
@@ -134,28 +141,54 @@ describe("POST /api/work-items/:id/status — asOperator", () => {
     expect(store.listWorkItemEvents(item.id).at(-1)).toMatchObject({
       toStatus: "assigned",
       actor: "operator",
-      detail: { asOperator: { actor: `session:${coo}`, employee: "company-coo" } },
+      detail: { asOperator: `session:${coo}` },
     });
     expect(feed.createWorkflowTodoEventFeed().listPendingEvents(500)).toContainEqual(
       expect.objectContaining({ workItemId: item.id, toStatus: "assigned", actor: "operator" }),
     );
   });
 
-  it("refuses an ordinary employee's claim and says who may make it", async () => {
-    const item = store.createWorkItem({ title: "Not yours to arm", status: "backlog" });
-    const worker = session("platform-worker", "web:worker-claims");
+  it("refuses every employee's claim, executive rank included — the COO is not an employee", async () => {
+    for (const [employee, ref] of [["platform-worker", "web:worker-claims"], ["company-coo", "web:executive-claims"]] as const) {
+      const item = store.createWorkItem({ title: `Not ${employee}'s to arm`, status: "backlog" });
+      const cap = await setStatus(item.id, { status: "assigned", asOperator: true }, toolHeaders(session(employee, ref)));
 
-    const cap = await setStatus(item.id, { status: "assigned", asOperator: true }, toolHeaders(worker));
-
-    expect(cap.status).toBe(403);
-    expect(cap.body.error).toMatch(/asOperator .*reserved for the operator surface and "company-coo"/);
-    expect(cap.body.error).toMatch(/employee "platform-worker" must transition as itself/);
-    expect(store.getWorkItem(item.id)?.status).toBe("backlog");
+      expect(cap.status).toBe(403);
+      expect(cap.body.error).toMatch(/asOperator .*reserved for the operator surface and the top-level COO session/);
+      expect(cap.body.error).toMatch(new RegExp(`employee "${employee}" must transition as itself`));
+      expect(store.getWorkItem(item.id)?.status).toBe("backlog");
+    }
   });
 
-  it("stamps an unclaimed COO transition as the COO, not the operator", async () => {
+  it("refuses a session an employee could produce: a child, and a workflow attempt", async () => {
+    const parent = portalSession("web:coo-parent");
+    const child = reg.createSession({ engine: "codex", source: "web", sourceRef: "web:coo-child", parentSessionId: parent }).id;
+    const attempt = reg.createSession({
+      engine: "codex",
+      source: "workflow",
+      sourceRef: "wf:attempt",
+      workflowProvenance: {
+        kind: "phase",
+        workflowId: "pipeline",
+        workflowName: "Pipeline",
+        runId: "run-1",
+        triggerSource: "todo-status",
+        phase: { nodeId: "land", name: "Land", index: 2, round: 1, attempt: 1 },
+      },
+    }).id;
+
+    for (const caller of [child, attempt]) {
+      const item = store.createWorkItem({ title: "Derived session", status: "backlog" });
+      const cap = await setStatus(item.id, { status: "assigned", asOperator: true }, toolHeaders(caller));
+      expect(cap.status).toBe(403);
+      expect(cap.body.error).toMatch(/top-level COO session/);
+      expect(store.getWorkItem(item.id)?.status).toBe("backlog");
+    }
+  });
+
+  it("stamps an unclaimed COO transition as the session, not the operator", async () => {
     const item = store.createWorkItem({ title: "Plain COO move", status: "backlog" });
-    const coo = session("company-coo", "web:coo-plain");
+    const coo = portalSession("web:coo-plain");
 
     const cap = await setStatus(item.id, { status: "assigned" }, toolHeaders(coo));
 
@@ -180,7 +213,7 @@ describe("POST /api/work-items/:id/status — asOperator", () => {
 
   it("rejects a non-boolean claim rather than reading it as off", async () => {
     const item = store.createWorkItem({ title: "Stringly typed", status: "backlog" });
-    const coo = session("company-coo", "web:coo-badtype");
+    const coo = portalSession("web:coo-badtype");
 
     const cap = await setStatus(item.id, { status: "assigned", asOperator: "true" }, toolHeaders(coo));
 
@@ -188,7 +221,7 @@ describe("POST /api/work-items/:id/status — asOperator", () => {
   });
 
   it("does not buy the COO done, cancelled, or a terminal reopen", async () => {
-    const coo = session("company-coo", "web:coo-terminals");
+    const coo = portalSession("web:coo-terminals");
 
     const reviewing = store.createWorkItem({ title: "Someone else's review", status: "in_review" });
     const done = await setStatus(reviewing.id, { status: "done", asOperator: true }, toolHeaders(coo));

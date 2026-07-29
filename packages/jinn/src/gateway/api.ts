@@ -34,6 +34,7 @@ import {
   listSessionsForGroup,
   getSessionGroupCounts,
   coercePortalEmployee,
+  isPortalAgentSession,
   searchSessions,
   searchMessages,
   searchSessionsFiltered,
@@ -1750,6 +1751,27 @@ function rejectScopedIdentityGrant(req: HttpRequest, res: ServerResponse, action
   return true;
 }
 
+/**
+ * The parent a spawn or delegation is recorded under.
+ *
+ * A session caller is ALWAYS a parent. It may name another session it already
+ * knows, but it can never mint a PARENTLESS child, because parentlessness is
+ * the shape of the gateway's own top-level agent session
+ * (`isPortalAgentSession`) and that shape carries operator-delegated authority.
+ * An explicit `null` in the body used to slip through the "was it omitted?"
+ * check and produce exactly that; it now collapses to the caller, as does an
+ * id naming no session. The operator surface is unrestricted — it already holds
+ * the authority a forged parentless child would be reaching for.
+ */
+function resolveSpawnParentSessionId(caller: CallerIdentity, requested: unknown, action: string): string | undefined {
+  const requestedId = typeof requested === "string" ? requested : undefined;
+  if (caller.kind !== "session") return requestedId;
+  if (requestedId && getSession(requestedId)) return requestedId;
+  if (getSession(caller.callerId)) return caller.callerId;
+  logger.warn(`Ignoring unknown x-jinn-caller-session "${caller.callerId}" on ${action}`);
+  return undefined;
+}
+
 function workItemActor(caller: WorkItemCaller): string {
   return caller.kind === 'session' ? `session:${caller.callerId}` : 'operator';
 }
@@ -1968,12 +1990,12 @@ function authorizeAgentWorkItemStatus(caller: WorkItemCaller, item: WorkItem, ta
  * The refusal for a session trying to mint a child that IS the employee-
  * hierarchy root, or undefined when the spawn is fine.
  *
- * Root identity carries operator-delegated authority — `asOperator` keys off it,
- * and so does any `todo-status` trigger filtered on the operator. A session that
- * can obtain a root-identity child holds that authority in two hops, so every
- * route that mints a session refuses it. Which route it takes does not matter,
- * hence one helper for both. The operator surface is unrestricted: it already
- * holds the authority the impersonation would be reaching for.
+ * Root identity decides approvals the rest of the org cannot: it can approve any
+ * Todo routed anywhere beneath it. A session that can obtain a root-identity
+ * child holds that authority in two hops, so every route that mints a session
+ * refuses it. Which route it takes does not matter, hence one helper for both.
+ * The operator surface is unrestricted: it already holds the authority the
+ * impersonation would be reaching for.
  *
  * Only an `employee` root can be impersonated. With no executive at the top,
  * `resolveRootApprovalTarget()` answers with a virtual root whose name belongs to
@@ -1987,12 +2009,6 @@ function spawnAsRootRefusal(caller: CallerIdentity, employeeName: string | null 
   return `a session cannot run work as "${root.name}", the employee-hierarchy root, because that identity carries operator-delegated authority; request an approval or escalate the Todo to the root instead of running as it`;
 }
 
-/** Who really performed a transition recorded as the operator's. */
-interface ActingAsOperator {
-  actor: string;
-  employee: string;
-}
-
 /**
  * `asOperator` stamps the transition's recorded actor as `operator`, so a
  * `todo-status` Workflow trigger filtered on the operator fires for work the
@@ -2001,28 +2017,30 @@ interface ActingAsOperator {
  * That actor string is an authority boundary — filtering on it is what keeps an
  * arbitrary employee from starting a pipeline nobody asked for — so exactly two
  * callers may claim it: the authenticated operator surface, for which it is a
- * no-op, and the employee-hierarchy root, resolved by the same
- * `resolveRootApprovalTarget()` the approval surface routes on. When the org has
- * no employee at its top that helper answers with a virtual root, which matches
- * no session's employee, so no session qualifies.
+ * no-op, and the gateway's own top-level agent session, the COO the operator is
+ * talking to.
+ *
+ * The COO is deliberately NOT an org employee — the portal is the root, and
+ * `resolveRootApprovalTarget()` answers with a VIRTUAL root that matches no
+ * session's employee. So the claim cannot be keyed on an employee name; it is
+ * keyed on the session shape only the operator's own surfaces produce
+ * (`isPortalAgentSession`). An employee session never has that shape, and
+ * neither does anything an employee can spawn.
  *
  * The claim never erases the claimant: the audit event's `actor` reads
- * `operator` for the trigger, and its `detail.asOperator` names the session and
- * employee that actually made the call.
+ * `operator` for the trigger, and its `detail.asOperator` names the session that
+ * actually made the call.
  */
-function authorizeActingAsOperator(caller: WorkItemCaller): { ok: true; actingAs?: ActingAsOperator } | { ok: false; error: string } {
+function authorizeActingAsOperator(caller: WorkItemCaller): { ok: true; actingAs?: string } | { ok: false; error: string } {
   if (caller.kind === 'operator') return { ok: true };
-  const employee = caller.session.employee;
-  const root = resolveRootApprovalTarget();
-  if (!employee || root?.kind !== 'employee' || employee !== root.name) {
-    const who = employee ? `employee "${employee}"` : `session ${caller.callerId}`;
-    const permitted = root?.kind === 'employee' ? `"${root.name}"` : 'the employee-hierarchy root';
+  if (!isPortalAgentSession(caller.session)) {
+    const who = caller.session.employee ? `employee "${caller.session.employee}"` : `session ${caller.callerId}`;
     return {
       ok: false,
-      error: `asOperator records the transition as the operator and is reserved for the operator surface and ${permitted}; ${who} must transition as itself`,
+      error: `asOperator records the transition as the operator and is reserved for the operator surface and the top-level COO session; ${who} must transition as itself`,
     };
   }
-  return { ok: true, actingAs: { actor: workItemActor(caller), employee } };
+  return { ok: true, actingAs: workItemActor(caller) };
 }
 
 function levenshtein(a: string, b: string): number {
@@ -3755,7 +3773,7 @@ export async function handleApiRequest(
       if (!item) return notFound(res);
       const authorized = authorizeAgentWorkItemStatus(caller, item, target as WorkItemStatus);
       if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
-      let actingAsOperator: ActingAsOperator | undefined;
+      let actingAsOperator: string | undefined;
       if (body.asOperator === true) {
         const permitted = authorizeActingAsOperator(caller);
         if (!permitted.ok) return json(res, { error: permitted.error }, 403);
@@ -4608,19 +4626,9 @@ export async function handleApiRequest(
 
       // Parent resolution must outrank durable idempotency replay: a historical
       // Workflow run projection stays read-only even when the key already owns
-      // an ordinary delegation receipt. Explicit body parent wins; otherwise
-      // the authenticated caller is used best-effort (unknown → parentless).
-      let parentSessionId: string | undefined =
-        typeof body.parentSessionId === "string" ? (body.parentSessionId as string) : undefined;
-      let delegatorSession = parentSessionId ? getSession(parentSessionId) : undefined;
-      if (delegationCaller.kind === "session" && body.parentSessionId === undefined) {
-        delegatorSession = getSession(delegationCaller.callerId);
-        if (delegatorSession) {
-          parentSessionId = delegationCaller.callerId;
-        } else {
-          logger.warn(`Ignoring unknown x-jinn-caller-session "${delegationCaller.callerId}" on delegation`);
-        }
-      }
+      // an ordinary delegation receipt.
+      const parentSessionId = resolveSpawnParentSessionId(delegationCaller, body.parentSessionId, "delegation");
+      const delegatorSession = parentSessionId ? getSession(parentSessionId) : undefined;
       // A completed first call is the durable idempotency receipt. Resolve it
       // before re-validating the remaining mutable request context: the caller-
       // chosen key owns the result, and an ordinary retry returns the original
@@ -4964,9 +4972,7 @@ export async function handleApiRequest(
       // GRS-017a identity seam: a spawn carrying x-jinn-caller-session (the jinn
       // MCP server run by another session) is auto-linked as that session's
       // child — the agent cannot forget the linkage and the child-completion
-      // callback protocol works without it knowing the mechanic. An explicit
-      // body.parentSessionId always wins (internal callers). Best-effort: an
-      // unknown caller id is ignored with a warning, never a refusal.
+      // callback protocol works without it knowing the mechanic.
       // A TOOL spawn that LOST its identity fails CLOSED (codex finding 2):
       // silently inheriting the operator's parentless spawn would orphan the
       // child and break the callback protocol without anyone noticing.
@@ -4976,13 +4982,7 @@ export async function handleApiRequest(
         res.end(JSON.stringify({ error: UNIDENTIFIED_TOOL_CALL_ERROR }));
         return;
       }
-      if (spawnCaller.kind === "session" && body.parentSessionId === undefined) {
-        if (getSession(spawnCaller.callerId)) {
-          body.parentSessionId = spawnCaller.callerId;
-        } else {
-          logger.warn(`Ignoring unknown x-jinn-caller-session "${spawnCaller.callerId}" on session spawn`);
-        }
-      }
+      body.parentSessionId = resolveSpawnParentSessionId(spawnCaller, body.parentSessionId, "session spawn");
       const parentSession = typeof body.parentSessionId === "string" ? getSession(body.parentSessionId) : undefined;
       const config = context.getConfig();
       const employeeName = coercePortalEmployee(body.employee, config.portal?.portalName);

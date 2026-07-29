@@ -2143,6 +2143,22 @@ export function coercePortalEmployee(
   return emp;
 }
 
+/**
+ * True for the gateway's own top-level agent session — the portal COO the
+ * operator talks to, which by design has no employee identity of its own.
+ *
+ * Having no employee is NOT on its own the test: an employee can spawn a plain
+ * session, and that child is employee-less too. What no session can produce is
+ * a PARENTLESS one — every spawn and delegation route records a session caller
+ * as the child's parent, whatever the request body asks for — and a workflow
+ * attempt always carries its run in `workflowProvenance`. So the shape below is
+ * reachable only from a surface the operator drives: the web console, a
+ * connector conversation, an operator-authored cron, or the gateway itself.
+ */
+export function isPortalAgentSession(session: Session): boolean {
+  return !session.employee && !session.parentSessionId && !session.workflowProvenance;
+}
+
 // Build the CASE that maps a row to its sidebar group. When a portalSlug is
 // supplied, portal-slug-tagged rows fold into the direct group (defensive +
 // retroactive for any rows that predate coercePortalEmployee). Returns the SQL
