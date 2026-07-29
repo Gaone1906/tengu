@@ -31,9 +31,18 @@ const ATTESTED = {
   // Rebased for `assigned` on update_work_item's status enum: the agent lane
   // can now put a Todo back in the queue. It costs 2 tokens and leaves Pi 7
   // under the ceiling, down from 9.
-  rpc: { tokens: 4471, sha256: "713fe14ec627f0d3b2fdf7d7cb6ca88b70114734121c5262d9535669104a8fbb" },
-  pi: { tokens: 4904, sha256: "f0819bc7bf70a1e982d6d5623b77e800fdd601858d224f8877ad2ff7e3e5dda0" },
-  openai: { tokens: 4646, sha256: "afac6723f2f7fdb89c8708ad857a4e1d5bc7785082c22ca483589bde0b6867bf" },
+  // Rebased once more for `asOperator` on update_work_item, which costs 24 and
+  // broke the ceiling. Three dead clauses bought it back:
+  //   - "Match role/persona fit;" on spawn_session — its own `employee` field
+  //     already teaches the selection rule, one line below.
+  //   - the field list on list_employees ("name, role, rank, department,
+  //     engine, reporting") — the rows it describes carry their own keys. The
+  //     part worth saying, that they include reporting lines, stays.
+  //   - "Include own session." on search_messages — the property name says it,
+  //     and the tool description already states the default it flips.
+  rpc: { tokens: 4473, sha256: "510574f9e612555192dcc116f71a6ffee21e8bb665eb59a2f3cd659e485c2a3e" },
+  pi: { tokens: 4906, sha256: "4045fbd96f210ea53c562ee1e81867a9fc23822f4a04b7c9c0b9f49823a6bc36" },
+  openai: { tokens: 4648, sha256: "adf9137958d280a25e6f6df968f1df2f70779d17d16b705c4ac19e6f4fd5590d" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;

@@ -67,7 +67,7 @@ async function fetchOrgEmployees(ctx: JinnMcpContext): Promise<OrgEmployeeRecord
 export function buildOrgTools(): JinnMcpTool[] {
   const listEmployees: JinnMcpTool = {
     name: "list_employees",
-    description: "List compact employee rows: name, role, rank, department, engine, reporting.",
+    description: "List compact employee rows with reporting lines.",
     inputSchema: { type: "object", properties: {} },
     handler: async (_args, ctx) => {
       assertBoundCaller(ctx);

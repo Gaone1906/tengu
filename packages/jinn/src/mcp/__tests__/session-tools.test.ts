@@ -113,7 +113,6 @@ describe("session tools — registry + schemas", () => {
   it("the protocol teaching (end turn, callback, no polling loops) lives on the spawn tool", () => {
     expect(tool("spawn_session").description).toMatch(/END YOUR TURN/);
     expect(tool("spawn_session").description).toMatch(/never poll/i);
-    expect(tool("spawn_session").description).toMatch(/role\/persona fit/);
   });
 
   it("positions spawn as the quick untracked session verb, distinct from delegate_task", () => {

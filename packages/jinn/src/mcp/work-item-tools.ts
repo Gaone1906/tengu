@@ -390,6 +390,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         id: TODO_ID_SCHEMA,
         status: { type: "string", enum: [...AGENT_UPDATE_STATUSES] },
         note: { type: "string" },
+        asOperator: { type: "boolean", description: "Record the move as the operator's. COO only." },
       },
       required: ["id", "status"],
     },
@@ -407,6 +408,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       const payload: Record<string, unknown> = { status: rawStatus };
       const note = optionalString(args, "note", WORK_ITEM_NOTE_CHAR_CAP);
       if (note !== undefined) payload.note = note;
+      if (args.asOperator !== undefined) payload.asOperator = args.asOperator;
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/status`, payload);
       if (status >= 400) throw gatewayFailure(`updating work item "${id}"`, status, body);
       return mutationResult(body, "Todo status updated.");

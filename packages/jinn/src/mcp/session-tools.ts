@@ -155,7 +155,7 @@ export function buildSessionTools(): JinnMcpTool[] {
   const spawnSession: JinnMcpTool = {
     name: "spawn_session",
     description:
-      "Spawn quick untracked session. For tracked company work use delegate_task. END YOUR TURN; never poll. Match role/persona fit; reuse employees for parallel sessions.",
+      "Spawn quick untracked session. For tracked company work use delegate_task. END YOUR TURN; never poll. Reuse employees for parallel sessions.",
     inputSchema: {
       type: "object",
       properties: {

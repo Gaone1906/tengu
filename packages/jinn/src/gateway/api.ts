@@ -1988,6 +1988,44 @@ function authorizeAgentWorkItemStatus(caller: WorkItemCaller, item: WorkItem, ta
   return review.ok ? { ok: true } : { ok: false, status: 403, error: review.error };
 }
 
+/** Who really performed a transition recorded as the operator's. */
+interface ActingAsOperator {
+  actor: string;
+  employee: string;
+}
+
+/**
+ * `asOperator` stamps the transition's recorded actor as `operator`, so a
+ * `todo-status` Workflow trigger filtered on the operator fires for work the
+ * COO arms on the operator's behalf.
+ *
+ * That actor string is an authority boundary — filtering on it is what keeps an
+ * arbitrary employee from starting a pipeline nobody asked for — so exactly two
+ * callers may claim it: the authenticated operator surface, for which it is a
+ * no-op, and the employee-hierarchy root, resolved by the same
+ * `resolveRootApprovalTarget()` the approval surface routes on. When the org has
+ * no employee at its top that helper answers with a virtual root, which matches
+ * no session's employee, so no session qualifies.
+ *
+ * The claim never erases the claimant: the audit event's `actor` reads
+ * `operator` for the trigger, and its `detail.asOperator` names the session and
+ * employee that actually made the call.
+ */
+function authorizeActingAsOperator(caller: WorkItemCaller): { ok: true; actingAs?: ActingAsOperator } | { ok: false; error: string } {
+  if (caller.kind === 'operator') return { ok: true };
+  const employee = caller.session.employee;
+  const root = resolveRootApprovalTarget();
+  if (!employee || root?.kind !== 'employee' || employee !== root.name) {
+    const who = employee ? `employee "${employee}"` : `session ${caller.callerId}`;
+    const permitted = root?.kind === 'employee' ? `"${root.name}"` : 'the employee-hierarchy root';
+    return {
+      ok: false,
+      error: `asOperator records the transition as the operator and is reserved for the operator surface and ${permitted}; ${who} must transition as itself`,
+    };
+  }
+  return { ok: true, actingAs: { actor: workItemActor(caller), employee } };
+}
+
 function levenshtein(a: string, b: string): number {
   const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
   for (let i = 1; i <= a.length; i++) {
@@ -3713,10 +3751,23 @@ export async function handleApiRequest(
       if ((target === "blocked" || target === "escalated") && !note && !isOperatorPut) {
         return badRequest(res, `note is required when moving a Todo to ${target}`);
       }
+      if (body.asOperator !== undefined && typeof body.asOperator !== "boolean") {
+        return badRequest(res, "asOperator must be a boolean");
+      }
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
       const authorized = authorizeAgentWorkItemStatus(caller, item, target as WorkItemStatus);
       if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
+      let actingAsOperator: ActingAsOperator | undefined;
+      if (body.asOperator === true) {
+        const permitted = authorizeActingAsOperator(caller);
+        if (!permitted.ok) return json(res, { error: permitted.error }, 403);
+        actingAsOperator = permitted.actingAs;
+      }
+      const actor = body.asOperator === true ? "operator" : workItemActor(caller);
+      const detail = note || actingAsOperator
+        ? { ...(note ? { note } : {}), ...(actingAsOperator ? { asOperator: actingAsOperator } : {}) }
+        : undefined;
       // The banner's asked-for-after reason (design-doc §5): a same-status
       // operator PUT with a note annotates the CURRENT exception state instead
       // of vanishing in transition()'s same-status no-op. The note event
@@ -3726,7 +3777,7 @@ export async function handleApiRequest(
           workItemId: params.id,
           kind: "note",
           toStatus: target as WorkItemStatus,
-          actor: workItemActor(caller),
+          actor,
           detail: { note },
           versionEffect: "state",
         });
@@ -3740,17 +3791,17 @@ export async function handleApiRequest(
               // The operator PUT lane is the human surface: the archive lane
               // carries the same human authority as every other sticky exit,
               // so escalated → cancelled (a declared edge) is reachable here.
-              item: archiveWorkItem(params.id, workItemActor(caller), { human: true, ...(note ? { note } : {}) }),
+              item: archiveWorkItem(params.id, actor, { human: true, ...(note ? { note } : {}) }),
               escalated: false,
             }
-          : transition(params.id, target as WorkItemStatus, workItemActor(caller), {
+          : transition(params.id, target as WorkItemStatus, actor, {
               manual: true,
               human: isOperatorPut || undefined,
               // Agent lane: the target allowlist above is what bounds this
               // caller, so the edge map does not also govern it.
               agent: !isOperatorPut || undefined,
               callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
-              detail: note ? { note } : undefined,
+              detail,
             });
         const activityReceiptId = persistTodoMutationActivity(
           req,

@@ -151,7 +151,7 @@ export function buildSearchTools(): JinnMcpTool[] {
       properties: {
         query: { type: "string", description: `All words, max ${QUERY_CHAR_CAP} chars.` },
         sessionId: { type: "string" },
-        includeOwnSession: { type: "boolean", description: "Include own session." },
+        includeOwnSession: { type: "boolean" },
         employee: { type: "string" },
         engine: { type: "string" },
         role: { type: "string", enum: ["user", "assistant"] },

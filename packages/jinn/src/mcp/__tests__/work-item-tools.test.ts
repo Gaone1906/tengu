@@ -114,6 +114,7 @@ describe("work-item tools — registry + schemas", () => {
     const status = tool("update_work_item").inputSchema.properties.status as { enum: string[] };
     expect(status.enum).toEqual(["assigned", "executing", "in_review", "blocked", "escalated", "done"]);
     expect(status.enum).not.toContain("cancelled");
+    expect(tool("update_work_item").inputSchema.properties.asOperator).toMatchObject({ type: "boolean" });
     expect(tool("get_work_item").inputSchema.properties.id).toMatchObject({
       pattern: "^[A-Z]{3}-[1-9][0-9]*$",
     });
@@ -354,6 +355,18 @@ describe("work-item tools — unit (stub gateway)", () => {
         url: "http://127.0.0.1:7777/api/work-items/JIN-1/status",
         body: { status: "executing" },
       }),
+    ]);
+  });
+
+  it("forwards asOperator for the gateway to authorize, and omits it when unasked", async () => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: { workItem: { id: "JIN-1", status: "assigned" } } }), "sess-1");
+
+    await tool("update_work_item").handler({ id: "JIN-1", status: "assigned", asOperator: true }, ctx);
+    await tool("update_work_item").handler({ id: "JIN-1", status: "assigned" }, ctx);
+
+    expect(calls.map((c) => c.body)).toEqual([
+      { status: "assigned", asOperator: true },
+      { status: "assigned" },
     ]);
   });
 
