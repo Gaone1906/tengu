@@ -40,9 +40,13 @@ const ATTESTED = {
   //     part worth saying, that they include reporting lines, stays.
   //   - "Include own session." on search_messages — the property name says it,
   //     and the tool description already states the default it flips.
-  rpc: { tokens: 4473, sha256: "510574f9e612555192dcc116f71a6ffee21e8bb665eb59a2f3cd659e485c2a3e" },
-  pi: { tokens: 4906, sha256: "4045fbd96f210ea53c562ee1e81867a9fc23822f4a04b7c9c0b9f49823a6bc36" },
-  openai: { tokens: 4648, sha256: "adf9137958d280a25e6f6df968f1df2f70779d17d16b705c4ac19e6f4fd5590d" },
+  // Rebased for `title` on edit_work_item, now that a Todo's content is open to
+  // every session. It costs 9 tokens; the tool's own description bought 10 back
+  // by dropping the field list ("Edit Todo title, body, acceptance, priority, or
+  // dueAt.") that its schema properties already enumerate.
+  rpc: { tokens: 4472, sha256: "60a4bde9331be7d14bbbde0c4fe49f534ec99e665adb3a22d36d2ce1ba9858c6" },
+  pi: { tokens: 4905, sha256: "73c7d4ed05bc89eea645ce87bc02271f1ff5cb9b04562d8a069c4785999bc2d9" },
+  openai: { tokens: 4647, sha256: "823724ea9e67c8fe331d5074cd3750ef3412baed23e448f0d212a2845ceeff13" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;

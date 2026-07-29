@@ -7,6 +7,8 @@ export const WORK_ITEM_SEARCH_LIMIT_DEFAULT = 25;
 export const WORK_ITEM_QUERY_CHAR_CAP = 512;
 const FILTER_CHAR_CAP = 256;
 const WORK_ITEM_BODY_CHAR_CAP = 64_000;
+/** Matches the route's own title ceiling, so an over-long title fails here with the field named. */
+const WORK_ITEM_TITLE_CHAR_CAP = 200;
 const WORK_ITEM_NOTE_CHAR_CAP = 8_000;
 
 const STATUSES = ["backlog", "assigned", "executing", "in_review", "done", "blocked", "escalated", "cancelled"] as const;
@@ -417,11 +419,12 @@ export function buildWorkItemTools(): JinnMcpTool[] {
 
   const edit: JinnMcpTool = {
     name: "edit_work_item",
-    description: "Edit Todo body, acceptance, priority, or dueAt.",
+    description: "Edit Todo content.",
     inputSchema: {
       type: "object",
       properties: {
         id: TODO_ID_SCHEMA,
+        title: { type: "string" },
         body: { type: "string" },
         acceptance: { type: ["string", "null"] },
         priority: { type: "number", enum: [0, 1, 2, 3] },
@@ -433,9 +436,6 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       assertIdentity(ctx);
       rejectApprovalFields(args, "edit_work_item");
       const id = requireTodoId(args);
-      if (args.title !== undefined) {
-        throw new JinnMcpToolError("title is a human-surface edit (the Todo's creator or the operator, over the web/HTTP surface) — edit_work_item cannot change it");
-      }
       if (args.status !== undefined) {
         throw new JinnMcpToolError("status is not a metadata edit — use update_work_item for lifecycle changes");
       }
@@ -448,6 +448,10 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         throw new JinnMcpToolError("department and rank are operator-only edits (web/HTTP surface) — edit_work_item cannot change them");
       }
       const patch: Record<string, unknown> = {};
+      {
+        const v = optionalString(args, "title", WORK_ITEM_TITLE_CHAR_CAP);
+        if (v !== undefined) patch.title = v;
+      }
       {
         const v = optionalString(args, "body", WORK_ITEM_BODY_CHAR_CAP);
         if (v !== undefined) patch.body = v;
@@ -473,7 +477,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         if (dueAt !== undefined) patch.dueAt = dueAt;
       }
       if (Object.keys(patch).length === 0) {
-        throw new JinnMcpToolError("pass at least one editable field (body, acceptance, priority, dueAt)");
+        throw new JinnMcpToolError("pass at least one editable field (title, body, acceptance, priority, dueAt)");
       }
       // Agents should not have to run the optimistic-concurrency loop for a
       // simple metadata edit: read a fresh version, PATCH with it, and retry

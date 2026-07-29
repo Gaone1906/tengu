@@ -944,13 +944,14 @@ describe("work-item relation + label tools (Todos v2 slice 3)", () => {
     expect(silent.calls).toEqual([]);
   });
 
-  it("edit_work_item validates locally: at least one field, priority 0..3, no title/status, approval fields rejected", async () => {
+  it("edit_work_item validates locally: at least one field, priority 0..3, no status, approval fields rejected", async () => {
     const silent = stub(() => ({ status: 500, body: { error: "must not run" } }));
     await expect(tool("edit_work_item").handler({ id: "JIN-1" }, silent.ctx)).rejects.toThrow(/at least one/i);
     await expect(tool("edit_work_item").handler({ id: "JIN-1", priority: 9 }, silent.ctx)).rejects.toThrow(/priority/);
     await expect(tool("edit_work_item").handler({ id: "nope", body: "x" }, silent.ctx)).rejects.toThrow(/canonical Todo ID/);
     await expect(tool("edit_work_item").handler({ id: "JIN-1", approvalState: "approved", body: "x" }, silent.ctx)).rejects.toThrow(/approval/i);
     await expect(tool("edit_work_item").handler({ id: "JIN-1", body: "a".repeat(64_001) }, silent.ctx)).rejects.toThrow(/too long/);
+    await expect(tool("edit_work_item").handler({ id: "JIN-1", title: "a".repeat(201) }, silent.ctx)).rejects.toThrow(/too long/);
     // Review F2: stray non-editable args refuse LOUDLY instead of silently
     // succeeding without the edit the agent asked for.
     await expect(tool("edit_work_item").handler({ id: "JIN-1", body: "x", assignee: "someone" }, silent.ctx)).rejects.toThrow(/assign_work_item/);
@@ -958,7 +959,7 @@ describe("work-item relation + label tools (Todos v2 slice 3)", () => {
     await expect(tool("edit_work_item").handler({ id: "JIN-1", body: "x", rank: 3 }, silent.ctx)).rejects.toThrow(/operator/);
     expect(silent.calls).toEqual([]);
     const props = Object.keys(tool("edit_work_item").inputSchema.properties);
-    expect(props.sort()).toEqual(["acceptance", "body", "dueAt", "id", "priority"]);
+    expect(props.sort()).toEqual(["acceptance", "body", "dueAt", "id", "priority", "title"]);
   });
 
   it("edit_work_item reads a fresh version and PATCHes with it", async () => {
@@ -1002,21 +1003,22 @@ describe("work-item relation + label tools (Todos v2 slice 3)", () => {
   it("edit_work_item surfaces the route's authority words verbatim", async () => {
     const { ctx } = stub((call) => {
       if (call.method === "GET") return { status: 200, body: { workItem: { id: "JIN-9", version: 1 } } };
-      return { status: 403, body: { error: 'field "title" is not editable by the assignee: title belongs to the Todo\'s creator or the operator; assignee, department, and rank are operator-only' } };
+      return { status: 403, body: { error: 'field "verifyPolicy" is not editable by employee "platform-dev": assignee, department, rank, verifyPolicy are operator-only' } };
     });
-    await expect(tool("edit_work_item").handler({ id: "JIN-9", body: "x" }, ctx)).rejects.toThrow(/refused \(403\).*"title"/);
+    await expect(tool("edit_work_item").handler({ id: "JIN-9", body: "x" }, ctx)).rejects.toThrow(/refused \(403\).*"verifyPolicy"/);
   });
 
-  it("edit_work_item round-trips through the real API as the assignee session", async () => {
+  it("edit_work_item round-trips content edits through the real API, including the title", async () => {
     const dev = registry.createSession({ engine: "codex", source: "web", sourceRef: "slice4-editor", title: "editor", employee: "platform-dev" });
     const devCtx = ctxFor(dev.id);
     const item = store.createWorkItem({ title: "slice4 editable", assignee: "platform-dev" });
 
     const edited = (await tool("edit_work_item").handler(
-      { id: item.id, body: "refined over MCP", acceptance: "AC v2", priority: 1, dueAt: "2026-08-20" },
+      { id: item.id, title: "renamed over MCP", body: "refined over MCP", acceptance: "AC v2", priority: 1, dueAt: "2026-08-20" },
       devCtx,
     )) as { workItem: Record<string, unknown> };
     expect(edited.workItem).toMatchObject({
+      title: "renamed over MCP",
       body: "refined over MCP",
       acceptance: "AC v2",
       priority: 1,
@@ -1025,10 +1027,10 @@ describe("work-item relation + label tools (Todos v2 slice 3)", () => {
     const edit = store.listWorkItemEvents(item.id).filter((e) => e.kind === "metadata_edited").at(-1)!;
     expect(edit.actor).toBe("platform-dev");
 
-    // the widened matrix still fences non-creator titles — the route's words surface
-    await expect(
-      tool("edit_work_item").handler({ id: item.id, body: "x", title: "hijack" } as Record<string, unknown>, devCtx),
-    ).rejects.toThrow(/title/);
+    // …and a session that never touched the Todo edits its content just the same.
+    const stranger = ctxFor(registry.createSession({ engine: "codex", source: "web", sourceRef: "slice4-stranger", title: "stranger" }).id);
+    const byStranger = (await tool("edit_work_item").handler({ id: item.id, title: "renamed by a stranger" }, stranger)) as { workItem: Record<string, unknown> };
+    expect(byStranger.workItem.title).toBe("renamed by a stranger");
   });
 
   it("link → label → list_labels → detail round-trips through the real API", async () => {

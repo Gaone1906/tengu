@@ -8,11 +8,10 @@ import { ensureSessionCapability } from "../../mcp/identity.js";
 import { CALLER_SESSION_CAPABILITY_HEADER, CALLER_SESSION_HEADER, TOOL_CALL_HEADER, TOOL_CALL_HEADER_VALUE } from "../../mcp/identity.js";
 
 /**
- * Todos v2 slice 4 — the widened PATCH /api/work-items/:id authority matrix
- * (spec §3.4): body/acceptance/priority/dueAt for operator, creator, assignee,
- * or the assignee's manager; title for operator/creator only; assignee,
- * department, and rank stay operator-only. Same expectedVersion/idempotencyKey
- * contract as before, now reachable by authorized non-operator callers.
+ * PATCH /api/work-items/:id splits on content versus ownership: title, body,
+ * acceptance, priority and dueAt are open to every authenticated session (like
+ * status), while assignee, department, rank and verifyPolicy stay operator-only.
+ * Same expectedVersion/idempotencyKey contract throughout.
  */
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "jinn-wi-edit-auth-"));
@@ -79,9 +78,6 @@ function makeReq(method: string, urlPath: string, body?: unknown, headers: Recor
   }) as unknown as Parameters<Api["handleApiRequest"]>[0];
 }
 
-/** Runs the bound-workflow-run authority path reads, keyed `<workflowId>/<runId>`. */
-const runs = new Map<string, { trigger: { todoId?: string } }>();
-
 const ctx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
   connectors: new Map(),
@@ -92,9 +88,6 @@ const ctx = {
       getPendingCount: () => 0,
       getTransportState: (_key: string, status: string) => status,
     }),
-  },
-  workflowService: {
-    getRun: (workflowId: string, runId: string) => runs.get(`${workflowId}/${runId}`) ?? null,
   },
 } as unknown as import("../api.js").ApiContext;
 
@@ -125,8 +118,8 @@ beforeAll(async () => {
   reg.initDb();
 });
 
-describe("PATCH /api/work-items/:id — widened edit authority (spec §3.4)", () => {
-  it("operator edits every field including the new acceptance and dueAt", async () => {
+describe("PATCH /api/work-items/:id — content is open, ownership is the operator's", () => {
+  it("operator edits every field, content and ownership alike", async () => {
     const item = store.createWorkItem({ title: "op all fields" });
     const cap = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, {
       title: "op edited",
@@ -135,6 +128,7 @@ describe("PATCH /api/work-items/:id — widened edit authority (spec §3.4)", ()
       priority: 1,
       rank: 5,
       dueAt: "2026-08-01",
+      verifyPolicy: { mode: "verify" },
     }), operatorHeaders);
     expect(cap.status).toBe(200);
     expect(cap.body.workItem).toMatchObject({
@@ -147,10 +141,11 @@ describe("PATCH /api/work-items/:id — widened edit authority (spec §3.4)", ()
     });
   });
 
-  it("assignee edits body/acceptance/priority/dueAt and the audit is a metadata_edited event with the employee actor", async () => {
+  it("the assignee edits every content field and the audit names the employee", async () => {
     const item = store.createWorkItem({ title: "assignee editable", assignee: "platform-worker" });
     const session = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-assignee", employee: "platform-worker" });
     const cap = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, {
+      title: "refined title",
       body: "refined by the assignee",
       acceptance: "criteria v2",
       priority: 0,
@@ -158,6 +153,7 @@ describe("PATCH /api/work-items/:id — widened edit authority (spec §3.4)", ()
     }), toolHeaders(session.id));
     expect(cap.status).toBe(200);
     expect(cap.body.workItem).toMatchObject({
+      title: "refined title",
       body: "refined by the assignee",
       acceptance: "criteria v2",
       priority: 0,
@@ -166,113 +162,80 @@ describe("PATCH /api/work-items/:id — widened edit authority (spec §3.4)", ()
     const events = store.listWorkItemEvents(item.id);
     const edit = events.filter((e) => e.kind === "metadata_edited").at(-1)!;
     expect(edit.actor).toBe("platform-worker");
-    expect((edit.detail!.updatedFields as string[]).sort()).toEqual(["acceptance", "body", "dueAt", "priority"]);
+    expect((edit.detail!.updatedFields as string[]).sort()).toEqual(["acceptance", "body", "dueAt", "priority", "title"]);
   });
 
-  it("assignee gets a 403 NAMING the field for title and rank", async () => {
-    const item = store.createWorkItem({ title: "assignee limits", assignee: "platform-worker" });
-    const session = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-assignee-limits", employee: "platform-worker" });
-
-    const title = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { title: "hijack" }), toolHeaders(session.id));
-    expect(title.status).toBe(403);
-    expect(title.body.error).toContain('"title"');
-
-    const rank = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { rank: 1 }), toolHeaders(session.id));
-    expect(rank.status).toBe(403);
-    expect(rank.body.error).toContain('"rank"');
-
-    const assignee = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { assignee: null }), toolHeaders(session.id));
-    expect(assignee.status).toBe(403);
-    expect(assignee.body.error).toContain('"assignee"');
-
-    expect(store.getWorkItem(item.id)!.title).toBe("assignee limits");
-  });
-
-  it("the assignee's manager has the same field authority as the assignee", async () => {
-    const item = store.createWorkItem({ title: "manager editable", assignee: "platform-worker" });
-    const manager = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-manager", employee: "platform-lead" });
-
-    const ok = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { body: "manager refinement" }), toolHeaders(manager.id));
-    expect(ok.status).toBe(200);
-    expect(ok.body.workItem.body).toBe("manager refinement");
-
-    const title = await call("PATCH", `/api/work-items/${item.id}`, patchBody(ok.body.workItem.version, { title: "manager hijack" }), toolHeaders(manager.id));
-    expect(title.status).toBe(403);
-    expect(title.body.error).toContain('"title"');
-  });
-
-  it("the item creator (employee slug) may edit the title too", async () => {
-    const item = store.createWorkItem({ title: "creator titled", createdBy: "platform-worker" });
-    const session = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-creator-slug", employee: "platform-worker" });
-    const cap = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { title: "creator retitled" }), toolHeaders(session.id));
-    expect(cap.status).toBe(200);
-    expect(cap.body.workItem.title).toBe("creator retitled");
-  });
-
-  it("an employee session stamps its SLUG as creator, so a sibling session of the same employee holds creator authority too (slice-5 decision 7)", async () => {
-    const creatorSession = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-creator-session", employee: "platform-worker" });
-    const created = await call("POST", "/api/work-items", { title: "slug-created", assignee: "platform-worker" }, toolHeaders(creatorSession.id));
-    expect(created.status).toBe(201);
-    const id = created.body.workItem.id as string;
-    const version = created.body.workItem.version as number;
-    expect(created.body.workItem.createdBy).toBe("platform-worker");
-
-    // the creating session may edit the title…
-    const ok = await call("PATCH", `/api/work-items/${id}`, patchBody(version, { title: "creator session retitle" }), toolHeaders(creatorSession.id));
-    expect(ok.status).toBe(200);
-
-    // …and so may a DIFFERENT session of the same employee — the creator is the
-    // employee (comments identity model), not one ephemeral session.
-    const sibling = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-creator-sibling", employee: "platform-worker" });
-    const siblingOk = await call(
-      "PATCH",
-      `/api/work-items/${id}`,
-      patchBody(ok.body.workItem.version, { title: "sibling retitle" }),
-      toolHeaders(sibling.id),
-    );
-    expect(siblingOk.status).toBe(200);
-    expect(store.getWorkItem(id)!.title).toBe("sibling retitle");
-  });
-
-  it("a session:<uuid> creator (employee-less session) matches only that exact session", async () => {
-    const creatorSession = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-creator-bare" });
-    const created = await call("POST", "/api/work-items", { title: "bare-session-created" }, toolHeaders(creatorSession.id));
-    expect(created.status).toBe(201);
-    const id = created.body.workItem.id as string;
-    const version = created.body.workItem.version as number;
-    expect(created.body.workItem.createdBy).toBe(`session:${creatorSession.id}`);
-
-    // the exact creator session may edit the title…
-    const ok = await call("PATCH", `/api/work-items/${id}`, patchBody(version, { title: "bare creator retitle" }), toolHeaders(creatorSession.id));
-    expect(ok.status).toBe(200);
-
-    // …a DIFFERENT bare session is neither creator, assignee, nor manager.
-    const other = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-creator-other-bare" });
-    const denied = await call(
-      "PATCH",
-      `/api/work-items/${id}`,
-      patchBody(ok.body.workItem.version, { title: "bare hijack" }),
-      toolHeaders(other.id),
-    );
-    expect(denied.status).toBe(403);
-    expect(store.getWorkItem(id)!.title).toBe("bare creator retitle");
-  });
-
-  it("an unrelated employee gets 403 outright; an anonymous tool call stays 403", async () => {
-    const item = store.createWorkItem({ title: "stranger fenced", assignee: "platform-worker" });
+  it("a session with NO relation to the Todo edits its content too — that is the point", async () => {
+    const item = store.createWorkItem({ title: "stranger editable", assignee: "platform-worker" });
     const stranger = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-stranger", employee: "solo-worker" });
-    const denied = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { body: "sneaky" }), toolHeaders(stranger.id));
-    expect(denied.status).toBe(403);
-    expect(denied.body.error).toMatch(/creator|assignee|manager/i);
-    expect(store.getWorkItem(item.id)!.body).toBeNull();
 
-    const anonymous = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { body: "ghost" }), {
+    const cap = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, {
+      title: "retitled by a stranger",
+      body: "and re-bodied",
+    }), toolHeaders(stranger.id));
+    expect(cap.status).toBe(200);
+    expect(store.getWorkItem(item.id)).toMatchObject({ title: "retitled by a stranger", body: "and re-bodied" });
+  });
+
+  it("an employee-less session edits content as well; an anonymous tool call still cannot", async () => {
+    const item = store.createWorkItem({ title: "bare session" });
+    const bare = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-bare" });
+
+    const ok = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { body: "bare edit" }), toolHeaders(bare.id));
+    expect(ok.status).toBe(200);
+    expect(store.listWorkItemEvents(item.id).filter((e) => e.kind === "metadata_edited").at(-1)!.actor).toBe(`session:${bare.id}`);
+
+    const anonymous = await call("PATCH", `/api/work-items/${item.id}`, patchBody(ok.body.workItem.version, { body: "ghost" }), {
       [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
     });
     expect(anonymous.status).toBe(403);
+    expect(store.getWorkItem(item.id)!.body).toBe("bare edit");
   });
 
-  it("expectedVersion conflicts and idempotency replay work through the widened path", async () => {
+  it("ownership stays the operator's: assignee, department, rank and verifyPolicy are refused BY NAME", async () => {
+    const item = store.createWorkItem({ title: "ownership fenced", assignee: "platform-worker" });
+    // The assignee's own manager is refused too — this is not a hierarchy rule.
+    const manager = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-manager", employee: "platform-lead" });
+
+    for (const patch of [{ assignee: null }, { department: "marketing" }, { rank: 1 }, { verifyPolicy: { mode: "verify" } }]) {
+      const cap = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, patch), toolHeaders(manager.id));
+      expect(cap.status).toBe(403);
+      expect(cap.body.error).toContain(`"${Object.keys(patch)[0]}"`);
+      expect(cap.body.error).toContain("operator-only");
+    }
+    expect(store.getWorkItem(item.id)).toMatchObject({ assignee: "platform-worker", rank: null });
+  });
+
+  it("a workflow phase edits the Todo it runs for without any run/Todo binding to consult", async () => {
+    const item = store.createWorkItem({ title: "pipeline status block" });
+    const phase = reg.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: "wf-phase",
+      employee: "solo-worker",
+      workflowProvenance: {
+        kind: "phase",
+        workflowId: "build-pipeline",
+        workflowName: "Build Pipeline",
+        runId: "run-1",
+        triggerSource: "todo-status",
+        phase: { nodeId: "implement", name: "Implement", index: 1, round: 1, attempt: 1 },
+      },
+    });
+
+    const cap = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, {
+      body: "<!-- pipeline-status -->\nIMPLEMENT: done",
+      acceptance: "gates green",
+    }), toolHeaders(phase.id));
+
+    expect(cap.status).toBe(200);
+    expect(cap.body.workItem).toMatchObject({
+      body: "<!-- pipeline-status -->\nIMPLEMENT: done",
+      acceptance: "gates green",
+    });
+  });
+
+  it("expectedVersion conflicts and idempotency replay work through the open path", async () => {
     const item = store.createWorkItem({ title: "cas widened", assignee: "platform-worker" });
     const session = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-cas", employee: "platform-worker" });
 
@@ -300,113 +263,21 @@ describe("PATCH /api/work-items/:id — widened edit authority (spec §3.4)", ()
     expect(replay.body.workItem.version).toBe(first.body.workItem.version);
   });
 
-  it("validates the new fields: bad dueAt 400, acceptance null clears, dueAt null clears", async () => {
+  it("validates fields the same for a session as for the operator: bad dueAt 400, nulls clear", async () => {
     const item = store.createWorkItem({ title: "field validation", acceptance: "old", dueAt: "2026-08-01T00:00:00.000Z" });
-    const bad = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { dueAt: "next tuesday" }), operatorHeaders);
+    const session = reg.createSession({ engine: "codex", source: "web", sourceRef: "edit-validation", employee: "solo-worker" });
+
+    const bad = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { dueAt: "next tuesday" }), toolHeaders(session.id));
     expect(bad.status).toBe(400);
 
     const cleared = await call(
       "PATCH",
       `/api/work-items/${item.id}`,
       patchBody(item.version, { acceptance: null, dueAt: null }),
-      operatorHeaders,
+      toolHeaders(session.id),
     );
     expect(cleared.status).toBe(200);
     expect(cleared.body.workItem.acceptance).toBeNull();
     expect(cleared.body.workItem.dueAt).toBeNull();
-  });
-});
-
-/**
- * The fourth edit relation: a phase of a workflow run bound to the Todo. The
- * binding already existed on both sides (`run.trigger.todoId` and the phase
- * session's provenance) but authorization did not consult it, so every phase of
- * a Todo-triggered pipeline got a 403 on the Todo it was running for. Status is
- * no longer part of this grant — it is open to every session, and its tests live
- * with the status route.
- */
-describe("PATCH /api/work-items/:id — a workflow run bound to the Todo", () => {
-  let phase = 0;
-
-  function phaseSession(runId: string, employee = "solo-worker") {
-    phase += 1;
-    return reg.createSession({
-      engine: "codex",
-      source: "web",
-      sourceRef: `wf-phase-${phase}`,
-      employee,
-      workflowProvenance: {
-        kind: "phase",
-        workflowId: "build-pipeline",
-        workflowName: "Build Pipeline",
-        runId,
-        triggerSource: "todo-status",
-        phase: { nodeId: "implement", name: "Implement", index: 1, round: 1, attempt: 1 },
-      },
-    });
-  }
-
-  it("edits body and acceptance on the Todo its run is bound to", async () => {
-    const item = store.createWorkItem({ title: "pipeline status block" });
-    runs.set("build-pipeline/run-bound", { trigger: { todoId: item.id } });
-    const session = phaseSession("run-bound");
-
-    const cap = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, {
-      body: "<!-- pipeline-status -->\nIMPLEMENT: done",
-      acceptance: "gates green",
-    }), toolHeaders(session.id));
-
-    expect(cap.status).toBe(200);
-    expect(cap.body.workItem).toMatchObject({
-      body: "<!-- pipeline-status -->\nIMPLEMENT: done",
-      acceptance: "gates green",
-    });
-  });
-
-  it("is refused title, assignee, priority and dueAt — it reports progress, it does not re-own the Todo", async () => {
-    const item = store.createWorkItem({ title: "pipeline limits" });
-    runs.set("build-pipeline/run-limits", { trigger: { todoId: item.id } });
-    const session = phaseSession("run-limits");
-
-    for (const patch of [{ title: "renamed" }, { assignee: "solo-worker" }, { priority: 0 }, { dueAt: "2026-09-01" }]) {
-      const cap = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, patch), toolHeaders(session.id));
-      expect(cap.status).toBe(403);
-      expect(cap.body.error).toContain(`"${Object.keys(patch)[0]}"`);
-    }
-    expect(store.getWorkItem(item.id)!.title).toBe("pipeline limits");
-  });
-
-  it("a phase of a run bound to a DIFFERENT Todo is still a stranger, and so is an unrelated employee", async () => {
-    const item = store.createWorkItem({ title: "not my todo" });
-    const other = store.createWorkItem({ title: "someone else's todo" });
-    runs.set("build-pipeline/run-elsewhere", { trigger: { todoId: other.id } });
-
-    const wrongTodo = await call(
-      "PATCH",
-      `/api/work-items/${item.id}`,
-      patchBody(item.version, { body: "reaching across" }),
-      toolHeaders(phaseSession("run-elsewhere").id),
-    );
-    expect(wrongTodo.status).toBe(403);
-    expect(wrongTodo.body.error).toContain("workflow run bound to Todo");
-
-    const unrelated = reg.createSession({ engine: "codex", source: "web", sourceRef: "wf-unrelated", employee: "solo-worker" });
-    const plain = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { body: "no" }), toolHeaders(unrelated.id));
-    expect(plain.status).toBe(403);
-
-    expect(store.getWorkItem(item.id)!.body).not.toBe("reaching across");
-  });
-
-  it("an unbound run grants nothing — the binding, not the provenance, is the authority", async () => {
-    const item = store.createWorkItem({ title: "unbound run" });
-    runs.set("build-pipeline/run-unbound", { trigger: {} });
-
-    const cap = await call(
-      "PATCH",
-      `/api/work-items/${item.id}`,
-      patchBody(item.version, { body: "manual run has no Todo" }),
-      toolHeaders(phaseSession("run-unbound").id),
-    );
-    expect(cap.status).toBe(403);
   });
 });

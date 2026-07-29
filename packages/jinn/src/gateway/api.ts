@@ -241,7 +241,7 @@ import {
   requestApproval,
 } from "../work-items/approvals.js";
 import { resolveApprovalDecisionAuthority, resolveApprovalRouteTarget, resolveRootApprovalTarget } from "./approval-authority.js";
-import { approvalIsOperatorOnly, runsWorkflowBoundToTodo } from "./workflow-todo-binding.js";
+import { approvalIsOperatorOnly } from "./workflow-todo-binding.js";
 import { scanOrg } from "./org.js";
 import { resolveOrgHierarchy } from "./org-hierarchy.js";
 import { surfaceManagerVisibility } from "./manager-visibility.js";
@@ -1750,10 +1750,6 @@ function workItemActor(caller: WorkItemCaller): string {
   return caller.kind === 'session' ? `session:${caller.callerId}` : 'operator';
 }
 
-function callerRunsWorkflowForTodo(caller: WorkItemCaller, item: WorkItem, context: ApiContext): boolean {
-  return caller.kind === 'session' && runsWorkflowBoundToTodo(caller.session, item.id, context.workflowService);
-}
-
 /** Comment identity is stamped server-side, never taken from the request body:
  *  operator surface → 'operator'; a session with a resolved employee comments
  *  as that employee (stable across their sessions); a bare session keeps the
@@ -1886,69 +1882,45 @@ function authorizeWorkItemOwnerManagerOrRoot(
   };
 }
 
-/** The metadata fields a non-operator relation may edit (spec §3.4). */
-const TODO_EDIT_SHARED_FIELDS: ReadonlyArray<keyof UpdateWorkItemInput> = ['body', 'acceptance', 'priority', 'dueAt'];
+/** What a Todo SAYS: open to every authenticated session, like its status. */
+const TODO_CONTENT_FIELDS: ReadonlyArray<keyof UpdateWorkItemInput> = ['title', 'body', 'acceptance', 'priority', 'dueAt'];
 
-/** A workflow phase reports progress on its Todo; it never re-owns or renames it. */
-const TODO_EDIT_WORKFLOW_RUN_FIELDS: ReadonlyArray<keyof UpdateWorkItemInput> = ['body', 'acceptance'];
+/** Who a Todo BELONGS to and how it is reviewed: the operator's alone. */
+const TODO_OWNERSHIP_FIELDS: ReadonlyArray<keyof UpdateWorkItemInput> = ['assignee', 'department', 'rank', 'verifyPolicy'];
 
-type TodoEditAuthority =
-  | { ok: true; fields: ReadonlySet<keyof UpdateWorkItemInput>; actor: string; who: string }
-  | { ok: false; error: string };
+interface TodoEditAuthority {
+  fields: ReadonlySet<keyof UpdateWorkItemInput>;
+  actor: string;
+  who: string;
+}
 
 /**
- * Resolve the per-field edit authority matrix (Todos v2 slice 4, spec §3.4).
- * Session identity resolves through the session's employee slug (the comments
- * author pattern); `created_by` matches either that slug or the caller's exact
- * `session:<uuid>` form — a session-form creator is only ever the one session
- * that created the item. The assignee's manager is the DIRECT reporting-line
- * parent (the same org resolution manager-visibility uses).
+ * Resolve the per-field edit authority, split on content versus ownership.
  *
- * `boundWorkflowRun` is the fourth relation: a phase of a workflow run bound to
- * this Todo. It is deliberately narrower than the other three — a pipeline keeps
- * the Todo's body and acceptance current and nothing else.
+ * Content is open for the same reason status is: gating it on a relation to the
+ * Todo (creator / assignee / assignee's manager / bound workflow run) bought
+ * nothing and cost honesty. A participant that could do the work could not
+ * record what the work now says, and had to ask someone with standing to
+ * perform the write for it. Every new kind of participant needed its own
+ * relation and its own 403 before it could describe its own Todo.
+ *
+ * Ownership stays operator-only, and deliberately: assignee, department, and
+ * rank decide who is accountable, and verifyPolicy decides who reviews them.
+ * Those are governance, not description, and an agent reassigning its own work
+ * is exactly what the review model exists to prevent.
  */
-function resolveTodoEditAuthority(caller: WorkItemCaller, item: WorkItem, boundWorkflowRun: boolean): TodoEditAuthority {
+function resolveTodoEditAuthority(caller: WorkItemCaller): TodoEditAuthority {
   if (caller.kind === 'operator') {
     return {
-      ok: true,
-      // verifyPolicy (slice 6) is deliberately operator-only: review policy is
-      // a governance knob, not collaborative metadata.
-      fields: new Set<keyof UpdateWorkItemInput>(['title', 'body', 'assignee', 'department', 'priority', 'rank', 'acceptance', 'dueAt', 'verifyPolicy']),
+      fields: new Set<keyof UpdateWorkItemInput>([...TODO_CONTENT_FIELDS, ...TODO_OWNERSHIP_FIELDS]),
       actor: 'operator',
       who: 'the operator',
     };
   }
-  const employee = caller.session.employee ?? null;
-  const sessionActor = workItemActor(caller);
-  const isCreator = item.createdBy === sessionActor || (employee !== null && item.createdBy === employee);
-  const isAssignee = employee !== null && item.assignee !== null && item.assignee === employee;
-  const isAssigneeManager =
-    !isAssignee &&
-    employee !== null &&
-    item.assignee !== null &&
-    resolveOrgHierarchy(scanOrg()).nodes[item.assignee]?.parentName === employee;
-  if (!isCreator && !isAssignee && !isAssigneeManager) {
-    if (boundWorkflowRun) {
-      return {
-        ok: true,
-        fields: new Set<keyof UpdateWorkItemInput>(TODO_EDIT_WORKFLOW_RUN_FIELDS),
-        actor: employee ?? sessionActor,
-        who: 'a workflow run bound to this Todo',
-      };
-    }
-    return {
-      ok: false,
-      error: `${employee ? `employee "${employee}"` : `session ${caller.callerId}`} is neither the creator, the assignee, the assignee's manager, nor a phase of a workflow run bound to Todo ${item.id}; cannot edit its metadata`,
-    };
-  }
-  const fields = new Set<keyof UpdateWorkItemInput>(TODO_EDIT_SHARED_FIELDS);
-  if (isCreator) fields.add('title');
   return {
-    ok: true,
-    fields,
-    actor: employee ?? sessionActor,
-    who: isCreator ? 'the Todo creator' : isAssignee ? 'the assignee' : "the assignee's manager",
+    fields: new Set<keyof UpdateWorkItemInput>(TODO_CONTENT_FIELDS),
+    actor: caller.session.employee ?? workItemActor(caller),
+    who: caller.session.employee ? `employee "${caller.session.employee}"` : `session ${caller.callerId}`,
   };
 }
 
@@ -3556,11 +3528,10 @@ export async function handleApiRequest(
       return json(res, fullWorkItemPayload(item));
     }
 
-    // PATCH /api/work-items/:id — the metadata pen. Authority is per-field
-    // (Todos v2 slice 4, spec §3.4): body/acceptance/priority/dueAt for the
-    // operator, the item creator, the assignee, or the assignee's manager;
-    // title for operator/creator only; assignee/department/rank stay
-    // operator-only. Status is intentionally excluded: lifecycle changes
+    // PATCH /api/work-items/:id — the metadata pen. Authority is per-field:
+    // content (title/body/acceptance/priority/dueAt) is open to every
+    // authenticated session; ownership (assignee/department/rank/verifyPolicy)
+    // is the operator's. Status is intentionally excluded: lifecycle changes
     // remain behind the guarded transition/archive/approval surfaces below.
     params = matchRoute("/api/work-items/:id", pathname);
     if (method === "PATCH" && params) {
@@ -3691,13 +3662,12 @@ export async function handleApiRequest(
 
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
-      const authority = resolveTodoEditAuthority(caller, item, callerRunsWorkflowForTodo(caller, item, context));
-      if (!authority.ok) return json(res, { error: authority.error }, 403);
+      const authority = resolveTodoEditAuthority(caller);
       const patchedFields = (Object.keys(patch) as Array<keyof UpdateWorkItemInput>);
       for (const field of patchedFields) {
         if (!authority.fields.has(field)) {
           return json(res, {
-            error: `field "${field}" is not editable by ${authority.who}: title belongs to the Todo's creator or the operator; assignee, department, and rank are operator-only`,
+            error: `field "${field}" is not editable by ${authority.who}: ${TODO_OWNERSHIP_FIELDS.join(", ")} are operator-only`,
           }, 403);
         }
       }
