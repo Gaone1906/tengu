@@ -17,6 +17,7 @@ import {
   type TodoFilters,
 } from "@/lib/todos"
 import { todoPath } from "@/lib/todo-id"
+import { useDepartments } from "@/hooks/use-departments"
 import {
   useDecideApproval,
   useEmployeesByName,
@@ -42,7 +43,6 @@ import {
   useBoardTransition,
   useBoardTrees,
   useCreateSubTask,
-  useDepartments,
 } from "./use-board"
 import { useBoardDrag } from "./use-board-drag"
 import {
