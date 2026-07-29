@@ -24,7 +24,9 @@ import {
  * (phase-2) dispatcher are consumers of this module, not competitors to it.
  */
 
-/** Declared edges: from → the set of legal targets (design §1.1's diagram). */
+/** Declared edges: from → the set of legal targets (design §1.1's diagram).
+ *  Governs the human and derived lanes; the agent lane (`opts.agent`) is
+ *  bounded by its caller's target allowlist instead. */
 const EDGES: Readonly<Record<WorkItemStatus, ReadonlySet<WorkItemStatus>>> = {
   // `done` from backlog/assigned covers trivially-completed work (e.g. a
   // gate-only workflow run that finishes without ever spawning a session) —
@@ -73,6 +75,15 @@ export interface TransitionOptions {
    * `done` — its reviewer does.
    */
   callerSessionId?: string;
+  /**
+   * The agent lane. The calling surface has already restricted `to` to the
+   * agent-settable targets, and inside that set the edge map only got in the
+   * way: a Todo parked in `blocked` could not be put back to work by the agent
+   * that unblocked it. Skips the edge map and the manual-start rule; nothing
+   * else moves. Sticky terminals still need `human`, the self-review ban still
+   * withholds `done`, and open children still block a close.
+   */
+  agent?: boolean;
   /**
    * Marks an `in_review → executing` transition as a review BOUNCE (rejection
    * with critique): `rounds` increments, and when the incremented count reaches
@@ -156,11 +167,13 @@ export function transition(id: string, to: WorkItemStatus, actor: string, opts: 
         `work item ${id} is ${from} — leaving a sticky terminal is a human decision (operator surface only)`,
       );
     }
-    if (opts.manual && to === 'executing' && from !== 'backlog' && from !== 'assigned') {
-      throw new TransitionError('illegal-edge', `illegal manual transition ${from} → ${to} for work item ${id}`);
-    }
-    if (!EDGES[from].has(to)) {
-      throw new TransitionError('illegal-edge', `illegal transition ${from} → ${to} for work item ${id}`);
+    if (!opts.agent) {
+      if (opts.manual && to === 'executing' && from !== 'backlog' && from !== 'assigned') {
+        throw new TransitionError('illegal-edge', `illegal manual transition ${from} → ${to} for work item ${id}`);
+      }
+      if (!EDGES[from].has(to)) {
+        throw new TransitionError('illegal-edge', `illegal transition ${from} → ${to} for work item ${id}`);
+      }
     }
     if (to === 'done' && opts.callerSessionId) {
       const linked = listSessionsByWorkItem(id);

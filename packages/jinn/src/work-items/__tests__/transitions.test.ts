@@ -49,6 +49,25 @@ describe("transition — the guarded edge map", () => {
     expect(store.getWorkItem(wi.id)?.status).toBe(status);
   });
 
+  it.each([
+    ["blocked", "executing"],
+    ["in_review", "executing"],
+    ["executing", "assigned"],
+  ] as const)("lets the agent lane walk %s → %s, which the edge map does not declare", (from, to) => {
+    const wi = mk(from);
+
+    expect(tr.transition(wi.id, to, "session:agent-1", { manual: true, agent: true }).item.status).toBe(to);
+  });
+
+  it.each(["done", "cancelled", "escalated"] as const)("still refuses the agent lane an exit from %s", (status) => {
+    const wi = mk(status);
+
+    expect(() => tr.transition(wi.id, "executing", "session:agent-1", { manual: true, agent: true })).toThrowError(
+      /leaving a sticky terminal is a human decision/,
+    );
+    expect(store.getWorkItem(wi.id)?.status).toBe(status);
+  });
+
   it.each(["in_review", "done", "blocked"] as const)("keeps manual executing → %s legal", (status) => {
     const wi = mk("backlog");
     tr.transition(wi.id, "executing", "operator", { human: true, manual: true });

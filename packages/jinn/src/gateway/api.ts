@@ -1016,7 +1016,7 @@ function cronJobSummary(job: Record<string, unknown>, lastRun: unknown): Record<
 
 const WORK_ITEM_STATUSES: readonly WorkItemStatus[] = ['backlog', 'assigned', 'executing', 'in_review', 'done', 'blocked', 'escalated', 'cancelled'];
 const WORK_ITEM_SOURCES: readonly WorkItemSource[] = ['human', 'delegation', 'cron', 'workflow', 'session', 'connector', 'goal'];
-const AGENT_WORK_ITEM_TARGETS: readonly WorkItemStatus[] = ['executing', 'in_review', 'blocked', 'escalated', 'done'];
+const AGENT_WORK_ITEM_TARGETS: readonly WorkItemStatus[] = ['assigned', 'executing', 'in_review', 'blocked', 'escalated', 'done'];
 const VERIFY_MODES = ['trust', 'verify', 'thorough'] as const;
 const VERIFY_POLICY_KEYS = new Set(['mode', 'verifier', 'maxRounds']);
 
@@ -3746,6 +3746,9 @@ export async function handleApiRequest(
           : transition(params.id, target as WorkItemStatus, workItemActor(caller), {
               manual: true,
               human: isOperatorPut || undefined,
+              // Agent lane: the target allowlist above is what bounds this
+              // caller, so the edge map does not also govern it.
+              agent: !isOperatorPut || undefined,
               callerSessionId: caller.kind === "session" ? caller.callerId : undefined,
               detail: note ? { note } : undefined,
             });

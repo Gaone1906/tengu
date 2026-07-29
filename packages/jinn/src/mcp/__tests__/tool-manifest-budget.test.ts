@@ -28,9 +28,12 @@ const ATTESTED = {
   // that reserves a Todo gate for the human operator. It costs 8 tokens and
   // leaves Pi 9 under the ceiling, down from 17. The next addition to this
   // surface has to buy its own room back; there is no longer slack to spend.
-  rpc: { tokens: 4469, sha256: "afeb3867597db22fcf597ece972dac3afc3a8a7514013f35b5f41ff2059140b0" },
-  pi: { tokens: 4902, sha256: "0b781a377c805f6c19efc972c30928a853550165287e2c046dd9d6e310103ea2" },
-  openai: { tokens: 4644, sha256: "90c1ea5cc8fa27f7ce3056866ab61bb4c2ea5c57af179875edbec1f5c57871b6" },
+  // Rebased for `assigned` on update_work_item's status enum: the agent lane
+  // can now put a Todo back in the queue. It costs 2 tokens and leaves Pi 7
+  // under the ceiling, down from 9.
+  rpc: { tokens: 4471, sha256: "713fe14ec627f0d3b2fdf7d7cb6ca88b70114734121c5262d9535669104a8fbb" },
+  pi: { tokens: 4904, sha256: "f0819bc7bf70a1e982d6d5623b77e800fdd601858d224f8877ad2ff7e3e5dda0" },
+  openai: { tokens: 4646, sha256: "afac6723f2f7fdb89c8708ad857a4e1d5bc7785082c22ca483589bde0b6867bf" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -203,7 +206,7 @@ const EXPECTED_ENUMS = {
     ["properties.source", ["human", "delegation", "cron", "workflow", "session", "connector", "goal"]],
   ],
   unlink_work_items: [["properties.kind", ["blocks", "relates", "duplicates"]]],
-  update_work_item: [["properties.status", ["executing", "in_review", "blocked", "escalated", "done"]]],
+  update_work_item: [["properties.status", ["assigned", "executing", "in_review", "blocked", "escalated", "done"]]],
 } as const;
 
 function collectEnums(value: unknown, path: string[] = []): Array<[string, string[]]> {

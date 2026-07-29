@@ -1932,6 +1932,21 @@ describe("POST /api/work-items/:id/status — open to any authenticated session"
     },
   );
 
+  // The edge map used to govern this lane too, so the agent that unstuck a
+  // blocked Todo could not put it back to work, and `assigned` had no agent
+  // lane at all. Within the target allowlist the graph now stops applying.
+  it.each([
+    ["blocked", "executing"],
+    ["in_review", "executing"],
+    ["executing", "assigned"],
+    ["in_review", "assigned"],
+  ] as const)("moves a Todo %s → %s off the declared edges", async (from, target) => {
+    const item = store.createWorkItem({ title: `Free ${from} to ${target}`, status: from, assignee: "platform-worker" });
+    const cap = await post(item.id, { status: target }, toolHeaders(strangerSession(`free-${from}-${target}`).id));
+
+    expect([cap.status, cap.body.workItem?.status]).toEqual([200, target]);
+  });
+
   it("refuses that same session done and cancelled, and the done refusal names the way forward", async () => {
     const item = store.createWorkItem({ title: "Stranger cannot close", status: "in_review", assignee: "platform-worker" });
     const session = strangerSession("open-status-closed-targets");

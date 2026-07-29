@@ -112,7 +112,7 @@ describe("work-item tools — registry + schemas", () => {
     );
     expect(JSON.stringify(createProps)).not.toMatch(/approval/i);
     const status = tool("update_work_item").inputSchema.properties.status as { enum: string[] };
-    expect(status.enum).toEqual(["executing", "in_review", "blocked", "escalated", "done"]);
+    expect(status.enum).toEqual(["assigned", "executing", "in_review", "blocked", "escalated", "done"]);
     expect(status.enum).not.toContain("cancelled");
     expect(tool("get_work_item").inputSchema.properties.id).toMatchObject({
       pattern: "^[A-Z]{3}-[1-9][0-9]*$",
@@ -541,9 +541,12 @@ describe("work-item tools — integration against the real API + store", () => {
       workItem: { status: string };
     };
     expect(reviewed.workItem.status).toBe("in_review");
-    await expect(tool("update_work_item").handler({ id: created.workItem.id, status: "executing" }, ctx)).rejects.toThrow(
-      /illegal manual transition in_review → executing/i,
-    );
+    // A review that sends work back is an ordinary agent move now, not an
+    // illegal edge the agent has to route through a human to perform.
+    const bounced = (await tool("update_work_item").handler({ id: created.workItem.id, status: "executing" }, ctx)) as {
+      workItem: { status: string };
+    };
+    expect(bounced.workItem.status).toBe("executing");
 
     const read = (await tool("get_work_item").handler({ id: created.workItem.id }, ctx)) as {
       workItem: { acceptance: string; verifyPolicy: { mode: string } };
