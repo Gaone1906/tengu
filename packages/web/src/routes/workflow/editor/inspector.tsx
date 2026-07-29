@@ -60,6 +60,32 @@ function PickerField({
   )
 }
 
+const CLEAR = "__none__"
+
+function FilterPicker({
+  label, value, onChange, options,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  options: Array<{ value: string; label: string }>
+}) {
+  const optionsWithStoredValue = value && !options.some((option) => option.value === value)
+    ? [{ value, label: value }, ...options]
+    : options
+  return (
+    <PickerField
+      label={label}
+      value={value || CLEAR}
+      onChange={(next) => onChange(next === CLEAR ? "" : next)}
+      options={[
+        { value: CLEAR, label: `Any ${label.toLowerCase()}` },
+        ...optionsWithStoredValue,
+      ]}
+    />
+  )
+}
+
 /* ── binding helpers: plain text ⇄ fixed bindings ─────────────────────────── */
 
 type BindingWire = { source?: unknown; value?: unknown; path?: unknown; nodeId?: unknown }
@@ -73,6 +99,13 @@ function withFixed(config: Record<string, unknown>, key: string, text: string, k
   const next = { ...config }
   if (!text && !keepEmpty) delete next[key]
   else next[key] = { source: "fixed", value: text }
+  return next
+}
+
+function withOptionalText(config: Record<string, unknown>, key: string, value: string): Record<string, unknown> {
+  const next = { ...config }
+  if (value) next[key] = value
+  else delete next[key]
   return next
 }
 
@@ -118,8 +151,30 @@ function defaultTriggerConfig(kind: string): Record<string, unknown> {
 }
 
 function TriggerForm({ node, update }: FormProps) {
-  const config = node.config as { kind?: string; cron?: string; timezone?: string; eventName?: string; status?: string }
+  const config = node.config as {
+    kind?: string
+    cron?: string
+    timezone?: string
+    eventName?: string
+    status?: string
+    label?: string
+    department?: string
+    assignee?: string
+    actor?: string
+  }
   const kind = config.kind ?? "manual"
+  const labels = useQuery({
+    queryKey: ["labels"],
+    queryFn: async () => (await api.listLabels()).labels,
+    staleTime: 60_000,
+    enabled: kind === "todo-status",
+  })
+  const org = useQuery({
+    queryKey: ["org"],
+    queryFn: api.getOrg,
+    staleTime: 60_000,
+    enabled: kind === "todo-status",
+  })
   return (
     <>
       <PickerField
@@ -157,19 +212,55 @@ function TriggerForm({ node, update }: FormProps) {
         </Field>
       )}
       {kind === "todo-status" && (
-        <PickerField
-          label="Todo moves to"
-          value={config.status ?? "in_review"}
-          onChange={(next) => update({ ...node.config, status: next })}
-          options={TODO_STATUSES.map((status) => ({ value: status, label: status }))}
-        />
+        <>
+          <PickerField
+            label="Todo moves to"
+            value={config.status ?? "in_review"}
+            onChange={(next) => update({ ...node.config, status: next })}
+            options={TODO_STATUSES.map((status) => ({ value: status, label: status }))}
+          />
+          <section className="space-y-3 rounded-[var(--radius-lg)] bg-[var(--fill-tertiary)] p-3">
+            <div>
+              <h3 className="text-[length:var(--text-footnote)] font-[var(--weight-semibold)] text-[var(--text-primary)]">
+                Only when
+              </h3>
+              <p className="mt-0.5 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
+                Empty fields match any Todo.
+              </p>
+            </div>
+            <FilterPicker
+              label="Label"
+              value={config.label ?? ""}
+              onChange={(value) => update(withOptionalText(node.config, "label", value))}
+              options={(labels.data ?? []).map((label) => ({ value: label.name, label: label.name }))}
+            />
+            <FilterPicker
+              label="Department"
+              value={config.department ?? ""}
+              onChange={(value) => update(withOptionalText(node.config, "department", value))}
+              options={(org.data?.departments ?? []).map((department) => ({ value: department, label: department }))}
+            />
+            <FilterPicker
+              label="Assignee"
+              value={config.assignee ?? ""}
+              onChange={(value) => update(withOptionalText(node.config, "assignee", value))}
+              options={(org.data?.employees ?? []).map((employee) => ({ value: employee.name, label: employee.name }))}
+            />
+            <Field label="Actor">
+              <TextInput
+                value={config.actor ?? ""}
+                onChange={(event) => update(withOptionalText(node.config, "actor", event.target.value))}
+                placeholder="operator"
+              />
+            </Field>
+          </section>
+        </>
       )}
     </>
   )
 }
 
 const EFFORTS = ["low", "medium", "high", "xhigh"]
-const CLEAR = "__none__"
 const OUTPUT_FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_-]*$/
 const OUTPUT_FIELD_TYPES = ["string", "number", "boolean", "string[]"] as const
 

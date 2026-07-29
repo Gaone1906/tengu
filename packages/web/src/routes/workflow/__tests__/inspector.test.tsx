@@ -1,13 +1,28 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { fireEvent, render, screen } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 
 vi.mock("@/lib/api", () => ({
   api: {
+    listLabels: () => Promise.resolve({
+      labels: [
+        { id: "lbl_build", name: "build", color: null, department: null, createdAt: "2026-07-23T08:00:00.000Z" },
+      ],
+    }),
     getOrg: () => Promise.resolve({
-      departments: [],
-      employees: [],
+      departments: ["platform"],
+      employees: [
+        {
+          name: "platform-lead",
+          displayName: "Platform Lead",
+          department: "platform",
+          rank: "manager",
+          engine: "codex",
+          model: "model",
+          persona: "Platform lead",
+        },
+      ],
       hierarchy: { root: null, sorted: [], warnings: [] },
     }),
   },
@@ -58,8 +73,134 @@ function employeeConfig(store: ReturnType<typeof createEditorStore>) {
   return store.getState().nodes[0]!.data.node.config as Record<string, unknown>
 }
 
+function renderTrigger(config: Record<string, unknown>) {
+  const initial = structuredClone(definition)
+  initial.nodes = [{
+    id: "trigger",
+    type: "trigger",
+    name: "Todo updated",
+    config,
+  }]
+  initial.ui.positions = { trigger: { x: 0, y: 0 } }
+  const store = createEditorStore(initial)
+  store.getState().selectNode("trigger")
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(
+    <QueryClientProvider client={client}>
+      <EditorStoreContext.Provider value={store}>
+        <Inspector />
+      </EditorStoreContext.Provider>
+    </QueryClientProvider>,
+  )
+  return store
+}
+
+function triggerConfig(store: ReturnType<typeof createEditorStore>) {
+  return store.getState().nodes[0]!.data.node.config as Record<string, unknown>
+}
+
+async function choose(label: string, option: string) {
+  await userEvent.click(screen.getByRole("combobox", { name: label }))
+  await userEvent.click(await screen.findByRole("option", { name: option }))
+}
+
+beforeAll(() => {
+  const proto = Element.prototype as unknown as Record<string, unknown>
+  if (!proto.scrollIntoView) proto.scrollIntoView = () => {}
+  if (!proto.hasPointerCapture) proto.hasPointerCapture = () => false
+  if (!proto.setPointerCapture) proto.setPointerCapture = () => {}
+  if (!proto.releasePointerCapture) proto.releasePointerCapture = () => {}
+  if (!window.matchMedia) {
+    window.matchMedia = (query: string) =>
+      ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      }) as MediaQueryList
+  }
+})
+
 beforeEach(() => {
   vi.restoreAllMocks()
+})
+
+describe("todo trigger filters", () => {
+  it("shows the status and all four filters", () => {
+    renderTrigger({ kind: "todo-status", status: "in_review" })
+
+    expect(screen.getByRole("combobox", { name: "Todo moves to" })).toBeTruthy()
+    expect(screen.getByRole("combobox", { name: "Label" })).toBeTruthy()
+    expect(screen.getByRole("combobox", { name: "Department" })).toBeTruthy()
+    expect(screen.getByRole("combobox", { name: "Assignee" })).toBeTruthy()
+    expect(screen.getByLabelText("Actor")).toBeTruthy()
+  })
+
+  it("renders stored values, including values missing from the registries", async () => {
+    renderTrigger({
+      kind: "todo-status",
+      status: "in_review",
+      label: "removed-label",
+      department: "platform",
+      assignee: "former-employee",
+      actor: "operator",
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: "Label" }).textContent).toContain("removed-label")
+      expect(screen.getByRole("combobox", { name: "Department" }).textContent).toContain("platform")
+      expect(screen.getByRole("combobox", { name: "Assignee" }).textContent).toContain("former-employee")
+    })
+    expect((screen.getByLabelText("Actor") as HTMLInputElement).value).toBe("operator")
+  })
+
+  it("writes a selected filter as a plain string", async () => {
+    const store = renderTrigger({ kind: "todo-status", status: "in_review" })
+
+    await choose("Department", "platform")
+
+    expect(triggerConfig(store).department).toBe("platform")
+  })
+
+  it("removes a filter key when cleared", async () => {
+    const store = renderTrigger({ kind: "todo-status", status: "in_review", label: "build" })
+
+    await choose("Label", "Any label")
+
+    expect(triggerConfig(store)).not.toHaveProperty("label")
+  })
+
+  it("drops stale filters when switching kind away and back", async () => {
+    const store = renderTrigger({
+      kind: "todo-status",
+      status: "done",
+      label: "build",
+      department: "platform",
+      assignee: "platform-lead",
+      actor: "operator",
+    })
+
+    await choose("Fires on", "Manual")
+    await choose("Fires on", "Todo status")
+
+    expect(triggerConfig(store)).toEqual({ kind: "todo-status", status: "in_review" })
+  })
+
+  it.each(["manual", "schedule", "event", "workflow-call"])(
+    "renders no filters for %s triggers",
+    (kind) => {
+      renderTrigger({ kind })
+
+      expect(screen.queryByRole("combobox", { name: "Label" })).toBeNull()
+      expect(screen.queryByRole("combobox", { name: "Department" })).toBeNull()
+      expect(screen.queryByRole("combobox", { name: "Assignee" })).toBeNull()
+      expect(screen.queryByLabelText("Actor")).toBeNull()
+    },
+  )
 })
 
 describe("employee inspector output schema", () => {
