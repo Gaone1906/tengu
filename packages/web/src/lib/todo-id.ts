@@ -1,6 +1,8 @@
 const TODO_ID_PATTERN = /^[A-Z]{3}-([1-9][0-9]*)$/
 const TODO_ID_PREFIX_PATTERN = /^[A-Z]{3}$/
 
+export const TODO_ID_MENTION_SOURCE = String.raw`(?<![A-Za-z0-9-])[A-Z]{3}-[1-9][0-9]*(?![\w.-])`
+
 export function deriveTodoIdPrefix(companyName: unknown): string | null {
   if (typeof companyName !== "string") return null
   const parts = companyName

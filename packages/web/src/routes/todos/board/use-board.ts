@@ -163,14 +163,6 @@ export function useBoardData(board: BoardId, filters: TodoFilters, now: number, 
 
 // ── Switcher data ───────────────────────────────────────────────────────────
 
-export function useDepartments() {
-  return useQuery({
-    queryKey: ["departments"],
-    queryFn: async (): Promise<DepartmentSummaryWire[]> => (await api.getDepartments()).departments,
-    staleTime: 60_000,
-  })
-}
-
 /** Open counts for the switcher menu rows, fetched lazily when the menu opens
  *  (one limit-1 query per scope; `totals` carries the truth). */
 export function useBoardMenuCounts(departments: DepartmentSummaryWire[] | undefined, enabled: boolean) {

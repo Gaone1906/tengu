@@ -26,10 +26,12 @@ const FileView = lazy(() =>
   import('@/components/chat/file-view').then((m) => ({ default: m.FileView })),
 )
 import { FileOpenContext } from '@/components/chat/file-open-context'
+import { TodoPrefixContext } from '@/components/chat/todo-prefix-context'
 import { ShortcutOverlay } from '@/components/chat/shortcut-overlay'
 import { useChatTabs, type ChatTab } from '@/hooks/use-chat-tabs'
 import { invalidateLiveSessionSnapshot, prefetchLiveSessionSnapshot } from '@/hooks/use-live-session'
 import { useKeyboardShortcuts, type ShortcutDef } from '@/hooks/use-keyboard-shortcuts'
+import { useTodoPrefixes } from '@/hooks/use-todo-prefixes'
 import { useArchiveSession, useDeleteSession, useDuplicateSession, useSessions, useUnarchiveSession } from '@/hooks/use-sessions'
 import { clearIntermediateMessages } from '@/lib/conversations'
 import type { Message } from '@/lib/conversations'
@@ -110,6 +112,7 @@ export default function ChatPageWrapper() {
 
 function ChatPage() {
   const { settings } = useSettings()
+  const todoPrefixes = useTodoPrefixes()
   const portalName = settings.portalName ?? 'Jinn'
   // The URL is the single source of truth for the selected session
   // (`/?session=<id>`) — selecting is a navigation, so browser back/forward
@@ -1028,6 +1031,7 @@ function ChatPage() {
 
   return (
     <FileOpenContext.Provider value={openFile}>
+    <TodoPrefixContext.Provider value={todoPrefixes}>
     <PageLayout chromeless>
       <div className="flex overflow-hidden h-full">
         {/* Left region (desktop): the permanent slim nav ribbon + the foldable
@@ -1195,6 +1199,7 @@ function ChatPage() {
         }
       `}</style>
     </PageLayout>
+    </TodoPrefixContext.Provider>
     </FileOpenContext.Provider>
   )
 }

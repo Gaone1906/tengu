@@ -1,9 +1,12 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import type { Message } from '@/lib/conversations'
 import { parseMedia, stripAttachedFilesBlock } from '@/lib/conversations'
 import { buildFileReadRequest } from '@/lib/file-read-request'
+import { isTodoId, TODO_ID_MENTION_SOURCE, todoPath } from '@/lib/todo-id'
 import { MessageMedia } from './message-media'
 import { useOpenFile } from '@/components/chat/file-open-context'
+import { useKnownTodoPrefixes } from '@/components/chat/todo-prefix-context'
 import { useStickToBottom } from '@/hooks/use-stick-to-bottom'
 import { useMessageTts, stopMessageTts } from './use-message-tts'
 import { ChatBlockInline, statusMark } from './chat-blocks'
@@ -671,14 +674,15 @@ export function isFilePath(s: string): boolean {
 
 // Inline-formatter pattern, assembled from the shared FILE_PATH_CORE so the
 // bare-path alternative (capture group 9) stays identical to FILE_PATH_RE.
-// Groups: 1,2 md-link · 3 url · 4,5 bold · 6,7 inline-code · 8 italic · 9 path.
+// Groups: 1,2 md-link · 3 url · 4,5 bold · 6,7 inline-code · 8 italic · 9 path · 10 Todo.
 const INLINE_RE_SOURCE =
   String.raw`\[([^\]]+)\]\(([^)]+)\)` +                 // [text](url)
   String.raw`|(https?:\/\/[^\s<]+[^\s<.,;:!?)}\]'"])` + // bare URL
   String.raw`|(\*\*(.+?)\*\*)` +                        // **bold**
   '|(`([^`\r\n]+)`)' +                                  // `inline code`
   String.raw`|\*([^*]+)\*` +                            // *italic*
-  `|(${FILE_PATH_CORE})`                                // bare file path
+  `|(${FILE_PATH_CORE})` +                              // bare file path
+  `|(${TODO_ID_MENTION_SOURCE})`                        // live Todo candidate
 
 // Render a file path as a clean clickable link. Opens the file in an in-app tab
 // when a FileOpenContext provider is present (chat page); otherwise / on
@@ -704,6 +708,28 @@ function FileLink({ path }: { path: string }) {
     >
       {path}
     </a>
+  )
+}
+
+function InlineCode({ children }: { children: string }) {
+  return (
+    <code className="bg-[var(--fill-secondary)] rounded-[5px] py-px px-[5px] text-[0.88em] font-[family-name:var(--font-code)] text-[var(--text-primary)]">
+      {children}
+    </code>
+  )
+}
+
+function TodoLink({ id, fallback }: { id: string; fallback?: React.ReactNode }) {
+  const knownPrefixes = useKnownTodoPrefixes()
+  if (!isTodoId(id) || !knownPrefixes.has(id.slice(0, 3))) return fallback ?? id
+  return (
+    <Link
+      to={todoPath(id)}
+      title={`Open ${id}`}
+      className="text-[var(--system-blue)] underline decoration-[var(--system-blue)]/40 hover:decoration-[var(--system-blue)] underline-offset-2 font-[family-name:var(--font-code)] text-[0.88em]"
+    >
+      {id}
+    </Link>
   )
 }
 
@@ -761,16 +787,18 @@ function inlineFormat(text: string): React.ReactNode {
       // Agents almost always wrap paths in backticks, so this is the common case.
       if (isFilePath(match[7])) {
         parts.push(renderPathLink(match[7], match.index))
+      } else if (isTodoId(match[7])) {
+        parts.push(<TodoLink key={match.index} id={match[7]} fallback={<InlineCode>{match[7]}</InlineCode>} />)
       } else {
-        parts.push(
-          <code key={match.index} className="bg-[var(--fill-secondary)] rounded-[5px] py-px px-[5px] text-[0.88em] font-[family-name:var(--font-code)] text-[var(--text-primary)]">{match[7]}</code>
-        )
+        parts.push(<InlineCode key={match.index}>{match[7]}</InlineCode>)
       }
     } else if (match[8]) {
       parts.push(<em key={match.index} className="italic opacity-[0.85]">{match[8]}</em>)
     } else if (match[9]) {
       // Bare (un-backticked) file path → viewer link
       parts.push(renderPathLink(match[9], match.index))
+    } else if (match[10]) {
+      parts.push(<TodoLink key={match.index} id={match[10]} />)
     }
     last = match.index + match[0].length
   }

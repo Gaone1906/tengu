@@ -13,6 +13,7 @@ import {
 } from "@/lib/api"
 import { STATUS_LABEL, operatorSafeTodoError, publicWorkItemReference } from "@/lib/todos"
 import { isTodoId, todoPath } from "@/lib/todo-id"
+import { useDepartments } from "@/hooks/use-departments"
 import { PageLayout } from "@/components/page-layout"
 import { useTheme } from "@/routes/providers"
 import {
@@ -22,7 +23,6 @@ import {
   useSetWorkItemStatus,
   useTodoById,
 } from "../use-todos"
-import { useDepartments } from "../board/use-board"
 import { parseBoardParam, boardPath, boardKey } from "../board/board-route"
 import { departmentTitle } from "../board/board-switcher"
 import { CrumbBar, type CrumbAncestor } from "./crumb-bar"
