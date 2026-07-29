@@ -498,6 +498,28 @@ describe("PATCH /api/work-items/:id — operator metadata editing", () => {
     });
   });
 
+  // The `actor` filter on a todo-status Workflow trigger is only an authority
+  // boundary if the operator string is exclusive to the operator surface. An
+  // employee session moving the SAME Todo the SAME way must never record it.
+  it("stamps an employee session's identical transition as session:<id>, never as the operator", async () => {
+    const item = store.createWorkItem({ title: "Employee start", status: "assigned", assignee: "platform-worker" });
+    const caller = reg.createSession({ engine: "codex", source: "web", sourceRef: "web:employee-actor", employee: "platform-worker" });
+    store.linkSession(item.id, caller.id);
+    const cap = makeRes();
+
+    await api.handleApiRequest(
+      makeReq("POST", `/api/work-items/${item.id}/status`, { status: "executing" }, toolHeaders(caller.id)),
+      cap.res,
+      ctx,
+    );
+
+    expect([cap.status, cap.body]).toEqual([200, expect.anything()]);
+    expect(store.listWorkItemEvents(item.id).at(-1)).toMatchObject({
+      toStatus: "executing",
+      actor: `session:${caller.id}`,
+    });
+  });
+
   it.each(["backlog", "assigned", "executing", "in_review", "blocked"] as const)(
     "lets the authenticated operator cancel %s work through PUT",
     async (status) => {

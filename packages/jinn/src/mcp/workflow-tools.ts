@@ -1,3 +1,4 @@
+import { describeWorkflowIssues, parseWorkflowIssues } from "../workflows/issues.js";
 import {
   assertBoundCaller,
   gatewayRequest,
@@ -40,10 +41,10 @@ function query(args: Args, keys: string[]): string {
 }
 
 function gatewayError(status: number, body: unknown): JinnMcpToolError {
-  const envelope = body && typeof body === "object" ? body as { code?: unknown; message?: unknown } : {};
+  const envelope = body && typeof body === "object" ? body as { code?: unknown; message?: unknown; issues?: unknown } : {};
   const code = typeof envelope.code === "string" ? envelope.code : `http-${status}`;
   const message = typeof envelope.message === "string" ? envelope.message : "Workflow operation failed.";
-  return new JinnMcpToolError(`${code}: ${message}`);
+  return new JinnMcpToolError(describeWorkflowIssues(`${code}: ${message}`, parseWorkflowIssues(envelope.issues)));
 }
 
 function tool(spec: ToolSpec): JinnMcpTool {
@@ -75,35 +76,36 @@ const specs: ToolSpec[] = [
     properties: { workflowId: string }, required: ["workflowId"], path: workflow,
   },
   {
-    name: "create_workflow", description: "Create a disabled Workflow draft; a live operation on the current gateway.", method: "POST",
+    name: "create_workflow", description: "Create a disabled Workflow draft; a live gateway operation.", method: "POST",
     properties: { id: string, title: string, description: string }, required: ["id", "title"], path: () => "/api/workflows",
     body: ({ id, title, description }) => ({ id, title, ...(description === undefined ? {} : { description }) }),
   },
   {
-    name: "update_workflow", description: "Save a Workflow revision; a live operation on the current gateway.", method: "PUT",
+    name: "update_workflow", description: "Save a Workflow revision; a live gateway operation.", method: "PUT",
     properties: { workflowId: string, definition: object, expectedRevision: integer },
     required: ["workflowId", "definition", "expectedRevision"], path: workflow,
     body: ({ definition, expectedRevision }) => ({ definition, expectedRevision }),
   },
   {
-    name: "duplicate_workflow", description: "Duplicate a Workflow to an explicit identity; a live operation on the current gateway.", method: "POST",
+    name: "duplicate_workflow", description: "Duplicate a Workflow to an explicit identity; a live gateway operation.", method: "POST",
     properties: { sourceId: string, id: string, title: string }, required: ["sourceId", "id", "title"],
     path: (args) => `/api/workflows/${path(value(args, "sourceId"))}/duplicate`, body: ({ id, title }) => ({ id, title }),
   },
   {
-    name: "retire_workflow", description: "Retire a Workflow revision; a live operation on the current gateway.", method: "POST",
+    name: "retire_workflow", description: "Retire a Workflow revision; a live gateway operation.", method: "POST",
     properties: { workflowId: string, expectedRevision: integer }, required: ["workflowId", "expectedRevision"],
     path: (args) => `${workflow(args)}/retire`, body: ({ expectedRevision }) => ({ expectedRevision }),
   },
   ...(["enable", "disable"] as const).map((action): ToolSpec => ({
-    name: `${action}_workflow`, description: `${action === "enable" ? "Enable" : "Disable"} a Workflow revision; a live operation on the current gateway.`, method: "POST",
+    name: `${action}_workflow`, description: `${action === "enable" ? "Enable" : "Disable"} a Workflow revision; a live gateway operation.`, method: "POST",
     properties: { workflowId: string, expectedRevision: integer }, required: ["workflowId", "expectedRevision"],
     path: (args) => `${workflow(args)}/${action}`, body: ({ expectedRevision }) => ({ expectedRevision }),
   })),
   {
-    name: "start_workflow_run", description: "Start a manual Workflow run; a live operation on the current gateway that may spawn real sessions.", method: "POST",
-    properties: { workflowId: string, input: object, idempotencyKey: string }, required: ["workflowId"],
-    path: (args) => `${workflow(args)}/runs`, body: ({ input, idempotencyKey }) => ({ input: input ?? {}, ...(idempotencyKey === undefined ? {} : { idempotencyKey }) }),
+    name: "start_workflow_run", description: "Start a manual Workflow run; a live gateway operation that may spawn real sessions.", method: "POST",
+    properties: { workflowId: string, input: object, idempotencyKey: string, todoId: string }, required: ["workflowId"],
+    path: (args) => `${workflow(args)}/runs`, body: ({ input, idempotencyKey, todoId }) => ({ input: input ?? {},
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey }), ...(todoId === undefined ? {} : { todoId }) }),
   },
   {
     name: "list_workflow_runs", description: "List Workflow run history.", method: "GET",
@@ -115,18 +117,18 @@ const specs: ToolSpec[] = [
     properties: { workflowId: string, runId: string }, required: ["workflowId", "runId"], path: run,
   },
   {
-    name: "cancel_workflow_run", description: "Cancel a Workflow run; a live operation on the current gateway.", method: "POST",
+    name: "cancel_workflow_run", description: "Cancel a Workflow run; a live gateway operation.", method: "POST",
     properties: { workflowId: string, runId: string, reason: string }, required: ["workflowId", "runId"],
     path: (args) => `${run(args)}/cancel`, body: ({ reason }) => ({ ...(reason === undefined ? {} : { reason }) }),
   },
   {
-    name: "rerun_workflow_run", description: "Rerun with the original or current definition; a live operation on the current gateway that may spawn real sessions.", method: "POST",
+    name: "rerun_workflow_run", description: "Rerun with the original or current definition; a live gateway operation that may spawn real sessions.", method: "POST",
     properties: { workflowId: string, runId: string, definition: { type: "string", enum: ["original", "current"] }, idempotencyKey: string },
     required: ["workflowId", "runId", "definition", "idempotencyKey"], path: (args) => `${run(args)}/rerun`,
     body: ({ definition, idempotencyKey }) => ({ definition, idempotencyKey }),
   },
   {
-    name: "decide_workflow_approval", description: "Approve or reject a pending Workflow approval as the authenticated caller; a live operation on the current gateway.", method: "POST",
+    name: "decide_workflow_approval", description: "Approve or reject a pending Workflow approval as the authenticated caller; a live gateway operation.", method: "POST",
     properties: { workflowId: string, runId: string, nodeId: string,
       decision: { type: "string", enum: ["approve", "reject"] }, reason: string, expectedRevision: integer },
     required: ["workflowId", "runId", "nodeId", "decision", "expectedRevision"],
@@ -134,14 +136,14 @@ const specs: ToolSpec[] = [
     body: ({ decision, reason, expectedRevision }) => ({ decision, ...(reason === undefined ? {} : { reason }), expectedRevision }),
   },
   {
-    name: "retry_workflow_node", description: "Retry an eligible failed Workflow Employee node; a live operation on the current gateway that may spawn real sessions.", method: "POST",
+    name: "retry_workflow_node", description: "Retry an eligible failed Workflow Employee node; a live gateway operation that may spawn real sessions.", method: "POST",
     properties: { workflowId: string, runId: string, nodeId: string, idempotencyKey: string },
     required: ["workflowId", "runId", "nodeId", "idempotencyKey"],
     path: (args) => `${run(args)}/nodes/${path(value(args, "nodeId"))}/retry`,
     body: ({ idempotencyKey }) => ({ idempotencyKey }),
   },
   {
-    name: "fire_workflow_event", description: "Fire an authenticated Workflow Event; a live operation on the current gateway that may spawn real sessions.", method: "POST",
+    name: "fire_workflow_event", description: "Fire an authenticated Workflow Event; a live gateway operation that may spawn real sessions.", method: "POST",
     properties: { eventName: string, fireId: string, payload: object }, required: ["eventName", "fireId", "payload"],
     path: (args) => `/api/workflows/events/${path(value(args, "eventName"))}`, body: ({ fireId, payload }) => ({ fireId, payload }),
   },

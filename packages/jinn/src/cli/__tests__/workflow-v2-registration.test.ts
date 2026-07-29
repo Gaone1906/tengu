@@ -12,7 +12,7 @@ const EXPECTED: Record<string, string[]> = {
   list: ["--cursor", "--limit", "--json"], get: ["--json"], create: ["--file", "--json"],
   update: ["--file", "--expected-revision", "--json"], duplicate: ["--id", "--title", "--json"],
   retire: ["--expected-revision", "--json"], enable: ["--expected-revision", "--json"],
-  disable: ["--expected-revision", "--json"], run: ["--input", "--idempotency-key", "--json"],
+  disable: ["--expected-revision", "--json"], run: ["--input", "--idempotency-key", "--todo-id", "--json"],
   runs: ["--cursor", "--limit", "--status", "--json"], "show-run": ["--json"],
   cancel: ["--reason", "--json"], rerun: ["--definition", "--idempotency-key", "--json"],
   approve: ["--expected-revision", "--reason", "--json"], reject: ["--expected-revision", "--reason", "--json"],

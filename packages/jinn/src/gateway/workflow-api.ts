@@ -36,7 +36,8 @@ function failure(res: ServerResponse, error: unknown): void {
     return;
   }
   if (error instanceof WorkflowRepositoryError) {
-    send(res, errorStatus(error), { code: error.code, message: error.message });
+    send(res, errorStatus(error), { code: error.code, message: error.message,
+      ...(error.issues ? { issues: error.issues } : {}) });
     return;
   }
   send(res, 500, { code: "internal-error", message: "Workflow operation failed." });
@@ -135,9 +136,10 @@ async function runs(req: IncomingMessage, res: ServerResponse, url: URL, parts: 
   const method = req.method ?? "GET"; const workflowId = parts[2]; if (!workflowId || parts[3] !== "runs") return false;
   if (parts.length === 4 && method === "GET") { send(res, 200, service.listRuns(workflowId, runQuery(url))); return true; }
   if (parts.length === 4 && method === "POST") {
-    const parsed = await body(req, res); if (parsed === undefined) return true; const value = record(parsed, ["input", "idempotencyKey"]);
+    const parsed = await body(req, res); if (parsed === undefined) return true; const value = record(parsed, ["input", "idempotencyKey", "todoId"]);
     send(res, 201, await service.startManual({ workflowId, input: value.input as never,
-      ...(value.idempotencyKey === undefined ? {} : { idempotencyKey: value.idempotencyKey as string }) })); return true;
+      ...(value.idempotencyKey === undefined ? {} : { idempotencyKey: value.idempotencyKey as string }),
+      ...(value.todoId === undefined ? {} : { todoId: value.todoId as string }) })); return true;
   }
   const runId = parts[4]; if (!runId) return false;
   if (parts.length === 5 && method === "GET") { const value = service.getRun(workflowId, runId); if (!value) throw new WorkflowRepositoryError("not-found", `Workflow run ${runId} was not found.`); send(res, 200, value); return true; }

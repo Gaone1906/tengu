@@ -148,6 +148,11 @@ const triggerConfigSchema = z.discriminatedUnion('kind', [
   z.strictObject({
     kind: z.literal('todo-status'),
     status: z.string(),
+    /** Who performed the status transition — `operator` for the human surface,
+     *  `session:<uuid>` for an agent, `reconciler`/`policy:trust` for derived
+     *  moves. This is the only filter that is an authority boundary: a label
+     *  any employee can attach is not one. */
+    actor: z.string().min(1).max(120).optional(),
     label: z.string().min(1).max(80).optional(),
     department: z.string().min(1).max(80).optional(),
     assignee: z.string().min(1).max(80).optional(),

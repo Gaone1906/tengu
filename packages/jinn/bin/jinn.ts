@@ -160,7 +160,7 @@ withJson(workflow.command("create").requiredOption("--file <jsonFile>")).action(
 withJson(workflow.command("duplicate <sourceId>").requiredOption("--id <targetId>").requiredOption("--title <title>")).action(workflowAction("duplicateWorkflow"));
 for (const [name, handler] of [["retire", "retireWorkflow"], ["enable", "enableWorkflow"], ["disable", "disableWorkflow"]] as const)
   withJson(workflow.command(`${name} <workflowId>`).requiredOption("--expected-revision <number>")).action(workflowAction(handler));
-withJson(workflow.command("run <workflowId>").option("--input <json>").option("--idempotency-key <key>")).action(workflowAction("startWorkflowRun")); withJson(workflow.command("runs <workflowId>").option("--cursor <cursor>").option("--limit <number>").option("--status <status>")).action(workflowAction("listWorkflowRuns"));
+withJson(workflow.command("run <workflowId>").option("--input <json>").option("--idempotency-key <key>").option("--todo-id <todoId>")).action(workflowAction("startWorkflowRun")); withJson(workflow.command("runs <workflowId>").option("--cursor <cursor>").option("--limit <number>").option("--status <status>")).action(workflowAction("listWorkflowRuns"));
 withJson(workflow.command("show-run <workflowId> <runId>")).action(workflowAction("showWorkflowRun")); withJson(workflow.command("cancel <workflowId> <runId>").option("--reason <reason>")).action(workflowAction("cancelWorkflowRun"));
 withJson(workflow.command("rerun <workflowId> <runId>").requiredOption("--definition <original|current>").requiredOption("--idempotency-key <key>")).action(workflowAction("rerunWorkflowRun"));
 for (const [name, handler] of [["approve", "approveWorkflowApproval"], ["reject", "rejectWorkflowApproval"]] as const)

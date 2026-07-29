@@ -131,6 +131,22 @@ describe("Workflow v2 canonical API", () => {
       runId: "run_11111111-1111-4111-8111-111111111111", nodeId: "write", idempotencyKey: "retry-1" });
   });
 
+  it("binds a manual run to an existing Todo and leaves unbound runs unbound", async () => {
+    const startManual = vi.fn(async () => ({ id: "run-1" }));
+    const context = { gatewayAuthToken: "test-token", workflowService: { startManual }, getConfig: () => ({ gateway: {}, engines: {} }),
+      connectors: new Map(), sessionManager: { getQueue: () => ({}) }, emit: vi.fn(), startTime: 1 } as unknown as ApiContext;
+
+    const bound = response();
+    await handleApiRequest(request("POST", "/api/workflows/release-flow/runs", { input: {}, todoId: "JIN-42" }), bound.res, context);
+    expect(bound.read().status).toBe(201);
+    expect(startManual).toHaveBeenCalledWith({ workflowId: "release-flow", input: {}, todoId: "JIN-42" });
+
+    const unbound = response();
+    await handleApiRequest(request("POST", "/api/workflows/release-flow/runs", { input: {} }), unbound.res, context);
+    expect(startManual).toHaveBeenLastCalledWith({ workflowId: "release-flow", input: {} });
+    expect(unbound.read().status).toBe(201);
+  });
+
   it("serializes reminder ladder state on every run-detail attempt", async () => {
     const detail = {
       id: "run_11111111-1111-4111-8111-111111111111",
@@ -194,6 +210,21 @@ describe("Workflow v2 canonical API", () => {
       code: "invalid-definition", message: "Workflow definition is invalid.", issues,
     } });
     expect(setEnabled).toHaveBeenCalledWith({ id: "invalid-field", enabled: true, expectedRevision: 2 });
+  });
+
+  it("carries repository schema issues in the error envelope too", async () => {
+    const issues = [{ code: "schema", message: "Node name must contain at least 1 character.", path: "nodes.0.name" }];
+    const error = new WorkflowRepositoryError("bad-input", "Workflow definition is invalid.", issues);
+    const service = { saveDefinition: () => { throw error; } };
+    const context = { gatewayAuthToken: "test-token", workflowService: service, getConfig: () => ({ gateway: {}, engines: {} }),
+      connectors: new Map(), sessionManager: { getQueue: () => ({}) }, emit: vi.fn(), startTime: 1 } as unknown as ApiContext;
+    const capture = response();
+
+    await handleApiRequest(request("PUT", "/api/workflows/broken-flow", { definition: { id: "broken-flow" }, expectedRevision: 1 }), capture.res, context);
+
+    expect(capture.read()).toEqual({ status: 422, body: {
+      code: "bad-input", message: "Workflow definition is invalid.", issues,
+    } });
   });
 
   it("rejects approval actor spoofing before the service and maps approval authority/conflict errors", async () => {
@@ -339,7 +370,8 @@ describe("Workflow v2 canonical API", () => {
     try {
       const create = response();
       await handleApiRequest(request("POST", "/api/workflows", { id: "events", title: "Reserved" }), create.res, context);
-      expect(create.read()).toEqual({ status: 422, body: { code: "bad-input", message: "Workflow definition is invalid." } });
+      expect(create.read()).toEqual({ status: 422, body: { code: "bad-input", message: "Workflow definition is invalid.",
+        issues: [expect.objectContaining({ code: "schema", path: "id" })] } });
 
       const event = response();
       await handleApiRequest(request("POST", "/api/workflows/events/duplicate", { fireId: "event-1", payload: {} }), event.res, context);

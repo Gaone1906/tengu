@@ -8,14 +8,9 @@ import {
   type WorkflowNode,
 } from './model.js';
 import { validateBindingPath } from './bindings.js';
+import type { WorkflowValidationIssue } from './issues.js';
 
-export interface WorkflowValidationIssue {
-  code: string;
-  message: string;
-  nodeId?: string;
-  edgeId?: string;
-  path?: string;
-}
+export type { WorkflowValidationIssue } from './issues.js';
 
 type AddIssue = (issue: WorkflowValidationIssue) => void;
 type RecordValue = Record<string, unknown>;

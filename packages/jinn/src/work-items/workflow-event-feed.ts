@@ -9,6 +9,10 @@ export interface WorkflowTodoStatusEvent {
   workItemId: string;
   fromStatus: WorkItemStatus | null;
   toStatus: WorkItemStatus;
+  /** Who performed the transition, read from the audit row's own `actor`
+   *  column rather than the provenance snapshot — so every event written
+   *  before the trigger filter existed replays with its actor intact. */
+  actor: string | null;
   item: {
     source: WorkItemSource;
     department: string | null;
@@ -58,6 +62,7 @@ interface TodoEventRow {
   work_item_id: string;
   from_status: WorkItemStatus;
   to_status: WorkItemStatus;
+  actor: string | null;
   detail: string | null;
 }
 
@@ -152,6 +157,7 @@ function eventFromImmutableSnapshot(row: TodoEventRow): WorkflowTodoStatusEvent 
       workItemId: row.work_item_id,
       fromStatus: row.from_status,
       toStatus: row.to_status,
+      actor: row.actor,
       item: {
         source: value.source as WorkItemSource,
         department: value.department as string | null,
@@ -217,7 +223,7 @@ export function createWorkflowTodoEventFeed(opts: WorkflowTodoEventFeedOptions =
     listPendingEvents(limit) {
       const db = ensureClaimsTable();
       const rows = db.prepare(
-        `SELECT e.id, e.work_item_id, e.from_status, e.to_status, e.detail
+        `SELECT e.id, e.work_item_id, e.from_status, e.to_status, e.actor, e.detail
          FROM work_item_events e
          LEFT JOIN ${CLAIMS_TABLE} c ON c.event_id = e.id
          WHERE e.from_status IS NOT NULL

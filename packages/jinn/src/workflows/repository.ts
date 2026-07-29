@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { isDeepStrictEqual } from 'node:util';
 import { isProxy } from 'node:util/types';
 import {
   jsonValueSchema,
@@ -105,7 +106,15 @@ const TRIGGER_KINDS = ['manual', 'schedule', 'event', 'todo-status', 'workflow-c
 const VALIDATION_STAMP = '1970-01-01T00:00:00.000Z';
 function parseInputDefinition(value: unknown): WorkflowDefinition {
   const parsed = workflowDefinitionSchema.safeParse(value);
-  if (!parsed.success) repositoryError('bad-input', 'Workflow definition is invalid.');
+  if (!parsed.success) {
+    // The schema failure names the field; without it a large graph can only be
+    // debugged by bisecting the JSON by hand.
+    repositoryError('bad-input', 'Workflow definition is invalid.', parsed.error.issues.map((issue) => ({
+      code: 'schema',
+      message: issue.message,
+      ...(issue.path.length > 0 ? { path: issue.path.join('.') } : {}),
+    })));
+  }
   return parsed.data;
 }
 function parseDefinitionInput(value: unknown, description: boolean): CreateWorkflowInput {
@@ -132,11 +141,18 @@ function initialDefinition(input: CreateWorkflowInput, stamp: string): WorkflowD
   return parseInputDefinition({ schemaVersion: 1, ...input, revision: 1, enabled: false,
     nodes: [], edges: [], createdAt: stamp, updatedAt: stamp });
 }
-function editableDefinition(requested: WorkflowDefinition, current: WorkflowDefinition, stamp: string): WorkflowDefinition {
+function editableDefinition(requested: WorkflowDefinition, current: WorkflowDefinition, stamp: string, revision: number): WorkflowDefinition {
   const { retiredAt: _retiredAt, ...authored } = requested;
-  return parseInputDefinition({ ...authored, id: current.id, revision: current.revision + 1, enabled: current.enabled,
+  return parseInputDefinition({ ...authored, id: current.id, revision, enabled: current.enabled,
     ...(current.retiredAt === undefined ? {} : { retiredAt: current.retiredAt }),
     createdAt: current.createdAt, updatedAt: stamp });
+}
+/** True when a save moves only canvas positions (or nothing at all). Dragging a
+ *  node is not an edit of the workflow, so charging it a revision would flood
+ *  the history and invalidate every `expectedRevision` a caller is holding. */
+function graphUnchanged(candidate: WorkflowDefinition, current: WorkflowDefinition): boolean {
+  const graph = ({ ui: _ui, revision: _revision, updatedAt: _updatedAt, ...rest }: WorkflowDefinition) => rest;
+  return isDeepStrictEqual(graph(candidate), graph(current));
 }
 function definitionSummary(value: WorkflowDefinition): WorkflowDefinitionSummary {
   return { id: value.id, title: value.title, description: value.description ?? null, revision: value.revision,
@@ -250,7 +266,9 @@ export class WorkflowRepository {
   saveDefinition(definition: WorkflowDefinition, expectedRevision: number): WorkflowDefinition {
     const requested = parseInputDefinition(definition); const revision = parseExpectedRevision(`Workflow definition ${requested.id}`, expectedRevision);
     const stamp = this.transactionStamp(); return this.db.transaction(() => { const current = this.requireMutable(requested.id, revision);
-      const saved = editableDefinition(requested, current, stamp); this.write(saved, false, revision); return this.requireDefinition(saved.id); }).immediate();
+      const candidate = editableDefinition(requested, current, stamp, current.revision);
+      const saved = graphUnchanged(candidate, current) ? candidate : { ...candidate, revision: current.revision + 1 };
+      this.write(saved, false, revision); return this.requireDefinition(saved.id); }).immediate();
   }
   setEnabled(id: string, enabled: boolean, expectedRevision: number): WorkflowDefinition {
     const workflowId = parseWorkflowId(id); if (typeof enabled !== 'boolean') repositoryError('bad-input', 'Enabled state must be boolean.');

@@ -54,8 +54,8 @@ let now: string;
 function edge(id: string, from: string, to: string) {
   return { id, from: { nodeId: from, port: "success" as const }, to: { nodeId: to, port: "input" as const } };
 }
-function todoEvent(id: string, item: Partial<WorkflowTodoStatusEvent["item"]> = {}): WorkflowTodoStatusEvent {
-  return { id, workItemId: "ICI-1", fromStatus: "executing", toStatus: "in_review",
+function todoEvent(id: string, item: Partial<WorkflowTodoStatusEvent["item"]> = {}, actor: string | null = "operator"): WorkflowTodoStatusEvent {
+  return { id, workItemId: "ICI-1", fromStatus: "executing", toStatus: "in_review", actor,
     item: { source: "human", department: "platform", assignee: "worker", labels: [], ...item } };
 }
 function todoTrigger(config: Omit<Extract<TriggerNode["config"], { kind: "todo-status" }>, "kind" | "status">): WorkflowNode {
@@ -87,9 +87,11 @@ describe("Workflow trigger adapters", () => {
   it("rebuilds only enabled Schedule definitions and fires each instant idempotently across restart and disable", async () => {
     const trigger: WorkflowNode = { id: "start", type: "trigger", name: "Schedule", config: { kind: "schedule", cron: "0 * * * *", timezone: "UTC" } };
     const definition = save("scheduled-flow", trigger, false);
-    service.saveDefinition(repository.getDefinition(definition.id)!, definition.revision);
+    // An identical re-save is not an edit, so it keeps the revision the caller holds.
+    const resaved = service.saveDefinition(repository.getDefinition(definition.id)!, definition.revision);
+    expect(resaved.revision).toBe(definition.revision);
     expect(scheduled).toHaveLength(0);
-    service.setEnabled({ id: definition.id, enabled: true, expectedRevision: definition.revision + 1 });
+    service.setEnabled({ id: definition.id, enabled: true, expectedRevision: definition.revision });
     expect(scheduled).toHaveLength(1);
     await scheduled[0]!.callback(); await scheduled[0]!.callback();
     expect(service.listRuns(definition.id, {}).items).toHaveLength(1);
@@ -145,11 +147,36 @@ describe("Workflow trigger adapters", () => {
   });
 
   it("completes a Todo event that matches zero filtered definitions instead of leaving it pending", async () => {
-    save("todo-excluding", todoTrigger({ label: "needs-review" }));
+    const definition = save("todo-excluding", todoTrigger({ label: "needs-review" }));
     feed.pending.push(todoEvent("event-1"));
     await service.recover(now);
-    expect(feed.processed.get("event-1")).toEqual([]);
+    expect(feed.processed.get("event-1")).toMatchObject([
+      { workflowId: definition.id, outcome: "suppressed", detail: expect.stringContaining("label") },
+    ]);
     expect(feed.listPendingEvents()).toHaveLength(0);
+  });
+
+  it("fires an actor-filtered Todo trigger for the operator's own transition and suppresses an employee's", async () => {
+    const definition = save("todo-by-actor", todoTrigger({ label: "build", actor: "operator" }));
+    const labels = [{ id: "lbl_0000000000ab", name: "build" }];
+    feed.pending.push(todoEvent("employee-move", { labels }, "session:6f1b0f4c-1f0f-4f0f-8f0f-0f0f0f0f0f0f"));
+    await service.recover(now);
+    expect(service.listRuns(definition.id, {}).items).toHaveLength(0);
+    expect(feed.processed.get("employee-move")).toMatchObject([
+      { workflowId: definition.id, outcome: "suppressed", detail: expect.stringContaining("actor") },
+    ]);
+
+    feed.pending.push(todoEvent("operator-move", { labels }, "operator"));
+    await service.recover(now);
+    expect(service.listRuns(definition.id, {}).items).toHaveLength(1);
+  });
+
+  it("carries the transition actor into the Todo trigger payload", async () => {
+    const definition = save("todo-actor-payload", todoTrigger({}));
+    feed.pending.push(todoEvent("event-1", {}, "reconciler"));
+    await service.recover(now);
+    const run = service.listRuns(definition.id, {}).items[0]!;
+    expect(repository.getRun(definition.id, run.id)!.trigger.payload).toMatchObject({ actor: "reconciler" });
   });
 
   it("carries the Todo labels into the trigger payload as an array and an interpolatable scalar", async () => {

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { gatewayBaseUrl, readGatewayInfo } from "../gateway/gateway-info.js";
+import { describeWorkflowIssues, parseWorkflowIssues, type WorkflowValidationIssue } from "../workflows/issues.js";
 import { loadConfig } from "../shared/config.js";
 import { GATEWAY_INFO_FILE, JINN_HOME } from "../shared/paths.js";
 
@@ -23,6 +24,15 @@ async function responseJson(response: Response): Promise<unknown> {
   try { return await response.json(); } catch { return null; }
 }
 
+/** A gateway rejection that keeps its envelope, so `--json` can print the whole
+ *  thing and the plain lane can list which node or edge was refused. */
+export class WorkflowRequestError extends Error {
+  constructor(message: string, readonly envelope: unknown, readonly issues?: readonly WorkflowValidationIssue[]) {
+    super(message);
+    this.name = "WorkflowRequestError";
+  }
+}
+
 export async function requestWorkflow(options: WorkflowRequestOptions): Promise<unknown> {
   const headers: Record<string, string> = { authorization: `Bearer ${options.token}`, accept: "application/json" };
   const init: RequestInit = { method: options.method, headers };
@@ -30,11 +40,11 @@ export async function requestWorkflow(options: WorkflowRequestOptions): Promise<
   const response = await (options.fetchImpl ?? fetch)(`${options.baseUrl}${options.path}`, init);
   const result = await responseJson(response);
   if (!response.ok) {
-    const envelope = result && typeof result === "object" ? result as { code?: unknown; message?: unknown; error?: unknown } : {};
+    const envelope = result && typeof result === "object" ? result as { code?: unknown; message?: unknown; error?: unknown; issues?: unknown } : {};
     const code = typeof envelope.code === "string" ? `${envelope.code}: ` : "";
     const message = typeof envelope.message === "string" ? envelope.message
       : typeof envelope.error === "string" ? envelope.error : `gateway returned HTTP ${response.status}`;
-    throw new Error(`${code}${message}`);
+    throw new WorkflowRequestError(`${code}${message}`, result, parseWorkflowIssues(envelope.issues));
   }
   return result;
 }
@@ -62,9 +72,13 @@ function print(result: unknown, json = false): void {
   else if (Array.isArray(result)) console.log(`${result.length} Workflow result(s).`);
   else console.log(JSON.stringify(result, null, 2));
 }
+function failureText(error: unknown, json: boolean): string {
+  if (!(error instanceof WorkflowRequestError)) return error instanceof Error ? error.message : String(error);
+  return json ? JSON.stringify(error.envelope, null, 2) : describeWorkflowIssues(error.message, error.issues);
+}
 async function command(method: Method, path: string, body: unknown, options: JsonOptions): Promise<void> {
   try { print(await requestWorkflow({ ...connection(), method, path, ...(body === undefined ? {} : { body }) }), options.json); }
-  catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
+  catch (error) { console.error(failureText(error, options.json === true)); process.exitCode = 1; }
 }
 const wf = (id: string) => `/api/workflows/${encodeURIComponent(id)}`;
 const run = (workflowId: string, runId: string) => `${wf(workflowId)}/runs/${encodeURIComponent(runId)}`;
@@ -89,9 +103,10 @@ export async function enableWorkflow(workflowId: string, options: { expectedRevi
 export async function disableWorkflow(workflowId: string, options: { expectedRevision: string } & JsonOptions): Promise<void> {
   return command("POST", `${wf(workflowId)}/disable`, { expectedRevision: revision(options.expectedRevision) }, options);
 }
-export async function startWorkflowRun(workflowId: string, options: { input?: string; idempotencyKey?: string } & JsonOptions = {}): Promise<void> {
+export async function startWorkflowRun(workflowId: string, options: { input?: string; idempotencyKey?: string; todoId?: string } & JsonOptions = {}): Promise<void> {
   return command("POST", `${wf(workflowId)}/runs`, { input: options.input ? parseWorkflowInput(options.input) : {},
-    ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}) }, options);
+    ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
+    ...(options.todoId ? { todoId: options.todoId } : {}) }, options);
 }
 export async function listWorkflowRuns(workflowId: string, options: { cursor?: string; limit?: string; status?: string } & JsonOptions = {}): Promise<void> {
   return command("GET", `${wf(workflowId)}/runs${query({ cursor: options.cursor, limit: options.limit, status: options.status })}`, undefined, options);

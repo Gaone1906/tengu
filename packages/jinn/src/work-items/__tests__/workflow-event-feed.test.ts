@@ -40,6 +40,17 @@ describe("workflow Todo event feed", () => {
     });
   });
 
+  it("carries the actor that performed the transition, including for rows written before the filter existed", () => {
+    const item = store.createWorkItem({ title: "actor todo", status: "executing" });
+    tr.transition(item.id, "in_review", "operator");
+    // The audit row this test reads was written by the unchanged transition path,
+    // so it stands in for every pre-existing event: `actor` is a first-class
+    // column, never part of the provenance snapshot the replay shape-checks.
+    const pending = feed.createWorkflowTodoEventFeed({ ownerId: "test-owner" }).listPendingEvents();
+
+    expect(pending.find((candidate) => candidate.workItemId === item.id)!.actor).toBe("operator");
+  });
+
   it("reads an unlabelled Todo as an empty label set", () => {
     const item = store.createWorkItem({ title: "bare todo", status: "executing" });
     tr.transition(item.id, "in_review", "worker");

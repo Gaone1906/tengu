@@ -47,6 +47,8 @@ describe("Workflow v2 CLI handlers", () => {
       [() => workflow.disableWorkflow("release-flow", { expectedRevision: "2" }), "POST", "/api/workflows/release-flow/disable", { expectedRevision: 2 }],
       [() => workflow.startWorkflowRun("release-flow", { input: "{\"topic\":\"release\"}", idempotencyKey: "start-1" }), "POST", "/api/workflows/release-flow/runs",
         { input: { topic: "release" }, idempotencyKey: "start-1" }],
+      [() => workflow.startWorkflowRun("release-flow", { todoId: "JIN-42" }), "POST", "/api/workflows/release-flow/runs",
+        { input: {}, todoId: "JIN-42" }],
       [() => workflow.listWorkflowRuns("release-flow", { status: "failed" }), "GET", "/api/workflows/release-flow/runs?status=failed"],
       [() => workflow.showWorkflowRun("release-flow", "run-1"), "GET", "/api/workflows/release-flow/runs/run-1"],
       [() => workflow.cancelWorkflowRun("release-flow", "run-1", { reason: "stop" }), "POST", "/api/workflows/release-flow/runs/run-1/cancel", { reason: "stop" }],
@@ -84,6 +86,26 @@ describe("Workflow v2 CLI handlers", () => {
     await workflow.createWorkflow({ file: definitionFile });
 
     expect(console.error).toHaveBeenCalledWith("bad-input: Workflow definition is invalid.");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("prints which node or edge failed validation, and the whole envelope under --json", async () => {
+    const body = { code: "invalid-definition", message: "Workflow definition is invalid.", issues: [
+      { code: "multiple-incoming", message: "Node accepts only one incoming edge.", nodeId: "review" },
+      { code: "undeclared-input", message: "Binding references an undeclared input.", path: "nodes.1.config.employee" },
+    ] };
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(body), { status: 422 })) as unknown as typeof fetch;
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await workflow.enableWorkflow("release-flow", { expectedRevision: "1" });
+    expect(console.error).toHaveBeenCalledWith(
+      "invalid-definition: Workflow definition is invalid."
+      + "\n- multiple-incoming (node review): Node accepts only one incoming edge."
+      + "\n- undeclared-input (nodes.1.config.employee): Binding references an undeclared input.",
+    );
+
+    await workflow.enableWorkflow("release-flow", { expectedRevision: "1", json: true });
+    expect(console.error).toHaveBeenLastCalledWith(JSON.stringify(body, null, 2));
     expect(process.exitCode).toBe(1);
   });
 });

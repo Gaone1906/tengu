@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 import { isProxy } from 'node:util/types';
+import type { WorkflowValidationIssue } from './issues.js';
 import { jsonValueSchema, nodeIdSchema, workflowIdSchema, type JsonValue } from './model.js';
 
 export type WorkflowRepositoryErrorCode =
@@ -16,16 +17,21 @@ export type WorkflowRepositoryErrorCode =
 
 export class WorkflowRepositoryError extends Error {
   readonly code: WorkflowRepositoryErrorCode;
+  /** What exactly was wrong. Authoring a 20-node graph against a bare
+   *  "definition is invalid" means bisecting it by hand, so every surface
+   *  that can name a node, edge, or field path does. */
+  readonly issues?: readonly WorkflowValidationIssue[];
 
-  constructor(code: WorkflowRepositoryErrorCode, message: string) {
+  constructor(code: WorkflowRepositoryErrorCode, message: string, issues?: readonly WorkflowValidationIssue[]) {
     super(message);
     this.name = 'WorkflowRepositoryError';
     this.code = code;
+    if (issues) this.issues = issues;
   }
 }
 
-export function repositoryError(code: WorkflowRepositoryErrorCode, message: string): never {
-  throw new WorkflowRepositoryError(code, message);
+export function repositoryError(code: WorkflowRepositoryErrorCode, message: string, issues?: readonly WorkflowValidationIssue[]): never {
+  throw new WorkflowRepositoryError(code, message, issues);
 }
 
 export function isCanonicalInstant(value: unknown): value is string {

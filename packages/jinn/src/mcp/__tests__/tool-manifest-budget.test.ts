@@ -11,11 +11,13 @@ const MAX_MANIFEST_TOKENS = 4911;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  // Rebased for choice approvals (+20 tokens each: `options` on request_work_item_approval,
-  // `choice` on decide_work_item_approval). Pi now sits 9 tokens under the cap.
-  rpc: { tokens: 4475, sha256: "5912e422625f9b0d3126984c3028177a8d688c89f9993250924249d89aa75ed2" },
-  pi: { tokens: 4902, sha256: "0aee2f8f703009a7d3ac220717537ac04dcb48ce229d2fc19a57c3737a8f4a95" },
-  openai: { tokens: 4647, sha256: "2dbf09c19583f678d079d22b930c2f573e8f20fad302c6e5f54808fbf093bf3e" },
+  // Rebased for `todoId` on start_workflow_run. That field cost 8 tokens and would
+  // have left Pi 1 token of headroom, so the same change dropped "on the current
+  // gateway" from the eleven Workflow tool descriptions — a tool can only ever act
+  // on its own gateway, so the clause said nothing. Pi now sits 37 tokens under.
+  rpc: { tokens: 4447, sha256: "e7ddfacfb3dd4d761ce7940945a1ad67d09ee2436613f2766b01d22b74944e7c" },
+  pi: { tokens: 4874, sha256: "5e881e19e28b23545507e7a51f1c992a380722809402d77866aef3594ca526a0" },
+  openai: { tokens: 4619, sha256: "ccacc2d091a2375a2e64970ebb28c8401345a558e5195f169f49278d4e94af7b" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;

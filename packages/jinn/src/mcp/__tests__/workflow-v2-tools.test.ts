@@ -47,6 +47,7 @@ describe("Workflow v2 MCP tools", () => {
       ["enable_workflow", { workflowId: "release-flow", expectedRevision: 1 }, "POST", "/api/workflows/release-flow/enable", { expectedRevision: 1 }],
       ["disable_workflow", { workflowId: "release-flow", expectedRevision: 1 }, "POST", "/api/workflows/release-flow/disable", { expectedRevision: 1 }],
       ["start_workflow_run", { workflowId: "release-flow", input: { topic: "release" }, idempotencyKey: "start-1" }, "POST", "/api/workflows/release-flow/runs", { input: { topic: "release" }, idempotencyKey: "start-1" }],
+      ["start_workflow_run", { workflowId: "release-flow", todoId: "JIN-42" }, "POST", "/api/workflows/release-flow/runs", { input: {}, todoId: "JIN-42" }],
       ["list_workflow_runs", { workflowId: "release-flow", status: "failed" }, "GET", "/api/workflows/release-flow/runs?status=failed"],
       ["get_workflow_run", { workflowId: "release-flow", runId: "run-1" }, "GET", "/api/workflows/release-flow/runs/run-1"],
       ["cancel_workflow_run", { workflowId: "release-flow", runId: "run-1", reason: "stop" }, "POST", "/api/workflows/release-flow/runs/run-1/cancel", { reason: "stop" }],
@@ -88,5 +89,22 @@ describe("Workflow v2 MCP tools", () => {
     const candidate = buildWorkflowTools().find((tool) => tool.name === "enable_workflow")!;
     await expect(candidate.handler({ workflowId: "release-flow", expectedRevision: 1 }, context))
       .rejects.toThrow("revision-conflict: Revision changed.");
+  });
+
+  it("names the offending node and edge when a definition fails validation", async () => {
+    const body = { code: "invalid-definition", message: "Workflow definition is invalid.", issues: [
+      { code: "multiple-incoming", message: "Node accepts only one incoming edge.", nodeId: "review" },
+      { code: "unknown-node", message: "Edge references an unknown node.", edgeId: "review-ship" },
+    ] };
+    const context: JinnMcpContext = { gatewayUrl: "http://127.0.0.1:7811", token: "test-token",
+      callerSessionId: "session-1", sessionCapability: "capability-1",
+      fetchFn: vi.fn(async () => new Response(JSON.stringify(body), { status: 422 })) as unknown as typeof fetch };
+    const candidate = buildWorkflowTools().find((tool) => tool.name === "enable_workflow")!;
+
+    await expect(candidate.handler({ workflowId: "release-flow", expectedRevision: 1 }, context)).rejects.toThrow(
+      "invalid-definition: Workflow definition is invalid."
+      + "\n- multiple-incoming (node review): Node accepts only one incoming edge."
+      + "\n- unknown-node (edge review-ship): Edge references an unknown node.",
+    );
   });
 });

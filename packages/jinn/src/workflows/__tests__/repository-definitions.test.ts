@@ -366,6 +366,19 @@ describe('canonical definition persistence', () => {
     expect(repository.getDefinition(created.id)).toEqual(created);
   });
 
+  it('reports which field failed the schema instead of a bare "definition is invalid"', () => {
+    const created = create('schema-detail');
+    const invalid = { ...created, nodes: [{ id: 'start', type: 'trigger', name: '', config: { kind: 'manual' } }] } as WorkflowDefinition;
+
+    let thrown: unknown;
+    try { repository.saveDefinition(invalid, 1); } catch (error) { thrown = error; }
+
+    expect(thrown).toBeInstanceOf(WorkflowRepositoryError);
+    expect((thrown as WorkflowRepositoryError).issues).toEqual([
+      expect.objectContaining({ code: 'schema', path: 'nodes.0.name' }),
+    ]);
+  });
+
   it('fails every definition read that encounters corrupt JSON', () => {
     create('corrupt-get');
     db.prepare("UPDATE workflow_definitions SET definition_json = '{' WHERE id = 'corrupt-get'").run();
@@ -391,6 +404,24 @@ describe('optimistic revision mutations', () => {
       'revision-conflict',
     );
     expect(repository.getDefinition(created.id)).toEqual(saved);
+  });
+
+  it('persists a canvas-only move without spending a revision, and still versions the next graph edit', () => {
+    const created = create('dragged', 'Dragged');
+    const graph = repository.saveDefinition({
+      ...created,
+      nodes: [{ id: 'start', type: 'trigger', name: 'Start', config: { kind: 'manual' } }],
+      ui: { positions: { start: { x: 0, y: 0 } } },
+    } as WorkflowDefinition, 1);
+    expect(graph.revision).toBe(2);
+
+    now = '2026-07-21T02:00:00.000Z';
+    const dragged = repository.saveDefinition({ ...graph, ui: { positions: { start: { x: 320, y: 96 } } } }, 2);
+    expect(dragged).toMatchObject({ revision: 2, updatedAt: now, ui: { positions: { start: { x: 320, y: 96 } } } });
+    expect(repository.getDefinition(created.id)).toEqual(dragged);
+
+    const renamed = repository.saveDefinition({ ...dragged, title: 'Renamed' }, 2);
+    expect(renamed).toMatchObject({ revision: 3, title: 'Renamed' });
   });
 
   it('rejects invalid repository clocks before every write and roundtrips emitted cursors', () => {
