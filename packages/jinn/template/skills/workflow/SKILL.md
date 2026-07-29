@@ -48,6 +48,8 @@ A `todo-status` trigger BINDS its run to the Todo that fired it: no new Todo is 
 
 A `todo-status` trigger fires for every Todo reaching `status` unless you narrow it with the optional `label`, `department`, and `assignee` filters. Every filter you set must match; an omitted one matches everything. `label` accepts a label id or a label name, matched against the Todo's labels as they stand when the trigger fires.
 
+The `assigned` status does NOT imply an assignee: assigning a Todo is its own action, and moving a Todo's status straight to `assigned` leaves it unassigned. So `{ "status": "assigned", "assignee": "some-employee" }` silently never fires for a Todo armed that way. Filter on `assignee` only for a status that assignment itself produces.
+
 ```json
 { "kind": "todo-status", "status": "in_review", "label": "needs-review", "department": "platform" }
 ```

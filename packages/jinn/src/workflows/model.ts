@@ -155,6 +155,10 @@ const triggerConfigSchema = z.discriminatedUnion('kind', [
     actor: z.string().min(1).max(120).optional(),
     label: z.string().min(1).max(80).optional(),
     department: z.string().min(1).max(80).optional(),
+    /** Matched against the Todo's assignee, which the `assigned` STATUS does not
+     *  imply: assigning is its own action (`assignWorkItem`), and a plain status
+     *  move to `assigned` leaves the assignee null. Filtering on `assignee` for
+     *  such a Todo never fires — pick the status the assignment itself produces. */
     assignee: z.string().min(1).max(80).optional(),
   }),
   z.strictObject({ kind: z.literal('workflow-call') }),

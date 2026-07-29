@@ -241,12 +241,17 @@ function TriggerForm({ node, update }: FormProps) {
               onChange={(value) => update(withOptionalText(node.config, "department", value))}
               options={(org.data?.departments ?? []).map((department) => ({ value: department, label: department }))}
             />
-            <FilterPicker
-              label="Assignee"
-              value={config.assignee ?? ""}
-              onChange={(value) => update(withOptionalText(node.config, "assignee", value))}
-              options={(org.data?.employees ?? []).map((employee) => ({ value: employee.name, label: employee.name }))}
-            />
+            <div>
+              <FilterPicker
+                label="Assignee"
+                value={config.assignee ?? ""}
+                onChange={(value) => update(withOptionalText(node.config, "assignee", value))}
+                options={(org.data?.employees ?? []).map((employee) => ({ value: employee.name, label: employee.name }))}
+              />
+              <p className="mt-1 text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
+                Moving a Todo to “assigned” does not assign it. An unassigned Todo never matches.
+              </p>
+            </div>
             <Field label="Actor">
               <TextInput
                 className="min-h-[34px]"
