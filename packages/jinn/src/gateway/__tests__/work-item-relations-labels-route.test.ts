@@ -245,6 +245,28 @@ describe("label registry routes", () => {
     const missing = await call("PUT", "/api/work-items/ZZZ-424242/labels", { labels: [] }, operatorHeaders);
     expect(missing.status).toBe(404);
   });
+
+  it("tags a Todo at creation with existing labels only, rolling the create back on an unknown one", async () => {
+    await call("POST", "/api/labels", { name: "birth-tag" }, operatorHeaders);
+
+    const created = await call("POST", "/api/work-items", { title: "born tagged", labels: ["Birth Tag"] }, operatorHeaders);
+    expect(created.status).toBe(201);
+    expect((created.body.labels as Array<{ name: string }>).map((l) => l.name)).toEqual(["birth-tag"]);
+    const detail = await call("GET", `/api/work-items/${created.body.workItem.id}`);
+    expect((detail.body.labels as Array<{ name: string }>).map((l) => l.name)).toEqual(["birth-tag"]);
+
+    // An unknown label fails the whole request: no implicit label, no orphan Todo.
+    const rejected = await call("POST", "/api/work-items", { title: "born untaggable", labels: ["ghost-tag"] }, operatorHeaders);
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.error).toContain("valid labels");
+    const names = ((await call("GET", "/api/labels")).body.labels as Array<{ name: string }>).map((l) => l.name);
+    expect(names).not.toContain("ghost-tag");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM work_items WHERE title = ?").get("born untaggable")).toEqual({ n: 0 });
+
+    const blank = await call("POST", "/api/work-items", { title: "bad labels", labels: ["  "] }, operatorHeaders);
+    expect(blank.status).toBe(400);
+    expect(blank.body.error).toContain("labels must be an array");
+  });
 });
 
 describe("list wire data — labels, blocked flag, label filter", () => {

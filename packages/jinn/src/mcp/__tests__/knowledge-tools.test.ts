@@ -92,7 +92,7 @@ describe("knowledge tools — registry + schemas", () => {
     expect(names).toContain("search_knowledge");
     expect(names).toContain("read_knowledge");
     expect(names).toContain("cancel_workflow_run");
-    expect(names).toHaveLength(62);
+    expect(names).toHaveLength(63);
   });
 
   it("domain teaching lives on search_knowledge; read names the instance scope", () => {

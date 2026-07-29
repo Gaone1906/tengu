@@ -77,6 +77,14 @@ function requireRelationKind(args: Record<string, unknown>): (typeof RELATION_KI
   return kind as (typeof RELATION_KINDS)[number];
 }
 
+function requireLabelRefs(args: Record<string, unknown>): string[] {
+  if (!Array.isArray(args.labels) || args.labels.length > WORK_ITEM_LABELS_MAX
+    || args.labels.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > FILTER_CHAR_CAP)) {
+    throw new JinnMcpToolError(`labels must be an array of up to ${WORK_ITEM_LABELS_MAX} label names or ids (non-empty strings) — list_labels shows valid labels`);
+  }
+  return (args.labels as string[]).map((entry) => entry.trim());
+}
+
 function optionalString(args: Record<string, unknown>, name: string, max = FILTER_CHAR_CAP): string | undefined {
   const v = args[name];
   if (v === undefined || v === null) return undefined;
@@ -322,6 +330,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
         parentId: TODO_ID_SCHEMA,
         priority: { type: "number", enum: [0, 1, 2, 3] },
         dueAt: { type: "string" },
+        labels: { type: "array", items: { type: "string" } },
       },
       required: ["title"],
     },
@@ -348,6 +357,7 @@ export function buildWorkItemTools(): JinnMcpTool[] {
       }
       const dueAt = optionalString(args, "dueAt", 64);
       if (dueAt !== undefined) body.dueAt = dueAt;
+      if (args.labels !== undefined) body.labels = requireLabelRefs(args);
       const { status, body: resp } = await gatewayRequest(ctx, "POST", "/api/work-items", body);
       if (status >= 400) throw gatewayFailure("creating work item", status, resp);
       return mutationResult(resp, "Next: assign_work_item or update_work_item.");
@@ -728,14 +738,35 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     handler: async (args, ctx) => {
       assertIdentity(ctx);
       const id = requireTodoId(args);
-      if (!Array.isArray(args.labels) || args.labels.length > WORK_ITEM_LABELS_MAX
-        || args.labels.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > FILTER_CHAR_CAP)) {
-        throw new JinnMcpToolError(`labels must be an array of up to ${WORK_ITEM_LABELS_MAX} label names or ids (non-empty strings) — list_labels shows valid labels`);
-      }
-      const labels = (args.labels as string[]).map((entry) => entry.trim());
+      const labels = requireLabelRefs(args);
       const { status, body } = await gatewayRequest(ctx, "PUT", `/api/work-items/${encodeURIComponent(id)}/labels`, { labels });
       if (status >= 400) throw gatewayFailure(`labelling work item "${id}"`, status, body);
       return mutationResult(body, "Todo labels replaced.");
+    },
+  };
+
+  const labelCreate: JinnMcpTool = {
+    name: "create_label",
+    description: "Create a Todo label; operator or manager only.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        color: { type: "string" },
+        department: { type: "string" },
+      },
+      required: ["name"],
+    },
+    handler: async (args, ctx) => {
+      assertIdentity(ctx);
+      const payload: Record<string, unknown> = { name: requireString(args, "name") };
+      for (const key of ["color", "department"] as const) {
+        const v = optionalString(args, key);
+        if (v !== undefined) payload[key] = v;
+      }
+      const { status, body } = await gatewayRequest(ctx, "POST", "/api/labels", payload);
+      if (status >= 400) throw gatewayFailure("creating label", status, body);
+      return { ...(body as Record<string, unknown>), hint: "Next: label_work_item { id, labels }, or pass labels to create_work_item." };
     },
   };
 
@@ -763,5 +794,5 @@ export function buildWorkItemTools(): JinnMcpTool[] {
     },
   };
 
-  return [list, get, tree, search, create, update, edit, assign, archive, comment, listComments, attach, listAttachments, link, unlink, label, labelsList, departments];
+  return [list, get, tree, search, create, update, edit, assign, archive, comment, listComments, attach, listAttachments, link, unlink, label, labelCreate, labelsList, departments];
 }

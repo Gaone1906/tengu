@@ -3421,6 +3421,17 @@ export async function handleApiRequest(
         }
         priority = body.priority;
       }
+      // Labels at creation carry the same contract as PUT /api/work-items/:id/labels:
+      // EXISTING labels only, by id or name. Nothing is created implicitly.
+      if (body.labels !== undefined) {
+        if (!Array.isArray(body.labels) || body.labels.some((entry) => typeof entry !== "string" || !entry.trim() || entry.length > 256)) {
+          return badRequest(res, "labels must be an array of label ids or names (non-empty strings)");
+        }
+        if (body.labels.length > TODO_LABELS_MAX) {
+          return badRequest(res, `labels accepts at most ${TODO_LABELS_MAX} entries per Todo (got ${body.labels.length})`);
+        }
+      }
+      const labelRefs = body.labels === undefined ? undefined : (body.labels as string[]).map((entry) => entry.trim());
       const source: WorkItemSource = caller.kind === "session" ? "session" : "human";
       const input: CreateWorkItemInput = {
         title: title.slice(0, 200),
@@ -3444,9 +3455,18 @@ export async function handleApiRequest(
         createdBy: workItemCommentAuthor(caller).author,
       };
       try {
-        const item = createWorkItem(input);
+        // Tagging runs inside the create transaction: an unknown label must fail
+        // the whole request rather than leave an untagged Todo behind.
+        let labels: Label[] | undefined;
+        const item = labelRefs === undefined
+          ? createWorkItem(input)
+          : initDb().transaction(() => {
+            const created = createWorkItem(input);
+            labels = setWorkItemLabels(created.id, labelRefs, workItemActor(caller));
+            return created;
+          })();
         const activityReceiptId = persistTodoMutationActivity(req, context, item, "created");
-        return json(res, withActivityReceipt({ workItem: item }, activityReceiptId), 201);
+        return json(res, withActivityReceipt({ workItem: item, ...(labels ? { labels } : {}) }, activityReceiptId), 201);
       } catch (err) {
         return badRequest(res, err instanceof Error ? err.message : String(err));
       }

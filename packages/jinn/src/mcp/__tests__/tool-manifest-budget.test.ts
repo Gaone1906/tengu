@@ -11,13 +11,15 @@ const MAX_MANIFEST_TOKENS = 4911;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  // Rebased for `todoId` on start_workflow_run. That field cost 8 tokens and would
-  // have left Pi 1 token of headroom, so the same change dropped "on the current
-  // gateway" from the eleven Workflow tool descriptions — a tool can only ever act
-  // on its own gateway, so the clause said nothing. Pi now sits 37 tokens under.
-  rpc: { tokens: 4447, sha256: "e7ddfacfb3dd4d761ce7940945a1ad67d09ee2436613f2766b01d22b74944e7c" },
-  pi: { tokens: 4874, sha256: "5e881e19e28b23545507e7a51f1c992a380722809402d77866aef3594ca526a0" },
-  openai: { tokens: 4619, sha256: "ccacc2d091a2375a2e64970ebb28c8401345a558e5195f169f49278d4e94af7b" },
+  // Rebased for `create_label` plus `labels` on create_work_item, which together
+  // cost 72 tokens and put Pi 35 over. The same change dropped "a live gateway
+  // operation" from the ten Workflow write descriptions — every tool on this
+  // surface operates on the live gateway, so the clause distinguished nothing;
+  // the "may spawn real sessions" warning it was bundled with is kept verbatim.
+  // Pi now sits 25 tokens under.
+  rpc: { tokens: 4453, sha256: "94ee1e6f8e5a5d6cf0d375e37f06d407613c62b29221a755d8d3512f017b2efe" },
+  pi: { tokens: 4886, sha256: "6b18bf147a1c227de874538da8d87c59916756444e539704381b3dd2845f6dcf" },
+  openai: { tokens: 4628, sha256: "99f1c88397b7bb8e189bdaf142ba4a48d7828ed1ac300ef9d2bd11905394f39a" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -44,6 +46,7 @@ const EXPECTED_TOOL_NAMES = [
   "cancel_workflow_run",
   "comment_work_item",
   "cost_report",
+  "create_label",
   "create_note",
   "create_work_item",
   "create_workflow",
@@ -109,6 +112,7 @@ const EXPECTED_REQUIRED = {
   cancel_workflow_run: ["workflowId", "runId"],
   comment_work_item: ["id", "body"],
   cost_report: [],
+  create_label: ["name"],
   create_note: ["title"],
   create_work_item: ["title"],
   create_workflow: ["id", "title"],
@@ -237,7 +241,7 @@ describe("tool manifest budget", () => {
   it("keeps tool names, required arrays, and enum arrays stable", () => {
     const tools = buildTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
-    expect(tools).toHaveLength(62);
+    expect(tools).toHaveLength(63);
 
     const required = Object.fromEntries(tools.map((t) => [t.name, t.inputSchema.required ?? []]));
     expect(required).toEqual(EXPECTED_REQUIRED);

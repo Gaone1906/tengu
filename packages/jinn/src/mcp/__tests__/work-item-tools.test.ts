@@ -74,6 +74,7 @@ describe("work-item tools — registry + schemas", () => {
       "link_work_items",
       "unlink_work_items",
       "label_work_item",
+      "create_label",
       "list_labels",
       "list_departments",
     ]);
@@ -87,7 +88,7 @@ describe("work-item tools — registry + schemas", () => {
     expect(names).toContain("fire_workflow_event");
     expect(names).toContain("cancel_workflow_run");
     expect(names.some((n) => /cancel/i.test(n) && /work_item/.test(n))).toBe(false);
-    expect(names).toHaveLength(62);
+    expect(names).toHaveLength(63);
   });
 
   it("positions list as recent/filter summaries and search as text/filter hits", () => {
@@ -107,7 +108,7 @@ describe("work-item tools — registry + schemas", () => {
   it("create schema has no approval fields and update schema allows manual start but excludes cancelled", () => {
     const createProps = tool("create_work_item").inputSchema.properties;
     expect(Object.keys(createProps).sort()).toEqual(
-      ["acceptance", "assignee", "body", "department", "dueAt", "parentId", "priority", "title", "verifyPolicy"].sort(),
+      ["acceptance", "assignee", "body", "department", "dueAt", "labels", "parentId", "priority", "title", "verifyPolicy"].sort(),
     );
     expect(JSON.stringify(createProps)).not.toMatch(/approval/i);
     const status = tool("update_work_item").inputSchema.properties.status as { enum: string[] };
@@ -1066,6 +1067,35 @@ describe("work-item relation + label tools (Todos v2 slice 3)", () => {
       removed: boolean;
     };
     expect(unlinked.removed).toBe(true);
+  });
+
+  it("create_label → create_work_item { labels } arms a Todo without leaving MCP", async () => {
+    const manager = registry.createSession({ engine: "codex", source: "web", sourceRef: "mcp-lbl-mgr", title: "mgr", employee: "platform-manager" });
+    const managerCtx = ctxFor(manager.id);
+    const dev = registry.createSession({ engine: "codex", source: "web", sourceRef: "mcp-lbl-dev", title: "dev", employee: "platform-dev" });
+    const devCtx = ctxFor(dev.id);
+
+    // The route's manager gate reaches the caller verbatim rather than being swallowed.
+    await expect(tool("create_label").handler({ name: "mcp-tag" }, devCtx)).rejects.toThrow(/refused \(403\).*manager/);
+
+    const created = (await tool("create_label").handler({ name: "MCP Tag", color: "#22cc88" }, managerCtx)) as {
+      label: { name: string; color: string };
+    };
+    expect(created.label).toMatchObject({ name: "mcp-tag", color: "#22cc88" });
+
+    const tagged = (await tool("create_work_item").handler({ title: "armed at birth", labels: ["MCP Tag"] }, devCtx)) as {
+      workItem: { id: string };
+      labels: Array<{ name: string }>;
+    };
+    expect(tagged.labels.map((l) => l.name)).toEqual(["mcp-tag"]);
+    const detail = (await tool("get_work_item").handler({ id: tagged.workItem.id }, devCtx)) as { labels: Array<{ name: string }> };
+    expect(detail.labels.map((l) => l.name)).toEqual(["mcp-tag"]);
+
+    // create_work_item never mints a label: an unknown name fails the create.
+    await expect(tool("create_work_item").handler({ title: "never born", labels: ["ghost-tag"] }, devCtx)).rejects.toThrow(/valid labels/);
+    const registryLabels = (await tool("list_labels").handler({}, devCtx)) as { labels: Array<{ name: string }> };
+    expect(registryLabels.labels.map((l) => l.name)).not.toContain("ghost-tag");
+    expect(store.listWorkItems({ text: "never born" })).toEqual([]);
   });
 });
 
