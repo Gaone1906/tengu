@@ -248,6 +248,7 @@ function TriggerForm({ node, update }: FormProps) {
             />
             <Field label="Actor">
               <TextInput
+                className="min-h-[34px]"
                 value={config.actor ?? ""}
                 onChange={(event) => update(withOptionalText(node.config, "actor", event.target.value))}
                 placeholder="operator"

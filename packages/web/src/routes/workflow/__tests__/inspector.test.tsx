@@ -140,6 +140,12 @@ describe("todo trigger filters", () => {
     expect(screen.getByLabelText("Actor")).toBeTruthy()
   })
 
+  it("keeps the Actor input at least 34px tall", () => {
+    renderTrigger({ kind: "todo-status", status: "in_review" })
+
+    expect(screen.getByLabelText("Actor").classList.contains("min-h-[34px]")).toBe(true)
+  })
+
   it("renders stored values, including values missing from the registries", async () => {
     renderTrigger({
       kind: "todo-status",
