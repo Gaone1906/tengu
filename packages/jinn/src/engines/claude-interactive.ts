@@ -17,6 +17,7 @@ import { neutralizeForPaste } from "../shared/skill-commands.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
 import { extractActivityReceiptId } from "../shared/activity-receipts.js";
 import { writeMcpConfigFile } from "../mcp/resolver.js";
+import { parsePermissionPrompt, chooseApproval, keystrokesToSelect } from "./claude-permission-prompt.js";
 
 export type { PtyControlEvent } from "./pty-view-engine.js";
 
@@ -545,6 +546,23 @@ export function shouldSettleStalledTurn(elapsedMs: number, quietMs: number): boo
   return elapsedMs >= TURN_STALL_TIMEOUT_MS && quietMs >= TURN_STALL_QUIET_MS;
 }
 
+/**
+ * Whether real work is in flight, and so missing-Stop recovery must hold off.
+ *
+ * A turn blocked on a safety prompt is the one case where a non-zero tool count
+ * does NOT mean work is happening: PreToolUse fires, THEN the CLI sits on a
+ * dialog nobody is there to answer. Counting that as busy suppressed the stall
+ * backstop forever — sessions pinned at status:"running" for hours (one observed
+ * at 9h26m) instead of failing after 15 minutes. Exported for tests.
+ */
+export function recoveryBlockedByWork(
+  activeTools: number,
+  blockedOnPermission: boolean,
+  upstreamActive: boolean,
+): boolean {
+  return (activeTools > 0 && !blockedOnPermission) || upstreamActive;
+}
+
 /** Warm-PTY submit confirmation. The CR that submits a bracketed paste is not
  *  guaranteed to land — the TUI discards keypresses while it is busy, and
  *  backticking attachment paths only removes the one trigger we characterised
@@ -561,6 +579,30 @@ const SUBMIT_CONFIRM_ATTEMPTS = 12;
 /** Hooks that prove the pasted prompt is running. SessionStart is excluded on
  *  purpose: the idle spawn that warmed this PTY fires it before the paste. */
 export const SUBMIT_ACK_HOOKS = new Set(["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "StopFailure"]);
+
+/** How long to let the TUI settle before reading the screen back. The prompt is
+ *  already drawn when Notification fires, so this only absorbs redraw jitter. */
+const PERMISSION_PROMPT_SETTLE_MS = 400;
+/** Re-read after answering to confirm the dialog actually cleared. */
+const PERMISSION_PROMPT_VERIFY_MS = 1500;
+/** Attempts before giving up and leaving the turn to the stall backstop. A
+ *  prompt we cannot answer twice is one we do not understand; keystroke spam at
+ *  an unrecognised dialog is exactly the failure mode worth avoiding. */
+const PERMISSION_PROMPT_MAX_ATTEMPTS = 3;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => { const t = setTimeout(resolve, ms); t.unref?.(); });
+}
+
+/** True for the Notification hook that means "the CLI is blocked on a permission
+ *  dialog". Verified against claude 2.1.220: notification_type is
+ *  "permission_prompt" and it fires ~6s after the PreToolUse for the gated tool.
+ *  Other Notification types (idle nudges) must not trip this. */
+export function isPermissionPromptNotification(h: HookPayload | Record<string, unknown>): boolean {
+  const payload = h as Record<string, unknown>;
+  return payload.hook_event_name === "Notification"
+    && payload.notification_type === "permission_prompt";
+}
 
 /** Claude Code built-in slash commands that run locally and never produce a new
  *  assistant API turn. Two behaviours, both handled by the native-command path:
@@ -599,6 +641,15 @@ interface ActiveTurn {
   /** Local tool calls in flight (PreToolUse seen, PostToolUse not yet). A long
    *  tool is real work, so a quiet PTY with tools running is NOT a stall. */
   activeTools: number;
+  /** Set when the CLI reports it is blocked on one of Claude Code's hardcoded
+   *  safety prompts (see claude-permission-prompt.ts). Load-bearing for the
+   *  stall backstop: PreToolUse fires BEFORE the prompt, so activeTools is
+   *  non-zero and a blocked turn is otherwise indistinguishable from a
+   *  long-running tool — which is exactly why these hung forever instead of
+   *  settling after 15 minutes. */
+  blockedOnPermissionAt?: number;
+  /** Guards the auto-approve retry loop against re-entry from a repeated hook. */
+  approvingPermission?: boolean;
   startedAt: number;
   /** Last hook of any kind — proof of life independent of PTY redraw noise. */
   lastHookAt: number;
@@ -757,10 +808,19 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
   /** Test override for the post-settle clear quiet window (default 10s). */
   backgroundClearQuietMs = BACKGROUND_CLEAR_QUIET_MS;
 
+  /** Answer Claude Code's hardcoded safety prompts automatically. On by default:
+   *  a gateway PTY has no keyboard, so the alternative is a wedged session. Set
+   *  `engines.claude.autoApproveSafetyPrompts: false` to leave them for a human
+   *  in the CLI/xterm view instead — the turn then fails via the stall backstop
+   *  rather than hanging, which is the other half of this fix. */
+  private autoApproveSafetyPrompts: boolean;
+
   constructor(
     private lifecycle: PtyLifecycleManager,
     private hookRegistry: HookRegistry,
+    opts: { autoApproveSafetyPrompts?: boolean } = {},
   ) {
+    this.autoApproveSafetyPrompts = opts.autoApproveSafetyPrompts ?? true;
     this.streams = new PtyStreamManager("PTY", (id) => this.lifecycle.getWarm(id) !== undefined);
     // Purge per-PTY bookkeeping whenever the session's PTY is released (kill,
     // LRU eviction, sweep reap, cold respawn) so these maps don't grow forever
@@ -781,6 +841,76 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
    *  only post-settle activity matters. */
   onBackgroundActivity(cb: (jinnSessionId: string, info: UpstreamActivityInfo | null) => void): void {
     this.backgroundActivityCb = cb;
+  }
+
+  /**
+   * Read the pending safety dialog off the terminal and answer it.
+   *
+   * Reading the screen (rather than trusting the hook) is the point: the
+   * Notification payload says only "Claude needs your permission" — not which
+   * dialog, nor what its options are. The parser refuses anything it does not
+   * fully recognise, so an unfamiliar dialog stalls the turn instead of being
+   * answered blind. `blockedOnPermissionAt` stays set on every failure path, so
+   * whatever we decline to answer still reaches the stall backstop.
+   */
+  private async answerPermissionPrompt(sessionId: string, entry: ActiveTurn, attempt = 1): Promise<void> {
+    if (!this.autoApproveSafetyPrompts) {
+      logger.warn(
+        `InteractiveClaudeEngine: ${sessionId} is blocked on a Claude Code safety prompt and `
+        + `autoApproveSafetyPrompts is off — answer it in the CLI/xterm view or the turn will fail on the stall backstop.`,
+      );
+      return;
+    }
+    if (entry.approvingPermission && attempt === 1) return; // a retry owns the loop
+    entry.approvingPermission = true;
+    try {
+      await delay(attempt === 1 ? PERMISSION_PROMPT_SETTLE_MS : PERMISSION_PROMPT_VERIFY_MS);
+      if (entry.resolver.isSettled) return;
+
+      const viewport = await this.streams.viewport(sessionId);
+      if (!viewport) return;
+      const prompt = parsePermissionPrompt(viewport);
+      if (!prompt) {
+        // Nothing recognisable on screen. Either it cleared (a human answered,
+        // or the CLI withdrew it) or we caught a redraw — retry, then stop.
+        if (attempt >= PERMISSION_PROMPT_MAX_ATTEMPTS) return;
+        return await this.answerPermissionPrompt(sessionId, entry, attempt + 1);
+      }
+
+      const target = chooseApproval(prompt);
+      if (!target) {
+        logger.warn(
+          `InteractiveClaudeEngine: ${sessionId} is blocked on a safety prompt with no unambiguous approval `
+          + `option (${prompt.options.map((o) => o.label).join(" / ")}) — leaving it for a human.`,
+        );
+        return;
+      }
+
+      const proc = entry.boundProc;
+      if (!proc) return;
+      logger.warn(
+        `InteractiveClaudeEngine: auto-approving Claude Code safety prompt for ${sessionId} `
+        + `(attempt ${attempt}, reason: ${prompt.reason ?? "unstated"}, answering "${target.label}")`,
+      );
+      for (const key of keystrokesToSelect(prompt.selectedPosition, target.position)) proc.write(key);
+
+      // Verify rather than assume. If the dialog is still up the keystrokes did
+      // not land (TUI busy, mid-redraw) and the next attempt re-sends them.
+      if (attempt < PERMISSION_PROMPT_MAX_ATTEMPTS) {
+        return await this.answerPermissionPrompt(sessionId, entry, attempt + 1);
+      }
+      logger.warn(
+        `InteractiveClaudeEngine: safety prompt for ${sessionId} still on screen after `
+        + `${PERMISSION_PROMPT_MAX_ATTEMPTS} attempts — leaving it to the stall backstop.`,
+      );
+    } catch (err) {
+      logger.warn(
+        `InteractiveClaudeEngine: failed to auto-approve safety prompt for ${sessionId}: `
+        + `${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      if (attempt === 1) entry.approvingPermission = false;
+    }
   }
 
   onRuntimeActivity(cb: (jinnSessionId: string, info: UpstreamActivityInfo | null) => void): void {
@@ -961,7 +1091,14 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
         }
         if (h.hook_event_name === "PostToolUse") {
           entry.activeTools = Math.max(0, entry.activeTools - 1);
+          // The tool ran, so whatever prompt was gating it is gone — whether we
+          // answered it or a human did in the CLI/xterm view.
+          entry.blockedOnPermissionAt = undefined;
           for (const delta of claudeHookToDeltas(h as Record<string, unknown>)) opts.onStream?.(delta);
+        }
+        if (isPermissionPromptNotification(h)) {
+          entry.blockedOnPermissionAt = Date.now();
+          void this.answerPermissionPrompt(jinnSessionId, entry);
         }
       });
 
@@ -1045,8 +1182,15 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
           if (resolver.stopFailure) return;
           // Missing-Stop recovery is only safe when the model stream and local
           // tool hooks are quiet; otherwise a long-running turn can be mistaken
-          // for a completed one just because transcript text exists.
-          if (entry.activeTools > 0 || this.hasActiveUpstream(jinnSessionId)) return;
+          // for a completed one just because transcript text exists. A pending
+          // safety prompt is the exception — see recoveryBlockedByWork. Auto-
+          // approve normally clears it in seconds; this catches what it cannot
+          // answer, so an unanswerable dialog fails the turn instead of hanging.
+          if (recoveryBlockedByWork(
+            entry.activeTools,
+            entry.blockedOnPermissionAt !== undefined,
+            this.hasActiveUpstream(jinnSessionId),
+          )) return;
           const now = Date.now();
           const elapsed = now - startedAt;
           const quietFor = now - (this.lastOutputAt.get(jinnSessionId) ?? startedAt);

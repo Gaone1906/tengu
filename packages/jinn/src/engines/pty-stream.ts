@@ -139,6 +139,14 @@ export class PtyStreamManager {
     });
   }
 
+  /** The session's visible terminal rows as plain text, or undefined when no
+   *  snapshot is attached. Used to read a pending TUI dialog off the screen —
+   *  the raw byte tail cannot serve for that, because the CLI positions text
+   *  with cursor moves rather than writing the spaces between columns. */
+  viewport(sessionId: string): Promise<string[]> | undefined {
+    return this.streams.get(sessionId)?.snapshot?.viewportAtBoundary();
+  }
+
   resize(sessionId: string, cols: number, rows: number): void {
     const stream = this.streams.get(sessionId);
     if (!stream?.snapshot) return;

@@ -115,6 +115,13 @@ export class PtySnapshot {
     };
   }
 
+  /** viewport() read through the same write queue capture() uses, so callers see
+   *  the screen as of every byte written before this call rather than a frame
+   *  torn mid-escape-sequence. Answering a TUI dialog depends on that ordering. */
+  viewportAtBoundary(): Promise<string[]> {
+    return this.pending.then(() => this.viewport());
+  }
+
   viewport(): string[] {
     const buffer = this.terminal.buffer.active;
     const first = buffer.baseY;

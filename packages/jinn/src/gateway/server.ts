@@ -522,7 +522,9 @@ export async function startGateway(
       refreshPtyPids();
     },
   });
-  const interactiveClaudeEngine = new InteractiveClaudeEngine(claudeLifecycle, hookRegistry);
+  const interactiveClaudeEngine = new InteractiveClaudeEngine(claudeLifecycle, hookRegistry, {
+    autoApproveSafetyPrompts: claudeCfg.autoApproveSafetyPrompts,
+  });
 
   // Codex has two modes: headless `codex exec --json` for chat/default work
   // turns, and real `codex` TUI PTYs for the dashboard CLI view.

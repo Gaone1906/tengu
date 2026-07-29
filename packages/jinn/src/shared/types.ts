@@ -893,6 +893,13 @@ export interface JinnConfig {
       /** Model ids shown by default in the picker (before "More models…"). Defaults
        *  to the three latest alias families (opus/sonnet/fable). Explicit [] = none. */
       featuredModels?: string[];
+      /** Auto-answer Claude Code's hardcoded safety prompts (dangerous rm on a
+       *  possibly-empty variable path, the `&` background operator, suspicious
+       *  Windows paths) — the ones --dangerously-skip-permissions does NOT
+       *  suppress. Default true: a gateway PTY has no keyboard, so leaving them
+       *  unanswered wedges the session. Set false to require a human in the
+       *  CLI/xterm view; the turn then fails on the stall backstop instead. */
+      autoApproveSafetyPrompts?: boolean;
     };
     codex: { bin: string; model: string; effortLevel?: string; childEffortOverride?: string };
     /** Antigravity (`agy`) engine. `bin` is optional — resolved dynamically

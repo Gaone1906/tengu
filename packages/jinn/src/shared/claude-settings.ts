@@ -20,8 +20,18 @@ interface HookMatcher { hooks: HookCommand[]; }
 // the text sitting in the composer while the gateway waits on a turn that never
 // started. Registering this hook turns "did the submit land?" from a guess into a
 // fact; claude-interactive.ts retries the CR until it arrives.
+// Notification carries the ONLY structured signal that the CLI is blocked on a
+// human. Claude Code keeps a handful of hardcoded safety prompts that
+// --dangerously-skip-permissions does not suppress (dangerous rm on a
+// possibly-empty variable path, the `&` background operator, suspicious Windows
+// paths); a gateway PTY has nobody at the keyboard, so the turn hangs forever.
+// Verified against claude 2.1.220: the hook fires ~6s after PreToolUse with
+// notification_type "permission_prompt". A PreToolUse hook answering
+// permissionDecision:"allow" was tested and does NOT dismiss these — hooks
+// cannot pre-approve a circuit breaker — so detecting it here and answering the
+// TUI is the only route. See engines/claude-permission-prompt.ts.
 export interface ClaudeSettings {
-  hooks: Record<"SessionStart" | "UserPromptSubmit" | "Stop" | "StopFailure" | "PreToolUse" | "PostToolUse", HookMatcher[]>;
+  hooks: Record<"SessionStart" | "UserPromptSubmit" | "Stop" | "StopFailure" | "PreToolUse" | "PostToolUse" | "Notification", HookMatcher[]>;
   statusLine?: HookCommand;
   appendSystemPrompt?: string;
 }
@@ -66,6 +76,7 @@ export function buildSessionSettings(opts: SessionSettingsOpts): ClaudeSettings 
       StopFailure: [cmd()],
       PreToolUse: [cmd()],
       PostToolUse: [cmd()],
+      Notification: [cmd()],
     },
     ...(opts.statusLineDir ? { statusLine: { type: "command", command: buildStatusLineRecorderCommand(opts.sessionId, opts.statusLineDir) } } : {}),
     ...(opts.appendSystemPrompt ? { appendSystemPrompt: opts.appendSystemPrompt } : {}),
