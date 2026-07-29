@@ -4,11 +4,19 @@ import { ArrowLeft } from "lucide-react"
 import { Link, useParams } from "react-router-dom"
 import { PageLayout } from "@/components/page-layout"
 import { useBreadcrumbs } from "@/context/breadcrumb-context"
-import { api } from "@/lib/api"
+import { api, type WorkflowRunDetailV2Wire } from "@/lib/api"
 import { queryKeys } from "@/lib/query-keys"
 import { RunCanvas } from "./run-canvas"
 import { RunInspector } from "./run-inspector"
-import { StatusLine, TRIGGER_KIND_LABEL, formatDuration, formatStarted, isLiveRunStatus } from "./run-support"
+import {
+  StatusLine,
+  TRIGGER_KIND_LABEL,
+  formatDuration,
+  formatStarted,
+  isLiveRunStatus,
+  mergeRunDetail,
+  missingPromptAttempt,
+} from "./run-support"
 
 /** The run detail page IS the canvas: the editor graph read-only, painted with
  *  live node state. Clicking a node opens the run inspector. */
@@ -16,9 +24,16 @@ export default function WorkflowRunPage() {
   const { id = "", runId = "" } = useParams<{ id: string; runId: string }>()
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const queryClient = useQueryClient()
+  const runKey = queryKeys.workflows.run(id, runId)
+  /** The canvas cannot draw without the definition snapshot, so the first fetch
+   *  is the fat one; every poll after it is lean and folded into that snapshot. */
   const query = useQuery({
-    queryKey: queryKeys.workflows.run(id, runId),
-    queryFn: () => api.getWorkflowRunV2(id, runId),
+    queryKey: runKey,
+    queryFn: async () => {
+      const snapshot = queryClient.getQueryData<WorkflowRunDetailV2Wire>(runKey)
+      if (!snapshot) return api.getWorkflowRunFullV2(id, runId)
+      return mergeRunDetail(snapshot, await api.getWorkflowRunV2(id, runId))
+    },
     enabled: Boolean(id && runId),
     refetchInterval: (current) => (isLiveRunStatus(current.state.data?.status) ? 2000 : false),
   })
@@ -28,16 +43,33 @@ export default function WorkflowRunPage() {
     { label: "Run" },
   ])
 
+  const detail = query.data
+  /** Opening a node whose prompt the snapshot predates — a retry dispatched
+   *  while this page was open — re-fetches the snapshot once, so the panel shows
+   *  the prompt instead of silently dropping the section. */
+  const promptGap = detail && selectedNodeId ? missingPromptAttempt(detail, selectedNodeId) : null
+  useQuery({
+    queryKey: queryKeys.workflows.runPrompt(id, runId, promptGap ?? ""),
+    queryFn: async () => {
+      const snapshot = await api.getWorkflowRunFullV2(id, runId)
+      queryClient.setQueryData<WorkflowRunDetailV2Wire>(runKey, (current) => (
+        current ? mergeRunDetail(snapshot, current) : snapshot
+      ))
+      return snapshot
+    },
+    enabled: promptGap !== null,
+    staleTime: Infinity,
+  })
+
   const decide = useMutation({
     mutationFn: ({ nodeId, decision }: { nodeId: string; decision: "approve" | "reject" }) =>
       api.decideWorkflowApprovalV2(id, runId, nodeId, { decision, expectedRevision: query.data?.revision ?? 0 }),
-    onSuccess: (detail) => {
-      queryClient.setQueryData(queryKeys.workflows.run(id, runId), detail)
+    onSuccess: (decided) => {
+      queryClient.setQueryData(runKey, decided)
       void queryClient.invalidateQueries({ queryKey: queryKeys.workflows.runs(id) })
     },
   })
 
-  const detail = query.data
   return (
     <PageLayout>
       <div className="flex h-full min-h-0 flex-col">

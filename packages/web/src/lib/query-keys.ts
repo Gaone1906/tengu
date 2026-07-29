@@ -21,6 +21,8 @@ export const queryKeys = {
     definition: (id: string) => ['workflows', 'definition', id] as const,
     runs: (id: string) => ['workflows', 'runs', id] as const,
     run: (id: string, runId: string) => ['workflows', 'runs', id, runId] as const,
+    runPrompt: (id: string, runId: string, attemptKey: string) =>
+      ['workflows', 'runs', id, runId, 'prompt', attemptKey] as const,
     triggers: ['workflows', 'triggers'] as const,
   },
   skills: {

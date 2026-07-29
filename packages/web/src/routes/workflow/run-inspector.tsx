@@ -429,11 +429,11 @@ export function RunInspector({ detail, nodeId, onClose, onDecide, deciding }: {
             <>
               <StepSection node={node} attempt={latest} />
               {latest?.promptText && <PromptSection text={latest.promptText} />}
-              {latest?.input !== undefined && (
+              {nodeRun?.input !== undefined && (
                 <Section title="Step input">
-                  {isEmptyRecord(latest.input)
+                  {isEmptyRecord(nodeRun.input)
                     ? <Note>No input</Note>
-                    : <JsonBlock value={latest.input} />}
+                    : <JsonBlock value={nodeRun.input} />}
                 </Section>
               )}
               <OutputSection output={output} isDark={isDark} />

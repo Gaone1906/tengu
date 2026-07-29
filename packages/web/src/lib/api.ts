@@ -451,6 +451,9 @@ export interface WorkflowNodeRunV2Wire {
   nodeType: WorkflowDefinitionV2Wire["nodes"][number]["type"]
   status: WorkflowNodeRunStatusV2
   activated: boolean
+  /** What the node was handed: the single activated upstream output, or the run
+   *  input when the node fans in from several. The attempts do not repeat it. */
+  input?: unknown
   output?: WorkflowNodeOutputV2Wire
   error?: WorkflowRunErrorV2Wire
   resumeAt?: string
@@ -470,8 +473,8 @@ export interface WorkflowAttemptV2Wire {
     model?: string
     effort?: "low" | "medium" | "high" | "xhigh"
   }
-  input?: unknown
-  /** The final composed prompt handed to the session (interpolated + contract block). */
+  /** The final composed prompt handed to the session (interpolated + contract
+   *  block). Only `?view=full` carries it. */
   promptText?: string
   output?: WorkflowNodeOutputV2Wire
   error?: WorkflowRunErrorV2Wire
@@ -514,6 +517,12 @@ export interface WorkflowRunDetailV2Wire {
   attempts: WorkflowAttemptV2Wire[]
   approvals: WorkflowApprovalV2Wire[]
 }
+
+/** What the run route returns without `?view=full`: everything needed to judge
+ *  run state, minus the definition snapshot and the attempt prompts. Both of
+ *  those are immutable once written, so the run page polls this and carries the
+ *  fat halves forward from the one snapshot it fetched. */
+export type WorkflowRunLeanV2Wire = Omit<WorkflowRunDetailV2Wire, "definition">
 
 export type WorkItemStatusWire =
   | "backlog" | "assigned" | "executing" | "in_review" | "done" | "blocked" | "escalated" | "cancelled"
@@ -845,9 +854,15 @@ export const api = {
     get<{ items: WorkflowRunSummaryV2Wire[]; nextCursor: string | null }>(
       `/api/workflows/${encodeURIComponent(id)}/runs?limit=${limit}`,
     ),
-  /** `view=full` because the run canvas and inspector render the definition
-   *  snapshot and the attempt prompts, which the lean default omits. */
+  /** The polled shape: no definition snapshot, no attempt prompts. */
   getWorkflowRunV2: (id: string, runId: string) =>
+    get<WorkflowRunLeanV2Wire>(
+      `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`,
+    ),
+  /** The snapshot the run canvas needs to draw the graph at the revision the run
+   *  started on, plus the prompts the inspector shows. Fetched once per run, and
+   *  again only when a node is opened whose prompt the snapshot predates. */
+  getWorkflowRunFullV2: (id: string, runId: string) =>
     get<WorkflowRunDetailV2Wire>(
       `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}?view=full`,
     ),

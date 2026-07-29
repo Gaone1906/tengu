@@ -3,6 +3,8 @@ import type {
   WorkflowAttemptV2Wire,
   WorkflowNodeRunStatusV2,
   WorkflowNodeRunV2Wire,
+  WorkflowRunDetailV2Wire,
+  WorkflowRunLeanV2Wire,
   WorkflowRunStatusV2,
   WorkflowTriggerKindV2,
 } from "@/lib/api"
@@ -54,6 +56,42 @@ export function latestAttempt(attempts: WorkflowAttemptV2Wire[]): WorkflowAttemp
     (latest, attempt) => (latest === undefined || attempt.attempt > latest.attempt ? attempt : latest),
     undefined,
   )
+}
+
+function attemptKey(nodeId: string, attempt: number): string {
+  return `${nodeId}:${attempt}`
+}
+
+/** A run's definition snapshot and an attempt's composed prompt never change
+ *  once written, so the run page fetches the fat payload once and folds every
+ *  lean poll into it rather than paying ~60 KB every two seconds. Prompts the
+ *  snapshot did not have but the caller already holds are kept. */
+export function mergeRunDetail(
+  snapshot: WorkflowRunDetailV2Wire,
+  lean: WorkflowRunLeanV2Wire,
+): WorkflowRunDetailV2Wire {
+  const prompts = new Map(
+    snapshot.attempts
+      .filter((attempt): attempt is WorkflowAttemptV2Wire & { promptText: string } => attempt.promptText !== undefined)
+      .map((attempt) => [attemptKey(attempt.nodeId, attempt.attempt), attempt.promptText]),
+  )
+  return {
+    ...lean,
+    definition: snapshot.definition,
+    attempts: lean.attempts.map((attempt) => {
+      const promptText = prompts.get(attemptKey(attempt.nodeId, attempt.attempt))
+      return promptText === undefined ? attempt : { ...attempt, promptText }
+    }),
+  }
+}
+
+/** The open node's latest attempt when its prompt is missing — a retry minted
+ *  after the page loaded its snapshot. Null when there is nothing left to fetch,
+ *  which keeps the fat payload off the poll loop. */
+export function missingPromptAttempt(detail: WorkflowRunDetailV2Wire, nodeId: string): string | null {
+  const latest = latestAttempt(detail.attempts.filter((attempt) => attempt.nodeId === nodeId))
+  if (!latest || latest.promptText !== undefined) return null
+  return attemptKey(latest.nodeId, latest.attempt)
 }
 
 export function deriveNodeStatus(

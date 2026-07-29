@@ -5,6 +5,7 @@ import { RouterProvider, createMemoryRouter } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 const getWorkflowRun = vi.fn()
+const getWorkflowRunFull = vi.fn()
 const decideWorkflowApproval = vi.fn()
 const getSession = vi.fn()
 
@@ -18,6 +19,7 @@ vi.mock("@/lib/api", () => {
     ApiError,
     api: {
       getWorkflowRunV2: (...args: unknown[]) => getWorkflowRun(...args),
+      getWorkflowRunFullV2: (...args: unknown[]) => getWorkflowRunFull(...args),
       decideWorkflowApprovalV2: (...args: unknown[]) => decideWorkflowApproval(...args),
       getSession: (...args: unknown[]) => getSession(...args),
     },
@@ -68,6 +70,23 @@ function baseDetail(overrides: Record<string, unknown> = {}) {
   }
 }
 
+/** Serve the route's two shapes from one fixture: the fat payload the page
+ *  fetches once, and the lean one it polls, which drops the definition snapshot
+ *  and every attempt prompt. Serving both is what catches a panel that renders
+ *  only because of a field the poll does not carry. */
+function serveRun(detail: Record<string, unknown>) {
+  getWorkflowRunFull.mockResolvedValue(detail)
+  const lean = { ...detail }
+  delete lean.definition
+  lean.attempts = (detail.attempts as Array<Record<string, unknown>>).map((attempt) => {
+    const polled = { ...attempt }
+    delete polled.promptText
+    delete polled.input
+    return polled
+  })
+  getWorkflowRun.mockResolvedValue(lean)
+}
+
 function renderRun() {
   const router = createMemoryRouter(
     [{ path: "/workflow/:id/runs/:runId", element: <WorkflowRunPage /> }],
@@ -94,7 +113,7 @@ beforeEach(() => {
 
 describe("workflow run canvas", () => {
   it("paints per-node statuses, including the derived waiting-submit state", async () => {
-    getWorkflowRun.mockResolvedValue(baseDetail({
+    serveRun(baseDetail({
       nodeRuns: [
         nodeRun("trigger", "completed", { endedAt: "2026-07-23T08:00:01.000Z" }),
         nodeRun("writer", "running"),
@@ -115,7 +134,7 @@ describe("workflow run canvas", () => {
   })
 
   it("keeps a running attempt without ladder activity as plain running", async () => {
-    getWorkflowRun.mockResolvedValue(baseDetail({
+    serveRun(baseDetail({
       nodeRuns: [nodeRun("trigger", "completed"), nodeRun("writer", "running")],
       attempts: [{
         runId: "run-1", nodeId: "writer", attempt: 1, sessionId: "sess-1", status: "running",
@@ -129,7 +148,7 @@ describe("workflow run canvas", () => {
   })
 
   it("marks failed nodes and dims skipped ones", async () => {
-    getWorkflowRun.mockResolvedValue(baseDetail({
+    serveRun(baseDetail({
       status: "failed",
       nodeRuns: [
         nodeRun("trigger", "completed"),
@@ -145,18 +164,18 @@ describe("workflow run canvas", () => {
   })
 
   it("opens the run inspector with output fields, attempts, and the session link", async () => {
-    getWorkflowRun.mockResolvedValue(baseDetail({
+    serveRun(baseDetail({
       nodeRuns: [
         nodeRun("trigger", "completed"),
         nodeRun("writer", "completed", {
           endedAt: "2026-07-23T08:03:00.000Z",
+          input: {},
           output: { text: "Digest **drafted**.", fields: { summary: "Looks good", count: 2 }, sessionId: "sess-1" },
         }),
       ],
       attempts: [{
         runId: "run-1", nodeId: "writer", attempt: 1, sessionId: "sess-1", status: "completed",
         resolvedConfig: { employeeId: "blog-writer", engine: "claude", model: "opus", effort: "high" },
-        input: {},
         promptText: "Write the digest.\n\n---\nContract block.",
         output: { text: "Digest **drafted**.", fields: { summary: "Looks good", count: 2 } },
         startedAt: "2026-07-23T08:00:01.000Z", endedAt: "2026-07-23T08:03:00.000Z",
@@ -187,7 +206,7 @@ describe("workflow run canvas", () => {
 
   it("collapses a long prompt behind a disclosure", async () => {
     const longPrompt = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join("\n")
-    getWorkflowRun.mockResolvedValue(baseDetail({
+    serveRun(baseDetail({
       nodeRuns: [nodeRun("trigger", "completed"), nodeRun("writer", "running")],
       attempts: [{
         runId: "run-1", nodeId: "writer", attempt: 1, sessionId: "sess-1", status: "running",
@@ -207,7 +226,7 @@ describe("workflow run canvas", () => {
   })
 
   it("shows an approval node's decision in the inspector", async () => {
-    getWorkflowRun.mockResolvedValue(baseDetail({
+    serveRun(baseDetail({
       nodeRuns: [nodeRun("trigger", "completed"), nodeRun("gate", "completed", { output: { text: "", fields: { port: "approved" } } })],
       approvals: [{
         runId: "run-1", nodeId: "gate", status: "approved", requestedAt: "2026-07-23T08:01:00.000Z",
@@ -228,14 +247,14 @@ describe("workflow run canvas", () => {
       nodeRuns: [nodeRun("trigger", "completed"), nodeRun("gate", "waiting")],
       approvals: [{ runId: "run-1", nodeId: "gate", status: "pending", requestedAt: "2026-07-23T08:01:00.000Z" }],
     })
-    getWorkflowRun.mockResolvedValue(pending)
+    serveRun(pending)
     const approved = {
       ...pending,
       status: "running",
       approvals: [{ ...pending.approvals[0] as object, status: "approved", decidedBy: "operator", decidedAt: "2026-07-23T08:05:00.000Z" }],
     }
     decideWorkflowApproval.mockImplementation(() => {
-      getWorkflowRun.mockResolvedValue(approved)
+      serveRun(approved)
       return Promise.resolve(approved)
     })
     renderRun()
@@ -249,8 +268,45 @@ describe("workflow run canvas", () => {
     expect(await screen.findByText(/Approved by operator/)).toBeTruthy()
   })
 
+  it("fetches the snapshot once and keeps the canvas painted off lean polls", async () => {
+    serveRun(baseDetail({ nodeRuns: [nodeRun("trigger", "completed"), nodeRun("writer", "running")] }))
+    renderRun()
+
+    expect(await screen.findByText("Writer")).toBeTruthy()
+    // The 2s poll loop must not pay for the definition snapshot again.
+    await waitFor(() => expect(getWorkflowRun).toHaveBeenCalled(), { timeout: 4000 })
+    expect(getWorkflowRunFull).toHaveBeenCalledTimes(1)
+    expect(screen.getByText("Quality gate")).toBeTruthy()
+  }, 10000)
+
+  it("re-fetches the snapshot when a node is opened whose prompt it predates", async () => {
+    const attempt = (number: number, promptText?: string) => ({
+      runId: "run-1", nodeId: "writer", attempt: number, sessionId: "sess-1", status: "running",
+      resolvedConfig: { employeeId: "blog-writer", engine: "claude" },
+      startedAt: "2026-07-23T08:00:01.000Z", remindersSent: 0, extensions: 0,
+      ...(promptText === undefined ? {} : { promptText }),
+    })
+    const nodeRuns = [nodeRun("trigger", "completed"), nodeRun("writer", "running")]
+    // The page loaded before a retry, so its snapshot only knows attempt 1.
+    getWorkflowRunFull
+      .mockResolvedValueOnce(baseDetail({ nodeRuns, attempts: [attempt(1, "First prompt.")] }))
+      .mockResolvedValue(baseDetail({ nodeRuns, attempts: [attempt(1, "First prompt."), attempt(2, "Retried prompt.")] }))
+    const lean = baseDetail({ nodeRuns, attempts: [attempt(1), attempt(2)] }) as Record<string, unknown>
+    delete lean.definition
+    getWorkflowRun.mockResolvedValue(lean)
+    renderRun()
+
+    fireEvent.click(await screen.findByText("Writer"))
+
+    // The retry surfaces on the next lean poll; opening the node then pulls the
+    // prompt the snapshot predates, instead of dropping the section silently.
+    const inspector = within(await screen.findByTestId("run-inspector"))
+    expect(await inspector.findByText(/Retried prompt\./, {}, { timeout: 6000 })).toBeTruthy()
+    expect(getWorkflowRunFull).toHaveBeenCalledTimes(2)
+  }, 10000)
+
   it("renders the run header without any editing affordances", async () => {
-    getWorkflowRun.mockResolvedValue(baseDetail({
+    serveRun(baseDetail({
       status: "completed", endedAt: "2026-07-23T08:05:00.000Z",
       nodeRuns: nodes.map((node) => nodeRun(node.id, "completed")),
     }))

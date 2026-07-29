@@ -93,7 +93,7 @@ describe("Workflow v2 canonical API", () => {
     const service = {
       getDefinition: vi.fn(() => result), saveDefinition: vi.fn(() => result), duplicateDefinition: vi.fn(() => result),
       retireDefinition: vi.fn(() => result), setEnabled: vi.fn(() => result), startManual: vi.fn(async () => result),
-      listRuns: vi.fn(() => ({ items: [result], nextCursor: null })), getRun: vi.fn(() => result),
+      listRuns: vi.fn(() => ({ items: [result], nextCursor: null })), getRun: vi.fn(() => ({ ...result, attempts: [] })),
       cancelRun: vi.fn(async () => result), rerun: vi.fn(async () => result), getAttemptTranscript: vi.fn(() => []),
       decideApproval: vi.fn(async () => result), retryNode: vi.fn(async () => result),
       fireEvent: vi.fn(async () => [result]), listDefinitions: vi.fn(), createDefinition: vi.fn(),
@@ -188,7 +188,7 @@ describe("Workflow v2 canonical API", () => {
         {
           runId: "run_11111111-1111-4111-8111-111111111111", nodeId: "write", nodeType: "employee",
           status: "completed", activated: true, resolvedConfig: { employeeId: "writer" },
-          output: { outcome: "success", fields: { notes: "Shipped." } },
+          input: { topic: "release" }, output: { outcome: "success", fields: { notes: "Shipped." } },
           startedAt: "2026-07-23T12:00:05.000Z", endedAt: "2026-07-23T12:20:00.000Z",
         },
         {
@@ -224,11 +224,22 @@ describe("Workflow v2 canonical API", () => {
     const attempts = body.attempts as Array<Record<string, unknown>>;
     expect(attempts).toHaveLength(1);
     expect(attempts[0]).not.toHaveProperty("promptText");
-    expect(attempts[0]).toMatchObject({ nodeId: "write", attempt: 1, status: "running", input: { topic: "release" } });
+    expect(attempts[0]).not.toHaveProperty("input");
+    expect(attempts[0]).toMatchObject({ nodeId: "write", attempt: 1, status: "running" });
+
+    // The attempt's input is the node run's input; the wire carries it once, in
+    // the one place a node that owns no attempts still has it.
+    expect((body.nodeRuns as Array<Record<string, unknown>>)[0]).toMatchObject({ input: { topic: "release" } });
 
     const full = response();
     await handleApiRequest(request("GET", `${route}?view=full`), full.res, context);
-    expect(full.read()).toEqual({ status: 200, body: detail });
+    const fat = full.read() as { status: number; body: Record<string, unknown> };
+    expect(fat.status).toBe(200);
+    expect(fat.body.definition).toEqual(detail.definition);
+    expect(fat.body.nodeRuns).toEqual(detail.nodeRuns);
+    const fatAttempts = fat.body.attempts as Array<Record<string, unknown>>;
+    expect(fatAttempts[0]).not.toHaveProperty("input");
+    expect(fatAttempts[0]).toMatchObject({ promptText: "Write the notes.\n\n---\nContract block." });
 
     const bogus = response();
     await handleApiRequest(request("GET", `${route}?view=lean`), bogus.res, context);

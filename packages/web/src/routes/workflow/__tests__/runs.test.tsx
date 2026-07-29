@@ -28,6 +28,7 @@ vi.mock("@/lib/api", () => {
       getWorkflowDefinitionV2: (...args: unknown[]) => getWorkflowDefinition(...args),
       listWorkflowRunsV2: (...args: unknown[]) => listWorkflowRuns(...args),
       getWorkflowRunV2: (...args: unknown[]) => getWorkflowRun(...args),
+      getWorkflowRunFullV2: (...args: unknown[]) => getWorkflowRun(...args),
       startWorkflowRunV2: (...args: unknown[]) => startWorkflowRun(...args),
       decideWorkflowApprovalV2: (...args: unknown[]) => decideWorkflowApproval(...args),
     },

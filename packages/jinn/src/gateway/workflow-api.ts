@@ -114,13 +114,26 @@ function runDetailIsFull(url: URL): boolean {
   return view === "full";
 }
 
+/** An attempt's `input` always repeats the input already on its own node run:
+ *  both are `inputFor(run, nodeId)` read in the same transaction at dispatch, a
+ *  retry copies the first attempt's value, and the graph is acyclic so a node
+ *  activates once. The node run keeps it — that is the only copy for a node type
+ *  that owns no attempts — and the wire carries it once. */
+function withoutAttemptInput(detail: WorkflowRunDetail) {
+  return detail.attempts.map(({ input, ...attempt }) => attempt);
+}
+
 /** Run detail is lean by default so that polling a run costs a status page, not
  *  the whole definition snapshot plus every interpolated prompt. The definition
  *  is still reachable through GET /api/workflows/:id, and prompts through the
  *  attempt transcript route. */
 function leanRunDetail(detail: WorkflowRunDetail) {
   const { definition, attempts, ...run } = detail;
-  return { ...run, attempts: attempts.map(({ promptText, ...attempt }) => attempt) };
+  return { ...run, attempts: withoutAttemptInput(detail).map(({ promptText, ...attempt }) => attempt) };
+}
+
+function fullRunDetail(detail: WorkflowRunDetail) {
+  return { ...detail, attempts: withoutAttemptInput(detail) };
 }
 
 async function definitions(req: IncomingMessage, res: ServerResponse, url: URL, parts: string[], options: WorkflowApiOptions): Promise<boolean> {
@@ -163,7 +176,7 @@ async function runs(req: IncomingMessage, res: ServerResponse, url: URL, parts: 
   if (parts.length === 5 && method === "GET") {
     const full = runDetailIsFull(url); const value = service.getRun(workflowId, runId);
     if (!value) throw new WorkflowRepositoryError("not-found", `Workflow run ${runId} was not found.`);
-    send(res, 200, full ? value : leanRunDetail(value)); return true;
+    send(res, 200, full ? fullRunDetail(value) : leanRunDetail(value)); return true;
   }
   if (parts.length === 6 && parts[5] === "cancel" && method === "POST") {
     const parsed = await body(req, res); if (parsed === undefined) return true; const value = record(parsed, ["reason"]);
