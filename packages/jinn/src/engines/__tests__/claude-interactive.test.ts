@@ -7,10 +7,9 @@ import { afterEach, describe, it, expect, vi } from "vitest";
 // focused and CI-portable.
 vi.mock("node-pty", () => ({ spawn: vi.fn() }));
 
-import { SUBMIT_ACK_HOOKS, InteractiveClaudeEngine, TurnResolver, buildAttachmentSuffix, buildInteractiveArgs, claudeHookToDeltas, neutralizeImagePathsForPaste, pasteAndSubmit, shouldSettleStalledTurn, sumTranscriptUsage } from "../claude-interactive.js";
+import { SUBMIT_ACK_HOOKS, TurnResolver, buildAttachmentSuffix, buildInteractiveArgs, claudeHookToDeltas, pasteAndSubmit, shouldSettleStalledTurn, sumTranscriptUsage } from "../claude-interactive.js";
 import { MAIN_AGENT_SENTINEL } from "../sse-pty-proxy.js";
 import { buildPromptWithPlatformContext } from "../platform-context.js";
-import { createSessionCommGuards, prepareLateralSend } from "../../gateway/session-comm-guards.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -388,10 +387,9 @@ describe("pasteAndSubmit", () => {
  * the trigger (a zero-newline prompt with a real image path hangs too), so do
  * not "simplify" this into a newline check.
  */
-// A bare absolute image path is what the TUI auto-attaches on.
-const BARE_IMAGE_PATH = /(^|[\s(\[])(\/[^\s`'"]+\.(png|jpe?g|gif|webp|bmp|svg))(?=$|[\s)\]])/i;
-
 describe("buildAttachmentSuffix", () => {
+  // A bare absolute image path is what the TUI auto-attaches on.
+  const BARE_IMAGE_PATH = /(^|[\s(\[])(\/[^\s`'"]+\.(png|jpe?g|gif|webp|bmp|svg))(?=$|[\s)\]])/i;
 
   it("never hands the TUI a bare image path", () => {
     const suffix = buildAttachmentSuffix(["/Users/x/.jinn/uploads/2026-07-25/s/shot.png"]);
@@ -411,121 +409,6 @@ describe("buildAttachmentSuffix", () => {
     // Sanity-check the guard itself: the same payload unbackticked MUST match,
     // otherwise this test would pass vacuously and lock in nothing.
     expect(BARE_IMAGE_PATH.test("Describe this\n\nAttached files:\n- /tmp/screenshot.png")).toBe(true);
-  });
-});
-
-describe("neutralizeImagePathsForPaste", () => {
-  it("wraps a bare absolute image path without changing the path", () => {
-    const output = neutralizeImagePathsForPaste("see /tmp/shot.png here");
-
-    expect(output).toBe("see `/tmp/shot.png` here");
-    expect(BARE_IMAGE_PATH.test(output)).toBe(false);
-  });
-
-  it("is idempotent and leaves an already-backticked path unchanged", () => {
-    const alreadyNeutralized = "see `/tmp/shot.png` here";
-    expect(neutralizeImagePathsForPaste(alreadyNeutralized)).toBe(alreadyNeutralized);
-
-    const once = neutralizeImagePathsForPaste("see /tmp/shot.png here");
-    expect(neutralizeImagePathsForPaste(once)).toBe(once);
-  });
-
-  it("leaves non-image paths, prose, quoted paths, and longer tokens byte-identical", () => {
-    const inputs = [
-      "/tmp/notes.txt",
-      "/usr/bin/env",
-      "no path in this sentence",
-      `quoted "/tmp/shot.png" and '/tmp/other.jpg' paths`,
-      "prefix/tmp/shot.png",
-    ];
-
-    for (const input of inputs) {
-      expect(neutralizeImagePathsForPaste(input)).toBe(input);
-    }
-  });
-
-  it("neutralizes every path in a relayed body, including code fences and markdown lists", () => {
-    const body = [
-      "**Live evidence**",
-      "```",
-      "/tmp/fenced.png",
-      "```",
-      "",
-      "- /tmp/list.webp",
-      "- ~/screenshots/home.jpeg",
-    ].join("\n");
-
-    const output = neutralizeImagePathsForPaste(body);
-
-    expect(output).toBe([
-      "**Live evidence**",
-      "```",
-      "`/tmp/fenced.png`",
-      "```",
-      "",
-      "- `/tmp/list.webp`",
-      "- `~/screenshots/home.jpeg`",
-    ].join("\n"));
-    expect(BARE_IMAGE_PATH.test(output)).toBe(false);
-  });
-
-  it("cleans the composed lateral relay prompt without a vacuous guard", () => {
-    const relay = prepareLateralSend({
-      caller: {
-        id: "child-session",
-        engine: "claude",
-        source: "workflow",
-        status: "idle",
-      } as any,
-      targetSessionId: "parent-session",
-      message: "Screenshot: /tmp/relay.png",
-      guards: createSessionCommGuards(() => 0),
-    });
-    expect(relay.ok).toBe(true);
-    if (!relay.ok) throw new Error(relay.error);
-
-    expect(BARE_IMAGE_PATH.test(relay.prompt)).toBe(true);
-    expect(BARE_IMAGE_PATH.test(neutralizeImagePathsForPaste(relay.prompt))).toBe(false);
-  });
-
-  it("is applied to injected prompts but not human terminal input", () => {
-    vi.useFakeTimers();
-    const prompt = "inspect /tmp/shot.png here";
-    const injectedWrites: string[] = [];
-    const injectedHandle = {
-      _proc: { write: (data: string) => injectedWrites.push(data) },
-    };
-
-    const cancel = (InteractiveClaudeEngine.prototype as any).injectPrompt(
-      injectedHandle,
-      { prompt, cwd: "/tmp" },
-    );
-
-    expect(BARE_IMAGE_PATH.test(injectedWrites.join(""))).toBe(false);
-    expect(injectedWrites[0]).toContain("`/tmp/shot.png`");
-    cancel?.();
-
-    const stdinWrites: string[] = [];
-    const stdinHandle = {
-      _proc: { write: (data: string) => stdinWrites.push(data) },
-    };
-    InteractiveClaudeEngine.prototype.writeStdin.call(
-      { lifecycle: { getWarm: () => stdinHandle } } as any,
-      "session",
-      prompt,
-    );
-
-    expect(stdinWrites[0]).toBe(`\x1b[200~${prompt}\x1b[201~`);
-    expect(BARE_IMAGE_PATH.test(stdinWrites.join(""))).toBe(true);
-    vi.clearAllTimers();
-  });
-
-  it("scans a 200KB path-like body without quadratic behavior", () => {
-    const input = "/tmp/not-an-image ".repeat(20_000).slice(0, 200 * 1024);
-    const startedAt = performance.now();
-
-    expect(neutralizeImagePathsForPaste(input)).toBe(input);
-    expect(performance.now() - startedAt).toBeLessThan(1_000);
   });
 });
 

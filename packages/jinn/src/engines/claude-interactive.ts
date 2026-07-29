@@ -724,14 +724,6 @@ export function buildAttachmentSuffix(attachments: readonly string[]): string {
   return "\n\nAttached files:\n" + attachments.map((a) => `- \`${a}\``).join("\n");
 }
 
-/** Keep bare image paths out of Claude Code's async paste-to-attachment path. */
-export function neutralizeImagePathsForPaste(text: string): string {
-  return text.replace(
-    /(^|[\s(\[])(~?\/[^\s`'"]+\.(?:png|jpe?g|gif|webp|bmp|svg))(?=$|[\s)\]])/gi,
-    (_match, prefix: string, imagePath: string) => `${prefix}\`${imagePath}\``,
-  );
-}
-
 export function pasteAndSubmit(
   proc: Pick<pty.IPty, "write">,
   text: string,
@@ -1529,7 +1521,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
     if (opts.attachments?.length) {
       text += buildAttachmentSuffix(opts.attachments);
     }
-    return pasteAndSubmit(proc, neutralizeImagePathsForPaste(text), confirm);
+    return pasteAndSubmit(proc, text, confirm);
   }
 
   subscribeWithSnapshot(
