@@ -13,7 +13,7 @@ import {
   type WorkflowRunSummary,
 } from "./repository.js";
 import type { WorkflowError, WorkflowRunDetail } from "./runtime.js";
-import { WorkflowRunner } from "./runner.js";
+import { WorkflowRunner, type WorkflowTodoApprovalMirror } from "./runner.js";
 import type { WorkflowSessionExecutor } from "./session-executor.js";
 import { WorkflowTriggerService, type FireWorkflowEventInput } from "./trigger-service.js";
 import { validateExecutableWorkflow, type WorkflowValidationIssue } from "./validation.js";
@@ -25,6 +25,9 @@ export interface StartWorkflowRunInput {
   workflowId: string;
   input: Record<string, JsonValue>;
   idempotencyKey?: string;
+  /** Bind this manual run to an existing Todo, exactly as a `todo-status`
+   *  trigger would — its gates mirror onto that Todo. Omit for an unbound run. */
+  todoId?: string;
 }
 export interface RerunWorkflowInput {
   workflowId: string;
@@ -39,6 +42,8 @@ export interface DecideWorkflowApprovalInput {
   decision: "approve" | "reject";
   decidedBy: string;
   reason?: string;
+  /** Required when approving a node that offers options; must be one of them. */
+  choice?: string;
   expectedRevision: number;
 }
 export interface RetryWorkflowNodeInput {
@@ -78,6 +83,8 @@ export interface WorkflowServiceOptions {
   onChange?: (change: { workflowId: string; runId: string }) => void;
   onDefinitionChange?: (change: { workflowId: string; revision: number }) => void;
   todoEventFeed?: WorkflowTodoEventFeed;
+  /** Mirrors parked Approval gates onto the run's bound Todo (see the runner). */
+  todoApprovals?: WorkflowTodoApprovalMirror;
 }
 function fail(code: "bad-input" | "not-found", message: string): never {
   throw new WorkflowRepositoryError(code, message);
@@ -232,7 +239,8 @@ export class WorkflowService {
     const trigger = definition.nodes.find((node) => node.type === "trigger" && node.config.kind === "manual");
     if (!trigger) fail("bad-input", "Workflow does not have an enabled manual trigger.");
     const created = this.options.repository.createRun({ workflowId: definition.id,
-      input: boundedRecord(input.input, "Workflow input"), trigger: { nodeId: trigger.id, kind: "manual", payload: {} },
+      input: boundedRecord(input.input, "Workflow input"),
+      trigger: { nodeId: trigger.id, kind: "manual", payload: {}, ...(input.todoId ? { todoId: input.todoId } : {}) },
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}) });
     const detail = this.requiredRun(definition.id, created.id);
     return detail.status === "pending" ? this.runner.start(created.id) : detail;
@@ -322,6 +330,13 @@ export class WorkflowService {
     if (approval.status !== "pending") throw new WorkflowServiceError("conflict", `Workflow approval ${input.nodeId} is already decided.`);
     if (approval.approverRef && input.decidedBy !== approval.approverRef && input.decidedBy !== "operator") {
       throw new WorkflowServiceError("forbidden", `Workflow actor ${input.decidedBy} is not authorized for approval ${input.nodeId}.`);
+    }
+    const offered = authored.config.options;
+    if (input.choice !== undefined) {
+      if (input.decision !== "approve") fail("bad-input", "A workflow approval choice requires an approve decision.");
+      if (!offered?.includes(input.choice)) fail("bad-input", `Workflow approval ${input.nodeId} does not offer that choice.`);
+    } else if (offered && input.decision === "approve") {
+      fail("bad-input", `Workflow approval ${input.nodeId} requires choosing one of: ${offered.join(", ")}.`);
     }
     return this.runner.decideApproval(input);
   }

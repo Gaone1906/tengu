@@ -53,6 +53,7 @@ export function buildApprovalTools(): JinnMcpTool[] {
       properties: {
         id: { type: "string" },
         request: { type: "string" },
+        options: { type: "array", items: { type: "string" } },
         target: { type: "string" },
       },
       required: ["id", "request"],
@@ -61,6 +62,13 @@ export function buildApprovalTools(): JinnMcpTool[] {
       assertIdentity(ctx);
       const id = requireString(args, "id");
       const payload: Record<string, unknown> = { request: requireString(args, "request") };
+      const options = args.options;
+      if (options !== undefined) {
+        if (!Array.isArray(options) || options.some((option) => typeof option !== "string")) {
+          throw new JinnMcpToolError("options must be an array of strings");
+        }
+        payload.options = options;
+      }
       const target = optionalString(args, "target");
       if (target !== undefined) payload.target = target;
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/approval/request`, payload);
@@ -77,6 +85,7 @@ export function buildApprovalTools(): JinnMcpTool[] {
       properties: {
         id: { type: "string" },
         decision: { type: "string", enum: [...DECISIONS] },
+        choice: { type: "string" },
         note: { type: "string" },
       },
       required: ["id", "decision"],
@@ -89,6 +98,8 @@ export function buildApprovalTools(): JinnMcpTool[] {
         throw new JinnMcpToolError(`decision must be one of ${DECISIONS.join(", ")}`);
       }
       const payload: Record<string, unknown> = { decision };
+      const choice = optionalString(args, "choice");
+      if (choice !== undefined) payload.choice = choice;
       const note = optionalString(args, "note");
       if (note !== undefined) payload.note = note;
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/approval`, payload);

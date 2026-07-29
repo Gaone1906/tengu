@@ -145,7 +145,13 @@ const triggerConfigSchema = z.discriminatedUnion('kind', [
     eventName: z.string().min(1).max(80).regex(/^[A-Za-z][A-Za-z0-9._-]*$/),
     tokenRef: z.string().optional(),
   }),
-  z.strictObject({ kind: z.literal('todo-status'), status: z.string() }),
+  z.strictObject({
+    kind: z.literal('todo-status'),
+    status: z.string(),
+    label: z.string().min(1).max(80).optional(),
+    department: z.string().min(1).max(80).optional(),
+    assignee: z.string().min(1).max(80).optional(),
+  }),
   z.strictObject({ kind: z.literal('workflow-call') }),
 ]);
 const triggerNodeSchema = z.strictObject({
@@ -206,7 +212,15 @@ const approvalNodeSchema = z.strictObject({
   id: nodeIdSchema,
   type: z.literal('approval'),
   name: z.string().min(1).max(80),
-  config: z.strictObject({ description: z.string(), approver: stringBindingSchema.optional() }),
+  config: z.strictObject({
+    description: z.string(),
+    approver: stringBindingSchema.optional(),
+    // Variant-picking: the labels are mirrored onto the bound Todo's approval
+    // and the pick is read back as `{{ node.<id>.choice }}`. Deliberately fixed
+    // labels, not bindings — a gate the operator reads must not shift under it.
+    options: z.array(z.string().min(1).max(80)).min(2).max(8)
+      .refine((values) => new Set(values).size === values.length, 'Approval options must be unique').optional(),
+  }),
 });
 const waitConfigSchema = z.discriminatedUnion('mode', [
   z.strictObject({ mode: z.literal('duration'), minutes: finiteNumberSchema.int().min(1).max(43_200) }),
@@ -335,6 +349,9 @@ export type WorkflowId = WorkflowDefinition['id'];
 export interface WorkflowNodeOutput {
   text: string;
   fields: Record<string, JsonValue>;
+  /** The option picked on an Approval node that offered a choice — read
+   *  downstream as `{{ node.<approvalNodeId>.choice }}`. */
+  choice?: string;
   employeeId?: string;
   engine?: string;
   model?: string;

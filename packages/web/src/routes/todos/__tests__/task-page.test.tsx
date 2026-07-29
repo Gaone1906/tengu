@@ -214,7 +214,29 @@ describe("the task page", () => {
     const banner = await screen.findByTestId("task-banner-approval")
     expect((banner).textContent).toContain("OK to go live?")
     fireEvent.click(screen.getByTestId("task-banner-approve"))
-    await waitFor(() => expect(decideWorkItemApproval).toHaveBeenCalledWith("PLA-12", "approve", undefined))
+    // No offered options on this gate → no choice argument.
+    await waitFor(() => expect(decideWorkItemApproval).toHaveBeenCalledWith("PLA-12", "approve", undefined, undefined))
+  })
+
+  it("a choice gate holds Approve until an option is picked, then sends the pick", async () => {
+    const item = full("PLA-12", { status: "in_review", approvalState: "pending", approvalRequest: "Which variant ships?" })
+    getWorkItem.mockResolvedValue(detailOf(item, {
+      approvals: [{
+        id: "wap_1", workItemId: "PLA-12", state: "pending", request: "Which variant ships?", ref: null,
+        options: ["variant-a", "variant-b"], choice: null, target: null, targetKind: null,
+        requestedBy: "workflow", requestedAt: "2026-07-23T07:00:00.000Z", escalatedAt: null,
+        decidedBy: null, decidedAt: null, note: null,
+      }],
+    }))
+    decideWorkItemApproval.mockResolvedValue({ workItem: item, escalated: false })
+    renderTask()
+
+    await screen.findByTestId("task-banner-approval")
+    // Approving without a pick is structurally impossible, not merely refused.
+    expect((screen.getByTestId("task-banner-approve") as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole("radio", { name: "variant-b" }))
+    fireEvent.click(screen.getByTestId("task-banner-approve"))
+    await waitFor(() => expect(decideWorkItemApproval).toHaveBeenCalledWith("PLA-12", "approve", undefined, "variant-b"))
   })
 
   it("a reason-less blocked item grows the banner reason field; committing PUTs the same status with the note (F6)", async () => {

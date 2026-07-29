@@ -5,7 +5,7 @@ import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Employee, ModelRegistry, WorkflowAttemptCommand, WorkflowAttemptCompletionListener } from "../../shared/types.js";
 import type { WorkflowTodoEventClaimOutcome, WorkflowTodoEventFeed, WorkflowTodoStatusEvent } from "../../work-items/workflow-event-feed.js";
-import type { WorkflowDefinition, WorkflowNode } from "../model.js";
+import type { TriggerNode, WorkflowDefinition, WorkflowNode } from "../model.js";
 import { openWorkflowDatabase } from "../repository-migrations.js";
 import { WorkflowRepository } from "../repository.js";
 import type { WorkflowSessionExecutor } from "../session-executor.js";
@@ -54,6 +54,13 @@ let now: string;
 function edge(id: string, from: string, to: string) {
   return { id, from: { nodeId: from, port: "success" as const }, to: { nodeId: to, port: "input" as const } };
 }
+function todoEvent(id: string, item: Partial<WorkflowTodoStatusEvent["item"]> = {}): WorkflowTodoStatusEvent {
+  return { id, workItemId: "ICI-1", fromStatus: "executing", toStatus: "in_review",
+    item: { source: "human", department: "platform", assignee: "worker", labels: [], ...item } };
+}
+function todoTrigger(config: Omit<Extract<TriggerNode["config"], { kind: "todo-status" }>, "kind" | "status">): WorkflowNode {
+  return { id: "start", type: "trigger", name: "Todo", config: { kind: "todo-status", status: "in_review", ...config } };
+}
 function save(id: string, trigger: WorkflowNode, enabled = true): WorkflowDefinition {
   const draft = service.createDefinition({ id, title: id });
   const worker: WorkflowNode = { id: "work", type: "employee", name: "Work", config: {
@@ -98,8 +105,7 @@ describe("Workflow trigger adapters", () => {
   it("claims the existing Todo feed against its enabled in-memory index without duplicate fires", async () => {
     const trigger: WorkflowNode = { id: "start", type: "trigger", name: "Todo", config: { kind: "todo-status", status: "in_review" } };
     const definition = save("todo-flow", trigger);
-    feed.pending.push({ id: "event-1", workItemId: "ICI-1", fromStatus: "executing", toStatus: "in_review",
-      item: { source: "human", department: "platform", assignee: "worker" } });
+    feed.pending.push(todoEvent("event-1"));
     await service.recover(now); await service.recover(now);
     expect(service.listRuns(definition.id, {}).items).toHaveLength(1);
     expect(feed.processed.get("event-1")).toMatchObject([{ workflowId: definition.id, outcome: "started" }]);
@@ -108,6 +114,51 @@ describe("Workflow trigger adapters", () => {
     service.setEnabled({ id: definition.id, enabled: false, expectedRevision: enabled.revision });
     feed.pending.push({ ...feed.pending[0]!, id: "event-2" }); await service.recover(now);
     expect(service.listRuns(definition.id, {}).items).toHaveLength(1);
+  });
+
+  it("fires a filtered Todo trigger only when label, department, and assignee all match", async () => {
+    const definition = save("todo-filtered", todoTrigger({ label: "Needs Review", department: "platform", assignee: "worker" }));
+    const matching = [{ id: "lbl_0000000000ab", name: "needs-review" }];
+    feed.pending.push(todoEvent("wrong-label", { labels: [{ id: "lbl_0000000000cd", name: "chore" }] }),
+      todoEvent("wrong-department", { department: "growth", labels: matching }),
+      todoEvent("wrong-assignee", { assignee: "other", labels: matching }));
+    await service.recover(now);
+    expect(service.listRuns(definition.id, {}).items).toHaveLength(0);
+
+    feed.pending.push(todoEvent("all-match", { labels: matching }));
+    await service.recover(now);
+    expect(service.listRuns(definition.id, {}).items).toHaveLength(1);
+  });
+
+  it("matches the label filter against the label id as well as the normalized name", async () => {
+    const byId = save("todo-label-id", todoTrigger({ label: "lbl_0000000000ab" }));
+    feed.pending.push(todoEvent("event-1", { labels: [{ id: "lbl_0000000000ab", name: "needs-review" }] }));
+    await service.recover(now);
+    expect(service.listRuns(byId.id, {}).items).toHaveLength(1);
+  });
+
+  it("keeps an unfiltered Todo trigger firing for every Todo reaching its status", async () => {
+    const definition = save("todo-unfiltered", todoTrigger({}));
+    feed.pending.push(todoEvent("event-1", { department: null, assignee: null }));
+    await service.recover(now);
+    expect(service.listRuns(definition.id, {}).items).toHaveLength(1);
+  });
+
+  it("completes a Todo event that matches zero filtered definitions instead of leaving it pending", async () => {
+    save("todo-excluding", todoTrigger({ label: "needs-review" }));
+    feed.pending.push(todoEvent("event-1"));
+    await service.recover(now);
+    expect(feed.processed.get("event-1")).toEqual([]);
+    expect(feed.listPendingEvents()).toHaveLength(0);
+  });
+
+  it("carries the Todo labels into the trigger payload as an array and an interpolatable scalar", async () => {
+    const definition = save("todo-payload", todoTrigger({}));
+    feed.pending.push(todoEvent("event-1", { labels: [{ id: "lbl_0000000000ab", name: "needs-review" }, { id: "lbl_0000000000cd", name: "urgent" }] }));
+    await service.recover(now);
+    const run = service.listRuns(definition.id, {}).items[0]!;
+    expect(repository.getRun(definition.id, run.id)!.trigger.payload).toMatchObject({
+      todoId: "ICI-1", labels: ["needs-review", "urgent"], labelList: "needs-review, urgent" });
   });
 
   it("calls only a workflow-call target, freezes caller identity, and creates fresh Employee sessions", async () => {

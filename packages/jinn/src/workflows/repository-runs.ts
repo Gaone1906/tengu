@@ -22,6 +22,7 @@ const errorSchema = z.strictObject({
 const outputSchema = z.strictObject({
   text: z.string(), fields: z.record(z.string(), jsonValueSchema), employeeId: z.string().optional(),
   engine: z.string().optional(), model: z.string().optional(), sessionId: z.string().optional(),
+  choice: z.string().optional(),
 });
 const resolvedSchema = z.strictObject({
   employeeId: z.string(), engine: z.string(), model: z.string().optional(),
@@ -31,7 +32,7 @@ const resolvedSchema = z.strictObject({
 });
 const triggerSchema = z.strictObject({
   nodeId: z.string(), kind: z.enum(['manual', 'schedule', 'event', 'todo-status', 'workflow-call']),
-  fireId: z.string().optional(), payload: z.record(z.string(), jsonValueSchema),
+  fireId: z.string().optional(), payload: z.record(z.string(), jsonValueSchema), todoId: z.string().optional(),
 });
 const nodeRecordSchema = z.strictObject({
   runId: z.string(), nodeId: z.string(),

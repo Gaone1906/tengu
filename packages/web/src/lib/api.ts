@@ -565,6 +565,9 @@ export interface WorkItemCompactWire {
   approvalState: ApprovalStateWire | null
   approvalRequest: string | null
   approvalRef: string | null
+  /** Offered variants when the pending gate asks for a PICK (older gateways omit). */
+  approvalOptions?: string[] | null
+  approvalChoice?: string | null
   approvalTarget: string | null
   approvalEscalatedAt: string | null
   sessionRef?: WorkItemSessionRefWire | null
@@ -729,6 +732,10 @@ export interface WorkItemApprovalWire {
   state: ApprovalStateWire
   request: string
   ref: string | null
+  /** Offered variants when this gate asks for a PICK, not a plain yes/no. */
+  options: string[] | null
+  /** The picked option, once approved. */
+  choice: string | null
   target: string | null
   targetKind: string | null
   requestedBy: string
@@ -1115,11 +1122,12 @@ export const api = {
     get<WorkItemDetailWire>(`/api/work-items/${encodeURIComponent(id)}`, signal ? { signal } : undefined),
   /** GRS-021b: the operator's approval DECISION. Human-only server-side; a
    *  tool-marked caller is refused 403. Send-back is `reject` (+ optional note). */
-  decideWorkItemApproval: (id: string, decision: "approve" | "reject", note?: string) =>
-    post<ApprovalDecisionResultWire>(
-      `/api/work-items/${encodeURIComponent(id)}/approval`,
-      note !== undefined && note !== "" ? { decision, note } : { decision },
-    ),
+  decideWorkItemApproval: (id: string, decision: "approve" | "reject", note?: string, choice?: string) =>
+    post<ApprovalDecisionResultWire>(`/api/work-items/${encodeURIComponent(id)}/approval`, {
+      decision,
+      ...(note !== undefined && note !== "" ? { note } : {}),
+      ...(choice !== undefined ? { choice } : {}),
+    }),
   escalateWorkItemApproval: (id: string) =>
     post<ApprovalEscalationResultWire>(`/api/work-items/${encodeURIComponent(id)}/approval/escalate`, {}),
   /** GRS-002: execution attempts linked to a Todo (the sheet's session link). */

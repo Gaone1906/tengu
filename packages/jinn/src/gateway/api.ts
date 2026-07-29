@@ -233,6 +233,7 @@ import { assignWorkItem, transition, TransitionError } from "../work-items/trans
 import { reconcileWorkItem } from "../work-items/reconcile.js";
 import {
   archiveWorkItem,
+  ApprovalChoiceError,
   decideWorkItemApproval,
   escalateApproval,
   listApprovals,
@@ -1045,6 +1046,8 @@ function compactWorkItem(
     approvalState: item.approvalState,
     approvalRequest: item.approvalRequest,
     approvalRef: item.approvalRef,
+    approvalOptions: item.approvalOptions,
+    approvalChoice: item.approvalChoice,
     approvalTarget: item.approvalTarget,
     approvalEscalatedAt: item.approvalEscalatedAt,
     sessionRef: sessionRef(item),
@@ -4303,11 +4306,21 @@ export async function handleApiRequest(
           return badRequest(res, `approval target "${target}" is not an org employee or the configured root approval target`);
         }
       }
-      const updated = requestApproval(params.id, {
+      if (body.options !== undefined && !Array.isArray(body.options)) {
+        return badRequest(res, "options must be an array of labels when provided");
+      }
+      let updated: WorkItem;
+      try {
+        updated = requestApproval(params.id, {
           request,
+          ...(body.options !== undefined ? { options: body.options as string[] } : {}),
           ...(target ? { target } : {}),
           actor: workItemActor(caller),
         });
+      } catch (err) {
+        if (err instanceof ApprovalChoiceError) return badRequest(res, err.message);
+        throw err;
+      }
       const activityReceiptId = persistTodoMutationActivity(req, context, updated, "approval-requested", updated.version !== item.version);
       return json(res, withActivityReceipt({ workItem: updated }, activityReceiptId));
     }
@@ -4333,6 +4346,10 @@ export async function handleApiRequest(
       if (!requireTodoRouteId(res, params.id)) return;
       const noteRaw = (parsed.body as { note?: unknown }).note;
       const note = typeof noteRaw === "string" ? noteRaw : undefined;
+      const choiceRaw = (parsed.body as { choice?: unknown }).choice;
+      if (choiceRaw !== undefined && typeof choiceRaw !== "string") {
+        return badRequest(res, "choice must be a string when provided");
+      }
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
       const authority = resolveApprovalDecisionAuthority(req.headers, item, {
@@ -4342,7 +4359,8 @@ export async function handleApiRequest(
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
 
       const result = await decideWorkItemApproval(
-        { id: params.id, decision, ...(note !== undefined ? { note } : {}), decidedBy: authority.authority.actor },
+        { id: params.id, decision, ...(note !== undefined ? { note } : {}),
+          ...(choiceRaw !== undefined ? { choice: choiceRaw } : {}), decidedBy: authority.authority.actor },
       );
       if (!result.ok) {
         switch (result.code) {

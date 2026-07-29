@@ -157,7 +157,7 @@ function parseCreateRun(value: unknown): CreateRunInput {
   const input = parseJsonRecord(value, 'Workflow run input is invalid.');
   assertExactKeys(input, ['workflowId', 'input', 'trigger', 'idempotencyKey', 'invocationSessionId'], 'Workflow run input is invalid.');
   const trigger = parseJsonRecord(input.trigger, 'Workflow run trigger is invalid.');
-  assertExactKeys(trigger, ['nodeId', 'kind', 'fireId', 'payload'], 'Workflow run trigger is invalid.');
+  assertExactKeys(trigger, ['nodeId', 'kind', 'fireId', 'payload', 'todoId'], 'Workflow run trigger is invalid.');
   if (typeof trigger.kind !== 'string' || !TRIGGER_KINDS.includes(trigger.kind as typeof TRIGGER_KINDS[number])) {
     repositoryError('bad-input', 'Workflow run trigger is invalid.');
   }
@@ -165,6 +165,7 @@ function parseCreateRun(value: unknown): CreateRunInput {
     workflowId: parseWorkflowId(input.workflowId), input: parseJsonRecord(input.input, 'Workflow run input is invalid.'),
     trigger: { nodeId: parseNodeId(trigger.nodeId), kind: trigger.kind as CreateRunInput['trigger']['kind'],
       ...(trigger.fireId === undefined ? {} : { fireId: parseBoundedString(trigger.fireId, 'Workflow trigger fire ID', 128)! }),
+      ...(trigger.todoId === undefined ? {} : { todoId: parseBoundedString(trigger.todoId, 'Workflow trigger Todo ID', 64)! }),
       payload: parseJsonRecord(trigger.payload, 'Workflow trigger payload is invalid.') },
     ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: parseBoundedString(input.idempotencyKey,
       'Workflow idempotency key', trigger.kind === 'workflow-call' ? 128 : 256)! }),

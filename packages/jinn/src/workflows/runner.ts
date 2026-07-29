@@ -25,6 +25,14 @@ export interface WorkflowRunnerOptions {
   models: () => ModelRegistry;
   now?: () => string;
   onChange?: (change: { workflowId: string; runId: string }) => void;
+  /** Mirrors an Approval node's gate onto the run's bound Todo so the operator
+   *  decides it from Todos, not from Workflows. Absent = no Todo surface (the
+   *  gate still parks the run and is decidable through the workflow API). */
+  todoApprovals?: WorkflowTodoApprovalMirror;
+}
+
+export interface WorkflowTodoApprovalMirror {
+  request(input: { todoId: string; request: string; ref: string; options?: string[]; approver?: string }): void;
 }
 
 type NodeAction =
@@ -47,7 +55,7 @@ function bindingContext(run: WorkflowRunDetail): WorkflowBindingContext {
   return {
     input: run.input,
     trigger: { kind: run.trigger.kind, payload: run.trigger.payload },
-    run: { id: run.id, startedAt: run.startedAt },
+    run: { id: run.id, startedAt: run.startedAt, ...(run.trigger.todoId ? { todoId: run.trigger.todoId } : {}) },
     nodes: Object.fromEntries(run.nodeRuns.map((node) => [node.nodeId, {
       status: node.status, output: node.output ?? null, error: node.error ?? null,
     }])),
@@ -189,6 +197,15 @@ function mergeOutput(run: WorkflowRunDetail, nodeId: string): WorkflowNodeOutput
 function approvalRef(run: WorkflowRunDetail, node: ApprovalNode): string | undefined {
   return node.config.approver ? resolveString(node.config.approver, bindingContext(run), "Workflow approver") : undefined;
 }
+/** Stable correlation key tying a Todo approval back to the node that parked. */
+export function todoApprovalRef(run: Pick<WorkflowRunDetail, "workflowId" | "id">, nodeId: string): string {
+  return `workflow:${run.workflowId}:${run.id}:${nodeId}`;
+}
+export function parseTodoApprovalRef(ref: string | null): { workflowId: string; runId: string; nodeId: string } | null {
+  const parts = ref?.split(":") ?? [];
+  if (parts.length !== 4 || parts[0] !== "workflow") return null;
+  return { workflowId: parts[1]!, runId: parts[2]!, nodeId: parts[3]! };
+}
 function waitResumeAt(run: WorkflowRunDetail, node: WaitNode, now: string): string {
   if (node.config.mode === "duration") return new Date(Date.parse(now) + node.config.minutes * 60_000).toISOString();
   const value = resolveBinding(node.config.timestamp, bindingContext(run));
@@ -276,6 +293,7 @@ export class WorkflowRunner {
         tx.putApproval({ nodeId: action.node.id, status: "pending", requestedAt: at, ...(approver ? { approverRef: approver } : {}) });
         tx.setNodeStatus(action.node.id, "waiting", { startedAt: at });
         tx.setRunStatus("waiting");
+        this.mirrorApproval(run, action.node as ApprovalNode, approver);
       } else if (action.kind === "wait") {
         tx.setNodeStatus(action.node.id, "waiting", { resumeAt, startedAt: at });
         tx.setRunStatus("waiting");
@@ -288,6 +306,18 @@ export class WorkflowRunner {
       }
     });
     this.changed(run);
+  }
+
+  /** Mirror a parked gate onto the run's bound Todo (Gap 2: the operator picks
+   *  and approves from Todos). Best-effort — a mirror failure must not fail a
+   *  run whose gate is already parked and decidable through the workflow API. */
+  private mirrorApproval(run: WorkflowRunDetail, node: ApprovalNode, approver: string | undefined): void {
+    if (!run.trigger.todoId || !this.options.todoApprovals) return;
+    try {
+      this.options.todoApprovals.request({ todoId: run.trigger.todoId, request: node.config.description,
+        ref: todoApprovalRef(run, node.id), ...(node.config.options ? { options: node.config.options } : {}),
+        ...(approver ? { approver } : {}) });
+    } catch { /* the workflow-side gate stands on its own */ }
   }
 
   private async dispatch(run: WorkflowRunDetail, node: EmployeeNode, config: ResolvedEmployeeConfig): Promise<void> {
@@ -415,7 +445,7 @@ export class WorkflowRunner {
 
   async decideApproval(input: {
     workflowId: string; runId: string; nodeId: string; decision: "approve" | "reject";
-    decidedBy: string; reason?: string; expectedRevision: number;
+    decidedBy: string; reason?: string; choice?: string; expectedRevision: number;
   }): Promise<WorkflowRunDetail> {
     const run = this.detail(input.workflowId, input.runId);
     const at = this.now();
@@ -430,7 +460,8 @@ export class WorkflowRunner {
         decidedAt: at, decidedBy: input.decidedBy, decision: input.decision,
         ...(input.reason !== undefined ? { reason: input.reason } : {}) });
       if (routed) {
-        tx.setNodeStatus(input.nodeId, "completed", { output: { text: "", fields: { port: status } }, endedAt: at });
+        tx.setNodeStatus(input.nodeId, "completed", { output: { text: input.choice ?? "", fields: { port: status },
+          ...(input.choice !== undefined ? { choice: input.choice } : {}) }, endedAt: at });
         tx.setRunStatus("running");
       } else {
         tx.setNodeStatus(input.nodeId, "failed", { error: missingRoute, endedAt: at });

@@ -94,6 +94,8 @@ export interface DecideArgs {
   id: string
   decision: "approve" | "reject"
   note?: string
+  /** Required when approving a gate that offers options (see the banner). */
+  choice?: string
 }
 
 /** The operator's approval decision. On settle, invalidate the ledger so the
@@ -102,7 +104,7 @@ export interface DecideArgs {
 export function useDecideApproval() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, decision, note }: DecideArgs) => api.decideWorkItemApproval(id, decision, note),
+    mutationFn: ({ id, decision, note, choice }: DecideArgs) => api.decideWorkItemApproval(id, decision, note, choice),
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ["work-items"] })
     },

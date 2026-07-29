@@ -70,7 +70,8 @@ export function TaskBanner({
   focusReason: boolean
   busy: boolean
   onCommitReason: (note: string) => void
-  onApprove: () => void
+  /** Carries the picked option when the pending gate offers a choice. */
+  onApprove: (choice?: string) => void
   onSendBack: (note: string) => void
   onReject: () => void
   /** Kind-contextual route actions (the status/assignee pickers own them). */
@@ -83,6 +84,7 @@ export function TaskBanner({
   const [reason, setReason] = useState("")
   const [composing, setComposing] = useState(false)
   const [sendBackNote, setSendBackNote] = useState("")
+  const [choice, setChoice] = useState<string | null>(null)
   const reasonRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if ((focusReason || needsReason) && reasonRef.current) reasonRef.current.focus()
@@ -92,6 +94,11 @@ export function TaskBanner({
 
   if (!kind) return null
   const style = KIND_STYLE[kind]
+  // A gate that offers variants is decided HERE, on the Todo: pick one, then
+  // approve. Picking is separate from committing so a mis-tap on a phone never
+  // ships the wrong variant.
+  const options = detail.approvals?.find((a) => a.state === "pending")?.options ?? null
+  const approveDisabled = busy || (options !== null && choice === null)
 
   const headWord = kind === "escalated" ? "Escalated" : kind === "approval" ? "Approval requested" : "Blocked"
   const when =
@@ -191,12 +198,42 @@ export function TaskBanner({
             </div>
           </div>
         ) : (
-          <div className="ml-[30px] mt-3 flex items-center gap-2.5">
+          <div className="ml-[30px] mt-3 flex flex-col gap-2.5 sm:ml-[30px]">
+            {options && (
+              <div role="radiogroup" aria-label="Choose an option" data-testid="task-banner-options" className="flex flex-wrap gap-2">
+                {options.map((option) => {
+                  const picked = choice === option
+                  return (
+                    <button
+                      key={option}
+                      type="button"
+                      role="radio"
+                      aria-checked={picked}
+                      disabled={busy}
+                      onClick={() => setChoice(picked ? null : option)}
+                      className="focus-ring inline-flex min-h-11 items-center rounded-full px-3.5 text-[13px] font-medium outline-none transition-colors disabled:opacity-40 sm:min-h-9"
+                      style={
+                        picked
+                          ? {
+                              background: "color-mix(in srgb, var(--accent) 16%, transparent)",
+                              color: "var(--accent)",
+                              boxShadow: "inset 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent)",
+                            }
+                          : { background: "var(--fill-quaternary)", color: "var(--text-secondary)" }
+                      }
+                    >
+                      {option}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+            <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
               data-testid="task-banner-approve"
-              disabled={busy}
-              onClick={onApprove}
+              disabled={approveDisabled}
+              onClick={() => onApprove(choice ?? undefined)}
               className="focus-ring inline-flex min-h-8 items-center gap-1.5 rounded-full px-3.5 text-[12.5px] font-semibold outline-none transition-transform hover:scale-[0.98] disabled:opacity-40"
               style={{
                 background: "color-mix(in srgb, var(--system-green) 16%, transparent)",
@@ -205,7 +242,7 @@ export function TaskBanner({
               }}
             >
               <Check size={13} strokeWidth={2.6} aria-hidden />
-              Approve
+              {choice ? `Approve · ${choice}` : "Approve"}
             </button>
             <button type="button" data-testid="task-banner-sendback" disabled={busy} onClick={() => setComposing(true)} className={QUIET_BTN}>
               Send back
@@ -220,6 +257,7 @@ export function TaskBanner({
             >
               Reject
             </button>
+            </div>
           </div>
         )
       )}

@@ -22,6 +22,10 @@ export interface WorkItemApproval {
   /** Opaque correlation reference carried by the request contract (sources the
    *  legacy `approvalRef` payload field). */
   ref: string | null;
+  /** Offered variants for a CHOICE approval (null = plain approve/reject). */
+  options: string[] | null;
+  /** The picked option, once an approve decision carried one. */
+  choice: string | null;
   target: string | null;
   targetKind: ApprovalTargetKind | null;
   requestedBy: string;
@@ -32,13 +36,29 @@ export interface WorkItemApproval {
   note: string | null;
 }
 
+/** Options are stored as a JSON array of labels; an unreadable blob reads as a
+ *  plain approval rather than poisoning the whole row. */
+function parseOptions(raw: unknown): string[] | null {
+  if (typeof raw !== 'string') return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === 'string')) return null;
+    return parsed.length > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function rowToApproval(row: Record<string, unknown>): WorkItemApproval {
+  const options = parseOptions(row.choice_options);
   return {
     id: row.id as string,
     workItemId: row.work_item_id as string,
     state: row.state as ApprovalState,
     request: row.request as string,
     ref: (row.ref as string) ?? null,
+    options,
+    choice: options ? ((row.choice_value as string) ?? null) : null,
     target: (row.target as string) ?? null,
     targetKind: (row.target_kind as ApprovalTargetKind) ?? null,
     requestedBy: row.requested_by as string,
@@ -60,11 +80,17 @@ function pickCurrent(history: WorkItemApproval[]): WorkItemApproval | undefined 
     .at(-1) ?? history.at(-1);
 }
 
+/** Every read joins the optional choice extension, so `options`/`choice` are
+ *  present on an approval regardless of which read path produced it. */
+const SELECT_APPROVALS = `SELECT a.*, c.options AS choice_options, c.choice AS choice_value
+   FROM work_item_approvals a
+   LEFT JOIN work_item_approval_choices c ON c.approval_id = a.id`;
+
 /** Full approval history for one item, oldest request first. */
 export function listApprovals(workItemId: string): WorkItemApproval[] {
   const db = initDb();
   const rows = db
-    .prepare('SELECT * FROM work_item_approvals WHERE work_item_id = ? ORDER BY requested_at, rowid')
+    .prepare(`${SELECT_APPROVALS} WHERE a.work_item_id = ? ORDER BY a.requested_at, a.rowid`)
     .all(parseTodoId(workItemId)) as Record<string, unknown>[];
   return rows.map(rowToApproval);
 }
@@ -85,7 +111,7 @@ export function currentApprovalsByItem(workItemIds: readonly string[]): Map<stri
     const chunk = workItemIds.slice(start, start + 500).map((id) => parseTodoId(id));
     const rows = db
       .prepare(
-        `SELECT * FROM work_item_approvals WHERE work_item_id IN (${chunk.map(() => '?').join(', ')}) ORDER BY requested_at, rowid`,
+        `${SELECT_APPROVALS} WHERE a.work_item_id IN (${chunk.map(() => '?').join(', ')}) ORDER BY a.requested_at, a.rowid`,
       )
       .all(...chunk) as Record<string, unknown>[];
     for (const raw of rows) {

@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import cron, { type ScheduledTask } from "node-cron";
+import { normalizeLabelName } from "../work-items/labels.js";
 import { createWorkflowTodoEventFeed, type WorkflowTodoEventClaimOutcome,
   type WorkflowTodoEventFeed, type WorkflowTodoStatusEvent } from "../work-items/workflow-event-feed.js";
 import { jsonValueSchema, type JsonValue, type TriggerNode, type WorkflowDefinition } from "./model.js";
@@ -26,6 +27,17 @@ function payload(value: unknown): Record<string, JsonValue> {
 }
 function trigger(definition: WorkflowDefinition, kind: TriggerNode["config"]["kind"]): TriggerNode | undefined {
   return definition.nodes.find((node): node is TriggerNode => node.type === "trigger" && node.config.kind === kind);
+}
+function labelMatches(filter: string, labels: WorkflowTodoStatusEvent["item"]["labels"]): boolean {
+  let name: string; try { name = normalizeLabelName(filter); } catch { return false; }
+  return labels.some((label) => label.id === filter || label.name === name);
+}
+function todoMatches(node: TriggerNode, event: WorkflowTodoStatusEvent): boolean {
+  if (node.config.kind !== "todo-status") return false;
+  const { label, department, assignee } = node.config;
+  return (department === undefined || department === event.item.department)
+    && (assignee === undefined || assignee === event.item.assignee)
+    && (label === undefined || labelMatches(label, event.item.labels));
 }
 export class WorkflowTriggerService {
   private readonly schedules = new Map<string, ScheduleIndex>();
@@ -97,16 +109,18 @@ export class WorkflowTriggerService {
   }
 
   private async fireTodo(event: WorkflowTodoStatusEvent): Promise<number> {
-    const indexed = this.todos.get(event.toStatus) ?? [];
+    const indexed = (this.todos.get(event.toStatus) ?? []).filter((item) => todoMatches(item.trigger, event));
     const claim = this.feed.claimEvent(event.id, indexed.map((item) => item.definition.id));
     if (claim.state !== "acquired") return 0;
     const allowed = new Set(claim.definitionIds); const outcomes: WorkflowTodoEventClaimOutcome[] = [];
+    const labels = event.item.labels.map((label) => label.name);
     try {
       for (const item of indexed.filter((candidate) => allowed.has(candidate.definition.id))) {
         const run = await this.start(item.definition, item.trigger, event.id, {
           todoId: event.workItemId, fromStatus: event.fromStatus, toStatus: event.toStatus,
           source: event.item.source, department: event.item.department, assignee: event.item.assignee,
-        }, `todo:${event.id}`);
+          labels, labelList: labels.join(", "),
+        }, `todo:${event.id}`, event.workItemId);
         outcomes.push({ workflowId: item.definition.id, outcome: "started", runId: run.id, detail: `Todo event ${event.id} started.` });
       }
       this.feed.completeEvent(event.id, outcomes); return outcomes.length;
@@ -114,9 +128,10 @@ export class WorkflowTriggerService {
   }
 
   private async start(definition: WorkflowDefinition, source: TriggerNode, fireId: string,
-    triggerPayload: Record<string, JsonValue>, idempotencyKey: string): Promise<WorkflowRunDetail> {
+    triggerPayload: Record<string, JsonValue>, idempotencyKey: string, todoId?: string): Promise<WorkflowRunDetail> {
     const created = this.repository.createRun({ workflowId: definition.id, input: {},
-      trigger: { nodeId: source.id, kind: source.config.kind, fireId, payload: triggerPayload }, idempotencyKey });
+      trigger: { nodeId: source.id, kind: source.config.kind, fireId, payload: triggerPayload, ...(todoId ? { todoId } : {}) },
+      idempotencyKey });
     const detail = this.repository.getRun(definition.id, created.id)!;
     return detail.status === "pending" ? this.runner.start(created.id) : detail;
   }

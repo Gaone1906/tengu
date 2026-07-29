@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { initDb } from '../sessions/registry.js';
 import type { WorkItemSource, WorkItemStatus } from './store.js';
+import { getWorkItemLabels } from './labels.js';
 import { isTodoId } from './id.js';
 
 export interface WorkflowTodoStatusEvent {
@@ -12,6 +13,10 @@ export interface WorkflowTodoStatusEvent {
     source: WorkItemSource;
     department: string | null;
     assignee: string | null;
+    /** Read live at replay time, not from the frozen provenance snapshot: labels
+     *  are re-tagged independently of status, so a trigger filter must see the
+     *  Todo's current set rather than whatever it carried when it moved. */
+    labels: Array<{ id: string; name: string }>;
   };
 }
 
@@ -151,6 +156,7 @@ function eventFromImmutableSnapshot(row: TodoEventRow): WorkflowTodoStatusEvent 
         source: value.source as WorkItemSource,
         department: value.department as string | null,
         assignee: value.assignee as string | null,
+        labels: getWorkItemLabels(row.work_item_id).map(({ id, name }) => ({ id, name })),
       },
     };
   } catch {

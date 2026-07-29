@@ -42,9 +42,25 @@ Use `rerun_workflow_run` with `definition: "original"` or `"current"`. Use `retr
 
 ## Triggers and approvals
 
-Trigger nodes support `manual`, `schedule`, `event`, `todo-status`, and `workflow-call`. Fire authenticated events with `fire_workflow_event`. A Todo-status trigger is a one-way input; the resulting Workflow run is independent.
+Trigger nodes support `manual`, `schedule`, `event`, `todo-status`, and `workflow-call`. Fire authenticated events with `fire_workflow_event`.
 
-An Approval node creates a native pending approval on the run. The resolved routed owner cannot decide their own approval, while a hierarchy root/COO is exempt. Reviewers should avoid approving work they personally executed. Use `decide_workflow_approval`; Todo approvals affect only Todos. Route unclear authority to the manager/COO.
+A `todo-status` trigger BINDS its run to the Todo that fired it: no new Todo is minted, and the run's Approval gates mirror onto that same Todo. Read the bound id as `{{ run.todoId }}`. Manual runs are unbound unless started with an explicit `todoId`; schedule and event runs are always unbound.
+
+A `todo-status` trigger fires for every Todo reaching `status` unless you narrow it with the optional `label`, `department`, and `assignee` filters. Every filter you set must match; an omitted one matches everything. `label` accepts a label id or a label name, matched against the Todo's labels as they stand when the trigger fires.
+
+```json
+{ "kind": "todo-status", "status": "in_review", "label": "needs-review", "department": "platform" }
+```
+
+Its payload carries `todoId`, `fromStatus`, `toStatus`, `source`, `department`, `assignee`, `labels` (the label names, for Condition predicates such as `contains`), and `labelList` (the same names joined for `{{ trigger.labelList }}` prompt placeholders, which only render primitives).
+
+An Approval node creates a native pending approval on the run. The resolved routed owner cannot decide their own approval, while a hierarchy root/COO is exempt. Reviewers should avoid approving work they personally executed. Use `decide_workflow_approval`. Route unclear authority to the manager/COO.
+
+Give an Approval node `options` (2 to 8 unique labels) to ask for a CHOICE rather than a yes/no — "which of these three variants ships". On a Todo-bound run the options mirror onto that Todo's approval, so the pick happens on the Todos surface; approving without picking one of them is refused rather than defaulted. Read the pick downstream as `{{ node.<approvalNodeId>.choice }}`, typically from a Condition.
+
+```json
+{ "description": "Which variant ships?", "options": ["variant-a", "variant-b", "variant-c"] }
+```
 
 ## Cancel
 

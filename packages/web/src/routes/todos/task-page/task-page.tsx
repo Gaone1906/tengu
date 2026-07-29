@@ -262,10 +262,10 @@ export default function TaskPage() {
     [item, setStatus, announce],
   )
   const runDecision = useCallback(
-    (decision: "approve" | "reject", note?: string) => {
+    (decision: "approve" | "reject", note?: string, choice?: string) => {
       if (!item) return
       decide.mutate(
-        { id: item.id, decision, note },
+        { id: item.id, decision, note, choice },
         {
           onError: (error) => announce(operatorSafeTodoError(error, "Couldn't record the decision")),
         },
@@ -378,7 +378,7 @@ export default function TaskPage() {
                   focusReason={!!routeState.focusBannerReason}
                   busy={setStatus.isPending || decide.isPending}
                   onCommitReason={commitBannerReason}
-                  onApprove={() => runDecision("approve")}
+                  onApprove={(choice) => runDecision("approve", undefined, choice)}
                   onSendBack={(note) => runDecision("reject", note || undefined)}
                   onReject={() => runDecision("reject")}
                   actions={

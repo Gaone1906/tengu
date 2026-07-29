@@ -42,6 +42,10 @@ export interface WorkflowRunRecord {
     kind: 'manual' | 'schedule' | 'event' | 'todo-status' | 'workflow-call';
     fireId?: string;
     payload: Record<string, JsonValue>;
+    /** The Todo this run is bound to: set by a `todo-status` trigger to the
+     *  Todo that fired it, so parked gates and comments land on THAT Todo
+     *  instead of minting a new one. Exposed to nodes as `{{ run.todoId }}`. */
+    todoId?: string;
   };
   status: WorkflowRunStatus;
   revision: number;

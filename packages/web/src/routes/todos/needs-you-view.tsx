@@ -286,6 +286,19 @@ function NeedsYouCard({
         <div className="ml-[58px] mt-3.5 flex flex-wrap items-center gap-2.5">
           {pending ? (
             <>
+              {/* A gate that offers variants can't be settled from a summary row —
+                  the pick belongs next to what is being picked between. */}
+              {item.approvalOptions?.length ? (
+                <button type="button" data-testid="needs-choose" onClick={() => onOpen(item.id)} className={BTN}
+                  style={{
+                    background: "color-mix(in srgb, var(--accent) 16%, transparent)",
+                    color: "var(--accent)",
+                    boxShadow: "var(--inset-shine)",
+                  }}
+                >
+                  Choose…
+                </button>
+              ) : (
               <button
                 type="button"
                 data-testid="needs-approve"
@@ -301,6 +314,7 @@ function NeedsYouCard({
                 <Check size={13} strokeWidth={2.6} aria-hidden />
                 Approve
               </button>
+              )}
               <button type="button" data-testid="needs-sendback" disabled={resolving} onClick={() => setComposing(true)} className={BTN_QUIET}>
                 Send back
               </button>

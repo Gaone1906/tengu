@@ -39,6 +39,8 @@ import { authenticateGatewayRequest, authRequiredForRequest, ensureGatewayAuthTo
 import { reconcileWorkItemsOnStartup, startWorkItemReconciler } from "../work-items/reconcile.js";
 import { setTodoLiveEmitter } from "../work-items/live-events.js";
 import { setTodoStatusChangeListener } from "../work-items/transitions.js";
+import { requestApproval, setTodoApprovalDecisionListener } from "../work-items/approvals.js";
+import { parseTodoApprovalRef } from "../workflows/runner.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
 import { enforceOwnerOnlyDirectory, pathIsOwnerOnly } from "../shared/owner-only.js";
@@ -969,6 +971,10 @@ export async function startGateway(
     executor: new WorkflowSessionExecutor(sessionManager, (id) => { const session = getSession(id); if (!session) return null;
       const finalText = [...getMessages(id)].reverse().find((message) => message.role === "assistant")?.content; return { session, ...(finalText ? { finalText } : {}) }; }),
     employees: () => employeeRegistry, models: () => getModelRegistry(currentConfig),
+    // A parked gate on a Todo-bound run is decided from Todos, not Workflows.
+    todoApprovals: { request: ({ todoId, request, ref, options, approver }) => {
+      requestApproval(todoId, { request, ref, ...(options ? { options } : {}), ...(approver ? { target: approver } : {}), actor: "workflow" });
+    } },
     readTranscript: (id) => getMessages(id).map(({ id: messageId, role, content, timestamp }) => ({ id: messageId, role, content, timestamp })),
     onChange: ({ workflowId, runId }) => emit("company:changed", { entity: "workflow", workflowId, runId }),
     onDefinitionChange: ({ workflowId, revision }) => emit("company:changed", { entity: "workflow", workflowId, revision }) });
@@ -1125,6 +1131,20 @@ export async function startGateway(
   setTodoStatusChangeListener(() => {
     void workflowService.recover(new Date().toISOString()).catch((error) => {
       logger.warn(`Workflow Todo trigger recovery failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  });
+
+  // The other half of the Todo-first approval loop: a gate decided on the Todo
+  // resolves the workflow node that mirrored it, carrying the picked option.
+  setTodoApprovalDecisionListener(({ approval, decision, decidedBy }) => {
+    const origin = parseTodoApprovalRef(approval.ref);
+    if (!origin) return;
+    const run = workflowRepository.getRun(origin.workflowId, origin.runId);
+    if (!run) return;
+    void workflowService.decideApproval({ ...origin, decision, decidedBy, expectedRevision: run.revision,
+      ...(approval.choice ? { choice: approval.choice } : {}),
+      ...(approval.note ? { reason: approval.note } : {}) }).catch((error) => {
+      logger.warn(`Workflow approval mirror-back failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   });
 
@@ -1515,6 +1535,7 @@ export async function startGateway(
     // Stop cron scheduler
     stopScheduler();
     setTodoStatusChangeListener(null);
+    setTodoApprovalDecisionListener(null);
 
     // Stop connectors
     for (const connector of connectors) {

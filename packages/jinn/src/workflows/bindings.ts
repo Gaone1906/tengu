@@ -7,7 +7,7 @@ export interface WorkflowBindingContext {
   input: Record<string, JsonValue>;
   trigger: { kind: string; payload: Record<string, JsonValue> };
   nodes: Record<string, { status: string; output: WorkflowNodeOutput | null; error: WorkflowError | null }>;
-  run: { id: string; startedAt: string };
+  run: { id: string; startedAt: string; todoId?: string };
 }
 
 type WorkflowBindingErrorCode = 'invalid-path' | 'missing-value' | 'type-mismatch' | 'unsafe-value';

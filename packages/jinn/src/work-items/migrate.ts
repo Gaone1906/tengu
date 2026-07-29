@@ -298,6 +298,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_wap_pending ON work_item_approvals(work_ite
 CREATE INDEX IF NOT EXISTS idx_wap_item ON work_item_approvals(work_item_id, requested_at);
 `;
 
+/** Variant-picking approvals: the offered options and the picked one, 1:1 with
+ *  an approval row. A separate table rather than two `work_item_approvals`
+ *  columns because `verifyCurrentWorkItemSchema` refuses ANY shape drift on an
+ *  existing table, while a MISSING additive table heals cleanly on boot — so a
+ *  new table is the only backward-compatible way to extend an approval.
+ *  `options` is a JSON array of labels; `choice` is null until a pick lands. */
+export const WORK_ITEM_APPROVAL_CHOICES_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_approval_choices (
+  approval_id TEXT PRIMARY KEY REFERENCES work_item_approvals(id) ON DELETE CASCADE,
+  options     TEXT NOT NULL,
+  choice      TEXT
+)`;
+
 export const WORK_ITEM_EDIT_RECEIPTS_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
   key_digest          TEXT PRIMARY KEY CHECK (length(key_digest) = 64),
@@ -632,6 +645,7 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
   ["labels", LABELS_TABLE_DDL],
   ["work_item_labels", WORK_ITEM_LABELS_TABLE_DDL],
   ["work_item_approvals", WORK_ITEM_APPROVALS_TABLE_DDL],
+  ["work_item_approval_choices", WORK_ITEM_APPROVAL_CHOICES_DDL],
   ["work_item_attachments", WORK_ITEM_ATTACHMENTS_TABLE_DDL],
   ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
   ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
@@ -653,6 +667,7 @@ const V2_ADDITIVE_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: "labels", ddl: LABELS_DDL },
   { name: "work_item_labels", ddl: WORK_ITEM_LABELS_DDL },
   { name: "work_item_approvals", ddl: WORK_ITEM_APPROVALS_DDL },
+  { name: "work_item_approval_choices", ddl: WORK_ITEM_APPROVAL_CHOICES_DDL },
   { name: "work_item_attachments", ddl: WORK_ITEM_ATTACHMENTS_DDL },
 ];
 
