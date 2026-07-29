@@ -149,7 +149,7 @@ import { readJsonlTail } from "./jsonl-tail.js";
 import { completedStreamedBlockIds } from "./streamed-blocks.js";
 import { deliverClaimedSessionDelivery, notifyParentSession, notifyRateLimited, notifyRateLimitResumed, notifyDiscordChannel, notifyAttachedTalkSessions, recoverPendingSessionDeliveries } from "../sessions/callbacks.js";
 import { clearDelegationCompletionContract, DELEGATION_COMPLETION_TRACKED_META_KEY } from "../sessions/delegation-completion-contract.js";
-import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity } from "./session-comm-guards.js";
+import { clipSessionMessage, sessionCommGuards, prepareLateralSend, isDescendantOf, resolveCallerIdentity, type CallerIdentity } from "./session-comm-guards.js";
 import {
   ACTIVITY_OPERATION_HEADER,
   ACTIVITY_TOOL_HEADER,
@@ -1986,6 +1986,29 @@ function authorizeAgentWorkItemStatus(caller: WorkItemCaller, item: WorkItem, ta
   if (caller.kind === 'operator' || target !== 'done') return { ok: true };
   const review = canReviewWorkItemDone(caller.session, item, listSessionsByWorkItem(item.id));
   return review.ok ? { ok: true } : { ok: false, status: 403, error: review.error };
+}
+
+/**
+ * The refusal for a session trying to mint a child that IS the employee-
+ * hierarchy root, or undefined when the spawn is fine.
+ *
+ * Root identity carries operator-delegated authority — `asOperator` keys off it,
+ * and so does any `todo-status` trigger filtered on the operator. A session that
+ * can obtain a root-identity child holds that authority in two hops, so every
+ * route that mints a session refuses it. Which route it takes does not matter,
+ * hence one helper for both. The operator surface is unrestricted: it already
+ * holds the authority the impersonation would be reaching for.
+ *
+ * Only an `employee` root can be impersonated. With no executive at the top,
+ * `resolveRootApprovalTarget()` answers with a virtual root whose name belongs to
+ * no employee — the spawn route already collapses that name to a plain session —
+ * so there is nothing to claim and nothing is refused.
+ */
+function spawnAsRootRefusal(caller: CallerIdentity, employeeName: string | null | undefined): string | undefined {
+  if (!employeeName || caller.kind !== "session") return undefined;
+  const root = resolveRootApprovalTarget();
+  if (root?.kind !== "employee" || employeeName !== root.name) return undefined;
+  return `a session cannot run work as "${root.name}", the employee-hierarchy root, because that identity carries operator-delegated authority; request an approval or escalate the Todo to the root instead of running as it`;
 }
 
 /** Who really performed a transition recorded as the operator's. */
@@ -4658,6 +4681,8 @@ export async function handleApiRequest(
       if (!employeeName && !engineParam) {
         return badRequest(res, "employee or engine is required — delegate to a named employee (GET /api/org lists them) or to a bare engine");
       }
+      const delegateAsRoot = spawnAsRootRefusal(delegationCaller, employeeName);
+      if (delegateAsRoot) return json(res, { error: delegateAsRoot }, 403);
       let attachments: string[] | undefined;
       if (body.attachments !== undefined) {
         if (!Array.isArray(body.attachments) || body.attachments.length > 20) {
@@ -4987,6 +5012,8 @@ export async function handleApiRequest(
       const parentSession = typeof body.parentSessionId === "string" ? getSession(body.parentSessionId) : undefined;
       const config = context.getConfig();
       const employeeName = coercePortalEmployee(body.employee, config.portal?.portalName);
+      const spawnAsRoot = spawnAsRootRefusal(spawnCaller, employeeName);
+      if (spawnAsRoot) return json(res, { error: spawnAsRoot }, 403);
       let employeeDefaults: { engine: string; model: string; effortLevel?: string; employee?: string } | undefined;
       if (employeeName) {
         const { scanOrg } = await import("./org.js");

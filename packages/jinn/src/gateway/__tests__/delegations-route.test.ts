@@ -1002,3 +1002,72 @@ describe("POST /api/delegations — fail-closed tool identity (codex finding 2)"
     expect(workItemCount()).toBe(before);
   });
 });
+
+/* A session that can mint a child whose employee IS the org root holds that
+ * root's operator-delegated authority in two hops. Both routes that mint a
+ * session refuse it; the operator surface, which already holds that authority,
+ * does not change. */
+describe("spawn/delegate as the employee-hierarchy root", () => {
+  const rootYaml = path.join(tmpHome, "org", "org-root.yaml");
+
+  function sessionHeaders(sessionId: string): Record<string, string> {
+    return {
+      [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+      [CALLER_SESSION_HEADER]: sessionId,
+      [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(sessionId),
+    };
+  }
+
+  it.each([
+    ["POST", "/api/sessions", { prompt: "arm it", employee: "org-root" }],
+    ["POST", "/api/delegations", { employee: "org-root", task: "arm it", title: "arm it" }],
+  ] as const)("refuses an employee session %s %s and names what to do instead", async (method, route, body) => {
+    const caller = createEmployeeSession("qa-emp", `as-root-${route.replace(/\W/g, "")}`);
+    const before = workItemCount();
+
+    const resp = await call(method, route, body, sessionHeaders(caller));
+
+    expect(resp.status).toBe(403);
+    expect(String(resp.body.error)).toMatch(/cannot run work as "org-root", the employee-hierarchy root/);
+    expect(String(resp.body.error)).toMatch(/request an approval or escalate the Todo/);
+    expect(workItemCount()).toBe(before);
+  });
+
+  it("still lets the operator surface spawn as the root", async () => {
+    const resp = await call("POST", "/api/sessions", { prompt: "operator arms it", employee: "org-root" });
+
+    expect(resp.status).toBe(201);
+    expect(reg.getSession(resp.body.id)).toMatchObject({ employee: "org-root" });
+  });
+
+  it("leaves an employee session's spawn as any non-root employee alone", async () => {
+    const caller = createEmployeeSession("qa-manager", "as-nonroot");
+
+    const resp = await call("POST", "/api/sessions", { prompt: "ordinary", employee: "qa-emp" }, sessionHeaders(caller));
+
+    expect(resp.status).toBe(201);
+    expect(reg.getSession(resp.body.id)).toMatchObject({ employee: "qa-emp", parentSessionId: caller });
+  });
+
+  // With no executive in the org the root resolves VIRTUAL — a name no employee
+  // holds — so there is nothing to impersonate and the guard refuses nothing.
+  it("refuses nothing when the org has no employee at its top", async () => {
+    const saved = fs.readFileSync(rootYaml, "utf-8");
+    fs.rmSync(rootYaml);
+    try {
+      const caller = createEmployeeSession("qa-emp", "virtual-root");
+
+      const employee = await call("POST", "/api/sessions", { prompt: "ordinary", employee: "qa-emp" }, sessionHeaders(caller));
+      expect(employee.status).toBe(201);
+
+      // "Jinn" is the virtual root here. It stays refused for the ordinary
+      // reason — no employee holds that name — and never through the root guard,
+      // which would otherwise turn every unknown name into an authority error.
+      const portal = await call("POST", "/api/sessions", { prompt: "portal", employee: "Jinn" }, sessionHeaders(caller));
+      expect(portal.status).toBe(400);
+      expect(String(portal.body.error)).toMatch(/unknown employee "Jinn"/);
+    } finally {
+      fs.writeFileSync(rootYaml, saved);
+    }
+  });
+});
