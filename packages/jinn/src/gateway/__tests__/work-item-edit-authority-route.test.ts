@@ -79,6 +79,9 @@ function makeReq(method: string, urlPath: string, body?: unknown, headers: Recor
   }) as unknown as Parameters<Api["handleApiRequest"]>[0];
 }
 
+/** Runs the bound-workflow-run authority path reads, keyed `<workflowId>/<runId>`. */
+const runs = new Map<string, { trigger: { todoId?: string } }>();
+
 const ctx = {
   getConfig: () => ({ gateway: {}, engines: {} }),
   connectors: new Map(),
@@ -89,6 +92,9 @@ const ctx = {
       getPendingCount: () => 0,
       getTransportState: (_key: string, status: string) => status,
     }),
+  },
+  workflowService: {
+    getRun: (workflowId: string, runId: string) => runs.get(`${workflowId}/${runId}`) ?? null,
   },
 } as unknown as import("../api.js").ApiContext;
 
@@ -308,5 +314,114 @@ describe("PATCH /api/work-items/:id — widened edit authority (spec §3.4)", ()
     expect(cleared.status).toBe(200);
     expect(cleared.body.workItem.acceptance).toBeNull();
     expect(cleared.body.workItem.dueAt).toBeNull();
+  });
+});
+
+/**
+ * The fourth edit relation: a phase of a workflow run bound to the Todo. The
+ * binding already existed on both sides (`run.trigger.todoId` and the phase
+ * session's provenance) but authorization did not consult it, so every phase of
+ * a Todo-triggered pipeline got a 403 on the Todo it was running for.
+ */
+describe("PATCH /api/work-items/:id — a workflow run bound to the Todo", () => {
+  let phase = 0;
+
+  function phaseSession(runId: string, employee = "solo-worker") {
+    phase += 1;
+    return reg.createSession({
+      engine: "codex",
+      source: "web",
+      sourceRef: `wf-phase-${phase}`,
+      employee,
+      workflowProvenance: {
+        kind: "phase",
+        workflowId: "build-pipeline",
+        workflowName: "Build Pipeline",
+        runId,
+        triggerSource: "todo-status",
+        phase: { nodeId: "implement", name: "Implement", index: 1, round: 1, attempt: 1 },
+      },
+    });
+  }
+
+  it("edits body and acceptance on the Todo its run is bound to", async () => {
+    const item = store.createWorkItem({ title: "pipeline status block" });
+    runs.set("build-pipeline/run-bound", { trigger: { todoId: item.id } });
+    const session = phaseSession("run-bound");
+
+    const cap = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, {
+      body: "<!-- pipeline-status -->\nIMPLEMENT: done",
+      acceptance: "gates green",
+    }), toolHeaders(session.id));
+
+    expect(cap.status).toBe(200);
+    expect(cap.body.workItem).toMatchObject({
+      body: "<!-- pipeline-status -->\nIMPLEMENT: done",
+      acceptance: "gates green",
+    });
+  });
+
+  it("is refused title, assignee, priority and dueAt — it reports progress, it does not re-own the Todo", async () => {
+    const item = store.createWorkItem({ title: "pipeline limits" });
+    runs.set("build-pipeline/run-limits", { trigger: { todoId: item.id } });
+    const session = phaseSession("run-limits");
+
+    for (const patch of [{ title: "renamed" }, { assignee: "solo-worker" }, { priority: 0 }, { dueAt: "2026-09-01" }]) {
+      const cap = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, patch), toolHeaders(session.id));
+      expect(cap.status).toBe(403);
+      expect(cap.body.error).toContain(`"${Object.keys(patch)[0]}"`);
+    }
+    expect(store.getWorkItem(item.id)!.title).toBe("pipeline limits");
+  });
+
+  it("moves its Todo's status but still cannot mark it done — the self-review ban is unchanged", async () => {
+    const item = store.createWorkItem({ title: "pipeline status move" });
+    runs.set("build-pipeline/run-status", { trigger: { todoId: item.id } });
+    const session = phaseSession("run-status");
+
+    const executing = await call("POST", `/api/work-items/${item.id}/status`, { status: "executing" }, toolHeaders(session.id));
+    expect(executing.status).toBe(200);
+    expect(executing.body.workItem.status).toBe("executing");
+
+    const review = await call("POST", `/api/work-items/${item.id}/status`, { status: "in_review" }, toolHeaders(session.id));
+    expect(review.status).toBe(200);
+
+    const done = await call("POST", `/api/work-items/${item.id}/status`, { status: "done" }, toolHeaders(session.id));
+    expect(done.status).toBe(403);
+    expect(store.getWorkItem(item.id)!.status).toBe("in_review");
+  });
+
+  it("a phase of a run bound to a DIFFERENT Todo is still a stranger, and so is an unrelated employee", async () => {
+    const item = store.createWorkItem({ title: "not my todo" });
+    const other = store.createWorkItem({ title: "someone else's todo" });
+    runs.set("build-pipeline/run-elsewhere", { trigger: { todoId: other.id } });
+
+    const wrongTodo = await call(
+      "PATCH",
+      `/api/work-items/${item.id}`,
+      patchBody(item.version, { body: "reaching across" }),
+      toolHeaders(phaseSession("run-elsewhere").id),
+    );
+    expect(wrongTodo.status).toBe(403);
+    expect(wrongTodo.body.error).toContain("workflow run bound to Todo");
+
+    const unrelated = reg.createSession({ engine: "codex", source: "web", sourceRef: "wf-unrelated", employee: "solo-worker" });
+    const plain = await call("PATCH", `/api/work-items/${item.id}`, patchBody(item.version, { body: "no" }), toolHeaders(unrelated.id));
+    expect(plain.status).toBe(403);
+
+    expect(store.getWorkItem(item.id)!.body).not.toBe("reaching across");
+  });
+
+  it("an unbound run grants nothing — the binding, not the provenance, is the authority", async () => {
+    const item = store.createWorkItem({ title: "unbound run" });
+    runs.set("build-pipeline/run-unbound", { trigger: {} });
+
+    const cap = await call(
+      "PATCH",
+      `/api/work-items/${item.id}`,
+      patchBody(item.version, { body: "manual run has no Todo" }),
+      toolHeaders(phaseSession("run-unbound").id),
+    );
+    expect(cap.status).toBe(403);
   });
 });

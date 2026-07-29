@@ -240,6 +240,7 @@ import {
   requestApproval,
 } from "../work-items/approvals.js";
 import { resolveApprovalDecisionAuthority, resolveApprovalRouteTarget, resolveRootApprovalTarget } from "./approval-authority.js";
+import { runsWorkflowBoundToTodo } from "./workflow-todo-binding.js";
 import { scanOrg } from "./org.js";
 import { resolveOrgHierarchy } from "./org-hierarchy.js";
 import { surfaceManagerVisibility } from "./manager-visibility.js";
@@ -1739,6 +1740,10 @@ function workItemActor(caller: WorkItemCaller): string {
   return caller.kind === 'session' ? `session:${caller.callerId}` : 'operator';
 }
 
+function callerRunsWorkflowForTodo(caller: WorkItemCaller, item: WorkItem, context: ApiContext): boolean {
+  return caller.kind === 'session' && runsWorkflowBoundToTodo(caller.session, item.id, context.workflowService);
+}
+
 /** Comment identity is stamped server-side, never taken from the request body:
  *  operator surface → 'operator'; a session with a resolved employee comments
  *  as that employee (stable across their sessions); a bare session keeps the
@@ -1874,6 +1879,9 @@ function authorizeWorkItemOwnerManagerOrRoot(
 /** The metadata fields a non-operator relation may edit (spec §3.4). */
 const TODO_EDIT_SHARED_FIELDS: ReadonlyArray<keyof UpdateWorkItemInput> = ['body', 'acceptance', 'priority', 'dueAt'];
 
+/** A workflow phase reports progress on its Todo; it never re-owns or renames it. */
+const TODO_EDIT_WORKFLOW_RUN_FIELDS: ReadonlyArray<keyof UpdateWorkItemInput> = ['body', 'acceptance'];
+
 type TodoEditAuthority =
   | { ok: true; fields: ReadonlySet<keyof UpdateWorkItemInput>; actor: string; who: string }
   | { ok: false; error: string };
@@ -1885,8 +1893,12 @@ type TodoEditAuthority =
  * `session:<uuid>` form — a session-form creator is only ever the one session
  * that created the item. The assignee's manager is the DIRECT reporting-line
  * parent (the same org resolution manager-visibility uses).
+ *
+ * `boundWorkflowRun` is the fourth relation: a phase of a workflow run bound to
+ * this Todo. It is deliberately narrower than the other three — a pipeline keeps
+ * the Todo's body and acceptance current and nothing else.
  */
-function resolveTodoEditAuthority(caller: WorkItemCaller, item: WorkItem): TodoEditAuthority {
+function resolveTodoEditAuthority(caller: WorkItemCaller, item: WorkItem, boundWorkflowRun: boolean): TodoEditAuthority {
   if (caller.kind === 'operator') {
     return {
       ok: true,
@@ -1907,9 +1919,17 @@ function resolveTodoEditAuthority(caller: WorkItemCaller, item: WorkItem): TodoE
     item.assignee !== null &&
     resolveOrgHierarchy(scanOrg()).nodes[item.assignee]?.parentName === employee;
   if (!isCreator && !isAssignee && !isAssigneeManager) {
+    if (boundWorkflowRun) {
+      return {
+        ok: true,
+        fields: new Set<keyof UpdateWorkItemInput>(TODO_EDIT_WORKFLOW_RUN_FIELDS),
+        actor: employee ?? sessionActor,
+        who: 'a workflow run bound to this Todo',
+      };
+    }
     return {
       ok: false,
-      error: `${employee ? `employee "${employee}"` : `session ${caller.callerId}`} is neither the creator, the assignee, nor the assignee's manager of Todo ${item.id}; cannot edit its metadata`,
+      error: `${employee ? `employee "${employee}"` : `session ${caller.callerId}`} is neither the creator, the assignee, the assignee's manager, nor a phase of a workflow run bound to Todo ${item.id}; cannot edit its metadata`,
     };
   }
   const fields = new Set<keyof UpdateWorkItemInput>(TODO_EDIT_SHARED_FIELDS);
@@ -1935,14 +1955,16 @@ function canReviewWorkItemDone(session: Session, item: WorkItem, linked: Session
   return { ok: false, error: `session ${session.id} is not an authorized reviewer for Todo ${item.id}; use the human review surface or the parent reviewer session` };
 }
 
-function authorizeAgentWorkItemStatus(caller: WorkItemCaller, item: WorkItem, target: WorkItemStatus): { ok: true } | { ok: false; status: 403; error: string } {
+function authorizeAgentWorkItemStatus(caller: WorkItemCaller, item: WorkItem, target: WorkItemStatus, boundWorkflowRun: boolean): { ok: true } | { ok: false; status: 403; error: string } {
   if (caller.kind === 'operator') return { ok: true };
   const linked = listSessionsByWorkItem(item.id);
   if (target === 'done') {
+    // The bound run is deliberately NOT an owner here: a pipeline that executed
+    // the work does not get to close it, exactly like every other executor.
     const review = canReviewWorkItemDone(caller.session, item, linked);
     return review.ok ? { ok: true } : { ok: false, status: 403, error: review.error };
   }
-  if (!ownsWorkItem(caller.session, item, linked)) {
+  if (!boundWorkflowRun && !ownsWorkItem(caller.session, item, linked)) {
     return {
       ok: false,
       status: 403,
@@ -3574,7 +3596,7 @@ export async function handleApiRequest(
 
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
-      const authority = resolveTodoEditAuthority(caller, item);
+      const authority = resolveTodoEditAuthority(caller, item, callerRunsWorkflowForTodo(caller, item, context));
       if (!authority.ok) return json(res, { error: authority.error }, 403);
       const patchedFields = (Object.keys(patch) as Array<keyof UpdateWorkItemInput>);
       for (const field of patchedFields) {
@@ -3659,7 +3681,7 @@ export async function handleApiRequest(
       }
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
-      const authorized = authorizeAgentWorkItemStatus(caller, item, target as WorkItemStatus);
+      const authorized = authorizeAgentWorkItemStatus(caller, item, target as WorkItemStatus, callerRunsWorkflowForTodo(caller, item, context));
       if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
       // The banner's asked-for-after reason (design-doc §5): a same-status
       // operator PUT with a note annotates the CURRENT exception state instead
