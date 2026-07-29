@@ -26,7 +26,8 @@ import { STATUS_LABEL, commentAuthorLabel, operatorSafeTodoError } from "@/lib/t
 import { EmployeeAvatar } from "@/components/ui/employee-avatar"
 import { buildCommentThread, type CommentThreadNode } from "../comment-thread"
 import { displayNameOf, formatRelativeTime } from "../util"
-import { formatBytes, isImageMime } from "./attachments"
+import { AttachmentTile, useAttachmentPreview } from "./attachment-preview"
+import { formatBytes } from "./attachments"
 
 /* Todos v2 slice 6 — Activity: ONE merged feed (design-doc §7.2.11, mock
  * task-detail.html). Machine events are one-line whispers (12px glyph + actor
@@ -177,29 +178,20 @@ function commentAuthor(comment: WorkItemCommentWire, byName: Map<string, Employe
 }
 
 function AttachmentChips({ attachments, workItemId }: { attachments: WorkItemAttachmentWire[]; workItemId: string }) {
+  const preview = useAttachmentPreview()
   if (attachments.length === 0) return null
   return (
     <div className="ml-[42px] mt-[9px] flex flex-wrap gap-2">
       {attachments.map((attachment) =>
-        isImageMime(attachment.mime) ? (
-          <a
+        preview.canPreview(attachment) ? (
+          <AttachmentTile
             key={attachment.id}
-            href={api.workItemAttachmentUrl(workItemId, attachment.id)}
-            target="_blank"
-            rel="noreferrer"
-            data-testid={`comment-attachment-${attachment.id}`}
-            className="focus-ring w-[118px] overflow-hidden rounded-[10px] bg-[var(--fill-tertiary)] shadow-[var(--shadow-ambient)] outline-none"
-          >
-            <span className="grid h-[70px] place-items-center overflow-hidden text-[var(--text-quaternary)]">
-              <img
-                src={api.workItemAttachmentUrl(workItemId, attachment.id)}
-                alt={attachment.filename}
-                className="h-full w-full object-cover"
-                loading="lazy"
-              />
-            </span>
-            <span className="block truncate px-2 py-1 text-[10.5px] text-[var(--text-tertiary)]">{attachment.filename}</span>
-          </a>
+            attachment={attachment}
+            preview={preview}
+            meta={formatBytes(attachment.bytes)}
+            dense
+            testId={`comment-attachment-${attachment.id}`}
+          />
         ) : (
           <a
             key={attachment.id}
@@ -216,6 +208,7 @@ function AttachmentChips({ attachments, workItemId }: { attachments: WorkItemAtt
           </a>
         ),
       )}
+      {preview.lightbox}
     </div>
   )
 }

@@ -2,16 +2,14 @@ import { useRef } from "react"
 import { FileText, Image as ImageIcon, Paperclip, X } from "lucide-react"
 import { api, type Employee, type WorkItemAttachmentWire } from "@/lib/api"
 import { displayNameOf, formatRelativeTime } from "../util"
+import { AttachmentTile, isImageMime, useAttachmentPreview } from "./attachment-preview"
 
 /* Todos v2 slice 6 — the attachments section (design-doc §7.2.10, mock
- * task-detail.html): inset rows (26px type glyph, filename, `size · who ·
- * when`), hover × to remove, `+ Attach a file` through the multipart route.
- * Item-level rows only — comment-level attachments render as chips inside the
- * activity feed. */
-
-export function isImageMime(mime: string): boolean {
-  return mime.startsWith("image/")
-}
+ * task-detail.html): images lead as a thumbnail grid that opens the full-size
+ * preview, everything else keeps the inset row (26px type glyph, filename,
+ * `size · who · when`), hover × to remove, `+ Attach a file` through the
+ * multipart route. Item-level only — comment-level attachments render as chips
+ * inside the activity feed. */
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -37,7 +35,13 @@ export function AttachmentsSection({
   onRemove: (attachment: WorkItemAttachmentWire) => void
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
+  const preview = useAttachmentPreview()
   const itemLevel = attachments.filter((attachment) => attachment.commentId === null)
+  const images = itemLevel.filter((attachment) => preview.canPreview(attachment))
+  const rows = itemLevel.filter((attachment) => !preview.canPreview(attachment))
+
+  const metaOf = (attachment: WorkItemAttachmentWire) =>
+    `${formatBytes(attachment.bytes)} · ${uploaderLabel(attachment.uploadedBy, byName)} · ${formatRelativeTime(attachment.createdAt)}`
 
   return (
     <section data-testid="task-attachments">
@@ -47,7 +51,31 @@ export function AttachmentsSection({
       >
         Attachments
       </div>
-      {itemLevel.map((attachment) => (
+      {images.length > 0 && (
+        <div className="mb-2.5 grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-2.5">
+          {images.map((attachment) => (
+            <AttachmentTile
+              key={attachment.id}
+              attachment={attachment}
+              preview={preview}
+              meta={metaOf(attachment)}
+              action={
+                <button
+                  type="button"
+                  aria-label={`Remove ${attachment.filename}`}
+                  data-testid={`attachment-remove-${attachment.id}`}
+                  onClick={() => onRemove(attachment)}
+                  className="focus-ring absolute right-1.5 top-1.5 grid size-[26px] place-items-center rounded-full text-[var(--text-secondary)] opacity-0 outline-none backdrop-blur-[20px] transition-opacity hover:text-[var(--text-primary)] focus-visible:opacity-100 group-hover/tile:opacity-100"
+                  style={{ background: "var(--material-thick)", boxShadow: "var(--shadow-subtle)" }}
+                >
+                  <X size={12} strokeWidth={2.2} aria-hidden />
+                </button>
+              }
+            />
+          ))}
+        </div>
+      )}
+      {rows.map((attachment) => (
         <div
           key={attachment.id}
           data-testid={`attachment-row-${attachment.id}`}
@@ -62,9 +90,7 @@ export function AttachmentsSection({
             {isImageMime(attachment.mime) ? <ImageIcon size={13} strokeWidth={1.8} aria-hidden /> : <FileText size={13} strokeWidth={1.8} aria-hidden />}
           </a>
           <span className="ml-1.5 min-w-0 truncate font-medium text-[var(--text-primary)]">{attachment.filename}</span>
-          <span className="ml-auto flex-none text-[12px] text-[var(--text-quaternary)]">
-            {formatBytes(attachment.bytes)} · {uploaderLabel(attachment.uploadedBy, byName)} · {formatRelativeTime(attachment.createdAt)}
-          </span>
+          <span className="ml-auto flex-none text-[12px] text-[var(--text-quaternary)]">{metaOf(attachment)}</span>
           <button
             type="button"
             aria-label={`Remove ${attachment.filename}`}
@@ -98,6 +124,7 @@ export function AttachmentsSection({
         <Paperclip size={12} strokeWidth={2} aria-hidden className="mr-4" />
         Attach a file
       </button>
+      {preview.lightbox}
     </section>
   )
 }
