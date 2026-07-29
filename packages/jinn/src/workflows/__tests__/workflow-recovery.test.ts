@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import type { Employee, Engine, JinnConfig, ModelRegistry, WorkflowAttemptCommand, WorkflowAttemptCompletion,
   WorkflowAttemptCompletionListener } from "../../shared/types.js";
 import type { WorkflowDefinition, WorkflowNode } from "../model.js";
+import type { SessionManager } from "../../sessions/manager.js";
 import { openWorkflowDatabase } from "../repository-migrations.js";
 import { WorkflowRepository } from "../repository.js";
 import type { WorkflowSessionExecutor } from "../session-executor.js";
@@ -24,6 +25,7 @@ class DurableExecutor {
   readonly stopped: string[] = [];
   failStops = false;
   failStarts = 0;
+  terminalReader?: (sessionId: string) => WorkflowAttemptCompletion | null;
   private readonly listeners = new Set<WorkflowAttemptCompletionListener>();
   private readonly receipts = new Map<string, WorkflowAttemptCompletion>();
 
@@ -42,7 +44,9 @@ class DurableExecutor {
   subscribe(listener: WorkflowAttemptCompletionListener): () => void {
     this.listeners.add(listener); return () => { this.listeners.delete(listener); };
   }
-  readTerminalCompletion(sessionId: string): WorkflowAttemptCompletion | null { return this.receipts.get(sessionId) ?? null; }
+  readTerminalCompletion(sessionId: string): WorkflowAttemptCompletion | null {
+    return this.terminalReader?.(sessionId) ?? this.receipts.get(sessionId) ?? null;
+  }
   async settle(nodeId: string, outcome: "succeeded" | "failed", at: string): Promise<void> {
     const command = this.commands.filter((item) => item.owner.nodeId === nodeId).at(-1)!;
     const key = `${command.owner.runId}:${nodeId}:${command.owner.attempt}`;
@@ -63,7 +67,7 @@ let now: Date;
 function edge(id: string, from: string, port: string, to: string) {
   return { id, from: { nodeId: from, port }, to: { nodeId: to, port: "input" as const } };
 }
-function worker(id: string, attempts = 3, delaySeconds = 60): WorkflowNode {
+function worker(id: string, attempts = 3, delaySeconds = 60): Extract<WorkflowNode, { type: "employee" }> {
   return { id, type: "employee", name: id, config: { employee: { source: "fixed", value: "worker" }, prompt: `Run ${id}.`,
     retry: { attempts, delaySeconds, backoff: "exponential" }, timeoutMinutes: 1 } };
 }
@@ -181,6 +185,91 @@ describe("Workflow retry, cancellation, and restart recovery", () => {
     expect(recovered.attempts.map((attempt) => ({ attempt: attempt.attempt, status: attempt.status })))
       .toEqual([{ attempt: 1, status: "timed-out" }, { attempt: 2, status: "running" }]);
     expect(executor.stopped).toEqual([expect.stringContaining(":work:1")]);
+  });
+
+  it("retries a running phase attempt orphaned inside its timeout by a gateway restart", async () => {
+    const authoredWorker = worker("work", 2, 60);
+    const definition = linear("restart-orphan-flow", {
+      ...authoredWorker,
+      config: { ...authoredWorker.config, timeoutMinutes: 180 },
+    });
+    const created = repository.createRun({
+      workflowId: definition.id,
+      input: {},
+      trigger: { nodeId: "start", kind: "manual", payload: {} },
+    });
+    const registry = await import("../../sessions/registry.js");
+    const key = `workflow:${definition.id}:${created.id}:work:1`;
+    const session = registry.getOrCreateWorkflowAttemptSession({
+      engine: "test-engine",
+      source: "workflow",
+      sourceRef: key,
+      connector: "workflow",
+      sessionKey: key,
+      employee: "worker",
+      model: "test-model",
+      effortLevel: "high",
+      prompt: "Run work.",
+      workflowProvenance: {
+        kind: "phase",
+        workflowId: definition.id,
+        workflowName: definition.id,
+        runId: created.id,
+        triggerSource: "manual",
+        phase: { nodeId: "work", name: "work", index: 1, round: 1, attempt: 1 },
+      },
+    });
+    registry.updateSession(session.id, { status: "running" });
+    const config = {
+      employeeId: "worker",
+      engine: "test-engine",
+      model: "test-model",
+      effort: "high" as const,
+      retry: { attempts: 2, delaySeconds: 60, backoff: "exponential" as const },
+      timeoutMinutes: 180,
+    };
+    const detail = repository.getRun(definition.id, created.id)!;
+    repository.mutateRun(detail.id, detail.revision, (tx) => {
+      tx.setRunStatus("running");
+      tx.setNodeStatus("start", "completed", {
+        activated: true,
+        startedAt: now.toISOString(),
+        endedAt: now.toISOString(),
+      });
+      tx.setNodeStatus("work", "running", {
+        activated: true,
+        resolvedConfig: config,
+        input: {},
+        startedAt: now.toISOString(),
+      });
+      const attempt = tx.createAttempt({ nodeId: "work", resolvedConfig: config, input: {} });
+      tx.settleAttempt("work", attempt.attempt, { status: "running", sessionId: session.id });
+    });
+    const { WorkflowSessionExecutor: ReceiptReader } = await import("../session-executor.js");
+    const receiptReader = new ReceiptReader(
+      {} as SessionManager,
+      (sessionId) => {
+        const stored = registry.getSession(sessionId);
+        return stored ? { session: stored } : null;
+      },
+    );
+    executor.terminalReader = (sessionId) => receiptReader.readTerminalCompletion(sessionId);
+
+    now = new Date("2026-07-21T10:05:00.000Z");
+    const recovery = registry as typeof registry & {
+      recoverStaleWorkflowAttemptSessions?: () => number;
+    };
+    // Keep the call optional so reverting the boot sweep proves the incident
+    // assertion below instead of failing earlier on a missing export.
+    recovery.recoverStaleWorkflowAttemptSessions?.();
+    await service.recover(now.toISOString());
+
+    const recovered = service.getRun(definition.id, created.id)!;
+    expect(recovered.nodeRuns.find((node) => node.nodeId === "work")).toMatchObject({
+      status: "waiting",
+      resumeAt: expect.any(String),
+    });
+    expect(recovered.status).toBe("waiting");
   });
 
   it("recovers persisted dispatch intent and post-dispatch crash without duplicate session or attempt", async () => {

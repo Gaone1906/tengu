@@ -19,7 +19,7 @@ import {
   refreshPiModels,
 } from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
-import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, getMessages, RESTART_ACK_META_KEY } from "../sessions/registry.js";
+import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleWorkflowAttemptSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, getMessages, RESTART_ACK_META_KEY } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
 import { recoverSessionDeliveryStateOnStartup } from "../sessions/callbacks.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
@@ -342,6 +342,10 @@ export async function startGateway(
   const recovered = recoverStaleSessions();
   if (recovered > 0) {
     logger.info(`Recovered ${recovered} stale session(s) — marked as "interrupted" for resume`);
+  }
+  const recoveredWorkflowAttempts = recoverStaleWorkflowAttemptSessions();
+  if (recoveredWorkflowAttempts > 0) {
+    logger.info(`Recovered ${recoveredWorkflowAttempts} stale workflow attempt session(s) after gateway restart`);
   }
   // GRS-003a split-brain fix: the sessions just flipped running→interrupted above, so any
   // work item still marked `executing` on the strength of one of those sessions is now stale.

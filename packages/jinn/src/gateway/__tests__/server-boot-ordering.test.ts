@@ -15,6 +15,16 @@ function callIndex(expr: string): number {
 }
 
 describe('gateway boot ordering', () => {
+  it('settles orphaned workflow attempts once before workflow recovery and listen', () => {
+    const sweep = callIndex('recoverStaleWorkflowAttemptSessions()');
+    const recover = callIndex('await workflowService.recover(new Date().toISOString())');
+    const listen = callIndex('server.listen(port, host)');
+
+    expect(sweep).toBeLessThan(recover);
+    expect(sweep).toBeLessThan(listen);
+    expect(serverSource.indexOf('recoverStaleWorkflowAttemptSessions()', sweep + 1)).toBe(-1);
+  });
+
   it('defers the work-item startup reconcile past server.listen() (perf: accept requests first)', () => {
     const listen = callIndex('server.listen(port, host)');
     const reconcile = callIndex('reconcileWorkItemsOnStartup()');

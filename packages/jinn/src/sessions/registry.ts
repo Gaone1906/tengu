@@ -2387,6 +2387,44 @@ export function recoverStaleSessions(): number {
   return result.changes;
 }
 
+/** Settle workflow attempts whose engine process was lost with the old gateway. */
+export function recoverStaleWorkflowAttemptSessions(): number {
+  const database = initDb();
+  const now = new Date().toISOString();
+  return database.transaction(() => {
+    database.prepare(`
+      UPDATE queue_items
+      SET status = 'cancelled'
+      WHERE internal = 1
+        AND status IN ('pending', 'running')
+        AND EXISTS (
+          SELECT 1
+          FROM sessions
+          WHERE sessions.id = queue_items.session_id
+            AND sessions.status = 'running'
+            AND sessions.workflow_kind = 'phase'
+            AND sessions.attempt_outcome IS NULL
+            AND sessions.attempt_terminal_version = 0
+        )
+    `).run();
+    return database.prepare(`
+      UPDATE sessions
+      SET status = 'interrupted',
+        attempt_outcome = 'interrupted',
+        attempt_terminal_version = 1,
+        attempt_turn = MAX(attempt_turn, 1),
+        attempt_interruption_cause = NULL,
+        attempt_interruption_turn = NULL,
+        last_activity = ?,
+        last_error = 'Interrupted: gateway restarted while workflow attempt was running'
+      WHERE status = 'running'
+        AND workflow_kind = 'phase'
+        AND attempt_outcome IS NULL
+        AND attempt_terminal_version = 0
+    `).run(now).changes;
+  }).immediate();
+}
+
 /**
  * Turn restart requests recorded by the old gateway into durable chat notices
  * after the replacement gateway is listening. Message insertion and marker
