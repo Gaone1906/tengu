@@ -321,7 +321,9 @@ describe("PATCH /api/work-items/:id — widened edit authority (spec §3.4)", ()
  * The fourth edit relation: a phase of a workflow run bound to the Todo. The
  * binding already existed on both sides (`run.trigger.todoId` and the phase
  * session's provenance) but authorization did not consult it, so every phase of
- * a Todo-triggered pipeline got a 403 on the Todo it was running for.
+ * a Todo-triggered pipeline got a 403 on the Todo it was running for. Status is
+ * no longer part of this grant — it is open to every session, and its tests live
+ * with the status route.
  */
 describe("PATCH /api/work-items/:id — a workflow run bound to the Todo", () => {
   let phase = 0;
@@ -372,23 +374,6 @@ describe("PATCH /api/work-items/:id — a workflow run bound to the Todo", () =>
       expect(cap.body.error).toContain(`"${Object.keys(patch)[0]}"`);
     }
     expect(store.getWorkItem(item.id)!.title).toBe("pipeline limits");
-  });
-
-  it("moves its Todo's status but still cannot mark it done — the self-review ban is unchanged", async () => {
-    const item = store.createWorkItem({ title: "pipeline status move" });
-    runs.set("build-pipeline/run-status", { trigger: { todoId: item.id } });
-    const session = phaseSession("run-status");
-
-    const executing = await call("POST", `/api/work-items/${item.id}/status`, { status: "executing" }, toolHeaders(session.id));
-    expect(executing.status).toBe(200);
-    expect(executing.body.workItem.status).toBe("executing");
-
-    const review = await call("POST", `/api/work-items/${item.id}/status`, { status: "in_review" }, toolHeaders(session.id));
-    expect(review.status).toBe(200);
-
-    const done = await call("POST", `/api/work-items/${item.id}/status`, { status: "done" }, toolHeaders(session.id));
-    expect(done.status).toBe(403);
-    expect(store.getWorkItem(item.id)!.status).toBe("in_review");
   });
 
   it("a phase of a run bound to a DIFFERENT Todo is still a stranger, and so is an unrelated employee", async () => {

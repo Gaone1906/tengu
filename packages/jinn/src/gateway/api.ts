@@ -1952,36 +1952,40 @@ function resolveTodoEditAuthority(caller: WorkItemCaller, item: WorkItem, boundW
   };
 }
 
+/** Every refusal here names the way forward, because the way forward always
+ *  exists: the executor moves the Todo to `in_review` and asks for approval. */
 function canReviewWorkItemDone(session: Session, item: WorkItem, linked: Session[]): { ok: true } | { ok: false; error: string } {
+  const instead = `completion is the reviewer's — move Todo ${item.id} to in_review and request approval`;
   if (item.status !== 'in_review') {
-    return { ok: false, error: `marking a Todo done through MCP requires an authorized reviewer and an item already in_review; use the human review surface for ${item.status} → done` };
+    return { ok: false, error: `Todo ${item.id} is ${item.status}, and done is not an agent shortcut: ${instead}` };
   }
   if (linked.some((s) => s.id === session.id)) {
-    return { ok: false, error: `session ${session.id} executed work item ${item.id} and cannot mark it done — a reviewer does (self-review ban); use the human review surface / a reviewer session to mark done` };
+    return { ok: false, error: `session ${session.id} executed Todo ${item.id} and cannot close it (self-review ban): ${instead}, or close it from the reviewer session / the human review surface` };
   }
   if (linked.some((s) => s.parentSessionId === session.id)) return { ok: true };
   if (item.sourceRef?.startsWith(`delegate:${session.id}:`)) return { ok: true };
   if (item.source === 'session' && item.sourceRef?.startsWith(`session:${session.id}:`)) return { ok: true };
-  return { ok: false, error: `session ${session.id} is not an authorized reviewer for Todo ${item.id}; use the human review surface or the parent reviewer session` };
+  return { ok: false, error: `session ${session.id} is not Todo ${item.id}'s reviewer: ${instead}, or close it from the reviewer session / the human review surface` };
 }
 
-function authorizeAgentWorkItemStatus(caller: WorkItemCaller, item: WorkItem, target: WorkItemStatus, boundWorkflowRun: boolean): { ok: true } | { ok: false; status: 403; error: string } {
-  if (caller.kind === 'operator') return { ok: true };
-  const linked = listSessionsByWorkItem(item.id);
-  if (target === 'done') {
-    // The bound run is deliberately NOT an owner here: a pipeline that executed
-    // the work does not get to close it, exactly like every other executor.
-    const review = canReviewWorkItemDone(caller.session, item, linked);
-    return review.ok ? { ok: true } : { ok: false, status: 403, error: review.error };
-  }
-  if (!boundWorkflowRun && !ownsWorkItem(caller.session, item, linked)) {
-    return {
-      ok: false,
-      status: 403,
-      error: `session ${caller.callerId} does not own Todo ${item.id} and is not its authorized reviewer; agents may update only their own Todos, otherwise use the human surface`,
-    };
-  }
-  return { ok: true };
+/**
+ * Status is the one Todo write open to every authenticated session.
+ *
+ * Gating it on a relationship to the Todo bought nothing and cost honesty: a
+ * participant that could do the work could not say where it had got to, and had
+ * to ask someone with standing to perform the write for it. Status is low-stakes
+ * and every participant needs it, so it is open — and each new caller arrives
+ * without needing its own relation and its own 403.
+ *
+ * Two targets stay closed. `done` is withheld here because "never close your own
+ * work" is the basis of the review model. `cancelled` has no agent lane at all
+ * and the route refuses it before this point, where cancellation's separate
+ * archive path is chosen.
+ */
+function authorizeAgentWorkItemStatus(caller: WorkItemCaller, item: WorkItem, target: WorkItemStatus): { ok: true } | { ok: false; status: 403; error: string } {
+  if (caller.kind === 'operator' || target !== 'done') return { ok: true };
+  const review = canReviewWorkItemDone(caller.session, item, listSessionsByWorkItem(item.id));
+  return review.ok ? { ok: true } : { ok: false, status: 403, error: review.error };
 }
 
 function levenshtein(a: string, b: string): number {
@@ -3711,7 +3715,7 @@ export async function handleApiRequest(
       }
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
-      const authorized = authorizeAgentWorkItemStatus(caller, item, target as WorkItemStatus, callerRunsWorkflowForTodo(caller, item, context));
+      const authorized = authorizeAgentWorkItemStatus(caller, item, target as WorkItemStatus);
       if (!authorized.ok) return json(res, { error: authorized.error }, authorized.status);
       // The banner's asked-for-after reason (design-doc §5): a same-status
       // operator PUT with a note annotates the CURRENT exception state instead

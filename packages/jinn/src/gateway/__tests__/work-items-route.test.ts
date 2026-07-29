@@ -20,6 +20,12 @@ fs.writeFileSync(
   path.join(tmp, "org", "platform-worker.yaml"),
   "name: platform-worker\ndisplayName: Platform Worker\ndepartment: platform\nrank: employee\nengine: codex\nmodel: default\npersona: Generic route-test worker.\n",
 );
+// Unrelated to platform-worker in every direction: no shared department, no
+// reporting line. Drives the "any authenticated session" status lane.
+fs.writeFileSync(
+  path.join(tmp, "org", "solo-worker.yaml"),
+  "name: solo-worker\ndisplayName: Solo Worker\ndepartment: marketing\nrank: employee\nengine: codex\nmodel: default\npersona: Generic route-test loner.\n",
+);
 
 type Api = typeof import("../api.js");
 type Reg = typeof import("../../sessions/registry.js");
@@ -1886,6 +1892,97 @@ describe("PUT /api/work-items/:id/status — the operator human-surface lane (To
     expect(exitTry.status).toBe(403);
     expect(exitTry.body.error).toMatch(/human decision/);
     expect(store.getWorkItem(sticky.id)?.status).toBe("done");
+  });
+});
+
+/* Status is the one Todo write open to every authenticated session: the
+ * relationship graph that used to gate it (creator / assignee / assignee's
+ * manager / bound workflow run) is gone, and only `done` and `cancelled` stay
+ * closed. */
+describe("POST /api/work-items/:id/status — open to any authenticated session", () => {
+  const operatorHeaders = { authorization: "Bearer test-token" };
+
+  function toolHeaders(sessionId: string): Record<string, string> {
+    return {
+      [TOOL_CALL_HEADER]: TOOL_CALL_HEADER_VALUE,
+      [CALLER_SESSION_HEADER]: sessionId,
+      [CALLER_SESSION_CAPABILITY_HEADER]: ensureSessionCapability(sessionId),
+    };
+  }
+
+  /** No relation to the Todo under test: not its creator, assignee, assignee's
+   *  manager, linked execution attempt, or the run of any workflow. */
+  function strangerSession(sourceRef: string) {
+    return reg.createSession({ engine: "codex", source: "web", sourceRef, employee: "solo-worker" });
+  }
+
+  async function post(itemId: string, body: unknown, headers: Record<string, string>) {
+    const cap = makeRes();
+    await api.handleApiRequest(makeReq("POST", `/api/work-items/${itemId}/status`, body, headers), cap.res, ctx);
+    return cap;
+  }
+
+  it.each(["executing", "in_review", "blocked", "escalated"] as const)(
+    "lets an unrelated employee session move a Todo it has no relationship to into %s",
+    async (target) => {
+      const item = store.createWorkItem({ title: `Stranger reports ${target}`, status: "assigned", assignee: "platform-worker" });
+      const cap = await post(item.id, { status: target, note: "reporting from elsewhere" }, toolHeaders(strangerSession(`open-status-${target}`).id));
+
+      expect([cap.status, cap.body.workItem?.status]).toEqual([200, target]);
+    },
+  );
+
+  it("refuses that same session done and cancelled, and the done refusal names the way forward", async () => {
+    const item = store.createWorkItem({ title: "Stranger cannot close", status: "in_review", assignee: "platform-worker" });
+    const session = strangerSession("open-status-closed-targets");
+
+    const done = await post(item.id, { status: "done" }, toolHeaders(session.id));
+    expect(done.status).toBe(403);
+    expect(done.body.error).toMatch(/completion is the reviewer's.*in_review.*request approval/i);
+
+    const cancelled = await post(item.id, { status: "cancelled" }, toolHeaders(session.id));
+    expect(cancelled.status).toBe(403);
+    expect(cancelled.body.error).toMatch(/human surface decision/i);
+
+    expect(store.getWorkItem(item.id)?.status).toBe("in_review");
+  });
+
+  it("keeps the self-review ban: the executing session cannot close its own Todo, its reviewer can", async () => {
+    const reviewer = reg.createSession({ engine: "codex", source: "web", sourceRef: "open-status-reviewer" });
+    const executor = reg.createSession({ engine: "codex", source: "web", sourceRef: "open-status-executor", parentSessionId: reviewer.id });
+    const item = store.createWorkItem({
+      title: "Self-review still banned",
+      status: "executing",
+      source: "delegation",
+      sourceRef: `delegate:${reviewer.id}:open-status`,
+    });
+    store.linkSession(item.id, executor.id);
+
+    const handed = await post(item.id, { status: "in_review" }, toolHeaders(executor.id));
+    expect(handed.status).toBe(200);
+
+    const selfClose = await post(item.id, { status: "done" }, toolHeaders(executor.id));
+    expect(selfClose.status).toBe(403);
+    expect(selfClose.body.error).toMatch(/self-review ban/i);
+    expect(store.getWorkItem(item.id)?.status).toBe("in_review");
+
+    const closed = await post(item.id, { status: "done" }, toolHeaders(reviewer.id));
+    expect([closed.status, store.getWorkItem(item.id)?.status]).toEqual([200, "done"]);
+  });
+
+  it("leaves the operator lanes unaffected: POST done closes, PUT cancels", async () => {
+    const reviewed = store.createWorkItem({ title: "Operator closes", status: "in_review" });
+    const done = await post(reviewed.id, { status: "done" }, operatorHeaders);
+    expect([done.status, done.body.workItem.status]).toEqual([200, "done"]);
+
+    const live = store.createWorkItem({ title: "Operator cancels", status: "assigned" });
+    const cancelled = makeRes();
+    await api.handleApiRequest(
+      makeReq("PUT", `/api/work-items/${live.id}/status`, { status: "cancelled" }, operatorHeaders),
+      cancelled.res,
+      ctx,
+    );
+    expect([cancelled.status, cancelled.body.workItem.status]).toEqual([200, "cancelled"]);
   });
 });
 

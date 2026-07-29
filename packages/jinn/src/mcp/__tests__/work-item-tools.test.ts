@@ -646,7 +646,7 @@ describe("work-item tools — integration against the real API + store", () => {
     expect(closed.workItem.status).toBe("done");
   });
 
-  it("enforces Todo status ownership and forbids backlog to done through an agent caller", async () => {
+  it("lets any employee report status but forbids backlog to done through an agent caller", async () => {
     const owner = registry.createSession({ engine: "codex", source: "web", sourceRef: "owner", title: "owner", employee: "platform-dev" });
     const other = registry.createSession({ engine: "codex", source: "web", sourceRef: "other", title: "other", employee: "other-dev" });
 
@@ -656,11 +656,11 @@ describe("work-item tools — integration against the real API + store", () => {
     );
     expect(store.getWorkItem(backlog.id)?.status).toBe("backlog");
 
-    const unowned = store.createWorkItem({ title: "Owned by another assignee", status: "assigned", assignee: "platform-dev", source: "session" });
-    await expect(tool("update_work_item").handler({ id: unowned.id, status: "blocked", note: "waiting" }, ctxFor(other.id))).rejects.toThrow(
-      /does not own.*Todo|authorized reviewer/i,
-    );
-    expect(store.getWorkItem(unowned.id)?.status).toBe("assigned");
+    const unowned = store.createWorkItem({ title: "Assigned to someone else", status: "assigned", assignee: "platform-dev", source: "session" });
+    const reported = (await tool("update_work_item").handler({ id: unowned.id, status: "blocked", note: "waiting" }, ctxFor(other.id))) as {
+      workItem: { status: string };
+    };
+    expect(reported.workItem.status).toBe("blocked");
 
     const owned = store.createWorkItem({ title: "Owner may report blocked", status: "assigned", assignee: "platform-dev", source: "session" });
     const blocked = (await tool("update_work_item").handler({ id: owned.id, status: "blocked", note: "waiting on input" }, ctxFor(owner.id))) as {
