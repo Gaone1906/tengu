@@ -507,3 +507,80 @@ describe("POST /api/work-items/:id/approval — an operator-only mirrored gate",
     expect(manager.body.workItem.approvalDecidedBy).toBe("platform-manager");
   });
 });
+
+/* The same reservation on a NATIVE gate — one with no workflow behind it. It is
+ * stored in `work_item_approval_operator_only`, a table keyed on the approval
+ * id, because `work_item_approvals.target_kind` carries a CHECK constraint the
+ * exact-shape boot preflight covers: a MISSING additive table heals on boot, an
+ * ALTERED one makes every existing database refuse to start. */
+describe("POST /api/work-items/:id/approval — a native operator-only gate", () => {
+  async function requestGate(body: Record<string, unknown>, headers = workerHeaders()) {
+    const item = store.createWorkItem({
+      title: "native reserved", status: "in_review", source: "human",
+      assignee: "platform-worker", department: "platform",
+    });
+    const resp = await call("POST", `/api/work-items/${item.id}/approval/request`, body, headers);
+    return { item, resp };
+  }
+
+  it("records the reservation on the Todo it was requested for", async () => {
+    const { item, resp } = await requestGate({ request: "Ship it?", operatorOnly: true });
+    expect(resp.status).toBe(200);
+    expect(resp.body.workItem.approvalOperatorOnly).toBe(true);
+    expect(approvals.currentApproval(item.id)!.operatorOnly).toBe(true);
+  });
+
+  it("refuses the routed manager, the COO, and the COO after an escalation", async () => {
+    const { item } = await requestGate({ request: "Ship it?", operatorOnly: true });
+
+    const manager = await decide(item.id, { decision: "approve" }, managerHeaders());
+    expect(manager.status).toBe(403);
+    expect(manager.body.error).toContain("operator-only");
+
+    const coo = await decide(item.id, { decision: "approve" }, cooHeaders());
+    expect(coo.status).toBe(403);
+
+    // Escalation is refused too, so it cannot be used to reach the executive path.
+    const escalate = await call("POST", `/api/work-items/${item.id}/approval/escalate`, {}, managerHeaders());
+    expect(escalate.status).toBe(403);
+    expect(store.getWorkItem(item.id)!.approvalEscalatedAt).toBeNull();
+
+    const cooAgain = await decide(item.id, { decision: "approve" }, cooHeaders());
+    expect(cooAgain.status).toBe(403);
+    expect(store.getWorkItem(item.id)!.approvalState).toBe("pending");
+  });
+
+  it("lets the operator decide it", async () => {
+    const { item } = await requestGate({ request: "Ship it?", operatorOnly: true });
+    const operator = await decide(item.id, { decision: "approve", note: "shipped" }, {});
+    expect(operator.status).toBe(200);
+    expect(operator.body.workItem).toMatchObject({ approvalState: "approved", approvalDecidedBy: "operator" });
+  });
+
+  it("refuses a reservation that also names an employee target", async () => {
+    const { resp } = await requestGate({ request: "Ship it?", operatorOnly: true, target: "platform-manager" });
+    expect(resp.status).toBe(400);
+    expect(resp.body.error).toContain("operator-only");
+  });
+
+  it("rejects a non-boolean operatorOnly", async () => {
+    const { resp } = await requestGate({ request: "Ship it?", operatorOnly: "yes" });
+    expect(resp.status).toBe(400);
+  });
+
+  it("defaults to ordinary routing, and re-requesting drops a reservation", async () => {
+    const { item, resp } = await requestGate({ request: "Ship it?" });
+    expect(resp.status).toBe(200);
+    expect(resp.body.workItem.approvalOperatorOnly).toBe(false);
+
+    await call("POST", `/api/work-items/${item.id}/approval/request`, { request: "Ship it?", operatorOnly: true }, workerHeaders());
+    expect(approvals.currentApproval(item.id)!.operatorOnly).toBe(true);
+
+    // Re-routing the one pending gate re-states the reservation rather than
+    // leaving a stale row behind.
+    await call("POST", `/api/work-items/${item.id}/approval/request`, { request: "Ship it?", target: "platform-manager" }, workerHeaders());
+    expect(approvals.currentApproval(item.id)!.operatorOnly).toBe(false);
+    const manager = await decide(item.id, { decision: "approve" }, managerHeaders());
+    expect(manager.status).toBe(200);
+  });
+});

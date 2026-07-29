@@ -26,6 +26,9 @@ export interface WorkItemApproval {
   options: string[] | null;
   /** The picked option, once an approve decision carried one. */
   choice: string | null;
+  /** Reserved for the human operator: no employee may decide it, not the COO
+   *  and not through escalation. */
+  operatorOnly: boolean;
   target: string | null;
   targetKind: ApprovalTargetKind | null;
   requestedBy: string;
@@ -59,6 +62,7 @@ function rowToApproval(row: Record<string, unknown>): WorkItemApproval {
     ref: (row.ref as string) ?? null,
     options,
     choice: options ? ((row.choice_value as string) ?? null) : null,
+    operatorOnly: row.operator_only_id != null,
     target: (row.target as string) ?? null,
     targetKind: (row.target_kind as ApprovalTargetKind) ?? null,
     requestedBy: row.requested_by as string,
@@ -80,11 +84,14 @@ function pickCurrent(history: WorkItemApproval[]): WorkItemApproval | undefined 
     .at(-1) ?? history.at(-1);
 }
 
-/** Every read joins the optional choice extension, so `options`/`choice` are
- *  present on an approval regardless of which read path produced it. */
-const SELECT_APPROVALS = `SELECT a.*, c.options AS choice_options, c.choice AS choice_value
+/** Every read joins the optional extensions, so `options`/`choice` and the
+ *  operator reservation are present on an approval regardless of which read path
+ *  produced it. */
+const SELECT_APPROVALS = `SELECT a.*, c.options AS choice_options, c.choice AS choice_value,
+     o.approval_id AS operator_only_id
    FROM work_item_approvals a
-   LEFT JOIN work_item_approval_choices c ON c.approval_id = a.id`;
+   LEFT JOIN work_item_approval_choices c ON c.approval_id = a.id
+   LEFT JOIN work_item_approval_operator_only o ON o.approval_id = a.id`;
 
 /** Full approval history for one item, oldest request first. */
 export function listApprovals(workItemId: string): WorkItemApproval[] {

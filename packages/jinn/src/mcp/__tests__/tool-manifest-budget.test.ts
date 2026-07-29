@@ -24,10 +24,13 @@ const ATTESTED = {
   //     other identity to act as.
   //   - "Read-only." on get_employee — the only tool that claimed it, and no other
   //     `get_`/`list_` tool needs to.
-  // Pi lands 17 tokens under, down from 37.
-  rpc: { tokens: 4461, sha256: "233711e7df5184e60d0629a5597f52fe178fec423f039207e5ee72dd3081cb98" },
-  pi: { tokens: 4894, sha256: "29a0fe6c3af9cea9e17c594bc637d70c697098f63bdcfcc70a13a634a9ef2858" },
-  openai: { tokens: 4636, sha256: "0ebaf39cfc428e3bca934a8678bfba241883ee1dd72379c3dfe661584e49e348" },
+  // Rebased again for `operatorOnly` on request_work_item_approval — the flag
+  // that reserves a Todo gate for the human operator. It costs 8 tokens and
+  // leaves Pi 9 under the ceiling, down from 17. The next addition to this
+  // surface has to buy its own room back; there is no longer slack to spend.
+  rpc: { tokens: 4469, sha256: "afeb3867597db22fcf597ece972dac3afc3a8a7514013f35b5f41ff2059140b0" },
+  pi: { tokens: 4902, sha256: "0b781a377c805f6c19efc972c30928a853550165287e2c046dd9d6e310103ea2" },
+  openai: { tokens: 4644, sha256: "90c1ea5cc8fa27f7ce3056866ab61bb4c2ea5c57af179875edbec1f5c57871b6" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;

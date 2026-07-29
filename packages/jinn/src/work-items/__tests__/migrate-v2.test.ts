@@ -263,4 +263,32 @@ describe("work_item_approvals self-heal + verifier", () => {
     expect(() => migrate.verifyCurrentWorkItemSchema(db)).toThrow(/Unsupported prerelease/);
     db.close();
   });
+
+  // The whole reason the operator reservation is its own table: a database that
+  // predates it must still boot, and heal on the way in.
+  it("boots a v2 DB missing the operator-only table additively", () => {
+    const file = path.join(tmp, "registry-heal-operator-only.db");
+    const db = freshV2(file);
+    seedItemWithColumns(db, { state: "pending", request: "reserve me", target: "coo", target_kind: "employee" });
+    db.exec("DROP TABLE work_item_approval_operator_only");
+    db.close();
+
+    expect(migrate.preflightWorkItemsDatabase(file)).toBe("current");
+
+    const reopened = new Database(file);
+    migrate.registerWorkItemIdentityFunctions(reopened);
+    expect(migrate.migrateWorkItemsSchema(reopened).rebuilt).toBe(false);
+    migrate.verifyCurrentWorkItemSchema(reopened);
+    expect(reopened.prepare("SELECT count(*) AS n FROM work_item_approval_operator_only").get()).toEqual({ n: 0 });
+    reopened.close();
+  });
+
+  it("verifier refuses an operator-only table whose shape drifted", () => {
+    const file = path.join(tmp, "registry-verify-operator-only-drift.db");
+    const db = freshV2(file);
+    db.exec("DROP TABLE work_item_approval_operator_only");
+    db.exec("CREATE TABLE work_item_approval_operator_only (approval_id TEXT PRIMARY KEY, reserved_by TEXT)");
+    expect(() => migrate.verifyCurrentWorkItemSchema(db)).toThrow(/Unsupported prerelease/);
+    db.close();
+  });
 });

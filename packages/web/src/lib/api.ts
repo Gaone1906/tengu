@@ -577,6 +577,9 @@ export interface WorkItemCompactWire {
   /** Offered variants when the pending gate asks for a PICK (older gateways omit). */
   approvalOptions?: string[] | null
   approvalChoice?: string | null
+  /** The gate is reserved for the operator: no employee may decide it, not the
+   *  COO and not through escalation (older gateways omit). */
+  approvalOperatorOnly?: boolean
   approvalTarget: string | null
   approvalEscalatedAt: string | null
   sessionRef?: WorkItemSessionRefWire | null

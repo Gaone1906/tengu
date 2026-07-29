@@ -234,6 +234,7 @@ import { reconcileWorkItem } from "../work-items/reconcile.js";
 import {
   archiveWorkItem,
   ApprovalChoiceError,
+  currentApproval,
   decideWorkItemApproval,
   escalateApproval,
   listApprovals,
@@ -1049,6 +1050,7 @@ function compactWorkItem(
     approvalRef: item.approvalRef,
     approvalOptions: item.approvalOptions,
     approvalChoice: item.approvalChoice,
+    approvalOperatorOnly: item.approvalOperatorOnly,
     approvalTarget: item.approvalTarget,
     approvalEscalatedAt: item.approvalEscalatedAt,
     sessionRef: sessionRef(item),
@@ -1665,6 +1667,14 @@ function rejectUnverifiedIdentifiedApiCaller(req: HttpRequest, res: ServerRespon
     && [...FORWARDED_REQUEST_HEADERS].some((name) => requestHeaderValues(req, name).length > 0);
   json(res, { error: proxiedWithoutAuth ? PROXIED_OPERATOR_AUTH_ERROR : UNIDENTIFIED_TOOL_CALL_ERROR }, 403);
   return true;
+}
+
+/** A gate is reserved for the human operator either because the Todo approval
+ *  was requested that way, or because it mirrors a workflow Approval node the
+ *  definition declared operator-only. Both decision surfaces read this one
+ *  answer, so escalating cannot open a path that deciding refuses. */
+function approvalReservedForOperator(item: WorkItem, service: WorkflowService | undefined): boolean {
+  return currentApproval(item.id)?.operatorOnly === true || approvalIsOperatorOnly(item, service);
 }
 
 function operatorOnlyControlPlaneRoute(method: string, pathname: string): string | null {
@@ -4351,12 +4361,21 @@ export async function handleApiRequest(
       if (body.options !== undefined && !Array.isArray(body.options)) {
         return badRequest(res, "options must be an array of labels when provided");
       }
+      if (body.operatorOnly !== undefined && typeof body.operatorOnly !== "boolean") {
+        return badRequest(res, "operatorOnly must be a boolean when provided");
+      }
+      // Reserving a gate for the operator and routing it at an employee are
+      // contradictory instructions; refuse rather than silently honour one.
+      if (body.operatorOnly === true && target) {
+        return badRequest(res, "an operator-only approval cannot also be routed to an employee target");
+      }
       let updated: WorkItem;
       try {
         updated = requestApproval(params.id, {
           request,
           ...(body.options !== undefined ? { options: body.options as string[] } : {}),
           ...(target ? { target } : {}),
+          ...(body.operatorOnly === true ? { operatorOnly: true } : {}),
           actor: workItemActor(caller),
         });
       } catch (err) {
@@ -4397,7 +4416,7 @@ export async function handleApiRequest(
       const authority = resolveApprovalDecisionAuthority(req.headers, item, {
         operatorCanActOnRootTarget: true,
         operatorAuthenticated: scopedOperatorAuthenticated(req, context),
-        operatorOnly: approvalIsOperatorOnly(item, context.workflowService),
+        operatorOnly: approvalReservedForOperator(item, context.workflowService),
       });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
 
@@ -4431,9 +4450,12 @@ export async function handleApiRequest(
       if (!requireTodoRouteId(res, params.id)) return;
       const item = getWorkItem(params.id);
       if (!item) return notFound(res);
+      // Same reservation the decision surface reads: escalating an operator-only
+      // gate must not open an employee path to it that deciding refuses.
       const authority = resolveApprovalDecisionAuthority(req.headers, item, {
         operatorCanActOnRootTarget: true,
         operatorAuthenticated: scopedOperatorAuthenticated(req, context),
+        operatorOnly: approvalReservedForOperator(item, context.workflowService),
       });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
       const body = (parsed.body ?? {}) as { reason?: unknown };

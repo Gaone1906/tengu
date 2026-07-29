@@ -108,6 +108,16 @@ describe("NeedsYouView", () => {
     expect(onApprove).toHaveBeenCalledWith("wi_private_approval")
   })
 
+  it("marks a pending gate that is reserved for the operator", () => {
+    renderView([item("wi_reserved", "in_review", "pending", { approvalOperatorOnly: true })])
+    expect(screen.getByTestId("needs-operator-only")).toBeTruthy()
+  })
+
+  it("leaves an ordinary pending gate unmarked", () => {
+    renderView([item("wi_ordinary", "in_review", "pending")])
+    expect(screen.queryByTestId("needs-operator-only")).toBeNull()
+  })
+
   it("opens a send-back composer and posts the note", () => {
     const { onSendBack } = renderView([item("wi_private_approval", "in_review", "pending")])
     fireEvent.click(screen.getByTestId("needs-sendback"))

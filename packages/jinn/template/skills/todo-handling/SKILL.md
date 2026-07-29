@@ -75,6 +75,8 @@ Approvals are routed records on a Todo, separate from its lifecycle status. Gene
 
    Omit `target` to use the default routed manager/COO. Repeating the identical pending request with the same target is idempotent and does not append another approval-requested event. A changed request or target replaces the pending route; there is no self-declared approval state on `create_work_item`.
 
+   Set `operatorOnly: true` to reserve the gate for the human operator when the decision authorizes something irreversible. No employee can then decide it, including the COO and including after an escalation, and the escalation itself is refused. It cannot be combined with `target`.
+
 2. The routed manager/COO decides with `decide_work_item_approval` and an optional evidence note:
 
 ```json

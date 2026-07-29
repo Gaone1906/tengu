@@ -55,6 +55,7 @@ export function buildApprovalTools(): JinnMcpTool[] {
         request: { type: "string" },
         options: { type: "array", items: { type: "string" } },
         target: { type: "string" },
+        operatorOnly: { type: "boolean" },
       },
       required: ["id", "request"],
     },
@@ -71,6 +72,11 @@ export function buildApprovalTools(): JinnMcpTool[] {
       }
       const target = optionalString(args, "target");
       if (target !== undefined) payload.target = target;
+      const operatorOnly = args.operatorOnly;
+      if (operatorOnly !== undefined) {
+        if (typeof operatorOnly !== "boolean") throw new JinnMcpToolError("operatorOnly must be a boolean");
+        payload.operatorOnly = operatorOnly;
+      }
       const { status, body } = await gatewayRequest(ctx, "POST", `/api/work-items/${encodeURIComponent(id)}/approval/request`, payload);
       if (status >= 400) throw gatewayFailure(`requesting approval for work item "${id}"`, status, body);
       return mutationResult(body, "Approval requested.");

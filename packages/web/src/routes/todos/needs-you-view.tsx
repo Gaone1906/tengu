@@ -243,6 +243,15 @@ function NeedsYouCard({
           <WorkRef item={item} />
         )}
         <span className="text-[11px] text-[var(--text-quaternary)]">{formatRelativeTime(item.updatedAt)}</span>
+        {pending && item.approvalOperatorOnly && (
+          <span
+            data-testid="needs-operator-only"
+            title="No employee can decide this gate, including the COO and through escalation."
+            className="rounded-full bg-[var(--fill-tertiary)] px-2 py-0.5 text-[11px] font-medium text-[var(--text-secondary)]"
+          >
+            Yours only
+          </span>
+        )}
       </div>
 
       {/* …and their words behind the thread-rail (quote at 58px). */}

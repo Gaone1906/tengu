@@ -311,6 +311,17 @@ CREATE TABLE IF NOT EXISTS work_item_approval_choices (
   choice      TEXT
 )`;
 
+/** Gates reserved for the human operator: a row here means NO employee may
+ *  decide this approval, not the COO and not through escalation. Presence IS the
+ *  reservation, so there is no value to drift. A separate table for the same
+ *  reason as `work_item_approval_choices`: `work_item_approvals.target_kind`
+ *  carries a CHECK constraint the exact-shape preflight covers, so adding a
+ *  value there would make every existing database refuse to boot. */
+export const WORK_ITEM_APPROVAL_OPERATOR_ONLY_DDL = `
+CREATE TABLE IF NOT EXISTS work_item_approval_operator_only (
+  approval_id TEXT PRIMARY KEY REFERENCES work_item_approvals(id) ON DELETE CASCADE
+)`;
+
 export const WORK_ITEM_EDIT_RECEIPTS_DDL = `
 CREATE TABLE IF NOT EXISTS work_item_edit_receipts (
   key_digest          TEXT PRIMARY KEY CHECK (length(key_digest) = 64),
@@ -646,6 +657,7 @@ const REQUIRED_TABLE_SQL = new Map<string, string>([
   ["work_item_labels", WORK_ITEM_LABELS_TABLE_DDL],
   ["work_item_approvals", WORK_ITEM_APPROVALS_TABLE_DDL],
   ["work_item_approval_choices", WORK_ITEM_APPROVAL_CHOICES_DDL],
+  ["work_item_approval_operator_only", WORK_ITEM_APPROVAL_OPERATOR_ONLY_DDL],
   ["work_item_attachments", WORK_ITEM_ATTACHMENTS_TABLE_DDL],
   ["work_item_edit_receipts", WORK_ITEM_EDIT_RECEIPTS_DDL],
   ["work_item_id_allocator", WORK_ITEM_ID_ALLOCATOR_TABLE_DDL],
@@ -668,6 +680,7 @@ const V2_ADDITIVE_TABLES: ReadonlyArray<{ name: string; ddl: string }> = [
   { name: "work_item_labels", ddl: WORK_ITEM_LABELS_DDL },
   { name: "work_item_approvals", ddl: WORK_ITEM_APPROVALS_DDL },
   { name: "work_item_approval_choices", ddl: WORK_ITEM_APPROVAL_CHOICES_DDL },
+  { name: "work_item_approval_operator_only", ddl: WORK_ITEM_APPROVAL_OPERATOR_ONLY_DDL },
   { name: "work_item_attachments", ddl: WORK_ITEM_ATTACHMENTS_DDL },
 ];
 

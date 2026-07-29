@@ -71,6 +71,9 @@ export interface RequestApprovalInput {
   options?: readonly string[] | null;
   /** Employee slug expected to decide this approval (manager/COO by default). */
   target?: string | null;
+  /** Reserve the gate for the human operator: no employee may decide it, not the
+   *  COO and not through escalation. */
+  operatorOnly?: boolean;
   /** Who requested it (audit only). */
   actor?: string | null;
 }
@@ -122,6 +125,7 @@ export function requestApproval(id: string, input: RequestApprovalInput): WorkIt
   const db = initDb();
   const ref = input.ref ?? null;
   const options = normalizeApprovalOptions(input.options);
+  const operatorOnly = input.operatorOnly === true;
   const txn = db.transaction((): WorkItem => {
     const item = getWorkItem(id);
     if (!item) throw new Error(`requestApproval: work item ${id} not found`);
@@ -133,6 +137,7 @@ export function requestApproval(id: string, input: RequestApprovalInput): WorkIt
       current.ref === ref &&
       current.target === routed.target &&
       current.targetKind === routed.kind &&
+      current.operatorOnly === operatorOnly &&
       sameOptions(current.options, options)
     ) {
       return item; // idempotent re-request (e.g. a workflow re-mirroring its gate)
@@ -153,18 +158,23 @@ export function requestApproval(id: string, input: RequestApprovalInput): WorkIt
       ).run(newApprovalRowId(), item.id, input.request, ref, routed.target, routed.kind, input.actor ?? 'system', now);
     }
     const approvalId = currentApproval(item.id)!.id;
-    // Re-offering a gate replaces its options wholesale (and clears any pick).
+    // Re-offering a gate replaces its options wholesale (and clears any pick),
+    // and re-states its reservation, so re-routing can never leave a stale one.
     db.prepare('DELETE FROM work_item_approval_choices WHERE approval_id = ?').run(approvalId);
     if (options) {
       db.prepare('INSERT INTO work_item_approval_choices (approval_id, options, choice) VALUES (?, ?, NULL)')
         .run(approvalId, JSON.stringify(options));
+    }
+    db.prepare('DELETE FROM work_item_approval_operator_only WHERE approval_id = ?').run(approvalId);
+    if (operatorOnly) {
+      db.prepare('INSERT INTO work_item_approval_operator_only (approval_id) VALUES (?)').run(approvalId);
     }
     db.prepare('UPDATE work_items SET updated_at = ?, version = version + 1 WHERE id = ?').run(now, item.id);
     appendWorkItemEvent({
       workItemId: id,
       kind: 'approval_requested',
       actor: input.actor ?? null,
-      detail: { request: input.request, ...(ref ? { ref } : {}), ...(options ? { options } : {}), ...(routed.target ? { target: routed.target, targetKind: routed.kind } : { targetKind: routed.kind }) },
+      detail: { request: input.request, ...(ref ? { ref } : {}), ...(options ? { options } : {}), ...(operatorOnly ? { operatorOnly } : {}), ...(routed.target ? { target: routed.target, targetKind: routed.kind } : { targetKind: routed.kind }) },
     });
     return getWorkItem(id)!;
   });

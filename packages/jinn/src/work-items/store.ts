@@ -126,6 +126,9 @@ export interface WorkItem {
   /** Offered variants when the current approval asks for a PICK (else null). */
   approvalOptions: string[] | null;
   approvalChoice: string | null;
+  /** The current approval is reserved for the human operator: no employee may
+   *  decide it, not the COO and not through escalation. */
+  approvalOperatorOnly: boolean;
   approvalTarget: string | null;
   approvalTargetKind: ApprovalTargetKind | null;
   approvalEscalatedAt: string | null;
@@ -248,6 +251,7 @@ function rowToWorkItem(row: Record<string, unknown>): WorkItem {
     // Frozen legacy columns never carried options; only the overlay sets them.
     approvalOptions: null,
     approvalChoice: null,
+    approvalOperatorOnly: false,
     approvalTarget: (row.approval_target as string) ?? null,
     approvalTargetKind: (row.approval_target_kind as ApprovalTargetKind) ?? null,
     approvalEscalatedAt: (row.approval_escalated_at as string) ?? null,
@@ -277,6 +281,7 @@ function overlayApproval(item: WorkItem, row: WorkItemApproval | undefined): Wor
     approvalRef: row.ref,
     approvalOptions: row.options,
     approvalChoice: row.choice,
+    approvalOperatorOnly: row.operatorOnly,
     approvalTarget: row.target,
     approvalTargetKind: row.targetKind,
     approvalEscalatedAt: row.escalatedAt,
