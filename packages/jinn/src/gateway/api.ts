@@ -240,7 +240,7 @@ import {
   requestApproval,
 } from "../work-items/approvals.js";
 import { resolveApprovalDecisionAuthority, resolveApprovalRouteTarget, resolveRootApprovalTarget } from "./approval-authority.js";
-import { runsWorkflowBoundToTodo } from "./workflow-todo-binding.js";
+import { approvalIsOperatorOnly, runsWorkflowBoundToTodo } from "./workflow-todo-binding.js";
 import { scanOrg } from "./org.js";
 import { resolveOrgHierarchy } from "./org-hierarchy.js";
 import { surfaceManagerVisibility } from "./manager-visibility.js";
@@ -4377,6 +4377,7 @@ export async function handleApiRequest(
       const authority = resolveApprovalDecisionAuthority(req.headers, item, {
         operatorCanActOnRootTarget: true,
         operatorAuthenticated: scopedOperatorAuthenticated(req, context),
+        operatorOnly: approvalIsOperatorOnly(item, context.workflowService),
       });
       if (!authority.ok) return json(res, { error: authority.error }, authority.status);
 

@@ -201,3 +201,54 @@ describe("reading the pick back into the run", () => {
     expect(decided.approvals).toEqual([expect.objectContaining({ status: "rejected" })]);
   });
 });
+
+/* An operator-only gate. Default routing sends an approval to the org
+ * hierarchy root, so the COO can approve a pipeline the COO started — a
+ * governance hole when the gate authorizes something irreversible. */
+describe("operator-only approval gates", () => {
+  it("refuses an employee decision, including the COO's", async () => {
+    const definition = gateDefinition("operator-gate", { description: "Merge to main?", operatorOnly: true });
+    const run = await service.startManual({ workflowId: definition.id, input: {}, todoId: "OPS-11" });
+
+    await expect(service.decideApproval({ workflowId: definition.id, runId: run.id, nodeId: "review",
+      decision: "approve", decidedBy: "Jimbo", expectedRevision: run.revision }))
+      .rejects.toThrow(/operator-only/i);
+
+    expect(service.getRun(definition.id, run.id)!.approvals[0]!.status).toBe("pending");
+  });
+
+  it("lets the operator decide it and the run advances", async () => {
+    const definition = gateDefinition("operator-gate-ok", { description: "Merge to main?", operatorOnly: true });
+    const run = await service.startManual({ workflowId: definition.id, input: {}, todoId: "OPS-12" });
+    const decided = await service.decideApproval({ workflowId: definition.id, runId: run.id, nodeId: "review",
+      decision: "approve", decidedBy: "operator", expectedRevision: run.revision });
+    expect(decided.status).toBe("completed");
+  });
+
+  it("leaves an ordinary gate decidable by an employee", async () => {
+    const definition = gateDefinition("ordinary-gate", {
+      description: "Approve?", approver: { source: "fixed", value: "worker" },
+    });
+    const run = await service.startManual({ workflowId: definition.id, input: {}, todoId: "OPS-13" });
+    const decided = await service.decideApproval({ workflowId: definition.id, runId: run.id, nodeId: "review",
+      decision: "approve", decidedBy: "worker", expectedRevision: run.revision });
+    expect(decided.status).toBe("completed");
+  });
+
+  it("refuses a definition that is both operator-only and approver-routed, naming why", () => {
+    let issues: unknown;
+    expect(() => {
+      try {
+        gateDefinition("contradictory", {
+          description: "Approve?", operatorOnly: true, approver: { source: "fixed", value: "worker" },
+        });
+      } catch (error) {
+        issues = (error as { issues?: unknown }).issues;
+        throw error;
+      }
+    }).toThrow(/Workflow definition is invalid/i);
+    expect(issues).toContainEqual(expect.objectContaining({
+      message: "An operator-only approval cannot also name an approver.",
+    }));
+  });
+});

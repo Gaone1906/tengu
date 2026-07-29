@@ -4,6 +4,7 @@ import { useShallow } from "zustand/react/shallow"
 import { Plus, Trash2, X } from "lucide-react"
 import { api } from "@/lib/api"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { allocateConditionPort } from "./graph"
 import { NodeTypeIcon } from "./node-icons"
@@ -730,6 +731,7 @@ function ConditionForm({ node, update }: FormProps) {
 
 function ApprovalForm({ node, update }: FormProps) {
   const config = node.config as Record<string, unknown>
+  const operatorOnly = config.operatorOnly === true
   return (
     <>
       <Field label="What needs approval?">
@@ -740,13 +742,38 @@ function ApprovalForm({ node, update }: FormProps) {
           placeholder="Describe the decision"
         />
       </Field>
-      <Field label="Approver (optional)">
-        <TextInput
-          value={fixedText(config.approver)}
-          onChange={(event) => update(withFixed(config, "approver", event.target.value))}
-          placeholder="operator"
+      <div className="flex items-center justify-between gap-[var(--space-3)]">
+        <label
+          htmlFor="approval-operator-only"
+          className="text-[length:var(--text-caption1)] font-[var(--weight-medium)] text-[var(--text-secondary)]"
+        >
+          Only the operator may decide
+        </label>
+        <Switch
+          id="approval-operator-only"
+          checked={operatorOnly}
+          // Mutually exclusive with an approver: naming one would contradict
+          // reserving the gate, and the definition schema refuses both together.
+          onCheckedChange={(next) => {
+            const { approver: _approver, operatorOnly: _operatorOnly, ...rest } = config
+            update(next ? { ...rest, operatorOnly: true } : rest)
+          }}
         />
-      </Field>
+      </div>
+      <p className="text-[length:var(--text-caption1)] text-[var(--text-tertiary)]">
+        {operatorOnly
+          ? "Reserved for the human operator. No employee can decide it, not even the COO, and escalating it does not open it up."
+          : "Otherwise this routes up the org hierarchy, so the COO can decide it."}
+      </p>
+      {!operatorOnly && (
+        <Field label="Approver (optional)">
+          <TextInput
+            value={fixedText(config.approver)}
+            onChange={(event) => update(withFixed(config, "approver", event.target.value))}
+            placeholder="Employee who decides"
+          />
+        </Field>
+      )}
     </>
   )
 }

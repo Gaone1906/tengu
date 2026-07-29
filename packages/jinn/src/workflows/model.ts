@@ -220,12 +220,18 @@ const approvalNodeSchema = z.strictObject({
   config: z.strictObject({
     description: z.string(),
     approver: stringBindingSchema.optional(),
+    // Reserves the gate for the human operator. Default routing sends an
+    // approval up the org hierarchy to its root, which means the COO can
+    // approve a pipeline the COO started — fine for ordinary gates, a
+    // governance hole for one that authorizes something irreversible.
+    operatorOnly: z.boolean().optional(),
     // Variant-picking: the labels are mirrored onto the bound Todo's approval
     // and the pick is read back as `{{ node.<id>.choice }}`. Deliberately fixed
     // labels, not bindings — a gate the operator reads must not shift under it.
     options: z.array(z.string().min(1).max(80)).min(2).max(8)
       .refine((values) => new Set(values).size === values.length, 'Approval options must be unique').optional(),
-  }),
+  }).refine((config) => !(config.operatorOnly && config.approver !== undefined),
+    'An operator-only approval cannot also name an approver.'),
 });
 const waitConfigSchema = z.discriminatedUnion('mode', [
   z.strictObject({ mode: z.literal('duration'), minutes: finiteNumberSchema.int().min(1).max(43_200) }),

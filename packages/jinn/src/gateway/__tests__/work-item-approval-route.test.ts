@@ -70,6 +70,9 @@ const apiConfig = {
   mcp: {},
 };
 
+/** Runs an operator-only mirrored gate resolves into, keyed `<workflowId>/<runId>`. */
+const workflowRuns = new Map<string, { definition: { nodes: unknown[] } }>();
+
 const apiCtx = {
   getConfig: () => apiConfig,
   config: apiConfig,
@@ -78,6 +81,9 @@ const apiCtx = {
   gatewayAuthToken: "test-token",
   jinnHome: tmpHome,
   emit: () => {},
+  workflowService: {
+    getRun: (workflowId: string, runId: string) => workflowRuns.get(`${workflowId}/${runId}`) ?? null,
+  },
   sessionManager: {
     getEngines: () => new Map([["codex", {}]]),
     getEngine: () => undefined,
@@ -439,5 +445,65 @@ describe("POST /api/work-items/:id/approval — native consequence rules", () =>
     expect(resp.body.workItem.status).toBe("backlog");
     expect(resp.body.workItem.approvalState).toBe("approved");
     expect(store.listWorkItemEvents(item.id).some((e) => e.kind === "status_change")).toBe(false);
+  });
+});
+
+/* A gate the workflow definition declared operator-only. Default routing puts
+ * an approval at the org hierarchy root, so the COO can approve a pipeline the
+ * COO started — a governance hole when the gate authorizes an auto-merge. The
+ * flag lives on the workflow node and is read back through the approval ref,
+ * so the definition stays the single source of truth for who may decide. */
+describe("POST /api/work-items/:id/approval — an operator-only mirrored gate", () => {
+  function operatorOnlyItem(operatorOnly: boolean, runKey = "merge-flow/run-1") {
+    workflowRuns.set(runKey, {
+      definition: { nodes: [{ id: "gate", type: "approval", name: "Gate", config: { description: "Merge?", operatorOnly } }] },
+    });
+    const item = store.createWorkItem({
+      title: "auto-merge gate", status: "in_review", source: "workflow",
+      assignee: "platform-worker", department: "platform",
+    });
+    approvals.requestApproval(item.id, {
+      request: "Merge to the default branch?",
+      ref: `workflow:${runKey.replace("/", ":")}:gate`,
+      target: "platform-manager",
+    });
+    return item;
+  }
+
+  it("refuses the routed manager AND the COO", async () => {
+    const item = operatorOnlyItem(true);
+
+    const manager = await decide(item.id, { decision: "approve" }, managerHeaders());
+    expect(manager.status).toBe(403);
+    expect(manager.body.error).toContain("operator-only");
+
+    const coo = await decide(item.id, { decision: "approve" }, cooHeaders());
+    expect(coo.status).toBe(403);
+    expect(coo.body.error).toContain("operator-only");
+
+    expect(store.getWorkItem(item.id)!.approvalState).toBe("pending");
+  });
+
+  it("still refuses the COO after the gate has been escalated", async () => {
+    const item = operatorOnlyItem(true, "merge-flow/run-escalated");
+    await call("POST", `/api/work-items/${item.id}/approval/escalate`, {}, managerHeaders());
+
+    const coo = await decide(item.id, { decision: "approve" }, cooHeaders());
+    expect(coo.status).toBe(403);
+    expect(store.getWorkItem(item.id)!.approvalState).toBe("pending");
+  });
+
+  it("lets the operator decide it", async () => {
+    const item = operatorOnlyItem(true, "merge-flow/run-operator");
+    const operator = await decide(item.id, { decision: "approve", note: "merge it" }, {});
+    expect(operator.status).toBe(200);
+    expect(operator.body.workItem).toMatchObject({ approvalState: "approved", approvalDecidedBy: "operator" });
+  });
+
+  it("leaves a mirrored gate that is NOT operator-only on ordinary hierarchy routing", async () => {
+    const item = operatorOnlyItem(false, "merge-flow/run-ordinary");
+    const manager = await decide(item.id, { decision: "approve" }, managerHeaders());
+    expect(manager.status).toBe(200);
+    expect(manager.body.workItem.approvalDecidedBy).toBe("platform-manager");
   });
 });

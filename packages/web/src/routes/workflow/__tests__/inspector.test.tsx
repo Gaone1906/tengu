@@ -269,3 +269,44 @@ describe("employee inspector timeout", () => {
     expect(employeeConfig(store).timeoutMinutes).toBe(30)
   })
 })
+
+function renderApproval(config: Record<string, unknown>) {
+  const initial = structuredClone(definition)
+  initial.nodes = [{ id: "gate", type: "approval", name: "Gate", config }]
+  initial.ui.positions = { gate: { x: 0, y: 0 } }
+  const store = createEditorStore(initial)
+  store.getState().selectNode("gate")
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(
+    <QueryClientProvider client={client}>
+      <EditorStoreContext.Provider value={store}>
+        <Inspector />
+      </EditorStoreContext.Provider>
+    </QueryClientProvider>,
+  )
+  return store
+}
+
+function approvalConfig(store: ReturnType<typeof createEditorStore>) {
+  return store.getState().nodes[0]!.data.node.config as Record<string, unknown>
+}
+
+describe("approval inspector operator-only gate", () => {
+  it("reserves the gate and drops any approver, since the two contradict", () => {
+    const store = renderApproval({ description: "Merge?", approver: { source: "fixed", value: "platform-lead" } })
+
+    fireEvent.click(screen.getByLabelText("Only the operator may decide"))
+
+    expect(approvalConfig(store)).toEqual({ description: "Merge?", operatorOnly: true })
+    expect(screen.queryByLabelText("Approver (optional)")).toBeNull()
+  })
+
+  it("clears the flag entirely rather than writing operatorOnly: false", () => {
+    const store = renderApproval({ description: "Merge?", operatorOnly: true })
+
+    fireEvent.click(screen.getByLabelText("Only the operator may decide"))
+
+    expect(approvalConfig(store)).not.toHaveProperty("operatorOnly")
+    expect(screen.getByLabelText("Approver (optional)")).toBeTruthy()
+  })
+})

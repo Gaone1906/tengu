@@ -328,6 +328,9 @@ export class WorkflowService {
     const approval = run.approvals.find((item) => item.nodeId === input.nodeId);
     if (authored?.type !== "approval" || !approval) fail("not-found", `Workflow approval ${input.nodeId} was not found.`);
     if (approval.status !== "pending") throw new WorkflowServiceError("conflict", `Workflow approval ${input.nodeId} is already decided.`);
+    if (authored.config.operatorOnly && input.decidedBy !== "operator") {
+      throw new WorkflowServiceError("forbidden", `Workflow approval ${input.nodeId} is operator-only; ${input.decidedBy} cannot decide it.`);
+    }
     if (approval.approverRef && input.decidedBy !== approval.approverRef && input.decidedBy !== "operator") {
       throw new WorkflowServiceError("forbidden", `Workflow actor ${input.decidedBy} is not authorized for approval ${input.nodeId}.`);
     }

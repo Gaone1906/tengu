@@ -42,6 +42,10 @@ export interface ApprovalDecisionAuthorityOptions {
   operatorCanActOnRootTarget?: boolean;
   /** Set only after gateway bearer/cookie verification at the HTTP boundary. */
   operatorAuthenticated?: boolean;
+  /** Gate reserved for the human operator: no employee may decide it, not even
+   *  the COO, and not via escalation. Resolved by the caller from the workflow
+   *  node that parked the gate. */
+  operatorOnly?: boolean;
 }
 
 function employeeDepartment(registry: Map<string, Employee>, employee: string | null): string | null {
@@ -210,6 +214,7 @@ export function resolveApprovalDecisionAuthority(
   if (!caller.ok) return { ok: false, status: 403, error: caller.error };
 
   if ("operator" in caller) {
+    if (opts.operatorOnly) return { ok: true, authority: { ...route, kind: "operator", actor: "operator" } };
     const routedToRoot = opts.operatorCanActOnRootTarget === true && !!route.root && route.target === route.root;
     if (!routedToRoot && !item.approvalEscalatedAt) {
       return {
@@ -219,6 +224,12 @@ export function resolveApprovalDecisionAuthority(
       };
     }
     return { ok: true, authority: { ...route, kind: "operator", actor: "operator" } };
+  }
+
+  // Ahead of every employee path, including the escalated-executive one: an
+  // operator-only gate must not be reachable by escalating it to the COO.
+  if (opts.operatorOnly) {
+    return { ok: false, status: 403, error: `Todo ${item.id} has an operator-only approval; only the operator/aCEO may decide it` };
   }
 
   const employee = caller.session.employee;
