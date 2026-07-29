@@ -11,15 +11,23 @@ const MAX_MANIFEST_TOKENS = 4911;
 // Exact gate: js-tiktoken 1.0.21 with its local o200k_base ranks. The provider
 // projection is the OpenAI Responses API function-tool request shape pinned on 2026-07-12.
 const ATTESTED = {
-  // Rebased for `create_label` plus `labels` on create_work_item, which together
-  // cost 72 tokens and put Pi 35 over. The same change dropped "a live gateway
-  // operation" from the ten Workflow write descriptions — every tool on this
-  // surface operates on the live gateway, so the clause distinguished nothing;
-  // the "may spawn real sessions" warning it was bundled with is kept verbatim.
-  // Pi now sits 25 tokens under.
-  rpc: { tokens: 4453, sha256: "94ee1e6f8e5a5d6cf0d375e37f06d407613c62b29221a755d8d3512f017b2efe" },
-  pi: { tokens: 4886, sha256: "6b18bf147a1c227de874538da8d87c59916756444e539704381b3dd2845f6dcf" },
-  openai: { tokens: 4628, sha256: "99f1c88397b7bb8e189bdaf142ba4a48d7828ed1ac300ef9d2bd11905394f39a" },
+  // Rebased once for two changes that landed together: `create_label` plus
+  // `labels` on create_work_item, and `view` on get_workflow_run (the opt-in back
+  // to the fat run detail). Together they cost 95 tokens and put Pi over, so the
+  // same rebase spent four dead clauses to buy them back:
+  //   - "; a live gateway operation" on the ten Workflow write descriptions —
+  //     every tool on this surface acts on its own gateway, so it distinguished
+  //     nothing. The "may spawn real sessions" warning it was bundled with stays.
+  //   - "Use role/persona fit before spawning." on list_employees — spawn_session
+  //     and delegate_task already say it where the choice is actually made.
+  //   - "as the authenticated caller" on decide_workflow_approval — a tool has no
+  //     other identity to act as.
+  //   - "Read-only." on get_employee — the only tool that claimed it, and no other
+  //     `get_`/`list_` tool needs to.
+  // Pi lands 17 tokens under, down from 37.
+  rpc: { tokens: 4461, sha256: "233711e7df5184e60d0629a5597f52fe178fec423f039207e5ee72dd3081cb98" },
+  pi: { tokens: 4894, sha256: "29a0fe6c3af9cea9e17c594bc637d70c697098f63bdcfcc70a13a634a9ef2858" },
+  openai: { tokens: 4636, sha256: "0ebaf39cfc428e3bca934a8678bfba241883ee1dd72379c3dfe661584e49e348" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;
@@ -177,6 +185,7 @@ const EXPECTED_ENUMS = {
   decide_workflow_approval: [["properties.decision", ["approve", "reject"]]],
   decide_work_item_approval: [["properties.decision", ["approve", "reject"]]],
   edit_work_item: [["properties.priority", [0, 1, 2, 3]]],
+  get_workflow_run: [["properties.view", ["full"]]],
   link_work_items: [["properties.kind", ["blocks", "relates", "duplicates"]]],
   list_sessions: [["properties.scope", ["children", "employee", "recent"]]],
   list_work_items: [

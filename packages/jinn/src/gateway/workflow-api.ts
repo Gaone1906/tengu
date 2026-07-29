@@ -7,6 +7,7 @@ import {
 import { CALLER_SESSION_HEADER } from "../mcp/identity.js";
 import { getSession } from "../sessions/registry.js";
 import type { DefinitionListQuery, RunListQuery } from "../workflows/repository.js";
+import type { WorkflowRunDetail } from "../workflows/runtime.js";
 import { WorkflowOutputError } from "../workflows/output.js";
 import { readJsonBody } from "./http-helpers.js";
 import { isJsonMediaType } from "./media-type.js";
@@ -105,6 +106,23 @@ function runQuery(url: URL): RunListQuery {
   return query as RunListQuery;
 }
 
+function runDetailIsFull(url: URL): boolean {
+  const allowed = new Set(["view"]);
+  for (const key of url.searchParams.keys()) if (!allowed.has(key)) throw new WorkflowRepositoryError("bad-input", "Workflow run query is invalid.");
+  const view = url.searchParams.get("view");
+  if (view !== null && view !== "full") throw new WorkflowRepositoryError("bad-input", 'Workflow run view must be "full".');
+  return view === "full";
+}
+
+/** Run detail is lean by default so that polling a run costs a status page, not
+ *  the whole definition snapshot plus every interpolated prompt. The definition
+ *  is still reachable through GET /api/workflows/:id, and prompts through the
+ *  attempt transcript route. */
+function leanRunDetail(detail: WorkflowRunDetail) {
+  const { definition, attempts, ...run } = detail;
+  return { ...run, attempts: attempts.map(({ promptText, ...attempt }) => attempt) };
+}
+
 async function definitions(req: IncomingMessage, res: ServerResponse, url: URL, parts: string[], options: WorkflowApiOptions): Promise<boolean> {
   const { service } = options; const method = req.method ?? "GET";
   if (parts.length === 2 && method === "GET") { send(res, 200, service.listDefinitions(definitionQuery(url))); return true; }
@@ -142,7 +160,11 @@ async function runs(req: IncomingMessage, res: ServerResponse, url: URL, parts: 
       ...(value.todoId === undefined ? {} : { todoId: value.todoId as string }) })); return true;
   }
   const runId = parts[4]; if (!runId) return false;
-  if (parts.length === 5 && method === "GET") { const value = service.getRun(workflowId, runId); if (!value) throw new WorkflowRepositoryError("not-found", `Workflow run ${runId} was not found.`); send(res, 200, value); return true; }
+  if (parts.length === 5 && method === "GET") {
+    const full = runDetailIsFull(url); const value = service.getRun(workflowId, runId);
+    if (!value) throw new WorkflowRepositoryError("not-found", `Workflow run ${runId} was not found.`);
+    send(res, 200, full ? value : leanRunDetail(value)); return true;
+  }
   if (parts.length === 6 && parts[5] === "cancel" && method === "POST") {
     const parsed = await body(req, res); if (parsed === undefined) return true; const value = record(parsed, ["reason"]);
     send(res, 200, await service.cancelRun({ workflowId, runId, reason: value.reason === undefined ? "" : value.reason as string })); return true;

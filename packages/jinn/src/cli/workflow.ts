@@ -111,8 +111,8 @@ export async function startWorkflowRun(workflowId: string, options: { input?: st
 export async function listWorkflowRuns(workflowId: string, options: { cursor?: string; limit?: string; status?: string } & JsonOptions = {}): Promise<void> {
   return command("GET", `${wf(workflowId)}/runs${query({ cursor: options.cursor, limit: options.limit, status: options.status })}`, undefined, options);
 }
-export async function showWorkflowRun(workflowId: string, runId: string, options: JsonOptions = {}): Promise<void> {
-  return command("GET", run(workflowId, runId), undefined, options);
+export async function showWorkflowRun(workflowId: string, runId: string, options: { full?: boolean } & JsonOptions = {}): Promise<void> {
+  return command("GET", `${run(workflowId, runId)}${query({ view: options.full ? "full" : undefined })}`, undefined, options);
 }
 export async function cancelWorkflowRun(workflowId: string, runId: string, options: { reason?: string } & JsonOptions = {}): Promise<void> {
   return command("POST", `${run(workflowId, runId)}/cancel`, options.reason ? { reason: options.reason } : {}, options);

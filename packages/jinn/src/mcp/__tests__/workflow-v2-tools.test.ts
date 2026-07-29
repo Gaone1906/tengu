@@ -50,6 +50,7 @@ describe("Workflow v2 MCP tools", () => {
       ["start_workflow_run", { workflowId: "release-flow", todoId: "JIN-42" }, "POST", "/api/workflows/release-flow/runs", { input: {}, todoId: "JIN-42" }],
       ["list_workflow_runs", { workflowId: "release-flow", status: "failed" }, "GET", "/api/workflows/release-flow/runs?status=failed"],
       ["get_workflow_run", { workflowId: "release-flow", runId: "run-1" }, "GET", "/api/workflows/release-flow/runs/run-1"],
+      ["get_workflow_run", { workflowId: "release-flow", runId: "run-1", view: "full" }, "GET", "/api/workflows/release-flow/runs/run-1?view=full"],
       ["cancel_workflow_run", { workflowId: "release-flow", runId: "run-1", reason: "stop" }, "POST", "/api/workflows/release-flow/runs/run-1/cancel", { reason: "stop" }],
       ["rerun_workflow_run", { workflowId: "release-flow", runId: "run-1", definition: "current", idempotencyKey: "again-1" }, "POST", "/api/workflows/release-flow/runs/run-1/rerun", { definition: "current", idempotencyKey: "again-1" }],
       ["decide_workflow_approval", { workflowId: "release-flow", runId: "run-1", nodeId: "review", decision: "reject", reason: "Revise", expectedRevision: 4 },

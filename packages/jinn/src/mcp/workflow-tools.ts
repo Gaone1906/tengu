@@ -113,8 +113,9 @@ const specs: ToolSpec[] = [
     path: (args) => `${workflow(args)}/runs${query(args, ["cursor", "limit", "status"])}`,
   },
   {
-    name: "get_workflow_run", description: "Get one Workflow run.", method: "GET",
-    properties: { workflowId: string, runId: string }, required: ["workflowId", "runId"], path: run,
+    name: "get_workflow_run", description: "Get one Workflow run; lean. view=full adds the definition and prompts.", method: "GET",
+    properties: { workflowId: string, runId: string, view: { type: "string", enum: ["full"] } },
+    required: ["workflowId", "runId"], path: (args) => `${run(args)}${query(args, ["view"])}`,
   },
   {
     name: "cancel_workflow_run", description: "Cancel a Workflow run.", method: "POST",
@@ -128,7 +129,7 @@ const specs: ToolSpec[] = [
     body: ({ definition, idempotencyKey }) => ({ definition, idempotencyKey }),
   },
   {
-    name: "decide_workflow_approval", description: "Approve or reject a pending Workflow approval as the authenticated caller.", method: "POST",
+    name: "decide_workflow_approval", description: "Approve or reject a pending Workflow approval.", method: "POST",
     properties: { workflowId: string, runId: string, nodeId: string,
       decision: { type: "string", enum: ["approve", "reject"] }, reason: string, expectedRevision: integer },
     required: ["workflowId", "runId", "nodeId", "decision", "expectedRevision"],

@@ -845,9 +845,11 @@ export const api = {
     get<{ items: WorkflowRunSummaryV2Wire[]; nextCursor: string | null }>(
       `/api/workflows/${encodeURIComponent(id)}/runs?limit=${limit}`,
     ),
+  /** `view=full` because the run canvas and inspector render the definition
+   *  snapshot and the attempt prompts, which the lean default omits. */
   getWorkflowRunV2: (id: string, runId: string) =>
     get<WorkflowRunDetailV2Wire>(
-      `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}`,
+      `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}?view=full`,
     ),
   createWorkflowV2: (input: { id: string; title: string; description?: string }) =>
     workflowWrite<WorkflowDefinitionV2Wire>("/api/workflows", "POST", input),

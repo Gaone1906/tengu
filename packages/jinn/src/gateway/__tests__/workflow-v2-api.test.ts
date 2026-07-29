@@ -109,7 +109,7 @@ describe("Workflow v2 canonical API", () => {
       ["POST", "/api/workflows/release-flow/disable", { expectedRevision: 1 }, 200],
       ["POST", "/api/workflows/release-flow/runs", { input: {} }, 201],
       ["GET", "/api/workflows/release-flow/runs?limit=10", undefined, 200],
-      ["GET", "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111", undefined, 200],
+      ["GET", "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111?view=full", undefined, 200],
       ["POST", "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111/cancel", { reason: "superseded" }, 200],
       ["POST", "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111/rerun", { definition: "original", idempotencyKey: "again-1" }, 201],
       ["POST", "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111/nodes/review/approval",
@@ -170,9 +170,73 @@ describe("Workflow v2 canonical API", () => {
     const capture = response();
 
     await handleApiRequest(request("GET",
-      "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111"), capture.res, context);
+      "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111?view=full"), capture.res, context);
 
     expect(capture.read()).toEqual({ status: 200, body: detail });
+  });
+
+  it("keeps run detail lean by default and fat only under view=full", async () => {
+    const detail = {
+      id: "run_11111111-1111-4111-8111-111111111111",
+      workflowId: "release-flow",
+      definitionRevision: 4,
+      definition: { schemaVersion: 1, nodes: [{ id: "write", type: "employee", config: { prompt: "Write the notes." } }], edges: [] },
+      status: "waiting",
+      revision: 7,
+      startedAt: "2026-07-23T12:00:00.000Z",
+      nodeRuns: [
+        {
+          runId: "run_11111111-1111-4111-8111-111111111111", nodeId: "write", nodeType: "employee",
+          status: "completed", activated: true, resolvedConfig: { employeeId: "writer" },
+          output: { outcome: "success", fields: { notes: "Shipped." } },
+          startedAt: "2026-07-23T12:00:05.000Z", endedAt: "2026-07-23T12:20:00.000Z",
+        },
+        {
+          runId: "run_11111111-1111-4111-8111-111111111111", nodeId: "publish", nodeType: "employee",
+          status: "failed", activated: true, resumeAt: "2026-07-23T13:00:00.000Z",
+          error: { code: "timeout", message: "Step timed out.", retryable: true },
+          startedAt: "2026-07-23T12:20:00.000Z", endedAt: "2026-07-23T12:30:00.000Z",
+        },
+      ],
+      attempts: [{
+        runId: "run_11111111-1111-4111-8111-111111111111", nodeId: "write", attempt: 1, status: "running",
+        promptText: "Write the notes.\n\n---\nContract block.", input: { topic: "release" },
+        startedAt: "2026-07-23T12:00:05.000Z", remindersSent: 0, extensions: 0,
+      }],
+      approvals: [{
+        runId: "run_11111111-1111-4111-8111-111111111111", nodeId: "review",
+        status: "pending", requestedAt: "2026-07-23T12:30:00.000Z",
+      }],
+    };
+    const service = { getRun: vi.fn(() => detail) };
+    const context = { gatewayAuthToken: "test-token", workflowService: service, getConfig: () => ({ gateway: {}, engines: {} }),
+      connectors: new Map(), sessionManager: { getQueue: () => ({}) }, emit: vi.fn(), startTime: 1 } as unknown as ApiContext;
+    const route = "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111";
+
+    const lean = response();
+    await handleApiRequest(request("GET", route), lean.res, context);
+    const { status, body } = lean.read() as { status: number; body: Record<string, unknown> };
+    expect(status).toBe(200);
+    expect(body).not.toHaveProperty("definition");
+    expect(body.definitionRevision).toBe(4);
+    expect(body.nodeRuns).toEqual(detail.nodeRuns);
+    expect(body.approvals).toEqual(detail.approvals);
+    const attempts = body.attempts as Array<Record<string, unknown>>;
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).not.toHaveProperty("promptText");
+    expect(attempts[0]).toMatchObject({ nodeId: "write", attempt: 1, status: "running", input: { topic: "release" } });
+
+    const full = response();
+    await handleApiRequest(request("GET", `${route}?view=full`), full.res, context);
+    expect(full.read()).toEqual({ status: 200, body: detail });
+
+    const bogus = response();
+    await handleApiRequest(request("GET", `${route}?view=lean`), bogus.res, context);
+    expect(bogus.read()).toMatchObject({ status: 422, body: { code: "bad-input" } });
+
+    const unknownKey = response();
+    await handleApiRequest(request("GET", `${route}?verbose=true`), unknownKey.res, context);
+    expect(unknownKey.read()).toMatchObject({ status: 422, body: { code: "bad-input" } });
   });
 
   it("authenticates retry and maps its authority, identity, conflict, and validation errors", async () => {

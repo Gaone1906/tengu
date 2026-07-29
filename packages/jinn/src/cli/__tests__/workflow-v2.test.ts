@@ -51,6 +51,7 @@ describe("Workflow v2 CLI handlers", () => {
         { input: {}, todoId: "JIN-42" }],
       [() => workflow.listWorkflowRuns("release-flow", { status: "failed" }), "GET", "/api/workflows/release-flow/runs?status=failed"],
       [() => workflow.showWorkflowRun("release-flow", "run-1"), "GET", "/api/workflows/release-flow/runs/run-1"],
+      [() => workflow.showWorkflowRun("release-flow", "run-1", { full: true }), "GET", "/api/workflows/release-flow/runs/run-1?view=full"],
       [() => workflow.cancelWorkflowRun("release-flow", "run-1", { reason: "stop" }), "POST", "/api/workflows/release-flow/runs/run-1/cancel", { reason: "stop" }],
       [() => workflow.rerunWorkflowRun("release-flow", "run-1", { definition: "current", idempotencyKey: "again-1" }), "POST",
         "/api/workflows/release-flow/runs/run-1/rerun", { definition: "current", idempotencyKey: "again-1" }],
