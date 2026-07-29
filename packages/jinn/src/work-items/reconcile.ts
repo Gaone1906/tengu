@@ -1,7 +1,10 @@
 import {
   effectiveVerifyMode,
   getWorkItem,
+  isBlockDeclared,
+  isReviewBounceDeclared,
   listWorkItems,
+  RECONCILER_ACTOR,
   STICKY_STATUSES,
   type WorkItem,
   type WorkItemSource,
@@ -49,6 +52,12 @@ export interface WorkItemAttemptEvidence {
 /** A session is "in flight" (work is actively happening) in these states. */
 const IN_FLIGHT: ReadonlySet<SessionStatus> = new Set<SessionStatus>(['running', 'waiting']);
 
+/** Declaration provenance that cannot be derived from attempt receipts alone. */
+export interface DeriveWorkItemOptions {
+  blockDeclared?: boolean;
+  reviewBounceDeclared?: boolean;
+}
+
 /**
  * Pure derivation: given an item's current status, its provenance, and the
  * terminal receipts of its linked sessions **ordered newest-first** (as
@@ -60,6 +69,7 @@ export function deriveWorkItemStatus(
   current: WorkItemStatus,
   attempts: readonly WorkItemAttemptEvidence[],
   source?: WorkItemSource,
+  opts?: DeriveWorkItemOptions,
 ): WorkItemStatus {
   if (STICKY_STATUSES.has(current)) return current;
   if (attempts.length === 0) return current;
@@ -67,6 +77,10 @@ export function deriveWorkItemStatus(
   // Parent callbacks and review conversations may run on linked sessions after
   // submission; only an explicit review bounce may reopen execution.
   if (current === 'in_review') return current;
+  // Explicit declarations are governance state, not session transport state.
+  // They remain authoritative until another declared transition moves the Todo.
+  if (current === 'blocked' && opts?.blockDeclared) return current;
+  if (current === 'executing' && opts?.reviewBounceDeclared) return current;
   if (attempts.some((attempt) => IN_FLIGHT.has(attempt.status))) return 'executing';
   // Nothing in flight — the most recent attempt (index 0, newest-first) is the
   // authority (an old clean settle must not mask a newer failure, and a newer
@@ -100,14 +114,28 @@ export function reconcileWorkItem(id: string): ReconcileResult | undefined {
     status: s.status as SessionStatus,
     outcome: s.attemptOutcome ?? null,
   }));
-  const derived = deriveWorkItemStatus(item.status, attempts, item.source);
+  let derived = deriveWorkItemStatus(item.status, attempts, item.source);
+  // Provenance is only needed when receipt derivation would overwrite the
+  // current state. Since a Todo cannot be blocked and executing simultaneously,
+  // this performs at most one indexed event-row lookup per reconcile.
+  if (derived !== item.status) {
+    if (item.status === 'blocked') {
+      derived = deriveWorkItemStatus(item.status, attempts, item.source, {
+        blockDeclared: isBlockDeclared(id),
+      });
+    } else if (item.status === 'executing') {
+      derived = deriveWorkItemStatus(item.status, attempts, item.source, {
+        reviewBounceDeclared: isReviewBounceDeclared(id),
+      });
+    }
+  }
 
   let current = item;
   let changed = false;
   if (derived !== item.status) {
     // transitionDerived returns undefined on a sticky/concurrent race — report
     // the fresh truth as unchanged rather than clobbering a deliberate decision.
-    const updated = transitionDerived(id, derived, 'reconciler');
+    const updated = transitionDerived(id, derived, RECONCILER_ACTOR, { declared: false });
     if (updated) {
       current = updated;
       changed = true;

@@ -51,6 +51,9 @@ const CLOSED_STATUSES: ReadonlySet<WorkItemStatus> = new Set<WorkItemStatus>(['d
  *  to the operator that session churn must not silently undo. */
 export const STICKY_STATUSES: ReadonlySet<WorkItemStatus> = new Set<WorkItemStatus>(['done', 'cancelled', 'escalated']);
 
+/** Actor recorded on the reconciler's own derived writes. */
+export const RECONCILER_ACTOR = 'reconciler';
+
 export interface VerifyPolicy {
   mode: VerifyMode;
   verifier?: { employee?: string; engine?: string; model?: string };
@@ -373,6 +376,61 @@ export function appendWorkItemEvent(input: AppendWorkItemEventInput): WorkItemEv
     return event;
   });
   return txn();
+}
+
+interface StatusTransitionProvenance {
+  fromStatus: WorkItemStatus | null;
+  actor: string | null;
+  detail: string | null;
+}
+
+/** Read the newest transition into a status without loading the full audit trail. */
+function latestStatusTransition(workItemId: string, toStatus: WorkItemStatus): StatusTransitionProvenance | undefined {
+  const db = initDb();
+  const id = parseTodoId(workItemId);
+  const row = db
+    .prepare(
+      `SELECT from_status, actor, detail FROM work_item_events
+       WHERE work_item_id = ? AND to_status = ?
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(id, toStatus) as { from_status: WorkItemStatus | null; actor: string | null; detail: string | null } | undefined;
+  return row
+    ? {
+        fromStatus: row.from_status,
+        actor: row.actor,
+        detail: row.detail,
+      }
+    : undefined;
+}
+
+/**
+ * Whether the current block was declared by a caller rather than derived from
+ * attempt transport. Historical events without an explicit marker fall back to
+ * actor provenance so existing rows retain their intended meaning.
+ */
+export function isBlockDeclared(workItemId: string): boolean {
+  const row = latestStatusTransition(workItemId, 'blocked');
+  if (!row) return false;
+  if (row.detail) {
+    try {
+      const detail = JSON.parse(row.detail) as Record<string, unknown>;
+      if (detail.declared === true) return true;
+      if (detail.declared === false) return false;
+    } catch {
+      // Historical malformed detail falls through to actor provenance.
+    }
+  }
+  return row.actor !== null && row.actor !== RECONCILER_ACTOR;
+}
+
+/**
+ * Whether the current execution state was explicitly reopened from review.
+ * Inspect the newest transition into `executing` first so an older bounce
+ * cannot outlive a later start or unblock.
+ */
+export function isReviewBounceDeclared(workItemId: string): boolean {
+  return latestStatusTransition(workItemId, 'executing')?.fromStatus === 'in_review';
 }
 
 /** List an item's audit trail, oldest-first (the story reads top-down). */

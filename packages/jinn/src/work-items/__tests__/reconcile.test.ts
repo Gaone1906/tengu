@@ -204,6 +204,45 @@ describe("reconcileWorkItem — integration against real store + registry", () =
     expect(store.listWorkItemEvents(wi.id).filter((event) => event.toStatus === "executing")).toHaveLength(0);
   });
 
+  it("keeps an agent-declared block while its linked session is still running", async () => {
+    const transitions = await import("../transitions.js");
+    const wi = store.createWorkItem({
+      title: "declared blocker",
+      status: "executing",
+      source: "delegation",
+    });
+    linkedSession("s-declared-block", wi.id, "running", "2026-07-01T01:45:00.000Z");
+    transitions.transition(wi.id, "blocked", "platform-engineer", {
+      detail: { note: "operator input required" },
+    });
+
+    expect(reconcile.reconcileWorkItem(wi.id)).toMatchObject({
+      changed: false,
+      item: { status: "blocked" },
+    });
+    expect(store.getWorkItem(wi.id)?.status).toBe("blocked");
+  });
+
+  it("keeps a review bounce executing when the newest attempt receipt succeeded", async () => {
+    const transitions = await import("../transitions.js");
+    const wi = store.createWorkItem({
+      title: "review bounce",
+      status: "in_review",
+      source: "delegation",
+    });
+    linkedSession("s-review-bounce", wi.id, "idle", "2026-07-01T01:50:00.000Z", "succeeded");
+    transitions.transition(wi.id, "executing", "reviewer", {
+      bounce: true,
+      detail: { critique: "address the review finding" },
+    });
+
+    expect(reconcile.reconcileWorkItem(wi.id)).toMatchObject({
+      changed: false,
+      item: { status: "executing" },
+    });
+    expect(store.getWorkItem(wi.id)?.status).toBe("executing");
+  });
+
   it("TRUST-tier settle auto-closes: executing → in_review → done in ONE pass, both event-audited", () => {
     const wi = store.createWorkItem({ title: "cron fire", status: "executing", source: "cron", sourceRef: "cron:j3:1" });
     linkedSession("s-ok-3", wi.id, "idle", "2026-07-01T01:00:00.000Z");
