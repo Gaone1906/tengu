@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type {
@@ -10,7 +10,7 @@ import type {
   WorkItemFullWire,
   WorkItemTreeNodeWire,
 } from "@/lib/api"
-import { buildFeed, whisperOf } from "../task-page/activity"
+import { ActivitySection, buildFeed, stripCommentMarkers, whisperOf } from "../task-page/activity"
 import TaskPage from "../task-page/task-page"
 
 /* Todos v2 slice 6 — the task page sections (design-doc §7.2.8–11):
@@ -125,6 +125,18 @@ function renderTask(path = "/todos/PLA-12") {
   )
 }
 
+function renderActivity(detail: WorkItemDetailWire) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })
+  const view = render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter>
+        <ActivitySection detail={detail} byName={new Map()} mobile={false} announce={vi.fn()} />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+  return { ...view, client }
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   getWorkItemTree.mockImplementation((id: string) =>
@@ -171,6 +183,13 @@ describe("the merged feed model", () => {
     expect(whisperOf(event("e", "approval_decided", "t", { detail: { decision: "approve" } })).text).toBe("approved it")
     expect(whisperOf(event("e", "escalated", "t", { detail: { reason: "max-rounds-exhausted" } })).text).toContain("rounds exhausted")
   })
+
+  it("leaves inline HTML comments and fenced examples intact", () => {
+    expect(stripCommentMarkers(
+      "Before\n<!-- pipeline-status -->\nInline <!-- keep --> text\n<!-- keep --> visible <!-- too -->\n```\n<!-- code -->\n```\n<!-- /pipeline-status -->\nAfter",
+    )).toBe("Before\nInline <!-- keep --> text\n<!-- keep --> visible <!-- too -->\n```\n<!-- code -->\n```\nAfter")
+  })
+
 })
 
 describe("sub-tasks", () => {
@@ -337,7 +356,7 @@ describe("attachments + activity", () => {
     expect(await screen.findByTestId("comment-attachment-wia_9")).toBeTruthy()
     // The birth whisper stays visible; the trailing 3-event run folds.
     expect(activity.textContent).toContain("created this todo")
-    const fold = screen.getByTestId("activity-fold-1")
+    const fold = screen.getByTestId("activity-fold-e2")
     expect(fold.textContent).toContain("3 quiet updates")
     fireEvent.click(fold)
     expect(activity.textContent).toContain("changed the labels")
@@ -352,16 +371,139 @@ describe("attachments + activity", () => {
     await waitFor(() => expect(uploadWorkItemAttachment).toHaveBeenCalledWith("PLA-12", staged, "wic_3"))
   })
 
-  it("carries comment edit/delete from the retired sheet: Edit only on operator-authored, Delete on any, wire round-trips (cutover)", async () => {
+  it("renders comment markdown and line breaks while hiding pipeline markers", async () => {
+    const body = [
+      "<!-- pipeline-status -->",
+      "**PLAN done** and `code`",
+      "- item",
+      "1. item",
+      "[text](https://example.com)",
+      "<!-- /pipeline-status -->",
+    ].join("\n")
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    listWorkItemComments.mockResolvedValue({
+      comments: [comment("wic_markdown", body, "2026-07-22T08:00:00.000Z")],
+      total: 1,
+    })
+    renderTask()
+
+    const block = await screen.findByTestId("activity-comment-wic_markdown")
+    expect(block.querySelector("strong")?.textContent).toBe("PLAN done")
+    expect(block.querySelector("code")?.textContent).toBe("code")
+    expect(block.querySelector('a[href="https://example.com"]')?.textContent).toBe("text")
+    expect(block.textContent).not.toContain("**")
+    expect(block.textContent).not.toContain("`")
+    expect(block.textContent).not.toContain("pipeline-status")
+
+    const bodyRail = block.children[1]
+    const renderedLines = [...bodyRail.children]
+      .filter((child) => child.tagName === "DIV")
+      .map((child) => child.textContent)
+    expect(renderedLines).toEqual(["PLAN done and code", "•item", "1.item", "text"])
+  })
+
+  it("shows newest blocks first, keeps replies chronological, and expands quiet updates newest first", async () => {
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12"), {
+      events: [
+        event("e1", "created", "2026-07-20T08:00:00.000Z"),
+        event("e2", "metadata_edited", "2026-07-20T09:00:00.000Z"),
+        event("e3", "label_changed", "2026-07-20T10:00:00.000Z"),
+        event("e4", "relation_added", "2026-07-20T11:00:00.000Z"),
+      ],
+    }))
+    listWorkItemComments.mockResolvedValue({
+      comments: [
+        comment("wic_parent", "Parent", "2026-07-21T08:00:00.000Z"),
+        comment("wic_reply_1", "First reply", "2026-07-21T09:00:00.000Z", { parentCommentId: "wic_parent" }),
+        comment("wic_reply_2", "Second reply", "2026-07-21T10:00:00.000Z", { parentCommentId: "wic_parent" }),
+        comment("wic_newest", "Newest", "2026-07-22T08:00:00.000Z"),
+      ],
+      total: 4,
+    })
+    renderTask()
+
+    const activity = await screen.findByTestId("task-activity")
+    await screen.findByTestId("activity-comment-wic_newest")
+    const comments = [...activity.querySelectorAll('[data-testid^="activity-comment-"]')]
+      .map((node) => node.getAttribute("data-testid"))
+    expect(comments).toEqual([
+      "activity-comment-wic_newest",
+      "activity-comment-wic_parent",
+      "activity-comment-wic_reply_1",
+      "activity-comment-wic_reply_2",
+    ])
+
+    const fold = screen.getByTestId("activity-fold-e2")
+    fireEvent.click(fold)
+    const expandedEvents = [...fold.parentElement!.querySelectorAll('[data-testid^="whisper-"]')]
+      .map((node) => node.getAttribute("data-testid"))
+    expect(expandedEvents).toEqual(["whisper-e4", "whisper-e3", "whisper-e2"])
+  })
+
+  it("places the desktop composer before the feed and keeps an expanded fold open when a newer comment is prepended", async () => {
+    const events = [
+      event("e1", "created", "2026-07-20T08:00:00.000Z"),
+      event("e2", "metadata_edited", "2026-07-20T09:00:00.000Z"),
+      event("e3", "label_changed", "2026-07-20T10:00:00.000Z"),
+      event("e4", "relation_added", "2026-07-20T11:00:00.000Z"),
+    ]
+    const older = comment("wic_older", "Older", "2026-07-21T08:00:00.000Z")
+    const detail = detailOf(full("PLA-12"), {
+      events,
+      comments: { comments: [older], total: 1 },
+    })
+    const { client } = renderActivity(detail)
+
+    const fold = await screen.findByTestId("activity-fold-e2")
+    const composer = screen.getByTestId("task-composer")
+    const olderBlock = screen.getByTestId("activity-comment-wic_older")
+    expect(composer.compareDocumentPosition(olderBlock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    fireEvent.click(fold)
+    expect(fold.getAttribute("aria-expanded")).toBe("true")
+
+    const newer = comment("wic_newer", "Newer", "2026-07-22T08:00:00.000Z")
+    act(() => {
+      client.setQueryData(["work-item-comments", "PLA-12"], {
+        comments: [newer, older],
+        total: 2,
+      })
+    })
+
+    expect(await screen.findByTestId("activity-comment-wic_newer")).toBeTruthy()
+    expect(screen.getByTestId("activity-fold-e2").getAttribute("aria-expanded")).toBe("true")
+  })
+
+  it("keeps tombstones italic and renders deleted text instead of stored markdown", async () => {
     getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
     listWorkItemComments.mockResolvedValue({
       comments: [
-        comment("wic_mine", "operator words", "2026-07-22T08:00:00.000Z", { authorKind: "operator", author: "operator" }),
+        comment("wic_deleted", "**should stay hidden**", "2026-07-22T08:00:00.000Z", {
+          deletedAt: "2026-07-23T09:00:00.000Z",
+        }),
+      ],
+      total: 1,
+    })
+    renderTask()
+
+    const block = await screen.findByTestId("activity-comment-wic_deleted")
+    const deleted = block.querySelector("span.italic")
+    expect(deleted?.textContent).toBe("[deleted]")
+    expect(block.textContent).not.toContain("should stay hidden")
+  })
+
+  it("carries comment edit/delete from the retired sheet: Edit only on operator-authored, Delete on any, wire round-trips (cutover)", async () => {
+    const rawBody = "**operator words**\n`raw code`"
+    const editedBody = "**operator words v2**\n`raw code`\n"
+    getWorkItem.mockResolvedValue(detailOf(full("PLA-12")))
+    listWorkItemComments.mockResolvedValue({
+      comments: [
+        comment("wic_mine", rawBody, "2026-07-22T08:00:00.000Z", { authorKind: "operator", author: "operator" }),
         comment("wic_theirs", "agent words", "2026-07-22T09:00:00.000Z"),
       ],
       total: 2,
     })
-    editWorkItemComment.mockResolvedValue({ comment: comment("wic_mine", "operator words v2", "2026-07-22T08:00:00.000Z", { authorKind: "operator", author: "operator", editedAt: "2026-07-23T09:00:00.000Z" }) })
+    editWorkItemComment.mockResolvedValue({ comment: comment("wic_mine", editedBody, "2026-07-22T08:00:00.000Z", { authorKind: "operator", author: "operator", editedAt: "2026-07-23T09:00:00.000Z" }) })
     deleteWorkItemComment.mockResolvedValue({ comment: comment("wic_theirs", "", "2026-07-22T09:00:00.000Z", { deletedAt: "2026-07-23T09:00:00.000Z" }) })
     renderTask()
 
@@ -372,10 +514,11 @@ describe("attachments + activity", () => {
     expect(screen.getByTestId("activity-delete-wic_theirs")).toBeTruthy()
 
     fireEvent.click(screen.getByTestId("activity-edit-start-wic_mine"))
-    const editBox = screen.getByTestId("activity-edit-wic_mine")
-    fireEvent.change(editBox, { target: { value: "operator words v2" } })
+    const editBox = screen.getByTestId("activity-edit-wic_mine") as HTMLTextAreaElement
+    expect(editBox.value).toBe(rawBody)
+    fireEvent.change(editBox, { target: { value: editedBody } })
     fireEvent.click(screen.getByTestId("activity-edit-save-wic_mine"))
-    await waitFor(() => expect(editWorkItemComment).toHaveBeenCalledWith("PLA-12", "wic_mine", "operator words v2"))
+    await waitFor(() => expect(editWorkItemComment).toHaveBeenCalledWith("PLA-12", "wic_mine", editedBody))
 
     fireEvent.click(screen.getByTestId("activity-delete-wic_theirs"))
     await waitFor(() => expect(deleteWorkItemComment).toHaveBeenCalledWith("PLA-12", "wic_theirs"))
