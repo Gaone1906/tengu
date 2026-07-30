@@ -79,6 +79,21 @@ export function workingSince(item: WorkItemCompactWire, detail: WorkItemOpenDeta
   return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`
 }
 
+/** Vertical anatomy used by the column FLIP dependency. Enrichment may add a
+ * body preview, state line, reason, or first footer after the column painted;
+ * each bit tells the column to cushion cards below that growth. */
+export function cardLayoutKey(item: WorkItemCompactWire, enrichment: CardEnrichment | undefined): string {
+  const tree = enrichment?.tree
+  const detail = enrichment?.detail
+  const rollup = rollupOf(tree, item.status)
+  const spendUsd = tree?.spendUsd ?? detail?.spendUsd ?? 0
+  const body = stripMarkdown(tree?.root.body ?? "").trim().length > 0
+  const working = workingSince(item, detail) !== null
+  const reason = reasonOf(item, detail) !== null
+  const footer = !!item.assignee || !!rollup || (spendUsd > 0 && (!!item.dueAt || item.approvalState === "pending"))
+  return `${Number(body)}${Number(working)}${Number(reason)}${Number(footer)}`
+}
+
 function formatDue(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ""

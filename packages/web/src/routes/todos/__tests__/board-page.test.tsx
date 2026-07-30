@@ -379,6 +379,55 @@ describe("card anatomy", () => {
     expect(card.textContent).not.toContain("`")
   })
 
+  it("FLIPs cards below an item when delayed enrichment grows its card", async () => {
+    rows.backlog = [
+      compact({ id: "PLA-15", status: "backlog" }),
+      compact({ id: "PLA-16", status: "backlog" }),
+    ]
+    const releases: Array<() => void> = []
+    let enriched = false
+    getWorkItemTree.mockImplementation(
+      (id: string) =>
+        new Promise((resolve) => {
+          releases.push(() => {
+            const tree = emptyTree(id)
+            if (id === "PLA-15") tree.root.body = "Delayed body preview"
+            resolve({ tree })
+          })
+        }),
+    )
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const id = this.dataset.boardCard
+      const top = id === "PLA-16" ? (enriched ? 112 : 80) : 0
+      return {
+        x: 0, y: top, left: 0, top, right: 240, bottom: top + 72, width: 240, height: 72,
+        toJSON: () => ({}),
+      } as DOMRect
+    })
+    const animate = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, "animate", {
+      configurable: true,
+      value: animate,
+    })
+
+    renderBoard("/todos/b/platform")
+    const lowerCard = await screen.findByTestId("board-card-PLA-16")
+    await waitFor(() => expect(releases).toHaveLength(2))
+    enriched = true
+    await act(async () => {
+      releases.forEach((release) => release())
+    })
+    await waitFor(() => expect(screen.getByTestId("board-card-PLA-15").textContent).toContain("Delayed body preview"))
+    expect(animate).toHaveBeenCalledWith(
+      [{ transform: "translateY(-32px)" }, { transform: "translateY(0)" }],
+      { duration: 200, easing: "cubic-bezier(.34,1.3,.64,1)" },
+    )
+    expect(animate.mock.instances).toContain(lowerCard)
+
+    rect.mockRestore()
+    delete (HTMLElement.prototype as { animate?: unknown }).animate
+  })
+
   it("renders the roll-up pill from the tree and expands the in-place tray", async () => {
     rows.executing = [compact({ id: "PLA-6", status: "executing" })]
     const tree = emptyTree("PLA-6", "executing")
@@ -604,6 +653,7 @@ describe("board states (states mock §6 — stage C)", () => {
     listWorkItems.mockImplementation(() => new Promise(() => {}))
     renderBoard("/todos/b/platform")
     await waitFor(() => expect(screen.getByTestId("board-skeleton")).toBeTruthy())
+    expect(screen.getByTestId("board-skeleton-closed-rail")).toBeTruthy()
   })
 
   it("a board load failure surfaces the calm error card, not a blank surface", async () => {

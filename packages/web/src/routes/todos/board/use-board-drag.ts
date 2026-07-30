@@ -152,8 +152,9 @@ export function useBoardDrag(
         setDrag(state)
         // A legal-but-empty exception column materializes on lift (states
         // mock §6: "empty columns simply don't render — except the column a
-        // drag could legally land in"), which reflows every flex column —
-        // re-measure once the lift render has painted.
+        // drag could legally land in"). Existing columns freeze to the lifted
+        // card's measured width; re-measure after paint to register the new
+        // landing target.
         if (typeof requestAnimationFrame === "function") {
           requestAnimationFrame(() => {
             if (dragRef.current?.id === item.id) geometryRef.current = measure(item.id)

@@ -352,6 +352,35 @@ export default function TaskPage() {
       </PageLayout>
     )
   }
+  if (detailQuery.isPending) {
+    return (
+      <PageLayout hideMobileTabBar={mobile}>
+        <div className="flex h-full min-h-0 flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto" data-scrollable data-testid="task-page-scroll">
+            <CrumbBar
+              boardLabel={boardLabel}
+              onBack={goBack}
+              ancestors={[]}
+              id={id}
+              title=""
+              onOpenAncestor={openTodo}
+              mobile={mobile}
+            />
+            <div
+              data-testid="task-page-grid"
+              className={
+                mobile
+                  ? "flex flex-col px-4 pb-[calc(96px+var(--safe-bottom,0px))] pt-1.5"
+                  : "w-full max-w-[920px] px-10 pb-8 pt-2"
+              }
+            >
+              <TaskPageSkeleton mobile={mobile} />
+            </div>
+          </div>
+        </div>
+      </PageLayout>
+    )
+  }
 
   return (
     // Mobile is a full-screen push (§8): the tab bar yields the bottom edge to
@@ -564,6 +593,31 @@ export default function TaskPage() {
         </div>
       )}
     </PageLayout>
+  )
+}
+
+function TaskPageSkeleton({ mobile }: { mobile: boolean }) {
+  const pulse =
+    "bg-[var(--fill-tertiary)] motion-safe:animate-[skeletonPulse_1.6s_var(--ease-smooth)_infinite]"
+  return (
+    <div data-testid="task-page-skeleton" className="min-w-0" aria-hidden>
+      {mobile && <div className={`mb-1 h-3 w-14 rounded-md ${pulse}`} />}
+      <div className={`${mobile ? "h-8 w-[82%]" : "h-[38px] w-[68%]"} rounded-[10px] ${pulse}`} />
+      <div className={`mt-3 flex ${mobile ? "h-[34px]" : "h-7"} items-center gap-2`}>
+        <span className={`h-full w-[92px] rounded-full ${pulse}`} />
+        <span className={`h-full w-[116px] rounded-full ${pulse}`} />
+        <span className={`h-full w-[84px] rounded-full ${pulse}`} />
+      </div>
+      <div
+        data-testid="task-details-toggle"
+        className={`mt-4 h-10 w-full rounded-[var(--radius-lg)] ${pulse}`}
+      />
+      <div data-testid="task-activity" className="pt-3">
+        <div className={`h-4 w-20 rounded-md ${pulse}`} />
+        <div className={`mt-3 h-[82px] w-full rounded-[var(--radius-lg)] ${pulse}`} />
+        <div className={`mt-3 h-[52px] w-[76%] rounded-[var(--radius-lg)] ${pulse}`} />
+      </div>
+    </div>
   )
 }
 

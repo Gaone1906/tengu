@@ -52,8 +52,8 @@ export function CrumbBar({
       data-testid="task-crumb-bar"
       className={
         mobile
-          ? "flex items-center gap-2 px-3.5 pb-2 pt-[calc(10px+var(--safe-top,0px))]"
-          : "flex items-center gap-2 px-10 pb-2 pt-3.5"
+          ? "flex min-h-[52px] items-center gap-2 px-3.5 pb-2 pt-[calc(10px+var(--safe-top,0px))]"
+          : "flex min-h-[56px] items-center gap-2 px-10 pb-2 pt-3.5"
       }
     >
       {mobile ? (
@@ -67,7 +67,7 @@ export function CrumbBar({
           <ChevronLeft size={17} strokeWidth={2.2} aria-hidden />
         </button>
       ) : (
-        <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap">
           {/* Text sits on the 96px spine; the wash bleeds -8px (polish law 5). */}
           <button
             type="button"
@@ -79,7 +79,7 @@ export function CrumbBar({
           </button>
           <Csep />
           {ancestors.map((ancestor) => (
-            <span key={ancestor.id} className="flex items-center gap-2">
+            <span key={ancestor.id} className="flex flex-none items-center gap-2">
               <button
                 type="button"
                 data-testid={`task-crumb-${ancestor.id}`}

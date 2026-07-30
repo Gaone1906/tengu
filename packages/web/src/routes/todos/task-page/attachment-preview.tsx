@@ -79,12 +79,22 @@ export function AttachmentTile({
           onError={() => preview.fail(attachment)}
           className={`block w-full object-cover ${dense ? "h-[70px]" : "aspect-[3/2]"}`}
         />
-        <span className={`block truncate px-2 pt-1 font-medium text-[var(--text-primary)] ${dense ? "text-[11px]" : "text-[12.5px]"}`}>
-          {attachment.filename}
+        <span
+          data-testid={`attachment-caption-${attachment.id}`}
+          aria-hidden
+          className={`pointer-events-none absolute inset-x-0 bottom-0 flex flex-col bg-gradient-to-t from-[var(--material-thick)] to-transparent opacity-0 transition-opacity duration-150 group-focus-within/tile:opacity-100 [@media(hover:hover)]:group-hover/tile:opacity-100 ${
+            dense ? "px-2 pb-1.5 pt-6" : "px-2.5 pb-2 pt-8"
+          }`}
+        >
+          <span className={`block truncate font-medium text-[var(--text-primary)] ${dense ? "text-[11px]" : "text-[12.5px]"}`}>
+            {attachment.filename}
+          </span>
+          {meta && (
+            <span className={`block truncate text-[var(--text-quaternary)] ${dense ? "text-[10px]" : "text-[11px]"}`}>
+              {meta}
+            </span>
+          )}
         </span>
-        {meta && (
-          <span className={`block truncate px-2 pb-1.5 text-[var(--text-quaternary)] ${dense ? "text-[10px]" : "text-[11px]"}`}>{meta}</span>
-        )}
       </button>
       {action}
     </div>

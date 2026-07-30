@@ -29,7 +29,7 @@ function Chip({
       data-testid={testId}
       aria-label={label}
       onClick={onOpen}
-      className={`focus-ring flex items-center gap-[7px] bg-[var(--fill-tertiary)] font-medium text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-secondary)] ${
+      className={`focus-ring flex flex-none items-center gap-[7px] bg-[var(--fill-tertiary)] font-medium text-[var(--text-secondary)] outline-none hover:bg-[var(--fill-secondary)] ${
         mobile
           ? "h-[34px] rounded-[17px] px-3 text-[13.5px]"
           : "h-7 rounded-[14px] px-[11px] text-[12.5px]"
@@ -55,27 +55,24 @@ export function ChipCluster({
 }) {
   const item = detail.workItem
   const labels = detail.labels ?? []
-  const readChip = mobile
-    ? "flex h-[34px] items-center gap-[7px] rounded-[17px] bg-[var(--fill-tertiary)] px-3 text-[13.5px] font-medium"
-    : "flex h-7 items-center gap-[7px] rounded-[14px] bg-[var(--fill-tertiary)] px-[11px] text-[12.5px] font-medium"
   return (
     <div
       data-testid="task-chip-cluster"
-      className="mt-3 flex flex-wrap gap-2"
+      className="mt-3 flex min-h-7 flex-wrap gap-2 max-[700px]:min-h-[34px] max-[700px]:flex-nowrap max-[700px]:overflow-x-auto"
     >
       <Chip mobile={mobile} label="Status" testId="chip-status" onOpen={() => onOpenPicker("status")}>
         <StatusCircle status={item.status} size={16} />
         {STATUS_LABEL[item.status]}
+        {working && (
+          <span className="flex items-center gap-1.5 text-[var(--system-blue)]" data-testid="chip-working">
+            <span
+              className="size-1.5 rounded-full bg-[var(--system-blue)] motion-safe:animate-[jinn-pulse_1.4s_ease-in-out_infinite]"
+              aria-hidden
+            />
+            Working · {working}
+          </span>
+        )}
       </Chip>
-      {working && (
-        <span className={`${readChip} text-[var(--system-blue)]`} data-testid="chip-working">
-          <span
-            className="size-1.5 rounded-full bg-[var(--system-blue)] motion-safe:animate-[jinn-pulse_1.4s_ease-in-out_infinite]"
-            aria-hidden
-          />
-          Working · {working}
-        </span>
-      )}
       <Chip mobile={mobile} label="Assignee" testId="chip-assignee" onOpen={() => onOpenPicker("assignee")}>
         {item.assignee ? (
           <>

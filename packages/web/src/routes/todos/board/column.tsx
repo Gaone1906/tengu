@@ -78,7 +78,10 @@ export function BoardColumn({
       data-testid={`board-column-${status}`}
       data-board-column={status}
       className="flex min-w-0 flex-1 flex-col transition-opacity duration-150 max-[700px]:flex-none"
-      style={dimmed ? { opacity: 0.38 } : undefined}
+      style={{
+        opacity: dimmed ? 0.38 : undefined,
+        flex: drag ? `0 0 ${drag.width}px` : undefined,
+      }}
       aria-label={`${label} column, ${count} items`}
     >
       <div className="group/colhead sticky top-0 z-[2] flex items-center gap-2 bg-[var(--bg)] px-[13px] pb-2.5 pt-0.5 max-[700px]:static max-[700px]:px-0.5 max-[700px]:pb-0.5">

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { WorkItemDetailWire, WorkItemFullWire, WorkItemStatusWire, WorkItemTreeNodeWire } from "@/lib/api"
@@ -26,6 +26,8 @@ const setWorkItemStatus = vi.fn()
 const decideWorkItemApproval = vi.fn()
 const listWorkItemAttachments = vi.fn()
 const listWorkItemComments = vi.fn()
+const listWorkItemSessions = vi.fn()
+const getOrg = vi.fn()
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>()
@@ -40,11 +42,11 @@ vi.mock("@/lib/api", async (importOriginal) => {
       listWorkItemComments: (...args: unknown[]) => listWorkItemComments(...args),
       workItemAttachmentUrl: (id: string, attachmentId: string) =>
         `/api/work-items/${id}/attachments/${attachmentId}`,
-      listWorkItemSessions: vi.fn().mockResolvedValue([]),
+      listWorkItemSessions: (...args: unknown[]) => listWorkItemSessions(...args),
       getDepartments: vi.fn().mockResolvedValue({
         departments: [{ slug: "platform", prefix: "PLA", createdAt: "2026-07-01T00:00:00.000Z", todoCount: 4 }],
       }),
-      getOrg: vi.fn().mockResolvedValue({ departments: ["platform"], employees: [], hierarchy: { root: null, sorted: [], warnings: [] } }),
+      getOrg: (...args: unknown[]) => getOrg(...args),
       listWorkItems: vi.fn().mockResolvedValue({ workItems: [], total: 0, nextOffset: null }),
     },
   }
@@ -130,6 +132,12 @@ beforeEach(() => {
   )
   listWorkItemAttachments.mockResolvedValue({ attachments: [] })
   listWorkItemComments.mockResolvedValue({ comments: [], total: 0 })
+  listWorkItemSessions.mockResolvedValue([])
+  getOrg.mockResolvedValue({
+    departments: ["platform"],
+    employees: [],
+    hierarchy: { root: null, sorted: [], warnings: [] },
+  })
 })
 
 afterEach(() => {
@@ -157,6 +165,81 @@ describe("ancestor helpers", () => {
 })
 
 describe("the task page", () => {
+  it("holds the loaded task geometry with a skeleton until the detail resolves", async () => {
+    let resolveDetail!: (detail: WorkItemDetailWire) => void
+    getWorkItem.mockImplementation(
+      () => new Promise<WorkItemDetailWire>((resolve) => {
+        resolveDetail = resolve
+      }),
+    )
+    renderTask()
+
+    expect(screen.getByTestId("task-page-skeleton")).toBeTruthy()
+    expect(screen.getByTestId("task-details-toggle")).toBeTruthy()
+    expect(screen.getByTestId("task-activity")).toBeTruthy()
+
+    await act(async () => {
+      resolveDetail(detailOf(full("PLA-12")))
+    })
+    await waitFor(() => expect(screen.queryByTestId("task-page-skeleton")).toBeNull())
+    expect(screen.getByTestId("task-details-toggle")).toBeTruthy()
+    expect(screen.getByTestId("task-activity")).toBeTruthy()
+  })
+
+  it("keeps the crumb and chip bands single-height while second-wave data lands", async () => {
+    const item = full("PLA-12", { rootId: "PLA-1", parentId: "PLA-1", assignee: "platform-dev" })
+    let resolveTree!: (value: { tree: { root: WorkItemTreeNodeWire; totals: {}; spendUsd: number } }) => void
+    let resolveSessions!: (value: Array<{ status: string }>) => void
+    getWorkItem.mockResolvedValue(detailOf(item))
+    getWorkItemTree.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveTree = resolve
+      }),
+    )
+    listWorkItemSessions.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveSessions = resolve
+      }),
+    )
+    getOrg.mockResolvedValue({
+      departments: ["platform"],
+      employees: [{
+        name: "platform-dev",
+        displayName: "Platform Engineer With A Long Name",
+        department: "platform",
+        rank: "senior",
+        engine: "codex",
+        model: "default",
+        persona: "Builds the platform",
+      }],
+      hierarchy: { root: null, sorted: [], warnings: [] },
+    })
+    renderTask()
+
+    const crumbBefore = await screen.findByTestId("task-crumb-bar")
+    const chipsBefore = await screen.findByTestId("task-chip-cluster")
+    expect(crumbBefore.className).toContain("min-h-[56px]")
+    expect(chipsBefore.className).toContain("max-[700px]:flex-nowrap")
+    expect(chipsBefore.querySelectorAll(":scope > button")).toHaveLength(3)
+
+    await act(async () => {
+      resolveTree({
+        tree: {
+          root: treeNode(full("PLA-1"), [treeNode(item)]),
+          totals: {},
+          spendUsd: 0,
+        },
+      })
+      resolveSessions([{ status: "running" }])
+    })
+
+    await waitFor(() => expect(screen.getByTestId("task-crumb-PLA-1")).toBeTruthy())
+    expect(screen.getByTestId("task-crumb-bar").className).toBe(crumbBefore.className)
+    expect(screen.getByTestId("task-chip-cluster").className).toBe(chipsBefore.className)
+    expect(screen.getByTestId("task-chip-cluster").querySelectorAll(":scope > button")).toHaveLength(3)
+    expect(screen.getByTestId("chip-working")).toBeTruthy()
+  })
+
   it("renders the breadcrumb (board › ancestors › ID + title) and the title block", async () => {
     const item = full("PLA-22", { title: "Postal-code validation", rootId: "PLA-12", parentId: "PLA-14", depth: 2 })
     getWorkItem.mockResolvedValue(detailOf(item))

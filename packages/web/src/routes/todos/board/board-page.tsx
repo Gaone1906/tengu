@@ -29,7 +29,7 @@ import { FilterBar } from "../filter-bar"
 import { TodoFilterSheet } from "../todo-filter-sheet"
 import { NeedsYouView } from "../needs-you-view"
 import { NewTodoDialog } from "../new-todo-dialog"
-import { BoardCard, type CardEnrichment } from "./card"
+import { BoardCard, cardLayoutKey, rollupOf, type CardEnrichment } from "./card"
 import { BoardColumn, DragSlot } from "./column"
 import { ClosedColumnGroup, ClosedColumnHeader, ClosedRail } from "./closed-rail"
 import { BoardSwitcher, departmentTitle } from "./board-switcher"
@@ -51,7 +51,6 @@ import {
   recallBoardScroll,
   rememberBoardScroll,
 } from "./board-route"
-import { rollupOf } from "./card"
 
 /* Todos v2 slice 6 — the board surface (design contract:
  * docs/superpowers/design/todos-v2-board — board.html is the visual truth).
@@ -524,7 +523,7 @@ export default function TodoBoardPage() {
         key={status}
         status={status}
         count={count}
-        orderKey={items.map((item) => item.id).join(",")}
+        orderKey={items.map((item) => `${item.id}:${cardLayoutKey(item, enrichmentOf(item.id))}`).join(",")}
         onQuickAdd={quickAdd}
         hasMore={column?.hasMore ?? false}
         remaining={Math.max(0, (column?.total ?? 0) - items.length)}
@@ -999,6 +998,10 @@ function BoardSkeleton() {
           </div>
         </div>
       ))}
+      <div
+        data-testid="board-skeleton-closed-rail"
+        className="h-24 w-11 flex-none rounded-[var(--radius-lg)] bg-[var(--fill-quaternary)] motion-safe:animate-[skeletonPulse_1.6s_var(--ease-smooth)_infinite]"
+      />
     </div>
   )
 }

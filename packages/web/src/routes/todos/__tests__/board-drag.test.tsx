@@ -254,6 +254,10 @@ describe("board drag legality", () => {
   it("a legal-but-empty exception column materializes on lift (states mock §6) and folds back after", async () => {
     renderBoard() // no blocked/escalated rows anywhere
     const card = await screen.findByTestId("board-card-PLA-3") // executing
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue({
+      x: 200, y: 0, left: 200, top: 0, right: 300, bottom: 72, width: 100, height: 72,
+      toJSON: () => ({}),
+    } as DOMRect)
     stubColumnGeometry()
     expect(screen.queryByTestId("board-column-blocked")).toBeNull()
 
@@ -264,6 +268,9 @@ describe("board drag legality", () => {
     // Blocked and Escalated are legal drops from executing — they appear.
     expect(screen.getByTestId("board-column-blocked")).toBeTruthy()
     expect(screen.getByTestId("board-column-escalated")).toBeTruthy()
+    for (const column of document.querySelectorAll<HTMLElement>("[data-board-column]")) {
+      expect(column.style.flex).toBe("0 0 100px")
+    }
 
     await act(async () => {
       window.dispatchEvent(pointer("pointermove", 5000, 50))
