@@ -231,7 +231,12 @@ const MIME_TYPES: Record<string, string> = {
   ".woff2": "font/woff2",
 };
 
-type RuntimeActivityInfo = { activeStreams: number; lastActivityAt: number };
+type RuntimeActivityInfo = {
+  activeStreams: number;
+  activeAgents?: number;
+  activeMonitors?: number;
+  lastActivityAt: number;
+};
 type RuntimeActivitySource = {
   onRuntimeActivity?: (cb: (sessionId: string, info: RuntimeActivityInfo | null) => void) => void;
 };
@@ -1037,7 +1042,7 @@ export async function startGateway(
   // Native CLI schedulers such as /loop wake inside the PTY without entering
   // Jinn's queue; engines can expose onRuntimeActivity so the UI stops showing
   // those sessions as transport-idle while the native work is awake.
-  const backgroundActivity = new Map<string, { activeStreams: number; lastActivityAt: number }>();
+  const backgroundActivity = new Map<string, RuntimeActivityInfo>();
   const handleRuntimeActivity = (sessionId: string, info: RuntimeActivityInfo | null): void => {
     if (info) backgroundActivity.set(sessionId, info);
     else backgroundActivity.delete(sessionId);
@@ -1052,7 +1057,12 @@ export async function startGateway(
       sessionId,
       transportState,
       backgroundActivity: info
-        ? { activeStreams: info.activeStreams, lastActivityAt: new Date(info.lastActivityAt).toISOString() }
+        ? {
+            activeStreams: info.activeStreams,
+            ...(info.activeAgents !== undefined ? { activeAgents: info.activeAgents } : {}),
+            ...(info.activeMonitors !== undefined ? { activeMonitors: info.activeMonitors } : {}),
+            lastActivityAt: new Date(info.lastActivityAt).toISOString(),
+          }
         : null,
     });
   };

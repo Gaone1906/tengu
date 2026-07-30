@@ -209,6 +209,44 @@ describe("InteractiveClaudeEngine — submit confirmation wiring", () => {
     expect(engine.turnProgress("s-cancel")).toBeUndefined();
   });
 
+  it("keeps an observed Bash monitor after settle and does not restore it after TaskStop", async () => {
+    vi.useFakeTimers();
+    const events: Array<{ activeMonitors?: number } | null> = [];
+    engine.onBackgroundActivity((_id, info) => events.push(info));
+
+    const launchTurn = engine.run({ sessionId: "s-monitor", prompt: "launch", cwd: "/tmp" } as any);
+    await vi.advanceTimersByTimeAsync(20);
+    hookCb!({ hook_event_name: "SessionStart", session_id: "c1" });
+    hookCb!({
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: { run_in_background: true },
+      tool_response: { backgroundTaskId: "task-1" },
+    });
+    hookCb!({ hook_event_name: "Stop", last_assistant_message: "launched" });
+    await launchTurn;
+
+    expect(events).toEqual([expect.objectContaining({ activeMonitors: 1 })]);
+
+    const stopTurn = engine.run({ sessionId: "s-monitor", prompt: "stop", cwd: "/tmp" } as any);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(events.at(-1)).toBeNull(); // foreground turn suppresses the StateLine
+    hookCb!({
+      hook_event_name: "PostToolUse",
+      tool_name: "TaskStop",
+      tool_input: { task_id: "task-1" },
+      tool_response: { task_id: "task-1", task_type: "local_bash" },
+    });
+    hookCb!({ hook_event_name: "Stop", last_assistant_message: "stopped" });
+    await stopTurn;
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(events).toEqual([
+      expect.objectContaining({ activeMonitors: 1 }),
+      null,
+    ]);
+  });
+
   // NOT tested here: that run()'s finally calls entry.cancelSubmitConfirm().
   // `submitted()` also reads resolver.isSettled, so a settled turn stops the loop
   // at its next tick with or without that call — removing it changes no

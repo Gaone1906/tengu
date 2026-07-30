@@ -815,10 +815,11 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
    *  API error, but the CLI may still finish — a late Stop supersedes). */
   private lateRecovery = new Map<string, { timer: NodeJS.Timeout }>();
   /** Post-settle background work per session: the CLI's SSE proxy still has
-   *  upstream requests in flight (background subagents/tasks) after the Stop
+   *  upstream requests in flight or a background Bash monitor after the Stop
    *  hook settled the turn. `emitted` tracks whether the gateway was told, so a
    *  cleared (null) notification is only sent when there's something to clear. */
   private bgActivity = new Map<string, { info: UpstreamActivityInfo; clearTimer?: NodeJS.Timeout; emitted: boolean }>();
+  private backgroundMonitors = new Map<string, Set<string>>();
   private backgroundActivityCb?: (jinnSessionId: string, info: UpstreamActivityInfo | null) => void;
   /** Test override for the post-settle clear quiet window (default 10s). */
   backgroundClearQuietMs = BACKGROUND_CLEAR_QUIET_MS;
@@ -936,25 +937,90 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
    *  must stay truthful across the run boundary); emission is gated downstream. */
   private handleUpstreamActivity(jinnSessionId: string, info: UpstreamActivityInfo): void {
     this.lifecycle.setRuntimeActive(jinnSessionId, info.activeStreams > 0);
+    const mergedInfo = {
+      ...info,
+      activeMonitors: this.backgroundMonitors.get(jinnSessionId)?.size ?? 0,
+    };
     let st = this.bgActivity.get(jinnSessionId);
     if (!st) {
-      st = { info, emitted: false };
+      st = { info: mergedInfo, emitted: false };
       this.bgActivity.set(jinnSessionId, st);
     } else {
-      st.info = info;
+      st.info = mergedInfo;
+    }
+    this.maybeEmitBackground(jinnSessionId);
+  }
+
+  /** Track the installed Claude CLI's observed monitor lifecycle. A top-level
+   *  PostToolUse Bash returns backgroundTaskId when launch succeeds; TaskStop
+   *  returns the same id with task_type=local_bash when termination succeeds.
+   *  Background Bash calls made inside Task subagents carry agent_id and are
+   *  not session monitors. */
+  private handleBackgroundMonitorHook(jinnSessionId: string, hook: HookPayload): void {
+    if (hook.hook_event_name !== "PostToolUse") return;
+    const input = hook.tool_input && typeof hook.tool_input === "object" && !Array.isArray(hook.tool_input)
+      ? hook.tool_input as Record<string, unknown>
+      : undefined;
+    const response = hook.tool_response && typeof hook.tool_response === "object" && !Array.isArray(hook.tool_response)
+      ? hook.tool_response as Record<string, unknown>
+      : undefined;
+
+    let taskId: string | undefined;
+    let add = false;
+    if (
+      hook.tool_name === "Bash"
+      && typeof hook.agent_id !== "string"
+      && input?.run_in_background === true
+      && typeof response?.backgroundTaskId === "string"
+    ) {
+      taskId = response.backgroundTaskId;
+      add = true;
+    } else if (
+      hook.tool_name === "TaskStop"
+      && response?.task_type === "local_bash"
+      && typeof response.task_id === "string"
+    ) {
+      taskId = response.task_id;
+    }
+    if (!taskId) return;
+
+    let monitors = this.backgroundMonitors.get(jinnSessionId);
+    if (add) {
+      monitors ??= new Set<string>();
+      const previousSize = monitors.size;
+      monitors.add(taskId);
+      if (monitors.size === previousSize) return;
+      this.backgroundMonitors.set(jinnSessionId, monitors);
+    } else {
+      if (!monitors?.delete(taskId)) return;
+      if (monitors.size === 0) this.backgroundMonitors.delete(jinnSessionId);
+    }
+
+    let state = this.bgActivity.get(jinnSessionId);
+    const info: UpstreamActivityInfo = {
+      activeStreams: state?.info.activeStreams ?? 0,
+      activeAgents: state?.info.activeAgents ?? 0,
+      activeMonitors: monitors?.size ?? 0,
+      lastActivityAt: Date.now(),
+    };
+    if (!state) {
+      state = { info, emitted: false };
+      this.bgActivity.set(jinnSessionId, state);
+    } else {
+      state.info = info;
     }
     this.maybeEmitBackground(jinnSessionId);
   }
 
   /** Emit the session's background state if it's post-settle and changed:
-   *  active streams emit immediately (cancelling any pending clear); zero
-   *  streams arm a quiet-window timer that emits `null` once, only if activity
-   *  was previously reported. Suppressed entirely while a run() is in flight. */
+   *  active streams/monitors emit immediately (cancelling any pending clear);
+   *  zero activity arms a quiet-window timer that emits `null` once, only if
+   *  activity was previously reported. Suppressed while a run() is in flight. */
   private maybeEmitBackground(jinnSessionId: string): void {
     const st = this.bgActivity.get(jinnSessionId);
     if (!st) return;
     if (this.active.has(jinnSessionId)) return; // in-flight turn — already "running"
-    if (st.info.activeStreams > 0) {
+    if (st.info.activeStreams > 0 || (st.info.activeMonitors ?? 0) > 0) {
       if (st.clearTimer) { clearTimeout(st.clearTimer); st.clearTimer = undefined; }
       st.emitted = true;
       this.backgroundActivityCb?.(jinnSessionId, { ...st.info });
@@ -969,7 +1035,10 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
     st.clearTimer = setTimeout(() => {
       const cur = this.bgActivity.get(jinnSessionId);
       if (cur !== st) return; // state was recreated/cleared since arming
-      if (cur.info.activeStreams > 0) { cur.clearTimer = undefined; return; }
+      if (cur.info.activeStreams > 0 || (cur.info.activeMonitors ?? 0) > 0) {
+        cur.clearTimer = undefined;
+        return;
+      }
       this.bgActivity.delete(jinnSessionId);
       this.backgroundActivityCb?.(jinnSessionId, null);
     }, this.backgroundClearQuietMs);
@@ -992,6 +1061,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
    *  the cleared notification if activity had been reported. */
   private clearBackground(jinnSessionId: string): void {
     this.lifecycle.setRuntimeActive(jinnSessionId, false);
+    this.backgroundMonitors.delete(jinnSessionId);
     const st = this.bgActivity.get(jinnSessionId);
     if (!st) return;
     if (st.clearTimer) clearTimeout(st.clearTimer);
@@ -1090,6 +1160,7 @@ export class InteractiveClaudeEngine implements InterruptibleEngine, PtyViewEngi
       // Register BEFORE spawning so a fast SessionStart is buffered+drained, not lost.
       this.hookRegistry.register(jinnSessionId, (h) => {
         resolver.onHook(h);
+        this.handleBackgroundMonitorHook(jinnSessionId, h);
         entry.lastHookAt = Date.now();
         // Submit acknowledgement. UserPromptSubmit is the direct signal; the in-turn
         // hooks are accepted too because none of them can fire before a prompt is

@@ -78,6 +78,62 @@ describe("serializeSession", () => {
     vi.useRealTimers();
   });
 
+  it("serializes agent and monitor counts without changing active-stream transport semantics", () => {
+    const session = makeSession({ status: "idle" });
+    const context = makeContext(new Map([
+      ["sess-1", {
+        activeStreams: 1,
+        activeAgents: 4,
+        activeMonitors: 1,
+        lastActivityAt: Date.now(),
+      }],
+    ]));
+
+    const serialized = serializeSession(session, context);
+
+    expect(serialized.transportState).toBe("running");
+    expect(serialized.backgroundActivity).toEqual({
+      activeStreams: 1,
+      activeAgents: 4,
+      activeMonitors: 1,
+      lastActivityAt: expect.any(String),
+    });
+  });
+
+  it("keeps an aux-only request transport-running even when no agents are active", () => {
+    const session = makeSession({ status: "idle" });
+    const context = makeContext(new Map([
+      ["sess-1", {
+        activeStreams: 1,
+        activeAgents: 0,
+        activeMonitors: 0,
+        lastActivityAt: Date.now(),
+      }],
+    ]));
+
+    const serialized = serializeSession(session, context);
+
+    expect(serialized.transportState).toBe("running");
+    expect(serialized.backgroundActivity?.activeAgents).toBe(0);
+  });
+
+  it("keeps monitor-only activity serialized while transport remains idle", () => {
+    const session = makeSession({ status: "idle" });
+    const context = makeContext(new Map([
+      ["sess-1", {
+        activeStreams: 0,
+        activeAgents: 0,
+        activeMonitors: 1,
+        lastActivityAt: Date.now(),
+      }],
+    ]));
+
+    const serialized = serializeSession(session, context);
+
+    expect(serialized.transportState).toBe("idle");
+    expect(serialized.backgroundActivity?.activeMonitors).toBe(1);
+  });
+
   it("keeps long active runtime work visible instead of staling it out", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-01T00:10:00.000Z"));

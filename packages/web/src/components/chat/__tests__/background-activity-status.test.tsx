@@ -35,6 +35,14 @@ describe('isBackgroundActivityVisible', () => {
     expect(isBackgroundActivityVisible(activity({ activeStreams: 0 }), NOW)).toBe(false)
   })
 
+  it('is visible for a monitor with zero active streams', () => {
+    expect(isBackgroundActivityVisible(activity({
+      activeStreams: 0,
+      activeAgents: 0,
+      activeMonitors: 1,
+    }), NOW)).toBe(true)
+  })
+
   it('goes stale 5 minutes after the last background call', () => {
     const fresh = activity({ lastActivityAt: new Date(NOW - 4 * 60 * 1000).toISOString() })
     const stale = activity({ lastActivityAt: new Date(NOW - 6 * 60 * 1000).toISOString() })
@@ -44,13 +52,59 @@ describe('isBackgroundActivityVisible', () => {
 })
 
 describe('BackgroundActivityStatus', () => {
-  it('renders a status line with the plural agent count', () => {
+  it('falls back to the active-stream count when new fields are absent', () => {
     render(<BackgroundActivityStatus activity={activity({ activeStreams: 2 })} />)
     const status = screen.getByRole('status')
     const [long, short] = Array.from(status.querySelectorAll('span')).slice(-2)
     expect(long.textContent).toBe('2 agents in background')
     // Compact <sm form: count + noun (the dot carries "working in background").
     expect(short.textContent).toBe('2 agents')
+  })
+
+  it('renders the classified agent count instead of the raw stream count', () => {
+    render(<BackgroundActivityStatus activity={activity({
+      activeStreams: 9,
+      activeAgents: 4,
+      activeMonitors: 0,
+    })} />)
+    const status = screen.getByRole('status')
+    const [long, short] = Array.from(status.querySelectorAll('span')).slice(-2)
+    expect(long.textContent).toBe('4 agents in background')
+    expect(short.textContent).toBe('4 agents')
+  })
+
+  it('uses generic copy for aux-only activity instead of rendering zero agents', () => {
+    render(<BackgroundActivityStatus activity={activity({
+      activeStreams: 1,
+      activeAgents: 0,
+      activeMonitors: 0,
+    })} />)
+    expect(screen.getByRole('status').textContent).toContain('Background work in progress')
+    expect(screen.getByRole('status').textContent).not.toContain('0 agents')
+  })
+
+  it('renders a monitor when no upstream request is active', () => {
+    render(<BackgroundActivityStatus activity={activity({
+      activeStreams: 0,
+      activeAgents: 0,
+      activeMonitors: 1,
+    })} />)
+    const status = screen.getByRole('status')
+    const [long, short] = Array.from(status.querySelectorAll('span')).slice(-2)
+    expect(long.textContent).toBe('1 monitor in background')
+    expect(short.textContent).toBe('1 monitor')
+  })
+
+  it('combines agents and monitors on one status line', () => {
+    render(<BackgroundActivityStatus activity={activity({
+      activeStreams: 9,
+      activeAgents: 4,
+      activeMonitors: 1,
+    })} />)
+    const status = screen.getByRole('status')
+    const [long, short] = Array.from(status.querySelectorAll('span')).slice(-2)
+    expect(long.textContent).toBe('4 agents and 1 monitor in background')
+    expect(short.textContent).toBe('4 agents · 1 monitor')
   })
 
   it('uses the singular label for one agent', () => {

@@ -412,9 +412,14 @@ export interface Session {
   queueDepth?: number;
   transportState?: "idle" | "queued" | "running" | "error" | "interrupted";
   /** Serialize-time only (in-memory, never persisted): post-settle background
-   *  work — the CLI still has upstream API requests in flight (background
-   *  subagents/tasks) after the turn settled. Null when none. */
-  backgroundActivity?: { activeStreams: number; lastActivityAt: string } | null;
+   *  work — upstream agent requests or tracked Bash monitors after the turn
+   *  settled. Null when none. */
+  backgroundActivity?: {
+    activeStreams: number;
+    activeAgents?: number;
+    activeMonitors?: number;
+    lastActivityAt: string;
+  } | null;
   /** Serialize-time only (derived, never persisted): the in-flight turn's progress,
    *  for the UI to age itself. Null when no turn runs, or while a tool or upstream
    *  request explains the quiet.

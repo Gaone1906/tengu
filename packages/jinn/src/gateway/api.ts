@@ -374,7 +374,12 @@ export interface ApiContext {
   /** In-memory (never persisted) post-settle background activity per session,
    *  maintained in server.ts from the interactive engine's onBackgroundActivity
    *  callback. lastActivityAt is epoch ms; serializeSession converts to ISO. */
-  backgroundActivity?: Map<string, { activeStreams: number; lastActivityAt: number }>;
+  backgroundActivity?: Map<string, {
+    activeStreams: number;
+    activeAgents?: number;
+    activeMonitors?: number;
+    lastActivityAt: number;
+  }>;
   /** Gateway auth token for seamless browser/CLI access when auth is required. */
   gatewayAuthToken?: string;
   /** Test-injectable Jinn home for auth device storage. Defaults to shared JINN_HOME. */
@@ -949,7 +954,9 @@ export function matchRoute(
 function sessionHasRuntimeActivity(session: Session, context: ApiContext): boolean {
   const activity = context.backgroundActivity?.get(session.id);
   if (!activity) return false;
-  const stale = activity.activeStreams <= 0 && Date.now() - activity.lastActivityAt > BACKGROUND_ACTIVITY_STALE_MS;
+  const stale = activity.activeStreams <= 0
+    && (activity.activeMonitors ?? 0) <= 0
+    && Date.now() - activity.lastActivityAt > BACKGROUND_ACTIVITY_STALE_MS;
   if (stale) {
     context.backgroundActivity?.delete(session.id);
     return false;
@@ -2111,7 +2118,10 @@ export function serializeSession(
   const queueDepth = queue.getPendingCount(session.sessionKey || session.sourceRef);
   const transportState = getSessionTransportState(session, context);
   const bg = context.backgroundActivity?.get(session.id);
-  const bgIsStale = bg && bg.activeStreams <= 0 && Date.now() - bg.lastActivityAt > BACKGROUND_ACTIVITY_STALE_MS;
+  const bgIsStale = bg
+    && bg.activeStreams <= 0
+    && (bg.activeMonitors ?? 0) <= 0
+    && Date.now() - bg.lastActivityAt > BACKGROUND_ACTIVITY_STALE_MS;
   if (bgIsStale) context.backgroundActivity?.delete(session.id);
   return {
     ...session,
@@ -2119,7 +2129,12 @@ export function serializeSession(
     transportState,
     turnProgress: computeLiveTurnProgress(session, context),
     backgroundActivity: bg && !bgIsStale
-      ? { activeStreams: bg.activeStreams, lastActivityAt: new Date(bg.lastActivityAt).toISOString() }
+      ? {
+          activeStreams: bg.activeStreams,
+          ...(bg.activeAgents !== undefined ? { activeAgents: bg.activeAgents } : {}),
+          ...(bg.activeMonitors !== undefined ? { activeMonitors: bg.activeMonitors } : {}),
+          lastActivityAt: new Date(bg.lastActivityAt).toISOString(),
+        }
       : null,
     delegatedActivity: delegatedActivityIndex?.get(session.id) ?? null,
   };

@@ -233,12 +233,14 @@ interface UploadedFile {
 
 /**
  * Background work still running after a session's turn officially ended
- * (subagents / background tasks making API calls). Present on session rows
- * (list + detail) and pushed live via the `session:background` WS event.
+ * (agent API calls or tracked Bash monitors). Present on session rows (list +
+ * detail) and pushed live via the `session:background` WS event.
  * null/absent = no background work.
  */
 export interface BackgroundActivity {
   activeStreams: number
+  activeAgents?: number
+  activeMonitors?: number
   lastActivityAt: string
 }
 
