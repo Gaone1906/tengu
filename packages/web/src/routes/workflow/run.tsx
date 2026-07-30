@@ -97,7 +97,12 @@ export default function WorkflowRunPage() {
               <StatusLine status={detail.status} className="shrink-0 text-[length:var(--text-footnote)]" />
               {detail.spendUsd > 0 && (
                 <span className="shrink-0 text-[length:var(--text-caption1)] text-[var(--text-tertiary)] [font-variant-numeric:tabular-nums]">
-                  ${detail.spendUsd.toFixed(2)}
+                  {detail.spendUsd.toLocaleString("en-US", {
+                    style: "currency",
+                    currency: "USD",
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 6,
+                  })}
                 </span>
               )}
               <span className="hidden shrink-0 text-[length:var(--text-caption1)] text-[var(--text-tertiary)] [font-variant-numeric:tabular-nums] sm:block">

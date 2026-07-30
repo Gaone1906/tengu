@@ -155,6 +155,14 @@ describe("workflow runs lens", () => {
     expect(await screen.findByText("$2.75")).toBeTruthy()
   })
 
+  it("shows positive sub-cent run spend without rounding it to zero", async () => {
+    getWorkflowRun.mockResolvedValue({ ...runDetail, spendUsd: 0.004 })
+    renderRoute("/workflow/morning-digest/runs/run-01HZX")
+
+    expect(await screen.findByText("$0.004")).toBeTruthy()
+    expect(screen.queryByText("$0.00")).toBeNull()
+  })
+
   it("does not show a zero-dollar placeholder", async () => {
     getWorkflowRun.mockResolvedValue({ ...runDetail, spendUsd: 0 })
     renderRoute("/workflow/morning-digest/runs/run-01HZX")
