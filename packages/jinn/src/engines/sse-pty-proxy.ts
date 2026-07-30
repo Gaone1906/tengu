@@ -36,6 +36,10 @@ type UpstreamRequestFn = (
 /** Snapshot of the proxy's in-flight upstream work, fired on every change. */
 export interface UpstreamActivityInfo {
   activeStreams: number;
+  /** Tool-bearing /v1/messages requests: main agent + Task subagents. */
+  activeAgents?: number;
+  /** Background Bash monitors tracked by the interactive engine. */
+  activeMonitors?: number;
   lastActivityAt: number;
 }
 
@@ -114,6 +118,9 @@ export class SsePtyProxy {
   /** Upstream requests currently in flight (incremented at request start,
    *  decremented exactly once per request on end/error/client-abort). */
   activeStreams = 0;
+  /** Agent requests currently in flight. Auxiliary requests remain streams but
+   *  do not inflate this count. */
+  activeAgents = 0;
   /** Epoch ms of the most recent upstream request start or completion. */
   lastUpstreamActivityAt = 0;
 
@@ -159,8 +166,9 @@ export class SsePtyProxy {
    *  decrements on whichever terminal path fires first (response end, upstream
    *  error, client-gone abort) — later calls are no-ops, so overlapping terminal
    *  events can never double-decrement. Both edges notify onUpstreamActivity. */
-  private streamStarted(): () => void {
+  private streamStarted(isAgent: boolean): () => void {
     this.activeStreams += 1;
+    if (isAgent) this.activeAgents += 1;
     this.lastUpstreamActivityAt = Date.now();
     this.notifyActivity();
     let done = false;
@@ -168,6 +176,7 @@ export class SsePtyProxy {
       if (done) return;
       done = true;
       this.activeStreams = Math.max(0, this.activeStreams - 1);
+      if (isAgent) this.activeAgents = Math.max(0, this.activeAgents - 1);
       this.lastUpstreamActivityAt = Date.now();
       this.notifyActivity();
     };
@@ -175,7 +184,11 @@ export class SsePtyProxy {
 
   private notifyActivity(): void {
     try {
-      this.onUpstreamActivity?.({ activeStreams: this.activeStreams, lastActivityAt: this.lastUpstreamActivityAt });
+      this.onUpstreamActivity?.({
+        activeStreams: this.activeStreams,
+        activeAgents: this.activeAgents,
+        lastActivityAt: this.lastUpstreamActivityAt,
+      });
     } catch (err) {
       logger.warn(`SsePtyProxy[${this.label}] onUpstreamActivity threw: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -209,17 +222,14 @@ export class SsePtyProxy {
     });
     req.on("end", () => {
       const body = Buffer.concat(chunks);
-      // Decide once per request whether to tee its events to the UI. Tool-bearing
-      // requests (real agent turns) are teed; no-tools auxiliary calls are still
-      // forwarded upstream but suppressed from the chat pane.
-      const tee = this.shouldTeeToUi(body);
+      const classification = this.classifyRequest(req.url, body);
       const headers: Record<string, unknown> = { ...req.headers, host: this.upstreamHost };
       // Plaintext SSE so we can parse it; we then forward the (uncompressed)
       // upstream response headers as-is, so the client sees consistent framing.
       delete headers["accept-encoding"];
 
-      tracked.finish = this.streamStarted();
-      this.sendUpstream(req, res, body, tee, headers, inflight, 0, tracked.finish);
+      tracked.finish = this.streamStarted(classification.isAgent);
+      this.sendUpstream(req, res, body, classification.teeToUi, headers, inflight, 0, tracked.finish);
     });
   }
 
@@ -310,17 +320,29 @@ export class SsePtyProxy {
     upstream.end();
   }
 
-  /** Is this request the MAIN agent's stream (the only one teed to the UI)? Main =
-   *  a tool-bearing request whose system carries the gateway's sentinel. No/empty
-   *  tools => an auxiliary call (haiku topic/title detection, quota check); tools but
-   *  no sentinel => a Task sub-agent (it gets Claude Code's own system prompt). Both
-   *  are suppressed so only the main agent streams to the transcript. */
-  private shouldTeeToUi(body: Buffer): boolean {
+  /** Only tool-bearing /v1/messages requests are agents. count_tokens and
+   *  no-tools calls remain auxiliary even when they carry similar request data.
+   *  The sentinel separates main from subagent only for the transcript tee. */
+  private classifyRequest(
+    url: string | undefined,
+    body: Buffer,
+  ): { isAgent: boolean; teeToUi: boolean } {
+    if ((url ?? "").split("?")[0] !== "/v1/messages") {
+      return { isAgent: false, teeToUi: false };
+    }
     let json: { tools?: unknown; system?: unknown } | null = null;
     try { json = JSON.parse(body.toString("utf-8")) as { tools?: unknown; system?: unknown }; }
-    catch { return false; }                                          // non-JSON (e.g. count_tokens) — never a turn
-    if (!Array.isArray(json?.tools) || json.tools.length === 0) return false; // aux call (no tools)
-    return systemHasSentinel(json?.system);                          // sentinel present => main agent
+    catch { return { isAgent: false, teeToUi: false }; }
+    if (!Array.isArray(json?.tools) || json.tools.length === 0) {
+      return { isAgent: false, teeToUi: false };
+    }
+    return { isAgent: true, teeToUi: systemHasSentinel(json?.system) };
+  }
+
+  /** Focused test seam for the main-only tee contract. Production handle()
+   *  classifies once and reuses both answers. */
+  private shouldTeeToUi(body: Buffer): boolean {
+    return this.classifyRequest("/v1/messages", body).teeToUi;
   }
 
   /** Consume complete SSE frames (separated by a blank line) from `buf`, JSON.parse

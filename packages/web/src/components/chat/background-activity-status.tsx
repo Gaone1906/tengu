@@ -4,17 +4,17 @@ import type { BackgroundActivity, DelegatedActivity } from '@/lib/api'
 const BACKGROUND_ACTIVITY_STALE_MS = 5 * 60 * 1000
 const EXIT_MS = 140
 
-/** True when background work should be surfaced: streams active and the last
- *  activity is fresh (a stream that stopped reporting 5min ago is gone, not
- *  "still working"). Exported for tests. */
+/** True when background work should be surfaced. Streams retain the stale
+ *  backstop; a tracked monitor stays visible until its observed end signal. */
 export function isBackgroundActivityVisible(
   activity: BackgroundActivity | null,
   nowMs: number,
 ): boolean {
-  const n = activity?.activeStreams ?? 0
+  const streams = activity?.activeStreams ?? 0
+  const monitors = activity?.activeMonitors ?? 0
   const lastActivityAt = activity?.lastActivityAt ? new Date(activity.lastActivityAt).getTime() : 0
   const stale = lastActivityAt > 0 && nowMs - lastActivityAt > BACKGROUND_ACTIVITY_STALE_MS
-  return n > 0 && !stale
+  return monitors > 0 || (streams > 0 && !stale)
 }
 
 interface ActivityCopy {
@@ -69,11 +69,26 @@ function activityCopy(
   }
 
   if (!isBackgroundActivityVisible(activity, Date.now())) return null
-  const count = activity?.activeStreams ?? 0
+  const agents = activity?.activeAgents ?? activity?.activeStreams ?? 0
+  const monitors = activity?.activeMonitors ?? 0
+  const agentLabel = `${agents} ${agents === 1 ? 'agent' : 'agents'}`
+  const monitorLabel = `${monitors} ${monitors === 1 ? 'monitor' : 'monitors'}`
+  let long = 'Background work in progress'
+  let short = 'Working'
+  if (agents > 0 && monitors > 0) {
+    long = `${agentLabel} and ${monitorLabel} in background`
+    short = `${agentLabel} · ${monitorLabel}`
+  } else if (agents > 0) {
+    long = `${agentLabel} in background`
+    short = agentLabel
+  } else if (monitors > 0) {
+    long = `${monitorLabel} in background`
+    short = monitorLabel
+  }
   return {
     kind: 'runtime',
-    long: count === 1 ? '1 agent in background' : `${count} agents in background`,
-    short: count === 1 ? '1 agent' : `${count} agents`,
+    long,
+    short,
     title: 'Background work running after the turn ended',
   }
 }
@@ -94,9 +109,9 @@ function usePrefersReducedMotion(): boolean {
 
 /**
  * Idle-but-busy StateLine for the composer toolbar: the session's turn ended
- * but subagents / background tasks are still making API calls. Rendered in the
- * toolbar's flexible middle (between two flex-1 spacers), so appearing and
- * disappearing move NOTHING — ambient state never shifts the page. Purely
+ * but subagents or monitors are still running. Rendered in the toolbar's
+ * flexible middle (between two flex-1 spacers), so appearing and disappearing
+ * move NOTHING — ambient state never shifts the page. Purely
  * informational (input stays live); the parent hides it while a foreground
  * turn streams (the "Thinking" indicator owns that) and in the CLI view.
  *
