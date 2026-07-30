@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import os from "node:os";
 import fs from "node:fs";
 import path from "node:path";
+import { costOfUsage } from "../../shared/model-pricing.js";
 
 // Point the registry DB at a throwaway dir BEFORE importing it (SESSIONS_DB is
 // resolved from JINN_HOME at module load). This keeps the suite off the live DB.
@@ -14,11 +15,11 @@ let store: Store;
 let reg: Reg;
 let db: import("better-sqlite3").Database;
 
-function insertSession(id: string): void {
+function insertSession(id: string, engine = "claude"): void {
   db.prepare(
     `INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity)
-     VALUES (?, 'claude', 'cron', ?, 'idle', ?, ?)`,
-  ).run(id, `cron:${id}`, "2026-07-01T00:00:00.000Z", "2026-07-01T00:00:00.000Z");
+     VALUES (?, ?, 'cron', ?, 'idle', ?, ?)`,
+  ).run(id, engine, `cron:${id}`, "2026-07-01T00:00:00.000Z", "2026-07-01T00:00:00.000Z");
 }
 
 beforeAll(async () => {
@@ -254,6 +255,33 @@ describe("work-item store — GRS-021a Todo model fields", () => {
       store.linkSession(wi.id, id);
     }
     expect(store.getWorkItemSpend(wi.id)).toBeCloseTo(1.75);
+  });
+
+  it("rolls two incremental Codex turn costs into a Codex-only Todo", () => {
+    const wi = store.createWorkItem({ title: "Codex costed" });
+    insertSession("sess-codex-cost", "codex");
+    store.linkSession(wi.id, "sess-codex-cost");
+
+    const first = costOfUsage("gpt-5.5", {
+      inputTokens: 3_000,
+      cachedInputTokens: 1_000,
+      outputTokens: 500,
+    })!;
+    const second = costOfUsage("gpt-5.5", {
+      inputTokens: 2_000,
+      cachedInputTokens: 1_000,
+      outputTokens: 400,
+    })!;
+    reg.recordTurnAccounting("sess-codex-cost", { cost: first, numTurns: 1 });
+    reg.recordTurnAccounting("sess-codex-cost", { cost: second, numTurns: 1 });
+
+    const expected = costOfUsage("gpt-5.5", {
+      inputTokens: 5_000,
+      cachedInputTokens: 2_000,
+      outputTokens: 900,
+    })!;
+    expect(db.prepare("SELECT total_cost FROM sessions WHERE id = ?").pluck().get("sess-codex-cost")).toBe(expected);
+    expect(store.getWorkItemSpend(wi.id)).toBe(expected);
   });
 
   it("the ifNotSticky guard also protects escalated (operator queue is never silently drained)", () => {

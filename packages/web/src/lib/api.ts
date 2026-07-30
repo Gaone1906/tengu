@@ -511,6 +511,7 @@ export interface WorkflowRunDetailV2Wire {
   definition: Pick<WorkflowDefinitionV2Wire, "nodes" | "edges"> & { ui?: WorkflowDefinitionV2Wire["ui"] }
   status: WorkflowRunStatusV2
   revision: number
+  spendUsd: number
   trigger: { nodeId: string; kind: WorkflowTriggerKindV2 }
   startedAt: string
   endedAt?: string

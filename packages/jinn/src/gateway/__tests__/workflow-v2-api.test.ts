@@ -94,6 +94,7 @@ describe("Workflow v2 canonical API", () => {
       getDefinition: vi.fn(() => result), saveDefinition: vi.fn(() => result), duplicateDefinition: vi.fn(() => result),
       retireDefinition: vi.fn(() => result), setEnabled: vi.fn(() => result), startManual: vi.fn(async () => result),
       listRuns: vi.fn(() => ({ items: [result], nextCursor: null })), getRun: vi.fn(() => ({ ...result, attempts: [] })),
+      getRunSpend: vi.fn(() => 0),
       cancelRun: vi.fn(async () => result), rerun: vi.fn(async () => result), getAttemptTranscript: vi.fn(() => []),
       decideApproval: vi.fn(async () => result), retryNode: vi.fn(async () => result),
       fireEvent: vi.fn(async () => [result]), listDefinitions: vi.fn(), createDefinition: vi.fn(),
@@ -164,7 +165,7 @@ describe("Workflow v2 canonical API", () => {
         pendingOutputError: "Required output field \"result\" is missing.",
       }],
     };
-    const service = { getRun: vi.fn(() => detail) };
+    const service = { getRun: vi.fn(() => detail), getRunSpend: vi.fn(() => 0) };
     const context = { gatewayAuthToken: "test-token", workflowService: service, getConfig: () => ({ gateway: {}, engines: {} }),
       connectors: new Map(), sessionManager: { getQueue: () => ({}) }, emit: vi.fn(), startTime: 1 } as unknown as ApiContext;
     const capture = response();
@@ -172,7 +173,7 @@ describe("Workflow v2 canonical API", () => {
     await handleApiRequest(request("GET",
       "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111?view=full"), capture.res, context);
 
-    expect(capture.read()).toEqual({ status: 200, body: detail });
+    expect(capture.read()).toEqual({ status: 200, body: { ...detail, spendUsd: 0 } });
   });
 
   it("keeps run detail lean by default and fat only under view=full", async () => {
@@ -208,7 +209,7 @@ describe("Workflow v2 canonical API", () => {
         status: "pending", requestedAt: "2026-07-23T12:30:00.000Z",
       }],
     };
-    const service = { getRun: vi.fn(() => detail) };
+    const service = { getRun: vi.fn(() => detail), getRunSpend: vi.fn(() => 0) };
     const context = { gatewayAuthToken: "test-token", workflowService: service, getConfig: () => ({ gateway: {}, engines: {} }),
       connectors: new Map(), sessionManager: { getQueue: () => ({}) }, emit: vi.fn(), startTime: 1 } as unknown as ApiContext;
     const route = "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111";
@@ -217,6 +218,7 @@ describe("Workflow v2 canonical API", () => {
     await handleApiRequest(request("GET", route), lean.res, context);
     const { status, body } = lean.read() as { status: number; body: Record<string, unknown> };
     expect(status).toBe(200);
+    expect(body.spendUsd).toBe(0);
     expect(body).not.toHaveProperty("definition");
     expect(body.definitionRevision).toBe(4);
     expect(body.nodeRuns).toEqual(detail.nodeRuns);
@@ -248,6 +250,45 @@ describe("Workflow v2 canonical API", () => {
     const unknownKey = response();
     await handleApiRequest(request("GET", `${route}?verbose=true`), unknownKey.res, context);
     expect(unknownKey.read()).toMatchObject({ status: 422, body: { code: "bad-input" } });
+  });
+
+  it("returns attempt-session spend and zero for a run without attempts", async () => {
+    const detail = {
+      id: "run_11111111-1111-4111-8111-111111111111",
+      workflowId: "release-flow",
+      definition: { nodes: [], edges: [] },
+      attempts: [
+        { nodeId: "write", attempt: 1, sessionId: "session-1", input: {} },
+        { nodeId: "review", attempt: 1, sessionId: "session-2", input: {} },
+      ],
+      nodeRuns: [],
+      approvals: [],
+    };
+    const service = {
+      getRun: vi.fn(() => detail),
+      getRunSpend: vi.fn(() => 2.75),
+    };
+    const context = {
+      gatewayAuthToken: "test-token",
+      workflowService: service,
+      getConfig: () => ({ gateway: {}, engines: {} }),
+      connectors: new Map(),
+      sessionManager: { getQueue: () => ({}) },
+      emit: vi.fn(),
+      startTime: 1,
+    } as unknown as ApiContext;
+    const route = "/api/workflows/release-flow/runs/run_11111111-1111-4111-8111-111111111111";
+
+    const costed = response();
+    await handleApiRequest(request("GET", route), costed.res, context);
+    expect(costed.read()).toMatchObject({ status: 200, body: { spendUsd: 2.75 } });
+    expect(service.getRunSpend).toHaveBeenCalledWith("release-flow", detail.id);
+
+    service.getRun.mockReturnValueOnce({ ...detail, attempts: [] });
+    service.getRunSpend.mockReturnValueOnce(0);
+    const empty = response();
+    await handleApiRequest(request("GET", route), empty.res, context);
+    expect(empty.read()).toMatchObject({ status: 200, body: { spendUsd: 0 } });
   });
 
   it("authenticates retry and maps its authority, identity, conflict, and validation errors", async () => {

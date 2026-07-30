@@ -14,10 +14,10 @@ beforeAll(async () => {
   reg = await import("../registry.js");
 });
 
-function seed(id: string, source: string): void {
+function seed(id: string, source: string, engine = "claude"): void {
   reg.initDb().prepare(
-    "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES (?, 'claude', ?, ?, 'idle', '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z')",
-  ).run(id, source, `${source}:${id}`);
+    "INSERT INTO sessions (id, engine, source, source_ref, status, created_at, last_activity) VALUES (?, ?, ?, ?, 'idle', '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z')",
+  ).run(id, engine, source, `${source}:${id}`);
 }
 
 function totals(id: string): { cost: number; turns: number } {
@@ -79,6 +79,16 @@ describe("recordTurnAccounting", () => {
     reg.recordTurnAccounting("cron-1", { cost: 0.5, numTurns: 1 });
     reg.recordTurnAccounting("web-5", { cost: 0.5, numTurns: 1 });
     expect(totals("web-5")).toEqual(totals("cron-1"));
+  });
+
+  it("sums the selected session costs and returns zero for no sessions", () => {
+    seed("codex-cost-1", "workflow", "codex");
+    seed("codex-cost-2", "workflow", "codex");
+    reg.recordTurnAccounting("codex-cost-1", { cost: 1.25 });
+    reg.recordTurnAccounting("codex-cost-2", { cost: 0.75 });
+
+    expect(reg.getSessionSpend(["codex-cost-1", "missing", "codex-cost-2"])).toBe(2);
+    expect(reg.getSessionSpend([])).toBe(0);
   });
 });
 

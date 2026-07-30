@@ -67,6 +67,7 @@ vi.mock("node:os", async (importOriginal) => {
 
 import { codexTranscriptLineToDeltas, CodexInteractiveEngine } from "../codex-interactive.js";
 import { PtyLifecycleManager } from "../pty-lifecycle.js";
+import { costOfUsage } from "../../shared/model-pricing.js";
 
 /** Find the `-c model_reasoning_effort="..."` value in a codex arg list, if present. */
 function reasoningEffortArg(args: string[]): string | undefined {
@@ -417,6 +418,8 @@ describe("CodexInteractiveEngine — terminal-marker gating + transcript discove
   const line = (obj: unknown) => JSON.stringify(obj) + "\n";
   const sessionMeta = (id: string) => line({ type: "session_meta", payload: { id } });
   const taskStarted = (turnId: string) => line({ type: "event_msg", payload: { type: "task_started", turn_id: turnId } });
+  const tokenCount = (usage: { input_tokens: number; cached_input_tokens: number; output_tokens: number }) =>
+    line({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: usage } } });
   const taskComplete = (turnId: string, msg: string) =>
     line({ type: "event_msg", payload: { type: "task_complete", turn_id: turnId, last_agent_message: msg } });
   const turnAborted = (turnId: string) => line({ type: "event_msg", payload: { type: "turn_aborted", turn_id: turnId } });
@@ -525,6 +528,56 @@ describe("CodexInteractiveEngine — terminal-marker gating + transcript discove
     fs.appendFileSync(file, taskComplete("t-tool", "finished"));
     const result = await run;
     expect(result.result).toBe("finished");
+    lifecycle.dispose();
+  }, 15000);
+
+  it("prices cumulative token deltas once per turn", async () => {
+    const first = engine.run({
+      prompt: "first",
+      sessionId: "it-cost",
+      cwd: "/tmp",
+      model: "gpt-5.5",
+    });
+    const file = freshTranscriptPath();
+    fs.writeFileSync(
+      file,
+      sessionMeta("codex-cost")
+      + taskStarted("t-1")
+      + tokenCount({ input_tokens: 1_000, cached_input_tokens: 200, output_tokens: 100 })
+      + tokenCount({ input_tokens: 5_000, cached_input_tokens: 1_200, output_tokens: 600 })
+      + taskComplete("t-1", "first done"),
+    );
+    const firstResult = await first;
+    expect(firstResult.cost).toBe(costOfUsage("gpt-5.5", {
+      inputTokens: 3_000,
+      cachedInputTokens: 1_000,
+      outputTokens: 500,
+    }));
+
+    const second = engine.run({
+      prompt: "second",
+      sessionId: "it-cost",
+      resumeSessionId: "codex-cost",
+      cwd: "/tmp",
+      model: "gpt-5.5",
+    });
+    fs.appendFileSync(
+      file,
+      taskStarted("t-2")
+      + tokenCount({ input_tokens: 8_000, cached_input_tokens: 2_200, output_tokens: 1_000 })
+      + taskComplete("t-2", "second done"),
+    );
+    const secondResult = await second;
+    expect(secondResult.cost).toBe(costOfUsage("gpt-5.5", {
+      inputTokens: 2_000,
+      cachedInputTokens: 1_000,
+      outputTokens: 400,
+    }));
+    expect(firstResult.cost! + secondResult.cost!).toBe(costOfUsage("gpt-5.5", {
+      inputTokens: 5_000,
+      cachedInputTokens: 2_000,
+      outputTokens: 900,
+    }));
     lifecycle.dispose();
   }, 15000);
 });

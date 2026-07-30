@@ -82,6 +82,7 @@ vi.mock("node:child_process", () => ({
 
 import { CodexEngine, type CodexEngineOpts } from "../codex.js";
 import type { StreamDelta, EngineResult } from "../../shared/types.js";
+import { costOfUsage } from "../../shared/model-pricing.js";
 import { expectPosixMode } from "../../shared/test-support/posix-mode.js";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -410,6 +411,50 @@ describe("CodexEngine — systemPrompt / developer_instructions injection", () =
 });
 
 describe("CodexEngine — usage / context-token extraction", () => {
+  it("prices only the cumulative usage added by each turn", async () => {
+    const engine = new CodexEngine({
+      codexSessionsDir: fs.mkdtempSync(path.join(os.tmpdir(), "codex-cost-sessions-")),
+    });
+    const run = async (usage: Record<string, unknown>, answer: string) => {
+      const promise = engine.run({
+        prompt: answer,
+        cwd: "/tmp",
+        sessionId: "cost-session",
+        model: "gpt-5.5",
+      } as any);
+      await flush();
+      const call = spawnCalls[spawnCalls.length - 1]!;
+      call.proc.emitStdout([
+        threadStarted("cost-thread"),
+        agentMessage(answer),
+        turnCompleted(usage),
+        "",
+      ].join("\n"));
+      call.proc.close(0);
+      return promise;
+    };
+
+    const first = await run(
+      { input_tokens: 5_000, cached_input_tokens: 1_200, output_tokens: 600 },
+      "first",
+    );
+    expect(first.cost).toBe(costOfUsage("gpt-5.5", {
+      inputTokens: 3_800,
+      cachedInputTokens: 1_200,
+      outputTokens: 600,
+    }));
+
+    const second = await run(
+      { input_tokens: 8_000, cached_input_tokens: 2_200, output_tokens: 1_000 },
+      "second",
+    );
+    expect(second.cost).toBe(costOfUsage("gpt-5.5", {
+      inputTokens: 2_000,
+      cachedInputTokens: 1_000,
+      outputTokens: 400,
+    }));
+  });
+
   it("does not use flat turn.completed input_tokens as contextTokens (headless Codex reports it cumulatively)", async () => {
     const { result } = await runWith({}, [
       threadStarted("t1"),

@@ -95,6 +95,11 @@ export default function WorkflowRunPage() {
           {detail && (
             <>
               <StatusLine status={detail.status} className="shrink-0 text-[length:var(--text-footnote)]" />
+              {detail.spendUsd > 0 && (
+                <span className="shrink-0 text-[length:var(--text-caption1)] text-[var(--text-tertiary)] [font-variant-numeric:tabular-nums]">
+                  ${detail.spendUsd.toFixed(2)}
+                </span>
+              )}
               <span className="hidden shrink-0 text-[length:var(--text-caption1)] text-[var(--text-tertiary)] [font-variant-numeric:tabular-nums] sm:block">
                 Started {formatStarted(detail.startedAt)} · {formatDuration(detail.startedAt, detail.endedAt)}
                 {" · "}Revision {detail.definitionRevision}

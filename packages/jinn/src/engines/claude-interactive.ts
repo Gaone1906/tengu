@@ -16,6 +16,7 @@ import { SsePtyProxy, MAIN_AGENT_SENTINEL, type SseDataEvent, type UpstreamActiv
 import { neutralizeForPaste } from "../shared/skill-commands.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
 import { extractActivityReceiptId } from "../shared/activity-receipts.js";
+import { costOfUsage } from "../shared/model-pricing.js";
 import { writeMcpConfigFile } from "../mcp/resolver.js";
 import { parsePermissionPrompt, chooseApproval, keystrokesToSelect } from "./claude-permission-prompt.js";
 
@@ -37,16 +38,13 @@ interface InteractiveArgsOpts {
   appendSystemPrompt?: string;
 }
 
-interface TranscriptUsage { inputTokens: number; outputTokens: number; cacheTokens: number; assistantTurns: number; }
-
-// $/million tokens. Conservative defaults.
-const MODEL_PRICES: Record<string, { in: number; out: number }> = {
-  "claude-fable-5": { in: 10, out: 50 },
-  "claude-opus-4-7": { in: 15, out: 75 },
-  "claude-sonnet-4-6": { in: 3, out: 15 },
-  "claude-haiku-4-5": { in: 1, out: 5 },
-};
-const DEFAULT_PRICE = { in: 15, out: 75 };
+interface TranscriptUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  assistantTurns: number;
+}
 
 /**
  * Sum assistant-message usage from a Claude transcript.
@@ -59,7 +57,13 @@ const DEFAULT_PRICE = { in: 15, out: 75 };
  * two engines agree.
  */
 export function sumTranscriptUsage(content: string, afterMs?: number): TranscriptUsage {
-  const u: TranscriptUsage = { inputTokens: 0, outputTokens: 0, cacheTokens: 0, assistantTurns: 0 };
+  const u: TranscriptUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    assistantTurns: 0,
+  };
   const seen = new Set<string>();
   for (const line of content.split("\n")) {
     const t = line.trim();
@@ -87,7 +91,8 @@ export function sumTranscriptUsage(content: string, afterMs?: number): Transcrip
     u.assistantTurns += 1;
     u.inputTokens += Number(usage.input_tokens ?? 0);
     u.outputTokens += Number(usage.output_tokens ?? 0);
-    u.cacheTokens += Number(usage.cache_read_input_tokens ?? 0) + Number(usage.cache_creation_input_tokens ?? 0);
+    u.cacheReadTokens += Number(usage.cache_read_input_tokens ?? 0);
+    u.cacheWriteTokens += Number(usage.cache_creation_input_tokens ?? 0);
   }
   return u;
 }
@@ -178,13 +183,18 @@ export function stripReasoningBlocks(text: string): string {
 
 /** Cost for ONE turn. `afterMs` (the turn's start) scopes the cumulative
  *  transcript to this turn — see sumTranscriptUsage. */
-function computeInteractiveCost(transcriptPath: string, model?: string, afterMs?: number): { cost: number; turns: number } | null {
+export function computeInteractiveCost(transcriptPath: string, model?: string, afterMs?: number): { cost: number; turns: number } | null {
   let content: string;
   try { content = fs.readFileSync(transcriptPath, "utf-8"); } catch { return null; }
   const u = sumTranscriptUsage(content, afterMs);
   if (u.assistantTurns === 0) return null;
-  const price = (model && MODEL_PRICES[model]) || DEFAULT_PRICE;
-  const cost = (u.inputTokens / 1_000_000) * price.in + (u.outputTokens / 1_000_000) * price.out;
+  const cost = costOfUsage(model, {
+    inputTokens: u.inputTokens,
+    cachedInputTokens: u.cacheReadTokens,
+    cacheWriteInputTokens: u.cacheWriteTokens,
+    outputTokens: u.outputTokens,
+  });
+  if (cost === undefined) return null;
   return { cost, turns: u.assistantTurns };
 }
 

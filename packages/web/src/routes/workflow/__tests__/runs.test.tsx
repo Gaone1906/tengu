@@ -71,6 +71,7 @@ const runDetail = {
   id: "run-01HZX", workflowId: "morning-digest", workflowTitle: "Morning Digest",
   definitionRevision: 3, revision: 7,
   definition: { nodes: definition.nodes, edges: [] },
+  spendUsd: 0,
   status: "waiting" as const,
   trigger: { nodeId: "trigger", kind: "manual" as const },
   startedAt: "2026-07-22T08:00:00.000Z",
@@ -145,5 +146,20 @@ describe("workflow runs lens", () => {
     expect(screen.getByText("Writer")).toBeTruthy()
     expect(screen.getByText("Publish gate")).toBeTruthy()
     expect(document.querySelector(".react-flow")).toBeTruthy()
+  })
+
+  it("shows non-zero run spend in the header", async () => {
+    getWorkflowRun.mockResolvedValue({ ...runDetail, spendUsd: 2.75 })
+    renderRoute("/workflow/morning-digest/runs/run-01HZX")
+
+    expect(await screen.findByText("$2.75")).toBeTruthy()
+  })
+
+  it("does not show a zero-dollar placeholder", async () => {
+    getWorkflowRun.mockResolvedValue({ ...runDetail, spendUsd: 0 })
+    renderRoute("/workflow/morning-digest/runs/run-01HZX")
+
+    await screen.findByText("Manual run")
+    expect(screen.queryByText("$0.00")).toBeNull()
   })
 })

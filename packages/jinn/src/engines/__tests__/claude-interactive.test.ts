@@ -1,4 +1,7 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 // claude-interactive.ts imports node-pty at the top level. node-pty loads its
 // native module at import time and that fails on Linux CI runners (looks for
@@ -7,7 +10,8 @@ import { afterEach, describe, it, expect, vi } from "vitest";
 // focused and CI-portable.
 vi.mock("node-pty", () => ({ spawn: vi.fn() }));
 
-import { SUBMIT_ACK_HOOKS, InteractiveClaudeEngine, TurnResolver, buildAttachmentSuffix, buildInteractiveArgs, claudeHookToDeltas, neutralizeImagePathsForPaste, pasteAndSubmit, shouldSettleStalledTurn, sumTranscriptUsage } from "../claude-interactive.js";
+import { SUBMIT_ACK_HOOKS, InteractiveClaudeEngine, TurnResolver, buildAttachmentSuffix, buildInteractiveArgs, claudeHookToDeltas, computeInteractiveCost, neutralizeImagePathsForPaste, pasteAndSubmit, shouldSettleStalledTurn, sumTranscriptUsage } from "../claude-interactive.js";
+import { costOfUsage } from "../../shared/model-pricing.js";
 import { MAIN_AGENT_SENTINEL } from "../sse-pty-proxy.js";
 import { buildPromptWithPlatformContext } from "../platform-context.js";
 import { createSessionCommGuards, prepareLateralSend } from "../../gateway/session-comm-guards.js";
@@ -624,6 +628,39 @@ describe("sumTranscriptUsage — per-turn scoping", () => {
     const u = sumTranscriptUsage(dup, TURN_2_START);
     expect(u.assistantTurns).toBe(1);
     expect(u.inputTokens).toBe(500);
+  });
+
+  it("includes cache reads and writes in the turn cost", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-cost-"));
+    const transcriptPath = path.join(root, "turn.jsonl");
+    fs.writeFileSync(transcriptPath, JSON.stringify({
+      type: "assistant",
+      timestamp: "2026-07-25T10:05:00.000Z",
+      message: {
+        id: "m-cost",
+        usage: {
+          input_tokens: 50_000,
+          cache_read_input_tokens: 900_000,
+          cache_creation_input_tokens: 50_000,
+          output_tokens: 10_000,
+        },
+      },
+    }));
+
+    try {
+      expect(computeInteractiveCost(transcriptPath, "claude-opus-5")).toEqual({
+        cost: costOfUsage("claude-opus-5", {
+          inputTokens: 50_000,
+          cachedInputTokens: 900_000,
+          cacheWriteInputTokens: 50_000,
+          outputTokens: 10_000,
+        }),
+        turns: 1,
+      });
+      expect(computeInteractiveCost(transcriptPath, "some-model-nobody-priced")).toBeNull();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

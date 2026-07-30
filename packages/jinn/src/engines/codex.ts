@@ -7,6 +7,7 @@ import { logger } from "../shared/logger.js";
 import { resolveBin } from "../shared/resolve-bin.js";
 import { CODEX_HOMES_DIR } from "../shared/paths.js";
 import { buildEngineChildEnv } from "../shared/child-env.js";
+import { costOfUsage, type ModelUsage } from "../shared/model-pricing.js";
 import { buildPromptWithPlatformContext } from "./platform-context.js";
 
 const CODEX_SESSIONS_DIR = path.join(os.homedir(), ".codex", "sessions");
@@ -410,6 +411,39 @@ export function extractCodexContextTokens(usage: unknown): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
+export interface CodexTokenUsage {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+}
+
+export function extractCodexTokenUsage(usage: unknown): CodexTokenUsage | undefined {
+  if (!usage || typeof usage !== "object") return undefined;
+  const record = usage as Record<string, unknown>;
+  const inputTokens = Number(record.input_tokens ?? 0);
+  const cachedInputTokens = Number(record.cached_input_tokens ?? 0);
+  const outputTokens = Number(record.output_tokens ?? 0);
+  if (![inputTokens, cachedInputTokens, outputTokens].every(Number.isFinite)) return undefined;
+  return {
+    inputTokens: Math.max(0, inputTokens),
+    cachedInputTokens: Math.max(0, cachedInputTokens),
+    outputTokens: Math.max(0, outputTokens),
+  };
+}
+
+export function codexUsageDelta(start: CodexTokenUsage, end: CodexTokenUsage): ModelUsage {
+  const inputTokens = Math.max(0, end.inputTokens - start.inputTokens);
+  const cachedInputTokens = Math.min(
+    inputTokens,
+    Math.max(0, end.cachedInputTokens - start.cachedInputTokens),
+  );
+  return {
+    inputTokens: inputTokens - cachedInputTokens,
+    cachedInputTokens,
+    outputTokens: Math.max(0, end.outputTokens - start.outputTokens),
+  };
+}
+
 function walkJsonl(dir: string, out: string[] = []): string[] {
   let entries: fs.Dirent[];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
@@ -465,6 +499,7 @@ export function lastCodexTranscriptContextTokens(sessionId: string, root = CODEX
 export class CodexEngine implements InterruptibleEngine {
   name = "codex" as const;
   private liveProcesses = new Map<string, LiveProcess>();
+  private totalUsage = new Map<string, CodexTokenUsage>();
 
   constructor(private readonly opts: CodexEngineOpts = {}) {}
 
@@ -547,6 +582,9 @@ export class CodexEngine implements InterruptibleEngine {
       let numTurns = 0;
       let turnError: string | null = null;
       let lastContextTokens: number | undefined;
+      const usageAtTurnStart = this.totalUsage.get(sessionId)
+        ?? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+      let latestTotalUsage: CodexTokenUsage | undefined;
       let lineBuf = "";
       let hardTimeout: NodeJS.Timeout | undefined;
       let terminalSettleTimer: NodeJS.Timeout | undefined;
@@ -559,6 +597,11 @@ export class CodexEngine implements InterruptibleEngine {
         if (terminalSettleTimer) { clearTimeout(terminalSettleTimer); terminalSettleTimer = undefined; }
       };
       const resetTextBlockRun = () => { lastStreamedTextBlock = null; };
+      const turnCost = (): number | undefined => {
+        if (!latestTotalUsage) return undefined;
+        this.totalUsage.set(sessionId, latestTotalUsage);
+        return costOfUsage(opts.model, codexUsageDelta(usageAtTurnStart, latestTotalUsage));
+      };
       const streamTextBlock = (delta: StreamDelta) => {
         if (!onStream) return;
         const needsBoundary =
@@ -594,12 +637,14 @@ export class CodexEngine implements InterruptibleEngine {
         }
 
         logger.info(`Codex turn settled on terminal event (thread: ${threadId || "none"}, turns: ${numTurns})`);
+        const cost = turnCost();
         resolve({
           sessionId: resolvedThreadId,
           result: resultText,
           error: resultText.trim() ? undefined : (turnError ?? undefined),
           numTurns: numTurns || undefined,
           ...(typeof lastContextTokens === "number" ? { contextTokens: lastContextTokens } : {}),
+          ...(cost === undefined ? {} : { cost }),
         });
       };
 
@@ -666,6 +711,7 @@ export class CodexEngine implements InterruptibleEngine {
               resetTextBlockRun();
               numTurns++;
               if (parsed.contextTokens) lastContextTokens = parsed.contextTokens;
+              if (parsed.totalUsage) latestTotalUsage = parsed.totalUsage;
               scheduleTerminalSettle(); // turn.completed = end of turn
               break;
             case "turn_failed":
@@ -713,6 +759,7 @@ export class CodexEngine implements InterruptibleEngine {
               case "usage":
                 numTurns++;
                 if (parsed.contextTokens) lastContextTokens = parsed.contextTokens;
+                if (parsed.totalUsage) latestTotalUsage = parsed.totalUsage;
                 break;
               case "error":
                 turnError = parsed.message;
@@ -750,12 +797,14 @@ export class CodexEngine implements InterruptibleEngine {
           // A non-empty agent message means the turn genuinely succeeded — don't
           // surface a transient/benign error item (e.g. the `web_search_request`
           // deprecation notice that codex emits before the answer) as a failure.
+          const cost = turnCost();
           resolve({
             sessionId: resolvedThreadId,
             result: resultText,
             error: resultText.trim() ? undefined : (turnError ?? undefined),
             numTurns: numTurns || undefined,
             ...(typeof lastContextTokens === "number" ? { contextTokens: lastContextTokens } : {}),
+            ...(cost === undefined ? {} : { cost }),
           });
           return;
         }
@@ -804,7 +853,7 @@ export class CodexEngine implements InterruptibleEngine {
     | { type: "tool_end"; delta: StreamDelta }
     | { type: "text"; delta: StreamDelta }
     | { type: "error"; message: string }
-    | { type: "usage"; contextTokens?: number }
+    | { type: "usage"; contextTokens?: number; totalUsage?: CodexTokenUsage }
     | { type: "turn_failed"; message: string }
     | null {
     const trimmed = line.trim();
@@ -928,7 +977,13 @@ export class CodexEngine implements InterruptibleEngine {
 
     if (eventType === "turn.completed") {
       const usage = msg.usage as Record<string, unknown> | undefined;
-      return { type: "usage", contextTokens: extractCodexContextTokens(usage?.last_token_usage) };
+      const contextTokens = extractCodexContextTokens(usage?.last_token_usage);
+      const totalUsage = extractCodexTokenUsage(usage);
+      return {
+        type: "usage",
+        ...(contextTokens ? { contextTokens } : {}),
+        ...(totalUsage ? { totalUsage } : {}),
+      };
     }
 
     if (eventType === "turn.failed") {

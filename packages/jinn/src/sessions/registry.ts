@@ -2498,6 +2498,15 @@ export function accumulateSessionCost(id: string, cost: number, turns: number): 
   ).run(cost, turns, id);
 }
 
+export function getSessionSpend(sessionIds: string[]): number {
+  if (sessionIds.length === 0) return 0;
+  const placeholders = sessionIds.map(() => "?").join(", ");
+  const row = initDb()
+    .prepare(`SELECT COALESCE(SUM(total_cost), 0) AS spend FROM sessions WHERE id IN (${placeholders})`)
+    .get(...sessionIds) as { spend: number };
+  return row.spend;
+}
+
 export interface CostReportFilter {
   groupBy?: 'employee' | 'day';
   since?: string;

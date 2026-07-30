@@ -12,8 +12,15 @@ import { PtyLifecycleManager, type PtyHandle } from "./pty-lifecycle.js";
 import { PtyStreamManager, createPtyHandle, setCapped } from "./pty-stream.js";
 import { tailTranscriptLines, type TranscriptTailer } from "./transcript-tailer.js";
 import type { PtyControlEvent, PtyIdleSpawnOpts, PtySnapshotSubscription, PtyViewEngine } from "./pty-view-engine.js";
-import { codexCliFlags, extractCodexContextTokens } from "./codex.js";
+import {
+  codexCliFlags,
+  codexUsageDelta,
+  extractCodexContextTokens,
+  extractCodexTokenUsage,
+  type CodexTokenUsage,
+} from "./codex.js";
 import { extractActivityReceiptId } from "../shared/activity-receipts.js";
+import { costOfUsage } from "../shared/model-pricing.js";
 
 const CODEX_SESSIONS_DIR = path.join(os.homedir(), ".codex", "sessions");
 const TURN_TIMEOUT_MS = 14 * 24 * 60 * 60 * 1000;
@@ -89,6 +96,7 @@ export function codexTranscriptLineToDeltas(line: string): {
   doneText?: string;
   sessionId?: string;
   contextTokens?: number;
+  totalUsage?: CodexTokenUsage;
   /** event_msg task_started — gates the terminal markers below to THIS turn. */
   taskStarted?: { turnId?: string };
   /** event_msg task_complete — the turn's deterministic end marker. */
@@ -114,7 +122,12 @@ export function codexTranscriptLineToDeltas(line: string): {
     // When last_token_usage is absent we simply omit the update rather than show
     // a cumulative figure.
     const ctx = extractCodexContextTokens(msg.payload.info?.last_token_usage);
-    return ctx ? { deltas: [{ type: "context", content: String(ctx) }], contextTokens: ctx } : { deltas: [] };
+    const totalUsage = extractCodexTokenUsage(msg.payload.info?.total_token_usage);
+    return {
+      deltas: ctx ? [{ type: "context", content: String(ctx) }] : [],
+      ...(ctx ? { contextTokens: ctx } : {}),
+      ...(totalUsage ? { totalUsage } : {}),
+    };
   }
 
   if (msg.type === "event_msg" && msg?.payload?.type === "task_started") {
@@ -180,6 +193,7 @@ export function codexTranscriptLineToDeltas(line: string): {
 export class CodexInteractiveEngine implements InterruptibleEngine, PtyViewEngine {
   name = "codex" as const;
   private active = new Map<string, ActiveTurn>();
+  private totalUsage = new Map<string, CodexTokenUsage>();
   private streams: PtyStreamManager;
   private lastGeom = new Map<string, { cols: number; rows: number }>();
   private spawnParams = new Map<string, CodexSpawnParams>();
@@ -188,7 +202,10 @@ export class CodexInteractiveEngine implements InterruptibleEngine, PtyViewEngin
     this.streams = new PtyStreamManager("Codex PTY", (id) => this.lifecycle.getWarm(id) !== undefined);
     // spawnParams describes the LIVE PTY's spawn args — purge it on every release
     // (kill, eviction, sweep reap, cold respawn) so the map doesn't grow forever.
-    this.lifecycle.onRelease((id) => this.spawnParams.delete(id));
+    this.lifecycle.onRelease((id) => {
+      this.spawnParams.delete(id);
+      this.totalUsage.delete(id);
+    });
   }
 
   async run(opts: EngineRunOpts): Promise<EngineResult> {
@@ -207,6 +224,8 @@ export class CodexInteractiveEngine implements InterruptibleEngine, PtyViewEngin
     let lastContextTokens: number | undefined;
     let sawTaskStarted = false;
     let startedTurnId: string | undefined;
+    let usageAtTurnStart = this.totalUsage.get(jinnSessionId);
+    let latestTotalUsage = usageAtTurnStart;
     let settled = false;
     let resolveFn!: (r: EngineResult) => void;
     const promise = new Promise<EngineResult>((res) => { resolveFn = res; });
@@ -226,6 +245,10 @@ export class CodexInteractiveEngine implements InterruptibleEngine, PtyViewEngin
       cleanup();
       resolveFn(r);
     };
+    const turnCost = (): number | undefined => {
+      if (!usageAtTurnStart || !latestTotalUsage) return undefined;
+      return costOfUsage(opts.model, codexUsageDelta(usageAtTurnStart, latestTotalUsage));
+    };
     turn.interrupt = (reason: string) =>
       finish({ sessionId: codexSessionId ?? opts.resumeSessionId ?? "", result: "", error: reason });
 
@@ -239,6 +262,13 @@ export class CodexInteractiveEngine implements InterruptibleEngine, PtyViewEngin
       if (parsed.taskStarted) {
         sawTaskStarted = true;
         startedTurnId = parsed.taskStarted.turnId ?? startedTurnId;
+        usageAtTurnStart = this.totalUsage.get(jinnSessionId);
+        latestTotalUsage = usageAtTurnStart;
+      }
+      if (parsed.totalUsage) {
+        if (sawTaskStarted && !usageAtTurnStart) usageAtTurnStart = parsed.totalUsage;
+        latestTotalUsage = parsed.totalUsage;
+        this.totalUsage.set(jinnSessionId, parsed.totalUsage);
       }
       for (const d of parsed.deltas) {
         if (d.type === "tool_use" || d.type === "tool_result" || d.type === "status") {
@@ -265,7 +295,14 @@ export class CodexInteractiveEngine implements InterruptibleEngine, PtyViewEngin
             ? parsed.taskComplete.lastAgentMessage
             : latestAnswer;
           if (!text.trim()) logger.warn(`CodexInteractiveEngine: task_complete with no text for ${jinnSessionId}`);
-          finish({ sessionId: codexSessionId ?? "", result: text, numTurns: 1, contextTokens: lastContextTokens });
+          const cost = turnCost();
+          finish({
+            sessionId: codexSessionId ?? "",
+            result: text,
+            numTurns: 1,
+            contextTokens: lastContextTokens,
+            ...(cost === undefined ? {} : { cost }),
+          });
           return;
         } else {
           finish({ sessionId: codexSessionId ?? opts.resumeSessionId ?? "", result: latestAnswer, error: "Interrupted: codex turn aborted" });
@@ -276,7 +313,16 @@ export class CodexInteractiveEngine implements InterruptibleEngine, PtyViewEngin
         latestAnswer = parsed.doneText;
         if (turn.doneTimer) clearTimeout(turn.doneTimer);
         turn.doneTimer = setTimeout(
-          () => finish({ sessionId: codexSessionId ?? "", result: latestAnswer, numTurns: 1, contextTokens: lastContextTokens }),
+          () => {
+            const cost = turnCost();
+            finish({
+              sessionId: codexSessionId ?? "",
+              result: latestAnswer,
+              numTurns: 1,
+              contextTokens: lastContextTokens,
+              ...(cost === undefined ? {} : { cost }),
+            });
+          },
           DONE_DEBOUNCE_MS,
         );
         turn.doneTimer.unref?.();

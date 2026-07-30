@@ -105,11 +105,16 @@ function twoPhaseDefinition(id: string): WorkflowDefinition {
   return repository.setEnabled(saved.id, true, saved.revision);
 }
 
-function serviceWith(link: WorkflowTodoSessionLink | undefined): WorkflowService {
+function serviceWith(
+  link: WorkflowTodoSessionLink | undefined,
+  sessionSpend?: (sessionIds: string[]) => number,
+): WorkflowService {
   return new WorkflowService({
     repository, executor: executor as unknown as WorkflowSessionExecutor,
     employees: () => new Map([[employee.name, employee]]), models: () => models,
-    now: () => now.toISOString(), ...(link ? { todoSessions: link } : {}),
+    now: () => now.toISOString(),
+    ...(link ? { todoSessions: link } : {}),
+    ...(sessionSpend ? { sessionSpend } : {}),
   });
 }
 
@@ -149,6 +154,25 @@ describe("attributing a run's spend to the Todo it is bound to", () => {
     await service.startManual({ workflowId: definition.id, input: {} });
     await executor.succeed("plan", { value: "planned" });
     expect(todoSessions.links).toEqual([]);
+  });
+
+  it("sums the costs of every attempt session in the run", async () => {
+    service.dispose();
+    const costs = new Map([
+      ["session:plan:1", 1.25],
+      ["session:verify:1", 0.75],
+    ]);
+    const seen: string[][] = [];
+    service = serviceWith(undefined, (sessionIds) => {
+      seen.push(sessionIds);
+      return sessionIds.reduce((sum, id) => sum + (costs.get(id) ?? 0), 0);
+    });
+    const definition = twoPhaseDefinition("costed-run");
+    const run = await service.startManual({ workflowId: definition.id, input: {} });
+    await executor.succeed("plan", { value: "planned" });
+
+    expect(service.getRunSpend(definition.id, run.id)).toBe(2);
+    expect(seen).toEqual([["session:plan:1", "session:verify:1"]]);
   });
 
   it("runs the workflow to completion when the bound Todo no longer exists", async () => {

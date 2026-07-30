@@ -127,13 +127,13 @@ function withoutAttemptInput(detail: WorkflowRunDetail) {
  *  the whole definition snapshot plus every interpolated prompt. The definition
  *  is still reachable through GET /api/workflows/:id, and prompts through the
  *  attempt transcript route. */
-function leanRunDetail(detail: WorkflowRunDetail) {
+function leanRunDetail(detail: WorkflowRunDetail, spendUsd: number) {
   const { definition, attempts, ...run } = detail;
-  return { ...run, attempts: withoutAttemptInput(detail).map(({ promptText, ...attempt }) => attempt) };
+  return { ...run, attempts: withoutAttemptInput(detail).map(({ promptText, ...attempt }) => attempt), spendUsd };
 }
 
-function fullRunDetail(detail: WorkflowRunDetail) {
-  return { ...detail, attempts: withoutAttemptInput(detail) };
+function fullRunDetail(detail: WorkflowRunDetail, spendUsd: number) {
+  return { ...detail, attempts: withoutAttemptInput(detail), spendUsd };
 }
 
 async function definitions(req: IncomingMessage, res: ServerResponse, url: URL, parts: string[], options: WorkflowApiOptions): Promise<boolean> {
@@ -176,7 +176,8 @@ async function runs(req: IncomingMessage, res: ServerResponse, url: URL, parts: 
   if (parts.length === 5 && method === "GET") {
     const full = runDetailIsFull(url); const value = service.getRun(workflowId, runId);
     if (!value) throw new WorkflowRepositoryError("not-found", `Workflow run ${runId} was not found.`);
-    send(res, 200, full ? fullRunDetail(value) : leanRunDetail(value)); return true;
+    const spendUsd = service.getRunSpend(workflowId, runId);
+    send(res, 200, full ? fullRunDetail(value, spendUsd) : leanRunDetail(value, spendUsd)); return true;
   }
   if (parts.length === 6 && parts[5] === "cancel" && method === "POST") {
     const parsed = await body(req, res); if (parsed === undefined) return true; const value = record(parsed, ["reason"]);

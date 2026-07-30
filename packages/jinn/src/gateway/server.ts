@@ -19,7 +19,7 @@ import {
   refreshPiModels,
 } from "../shared/models.js";
 import { configureLogger, logger } from "../shared/logger.js";
-import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleWorkflowAttemptSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, getMessages, RESTART_ACK_META_KEY } from "../sessions/registry.js";
+import { initDb, scheduleFtsBackfill, recoverStaleSessions, recoverStaleWorkflowAttemptSessions, recoverStaleQueueItems, clearAllPartialMessages, consumeRestartAcknowledgements, getInterruptedSessions, listSessions, updateSession, getSession, getMessages, getSessionSpend, RESTART_ACK_META_KEY } from "../sessions/registry.js";
 import { SessionManager, type RouteOptions } from "../sessions/manager.js";
 import { recoverSessionDeliveryStateOnStartup } from "../sessions/callbacks.js";
 import { InteractiveClaudeEngine } from "../engines/claude-interactive.js";
@@ -990,6 +990,7 @@ export async function startGateway(
     // A Todo-bound run's phases are execution attempts on that Todo, so its
     // derived spend covers the whole pipeline.
     todoSessions: { link: ({ todoId, sessionId }) => linkSession(todoId, sessionId) },
+    sessionSpend: getSessionSpend,
     // A Todo-bound run reflects its own lifecycle onto that Todo — no phase
     // prompt has to say so, and a dead run leaves its reason behind.
     todoLifecycle: workflowTodoLifecycle,

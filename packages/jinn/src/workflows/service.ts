@@ -89,6 +89,8 @@ export interface WorkflowServiceOptions {
   todoSessions?: WorkflowTodoSessionLink;
   /** Reflects a bound run's own lifecycle onto its Todo (see the runner). */
   todoLifecycle?: WorkflowTodoLifecycle;
+  /** Live session-cost aggregate for Workflow attempt sessions. */
+  sessionSpend?: (sessionIds: string[]) => number;
 }
 function fail(code: "bad-input" | "not-found", message: string): never {
   throw new WorkflowRepositoryError(code, message);
@@ -195,6 +197,11 @@ export class WorkflowService {
   listDefinitions(query: DefinitionListQuery): CursorPage<WorkflowDefinitionSummary> { return this.options.repository.listDefinitions(query); }
   getDefinition(id: string): WorkflowDefinition | null { return this.options.repository.getDefinition(id); }
   getRun(workflowId: string, runId: string): WorkflowRunDetail | null { return this.options.repository.getRun(workflowId, runId); }
+  getRunSpend(workflowId: string, runId: string): number {
+    const run = this.requiredRun(workflowId, runId);
+    const sessionIds = [...new Set(run.attempts.flatMap((attempt) => attempt.sessionId ? [attempt.sessionId] : []))];
+    return sessionIds.length > 0 ? (this.options.sessionSpend?.(sessionIds) ?? 0) : 0;
+  }
   listRuns(workflowId: string, query: RunListQuery): CursorPage<WorkflowRunSummary> { return this.options.repository.listRuns(workflowId, query); }
   submitAttemptOutput(input: {
     sessionId: string;
