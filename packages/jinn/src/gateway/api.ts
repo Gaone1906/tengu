@@ -119,6 +119,7 @@ import {
   resolveHomeIdentity,
 } from "../shared/paths.js";
 import { saveConfigAtomic } from "../shared/config.js";
+import { messageBodyError } from "../shared/message-body.js";
 import { logger } from "../shared/logger.js";
 import { redactText } from "../shared/redact.js";
 import { getSttStatus, downloadModel, transcribe as sttTranscribe, resolveLanguages, WHISPER_LANGUAGES } from "../stt/stt.js";
@@ -4968,7 +4969,8 @@ export async function handleApiRequest(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const body = _parsed.body as any;
       const prompt = body.prompt || body.message;
-      if (!prompt) return badRequest(res, "prompt or message is required");
+      const promptError = messageBodyError(prompt, "prompt or message");
+      if (promptError) return badRequest(res, promptError);
       // GRS-017a identity seam: a spawn carrying x-jinn-caller-session (the jinn
       // MCP server run by another session) is auto-linked as that session's
       // child — the agent cannot forget the linkage and the child-completion
@@ -5162,7 +5164,8 @@ export async function handleApiRequest(
       if (msgCaller.kind === "session") {
         const msgCallerId = msgCaller.callerId;
         const rawMessage = body.message || body.prompt;
-        if (!rawMessage) return badRequest(res, "message is required");
+        const rawMessageError = messageBodyError(rawMessage);
+        if (rawMessageError) return badRequest(res, rawMessageError);
         const caller = getSession(msgCallerId);
         if (!caller) {
           return badRequest(res, `unknown caller session "${msgCallerId}" — agent-initiated sends need a live caller session`);
@@ -5240,7 +5243,8 @@ export async function handleApiRequest(
       }
 
       const prompt = body.message || body.prompt;
-      if (!prompt) return badRequest(res, "message is required");
+      const messageError = messageBodyError(prompt);
+      if (messageError) return badRequest(res, messageError);
 
       // Voice mode: when the orchestrator CONTINUES an existing COO child (a
       // thread switch/reuse), re-signal focus so the Talk UI relights that
