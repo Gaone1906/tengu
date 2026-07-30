@@ -238,6 +238,72 @@ describe("InstanceMigrationGate", () => {
     expect(banner.outerHTML).not.toContain("var(--system-blue)")
     expect(banner.textContent).not.toContain("Action")
   })
+
+  it("retires the reminder after copying the prompt and closing the dialog", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    })
+    const get = vi.fn().mockResolvedValue(pending)
+    const { client } = setup({ get })
+    await screen.findByRole("dialog")
+
+    await userEvent.click(screen.getByRole("button", { name: "Copy migration prompt" }))
+
+    expect(screen.getByRole("dialog")).not.toBeNull()
+    expect(screen.getByRole("status").textContent).toContain("Migration prompt copied")
+    fireEvent.keyDown(document, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    expect(screen.queryByText("Finish v0.26.0 setup")).toBeNull()
+
+    await client.refetchQueries({ queryKey: ["instance-migration"] })
+    expect(screen.queryByText("Finish v0.26.0 setup")).toBeNull()
+  })
+
+  it("retires the reminder after opening with the COO without relying on navigation", async () => {
+    setup()
+    await screen.findByRole("dialog")
+
+    await userEvent.click(screen.getByRole("button", { name: "Open with COO" }))
+
+    await waitFor(() => expect(screen.queryByText("Finish v0.26.0 setup")).toBeNull())
+  })
+
+  it("keeps the reminder available when opening with the COO fails", async () => {
+    const open = vi.fn().mockRejectedValue(new Error("offline"))
+    setup({ open })
+    await screen.findByRole("dialog")
+
+    await userEvent.click(screen.getByRole("button", { name: "Open with COO" }))
+
+    expect(await screen.findByRole("alert")).not.toBeNull()
+    expect(window.localStorage.getItem(dismissedStorageKey)).toBeNull()
+    fireEvent.keyDown(document, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    expect(screen.getByRole("button", { name: /Finish v0\.26\.0 setup/ })).not.toBeNull()
+  })
+
+  it("does not carry acknowledgement into a new migration key", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    })
+    const nextMigration = { ...pending, toVersion: "0.27.0", versions: ["0.27.0"], migrationKey: "key-2" }
+    const get = vi.fn().mockResolvedValueOnce(pending).mockResolvedValue(nextMigration)
+    const { client } = setup({ get })
+    await screen.findByRole("dialog", { name: /v0\.26\.0 is installed/ })
+    await userEvent.click(screen.getByRole("button", { name: "Copy migration prompt" }))
+    fireEvent.keyDown(document, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+
+    await client.refetchQueries({ queryKey: ["instance-migration"] })
+
+    expect(await screen.findByRole("dialog", { name: /v0\.27\.0 is installed/ })).not.toBeNull()
+    expect(screen.getByText("Finish v0.27.0 setup")).not.toBeNull()
+    fireEvent.keyDown(document, { key: "Escape" })
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    expect(screen.getByRole("button", { name: /Finish v0\.27\.0 setup/ })).not.toBeNull()
+  })
 })
 
 describe("InstanceMigrationGate: actionable open failures", () => {
