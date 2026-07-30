@@ -25,8 +25,9 @@ import {
  */
 
 /** Declared edges: from → the set of legal targets (design §1.1's diagram).
- *  Governs the human and derived lanes; the agent lane (`opts.agent`) is
- *  bounded by its caller's target allowlist instead. */
+ *  Governs the human and derived lanes; the agent lane (`opts.agent`) and the
+ *  workflow re-arm lane (`opts.requeue`) are bounded by their caller's target
+ *  allowlist instead. */
 const EDGES: Readonly<Record<WorkItemStatus, ReadonlySet<WorkItemStatus>>> = {
   // `done` from backlog/assigned covers trivially-completed work (e.g. a
   // gate-only workflow run that finishes without ever spawning a session) —
@@ -91,6 +92,15 @@ export interface TransitionOptions {
    * bounded loops end in front of the operator, never spin).
    */
   bounce?: boolean;
+  /**
+   * The re-arm lane: `to` is dictated by a Workflow's own `todo-status` trigger,
+   * not chosen by the caller, so the edge map does not apply. The board withholds
+   * `in_review → assigned` from a human drag on purpose (a send-back there is a
+   * review verdict, not a drag) — but work sent back for revision has to restart
+   * exactly where its trigger fires, whatever status that is. Sticky terminals
+   * still need `human`, and the self-review ban still withholds `done`.
+   */
+  requeue?: boolean;
   /** Free-form audit payload (critique text, verdict, reason) stored on the event. */
   detail?: Record<string, unknown>;
 }
@@ -167,7 +177,7 @@ export function transition(id: string, to: WorkItemStatus, actor: string, opts: 
         `work item ${id} is ${from} — leaving a sticky terminal is a human decision (operator surface only)`,
       );
     }
-    if (!opts.agent) {
+    if (!opts.agent && !opts.requeue) {
       if (opts.manual && to === 'executing' && from !== 'backlog' && from !== 'assigned') {
         throw new TransitionError('illegal-edge', `illegal manual transition ${from} → ${to} for work item ${id}`);
       }

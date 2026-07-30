@@ -9,6 +9,7 @@ import type {
   EmployeeNode,
   JsonValue,
   ApprovalNode,
+  TriggerNode,
   WaitNode,
   WorkflowNode,
   WorkflowNodeOutput,
@@ -62,6 +63,33 @@ export interface WorkflowTodoLifecycle {
   /** Write onto the bound Todo why a run settled failed: which node died, the
    *  error, and the run id. Factual, no LLM call. */
   recordFailure(input: { todoId: string; workflowId: string; runId: string; nodeId: string; error: WorkflowError }): void;
+  /** Send the work round again from a rejection that carried feedback (see
+   *  `WorkflowRevisionRequest`). The run has already stopped when this is called. */
+  requestRevision(input: WorkflowRevisionRequest): void;
+}
+
+/** Where a re-armed Todo has to land for the workflow's own trigger to fire it
+ *  again, or the reason no re-arm can fire at all. */
+export type WorkflowRearmTarget =
+  | { status: string; actor?: string }
+  | { unavailable: string };
+
+/**
+ * A run-bound Approval gate was rejected WITH a note. A note turns "no" into
+ * "not yet — do it again with this", so the Todo goes round rather than the run
+ * ending: the note becomes the current requirement, and the Todo returns to the
+ * status its workflow's trigger fires on.
+ */
+export interface WorkflowRevisionRequest {
+  todoId: string;
+  workflowId: string;
+  runId: string;
+  nodeId: string;
+  /** The rejecter's note, trimmed and non-empty — this IS the new instruction. */
+  feedback: string;
+  /** Who rejected it. Becomes the actor of the re-arm, because they decided it. */
+  decidedBy: string;
+  rearm: WorkflowRearmTarget;
 }
 
 type NodeAction =
@@ -385,6 +413,41 @@ export class WorkflowRunner {
     }
   }
 
+  /** Hand a rejection's feedback to the bound Todo so the work goes round again.
+   *  Best-effort like every other Todo-side write from a run: the run has already
+   *  stopped, and a Todo closed or deleted mid-run must not throw from here. */
+  private requestRevision(run: WorkflowRunDetail, nodeId: string, feedback: string, decidedBy: string): void {
+    const todoId = run.trigger.todoId;
+    if (!todoId || !this.options.todoLifecycle) return;
+    try {
+      this.options.todoLifecycle.requestRevision({ todoId, workflowId: run.workflowId, runId: run.id,
+        nodeId, feedback, decidedBy, rearm: this.rearmTarget(run.workflowId) });
+    } catch (error) {
+      logger.warn(`Workflow run ${run.id} could not send Todo ${todoId} round again: `
+        + `${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** Where a re-armed Todo has to land, read off the CURRENT definition rather
+   *  than the snapshot this run started with: a workflow disabled or retired
+   *  since the run began fires nothing, and a Todo left sitting at its trigger
+   *  status would look queued forever. The status comes from the trigger, never
+   *  from a hardcoded default — every Todo-triggered workflow gets this, not one
+   *  of them. */
+  private rearmTarget(workflowId: string): WorkflowRearmTarget {
+    const current = this.options.repository.getDefinition(workflowId);
+    if (!current) return { unavailable: `workflow \`${workflowId}\` no longer exists` };
+    if (current.retiredAt !== undefined) return { unavailable: `workflow \`${workflowId}\` is retired` };
+    if (!current.enabled) return { unavailable: `workflow \`${workflowId}\` is disabled` };
+    const trigger = current.nodes.find((node): node is TriggerNode =>
+      node.type === "trigger" && node.config.kind === "todo-status");
+    if (trigger?.config.kind !== "todo-status") {
+      return { unavailable: `workflow \`${workflowId}\` has no Todo trigger to re-arm` };
+    }
+    return { status: trigger.config.status,
+      ...(trigger.config.actor !== undefined ? { actor: trigger.config.actor } : {}) };
+  }
+
   /** Attribute a phase session to the run's bound Todo, so the Todo's derived
    *  spend covers what the pipeline cost — it sums `total_cost` over its linked
    *  sessions, and until now a run's phases were linked to nothing. Best-effort:
@@ -537,7 +600,18 @@ export class WorkflowRunner {
     const run = this.detail(input.workflowId, input.runId);
     const at = this.now();
     const status = input.decision === "approve" ? "approved" : "rejected";
-    const routed = run.definition.edges.some((edge) => edge.from.nodeId === input.nodeId && edge.from.port === status);
+    // A rejection that carries a note is not "no", it is "not yet — do it again
+    // with this". The graph's `rejected` route encodes what "no" means (in
+    // practice, an End that abandons the work), so it is deliberately NOT taken:
+    // this run stops here and the bound Todo goes round again carrying the note.
+    // Silence still means stop, and takes the authored route exactly as before.
+    const feedback = input.decision === "reject" ? (input.reason ?? "").trim() : "";
+    const revising: WorkflowError | undefined = feedback && run.trigger.todoId && this.options.todoLifecycle
+      ? { code: "workflow-revision-requested", nodeId: input.nodeId, retryable: false,
+          message: `Workflow approval ${input.nodeId} was rejected with feedback; the Todo goes round again.` }
+      : undefined;
+    const routed = !revising
+      && run.definition.edges.some((edge) => edge.from.nodeId === input.nodeId && edge.from.port === status);
     const missingRoute: WorkflowError = { code: "workflow-approval-route-missing",
       message: `Workflow approval ${input.nodeId} has no ${status} route.`, retryable: false, nodeId: input.nodeId };
     this.options.repository.mutateRun(run.id, input.expectedRevision, (tx) => {
@@ -546,7 +620,13 @@ export class WorkflowRunner {
         ...(pending.approverRef ? { approverRef: pending.approverRef } : {}), status,
         decidedAt: at, decidedBy: input.decidedBy, decision: input.decision,
         ...(input.reason !== undefined ? { reason: input.reason } : {}) });
-      if (routed) {
+      if (revising) {
+        // The gate was decided, not broken — `completed` on its `rejected` port.
+        // The run is `cancelled`, not `failed`: a human stopped it on purpose, and
+        // a failed run would reflect `blocked` onto the very Todo being re-armed.
+        tx.setNodeStatus(input.nodeId, "completed", { output: { text: "", fields: { port: status } }, endedAt: at });
+        tx.setRunStatus("cancelled", { cancelRequestedAt: at, endedAt: at, error: revising });
+      } else if (routed) {
         tx.setNodeStatus(input.nodeId, "completed", { output: { text: input.choice ?? "", fields: { port: status },
           ...(input.choice !== undefined ? { choice: input.choice } : {}) }, endedAt: at });
         tx.setRunStatus("running");
@@ -556,6 +636,14 @@ export class WorkflowRunner {
       }
     });
     this.changed(run);
+    if (revising) {
+      this.requestRevision(run, input.nodeId, feedback, input.decidedBy);
+      return this.detail(input.workflowId, input.runId);
+    }
+    // An unrouted decision ends the run, so the bound Todo owes the same honest
+    // trace as any other failure — without this it kept reading `in_review`
+    // while the run behind it was already dead.
+    if (!routed) this.reflectFailure(run, input.nodeId, missingRoute);
     return routed ? this.advance(input.workflowId, input.runId) : this.detail(input.workflowId, input.runId);
   }
 

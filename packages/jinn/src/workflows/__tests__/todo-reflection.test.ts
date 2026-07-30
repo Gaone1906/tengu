@@ -15,7 +15,7 @@ import { openWorkflowDatabase } from "../repository-migrations.js";
 import { WorkflowRepository } from "../repository.js";
 import type { WorkflowSessionExecutor } from "../session-executor.js";
 import { WorkflowService } from "../service.js";
-import type { WorkflowTodoApprovalMirror, WorkflowTodoLifecycle } from "../runner.js";
+import type { WorkflowRevisionRequest, WorkflowTodoApprovalMirror, WorkflowTodoLifecycle } from "../runner.js";
 
 /* A Todo-bound run reports its own lifecycle onto that Todo. Before this, the only
  * reason a bound Todo ever moved was a workflow author hand-writing
@@ -68,12 +68,16 @@ class FakeExecutor {
 class RecordingLifecycle implements WorkflowTodoLifecycle {
   readonly reflections: Array<{ todoId: string; status: string; nodeId: string }> = [];
   readonly failures: Array<{ todoId: string; nodeId: string; runId: string; code: string; message: string }> = [];
+  readonly revisions: WorkflowRevisionRequest[] = [];
   reflect(input: Parameters<WorkflowTodoLifecycle["reflect"]>[0]): void {
     this.reflections.push({ todoId: input.todoId, status: input.status, nodeId: input.nodeId });
   }
   recordFailure(input: Parameters<WorkflowTodoLifecycle["recordFailure"]>[0]): void {
     this.failures.push({ todoId: input.todoId, nodeId: input.nodeId, runId: input.runId,
       code: input.error.code, message: input.error.message });
+  }
+  requestRevision(input: WorkflowRevisionRequest): void {
+    this.revisions.push(input);
   }
 }
 
@@ -106,8 +110,10 @@ function worker(id: string): WorkflowNode {
   };
 }
 /** Decide a parked gate at the run's current revision. */
-async function decide(definition: WorkflowDefinition, runId: string, nodeId: string, decision: "approve" | "reject") {
-  return service.decideApproval({ workflowId: definition.id, runId, nodeId, decision, decidedBy: "operator",
+async function decide(definition: WorkflowDefinition, runId: string, nodeId: string, decision: "approve" | "reject",
+  opts: { reason?: string; decidedBy?: string } = {}) {
+  return service.decideApproval({ workflowId: definition.id, runId, nodeId, decision,
+    decidedBy: opts.decidedBy ?? "operator", ...(opts.reason !== undefined ? { reason: opts.reason } : {}),
     expectedRevision: service.getRun(definition.id, runId)!.revision });
 }
 function save(id: string, nodes: WorkflowNode[], edges: ReturnType<typeof edge>[]): WorkflowDefinition {
@@ -207,6 +213,9 @@ describe("a bound run reflects its own lifecycle onto its Todo", () => {
     expect(service.getRun(definition.id, run.id)!.status).toBe("failed");
     expect(lifecycle.reflections.at(-1)).toEqual({ todoId: "OPS-4", status: "blocked", nodeId: "not-merged" });
     expect(lifecycle.failures.at(-1)).toMatchObject({ todoId: "OPS-4", code: "workflow-failure-end" });
+    // Silence means stop: with no note, the authored `rejected` route still runs
+    // and nothing goes round again.
+    expect(lifecycle.revisions).toEqual([]);
   });
 
   it("leaves the Todo alone while a routed error edge keeps the run alive", async () => {
@@ -260,6 +269,7 @@ describe("a bound run reflects its own lifecycle onto its Todo", () => {
       todoLifecycle: {
         reflect: () => { throw new Error("linkSession: work item OPS-404 not found"); },
         recordFailure: () => { throw new Error("addComment: work item OPS-404 not found"); },
+        requestRevision: () => { throw new Error("addComment: work item OPS-404 not found"); },
       },
       todoApprovals: { request: () => {}, notifyParked: () => { throw new Error("no approver session"); } },
     });
