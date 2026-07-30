@@ -53,6 +53,13 @@ export const STICKY_STATUSES: ReadonlySet<WorkItemStatus> = new Set<WorkItemStat
 
 /** Actor recorded on the reconciler's own derived writes. */
 export const RECONCILER_ACTOR = 'reconciler';
+/** Actor recorded when a Workflow run reflects its own lifecycle onto its bound
+ *  Todo. Derived, not declared: a status a phase set on purpose outranks it. */
+export const WORKFLOW_RUN_ACTOR = 'workflow:run';
+
+/** Actors whose status writes are DERIVED — reflections of machine state rather
+ *  than a caller's decision about the work. */
+const DERIVED_ACTORS: ReadonlySet<string> = new Set([RECONCILER_ACTOR, WORKFLOW_RUN_ACTOR]);
 
 export interface VerifyPolicy {
   mode: VerifyMode;
@@ -434,7 +441,7 @@ export function isBlockDeclared(workItemId: string): boolean {
       // Historical malformed detail falls through to actor provenance.
     }
   }
-  return row.actor !== null && row.actor !== RECONCILER_ACTOR;
+  return row.actor !== null && !DERIVED_ACTORS.has(row.actor);
 }
 
 /**

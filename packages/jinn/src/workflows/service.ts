@@ -13,7 +13,7 @@ import {
   type WorkflowRunSummary,
 } from "./repository.js";
 import type { WorkflowError, WorkflowRunDetail } from "./runtime.js";
-import { WorkflowRunner, type WorkflowTodoApprovalMirror, type WorkflowTodoSessionLink } from "./runner.js";
+import { WorkflowRunner, type WorkflowTodoApprovalMirror, type WorkflowTodoLifecycle, type WorkflowTodoSessionLink } from "./runner.js";
 import type { WorkflowSessionExecutor } from "./session-executor.js";
 import { WorkflowTriggerService, type FireWorkflowEventInput } from "./trigger-service.js";
 import { validateExecutableWorkflow, type WorkflowValidationIssue } from "./validation.js";
@@ -87,6 +87,8 @@ export interface WorkflowServiceOptions {
   todoApprovals?: WorkflowTodoApprovalMirror;
   /** Links phase sessions to the run's bound Todo for spend (see the runner). */
   todoSessions?: WorkflowTodoSessionLink;
+  /** Reflects a bound run's own lifecycle onto its Todo (see the runner). */
+  todoLifecycle?: WorkflowTodoLifecycle;
 }
 function fail(code: "bad-input" | "not-found", message: string): never {
   throw new WorkflowRepositoryError(code, message);

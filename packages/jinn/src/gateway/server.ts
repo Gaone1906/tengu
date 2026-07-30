@@ -42,7 +42,7 @@ import { setTodoStatusChangeListener } from "../work-items/transitions.js";
 import { requestApproval, setTodoApprovalDecisionListener } from "../work-items/approvals.js";
 import { linkSession } from "../work-items/store.js";
 import { parseTodoApprovalRef } from "../workflows/todo-approval-ref.js";
-import { workflowTodoApprovals } from "./workflow-todo-surface.js";
+import { workflowTodoApprovals, workflowTodoLifecycle } from "./workflow-todo-surface.js";
 import { seedTrust, cleanupSessionSettings } from "../shared/claude-settings.js";
 import { GATEWAY_INFO_FILE, HOOK_RELAY_SCRIPT, JINN_HOME, CLAUDE_SETTINGS_DIR } from "../shared/paths.js";
 import { enforceOwnerOnlyDirectory, pathIsOwnerOnly } from "../shared/owner-only.js";
@@ -985,6 +985,9 @@ export async function startGateway(
     // A Todo-bound run's phases are execution attempts on that Todo, so its
     // derived spend covers the whole pipeline.
     todoSessions: { link: ({ todoId, sessionId }) => linkSession(todoId, sessionId) },
+    // A Todo-bound run reflects its own lifecycle onto that Todo — no phase
+    // prompt has to say so, and a dead run leaves its reason behind.
+    todoLifecycle: workflowTodoLifecycle,
     readTranscript: (id) => getMessages(id).map(({ id: messageId, role, content, timestamp }) => ({ id: messageId, role, content, timestamp })),
     onChange: ({ workflowId, runId }) => emit("company:changed", { entity: "workflow", workflowId, runId }),
     onDefinitionChange: ({ workflowId, revision }) => emit("company:changed", { entity: "workflow", workflowId, revision }) });

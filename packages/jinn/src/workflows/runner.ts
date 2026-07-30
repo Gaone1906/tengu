@@ -35,7 +35,14 @@ export interface WorkflowRunnerOptions {
   /** Links each phase session to the run's bound Todo so the run's spend rolls
    *  up on that Todo. Absent = no attribution (the run still executes). */
   todoSessions?: WorkflowTodoSessionLink;
+  /** Reflects the run's own lifecycle onto its bound Todo, so no workflow author
+   *  has to write `update_work_item` into a phase prompt for the board to be
+   *  honest. Absent = no reflection (the run still executes). */
+  todoLifecycle?: WorkflowTodoLifecycle;
 }
+
+/** Where a bound Todo sits when a run is reporting its own lifecycle. */
+export type WorkflowRunReflection = "executing" | "in_review" | "blocked";
 
 export interface WorkflowTodoApprovalMirror {
   request(input: { todoId: string; request: string; ref: string; options?: string[]; approver?: string }): void;
@@ -48,6 +55,13 @@ export interface WorkflowTodoApprovalMirror {
 
 export interface WorkflowTodoSessionLink {
   link(input: { todoId: string; sessionId: string }): void;
+}
+
+export interface WorkflowTodoLifecycle {
+  reflect(input: { todoId: string; status: WorkflowRunReflection; workflowId: string; runId: string; nodeId: string }): void;
+  /** Write onto the bound Todo why a run settled failed: which node died, the
+   *  error, and the run id. Factual, no LLM call. */
+  recordFailure(input: { todoId: string; workflowId: string; runId: string; nodeId: string; error: WorkflowError }): void;
 }
 
 type NodeAction =
@@ -235,6 +249,7 @@ export class WorkflowRunner {
       const runtime = nodeRun(run, nodeId);
       if (!terminalNode(runtime)) tx.setNodeStatus(nodeId, "failed", { activated: true, error: failure, startedAt: endedAt, endedAt });
     });
+    this.reflectFailure(run, nodeId, failure);
     this.changed(run);
     return this.detail(run.workflowId, run.id);
   }
@@ -283,6 +298,11 @@ export class WorkflowRunner {
     let resumeAt: string | undefined;
     if (action.kind === "approval") approver = approvalRef(run, action.node as ApprovalNode);
     if (action.kind === "wait") resumeAt = waitResumeAt(run, action.node as WaitNode, at);
+    const failureEnd: WorkflowError | undefined = action.kind === "end" && action.node.type === "end"
+      && action.node.config.result === "failure"
+      ? { code: "workflow-failure-end", message: `Workflow reached failure End ${action.node.id}.`,
+          retryable: false, nodeId: action.node.id }
+      : undefined;
     this.options.repository.mutateRun(run.id, run.revision, (tx) => {
       if (action.kind === "activate") tx.setNodeStatus(action.node.id, "pending", { activated: true, input: inputFor(run, action.node.id) });
       else if (action.kind === "skip") tx.setNodeStatus(action.node.id, "skipped", { endedAt: at });
@@ -301,12 +321,11 @@ export class WorkflowRunner {
         tx.setRunStatus("waiting");
       } else {
         tx.setNodeStatus(action.node.id, "completed", { startedAt: at, endedAt: at });
-        if (action.node.type === "end" && action.node.config.result === "failure") {
-          tx.setRunStatus("failed", { endedAt: at, error: { code: "workflow-failure-end",
-            message: `Workflow reached failure End ${action.node.id}.`, retryable: false, nodeId: action.node.id } });
-        }
+        if (failureEnd) tx.setRunStatus("failed", { endedAt: at, error: failureEnd });
       }
     });
+    if (action.kind === "approval") this.reflect(run, "in_review", action.node.id);
+    if (failureEnd) this.reflectFailure(run, action.node.id, failureEnd);
     this.changed(run);
   }
 
@@ -335,6 +354,37 @@ export class WorkflowRunner {
     }
   }
 
+  /** Reflect the run's own lifecycle onto its bound Todo. The platform owes the
+   *  board this: until now the ONLY reason a bound Todo moved was an author
+   *  hand-writing `update_work_item` into a phase prompt, so one forgotten
+   *  instruction left a merged Todo reading `assigned`. Best-effort — the Todo
+   *  may have been closed or deleted since the run started. */
+  private reflect(run: WorkflowRunDetail, status: WorkflowRunReflection, nodeId: string): void {
+    const todoId = run.trigger.todoId;
+    if (!todoId || !this.options.todoLifecycle) return;
+    try {
+      this.options.todoLifecycle.reflect({ todoId, status, workflowId: run.workflowId, runId: run.id, nodeId });
+    } catch (error) {
+      logger.warn(`Workflow run ${run.id} could not reflect ${status} onto Todo ${todoId}: `
+        + `${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** A run that settles failed leaves an honest trace: `blocked`, plus which
+   *  node died and why. Both halves so an author needs neither a status
+   *  instruction in a prompt nor a record-failure node in the graph. */
+  private reflectFailure(run: WorkflowRunDetail, nodeId: string, error: WorkflowError): void {
+    this.reflect(run, "blocked", nodeId);
+    const todoId = run.trigger.todoId;
+    if (!todoId || !this.options.todoLifecycle) return;
+    try {
+      this.options.todoLifecycle.recordFailure({ todoId, workflowId: run.workflowId, runId: run.id, nodeId, error });
+    } catch (recordError) {
+      logger.warn(`Workflow run ${run.id} could not record its failure onto Todo ${todoId}: `
+        + `${recordError instanceof Error ? recordError.message : String(recordError)}`);
+    }
+  }
+
   /** Attribute a phase session to the run's bound Todo, so the Todo's derived
    *  spend covers what the pipeline cost — it sums `total_cost` over its linked
    *  sessions, and until now a run's phases were linked to nothing. Best-effort:
@@ -354,11 +404,16 @@ export class WorkflowRunner {
   private async dispatch(run: WorkflowRunDetail, node: EmployeeNode, config: ResolvedEmployeeConfig): Promise<void> {
     const at = this.now();
     const promptText = composeEmployeePrompt(run, node);
+    const firstPhase = run.attempts.length === 0;
     const attempt = this.options.repository.mutateRun(run.id, run.revision, (tx) => {
       tx.setNodeStatus(node.id, "dispatching", { resolvedConfig: config as unknown as Record<string, JsonValue>,
         input: inputFor(run, node.id), startedAt: at });
       return tx.createAttempt({ nodeId: node.id, resolvedConfig: config, input: inputFor(run, node.id), promptText });
     });
+    // The run's first attempt going out is the moment work starts. Later phases do
+    // not re-assert it: a phase that deliberately moved the Todo somewhere more
+    // informative keeps that status for the rest of the run.
+    if (firstPhase) this.reflect(run, "executing", node.id);
     this.changed(run);
     try {
       await this.recoverDispatching(run.workflowId, run.id, node.id, attempt.attempt);
@@ -530,6 +585,9 @@ export class WorkflowRunner {
         else tx.setRunStatus("failed", { error, endedAt });
       }
     });
+    // A routed error edge keeps the run alive, so the Todo is not blocked yet —
+    // whatever that branch reaches decides.
+    if (!retry && !routed) this.reflectFailure(run, attempt.nodeId, error);
     this.changed(run);
     return routed;
   }

@@ -11,6 +11,7 @@ import {
   type WorkItemStatus,
 } from './store.js';
 import { transitionDerived } from './transitions.js';
+import { currentApproval } from './approval-rows.js';
 import { notifyTodoChanged } from './live-events.js';
 import { listSessionsByWorkItem } from '../sessions/registry.js';
 import { logger } from '../shared/logger.js';
@@ -157,7 +158,13 @@ export function reconcileWorkItem(id: string): ReconcileResult | undefined {
   // TRUST policy hook (design §1.5): an item landing (or sitting) in `in_review`
   // whose effective verify mode is `trust` auto-closes in the SAME pass —
   // settle → in_review → done reads as one truthful story in the event log.
-  if (current.status === 'in_review' && effectiveVerifyMode(current) === 'trust') {
+  //
+  // A PENDING approval withholds it: an open routed gate IS the review, so
+  // closing over one asserts a decision nobody made. This matters most for a
+  // Todo-bound Workflow run, which parks its gates here — a trust-tier item would
+  // otherwise reach `done` inside one sweep with the merge still unapproved.
+  if (current.status === 'in_review' && effectiveVerifyMode(current) === 'trust'
+    && currentApproval(current.id)?.state !== 'pending') {
     const closed = transitionDerived(id, 'done', 'policy:trust', { policy: 'trust', auto: true });
     if (closed) {
       current = closed;

@@ -2,8 +2,11 @@ import { logger } from "../shared/logger.js";
 import { deliverClaimedSessionDelivery, notifyOperatorChannel } from "../sessions/callbacks.js";
 import { claimSessionDelivery, DIRECT_GROUP, isPortalAgentSession, listSessionsForGroup } from "../sessions/registry.js";
 import { currentApproval } from "../work-items/approval-rows.js";
-import type { ApprovalTargetKind } from "../work-items/store.js";
-import type { WorkflowTodoApprovalMirror } from "../workflows/runner.js";
+import { addComment } from "../work-items/comments.js";
+import { getWorkItem, isBlockDeclared, WORKFLOW_RUN_ACTOR, type ApprovalTargetKind, type WorkItemStatus } from "../work-items/store.js";
+import { transitionDerived } from "../work-items/transitions.js";
+import type { WorkflowError } from "../workflows/runtime.js";
+import type { WorkflowRunReflection, WorkflowTodoApprovalMirror, WorkflowTodoLifecycle } from "../workflows/runner.js";
 
 /**
  * What a Todo-bound Workflow run owes the Todo it runs for, implemented once in
@@ -14,9 +17,63 @@ import type { WorkflowTodoApprovalMirror } from "../workflows/runner.js";
  * record-failure branch into the graph. One forgotten instruction left a merged
  * Todo reading `assigned`, and a parked gate told nobody at all.
  *
- * First obligation: tell the routed approver when the run parks on their
- * decision. Reflecting the run's lifecycle onto the Todo follows separately.
+ * Three obligations:
+ *   - reflect the run's lifecycle onto the Todo's status
+ *   - record WHY a run settled failed
+ *   - tell the routed approver when the run parks on their decision
+ *
+ * Completion is deliberately absent. A run reaching its success End does NOT
+ * close the Todo: closing is a decision, and the self-review ban means the thing
+ * that did the work never makes it.
  */
+
+/**
+ * Whether a reflection is allowed to move this Todo. Sticky terminals need no
+ * check — `transition` refuses to leave them without human authority — so this
+ * is only about the statuses a phase can deliberately choose.
+ *
+ *   - `executing` is the START edge, legal only out of `backlog`/`assigned` (the
+ *     same rule `transition` applies to a manual start). Anywhere else, a phase
+ *     has already said something more specific and keeps it.
+ *   - `in_review` yields to a DECLARED block: a phase that blocked with a real
+ *     reason says more than "a decision is pending".
+ *   - `blocked` always writes. A run that died is the newest and most
+ *     consequential fact about the work, and leaving the board on a phase's
+ *     optimistic `in_review` is the exact lie this surface exists to stop.
+ */
+function mayReflect(status: WorkflowRunReflection, current: WorkItemStatus, todoId: string): boolean {
+  if (status === "executing") return current === "backlog" || current === "assigned";
+  if (status === "in_review") return !(current === "blocked" && isBlockDeclared(todoId));
+  return true;
+}
+
+function reflect(input: {
+  todoId: string; status: WorkflowRunReflection; workflowId: string; runId: string; nodeId: string;
+}): void {
+  const item = getWorkItem(input.todoId);
+  if (!item || !mayReflect(input.status, item.status, input.todoId)) return;
+  // `declared: false` keeps this out of the declaration lane: the reconciler's
+  // provenance checks read it, so a reflected status stays re-derivable instead of
+  // freezing the Todo.
+  transitionDerived(input.todoId, input.status, WORKFLOW_RUN_ACTOR, {
+    declared: false,
+    workflowId: input.workflowId,
+    runId: input.runId,
+    nodeId: input.nodeId,
+  });
+}
+
+function recordFailure(input: {
+  todoId: string; workflowId: string; runId: string; nodeId: string; error: WorkflowError;
+}): void {
+  addComment({
+    workItemId: input.todoId,
+    author: "workflow",
+    authorKind: "system",
+    body: `**Workflow run failed** — \`${input.workflowId}\` run \`${input.runId}\`.\n\n`
+      + `Node \`${input.nodeId}\` (${input.error.code}): ${input.error.message}`,
+  });
+}
 
 /** The gate text, trimmed to a length that reads in a notification banner. */
 function gateRequest(request: string): string {
@@ -99,7 +156,10 @@ function notifyParked(input: {
   });
 }
 
-/** `request` mirrors the gate onto the Todo; `notifyParked` tells its approver. */
+/** The lifecycle half of the surface (status + failure record). */
+export const workflowTodoLifecycle: WorkflowTodoLifecycle = { reflect, recordFailure };
+
+/** The approval half: `request` mirrors the gate, `notifyParked` tells its approver. */
 export function workflowTodoApprovals(
   request: WorkflowTodoApprovalMirror["request"],
 ): WorkflowTodoApprovalMirror {

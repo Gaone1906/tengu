@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { initDb } from '../sessions/registry.js';
 import { resolveApprovalRouteTarget, resolveRootApprovalTarget } from '../gateway/approval-authority.js';
+import { parseTodoApprovalRef } from '../workflows/todo-approval-ref.js';
 import { currentApproval, type WorkItemApproval } from './approval-rows.js';
 import { appendWorkItemEvent, getWorkItem, type ApprovalTargetKind, type WorkItem } from './store.js';
 import { transition } from './transitions.js';
@@ -29,6 +30,10 @@ export { currentApproval, listApprovals, type WorkItemApproval } from './approva
  *     the bounce that reaches maxRounds `escalated`s instead — the transitions
  *     module enforces that)
  *   - any OTHER status              → the decision is recorded, status UNTOUCHED
+ *   - a gate MIRRORED from a Workflow run → the decision is recorded, status
+ *     UNTOUCHED whatever it is. The run owns its own lifecycle: its gates are
+ *     mid-pipeline decisions ("pick a variant", "merge this"), not a review of
+ *     the Todo, and the phases after the gate have not run yet.
  */
 
 /** A CHOICE approval offers variants to pick between instead of a bare yes/no.
@@ -376,13 +381,20 @@ function applyNativeDecisionAtomic(
   const db = initDb();
   const txn = db.transaction((): { item: WorkItem; escalated: boolean } => {
     const item = getWorkItem(id);
-    if (!item || currentApproval(item.id)?.state !== 'pending') throw new ApprovalNotPendingError(id);
+    if (!item) throw new ApprovalNotPendingError(id);
+    const pending = currentApproval(item.id);
+    if (pending?.state !== 'pending') throw new ApprovalNotPendingError(id);
+    // A gate a Workflow run mirrored here is that run's decision point, not a
+    // review of this Todo. Recording it is the whole job — the mirror-back
+    // listener resumes the run, and the run's own reflection moves the Todo when
+    // the remaining phases say so.
+    const mirroredFromRun = parseTodoApprovalRef(pending.ref) !== null;
     // 1. Record the decision (approval fields + approval_decided event).
     decideApproval(id, decision, decidedBy, note, choice);
     // 2. The fixed consequence, in the SAME transaction — a failure here rolls the
     //    decision back with it (atomicity), never leaving approved + in_review.
     let escalated = false;
-    if (item.status === 'in_review') {
+    if (item.status === 'in_review' && !mirroredFromRun) {
       if (decision === 'approve') {
         transition(id, 'done', decidedBy, { human: true, ...(note !== undefined ? { detail: { note } } : {}) });
       } else {
