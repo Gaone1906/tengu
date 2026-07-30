@@ -46,9 +46,11 @@ const ATTESTED = {
   // dueAt.") that its schema properties already enumerate.
   // Rebased for `backlog` on update_work_item's status enum: "not now" is a
   // legitimate agent move. It costs 3 tokens and leaves Pi 3 under the ceiling.
-  rpc: { tokens: 4475, sha256: "cecf528d523d087dfd9ba50e684c3f841e514e4bd79129e254d7e36345a69719" },
-  pi: { tokens: 4908, sha256: "6fcdbbd4725032c42bb5697ec0f022f7a7d7da03ac165cb14854491e2cb3eedd" },
-  openai: { tokens: 4650, sha256: "d2336f97d7d7397a593ec23bd8df76fe961d1e64fa56e8af3ce82b3041d8fac4" },
+  // Rebased for read_session's full-body and last=0 transcript contract. Its
+  // concise field prose keeps Pi one token under the fixed ceiling.
+  rpc: { tokens: 4477, sha256: "cca3bb1aff660767f068464d0a861b61f8c9c1996bd0825b8349ab341659640a" },
+  pi: { tokens: 4910, sha256: "895ab9f65c428d1263f95dc751e5231c7d751d1b57bcedc29b72c592bb3b58b4" },
+  openai: { tokens: 4652, sha256: "45a42a845abad46eef732a00bc7b856908ae75bebe89e5c0498a2e73890f5cc0" },
 } as const;
 
 type TokenizerLoader = () => Promise<[{ Tiktoken: typeof import("js-tiktoken/lite").Tiktoken }, { default: typeof import("js-tiktoken/ranks/o200k_base").default }]>;

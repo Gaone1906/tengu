@@ -30,7 +30,7 @@ import type { JinnMcpContext, JinnMcpTool } from "../toolkit.js";
  *      registry: never a MATCH syntax error, never SQL injection, tables intact.
  *   3. INTEGRATION — the operator headline against the real gateway routes +
  *      registry (temp JINN_HOME): seed history → search messages (anchored
- *      hits) → get context (radius + caps) → search sessions by
+ *      hits) → get context (bounded radius) → search sessions by
  *      employee/status/needsAttention; route negatives (400/404 shapes).
  */
 
@@ -240,19 +240,23 @@ describe("search tools — unit (stub gateway)", () => {
     expect(out.hint).toContain("find_employees");
   });
 
-  it("get_message_context GETs the context route with the anchor + clamped radius and passes 404s through readable", async () => {
+  it("get_message_context honours radius 100, clamps larger radii, and passes 404s through readable", async () => {
     const { calls, ctx } = stub(() => ({
       status: 200,
       body: { session: { id: "s1", engine: "codex" }, anchorMessageId: "m7", messages: [{ id: "m7", isAnchor: true }] },
     }));
-    const out = (await tool("get_message_context").handler({ sessionId: "s/1", messageId: "m7", radius: 999 }, ctx)) as {
+    const out = (await tool("get_message_context").handler({ sessionId: "s/1", messageId: "m7", radius: 100 }, ctx)) as {
       anchorMessageId: string;
     };
     const url = new URL(calls[0].url);
     expect(url.pathname).toBe("/api/sessions/s%2F1/context"); // id is URL-encoded
     expect(url.searchParams.get("message")).toBe("m7");
-    expect(url.searchParams.get("radius")).toBe(String(CONTEXT_RADIUS_MAX));
+    expect(CONTEXT_RADIUS_MAX).toBe(100);
+    expect(url.searchParams.get("radius")).toBe("100");
     expect(out.anchorMessageId).toBe("m7");
+
+    await tool("get_message_context").handler({ sessionId: "s/1", messageId: "m7", radius: 500 }, ctx);
+    expect(new URL(calls[1].url).searchParams.get("radius")).toBe("100");
 
     const notFound = stub(() => ({ status: 404, body: { error: 'message "mX" not found in session "s1" — anchors come from message-search results' } }));
     await expect(tool("get_message_context").handler({ sessionId: "s1", messageId: "mX" }, notFound.ctx)).rejects.toThrow(
@@ -410,7 +414,7 @@ describe("search tools — integration against the real routes/registry", () => 
 
     // 2. The anchor expands into its surrounding context, anchor flagged.
     const context = (await tool("get_message_context").handler(
-      { sessionId: hit.sessionId, messageId: hit.messageId, radius: 1 },
+      { sessionId: hit.sessionId, messageId: hit.messageId, radius: 100 },
       ctx,
     )) as { anchorMessageId: string; messages: Array<{ content: string; isAnchor: boolean }>; session: { id: string } };
     expect(context.anchorMessageId).toBe(hit.messageId);
@@ -597,14 +601,15 @@ describe("search tools — integration against the real routes/registry", () => 
     expect(Object.keys(context.session).sort()).toEqual(COMPACT_KEYS);
   });
 
-  it("caps hold through the real route: search limit ≤ 20 and context bodies carry the intentional-cap marker", async () => {
+  it("the real route caps search hits while returning context bodies in full", async () => {
     const ctx = ctxFor();
     const sid = seedSession({ title: "Caps" });
     for (let i = 0; i < 30; i++) registry.insertMessage(sid, "assistant", `pangolin item ${i}`);
     const hits = (await tool("search_messages").handler({ query: "pangolin", limit: 999 }, ctx)) as { results: unknown[] };
     expect(hits.results).toHaveLength(SEARCH_LIMIT_MAX);
 
-    registry.insertMessage(sid, "assistant", `capybara ${"z".repeat(6000)}`);
+    const long = `capybara ${"z".repeat(6000)}`;
+    registry.insertMessage(sid, "assistant", long);
     const found = (await tool("search_messages").handler({ query: "capybara" }, ctx)) as {
       results: Array<{ messageId: string }>;
     };
@@ -613,7 +618,7 @@ describe("search tools — integration against the real routes/registry", () => 
       ctx,
     )) as { messages: Array<{ content: string; isAnchor: boolean }> };
     const anchor = context.messages.find((m) => m.isAnchor)!;
-    expect(anchor.content.length).toBeLessThan(2300);
-    expect(anchor.content).toMatch(/intentional cap/);
+    expect(anchor.content).toBe(long);
+    expect(anchor.content).not.toContain("…[truncated");
   });
 });

@@ -2930,11 +2930,8 @@ export function getMessagePage(sessionId: string, options: MessagePageOptions = 
   return { messages: pageRows.map(rowToMessage), hasOlder };
 }
 
-/** Per-message content cap in getMessageContext output (chars). Matches the
- *  read_session cap — the reference layer never returns unbounded bodies. */
-export const MESSAGE_CONTEXT_CHAR_CAP = 2_000;
 /** Max messages each side of the anchor. */
-export const MESSAGE_CONTEXT_MAX_RADIUS = 10;
+export const MESSAGE_CONTEXT_MAX_RADIUS = 100;
 
 export interface MessageContextEntry {
   id: string;
@@ -2953,10 +2950,8 @@ export interface MessageContext {
 /**
  * GRS-020a — the ±radius window around a message anchor (a search_messages
  * hit), so a search result becomes readable in place without pulling a whole
- * transcript. Bounded by construction: radius clamped to
- * {@link MESSAGE_CONTEXT_MAX_RADIUS}, each body truncated at
- * {@link MESSAGE_CONTEXT_CHAR_CAP} with the intentional-cap marker (the same
- * doctrine as read_session — no full-transcript escape hatch).
+ * transcript. The radius is clamped to {@link MESSAGE_CONTEXT_MAX_RADIUS};
+ * selected message bodies are returned as stored.
  * Returns undefined when the message doesn't exist IN THAT SESSION (an anchor
  * from another session must not leak across).
  */
@@ -3007,11 +3002,7 @@ export function getMessageContext(sessionId: string, messageId: string, radius =
   const messages: MessageContextEntry[] = [...before.reverse(), anchor, ...after].map((row) => ({
     id: row.id,
     role: row.role,
-    content:
-      row.content.length > MESSAGE_CONTEXT_CHAR_CAP
-        ? row.content.slice(0, MESSAGE_CONTEXT_CHAR_CAP) +
-          `…[truncated ${row.content.length - MESSAGE_CONTEXT_CHAR_CAP} chars — intentional cap; ask the session to summarize instead of re-reading]`
-        : row.content,
+    content: row.content,
     timestamp: row.timestamp,
     isAnchor: row.id === messageId,
   }));

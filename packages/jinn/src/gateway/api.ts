@@ -3416,9 +3416,8 @@ export async function handleApiRequest(
 
     // GET /api/sessions/:id/context?message=<id>&radius=<n> — GRS-020a: the
     // bounded ±radius window around a message anchor (a search hit), so a hit
-    // becomes readable in place without a full-transcript read. Content is
-    // capped store-side (MESSAGE_CONTEXT_CHAR_CAP + intentional-cap marker);
-    // the session field is the COMPACT summary (GRS-020a-fix finding 5).
+    // becomes readable in place. Message bodies are returned as stored; the
+    // session field is the COMPACT summary (GRS-020a-fix finding 5).
     params = matchRoute("/api/sessions/:id/context", pathname);
     if (method === "GET" && params) {
       const session = getSession(params.id);
