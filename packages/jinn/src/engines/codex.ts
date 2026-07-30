@@ -330,6 +330,10 @@ export function sweepOrphanCodexSessionHomes(
  * jinn server rides the per-session CODEX_HOME config.toml, so it is skipped from
  * the argv `-c` overrides (its capability must never touch argv). No `--profile`:
  * codex 0.141 dropped it, and fresh/resume are unified on the CODEX_HOME overlay.
+ *
+ * The prompt is user text, so it goes behind `--`. Without the separator codex's
+ * parser reads a leading dash as a flag and exits 2 (`unexpected argument '- '`),
+ * and a prompt of "resume" or "review" would dispatch a subcommand instead.
  */
 export function buildCodexFreshArgs(opts: EngineRunOpts, prompt: string, homeActive: boolean): string[] {
   const args = ["exec"];
@@ -339,14 +343,15 @@ export function buildCodexFreshArgs(opts: EngineRunOpts, prompt: string, homeAct
   if (opts.cwd) args.push("-C", opts.cwd);
   args.push(...codexMcpConfigArgs(opts.resolvedMcp, { skipJinn: homeActive }));
   args.push(...codexCliFlags(opts.cliFlags));
-  args.push(prompt);
+  args.push("--", prompt);
   return args;
 }
 
 /**
  * Build `codex exec resume` argv. `codex exec resume` accepts neither `--profile`
  * nor `-C`; the per-session CODEX_HOME (shared with the fresh turn) carries the
- * jinn MCP config and locates the thread rollout.
+ * jinn MCP config and locates the thread rollout. Both positionals sit behind `--`
+ * for the same reason the fresh turn's prompt does.
  */
 export function buildCodexResumeArgs(opts: EngineRunOpts, prompt: string, homeActive: boolean): string[] {
   const args = ["exec", "resume"];
@@ -355,8 +360,7 @@ export function buildCodexResumeArgs(opts: EngineRunOpts, prompt: string, homeAc
   args.push("--json", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check");
   args.push(...codexMcpConfigArgs(opts.resolvedMcp, { skipJinn: homeActive }));
   args.push(...codexCliFlags(opts.cliFlags));
-  args.push(opts.resumeSessionId!);
-  args.push(prompt);
+  args.push("--", opts.resumeSessionId!, prompt);
   return args;
 }
 

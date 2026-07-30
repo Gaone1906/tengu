@@ -271,6 +271,39 @@ describe("CodexInteractiveEngine — effort/model PTY args + respawn", () => {
     lifecycle.dispose();
   });
 
+  // A prompt starting with `-` is read by codex's clap parser as a flag and kills
+  // the spawn with `unexpected argument` — the positionals must sit behind `--`.
+  it.each(["- ", "-p do the thing", "--json output please", "-"])(
+    "passes the dash-leading prompt %j as a positional, not a flag",
+    async (prompt) => {
+      const run = engine.run({ prompt, sessionId: "sess-dash", cwd: "/tmp", model: "gpt-5.5" } as any);
+      const args = lastArgs();
+      const separator = args.indexOf("--");
+      expect(separator).toBeGreaterThanOrEqual(0);
+      expect(args.slice(separator + 1)).toEqual([prompt]);
+      spawnCalls[spawnCalls.length - 1]!.proc._exit(0);
+      await run;
+      lifecycle.dispose();
+    },
+  );
+
+  it("passes a dash-leading prompt and the resume id as positionals on a resumed PTY", async () => {
+    const run = engine.run({
+      prompt: "- ",
+      sessionId: "sess-dash-resume",
+      cwd: "/tmp",
+      model: "gpt-5.5",
+      resumeSessionId: "thread-abc",
+    } as any);
+    const args = lastArgs();
+    const separator = args.indexOf("--");
+    expect(separator).toBeGreaterThanOrEqual(0);
+    expect(args.slice(separator + 1)).toEqual(["thread-abc", "- "]);
+    spawnCalls[spawnCalls.length - 1]!.proc._exit(0);
+    await run;
+    lifecycle.dispose();
+  });
+
   it('omits the reasoning-effort flag when effortLevel is "default" or absent', () => {
     engine.ensureIdleSpawn("sess-default", { model: "gpt-5.5", effortLevel: "default" });
     expect(reasoningEffortArg(lastArgs())).toBeUndefined();

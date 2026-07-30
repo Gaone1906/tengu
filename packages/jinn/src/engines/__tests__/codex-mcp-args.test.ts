@@ -348,6 +348,30 @@ describe("buildCodexFreshArgs / buildCodexResumeArgs — no --profile, no capabi
   });
 });
 
+/**
+ * A prompt is user text, and codex's clap parser reads a leading `-` as a flag:
+ * `codex exec "- "` exits 2 with `unexpected argument '- ' found` before the model
+ * is ever reached. Both builders must fence their positionals behind `--`.
+ */
+describe("buildCodexFreshArgs / buildCodexResumeArgs — dash-leading prompts", () => {
+  const dashPrompts = ["- ", "-p do the thing", "--json output please", "-"];
+
+  it.each(dashPrompts)("fresh argv passes %j as a positional, not a flag", (prompt) => {
+    const args = buildCodexFreshArgs(baseOpts(), prompt, true);
+    const separator = args.indexOf("--");
+    expect(separator).toBeGreaterThanOrEqual(0);
+    expect(args.slice(separator + 1)).toEqual([prompt]);
+  });
+
+  it.each(dashPrompts)("resume argv passes %j as a positional, not a flag", (prompt) => {
+    const args = buildCodexResumeArgs(baseOpts({ resumeSessionId: "thread-abc" }), prompt, true);
+    const separator = args.indexOf("--");
+    expect(separator).toBeGreaterThanOrEqual(0);
+    // Both positionals sit after the separator, session id first.
+    expect(args.slice(separator + 1)).toEqual(["thread-abc", prompt]);
+  });
+});
+
 describe("codexChildEnv — CODEX_HOME wiring", () => {
   it("points CODEX_HOME at the per-session home and strips inherited CODEX_*", () => {
     const base = { PATH: "/usr/bin", CODEX_HOME: "/real/.codex", CODEX_API_KEY: "x", CLAUDECODE: "1" };

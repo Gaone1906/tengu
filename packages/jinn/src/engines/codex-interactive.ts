@@ -382,6 +382,11 @@ export class CodexInteractiveEngine implements InterruptibleEngine, PtyViewEngin
     return env;
   }
 
+  /**
+   * The prompt is user text, so the positionals go behind `--`. Without the
+   * separator codex's parser reads a leading dash as a flag and exits 2
+   * (`unexpected argument '- '`) before the TUI ever starts.
+   */
   private buildArgs(opts: EngineRunOpts, prompt?: string, resumeSessionId?: string): string[] {
     const args: string[] = [];
     if (resumeSessionId) args.push("resume");
@@ -390,8 +395,8 @@ export class CodexInteractiveEngine implements InterruptibleEngine, PtyViewEngin
     if (opts.effortLevel && opts.effortLevel !== "default") args.push("-c", `model_reasoning_effort="${opts.effortLevel}"`);
     if (opts.cwd) args.push("-C", opts.cwd);
     args.push(...codexCliFlags(opts.cliFlags));
-    if (resumeSessionId) args.push(resumeSessionId);
-    if (prompt) args.push(prompt);
+    const positionals = [resumeSessionId, prompt].filter((v): v is string => !!v);
+    if (positionals.length) args.push("--", ...positionals);
     return args;
   }
 
