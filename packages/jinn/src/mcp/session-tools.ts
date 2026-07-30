@@ -12,9 +12,8 @@ import { assertBoundCaller, gatewayRequest, JinnMcpToolError, type JinnMcpContex
  * gateway errors pass through readable so the agent self-corrects.
  *
  * Domain-specific rules this module owns:
- *   - CONTEXT-BOMB GUARD: `read_session` clamps `last` to ≤ 20 (default 5)
- *     and truncates each message to 2,000 chars. There is deliberately NO
- *     full-transcript mode.
+ *   - SESSION READING: `last` is a non-negative integer, where 0 requests the
+ *     whole transcript. Message bodies are returned as stored.
  *   - PROTOCOL TEACHING lives in exactly two places (schema-budget rule "one
  *     teaching description per domain"): the spawn tool's description/hint
  *     carries the end-turn-and-await-callback protocol; everything else stays
@@ -35,14 +34,10 @@ import { assertBoundCaller, gatewayRequest, JinnMcpToolError, type JinnMcpContex
  *     lesson). Deletion stays on the HTTP route / web UI for the operator.
  */
 
-/* ── Caps (design §1.2) ─────────────────────────────────────────────────────── */
+/* ── Limits (design §1.2) ───────────────────────────────────────────────────── */
 
-/** Max messages read_session returns per call. */
-export const READ_LAST_MAX = 20;
 /** Default messages per read when `last` is omitted. */
-export const READ_LAST_DEFAULT = 5;
-/** Per-message content cap (chars) in read output. */
-export const READ_MESSAGE_CHAR_CAP = 2_000;
+export const READ_LAST_DEFAULT = 30;
 /** Max sessions per list call. */
 export const LIST_LIMIT_MAX = 50;
 /** Default sessions per list call. */
@@ -75,6 +70,14 @@ function requireCallerIdentity(ctx: JinnMcpContext): string {
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {
   const n = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback;
   return Math.min(max, Math.max(min, n));
+}
+
+function readLast(value: unknown): number {
+  if (value === undefined || value === null) return READ_LAST_DEFAULT;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new JinnMcpToolError("last must be a non-negative integer (0 requests the whole transcript)");
+  }
+  return value;
 }
 
 function asText(body: unknown, max = 2000): string {
@@ -224,31 +227,30 @@ export function buildSessionTools(): JinnMcpTool[] {
 
   const readSession: JinnMcpTool = {
     name: "read_session",
-    description: "Read one session status and last N messages; long messages are capped.",
+    description: "Read one session status and messages in full; last=0 returns the whole transcript.",
     inputSchema: {
       type: "object",
       properties: {
         sessionId: { type: "string" },
-        last: { type: "number", description: `How many recent messages (1–${READ_LAST_MAX}, default ${READ_LAST_DEFAULT}).` },
+        last: {
+          type: "number",
+          description: `Recent messages; 0=all (default ${READ_LAST_DEFAULT}).`,
+        },
       },
       required: ["sessionId"],
     },
     handler: async (args, ctx) => {
       requireCallerIdentity(ctx);
       const sessionId = requireString(args, "sessionId");
-      const last = clampInt(args.last, READ_LAST_DEFAULT, 1, READ_LAST_MAX);
+      const last = readLast(args.last);
       const { status, body } = await gatewayRequest(ctx, "GET", `${sessionPath(sessionId)}?last=${last}`);
       if (status >= 400) throw gatewayFailure(`reading session "${sessionId}"`, status, body);
       const s = (body ?? {}) as SessionRecord;
-      const messages = (Array.isArray(s.messages) ? s.messages : []).map((m) => {
-        const content = typeof m.content === "string" ? m.content : "";
-        const truncated =
-          content.length > READ_MESSAGE_CHAR_CAP
-            ? content.slice(0, READ_MESSAGE_CHAR_CAP) +
-              `…[truncated ${content.length - READ_MESSAGE_CHAR_CAP} chars — intentional cap; ask the session to summarize or write a report file instead]`
-            : content;
-        return { role: m.role, content: truncated, timestamp: m.timestamp };
-      });
+      const messages = (Array.isArray(s.messages) ? s.messages : []).map((m) => ({
+        role: m.role,
+        content: typeof m.content === "string" ? m.content : "",
+        timestamp: m.timestamp,
+      }));
       return {
         ...summarize(s),
         model: s.model ?? null,

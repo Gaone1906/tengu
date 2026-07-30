@@ -6,9 +6,7 @@ import { Readable } from "node:stream";
 import type { ServerResponse } from "node:http";
 import {
   buildSessionTools,
-  READ_LAST_MAX,
   READ_LAST_DEFAULT,
-  READ_MESSAGE_CHAR_CAP,
   LIST_LIMIT_MAX,
 } from "../session-tools.js";
 import { buildTools } from "../server.js";
@@ -23,7 +21,7 @@ import {
   TOOL_CALL_HEADER,
   TOOL_CALL_HEADER_VALUE,
 } from "../identity.js";
-import type { JinnMcpContext, JinnMcpTool } from "../toolkit.js";
+import { JinnMcpToolError, type JinnMcpContext, type JinnMcpTool } from "../toolkit.js";
 import { sessionCommGuards, LATERAL_MAX_SENDS, LATERAL_MAX_HOPS } from "../../gateway/session-comm-guards.js";
 import type { ResolvedMcpConfig } from "../../shared/types.js";
 
@@ -32,8 +30,8 @@ import type { ResolvedMcpConfig } from "../../shared/types.js";
  *
  * Three tiers:
  *   1. UNIT — every tool against a stub fetch: exact route/method/body/header,
- *      caps + truncation, scope refusals, local self-message refusal, decision-
- *      shaped hints, structured error mapping (400/403/404/429).
+ *      read controls, scope refusals, local self-message refusal,
+ *      decision-shaped hints, structured error mapping (400/403/404/429).
  *   2. IDENTITY SEAM — attachSessionIdentity purity + the header contract
  *      (present when ctx has callerSessionId, absent otherwise).
  *   3. INTEGRATION — the tools drive the REAL gateway session routes + registry
@@ -190,8 +188,8 @@ describe("session tools — unit (stub gateway)", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it(`read_session defaults last=${READ_LAST_DEFAULT}, clamps to ${READ_LAST_MAX}, and truncates long messages with the intentional-cap marker`, async () => {
-    const long = "y".repeat(READ_MESSAGE_CHAR_CAP + 500);
+  it(`read_session defaults last=${READ_LAST_DEFAULT} and returns 50,000-char messages byte-identically`, async () => {
+    const long = "y".repeat(50_000);
     const { calls, ctx } = stub(() => ({
       status: 200,
       body: { id: "s", engine: "codex", status: "idle", messages: [{ role: "assistant", content: long, timestamp: 5 }] },
@@ -201,14 +199,28 @@ describe("session tools — unit (stub gateway)", () => {
       hint: string;
     };
     expect(calls[0].url).toBe(`http://127.0.0.1:7777/api/sessions/s?last=${READ_LAST_DEFAULT}`);
-    expect(out.messages[0].content).toContain("…[truncated 500 chars");
-    expect(out.messages[0].content.length).toBeLessThan(READ_MESSAGE_CHAR_CAP + 120);
+    expect(Buffer.from(out.messages[0].content).equals(Buffer.from(long))).toBe(true);
+    expect(out.messages[0].content).not.toContain("…[truncated");
     expect(out.hint).toMatch(/idle/i);
+  });
 
-    await tool("read_session").handler({ sessionId: "s", last: 999 }, ctx);
-    expect(calls[1].url).toBe(`http://127.0.0.1:7777/api/sessions/s?last=${READ_LAST_MAX}`);
+  it("read_session forwards last=200 and last=0 without clamping", async () => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: { id: "s", status: "idle", messages: [] } }), "reader");
+    await tool("read_session").handler({ sessionId: "s", last: 200 }, ctx);
+    expect(calls[0].url).toBe("http://127.0.0.1:7777/api/sessions/s?last=200");
     await tool("read_session").handler({ sessionId: "s", last: 0 }, ctx);
-    expect(calls[2].url).toBe("http://127.0.0.1:7777/api/sessions/s?last=1");
+    expect(calls[1].url).toBe("http://127.0.0.1:7777/api/sessions/s?last=0");
+  });
+
+  it.each([-1, 1.5])("read_session rejects invalid last=%s as a non-negative integer before the gateway call", async (last) => {
+    const { calls, ctx } = stub(() => ({ status: 200, body: {} }), "reader");
+    const failure = await tool("read_session").handler({ sessionId: "s", last }, ctx).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(JinnMcpToolError);
+    expect(failure).toHaveProperty("message", expect.stringMatching(/last must be a non-negative integer/));
+    expect(calls).toHaveLength(0);
   });
 
   it("read_session hints are decision-shaped per status (running → end turn / wake; error → surfaces lastError)", async () => {
@@ -481,6 +493,23 @@ beforeEach(() => {
 });
 
 describe("session tools — integration against the real routes/registry", () => {
+  it("read_session last=0 returns a complete 200-message transcript with its 50,000-char latest message intact", async () => {
+    const sessionId = await createOperatorSession("message 0");
+    const existing = registry.getMessages(sessionId).length;
+    const latest = "y".repeat(50_000);
+    for (let i = existing; i < 200; i++) {
+      registry.insertMessage(sessionId, "assistant", i === 199 ? latest : `message ${i}`);
+    }
+
+    const read = (await tool("read_session").handler({ sessionId, last: 0 }, ctxFor(sessionId))) as {
+      messages: Array<{ content: string }>;
+    };
+    expect(read.messages).toHaveLength(200);
+    expect(read.messages[0].content).toBe("message 0");
+    expect(Buffer.from(read.messages[199].content).equals(Buffer.from(latest))).toBe(true);
+    expect(read.messages[199].content).not.toContain("…[truncated");
+  });
+
   it("refuses to erase a linked attempt and preserves its spend while interrupting unfinished work", async () => {
     const sessionId = await createOperatorSession("costly unfinished attempt");
     const item = workItems.createWorkItem({
@@ -532,7 +561,7 @@ describe("session tools — integration against the real routes/registry", () =>
     expect(workItems.getWorkItem(item.id)?.status).not.toBe("done");
   });
 
-  it("the headline loop: spawn (auto parent link) → list children → read (capped) → lateral send (sender-tagged, wakes) → stop", async () => {
+  it("the headline loop: spawn (auto parent link) → list children → read → lateral send (sender-tagged, wakes) → stop", async () => {
     const parentId = await createOperatorSession("I am the COO");
     const ctx = ctxFor(parentId);
 
@@ -549,13 +578,13 @@ describe("session tools — integration against the real routes/registry", () =>
     const listed = (await tool("list_sessions").handler({}, ctx)) as { sessions: Array<{ id: string }> };
     expect(listed.sessions.map((s) => s.id)).toContain(spawned.sessionId);
 
-    // 3. Read: the spawn prompt is there; the cap holds against a padded history.
+    // 3. Read: the requested recent window is returned.
     for (let i = 0; i < 30; i++) registry.insertMessage(spawned.sessionId, "assistant", `filler ${i}`);
-    const read = (await tool("read_session").handler({ sessionId: spawned.sessionId, last: 999 }, ctx)) as {
+    const read = (await tool("read_session").handler({ sessionId: spawned.sessionId, last: 30 }, ctx)) as {
       messages: Array<{ content: string }>;
       parentSessionId: string;
     };
-    expect(read.messages.length).toBe(READ_LAST_MAX);
+    expect(read.messages.length).toBe(30);
     expect(read.parentSessionId).toBe(parentId);
 
     // 4. Lateral/child send: persisted as a sender-tagged notification banner.

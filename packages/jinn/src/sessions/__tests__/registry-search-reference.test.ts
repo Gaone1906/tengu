@@ -10,7 +10,7 @@ import path from "node:path";
  *   - searchSessionsFiltered() — AND-composed structured session search with
  *     escaped-LIKE text over {title, prompt_excerpt, id}
  *   - getMessageContext() — bounded ±radius window around a message anchor,
- *     content capped with the intentional-cap marker
+ *     with complete message bodies
  *
  * Own file (not registry-search-messages.test.ts) because that suite ends by
  * disabling FTS for its process — these tests need a live index throughout.
@@ -292,13 +292,13 @@ describe("getMessageContext (GRS-020a)", () => {
     expect(atStart!.messages[0].isAnchor).toBe(true);
   });
 
-  it("caps each message at 2,000 chars with the intentional-cap marker", () => {
+  it("returns each message body in full", () => {
     mkSession("ctx-cap");
     const long = "x".repeat(5000);
     const mid = mkMessage("ctx-cap", "assistant", long, 8000);
     const ctx = reg.getMessageContext("ctx-cap", mid, 1);
-    expect(ctx!.messages[0].content.length).toBeLessThan(2200);
-    expect(ctx!.messages[0].content).toMatch(/truncated 3000 chars.*intentional/);
+    expect(ctx!.messages[0].content).toBe(long);
+    expect(ctx!.messages[0].content).not.toContain("…[truncated");
   });
 
   it("keeps getMessages ordering under timestamp ties (NULL seq vs numbered seq) — the bounded-window rewrite (finding 6)", () => {

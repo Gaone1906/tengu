@@ -18,9 +18,8 @@ import { assertBoundCaller, gatewayGet, JinnMcpToolError, type JinnMcpContext, t
  *     parameter — they never build SQL or MATCH strings.
  *   - CONTEXT-BOMB GUARDS: search returns SNIPPETS only (≤ {@link SNIPPET_CHAR_CAP}
  *     chars each, ≤ {@link SEARCH_LIMIT_MAX} hits); session search returns
- *     summaries without message bodies; get-context is radius-bounded with the
- *     store's 2,000-char per-message cap. There is deliberately NO
- *     full-transcript mode anywhere on the reference layer.
+ *     summaries without message bodies; get-context is radius-bounded and
+ *     returns each selected message body in full.
  *   - SELF-EXCLUSION (GRS-020a-fix finding 1): search_messages excludes
  *     the CALLER'S OWN session by default — the act of searching for X is
  *     itself a message containing X, and newest-first ranking would return it
@@ -50,7 +49,7 @@ export const SESSION_SEARCH_LIMIT_MAX = 50;
 /** Default session summaries per session search. */
 export const SESSION_SEARCH_LIMIT_DEFAULT = 20;
 /** Max messages each side of a context anchor. */
-export const CONTEXT_RADIUS_MAX = 10;
+export const CONTEXT_RADIUS_MAX = 100;
 /** Default context radius. */
 export const CONTEXT_RADIUS_DEFAULT = 3;
 /** Tool-side cap on the search query / text filter (GRS-020a-fix finding 3):
