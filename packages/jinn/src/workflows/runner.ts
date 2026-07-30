@@ -13,6 +13,7 @@ import type {
   WorkflowNode,
   WorkflowNodeOutput,
 } from "./model.js";
+import { dispatchFailure, interruptedAttemptFailure, workflowError } from "./failure.js";
 import { parseWorkflowOutput, validateSubmittedFields, WorkflowOutputError } from "./output.js";
 import { WorkflowRepositoryError, type WorkflowRepository } from "./repository.js";
 import type { ResolvedEmployeeConfig, WorkflowError, WorkflowNodeRunRecord, WorkflowRunDetail } from "./runtime.js";
@@ -54,10 +55,6 @@ function addMinutes(at: string, minutes: number): string {
 }
 function hasWorkflowOutputBlock(text: string): boolean {
   return /(?:^|\n)```jinn-output[ \t]*(?:\r?\n|$)/.test(text);
-}
-function workflowError(error: unknown, nodeId: string, attempt?: number): WorkflowError {
-  const value = error instanceof Error ? error : new Error(String(error));
-  return { code: "workflow-step-failed", message: value.message, retryable: false, nodeId, ...(attempt ? { attempt } : {}) };
 }
 function bindingContext(run: WorkflowRunDetail): WorkflowBindingContext {
   return {
@@ -358,7 +355,7 @@ export class WorkflowRunner {
     } catch (error) {
       const current = this.detail(run.workflowId, run.id);
       const endedAt = this.now();
-      const failure = workflowError(error, node.id, attempt.attempt);
+      const failure = dispatchFailure(error, node.id, attempt.attempt);
       const stored = current.attempts.find((item) => item.nodeId === node.id && item.attempt === attempt.attempt)!;
       if (this.settleFailure(current, stored, failure, "failed", endedAt)) await this.advance(run.workflowId, run.id);
     }
@@ -499,26 +496,28 @@ export class WorkflowRunner {
 
   private settleFailure(run: WorkflowRunDetail, attempt: typeof run.attempts[number], error: WorkflowError,
     status: "failed" | "timed-out" | "cancelled", endedAt: string, processedTurn?: number): boolean {
-    const retry = attempt.attempt < attempt.resolvedConfig.retry.attempts;
+    // `error.retryable` is what decides this, not the attempt counter alone. A
+    // node's retry budget exists for attempts that never landed; spending it on
+    // an employee that ran and reported failure pays twice for a verdict that was
+    // already reached, and can override a phase that deliberately refused.
+    const retry = error.retryable && attempt.attempt < attempt.resolvedConfig.retry.attempts;
     const routed = !retry && run.definition.edges.some((edge) => edge.from.nodeId === attempt.nodeId && edge.from.port === "error");
-    const failure = retry ? { ...error, retryable: true } : error;
     this.options.repository.mutateRun(run.id, run.revision, (tx) => {
       if (processedTurn !== undefined) {
         tx.setAttemptReminder(attempt.nodeId, attempt.attempt, { lastProcessedTurn: processedTurn });
       }
       tx.settleAttempt(attempt.nodeId, attempt.attempt, { status,
-        ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}), error: failure, endedAt });
+        ...(attempt.sessionId ? { sessionId: attempt.sessionId } : {}), error, endedAt });
       if (retry) {
         const factor = attempt.resolvedConfig.retry.backoff === "exponential" ? 2 ** (attempt.attempt - 1) : 1;
         const resumeAt = new Date(Date.parse(endedAt)
           + Math.min(600, attempt.resolvedConfig.retry.delaySeconds * factor) * 1000).toISOString();
-        tx.setNodeStatus(attempt.nodeId, "waiting", { error: failure,
-          resumeAt, endedAt });
+        tx.setNodeStatus(attempt.nodeId, "waiting", { error, resumeAt, endedAt });
         tx.setRunStatus("waiting");
       } else {
-        tx.setNodeStatus(attempt.nodeId, "failed", { error: failure, endedAt });
+        tx.setNodeStatus(attempt.nodeId, "failed", { error, endedAt });
         if (routed) tx.setRunStatus("running");
-        else tx.setRunStatus("failed", { error: failure, endedAt });
+        else tx.setRunStatus("failed", { error, endedAt });
       }
     });
     this.changed(run);
@@ -590,8 +589,11 @@ export class WorkflowRunner {
     if (input.outcome === "failure") {
       const error: WorkflowError = {
         code: "workflow-submitted-failure",
+        // The employee ran and reported failure. That is a verdict, not a dropped
+        // attempt: re-dispatching it spends again on a decision already made, and
+        // has overridden a phase that stopped on purpose.
         message: input.summary ?? "Step reported failure.",
-        retryable: true,
+        retryable: false,
         nodeId: attempt.nodeId,
         attempt: attempt.attempt,
       };
@@ -678,7 +680,9 @@ export class WorkflowRunner {
         }
       }
     } else if (!userMessageTurnEnd) {
-      failure = workflowError(event.error ?? `Workflow attempt was ${event.outcome}.`, attempt.nodeId, attempt.attempt);
+      failure = event.outcome === "interrupted"
+        ? interruptedAttemptFailure(event.error ?? "Workflow attempt was interrupted.", attempt.nodeId, attempt.attempt)
+        : workflowError(event.error ?? `Workflow attempt was ${event.outcome}.`, attempt.nodeId, attempt.attempt);
     }
     const endedAt = event.completedAt;
     if (cleanTurnEnd && !output && !failure) {

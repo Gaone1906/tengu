@@ -53,7 +53,9 @@ class DurableExecutor {
     const event: WorkflowAttemptCompletion = { sessionId: this.sessions.get(key)!, owner: command.owner, turn: 1, terminalVersion: 1,
       outcome, ...(outcome === "succeeded"
         ? { finalText: "Done.\n```jinn-output\n{}\n```" }
-        : { error: "provider failed" }), completedAt: at };
+        // A transport diagnostic on purpose: these tests exercise the retry
+        // MECHANISM, and only an undelivered attempt earns a retry budget.
+        : { error: "Interactive turn failed: server_error" }), completedAt: at };
     this.receipts.set(event.sessionId, event);
     await Promise.all([...this.listeners].map((listener) => listener(event)));
   }
